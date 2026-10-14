@@ -41,6 +41,9 @@ import org.openbravo.dal.service.OBDal;
  * Returns arrays of labels, revenue totals, and expense totals for each month,
  * computed directly in SQL using generate_series so no records need to be
  * transferred to the frontend.
+ *
+ * <p>ETP-5600: amounts are NET ({@code c_invoice.totallines}, VAT excluded), the same base as
+ * {@code ContactsBpStatsHandler}, so the sidebar chart and the summary amounts agree.</p>
  */
 @Named("contactsBpTrendHandler")
 public class ContactsBpTrendHandler implements NeoHandler {
@@ -59,8 +62,8 @@ public class ContactsBpTrendHandler implements NeoHandler {
       + ") "
       + "SELECT "
       + "  to_char(m.month, 'Mon') AS label, "
-      + "  COALESCE(SUM(CASE WHEN i.issotrx = 'Y' THEN i.grandtotal END), 0) AS revenue, "
-      + "  COALESCE(SUM(CASE WHEN i.issotrx = 'N' THEN i.grandtotal END), 0) AS expenses "
+      + "  COALESCE(SUM(CASE WHEN i.issotrx = 'Y' THEN i.totallines END), 0) AS revenue, "
+      + "  COALESCE(SUM(CASE WHEN i.issotrx = 'N' THEN i.totallines END), 0) AS expenses "
       + "FROM months m "
       + "LEFT JOIN c_invoice i "
       + "  ON date_trunc('month', i.dateinvoiced) = m.month "

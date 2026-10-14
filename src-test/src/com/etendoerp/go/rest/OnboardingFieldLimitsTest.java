@@ -52,6 +52,14 @@ class OnboardingFieldLimitsTest {
   }
 
   @Test
+  @DisplayName("the client name fits every untruncated derived name inside its 60-char column")
+  void clientNameFitsLongestDerivedName() {
+    // ETP-5638: "Arbol de cuentas " + name (C_ELEMENT.NAME) is the longest derived name that
+    // keeps the whole company name. Trees overflow above 37 and are truncated on rename.
+    assertTrue(OnboardingFieldLimits.CLIENT_NAME + "Arbol de cuentas ".length() <= 60);
+  }
+
+  @Test
   @DisplayName("exceeds is inclusive of the limit itself")
   void exceedsIsInclusiveBoundary() {
     assertFalse(OnboardingFieldLimits.exceeds("a".repeat(40), 40));

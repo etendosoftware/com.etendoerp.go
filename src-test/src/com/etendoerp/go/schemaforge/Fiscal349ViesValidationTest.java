@@ -66,6 +66,7 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.module.bptaxidkey.ViesService;
 
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
+import com.etendoerp.go.schemaforge.util.RoleAccessMatrix;
 
 /**
  * Unit tests for the {@code POST /neo/fiscal349/validate-vies} verb of
@@ -118,7 +119,7 @@ class Fiscal349ViesValidationTest {
 
     accessMock = mockStatic(NeoAccessHelper.class);
     accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
-        eq(NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID), anyString())).thenReturn(true);
+        eq(RoleAccessMatrix.TAX_MODELS_PROXY_WINDOW_ID), anyString())).thenReturn(true);
 
     connMock = mock(Connection.class);
     selectPs = mock(PreparedStatement.class);
@@ -210,7 +211,7 @@ class Fiscal349ViesValidationTest {
     HttpServletResponse resp = mock(HttpServletResponse.class);
 
     accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
-        eq(NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID), eq("POST"))).thenReturn(false);
+        eq(RoleAccessMatrix.TAX_MODELS_PROXY_WINDOW_ID), eq("POST"))).thenReturn(false);
 
     handler.handle("validate-vies", "POST", req, resp);
 
