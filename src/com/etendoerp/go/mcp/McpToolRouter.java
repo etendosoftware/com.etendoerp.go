@@ -792,22 +792,11 @@ public class McpToolRouter {
       return wrapAsErrorContent(McpWriteRequestSupport.buildInvalidDatesError(invalidDates));
     }
 
-    // Validate mandatory fields before insert — return structured error matching etendo_schema contract
-    JSONArray missingFields = McpWriteRequestSupport.validateMandatoryFields(filteredBody, adTab, dalEntity, SYSTEM_COLUMNS, SELECTOR_REFS, sfEntity, log);
-    if (missingFields.length() > 0) {
-      // IMP-5: stable machine-detectable code + status so the agent can distinguish an
-      // "invalid write" from a "server error"; the human text moves to `detail`, and the
-      // existing `missingFields`/`hint` guidance is preserved.
-      JSONObject errorObj = new JSONObject();
-      errorObj.put(McpConstants.KEY_STATUS, McpConstants.STATUS_UNPROCESSABLE);
-      errorObj.put(McpConstants.KEY_ERROR, McpConstants.ERROR_VALIDATION);
-      errorObj.put(McpConstants.KEY_DETAIL, "Missing required fields that could not be auto-resolved");
-      errorObj.put("missingFields", missingFields);
-      errorObj.put("hint", "Provide these fields in the request, or use etendo_selectors to find valid values for foreignKey fields");
-      errorObj.put(McpConstants.KEY_SEE_ALSO, McpConstants.SEE_ALSO_WRITING);
-      return wrapAsErrorContent(errorObj);
-    }
-
+    // ETP-5703: the pre-hook runs BEFORE the mandatory pre-check, as on REST single and batch, where
+    // it runs before any validation at all. A customization that derives a mandatory field from the
+    // body (the invoice header's partnerAddress from its business partner) used to be refused here
+    // with a 422 for a field it was about to fill; the check now judges the body that is actually
+    // written. A pre-hook short-circuit (validation error or own response) still wins, as before.
     // Run the entity's NeoHandler pre-hook (parity with the REST CRUD path): it may
     // validate and mutate filteredBody (e.g. inject derived FK values) before persist.
     // ETP-5415: routed through NeoExtensionDispatcher so this write is traced like the REST
@@ -828,6 +817,22 @@ public class McpToolRouter {
     NeoHandler handler = preDispatch.customization();
     if (preDispatch.response() != null) {
       return McpHookExecutor.neoResponseToMcpResult(preDispatch.response());
+    }
+
+    // Validate mandatory fields before insert — return structured error matching etendo_schema contract
+    JSONArray missingFields = McpWriteRequestSupport.validateMandatoryFields(filteredBody, adTab, dalEntity, SYSTEM_COLUMNS, SELECTOR_REFS, sfEntity, log);
+    if (missingFields.length() > 0) {
+      // IMP-5: stable machine-detectable code + status so the agent can distinguish an
+      // "invalid write" from a "server error"; the human text moves to `detail`, and the
+      // existing `missingFields`/`hint` guidance is preserved.
+      JSONObject errorObj = new JSONObject();
+      errorObj.put(McpConstants.KEY_STATUS, McpConstants.STATUS_UNPROCESSABLE);
+      errorObj.put(McpConstants.KEY_ERROR, McpConstants.ERROR_VALIDATION);
+      errorObj.put(McpConstants.KEY_DETAIL, "Missing required fields that could not be auto-resolved");
+      errorObj.put("missingFields", missingFields);
+      errorObj.put("hint", "Provide these fields in the request, or use etendo_selectors to find valid values for foreignKey fields");
+      errorObj.put(McpConstants.KEY_SEE_ALSO, McpConstants.SEE_ALSO_WRITING);
+      return wrapAsErrorContent(errorObj);
     }
 
     // Wrap for DefaultJsonDataService

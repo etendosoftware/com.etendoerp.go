@@ -22,6 +22,9 @@ import java.math.RoundingMode;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
@@ -39,8 +42,10 @@ import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBCurrencyUtils;
+import org.openbravo.model.common.businesspartner.Location;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.invoice.Invoice;
@@ -82,6 +87,11 @@ public abstract class AbstractInvoiceHeaderHandler {
   protected static final String FIELD_ORIGIN_INVOICES      = "originInvoices";
   protected static final String FIELD_TRANSACTION_DOCUMENT = "transactionDocument";
   private static final String FIELD_CURRENCY = "currency";
+  /** {@code EM_ETGO_Currency_Rate}: the org→document multiply rate (ETP-4029). */
+  private static final String FIELD_CURRENCY_RATE = "eTGOCurrencyRate";
+  /** {@code C_BPartner_Location_ID}: the invoicing address. */
+  static final String FIELD_PARTNER_ADDRESS = "partnerAddress";
+  static final String FIELD_BUSINESS_PARTNER = "businessPartner";
   // Package-private: also used by InvoiceCalloutHelper (S1448 extraction)
   static final String FIELD_VALUE = "value";
   private static final String FIELD_PROCESSED = "processed";
@@ -113,6 +123,10 @@ public abstract class AbstractInvoiceHeaderHandler {
   // injected into the request body in handle() and survive to the DAL layer.
   private String pendingSiiAuthorizationno;
   private boolean siiAuthorizationCaptured;
+
+  // ETP-5703: set by captureCurrencyRateDefault() in handle(), consumed by
+  // applyCurrencyRateDefault() in afterHandle() — same instance-per-request pattern as above.
+  private boolean currencyRateDefaultPending;
 
   // ---------------------------------------------------------------------------
   // Abstract contract
@@ -1035,6 +1049,234 @@ public abstract class AbstractInvoiceHeaderHandler {
       InvoiceCalloutHelper.appendMessage(body, "WARNING", "noExchangeRateAvailable");
       log.debug("[ETP-4029] No conversion rate warning added (currency={})", docCurrencyId);
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Server-side defaults for a write that leaves a field out (ETP-5703)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Fills {@code partnerAddress} (the invoicing address, {@code C_Invoice.C_BPartner_Location_ID},
+   * mandatory) on a create that names a business partner but no address, when the partner has
+   * exactly one active bill-to location (ETP-5703).
+   *
+   * <p><b>Why.</b> The SPA always sends the address it picked from the partner's locations, but an
+   * agent creating an invoice with only {@code businessPartner} was refused with a 422 naming
+   * {@code partnerAddress}, even for a partner with a single address: the business-partner callout
+   * cannot select one through NEO (the {@code _LOC} selector aux value it reads does not exist —
+   * see {@code McpBillToInjector}). Sales and purchase invoices alike.
+   *
+   * <p><b>Only when unambiguous.</b> With several bill-to locations the choice is the caller's —
+   * a plausible wrong invoicing address is worse than a precise 422 — so this abstains, as it does
+   * when the body already carries an address, when the partner is absent or still a batch
+   * {@code $ref:}, or when the partner has none. Runs in the caller's own DAL scope: a location this
+   * role cannot read never becomes the address of a document it writes.
+   *
+   * <p><b>Channels.</b> Called from each subclass's {@code handle()} pre-hook, which runs before
+   * the create on REST single, REST batch / {@code etendo_batch} ({@code handleWithHooks}) and
+   * {@code etendo_create} (before its mandatory pre-check since ETP-5703).
+   *
+   * <p>Total: never throws.
+   *
+   * @param context the current request context; its request body is mutated in place
+   */
+  protected static void injectPartnerAddressIfMissing(NeoContext context) {
+    if (context == null || !NeoEndpointType.CRUD.equals(context.getEndpointType())
+        || !"POST".equals(context.getHttpMethod()) || context.getRecordId() != null) {
+      return;
+    }
+    JSONObject body = context.getRequestBody();
+    if (body == null || hasUsableValue(body, FIELD_PARTNER_ADDRESS)) {
+      return;
+    }
+    String partnerId = usableValue(body, FIELD_BUSINESS_PARTNER);
+    if (partnerId == null) {
+      return;
+    }
+    try {
+      String locationId = findSingleBillToLocation(partnerId);
+      if (locationId != null) {
+        body.put(FIELD_PARTNER_ADDRESS, locationId);
+        log.debug("[ETP-5703] Defaulted partnerAddress {} from business partner {}", locationId,
+            partnerId);
+      }
+    } catch (Exception e) {
+      log.debug("[ETP-5703] partnerAddress default skipped for partner {}: {}", partnerId,
+          e.getMessage());
+    }
+  }
+
+  /**
+   * @return the id of the partner's only active bill-to location, or {@code null} when it has none
+   *     or more than one
+   */
+  static String findSingleBillToLocation(String partnerId) {
+    OBCriteria<Location> crit = OBDal.getInstance().createCriteria(Location.class);
+    crit.add(Restrictions.eq(Location.PROPERTY_BUSINESSPARTNER + ".id", partnerId));
+    crit.add(Restrictions.eq(Location.PROPERTY_INVOICETOADDRESS, true));
+    crit.add(Restrictions.eq(Location.PROPERTY_ACTIVE, true));
+    crit.setMaxResults(2);
+    List<Location> locations = crit.list();
+    return locations.size() == 1 ? locations.get(0).getId() : null;
+  }
+
+  /**
+   * Notes, in the pre-hook, that this write leaves the exchange rate to the server: a create, or an
+   * update that changes the currency, whose body carries no {@code eTGOCurrencyRate} (ETP-5703).
+   * {@link #applyCurrencyRateDefault} resolves it in {@code afterHandle()}, once the saved invoice
+   * says which currency and date it ended up with — on REST and batch the currency may only be
+   * derived after the pre-hook, by the create cascade.
+   *
+   * <p>The SPA stages the rate together with the currency in its currency picker, so for it this
+   * flag stays unset (or, when it sends the rate as null because no rate exists, the default finds
+   * none either): no visible change there.
+   *
+   * @param context the current request context
+   */
+  protected void captureCurrencyRateDefault(NeoContext context) {
+    currencyRateDefaultPending = false;
+    if (context == null || !NeoEndpointType.CRUD.equals(context.getEndpointType())
+        || !NeoHandlerUtils.isWriteMethod(context.getHttpMethod())) {
+      return;
+    }
+    JSONObject body = context.getRequestBody();
+    if (body == null || hasUsableValue(body, FIELD_CURRENCY_RATE)) {
+      return;
+    }
+    boolean create = "POST".equals(context.getHttpMethod()) && context.getRecordId() == null;
+    currencyRateDefaultPending = create || currencyChangedBy(body, context.getRecordId());
+  }
+
+  /** {@code true} when {@code body} sets a currency different from the stored invoice's. */
+  private static boolean currencyChangedBy(JSONObject body, String invoiceId) {
+    String currencyId = usableValue(body, FIELD_CURRENCY);
+    if (currencyId == null || StringUtils.isBlank(invoiceId)) {
+      return false;
+    }
+    try {
+      Invoice invoice = OBDal.getInstance().get(Invoice.class, invoiceId);
+      return invoice != null && invoice.getCurrency() != null
+          && !currencyId.equals(invoice.getCurrency().getId());
+    } catch (Exception e) {
+      log.debug("[ETP-5703] Could not read invoice {} currency: {}", invoiceId, e.getMessage());
+      return false;
+    }
+  }
+
+  /**
+   * Defaults {@code EM_ETGO_Currency_Rate} on the invoice the write just saved, when
+   * {@link #captureCurrencyRateDefault} flagged it and the invoice still has none (ETP-5703).
+   *
+   * <p><b>Why.</b> The {@code C_Conversion_Rate_Document} sync
+   * ({@link #autoCreateOrUpdateConversionRateDocument(String)}) does nothing while the rate is
+   * null, so a USD invoice created through MCP showed an empty exchange-rates tab. The SPA fills the
+   * rate from its currency picker ({@code currencyOptions}); this resolves the same org→document
+   * rate for the invoice date through {@link NeoExchangeRateService#rateAsDecimal} (direct, then
+   * inverse) and writes it. When no rate exists the invoice is left as it was — no new error.
+   *
+   * <p>Only on a draft whose currency differs from the organization's. Call from
+   * {@code afterHandle()} BEFORE {@link #autoCreateOrUpdateConversionRateDocument(NeoContext)}, so the
+   * sync sees the rate. The saved record in the write response is updated too, when it carries the
+   * field.
+   *
+   * <p>Total: never throws.
+   *
+   * @param context the current request context
+   */
+  protected void applyCurrencyRateDefault(NeoContext context) {
+    if (!currencyRateDefaultPending) {
+      return;
+    }
+    currencyRateDefaultPending = false;
+    String invoiceId = InvoiceCalloutHelper.resolveInvoiceIdFromContext(context);
+    if (StringUtils.isBlank(invoiceId)) {
+      return;
+    }
+    try {
+      OBContext.setAdminMode(true);
+      try {
+        Invoice invoice = OBDal.getInstance().get(Invoice.class, invoiceId);
+        BigDecimal rate = resolveDefaultCurrencyRate(invoice);
+        if (rate == null) {
+          return;
+        }
+        invoice.setETGOCurrencyRate(rate);
+        OBDal.getInstance().save(invoice);
+        OBDal.getInstance().flush();
+        reflectInWriteResponse(context, FIELD_CURRENCY_RATE, rate);
+        log.debug("[ETP-5703] Defaulted eTGOCurrencyRate {} on invoice {}", rate, invoiceId);
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (Exception e) {
+      log.warn("[ETP-5703] Could not default the exchange rate of invoice {}: {}", invoiceId,
+          e.getMessage());
+    }
+  }
+
+  /**
+   * The org→document rate to default on {@code invoice}, or {@code null} when it must be left
+   * alone: no invoice, already processed, a rate already set, no currency or date, the
+   * organization's own currency, or no rate configured.
+   */
+  static BigDecimal resolveDefaultCurrencyRate(Invoice invoice) throws java.sql.SQLException {
+    if (invoice == null || invoice.getCurrency() == null || invoice.getInvoiceDate() == null
+        || invoice.getETGOCurrencyRate() != null || Boolean.TRUE.equals(invoice.isProcessed())) {
+      return null;
+    }
+    String orgId = invoice.getOrganization().getId();
+    String orgCurrencyId = OBCurrencyUtils.getOrgCurrency(orgId);
+    String docCurrencyId = invoice.getCurrency().getId();
+    if (orgCurrencyId == null || orgCurrencyId.equals(docCurrencyId)) {
+      return null;
+    }
+    // getTime(), not toInstant(): a java.sql.Date from Hibernate throws on toInstant().
+    LocalDate date = Instant.ofEpochMilli(invoice.getInvoiceDate().getTime())
+        .atZone(ZoneId.systemDefault()).toLocalDate();
+    BigDecimal rate = NeoExchangeRateService.rateAsDecimal(orgCurrencyId, docCurrencyId, date,
+        orgId);
+    return rate != null && rate.signum() > 0 ? rate : null;
+  }
+
+  /**
+   * Writes {@code value} under {@code key} into the saved record of the write response, when the
+   * record already carries that key — the response was captured before {@code afterHandle()} wrote
+   * the value. Mutates the captured body in place, so it holds whichever post-hook returns it.
+   */
+  private static void reflectInWriteResponse(NeoContext context, String key, Object value) {
+    try {
+      NeoResponse prev = context.getPreviousResult();
+      if (prev == null || prev.getBody() == null) {
+        return;
+      }
+      JSONObject body = prev.getBody();
+      JSONObject wrapper = body.optJSONObject("response");
+      JSONArray data = wrapper != null ? wrapper.optJSONArray("data") : null;
+      JSONObject rec = data != null && data.length() > 0 ? data.optJSONObject(0) : body;
+      if (rec != null && rec.has(key)) {
+        rec.put(key, value);
+      }
+    } catch (Exception e) {
+      log.debug("[ETP-5703] Could not reflect {} in the write response: {}", key, e.getMessage());
+    }
+  }
+
+  /** {@code true} when {@code key} holds a real value: not absent, null, blank, "null" or "0". */
+  private static boolean hasUsableValue(JSONObject body, String key) {
+    if (!body.has(key) || body.isNull(key)) {
+      return false;
+    }
+    String value = body.optString(key, "").trim();
+    return !value.isEmpty() && !"null".equals(value) && !"0".equals(value);
+  }
+
+  /** The id held under {@code key}, or {@code null} when unusable or still a batch reference. */
+  private static String usableValue(JSONObject body, String key) {
+    if (!hasUsableValue(body, key)) {
+      return null;
+    }
+    String value = body.optString(key, "").trim();
+    return value.startsWith(BatchService.REF_PREFIX) ? null : value;
   }
 
   // ---------------------------------------------------------------------------

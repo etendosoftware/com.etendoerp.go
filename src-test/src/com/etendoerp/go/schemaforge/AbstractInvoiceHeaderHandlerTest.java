@@ -58,6 +58,7 @@ import org.openbravo.erpCommon.utility.OBCurrencyUtils;
 import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.ad.ui.Process;
+import org.openbravo.model.common.businesspartner.Location;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.enterprise.Organization;
@@ -3484,6 +3485,90 @@ public class AbstractInvoiceHeaderHandlerTest {
 
       assertFalse(docTypeHandler.isStandardInvoiceDocType("dt-arc"));
       assertTrue(docTypeHandler.isStandardInvoiceDocType("dt-ari"));
+    }
+  }
+
+  // ── ETP-5703: server-side defaults for a write that leaves them out ───────────
+
+  /**
+   * ETP-5703 repro (A): an agent creating an invoice header with only {@code businessPartner} was
+   * refused with a 422 naming {@code partnerAddress}, although the partner has exactly one bill-to
+   * location. The create pre-hook must fill it from that location.
+   */
+  @Test
+  public void injectPartnerAddress_createWithSingleBillToLocation_fillsIt() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      @SuppressWarnings("unchecked")
+      OBCriteria<Location> criteria = mock(OBCriteria.class);
+      when(dal.createCriteria(Location.class)).thenReturn(criteria);
+      when(criteria.add(any())).thenReturn(criteria);
+      Location only = mock(Location.class);
+      when(only.getId()).thenReturn("loc-1");
+      java.util.List<Location> locations = Collections.singletonList(only);
+      when(criteria.list()).thenReturn(locations);
+
+      JSONObject body = new JSONObject().put("businessPartner", "bp-1");
+      NeoContext ctx = NeoContext.builder()
+          .httpMethod("POST")
+          .endpointType(NeoEndpointType.CRUD)
+          .requestBody(body)
+          .build();
+
+      AbstractInvoiceHeaderHandler.injectPartnerAddressIfMissing(ctx);
+
+      assertEquals("loc-1", body.getString("partnerAddress"));
+    }
+  }
+
+  /**
+   * ETP-5703 repro (D): a foreign-currency invoice created without {@code eTGOCurrencyRate} kept
+   * it null, so the conversion-rate document was never written and the exchange-rates tab stayed
+   * empty. The post-hook must default it from the org→document rate for the invoice date.
+   */
+  @Test
+  public void currencyRateDefault_createWithoutRate_writesLookedUpRate() throws Exception {
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class);
+         MockedStatic<NeoExchangeRateService> rateMock =
+             Mockito.mockStatic(NeoExchangeRateService.class)) {
+      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Invoice invoice = mock(Invoice.class);
+      Currency usd = mock(Currency.class);
+      Organization org = mock(Organization.class);
+      when(dal.get(Invoice.class, "inv-usd")).thenReturn(invoice);
+      when(invoice.getCurrency()).thenReturn(usd);
+      when(usd.getId()).thenReturn("usd-id");
+      when(invoice.getOrganization()).thenReturn(org);
+      when(org.getId()).thenReturn("org-1");
+      java.util.Date invoiceDate = new java.util.Date();
+      when(invoice.getInvoiceDate()).thenReturn(invoiceDate);
+      when(invoice.getETGOCurrencyRate()).thenReturn(null);
+      when(invoice.isProcessed()).thenReturn(false);
+      curMock.when(() -> OBCurrencyUtils.getOrgCurrency("org-1")).thenReturn("eur-id");
+      BigDecimal lookedUp = new BigDecimal("1.16");
+      rateMock.when(() -> NeoExchangeRateService.rateAsDecimal(eq("eur-id"), eq("usd-id"),
+          any(), eq("org-1"))).thenReturn(lookedUp);
+
+      TestHandler handler = new TestHandler();
+      handler.captureCurrencyRateDefault(NeoContext.builder()
+          .httpMethod("POST")
+          .endpointType(NeoEndpointType.CRUD)
+          .requestBody(new JSONObject().put("currency", "usd-id"))
+          .build());
+      handler.applyCurrencyRateDefault(NeoContext.builder()
+          .httpMethod("POST")
+          .endpointType(NeoEndpointType.CRUD)
+          .recordId("inv-usd")
+          .build());
+
+      verify(invoice).setETGOCurrencyRate(lookedUp);
     }
   }
 }

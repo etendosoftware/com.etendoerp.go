@@ -471,11 +471,11 @@ final class McpWriteRequestSupport {
    * <p>ETP-5535: the fields a customization declares through
    * {@code NeoHandler#serverResolvedCreateFields} are deliberately NOT skipped here, although
    * {@code etendo_schema} demotes them. This check runs after {@code injectMandatoryDefaults} — the
-   * create callout cascade that derives them — and before the customization's pre-hook. So a
-   * declared field the cascade filled is simply not missing, and one it could not fill is a real
-   * gap: reporting it here gives the agent a precise 422 instead of the DAL's NOT NULL failure. The
-   * wrapper-policy names keep being skipped, because their value is built only later, by the
-   * handler.
+   * create callout cascade that derives them — and, since ETP-5703, after the customization's
+   * pre-hook too. So a declared field the cascade or the pre-hook filled is simply not missing, and
+   * one neither could fill is a real gap: reporting it here gives the agent a precise 422 instead of
+   * the DAL's NOT NULL failure. The wrapper-policy names keep being skipped, because their value is
+   * built only later, by the handler.
    *
    * @param systemColumns system/audit columns excluded from schema (auto-managed by Etendo)
    * @param selectorRefs  AD_Reference IDs for OBUISEL selectors (extends the base FK refs from
