@@ -41,7 +41,7 @@ public final class EnvironmentPlanCache {
   private static final EnvironmentPlanCache EMPTY =
       new EnvironmentPlanCache(Collections.emptyMap());
 
-  /** What a tenant with no subscription row at all looks like to every caller. */
+  /** What a tenant with no active subscription row, open or closed, looks like to every caller. */
   private static final PlanView NO_SUBSCRIPTION =
       new PlanView(null, null, TenantPlanService.PLAN_FREE);
 
@@ -94,8 +94,8 @@ public final class EnvironmentPlanCache {
 
   /**
    * Builds a cache for a known set of tenants, applying the transitional preference fallback to
-   * the ones that have no subscription row at all (a tenant whose latest row is closed is answered
-   * from that row, since ETP-5047).
+   * the ones that have no active subscription row, open or closed (a tenant whose latest row is
+   * closed is answered from that row, since ETP-5047; an inactive row is not read at all).
    *
    * <p><b>TRANSITIONAL — ETP-5046-TRANSITIONAL-FALLBACK.</b> This overload exists so the bulk path
    * and {@link TenantPlanService#resolvePlan} agree about the same tenant. If only one of them
@@ -104,9 +104,9 @@ public final class EnvironmentPlanCache {
    * {@link #of(Map)} and {@code allClientIds} is dropped.
    *
    * <p><b>One extra query, and only when it is needed.</b> The fallback is asked once, for exactly
-   * the ids that have no subscription row at all; when every tenant has one, no query is issued
-   * at all. Looping {@link TenantPlanService#resolvePlan} here would reintroduce the N+1 this class
-   * exists to remove.
+   * the ids that have no active subscription row, open or closed; when every tenant has one, no
+   * query is issued at all. Looping {@link TenantPlanService#resolvePlan} here would reintroduce
+   * the N+1 this class exists to remove.
    *
    * @param allClientIds every tenant the caller is about to render; may be null or empty
    * @param openSubscriptions each tenant's subscription row (open, else latest closed) keyed by
@@ -127,8 +127,8 @@ public final class EnvironmentPlanCache {
    * @param allClientIds every tenant the caller is about to render; may be null or empty
    * @param openSubscriptions each tenant's subscription row (open, else latest closed) keyed by
    *     tenant id; may be null or empty
-   * @param fallback the preference fallback to consult for tenants with no subscription row at
-   *     all
+   * @param fallback the preference fallback to consult for tenants with no active subscription
+   *     row, open or closed
    * @return an immutable view over those rows plus the transitional fallback
    */
   static EnvironmentPlanCache of(Collection<String> allClientIds,

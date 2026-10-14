@@ -147,12 +147,13 @@ public class TenantEnvironmentLifecycleService {
    * Resolves a stored environment snapshot, falling back to the existing productive marker.
    *
    * <p><b>A subscription row makes the tenant productive (ETP-5047).</b> Only a paid tenant ever
-   * has an {@code ETGO_SUBSCRIPTION} row, open or closed, so any row sends the tenant down the
-   * productive path, first, whatever the {@code ETGO_EnvironmentType} marker says — the row, not
-   * the marker, decides. Deciding on the marker or on {@code resolvePlan} alone failed open: a
-   * canceled row makes the plan {@code free}, and a tenant without the marker (every tenant
-   * provisioned before it existed) then fell into the demo path, got a legacy-transition start or
-   * no snapshot at all, and was allowed in. A tenant with a row therefore never reaches the demo
+   * has an {@code ETGO_SUBSCRIPTION} row, open or closed, so any active row (the reads ignore an
+   * inactive one) sends the tenant down the productive path, first, whatever the
+   * {@code ETGO_EnvironmentType} marker says — the row, not the marker, decides. Deciding on the
+   * marker or on {@code resolvePlan} alone failed open: a canceled row makes the plan
+   * {@code free}, and a tenant without the marker (every tenant provisioned before it existed)
+   * then fell into the demo path, got a legacy-transition start or no snapshot at all, and was
+   * allowed in. A tenant with a row therefore never reaches the demo
    * path and never gets a demo or legacy-transition preference written. The marker is therefore
    * read only on the no-row fallback, and its absence on a tenant with a row is not reported: it
    * is the normal state of a tenant provisioned before the marker existed.
@@ -204,13 +205,14 @@ public class TenantEnvironmentLifecycleService {
   }
 
   /**
-   * The productive decision for a tenant with no subscription row, shared by {@link #resolve} and
-   * {@link #isProductiveEnvironment} so the two can never disagree about the same tenant.
+   * The productive decision for a tenant with no active subscription row, shared by
+   * {@link #resolve} and {@link #isProductiveEnvironment} so the two can never disagree about the
+   * same tenant.
    *
-   * <p>No row at all: the plan can only come from the transitional preference fallback, so it is
-   * asked directly instead of through {@code resolvePlan}, which would repeat the row lookup
-   * (ETP-5047). ETP-5046-TRANSITIONAL-FALLBACK — the {@code ETGO_EnvironmentType} marker retires
-   * in Phase F.
+   * <p>No active row, open or closed: the plan can only come from the transitional preference
+   * fallback, so it is asked directly instead of through {@code resolvePlan}, which would repeat
+   * the row lookup (ETP-5047). ETP-5046-TRANSITIONAL-FALLBACK — the {@code ETGO_EnvironmentType}
+   * marker retires in Phase F.
    */
   private boolean isProductiveWithoutRow(String clientId) {
     String type = readPreference(ENVIRONMENT_TYPE_ATTRIBUTE, clientId);
@@ -244,9 +246,9 @@ public class TenantEnvironmentLifecycleService {
   }
 
   /**
-   * ETP-5046-TRANSITIONAL-FALLBACK — the productive snapshot of a tenant with no subscription row
-   * at all, open or closed, read from the lifecycle preferences. Delete in Phase F, once every
-   * productive tenant has a row.
+   * ETP-5046-TRANSITIONAL-FALLBACK — the productive snapshot of a tenant with no active
+   * subscription row, open or closed, read from the lifecycle preferences. Delete in Phase F,
+   * once every productive tenant has a row.
    *
    * @param clientId environment client id, already known to be productive
    * @return the productive snapshot, never null
@@ -364,8 +366,9 @@ public class TenantEnvironmentLifecycleService {
    * the checkout request that created it, or the Stripe customer).
    *
    * <ul>
-   *   <li><b>No row at all</b> → the preference projection ({@code ETGO_SubscriptionStatus} /
-   *       {@code ETGO_SubscriptionDueAt}), a tenant the R37 backfill has not reached
+   *   <li><b>No active row, open or closed</b> → the preference projection
+   *       ({@code ETGO_SubscriptionStatus} / {@code ETGO_SubscriptionDueAt}), a tenant the R37
+   *       backfill has not reached
    *       ({@code ETP-5046-TRANSITIONAL-FALLBACK}).</li>
    *   <li><b>An open row naming no Stripe subscription, or this one</b> → that row (a backfilled
    *       row may carry no id).</li>
@@ -640,9 +643,10 @@ public class TenantEnvironmentLifecycleService {
    * environment instead of associating and copying the wrong tenant.
    *
    * @param clientId environment client id
-   * @return true when the tenant has a subscription row, open or closed, or (without a row) the
-   *     productive marker or the retired productive plan preference; false for a blank id and the
-   *     System client, which have no lifecycle
+   * @return true when the tenant has an active subscription row, open or closed (the read
+   *     {@link SubscriptionService#findLatest} ignores an inactive row, as {@link #resolve} does),
+   *     or (without one) the productive marker or the retired productive plan preference; false
+   *     for a blank id and the System client, which have no lifecycle
    */
   public boolean isProductiveEnvironment(String clientId) {
     if (isNotATenant(clientId)) {

@@ -259,12 +259,13 @@ public class TenantPlanService {
    * OnboardingForceTestModeService} compares the result to {@value #PLAN_FREE} with no null guard,
    * and the environment list renders it directly.
    *
-   * <p><b>TRANSITIONAL (ETP-5046-TRANSITIONAL-FALLBACK).</b> A tenant with <em>no</em> open
-   * subscription is then checked against the retired {@value #PREFERENCE_ATTRIBUTE} preference, so
-   * a tenant the R37 backfill has not reached yet does not silently lose its paid plan between the
-   * deploy and the backfill. A tenant that <em>has</em> an open row never reaches the fallback, so
-   * the normal case costs no extra query. Delete the fallback in Phase F together with
-   * {@link #markProductive} and {@link #PREFERENCE_ATTRIBUTE}.
+   * <p><b>TRANSITIONAL (ETP-5046-TRANSITIONAL-FALLBACK).</b> A tenant with <em>no active</em>
+   * subscription row, open or closed, is then checked against the retired
+   * {@value #PREFERENCE_ATTRIBUTE} preference, so a tenant the R37 backfill has not reached yet
+   * does not silently lose its paid plan between the deploy and the backfill. A tenant that
+   * <em>has</em> an active row, open or closed, never reaches the fallback (since ETP-5047 a closed
+   * row answers for itself, as canceled), so the normal case costs no extra query. Delete the
+   * fallback in Phase F together with {@link #markProductive} and {@link #PREFERENCE_ATTRIBUTE}.
    *
    * <p>The plan is system state about the tenant, not the caller's data, so it is read in admin
    * mode. The access checks call this before any OBContext exists (the MCP commercial block runs
@@ -289,7 +290,7 @@ public class TenantPlanService {
       if (subscription.isPresent()) {
         return legacyPlanForStatus(SubscriptionService.effectiveStatusOf(subscription.get()));
       }
-      // ETP-5046-TRANSITIONAL-FALLBACK — only reached when the tenant never had a subscription.
+      // ETP-5046-TRANSITIONAL-FALLBACK — only reached when the tenant has no active row at all.
       return preferenceFallback.isProductive(clientId) ? PLAN_PRODUCTIVE : PLAN_FREE;
     } catch (RuntimeException e) {
       log.warn("Could not resolve plan for tenant {}, assuming '{}'", clientId, PLAN_FREE, e);
@@ -301,14 +302,15 @@ public class TenantPlanService {
 
   /**
    * ETP-5047 — {@link #resolvePlan} for a caller that has just established the tenant has no
-   * subscription row at all ({@link SubscriptionService#findLatest} was empty): only the
-   * transitional preference fallback is left to ask, so the row lookup is not repeated. Same
-   * contract as {@link #resolvePlan}: never null, never throws, degrades to {@value #PLAN_FREE}.
+   * active subscription row, open or closed ({@link SubscriptionService#findLatest} was empty):
+   * only the transitional preference fallback is left to ask, so the row lookup is not repeated.
+   * Same contract as {@link #resolvePlan}: never null, never throws, degrades to
+   * {@value #PLAN_FREE}.
    *
    * <p>TRANSITIONAL (ETP-5046-TRANSITIONAL-FALLBACK) — with the fallback gone in Phase F this
    * answers {@value #PLAN_FREE} unconditionally and its caller can drop it.
    *
-   * @param clientId the AD_Client to inspect, already known to have no subscription row
+   * @param clientId the AD_Client to inspect, already known to have no active subscription row
    * @return {@value #PLAN_PRODUCTIVE} when the retired preference still marks the tenant
    *     productive, otherwise {@value #PLAN_FREE}
    */

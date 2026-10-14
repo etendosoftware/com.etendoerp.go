@@ -52,8 +52,9 @@ import org.openbravo.model.ad.system.Client;
  *
  * <p>ETP-5047 narrowed the gap further: the reads take the tenant's open row, else its latest
  * closed one, so a tenant whose subscription was canceled is answered from its closed row (as
- * canceled), never from here. Only a tenant with <em>no</em> subscription row at all reaches this
- * class.
+ * canceled), never from here. Only a tenant with <em>no active</em> subscription row, open or
+ * closed, reaches this class: both reads of {@link SubscriptionService#findLatest} filter on
+ * {@code isactive = 'Y'}, so a tenant whose only rows are inactive reaches it too.
  *
  * <p>The backfill cannot simply be made automatic: it is deliberately gated on a human
  * re-verifying that production Stripe checkout has not gone live, because if it has, a real paying
@@ -100,12 +101,13 @@ public class TenantPlanPreferenceFallback {
 
   /**
    * Emitted at WARN once per tenant actually served by the fallback, on an environment that has
-   * switched to the subscription model. Since ETP-5047 only a tenant with no subscription row at
-   * all reaches the fallback — a closed row answers for itself (as canceled) — so the line says
-   * exactly that. Carries the grep marker.
+   * switched to the subscription model. Since ETP-5047 only a tenant with no active subscription
+   * row, open or closed, reaches the fallback — a closed row answers for itself (as canceled), and
+   * an inactive row is ignored by both reads — so the line says exactly that. Carries the grep
+   * marker.
    */
   private static final String FALLBACK_WARNING =
-      "ETP-5046-TRANSITIONAL-FALLBACK: tenant {} has no ETGO_SUBSCRIPTION row at all, open or"
+      "ETP-5046-TRANSITIONAL-FALLBACK: tenant {} has no active ETGO_SUBSCRIPTION row, open or"
           + " closed; resolving it as"
           + " '{}' from the retired {} preference. The ETP-5046 backfill has not run for this"
           + " tenant — run it and this line disappears.";
@@ -179,8 +181,8 @@ public class TenantPlanPreferenceFallback {
    * <p>The bulk path exists so the environment list keeps issuing a constant number of queries per
    * render. Looping {@link #isProductive} here would reintroduce exactly the N+1 that
    * {@link EnvironmentPlanCache} was built to remove. Callers pass only the ids that have no
-   * subscription row at all (a tenant whose latest row is closed is answered from that row, since
-   * ETP-5047), and an empty collection issues no query at all.
+   * active subscription row, open or closed (a tenant whose latest row is closed is answered from
+   * that row, since ETP-5047), and an empty collection issues no query at all.
    *
    * <p>Deliberately not chunked, unlike {@link SubscriptionService#findOpenForClients}: the caller
    * is the per-account environment list, whose id set is a handful of tenants, and this class is

@@ -174,7 +174,7 @@ class TenantPlanServiceTest {
     when(subscriptionService.findLatest(CLIENT_ID)).thenReturn(Optional.of(subscription));
   }
 
-  /** Stubs a tenant with no subscription row at all, open or closed. */
+  /** Stubs a tenant with no active subscription row, open or closed: findLatest is empty. */
   private void givenNoOpenSubscription() {
     when(subscriptionService.findOpen(CLIENT_ID)).thenReturn(Optional.empty());
     when(subscriptionService.findLatest(CLIENT_ID)).thenReturn(Optional.empty());
@@ -921,9 +921,10 @@ class TenantPlanServiceTest {
   void theSafetyNetStillWritesAndStillAnswersUntilTheBackfillHasRun() {
     // ETP-5046-TRANSITIONAL-FALLBACK — end to end, the one path that still needs the preference.
     // The paid-upgrade flow writes the marker ONLY when the subscription write failed; this spec
-    // is that tenant. It has no open subscription, so resolvePlan falls through to the fallback
-    // and reads the marker back as productive — which is the whole reason neither the write path
-    // nor the read may be deleted before every tenant has a subscription row.
+    // is that tenant. It has no active subscription row, open or closed (findLatest is empty), so
+    // resolvePlan falls through to the fallback and reads the marker back as productive — which is
+    // the whole reason neither the write path nor the read may be deleted before every tenant has
+    // a subscription row.
     Client client = mock(Client.class);
     when(obDal.get(Client.class, CLIENT_ID)).thenReturn(client);
     assertTrue(service.markProductive(CLIENT_ID, null));

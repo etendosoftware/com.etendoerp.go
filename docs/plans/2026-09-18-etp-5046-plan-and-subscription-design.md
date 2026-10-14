@@ -95,9 +95,11 @@ whose status is `active` or `past_due`. It does **not** look at the plan's price
 > **ETP-5047.** A cancellation now closes the row, so `resolvePlan` reads the tenant's *latest* row
 > (open, else the most recently closed, `SubscriptionService.findLatest`) and a closed row reads as
 > `canceled` — `free` — whatever its `STATUS` says; the preference fallback answers only for a
-> tenant with no row at all. The rule above is unchanged in effect: only an open `active` /
-> `past_due` row is productive for the plan. For *access*, any row at all makes the environment
-> productive, whatever its `ETGO_EnvironmentType` marker says (`open-and-notable-topics.md` §3.7).
+> tenant with no active row, open or closed (both reads of `findLatest` filter on `isactive`). The
+> rule above is unchanged in effect: only an open `active` / `past_due` row is productive for the
+> plan. For *access*, and for purchase-source eligibility, any active row, open or closed, makes
+> the environment productive, whatever its `ETGO_EnvironmentType` marker says
+> (`open-and-notable-topics.md` §3.7 and §4.14).
 
 The grandfathered `legacy-productive` plan has **no** `PROVIDER_PRICE_ID` by design. Keying
 "productive" on the presence of a price id would flip every backfilled tenant to free the instant
@@ -404,16 +406,19 @@ marker and the failure is logged at ERROR. For a tenant that did have a row that
 invisible behind the row, and since ETP-5047 a tenant whose only row is closed reads as canceled —
 it would stay blocked (the 402) while it pays.
 
-- **Reachable in principle.** A tenant can be re-opened and buy again (same decision), and a
-  re-purchasing tenant with a closed row is exactly the tenant this lookup exists for. Today's
-  checkout still provisions a new, rowless environment for every purchase
-  (`feature-flags-and-tenant-upgrade.md` §3), so no current flow reaches the edge — but the
-  acceptance does not rest on that.
+- **Reachable in principle only.** Letting a canceled tenant re-subscribe its own environment was
+  decided on 2026-10-14 (Martin Taal), and a re-purchasing tenant with a closed row is exactly the
+  tenant this lookup exists for — but that flow is **ETP-5742** and does not exist yet. Today every
+  checkout provisions a new, rowless environment (`feature-flags-and-tenant-upgrade.md` §3), and
+  since ETP-5047 a canceled productive tenant is no longer a demo source either
+  (`open-and-notable-topics.md` §4.14), so no current purchase reaches the edge. The acceptance
+  does not depend on that.
 - **Why it is accepted: it fails closed in practice.** The lookup runs inside the onboarding
   transaction, and on PostgreSQL a failed SQL statement aborts that transaction: every statement
   after it fails too (the marker write, the lifecycle projection, the commit), so the upgrade fails
-  and the purchase stays retryable instead of being recorded in the marker. Only a non-SQL failure
-  raised *before* the statement runs leaves a usable transaction and can reach the marker path.
+  and the purchase stays retryable instead of being recorded in the marker. Only a failure other
+  than a failed SQL statement (a mapping or hydration error after the statement ran, for instance)
+  leaves a usable transaction and can reach the marker path.
 - **The alternative is worse.** Failing the purchase on every lookup error would fail every rowless
   OFF purchase whenever the lookup misbehaves, to close an edge that already fails closed for SQL
   failures.
@@ -429,7 +434,13 @@ nothing — treat the switch as one-way.
 resolution of a rowless productive tenant (§8.1), with the grep marker
 `ETP-5046-TRANSITIONAL-FALLBACK`. While OFF that is every paying tenant, on purpose, so the line is
 **DEBUG** ("the subscription model is off in this environment, so this is the intended path"). While
-ON a tenant without a row is unexpected, so it is **WARN** ("… has no open ETGO_SUBSCRIPTION row …").
+ON a tenant without an active row is unexpected, so it is **WARN**, one line, with the tenant id,
+`productive` and `ETGO_TenantPlan` in the placeholders:
+
+```
+ETP-5046-TRANSITIONAL-FALLBACK: tenant {} has no active ETGO_SUBSCRIPTION row, open or closed; resolving it as '{}' from the retired {} preference. The ETP-5046 backfill has not run for this tenant — run it and this line disappears.
+```
+
 The "silence" half of §8.1's end condition therefore means "no WARN" and only exists once the switch
 is on. Cost: the switch is read only when the fallback actually serves a tenant — once per
 `isProductive` resolution, once per `productiveAmong` batch — never for a tenant with a row or
@@ -628,9 +639,9 @@ also requires `ETGO_SubscriptionModel = Y` on every environment. Phase F — del
 select count(*) from ad_preference where attribute = 'ETGO_TenantPlan';
 ```
 
-When that reaches **0**, and the fallback's `WARN` lines
-(`ETP-5046-TRANSITIONAL-FALLBACK: tenant … has no open ETGO_SUBSCRIPTION row`) have stopped
-appearing in the logs, every tenant has moved and the transitional code can be deleted safely.
+When that reaches **0**, and the fallback's `WARN` lines (§6.3 quotes the full text,
+`ETP-5046-TRANSITIONAL-FALLBACK: tenant … has no active ETGO_SUBSCRIPTION row, open or closed; …`)
+have stopped appearing in the logs, every tenant has moved and the transitional code can be deleted safely.
 Until then, **the rows that remain ARE the worklist** — each one names a tenant the backfill has
 not reached.
 

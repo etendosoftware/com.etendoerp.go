@@ -316,16 +316,17 @@ open no row, and the lifecycle webhooks keep the `ETGO_SubscriptionStatus`/`DueA
   `false` when `hasAnySubscription` throws (logged at ERROR), so the payment goes only to the
   `ETGO_TenantPlan` marker. For a tenant whose only row is closed the marker is hidden behind that
   row: since ETP-5047 the tenant reads as canceled, so it would stay blocked (402) while it pays.
-  *Reachable in principle:* a tenant can be re-opened and buy again (same decision), and a
-  re-purchasing tenant with a closed row is exactly the one the lookup exists for. Today's checkout
-  still provisions a new, rowless environment for every purchase
-  (`feature-flags-and-tenant-upgrade.md` §3), so no current flow reaches it — the acceptance does
-  not rest on that. *Why accepted:* it fails closed in practice. The lookup runs in the onboarding
-  transaction, and on PostgreSQL a failed SQL statement aborts it, so the writes that follow fail
-  too and the upgrade fails and stays retryable instead of being recorded in the marker; only a
-  non-SQL failure raised before the statement runs leaves a usable transaction and can reach the
-  edge. Failing every OFF purchase on a lookup error would be the worse trade. **Follow-up:** none
-  (no ticket). Design doc §6.3.
+  *Reachable in principle only:* letting a canceled tenant re-subscribe its own environment was
+  decided on 2026-10-14 (Martin Taal), but that flow is **ETP-5742** and does not exist yet. Today
+  every checkout provisions a new, rowless environment (`feature-flags-and-tenant-upgrade.md` §3),
+  and since ETP-5047 a canceled productive tenant is no longer a demo source either (§4.14), so no
+  current purchase reaches a tenant with a closed row. The acceptance does not depend on that.
+  *Why accepted:* it fails closed in practice. The lookup runs in the onboarding transaction, and on
+  PostgreSQL a failed SQL statement aborts it, so the writes that follow fail too and the upgrade
+  fails and stays retryable instead of being recorded in the marker; only a failure other than a
+  failed SQL statement (a mapping or hydration error after the statement ran, for instance) leaves
+  a usable transaction and can reach the edge. Failing every OFF purchase on a lookup error would
+  be the worse trade. **Follow-up:** none (no ticket). Design doc §6.3.
 - **Several switch rows:** the reader and the verification query both take the first in
   `created desc, updated desc, ad_preference_id desc`, so the winner is deterministic even for rows
   created in one transaction.
@@ -348,9 +349,11 @@ open no row, and the lifecycle webhooks keep the `ETGO_SubscriptionStatus`/`DueA
 
 The `ETGO_TenantPlan` preference is retired per tenant (R37 and the paid onboarding), and a
 transitional read fallback answers for tenants not reached yet; design doc §8 describes both.
-(Since ETP-5047 the fallback answers only for a tenant with **no subscription row at all**: a
-cancellation closes its row, so a tenant with only closed rows reads as canceled from its latest
-row instead — `findLatest`, §3.7.) What
+(Since ETP-5047 the fallback answers only for a tenant with **no active subscription row, open or
+closed**: a cancellation closes its row, so a tenant with only closed rows reads as canceled from
+its latest row instead — `findLatest`, §3.7. Both of `findLatest`'s reads filter on `isactive`, so
+a tenant whose only rows are inactive reaches the fallback too; R37's branch (B) retires its
+marker, after which the fallback stops serving it and its WARN stops.) What
 is open is the cleanup that ends the transition: nothing owns it, so without a ticket the
 transitional code stays indefinitely.
 
@@ -375,8 +378,16 @@ therefore a precondition of Phase F.
 select count(*) from ad_preference where attribute = 'ETGO_TenantPlan';   -- reaches 0
 ```
 
-and the fallback's WARN (`ETP-5046-TRANSITIONAL-FALLBACK: tenant … has no open ETGO_SUBSCRIPTION
-row`) no longer appears in the logs.
+and the fallback's WARN no longer appears in the logs. It is one line, with the tenant id,
+`productive` and `ETGO_TenantPlan` in the `{}` placeholders:
+
+```
+ETP-5046-TRANSITIONAL-FALLBACK: tenant {} has no active ETGO_SUBSCRIPTION row, open or closed; resolving it as '{}' from the retired {} preference. The ETP-5046 backfill has not run for this tenant — run it and this line disappears.
+```
+
+Search the WARN lines for the prefix `ETP-5046-TRANSITIONAL-FALLBACK: tenant` rather than the rest
+of the sentence, whose wording changed in ETP-5047. The DEBUG line logged while the switch is OFF
+shares the prefix, but a switched environment no longer emits it.
 
 **What Phase F deletes** — every site carrying the grep marker `ETP-5046-TRANSITIONAL-FALLBACK`
 (6 source files, 5 test files as of 2026-09-28):
@@ -458,11 +469,11 @@ together or they drift apart in silence.
 - `ENVIRONMENT_TYPE` stays a preference. It records DEMO versus PRODUCTIVE, which the subscription
   table does not carry, so `applyPaidUpgradeSideEffects` still marks the lifecycle projection
   whichever way the payment itself was recorded. **Since ETP-5047 it no longer decides for a tenant
-  with a row:** any subscription row makes the tenant productive (§3.7), and the marker is read
-  only for a tenant with no row at all — retired in Phase F (§3.2).
+  with a row:** any active subscription row, open or closed, makes the tenant productive (§3.7),
+  and the marker is read only for a tenant with no active row — retired in Phase F (§3.2).
 - The `ETGO_SubscriptionStatus` / `ETGO_SubscriptionDueAt` preferences are still read **when the
-  tenant has no subscription row at all** (`ETP-5046-TRANSITIONAL-FALLBACK`). The order matters:
-  consulting them first would let the access policy and the Subscription Plan Catalog disagree about the same
+  tenant has no active subscription row, open or closed** (`ETP-5046-TRANSITIONAL-FALLBACK`). The
+  order matters: consulting them first would let the access policy and the Subscription Plan Catalog disagree about the same
   tenant, which is the whole point of the unification. That block goes in Phase F with the rest of
   the fallback, once R37 has given every productive tenant a row.
 
@@ -542,7 +553,7 @@ Develop's ETP-5443 wired the Stripe lifecycle webhooks (`invoice.paid`, `invoice
    a successor row, ETP-5053), so `END_DATE IS NULL` is part of the lookup;
 2. otherwise the tenant is found the old way — the checkout request that bought the subscription,
    then the Stripe customer — and its **latest** row decides:
-   - no row at all → the preference projection (`ETP-5046-TRANSITIONAL-FALLBACK`);
+   - no active row, open or closed → the preference projection (`ETP-5046-TRANSITIONAL-FALLBACK`);
    - an open row with no Stripe id (backfilled) or this one → that row;
    - an open row naming **another** subscription → `IGNORED`, `event for another subscription`;
    - only closed rows → `IGNORED`, `subscription closed` (a late event of the canceled
@@ -574,20 +585,25 @@ calling user, whose role can read neither `AD_Preference` nor `ETGO_SUBSCRIPTION
   tenant again would run `forceTestModeForFreeTenant` on it, routing its SII / TicketBAI /
   VeriFactu submissions to the test endpoints — a compliance stake, not a config nit.
 - **The row, not the marker, makes a tenant productive (ETP-5047 review, B1).**
-  `TenantEnvironmentLifecycleService.resolve` checks for any subscription row (open or closed)
-  **first** and takes the productive path when there is one, whatever `ETGO_EnvironmentType` says.
+  `TenantEnvironmentLifecycleService.resolve` checks for any active subscription row (open or
+  closed — `findLatest` ignores an inactive one) **first** and takes the productive path when
+  there is one, whatever `ETGO_EnvironmentType` says.
   The earlier version decided on the marker or on `resolvePlan`, and failed open: a canceled row
   makes the plan `free`, and a tenant without the marker — every tenant provisioned before the
   marker existed (6 of 6 productive tenants on the development database) — fell into the demo path,
   got a legacy-transition start or no snapshot, and was **allowed**. A tenant with a row now never
   reaches the demo path, so no demo or legacy-transition preference is ever written for it. On the
   row path the marker is not even read, and a missing one is not reported (it is the normal state
-  of a pre-marker tenant). The marker and `resolvePlan` still decide for a tenant with no row at
-  all (the preference fallback).
+  of a pre-marker tenant). The marker and `resolvePlan` still decide for a tenant with no active
+  row (the preference fallback). `isProductiveEnvironment` reads the same way to keep a productive
+  tenant, canceled included, out of the purchase-source checks (§4.14).
 - **Re-subscribing opens a fresh row.** A later purchase for the same tenant finds no open row and
-  `openSubscription` inserts one. (A tenant can be re-opened and buy again — decided 2026-10-14,
-  Martin Taal — but today's checkout still provisions a new environment for every purchase, so no
-  current purchase targets a finished environment; `feature-flags-and-tenant-upgrade.md` §3.)
+  `openSubscription` inserts one (`SubscriptionResubscriptionIntegrationTest`). No purchase reaches
+  that path yet: letting a canceled tenant re-subscribe its own environment was decided on
+  2026-10-14 (Martin Taal), but the flow is **ETP-5742** and does not exist yet. Today every
+  checkout provisions a new environment, and since ETP-5047 a canceled productive tenant is no
+  longer a demo source either (§4.14); `feature-flags-and-tenant-upgrade.md` §3. The acceptance of
+  §2.9's failed row lookup does not depend on it.
   If the open row is `canceled` but was never closed — its delete event was lost, or R37
   backfilled it (R37 leaves canceled rows open on purpose: it has no provider end instant to close
   them at; its idempotency guard is "no row at all", so a re-run never inserts a second one either
@@ -871,6 +887,8 @@ header as well.
 
 ## 4. Known issues
 
+*Fixed on arrival and recorded in §6 on 2026-10-14: §4.14.*
+
 ### 🟡 4.4 The at-sign guard is over-tested (ETP-5050)
 
 **Ticket:** owner ETP-5050.
@@ -1114,7 +1132,8 @@ A trim along these lines is parked, unpushed, on the local branch `parked/ETP-50
 
 ### 🟡 4.13 Existing issues found while developing ETP-5047 — not fixed in ETP-5047
 
-**Ticket:** no ticket — candidates for one follow-up ticket; related ETP-5047.
+**Ticket:** items 1–10: no ticket — candidates for one follow-up ticket; item 11: ETP-5743; item
+12: ETP-5742 (both linked to ETP-5047). Related ETP-5047.
 
 Found during ETP-5047's development, review and QA, then taken out of its scope by Martin on
 2026-10-14. The **Since** column says where each one comes from, checked against `develop` (go
@@ -1143,6 +1162,8 @@ below assume it (item 1's 503 is decided per enforcement flag).
 | 8 | SPA does not recognise the OAuth2 API-key 402 envelope (`error: access_denied` + `error_description`) as an environment block; the message is untranslated. | Low: another request's 402 normally blocks the app first. | `develop` | None. |
 | 9 | A brief access-map failure during a background refresh replaces the whole app. | Unsaved form input is lost. Core behaviour. | `develop` | None — needs an `app-shell-core` change: keep the previous access map on a background refresh. |
 | 10 | Two readers of the 402 decision: core `apiFetch` reads only the message text; schema_forge's `readEnvironmentAccessDecision` (`d18c484d9`) reads `error.decision` first. | Same answer while the backend keeps both in sync; they drift if it stops. | **ETP-5047** | core: the reader moves into `app-shell-core` (`d57298c06`); the schema_forge side waits for a core release. |
+| 11 | **Unverified.** Purchase-source ownership is `EtendoGoJwtDalHelper.clientBelongsToAccountEmail`: any active user of the environment whose email or username is the account email (or an `email+suffix` variant). That matches a member **invited** into another owner's environment, not only its owner. | An invited member might name another owner's demo as `demoClientId`, so a purchase would associate, copy and revoke a demo the buyer does not own — against FR-08 of `schema_forge/docs/plans/etp-5396-demo-to-pro-prd.md`. | `develop` (predates ETP-5046/5047) | None — **ETP-5743** "Restrict the purchase demo source to the account owner". |
+| 12 | A canceled tenant cannot re-subscribe its own environment: every checkout provisions a new one, and since ETP-5047 a canceled productive tenant is not a demo source either (§4.14). The flow was decided on 2026-10-14 (Martin Taal; §2.9, §3.7). The same-name check `ownsProductiveNamed` (pre-checkout and onboarding) asks `resolvePlan`, which reads a canceled tenant as `free`, so its name does not count as taken. | A canceled customer who wants to come back gets a second environment, and may give it the canceled one's company name. | **ETP-5047** (it closes the row on cancel, so a canceled tenant reads `free`; the missing flow itself predates it) | None — **ETP-5742** "Let a canceled tenant re-subscribe its own environment". |
 
 ## 5. Handed forward to later tickets
 
@@ -1447,6 +1468,47 @@ of when that flag ends (a placeholder TTL in `flags-registry.json`). Production 
 switch-on procedure after the deploy: read the would-be refusals, check them against the
 subscription rows, then switch on one tenant, then everyone. The parked fixes of §4.13 are on the
 same branches.
+
+### ✅ 4.14 A canceled productive tenant passed for a free demo as a purchase source
+
+**Ticket:** owner ETP-5047 (fixed: go `99f765229`, sf `a9f570e88`); related ETP-5046 (introduced
+it), ETP-5742 and ETP-5743 (§4.13, items 12 and 11).
+
+**Status:** decided 2026-10-14 (Martin Taal) — found and fixed in ETP-5047, so it sits here on
+arrival.
+
+**Decision: a productive environment is never the demo source of a purchase, whatever its plan
+reads.** Source eligibility used to rest on the plan: an environment owned by the account, on the
+`free` plan and not yet the origin of a productive environment was a valid source. ETP-5046 made a
+`canceled` subscription read as plan `free` (`TenantPlanService.legacyPlanForStatus`), so a
+productive tenant whose subscription was canceled passed for a free demo. ETP-5047 made it certain:
+every cancellation closes the row, and a closed row reads `canceled` whatever its `STATUS` says
+(§3.7). On `develop` it cannot happen: the plan comes from the `ETGO_TenantPlan` marker, which a
+cancellation does not touch. What it did on the ETP-5047 branch before the fix: from that tenant's
+own session the checkout answered `DEMO_SELECTION_REQUIRED`, the upgrade page listed it in the
+source picker, preselected it and badged it "Demo"; the backend accepted it as `demoClientId`; and
+the paid setup associated it with the new environment, copied its profile and data, and revoked its
+access, as if it were a demo.
+
+The fix asks the lifecycle type as well as the plan:
+
+- **Backend** (go `99f765229`): `TenantEnvironmentLifecycleService#isProductiveEnvironment` — any
+  active subscription row, open or closed, else the `ETGO_EnvironmentType = PRODUCTIVE` marker or
+  the retired `ETGO_TenantPlan` preference, so it holds with `ETGO_SubscriptionModel` OFF too. It
+  writes nothing, never reads the access decision or its kill switch, and fails closed (a lookup
+  error answers "productive"). `resolveCheckoutSelection`, `isOwnedFreeDemoClient` (400
+  `INVALID_DEMO_SELECTION`), `findFreeTenantIdsByAccountEmail` and `restorePaidOnboardingSelection`
+  use it. A tenant that predates the lifecycle metadata (no row, no marker, free plan) stays a
+  valid source.
+- **SPA** (sf `a9f570e88`): `isPurchaseSourceDemo` (`lib/environmentPresentation.js`) also excludes
+  `environmentType: 'PRODUCTIVE'`, and `environmentPlanLabelKey` badges it "Productive".
+
+The effect: a canceled productive tenant's checkout provisions a clean new environment, as on
+`develop`. Reference: `feature-flags-and-tenant-upgrade.md` §2, *A productive environment is never
+a source*; `schema_forge/docs/paid-tenant-infrastructure.md`, step 8.
+
+**Follow-up:** none for this fix. Letting that tenant re-subscribe its own environment instead is
+ETP-5742, and restricting the source to the account owner is ETP-5743 (§4.13).
 
 ### ✅ 5.7 `ETGO_PLAN_QUOTA.CONSUMPTION_SOURCE` means something else in ETP-5051
 

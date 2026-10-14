@@ -1586,7 +1586,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * an out-of-order older event stale and keeps an authoritative {@code PAST_DUE} due date.
    *
    * <p>The outcome lands on the resolved {@code ETGO_SUBSCRIPTION} row, and on the preference
-   * projection for a tenant with no row at all (see
+   * projection for a tenant with no active row, open or closed (see
    * {@link TenantEnvironmentLifecycleService#applySubscriptionEvent}); the stored state the event
    * is evaluated against is read from the same place.
    *
@@ -3724,14 +3724,16 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * {@code false} on a failed lookup means that a tenant which DID have a row would get its payment
    * recorded only in the marker — invisible behind that row. Since ETP-5047 a tenant whose only row
    * is closed reads as canceled, so such a tenant would stay canceled while it pays. The case is
-   * reachable in principle: a tenant can be re-opened and buy again, and a re-purchasing tenant
-   * with a closed row is exactly the one this lookup exists for. It is accepted with no code change
-   * because it fails closed in practice: on PostgreSQL a failed SQL statement aborts the
-   * transaction, so the onboarding writes that follow fail too and the upgrade fails instead of
-   * being recorded in the marker. Only a non-SQL failure raised before the statement runs could
-   * reach the marker path with a usable transaction. Failing the purchase on every lookup error
-   * instead would trade that edge for failing every rowless purchase whenever the lookup
-   * misbehaves.
+   * reachable in principle only: letting a canceled tenant re-subscribe its own environment was
+   * decided on 2026-10-14 (Martin Taal), but that flow is ETP-5742 and does not exist yet. Today
+   * every checkout provisions a new environment, and since ETP-5047 a canceled productive tenant is
+   * no longer a demo source either, so no current purchase reaches a tenant with a closed row. The
+   * acceptance does not depend on that: it fails closed in practice. On PostgreSQL a failed SQL
+   * statement aborts the transaction, so the onboarding writes that follow fail too and the upgrade
+   * fails instead of being recorded in the marker. Only a failure other than a failed SQL statement
+   * (a mapping or hydration error after the statement ran, for instance) could reach the marker
+   * path with a usable transaction. Failing the purchase on every lookup error instead would trade
+   * that edge for failing every rowless purchase whenever the lookup misbehaves.
    */
   private boolean tenantHasSubscriptionRow(String clientId, String clientName,
       String accountEmail) {
@@ -3829,8 +3831,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * Returns 200 with environments linked to the account, plus the account email as the
    * flag-targeting identity. Links via AD_User.username matching the account email.
    *
-   * <p>Each environment carries three plan fields, read from its open {@code ETGO_SUBSCRIPTION}
-   * row:
+   * <p>Each environment carries three plan fields, read from its {@code ETGO_SUBSCRIPTION} row —
+   * the open one, else the latest closed one (ETP-5047):
    * <ul>
    *   <li>{@code plan} — the original coarse {@code "free" | "productive"} value, unchanged since
    *       ETP-4686 and still what live clients branch on. Never null.</li>
@@ -3844,7 +3846,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * <p>All three come from a single {@link EnvironmentPlanCache} built before the sort. Resolving
    * the plan per comparison would issue O(n log n) queries for one page render.
    *
-   * <p><b>TRANSITIONAL (ETP-5046-TRANSITIONAL-FALLBACK).</b> Tenants with no open subscription are
+   * <p><b>TRANSITIONAL (ETP-5046-TRANSITIONAL-FALLBACK).</b> Tenants with no active subscription
+   * row, open or closed (a closed row answers for its tenant, as canceled, since ETP-5047), are
    * checked once, in one extra query, against the retired {@code ETGO_TenantPlan} preference, so
    * this list agrees with {@code TenantPlanService#resolvePlan} until the R37 backfill has run.
    * Such a tenant reports {@code plan = "productive"} with {@code planKey} and

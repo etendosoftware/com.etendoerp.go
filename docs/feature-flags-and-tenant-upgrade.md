@@ -528,7 +528,8 @@ canceled subscription closes the tenant's row, and a closed row reads plan `free
 (`TenantPlanService#resolvePlan`), so the plan alone would let a canceled productive tenant pass for
 a free demo. Source eligibility therefore also asks
 `TenantEnvironmentLifecycleService#isProductiveEnvironment`, which reads the lifecycle type the same
-way `resolve` does: any subscription row, open or closed, makes the tenant productive; without a row,
+way `resolve` does: any active subscription row, open or closed, makes the tenant productive (both
+reads of `SubscriptionService#findLatest` ignore an inactive row); without one,
 the `ETGO_EnvironmentType = PRODUCTIVE` marker or the retired `ETGO_TenantPlan` preference does, so
 the check holds while `ETGO_SubscriptionModel` is OFF too.
 
@@ -857,12 +858,14 @@ A `paymentToken` the webhook confirmed is what makes an environment productive �
 account's first environment.
 
 **Today's checkout provisions a new environment for every purchase (ETP-5548) — but that is a
-property of the current flow, not a rule the plan record may rely on: a tenant can be re-opened and
-buy again** (decided 2026-10-14, Martin Taal). What the code does today: `resolveCheckoutSelection`
-turns a purchase from a productive or spent-demo session into a clean new environment, and the paid
-onboarding's `selectTenant` only ever picks a pooled tenant, a new classic client, or the
-half-built client this same checkout left under its provisioning name — never a finished
-environment. The plan record is already built for a tenant that buys again:
+property of the current flow, not a rule the plan record may rely on.** Letting a canceled tenant
+re-subscribe its own environment was decided on 2026-10-14 (Martin Taal); the flow is **ETP-5742**
+and does not exist yet. What the code does today: `resolveCheckoutSelection` turns a purchase from
+a productive or spent-demo session into a clean new environment, and the paid onboarding's
+`selectTenant` only ever picks a pooled tenant, a new classic client, or the half-built client this
+same checkout left under its provisioning name — never a finished environment. Since ETP-5047 a
+canceled productive tenant is no longer a demo source either (§2, *A productive environment is
+never a source*). The plan record is already built for a tenant that buys again:
 
 - a tenant with any `ETGO_SUBSCRIPTION` row, open or closed, is recorded on a row whatever the
   subscription-model switch says (*Only a tenant's first row is switched*, below), so its payment
@@ -873,7 +876,8 @@ environment. The plan record is already built for a tenant that buys again:
   "Re-subscribing opens a fresh row").
 
 The one way such a tenant's payment can still reach the marker is a *failed* row lookup with the
-switch OFF — an accepted edge, see *Only a tenant's first row is switched*.
+switch OFF — an accepted edge, see *Only a tenant's first row is switched*. That acceptance does
+not depend on ETP-5742: it holds whether or not a tenant can buy again.
 
 ### Transitional read fallback (ETP-5046 cutover) — grep `ETP-5046-TRANSITIONAL-FALLBACK`
 
@@ -936,10 +940,12 @@ what every read answers from; a payment recorded only in the marker would leave 
 canceled or closed row. **A failed row lookup takes the marker path — accepted, decided 2026-10-14
 (Martin Taal), no code change.** With the switch OFF, a lookup that throws is logged at ERROR and
 answered "no row", so a re-purchasing tenant whose only row is closed would stay blocked while it
-pays — the case where the edge is reachable in principle. It fails closed in practice: the lookup
-runs in the onboarding transaction, and on PostgreSQL a failed SQL statement aborts it, so the
-upgrade fails and stays retryable; only a non-SQL failure raised before the statement runs can
-reach the marker (`open-and-notable-topics.md` §2.9, design doc §6.3).
+pays. That is reachable in principle only: the re-subscribe flow is ETP-5742, and no current
+purchase reaches a tenant with a closed row (above). The acceptance does not depend on it — it
+fails closed in practice: the lookup runs in the onboarding transaction, and on PostgreSQL a failed
+SQL statement aborts it, so the upgrade fails and stays retryable; only a failure other than a
+failed SQL statement (a mapping or hydration error after the statement ran, for instance) can reach
+the marker (`open-and-notable-topics.md` §2.9, design doc §6.3).
 
 **One-way in practice.** Setting the switch back to `N` sends only tenants that have never had a
 row back to the marker; every tenant with a row stays on it, payments included. Two populations that
@@ -996,13 +1002,14 @@ never run for a tenant after R37 has; see §8.2 of
 `plans/2026-09-18-etp-5046-plan-and-subscription-design.md`.
 
 The read side therefore tolerates the gap. `com.etendoerp.go.payment.TenantPlanPreferenceFallback`
-answers for a tenant **only when it has no subscription row at all** (open or closed — since
+answers for a tenant **only when it has no active subscription row, open or closed** (since
 ETP-5047 a canceled subscription closes its row, and a closed row reads as `canceled`, so it must not
-fall through to the preference):
+fall through to the preference; both reads of `SubscriptionService#findLatest` filter on `isactive`,
+so a tenant whose only rows are inactive falls back too):
 
 | Path | Where | Cost |
 |---|---|---|
-| Single tenant | `TenantPlanService.resolvePlan` | one extra query, and only when the tenant has no subscription row |
+| Single tenant | `TenantPlanService.resolvePlan` | one extra query, and only when the tenant has no active subscription row |
 | Bulk (`GET /environments`) | `EnvironmentPlanCache.of(allClientIds, openSubscriptions)` | **one** extra query for all the missing ids at once; none when every tenant has a row |
 
 Both paths must fall back or neither: if only one did, the environment list and `resolvePlan` would
@@ -1027,8 +1034,13 @@ Every resolution served by the fallback logs one line naming the tenant — one 
 never per comparison — at a level that follows the subscription-model switch (read only when the
 fallback serves a tenant, at most once per resolution or batch). With the switch **OFF** it is
 **DEBUG**: every paying tenant is recorded with the preference on purpose. With it **ON** it is
-**WARN**, pointing at the backfill, because a tenant without a row is unexpected there. Once
-switched, that WARN is the deletion signal:
+**WARN**, pointing at the backfill, because a tenant without a row is unexpected there:
+
+```
+ETP-5046-TRANSITIONAL-FALLBACK: tenant {} has no active ETGO_SUBSCRIPTION row, open or closed; resolving it as '{}' from the retired {} preference. The ETP-5046 backfill has not run for this tenant — run it and this line disappears.
+```
+
+Once switched, that WARN is the deletion signal:
 **when it stops appearing, every tenant has a subscription row** and the fallback is safe to remove. Read it
 together with the preference count above: the count says no tenant still *has* a marker, the silence
 says no tenant still *needs* one. Phase F deletes `TenantPlanPreferenceFallback`, `markProductive`,
