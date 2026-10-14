@@ -293,8 +293,10 @@ optional — an environment may stay on the preference path indefinitely.
       invariant of §8.2 true now that R37 is no longer visited in chain order.
    3. Run R37 explicitly, dry run first:
       `make data-fixes FIX=R37-tenant-subscription-backfill DRY_RUN=1`, then
-      `make data-fixes FIX=R37-tenant-subscription-backfill`. Every productive tenant gets its open
-      `legacy-productive` row and loses its marker in the same transaction (§7, §8).
+      `make data-fixes FIX=R37-tenant-subscription-backfill`. A productive tenant with **no
+      subscription row at all** gets its open `legacy-productive` row and loses its marker in the
+      same transaction; a tenant that already has any row — closed or inactive included — only
+      loses its marker, and no row is inserted for it (the ETP-5047 backfill guard, §7, §8).
    4. **Set the system preference** — Classic **Preference** window as System Administrator:
       Property `ETGO_SubscriptionModel`, Value `Y`, Client `System`, Organization `*`, no
       Visible-at Client other than System, no role, user or window, and **no Module**. From the
@@ -308,7 +310,8 @@ optional — an environment may stay on the preference path indefinitely.
         from etgo_data_fix_history
        where fix_id = '20261005T180000Z__R37-tenant-subscription-backfill'
        order by status;
-      -- must be 0: every active productive marker has become an open subscription row
+      -- must be 0: no active productive marker is left -- a rowless tenant's became an open row,
+      -- a tenant with any row (closed or inactive too) only had its marker retired
       select count(*) from ad_preference
        where attribute = 'ETGO_TenantPlan' and isactive = 'Y'
          and upper(trim(value)) = 'PRODUCTIVE';
@@ -394,14 +397,28 @@ transitional fallback (§8). `openSubscription` has exactly one runtime caller �
 so the gate there covers every row a tenant can get at runtime; R37 is the operator's own step 3.3
 of §6.2.
 
-**A failed row lookup takes the marker path — on purpose.** With the switch OFF, if
-`hasAnySubscription` itself fails the purchase is recorded with the marker and the failure is logged
-at ERROR. For a tenant that did have a row that payment would be invisible behind it. Accepted
-because the case is near-unreachable: a purchase always provisions a NEW tenant (ETP-5548), which
-has no row, and a SQL-level failure has already marked the onboarding transaction for rollback, so
-the upgrade fails closed and is retried. Failing every OFF purchase on a lookup error would be the
-worse trade. To revisit when ETP-5047 is merged (register §2.9): there a tenant whose only row is
-closed reads as canceled, and a payment that reached it through this path would leave it canceled.
+**A failed row lookup takes the marker path — accepted, decided 2026-10-14 (Martin Taal), no code
+change.** With the switch OFF, if `hasAnySubscription` itself fails,
+`EtendoGoJwtServlet#tenantHasSubscriptionRow` answers `false`: the purchase is recorded with the
+marker and the failure is logged at ERROR. For a tenant that did have a row that payment is
+invisible behind the row, and since ETP-5047 a tenant whose only row is closed reads as canceled —
+it would stay blocked (the 402) while it pays.
+
+- **Reachable in principle.** A tenant can be re-opened and buy again (same decision), and a
+  re-purchasing tenant with a closed row is exactly the tenant this lookup exists for. Today's
+  checkout still provisions a new, rowless environment for every purchase
+  (`feature-flags-and-tenant-upgrade.md` §3), so no current flow reaches the edge — but the
+  acceptance does not rest on that.
+- **Why it is accepted: it fails closed in practice.** The lookup runs inside the onboarding
+  transaction, and on PostgreSQL a failed SQL statement aborts that transaction: every statement
+  after it fails too (the marker write, the lifecycle projection, the commit), so the upgrade fails
+  and the purchase stays retryable instead of being recorded in the marker. Only a non-SQL failure
+  raised *before* the statement runs leaves a usable transaction and can reach the marker path.
+- **The alternative is worse.** Failing the purchase on every lookup error would fail every rowless
+  OFF purchase whenever the lookup misbehaves, to close an edge that already fails closed for SQL
+  failures.
+
+Recorded in register §2.9.
 
 **One-way in practice.** Turning the switch OFF again sends only tenants that have never had a row
 back to the marker; every tenant with a row stays on it, payments included. The fleet is then two
@@ -420,20 +437,20 @@ without a marker; the serving path already cost one `AD_Preference` query and ad
 
 ## 7. Backfill
 
-Every tenant carrying the `productive` preference gets one open subscription row on the
-grandfathered `legacy-productive` plan, with the Stripe customer and subscription ids — and the
-Stripe price id actually charged (`STRIPE_PRICE_ID`, recorded on requests since develop's ETP-5463)
-into `PROVIDER_PRICE_ID` — copied from its latest paid `ETGO_CHECKOUT_REQUEST` row where one
-exists (NULL otherwise; `SNAPSHOT_AMOUNT`/`SNAPSHOT_CURRENCY` always stay NULL, since the request
-stores no amount), **and retires that tenant's now-stale `ETGO_TenantPlan` preference in the
-same transaction** (§8). Delivered as `20261005T180000Z__R37-tenant-subscription-backfill.sql`
-under `schema_forge/cli/src/data-fixes/sql/` — re-dated from `20260918T120000Z` during the develop
-merge, see §7.3. **Opt-in since 2026-10-14** (`-- @optIn: true`): a full `make data-fixes` never
-runs it; the operator runs it with `FIX=` as step 3.3 of §6.2, at the moment the environment
-switches to the subscription model (§6.3). `@check` selects a tenant on either of two grounds:
-**(A) backfill** — an active productive marker and **no subscription row at all**, active or not,
-open or closed (narrowed from "no open subscription" in ETP-5047, §8); **(B) retirement** — any
-`ETGO_TenantPlan` row and any
+Every tenant carrying the `productive` preference **and no subscription row at all** gets one open
+subscription row on the grandfathered `legacy-productive` plan, with the Stripe customer and
+subscription ids — and the Stripe price id actually charged (`STRIPE_PRICE_ID`, recorded on requests
+since develop's ETP-5463) into `PROVIDER_PRICE_ID` — copied from its latest paid
+`ETGO_CHECKOUT_REQUEST` row where one exists (NULL otherwise; `SNAPSHOT_AMOUNT`/`SNAPSHOT_CURRENCY`
+always stay NULL, since the request stores no amount), **and retires that tenant's now-stale
+`ETGO_TenantPlan` preference in the same transaction** (§8). Delivered as
+`20261005T180000Z__R37-tenant-subscription-backfill.sql` under
+`schema_forge/cli/src/data-fixes/sql/` — re-dated from `20260918T120000Z` during the develop merge,
+see §7.3. **Opt-in since 2026-10-14** (`-- @optIn: true`): a full `make data-fixes` never runs it;
+the operator runs it with `FIX=` as step 3.3 of §6.2, at the moment the environment switches to the
+subscription model (§6.3). `@check` selects a tenant on either of two grounds: **(A) backfill** — an
+active productive marker and **no subscription row at all**, active or not, open or closed (narrowed
+from "no open subscription" in ETP-5047, §8); **(B) retirement** — any `ETGO_TenantPlan` row and any
 subscription row, open or closed (added for develop's R42, §8). Re-running creates zero rows and
 retires nothing: (A) turns false because the inserted row is a row and the marker is gone, (B)
 because every marker of a tenant with a row is gone.

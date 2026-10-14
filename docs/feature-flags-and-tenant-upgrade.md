@@ -823,8 +823,26 @@ paid tenant read back as free with nothing reporting it. `TenantPlanServiceTest`
 for that reason.
 
 A `paymentToken` the webhook confirmed is what makes an environment productive — including for an
-account's first environment. A purchase never converts an existing environment (ETP-5548): it
-always provisions a new one.
+account's first environment.
+
+**Today's checkout provisions a new environment for every purchase (ETP-5548) — but that is a
+property of the current flow, not a rule the plan record may rely on: a tenant can be re-opened and
+buy again** (decided 2026-10-14, Martin Taal). What the code does today: `resolveCheckoutSelection`
+turns a purchase from a productive or spent-demo session into a clean new environment, and the paid
+onboarding's `selectTenant` only ever picks a pooled tenant, a new classic client, or the
+half-built client this same checkout left under its provisioning name — never a finished
+environment. The plan record is already built for a tenant that buys again:
+
+- a tenant with any `ETGO_SUBSCRIPTION` row, open or closed, is recorded on a row whatever the
+  subscription-model switch says (*Only a tenant's first row is switched*, below), so its payment
+  never lands in a marker hidden behind a closed row;
+- `SubscriptionService#openSubscription` opens a fresh row next to a closed one, and closes a
+  canceled open row whose close never arrived before it does
+  (`SubscriptionResubscriptionIntegrationTest`; `open-and-notable-topics.md` §3.7,
+  "Re-subscribing opens a fresh row").
+
+The one way such a tenant's payment can still reach the marker is a *failed* row lookup with the
+switch OFF — an accepted edge, see *Only a tenant's first row is switched*.
 
 ### Transitional read fallback (ETP-5046 cutover) — grep `ETP-5046-TRANSITIONAL-FALLBACK`
 
@@ -884,7 +902,13 @@ Switching, on the target environment:
 **Only a tenant's first row is switched.** A tenant that already has a subscription row — any row,
 open or closed — is recorded on a row when it pays, whatever the switch says, because its row is
 what every read answers from; a payment recorded only in the marker would leave it blocked behind a
-canceled or closed row.
+canceled or closed row. **A failed row lookup takes the marker path — accepted, decided 2026-10-14
+(Martin Taal), no code change.** With the switch OFF, a lookup that throws is logged at ERROR and
+answered "no row", so a re-purchasing tenant whose only row is closed would stay blocked while it
+pays — the case where the edge is reachable in principle. It fails closed in practice: the lookup
+runs in the onboarding transaction, and on PostgreSQL a failed SQL statement aborts it, so the
+upgrade fails and stays retryable; only a non-SQL failure raised before the statement runs can
+reach the marker (`open-and-notable-topics.md` §2.9, design doc §6.3).
 
 **One-way in practice.** Setting the switch back to `N` sends only tenants that have never had a
 row back to the marker; every tenant with a row stays on it, payments included. Two populations that

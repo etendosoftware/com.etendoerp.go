@@ -311,11 +311,21 @@ open no row, and the lifecycle webhooks keep the `ETGO_SubscriptionStatus`/`DueA
   A tenant whose only rows are inactive gets a new active open row next to them: the partial unique
   index `etgo_sub_open_envclient_uq` covers only active rows with no end date. `openSubscription`
   has one runtime caller (the paid upgrade), which is where the gate sits.
-- **Known edge, revisit when ETP-5047 is merged:** with the switch OFF, a *failed*
-  `hasAnySubscription` lookup takes the marker path (logged at ERROR). Kept on purpose — a purchase
-  always provisions a new, rowless tenant (ETP-5548) and a SQL-level failure already rolls the
-  onboarding back — but after the 5047 merge a tenant whose only row is closed reads as canceled,
-  so a payment that reached it this way would leave it canceled. Design doc §6.3.
+- **A failed row lookup takes the marker path — accepted, decided 2026-10-14 (Martin Taal), no
+  code change.** With the switch OFF, `EtendoGoJwtServlet#tenantHasSubscriptionRow` answers
+  `false` when `hasAnySubscription` throws (logged at ERROR), so the payment goes only to the
+  `ETGO_TenantPlan` marker. For a tenant whose only row is closed the marker is hidden behind that
+  row: since ETP-5047 the tenant reads as canceled, so it would stay blocked (402) while it pays.
+  *Reachable in principle:* a tenant can be re-opened and buy again (same decision), and a
+  re-purchasing tenant with a closed row is exactly the one the lookup exists for. Today's checkout
+  still provisions a new, rowless environment for every purchase
+  (`feature-flags-and-tenant-upgrade.md` §3), so no current flow reaches it — the acceptance does
+  not rest on that. *Why accepted:* it fails closed in practice. The lookup runs in the onboarding
+  transaction, and on PostgreSQL a failed SQL statement aborts it, so the writes that follow fail
+  too and the upgrade fails and stays retryable instead of being recorded in the marker; only a
+  non-SQL failure raised before the statement runs leaves a usable transaction and can reach the
+  edge. Failing every OFF purchase on a lookup error would be the worse trade. **Follow-up:** none
+  (no ticket). Design doc §6.3.
 - **Several switch rows:** the reader and the verification query both take the first in
   `created desc, updated desc, ad_preference_id desc`, so the winner is deterministic even for rows
   created in one transaction.
@@ -575,13 +585,15 @@ calling user, whose role can read neither `AD_Preference` nor `ETGO_SUBSCRIPTION
   of a pre-marker tenant). The marker and `resolvePlan` still decide for a tenant with no row at
   all (the preference fallback).
 - **Re-subscribing opens a fresh row.** A later purchase for the same tenant finds no open row and
-  `openSubscription` inserts one. If the open row is `canceled` but was never closed — its delete
-  event was lost, or R37 backfilled it (R37 leaves canceled rows open on purpose: it has no
-  provider end instant to close them at; its idempotency guard is "no row at all", so a re-run
-  never inserts a second one either way) — `openSubscription`
-  closes it before inserting. The close must be in the database first — Hibernate runs inserts
-  before updates at flush, and `etgo_sub_open_envclient_uq` would otherwise reject the new row —
-  but it is **not** a session flush: the only caller is the paid onboarding
+  `openSubscription` inserts one. (A tenant can be re-opened and buy again — decided 2026-10-14,
+  Martin Taal — but today's checkout still provisions a new environment for every purchase, so no
+  current purchase targets a finished environment; `feature-flags-and-tenant-upgrade.md` §3.)
+  If the open row is `canceled` but was never closed — its delete event was lost, or R37
+  backfilled it (R37 leaves canceled rows open on purpose: it has no provider end instant to close
+  them at; its idempotency guard is "no row at all", so a re-run never inserts a second one either
+  way) — `openSubscription` closes it before inserting. The close must be in the database first —
+  Hibernate runs inserts before updates at flush, and `etgo_sub_open_envclient_uq` would otherwise
+  reject the new row — but it is **not** a session flush: the only caller is the paid onboarding
   (`openSubscriptionBestEffort`), and a flush there, under `SystemContext`, would write the whole
   pending onboarding with `updatedBy='0'` and report an unrelated pending-write failure as "could
   not have its subscription opened". `SubscriptionService.closeInDatabase` issues one HQL `update`
