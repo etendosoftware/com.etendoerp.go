@@ -43,10 +43,10 @@ package com.etendoerp.go.schemaforge;
 public class SalesOrderLineHandler extends OrderLineHandler {
 
   /**
-   * Runs the parent's pre-hook first — a response from it still short-circuits — then sets the
-   * standard price of a new line, then applies a discount its price does not reflect yet, and
-   * finally derives the gross amount of a new line. The order matters: the discount re-fire reads
-   * the standard price, and the amounts read the discounted price.
+   * Runs the parent's pre-hook first — a response from it still short-circuits — then the line
+   * rules of {@link OrderLineDiscountSupport#applyLineRules}: the standard (and, when missing, list)
+   * price of a new line, a discount its price does not reflect yet, the discount a new price
+   * implies, and the gross amount of a new or updated line. The order lives there, once.
    */
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -54,9 +54,7 @@ public class SalesOrderLineHandler extends OrderLineHandler {
     if (response != null) {
       return response;
     }
-    OrderLineDiscountSupport.setStandardPriceOnCreate(context);
-    OrderLineDiscountSupport.applyDiscount(context);
-    OrderLineDiscountSupport.deriveAmountsOnCreate(context);
+    OrderLineDiscountSupport.applyLineRules(context);
     return null;
   }
 }
