@@ -21,7 +21,9 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
@@ -158,7 +160,7 @@ public class OnboardingPeriodControlServiceTest {
 
     assertTrue("enablePeriodControl must run", service.enablePeriodControlCalled);
     assertTrue("rebrandImportedCalendarName must run", service.rebrandCalled);
-    assertTrue("openPeriodsThroughCurrentMonth must run", service.openPeriodsCalled);
+    assertTrue("resetPeriodsToNeverOpened must run", service.openPeriodsCalled);
     assertTrue("changes must be flushed", service.flushed);
     assertSame(previous, OBContext.getOBContext());
   }
@@ -181,53 +183,36 @@ public class OnboardingPeriodControlServiceTest {
   }
 
   // ---------------------------------------------------------------------------
-  // 5. openPeriodsThroughCurrentMonth date cut-off
+  // 5. resetPeriodsToNeverOpened (ETP-5577: the chain leaves every period never-opened)
   // ---------------------------------------------------------------------------
 
   @Test
-  public void testOpenPeriodsAppliesDateCutoff() {
+  public void testResetPeriodsLeavesEveryPeriodNeverOpened() {
     Period pastPeriod = mock(Period.class);
-    Period todayPeriod = mock(Period.class);
     Period futurePeriod = mock(Period.class);
     when(pastPeriod.getStartingDate()).thenReturn(PAST);
-    when(todayPeriod.getStartingDate()).thenReturn(NOW);
     when(futurePeriod.getStartingDate()).thenReturn(FUTURE);
-
     PeriodControl pastControl = mock(PeriodControl.class);
-    PeriodControl todayControl = mock(PeriodControl.class);
     PeriodControl futureControl = mock(PeriodControl.class);
 
     RealLogicService service = new RealLogicService();
-    service.fixedNow = NOW;
-    service.periods = Arrays.asList(pastPeriod, todayPeriod, futurePeriod);
+    service.periods = Arrays.asList(pastPeriod, futurePeriod);
     service.controlsByPeriod.put(pastPeriod, Arrays.asList(pastControl));
-    service.controlsByPeriod.put(todayPeriod, Arrays.asList(todayControl));
     service.controlsByPeriod.put(futurePeriod, Arrays.asList(futureControl));
-
-    Calendar calendar = mock(Calendar.class);
 
     try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
       obDal.when(OBDal::getInstance).thenReturn(mock(OBDal.class));
-      service.openPeriodsThroughCurrentMonth(calendar);
+      service.resetPeriodsToNeverOpened(mock(Calendar.class));
     }
 
-    // Past period -> OPEN
-    verify(pastPeriod).setOpenClose("C");
-    verify(pastControl).setPeriodStatus("O");
-    verify(pastControl).setPeriodAction("N");
-    verify(pastControl).setOpenClose("C");
-
-    // Boundary: starting date == today -> OPEN (condition is !after(today))
-    verify(todayPeriod).setOpenClose("C");
-    verify(todayControl).setPeriodStatus("O");
-    verify(todayControl).setPeriodAction("N");
-    verify(todayControl).setOpenClose("C");
-
-    // Future period -> CLOSED / never-opened
-    verify(futurePeriod).setOpenClose("O");
-    verify(futureControl).setPeriodStatus("N");
-    verify(futureControl).setPeriodAction("N");
-    verify(futureControl).setOpenClose("O");
+    for (Period period : Arrays.asList(pastPeriod, futurePeriod)) {
+      verify(period).setOpenClose("O");
+    }
+    for (PeriodControl control : Arrays.asList(pastControl, futureControl)) {
+      verify(control).setPeriodStatus("N");
+      verify(control).setPeriodAction("N");
+      verify(control).setOpenClose("O");
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -571,7 +556,7 @@ public class OnboardingPeriodControlServiceTest {
           Instant.parse("2026-10-01T10:00:00Z"), 15);
       fail("Expected a missing organization to fail");
     } catch (OBException e) {
-      assertTrue(e.getMessage().contains("Organization not found for demo period window"));
+      assertTrue(e.getMessage().contains("Organization not found for period control"));
     }
     assertSame(previous, OBContext.getOBContext());
   }
@@ -586,7 +571,59 @@ public class OnboardingPeriodControlServiceTest {
           Instant.parse("2026-10-01T10:00:00Z"), 15);
       fail("Expected a missing calendar to fail");
     } catch (OBException e) {
-      assertTrue(e.getMessage().contains("No calendar found for demo period window"));
+      assertTrue(e.getMessage().contains("No calendar found for period control"));
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // ETP-5577: productive initial state and chain normalization
+  // ---------------------------------------------------------------------------
+
+  @Test
+  public void testProductiveEnsuresTheSignupYearOpensNothingAndNormalizes() {
+    Period oct = period("2026-10-01", "2026-10-31", "O");
+    PeriodControl octControl = control("N");
+    RealLogicService service = new RealLogicService();
+    service.fixedNow = date("2026-10-15");
+    service.periods = Arrays.asList(oct);
+    service.controlsByPeriod.put(oct, Arrays.asList(octControl));
+    when(service.importedCalendar.getId()).thenReturn("CAL-1");
+
+    try (MockedStatic<FiscalCalendarSupport> support = mockStatic(FiscalCalendarSupport.class)) {
+      runWithDal(() -> service.applyProductiveInitialState("CLIENT-1", "ORG-1", "USER-1",
+          "ROLE-1"));
+      support.verify(() -> FiscalCalendarSupport.ensureYear(service.importedCalendar, 2026));
+      support.verify(() -> FiscalCalendarSupport.ensureYear(any(Calendar.class), eq(2025)),
+          never());
+      support.verify(() -> FiscalCalendarSupport.ensureYear(any(Calendar.class), eq(2027)),
+          never());
+      support.verify(() -> FiscalCalendarSupport.normalizePeriodControls("CAL-1"));
+    }
+    assertEquals("N", octControl.getPeriodStatus());
+  }
+
+  @Test
+  public void testProductiveAroundNewYearEnsuresBothYears() {
+    RealLogicService service = new RealLogicService();
+    service.fixedNow = Date.from(java.time.LocalDateTime.of(2026, 12, 31, 23, 30)
+        .atZone(java.time.ZoneId.systemDefault()).toInstant());
+
+    try (MockedStatic<FiscalCalendarSupport> support = mockStatic(FiscalCalendarSupport.class)) {
+      runWithDal(() -> service.applyProductiveInitialState("CLIENT-1", "ORG-1", "USER-1",
+          "ROLE-1"));
+      support.verify(() -> FiscalCalendarSupport.ensureYear(service.importedCalendar, 2026));
+      support.verify(() -> FiscalCalendarSupport.ensureYear(service.importedCalendar, 2027));
+    }
+  }
+
+  @Test
+  public void testNormalizeRunsOnTheOrganizationCalendar() {
+    RealLogicService service = new RealLogicService();
+    when(service.importedCalendar.getId()).thenReturn("CAL-1");
+
+    try (MockedStatic<FiscalCalendarSupport> support = mockStatic(FiscalCalendarSupport.class)) {
+      runWithDal(() -> service.normalize("CLIENT-1", "ORG-1", "USER-1", "ROLE-1"));
+      support.verify(() -> FiscalCalendarSupport.normalizePeriodControls("CAL-1"));
     }
   }
 
@@ -702,7 +739,7 @@ public class OnboardingPeriodControlServiceTest {
     }
 
     @Override
-    protected void openPeriodsThroughCurrentMonth(Calendar calendar) {
+    protected void resetPeriodsToNeverOpened(Calendar calendar) {
       openPeriodsCalled = true;
       if (failOnOpenPeriods) {
         throw new OBException("open-periods-boom");
@@ -713,7 +750,7 @@ public class OnboardingPeriodControlServiceTest {
   /**
    * Subclass used by the unit tests that exercise the REAL provisioning logic
    * ({@code enablePeriodControl}, {@code rebrandImportedCalendarName},
-   * {@code openPeriodsThroughCurrentMonth}). It keeps those implementations intact and only stubs
+   * {@code resetPeriodsToNeverOpened}). It keeps those implementations intact and only stubs
    * the leaf seams ({@code currentDate}, {@code resolveCalendarPeriods},
    * {@code resolvePeriodControls}); direct {@code OBDal} saves are swallowed by a
    * {@link MockedStatic} in each test.

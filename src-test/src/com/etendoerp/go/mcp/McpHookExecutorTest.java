@@ -27,6 +27,8 @@ import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.util.List;
+
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Rule;
@@ -210,6 +212,42 @@ public class McpHookExecutorTest {
     assertEquals(422, envelope.getInt(FIELD_STATUS));
     assertEquals("Este registro está siendo contabilizado por otro proceso", envelope.getString("message"));
     assertEquals("OtherPostingProcessActive", envelope.getJSONArray("messageKeys").getString(0));
+  }
+
+  /**
+   * ETP-5577: a refusal keyed {@code PeriodNotAvailable} — a completion's flat body or a payment's
+   * nested {@code error} — reaches the agent with a hint naming the {@code openClose} action.
+   */
+  @Test
+  public void testNeoResponseToMcpResultAddsPeriodNotAvailableHint() throws Exception {
+    JSONObject flat = new JSONObject();
+    flat.put("status", "error");
+    flat.put("message", "El Periodo no existe o no está abierto");
+    flat.put("messageKeys", new JSONArray().put("PeriodNotAvailable"));
+    JSONObject nested = new JSONObject().put("error", new JSONObject()
+        .put("message", "El Periodo no existe o no está abierto").put("status", 400)
+        .put("messageKeys", new JSONArray().put("PeriodNotAvailable")));
+
+    for (JSONObject body : List.of(flat, nested)) {
+      JSONObject result = McpHookExecutor.neoResponseToMcpResult(NeoResponse.error(400, body));
+      JSONObject envelope = new JSONObject(
+          result.getJSONArray(FIELD_CONTENT).getJSONObject(0).getString(FIELD_TEXT));
+      assertEquals(McpToolRouter.PERIOD_NOT_AVAILABLE_HINT, envelope.getString("hint"));
+    }
+  }
+
+  /** Any other refusal keeps its envelope without the period hint. */
+  @Test
+  public void testNeoResponseToMcpResultHasNoPeriodHintForOtherKeys() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("message", "locked");
+    body.put("messageKeys", new JSONArray().put("OtherPostingProcessActive"));
+
+    JSONObject result = McpHookExecutor.neoResponseToMcpResult(NeoResponse.error(422, body));
+
+    JSONObject envelope = new JSONObject(
+        result.getJSONArray(FIELD_CONTENT).getJSONObject(0).getString(FIELD_TEXT));
+    assertFalse(envelope.has("hint"));
   }
 
   // ── runPreHook ────────────────────────────────────────────────────────

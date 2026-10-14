@@ -20,8 +20,10 @@ package com.etendoerp.go.schemaforge;
 import java.util.HashMap;
 import java.util.Map;
 
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.base.exception.OBException;
 
 /**
  * Wrapper for NEO Headless API responses.
@@ -144,6 +146,27 @@ public class NeoResponse {
    */
   public static NeoResponse error(int status, JSONObject body) {
     return new NeoResponse(status, body);
+  }
+
+  /**
+   * Builds an error response from a business exception: like {@link #error(int, String)}, plus
+   * {@code error.messageKeys} when the exception is a {@link MessageKeyedException}.
+   *
+   * @param status the HTTP status code
+   * @param e      the business exception
+   * @return a NeoResponse with the exception's message and, when known, its identity
+   */
+  public static NeoResponse error(int status, OBException e) {
+    NeoResponse response = error(status, e.getMessage());
+    if (e instanceof MessageKeyedException && response.body != null) {
+      try {
+        response.body.getJSONObject("error").put("messageKeys",
+            new JSONArray().put(((MessageKeyedException) e).getMessageKey()));
+      } catch (JSONException ignored) {
+        // the plain error body is still a valid answer
+      }
+    }
+    return response;
   }
 
   /**

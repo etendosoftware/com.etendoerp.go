@@ -20,11 +20,16 @@ package com.etendoerp.go.schemaforge;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.Mockito.mockStatic;
 
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
+import org.mockito.MockedStatic;
+import org.openbravo.base.exception.OBException;
+import org.openbravo.erpCommon.utility.OBMessageUtils;
 
 /**
  * Unit tests for {@link NeoResponse}.
@@ -184,5 +189,31 @@ public class NeoResponseTest {
   public void testEnsureTopLevelMessageWithNullResponseDoesNotThrow() {
     NeoResponse result = NeoResponse.ensureTopLevelMessage(null);
     assertNull(result);
+  }
+
+  /** ETP-5577: a keyed business refusal publishes its identity next to the message. */
+  @Test
+  public void testErrorFromKeyedExceptionCarriesMessageKeys() throws JSONException {
+    try (MockedStatic<OBMessageUtils> msg = mockStatic(OBMessageUtils.class)) {
+      msg.when(() -> OBMessageUtils.messageBD("PeriodNotAvailable"))
+          .thenReturn("El Periodo no existe o no está abierto");
+
+      NeoResponse r = NeoResponse.error(400, new MessageKeyedException("PeriodNotAvailable"));
+
+      JSONObject error = r.getBody().getJSONObject("error");
+      assertEquals(400, r.getHttpStatus());
+      assertEquals("El Periodo no existe o no está abierto", error.getString("message"));
+      assertEquals("PeriodNotAvailable", error.getJSONArray("messageKeys").getString(0));
+    }
+  }
+
+  /** A plain business exception keeps the plain error body. */
+  @Test
+  public void testErrorFromPlainExceptionHasNoMessageKeys() throws JSONException {
+    NeoResponse r = NeoResponse.error(400, new OBException("boom"));
+
+    JSONObject error = r.getBody().getJSONObject("error");
+    assertEquals("boom", error.getString("message"));
+    assertFalse(error.has("messageKeys"));
   }
 }
