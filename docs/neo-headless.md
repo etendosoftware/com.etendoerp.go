@@ -972,8 +972,10 @@ Inside one batch request, `NeoCalloutDiscardMemory` (held by `NeoBatchScope`, op
 Logged as `[NEO-PERF] batch callout skip learned key=… outputs=…` when a key becomes skippable, and
 `[NEO-PERF] batch callout skipped N time(s) key=…` when the batch ends. The residual assumption is
 that a callout's **set of output fields** does not depend on a body field outside the key — true of
-the callouts measured here, and the reason this is confined to bulk writes. The persisted result is
-identical to running every callout, so this is not a channel divergence (§4.12.9); REST batch and
+the callouts measured here, and the reason this is confined to bulk writes. **Under that
+assumption** the persisted result is identical to running every callout, so this is not a channel
+divergence (§4.12.9); a callout whose output set does depend on such a field could be skipped on a
+row where it would have written something. REST batch and
 `etendo_batch` share it because both go through `BatchService`.
 
 **Automatic: per-batch lookup memo.** `NeoBatchScope.memoize(key, loader)` answers a lookup once per
