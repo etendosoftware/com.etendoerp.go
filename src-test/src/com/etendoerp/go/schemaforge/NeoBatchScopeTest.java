@@ -24,6 +24,8 @@ import static org.junit.Assert.assertNotSame;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -35,6 +37,8 @@ import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.dal.service.OBDal;
+
+import com.etendoerp.go.featureflags.GoFeatureFlags;
 
 /**
  * Unit tests for {@link NeoBatchScope}: the per-request lookup memo, the request options it
@@ -224,11 +228,11 @@ public class NeoBatchScopeTest {
    */
   @Test
   public void testCloseRestoresThePreviousScope() {
-    assertNull(NeoBatchScope.open(true));
+    assertNull(NeoBatchScope.open(true, true));
     NeoBatchScope outer = NeoBatchScope.current();
     NeoCalloutDiscardMemory outerMemory = NeoBatchScope.currentCalloutDiscardMemory();
 
-    NeoBatchScope previous = NeoBatchScope.open(false);
+    NeoBatchScope previous = NeoBatchScope.open(false, true);
     assertSame(outer, previous);
     assertNotSame(outer, NeoBatchScope.current());
     assertNotSame(outerMemory, NeoBatchScope.currentCalloutDiscardMemory());
@@ -247,7 +251,7 @@ public class NeoBatchScopeTest {
   public void testCalloutDiscardMemoryExistsOnlyInsideABatchAndIsFreshPerRequest() {
     assertNull(NeoBatchScope.currentCalloutDiscardMemory());
 
-    NeoBatchScope previous = NeoBatchScope.open(false);
+    NeoBatchScope previous = NeoBatchScope.open(false, true);
     NeoCalloutDiscardMemory first;
     try {
       first = NeoBatchScope.currentCalloutDiscardMemory();
@@ -259,12 +263,60 @@ public class NeoBatchScopeTest {
     }
     assertNull(NeoBatchScope.currentCalloutDiscardMemory());
 
-    previous = NeoBatchScope.open(false);
+    previous = NeoBatchScope.open(false, true);
     try {
       assertNotSame("a new request does not inherit what the last one learned", first,
           NeoBatchScope.currentCalloutDiscardMemory());
     } finally {
       NeoBatchScope.close(previous);
+    }
+  }
+
+  /**
+   * The skip is opt-in: a batch sent without {@code _skipRedundantCallouts} has no memory, so the
+   * cascade runs every callout exactly as on develop.
+   */
+  @Test
+  public void testCalloutDiscardMemoryIsAbsentWithoutTheOptIn() {
+    NeoBatchScope previous = NeoBatchScope.open(true);
+    try {
+      assertNull(NeoBatchScope.currentCalloutDiscardMemory());
+    } finally {
+      NeoBatchScope.close(previous);
+    }
+    previous = NeoBatchScope.open(false, false);
+    try {
+      assertNull(NeoBatchScope.currentCalloutDiscardMemory());
+    } finally {
+      NeoBatchScope.close(previous);
+    }
+  }
+
+  /**
+   * The {@code batch-callout-skip-disabled} kill switch wins over the request: with it on, a batch
+   * that opted in still gets no memory and runs every callout.
+   */
+  @Test
+  public void testKillSwitchDisablesTheSkipEvenWhenTheRequestOptsIn() {
+    try (MockedStatic<GoFeatureFlags> flags = Mockito.mockStatic(GoFeatureFlags.class)) {
+      flags.when(() -> GoFeatureFlags.isEnabled(
+          eq(GoFeatureFlags.FLAG_BATCH_CALLOUT_SKIP_DISABLED), any())).thenReturn(true);
+      NeoBatchScope previous = NeoBatchScope.open(false, true);
+      try {
+        assertNull(NeoBatchScope.currentCalloutDiscardMemory());
+      } finally {
+        NeoBatchScope.close(previous);
+      }
+
+      flags.when(() -> GoFeatureFlags.isEnabled(
+          eq(GoFeatureFlags.FLAG_BATCH_CALLOUT_SKIP_DISABLED), any())).thenReturn(false);
+      previous = NeoBatchScope.open(false, true);
+      try {
+        assertNotNull("kill switch off: the opt-in is honoured",
+            NeoBatchScope.currentCalloutDiscardMemory());
+      } finally {
+        NeoBatchScope.close(previous);
+      }
     }
   }
 

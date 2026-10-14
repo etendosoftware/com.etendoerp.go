@@ -1555,11 +1555,12 @@ public class McpToolRouter {
       // the first point where a $ref is resolved and a parentRef's parent exists; running them
       // over the whole array beforehand made every parent-dependent injection abstain in silence.
       // See BatchService#executeBatch(JSONArray, OperationPreprocessor).
-      // ETP-5676: optional, default false — the response is ids-only either way; the option only
-      // lets each write skip decorating the record it echoes back.
+      // ETP-5676: both optional, default false — the response is ids-only either way; the options
+      // only let each write skip decorating its echo and skip callouts proven redundant.
       JSONObject result = BatchService.forBatchOnly()
           .executeBatch(operations, this::preprocessBatchOperation,
-              args.optBoolean(BatchService.PARAM_ONLY_RETURN_IDS, false));
+              args.optBoolean(BatchService.PARAM_ONLY_RETURN_IDS, false),
+              args.optBoolean(BatchService.PARAM_SKIP_REDUNDANT_CALLOUTS, false));
       if (!result.optBoolean("committed", false)) {
         // IMP-15: rewrite the failure in place into the IMP-5 envelope, so an agent gets a stable
         // error code instead of the raw DAL sub-response BatchService forwards to REST callers.

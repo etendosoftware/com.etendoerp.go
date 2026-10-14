@@ -471,26 +471,28 @@ public class BatchServiceTest {
     }
   }
 
-  /** The REST body option is read from the top level of the body and defaults to false. */
+  /** The REST body options are read from the top level of the body and default to false. */
   @Test
-  public void handleReadsTheOnlyReturnIdsOptionFromTheRestBody() throws Exception {
+  public void handleReadsTheBatchOptionsFromTheRestBody() throws Exception {
     String[] bodies = {
         "{\"operations\":[{\"id\":\"a\"}]}",
         "{\"operations\":[{\"id\":\"a\"}],\"_onlyReturnIds\":true}",
-        "{\"operations\":[{\"id\":\"a\"}],\"_onlyReturnIds\":false}" };
-    boolean[] expected = { false, true, false };
+        "{\"operations\":[{\"id\":\"a\"}],\"_onlyReturnIds\":false}",
+        "{\"operations\":[{\"id\":\"a\"}],\"_skipRedundantCallouts\":true}" };
+    boolean[] expectedIds = { false, true, false, false };
+    boolean[] expectedSkip = { false, false, false, true };
     for (int i = 0; i < bodies.length; i++) {
       NeoServlet servlet = mock(NeoServlet.class);
       BatchService service = spy(new BatchService(servlet));
       JSONObject committed = new JSONObject().put("committed", true);
-      doReturn(committed).when(service).executeBatch(any(), isNull(), anyBoolean());
+      doReturn(committed).when(service).executeBatch(any(), isNull(), anyBoolean(), anyBoolean());
       try (MockedStatic<NeoRequestBodyParser> parser = mockStatic(NeoRequestBodyParser.class)) {
         String body = bodies[i];
         parser.when(() -> NeoRequestBodyParser.readRequestBody(any())).thenReturn(body);
 
         service.handle(mock(HttpServletRequest.class), mock(HttpServletResponse.class));
       }
-      verify(service).executeBatch(any(), isNull(), eq(expected[i]));
+      verify(service).executeBatch(any(), isNull(), eq(expectedIds[i]), eq(expectedSkip[i]));
     }
   }
 

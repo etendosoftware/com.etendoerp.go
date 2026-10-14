@@ -185,6 +185,15 @@ public class BatchService {
    * the new id from it. The batch response itself is unchanged: it always carried ids only.
    */
   public static final String PARAM_ONLY_RETURN_IDS = "_onlyReturnIds";
+  /**
+   * ETP-5676: optional top-level boolean of a batch request (REST body, MCP {@code etendo_batch}
+   * argument), default {@code false}. {@code true} lets a create-cascade callout be skipped once an
+   * earlier operation of the same batch, on the same tab, field and trigger value, proved that
+   * every value it writes is discarded by the caller's own fields (see
+   * {@link NeoCalloutDiscardMemory}). Without it every batch runs every callout. The server-side
+   * kill switch {@code batch-callout-skip-disabled} overrides it.
+   */
+  public static final String PARAM_SKIP_REDUNDANT_CALLOUTS = "_skipRedundantCallouts";
   private static final String FIELD_PARENT_ID = "parentId";
   private static final String FIELD_ID = "id";
   private static final String FIELD_ENTITY = "entity";
@@ -255,7 +264,8 @@ public class BatchService {
 
     JSONObject result;
     try {
-      result = executeBatch(operations, null, body.optBoolean(PARAM_ONLY_RETURN_IDS, false));
+      result = executeBatch(operations, null, body.optBoolean(PARAM_ONLY_RETURN_IDS, false),
+          body.optBoolean(PARAM_SKIP_REDUNDANT_CALLOUTS, false));
     } catch (JSONException e) {
       log.error("[BATCH] JSON error while executing batch", e);
       servlet.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
@@ -349,6 +359,21 @@ public class BatchService {
    */
   public JSONObject executeBatch(JSONArray operations, OperationPreprocessor preprocessor,
       boolean onlyReturnIds) throws JSONException {
+    return executeBatch(operations, preprocessor, onlyReturnIds, false);
+  }
+
+  /**
+   * Overload taking both request options (ETP-5676).
+   *
+   * @param operations            the ordered list of operation objects (must be non-null)
+   * @param preprocessor          invoked per operation, or {@code null}
+   * @param onlyReturnIds         {@code true} to let each write skip decorating the record it echoes
+   * @param skipRedundantCallouts the request's {@link #PARAM_SKIP_REDUNDANT_CALLOUTS} option
+   * @return a JSONObject in one of the two shapes documented on {@link #executeBatch(JSONArray)}
+   * @throws JSONException only on truly unexpected JSON serialization failures
+   */
+  public JSONObject executeBatch(JSONArray operations, OperationPreprocessor preprocessor,
+      boolean onlyReturnIds, boolean skipRedundantCallouts) throws JSONException {
     if (operations == null) {
       return failureBody(-1, null, HttpServletResponse.SC_BAD_REQUEST,
           "Missing 'operations' array", null, null);
@@ -366,7 +391,7 @@ public class BatchService {
     // ETP-5676: per-request state shared by the operations (the callout-discard memory). Opened
     // after the claim and closed in the same finally, so it can never outlive this request.
     TransactionTracker tracker = new TransactionTracker();
-    NeoBatchScope previousScope = NeoBatchScope.open(onlyReturnIds);
+    NeoBatchScope previousScope = NeoBatchScope.open(onlyReturnIds, skipRedundantCallouts);
     try {
       for (int i = 0; i < operations.length(); i++) {
         JSONObject failure = processOperation(i, operations.optJSONObject(i), resolvedIds, opResults,

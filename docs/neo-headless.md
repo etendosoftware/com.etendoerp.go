@@ -952,7 +952,18 @@ NEO field-projection parameter applies to a write (`fields:[…]` / `view` are M
 `_extraProperties` a GET-only key), so none was reused. The option is read once per request and kept
 in `NeoBatchScope`; it never affects REST single or MCP `etendo_create`.
 
-**Automatic: a batch skips callouts whose output it already saw thrown away.** The create path runs
+**Opt-in: `_skipRedundantCallouts` — a batch skips callouts whose output it already saw thrown
+away.** Optional top-level boolean of the batch request (REST body, MCP `etendo_batch` argument),
+default `false`: **without it every batch runs every callout, exactly as before ETP-5676.** The
+products/contacts import sends it; OCR and every other caller do not. The server-side kill switch
+`batch-callout-skip-disabled` (`GoFeatureFlags#FLAG_BATCH_CALLOUT_SKIP_DISABLED`, environment level,
+backend-only) overrides the request: unset or `false` honours the opt-in, `true` turns the skip off
+for every batch. It is evaluated once per batch, when `NeoBatchScope` opens. To flip it: in
+ConfigCat where `etendo.go.configcat.sdkKey` is set (live within one 60 s poll); otherwise
+`etendo.go.flags.batch-callout-skip-disabled=true` in `Openbravo.properties` or the
+`ETGO_FLAG_BATCH_CALLOUT_SKIP_DISABLED=true` environment variable, which needs a Tomcat restart.
+
+The create path runs
 the callout of every field present in the body (§ callout cascade). On a uniform import most of that
 work is discarded: `SL_TaxCategory_Org` (trigger `organization`) proposes the tax category and the
 product category the body already carries, and `SL_Costing_Currency` proposes the currency the
@@ -970,8 +981,8 @@ Inside one batch request, `NeoCalloutDiscardMemory` (held by `NeoBatchScope`, op
   never skipped afterwards — the first observation decides;
 - a row that leaves one of the kept fields blank, or triggers with another value, has another key
   and runs the callout;
-- the memory dies with the request (`finally`), is never consulted outside `/sws/neo/batch` and
-  `etendo_batch`, and is wired only into the create cascade (`NeoCrudHandler#executePostCalloutCascade`)
+- the memory exists only when the request opted in and the kill switch is off; it dies with the
+  request (`finally`), is never consulted outside `/sws/neo/batch` and `etendo_batch`, and is wired only into the create cascade (`NeoCrudHandler#executePostCalloutCascade`)
   — not the `/defaults` endpoint, not the interactive callout, not `executeCalloutsForTriggerFields`.
 
 Logged as `[NEO-PERF] batch callout skip learned key=… outputs=…` when a key becomes skippable, and

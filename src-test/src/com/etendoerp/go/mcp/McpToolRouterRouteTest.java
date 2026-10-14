@@ -568,7 +568,8 @@ class McpToolRouterRouteTest {
             .thenReturn(mockBatch);
         JSONObject batchResult = new JSONObject();
         batchResult.put("committed", true);
-        when(mockBatch.executeBatch(any(), any(), org.mockito.ArgumentMatchers.anyBoolean()))
+        when(mockBatch.executeBatch(any(), any(), org.mockito.ArgumentMatchers.anyBoolean(),
+            org.mockito.ArgumentMatchers.anyBoolean()))
             .thenReturn(batchResult);
 
         JSONObject result = router.handleBatch(buildBatchArgs());
@@ -577,15 +578,16 @@ class McpToolRouterRouteTest {
         // ETP-5415: a non-null preprocessor is the assertion, not an incidental detail — the MCP
         // body transforms ride along as a per-operation preprocessor, and a call through the
         // one-arg overload would silently run the batch with none of them. ETP-5676: the
-        // _onlyReturnIds option defaults to false on MCP.
+        // _onlyReturnIds and _skipRedundantCallouts options default to false on MCP.
         org.mockito.Mockito.verify(mockBatch).executeBatch(any(),
-            org.mockito.ArgumentMatchers.notNull(), org.mockito.ArgumentMatchers.eq(false));
+            org.mockito.ArgumentMatchers.notNull(), org.mockito.ArgumentMatchers.eq(false),
+            org.mockito.ArgumentMatchers.eq(false));
       }
     }
 
     /** ETP-5676: the etendo_batch argument reaches BatchService with the REST option's meaning. */
     @Test
-    @DisplayName("an etendo_batch sent with _onlyReturnIds:true forwards the option")
+    @DisplayName("an etendo_batch forwards _onlyReturnIds and _skipRedundantCallouts")
     void batchForwardsOnlyReturnIds() throws Exception {
       SFSpec spec = mockSpec();
       supportMock.when(() -> McpToolRouterSupport.findActiveSpecByName(SPEC_NAME))
@@ -601,16 +603,19 @@ class McpToolRouterRouteTest {
             .thenReturn(mockBatch);
         JSONObject batchResult = new JSONObject();
         batchResult.put("committed", true);
-        when(mockBatch.executeBatch(any(), any(), org.mockito.ArgumentMatchers.anyBoolean()))
+        when(mockBatch.executeBatch(any(), any(), org.mockito.ArgumentMatchers.anyBoolean(),
+            org.mockito.ArgumentMatchers.anyBoolean()))
             .thenReturn(batchResult);
         JSONObject args = buildBatchArgs();
         args.put(com.etendoerp.go.schemaforge.BatchService.PARAM_ONLY_RETURN_IDS, true);
+        args.put(com.etendoerp.go.schemaforge.BatchService.PARAM_SKIP_REDUNDANT_CALLOUTS, true);
 
         JSONObject result = router.handleBatch(args);
 
         assertFalse(result.has("isError"));
         org.mockito.Mockito.verify(mockBatch).executeBatch(any(),
-            org.mockito.ArgumentMatchers.notNull(), org.mockito.ArgumentMatchers.eq(true));
+            org.mockito.ArgumentMatchers.notNull(), org.mockito.ArgumentMatchers.eq(true),
+            org.mockito.ArgumentMatchers.eq(true));
       }
     }
   }
