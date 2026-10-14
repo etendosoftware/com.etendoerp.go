@@ -965,6 +965,8 @@ The service resolves `@param@` placeholders in OBUISEL HQL where clauses: `@AD_O
 
 New entity-specific selector behavior should be implemented as a selector policy where possible, not as another hardcoded branch in `NeoSelectorService`.
 
+**Account selectors list posting accounts only (ETP-5681).** `PostingAccountCombinationSelectorPolicy` (entity-keyed, `FinancialMgmtAccountingCombination`) adds `e.account.summaryLevel = false and e.account.active = true` to every `C_ValidCombination` selector — the 186 account columns all share the one OBUISEL "Valid Combination Selector", so the target entity is the only common hook. A summary account is a heading that only adds up its children; Etendo does not reject one at posting time, so offering it let a heading be configured as, e.g., a default receivables account and be posted to silently. The two handlers that ship their own account catalog instead of using `/selectors` — `GeneralLedgerConfigurationHandler` (Esquema contable) and `FinancialAccountAccountingHandler` — apply the same rule through `schemaforge/util/PostingAccountCombinations.forSchema()`. `ElementValue` selectors are deliberately left alone (the chart of accounts "parent account" field must list headings). Scope: selector **lists** only, on every channel (REST and MCP); a write that sends a summary combination id directly is not rejected yet — ETP-5693.
+
 ### 4.5 Button Actions (Process Execution on Records)
 
 Button actions are fields whose AD_Column has `AD_Reference_ID = '28'` (Button type) with a linked process.
@@ -1102,8 +1104,10 @@ Errors from either type return HTTP 400 with `"status": "error"`.
 
 A built-in endpoint over Etendo's real `Attachment`/`C_File` table, backing both the generic
 "Adjuntos" tab and, via the "main document" marker below, the sidebar/preview panel of every
-document window. Implemented in `NeoAttachmentsHelper.java`, routed from
-`NeoBuiltInEndpointHandler.java`.
+document window. Implemented in `NeoAttachmentsHelper.java` — plus
+`NeoAttachmentsDownloader.java` for the two shapes that stream binary content (the
+single-file download and the zip, which write the response body themselves instead of
+returning a `NeoResponse`) — and routed from `NeoBuiltInEndpointHandler.java`.
 
 **Base path:** `/sws/neo/attachments`
 
@@ -1161,6 +1165,13 @@ Authorization: Bearer {token}
 `{tableName}` is the AD_Table physical name (case-insensitive, e.g. `C_Invoice`, `C_Order`,
 `M_InOut`). Returns `200 { "items": [...] }`, one entry per attachment
 (`id`, `name`, `size`, `dataType`, `description`, `uploadedAt`, `updatedAt`, `uploadedBy`).
+
+`size` is the byte length reported by the attach implementation configured for the row
+(`AttachImplementation.downloadFile`), i.e. the same file the download endpoint serves — never a
+path rebuilt from `c_file.path`, which is `NULL` for attachments stored the "old way" and made
+every size read as 0 (ETP-5526). Any backend failure degrades to `0` rather than breaking the
+listing.
+
 Includes whichever attachment is currently marked as the record's "main" document (see below) —
 since ETP-4855 a file attached from the preview must also be visible in the Attachments tab.
 Returns `400` if `tableName` or `recordId` is missing, `404` if `tableName` does not resolve to a
@@ -1276,15 +1287,44 @@ Streams the file body directly (not wrapped in JSON) with `Content-Type` from th
 `dataType` and an RFC 5987 `Content-Disposition: attachment` header. Returns `404` if the
 attachment does not exist.
 
-#### GET — Download all attachments as a zip
+#### GET — Download attachments as a zip
 
 ```
-GET /sws/neo/attachments/{tableName}/{recordId}?zip=true
+GET /sws/neo/attachments/{tableName}/{recordId}/zip
+GET /sws/neo/attachments/{tableName}/{recordId}/zip?ids={id1},{id2},...
 Authorization: Bearer {token}
 ```
 
-Streams a zip of every attachment for the record, including whichever one is marked as main — same
-set as the list above.
+Streams a zip named `attachments_{recordId}.zip`.
+
+Without `ids`, it contains every attachment of the record, including whichever one is marked as
+main — the same set as the list above. (Earlier revisions of this page documented the route as
+`?zip=true`; the sub-resource has always been `/zip`.)
+
+**`ids` — zip a subset (ETP-5526).** Optional, comma-separated. The Attachments tab's
+selection bar sends it so that "download" acts on the ticked rows instead of the whole record.
+It is a query parameter on the existing GET rather than a new verb or body, matching how the
+sibling record endpoints already take optional arguments (`?markAsMain=`, `?tabId=`), and keeping
+the zip a plain cacheable read.
+
+| Request | Answer |
+|---|---|
+| no `ids` | every attachment of the record (unchanged — existing callers are unaffected) |
+| `ids` naming attachments of this record | a zip with exactly those, in list order |
+| `ids` naming an attachment of ANOTHER record, or no attachment at all | `404 Attachment not found`, **nothing streamed** |
+| `ids` present but empty (`?ids=` / `?ids=+,+`) | `400 ids must name at least one attachment` |
+
+**Authorization.** The candidate set is always the record's own attachments, resolved with exactly
+the criteria `handleList` uses; a requested id is served only if it is found there. One foreign id
+fails the whole request — no partial archive is produced — and the "foreign" and "non-existent"
+cases answer the same 404 on purpose, so the endpoint cannot be used to probe for attachments the
+caller is not entitled to. Note this is *stricter* than the single-file
+`GET /attachments/file/{attachmentId}`, which resolves by id alone because its URL carries no
+record to validate against; here the record is in the URL, so the relation is checkable and is
+checked.
+
+An empty `ids` is deliberately NOT treated as "everything": a client that computed an empty
+selection would otherwise trigger a surprise whole-record download instead of surfacing its bug.
 
 #### DELETE — Remove an attachment
 
@@ -2225,7 +2265,13 @@ payments by hand through the route BUG-1 corrupted data with (FR-1 of the ETP-55
   array once (`McpActionsView.applyConfig`), right after it is built and before the view dispatch,
   so `view:"actions"`, `view:"full"` and its `fields:[…]` whitelist describe the same buttons: a
   hidden or agent-excluded button is absent from all three (a `fields:["<hidden>"]` request reports
-  it in `unknownFields`), a redirected one carries `useInstead`, a narrowed one keeps only its
+  it in `unknownFields`) — **except** one curated `visibility:"readOnly"`, which is a value the window
+  displays (`Posted` holds the posting state): since ETP-5692 it stays in `view:"full"` and
+  `fields:[…]` as a plain `type:"string"`, `readOnly:true` value with every action key stripped
+  (`action`, `actionValues`, `processId`, `invokeVia`…), and stays out of `view:"actions"`
+  (`McpActionsView.isDisplayedValue`, structural — it reads the curation, never the entity). Before,
+  hiding the invoices' `posted` toggle made `fields:["posted"]` answer `unknownFields:["posted"]`
+  while the post/unpost contracts told the agent to read it. A redirected one carries `useInstead`, a narrowed one keeps only its
   allowed `actionValues`, and an unusable configuration withdraws every button. The match uses the
   field name and its DB `column`. Until ETP-5558 only the actions view was shaped: in blind run
   `20261001T1949-local-a00c` the agent read `view:"full"` of `payment-in/finPayment`, found
@@ -2238,7 +2284,11 @@ payments by hand through the route BUG-1 corrupted data with (FR-1 of the ETP-55
   button stays listed (the catalogue is complete, IMP-21) as `invokable:false` with
   `notInvokableReason` and `useInstead`, and `etendo_action` on it is refused 405 with a hint naming the
   replacement. `redirectReason` (optional) gives a redirect its own reason; without it the redirect
-  uses `reason`. A button is matched under **every** name `etendo_action` fires it by — its field name
+  uses `reason`. `reasons` (optional, ETP-5692) is `{action: reason}`: the reason ONE hidden or
+  redirected action gives instead of the section-wide `reason` / `redirectReason`, for a section
+  that withholds actions for unrelated causes — the invoice headers hide the PIS actions (SCA) and
+  the `posted` toggle (use `post` / `unpost`), and a single `reason` handed the agent refused on
+  `posted` the PIS explanation. Every key must name an action of `hidden` or `redirect`. A button is matched under **every** name `etendo_action` fires it by — its field name
   and its DB column name (`NeoButtonActionHelper.findButtonColumn` accepts both), so
   `action:"EM_Psd2_Generate_Bank_Payment"` is refused exactly like `psd2GenerateBankPayment`. A
   button whose field curation left out (it cannot fire, so `findButtonColumn` does not see it) is
@@ -2252,7 +2302,10 @@ payments by hand through the route BUG-1 corrupted data with (FR-1 of the ETP-55
   actions the handler serves to the SPA that an agent must never run. If `agentExcludedActions()`
   throws, the MCP fails closed: every action of the entity is treated as excluded (refused,
   never advertised) and a WARN names the spec, the entity and only the exception's class. `etendo_action` refuses them
-  (405 `method_not_allowed`) before the handler runs, whatever `MCP_CONFIG` says, and they are never
+  (405 `method_not_allowed`) before the handler runs, whatever `MCP_CONFIG` says. A code-level
+  exclusion answers the generic "its customization keeps it for people only" before `MCP_CONFIG` is
+  consulted, so an action that is also hidden by the row (the PIS actions on the invoice headers)
+  never shows the row's `reason`. They are never
   advertised (neither as a declared action nor as a button). The check runs over every name of the
   call, aliases included. Both invoice headers return the five PIS actions and the
   `psd2GenerateBankPayment` button (`PaymentActionHandlerSupport.AGENT_EXCLUDED_ACTIONS`); the
@@ -3123,7 +3176,7 @@ The shape and the rules are in §4.12.1.3.
 
 | Entity | `hidden` | `values` / `redirect` | Why |
 |---|---|---|---|
-| `sales-invoice/header`, `purchase-invoice/header` | the five PIS actions, `psd2GenerateBankPayment` | redirect `aPRMAddpayment` → `registerPayment` | PIS needs a person to authorize at the bank (SCA); Classic's *Add Payment* is not the Etendo payment flow |
+| `sales-invoice/header`, `purchase-invoice/header` | the five PIS actions, `psd2GenerateBankPayment`, `posted` (ETP-5692) | redirect `aPRMAddpayment` → `registerPayment`; `reasons.posted` | PIS needs a person to authorize at the bank (SCA); Classic's *Add Payment* is not the Etendo payment flow. `posted` is the AD button behind the *Posted* column — a blind toggle that answered "Process completed successfully" on a draft while doing nothing, and that the window never shows. Agents book and unbook the invoice with the header's **declared** `post` / `unpost` contracts instead (`InvoicePostingGate.CONTRACTS`, §4.12.29). `posted` has its own `reasons` entry naming both, so a refusal on it never carries the PIS sentence, and the section `reason` stays the PIS one. The `posted` *field* (curated `readOnly`) stays readable in `view:"full"` / `fields:[…]` as a plain value (§4.12.1.3) |
 | `payment-in/finPayment`, `payment-out/header` | `psd2GenerateBankPayment`, `aPRMAddScheduledpayments`, `aprmExecutepayment`, `aPRMReversePayment`, `aPRMReconcilePayment`, `aeatsiiSend`, `etblkpBulkposting`, `posted`, `retryPisPayment`, `pisPaymentStatus` | `aPRMProcessPayment: ["P"]` | agents get exactly the window's three buttons, all with `parameters:{}`: *Confirmar* (`aPRMProcessPayment`), *Reactivar* (`etprReactivatePayment`) and *Eliminar* (`eTPRRemovePayment`). *Eliminar* is offered with the UI's own gate: the trash icon and the row action call it at every status except `RPVOID` and except when `pisLocked`, so `ReactivatePaymentHandler` refuses an agent with **422** in those two cases (same `isLifecycleLockedByTransfer` predicate the GET emits as `pisLocked`). On a processed payment it reactivates and then deletes it, and it gives **no** consumed credit back — exactly as in the UI; the invoice's `deletePayment` still deletes a draft and does give the credit back. `retryPisPayment` / `pisPaymentStatus` (served by `ReactivatePaymentHandler` on the payment record) are PIS, hidden like every PIS action under the fiscal/bank-integration criterion (§4.12.9). Payments are created and allocated through `registerPayment` on the invoice header. `values` keeps the catalogue honest but is **not** a safety boundary: `ReactivatePaymentHandler` always sends `action:"P"` for `aPRMProcessPayment` and ignores what the agent passes |
 | `financial-account/transaction` | `etprReactivateTransaction`, `etprRemoveTransaction`, `posted`, `etblkpBulkposting` | — | the UI's movements are reactivated, deleted and recorded through the account's movement flow; for agents, the account's `reactivateMovement` / `deleteMovement` / `createMovement` (§4.12.1.4). What stays for agents is `post` / `unpost` — `etendo_action(spec:'financial-account', entity:'transaction', id:<transactionId>, action:'post'\|'unpost', parameters:{})`, served by the `document-posting` qualifier (`DocumentPostingService`, as the SPA's kebab). They are handler-served, not declared contracts, so `view:"actions"` does not list them |
 | `open-close-period-control/documents` | `openClose`, `processNow` | — | the calendar has no per-document-type open/close since ETP-4948; the period's own `openClose` (§4.12.1.6) opens or closes every document type at once |
@@ -3457,7 +3510,9 @@ Same handler, same business validations, but the MCP channel refuses more, on pu
 | `aPRMAddpayment` / `EM_APRM_Addpayment` | Classic button path (field not included: 404) | **405** with its own `redirectReason`, hint `registerPayment` |
 | `DELETE` / `etendo_delete` on a draft payment header | generic delete; **fails** on the payment-detail FK (known, not fixed; the SPA deletes through `eTPRRemovePayment` / `deletePayment`) | **405** — `MCP_CONFIG.verbs` hides it, `instead` = `deletePayment` |
 | `createShipment` (sales) / `createGoodsReceipt` (purchase) | served | **discoverable since ETP-5576 (MCP-8)**: declared by `FollowUpSupport.actionContracts()` (one contract per registered follow-up flow, inputs from `TargetCreator.inputParams()` — `warehouseId`, optional), so `etendo_schema(view:"actions")` lists them and `etendo_action` validates the body against the contract; REST does not read the contract |
-| `cloneRecord`, `post`, `unpost`, `EM_Aeatsii_Send`, `EM_Tbai_Xmlgenerator` | served | **callable but not discoverable**: the header handlers serve them with no contract, so `etendo_schema`/`etendo_discover` do not list them (the two buttons' fields are not included) and their parameters are not validated. Known gap, tracked in the ETP-5558 follow-ups |
+| `cloneRecord`, `EM_Aeatsii_Send`, `EM_Tbai_Xmlgenerator` | served | **callable but not discoverable**: the header handlers serve them with no contract, so `etendo_schema`/`etendo_discover` do not list them (the two buttons' fields are not included) and their parameters are not validated. Known gap, tracked in the ETP-5558 follow-ups |
+| `post`, `unpost` (ETP-5692) | served; `unpost` refused **422** unless `documentStatus` is `CO` and `posted` is `Y` | same handler, same refusals, and **declared**: both headers publish them as `NeoActionContract`s (no parameters, `id` = the invoice id, preconditions in the description), so `view:"actions"` and `etendo_discover` list them and an unknown parameter is a **422** `unknownParameters`. Until ETP-5692 they were callable but undeclared and `unpost` had no status gate (§4.12.29) |
+| the `posted` AD button (by field or DB column name) | served (Classic toggle) | **405** — `MCP_CONFIG.actions.hidden`, with its own `reasons.posted` pointing at `post` / `unpost`; the field stays readable as a value |
 | `registerPayment` with `pis` or any key its contract does not declare | accepted (unread keys ignored) | **422** `unknownParameters` before anything runs |
 | `currencyOptions` | `GET` only | called as `GET` (the contract says so) |
 | `registerPayment` with `paymentId`, `conversionRate` or `writeoffDifference` but no `process` (nor `creditSources` / `overpaymentAction` / `fin_paymentmethod_id`) | **known quirk, not fixed:** the simple path runs and silently ignores those keys — a NEW payment instead of editing the draft, the cross-currency account refused, no write-off | **422** `missingParameters:["process"]` — `process` is required in the contract |
@@ -4603,6 +4658,10 @@ Core Etendo's accounting engine (`AcctServer`) doesn't always say *which* entity
 **`DocumentPostingService` failure messages are translated and carry `messageKeys` (ETP-5360 reject cycle):** the `post()` and `unpost()` catch blocks used to return `e.getMessage()` verbatim. Core accounting code raises raw AD_Message tokens there, most visibly `ResetAccounting`'s `new OBException("@PeriodClosedForUnPosting@")` on every unpost in a closed period, so the SPA toast showed the literal `@PeriodClosedForUnPosting@`. Both catches now go through the private `translatedFailure(raw)`, which extracts the keys with `NeoMessageTranslator.extractMessageKeys` BEFORE translating the text with `NeoMessageTranslator.safeParseTranslation` (session language, degrades to the raw text when no OBContext is available). `PostResult` gained a third component, `messageKeys` (never `null`; the two-argument constructor defaults it to an empty list, so existing callers compile unchanged), and the M_Inventory pre-check above sets it to `["NotCalculatedCost"]`. `handleAction` adds a top-level `messageKeys` array (`NeoProcessService.MESSAGE_KEYS`) to the flat `{success, message}` body only when the list is non-empty, the same wire field `NeoProcessService` already sends, which the SPA reads through `extractBackendMessageKeys` and maps by identity in `translateBackendError`.
 
 **`DocumentPostingService` re-localizes the locked-document message and sends its `messageKeys` (ETP-5529):** when `AcctServerData.update` cannot take the `Processing='Y'` lock (another posting process holds the record — or the record is already posted, unprocessed, or left with a stuck `Processing='Y'`), `AcctServer.post` sets `STATUS_DocumentLocked` and `@OtherPostingProcessActive@` ("This record is being posted by another process"). That text came back in English for every NEO user: core's `setMessageResult(conn, vars, status, type)` overload **discards the `VariablesSecureApp` it is handed** and delegates to the session overload, which reads the classic `HttpServletRequest` session (no `#AD_Language` for a NEO request) — so building the vars with the GO locale changes nothing (tried and disproved live; the generic per-status fallback `setMessageResult(conn, vars, getStatus(), "")` goes through the same overload). `errorMessageOf` therefore re-resolves `OtherPostingProcessActive` in the `OBContext` (GO) language — the same per-status pattern as `InvalidAccount` (ETP-5175) — keeping core's text if that lookup returns `null` or blank (see the guard below), and `failureOf` sets `messageKeys = ["OtherPostingProcessActive"]`, which the SPA maps to its own `backendError.recordBeingPosted` copy (`en_US` / `es_ES`). An active AD language with no `AD_MESSAGE_TRL` row for that message (e.g. `es_AR`) still gets the English base text. Any other status that is not re-localized here keeps core's session-language text. All three re-localizations in `errorMessageOf` — `InvalidAccount`, this locked-document one and the Goods Movement `DocumentDisabled` → `NotCalculatedCost` one (ETP-5436) — go through the private helper `localizedMessage(key)`, which calls `OBMessageUtils.messageBD(key)` only when there is an `OBContext` with a language and otherwise returns `null`, read as "keep core's text": `messageBD(String)` dereferences the context language unguarded, so a caller with no language (a background process, not a NEO/MCP request, which always sets one) would otherwise have turned a known posting failure into a `NullPointerException` message with no `messageKeys`. This is the one case the "fail-closed by construction" claim in the ETP-5175 base-sentence fix above did not cover.
+
+**`DocumentPostingService` names the real reason behind a "locked" post (ETP-5692):** the ETP-5529 paragraph above lists what a failed lock can mean — another posting process, or a document that is already posted, unprocessed, or stuck with `Processing='Y'` — because the lock statement (`AcctServer_data.xsql` `update`: `UPDATE <table> SET Processing='Y' WHERE <table>_ID=? AND Processed='Y' AND (Processing='N' OR Processing IS NULL) AND Posted<>'Y'`) folds all of them into `STATUS_DocumentLocked`. Live QA hit the consequence: posting a **draft** invoice answered "This record is being posted by another process" with `Processing='N'`. `post()` now re-reads, on that status only, the two columns of that very statement (`notPostableFailure`: `SELECT Processed, Posted FROM <AcctServer.tableName> WHERE <table>_ID = ?`, through the provider's non-transaction connection, after the rollback) and answers "Only processed (completed) documents can be posted. Complete the document first." with `messageKeys:["ETGO_PostingDocumentNotProcessed"]` when `Processed <> 'Y'` — plain English built in Java, like the service's own "Document posted" / "Unposted (N entries removed)"; the key is a stable identity string, **not** an `AD_MESSAGE` record (no core message says exactly this for every table) — `["PostedDocument"]` (core, `AD_MESSAGE_ID 800116`, "Document already Posted.", translated by the language packs) when `Posted = 'Y'`, and keeps `OtherPostingProcessActive` otherwise. **Structural, not identity**: the columns are the ones `AcctServer` requires of every table it posts and the table name is the one `AcctServer.get` resolved, so it applies to every caller of `post()` — every document window and `NotPostedDocumentsHandler` — without naming a table. It **fails open** (unknown table name, a name that is not `\w+`, a missing row or a failed read keep the lock answer). The happy path is untouched: the read only runs after a failed post. The SPA maps `OtherPostingProcessActive` today; it only offers *Contabilizar* on a processed, unposted row, so it meets the two new answers only on stale data (a row posted or reactivated elsewhere since it was read). If it is ever wanted in Spanish, map `ETGO_PostingDocumentNotProcessed` in `backendErrors.js` (SPA i18n), not in the AD.
+
+**The invoice `unpost` status gate is NOT in `DocumentPostingService` (ETP-5692):** for every table this service serves, unposting a document that is not posted is a handled `200` "0 entries removed" (ETP-5445, Internal Consumption — the `InternalConsumptionHeaderHandler` paragraph above), and that stays. An invoice is narrower, and the rule is invoice semantics, not structure: only a **Completed** (`CO`) **and posted** invoice may be unposted — the only case the SPA offers. Without a gate, `ResetAccounting.delete` ran on drafts (a no-op answered as success) and on **voided** invoices, where it flipped `Posted` from `'D'` to `'N'` and so made a voided document eligible for background posting again. The gate is `InvoicePostingGate.checkUnpost`, called from `InvoicePostingGate.checkHeaderRequest` by both invoice header customizations before they delegate to the service: **422** with the flat `{success:false, message, messageKeys}` body `handleAction` answers: "Only a completed invoice can be unposted. This invoice's status is <code>." (`messageKeys:["ETGO_InvoiceUnpostNotCompleted"]`, `messageParams.docStatus`) or "This invoice is not posted, so it has no accounting entries to remove." (`["ETGO_InvoiceUnpostNotPosted"]`). Plain English built in Java; the keys are identity strings, not `AD_MESSAGE` records (core's `NotCompletedInvoice`, "The invoice must be completed", cannot carry the status an agent needs). The same `D → N` hazard exists for any other window whose voided documents carry `Posted='D'`; it is not changed there (out of scope, flagged in the ETP-5692 report).
 
 **Real-world example — `ChartOfAccountsHandler` GL Item auto-management (ETP-5020):** `schemaforge/handlers/ChartOfAccountsHandler.java` (`@Named("chart-of-accounts")`, wired on the chart-of-accounts spec) keeps Etendo Classic's `C_Glitem` plumbing invisible behind the `C_ElementValue` subaccount UI.
 
@@ -7968,8 +8027,8 @@ Production logs are read in Datadog, so each MCP line below is one line, carries
 act on it, and never carries agent-written free text or a request body.
 
 **Unknown JSON-RPC method → one `WARN`, no stack trace.** A client asking for a method the server
-does not offer — mostly MCP 2026-07-28 clients probing with `server/discover` before falling back to
-`initialize`, plus the odd `resources/templates/list` — still gets JSON-RPC `-32601`, but is no
+does not offer — before ETP-5640 mostly MCP 2026-07-28 clients probing with `server/discover`
+(answered since, §4.12.30), plus the odd `resources/templates/list` — still gets JSON-RPC `-32601`, but is no
 longer logged as `ERROR Error processing MCP message` with a full stack trace (~570 a week before
 this change). `McpServlet` has a dedicated `catch (McpMethodNotFoundException)`:
 
@@ -8028,9 +8087,9 @@ production layout (`%d [%t] %-5p %c - %m%n`) prints no MDC, which is why the key
 #### 4.12.24 Protocol revision: 2025-11-25, negotiated (ETP-5639)
 
 The server speaks the four `initialize`-based revisions **`2024-11-05`, `2025-03-26`,
-`2025-06-18`, `2025-11-25`** (latest), in `McpProtocolVersion`. The stateless `2026-07-28`
-revision is not served (its `server/discover` probe answers `-32601`, which makes a dual-era client
-fall back to `initialize`; see §4.12.23).
+`2025-06-18`, `2025-11-25`** (latest), in `McpProtocolVersion`. Since ETP-5640 it also serves the
+stateless `2026-07-28` revision — see §4.12.30. The table below is the legacy era's; a request is
+only legacy when it carries no modern marker.
 
 | Request | Behaviour |
 |---|---|
@@ -8038,7 +8097,7 @@ fall back to `initialize`; see §4.12.23).
 | `initialize` with an unknown or missing `protocolVersion` | answered with the latest, `2025-11-25` (lifecycle rule) |
 | any later POST without `MCP-Protocol-Version` | served, taken as `2025-03-26` (spec fallback) |
 | any later POST with a supported header | served as sent |
-| any later POST with an unsupported header | **served** with the session's negotiated version (or the latest) and one `WARN` `MCP client sent unsupported MCP-Protocol-Version '<value>' (client=…) session=…` — never `400`. Lenient on purpose; it turns strict when the 2026-07-28 era is added, where era detection depends on the header |
+| any later POST with an unsupported header | **served** with the session's negotiated version (or the latest) and one `WARN` `MCP client sent unsupported MCP-Protocol-Version '<value>' (client=…) session=…` — never `400`. Lenient on purpose, and still so for legacy requests; a header naming `2026-07-28` makes the request modern (§4.12.30), where errors are strict |
 | notification (no `id`) | `202 Accepted` (was `204 No Content`) |
 | `GET /sws/mcp` | **`405 Method Not Allowed`**, `Allow: POST, OPTIONS` — a Streamable HTTP server without an SSE stream MUST. The informational JSON it used to answer is gone |
 | `GET /sws/mcp/.well-known/oauth-protected-resource` | unchanged — RFC 9728 metadata, `200` |
@@ -8245,3 +8304,147 @@ legacy JWT fallback in `McpServlet.authenticate` does not honour the `GoLegacyBe
 and the cookie path does not run `GoSessionRoleReconciler` (ETP-5395). Moving `McpServlet` onto the
 shared authenticator would close both; it needs an `identify()` variant that keeps the commercial
 check, because MCP builds its own per-call `OBContext`.
+
+#### 4.12.29 A processed invoice accepts only the UI's edits, on every channel (ETP-5692)
+
+ETP-5692 lets a person **unpost** a Completed invoice, correct its accounting dimensions, accounting
+date and exchange rates, and post it again — without reactivating it. The SPA enforces what may be
+edited in that state; until this change REST and MCP did not. Live QA, local MCP:
+
+- **BUG-3** — on a Completed, unposted invoice, `etendo_update` of `paymentMethod` (purchase) answered
+  200 while the SPA locks it. Only the core trigger lists applied (`C_INVOICE_TRG`: business partner,
+  payment terms, dates, price list…; `C_INVLINE_CHK_RESTRICTIONS_TRG`: product, quantity, prices…).
+- **BUG-2** — on a **posted** invoice, `etendo_update` of the header `costcenter` answered 200, so the
+  header disagreed with the ledger. `C_INVOICE_TRG` locks `DateAcct`, `C_Project_ID`,
+  `C_Campaign_ID`, `C_Activity_ID`, `User1_ID`, `User2_ID` and `A_Asset_ID` while posted, but **not**
+  `C_Costcenter_ID` (the line trigger does lock it).
+
+**The fence** — `CompletedInvoiceWriteFence`, the invoice customization's own support class, called
+first in `handle()` by `SalesInvoiceHeaderHandler`, `PurchaseInvoiceHeaderHandler` (through
+`InvoicePostingGate.checkHeaderRequest`, with the allowlist of
+`AbstractInvoiceHeaderHandler.completedEditableHeaderFields()`) and `InvoiceLineHandler` (so also
+`SalesInvoiceLineHandler`). It judges a CRUD `PUT`/`PATCH` against the stored record:
+
+1. a draft (`Processed='N'`) is not fenced;
+2. on a processed invoice, every key whose value **differs** from the stored one must be in the
+   allowlist — anything else, including a key that is not a property of the entity, is refused
+   (fail closed). A key re-sent with its stored value is not a change. Identity, audit, the `updated`
+   concurrency token, `parentId`, server-owned `client`/`organization` and `$_identifier` companions
+   are skipped;
+3. while `Posted='Y'`, the allowlisted fields that feed the ledger (`accountingDate`, `project`,
+   `costcenter`) are refused too — unpost first;
+4. on a processed invoice whose status is not `CO` (voided, closed…), `project` and `costcenter` are
+   refused — "<fields> cannot be changed on a voided or closed invoice (status <code>).". A draft
+   never reaches this rule (rule 1). Rules 3–4 mirror the `readOnlyLogic` the SPA applies to both dimensions,
+   `@Posted@='Y' | (@Processed@='Y' & @DocStatus@!'CO')`, and to `accountingDate`, `@Posted@='Y'`;
+5. a purchase invoice already sent to the SII refuses `orderReference`
+   (`sii_sent_invoice_fields_locked`), mirroring its SPA `readOnlyLogic`
+   `@EM_Aeatsii_Issent@='Y' & @IsSOTrx@='N'`.
+
+| entity | editable once processed | source in the SPA |
+|---|---|---|
+| `sales-invoice/header` | `accountingDate`, `project`, `costcenter`, `description` | `draftMode.keepSaveWhenCompletedFields` + `notesField` |
+| `purchase-invoice/header` | the above + `orderReference` | idem (ETP-4839 kept the supplier invoice number editable) |
+| `sales-invoice/lines`, `purchase-invoice/lines` | `project`, `costcenter` | `draftMode.editableLineFieldsWhenCompleted` |
+
+`description` is the exception worth knowing: it is the window's `notesField`, and the notes panel
+PATCHes it on a completed invoice **by design** (ETP-5205, `handleNotesSave` excludes only the
+role-level read-only). The live QA case "`description` (sales) answered 200 while the SPA locks it"
+is therefore the SPA's own behaviour, not a gap, and stays allowed. The allowlist is declared once,
+in `CompletedInvoiceWriteFence` (`headerEditableWhenCompleted()`,
+`purchaseHeaderEditableWhenCompleted()`, `lineEditableWhenCompleted()`); `draftMode` is a
+frontend-only setting that `push-to-neo` does not carry, so the two must be changed together.
+
+**What is not fenced, and why it does not need to be.** Writes the invoice's own handlers and
+processes make through DAL never pass the CRUD update: the SII/TicketBAI/VeriFactu state and
+authorization number, payments (`registerPayment` & co.), the exchange-rate mirror onto
+`eTGOCurrencyRate`, the origin-invoice link. REST `/batch` and MCP `etendo_batch` only **create**
+(§4.12.9); a line created on a processed invoice is refused by `C_INVLINE_CHK_RESTRICTIONS_TRG`.
+
+**Exchange rates.** `InvoiceExchangeRateHandler` refuses a create or a rate edit on the
+`exchangeRates` tab of a **posted** invoice with **422**
+`posted_invoice_exchange_rate_locked` ("This invoice is posted, so its exchange rates cannot be
+changed. Unpost it first."), before it mirrors the
+new rate onto the header. Core's `C_CONVERSION_RATE_DOCUMENT_TRG` refused the row too, but only
+with the generic `@20501@` and only after the header had already been changed through DAL. On a
+Completed, unposted invoice the tab stays editable (ETP-5657); delete of a non-draft invoice's rate is
+refused by `ConversionRateDocDeleteGuardObserver`, as before.
+
+**The refusal** is a 422 whose `error` object carries a plain-English sentence in `message`, built in
+Java with the field names and status filled in (no `AD_MESSAGE` record — ETP-5692 decision), and the
+identity: `code` (`completed_invoice_fields_locked`,
+`posted_invoice_fields_locked`, `invoice_status_fields_locked`, `sii_sent_invoice_fields_locked`), `fields` (every refused key),
+`allowedFields` (rule 2), `hint` (rules 3 and the exchange rate: unpost first), `messageKeys`
+(`ETGO_CompletedInvoiceFieldsLocked`, `ETGO_InvoiceFieldsLockedPosted`,
+`ETGO_InvoiceFieldsLockedStatus`, `ETGO_InvoiceFieldsLockedSiiSent`,
+`ETGO_InvoiceExchangeRateLockedPosted` — stable identity strings,
+not AD records) and `messageParams` (`fields`, `allowedFields`, `docStatus`). A client that needs
+another language maps the key — the SPA in its own i18n (`backendErrors.js`, `en_US`/`es_ES`). The
+MCP lifts all of them to the top level of the agent's error (`toMcpHandlerError`). It is
+deliberately **not** `read_only_field`: the SPA's `saveWithReadOnlyFieldRetry` drops a field named
+that way and retries, which would turn this refusal into a silent partial save.
+
+**Channels.** REST single and MCP `etendo_update` reach the same customization through
+`NeoExtensionDispatcher`, so they behave identically — no new divergence. The SPA does not meet the
+fence on its own flows: it sends a diff of dirty fields, which its `keepSaveWhenCompletedFields`
+gate already limits to the same list, and the same locks are `readOnlyLogic` there (`accountingDate`
+`@Posted@='Y'`; `project`/`costcenter` as above; purchase `orderReference`
+`@EM_Aeatsii_Issent@='Y' & @IsSOTrx@='N'`). Only a stale screen (the invoice posted, voided or sent
+to the SII elsewhere since it was read) can surface one of these answers in the SPA. The fence fails open when the record cannot be read: the update
+then meets the core triggers it always did.
+
+#### 4.12.30 Dual era: MCP 2026-07-28 next to `initialize` (ETP-5640)
+
+The server is **dual-era**: it serves the stateless revision `2026-07-28` (no `initialize`, no
+`Mcp-Session-Id`, version and client in every request's `params._meta`) on the same `/sws/mcp`
+endpoint as the four legacy revisions. Design and decision table:
+`docs/plans/2026-10-09-etp-5640-mcp-dual-era-design.md`.
+
+**Era detection** (`McpRequestEra.classify`, body first — headers only mirror it). A request is
+*modern* when `params._meta["io.modelcontextprotocol/protocolVersion"]` is present, when its method
+is `server/discover`, or when its `MCP-Protocol-Version` header is `2026-07-28`. `initialize` is
+always legacy. Anything else is legacy and behaves exactly as §4.12.24 describes.
+
+| Modern request | Answer |
+|---|---|
+| well formed | `200`, result + `resultType: "complete"` + `_meta["io.modelcontextprotocol/serverInfo"]` (`name`, `version`); `tools/list`, `resources/list`, `resources/read` also carry `ttlMs: 300000`, `cacheScope: "private"`; never an `Mcp-Session-Id` |
+| `server/discover` | `supportedVersions` (all five, newest first), the same `capabilities` and full `serverInfo` as `initialize`, `ttlMs: 3600000`, `cacheScope: "public"` |
+| `_meta` version not served (`2027-01-01`, or a legacy version sent per request) | `400`, `-32022` with `data.supported` / `data.requested` |
+| a mirror header present and different from the body (`MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name` after Base64-sentinel decoding) | `400`, `-32020` |
+| `_meta` version not a string | `400`, `-32602` |
+| a mirror header, `_meta` version or `clientCapabilities` **missing** | served, one `WARN MCP modern request served without: …`; `400` (`-32020` / `-32602`) only with `mcp.modern.strict=true` |
+| `ping` or any unknown method | `404`, `-32601` |
+| `resources/read` of a missing or inaccessible resource | `-32602` `Resource not found: <uri>` (legacy keeps `-32603`); both eras log one `WARN`, no stack trace. An unknown entity inside a known spec is the same answer |
+
+**The one legacy-visible change.** Everything else in the legacy era is ETP-5639 as it was, but a
+legacy `resources/read` of a missing or inaccessible resource changes on purpose: the code stays
+`-32603`, the message becomes `Resource not found: <uri>` (it used to be the internal exception
+text, which could name the spec), and the log drops from `ERROR` with a stack trace to one `WARN`.
+The message never says whether the spec exists.
+
+Why missing headers are lenient by default: a dual-era client reads a `400` with a recognised
+modern error as "modern server, fix and retry", not "fall back" — refusing a client that omits a
+newly required header would loop it forever. A mismatch is always refused.
+
+**Kill switch.** Backend feature flag `mcp-modern-era-disabled`
+(`GoFeatureFlags.FLAG_MCP_MODERN_ERA_DISABLED`), environment level, never per account (clients cache
+the era per origin, and one origin serves every tenant). `true` restores the pre-ETP-5640
+behaviour: `server/discover` gets `200` + `-32601`, `_meta` is ignored, everything is legacy. Unset,
+`false` or an unreachable control plane keep the server dual-era. Live within one ConfigCat poll
+where ConfigCat is configured; a restart where the flag comes from
+`etendo.go.flags.mcp-modern-era-disabled`. A client that already cached "modern" keeps working
+after a rollback, because tool calls never needed `initialize`.
+
+**Telemetry.** A modern request's client name comes from its own `_meta` clientInfo and its session
+key is derived per (user, token client, role) — never per client name, which the client controls —
+with an `m-` prefix, renewed after 30 min idle; see `docs/mcp-usage-telemetry.md`
+§*Modern clients*. One `INFO MCP modern session started: session=m-… client=<name>/<version>
+protocol=2026-07-28 traceparent=yes|no` per derived session is the rollout's evidence. The client name
+is read whatever the kill switch says; with the switch on, no `m-` session is derived and no such line
+is logged.
+
+**CORS**: `Mcp-Method` and `Mcp-Name` are in `Access-Control-Allow-Headers`.
+
+**Not served** (answer `404 -32601` in the modern era): `subscriptions/listen`,
+`resources/templates/list`, `logging/setLevel`, tasks, MRTR. We never need client input, so a
+result is always `complete`.

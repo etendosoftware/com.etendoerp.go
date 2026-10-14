@@ -251,8 +251,12 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
     // same resolution {@link Fiscal349GenerateSupport#applyContactParams} already falls back to
     // server-side — never duplicated, just exposed — so this can never drift from what a blank
     // field actually does.
-    String contactFallback = Fiscal349GenerateSupport.resolveCurrentUserContactName();
-    String phoneFallback   = generateSupport.resolveOrgPhone(orgId);
+    // ETP-5597 — passed through the same fitAeat* normalisation generation applies, so a fallback
+    // that normalises to nothing (a phone with no digits) is reported as no fallback at all.
+    String contactFallback = Fiscal349GenerateSupport.fitAeatContact(
+        Fiscal349GenerateSupport.resolveCurrentUserContactName());
+    String phoneFallback   = Fiscal349GenerateSupport.fitAeatPhone(
+        generateSupport.resolveOrgPhone(orgId));
     root.put("contactFallback", contactFallback != null ? contactFallback : "");
     root.put("phoneFallback",   phoneFallback   != null ? phoneFallback   : "");
     return root;
@@ -642,8 +646,11 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
       BigDecimal keyBase) throws Exception {
     BusinessPartner bp   = inv.getBusinessPartner();
     BigDecimal      raw  = keyBase != null ? keyBase : inv.getSummedLineAmount();
+    // ETP-5597 (CP-20): the sign is kept. A credit note's lines are negative and the operator
+    // rows (getTaxBaseAmountPerBusinessPartner) and the AEAT file add them up signed, so the
+    // old abs() showed a rectifying invoice as if it added to the base it actually reduces.
     BigDecimal      base = raw != null
-        ? raw.abs().setScale(2, RoundingMode.HALF_UP)
+        ? raw.setScale(2, RoundingMode.HALF_UP)
         : BigDecimal.ZERO;
     JSONObject row = new JSONObject();
     // ETP-5597: the invoice id gives the frontend a collision-free row key (documentNo is not
