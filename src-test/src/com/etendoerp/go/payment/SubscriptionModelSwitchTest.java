@@ -176,9 +176,22 @@ public class SubscriptionModelSwitchTest {
 
     new SubscriptionModelSwitch().isOn();
 
-    assertEquals(1, orders.size());
     assertEquals(Preference.PROPERTY_CREATIONDATE + " desc", orders.get(0).toString());
     verify(criteria).setMaxResults(1);
+  }
+
+  @Test
+  public void rowsCreatedInOneTransactionStillHaveADeterministicWinner() {
+    // Two rows inserted in one transaction share now() as their creation date, so the order must
+    // not stop there: updated desc, then the id, exactly as the operator verification query sorts.
+    OBCriteria<Preference> criteria = criteriaReturning(rowWithValue("Y"));
+    doReturn(criteria).when(obDal).createCriteria(Preference.class);
+
+    new SubscriptionModelSwitch().isOn();
+
+    assertEquals(List.of(Preference.PROPERTY_CREATIONDATE + " desc",
+        Preference.PROPERTY_UPDATED + " desc", Preference.PROPERTY_ID + " desc"),
+        orders.stream().map(Order::toString).collect(java.util.stream.Collectors.toList()));
   }
 
   @Test

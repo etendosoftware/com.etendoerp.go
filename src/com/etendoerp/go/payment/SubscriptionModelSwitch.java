@@ -55,8 +55,11 @@ import org.openbravo.model.ad.domain.Preference;
  * is exactly {@value #ON}; an absent row, any other value, or a read that fails all mean OFF — the
  * pre-ETP-5046 behaviour, which is the safe direction.
  *
- * <p><b>Read on every call, never cached.</b> It is consulted once per paid purchase, which is rare,
- * so flipping the switch takes effect on the next purchase without a restart.
+ * <p><b>Read on every call, never cached.</b> Two callers consult it: the paid upgrade, once per
+ * purchase (which is rare), to decide whether a rowless tenant gets a row; and
+ * {@link TenantPlanPreferenceFallback}, once per resolution or batch that the fallback actually
+ * serves, to decide the level of its log line. Neither caches, so flipping the switch takes effect
+ * on the next purchase and the next resolution without a restart.
  *
  * <p><b>Not module data.</b> The module ships the list value only, never a preference row: a row
  * shipped as module sourcedata would be reset to its shipped value by every
@@ -102,8 +105,12 @@ public class SubscriptionModelSwitch {
   }
 
   /**
-   * Finds the System-level, unrestricted row. The most recently created one wins if an operator
-   * left more than one, so a second row added to flip the switch takes effect.
+   * Finds the System-level, unrestricted row. If an operator left more than one, the order is
+   * {@code created desc, updated desc, ad_preference_id desc}: the most recently created row wins,
+   * so a second row added to flip the switch takes effect; two rows created in one transaction share
+   * {@code now()}, so the most recently updated one breaks the tie, and the id makes the winner
+   * deterministic when even that is equal. The operator verification query in the docs uses the
+   * same {@code ORDER BY}, so its first row is always the row this method reads.
    */
   private static Preference findSystemPreference() {
     // AD_Preference is readable by everyone, but the paid onboarding calls this from the new
@@ -125,6 +132,8 @@ public class SubscriptionModelSwitch {
       criteria.add(Restrictions.isNull(Preference.PROPERTY_USERCONTACT));
       criteria.add(Restrictions.isNull(Preference.PROPERTY_WINDOW));
       criteria.addOrder(Order.desc(Preference.PROPERTY_CREATIONDATE));
+      criteria.addOrder(Order.desc(Preference.PROPERTY_UPDATED));
+      criteria.addOrder(Order.desc(Preference.PROPERTY_ID));
       criteria.setMaxResults(1);
       return (Preference) criteria.uniqueResult();
     } finally {
