@@ -225,14 +225,13 @@ purchases write `ETGO_TenantPlan`, open no row, and the lifecycle webhooks keep 
 - **Only creation is gated.** Reads are unchanged: a tenant with a row is decided by the row
   whatever the switch says. `openSubscription` has one runtime caller (the paid upgrade), which is
   where the gate sits.
-- **While OFF the fallback WARN fires for every paying tenant**, by design; §3.2's "silence" signal
-  is meaningful only on a switched environment.
+- **The fallback's log line follows the switch:** DEBUG while OFF (every paying tenant falls back
+  on purpose), WARN while ON (a tenant without a row is unexpected). §3.2's "silence" signal is
+  therefore "no WARN on a switched environment".
 - **Do not ship a preference row as module data.** A sourcedata row would be reset by every
   `update.database`, silently switching an environment back; the operator's row has no module.
-- **Residual after the switch (data-fix side):** a tenant that first reaches develop's R42 after the
-  switch (onboarded later, baseline 2026-09-02) gets a marker re-inserted next to its row, because
-  opt-in R37 no longer follows R42 in the chain. Until a successor of R42 ships, re-run
-  `make data-fixes FIX=R37-tenant-subscription-backfill CLIENT=<id>` for such a tenant (R37 header).
+- **Residual after the switch:** R42 re-inserts the `ETGO_TenantPlan` marker for tenants that first
+  reach it after the switch — its own topic, §3.8 (interim workaround and proper fix there).
 
 ---
 
@@ -259,7 +258,8 @@ branch does: it deletes the marker of **every tenant that has any subscription r
 closed (design doc §8). The end condition below is therefore reached only once R37 has run *after*
 R42 for every tenant — which the runner's chain-current gate on the opt-in R37 guarantees for the
 tenants present at the switch (§3.6); a marker that reappears after R37 means either a tenant that
-first reached R42 after the switch (§2.9 residual) or someone forced R42 by hand.
+first reached R42 after the switch (§3.8) or someone forced R42 by hand. §3.8's proper fix is
+therefore a precondition of Phase F.
 
 **Trigger** — on every environment, first that it has switched (§2.9: the System preference
 `ETGO_SubscriptionModel = Y` exists), then both of these (design doc §8.1):
@@ -386,7 +386,7 @@ the order is kept by the runner instead: `FIX=` applies an opt-in fix only to a 
 watermark has already reached the fix's own date (`BLOCKED_CHAIN_BEHIND` otherwise), so R42 is
 always at or below the watermark when R37 runs, R37's retirement branch removes whatever marker R42
 wrote, and R42 never runs for that tenant again. R37's own ledger rows never move the watermark.
-The gap this leaves — a tenant that first reaches R42 *after* the switch — is §2.9's residual.
+The gap this leaves — a tenant that first reaches R42 *after* the switch — is §3.8.
 **The one way to run R42 after R37 for a tenant already past it is an operator forcing it** — `run.js --fix <R42>` ignores chain order and the watermark. Whoever does
 that must follow it with `run.js --fix <R37> --client <same tenant>`, or the re-inserted marker
 survives and §3.2's end condition never reaches 0.
@@ -456,6 +456,61 @@ role can read neither `AD_Preference` nor `ETGO_SUBSCRIPTION`.
   owned by the tenant, unlike the `ETGO_TenantPlan` marker, which is scoped by
   `VISIBLEAT_CLIENT_ID`). Without that, the row — which wins once it
   exists — would have reset every past-due or expired tenant to paying. Design doc §7.0.
+
+### 🟡 3.8 R42 re-inserts the `ETGO_TenantPlan` marker next to a subscription row after the switch
+
+**Ticket:** no ticket — needs its own (fix before Phase F). Related ETP-5046 (opt-in R37, the
+switch of §2.9), ETP-5548 (R42).
+**To raise with:** Martin Taal.
+
+**What R42 does.** Develop's `20260929T190000Z__R42-paid-provisioning-commercial-metadata.sql`
+(ETP-5548, applied on shared environments, immutable) restores the commercial metadata of every
+paid-provisioned owned tenant: one with an active owner, a `PROVISIONED` paid
+`ETGO_CHECKOUT_REQUEST` and no refunded/canceled request. Among other things it inserts an active
+`ETGO_TenantPlan='productive'` marker — or flips an existing one to `productive` — whenever the
+marker is missing. It decides "paid" from `etgo_checkout_request` alone and knows nothing about
+`etgo_subscription`.
+
+**How the marker comes back.** On an environment that has switched (§2.9), a new paid tenant opens
+an `ETGO_SUBSCRIPTION` row and deliberately gets **no** marker. Its data-fix chain starts at the
+onboarding baseline (`ONBOARDING_PROVISIONED_THROUGH`, 2026-09-02), which is below R42, so the next
+full `make data-fixes` runs R42 for it: the missing marker looks like a gap, and R42 inserts it next
+to the row. Before R37 became opt-in, R37 followed R42 in the same chain and retired that marker
+again; now R37 runs only when an operator names it with `FIX=`, so nothing removes it. Tenants that
+were present when the operator ran R37 are not affected — the runner's chain-current gate made sure
+R42 had already run for them (§3.6).
+
+**Impact.**
+- **Access and plan: unaffected while the row is open.** `resolvePlan`, the access policy and the
+  lifecycle webhooks read the open row first; the marker is never consulted for such a tenant.
+- **The switch verification breaks.** The "active `ETGO_TenantPlan='PRODUCTIVE'` markers = 0" check
+  of design doc §6.2 / §2.9 goes back above 0 after the next full data-fix run, and so does §3.2's
+  Phase F count — the end condition can never be reached while R42 keeps doing this.
+- **The marker's meaning gets muddied.** After the switch a marker is supposed to mean "a tenant the
+  backfill has not reached" or "a purchase whose row could not be opened". An R42 marker next to a
+  row means neither, so the remaining markers stop being a reliable worklist for Phase F. And once
+  the tenant's row is closed (ETP-5047 close-on-cancel), `resolvePlan` falls through to the
+  fallback and reads the stale marker as `productive` — a canceled tenant reading as paying
+  (design doc §8).
+
+**Interim workaround.** After a full `make data-fixes` on a switched environment, retire the marker
+of each such tenant by re-running R37 for it — its retirement branch removes the marker of any
+tenant that has a subscription row:
+
+```bash
+make data-fixes FIX=R37-tenant-subscription-backfill CLIENT=<id> DRY_RUN=1
+make data-fixes FIX=R37-tenant-subscription-backfill CLIENT=<id>
+```
+
+The tenants to treat are exactly the ones the §6.2 verification query reports with a marker and an
+`ETGO_SUBSCRIPTION` row.
+
+**Proper fix.** A subscription-aware successor of R42 — same restoration, but no marker for a tenant
+that has any `etgo_subscription` row — plus retiring R42 in `retired.json` (`supersededBy` the
+successor; the R42 file stays byte-for-byte untouched, as for every applied fix). It must land
+**before Phase F**: Phase F deletes the fallback that would read a stale marker, but its trigger
+(§3.2) cannot be met while R42 keeps re-creating them. Recorded on the data-fix side in R37's
+header as well.
 
 ## 4. Known issues
 
