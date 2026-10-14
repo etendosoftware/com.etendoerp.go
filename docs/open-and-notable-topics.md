@@ -109,9 +109,9 @@ subscriptions are expected in the coming weeks, so make a one-time cutover now �
 worth keeping, switch to `ETGO_SUBSCRIPTION`, remove the preference fallback — after confirming
 there are no live subscriptions to adopt (§2.4). Martin raised that this means moving the code to
 production quickly; Sebastián's answer was the off-by-default feature-flag rollout of §1.3 —
-decided on 2026-10-14, though ETP-5047 itself still ships enforcement on. **Still to decide.** Prerequisites, from §3.2, on every
-environment: R37 has run after R42, the `ETGO_TenantPlan` marker count reaches 0, and the fallback
-WARN no longer appears. The cutover deletes §3.2's list, and with it the watermark preference of
+decided on 2026-10-14, though ETP-5047 itself still ships enforcement on. **Still to decide.**
+Prerequisites, from §3.2, on every environment: R37 has run after R42, the `ETGO_TenantPlan` marker
+count reaches 0, and the fallback WARN no longer appears. The cutover deletes §3.2's list, and with it the watermark preference of
 §3.7.
 
 ### 🔴 1.7 `END_DATE` meaning — not discussed on 2026-09-28
@@ -928,7 +928,7 @@ of static `CheckoutConfiguration` mocks. Found after the ETP-5046 develop merge;
 
 ### 🟡 4.12 `NeoAuthenticatorEnvironmentAccessTest` re-tests the shared auth pipeline (ETP-5047)
 
-**Ticket:** owner ETP-5047; related ETP-5455.
+**Ticket:** no ticket — the trim is parked (§4.13); related ETP-5047, ETP-5455.
 
 `schemaforge/NeoAuthenticatorEnvironmentAccessTest` (572 lines, 16 tests) was written for ETP-5443,
 when NEO had three separate auth paths — the cookie session (`applySessionContext`), the legacy
@@ -986,9 +986,12 @@ A trim along these lines is parked, unpushed, on the local branch `parked/ETP-50
 **Ticket:** no ticket — candidates for one follow-up ticket; related ETP-5047.
 
 Found during ETP-5047's development, review and QA, then taken out of its scope by Martin on
-2026-10-14. All but item 11 predate ETP-5047 and exist on `develop` too. Fixes for most are built,
-reviewed and QA'd but **parked, unpushed, on local branches only** — a reader on another machine
-cannot see them; they are the starting point for whichever ticket picks this up:
+2026-10-14. The **Since** column says where each one comes from, checked against `develop` (go
+`3b4afe5a9`, sf `995a2cf9f`) and the ETP-5047 base (go `fa7668ff7`, sf `59b286c2b`): `develop` =
+already there today, not caused by ETP-5047; **ETP-5047** = arrives with ETP-5047's own changes —
+the part to weigh when deciding whether an item blocks the ETP-5047 deploy. Fixes for most are
+built, reviewed and QA'd but **parked, unpushed, on local branches only** — a reader on another
+machine cannot see them; they are the starting point for whichever ticket picks this up:
 
 - `com.etendoerp.go` — `parked/ETP-5047-followups` (18 commits on `fa7668ff7`, head `ca1dc71cc`);
 - `schema_forge` — `parked/ETP-5047-followups` (14 commits on `59b286c2b`, head `5da6521f0`);
@@ -997,19 +1000,18 @@ cannot see them; they are the starting point for whichever ticket picks this up:
 Those branches also carry the opt-in enforcement of §1.3 and the test trim of §4.12; several fixes
 below assume it (item 1's 503 is decided per enforcement flag).
 
-| # | What happens | Impact | Parked fix |
-|---|---|---|---|
-| 1 | NEO answers **401** when the commercial access check itself throws (e.g. a DB error). | The SPA reads the 401 as an expired session and logs the user out. | go: 503 `ENVIRONMENT_UNVERIFIED` in the guard's shared body, decided per enforcement flag (`8818b02b0`, `a77f783c9`). |
-| 2 | An unresolved tenant (role / effective-client lookup fails) is a 401 on NEO and a 503 on MCP. | Same failure, two answers; on NEO, again a logout. | go: always the 503, whatever the flag (`fe097be21`). |
-| 3 | A SQL-level error inside `TenantEnvironmentLifecycleService.evaluateAccess` aborts the request's PostgreSQL transaction. | Later DAL work and the end-of-request commit fail (500s); on `POST /session/environment` the rotated session can be lost → logout. | go: a savepoint around the evaluation, plus a DB-backed integration test (`3f64f1219`, `ca1dc71cc`). |
-| 4 | Error bodies differ: the Copilot bridge and the OAuth2 API-key endpoints answer their own flat shapes; OAuth2 says `access_denied` even for a 503. | Clients need one reader per door; a retryable 503 looks like a denial. | go: shared 402/503 body on the Copilot bridge (`e8d5d8ed8`), `temporarily_unavailable` for the OAuth2 503 (`959689518`); sf: the readers accept both shapes. |
-| 5 | SPA: a 5xx or network failure on `windowaccessmap` shows "your role has no access"; session restore on a 5xx shows a blank screen. | Wrong copy for a temporary failure; a blank app with no way out. | sf: `AccessUnreachableScreen` (retry / log out) and `SessionBootingScreen`. |
-| 6 | SPA: a list shows an empty grid on any load failure — no error state. | A failed load looks like "no records". | None yet. |
-| 7 | SPA: the backend error code is lost on several paths — `useEntity` save / delete / process, `apiError`, the API-keys page, the `DataTable` inline toggle, `useCreateMovement` / `useStatementActions` — so English backend text reaches the user. | Untranslated messages in a Spanish UI. | sf: a code → i18n map (`lib/backendErrors.js`, `lib/requestError.js`) covers all but the two finance hooks. |
-| 8 | SPA API-keys page: hardcoded English confirm titles and copy toast; builds `createApiFetch` from the `@/auth/api.js` barrel instead of `useApiFetch`. | Breaks the i18n and request-policy rules of `schema_forge/CLAUDE.md`. | sf: translated, moved to `useApiFetch` (`6e2453a5c`). |
-| 9 | SPA does not recognise the OAuth2 API-key 402 envelope (`error: access_denied` + `error_description`) as an environment block; the message is untranslated. | Low: another request's 402 normally blocks the app first. | None. |
-| 10 | A brief access-map failure during a background refresh replaces the whole app. | Unsaved form input is lost. Pre-existing core behaviour. | None — needs an `app-shell-core` change: keep the previous access map on a background refresh. |
-| 11 | **Introduced by ETP-5047.** Two readers of the 402 decision: core `apiFetch` reads only the message text; schema_forge's `readEnvironmentAccessDecision` (`d18c484d9`) reads `error.decision` first. | Same answer while the backend keeps both in sync; they drift if it stops. | core: the reader moves into `app-shell-core` (`d57298c06`); the schema_forge side waits for a core release. |
+| # | What happens | Impact | Since | Parked fix |
+|---|---|---|---|---|
+| 1 | NEO answers **401** when the commercial access check itself throws (e.g. a DB error): the exception reaches `EnvironmentRequestAuthenticator.refusedFor`. MCP answers 503 there since ETP-5047. | The SPA reads the 401 as an expired session and logs the user out. | `develop` | go: 503 `ENVIRONMENT_UNVERIFIED` in the guard's shared body, decided per enforcement flag (`8818b02b0`, `a77f783c9`). |
+| 2 | A SQL-level error inside `TenantEnvironmentLifecycleService.evaluateAccess` aborts the request's PostgreSQL transaction. | Later DAL work and the end-of-request commit fail (500s); on `POST /session/environment` the rotated session can be lost → logout. | Transaction abort: `develop`. Session loss: **ETP-5047** (that endpoint evaluates access only since `enforcedDecision` / `accessDecision`). | go: a savepoint around the evaluation and a DB-backed integration test (`3f64f1219`); a WARN when no savepoint can be taken (`ca1dc71cc`). |
+| 3 | Error bodies differ by door. **402:** the Copilot bridge answers a flat `{"error": "<message>"}` and the OAuth2 API-key endpoints their own envelope (`access_denied`), not the shared structured body. **503** (unresolved tenant — `EffectiveClientResolver` — and MCP's failed check): NEO answers `{error: {message, status}}`, MCP and the Copilot bridge a flat `{"error": "<message>"}`, OAuth2 `access_denied`. | Clients need one reader per door; on OAuth2 a retryable 503 looks like a denial. | 402 shapes: `develop`. Every 503: **ETP-5047**. | go: shared 402/503 body on the Copilot bridge (`e8d5d8ed8`), `temporarily_unavailable` for the OAuth2 503 (`959689518`); sf: the readers accept both shapes. |
+| 4 | SPA: a 5xx or network failure on `windowaccessmap` shows "your role has no access"; session restore on a 5xx shows a blank screen. | Wrong copy for a temporary failure; a blank app with no way out. | `develop` | sf: `AccessUnreachableScreen` (retry / log out) and `SessionBootingScreen`. |
+| 5 | SPA: a list shows an empty grid on any load failure — no error state. | A failed load looks like "no records". | `develop` | None yet. |
+| 6 | SPA: the backend error code is lost on several paths — `useEntity` save / delete / process, `apiError`, the API-keys page, the `DataTable` inline toggle, `useCreateMovement` / `useStatementActions` — so English backend text reaches the user. | Untranslated messages in a Spanish UI. | `develop` | sf: a code → i18n map (`lib/backendErrors.js`, `lib/requestError.js`) covers all but the two finance hooks. |
+| 7 | SPA API-keys page: hardcoded English confirm titles and copy toast; builds `createApiFetch` from the `@/auth/api.js` barrel instead of `useApiFetch`. | Breaks the i18n and request-policy rules of `schema_forge/CLAUDE.md`. | `develop` | sf: translated, moved to `useApiFetch` (`6e2453a5c`). |
+| 8 | SPA does not recognise the OAuth2 API-key 402 envelope (`error: access_denied` + `error_description`) as an environment block; the message is untranslated. | Low: another request's 402 normally blocks the app first. | `develop` | None. |
+| 9 | A brief access-map failure during a background refresh replaces the whole app. | Unsaved form input is lost. Core behaviour. | `develop` | None — needs an `app-shell-core` change: keep the previous access map on a background refresh. |
+| 10 | Two readers of the 402 decision: core `apiFetch` reads only the message text; schema_forge's `readEnvironmentAccessDecision` (`d18c484d9`) reads `error.decision` first. | Same answer while the backend keeps both in sync; they drift if it stops. | **ETP-5047** | core: the reader moves into `app-shell-core` (`d57298c06`); the schema_forge side waits for a core release. |
 
 ## 5. Handed forward to later tickets
 
