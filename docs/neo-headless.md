@@ -7631,7 +7631,9 @@ and amounts as the same line entered in the form. Two gaps broke that:
 
 `SalesOrderLineHandler` — `@NeoExtension(spec = "sales-order", entity = "lines")` — and
 `SalesQuotationLineHandler` — `@NeoExtension(spec = "sales-quotation", entity = "quotationLine")`.
-Two classes because the annotation is not repeatable; both extend `OrderLineHandler`, so they keep
+Two classes because the annotation is not repeatable; both are empty bindings over the abstract,
+unannotated `SalesOrderLineCustomization`, which holds the pre-hook and `serverResolvedCreateFields`
+once (it is never a bean nor an index entry). It extends `OrderLineHandler`, so both keep
 its GET filter and `productCode`, its `afterCallout` tax rate and its PATCH gross-price fix, and both
 call the same entity helper `OrderLineDiscountSupport` explicitly (T12). Nothing is selected by a
 property-name guard; the former `McpLineAmountSupport`, which was, is deleted.

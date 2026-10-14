@@ -17,60 +17,24 @@
 
 package com.etendoerp.go.schemaforge;
 
-import java.util.Set;
-
 /**
- * Customization of sales-order/lines (ETP-5528): everything
- * {@link OrderLineHandler} does, plus the order line's own price rules: the standard price of a new
- * line and a discount its price does not reflect yet (see {@link OrderLineDiscountSupport}).
+ * Customization of sales-order/lines (ETP-5528): the behaviour lives in
+ * {@link SalesOrderLineCustomization}; this class only binds it to the entity.
  *
  * <p><b>Binding.</b> Resolved by {@link NeoExtension} on every channel, ahead of the row's
  * {@code Java_Qualifier}. The row still carries {@code orderLineHandler}, on purpose: several
  * readers look the qualifier up directly instead of going through the dispatcher (the MCP read
  * post-hook, the REST CRUD gate, the field filter, {@code protectedCreateCalloutFields}), and they
- * keep resolving the parent class — whose behaviour this class inherits unchanged — so those
- * surfaces behave exactly as before. The price is the ERROR line
+ * keep resolving {@link OrderLineHandler} — whose behaviour this class inherits unchanged — so
+ * those surfaces behave exactly as before. The price is the ERROR line
  * {@code NeoExtensionIndex.warnOnQualifierDisagreement} logs on each resolution; see
  * {@code neo-headless.md} §4.12.20.
  *
  * <p>No {@code @Named}: the parent's {@code orderLineHandler} name is not inherited, and a second
- * bean carrying it would make the name ambiguous. {@code purchase-order/lines} is not annotated and
- * stays on {@link OrderLineHandler} alone.
- *
- * <p>{@link SalesQuotationLineHandler} is the same customization for the other entity that opts in.
- * They are two classes only because {@link NeoExtension} is not repeatable; the behaviour lives once, in
- * {@link OrderLineDiscountSupport}.
+ * bean carrying it would make the name ambiguous.
+ * {@link SalesQuotationLineHandler} binds the same customization to the
+ * other entity; they are two classes only because {@link NeoExtension} is not repeatable.
  */
 @NeoExtension(spec = "sales-order", entity = "lines")
-public class SalesOrderLineHandler extends OrderLineHandler {
-
-  /**
-   * Runs the parent's pre-hook first — a response from it still short-circuits — then the line
-   * rules of {@link OrderLineDiscountSupport#applyLineRules}: the standard (and, when missing, list)
-   * price of a new line, a discount its price does not reflect yet, the discount a new price
-   * implies, and the gross amount of a new or updated line. The order lives there, once.
-   */
-  @Override
-  public NeoResponse handle(NeoContext context) {
-    NeoResponse response = super.handle(context);
-    if (response != null) {
-      return response;
-    }
-    OrderLineDiscountSupport.applyLineRules(context);
-    return null;
-  }
-
-  /**
-   * Same declaration as {@link SalesQuotationLineHandler#serverResolvedCreateFields()}: the two
-   * entities are the same table ({@code C_OrderLine}), with the same column callouts and trigger
-   * ({@link OrderLineDiscountSupport#SERVER_RESOLVED_CREATE_FIELDS}). On {@code sales-order/lines}
-   * it changes {@code tax}, which is editable and mandatory and so was listed as required;
-   * {@code lineNetAmount} is published read-only ({@code system}) there and never appears in
-   * {@code view:"create"}, so declaring it changes nothing visible — it is kept so the declaration
-   * stays true of the entity rather than of its current field visibility.
-   */
-  @Override
-  public Set<String> serverResolvedCreateFields() {
-    return OrderLineDiscountSupport.SERVER_RESOLVED_CREATE_FIELDS;
-  }
+public class SalesOrderLineHandler extends SalesOrderLineCustomization {
 }
