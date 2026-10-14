@@ -900,19 +900,31 @@ does on its own.
 new product a zero-priced `M_ProductPrice` row on the default sales and purchase tariffs
 (ETP-5245), with a flush and core's price observer per row. A caller that writes the product's
 prices in the same request (the import does) made each price write twice: the seed inserted the
-zero row, and `ProductPriceHandler` then found it and updated it. Sending
-`"_skipPricesSeed": true` in the **product create body** skips the seed for that product.
+zero row, and `ProductPriceHandler` then found it and updated it. The **product create body**
+takes `_skipPricesSeed` in one of two forms:
+
+- **An array of `M_PriceList_Version` ids** — what the products import sends: the versions the
+  same request prices the product on. The seed skips a direction only when the version it would
+  use for it (`PriceListVersionResolver#resolveDefaultVersionId`: the default-flagged list, org
+  before `*`, newest `ValidFromDate`) is in the list; any other default tariff is still seeded.
+  The client picks its tariff from the selector by a different rule (selector order, and for
+  sales an unflagged list is accepted), so the two can disagree — when no list is flagged
+  default, or the default list has several versions. Matching on the server's own answer is what
+  guarantees the server's default tariff is never left without a row (review W2).
+- **`true`** — skip both directions unconditionally. Only for a caller that prices both of the
+  server's default tariffs itself.
 
 - Read and removed by the product customization's pre-hook (`handle()`), so it never reaches the
-  field filter or the DAL. It is honoured on create only and stripped from a PATCH as well.
+  field filter or the DAL. It is honoured on create only: on a PATCH (REST) or `etendo_update`
+  (MCP) it is accepted, stripped and ignored — no seed runs on an update anyway.
 - Same behaviour on REST single (`POST /sws/neo/product/product`), REST batch and MCP
   (`etendo_create`, `etendo_batch`): all three hand the same body to the same customization.
 - Declared through `NeoHandler#createDirectives()`. That declaration is what lets the MCP write
   verbs accept it without reporting it in `unknownFields`, and what `etendo_schema(view:"create")`
   publishes as `directives: { _skipPricesSeed: "<description>" }` on `product/product`. An entity
   declaring no directive gets no `directives` key — its response is unchanged.
-- Without the matching price operations the product stays unpriced on those tariffs. That is the
-  caller's choice to make; the default (`false`) keeps the ETP-5245 behaviour.
+- With `true` and no matching price operations the product stays unpriced on those tariffs —
+  the caller's choice. Absent (or `false`, or an empty array) keeps the ETP-5245 behaviour.
 
 **`_onlyReturnIds` — batch request option.** A top-level boolean next to `operations`
 (`POST /sws/neo/batch {"operations":[…], "_onlyReturnIds": true}`; MCP `etendo_batch` takes the

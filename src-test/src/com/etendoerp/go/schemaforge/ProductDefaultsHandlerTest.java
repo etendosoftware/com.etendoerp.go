@@ -663,6 +663,38 @@ public class ProductDefaultsHandlerTest {
     }
   }
 
+  /**
+   * Review W2: the list form skips a direction only when the version the seed would use is one the
+   * request prices itself. Here the caller priced the server's sales default and some other
+   * purchase list: sales is not seeded, the server's purchase default still is — the case where
+   * the client's tariff choice and PriceListVersionResolver's disagree.
+   */
+  @Test
+  public void testSkipPricesSeedListSkipsOnlyTheListedDefaultVersions() throws Exception {
+    OBContext obContext = obContextWithClient(CLIENT1);
+    try (SeedingMocks mocks = new SeedingMocks()) {
+      mocks.withBothDefaultTariffs(obContext);
+      mocks.utilsMock.when(() -> ProductHandlerUtils.findExistingPrice(anyString(), anyString()))
+          .thenReturn(null);
+      ProductPrice purchasePrice = mock(ProductPrice.class);
+      when(mocks.provider.get(ProductPrice.class)).thenReturn(purchasePrice);
+      JSONObject body = new JSONObject().put("name", "PERF5676-2")
+          .put(ProductDefaultsHandler.DIRECTIVE_SKIP_PRICES_SEED,
+              new JSONArray().put(SALES_VERSION_ID).put("plv-some-other-purchase-list"));
+      NeoContext ctx = postCtx(body, obContext);
+      ProductDefaultsHandler handler = new ProductDefaultsHandler();
+
+      handler.handle(ctx);
+      assertFalse(body.has(ProductDefaultsHandler.DIRECTIVE_SKIP_PRICES_SEED));
+      ctx.setPreviousResult(NeoResponse.ok(createdRow()));
+      handler.afterHandle(ctx);
+
+      verify(mocks.provider, times(1)).get(ProductPrice.class);
+      verify(purchasePrice).setPriceListVersion(mocks.purchaseVersion);
+      verify(mocks.dal, times(1)).save(any());
+    }
+  }
+
   /** A batch scope left open by a failed assertion must not leak into the next test. */
   @After
   public void clearLeakedBatchScope() {
@@ -761,10 +793,10 @@ public class ProductDefaultsHandlerTest {
   }
 
   @Test
-  public void testConsumeSkipPricesSeedAnswersFalseWithoutTheDirective() throws Exception {
-    assertFalse(ProductDefaultsHandler.consumeSkipPricesSeed(null));
+  public void testConsumeSkipPricesSeedAnswersEmptyWithoutTheDirective() throws Exception {
+    assertTrue(ProductDefaultsHandler.consumeSkipPricesSeed(null).isEmpty());
     JSONObject body = new JSONObject().put("name", "P");
-    assertFalse(ProductDefaultsHandler.consumeSkipPricesSeed(body));
+    assertTrue(ProductDefaultsHandler.consumeSkipPricesSeed(body).isEmpty());
     assertEquals(1, body.length());
   }
 

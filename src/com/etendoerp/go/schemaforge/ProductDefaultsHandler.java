@@ -111,6 +111,8 @@ public class ProductDefaultsHandler implements NeoHandler {
    * never reaches the field filter or the DAL.
    */
   static final String DIRECTIVE_SKIP_PRICES_SEED = "_skipPricesSeed";
+  /** In a parsed {@link #DIRECTIVE_SKIP_PRICES_SEED}: skip both directions, whatever the tariff. */
+  static final String SKIP_ALL_TARIFFS = "*";
   /** Carries {@link #DIRECTIVE_SKIP_PRICES_SEED} from the pre-hook to {@link #afterHandle}. */
   private static final String ATTR_SKIP_PRICES_SEED =
       ProductDefaultsHandler.class.getName() + ".skipPricesSeed";
@@ -147,9 +149,9 @@ public class ProductDefaultsHandler implements NeoHandler {
     }
     // Stripped on PATCH too, so the directive never reaches the generic write path; honoured on
     // create only, the one place a price is seeded.
-    boolean skipPricesSeed = consumeSkipPricesSeed(body);
-    if (isCreate && skipPricesSeed) {
-      context.setAttribute(ATTR_SKIP_PRICES_SEED, Boolean.TRUE);
+    Set<String> skipPricesSeed = consumeSkipPricesSeed(body);
+    if (isCreate && !skipPricesSeed.isEmpty()) {
+      context.setAttribute(ATTR_SKIP_PRICES_SEED, skipPricesSeed);
     }
     try {
       enforceNonStockableProductTypes(body);
@@ -179,16 +181,34 @@ public class ProductDefaultsHandler implements NeoHandler {
    * {@code ProductPriceHandler} to find and overwrite them doubled every price write, and cost a
    * flush plus core's price observer per row.
    *
+   * <p>Two forms. An array of price list version ids — what the import sends: the versions the
+   * same request prices — skips a direction only when the version the seed would use for it is
+   * listed. The caller and the server pick "the default tariff" by different rules (selector order
+   * versus {@link PriceListVersionResolver}), so this is the form that cannot leave the server's
+   * default tariff without a row. {@code true} skips both directions unconditionally.
+   *
    * @param body the request body, mutated in place
-   * @return {@code true} when the caller asked to skip the seed
+   * @return the listed version ids, {@link #SKIP_ALL_TARIFFS} alone for {@code true}, or an empty
+   *     set when the seed must run as usual
    */
-  static boolean consumeSkipPricesSeed(JSONObject body) {
+  static Set<String> consumeSkipPricesSeed(JSONObject body) {
     if (body == null || !body.has(DIRECTIVE_SKIP_PRICES_SEED)) {
-      return false;
+      return Set.of();
     }
-    boolean skip = body.optBoolean(DIRECTIVE_SKIP_PRICES_SEED, false);
+    Object raw = body.opt(DIRECTIVE_SKIP_PRICES_SEED);
     body.remove(DIRECTIVE_SKIP_PRICES_SEED);
-    return skip;
+    if (raw instanceof JSONArray) {
+      JSONArray ids = (JSONArray) raw;
+      Set<String> listed = new java.util.HashSet<>();
+      for (int i = 0; i < ids.length(); i++) {
+        String id = StringUtils.trimToNull(ids.optString(i, null));
+        if (id != null && !SKIP_ALL_TARIFFS.equals(id)) {
+          listed.add(id);
+        }
+      }
+      return listed;
+    }
+    return Boolean.TRUE.equals(raw) || "true".equals(raw) ? Set.of(SKIP_ALL_TARIFFS) : Set.of();
   }
 
   /**
@@ -198,10 +218,12 @@ public class ProductDefaultsHandler implements NeoHandler {
   @Override
   public Map<String, String> createDirectives() {
     return Map.of(DIRECTIVE_SKIP_PRICES_SEED,
-        "Boolean, default false. true = do not give the new product the zero-priced rows on the "
-            + "default sales and purchase tariffs. Send it only when the same request (e.g. the "
-            + "same etendo_batch) also creates this product's prices; otherwise the product stays "
-            + "without a price on those tariffs.");
+        "Optional. An array of price list version ids this same request (e.g. the same "
+            + "etendo_batch) prices the product on: the new product is not given the zero-priced row "
+            + "on a default sales/purchase tariff whose version is in the list — your price op "
+            + "writes it instead. A default tariff not in the list is still seeded. true skips "
+            + "both unconditionally (only when you price both default tariffs yourself). Create "
+            + "only: accepted and ignored on etendo_update.");
   }
 
   /**
@@ -249,8 +271,7 @@ public class ProductDefaultsHandler implements NeoHandler {
       return injectDefaults(context);
     }
     if (NeoEndpointType.CRUD.equals(context.getEndpointType())) {
-      if (METHOD_POST.equals(context.getHttpMethod())
-          && !Boolean.TRUE.equals(context.getAttribute(ATTR_SKIP_PRICES_SEED))) {
+      if (METHOD_POST.equals(context.getHttpMethod()) && !skipsAllTariffs(context)) {
         seedDefaultPrices(context);
       }
       return annotateCostPresence(context, hideSystemCategoryProducts(context));
@@ -384,6 +405,17 @@ public class ProductDefaultsHandler implements NeoHandler {
     }
   }
 
+  /** The {@link #DIRECTIVE_SKIP_PRICES_SEED} the pre-hook kept for this operation; empty if none. */
+  @SuppressWarnings("unchecked")
+  private static Set<String> skippedTariffs(NeoContext context) {
+    Object kept = context.getAttribute(ATTR_SKIP_PRICES_SEED);
+    return kept instanceof Set ? (Set<String>) kept : Set.of();
+  }
+
+  private static boolean skipsAllTariffs(NeoContext context) {
+    return skippedTariffs(context).contains(SKIP_ALL_TARIFFS);
+  }
+
   /**
    * Creates the zero-priced row for one direction, unless the product already has one there.
    *
@@ -397,6 +429,10 @@ public class ProductDefaultsHandler implements NeoHandler {
     if (StringUtils.isBlank(versionId)) {
       log.debug("No default {} price list configured; product {} gets no seeded price",
           salesPriceList ? "sales" : "purchase", product.getId());
+      return;
+    }
+    if (skippedTariffs(context).contains(versionId)) {
+      // ETP-5676: the same request prices this very version itself.
       return;
     }
     if (ProductHandlerUtils.findExistingPrice(product.getId(), versionId) != null) {
