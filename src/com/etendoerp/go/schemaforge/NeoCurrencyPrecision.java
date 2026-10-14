@@ -77,6 +77,38 @@ final class NeoCurrencyPrecision {
     return memoize(() -> resolve(adTab, body, recordId));
   }
 
+  /**
+   * A lazy, memoized precision of the currency {@code currencyId} (ETP-5703). A blank id (or
+   * {@code "null"}) answers {@link #DEFAULT_SCALE} without touching the DAL; any lookup failure, or
+   * an unknown currency, answers it too. Never throws.
+   */
+  static IntSupplier forCurrencyId(String currencyId) {
+    if (StringUtils.isBlank(currencyId) || "null".equals(currencyId.trim())) {
+      return () -> DEFAULT_SCALE;
+    }
+    return memoize(() -> scaleOfCurrencyId(currencyId.trim()));
+  }
+
+  /** {@link #forCurrencyId}'s lookup; total. */
+  static int scaleOfCurrencyId(String currencyId) {
+    try {
+      OBContext.setAdminMode(true);
+    } catch (Exception | LinkageError e) {
+      log.debug("[CURRENCY-PRECISION] No DAL context, using {} decimals: {}", DEFAULT_SCALE,
+          e.getMessage());
+      return DEFAULT_SCALE;
+    }
+    try {
+      return scaleOf(OBDal.getInstance().get(Currency.class, currencyId));
+    } catch (Exception | LinkageError e) {
+      log.debug("[CURRENCY-PRECISION] Currency {} not resolvable, using {} decimals: {}",
+          currencyId, DEFAULT_SCALE, e.getMessage());
+      return DEFAULT_SCALE;
+    } finally {
+      restoreQuietly();
+    }
+  }
+
   /** {@code supplier}, evaluated at most once. */
   static IntSupplier memoize(IntSupplier supplier) {
     if (supplier == null) {

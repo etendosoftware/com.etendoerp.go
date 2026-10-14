@@ -128,6 +128,9 @@ final class OrderLineDiscountSupport {
   private static final String METHOD_PUT = "PUT";
   private static final String METHOD_PATCH = "PATCH";
 
+  /** {@code C_OrderLine.C_Currency_ID}: the line's currency, read for its rounding precision. */
+  static final String FIELD_CURRENCY = OrderLine.PROPERTY_CURRENCY;
+
   /** The amounts {@link NeoCommercialLinePolicy#injectCommercialAmounts} derives for an order line. */
   private static final List<String> AMOUNT_OUTPUTS = Arrays.asList(FIELD_LINE_NET_AMOUNT,
       FIELD_LINE_GROSS_AMOUNT);
@@ -430,11 +433,31 @@ final class OrderLineDiscountSupport {
    *
    * <p>The view carries only those inputs, never the stored amounts: a stale non-zero
    * {@code lineGrossAmount} would otherwise read as a client-supplied one and be kept.
+   *
+   * <p>ETP-5703: rounds to the LINE's currency precision on its own, read from the order line's
+   * {@code currency} (the body's, else the stored line's in {@code formState}). Why here and not in
+   * the callers: the ETP-5528 update paths ({@code applyUnitPrice},
+   * {@code deriveAmountsOnUpdate(NeoContext, StoredLine)}) call this 3-argument overload and must
+   * get the right precision after a merge without any manual step. No currency (or a failed lookup)
+   * rounds to 2, with no DAL access when the id is absent; EUR/USD lines are unchanged.
    */
   static void deriveAmountsOnUpdate(JSONObject body, JSONObject formState, JSONObject sentBody)
       throws JSONException {
     deriveAmountsOnUpdate(body, formState, sentBody,
-        () -> NeoCurrencyPrecision.DEFAULT_SCALE);
+        NeoCurrencyPrecision.forCurrencyId(lineCurrencyId(body, formState)));
+  }
+
+  /** The line's currency id: the body's, else the stored line's; {@code null} when neither. */
+  static String lineCurrencyId(JSONObject body, JSONObject formState) {
+    for (JSONObject source : new JSONObject[] { body, formState }) {
+      if (source != null && source.has(FIELD_CURRENCY) && !source.isNull(FIELD_CURRENCY)) {
+        String id = source.optString(FIELD_CURRENCY, "").trim();
+        if (!id.isEmpty() && !"null".equals(id)) {
+          return id;
+        }
+      }
+    }
+    return null;
   }
 
   /**

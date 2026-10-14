@@ -3626,7 +3626,10 @@ property whose target entity is `Currency`, on the line itself (body or stored r
 on its `IsParent` record; 2 decimals when none resolves. No entity is named. It applies on every
 channel that derives these amounts — `NeoCrudHandler` create and update (REST single, REST batch,
 `etendo_batch`) and the line customizations that call the policy explicitly (`etendo_create`). A value
-that is already correctly rounded is unchanged.
+that is already correctly rounded is unchanged. `OrderLineDiscountSupport.deriveAmountsOnUpdate(body, formState, sentBody)` — the overload the
+ETP-5528 order/quotation-line update paths call — resolves the precision itself from the line's
+`currency` (`NeoCurrencyPrecision.forCurrencyId`), so those callers need no change after a merge; no
+currency on the line → 2, with no DAL access.
 
 **Visible effect on the UI path (accepted).** REST single — the React form — reaches the same
 `executePostCreate` / `executeUpdate`, and `lineNetAmount` and `grossAmount` are written
