@@ -91,10 +91,13 @@ environment reads that environment's flag state.
 |----------------|----------|---------------------|
 | experimental | `experimental` | Experimental |
 | production | `production` | Production (also answers to `prod`) |
-| staging | `staging` | Staging (also answers to `stage`) |
+| staging | `staging` | Staging (also answers to `stage`) — **disabled** in Datadog |
 
-A `DD_ENV` that matches no environment is not an error: every flag resolves to its `false` default.
-Check the queries in Datadog before introducing a new value.
+Only **Experimental** and **Production** are enabled in Datadog today; Staging and Development are
+disabled, so a JVM whose `DD_ENV` points at them resolves every flag to its `false` code default —
+the same result as a `DD_ENV` that matches no environment, which is not an error either. The web
+client maps `VITE_APP_ENV` onto the same environments. Check the queries in Datadog before
+introducing a new value.
 
 **Targeting.** Datadog has no reserved user fields: the targeting key drives percentage bucketing
 and every rule matches a flat attribute **by its exact, case-sensitive name**. The rules in the
@@ -103,13 +106,20 @@ account email as the targeting key, as `email` (Datadog, **lowercased** with `Lo
 values are matched case-sensitively and every value in the Datadog project is lowercase) **and** as
 `Email` (ConfigCat, as stored — see *Per-account targeting* below). Drop `Email` only when ConfigCat is retired.
 
+**Data sent to Datadog.** Evaluation is in-process, but the agent reports flag exposures and
+evaluations to Datadog with the evaluation context — the account email included — so that context
+leaves the JVM. The web client sends the same attributes from the browser (see
+`docs/feature-flags.md` in the functional repo). This is accepted under the same Datadog data
+processing as our logs and RUM.
+
 **Startup.** Installing the provider waits at most 5 s (`DATADOG_MAX_INIT_WAIT_SECONDS`; Datadog's
 own default is 30 s) for the first configuration. If it has not arrived, the provider stays
 installed, every flag reads `false` meanwhile, and it turns ready by itself as soon as the agent
 delivers the configuration — no restart. After that, flag changes in Datadog reach the JVM without a
 restart.
 
-> **VERSION LOCK — `dd-openfeature` MUST equal the deployed `dd-java-agent` version.** The provider
+> **VERSION LOCK — `dd-openfeature` MUST equal the deployed `dd-java-agent` version** (currently
+> **1.66.0**). The provider
 > calls into the agent's internal bootstrap classes, which carry no compatibility guarantee across
 > versions. The version is pinned once, as `ext.ddJavaAgentVersion` in this module's `build.gradle`.
 > `deploy-staging.yml` reads it and passes it to the image build as `--build-arg
@@ -118,6 +128,26 @@ restart.
 > build** instead of shipping a mismatch. Update both in the same change (and the mirror copy in
 > `etendo-go-infraestructure/docker/Dockerfile.runtime`). A mismatch that did reach runtime would
 > show as "every flag off" or a `LinkageError` at the first evaluation.
+
+**Where the image is built.** `deploy-staging.yml` builds the staging image from
+`.github/docker/` of this module. The experimental and production images are built on their build
+servers from `/opt/docker-build`, whose copies have diverged: the agent block of
+`Dockerfile.runtime` and the `DD_FEATURE_FLAGS_ENABLED` block of `docker-entrypoint.sh` are
+**patched into** those copies by hand, never copied over whole.
+
+**Applying the variables.** Every `DD_*` is read from the process environment, not from
+`Openbravo.properties`, so each one is applied with `setup-env-var.sh apply --no-entrypoint` and no
+`--prop`. `DD_API_KEY` is a per-environment secret, `etendo/<env>/datadog-api-key`;
+`DD_FEATURE_FLAGS_ENABLED=true` goes last, with `--deploy`. Experimental first, then the smoke check
+— including the *proof it reads Datadog and not ConfigCat* (a targeting rule that makes a flag
+diverge between the two control planes for one tester) — and only then production. Full procedure:
+`etendo-go-infraestructure/COMO-REEMPLAZAR-AL-TUTI.md`, section *Datadog Feature Flags (ETP-5751)*.
+
+**Rollback.** Remove `DD_FEATURE_FLAGS_ENABLED` from the task definition (or set it to `false`) and
+redeploy. The entrypoint stops loading the agent and the backend falls back to ConfigCat (while
+`ETGO_CONFIGCAT_SDK_KEY` is set) or to local properties. No image rebuild is needed. The web
+client's rollback is independent: the `VITE_FLAGS_PROVIDER=configcat` Actions variable plus a
+redeploy.
 
 ### ConfigCat (ETP-5267)
 
@@ -199,15 +229,16 @@ iteration of ETP-5267 added an `etendo.go.flags.<key>.emails` allowlist to
 Consequences to hold onto:
 
 - **A dev box needs no targeting.** It has one user, so the plain boolean is enough there.
-- **A shared environment must have ConfigCat configured before the flag is switched on**, because
-  the local arm can only answer "everyone" or "nobody".
-- **Evaluation is in-memory and costs no network call.** ConfigCat's `autoPoll` fetches in the
-  background (60 s here, `CONFIGCAT_POLL_SECONDS`) and evaluates against the in-memory snapshot, so
-  a flag check inside request handling is a map lookup.
-- **A flag that does not exist in ConfigCat resolves to its code default, `false`** — asking for an
-  undefined key is never an error.
-- **Creating a flag or changing a targeting rule is visible within one poll interval, with no
-  restart.** That, not the local properties, is the day-to-day path.
+- **A shared environment must have a hosted arm (Datadog, or ConfigCat while it remains the
+  fallback) configured before the flag is switched on**, because the local arm can only answer
+  "everyone" or "nobody".
+- **Evaluation is in-memory and costs no network call.** `dd-java-agent` keeps the Datadog
+  configuration in memory and refreshes it in the background; ConfigCat's `autoPoll` does the same
+  every 60 s (`CONFIGCAT_POLL_SECONDS`). A flag check inside request handling is a map lookup.
+- **A flag that does not exist on the hosted control plane resolves to its code default, `false`** —
+  asking for an undefined key is never an error.
+- **Creating a flag or changing a targeting rule takes effect with no restart** (on ConfigCat,
+  within one poll interval). That, not the local properties, is the day-to-day path.
 
 ### Targeting key — still OPEN for any future flag, no longer blocking this capability
 
@@ -319,8 +350,8 @@ choice. The recovery procedure is in
 
 Switches onboarding between the classic from-scratch path (off) and claiming a pre-provisioned
 tenant from `ETGO_TENANT_POOL` (on). Evaluated through `TenantPoolConfig.isEnabled(accountEmail)`
-at two points: the onboarding claim (with the signup's account, so ConfigCat can target it per
-account) and every run of the "Tenant Pool Filler" background process (account-less). Off, the
+at two points: the onboarding claim (with the signup's account, so the hosted control plane can target
+it per account) and every run of the "Tenant Pool Filler" background process (account-less). Off, the
 claim never touches the pool and the filler run does nothing — onboarding is byte-for-byte the
 classic path. The pool size and the other knobs are plain runtime properties, not flags. Full
 reference: [`onboarding-flow.md`](onboarding-flow.md), "Tenant pool".
