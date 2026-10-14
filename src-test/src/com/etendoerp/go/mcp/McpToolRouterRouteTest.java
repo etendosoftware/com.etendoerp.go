@@ -547,7 +547,7 @@ class McpToolRouterRouteTest {
         // The denial must short-circuit before any DAL work — BatchService must never
         // be reached once authorizeSpecAccess throws.
         org.mockito.Mockito.verify(mockBatch, org.mockito.Mockito.never())
-            .executeBatch(any(), any());
+            .executeBatch(any(), any(), org.mockito.ArgumentMatchers.anyBoolean());
       }
     }
 
@@ -568,15 +568,18 @@ class McpToolRouterRouteTest {
             .thenReturn(mockBatch);
         JSONObject batchResult = new JSONObject();
         batchResult.put("committed", true);
-        when(mockBatch.executeBatch(any(), any())).thenReturn(batchResult);
+        when(mockBatch.executeBatch(any(), any(), org.mockito.ArgumentMatchers.anyBoolean()))
+            .thenReturn(batchResult);
 
         JSONObject result = router.handleBatch(buildBatchArgs());
 
         assertFalse(result.has("isError"));
-        // ETP-5415: the two-arg overload is the assertion, not an incidental detail — the MCP
-        // body transforms now ride along as a per-operation preprocessor, and a call through the
-        // one-arg overload would silently run the batch with none of them.
-        org.mockito.Mockito.verify(mockBatch).executeBatch(any(), any());
+        // ETP-5415: a non-null preprocessor is the assertion, not an incidental detail — the MCP
+        // body transforms ride along as a per-operation preprocessor, and a call through the
+        // one-arg overload would silently run the batch with none of them. ETP-5676: the
+        // _onlyReturnIds option defaults to false on MCP.
+        org.mockito.Mockito.verify(mockBatch).executeBatch(any(),
+            org.mockito.ArgumentMatchers.notNull(), org.mockito.ArgumentMatchers.eq(false));
       }
     }
   }

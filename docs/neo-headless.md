@@ -914,6 +914,27 @@ zero row, and `ProductPriceHandler` then found it and updated it. Sending
 - Without the matching price operations the product stays unpriced on those tariffs. That is the
   caller's choice to make; the default (`false`) keeps the ETP-5245 behaviour.
 
+**`_onlyReturnIds` — batch request option.** A top-level boolean next to `operations`
+(`POST /sws/neo/batch {"operations":[…], "_onlyReturnIds": true}`; MCP `etendo_batch` takes the
+same argument). Default `false`.
+
+The batch **response is ids-only either way** — `{committed, operations:[{id, ok, recordId}]}` — and
+`BatchService` reads nothing but `response.data[0].id` from each operation. What the option changes
+is the work done to produce a record nobody reads: with it, each create operation
+
+- skips `NeoLocatorIdentifierHelper.enrichLocatorIdentifiers` in
+  `NeoCrudHandler#executeJsonServiceAndBuildResponse` (it loads every `ETGO_SF_FIELD` of the entity
+  and resolves warehouse names, per row);
+- carries `NeoContext#isIdsOnlyResponse() == true`, so a customization can skip its own
+  display-only decoration — the product customization skips the `etgoHasCost` annotation and its
+  `M_Costing` lookup.
+
+`NeoFieldFilter#filterGetResponse` still runs: it renames DAL properties to the API keys a
+customization's `afterHandle` reads, so skipping it would change what the hook sees. No existing
+NEO field-projection parameter applies to a write (`fields:[…]` / `view` are MCP read projections,
+`_extraProperties` a GET-only key), so none was reused. The option is read once per request and kept
+in `NeoBatchScope`; it never affects REST single or MCP `etendo_create`.
+
 **Automatic: a batch skips callouts whose output it already saw thrown away.** The create path runs
 the callout of every field present in the body (§ callout cascade). On a uniform import most of that
 work is discarded: `SL_TaxCategory_Org` (trigger `organization`) proposes the tax category and the
