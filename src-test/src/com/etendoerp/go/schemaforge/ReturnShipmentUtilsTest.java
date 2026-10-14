@@ -51,12 +51,14 @@ import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
+import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.enterprise.Locator;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.enterprise.Warehouse;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.invoice.InvoiceLine;
+import org.openbravo.model.common.invoice.InvoiceTax;
 import org.openbravo.model.common.invoice.ReversedInvoice;
 import org.openbravo.model.common.plm.Product;
 import org.openbravo.model.financialmgmt.tax.TaxRate;
@@ -90,6 +92,8 @@ import static org.mockito.Mockito.when;
  *   <li>{@code findReturnDocTypeForOrg} — requireRectificative gating on column presence, org
  *       match, org-'0' fallback, and first-candidate fallback.</li>
  * </ul>
+ *
+ * @covers com.etendoerp.go.schemaforge.ReturnShipmentUtils
  */
 public class ReturnShipmentUtilsTest {
 
@@ -452,8 +456,13 @@ public class ReturnShipmentUtilsTest {
           invoice, Collections.singletonList(retLine), createDraftInvoiceHandler);
 
       assertEquals(0, expectedQty.compareTo(qtyCaptor.getValue()));
-      verify(il).setGoodsShipmentLine(retLine);
-      verify(dal).save(il);
+      // ETP-5729: the order line only supplies price and tax. The link must be cleared before
+      // the line is persisted, or C_INVOICE_POST adds this negative quantity to the order
+      // line's QtyInvoiced and the order reads as pending to invoice again.
+      InOrder inOrder = Mockito.inOrder(il, dal);
+      inOrder.verify(il).setGoodsShipmentLine(retLine);
+      inOrder.verify(il).setSalesOrderLine(null);
+      inOrder.verify(dal).save(il);
     }
   }
 
@@ -1132,6 +1141,78 @@ public class ReturnShipmentUtilsTest {
         assertEquals("CO", data.getString("documentStatus"));
       }
     }
+  }
+
+  /**
+   * ETP-5729: the rectificative invoice's tax rows are made by the core trigger chain when the
+   * lines are flushed ({@code C_INVOICELINE_TRG2} → {@code C_INVOICELINETAX_TRG}, one
+   * {@code C_InvoiceTax} per rate). Inserting another {@code InvoiceTax} from Java on top of it
+   * made the completion sum both rows: tax and amount to pay doubled (base -300 → tax -126
+   * instead of -63). Two lines at two rates, so the old per-rate insertion would fire twice.
+   *
+   * <p>The handler is a spy so that anything it still did on the real class would run; only the
+   * two collaborators that need a live environment are stubbed.
+   */
+  @Test
+  public void finalizeReturnInvoice_leavesTaxRowsToTheDbTriggers_neverInsertsAnInvoiceTax()
+      throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getSession()).thenReturn(mock(Session.class));
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      InvoiceTax handMadeTaxRow = mock(InvoiceTax.class);
+      when(provider.get(InvoiceTax.class)).thenReturn(handMadeTaxRow);
+      ReversedInvoice link = mock(ReversedInvoice.class);
+      when(provider.get(ReversedInvoice.class)).thenReturn(link);
+
+      Currency currency = mock(Currency.class);
+      when(currency.getStandardPrecision()).thenReturn(2L);
+      InvoiceLine lineAt21 = taxedReturnInvoiceLine("tax-21", "21", "-300.00");
+      InvoiceLine lineAt10 = taxedReturnInvoiceLine("tax-10", "10", "-50.00");
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getId()).thenReturn("ret-inv-1");
+      when(invoice.getCurrency()).thenReturn(currency);
+      when(invoice.getInvoiceLineList()).thenReturn(Arrays.asList(lineAt21, lineAt10));
+      when(dal.get(eq(Invoice.class), eq("inv-origin-1"))).thenReturn(mock(Invoice.class));
+      stubNoExistingReversedInvoiceLink(dal);
+
+      InvoiceFromOrderSupport support = mock(InvoiceFromOrderSupport.class);
+      CreateDraftInvoiceHandler createDraftInvoiceHandler = Mockito.spy(new CreateDraftInvoiceHandler());
+      Mockito.doNothing().when(createDraftInvoiceHandler).ensureDocumentNo(any());
+      Mockito.doReturn(support).when(createDraftInvoiceHandler).getSupport();
+
+      try (CompletionMocks completion = new CompletionMocks(dal, completionSuccess())) {
+        mockCompletedInvoice(dal, "ret-inv-1", "REC-1000001", "CO");
+
+        ReturnShipmentUtils.finalizeReturnInvoice(invoice,
+            Collections.<ShipmentInOutLine>emptyList(), createDraftInvoiceHandler,
+            Collections.singletonList("inv-origin-1"), null);
+
+        verify(provider, never()).get(InvoiceTax.class);
+        verify(dal, never()).save(handMadeTaxRow);
+        verify(invoice, never()).setGrandTotalAmount(any());
+        verify(invoice, never()).setSummedLineAmount(any());
+        verify(completion.processInvoiceUtil).process(
+            eq("ret-inv-1"), eq("CO"), anyString(), anyString(), anyString(), any(), any());
+      }
+    }
+  }
+
+  /** A persisted rectificative line carrying a non-summary tax rate and a negative net amount. */
+  private static InvoiceLine taxedReturnInvoiceLine(String taxId, String rate, String lineNet) {
+    TaxRate tax = mock(TaxRate.class);
+    when(tax.getId()).thenReturn(taxId);
+    when(tax.getRate()).thenReturn(new BigDecimal(rate));
+    when(tax.isSummaryLevel()).thenReturn(false);
+    InvoiceLine line = mock(InvoiceLine.class);
+    when(line.getInvoicedQuantity()).thenReturn(BigDecimal.ONE.negate());
+    when(line.getUnitPrice()).thenReturn(new BigDecimal(lineNet).negate());
+    when(line.getLineNetAmount()).thenReturn(new BigDecimal(lineNet));
+    when(line.getTax()).thenReturn(tax);
+    return line;
   }
 
   // ── linkRectifiedInvoices ─────────────────────────────────────────────────
