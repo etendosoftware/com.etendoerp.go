@@ -193,6 +193,10 @@ final class McpWriteRequestSupport {
     McpQuerySupport.WriteGate gate = McpQuerySupport.writeGate(sfEntity, dalEntity);
     // ETP-5368: resolved once for the whole body rather than per unresolved key — it is a DB read.
     Set<String> virtualFieldNames = virtualFieldNames(sfEntity);
+    // ETP-5676: request options the entity's customization reads and strips in its pre-hook. Not
+    // properties, so they would otherwise be reported unknown while being honoured. Resolved only
+    // when an unresolved key turns up: it is a customization lookup most writes never need.
+    Set<String> directiveNames = null;
     JSONObject mapped = new JSONObject();
 
     Iterator<String> keys = fields.keys();
@@ -218,7 +222,12 @@ final class McpWriteRequestSupport {
         // not properties of this one - but etendo_schema now publishes them and the handler writes
         // them, and a key the schema advertises must not come back labelled unrecognised.
         if (!McpConstants.PARAM_PARENT_ID.equals(key) && !virtualFieldNames.contains(key)) {
-          unknown.add(key);
+          if (directiveNames == null) {
+            directiveNames = McpServerResolvedFields.createDirectives(sfEntity).keySet();
+          }
+          if (!directiveNames.contains(key)) {
+            unknown.add(key);
+          }
         }
       } else {
         applyWriteGates(gate, key, mappedKey, value, sfEntity, dalEntity);
