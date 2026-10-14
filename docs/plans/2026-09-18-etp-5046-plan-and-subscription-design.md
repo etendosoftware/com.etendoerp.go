@@ -302,11 +302,20 @@ optional — an environment may stay on the preference path indefinitely.
       select count(*) from ad_preference
        where attribute = 'ETGO_TenantPlan' and isactive = 'Y'
          and upper(trim(value)) = 'PRODUCTIVE';
-      -- must return exactly one row with value Y: the switch is on
-      select ad_preference_id, value from ad_preference
+      -- after 3.4: exactly ONE row, and trim(value) = 'Y' -- the switch is ON
+      select ad_preference_id, value, created from ad_preference
        where property = 'ETGO_SubscriptionModel' and ispropertylist = 'Y' and isactive = 'Y'
-         and ad_client_id = '0';
+         and ad_client_id = '0' and coalesce(visibleat_client_id, '0') = '0'
+         and coalesce(visibleat_org_id, '0') = '0' and visibleat_role_id is null
+         and ad_user_id is null and ad_window_id is null
+       order by created desc;
       ```
+      The last query is the same selection `SubscriptionModelSwitch` makes, and like it does not
+      filter on the value: the reader takes the newest matching row and trims it, so a second row
+      or an `N` shows up here instead of hiding. It does not filter on `ad_module_id` either — the
+      reader ignores the module. "No Module" in 3.4 is not about the switch's answer but about
+      survival: a row assigned to a module in development is exported with it and reset by the next
+      `update.database` (§6.3).
    Run 3.3 **before** 3.4. The reverse order works too (rows are decided by the row, preferences by
    the fallback) but opens a window in which new tenants have rows while the existing fleet does
    not — a half-switched environment nobody chose.
