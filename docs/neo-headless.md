@@ -889,6 +889,30 @@ Tests: `NeoDefaultTenantGuardTest` (applicability, ordering, batching across the
 unknown ids, lookup failure, null rows) and the `testResolveSqlDefaultOutcomeTenantGuard*` cases in
 `NeoDefaultsServiceTest`. Background and the list of known unscoped defaults:
 `etendo_schema_forge` `docs/etendo-ad/unscoped-sql-defaults.md`.
+#### 4.3.6 Bulk writes through `/sws/neo/batch` — per-row cost options (ETP-5676)
+
+Measured on the products import (1000 products in 10-row chunks, 4 operations per row —
+`product`, `salesPrice`, `purchasePrice`, `cost`): about 800 ms of server time per row, 515 ms of
+it in the product create. This section lists what a bulk caller can do about it and what the batch
+does on its own.
+
+**`_skipPricesSeed` — product create directive.** `ProductDefaultsHandler#afterHandle` gives every
+new product a zero-priced `M_ProductPrice` row on the default sales and purchase tariffs
+(ETP-5245), with a flush and core's price observer per row. A caller that writes the product's
+prices in the same request (the import does) made each price write twice: the seed inserted the
+zero row, and `ProductPriceHandler` then found it and updated it. Sending
+`"_skipPricesSeed": true` in the **product create body** skips the seed for that product.
+
+- Read and removed by the product customization's pre-hook (`handle()`), so it never reaches the
+  field filter or the DAL. It is honoured on create only and stripped from a PATCH as well.
+- Same behaviour on REST single (`POST /sws/neo/product/product`), REST batch and MCP
+  (`etendo_create`, `etendo_batch`): all three hand the same body to the same customization.
+- Declared through `NeoHandler#createDirectives()`. That declaration is what lets the MCP write
+  verbs accept it without reporting it in `unknownFields`, and what `etendo_schema(view:"create")`
+  publishes as `directives: { _skipPricesSeed: "<description>" }` on `product/product`. An entity
+  declaring no directive gets no `directives` key — its response is unchanged.
+- Without the matching price operations the product stays unpriced on those tariffs. That is the
+  caller's choice to make; the default (`false`) keeps the ETP-5245 behaviour.
 
 ### 4.4 Selectors (FK Dropdowns)
 

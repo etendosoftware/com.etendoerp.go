@@ -66,6 +66,8 @@ import org.openbravo.model.pricing.pricelist.ProductPrice;
  * {@code ProductCategoryDefaultHandlerTest} and the interesting behavior here is the
  * client-then-System COALESCE fallback and the pre/post-hook wiring, not the Hibernate criteria
  * construction itself.
+ *
+ * @covers com.etendoerp.go.schemaforge.ProductDefaultsHandler
  */
 public class ProductDefaultsHandlerTest {
 
@@ -625,6 +627,44 @@ public class ProductDefaultsHandlerTest {
       verify(mocks.dal, never()).save(any());
       verify(mocks.provider, never()).get(ProductPrice.class);
     }
+  }
+
+  /**
+   * ETP-5676: {@code _skipPricesSeed} is read and stripped by the pre-hook — so it never reaches
+   * the generic write path — and the post-hook of the same operation then seeds nothing, because
+   * the caller writes the product's prices itself in the same request.
+   */
+  @Test
+  public void testSkipPricesSeedDirectiveIsStrippedAndSuppressesTheSeed() throws Exception {
+    OBContext obContext = obContextWithClient(CLIENT1);
+    try (SeedingMocks mocks = new SeedingMocks()) {
+      mocks.withBothDefaultTariffs(obContext);
+      mocks.utilsMock.when(() -> ProductHandlerUtils.findExistingPrice(anyString(), anyString()))
+          .thenReturn(null);
+      JSONObject body = new JSONObject();
+      body.put("name", "PERF5676-1");
+      body.put(ProductDefaultsHandler.DIRECTIVE_SKIP_PRICES_SEED, true);
+      NeoContext ctx = postCtx(body, obContext);
+      ProductDefaultsHandler handler = new ProductDefaultsHandler();
+
+      assertNull(handler.handle(ctx));
+      assertFalse(body.has(ProductDefaultsHandler.DIRECTIVE_SKIP_PRICES_SEED));
+
+      JSONObject row = new JSONObject();
+      row.put("id", PRODUCT_ID);
+      ctx.setPreviousResult(NeoResponse.ok(dataResponse(new JSONArray().put(row))));
+      handler.afterHandle(ctx);
+
+      verify(mocks.provider, never()).get(ProductPrice.class);
+      verify(mocks.dal, never()).save(any());
+    }
+  }
+
+  /** ETP-5676: the directive is declared, so the MCP write verbs accept it and etendo_schema lists it. */
+  @Test
+  public void testSkipPricesSeedIsDeclaredAsACreateDirective() {
+    assertTrue(new ProductDefaultsHandler().createDirectives()
+        .containsKey(ProductDefaultsHandler.DIRECTIVE_SKIP_PRICES_SEED));
   }
 
   /**

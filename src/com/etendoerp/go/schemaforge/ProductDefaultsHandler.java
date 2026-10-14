@@ -19,6 +19,7 @@ package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import javax.inject.Named;
@@ -105,6 +106,15 @@ public class ProductDefaultsHandler implements NeoHandler {
   /** Display-only flag consumed by the Product window's cost banner and save gate. */
   private static final String FIELD_HAS_COST = "etgoHasCost";
   /**
+   * ETP-5676: create-body directive. {@code true} skips {@link #seedDefaultPrices} for this
+   * product. Read and removed by {@link #handle} before the generic CRUD path sees the body, so it
+   * never reaches the field filter or the DAL.
+   */
+  static final String DIRECTIVE_SKIP_PRICES_SEED = "_skipPricesSeed";
+  /** Carries {@link #DIRECTIVE_SKIP_PRICES_SEED} from the pre-hook to {@link #afterHandle}. */
+  private static final String ATTR_SKIP_PRICES_SEED =
+      ProductDefaultsHandler.class.getName() + ".skipPricesSeed";
+  /**
    * ETP-5009: excludes products whose category is flagged {@code EM_Etgo_IsSystemCategory = 'Y'}
    * (DAL property {@code etgoIssystemcategory}, a Yes/No column mapped as {@code Boolean} — the
    * same property {@code ProductCategorySystemFlagSelectorPolicy} already filters on). A
@@ -135,6 +145,12 @@ public class ProductDefaultsHandler implements NeoHandler {
     if (body == null) {
       return null;
     }
+    // Stripped on PATCH too, so the directive never reaches the generic write path; honoured on
+    // create only, the one place a price is seeded.
+    boolean skipPricesSeed = consumeSkipPricesSeed(body);
+    if (isCreate && skipPricesSeed) {
+      context.setAttribute(ATTR_SKIP_PRICES_SEED, Boolean.TRUE);
+    }
     try {
       enforceNonStockableProductTypes(body);
     } catch (Exception e) {
@@ -153,6 +169,39 @@ public class ProductDefaultsHandler implements NeoHandler {
     // body already corrected (so the generic "first combo option" fallback never fires for
     // uOM/taxCategory, and a Service product can never persist as stocked/returnable).
     return null;
+  }
+
+  /**
+   * ETP-5676: reads and removes {@link #DIRECTIVE_SKIP_PRICES_SEED} from a write body.
+   *
+   * <p>For a caller that sends its own prices in the same request — the products import writes a
+   * sales and a purchase price op right after the product op. Seeding zero rows first only for
+   * {@code ProductPriceHandler} to find and overwrite them doubled every price write, and cost a
+   * flush plus core's price observer per row.
+   *
+   * @param body the request body, mutated in place
+   * @return {@code true} when the caller asked to skip the seed
+   */
+  static boolean consumeSkipPricesSeed(JSONObject body) {
+    if (body == null || !body.has(DIRECTIVE_SKIP_PRICES_SEED)) {
+      return false;
+    }
+    boolean skip = body.optBoolean(DIRECTIVE_SKIP_PRICES_SEED, false);
+    body.remove(DIRECTIVE_SKIP_PRICES_SEED);
+    return skip;
+  }
+
+  /**
+   * ETP-5676: published to agents by {@code etendo_schema(view:"create")} and accepted by the MCP
+   * write verbs without being reported as an unknown field.
+   */
+  @Override
+  public Map<String, String> createDirectives() {
+    return Map.of(DIRECTIVE_SKIP_PRICES_SEED,
+        "Boolean, default false. true = do not give the new product the zero-priced rows on the "
+            + "default sales and purchase tariffs. Send it only when the same request (e.g. the "
+            + "same etendo_batch) also creates this product's prices; otherwise the product stays "
+            + "without a price on those tariffs.");
   }
 
   /**
@@ -200,7 +249,8 @@ public class ProductDefaultsHandler implements NeoHandler {
       return injectDefaults(context);
     }
     if (NeoEndpointType.CRUD.equals(context.getEndpointType())) {
-      if (METHOD_POST.equals(context.getHttpMethod())) {
+      if (METHOD_POST.equals(context.getHttpMethod())
+          && !Boolean.TRUE.equals(context.getAttribute(ATTR_SKIP_PRICES_SEED))) {
         seedDefaultPrices(context);
       }
       return annotateCostPresence(context, hideSystemCategoryProducts(context));
@@ -300,7 +350,8 @@ public class ProductDefaultsHandler implements NeoHandler {
    * <p>Idempotent by construction — it skips any tariff the product is already priced on. That
    * matters beyond retries: the products import posts its own price for the same tariff in the
    * same {@code /batch} call, and {@code ProductPriceHandler} turns that second write into an
-   * update of the row seeded here rather than a duplicate.
+   * update of the row seeded here rather than a duplicate. ETP-5676: such a caller should send
+   * {@link #DIRECTIVE_SKIP_PRICES_SEED} instead, so the price is written once.
    *
    * @param context the CRUD POST context whose previous result carries the created product
    */
