@@ -394,7 +394,8 @@ class McpSchemaServerResolvedFieldsTest {
       assertEquals(Set.of("_skipPricesSeed"), directives.keySet());
       JSONObject published = createView.getJSONObject("directives");
       assertEquals(1, published.length());
-      assertTrue(published.getString("_skipPricesSeed").startsWith("Boolean, default false"));
+      assertTrue(published.getString("_skipPricesSeed")
+          .startsWith("Optional. An array of price list version ids"));
       // Two reads: the direct call above and the one inside addCreateDirectives — both CREATE.
       dispatcher.verify(() -> NeoExtensionDispatcher.resolveOnly(
           argThat((NeoExtensionRequest request) -> request.surface() == NeoExtensionSurface.CREATE)),
