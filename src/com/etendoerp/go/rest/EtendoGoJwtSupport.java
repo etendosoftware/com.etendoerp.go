@@ -154,8 +154,11 @@ public final class EtendoGoJwtSupport {
    * in {@code AD_Role_Inheritance.Seqno} order. Empty when the user has no personal role yet or
    * no templates applied ({@link UserRoleCompositionService#getAppliedTemplateRoleIds(String)}
    * documents both as returning an empty list, never {@code null}).
+   *
+   * <p>Package-private since ETP-5734: the "Mis empresas" environment details label an invited
+   * account's role in another tenant with exactly these names.
    */
-  private static List<String> resolveEffectiveRoleNames(String userId) {
+  static List<String> resolveEffectiveRoleNames(String userId) {
     List<String> templateRoleIds = new UserRoleCompositionService()
         .getAppliedTemplateRoleIds(userId);
     if (templateRoleIds.isEmpty()) {
