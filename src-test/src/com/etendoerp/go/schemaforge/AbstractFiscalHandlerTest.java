@@ -63,6 +63,7 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
 
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
+import com.etendoerp.go.schemaforge.util.RoleAccessMatrix;
 
 /**
  * Unit tests for routing logic in {@link AbstractFiscalHandler}.
@@ -70,6 +71,8 @@ import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
  * Uses a minimal stub subclass so the base-class routing (declarations path,
  * dispatch exception handling, allowsPost default) can be exercised without
  * a real database connection.
+ *
+ * @covers com.etendoerp.go.schemaforge.AbstractFiscalHandler
  */
 public class AbstractFiscalHandlerTest {
 
@@ -181,7 +184,7 @@ public class AbstractFiscalHandlerTest {
     servlet = mock(NeoServlet.class);
     accessMock = mockStatic(NeoAccessHelper.class);
     accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
-        eq(NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID), anyString())).thenReturn(true);
+        eq(RoleAccessMatrix.TAX_MODELS_PROXY_WINDOW_ID), anyString())).thenReturn(true);
   }
 
   @After
@@ -276,7 +279,7 @@ public class AbstractFiscalHandlerTest {
     HttpServletResponse resp = mock(HttpServletResponse.class);
 
     accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
-        eq(NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID), eq("GET"))).thenReturn(false);
+        eq(RoleAccessMatrix.TAX_MODELS_PROXY_WINDOW_ID), eq("GET"))).thenReturn(false);
 
     StubHandler handler = new StubHandler(servlet, false);
     handler.handle("declarations", "GET", req, resp);
@@ -297,7 +300,7 @@ public class AbstractFiscalHandlerTest {
     HttpServletResponse resp = mock(HttpServletResponse.class);
 
     accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
-        eq(NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID), eq("POST"))).thenReturn(false);
+        eq(RoleAccessMatrix.TAX_MODELS_PROXY_WINDOW_ID), eq("POST"))).thenReturn(false);
 
     StubHandler handler = new StubHandler(servlet, false);
     handler.handle("known", "POST", req, resp);

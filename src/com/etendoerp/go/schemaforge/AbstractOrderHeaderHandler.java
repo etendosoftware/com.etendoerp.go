@@ -692,7 +692,34 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
     return result;
   }
 
+  /**
+   * The single-record {@code hasLinkedDocuments} annotation. Degrades to {@code false} on a DB
+   * failure: a GET must never fail because of this flag.
+   */
   private boolean checkLinkedDocuments(String orderId) {
+    try {
+      return hasLinkedDocuments(orderId);
+    } catch (Exception e) {
+      log.error("DB error querying linked documents for order {}", orderId, e);
+      return false;
+    }
+  }
+
+  /**
+   * Whether the order has a linked shipment/receipt or invoice: an active {@code C_Invoice} or
+   * {@code M_InOut} whose header {@code C_Order_ID} is the order, in any document status.
+   *
+   * <p>This is the one definition of "linked documents" behind both the {@code hasLinkedDocuments}
+   * flag the SPA hides Reactivate with and {@link OrderReactivationGuard}, which refuses the same
+   * action in the backend (ETP-5704) — so the two can never disagree. Unlike
+   * {@link #checkLinkedDocuments} it lets a DB failure propagate: the guard must fail closed, while
+   * the GET annotation must not fail at all.
+   *
+   * @param orderId the {@code C_Order_ID} to look up
+   * @return {@code true} when at least one linked document exists
+   * @throws SQLException when the lookup cannot be run
+   */
+  static boolean hasLinkedDocuments(String orderId) throws SQLException {
     String sql =
         "SELECT 1 FROM C_Invoice WHERE C_Order_ID = ? AND IsActive = 'Y' " +
         "UNION ALL " +
@@ -705,9 +732,6 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
       try (ResultSet rs = ps.executeQuery()) {
         return rs.next();
       }
-    } catch (Exception e) {
-      log.error("DB error querying linked documents for order {}", orderId, e);
-      return false;
     }
   }
 
