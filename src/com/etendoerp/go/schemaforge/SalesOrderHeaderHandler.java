@@ -41,6 +41,11 @@ import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
  *
  * <p>GET post-hook (hasLinkedDocuments, plus the ETP-5295 needsPrimaryDoc/needsInvoiceDoc
  * annotations) is inherited from {@link AbstractOrderHeaderHandler}.
+ *
+ * <p>ETP-5704: Reactivate ({@code DocAction} = {@code RE}) on an order with linked shipments or
+ * invoices is refused before the button runs — see {@link OrderReactivationGuard}. Same rule as
+ * the {@code hasLinkedDocuments} flag the SPA hides the action with; REST and MCP both reach this
+ * pre-hook.
  */
 @Named("salesOrderHeaderHandler")
 public class SalesOrderHeaderHandler extends AbstractOrderHeaderHandler {
@@ -66,6 +71,12 @@ public class SalesOrderHeaderHandler extends AbstractOrderHeaderHandler {
         PaymentMethodSelectorSupport.DirectionFallback.WINDOW);
     if (paymentMethodSelector != null) {
       return paymentMethodSelector;
+    }
+    // ETP-5704: Reactivate is refused when the order has linked shipments or invoices — the rule
+    // the SPA already applies by hiding the action, now enforced for every channel.
+    NeoResponse reactivationRefusal = OrderReactivationGuard.refuseIfLinkedDocuments(context);
+    if (reactivationRefusal != null) {
+      return reactivationRefusal;
     }
     AbstractOrderHeaderHandler.mirrorAccountingDate(context);
     AbstractOrderHeaderHandler.applyTotalDiscountBeforeComplete(context, totalDiscountService, false);

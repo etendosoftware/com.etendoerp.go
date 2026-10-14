@@ -69,6 +69,9 @@ public class ConversionRateDocumentSavepointIntegrationTest extends OBBaseTest {
   /** PostgreSQL SQLSTATE for "current transaction is aborted, commands ignored…". */
   private static final String SQLSTATE_IN_FAILED_TRANSACTION = "25P02";
 
+  /** PostgreSQL SQLSTATE for "division by zero"; unlike the message, it does not follow lc_messages. */
+  private static final String SQLSTATE_DIVISION_BY_ZERO = "22012";
+
   /** Core's "document posted" message key, raised by {@code c_conversion_rate_document_trg}. */
   private static final String POSTED_DOCUMENT_MESSAGE = "@20501@";
 
@@ -119,8 +122,8 @@ public class ConversionRateDocumentSavepointIntegrationTest extends OBBaseTest {
   public void testFailedStatementInsideSavepointLeavesTransactionUsable() throws Exception {
     SQLException failure = expectSqlException(
         () -> JdbcSavepoints.run(conn, () -> execute(FAILING_STATEMENT)));
-    assertTrue("The original failure must be rethrown, got: " + failure.getMessage(),
-        failure.getMessage().toLowerCase().contains("division by zero"));
+    assertEquals("The original failure must be rethrown, got: " + failure.getMessage(),
+        SQLSTATE_DIVISION_BY_ZERO, failure.getSQLState());
 
     assertEquals(1, queryInt("SELECT 1"));
     assertDalReadWorks();

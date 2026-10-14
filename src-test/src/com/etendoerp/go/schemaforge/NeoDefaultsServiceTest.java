@@ -88,6 +88,7 @@ import com.etendoerp.sequences.SequenceUtils;
  *
  * @covers com.etendoerp.go.schemaforge.NeoDefaultsService
  * @covers com.etendoerp.go.schemaforge.NeoDefaultsSqlHelper
+ * @covers com.etendoerp.go.schemaforge.NeoDefaultTenantGuard
  * @covers com.etendoerp.go.schemaforge.NeoMandatoryDefaultsService
  * @covers com.etendoerp.go.schemaforge.NeoSequencePreviewHelper
  */
@@ -4527,6 +4528,56 @@ public class NeoDefaultsServiceTest {
       assertNull("A resolved value has no diagnostic to report", outcome.getMissingParentToken());
       assertFalse(outcome.isZeroRows());
     }
+  }
+
+  /**
+   * ETP-5682: with a tenant guard the helper reads every candidate row (not just the first),
+   * hands them to the guard in query order and returns its pick; when the guard rejects them
+   * all, the outcome is zero rows (the tenant has no such record of its own).
+   */
+  private NeoDefaultsSqlHelper.SqlDefaultOutcome resolveWithGuard(String guardPick)
+      throws Exception {
+    OBDal dal = mock(OBDal.class);
+    Connection conn = mock(Connection.class);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+    VariablesSecureApp vars = mock(VariablesSecureApp.class);
+    when(vars.getClient()).thenReturn("OWN-CLIENT");
+    Column adColumn = mock(Column.class);
+    when(adColumn.getDBColumnName()).thenReturn("C_DocType_ID");
+    NeoDefaultTenantGuard guard = mock(NeoDefaultTenantGuard.class);
+    when(guard.scan(any(ResultSet.class)))
+        .thenReturn(new NeoDefaultTenantGuard.Scan(true, guardPick));
+
+    when(dal.getConnection(false)).thenReturn(conn);
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+    when(ps.executeQuery()).thenReturn(rs);
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
+         MockedStatic<NeoDefaultTenantGuard> guardMock = mockStatic(NeoDefaultTenantGuard.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      guardMock.when(() -> NeoDefaultTenantGuard.forColumn(adColumn, "OWN-CLIENT"))
+          .thenReturn(guard);
+
+      return NeoDefaultsSqlHelper.resolveSQLDefaultWithOutcome(
+          "@SQL=SELECT C_DocType_ID FROM C_DocType WHERE DocBaseType='GLJ'",
+          vars, mock(DalConnectionProvider.class), "WIN-1", adColumn, null, true);
+    }
+  }
+
+  @Test
+  public void testResolveSqlDefaultOutcomeTenantGuardPicksOwnRow() throws Exception {
+    NeoDefaultsSqlHelper.SqlDefaultOutcome outcome = resolveWithGuard("DT-OWN");
+    assertEquals("DT-OWN", outcome.getValue());
+    assertFalse(outcome.isZeroRows());
+  }
+
+  @Test
+  public void testResolveSqlDefaultOutcomeTenantGuardRejectsAllForeignRows() throws Exception {
+    NeoDefaultsSqlHelper.SqlDefaultOutcome outcome = resolveWithGuard(null);
+    assertNull(outcome.getValue());
+    assertTrue(outcome.isZeroRows());
   }
 
   @Test
