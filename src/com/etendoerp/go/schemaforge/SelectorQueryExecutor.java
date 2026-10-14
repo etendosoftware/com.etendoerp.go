@@ -348,10 +348,11 @@ final class SelectorQueryExecutor {
     // ETP-5703: a custom-HQL selector can return several rows for ONE record — a join to a child
     // table (ProductSimple joins PricingProductPrice, one row per price-list version) multiplies
     // them. No blanket "SELECT DISTINCT": the projection has many columns, so it would dedupe by the
-    // whole tuple. When the projection's record-id column is a plain property path, the query is
-    // paged by RECORD instead of by row (see pageRecordIds): count, offset, limit and hasMore all
-    // use the same unit, so no record is repeated across pages or made unreachable. Any other id
-    // expression keeps the row-based behaviour it always had.
+    // whole tuple. When the projection's record-id column is a plain path ending in `.id` AND the
+    // display property is a plain (non-association) property of the selector entity — both decided
+    // up front, structurally, with no query — the query is paged by RECORD instead of by row (see
+    // pageRecordIds): count, offset, limit and hasMore all use the same unit, so no record is
+    // repeated across pages or made unreachable. Otherwise it keeps the row-based flow it always had.
     String alias = meta.entityAlias;
     String rawHql = meta.customHql.replace("@additional_filters@", "1=1");
     java.util.regex.Matcher fromMatcher = Pattern.compile("\\sFROM\\s",
@@ -382,24 +383,17 @@ final class SelectorQueryExecutor {
     int totalCount = 0;
     List<Object> rows = null;
     List<String> pageIds = null;
-    if (idExpr != null) {
-      // Record paging is new SQL for an existing selector: it runs under a JDBC savepoint and, if
-      // it fails for any reason, the selector falls back to the row-paged flow it always had — a
-      // selector that worked before ETP-5703 must never turn into an error.
-      try {
-        RecordPage page = fetchRecordPage(selectPart, fromClause.getHql(), fromOnwards, idExpr,
-            displayOrder, fromParams, searchParam, limit, offset);
-        totalCount = page.totalCount;
-        pageIds = page.ids;
-        rows = page.rows;
-      } catch (Exception e) {
-        log.warn("[ETP-5703] Record paging failed for custom-HQL selector {}; falling back to row"
-            + " paging: {}", meta.entityName, e.getMessage());
-        pageIds = null;
-        rows = null;
-      }
-    }
-    if (rows == null) {
+    if (idExpr != null && displayIsPrimitive(meta)) {
+      // Decided up front, with no query: no fallback on failure. A failing Hibernate query marks
+      // the transaction rollback-only before any catch could run, and custom-HQL selectors also run
+      // inside writes (FK-by-name resolution), so a swallowed failure would let a write report
+      // success and lose its commit. If record paging is chosen and fails, the error propagates.
+      RecordPage page = fetchRecordPage(selectPart, fromClause.getHql(), fromOnwards, idExpr,
+          displayOrder, fromParams, searchParam, limit, offset);
+      totalCount = page.totalCount;
+      pageIds = page.ids;
+      rows = page.rows;
+    } else {
       String countHql = "SELECT COUNT(" + alias + ")" + fromClause.getHql();
       org.hibernate.query.Query<Long> countQuery = OBDal.getInstance()
           .getSession().createQuery(countHql, Long.class);
@@ -474,32 +468,50 @@ final class SelectorQueryExecutor {
   }
 
   /**
-   * The record-paged queries (ETP-5703) — {@code COUNT(DISTINCT <id>)}, the page of ids, the rows
-   * of those ids — under one JDBC savepoint, so a failure rolls back to it and leaves the request
-   * transaction usable for the row-paged fallback.
+   * The record-paged queries (ETP-5703): {@code COUNT(DISTINCT <id>)}, the page of ids, the rows of
+   * those ids. Any failure propagates to the caller.
    */
   private static RecordPage fetchRecordPage(String selectPart, String fromHql, String fromOnwards,
       String idExpr, String displayOrder, Map<String, Object> params, String searchParam,
-      int limit, int offset) throws Exception {
+      int limit, int offset) {
     RecordPage page = new RecordPage();
-    java.sql.Connection conn = OBDal.getInstance().getConnection();
-    JdbcSavepoints.run(conn, () -> {
-      org.hibernate.query.Query<Long> countQuery = OBDal.getInstance().getSession()
-          .createQuery("SELECT COUNT(DISTINCT " + idExpr + ")" + fromHql, Long.class);
-      bindCustomHqlParams(countQuery, params, searchParam);
-      Long count = countQuery.uniqueResult();
-      page.totalCount = count != null ? count.intValue() : 0;
-      List<Object> pageIdValues = pageRecordIds(fromHql, idExpr, displayOrder, params,
-          searchParam, limit, offset);
-      for (Object value : pageIdValues) {
-        page.ids.add(idValueAsString(value));
-      }
-      if (!pageIdValues.isEmpty()) {
-        page.rows = rowsOfRecords(selectPart, fromHql, fromOnwards, idExpr, displayOrder, params,
-            searchParam, pageIdValues);
-      }
-    });
+    org.hibernate.query.Query<Long> countQuery = OBDal.getInstance().getSession()
+        .createQuery("SELECT COUNT(DISTINCT " + idExpr + ")" + fromHql, Long.class);
+    bindCustomHqlParams(countQuery, params, searchParam);
+    Long count = countQuery.uniqueResult();
+    page.totalCount = count != null ? count.intValue() : 0;
+    List<Object> pageIdValues = pageRecordIds(fromHql, idExpr, displayOrder, params, searchParam,
+        limit, offset);
+    for (Object value : pageIdValues) {
+      page.ids.add(idValueAsString(value));
+    }
+    if (!pageIdValues.isEmpty()) {
+      page.rows = rowsOfRecords(selectPart, fromHql, fromOnwards, idExpr, displayOrder, params,
+          searchParam, pageIdValues);
+    }
     return page;
+  }
+
+  /**
+   * Whether the selector's display property is a plain (non-association) property of its entity,
+   * resolved structurally through the runtime model (ETP-5703): only then is
+   * {@code MIN(<alias>.<display>)} — the page-of-ids ordering — a valid aggregate. No query runs.
+   */
+  static boolean displayIsPrimitive(SelectorMeta meta) {
+    if (meta == null || StringUtils.isBlank(meta.displayProperty)
+        || meta.displayProperty.contains(".")) {
+      return false;
+    }
+    try {
+      Entity entity = ModelProvider.getInstance().getEntity(meta.entityName);
+      org.openbravo.base.model.Property property =
+          entity != null ? entity.getProperty(meta.displayProperty, false) : null;
+      return property != null && property.isPrimitive();
+    } catch (RuntimeException e) {
+      log.debug("[ETP-5703] Display property {} of {} not resolvable; using row paging: {}",
+          meta.displayProperty, meta.entityName, e.getMessage());
+      return false;
+    }
   }
 
   /** The FROM root alias of a custom HQL ({@code from PricingProductPrice pp} → {@code pp}). */

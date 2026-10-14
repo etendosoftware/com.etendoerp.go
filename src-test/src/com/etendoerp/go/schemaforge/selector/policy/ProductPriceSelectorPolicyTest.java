@@ -48,14 +48,15 @@ public class ProductPriceSelectorPolicyTest {
    * ETP-5703 QA: with a price list in context, the product selector showed the context list's
    * standard/list price but `_aux._PLIM` of whichever price-list version row the selector kept (a
    * purchase list's 0.90 instead of the sales list's 1.50). All three aux prices must come from
-   * the context price list.
+   * the context price list, and so must the item-level {@code priceLimit} grid value.
    */
   @Test
   @SuppressWarnings({ "unchecked", "rawtypes" })
   public void enrich_withContextPriceList_setsAllAuxPricesFromIt() throws Exception {
     JSONObject aux = new JSONObject().put("_PSTD", "0.90").put("_PLIST", "0.90")
         .put("_PLIM", "0.90");
-    JSONObject item = new JSONObject().put("id", "agua").put("_aux", aux);
+    JSONObject item = new JSONObject().put("id", "agua").put("priceLimit", new BigDecimal("0.90"))
+        .put("_aux", aux);
     NeoResponse response = NeoResponse.ok(new JSONObject().put("items", new JSONArray().put(item)));
 
     Object[] salesRow = { "agua", new BigDecimal("1.50"), new BigDecimal("1.60"), "N",
@@ -73,8 +74,10 @@ public class ProductPriceSelectorPolicyTest {
       ProductPriceSelectorPolicy.enrichProductSelectorWithPrices(response, "sales-list");
     }
 
-    JSONObject enrichedAux = response.getBody().getJSONArray("items").getJSONObject(0)
-        .getJSONObject("_aux");
+    JSONObject enriched = response.getBody().getJSONArray("items").getJSONObject(0);
+    JSONObject enrichedAux = enriched.getJSONObject("_aux");
+    assertEquals(0, new BigDecimal("1.45").compareTo(new BigDecimal(
+        String.valueOf(enriched.get("priceLimit")))));
     assertEquals("1.50", enrichedAux.getString("_PSTD"));
     assertEquals("1.60", enrichedAux.getString("_PLIST"));
     assertEquals("1.45", enrichedAux.getString("_PLIM"));

@@ -180,6 +180,8 @@ public final class ProductPriceSelectorPolicy implements SelectorEnrichmentPolic
         // list (a purchase one, at 0.90 instead of 1.50); all three aux prices must be the context
         // price list's, like standardPrice/listPrice above.
         if (cols.length > 4) {
+          // The grid value too, so every price the item shows is the context price list's.
+          item.put("priceLimit", cols[4]);
           aux.put("_PLIM", String.valueOf(cols[4]));
         }
       }

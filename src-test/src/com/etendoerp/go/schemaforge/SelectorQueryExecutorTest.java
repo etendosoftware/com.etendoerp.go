@@ -850,10 +850,11 @@ public class SelectorQueryExecutorTest {
     when(session.createQuery(anyString())).thenReturn(dataHibQuery);
     OBDal obDal = mock(OBDal.class);
     when(obDal.getSession()).thenReturn(session);
-    // The record-paged queries run under a JDBC savepoint on the request connection.
-    java.sql.Connection connection = mock(java.sql.Connection.class);
-    when(obDal.getConnection()).thenReturn(connection);
     Entity entityDef = mock(Entity.class);
+    // Record paging needs a plain display property: "name" is a primitive of the entity.
+    org.openbravo.base.model.Property nameProperty = mock(org.openbravo.base.model.Property.class);
+    when(nameProperty.isPrimitive()).thenReturn(true);
+    when(entityDef.getProperty("name", false)).thenReturn(nameProperty);
     ModelProvider modelProvider = mock(ModelProvider.class);
     when(modelProvider.getEntity(anyString())).thenReturn(entityDef);
     SelectorQueryBuilder.HqlWithParams emptyClause = SelectorQueryBuilder.HqlWithParams.empty();
@@ -937,10 +938,11 @@ public class SelectorQueryExecutorTest {
     });
     OBDal obDal = mock(OBDal.class);
     when(obDal.getSession()).thenReturn(session);
-    // The record-paged queries run under a JDBC savepoint on the request connection.
-    java.sql.Connection connection = mock(java.sql.Connection.class);
-    when(obDal.getConnection()).thenReturn(connection);
     Entity entityDef = mock(Entity.class);
+    // Record paging needs a plain display property: "name" is a primitive of the entity.
+    org.openbravo.base.model.Property nameProperty = mock(org.openbravo.base.model.Property.class);
+    when(nameProperty.isPrimitive()).thenReturn(true);
+    when(entityDef.getProperty("name", false)).thenReturn(nameProperty);
     ModelProvider modelProvider = mock(ModelProvider.class);
     when(modelProvider.getEntity(anyString())).thenReturn(entityDef);
     SelectorQueryBuilder.HqlWithParams emptyClause = SelectorQueryBuilder.HqlWithParams.empty();
@@ -994,16 +996,25 @@ public class SelectorQueryExecutorTest {
   }
 
   /**
-   * ETP-5703 review: an id column that is not a {@code .id} path never takes the record-paged
-   * route — the selector runs the row-paged flow it always had: COUNT(alias), offset and limit on
-   * the data query, no GROUP BY.
+   * ETP-5703 review: record paging is decided up front and structurally. An id column that is not a
+   * {@code .id} path, or a display property that is an association, keeps the row-paged flow it
+   * always had — COUNT(alias), offset and limit on the data query, no GROUP BY — and nothing is
+   * caught or retried.
    */
   @Test
-  @SuppressWarnings("unchecked")
   public void testExecuteCustomHqlQueryNonIdPathKeepsRowPaging() throws Exception {
+    assertRowPaging("SELECT e.searchKey as id, e.name as name FROM Product e", true);
+  }
+
+  @Test
+  public void testExecuteCustomHqlQueryAssociationDisplayKeepsRowPaging() throws Exception {
+    assertRowPaging("SELECT e.id as id, e.name as name FROM Product e", false);
+  }
+
+  @SuppressWarnings("unchecked")
+  private void assertRowPaging(String customHql, boolean displayPrimitive) throws Exception {
     SelectorMeta meta = new SelectorMeta.Builder("Product", "name").isRich(true)
-        .isCustomQuery(true)
-        .customHql("SELECT e.searchKey as id, e.name as name FROM Product e").build();
+        .isCustomQuery(true).customHql(customHql).build();
 
     Query countHibQuery = mock(Query.class);
     when(countHibQuery.uniqueResult()).thenReturn(3L);
@@ -1024,6 +1035,9 @@ public class SelectorQueryExecutorTest {
     OBDal obDal = mock(OBDal.class);
     when(obDal.getSession()).thenReturn(session);
     Entity entityDef = mock(Entity.class);
+    org.openbravo.base.model.Property nameProperty = mock(org.openbravo.base.model.Property.class);
+    when(nameProperty.isPrimitive()).thenReturn(displayPrimitive);
+    when(entityDef.getProperty("name", false)).thenReturn(nameProperty);
     ModelProvider modelProvider = mock(ModelProvider.class);
     when(modelProvider.getEntity(anyString())).thenReturn(entityDef);
     SelectorQueryBuilder.HqlWithParams emptyClause = SelectorQueryBuilder.HqlWithParams.empty();
