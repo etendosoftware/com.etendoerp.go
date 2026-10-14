@@ -208,13 +208,15 @@ table that mixes shipped and runtime rows: seed the shipped rows with a module s
 rows), ETP-5051/5053 (quotas and plan changes need a row), §3.2 (Phase F).
 
 Whether a **new** paid purchase opens an `ETGO_SUBSCRIPTION` row is decided per environment by one
-database-stored switch: the System-level list preference **`ETGO_SubscriptionModel`**, read by
-`SubscriptionModelSwitch#isOn` on every purchase (no cache, no restart). Only `Y` on an active row at
-`AD_CLIENT_ID = '0'` with no narrower visibility means ON; absent, any other value, a tenant-scoped
-row or a failed read mean OFF. The module ships the `AD_Ref_List` value but **no preference row**,
-so every environment comes up OFF after the deploy and stays exactly where develop is: new
-purchases write `ETGO_TenantPlan`, open no row, and the lifecycle webhooks keep the
-`ETGO_SubscriptionStatus`/`DueAt` preferences.
+database-stored switch: the System-level list preference **`ETGO_SubscriptionModel`**, answered by
+`SubscriptionModelSwitch#isOn` (no cache, no restart). It has two readers: the paid upgrade, once per
+purchase, and `TenantPlanPreferenceFallback`, once per resolution or batch it serves, only to pick
+its DEBUG/WARN log level — while OFF that is one extra `AD_Preference` query per fallback resolution
+of a rowless tenant, still uncached. Only `Y` on an active row at `AD_CLIENT_ID = '0'` with no
+narrower visibility means ON; absent, any other value, a tenant-scoped row or a failed read mean
+OFF. The module ships the `AD_Ref_List` value but **no preference row**, so every environment comes
+up OFF after the deploy and stays exactly where develop is: new purchases write `ETGO_TenantPlan`,
+open no row, and the lifecycle webhooks keep the `ETGO_SubscriptionStatus`/`DueAt` preferences.
 
 - **Switching is one operator step, done once:** chain current → R37 with `FIX=` (dry run first)
   → set the preference → verify, three checks: R37 ledger rows `APPLIED`/`SKIPPED_NOT_NEEDED`;
@@ -232,10 +234,12 @@ purchases write `ETGO_TenantPlan`, open no row, and the lifecycle webhooks keep 
 - **One-way in practice.** Setting it back to `N` sends only tenants that have never had a row back
   to the marker; every tenant with a row stays on it, payments included. Two populations that only
   grow apart, Phase F further away — turning it back OFF undoes nothing.
-- **Only a tenant's first row is gated.** A tenant with any row (open or closed,
+- **Only a tenant's first row is gated.** A tenant with any row (open or closed, active or not,
   `SubscriptionService#hasAnySubscription`) is decided by it for reads and writes: its next payment
   goes to a row even with the switch OFF, or it would stay blocked behind a canceled or closed row.
-  `openSubscription` has one runtime caller (the paid upgrade), which is where the gate sits.
+  A tenant whose only rows are inactive gets a new active open row next to them: the partial unique
+  index `etgo_sub_open_envclient_uq` covers only active rows with no end date. `openSubscription`
+  has one runtime caller (the paid upgrade), which is where the gate sits.
 - **Known edge, revisit when ETP-5047 is merged:** with the switch OFF, a *failed*
   `hasAnySubscription` lookup takes the marker path (logged at ERROR). Kept on purpose — a purchase
   always provisions a new, rowless tenant (ETP-5548) and a SQL-level failure already rolls the

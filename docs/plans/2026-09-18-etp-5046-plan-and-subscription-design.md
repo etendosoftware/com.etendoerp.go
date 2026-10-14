@@ -337,13 +337,15 @@ optional — an environment may stay on the preference path indefinitely.
 
 Decided 2026-10-14. One environment-level, database-stored switch decides whether a **new** paid
 purchase opens an `ETGO_SUBSCRIPTION` row. `com.etendoerp.go.payment.SubscriptionModelSwitch#isOn`
-is the only place that answers it; `EtendoGoJwtServlet#applyPaidUpgradeSideEffects` asks it once per
-purchase, before it opens anything.
+is the only place that answers it. It has two readers:
+`EtendoGoJwtServlet#applyPaidUpgradeSideEffects` asks it once per purchase, before it opens
+anything, and `TenantPlanPreferenceFallback` asks it once per resolution or batch it serves, only to
+pick the level of its log line (end of this section).
 
 | Switch | What a new purchase records | Lifecycle webhooks then write |
 |---|---|---|
 | **OFF** (default: no row, or any value but `Y`, or an unreadable row) — tenant with **no** subscription row | the `ETGO_TenantPlan` marker (`markProductive`), no row, nothing retired — logged at INFO, not as a failure | the `ETGO_SubscriptionStatus` / `ETGO_SubscriptionDueAt` preferences (the tenant has no row) |
-| **OFF** — tenant that already has **any** row (open or closed) | a row, exactly as ON: its row is what every read answers from | the row |
+| **OFF** — tenant that already has **any** row (open or closed, active or not) | a row, exactly as ON: its row is what every read answers from | the row |
 | **ON** (`Y`) | an open `ETGO_SUBSCRIPTION` row, and the tenant's marker is retired; the marker is written only if the row cannot be opened (§8) | the row (`SubscriptionService#applyLifecycleStatus`) |
 
 **The row it reads.** A *list* preference: `ETGO_SubscriptionModel` is an `AD_Ref_List` value of the
@@ -354,29 +356,33 @@ system — Visible-at Client empty or `0`, Visible-at Organization empty or `0`,
 window — counts. If there are several, the first in `created desc, updated desc, ad_preference_id
 desc` wins: the newest row, then (two rows created in one transaction share `now()`) the most
 recently updated, then the id, so the winner is always deterministic. The §6.2 verification query
-sorts the same way, so its first row is the one the reader uses. A row scoped to one tenant is not an environment decision
-and is ignored (`ETGO_TenantPlan` is the cautionary tale: client-`0` rows that are *about* one
-tenant). The reader uses a plain criteria on the row's own `AD_CLIENT_ID`, like
+sorts the same way, so its first row is the one the reader uses. A row scoped to one tenant is not
+an environment decision and is ignored (`ETGO_TenantPlan` is the cautionary tale: client-`0` rows
+that are *about* one tenant). The reader uses a plain criteria on the row's own `AD_CLIENT_ID`, like
 `FiscalTestModeResolver`, not `Preferences.getPreferenceValue`.
 
 **Not module data, on purpose.** The module ships the list value only. A preference row shipped as
 sourcedata would be reset to its shipped value by every `update.database`, silently switching an
 environment back. The operator's row has no module and survives deploys.
 
-**Read per purchase, never cached.** A purchase is rare, so the switch costs one query each time and
-flipping it needs no restart. A failed read is logged at ERROR and answered OFF — the pre-ETP-5046
-path, which is the safe direction.
+**Read on every use, never cached.** Flipping it needs no restart. The paid upgrade costs one query
+per purchase, and a purchase is rare. The fallback costs one more `AD_Preference` query per
+resolution or batch it serves for a rowless productive tenant — while OFF that is every paying
+tenant, still uncached. A failed read is logged at ERROR and answered OFF — the pre-ETP-5046 path,
+which is the safe direction.
 
-**Only a tenant's first row is switched.** A tenant that has a row — any row, open or closed,
-`SubscriptionService#hasAnySubscription` — is decided by it whatever the switch says, for reads
-(`resolvePlan`, the access policy, the lifecycle webhooks) **and for writes**: with the switch OFF
-its next payment still goes to a row, because a payment recorded only in the marker would be
+**Only a tenant's first row is switched.** A tenant that has a row — any row, open or closed, active
+or not, `SubscriptionService#hasAnySubscription` — is decided by it whatever the switch says, for
+reads (`resolvePlan`, the access policy, the lifecycle webhooks) **and for writes**: with the switch
+OFF its next payment still goes to a row, because a payment recorded only in the marker would be
 invisible behind a canceled or closed row and the paying tenant would stay blocked. The lookup is
 "any row", not "an open row", so it stays correct whatever later tickets change about which row is
-current; it runs only when the switch is OFF. A rowless tenant is decided by the switch, and read
-through the transitional fallback (§8). `openSubscription` has exactly one runtime caller — the
-paid upgrade — so the gate there covers every row a tenant can get at runtime; R37 is the
-operator's own step 3.3 of §6.2.
+current; it runs only when the switch is OFF. A tenant whose only rows are inactive therefore gets a
+new active open row next to them: the partial unique index `etgo_sub_open_envclient_uq` covers only
+active rows with no end date. A rowless tenant is decided by the switch, and read through the
+transitional fallback (§8). `openSubscription` has exactly one runtime caller — the paid upgrade —
+so the gate there covers every row a tenant can get at runtime; R37 is the operator's own step 3.3
+of §6.2.
 
 **A failed row lookup takes the marker path — on purpose.** With the switch OFF, if
 `hasAnySubscription` itself fails the purchase is recorded with the marker and the failure is logged
