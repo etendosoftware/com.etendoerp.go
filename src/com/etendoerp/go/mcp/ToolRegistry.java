@@ -45,6 +45,7 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.ui.Process;
 
 import com.etendoerp.go.oauth2.ApiScopes;
+import com.etendoerp.go.schemaforge.BatchService;
 import com.etendoerp.go.schemaforge.NeoVectorSearchEndpoint;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
@@ -1017,6 +1018,11 @@ public class ToolRegistry {
 
     Map<String, Object> props = new LinkedHashMap<>();
     props.put("operations", operationsProp);
+    // ETP-5676: same name and meaning as the REST /sws/neo/batch body option.
+    props.put(BatchService.PARAM_ONLY_RETURN_IDS, booleanProp(
+        "Optional, default false. true = a bulk-write hint: each create skips decorating the record "
+            + "it would echo back (identifier enrichment, display flags), which only the id is read "
+            + "from anyway. The response is the same either way."));
 
     return new McpToolDefinition(
         "etendo_batch",

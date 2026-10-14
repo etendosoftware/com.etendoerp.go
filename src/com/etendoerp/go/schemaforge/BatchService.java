@@ -178,6 +178,13 @@ public class BatchService {
   public static final String FIELD_PERSISTED = "persisted";
   /** @see #FIELD_COMMITTED */
   public static final String FIELD_HINT = "hint";
+  /**
+   * ETP-5676: optional top-level boolean of a batch request (REST body, MCP {@code etendo_batch}
+   * argument). {@code true} lets every operation skip the work that only decorates the record a
+   * write echoes back — identifier enrichment, display flags — because a batch reads nothing but
+   * the new id from it. The batch response itself is unchanged: it always carried ids only.
+   */
+  public static final String PARAM_ONLY_RETURN_IDS = "_onlyReturnIds";
   private static final String FIELD_PARENT_ID = "parentId";
   private static final String FIELD_ID = "id";
   private static final String FIELD_ENTITY = "entity";
@@ -248,7 +255,7 @@ public class BatchService {
 
     JSONObject result;
     try {
-      result = executeBatch(operations);
+      result = executeBatch(operations, null, body.optBoolean(PARAM_ONLY_RETURN_IDS, false));
     } catch (JSONException e) {
       log.error("[BATCH] JSON error while executing batch", e);
       servlet.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
@@ -328,6 +335,20 @@ public class BatchService {
    */
   public JSONObject executeBatch(JSONArray operations, OperationPreprocessor preprocessor)
       throws JSONException {
+    return executeBatch(operations, preprocessor, false);
+  }
+
+  /**
+   * Overload taking the request's {@link #PARAM_ONLY_RETURN_IDS} option (ETP-5676).
+   *
+   * @param operations    the ordered list of operation objects (must be non-null)
+   * @param preprocessor  invoked per operation, or {@code null}
+   * @param onlyReturnIds {@code true} to let each write skip decorating the record it echoes
+   * @return a JSONObject in one of the two shapes documented on {@link #executeBatch(JSONArray)}
+   * @throws JSONException only on truly unexpected JSON serialization failures
+   */
+  public JSONObject executeBatch(JSONArray operations, OperationPreprocessor preprocessor,
+      boolean onlyReturnIds) throws JSONException {
     if (operations == null) {
       return failureBody(-1, null, HttpServletResponse.SC_BAD_REQUEST,
           "Missing 'operations' array", null, null);
@@ -345,7 +366,7 @@ public class BatchService {
     // ETP-5676: per-request state shared by the operations (the callout-discard memory). Opened
     // after the claim and closed in the same finally, so it can never outlive this request.
     TransactionTracker tracker = new TransactionTracker();
-    NeoBatchScope previousScope = NeoBatchScope.open();
+    NeoBatchScope previousScope = NeoBatchScope.open(onlyReturnIds);
     try {
       for (int i = 0; i < operations.length(); i++) {
         JSONObject failure = processOperation(i, operations.optJSONObject(i), resolvedIds, opResults,
@@ -781,6 +802,7 @@ public class BatchService {
         .sfEntity(sfEntity)
         .obContext(OBContext.getOBContext())
         .endpointType(NeoEndpointType.CRUD)
+        .idsOnlyResponse(isOnlyReturnIds())
         .build();
 
     // Entities with a configured Java_Qualifier own logic the generic CRUD path knows
@@ -819,6 +841,12 @@ public class BatchService {
     criteria.setMaxResults(1);
     List<SFEntity> results = criteria.list();
     return results.isEmpty() ? null : results.get(0);
+  }
+
+  /** Whether the batch running on this thread was sent with {@link #PARAM_ONLY_RETURN_IDS}. */
+  private static boolean isOnlyReturnIds() {
+    NeoBatchScope scope = NeoBatchScope.current();
+    return scope != null && scope.isOnlyReturnIds();
   }
 
   private static boolean isSuccess(NeoResponse response) {

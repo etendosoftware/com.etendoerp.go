@@ -590,7 +590,14 @@ class NeoCrudHandler {
     if (errorResponse != null) {
       return errorResponse;
     }
+    // Kept even for an ids-only response: it renames DAL properties to the API keys a
+    // customization's afterHandle reads, so skipping it would change what the hook sees.
     fieldFilter.filterGetResponse(responseJson);
+    // ETP-5676: a batch sent with _onlyReturnIds reads nothing but the new id from this response
+    // (BatchService#extractRecordId), so the identifier enrichment below is work nobody sees.
+    if (context.isIdsOnlyResponse() && "POST".equals(context.getHttpMethod())) {
+      return NeoResponse.ok(responseJson);
+    }
     if (context.getSfEntity() != null) {
       String httpMethod = context.getHttpMethod();
       if ("GET".equals(httpMethod)) {
