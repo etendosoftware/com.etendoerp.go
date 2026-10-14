@@ -178,4 +178,24 @@ class InvoiceLineAmountSupportTest {
     assertFalse(body.has(InvoiceLineAmountSupport.FIELD_LINE_NET_AMOUNT));
     assertFalse(body.has(InvoiceLineAmountSupport.FIELD_GROSS_AMOUNT));
   }
+
+  /**
+   * An amount the caller sent with the quantity change is its own choice and is kept (net 4.40 vs a
+   * derived 4.50); one that reads as server-derived — here a stale 0 — is replaced (gross 5.45).
+   */
+  @Test
+  void deriveAmountsOnUpdate_callerAmountKeptUnlessStale() throws Exception {
+    InvoiceLine stored = storedLine();
+    JSONObject body = new JSONObject(
+        "{\"invoicedQuantity\":3,\"lineNetAmount\":4.40,\"grossAmount\":0}");
+
+    try (MockedStatic<OBDal> dal = LineAmountTestSupport.taxRate(21.0)) {
+      OBDal instance = OBDal.getInstance();
+      when(instance.get(InvoiceLine.class, "line-1")).thenReturn(stored);
+      InvoiceLineAmountSupport.deriveAmountsOnUpdate(updateContext(body));
+    }
+
+    assertAmount("caller net kept", "4.40", body, InvoiceLineAmountSupport.FIELD_LINE_NET_AMOUNT);
+    assertAmount("stale gross replaced", "5.45", body, InvoiceLineAmountSupport.FIELD_GROSS_AMOUNT);
+  }
 }

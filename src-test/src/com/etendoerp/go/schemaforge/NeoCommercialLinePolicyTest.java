@@ -53,7 +53,10 @@ import org.openbravo.model.common.uom.UOM;
  *
  * Key regressions guarded: the client-value guard, the no-double-discount formula
  * ({@code baseNetAmt = unitPrice × qty}, never applying discount twice), and the
- * net-before-gross injector order (ETP-4855).
+ * net-before-gross injector order (ETP-4855), and the rounding of derived amounts to the
+ * supplied currency precision (ETP-5703).
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoCommercialLinePolicy
  */
 public class NeoCommercialLinePolicyTest {
 
@@ -511,6 +514,34 @@ public class NeoCommercialLinePolicyTest {
 
     assertEquals("4.5", String.valueOf(body.get("lineNetAmount")));
     assertEquals("5.45", String.valueOf(body.get("grossAmount")));
+  }
+
+  /**
+   * ETP-5703: {@code lineGrossAmount} is rounded HALF_UP to the precision the caller supplies (the
+   * document currency's), no longer to a fixed 2; an amount already at that precision is unchanged.
+   * Gross-price lines, so no tax rate is read.
+   */
+  @Test
+  public void testInjectLineGross_roundedToSuppliedPrecision() throws Exception {
+    // { orderedQuantity, grossUnitPrice, scale, expected lineGrossAmount }
+    String[][] cases = {
+        { "3", "1.2345", "0", "4" },        // 3.7035 at 0 decimals (e.g. JPY)
+        { "1", "3.7025", "3", "3.703" },    // HALF_UP, not HALF_EVEN (3.702), at 3 decimals
+        { "2", "1.25", "2", "2.5" },        // already at 2 decimals: unchanged
+        { "1", "2.125", "3", "2.125" },     // already at 3 decimals: unchanged, not cut to 2.13
+    };
+    for (String[] c : cases) {
+      JSONObject body = new JSONObject()
+          .put("orderedQuantity", c[0])
+          .put("unitPrice", 1.0)
+          .put("grossUnitPrice", c[1]);
+      int scale = Integer.parseInt(c[2]);
+
+      NeoCommercialLinePolicy.injectLineGrossAmountIfMissing(body, () -> scale);
+
+      assertEquals(String.join(",", c), new java.math.BigDecimal(c[3]).doubleValue(),
+          body.getDouble("lineGrossAmount"), 0.0);
+    }
   }
 
   /**
