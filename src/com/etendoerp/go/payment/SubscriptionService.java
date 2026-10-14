@@ -108,6 +108,38 @@ public class SubscriptionService {
   }
 
   /**
+   * Whether the tenant has ANY subscription row: open or closed, active or not.
+   *
+   * <p>This is the "is this tenant on the row model at all" test — the same one R37's retirement
+   * branch uses. A closed or canceled row still means the tenant's plan is decided by its rows, so
+   * the paid upgrade must record a new payment as a row for it even while the environment's
+   * subscription model is off ({@link SubscriptionModelSwitch}). Deliberately not
+   * {@link #findOpen}: that would miss a tenant whose only row is closed.
+   *
+   * @param environmentClientId {@code AD_CLIENT_ID} of the tenant, may be null or blank
+   * @return {@code true} when at least one row names the tenant
+   */
+  public boolean hasAnySubscription(String environmentClientId) {
+    if (StringUtils.isBlank(environmentClientId)) {
+      return false;
+    }
+    OBContext.setAdminMode(true);
+    try {
+      OBQuery<Subscription> query = OBDal.getInstance().createQuery(Subscription.class,
+          "as sub where sub." + Subscription.PROPERTY_ENVIRONMENTCLIENT + ".id = :"
+              + PARAM_CLIENT_ID);
+      query.setNamedParameter(PARAM_CLIENT_ID, StringUtils.trimToEmpty(environmentClientId));
+      query.setFilterOnReadableClients(false);
+      query.setFilterOnReadableOrganization(false);
+      query.setFilterOnActive(false);
+      query.setMaxResult(1);
+      return query.uniqueResult() != null;
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
    * Returns the open subscription of each of the given tenants, keyed by tenant id.
    *
    * <p><b>One query, not one per tenant.</b> The environment list sorts paid tenants first and

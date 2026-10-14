@@ -34,9 +34,11 @@ import org.openbravo.model.ad.domain.Preference;
  * recorded exactly as before ETP-5046: the {@code ETGO_TenantPlan} preference is written and no row
  * is opened, so the lifecycle webhooks keep projecting that tenant's billing state into the
  * {@code ETGO_SubscriptionStatus} / {@code ETGO_SubscriptionDueAt} preferences. Only the
- * <em>creation</em> of rows is switched. A tenant that already has a row is decided by that row
- * whatever the switch says, so turning the switch OFF again only stops new rows — in practice the
- * switch is one-way.
+ * <em>first</em> row of a tenant is switched: a tenant that already has a row — any row, open or
+ * closed — is decided by that row whatever the switch says, for reads and for writes, so its next
+ * payment is recorded on a row even while the switch is OFF. Turning the switch OFF again therefore
+ * sends only tenants that have never had a row back to the preference; it does not undo anything
+ * and leaves the fleet in two populations, which is why in practice the switch is one-way.
  *
  * <p><b>Why a switch.</b> Each environment moves to the subscription model at one moment, chosen by
  * its operator, right after running the R37 backfill data-fix for its existing tenants. Until then

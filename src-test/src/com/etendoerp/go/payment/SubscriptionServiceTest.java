@@ -6,6 +6,7 @@
 package com.etendoerp.go.payment;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -164,6 +165,60 @@ class SubscriptionServiceTest {
       // every paying tenant silently reads back as free.
       verify(subscriptionQuery).setFilterOnReadableClients(false);
       verify(subscriptionQuery).setFilterOnReadableOrganization(false);
+    }
+  }
+
+  /**
+   * "Is this tenant on the row model at all?" — the paid upgrade records a new payment as a row
+   * for any tenant this answers true for, whatever the subscription-model switch says.
+   */
+  @Nested
+  class HasAnySubscription {
+
+    @Test
+    void aTenantWithAnyRowHasOne() {
+      Subscription closed = subscriptionOf(CLIENT_ID);
+      when(subscriptionQuery.uniqueResult()).thenReturn(closed);
+
+      assertTrue(service.hasAnySubscription(CLIENT_ID));
+    }
+
+    @Test
+    void aTenantWithNoRowHasNone() {
+      when(subscriptionQuery.uniqueResult()).thenReturn(null);
+
+      assertFalse(service.hasAnySubscription(CLIENT_ID));
+    }
+
+    @Test
+    void countsClosedAndInactiveRowsTooAndIgnoresContextVisibility() {
+      // A closed or deactivated row still means the tenant's plan is decided by its rows, so the
+      // lookup must not reuse findOpen's open-row predicate nor the default active filter.
+      when(subscriptionQuery.uniqueResult()).thenReturn(null);
+
+      service.hasAnySubscription(CLIENT_ID);
+
+      ArgumentCaptor<String> hql = ArgumentCaptor.forClass(String.class);
+      verify(obDal).createQuery(eq(Subscription.class), hql.capture());
+      assertTrue(hql.getValue().contains("sub." + Subscription.PROPERTY_ENVIRONMENTCLIENT + ".id"),
+          hql.getValue());
+      assertFalse(
+          hql.getValue().contains(Subscription.PROPERTY_ENDDATE), hql.getValue());
+      assertFalse(
+          hql.getValue().contains(Subscription.PROPERTY_ACTIVE), hql.getValue());
+      verify(subscriptionQuery).setFilterOnActive(false);
+      verify(subscriptionQuery).setFilterOnReadableClients(false);
+      verify(subscriptionQuery).setFilterOnReadableOrganization(false);
+      verify(subscriptionQuery).setNamedParameter("environmentClientId", CLIENT_ID);
+    }
+
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = { "", "   " })
+    void aBlankTenantHasNoneWithoutQuerying(String clientId) {
+      assertFalse(service.hasAnySubscription(clientId));
+
+      verify(obDal, never()).createQuery(eq(Subscription.class), anyString());
     }
   }
 
