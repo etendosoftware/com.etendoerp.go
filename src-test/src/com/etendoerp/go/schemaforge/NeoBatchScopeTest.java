@@ -18,24 +18,39 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNotSame;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
+import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.hibernate.Session;
+import org.junit.After;
 import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.dal.service.OBDal;
 
 /**
- * Unit tests for {@link NeoBatchScope}'s per-request lookup memo (ETP-5676).
+ * Unit tests for {@link NeoBatchScope}: the per-request lookup memo, the request options it
+ * carries and its lifetime on the (pooled) request thread (ETP-5676).
  *
  * @covers com.etendoerp.go.schemaforge.NeoBatchScope
  */
 public class NeoBatchScopeTest {
+
+  /** A failed assertion must not leave a scope on the pooled test thread for the next test. */
+  @After
+  public void clearLeakedScope() {
+    while (NeoBatchScope.current() != null) {
+      NeoBatchScope.close(null);
+    }
+  }
 
   @Test
   public void testMemoizeLoadsOncePerKeyInsideABatchAndNeverOutside() {
@@ -110,5 +125,159 @@ public class NeoBatchScopeTest {
         NeoBatchScope.close(previous);
       }
     }
+  }
+
+  /**
+   * After the session change the memo refills in the new session and is reused from there: the
+   * clear is a one-off per session, not a permanent bypass.
+   */
+  @Test
+  public void testMemoizeRefillsInTheNewSessionAndReusesIt() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      Session before = mock(Session.class);
+      Session after = mock(Session.class);
+      when(dal.getSession()).thenReturn(before, before, after, after);
+      AtomicInteger loads = new AtomicInteger();
+
+      NeoBatchScope previous = NeoBatchScope.open(false);
+      try {
+        assertEquals(Integer.valueOf(1), NeoBatchScope.memoize("k", loads::incrementAndGet));
+        assertEquals(Integer.valueOf(1), NeoBatchScope.memoize("k", loads::incrementAndGet));
+        assertEquals("the commit closed the session: the stale answer is dropped",
+            Integer.valueOf(2), NeoBatchScope.memoize("k", loads::incrementAndGet));
+        assertEquals("and the fresh one is reused in the new session",
+            Integer.valueOf(2), NeoBatchScope.memoize("k", loads::incrementAndGet));
+        assertEquals(2, loads.get());
+      } finally {
+        NeoBatchScope.close(previous);
+      }
+    }
+  }
+
+  /** A lookup that answers "nothing" is not repeated for every operation of the batch either. */
+  @Test
+  public void testMemoizeRemembersANullAnswer() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      AtomicInteger loads = new AtomicInteger();
+
+      NeoBatchScope previous = NeoBatchScope.open(false);
+      try {
+        assertNull(NeoBatchScope.memoize("k", () -> {
+          loads.incrementAndGet();
+          return null;
+        }));
+        assertNull(NeoBatchScope.memoize("k", () -> {
+          loads.incrementAndGet();
+          return null;
+        }));
+        assertEquals(1, loads.get());
+      } finally {
+        NeoBatchScope.close(previous);
+      }
+    }
+  }
+
+  /**
+   * A DAL that cannot hand out a session (no context yet) does not break the memo: the session is
+   * then treated as one stable "none", and the answer is still reused.
+   */
+  @Test
+  public void testMemoizeStillWorksWhenTheSessionCannotBeRead() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      dalMock.when(OBDal::getInstance).thenThrow(new IllegalStateException("no DAL"));
+      AtomicInteger loads = new AtomicInteger();
+
+      NeoBatchScope previous = NeoBatchScope.open(false);
+      try {
+        NeoBatchScope.memoize("k", loads::incrementAndGet);
+        NeoBatchScope.memoize("k", loads::incrementAndGet);
+        assertEquals(1, loads.get());
+      } finally {
+        NeoBatchScope.close(previous);
+      }
+    }
+  }
+
+  @Test
+  public void testScopeCarriesTheOnlyReturnIdsOption() {
+    NeoBatchScope previous = NeoBatchScope.open(true);
+    try {
+      assertTrue(NeoBatchScope.current().isOnlyReturnIds());
+    } finally {
+      NeoBatchScope.close(previous);
+    }
+    previous = NeoBatchScope.open(false);
+    try {
+      assertFalse(NeoBatchScope.current().isOnlyReturnIds());
+    } finally {
+      NeoBatchScope.close(previous);
+    }
+  }
+
+  /**
+   * Closing an inner scope puts the outer one back — with its own options and its own memory —
+   * and closing the outer one leaves the thread clean.
+   */
+  @Test
+  public void testCloseRestoresThePreviousScope() {
+    assertNull(NeoBatchScope.open(true));
+    NeoBatchScope outer = NeoBatchScope.current();
+    NeoCalloutDiscardMemory outerMemory = NeoBatchScope.currentCalloutDiscardMemory();
+
+    NeoBatchScope previous = NeoBatchScope.open(false);
+    assertSame(outer, previous);
+    assertNotSame(outer, NeoBatchScope.current());
+    assertNotSame(outerMemory, NeoBatchScope.currentCalloutDiscardMemory());
+    NeoBatchScope.close(previous);
+
+    assertSame(outer, NeoBatchScope.current());
+    assertTrue(NeoBatchScope.current().isOnlyReturnIds());
+    assertSame(outerMemory, NeoBatchScope.currentCalloutDiscardMemory());
+
+    NeoBatchScope.close(null);
+    assertNull(NeoBatchScope.current());
+  }
+
+  /** Outside a batch there is no memory, so the create cascade runs every callout as before. */
+  @Test
+  public void testCalloutDiscardMemoryExistsOnlyInsideABatchAndIsFreshPerRequest() {
+    assertNull(NeoBatchScope.currentCalloutDiscardMemory());
+
+    NeoBatchScope previous = NeoBatchScope.open(false);
+    NeoCalloutDiscardMemory first;
+    try {
+      first = NeoBatchScope.currentCalloutDiscardMemory();
+      assertNotNull(first);
+      assertSame("one memory for the whole request", first,
+          NeoBatchScope.currentCalloutDiscardMemory());
+    } finally {
+      NeoBatchScope.close(previous);
+    }
+    assertNull(NeoBatchScope.currentCalloutDiscardMemory());
+
+    previous = NeoBatchScope.open(false);
+    try {
+      assertNotSame("a new request does not inherit what the last one learned", first,
+          NeoBatchScope.currentCalloutDiscardMemory());
+    } finally {
+      NeoBatchScope.close(previous);
+    }
+  }
+
+  @Test
+  public void testCurrentMemoStatsIsEmptyOutsideABatch() {
+    assertTrue(NeoBatchScope.currentMemoStats().isEmpty());
+  }
+
+  @Test
+  public void testNamespaceOfKeepsTheFirstTwoSegments() {
+    assertEquals("a.Owner|spec", NeoBatchScope.namespaceOf("a.Owner|spec|sales-order"));
+    assertEquals("a.Owner|entity", NeoBatchScope.namespaceOf("a.Owner|entity|S1|header"));
+    assertEquals("a.Owner|spec", NeoBatchScope.namespaceOf("a.Owner|spec"));
+    assertEquals("plain", NeoBatchScope.namespaceOf("plain"));
   }
 }
