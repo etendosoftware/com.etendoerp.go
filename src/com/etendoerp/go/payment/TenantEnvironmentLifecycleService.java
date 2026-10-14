@@ -638,9 +638,15 @@ public class TenantEnvironmentLifecycleService {
    * tenant that predates the lifecycle metadata (no row, no or blank {@code ETGO_EnvironmentType},
    * free plan) answers {@code false} and stays a valid source, exactly as before.
    *
-   * <p><b>Fails closed.</b> A lookup that throws answers {@code true}: an environment whose type
+   * <p><b>Fails closed on the type reads only.</b> A {@link SubscriptionService#findLatest} or
+   * {@code ETGO_EnvironmentType} read that throws answers {@code true}: an environment whose type
    * cannot be read is not offered as a source, which at worst turns a purchase into a clean
-   * environment instead of associating and copying the wrong tenant.
+   * environment instead of associating and copying the wrong tenant. A genuine demo whose read
+   * fails is therefore dropped as a source without a message — accepted 2026-10-14 (Martin Taal),
+   * {@code docs/open-and-notable-topics.md} §4.14. A failure inside the retired
+   * {@code ETGO_TenantPlan} fallback ({@link TenantPlanService#resolvePlanWithoutSubscription}) is
+   * not covered: that read swallows its own error and answers {@code free}, so the tenant counts
+   * as not productive (fail-open, accepted the same day; the fallback retires in Phase F).
    *
    * @param clientId environment client id
    * @return true when the tenant has an active subscription row, open or closed (the read

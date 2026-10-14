@@ -543,12 +543,19 @@ the check holds while `ETGO_SubscriptionModel` is OFF too.
   the body is ignored, and a clean productive environment is provisioned. Naming such an environment
   as `demoClientId` from a demo session answers 400 `INVALID_DEMO_SELECTION`.
 - The account's source candidates (`EtendoGoJwtDalHelper#findFreeTenantIdsByAccountEmail`, used by
-  the paid onboarding re-check and the transfer status fallback) leave it out.
+  the paid onboarding re-check and by the data-transfer status and retry fallbacks, both through
+  `findOnlyFreeTenantIdByAccountEmail`) leave it out.
 - A purchase that recorded a productive environment as its source before this rule existed is
   already paid, so onboarding does not refuse it: like a spent demo, it drops the source and
   provisions a clean productive environment.
-- A lookup that fails answers "productive" (not a source): the worst outcome is a clean environment,
-  never the association of the wrong tenant.
+- **It fails closed on the type reads only.** When the `SubscriptionService#findLatest` read or the
+  `ETGO_EnvironmentType` read throws, the answer is "productive" (not a source): the worst outcome
+  is a clean environment, never the association of the wrong tenant. A genuine demo whose read
+  fails is dropped as a source without a message — accepted 2026-10-14 (Martin Taal),
+  `open-and-notable-topics.md` §4.14. A failure inside the retired `ETGO_TenantPlan` fallback
+  (`TenantPlanPreferenceFallback#isProductive`, via `TenantPlanService#resolvePlanWithoutSubscription`)
+  is swallowed there and answers `free`, so the tenant counts as **not** productive — fail-open,
+  accepted the same day; the fallback retires in Phase F.
 - `GET /sws/go/environments` keeps reporting the facts: `plan: "free"`, `environmentType:
   "PRODUCTIVE"`, `subscriptionStatus: "EXPIRED"`. The upgrade page keys its picker on
   `environmentType`, not only on `plan`.

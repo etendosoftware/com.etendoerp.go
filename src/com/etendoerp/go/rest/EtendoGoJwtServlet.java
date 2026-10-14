@@ -4642,8 +4642,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       // ETP-5047 — a purchase recorded a productive environment as its source (a canceled one
       // reads plan free) before the checkout stopped accepting one. It is already paid, so like
       // the spent demo above it is not refused: it becomes a clean productive environment.
-      log.info("Source {} of the paid setup is a productive environment, not a demo; the paid "
-          + "setup continues without a source", persistedDemoClientId);
+      log.info("Source {} of the paid setup is not usable as a demo source (a productive "
+          + "environment, or its type could not be read); the paid setup continues without a "
+          + "source", persistedDemoClientId);
       onboardingRequest.demoClientId = null;
       return true;
     }

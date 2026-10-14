@@ -326,7 +326,8 @@ open no row, and the lifecycle webhooks keep the `ETGO_SubscriptionStatus`/`DueA
   fails and stays retryable instead of being recorded in the marker; only a failure other than a
   failed SQL statement (a mapping or hydration error after the statement ran, for instance) leaves
   a usable transaction and can reach the edge. Failing every OFF purchase on a lookup error would
-  be the worse trade. **Follow-up:** none (no ticket). Design doc §6.3.
+  be the worse trade. The purchase-source check has a sibling edge, accepted on the same reasoning
+  the same day: §4.14, *Accepted edge*. **Follow-up:** none (no ticket). Design doc §6.3.
 - **Several switch rows:** the reader and the verification query both take the first in
   `created desc, updated desc, ad_preference_id desc`, so the winner is deterministic even for rows
   created in one transaction.
@@ -1495,8 +1496,11 @@ The fix asks the lifecycle type as well as the plan:
 - **Backend** (go `99f765229`): `TenantEnvironmentLifecycleService#isProductiveEnvironment` — any
   active subscription row, open or closed, else the `ETGO_EnvironmentType = PRODUCTIVE` marker or
   the retired `ETGO_TenantPlan` preference, so it holds with `ETGO_SubscriptionModel` OFF too. It
-  writes nothing, never reads the access decision or its kill switch, and fails closed (a lookup
-  error answers "productive"). `resolveCheckoutSelection`, `isOwnedFreeDemoClient` (400
+  writes nothing, never reads the access decision or its kill switch, and fails closed on the type
+  reads only: a `findLatest` or `ETGO_EnvironmentType` read that throws answers "productive". A
+  failure inside the retired `ETGO_TenantPlan` fallback (`TenantPlanPreferenceFallback#isProductive`
+  via `resolvePlanWithoutSubscription`) is swallowed there and answers "not productive" —
+  fail-open, accepted 2026-10-14 (Martin Taal); it retires in Phase F. `resolveCheckoutSelection`, `isOwnedFreeDemoClient` (400
   `INVALID_DEMO_SELECTION`), `findFreeTenantIdsByAccountEmail` and `restorePaidOnboardingSelection`
   use it. A tenant that predates the lifecycle metadata (no row, no marker, free plan) stays a
   valid source.
@@ -1506,6 +1510,20 @@ The fix asks the lifecycle type as well as the plan:
 The effect: a canceled productive tenant's checkout provisions a clean new environment, as on
 `develop`. Reference: `feature-flags-and-tenant-upgrade.md` §2, *A productive environment is never
 a source*; `schema_forge/docs/paid-tenant-infrastructure.md`, step 8.
+
+**Accepted edge — a genuine demo dropped on a lookup error: accepted 2026-10-14 (Martin Taal),
+same reasoning as the failed row lookup in §2.9, no code change.** When `isProductiveEnvironment`
+fails on a type read, it answers "productive", so a demo the buyer chose is dropped as a source
+without a message. From a demo session (`demoClientId` + `dataTransfer`) the failure on the session
+client makes `resolveCheckoutSelection` answer 201 with no source recorded; a recorded source that
+fails in `restorePaidOnboardingSelection` provisions a clean environment — no profile copy, no
+transfer, no association — and the demo stays alive (its INFO line says the source "is not usable
+as a demo source (a productive environment, or its type could not be read)"). The picker still lists
+the demo, because `resolve()` answers null on the same error, and the backend then answers 400
+`INVALID_DEMO_SELECTION` on submit. *Why accepted:* as in §2.9, a failed SQL statement aborts the
+PostgreSQL transaction, so the request fails and stays retryable; only a failure other than a failed
+SQL statement reaches the edge, and its worst outcome is a clean environment, never the association
+of the wrong tenant.
 
 **Follow-up:** none for this fix. Letting that tenant re-subscribe its own environment instead is
 ETP-5742, and restricting the source to the account owner is ETP-5743 (§4.13).
