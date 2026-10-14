@@ -183,9 +183,9 @@ public class ProductDefaultsHandler implements NeoHandler {
    *
    * <p>Two forms. An array of price list version ids — what the import sends: the versions the
    * same request prices — skips a direction only when the version the seed would use for it is
-   * listed. The caller and the server pick "the default tariff" by different rules (selector order
-   * versus {@link PriceListVersionResolver}), so this is the form that cannot leave the server's
-   * default tariff without a row. {@code true} skips both directions unconditionally.
+   * listed. Once a user clears the default flag on a direction, the caller (selector order) and
+   * {@link PriceListVersionResolver} (org before {@code *}) can fall back to different lists, so
+   * this is the form that cannot leave the server's default tariff without a row. {@code true} skips both directions unconditionally.
    *
    * @param body the request body, mutated in place
    * @return the listed version ids, {@link #SKIP_ALL_TARIFFS} alone for {@code true}, or an empty
