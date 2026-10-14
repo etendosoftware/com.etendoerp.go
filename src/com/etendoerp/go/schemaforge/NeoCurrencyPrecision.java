@@ -215,17 +215,17 @@ final class NeoCurrencyPrecision {
   }
 
   /** The record's own currency, else the currency of its parent record. */
-  private static Currency currencyOfRecordOrParent(Entity entity, BaseOBObject record) {
-    if (record == null) {
+  private static Currency currencyOfRecordOrParent(Entity entity, BaseOBObject stored) {
+    if (stored == null) {
       return null;
     }
-    Currency own = currencyOf(entity, record);
+    Currency own = currencyOf(entity, stored);
     if (own != null) {
       return own;
     }
     for (Property property : entity.getProperties()) {
       if (isParentReference(property)) {
-        Object parent = record.get(property.getName());
+        Object parent = stored.get(property.getName());
         if (parent instanceof BaseOBObject) {
           Currency currency = currencyOf(property.getTargetEntity(), (BaseOBObject) parent);
           if (currency != null) {
@@ -275,14 +275,14 @@ final class NeoCurrencyPrecision {
     return currencyOf(parentEntity, OBDal.getInstance().get(parentEntity.getName(), parentId));
   }
 
-  /** The first non-null currency-typed property value of {@code record}. */
-  private static Currency currencyOf(Entity entity, BaseOBObject record) {
-    if (entity == null || record == null) {
+  /** The first non-null currency-typed property value of {@code stored}. */
+  private static Currency currencyOf(Entity entity, BaseOBObject stored) {
+    if (entity == null || stored == null) {
       return null;
     }
     for (Property property : entity.getProperties()) {
       if (isCurrencyReference(property)) {
-        Object value = record.get(property.getName());
+        Object value = stored.get(property.getName());
         if (value instanceof Currency) {
           return (Currency) value;
         }

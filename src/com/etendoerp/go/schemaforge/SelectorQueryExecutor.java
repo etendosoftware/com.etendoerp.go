@@ -388,8 +388,8 @@ final class SelectorQueryExecutor {
       // the transaction rollback-only before any catch could run, and custom-HQL selectors also run
       // inside writes (FK-by-name resolution), so a swallowed failure would let a write report
       // success and lose its commit. If record paging is chosen and fails, the error propagates.
-      RecordPage page = fetchRecordPage(selectPart, fromClause.getHql(), fromOnwards, idExpr,
-          displayOrder, fromParams, searchParam, limit, offset);
+      RecordPage page = fetchRecordPage(new RecordQuery(selectPart, fromClause.getHql(),
+          fromOnwards, idExpr, displayOrder, fromParams, searchParam), limit, offset);
       totalCount = page.totalCount;
       pageIds = page.ids;
       rows = page.rows;
@@ -460,6 +460,31 @@ final class SelectorQueryExecutor {
 
   private static final String PARAM_PAGE_IDS = "sfPageRecordIds";
 
+  /**
+   * The parts of a record-paged custom-HQL query (ETP-5703), grouped so the helpers below take one
+   * argument instead of seven.
+   */
+  private static final class RecordQuery {
+    final String selectPart;
+    final String fromHql;
+    final String fromOnwards;
+    final String idExpr;
+    final String displayOrder;
+    final Map<String, Object> params;
+    final String searchParam;
+
+    RecordQuery(String selectPart, String fromHql, String fromOnwards, String idExpr,
+        String displayOrder, Map<String, Object> params, String searchParam) {
+      this.selectPart = selectPart;
+      this.fromHql = fromHql;
+      this.fromOnwards = fromOnwards;
+      this.idExpr = idExpr;
+      this.displayOrder = displayOrder;
+      this.params = params;
+      this.searchParam = searchParam;
+    }
+  }
+
   /** One record-paged result: the distinct count, the page's record ids and their rows. */
   private static final class RecordPage {
     int totalCount;
@@ -471,23 +496,19 @@ final class SelectorQueryExecutor {
    * The record-paged queries (ETP-5703): {@code COUNT(DISTINCT <id>)}, the page of ids, the rows of
    * those ids. Any failure propagates to the caller.
    */
-  private static RecordPage fetchRecordPage(String selectPart, String fromHql, String fromOnwards,
-      String idExpr, String displayOrder, Map<String, Object> params, String searchParam,
-      int limit, int offset) {
+  private static RecordPage fetchRecordPage(RecordQuery query, int limit, int offset) {
     RecordPage page = new RecordPage();
     org.hibernate.query.Query<Long> countQuery = OBDal.getInstance().getSession()
-        .createQuery("SELECT COUNT(DISTINCT " + idExpr + ")" + fromHql, Long.class);
-    bindCustomHqlParams(countQuery, params, searchParam);
+        .createQuery("SELECT COUNT(DISTINCT " + query.idExpr + ")" + query.fromHql, Long.class);
+    bindCustomHqlParams(countQuery, query.params, query.searchParam);
     Long count = countQuery.uniqueResult();
     page.totalCount = count != null ? count.intValue() : 0;
-    List<Object> pageIdValues = pageRecordIds(fromHql, idExpr, displayOrder, params, searchParam,
-        limit, offset);
+    List<Object> pageIdValues = pageRecordIds(query, limit, offset);
     for (Object value : pageIdValues) {
       page.ids.add(idValueAsString(value));
     }
     if (!pageIdValues.isEmpty()) {
-      page.rows = rowsOfRecords(selectPart, fromHql, fromOnwards, idExpr, displayOrder, params,
-          searchParam, pageIdValues);
+      page.rows = rowsOfRecords(query, pageIdValues);
     }
     return page;
   }
@@ -516,7 +537,7 @@ final class SelectorQueryExecutor {
 
   /** The FROM root alias of a custom HQL ({@code from PricingProductPrice pp} → {@code pp}). */
   private static final Pattern FROM_ROOT_ALIAS = Pattern.compile(
-      "^\\s*FROM\\s+[A-Za-z_][\\w.]*\\s+(?:AS\\s+)?([A-Za-z_]\\w*)", Pattern.CASE_INSENSITIVE);
+      "^\\s*FROM\\s+[a-z_][\\w.]*\\s+(?:AS\\s+)?([a-z_]\\w*)", Pattern.CASE_INSENSITIVE);
 
   private static final java.util.Set<String> HQL_KEYWORDS = new java.util.HashSet<>(
       java.util.Arrays.asList("where", "join", "left", "inner", "right", "full", "cross", "order",
@@ -535,16 +556,15 @@ final class SelectorQueryExecutor {
    * display value of each record and then the id, so the order is total and stable across pages.
    */
   @SuppressWarnings("unchecked")
-  private static List<Object> pageRecordIds(String fromHql, String idExpr, String displayOrder,
-      Map<String, Object> params, String searchParam, int limit, int offset) {
-    String pageHql = "SELECT " + idExpr + fromHql + " GROUP BY " + idExpr
-        + " ORDER BY MIN(" + displayOrder + "), " + idExpr;
+  private static List<Object> pageRecordIds(RecordQuery query, int limit, int offset) {
+    String pageHql = "SELECT " + query.idExpr + query.fromHql + " GROUP BY " + query.idExpr
+        + " ORDER BY MIN(" + query.displayOrder + "), " + query.idExpr;
     org.hibernate.query.Query<?> pageQuery = OBDal.getInstance().getSession().createQuery(pageHql);
-    bindCustomHqlParams(pageQuery, params, searchParam);
+    bindCustomHqlParams(pageQuery, query.params, query.searchParam);
     pageQuery.setMaxResults(limit);
     pageQuery.setFirstResult(offset);
     // The same id twice cannot come out of a GROUP BY; kept unique anyway, defensively.
-    return new ArrayList<Object>(new java.util.LinkedHashSet<Object>(pageQuery.list()));
+    return new ArrayList<>(new java.util.LinkedHashSet<>(pageQuery.list()));
   }
 
   /**
@@ -552,24 +572,22 @@ final class SelectorQueryExecutor {
    * value, record id, then the FROM root's id when it can be read off the HQL.
    */
   @SuppressWarnings("unchecked")
-  private static List<Object> rowsOfRecords(String selectPart, String fromHql, String fromOnwards,
-      String idExpr, String displayOrder, Map<String, Object> params, String searchParam,
-      List<Object> pageIdValues) {
+  private static List<Object> rowsOfRecords(RecordQuery query, List<Object> pageIdValues) {
     boolean hasWhere = Pattern.compile("\\sWHERE\\s", Pattern.CASE_INSENSITIVE)
-        .matcher(fromHql).find();
-    StringBuilder dataHql = new StringBuilder(selectPart).append(fromHql)
-        .append(hasWhere ? " AND " : " WHERE ").append(idExpr).append(" IN (:")
+        .matcher(query.fromHql).find();
+    StringBuilder dataHql = new StringBuilder(query.selectPart).append(query.fromHql)
+        .append(hasWhere ? " AND " : " WHERE ").append(query.idExpr).append(" IN (:")
         .append(PARAM_PAGE_IDS).append(")")
-        .append(" ORDER BY ").append(displayOrder).append(", ").append(idExpr);
-    String rootAlias = fromRootAlias(fromOnwards);
+        .append(" ORDER BY ").append(query.displayOrder).append(", ").append(query.idExpr);
+    String rootAlias = fromRootAlias(query.fromOnwards);
     if (rootAlias != null) {
       dataHql.append(", ").append(rootAlias).append(".id");
     }
     org.hibernate.query.Query<?> dataQuery = OBDal.getInstance().getSession()
         .createQuery(dataHql.toString());
-    bindCustomHqlParams(dataQuery, params, searchParam);
+    bindCustomHqlParams(dataQuery, query.params, query.searchParam);
     dataQuery.setParameterList(PARAM_PAGE_IDS, pageIdValues);
-    return new ArrayList<Object>(dataQuery.list());
+    return new ArrayList<>(dataQuery.list());
   }
 
   /** The alias of the FROM root entity, or {@code null} when it cannot be read reliably. */
@@ -600,11 +618,40 @@ final class SelectorQueryExecutor {
   }
 
   /**
-   * A plain HQL path to a record id ({@code e.id}, {@code e.product.id}), safe inside
-   * COUNT(DISTINCT). Must end in {@code .id}: only then is it the identity of a record.
+   * Whether {@code expr} is a plain HQL path to a record id ({@code e.id}, {@code e.product.id}),
+   * safe inside COUNT(DISTINCT): dot-separated ASCII identifiers ({@code [A-Za-z_][A-Za-z0-9_]*}),
+   * at least two of them, the last being exactly {@code id} — only then is it the identity of a
+   * record. Hand-written (no regex) so it cannot backtrack.
    */
-  private static final Pattern PLAIN_PROPERTY_PATH =
-      Pattern.compile("[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z_][A-Za-z0-9_]*)*\\.id");
+  static boolean isPlainIdPath(String expr) {
+    if (expr == null) {
+      return false;
+    }
+    String[] segments = expr.split("\\.", -1);
+    if (segments.length < 2 || !"id".equals(segments[segments.length - 1])) {
+      return false;
+    }
+    for (String segment : segments) {
+      if (!isAsciiIdentifier(segment)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private static boolean isAsciiIdentifier(String segment) {
+    if (segment.isEmpty()) {
+      return false;
+    }
+    for (int i = 0; i < segment.length(); i++) {
+      char c = segment.charAt(i);
+      boolean letter = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_';
+      if (!letter && (i == 0 || c < '0' || c > '9')) {
+        return false;
+      }
+    }
+    return true;
+  }
 
   /**
    * The record-id expression of the projection when it is a plain property path ending in
@@ -614,7 +661,7 @@ final class SelectorQueryExecutor {
   static String plainIdExpression(String[] selectExprs, Integer idColIdx) {
     if (idColIdx != null && idColIdx >= 0 && idColIdx < selectExprs.length) {
       String expr = stripColumnAlias(selectExprs[idColIdx]);
-      if (PLAIN_PROPERTY_PATH.matcher(expr).matches()) {
+      if (isPlainIdPath(expr)) {
         return expr;
       }
     }

@@ -523,7 +523,7 @@ public class NeoCommercialLinePolicyTest {
    */
   @Test
   public void testInjectLineGross_roundedToSuppliedPrecision() throws Exception {
-    // { orderedQuantity, grossUnitPrice, scale, expected lineGrossAmount }
+    // Each row: the ordered quantity, the gross unit price, the scale and the expected line gross.
     String[][] cases = {
         { "3", "1.2345", "0", "4" },        // 3.7035 at 0 decimals (e.g. JPY)
         { "1", "3.7025", "3", "3.703" },    // HALF_UP, not HALF_EVEN (3.702), at 3 decimals
