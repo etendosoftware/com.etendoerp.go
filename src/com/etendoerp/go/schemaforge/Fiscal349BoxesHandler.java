@@ -638,14 +638,12 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
       arr.put(buildInvoiceRow(inv, type, sdf, null, null));
       return;
     }
-    // ETP-5725 — ALWAYS use the per-key live base (the same InvoiceTax-sourced HQL
-    // resolveInvoiceKeyBases/getTaxBaseAmountPerBusinessPartner use for the Operadores totals
-    // and the multi-key branch), even for a single-key invoice. The single-key case used to pass
-    // `null` here so buildInvoiceRow fell back to `inv.getSummedLineAmount()` — a cached header
-    // column that can disagree in SIGN with the live tax-line sum (confirmed for FVR
-    // rectificativa invoices, ETP-5725). That stale fallback is now unreachable from this loop;
-    // it only remains in buildInvoiceRow for the `bases == null/empty` branch above, where there
-    // is no live per-key source to use instead.
+    // ETP-5725: every entry here, including a lone one, goes through the per-key live
+    // base below instead of the invoice's cached header total. The two sources are the
+    // same tax-derived figure the Operadores totals and the multi-key branch already
+    // rely on, so a single-key invoice no longer risks a sign mismatch against them (the
+    // problem seen with FVR rectificativa invoices). The cached header total is only
+    // ever reached above, for an invoice with no resolvable key at all.
     for (Map.Entry<String, BigDecimal> e : bases.entrySet()) {
       arr.put(buildInvoiceRow(inv, type, sdf, e.getKey(), e.getValue()));
     }
