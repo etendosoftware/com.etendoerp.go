@@ -378,28 +378,34 @@ final class SelectorQueryExecutor {
     }
     String searchParam = hasSearch ? "%" + search.toLowerCase() + "%" : null;
 
-    String countHql = "SELECT " + customHqlCountExpression(alias, selectExprs, idColIdx)
-        + fromClause.getHql();
-    org.hibernate.query.Query<Long> countQuery = OBDal.getInstance()
-        .getSession().createQuery(countHql, Long.class);
-    bindCustomHqlParams(countQuery, fromParams, searchParam);
-    Long countResult = countQuery.uniqueResult();
-    int totalCount = (countResult != null) ? countResult.intValue() : 0;
-
     String displayOrder = alias + "." + meta.displayProperty;
-    List<Object> rows;
+    int totalCount = 0;
+    List<Object> rows = null;
     List<String> pageIds = null;
     if (idExpr != null) {
-      List<Object> pageIdValues = pageRecordIds(fromClause.getHql(), idExpr, displayOrder,
-          fromParams, searchParam, limit, offset);
-      pageIds = new ArrayList<>();
-      for (Object value : pageIdValues) {
-        pageIds.add(idValueAsString(value));
+      // Record paging is new SQL for an existing selector: it runs under a JDBC savepoint and, if
+      // it fails for any reason, the selector falls back to the row-paged flow it always had — a
+      // selector that worked before ETP-5703 must never turn into an error.
+      try {
+        RecordPage page = fetchRecordPage(selectPart, fromClause.getHql(), fromOnwards, idExpr,
+            displayOrder, fromParams, searchParam, limit, offset);
+        totalCount = page.totalCount;
+        pageIds = page.ids;
+        rows = page.rows;
+      } catch (Exception e) {
+        log.warn("[ETP-5703] Record paging failed for custom-HQL selector {}; falling back to row"
+            + " paging: {}", meta.entityName, e.getMessage());
+        pageIds = null;
+        rows = null;
       }
-      rows = pageIdValues.isEmpty() ? new ArrayList<>()
-          : rowsOfRecords(selectPart, fromClause.getHql(), fromOnwards, idExpr, displayOrder,
-              fromParams, searchParam, pageIdValues);
-    } else {
+    }
+    if (rows == null) {
+      String countHql = "SELECT COUNT(" + alias + ")" + fromClause.getHql();
+      org.hibernate.query.Query<Long> countQuery = OBDal.getInstance()
+          .getSession().createQuery(countHql, Long.class);
+      bindCustomHqlParams(countQuery, fromParams, searchParam);
+      Long countResult = countQuery.uniqueResult();
+      totalCount = (countResult != null) ? countResult.intValue() : 0;
       String dataHql = selectPart + fromClause.getHql() + " ORDER BY " + displayOrder;
       org.hibernate.query.Query<?> dataQuery = OBDal.getInstance().getSession().createQuery(dataHql);
       bindCustomHqlParams(dataQuery, fromParams, searchParam);
@@ -459,6 +465,42 @@ final class SelectorQueryExecutor {
   }
 
   private static final String PARAM_PAGE_IDS = "sfPageRecordIds";
+
+  /** One record-paged result: the distinct count, the page's record ids and their rows. */
+  private static final class RecordPage {
+    int totalCount;
+    List<String> ids = new ArrayList<>();
+    List<Object> rows = new ArrayList<>();
+  }
+
+  /**
+   * The record-paged queries (ETP-5703) — {@code COUNT(DISTINCT <id>)}, the page of ids, the rows
+   * of those ids — under one JDBC savepoint, so a failure rolls back to it and leaves the request
+   * transaction usable for the row-paged fallback.
+   */
+  private static RecordPage fetchRecordPage(String selectPart, String fromHql, String fromOnwards,
+      String idExpr, String displayOrder, Map<String, Object> params, String searchParam,
+      int limit, int offset) throws Exception {
+    RecordPage page = new RecordPage();
+    java.sql.Connection conn = OBDal.getInstance().getConnection();
+    JdbcSavepoints.run(conn, () -> {
+      org.hibernate.query.Query<Long> countQuery = OBDal.getInstance().getSession()
+          .createQuery("SELECT COUNT(DISTINCT " + idExpr + ")" + fromHql, Long.class);
+      bindCustomHqlParams(countQuery, params, searchParam);
+      Long count = countQuery.uniqueResult();
+      page.totalCount = count != null ? count.intValue() : 0;
+      List<Object> pageIdValues = pageRecordIds(fromHql, idExpr, displayOrder, params,
+          searchParam, limit, offset);
+      for (Object value : pageIdValues) {
+        page.ids.add(idValueAsString(value));
+      }
+      if (!pageIdValues.isEmpty()) {
+        page.rows = rowsOfRecords(selectPart, fromHql, fromOnwards, idExpr, displayOrder, params,
+            searchParam, pageIdValues);
+      }
+    });
+    return page;
+  }
 
   /** The FROM root alias of a custom HQL ({@code from PricingProductPrice pp} → {@code pp}). */
   private static final Pattern FROM_ROOT_ALIAS = Pattern.compile(
@@ -545,13 +587,17 @@ final class SelectorQueryExecutor {
     return item;
   }
 
-  /** A plain HQL property path ({@code e.id}, {@code e.product.id}), safe inside COUNT(DISTINCT). */
+  /**
+   * A plain HQL path to a record id ({@code e.id}, {@code e.product.id}), safe inside
+   * COUNT(DISTINCT). Must end in {@code .id}: only then is it the identity of a record.
+   */
   private static final Pattern PLAIN_PROPERTY_PATH =
-      Pattern.compile("[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z_][A-Za-z0-9_]*)+");
+      Pattern.compile("[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z_][A-Za-z0-9_]*)*\\.id");
 
   /**
-   * The record-id expression of the projection when it is a plain property path, else
-   * {@code null} (ETP-5703): only then is the selector counted and paged by record.
+   * The record-id expression of the projection when it is a plain property path ending in
+   * {@code .id}, else {@code null} (ETP-5703): only then is the selector counted and paged by
+   * record.
    */
   static String plainIdExpression(String[] selectExprs, Integer idColIdx) {
     if (idColIdx != null && idColIdx >= 0 && idColIdx < selectExprs.length) {
@@ -561,18 +607,6 @@ final class SelectorQueryExecutor {
       }
     }
     return null;
-  }
-
-  /**
-   * The COUNT projection of a custom-HQL selector (ETP-5703): {@code COUNT(DISTINCT <id expr>)} when
-   * the record-id column is a plain property path — the unit the selector is then paged by —
-   * otherwise the row count {@code COUNT(<alias>)} it has always been.
-   *
-   * @param idColIdx the projection index of the record id, or {@code null} when unresolved
-   */
-  static String customHqlCountExpression(String alias, String[] selectExprs, Integer idColIdx) {
-    String idExpr = plainIdExpression(selectExprs, idColIdx);
-    return idExpr != null ? "COUNT(DISTINCT " + idExpr + ")" : "COUNT(" + alias + ")";
   }
 
   /** {@code "e.id as id"} → {@code "e.id"}; an expression without an alias is returned trimmed. */

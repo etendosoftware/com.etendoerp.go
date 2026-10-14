@@ -3692,7 +3692,7 @@ public class AbstractInvoiceHeaderHandlerTest {
   public void missingRateText_namesCurrenciesAndDateInRequestLanguage() {
     java.time.LocalDate date = java.time.LocalDate.of(2026, 10, 14);
 
-    assertEquals("No hay tasa de cambio de EUR a USD para el 14/10/2026; indica eTGOCurrencyRate.",
+    assertEquals("No hay tipo de cambio de EUR a USD para el 14/10/2026; indica eTGOCurrencyRate.",
         AbstractInvoiceHeaderHandler.missingRateText("es_ES", "EUR", "USD", date));
     assertEquals("No exchange rate from EUR to USD for 2026-10-14; send eTGOCurrencyRate.",
         AbstractInvoiceHeaderHandler.missingRateText("en_US", "EUR", "USD", date));
@@ -3746,7 +3746,7 @@ public class AbstractInvoiceHeaderHandlerTest {
       assertEquals(1, messages.length());
       assertEquals("warning", messages.getJSONObject(0).getString("type"));
       assertTrue(messages.getJSONObject(0).getString("text")
-          .startsWith("No hay tasa de cambio de EUR a USD para el "));
+          .startsWith("No hay tipo de cambio de EUR a USD para el "));
       assertFalse(coreBody.has("messages"));
       verify(dal, Mockito.never()).getConnection();
     }

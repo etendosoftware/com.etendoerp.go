@@ -943,7 +943,7 @@ Response (rich OBUISEL selector):
 
 OBUISEL selectors with custom HQL queries are fully supported. The service uses `Session.createQuery()` to execute the custom HQL with org security filtering, validation rules, search across searchable properties, and pagination.
 
-**One item per record (ETP-5703).** A custom HQL that joins a child table returns several rows for one record — `ProductSimple` (`PricingProductPrice` join `product`) returns a product once per price-list version. When the projection's record-id column is a plain property path (`e.id`), `executeCustomHqlQuery` pages **by record**: (1) `COUNT(DISTINCT <id>)` is the `totalCount`; (2) one page of distinct ids — `GROUP BY <id> ORDER BY MIN(<display>), <id>` with `offset`/`limit`; (3) the rows of those ids (`<id> IN (:ids)`, ordered by display, id and the FROM root's id, so the row kept per record is deterministic), collapsed to one item per record in page order. Count, `offset`, `limit` and `hasMore` thus share one unit: no record repeats within or across pages and none becomes unreachable (6, not 13, for six products in two versions). Any other id expression keeps the previous row-based query unchanged.
+**One item per record (ETP-5703).** A custom HQL that joins a child table returns several rows for one record — `ProductSimple` (`PricingProductPrice` join `product`) returns a product once per price-list version. When the projection's record-id column is a plain property path ending in `.id` (`e.id`, `e.product.id`), `executeCustomHqlQuery` pages **by record**, under a JDBC savepoint — if any of those queries fails, it logs a warning and falls back to the previous row-paged flow, so a selector that worked before never becomes an error: (1) `COUNT(DISTINCT <id>)` is the `totalCount`; (2) one page of distinct ids — `GROUP BY <id> ORDER BY MIN(<display>), <id>` with `offset`/`limit`; (3) the rows of those ids (`<id> IN (:ids)`, ordered by display, id and the FROM root's id, so the row kept per record is deterministic), collapsed to one item per record in page order. Count, `offset`, `limit` and `hasMore` thus share one unit: no record repeats within or across pages and none becomes unreachable (6, not 13, for six products in two versions). Any other id expression keeps the previous row-based query unchanged.
 
 **Search fragments and their alias (ETP-5670).** On a standard (non-custom) OBUISEL selector, a searchable field's `property` is a DAL path relative to the entity (`product.name`), so the search always qualifies it with the query alias (`e.product.name`), dotted or not. A `clause_left_part` (used only when `property` is blank) is raw HQL and keeps its own alias (`bp.name`). Custom-HQL selectors keep their original rule: a dotted fragment is used as written. An unqualified relative path used to bind to the outer row once the where clause was copied into the de-dup subquery of view-backed selectors (Value Field ≠ `id`), turning it into a correlated subquery that PostgreSQL re-ran once per candidate row.
 
@@ -3647,8 +3647,8 @@ currency-precision rounding as above), on these channels:
 | MCP `etendo_update` | the invoice-line customization's pre-hook — `InvoiceLineHandler.handle` → `InvoiceLineAmountSupport.deriveAmountsOnUpdate` — which `handleUpdate` dispatches with `PUT` (the shared MCP update path is unchanged). Sales and purchase lines (both bound to `invoiceLineHandler`) |
 | REST `/batch`, `etendo_batch` | create only — not applicable |
 
-The MCP derivation runs only when the body sets `invoicedQuantity`, `unitPrice` or `grossUnitPrice` to
-a value different from the stored line's; the inputs are the stored line overlaid with the patch (a
+The MCP derivation runs only when the body sets `invoicedQuantity`, `unitPrice`, `grossUnitPrice` or
+`tax` to a value different from the stored line's (a tax-only change re-derives the gross); the inputs are the stored line overlaid with the patch (a
 sparse update of the quantity alone is priced with the stored price and tax). An amount the caller
 sent is kept unless it is zero or equal (at 2 decimals) to the derived one; a quantity set to 0 zeroes
 the amounts. On REST the same pre-hook runs too but persists nothing different: the amounts are
@@ -3690,7 +3690,7 @@ behaviour is unchanged. Channels as noted per field:
   succeeds with its usual status and the response carries a warning in the existing `messages`
   array (`[{"type":"warning","text":…}]`, the envelope `BusinessPartnerHandler` and the callouts
   already use), translated to the request language from `messages/neo_hints_<lang>.properties`
-  (`NeoHints`) — ES: *"No hay tasa de cambio de EUR a USD para el 14/10/2026; indica
+  (`NeoHints`) — ES: *"No hay tipo de cambio de EUR a USD para el 14/10/2026; indica
   eTGOCurrencyRate."*, EN: *"No exchange rate from EUR to USD for 2026-10-14; send
   eTGOCurrencyRate."* REST: at the root of the body (where the SPA reads `data.messages`). MCP: inside
   core's `response` wrapper, so the flattened record the agent gets has `messages` at its top level.

@@ -142,6 +142,27 @@ class InvoiceLineAmountSupportTest {
         new BigDecimal(String.valueOf(body.get(InvoiceLineAmountSupport.FIELD_GROSS_AMOUNT)))));
   }
 
+  /**
+   * A tax-only change re-derives the gross from the stored quantity and price (REST PATCH parity):
+   * 10 × 1.50 = 15.00 net, at the new tax's 21 % (the stub answers 21 for any tax) 18.15 gross.
+   */
+  @Test
+  void deriveAmountsOnUpdate_taxOnlyChanged_rederivesGross() throws Exception {
+    InvoiceLine stored = storedLine();
+    JSONObject body = new JSONObject("{\"tax\":\"TAX-OTHER\"}");
+
+    try (MockedStatic<OBDal> dal = LineAmountTestSupport.taxRate(21.0)) {
+      OBDal instance = OBDal.getInstance();
+      when(instance.get(InvoiceLine.class, "line-1")).thenReturn(stored);
+      InvoiceLineAmountSupport.deriveAmountsOnUpdate(updateContext(body));
+    }
+
+    assertEquals(0, new BigDecimal("15.00").compareTo(
+        new BigDecimal(String.valueOf(body.get(InvoiceLineAmountSupport.FIELD_LINE_NET_AMOUNT)))));
+    assertEquals(0, new BigDecimal("18.15").compareTo(
+        new BigDecimal(String.valueOf(body.get(InvoiceLineAmountSupport.FIELD_GROSS_AMOUNT)))));
+  }
+
   /** A quantity equal to the stored one is not a change: the amounts are left alone. */
   @Test
   void deriveAmountsOnUpdate_quantityUnchanged_leavesAmountsAlone() throws Exception {

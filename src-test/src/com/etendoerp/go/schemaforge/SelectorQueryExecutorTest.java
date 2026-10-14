@@ -850,6 +850,9 @@ public class SelectorQueryExecutorTest {
     when(session.createQuery(anyString())).thenReturn(dataHibQuery);
     OBDal obDal = mock(OBDal.class);
     when(obDal.getSession()).thenReturn(session);
+    // The record-paged queries run under a JDBC savepoint on the request connection.
+    java.sql.Connection connection = mock(java.sql.Connection.class);
+    when(obDal.getConnection()).thenReturn(connection);
     Entity entityDef = mock(Entity.class);
     ModelProvider modelProvider = mock(ModelProvider.class);
     when(modelProvider.getEntity(anyString())).thenReturn(entityDef);
@@ -934,6 +937,9 @@ public class SelectorQueryExecutorTest {
     });
     OBDal obDal = mock(OBDal.class);
     when(obDal.getSession()).thenReturn(session);
+    // The record-paged queries run under a JDBC savepoint on the request connection.
+    java.sql.Connection connection = mock(java.sql.Connection.class);
+    when(obDal.getConnection()).thenReturn(connection);
     Entity entityDef = mock(Entity.class);
     ModelProvider modelProvider = mock(ModelProvider.class);
     when(modelProvider.getEntity(anyString())).thenReturn(entityDef);
@@ -984,6 +990,86 @@ public class SelectorQueryExecutorTest {
       assertEquals(2, capturedItems[0].length());
       assertEquals("P3", capturedItems[0].getJSONObject(0).getString("id"));
       assertEquals("P4", capturedItems[0].getJSONObject(1).getString("id"));
+    }
+  }
+
+  /**
+   * ETP-5703 review: an id column that is not a {@code .id} path never takes the record-paged
+   * route — the selector runs the row-paged flow it always had: COUNT(alias), offset and limit on
+   * the data query, no GROUP BY.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testExecuteCustomHqlQueryNonIdPathKeepsRowPaging() throws Exception {
+    SelectorMeta meta = new SelectorMeta.Builder("Product", "name").isRich(true)
+        .isCustomQuery(true)
+        .customHql("SELECT e.searchKey as id, e.name as name FROM Product e").build();
+
+    Query countHibQuery = mock(Query.class);
+    when(countHibQuery.uniqueResult()).thenReturn(3L);
+    Query dataQuery = mock(Query.class);
+    List<Object> rows = Arrays.asList("A", "B");
+    when(dataQuery.list()).thenReturn(rows);
+    String[] countHql = new String[1];
+    List<String> dataHqls = new ArrayList<>();
+    Session session = mock(Session.class);
+    when(session.createQuery(anyString(), eq(Long.class))).thenAnswer(inv -> {
+      countHql[0] = inv.getArgument(0);
+      return countHibQuery;
+    });
+    when(session.createQuery(anyString())).thenAnswer(inv -> {
+      dataHqls.add(inv.getArgument(0));
+      return dataQuery;
+    });
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.getSession()).thenReturn(session);
+    Entity entityDef = mock(Entity.class);
+    ModelProvider modelProvider = mock(ModelProvider.class);
+    when(modelProvider.getEntity(anyString())).thenReturn(entityDef);
+    SelectorQueryBuilder.HqlWithParams emptyClause = SelectorQueryBuilder.HqlWithParams.empty();
+    NeoResponse expected = NeoResponse.ok(new JSONObject());
+
+    try (MockedStatic<SelectorQueryBuilder> builderMock = mockStatic(SelectorQueryBuilder.class);
+        MockedStatic<NeoSelectorExecutionHelper> helperMock =
+            mockStatic(NeoSelectorExecutionHelper.class);
+        MockedStatic<SelectorRowMapper> mapperMock = mockStatic(SelectorRowMapper.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+        MockedStatic<ModelProvider> providerMock = mockStatic(ModelProvider.class);
+        MockedStatic<SelectorResponseSupport> respMock = mockStatic(SelectorResponseSupport.class)) {
+      builderMock.when(() -> SelectorQueryBuilder.buildCustomHqlFromClause(any(), any(), any(),
+          any(), any(), any())).thenReturn(emptyClause);
+      helperMock.when(() -> NeoSelectorExecutionHelper.bindNamedParameters(any(Query.class), any()))
+          .thenAnswer(inv -> null);
+      mapperMock.when(() -> SelectorRowMapper.buildSelectColumnIndexMap(any()))
+          .thenReturn(new HashMap<>());
+      mapperMock.when(() -> SelectorRowMapper.resolveIdColumnIndex(any(), any(), any(), any()))
+          .thenReturn(0);
+      mapperMock.when(() -> SelectorRowMapper.extractDisplayLabel(any(), any(), any(), any(), any()))
+          .thenReturn("x");
+      mapperMock.when(() -> SelectorRowMapper.mapGridFieldsToItem(any(), any(), any(), any()))
+          .thenAnswer(inv -> null);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      providerMock.when(ModelProvider::getInstance).thenReturn(modelProvider);
+      respMock.when(() -> SelectorResponseSupport.buildGridColumnMetadata(any()))
+          .thenReturn(new JSONArray());
+      respMock.when(() -> SelectorResponseSupport.extractRecordId(any(), any()))
+          .thenAnswer(inv -> ((Object[]) inv.getArgument(0))[0]);
+      JSONArray[] capturedItems = new JSONArray[1];
+      respMock.when(() -> SelectorResponseSupport.buildSelectorResponse(any(), any(), anyInt(),
+          anyInt(), anyInt())).thenAnswer(inv -> {
+            capturedItems[0] = inv.getArgument(0);
+            return expected;
+          });
+
+      SelectorQueryExecutor.execute(meta, "", 2, 4, null, "org-1", null);
+
+      assertTrue(countHql[0], countHql[0].startsWith("SELECT COUNT(e)"));
+      assertEquals(1, dataHqls.size());
+      assertFalse(dataHqls.get(0), dataHqls.get(0).contains("GROUP BY"));
+      org.mockito.Mockito.verify(dataQuery).setFirstResult(4);
+      org.mockito.Mockito.verify(dataQuery).setMaxResults(2);
+      org.mockito.Mockito.verify(obDal, never()).getConnection();
+      assertEquals(2, capturedItems[0].length());
     }
   }
 

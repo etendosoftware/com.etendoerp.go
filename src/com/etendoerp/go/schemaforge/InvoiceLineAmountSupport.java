@@ -60,7 +60,7 @@ final class InvoiceLineAmountSupport {
 
   /** The inputs whose change re-derives the amounts of an existing line (ETP-5703). */
   private static final List<String> QUANTITY_AND_PRICE = Arrays.asList(FIELD_INVOICED_QTY,
-      FIELD_UNIT_PRICE, FIELD_GROSS_UNIT_PRICE);
+      FIELD_UNIT_PRICE, FIELD_GROSS_UNIT_PRICE, FIELD_TAX);
 
   /** The inputs {@link NeoCommercialLinePolicy#injectCommercialAmounts} reads for an invoice line. */
   private static final List<String> AMOUNT_INPUTS = Arrays.asList(FIELD_INVOICED_QTY,
@@ -144,8 +144,8 @@ final class InvoiceLineAmountSupport {
    *
    * <p><b>The rule.</b>
    * <ul>
-   *   <li>Only when the body sets {@code invoicedQuantity}, {@code unitPrice} or
-   *       {@code grossUnitPrice} to a value different from the stored line's; otherwise nothing is
+   *   <li>Only when the body sets {@code invoicedQuantity}, {@code unitPrice},
+   *       {@code grossUnitPrice} or {@code tax} to a value different from the stored line's; otherwise nothing is
    *       read or written beyond that comparison.</li>
    *   <li>The inputs are the stored line overlaid with the body (an update is sparse), so a patch
    *       of the quantity alone is priced with the stored price and tax.</li>
@@ -192,11 +192,22 @@ final class InvoiceLineAmountSupport {
     }
   }
 
-  /** {@code true} when the body sets a quantity or price different from the stored line's. */
+  /** {@code true} when the body sets a quantity, price or tax different from the stored line's. */
   static boolean changesQuantityOrPrice(JSONObject body, InvoiceLine stored) {
     return differs(body, FIELD_INVOICED_QTY, stored.getInvoicedQuantity())
         || differs(body, FIELD_UNIT_PRICE, stored.getUnitPrice())
-        || differs(body, FIELD_GROSS_UNIT_PRICE, stored.getGrossUnitPrice());
+        || differs(body, FIELD_GROSS_UNIT_PRICE, stored.getGrossUnitPrice())
+        || taxDiffers(body, stored);
+  }
+
+  /** {@code true} when the body sets a tax other than the stored line's (the gross depends on it). */
+  private static boolean taxDiffers(JSONObject body, InvoiceLine stored) {
+    if (!body.has(FIELD_TAX) || body.isNull(FIELD_TAX)) {
+      return false;
+    }
+    String sent = body.optString(FIELD_TAX, "");
+    return StringUtils.isNotBlank(sent)
+        && (stored.getTax() == null || !sent.equals(stored.getTax().getId()));
   }
 
   private static boolean differs(JSONObject body, String key, BigDecimal stored) {

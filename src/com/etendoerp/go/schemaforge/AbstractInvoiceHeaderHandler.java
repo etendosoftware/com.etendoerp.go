@@ -1247,6 +1247,9 @@ public abstract class AbstractInvoiceHeaderHandler {
         }
         if (change.write()) {
           writeCurrencyRate(invoiceId, change.rate());
+          // Safe: the CRUD write already flushed the invoice before afterHandle() runs, so the
+          // refresh only discards the stale in-memory rate, never a pending change. It must stay
+          // after that flush (and after the UPDATE above) — moved earlier it would drop edits.
           OBDal.getInstance().getSession().refresh(invoice);
           if (change.rate() == null) {
             // No rate for the new currency: the row synced for the previous one is stale too.
