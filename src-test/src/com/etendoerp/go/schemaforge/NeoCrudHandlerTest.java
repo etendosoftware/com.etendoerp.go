@@ -3833,7 +3833,7 @@ class NeoCrudHandlerTest {
            MockedStatic<DocTypeResolver> docTypeMock =
                Mockito.mockStatic(DocTypeResolver.class)) {
         cascadeMock.when(() -> NeoDefaultsCascadeHelper.executeCalloutCascade(
-            any(), any(), any(), any(), any(), any())).then(invocation -> null);
+            any(), any(), any(), any(), any(), any(), any())).then(invocation -> null);
         cascadeMock.when(() -> NeoDefaultsCascadeHelper.removeEmptyFkValues(
             any(), any())).then(invocation -> null);
         docTypeMock.when(() -> DocTypeResolver.reapplyDocTypeFromTabFilter(
@@ -3846,7 +3846,7 @@ class NeoCrudHandlerTest {
 
         // Verify cascade was called (no exception)
         cascadeMock.verify(() -> NeoDefaultsCascadeHelper.executeCalloutCascade(
-            any(), any(), any(), any(), any(), any()));
+            any(), any(), any(), any(), any(), any(), any()));
       }
     }
 
@@ -3865,7 +3865,7 @@ class NeoCrudHandlerTest {
            MockedStatic<DocTypeResolver> docTypeMock =
                Mockito.mockStatic(DocTypeResolver.class)) {
         cascadeMock.when(() -> NeoDefaultsCascadeHelper.executeCalloutCascade(
-            any(), any(), any(), any(), any(), any())).then(invocation -> null);
+            any(), any(), any(), any(), any(), any(), any())).then(invocation -> null);
         cascadeMock.when(() -> NeoDefaultsCascadeHelper.removeEmptyFkValues(
             any(), any())).then(invocation -> null);
         docTypeMock.when(() -> DocTypeResolver.reapplyDocTypeFromTabFilter(
@@ -3879,7 +3879,7 @@ class NeoCrudHandlerTest {
 
         // Should not throw NPE
         cascadeMock.verify(() -> NeoDefaultsCascadeHelper.executeCalloutCascade(
-            any(), any(), any(), any(), any(), any()));
+            any(), any(), any(), any(), any(), any(), any()));
       }
     }
 

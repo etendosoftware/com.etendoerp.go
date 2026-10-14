@@ -952,8 +952,10 @@ class NeoCrudHandler {
     Set<String> effectiveSuppressed = suppressedFields != null
         ? suppressedFields
         : java.util.Collections.emptySet();
+    // ETP-5676: inside a batch, a callout whose every output the same batch already saw discarded
+    // under the same key is skipped; null outside a batch, where every callout runs as before.
     NeoDefaultsCascadeHelper.executeCalloutCascade(context, adTab, filteredBody, seqFields,
-        effectiveProtected, effectiveSuppressed);
+        effectiveProtected, effectiveSuppressed, NeoBatchScope.currentCalloutDiscardMemory());
     long t1 = System.nanoTime();
     DocTypeResolver.reapplyDocTypeFromTabFilter(filteredBody, adTab, context, effectiveProtected);
     NeoDefaultsCascadeHelper.removeEmptyFkValues(filteredBody, adTab);
