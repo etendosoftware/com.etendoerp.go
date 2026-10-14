@@ -958,10 +958,16 @@ default `false`: **without it every batch runs every callout, exactly as before 
 products/contacts import sends it; OCR and every other caller do not. The server-side kill switch
 `batch-callout-skip-disabled` (`GoFeatureFlags#FLAG_BATCH_CALLOUT_SKIP_DISABLED`, environment level,
 backend-only) overrides the request: unset or `false` honours the opt-in, `true` turns the skip off
-for every batch. It is evaluated once per batch, when `NeoBatchScope` opens. To flip it: in
-ConfigCat where `etendo.go.configcat.sdkKey` is set (live within one 60 s poll); otherwise
-`etendo.go.flags.batch-callout-skip-disabled=true` in `Openbravo.properties` or the
-`ETGO_FLAG_BATCH_CALLOUT_SKIP_DISABLED=true` environment variable, which needs a Tomcat restart.
+for every batch. It is evaluated once per batch, when `NeoBatchScope` opens.
+**Not created in ConfigCat yet**: the `etendo-go` config is at the plan's 10-flag limit (ConfigCat
+answered 402); tracked in ETP-5751, the migration to Datadog Feature Flags. Until then it is unset,
+so it resolves to `false` and the skip runs whenever a request opts in. The local value
+(`etendo.go.flags.batch-callout-skip-disabled=true` in `Openbravo.properties`, or
+`ETGO_FLAG_BATCH_CALLOUT_SKIP_DISABLED=true`, plus a Tomcat restart) is read **only where no
+ConfigCat SDK key is configured**: `GoFeatureFlags#createProvider()` installs one provider, ConfigCat
+when `etendo.go.configcat.sdkKey` resolves, `PropertiesFeatureProvider` otherwise, never both.
+**Production has an SDK key, so there the local value is ignored and there is no rollback until the
+flag exists in the control plane.**
 
 The create path runs
 the callout of every field present in the body (§ callout cascade). On a uniform import most of that
