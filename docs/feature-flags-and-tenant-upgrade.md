@@ -264,6 +264,16 @@ evaluated once per batch; its only caller is `NeoBatchScope.calloutSkipKillSwitc
 keeping the skip, once the skip has run on real tenant imports without a wrong default. Full
 reference: [`neo-headless.md`](neo-headless.md) §4.3.6.
 
+**Not created in ConfigCat yet**: the `etendo-go` config is at the plan's 10-flag limit (ConfigCat
+answered 402); tracked in ETP-5751, the migration to Datadog Feature Flags. Until then it is unset,
+so it resolves to `false` and the skip runs whenever a request opts in. The local value
+(`etendo.go.flags.batch-callout-skip-disabled=true` in `Openbravo.properties`, or
+`ETGO_FLAG_BATCH_CALLOUT_SKIP_DISABLED=true`, plus a Tomcat restart) is read **only where no
+ConfigCat SDK key is configured**: `GoFeatureFlags#createProvider()` installs one provider, ConfigCat
+when `etendo.go.configcat.sdkKey` resolves, `PropertiesFeatureProvider` otherwise, never both.
+**Production has an SDK key, so there the local value is ignored and there is no rollback until the
+flag exists in the control plane.**
+
 ## 2. The onboarding paywall
 
 ### Local pooled failure fixture
