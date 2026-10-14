@@ -980,8 +980,8 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
 
   @Test
   public void aRetiredPlanOnlyProductiveIsProductiveWithTheSwitchOnAndOff() {
-    // The one shape that reaches the switch (the fallback reads it to pick its log level), so
-    // here "same answer" is not vacuous.
+    // This is the one shape whose fallback reads the switch to pick its log level, which is why
+    // getting the same answer with the switch on and off is a meaningful check here
     String clientId = freshClientId();
     java.util.function.Supplier<Fixture> planOnly = () -> new Fixture().withPreference(
         TenantPlanService.PREFERENCE_ATTRIBUTE, TenantPlanService.PLAN_PRODUCTIVE);
