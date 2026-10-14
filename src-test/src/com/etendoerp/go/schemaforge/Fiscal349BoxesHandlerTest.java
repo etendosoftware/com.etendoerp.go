@@ -810,11 +810,19 @@ public class Fiscal349BoxesHandlerTest {
   }
 
   /**
-   * ETP-5597: a single-key invoice keeps exactly its old row — one row, invoice-level base
-   * (summed line amount), even though the per-key map carries a (possibly different) base.
+   * ETP-5725 (was ETP-5597 "keeps invoice-level base"): a single-key invoice's row now uses the
+   * LIVE per-key base — the same {@code resolveInvoiceKeyBases}/{@code
+   * getTaxBaseAmountPerBusinessPartner} HQL sum the Operadores tab and the multi-key branch
+   * already trust — instead of the invoice's cached {@code summedLineAmount}. Before this fix
+   * {@code appendInvoiceRows} discarded the per-key base for the single-key case and passed
+   * {@code null} into {@code buildInvoiceRow}, which then fell back to the stale column; this
+   * test used to assert that OLD (buggy) behavior ("keeps invoice-level base", 120.00) and has
+   * been rewritten to assert the fix instead. See {@link
+   * #testCollectInvoicesSingleKeyRectificativaUsesLiveNegativeBaseNotStaleSummedAmount} for the
+   * bug's actual symptom: a cached column that disagrees in SIGN with the live sum.
    */
   @Test
-  public void testCollectInvoicesSingleKeyInvoiceKeepsInvoiceLevelBase() throws Exception {
+  public void testCollectInvoicesSingleKeyInvoiceUsesLivePerKeyBase() throws Exception {
     Invoice s = invoice("s1", "S1", "120.00");
 
     JSONArray arr = handler.collectInvoices(Collections.<Invoice>emptySet(),
@@ -822,7 +830,29 @@ public class Fiscal349BoxesHandlerTest {
 
     assertEquals(1, arr.length());
     assertEquals("E", arr.getJSONObject(0).getString("key"));
-    assertEquals("120.00", arr.getJSONObject(0).getString("base"));
+    // Live per-key base (77.00) wins over the invoice's cached summedLineAmount (120.00).
+    assertEquals("77.00", arr.getJSONObject(0).getString("base"));
+  }
+
+  /**
+   * ETP-5725 — the actual bug: a rectificativa (FVR) invoice whose CACHED {@code
+   * summedLineAmount} carries the WRONG (positive) sign, while the LIVE per-key base — computed
+   * straight from {@code InvoiceTax}, the same source the Operadores totals and the
+   * Rectificaciones tab's signed-delta path already use — is correctly NEGATIVE. "Facturas
+   * origen" must show the live, correctly-signed value, not the stale column.
+   */
+  @Test
+  public void testCollectInvoicesSingleKeyRectificativaUsesLiveNegativeBaseNotStaleSummedAmount()
+      throws Exception {
+    Invoice fvr = invoice("fvr1", "FVR1000013", "115.00"); // stale cached column: wrong sign
+
+    JSONArray arr = handler.collectInvoices(
+        new LinkedHashSet<>(Collections.singletonList(fvr)), Collections.<Invoice>emptySet(),
+        keyBases("fvr1", "A", "-115.00")); // live InvoiceTax-derived base: correct sign
+
+    assertEquals(1, arr.length());
+    assertEquals("A", arr.getJSONObject(0).getString("key"));
+    assertEquals("-115.00", arr.getJSONObject(0).getString("base"));
   }
 
   /** ETP-5597: a sale mixing goods (E) and services (S) backs both keys, each with its own base. */
@@ -851,10 +881,18 @@ public class Fiscal349BoxesHandlerTest {
   }
 
   /**
-   * ETP-5597 (CP-20): a rectifying invoice (credit note) keeps its NEGATIVE base in "Facturas
-   * origen" — single-key (invoice-level summed line amount) and mixed (per-key, already halved
-   * for a purchase) alike. The operator rows and the AEAT file aggregate these lines signed, so an
-   * abs() here showed a credit note as if it added to the base.
+   * ETP-5597 (CP-20) / ETP-5725: a rectifying invoice (credit note) keeps its NEGATIVE base in
+   * "Facturas origen" — single-key and mixed (per-key, already halved for a purchase) alike. The
+   * operator rows and the AEAT file aggregate these lines signed, so an abs() here showed a
+   * credit note as if it added to the base.
+   *
+   * <p>ETP-5725 — the single-key expectation changed from "-80.00" (the invoice's cached {@code
+   * summedLineAmount}) to "-40.00" (the live per-key base): this is exactly the bug this ticket
+   * fixes — the cached column and the live tax-line sum can disagree, and "Facturas origen" must
+   * show the live one. The sign stays negative either way, which is why this pre-existing test
+   * didn't catch the bug on its own; {@link
+   * #testCollectInvoicesSingleKeyRectificativaUsesLiveNegativeBaseNotStaleSummedAmount} covers
+   * the case where the cached column's SIGN itself is wrong.
    */
   @Test
   public void testCollectInvoicesKeepsTheNegativeBaseOfACreditNote() throws Exception {
@@ -867,7 +905,7 @@ public class Fiscal349BoxesHandlerTest {
         new LinkedHashSet<>(Arrays.asList(single, mixed)), Collections.<Invoice>emptySet(), keys);
 
     assertEquals(3, arr.length());
-    assertEquals("-80.00", arr.getJSONObject(0).getString("base"));
+    assertEquals("-40.00", arr.getJSONObject(0).getString("base"));
     assertEquals("-100.00", arr.getJSONObject(1).getString("base"));
     assertEquals("-50.00", arr.getJSONObject(2).getString("base"));
   }
