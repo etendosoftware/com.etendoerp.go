@@ -86,7 +86,7 @@ only what is still open.
   real plan — a plan change, which only ETP-5053 provides. Their subscription row snapshots
   the charged price id but no amount or currency, since the plan has none (design doc §7).
 
-### 🟠 2.3 Run the backfill AFTER the deploy, never before
+### 🟠 2.3 Run the backfill AFTER the deploy, never before — and only as part of the switch
 
 **Ticket:** owner ETP-5046 (the pre-check, an R37 deployment step) and ETP-5048 (the adoption
 step, if the pre-check fails); moving grandfathered tenants to a priced plan is ETP-5053.
@@ -95,6 +95,12 @@ step, if the pre-check fails); moving grandfathered tenants to a priced plan is 
 the code shipping gets a preference and no subscription. The backfill's `@check` catches exactly
 that tenant because it keys on the preference rather than on a date — but only if it runs
 afterwards.
+
+Since 2026-10-14 R37 is **opt-in** (`-- @optIn: true`): a full `make data-fixes` never runs it, so it
+cannot run before the deploy by accident. It is step 3.3 of the switch to the subscription model
+(§2.9, design doc §6.2): chain current first (`make data-fixes`), then
+`make data-fixes FIX=R37-tenant-subscription-backfill` (`DRY_RUN=1` first), then the System
+preference. `FIX=` refuses a tenant whose chain is behind R37's date (`BLOCKED_CHAIN_BEHIND`).
 
 The transitional fallback (design doc §8) means this ordering is no longer *load-bearing for uptime*, only
 for completeness.
@@ -196,13 +202,46 @@ keeps running. `EnsureLegacyPlanScriptTest` fails the build if `ETGO_PLAN` reapp
 `AD_DATASET_TABLE.xml` or as sourcedata, or if the compiled class is not committed. The same rule applies to any other
 table that mixes shipped and runtime rows: seed the shipped rows with a module script.
 
+### 🟠 2.9 The subscription model is OFF on every environment until its operator switches it on
+
+**Ticket:** owner ETP-5046 (decided by Martin, 2026-10-14). Related ETP-5047 (enforcement reads the
+rows), ETP-5051/5053 (quotas and plan changes need a row), §3.2 (Phase F).
+
+Whether a **new** paid purchase opens an `ETGO_SUBSCRIPTION` row is decided per environment by one
+database-stored switch: the System-level list preference **`ETGO_SubscriptionModel`**, read by
+`SubscriptionModelSwitch#isOn` on every purchase (no cache, no restart). Only `Y` on an active row at
+`AD_CLIENT_ID = '0'` with no narrower visibility means ON; absent, any other value, a tenant-scoped
+row or a failed read mean OFF. The module ships the `AD_Ref_List` value but **no preference row**,
+so every environment comes up OFF after the deploy and stays exactly where develop is: new
+purchases write `ETGO_TenantPlan`, open no row, and the lifecycle webhooks keep the
+`ETGO_SubscriptionStatus`/`DueAt` preferences.
+
+- **Switching is one operator step, done once:** chain current → R37 with `FIX=` (dry run first)
+  → set the preference → verify (R37 ledger rows `APPLIED`/`SKIPPED_NOT_NEEDED`; active
+  `ETGO_TenantPlan='PRODUCTIVE'` markers = 0). Full checklist: design doc §6.2, rationale §6.3.
+- **One-way in practice.** Setting it back to `N` only stops new rows; tenants that have one keep
+  being decided by it. Both populations then grow again and Phase F moves further away — an
+  emergency brake, not an undo.
+- **Only creation is gated.** Reads are unchanged: a tenant with a row is decided by the row
+  whatever the switch says. `openSubscription` has one runtime caller (the paid upgrade), which is
+  where the gate sits.
+- **While OFF the fallback WARN fires for every paying tenant**, by design; §3.2's "silence" signal
+  is meaningful only on a switched environment.
+- **Do not ship a preference row as module data.** A sourcedata row would be reset by every
+  `update.database`, silently switching an environment back; the operator's row has no module.
+- **Residual after the switch (data-fix side):** a tenant that first reaches develop's R42 after the
+  switch (onboarded later, baseline 2026-09-02) gets a marker re-inserted next to its row, because
+  opt-in R37 no longer follows R42 in the chain. Until a successor of R42 ships, re-run
+  `make data-fixes FIX=R37-tenant-subscription-backfill CLIENT=<id>` for such a tenant (R37 header).
+
 ---
 
 ## 3. Legacy plans and the cutover
 
 ### 🟠 3.2 Phase F — deleting the transitional plan code — has no ticket
 
-**Ticket:** no ticket — needs its own once R37 has run on every environment.
+**Ticket:** no ticket — needs its own once every environment has switched (§2.9: R37 run and
+`ETGO_SubscriptionModel = Y`).
 
 The `ETGO_TenantPlan` preference is retired per tenant (R37 and the paid onboarding), and a
 transitional read fallback answers for tenants not reached yet; design doc §8 describes both. What
@@ -218,10 +257,12 @@ whose paid upgrade opened a subscription row and deliberately wrote no marker. T
 cannot remove such a marker (it retires only at the moment it opens a row), so R37's retirement
 branch does: it deletes the marker of **every tenant that has any subscription row**, open or
 closed (design doc §8). The end condition below is therefore reached only once R37 has run *after*
-R42 for every tenant — the normal chain order (§3.6); a marker that reappears after R37 means
-someone forced R42 by hand.
+R42 for every tenant — which the runner's chain-current gate on the opt-in R37 guarantees for the
+tenants present at the switch (§3.6); a marker that reappears after R37 means either a tenant that
+first reached R42 after the switch (§2.9 residual) or someone forced R42 by hand.
 
-**Trigger** — both, checked on every environment (design doc §8.1):
+**Trigger** — on every environment, first that it has switched (§2.9: the System preference
+`ETGO_SubscriptionModel = Y` exists), then both of these (design doc §8.1):
 
 ```sql
 select count(*) from ad_preference where attribute = 'ETGO_TenantPlan';   -- reaches 0
@@ -236,6 +277,9 @@ row`) no longer appears in the logs.
 - `TenantPlanPreferenceFallback`, and its use in `TenantPlanService.resolvePlan`;
 - `TenantPlanService.markProductive`, `retireProductivePreference` and `PREFERENCE_ATTRIBUTE`, with
   their call sites in `EtendoGoJwtServlet.applyPaidUpgradeSideEffects`;
+- `SubscriptionModelSwitch` and its gate in `applyPaidUpgradeSideEffects`, plus the
+  `ETGO_SubscriptionModel` `AD_Ref_List` value — once every environment is ON the switch has nothing
+  left to decide;
 - the `allClientIds` overload of `EnvironmentPlanCache.of` and its callers in
   `EtendoGoJwtServlet` / `EtendoGoJwtDalHelper`;
 - the `ETGO_SubscriptionStatus` / `ETGO_SubscriptionDueAt` preference reads in
@@ -337,13 +381,13 @@ in the target branch** — and re-date it if it is not strictly newer.
 
 **The date also fixes R37's place after R42, and that order is load-bearing.** R37 now sits at
 2026-10-05T18:00:00Z; develop's R42 (`20260929T190000Z`, which re-inserts the `ETGO_TenantPlan`
-marker, §3.2) sorts before it. Per tenant, the chain visits R42 and then R37 in the same run, and
-R37's retirement branch removes whatever marker R42 just wrote. A failed R42 halts that tenant's
-chain before R37 and the next run resumes at R42, so R42 still comes first. Once R37 is
-`PROCESSED` the tenant's watermark is ≥ 2026-10-05T18:00:00Z and R42 never runs for it again. A
-tenant onboarded after ETP-5046 carries the onboarding baseline (2026-09-02) as its watermark, so
-its first chain runs R42 and then R37 in one pass. **The one way to run R42 after R37 is an
-operator forcing it** — `run.js --fix <R42>` ignores chain order and the watermark. Whoever does
+marker, §3.2) is dated before it. Since 2026-10-14 R37 is opt-in and never visited in chain order;
+the order is kept by the runner instead: `FIX=` applies an opt-in fix only to a tenant whose
+watermark has already reached the fix's own date (`BLOCKED_CHAIN_BEHIND` otherwise), so R42 is
+always at or below the watermark when R37 runs, R37's retirement branch removes whatever marker R42
+wrote, and R42 never runs for that tenant again. R37's own ledger rows never move the watermark.
+The gap this leaves — a tenant that first reaches R42 *after* the switch — is §2.9's residual.
+**The one way to run R42 after R37 for a tenant already past it is an operator forcing it** — `run.js --fix <R42>` ignores chain order and the watermark. Whoever does
 that must follow it with `run.js --fix <R37> --client <same tenant>`, or the re-inserted marker
 survives and §3.2's end condition never reaches 0.
 

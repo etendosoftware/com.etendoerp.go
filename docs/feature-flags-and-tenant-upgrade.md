@@ -638,11 +638,13 @@ hypothetical preconditions for a future gateway:
 
 ## 3. The plan marker
 
-> **Since ETP-5046 the marker is no longer the source of truth.** A tenant is productive when it has
-> an open `ETGO_SUBSCRIPTION` row in status `active` or `past_due`; the `ETGO_TenantPlan`
-> preference described below is written only when that subscription write fails, is retired per
-> tenant, and is read only as a transitional fallback — see "Transitional read fallback" at the end
-> of this section.
+> **Since ETP-5046 the marker is no longer the source of truth — on an environment that has
+> switched to the subscription model.** There a tenant is productive when it has an open
+> `ETGO_SUBSCRIPTION` row in status `active` or `past_due`; the `ETGO_TenantPlan` preference
+> described below is written only when that subscription write fails, is retired per tenant, and is
+> read only as a transitional fallback. Until the operator switches (the System preference
+> `ETGO_SubscriptionModel = Y`, see *The subscription-model switch* below), every new purchase still
+> writes the marker and opens no row, exactly as before ETP-5046.
 
 A tenant created through the paid flow is marked **productive**; every other tenant is **free**.
 
@@ -697,15 +699,56 @@ always provisions a new one.
 ### Transitional read fallback (ETP-5046 cutover) — grep `ETP-5046-TRANSITIONAL-FALLBACK`
 
 Since ETP-5046 the source of truth for "is this tenant paying" is the tenant's **open
-`ETGO_SUBSCRIPTION` row**, not the preference. Between deploying that change and running the **R37
-backfill** data-fix, every tenant provisioned before the deploy has a preference and no subscription
-row, and would therefore resolve to `free` — paid features off, wrong environment ordering, and,
-once ETP-5047's enforcement lands, denied login. The backfill is deliberately gated on a human
-re-verifying that production Stripe checkout has not gone live (if it has, a real paying cohort
-exists that the backfill would orphan), so it cannot simply be made automatic.
+`ETGO_SUBSCRIPTION` row** when it has one, not the preference. A tenant without a row — every paying
+tenant of an environment that has not switched yet (below), and on a switched one any tenant the
+opt-in **R37 backfill** has not reached — would otherwise resolve to `free`: paid features off,
+wrong environment ordering, and, once ETP-5047's enforcement lands, denied login. The backfill is
+deliberately gated on a human re-verifying that production Stripe checkout has not gone live (if it
+has, a real paying cohort exists that the backfill would orphan), so it is opt-in and never part of
+a full data-fix run.
 
-**The preference is the safety net, not a parallel truth — and it is retired per tenant.**
-`applyPaidUpgradeSideEffects` writes the subscription row and then:
+#### The subscription-model switch (`ETGO_SubscriptionModel`) — operator steps
+
+Each environment moves to the subscription model **once, at a moment its operator chooses**. Until
+then the whole environment — new customers included — keeps the preferences (`ETGO_TenantPlan`,
+`ETGO_SubscriptionStatus`/`DueAt`, `ETGO_EnvironmentType`) exactly as develop does, and the
+transitional fallback below is what answers for every paying tenant.
+
+`com.etendoerp.go.payment.SubscriptionModelSwitch#isOn` is the single answer. It reads an active
+**list** preference at System level — Property `ETGO_SubscriptionModel` (an `AD_Ref_List` value of
+`Property Configuration`), `AD_CLIENT_ID = '0'`, no visibility narrower than the system (Visible-at
+Client/Organization empty or `0`, no role, user or window) — and is ON only for the value `Y`.
+Absent, any other value, a tenant-scoped row or a failed read all mean OFF. It is read on every
+purchase (no cache, no restart needed) and only `applyPaidUpgradeSideEffects` consults it: it
+switches whether a **new** tenant gets a row, never how a tenant is read — a tenant with a row is
+decided by the row whatever the switch says. The module ships the list value but no preference row;
+a shipped row would be reset by every `update.database`.
+
+Switching, on the target environment:
+
+1. Re-verify the R37 pre-check (production Stripe checkout has not gone live since 2026-08-27,
+   `open-and-notable-topics.md` §2.4).
+2. `make data-fixes` in `schema_forge` — bring every tenant's chain current. R37 is **opt-in**: a
+   full run never applies it, and `FIX=` refuses a tenant whose chain is behind R37's date
+   (`BLOCKED_CHAIN_BEHIND`).
+3. `make data-fixes FIX=R37-tenant-subscription-backfill DRY_RUN=1`, then without `DRY_RUN`.
+4. Set the System preference in the Classic **Preference** window (System Administrator): Property
+   `ETGO_SubscriptionModel`, Value `Y`, Client System, Organization `*`, no role/user/window, **no
+   Module**.
+5. Verify: R37's rows in `etgo_data_fix_history`
+   (`fix_id = '20261005T180000Z__R37-tenant-subscription-backfill'`) are all `APPLIED` or
+   `SKIPPED_NOT_NEEDED`, and
+   `select count(*) from ad_preference where attribute = 'ETGO_TenantPlan' and isactive = 'Y' and
+   upper(trim(value)) = 'PRODUCTIVE'` returns **0**.
+
+**One-way in practice.** Setting the switch back to `N` only stops new rows: existing rows stay
+authoritative for their tenants, and new tenants go back to the marker — two populations again.
+Use it as an emergency brake, not as an undo. Full design: §6.2/§6.3 of
+`plans/2026-09-18-etp-5046-plan-and-subscription-design.md`.
+
+**The preference is the safety net, not a parallel truth — and it is retired per tenant.** With the
+switch OFF, `applyPaidUpgradeSideEffects` opens no row and calls `markProductive`, logged at INFO.
+With it ON it writes the subscription row and then:
 
 - **success** → it does *not* call `markProductive`; it calls
   `TenantPlanService.retireProductivePreference(clientId)` instead, removing any stale
@@ -724,13 +767,15 @@ and a refusal from that check also marks the whole request for rollback, which n
 cannot resurface as a `StaleStateException` in the onboarding's next flush. Both are pinned from a
 real tenant context by `TenantContextSubscriptionWriteIntegrationTest`.
 
-R37 does the same thing for tenants that predate the subscription model (statement 3 of its
-`@apply`, in the same transaction as the backfilled row) — and, more widely than the runtime path,
+R37 — run by the operator as step 3 of the switch above — does the same thing for tenants that
+predate the subscription model (statement 3 of its `@apply`, in the same transaction as the
+backfilled row) — and, more widely than the runtime path,
 for **every tenant that has any `ETGO_SUBSCRIPTION` row**, open or closed. That widening exists
 because develop's data-fix R42 (`20260929T190000Z__R42-paid-provisioning-commercial-metadata`,
 ETP-5548) re-inserts the marker for paid-provisioned tenants, including ones that already have a
-row; R42 always runs before R37 in a tenant's chain, so R37 removes it (design doc §8 and §8.2,
-including the `run.js --fix <R42>` caveat). The fleet therefore converges from both ends onto
+row; the runner runs R37 only for a tenant whose chain is already past R42, so R37 removes it
+(design doc §8 and §8.2, including the `run.js --fix <R42>` caveat and the residual for tenants
+that first reach R42 after the switch). The fleet therefore converges from both ends onto
 one **observable end condition**: `select count(*) from ad_preference where
 attribute = 'ETGO_TenantPlan'` reaching 0, with the WARN line below silent. Both retirement paths
 remove *every* `ETGO_TenantPlan` row visible at the tenant, whatever its value or `isactive` flag —
@@ -741,8 +786,9 @@ simply keeps answering until R37 retires the row.
 **Any future data-fix must key on `etgo_subscription`, not on `ETGO_TenantPlan`** — after R37 the
 preference is present only for tenants the backfill has not reached, so "no productive preference"
 increasingly means "already migrated paying tenant", not "free tenant". `R31`/`R32` are safe only
-because the runner's filename-ordered, watermark-gated execution guarantees they can never run for a
-tenant after R37 has; see §8.2 of
+because the runner's filename-ordered, watermark-gated execution — plus its rule that an opt-in fix
+such as R37 runs only for a tenant whose chain is already past the fix's date — guarantees they can
+never run for a tenant after R37 has; see §8.2 of
 `plans/2026-09-18-etp-5046-plan-and-subscription-design.md`.
 
 The read side therefore tolerates the gap. `com.etendoerp.go.payment.TenantPlanPreferenceFallback`
@@ -772,8 +818,9 @@ it; inventing a key such as `"legacy-productive"` would claim a row that does no
 hide the gap from anyone reading the payload.
 
 Every resolution served by the fallback logs at **WARN**, naming the tenant and pointing at the
-backfill — one line per resolution, never per comparison. That log is the deletion signal: **when it
-stops appearing, every tenant has a subscription row** and the fallback is safe to remove. Read it
+backfill — one line per resolution, never per comparison. On an environment whose switch is still OFF
+that is every paying tenant, every time, and expected. Once switched, that log is the deletion signal:
+**when it stops appearing, every tenant has a subscription row** and the fallback is safe to remove. Read it
 together with the preference count above: the count says no tenant still *has* a marker, the silence
 says no tenant still *needs* one. Phase F deletes `TenantPlanPreferenceFallback`, `markProductive`,
 `retireProductivePreference`, `PREFERENCE_ATTRIBUTE` and every call site — one
@@ -904,6 +951,7 @@ must never break the session.
 | Payload allow-list (what may ever be written down) | `com.etendoerp.go.payment.WebhookPayloadSummary` |
 | Confirmed-payment correlation, checkout lifecycle | `com.etendoerp.go.payment.CheckoutRequestStore` (`ETGO_CHECKOUT_REQUEST`) |
 | Plan read/write | `com.etendoerp.go.payment.TenantPlanService` |
+| Subscription-model switch (does a new purchase open a row?) | `com.etendoerp.go.payment.SubscriptionModelSwitch` |
 | Gate wiring, 402 response, plan marking | `com.etendoerp.go.rest.EtendoGoJwtServlet` |
 | Demo data transfer worker | `com.etendoerp.go.payment.DemoDataTransferService` |
 | Ownership count, `plan` in `/environments` | `com.etendoerp.go.rest.EtendoGoJwtDalHelper` |
