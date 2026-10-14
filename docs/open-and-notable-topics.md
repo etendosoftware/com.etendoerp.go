@@ -33,7 +33,7 @@ rule; their history is in git.
 
 ## 1. Decisions still owed
 
-*Moved to §6 on 2026-09-28: §1.1.*
+*Moved to §6 on 2026-09-28: §1.1. On 2026-10-14: §1.3.*
 
 ### 🔴 1.2 The billing period is per subscription, not per price
 
@@ -58,24 +58,6 @@ subscription to look up, so neither the script nor a lifecycle event (§5.5) can
 a period. **To decide:** the rule for it — e.g. a period computed locally from `START_DATE`, no
 quota at all (true today, while `legacy-productive` has no quota rows, §5.1), or moving the tenant
 onto a real Stripe subscription (a plan change, ETP-5053) before any quota applies to it.
-
-### 🔴 1.3 Enforcement default: shipped ON with a kill switch, or OFF behind a feature flag
-
-**Ticket:** related ETP-5047 (§3.8); the production rollout has no ticket.
-
-**To raise with:** Sebastián Barrozo
-
-Sebastián's rollout preference (2026-09-28): deploy reviewed code to production with the feature
-**off** by default, enable it for selected users or tenants, possibly validating on a demo server
-first. ETP-5047's environment-access enforcement ships the opposite way, by Martin's decision of
-2026-09-25 (§3.8): it enforces by default, and the kill switch `environment-access-enforcement-off`
-stops it per `clientId` only when the flag resolves to `true` (`EnvironmentAccessEnforcementFlag`).
-`GoFeatureFlags.isEnabled` answers `false` for an unconfigured flag, an unreachable control plane
-and any evaluation error, so today every failure of the flag provider keeps enforcing. An
-off-by-default rollout needs a positive "enforce" flag, and inverts that failure mode: an
-unreachable provider would let every blocked tenant in. The production default needs an explicit
-agreement before the ETP-5047 deploy. Operator procedure: `feature-flags-and-tenant-upgrade.md` §1,
-"Operating environment-access enforcement".
 
 ### 🔴 1.4 Per-client transactions versus today's per-resource-day transactions
 
@@ -126,8 +108,8 @@ Sebastián proposed (2026-09-28): there are no real customers yet, only demos, a
 subscriptions are expected in the coming weeks, so make a one-time cutover now — migrate the state
 worth keeping, switch to `ETGO_SUBSCRIPTION`, remove the preference fallback — after confirming
 there are no live subscriptions to adopt (§2.4). Martin raised that this means moving the code to
-production quickly; Sebastián's answer was the off-by-default feature-flag rollout of §1.3, which
-this module's enforcement does not follow. **Still to decide.** Prerequisites, from §3.2, on every
+production quickly; Sebastián's answer was the off-by-default feature-flag rollout of §1.3 —
+decided on 2026-10-14, though ETP-5047 itself still ships enforcement on. **Still to decide.** Prerequisites, from §3.2, on every
 environment: R37 has run after R42, the `ETGO_TenantPlan` marker count reaches 0, and the fallback
 WARN no longer appears. The cutover deletes §3.2's list, and with it the watermark preference of
 §3.7.
@@ -995,6 +977,40 @@ classes asserting the same thing, which is what made the ETP-5046 → ETP-5047 m
 risk — test-only, no behaviour change — and the lowest priority in this section. Raised by Martin
 on 2026-09-28, after the ETP-5046 → ETP-5047 merge; not yet actioned.
 
+A trim along these lines is parked, unpushed, on the local branch `parked/ETP-5047-followups` of
+`com.etendoerp.go` (`5363fa4d8`, "Trim the NEO environment-access test to what NEO decides"); see
+§4.13.
+
+### 🟡 4.13 Existing issues found while developing ETP-5047 — not fixed in ETP-5047
+
+**Ticket:** no ticket — candidates for one follow-up ticket; related ETP-5047.
+
+Found during ETP-5047's development, review and QA, then taken out of its scope by Martin on
+2026-10-14. All but item 11 predate ETP-5047 and exist on `develop` too. Fixes for most are built,
+reviewed and QA'd but **parked, unpushed, on local branches only** — a reader on another machine
+cannot see them; they are the starting point for whichever ticket picks this up:
+
+- `com.etendoerp.go` — `parked/ETP-5047-followups` (18 commits on `fa7668ff7`, head `ca1dc71cc`);
+- `schema_forge` — `parked/ETP-5047-followups` (14 commits on `59b286c2b`, head `5da6521f0`);
+- `schema_forge_core` — `parked/ETP-5047-core-402-reader` (`d57298c06`).
+
+Those branches also carry the opt-in enforcement of §1.3 and the test trim of §4.12; several fixes
+below assume it (item 1's 503 is decided per enforcement flag).
+
+| # | What happens | Impact | Parked fix |
+|---|---|---|---|
+| 1 | NEO answers **401** when the commercial access check itself throws (e.g. a DB error). | The SPA reads the 401 as an expired session and logs the user out. | go: 503 `ENVIRONMENT_UNVERIFIED` in the guard's shared body, decided per enforcement flag (`8818b02b0`, `a77f783c9`). |
+| 2 | An unresolved tenant (role / effective-client lookup fails) is a 401 on NEO and a 503 on MCP. | Same failure, two answers; on NEO, again a logout. | go: always the 503, whatever the flag (`fe097be21`). |
+| 3 | A SQL-level error inside `TenantEnvironmentLifecycleService.evaluateAccess` aborts the request's PostgreSQL transaction. | Later DAL work and the end-of-request commit fail (500s); on `POST /session/environment` the rotated session can be lost → logout. | go: a savepoint around the evaluation, plus a DB-backed integration test (`3f64f1219`, `ca1dc71cc`). |
+| 4 | Error bodies differ: the Copilot bridge and the OAuth2 API-key endpoints answer their own flat shapes; OAuth2 says `access_denied` even for a 503. | Clients need one reader per door; a retryable 503 looks like a denial. | go: shared 402/503 body on the Copilot bridge (`e8d5d8ed8`), `temporarily_unavailable` for the OAuth2 503 (`959689518`); sf: the readers accept both shapes. |
+| 5 | SPA: a 5xx or network failure on `windowaccessmap` shows "your role has no access"; session restore on a 5xx shows a blank screen. | Wrong copy for a temporary failure; a blank app with no way out. | sf: `AccessUnreachableScreen` (retry / log out) and `SessionBootingScreen`. |
+| 6 | SPA: a list shows an empty grid on any load failure — no error state. | A failed load looks like "no records". | None yet. |
+| 7 | SPA: the backend error code is lost on several paths — `useEntity` save / delete / process, `apiError`, the API-keys page, the `DataTable` inline toggle, `useCreateMovement` / `useStatementActions` — so English backend text reaches the user. | Untranslated messages in a Spanish UI. | sf: a code → i18n map (`lib/backendErrors.js`, `lib/requestError.js`) covers all but the two finance hooks. |
+| 8 | SPA API-keys page: hardcoded English confirm titles and copy toast; builds `createApiFetch` from the `@/auth/api.js` barrel instead of `useApiFetch`. | Breaks the i18n and request-policy rules of `schema_forge/CLAUDE.md`. | sf: translated, moved to `useApiFetch` (`6e2453a5c`). |
+| 9 | SPA does not recognise the OAuth2 API-key 402 envelope (`error: access_denied` + `error_description`) as an environment block; the message is untranslated. | Low: another request's 402 normally blocks the app first. | None. |
+| 10 | A brief access-map failure during a background refresh replaces the whole app. | Unsaved form input is lost. Pre-existing core behaviour. | None — needs an `app-shell-core` change: keep the previous access map on a background refresh. |
+| 11 | **Introduced by ETP-5047.** Two readers of the 402 decision: core `apiFetch` reads only the message text; schema_forge's `readEnvironmentAccessDecision` (`d18c484d9`) reads `error.decision` first. | Same answer while the backend keeps both in sync; they drift if it stops. | core: the reader moves into `app-shell-core` (`d57298c06`); the schema_forge side waits for a core release. |
+
 ## 5. Handed forward to later tickets
 
 *Moved to §6 on 2026-09-28: §5.7, §5.10, §5.12; §5.15 was decided on arrival and sits there too.*
@@ -1266,6 +1282,38 @@ a daily snapshot of the active clients (strategy `S`), not the ticket's `Client`
   backfill (`run(from, to)` rewrites even final days).
 - **`schema_forge/docs/usage-measurement.md` §4 is stale** — still titled "(open)", and its note
   on `productiveEnvironments` describes the ticket's `creationDate` wording, not the snapshot.
+
+### ✅ 1.3 Enforcement default: shipped ON with a kill switch, or OFF behind a feature flag
+
+**Ticket:** related ETP-5047 (§3.8); the opt-in implementation and the production rollout have no
+ticket.
+
+**Status:** decided 2026-10-14 (Martin Taal, following Sebastián Barrozo's rollout proposal of
+2026-09-28) — implementation owed.
+
+**Decision: OFF by default, behind a positive flag.** Environment-access enforcement should refuse
+a tenant only when an "enforce" flag resolves to `true` for it (per `clientId` or for everyone), and
+otherwise only log what it would have refused. This reverses Martin's decision of 2026-09-25 (§3.8).
+It also accepts the inverted failure mode: `GoFeatureFlags.isEnabled` answers `false` for an
+unconfigured flag, an unreachable control plane and any evaluation error, so with a positive flag
+every such failure means **not enforcing** — a blocked tenant is let in (and logged), never refused.
+
+**Not in ETP-5047.** ETP-5047 ships enforcement the way `develop` does today — **on** by default —
+plus the kill switch `environment-access-enforcement-off`, which stops it per `clientId` only when
+the flag resolves to `true` (`EnvironmentAccessEnforcementFlag`); every failure of the flag provider
+keeps enforcing. Operator procedure: `feature-flags-and-tenant-upgrade.md` §1, "Operating
+environment-access enforcement".
+
+**Follow-up:** no ticket. The opt-in implementation is built, reviewed and QA'd but **parked,
+unpushed**, on the local branches `parked/ETP-5047-followups` of `com.etendoerp.go` (`f988caf9f`,
+"Make environment-access enforcement opt-in per tenant": the flag becomes
+`environment-access-enforcement`, the kill switch is removed without a shim) and of `schema_forge`
+(`1500a3916`, the `flags-registry.json` entry, plus the docs). Those branches exist only on Martin's
+machine; a ticket that picks this up starts from them. Their register text also opens the question
+of when that flag ends (a placeholder TTL in `flags-registry.json`). Production still needs the
+switch-on procedure after the deploy: read the would-be refusals, check them against the
+subscription rows, then switch on one tenant, then everyone. The parked fixes of §4.13 are on the
+same branches.
 
 ### ✅ 5.7 `ETGO_PLAN_QUOTA.CONSUMPTION_SOURCE` means something else in ETP-5051
 
