@@ -29,7 +29,19 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
 
+/**
+ * @covers com.etendoerp.go.featureflags.FeatureFlagContext
+ */
 class FeatureFlagContextTest {
+
+  /**
+   * What {@code forAccount("user@example.com")} publishes: the email under the ConfigCat spelling
+   * ({@code Email}) and the Datadog one ({@code email}, ETP-5751). Losing either silently stops
+   * every rule written on that provider from matching.
+   */
+  private static final Map<String, String> ACCOUNT_ATTRIBUTES = Map.of(
+      FeatureFlagContext.ATTRIBUTE_EMAIL, "user@example.com",
+      FeatureFlagContext.ATTRIBUTE_EMAIL_LOWERCASE, "user@example.com");
 
   /**
    * Updated: {@code forAccount} now carries the email as BOTH the targeting key and the
@@ -43,9 +55,9 @@ class FeatureFlagContextTest {
   void targetsOnTheAccountEmail() {
     FeatureFlagContext context = FeatureFlagContext.forAccount("user@example.com");
     assertEquals("user@example.com", context.getTargetingKey());
-    // forAccount() publishes the email as BOTH the targeting key and the Email attribute — see
-    // FeatureFlagContext.ATTRIBUTE_EMAIL for why the duplication is load-bearing (ETP-4966).
-    assertEquals(Map.of(FeatureFlagContext.ATTRIBUTE_EMAIL, "user@example.com"),
+    // forAccount() publishes the email as the targeting key AND as the Email (ConfigCat) and email
+    // (Datadog) attributes — the duplication is load-bearing (ETP-4966, ETP-5751).
+    assertEquals(ACCOUNT_ATTRIBUTES,
         context.getAttributes());
   }
 
@@ -76,7 +88,7 @@ class FeatureFlagContextTest {
     FeatureFlagContext scoped = base.with(FeatureFlagContext.ATTRIBUTE_CLIENT_ID, "CLIENT1");
 
     // base still carries exactly what forAccount() gave it: it never gained clientId.
-    assertEquals(Map.of(FeatureFlagContext.ATTRIBUTE_EMAIL, "user@example.com"),
+    assertEquals(ACCOUNT_ATTRIBUTES,
         base.getAttributes());
     assertEquals("CLIENT1", scoped.getAttributes().get(FeatureFlagContext.ATTRIBUTE_CLIENT_ID));
     assertEquals("user@example.com",
@@ -92,8 +104,8 @@ class FeatureFlagContextTest {
         .with(FeatureFlagContext.ATTRIBUTE_CLIENT_ID, "  ")
         .with(null, "CLIENT1")
         .with("   ", "CLIENT1");
-    // Only the Email attribute survives: none of the four blank with() calls added anything.
-    assertEquals(Map.of(FeatureFlagContext.ATTRIBUTE_EMAIL, "user@example.com"),
+    // Only the email attributes survive: none of the four blank with() calls added anything.
+    assertEquals(ACCOUNT_ATTRIBUTES,
         context.getAttributes());
   }
 

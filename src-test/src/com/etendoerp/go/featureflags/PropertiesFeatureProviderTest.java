@@ -40,6 +40,10 @@ import dev.openfeature.sdk.ErrorCode;
 import dev.openfeature.sdk.ProviderEvaluation;
 import dev.openfeature.sdk.Value;
 
+/**
+ * @covers com.etendoerp.go.featureflags.PropertiesFeatureProvider
+ * @covers com.etendoerp.go.featureflags.GoFeatureFlags
+ */
 class PropertiesFeatureProviderTest {
 
   /**
@@ -86,6 +90,7 @@ class PropertiesFeatureProviderTest {
     }
     System.clearProperty(FLAG_PROPERTY);
     System.clearProperty(CONFIGCAT_SDK_KEY_PROPERTY);
+    System.clearProperty(GoFeatureFlags.DATADOG_FLAGS_ENABLED_PROPERTY);
     GoFeatureFlags.reset();
   }
 
@@ -268,5 +273,46 @@ class PropertiesFeatureProviderTest {
     GoFeatureFlags.reset();
 
     assertFalse(GoFeatureFlags.isEnabled(FLAG, FeatureFlagContext.forAccount("user@example.com")));
+  }
+
+  // --- Datadog arm and provider selection order (ETP-5751) ---
+
+  /**
+   * Datadog → ConfigCat → local properties: the first arm whose prerequisites are all met wins. A
+   * Datadog switch without the agent is "not configured", so it falls through rather than failing.
+   */
+  @ParameterizedTest
+  @CsvSource(nullValues = "NULL", value = {
+      "true,  true,  NULL,    DATADOG",
+      "true,  true,  sdk/key, DATADOG",
+      "true,  false, sdk/key, CONFIGCAT",
+      "true,  false, NULL,    PROPERTIES",
+      "false, true,  sdk/key, CONFIGCAT",
+      "false, true,  NULL,    PROPERTIES",
+      "false, false, NULL,    PROPERTIES",
+  })
+  void selectsTheFirstUsableControlPlane(boolean datadogRequested, boolean agentLoaded,
+      String sdkKey, GoFeatureFlags.ProviderKind expected) {
+    assertEquals(expected, GoFeatureFlags.selectProvider(datadogRequested, agentLoaded, sdkKey));
+  }
+
+  /** This test JVM runs without {@code -javaagent:dd-java-agent.jar}, like dev, CI and e2e. */
+  @Test
+  void theDatadogAgentIsNotDetectedWithoutTheJavaAgent() {
+    assertFalse(GoFeatureFlags.isDatadogAgentLoaded());
+  }
+
+  /**
+   * The Datadog switch on in an agent-less JVM must fall through to the local arm — not install a
+   * Datadog provider that can never become ready and so turn every flag off. A configured local
+   * flag reading true is what proves the fall-through happened.
+   */
+  @Test
+  void theDatadogSwitchWithoutTheAgentFallsBackToLocalConfiguration() {
+    System.setProperty(GoFeatureFlags.DATADOG_FLAGS_ENABLED_PROPERTY, "true");
+    System.setProperty(FLAG_PROPERTY, "true");
+    GoFeatureFlags.reset();
+
+    assertTrue(GoFeatureFlags.isEnabled(FLAG, FeatureFlagContext.forAccount("user@example.com")));
   }
 }
