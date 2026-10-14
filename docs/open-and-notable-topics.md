@@ -163,10 +163,10 @@ that tenant because it keys on the preference rather than on a date — but only
 afterwards.
 
 Since 2026-10-14 R37 is **opt-in** (`-- @optIn: true`): a full `make data-fixes` never runs it, so it
-cannot run before the deploy by accident. It is step 3.3 of the switch to the subscription model
-(§2.9, design doc §6.2): chain current first (`make data-fixes`), then
-`make data-fixes FIX=R37-tenant-subscription-backfill` (`DRY_RUN=1` first), then the System
-preference. `FIX=` refuses a tenant whose chain is behind R37's date (`BLOCKED_CHAIN_BEHIND`).
+cannot run before the deploy by accident. It is step 3.4 of the switch to the subscription model
+(§2.9, design doc §6.2): chain current first (`make data-fixes`), then the System preference, then
+`make data-fixes FIX=R37-tenant-subscription-backfill` (`DRY_RUN=1` first; `CLIENT=<id>` for one
+tenant). `FIX=` refuses a tenant whose chain is behind R37's date (`BLOCKED_CHAIN_BEHIND`).
 
 The transitional fallback (design doc §8) means this ordering is no longer *load-bearing for uptime*, only
 for completeness.
@@ -289,8 +289,9 @@ OFF. The module ships the `AD_Ref_List` value but **no preference row**, so ever
 up OFF after the deploy and stays exactly where develop is: new purchases write `ETGO_TenantPlan`,
 open no row, and the lifecycle webhooks keep the `ETGO_SubscriptionStatus`/`DueAt` preferences.
 
-- **Switching is one operator step, done once:** chain current → R37 with `FIX=` (dry run first)
-  → set the preference → verify, three checks: R37 ledger rows `APPLIED`/`SKIPPED_NOT_NEEDED`;
+- **Switching is one operator step, done once:** chain current → set the preference → R37 with
+  `FIX=` (dry run first; all at once or client by client with `CLIENT=<id>`) → verify, three
+  checks: R37 ledger rows `APPLIED`/`SKIPPED_NOT_NEEDED`;
   active `ETGO_TenantPlan='PRODUCTIVE'` markers = 0; and the switch row as the reader selects it —
   exactly ONE row with `trim(value) = 'Y'`:
   ```sql
@@ -301,7 +302,14 @@ open no row, and the lifecycle webhooks keep the `ETGO_SubscriptionStatus`/`DueA
      and ad_user_id is null and ad_window_id is null
    order by created desc, updated desc, ad_preference_id desc;
   ```
-  Full checklist: design doc §6.2, rationale §6.3.
+  Full checklist: design doc §6.2, rationale §6.3; operator page:
+  `feature-flags-and-tenant-upgrade.md` §3, *The subscription-model switch*.
+- **Switch first, then R37 (decided 2026-10-14, Martin Taal).** With the switch ON every new
+  purchase opens a row, so one R37 pass catches every tenant still on the marker. The old order
+  (R37, then the switch) is safe too, but a purchase made between the two steps still writes the
+  marker and needs a second R37 run — as does any client migrated with `CLIENT=` before the switch
+  was enabled. The switch is system-wide and only R37 is per client, so both models coexist
+  meanwhile (readers: row first, preference fallback).
 - **One-way in practice.** Setting it back to `N` sends only tenants that have never had a row back
   to the marker; every tenant with a row stays on it, payments included. Two populations that only
   grow apart, Phase F further away — turning it back OFF undoes nothing.

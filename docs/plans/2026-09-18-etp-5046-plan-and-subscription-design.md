@@ -286,28 +286,32 @@ optional — an environment may stay on the preference path indefinitely.
    `ETGO_TenantPlan` marker is written, no `ETGO_SUBSCRIPTION` row is opened, and the lifecycle
    webhooks keep writing `ETGO_SubscriptionStatus` / `ETGO_SubscriptionDueAt`. The checkout request
    still records the plan and the charged price.
-3. **Switch the environment to the subscription model — once, when ready.** In this order:
+3. **Switch the environment to the subscription model — once, when ready.** In this order (switch
+   first, then backfill — decided 2026-10-14, Martin Taal):
    1. Re-verify the R37 `@report` pre-check (production Stripe checkout has not gone live since
       2026-08-27) against the **target** environment — `open-and-notable-topics.md` §2.4.
    2. Bring every tenant's data-fix chain current: `make data-fixes` in `schema_forge`. R37 is
       **opt-in** (`-- @optIn: true`): a full run never applies it, and `FIX=` refuses a tenant whose
       chain is behind R37's date (`BLOCKED_CHAIN_BEHIND`) — this is what keeps the ordering
       invariant of §8.2 true now that R37 is no longer visited in chain order.
-   3. Run R37 explicitly, dry run first:
+   3. **Set the system preference** — Classic **Preference** window as System Administrator:
+      Property List checked, Property `ETGO_SubscriptionModel` (*Billing: new purchases open a
+      subscription row (Y/N)*), Value `Y`, Client `System`, Organization `*`, no Visible-at Client
+      other than System, no role, user or window, and **no Module**. From the next purchase on, a
+      new tenant opens an `ETGO_SUBSCRIPTION` row and writes no marker. No restart: the switch is
+      read on every purchase.
+   4. Run R37 explicitly, dry run first — for the whole environment, or client by client with
+      `CLIENT=<ad_client_id>`:
       `make data-fixes FIX=R37-tenant-subscription-backfill DRY_RUN=1`, then
       `make data-fixes FIX=R37-tenant-subscription-backfill`. A productive tenant with **no
       subscription row at all** gets its open `legacy-productive` row and loses its marker in the
       same transaction; a tenant that already has any row — closed or inactive included — only
-      loses its marker, and no row is inserted for it (the ETP-5047 backfill guard, §7, §8).
-   4. **Set the system preference** — Classic **Preference** window as System Administrator:
-      Property `ETGO_SubscriptionModel`, Value `Y`, Client `System`, Organization `*`, no
-      Visible-at Client other than System, no role, user or window, and **no Module**. From the
-      next purchase on, a new tenant opens an `ETGO_SUBSCRIPTION` row and writes no marker. No
-      restart: the switch is read on every purchase.
+      loses its marker, and no row is inserted for it (the ETP-5047 backfill guard, §7, §8). A
+      tenant onboarded after 3.2 is refused `BLOCKED_CHAIN_BEHIND`: repeat 3.2, then 3.4 for it.
    5. Verify:
       ```sql
       -- every tenant APPLIED or SKIPPED_NOT_NEEDED; FAILED means the legacy-productive plan row is
-      -- missing (R37 header, "Why @apply ABORTS") — fix it and repeat 3.3
+      -- missing (R37 header, "Why @apply ABORTS") — fix it and repeat 3.4
       select remediated_client_id, status, rows_affected, detail
         from etgo_data_fix_history
        where fix_id = '20261005T180000Z__R37-tenant-subscription-backfill'
@@ -317,7 +321,7 @@ optional — an environment may stay on the preference path indefinitely.
       select count(*) from ad_preference
        where attribute = 'ETGO_TenantPlan' and isactive = 'Y'
          and upper(trim(value)) = 'PRODUCTIVE';
-      -- after 3.4: exactly ONE row, and trim(value) = 'Y' -- the switch is ON
+      -- after 3.3: exactly ONE row, and trim(value) = 'Y' -- the switch is ON
       select ad_preference_id, value, created, updated from ad_preference
        where property = 'ETGO_SubscriptionModel' and ispropertylist = 'Y' and isactive = 'Y'
          and ad_client_id = '0' and coalesce(visibleat_client_id, '0') = '0'
@@ -328,12 +332,18 @@ optional — an environment may stay on the preference path indefinitely.
       The last query is the same selection `SubscriptionModelSwitch` makes, and like it does not
       filter on the value: the reader takes the newest matching row and trims it, so a second row
       or an `N` shows up here instead of hiding. It does not filter on `ad_module_id` either — the
-      reader ignores the module. "No Module" in 3.4 is not about the switch's answer but about
+      reader ignores the module. "No Module" in 3.3 is not about the switch's answer but about
       survival: a row assigned to a module in development is exported with it and reset by the next
       `update.database` (§6.3).
-   Run 3.3 **before** 3.4. The reverse order works too (rows are decided by the row, preferences by
-   the fallback) but opens a window in which new tenants have rows while the existing fleet does
-   not — a half-switched environment nobody chose.
+      **Done** when `select count(*) from ad_preference where attribute = 'ETGO_TenantPlan';`
+      returns 0 and the `ETP-5046-TRANSITIONAL-FALLBACK` WARN lines stop (§8.1).
+   Run 3.3 **before** 3.4. Once the switch is ON every new purchase opens a row, so one R37 pass
+   catches every tenant still on the marker. The reverse order (R37, then the switch — the order
+   this checklist gave until 2026-10-14) is safe too, since rows are decided by the row and markers
+   by the fallback, but a purchase made between the two steps still writes the marker and needs a
+   second R37 run; whoever migrates client by client before switching on must re-run R37 after
+   enabling the switch. Meanwhile both models coexist: the switch is system-wide, only R37 is per
+   client.
 4. **Switch to the plan catalog when ready.** In the Classic **Plans** window, create (or activate)
    a plan and enter its **Provider Price ID** — an active, recurring Stripe price with
    `interval_count = 1`. Display price, currency, billing interval and sync time are derived from
@@ -396,7 +406,7 @@ current; it runs only when the switch is OFF. A tenant whose only rows are inact
 new active open row next to them: the partial unique index `etgo_sub_open_envclient_uq` covers only
 active rows with no end date. A rowless tenant is decided by the switch, and read through the
 transitional fallback (§8). `openSubscription` has exactly one runtime caller — the paid upgrade —
-so the gate there covers every row a tenant can get at runtime; R37 is the operator's own step 3.3
+so the gate there covers every row a tenant can get at runtime; R37 is the operator's own step 3.4
 of §6.2.
 
 **A failed row lookup takes the marker path — accepted, decided 2026-10-14 (Martin Taal), no code
@@ -458,7 +468,7 @@ always stay NULL, since the request stores no amount), **and retires that tenant
 `20261005T180000Z__R37-tenant-subscription-backfill.sql` under
 `schema_forge/cli/src/data-fixes/sql/` — re-dated from `20260918T120000Z` during the develop merge,
 see §7.3. **Opt-in since 2026-10-14** (`-- @optIn: true`): a full `make data-fixes` never runs it;
-the operator runs it with `FIX=` as step 3.3 of §6.2, at the moment the environment switches to the
+the operator runs it with `FIX=` as step 3.4 of §6.2, right after the environment switches to the
 subscription model (§6.3). `@check` selects a tenant on either of two grounds: **(A) backfill** — an
 active productive marker and **no subscription row at all**, active or not, open or closed (narrowed
 from "no open subscription" in ETP-5047, §8); **(B) retirement** — any `ETGO_TenantPlan` row and any
@@ -576,7 +586,7 @@ tenant's watermark.
 ## 8. Cutover: per-tenant retirement, not a flag day
 
 **One environment-level moment comes first: the switch (§6.3).** Until an environment's operator
-runs R37 and sets `ETGO_SubscriptionModel = Y` (§6.2 step 3), nothing below happens there — new
+sets `ETGO_SubscriptionModel = Y` and runs R37 (§6.2 step 3), nothing below happens there — new
 purchases write the marker and open no row, as on develop. Everything in this section describes an
 environment that has switched.
 
@@ -709,9 +719,10 @@ the re-inserted marker survives and §8.1's count never reaches 0.
 
 ### 8.3 Deploy ordering still matters
 
-- **Run R37 after the deploy and before setting the switch, never before the deploy.** It is
-  opt-in now (§6.2 step 3), so nothing runs it by accident; whoever runs it does so as part of the
-  switch. A tenant provisioned between the schema landing and the code shipping gets a preference
+- **Run R37 after the deploy and after setting the switch, never before the deploy.** It is
+  opt-in now (§6.2 step 3.4), so nothing runs it by accident; whoever runs it does so as part of the
+  switch, right after setting it (since 2026-10-14; before the switch also works but then needs a
+  second run, §6.2). A tenant provisioned between the schema landing and the code shipping gets a preference
   and no subscription; the backfill's `@check` catches exactly that tenant, because it keys on the
   preference rather than on a date. **Since ETP-5047 "the deploy" is the ETP-5047 deploy:** R37
   writes `GRACE_ANCHOR` and `LAST_EVENT_AT`, columns ETP-5047 adds, so run earlier it fails on
