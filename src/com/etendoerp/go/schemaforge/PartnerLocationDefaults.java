@@ -92,6 +92,82 @@ final class PartnerLocationDefaults {
   }
 
   /**
+   * Ship-to then bill-to default of an order-like header (ETP-5703): fills {@code shipToKey} with the
+   * partner's only location flagged {@code shipToFlag} and, only when that happened, resolves
+   * {@code billToKey} with {@link #alignBillTo}. A caller that sent the ship-to address (the SPA)
+   * is untouched, bill-to included.
+   */
+  static void fillShipToAndBillTo(NeoContext context, String shipToKey, String shipToFlag,
+      String billToKey, String billToFlag) {
+    if (!fillIfMissing(context, shipToKey, shipToFlag)) {
+      return;
+    }
+    try {
+      alignBillTo(context.getRequestBody(), shipToKey, billToKey, billToFlag);
+    } catch (Exception e) {
+      log.debug("[ETP-5703] {} alignment skipped: {}", billToKey, e.getMessage());
+    }
+  }
+
+  /**
+   * Resolves the bill-to of a header whose ship-to the server just filled. Never leaves it empty
+   * when a ship-to exists: a null bill-to is copied by {@code C_INVOICE_CREATE} into the NOT NULL
+   * {@code C_Invoice.C_BPartner_Location_ID}, so the document could never be invoiced.
+   *
+   * <ul>
+   *   <li>Ship-to also flagged bill-to: the bill-to is the ship-to — unless the body already holds
+   *       a different bill-to that is NOT the partner's oldest bill-to location. The oldest one is
+   *       exactly what {@code McpBillToInjector} derives on {@code etendo_batch} before this pre-hook
+   *       runs (it sees no ship-to yet), and the body carries no marker of who set the value, so
+   *       that value is treated as server-derived and replaced; any other value is the caller's and
+   *       kept. Limitation (accepted): a caller who deliberately sends the oldest bill-to together
+   *       with no ship-to gets the ship-to instead — the two are then both valid bill-to addresses
+   *       of the partner.</li>
+   *   <li>Ship-to not flagged bill-to: a bill-to already in the body is kept; otherwise the
+   *       partner's only bill-to location, else the ship-to itself — the fallback core's
+   *       {@code SL_Order_Product} and {@code McpBillToInjector} use.</li>
+   * </ul>
+   */
+  static void alignBillTo(JSONObject body, String shipToKey, String billToKey, String billToFlag)
+      throws org.codehaus.jettison.json.JSONException {
+    String shipToId = usableValue(body, shipToKey);
+    String partnerId = usableValue(body, FIELD_BUSINESS_PARTNER);
+    if (shipToId == null || partnerId == null) {
+      return;
+    }
+    if (hasUsableValue(body, billToKey) && usableValue(body, billToKey) == null) {
+      return; // a batch $ref: placeholder — never second-guessed
+    }
+    String current = usableValue(body, billToKey);
+    Location shipTo = OBDal.getInstance().get(Location.class, shipToId);
+    boolean shipToIsBillTo = shipTo != null && Boolean.TRUE.equals(shipTo.get(billToFlag));
+    if (shipToIsBillTo) {
+      if (current == null || (!current.equals(shipToId)
+          && current.equals(findOldestLocation(partnerId, billToFlag)))) {
+        body.put(billToKey, shipToId);
+      }
+      return;
+    }
+    if (current != null) {
+      return;
+    }
+    String single = findSingleLocation(partnerId, billToFlag);
+    body.put(billToKey, single != null ? single : shipToId);
+  }
+
+  /** The partner's oldest active location flagged {@code flag} — McpBillToInjector's choice. */
+  static String findOldestLocation(String partnerId, String flag) {
+    OBCriteria<Location> crit = OBDal.getInstance().createCriteria(Location.class);
+    crit.add(Restrictions.eq(Location.PROPERTY_BUSINESSPARTNER + ".id", partnerId));
+    crit.add(Restrictions.eq(flag, true));
+    crit.add(Restrictions.eq(Location.PROPERTY_ACTIVE, true));
+    crit.addOrderBy(Location.PROPERTY_CREATIONDATE, true);
+    crit.setMaxResults(1);
+    List<Location> locations = crit.list();
+    return locations.isEmpty() ? null : locations.get(0).getId();
+  }
+
+  /**
    * @return the id of the partner's only active location flagged by {@code locationFlagProperty},
    *     or {@code null} when it has none or more than one
    */

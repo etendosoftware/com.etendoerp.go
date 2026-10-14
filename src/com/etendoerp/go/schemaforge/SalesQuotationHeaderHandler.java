@@ -121,14 +121,13 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
     }
     // ETP-5703: a create that names a business partner but no address (an agent; the SPA always
     // sends one) gets the partner's only ship-to location — the AD rule of
-    // C_Order.C_BPartner_Location_ID is "C_BPartner Location - Ship To" — and, only then, its only
-    // bill-to location for BillTo_ID ("C_BPartner Location - Bill To"). REST single and batch;
-    // etendo_create keeps its 422 (declared divergence, neo-headless.md §4.12.9).
-    if (PartnerLocationDefaults.fillIfMissing(context, Order.PROPERTY_PARTNERADDRESS,
-        Location.PROPERTY_SHIPTOADDRESS)) {
-      PartnerLocationDefaults.fillIfMissing(context, Order.PROPERTY_INVOICEADDRESS,
-          Location.PROPERTY_INVOICETOADDRESS);
-    }
+    // C_Order.C_BPartner_Location_ID is "C_BPartner Location - Ship To" — and, only then, a bill-to
+    // for BillTo_ID ("C_BPartner Location - Bill To") that is never left empty (see
+    // PartnerLocationDefaults#alignBillTo). REST single and batch; etendo_create keeps its 422
+    // (declared divergence, neo-headless.md §4.12.9).
+    PartnerLocationDefaults.fillShipToAndBillTo(context, Order.PROPERTY_PARTNERADDRESS,
+        Location.PROPERTY_SHIPTOADDRESS, Order.PROPERTY_INVOICEADDRESS,
+        Location.PROPERTY_INVOICETOADDRESS);
     // ETP-5535: ahead of the total-discount sync, which recalculates on every DocAction — a
     // rejection does not touch the lines, exactly as the UI's rejectQuotation does not.
     if (isRejectDocAction(context)) {

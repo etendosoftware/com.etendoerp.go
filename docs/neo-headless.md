@@ -3679,11 +3679,18 @@ behaviour is unchanged. Channels as noted per field:
   `partnerAddress`, with the location flag the column's own AD validation rule requires:
   `C_Order.C_BPartner_Location_ID` uses "C_BPartner Location - Ship To" (`IsShipTo='Y'`), the invoice
   uses "… - Bill To" (`IsBillTo='Y'`). Only when that fills `partnerAddress` is `invoiceAddress`
-  (`BillTo_ID`, "… - Bill To") defaulted the same way, so an order the server addressed also has a
-  bill-to; a caller that sent an address (the SPA) is untouched. Shared helper:
-  `PartnerLocationDefaults` (names no entity; each customization passes the key and the flag).
-  On MCP `etendo_batch` the batch preprocessor's `McpBillToInjector` runs first and normally sets
-  `invoiceAddress` from the partner's bill-to location, in which case the pre-hook leaves it. Same
+  (`BillTo_ID`, "… - Bill To") resolved, and it is never left empty — a null BillTo is copied by
+  `C_INVOICE_CREATE` into the NOT NULL `C_Invoice.C_BPartner_Location_ID`, so the order could never
+  be invoiced (`PartnerLocationDefaults.alignBillTo`): if the filled ship-to is itself a bill-to
+  address, BillTo is the ship-to; otherwise a BillTo already in the body is kept, else the partner's
+  only bill-to location, else the ship-to (core's `SL_Order_Product` fallback). A caller that sent an
+  address (the SPA) is untouched. Shared helper: `PartnerLocationDefaults` (names no entity; each
+  customization passes the keys and the flags). On MCP `etendo_batch` the preprocessor's
+  `McpBillToInjector` runs first and, seeing no ship-to yet, sets the partner's **oldest** bill-to;
+  when the ship-to the pre-hook then fills is a bill-to address and the body's BillTo equals that
+  oldest one, it is treated as injector-derived and replaced by the ship-to (no marker says who set
+  it). Any other BillTo is the caller's and kept. Accepted limitation: a caller who deliberately sends
+  the oldest bill-to with no ship-to gets the ship-to instead (both are valid bill-to addresses). Same
   **declared divergence** as the invoice: MCP `etendo_create` still answers the `partnerAddress` 422,
   because its mandatory pre-check runs before the customization pre-hook (platform decision,
   pending).

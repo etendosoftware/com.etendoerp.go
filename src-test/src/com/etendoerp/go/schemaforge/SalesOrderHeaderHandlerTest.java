@@ -811,4 +811,94 @@ public class SalesOrderHeaderHandlerTest {
       obDal.verifyNoInteractions();
     }
   }
+
+  /**
+   * Stubs Location reads: the criteria's list() answers {@code answers} in call order (ship-to
+   * query first), and {@code shipTo} is the location OBDal returns by id.
+   */
+  @SuppressWarnings("unchecked")
+  private static void stubLocationQueries(OBDal dal, Location shipTo, List<Location> shipToAnswer,
+      List<Location> secondAnswer) {
+    String shipToId = shipTo.getId();
+    OBCriteria<Location> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(Location.class)).thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.list()).thenReturn(shipToAnswer, secondAnswer);
+    when(dal.get(Location.class, shipToId)).thenReturn(shipTo);
+  }
+
+  /**
+   * ETP-5703 review W2: the ship-to was filled but the partner has two bill-to locations, so no
+   * single bill-to exists. BillTo must fall back to the ship-to, never stay null — a null BillTo makes
+   * the order impossible to invoice (C_INVOICE_CREATE copies it into a NOT NULL column).
+   */
+  @Test
+  public void testHandleCreateBillToFallsBackToShipToWhenNoSingleBillTo() throws Exception {
+    try (MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      Location shipTo = mock(Location.class);
+      Location billA = mock(Location.class);
+      Location billB = mock(Location.class);
+      when(shipTo.getId()).thenReturn("ship-1");
+      when(shipTo.get(Location.PROPERTY_INVOICETOADDRESS)).thenReturn(Boolean.FALSE);
+      stubLocationQueries(dal, shipTo, Collections.singletonList(shipTo),
+          java.util.Arrays.asList(billA, billB));
+      JSONObject body = new JSONObject().put("businessPartner", "bp-1");
+
+      assertNull(new SalesOrderHeaderHandler().handle(createCtx(body)));
+
+      assertEquals("ship-1", body.getString("partnerAddress"));
+      assertEquals("ship-1", body.getString("invoiceAddress"));
+    }
+  }
+
+  /**
+   * ETP-5703 review W1: on etendo_batch McpBillToInjector runs first and, with no ship-to yet,
+   * sets the partner's OLDEST bill-to. When the ship-to the pre-hook then fills is itself a bill-to
+   * address, the bill-to follows it — the injector's value is recognised as server-derived.
+   */
+  @Test
+  public void testHandleCreateReplacesInjectorBillToWithFilledShipToBillTo() throws Exception {
+    try (MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      Location shipTo = mock(Location.class);
+      Location oldest = mock(Location.class);
+      when(shipTo.getId()).thenReturn("ship-1");
+      when(shipTo.get(Location.PROPERTY_INVOICETOADDRESS)).thenReturn(Boolean.TRUE);
+      when(oldest.getId()).thenReturn("bill-old");
+      stubLocationQueries(dal, shipTo, Collections.singletonList(shipTo),
+          Collections.singletonList(oldest));
+      JSONObject body = new JSONObject().put("businessPartner", "bp-1")
+          .put("invoiceAddress", "bill-old");
+
+      assertNull(new SalesOrderHeaderHandler().handle(createCtx(body)));
+
+      assertEquals("ship-1", body.getString("partnerAddress"));
+      assertEquals("ship-1", body.getString("invoiceAddress"));
+    }
+  }
+
+  /** A bill-to that is not the injector's choice is the caller's, and is kept. */
+  @Test
+  public void testHandleCreateKeepsCallerBillTo() throws Exception {
+    try (MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      Location shipTo = mock(Location.class);
+      Location oldest = mock(Location.class);
+      when(shipTo.getId()).thenReturn("ship-1");
+      when(shipTo.get(Location.PROPERTY_INVOICETOADDRESS)).thenReturn(Boolean.TRUE);
+      when(oldest.getId()).thenReturn("bill-old");
+      stubLocationQueries(dal, shipTo, Collections.singletonList(shipTo),
+          Collections.singletonList(oldest));
+      JSONObject body = new JSONObject().put("businessPartner", "bp-1")
+          .put("invoiceAddress", "bill-chosen");
+
+      assertNull(new SalesOrderHeaderHandler().handle(createCtx(body)));
+
+      assertEquals("bill-chosen", body.getString("invoiceAddress"));
+    }
+  }
 }
