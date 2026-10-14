@@ -60,6 +60,23 @@ import org.codehaus.jettison.json.JSONObject;
  *
  * <p>The registry is bounded and evicts oldest-first. Losing an entry costs the client name on later
  * rows of a very old session; it cannot fail a call.</p>
+ *
+ * <h2>Modern clients: a derived session key (ETP-5640)</h2>
+ *
+ * <p>MCP 2026-07-28 has no {@code initialize} and no {@code Mcp-Session-Id}. A modern client names
+ * itself on every request ({@code params._meta["io.modelcontextprotocol/clientInfo"]}, read by
+ * {@link #clientInfoFromMeta}), and {@link #modernSession} derives the key: one per authenticated
+ * caller (user, token client, role), renewed after {@link #MODERN_SESSION_IDLE_MS} without a call,
+ * and prefixed {@value #MODERN_SESSION_PREFIX} so the era is visible in the table and in the logs
+ * without a column of its own. Two parallel conversations of one user merge, and a multi-node
+ * deployment can split one task across nodes — accepted for telemetry; the rows still carry user,
+ * client name and timestamps, from which SQL can regroup them cluster-wide.</p>
+ *
+ * <p>The self-reported client name is deliberately <b>not</b> part of the key: a caller rotating
+ * it could otherwise mint as many sessions as it liked — flushing other tenants' sessions out of the
+ * bounded map, and opening a fresh {@code etendo_feedback} rate-limit bucket each time. The bucket
+ * is keyed on the same authenticated caller ({@link #rateLimitKey()}), never on the session, which
+ * renews.</p>
  */
 final class McpUsageTelemetry {
 
@@ -70,6 +87,29 @@ final class McpUsageTelemetry {
 
   /** How many concurrent MCP sessions keep their handshake details. Oldest are evicted first. */
   private static final int MAX_TRACKED_SESSIONS = 1_000;
+
+  /** Prefix that marks a derived (modern-era) session key. Legacy keys are bare UUIDs. */
+  static final String MODERN_SESSION_PREFIX = "m-";
+
+  /** Inactivity after which a modern client's next call starts a new derived session. */
+  static final long MODERN_SESSION_IDLE_MS = 30L * 60L * 1000L;
+
+  /** Bound on a {@code clientInfo} name or version kept from a request: it is self-reported. */
+  private static final int MAX_CLIENT_FIELD = 100;
+
+  /**
+   * Derived sessions by caller. Bounded and in <b>access</b> order, so the least recently active
+   * session is evicted first and a busy one never is.
+   */
+  private static final Map<String, DerivedSession> MODERN_SESSIONS = Collections.synchronizedMap(
+      new LinkedHashMap<String, DerivedSession>(64, 0.75f, true) {
+        private static final long serialVersionUID = 1L;
+
+        @Override
+        protected boolean removeEldestEntry(Map.Entry<String, DerivedSession> eldest) {
+          return size() > MAX_TRACKED_SESSIONS;
+        }
+      });
 
   private static final Map<String, ClientInfo> SESSIONS = Collections.synchronizedMap(
       new LinkedHashMap<String, ClientInfo>(64, 0.75f, false) {
@@ -100,6 +140,19 @@ final class McpUsageTelemetry {
    */
   private static final ThreadLocal<Tenant> CURRENT_TENANT = new ThreadLocal<>();
 
+  /**
+   * The client a modern request named in its own {@code _meta} (ETP-5640) — there is no handshake
+   * to remember it from. Cleared by {@link McpServlet#doPost} in a {@code finally}, for the same
+   * pooled-thread reason as {@link #CURRENT_SESSION}.
+   */
+  private static final ThreadLocal<ClientInfo> CURRENT_CLIENT = new ThreadLocal<>();
+
+  /**
+   * The authenticated caller of a modern request, as the {@code etendo_feedback} rate-limit bucket
+   * (ETP-5640). Cleared with {@link #CURRENT_CLIENT}.
+   */
+  private static final ThreadLocal<String> CURRENT_CALLER = new ThreadLocal<>();
+
   private McpUsageTelemetry() {
   }
 
@@ -121,6 +174,98 @@ final class McpUsageTelemetry {
     return CURRENT_TENANT.get();
   }
 
+  /** Bind the client a modern request named in its {@code _meta}. */
+  static void setCurrentClient(ClientInfo client) {
+    CURRENT_CLIENT.set(client);
+  }
+
+  /**
+   * Unbind the per-request client and caller. Must run in a {@code finally} — the thread is
+   * pooled.
+   */
+  static void clearCurrentClient() {
+    CURRENT_CLIENT.remove();
+    CURRENT_CALLER.remove();
+  }
+
+  /**
+   * The client a tool row records: the one a modern request named in its {@code _meta}, otherwise
+   * what {@code initialize} reported for the session.
+   *
+   * @param sessionKey the request's session key, may be {@code null}
+   * @return the client, never {@code null}
+   */
+  static ClientInfo clientFor(String sessionKey) {
+    ClientInfo fromRequest = CURRENT_CLIENT.get();
+    return fromRequest != null ? fromRequest : clientInfo(sessionKey);
+  }
+
+  /**
+   * The bucket {@code etendo_feedback} rate-limits on: the authenticated caller of a modern request
+   * (which a rotating client name cannot change), else the legacy session key.
+   *
+   * @return the bucket key, or {@code null} when the request has neither
+   */
+  static String rateLimitKey() {
+    String caller = CURRENT_CALLER.get();
+    return caller != null ? caller : CURRENT_SESSION.get();
+  }
+
+  /**
+   * Bind the telemetry of a modern-shaped request (ETP-5640): the client it names in
+   * {@code _meta}, its derived session key — replacing an {@code Mcp-Session-Id}, which a modern
+   * client never sends and which is ignored if it does — and its rate-limit caller. A request that
+   * is neither modern nor declares a modern version is left alone.
+   *
+   * <p>With the kill switch on, a request declaring a modern version is legacy: a client that
+   * cached the modern era keeps sending {@code _meta} after a rollback, so its client name and
+   * rate-limit caller are still bound, but no {@code m-} session is derived — the request keeps its
+   * legacy {@code Mcp-Session-Id}, if any. One INFO line marks each new derived session; it is the
+   * rollout's evidence, so a rolled-back era must not add to it.</p>
+   *
+   * @param userId   the caller's {@code AD_User_ID}
+   * @param clientId the token's {@code AD_Client_ID}
+   * @param roleId   the caller's {@code AD_Role_ID}
+   * @param params   the request's {@code params}, may be {@code null}
+   * @param era      the request's era
+   */
+  static void bindModernCaller(String userId, String clientId, String roleId, JSONObject params,
+      McpRequestEra.Classification era) {
+    String declared = McpRequestEra.declaredVersion(params);
+    if (!era.isModern() && declared == null) {
+      return;
+    }
+    ClientInfo client = clientInfoFromMeta(params);
+    CURRENT_CLIENT.set(client);
+    CURRENT_CALLER.set(callerKey(userId, clientId, roleId));
+    if (!era.isModern()) {
+      // Kill switch on: keep the client name, but derive no m- session — one nothing uses
+      // afterwards would pollute the rollout evidence exactly when the era is rolled back.
+      return;
+    }
+    ModernSession session = modernSession(userId, clientId, roleId, System.currentTimeMillis());
+    CURRENT_SESSION.set(session.key());
+    if (session.started()) {
+      JSONObject meta = params != null ? params.optJSONObject(McpModernResults.META) : null;
+      log.info("MCP modern session started: session={} client={}/{} protocol={} traceparent={}",
+          session.key(), StringUtils.defaultString(client.getName(), NO_SESSION_CLIENT),
+          StringUtils.defaultString(client.getVersion(), NO_SESSION_CLIENT),
+          McpRequestEra.printable(era.protocolVersion()),
+          meta != null && meta.has("traceparent") ? "yes" : "no");
+    }
+  }
+
+  /** Kept in memory only, never logged: the tuple holds identifiers of a user. */
+  private static String callerKey(String userId, String clientId, String roleId) {
+    return String.join("\0", StringUtils.defaultString(userId),
+        StringUtils.defaultString(clientId), StringUtils.defaultString(roleId));
+  }
+
+  /** @return the client bound for this request, or null when it is a legacy request */
+  static ClientInfo currentClient() {
+    return CURRENT_CLIENT.get();
+  }
+
   /** Bind the session key for the duration of this request. */
   static void setCurrentSessionKey(String sessionKey) {
     CURRENT_SESSION.set(sessionKey);
@@ -138,6 +283,8 @@ final class McpUsageTelemetry {
 
   /** What a log line prints when the request carries no session key. */
   static final String NO_SESSION = "none";
+  /** What a log line prints for a client name or version nobody reported. */
+  private static final String NO_SESSION_CLIENT = "unknown";
 
   /**
    * The session key as MCP WARN/ERROR lines print it ({@code session=<key>}), so Datadog can put a
@@ -180,6 +327,73 @@ final class McpUsageTelemetry {
         : null;
     SESSIONS.put(sessionKey, new ClientInfo(name, version, protocolVersion));
     return sessionKey;
+  }
+
+  /**
+   * The client a request names in {@code params._meta["io.modelcontextprotocol/clientInfo"]}
+   * (MCP 2026-07-28). Self-reported, so only {@code name} and {@code version} are kept, trimmed and
+   * bounded; anything malformed is ignored, never refused.
+   *
+   * @param params the request's {@code params}, may be {@code null}
+   * @return the client, or {@link ClientInfo#UNKNOWN} when the request names none
+   */
+  static ClientInfo clientInfoFromMeta(JSONObject params) {
+    JSONObject meta = params != null ? params.optJSONObject("_meta") : null;
+    JSONObject info = meta != null ? meta.optJSONObject(McpServlet.META_CLIENT_INFO) : null;
+    if (info == null) {
+      return ClientInfo.UNKNOWN;
+    }
+    String name = StringUtils.abbreviate(
+        McpRequestEra.withoutControls(StringUtils.trimToNull(info.optString("name", null))),
+        MAX_CLIENT_FIELD);
+    String version = StringUtils.abbreviate(
+        McpRequestEra.withoutControls(StringUtils.trimToNull(info.optString("version", null))),
+        MAX_CLIENT_FIELD);
+    return name == null && version == null ? ClientInfo.UNKNOWN : new ClientInfo(name, version);
+  }
+
+  /**
+   * The derived session a modern request belongs to (see the class Javadoc).
+   *
+   * @param userId   the caller's {@code AD_User_ID}
+   * @param clientId the token's {@code AD_Client_ID}
+   * @param roleId   the caller's {@code AD_Role_ID}
+   * @param nowMs    the current time, in milliseconds
+   * @return the session, and whether this call started it
+   */
+  static ModernSession modernSession(String userId, String clientId, String roleId, long nowMs) {
+    String caller = callerKey(userId, clientId, roleId);
+    synchronized (MODERN_SESSIONS) {
+      DerivedSession known = MODERN_SESSIONS.get(caller);
+      if (known != null && nowMs - known.lastSeenMs <= MODERN_SESSION_IDLE_MS) {
+        known.lastSeenMs = nowMs;
+        return new ModernSession(known.key, false);
+      }
+      DerivedSession fresh =
+          new DerivedSession(MODERN_SESSION_PREFIX + UUID.randomUUID(), nowMs);
+      MODERN_SESSIONS.put(caller, fresh);
+      return new ModernSession(fresh.key, true);
+    }
+  }
+
+  /**
+   * A derived session as {@link #modernSession} answers it.
+   *
+   * @param key     the session key, {@value #MODERN_SESSION_PREFIX}-prefixed
+   * @param started whether this call opened it
+   */
+  record ModernSession(String key, boolean started) {
+  }
+
+  /** A derived session's key and last activity. Guarded by the MODERN_SESSIONS monitor. */
+  private static final class DerivedSession {
+    private final String key;
+    private long lastSeenMs;
+
+    DerivedSession(String key, long lastSeenMs) {
+      this.key = key;
+      this.lastSeenMs = lastSeenMs;
+    }
   }
 
   /** @return what {@code initialize} reported for this session, or an empty record if unknown. */
