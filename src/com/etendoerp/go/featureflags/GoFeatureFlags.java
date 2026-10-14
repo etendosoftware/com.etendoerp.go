@@ -21,6 +21,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BooleanSupplier;
+import java.util.function.Supplier;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -244,6 +246,19 @@ public final class GoFeatureFlags {
   private static volatile Client openFeatureClient;
   private static volatile boolean initializationAttempted;
 
+  /**
+   * Builds the provider {@link #install()} binds. Always {@link #createProvider()} in production;
+   * a test seam only, so the install failure paths can be driven with a provider that fails on
+   * purpose.
+   */
+  static Supplier<FeatureProvider> providerFactory = GoFeatureFlags::createProvider;
+
+  /**
+   * Answers whether {@code dd-java-agent} is loaded. Always {@link #isDatadogAgentLoaded()} in
+   * production; a test seam only, since no test JVM runs with the agent.
+   */
+  static BooleanSupplier datadogAgentProbe = GoFeatureFlags::isDatadogAgentLoaded;
+
   private GoFeatureFlags() {
   }
 
@@ -318,10 +333,10 @@ public final class GoFeatureFlags {
    *
    * @return the provider to bind to the {@value #OPENFEATURE_DOMAIN} domain
    */
-  private static FeatureProvider createProvider() {
+  static FeatureProvider createProvider() {
     boolean datadogRequested = GoRuntimeProperties.readBoolean(
         DATADOG_FLAGS_ENABLED_PROPERTY, DATADOG_FLAGS_ENABLED_ENV, false);
-    boolean datadogAgentLoaded = datadogRequested && isDatadogAgentLoaded();
+    boolean datadogAgentLoaded = datadogRequested && datadogAgentProbe.getAsBoolean();
     String sdkKey = StringUtils.trimToNull(GoRuntimeProperties.readValue(
         CONFIGCAT_SDK_KEY_PROPERTY, CONFIGCAT_SDK_KEY_ENV, null));
     if (datadogRequested && !datadogAgentLoaded) {
@@ -412,10 +427,10 @@ public final class GoFeatureFlags {
     }
   }
 
-  private static Client install() {
+  static Client install() {
     try {
       OpenFeatureAPI api = OpenFeatureAPI.getInstance();
-      FeatureProvider provider = createProvider();
+      FeatureProvider provider = providerFactory.get();
       // Blocking install: setProvider() alone returns before the provider is
       // ready to evaluate, so the first read after installing can still hit the
       // previous provider and silently answer with the code default. For a flag
