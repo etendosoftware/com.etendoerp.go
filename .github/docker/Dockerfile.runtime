@@ -10,6 +10,20 @@ FROM tomcat:9.0-jdk17
 
 RUN apt-get update && apt-get install -y postgresql-client curl && rm -rf /var/lib/apt/lists/*
 
+# ETP-5751 — Datadog Java agent, required by the Datadog Feature Flags provider (dd-openfeature).
+# Baked in, but only LOADED by docker-entrypoint.sh when DD_FEATURE_FLAGS_ENABLED is true, so an
+# environment without DD_* variables runs exactly as before.
+# VERSION LOCK: must equal ext.ddJavaAgentVersion in com.etendoerp.go/build.gradle. CI passes that
+# value as --build-arg (deploy-staging.yml); bumping it without updating DD_JAVA_AGENT_SHA256 below
+# fails the checksum, which is the point — both pins move together.
+ARG DD_JAVA_AGENT_VERSION=1.66.0
+ARG DD_JAVA_AGENT_SHA256=5f0eb51160fade367d97404624561b6666f7475fb1453a7a73237eb643e398d8
+RUN mkdir -p /opt/datadog \
+ && curl -fsSL -o /opt/datadog/dd-java-agent.jar \
+    "https://repo1.maven.org/maven2/com/datadoghq/dd-java-agent/${DD_JAVA_AGENT_VERSION}/dd-java-agent-${DD_JAVA_AGENT_VERSION}.jar" \
+ && echo "${DD_JAVA_AGENT_SHA256}  /opt/datadog/dd-java-agent.jar" | sha256sum -c -
+ENV DD_JAVA_AGENT_JAR=/opt/datadog/dd-java-agent.jar
+
 # Limpiar webapps por defecto
 RUN rm -rf "$CATALINA_HOME/webapps"/*
 

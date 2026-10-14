@@ -67,8 +67,11 @@ the bounded first wait, never throw, and resolve to the caller's default when it
 
 The flags live in the Datadog Feature Flags product. `dd-openfeature` is a thin OpenFeature
 provider; the flag configuration is fetched by **`dd-java-agent`**, which must be loaded with
-`-javaagent` (in the runtime image, through `JAVA_TOOL_OPTIONS`). Tracing is not needed for this and
-runs disabled (`DD_TRACE_ENABLED=false`).
+`-javaagent`. The runtime image (`.github/docker/Dockerfile.runtime`) bakes the agent in at
+`/opt/datadog/dd-java-agent.jar` with a pinned version and SHA-256, and
+`.github/docker/docker-entrypoint.sh` appends `-javaagent:` to `CATALINA_OPTS` **only when
+`DD_FEATURE_FLAGS_ENABLED` is true** — an environment without the `DD_*` variables starts exactly as
+before. Tracing is not needed for this and defaults to disabled (`DD_TRACE_ENABLED=false`).
 
 | Variable | Value | Purpose |
 |----------|-------|---------|
@@ -107,10 +110,13 @@ restart.
 
 > **VERSION LOCK — `dd-openfeature` MUST equal the deployed `dd-java-agent` version.** The provider
 > calls into the agent's internal bootstrap classes, which carry no compatibility guarantee across
-> versions. The version is pinned once, as `ext.ddJavaAgentVersion` in this module's `build.gradle`,
-> and must match `DD_JAVA_AGENT_VERSION` in the runtime image (`etendo-go-infraestructure`). Bump
-> both in the same change; a mismatch fails as "every flag off" or a `LinkageError` at the first
-> evaluation, not at build time.
+> versions. The version is pinned once, as `ext.ddJavaAgentVersion` in this module's `build.gradle`.
+> `deploy-staging.yml` reads it and passes it to the image build as `--build-arg
+> DD_JAVA_AGENT_VERSION`, and `Dockerfile.runtime` verifies the download against its pinned
+> `DD_JAVA_AGENT_SHA256` — so bumping the Gradle pin without updating the checksum **fails the image
+> build** instead of shipping a mismatch. Update both in the same change (and the mirror copy in
+> `etendo-go-infraestructure/docker/Dockerfile.runtime`). A mismatch that did reach runtime would
+> show as "every flag off" or a `LinkageError` at the first evaluation.
 
 ### ConfigCat (ETP-5267)
 

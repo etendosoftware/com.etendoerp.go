@@ -99,9 +99,9 @@ dependencies {
     // ETP-5751 — Datadog Feature Flags provider. It is only a bridge: the flag configuration is
     // fetched by dd-java-agent, which must be loaded with -javaagent (GoFeatureFlags skips this arm
     // when it is not). VERSION LOCK: this MUST equal the dd-java-agent version baked into the
-    // runtime image (etendo-go-infraestructure, DD_JAVA_AGENT_VERSION) — the provider talks to the
-    // agent's internal bootstrap classes, which carry no compatibility guarantee across versions.
-    // Bump both in the same change. Its only transitive dependency is dev.openfeature:sdk 1.20.1.
+    // runtime image — the provider talks to the agent's internal bootstrap classes, which carry no
+    // compatibility guarantee across versions. deploy-staging.yml passes ddJavaAgentVersion to
+    // .github/docker/Dockerfile.runtime, whose pinned DD_JAVA_AGENT_SHA256 must be updated with it. Its only transitive dependency is dev.openfeature:sdk 1.20.1.
     implementation("com.datadoghq:dd-openfeature:${ddJavaAgentVersion}")
     compileOnly 'io.swagger.core.v3:swagger-models:2.1.13'
     compileOnly 'org.apache.commons:commons-lang3:3.12.0'

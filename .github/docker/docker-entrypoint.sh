@@ -105,6 +105,31 @@ else
 fi
 
 # ─────────────────────────────────────────────
+# ETP-5751 — Datadog Feature Flags: load dd-java-agent only when enabled.
+# The agent fetches the flag configuration that GoFeatureFlags' Datadog arm
+# reads; without it that arm is skipped (ConfigCat / local properties win).
+# Tracing is off unless explicitly turned on: only feature flags are wanted.
+# ─────────────────────────────────────────────
+case "$(echo "${DD_FEATURE_FLAGS_ENABLED:-false}" | tr '[:upper:]' '[:lower:]')" in
+    true|1|yes)
+        export DD_TRACE_ENABLED="${DD_TRACE_ENABLED:-false}"
+        export DD_SERVICE="${DD_SERVICE:-etendo-go}"
+        if [ ! -f "$DD_JAVA_AGENT_JAR" ]; then
+            echo ">>> WARNING: DD_FEATURE_FLAGS_ENABLED is on but $DD_JAVA_AGENT_JAR is missing; Datadog flags disabled"
+        else
+            if [ -z "$DD_API_KEY" ]; then
+                echo ">>> WARNING: DD_FEATURE_FLAGS_ENABLED is on but DD_API_KEY is empty; flags will resolve to their defaults"
+            fi
+            export CATALINA_OPTS="${CATALINA_OPTS:+$CATALINA_OPTS }-javaagent:${DD_JAVA_AGENT_JAR}"
+            echo ">>> Datadog Java agent enabled (env=${DD_ENV:-unset}, site=${DD_SITE:-unset}, tracing=${DD_TRACE_ENABLED})."
+        fi
+        ;;
+    *)
+        echo ">>> Datadog feature flags disabled (DD_FEATURE_FLAGS_ENABLED not true); agent not loaded."
+        ;;
+esac
+
+# ─────────────────────────────────────────────
 # Start Tomcat in foreground
 # ─────────────────────────────────────────────
 echo ">>> Starting Tomcat on port 8080..."
