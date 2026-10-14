@@ -71,7 +71,8 @@ import com.etendoerp.go.schemaforge.data.Subscription;
  * <p><b>The subscription-model switch decides which of the two writes happens.</b> Group 2 drives
  * the servlet's {@code applyPaidUpgradeSideEffects} itself, from the same tenant context, with the
  * {@link SubscriptionModelSwitch} row absent (the pre-ETP-5046 marker path) and present (the row
- * path). The switch is environment-wide, so those specs commit NOTHING: the tenant, the switch row
+ * path), and with the switch absent for a tenant that already has a row (still the row path). The
+ * switch is environment-wide, so those specs commit NOTHING: the tenant, the switch row
  * and everything the upgrade writes stay in the test's transaction, are read back through the same
  * session, and are discarded by the rollback that opens {@link #cleanUp()}.
  *
@@ -205,6 +206,57 @@ public class TenantContextSubscriptionWriteIntegrationTest extends OBBaseTest {
         subscriptionCount(tenant));
     assertEquals("The row is opened from the checkout request", 1, store.finds);
     assertEquals("and no marker is written next to it", 0L, planPreferenceCount(tenant));
+  }
+
+  /**
+   * A tenant that already has a subscription row is decided by its rows whatever the switch says:
+   * every read answers from that row, so a marker written next to it would be a second answer that
+   * nothing reads. With the switch absent, the upgrade must still take the row path — reach
+   * {@code openSubscription}, which hands back the tenant's existing open row untouched — and write
+   * no {@code ETGO_TenantPlan} marker.
+   */
+  @Test
+  public void testWithTheSwitchOffATenantThatAlreadyHasARowIsStillRecordedOnTheRow()
+      throws Exception {
+    String tenant = prepareUpgrade(false);
+    String existingRow = newId();
+    nativeUpdate("INSERT INTO ETGO_SUBSCRIPTION (ETGO_SUBSCRIPTION_ID, AD_CLIENT_ID, AD_ORG_ID, "
+            + "ISACTIVE, CREATED, CREATEDBY, UPDATED, UPDATEDBY, ENVIRONMENT_CLIENT_ID, "
+            + "ETGO_PLAN_ID, STATUS, START_DATE) VALUES (:id, '0', '0', 'Y', now(), '0', now(), "
+            + "'0', :tenant, :plan, :status, now() - interval '1 day')",
+        "id", existingRow, "tenant", tenant, "plan", LEGACY_PLAN_ID,
+        "status", SubscriptionService.STATUS_ACTIVE);
+    assertTrue("Sanity: the tenant is on the row model before the upgrade",
+        hasAnySubscriptionAsSystem(tenant));
+
+    setTestUserContext();
+    assertTenantContext();
+    RecordingCheckoutRequestStore store =
+        new RecordingCheckoutRequestStore(checkoutRequestOn(LEGACY_PLAN_ID));
+    applyPaidUpgradeSideEffects(store, tenant);
+    assertTenantContext();
+    OBDal.getInstance().flush();
+
+    assertEquals("The row path reads the checkout request to open the subscription", 1,
+        store.finds);
+    assertEquals("Still exactly one open row: the existing one is reused, not duplicated", 1L,
+        subscriptionCount(tenant));
+    assertEquals("and it is the tenant's existing row", 1L,
+        count("SELECT COUNT(*) FROM ETGO_SUBSCRIPTION WHERE ETGO_SUBSCRIPTION_ID = :id"
+            + " AND ENVIRONMENT_CLIENT_ID = :tenant AND END_DATE IS NULL",
+            "id", existingRow, "tenant", tenant));
+    assertEquals("A tenant with a row must not get the marker, even with the switch off", 0L,
+        planPreferenceCount(tenant));
+  }
+
+  private static boolean hasAnySubscriptionAsSystem(String tenant) {
+    OBContext previous = OBContext.getOBContext();
+    OBContext.setOBContext(ZERO, ZERO, ZERO, ZERO);
+    try {
+      return new SubscriptionService().hasAnySubscription(tenant);
+    } finally {
+      OBContext.setOBContext(previous);
+    }
   }
 
   /**
