@@ -2988,7 +2988,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         calendarReviewService.confirm(session.clientId, userId);
       }
       EtendoGoDalHelper.commitDalChanges("calendar review", log);
-      writeSuccessStatus(response, calendarReviewService.state(session.clientId, LocalDate.now()));
+      // Same shape as the GET: the caller is the owner, or it would have been refused above.
+      JSONObject result = calendarReviewService.state(session.clientId, LocalDate.now());
+      result.put("isOwner", true);
+      writeSuccessStatus(response, result);
     });
   }
 

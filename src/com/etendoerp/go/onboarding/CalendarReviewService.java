@@ -107,6 +107,16 @@ public class CalendarReviewService {
           + " AND cl.relname NOT IN ('c_period', 'c_periodcontrol', 'c_periodcontrol_log')"
           + " ORDER BY 1, 2";
 
+  /**
+   * The calendar's open/close log. {@code C_PERIOD_TRG2} deletes it only by {@code periodno}, so
+   * a classic year-level row ({@code c_year_id} or {@code c_period_id} alone) would block the
+   * deletes below. Only closes can be left here: any open makes {@link #anyPeriodOpened} refuse.
+   */
+  static final String DELETE_LOG_SQL =
+      "DELETE FROM c_periodcontrol_log WHERE c_year_id IN"
+          + " (SELECT c_year_id FROM c_year WHERE c_calendar_id = :calendarId)"
+          + " OR c_period_id IN (" + CALENDAR_PERIODS + ") OR periodno IN (" + CALENDAR_PERIODS + ")";
+
   static final String DELETE_PERIODS_SQL =
       "DELETE FROM c_period WHERE c_year_id IN"
           + " (SELECT c_year_id FROM c_year WHERE c_calendar_id = :calendarId)";
@@ -142,7 +152,9 @@ public class CalendarReviewService {
     result.put("required", required);
     result.put("reviewed", reviewed);
     result.put("pending", required && !reviewed);
-    result.put("reviewedAt", reviewedAt == null ? JSONObject.NULL : reviewedAt);
+    // The preference holds "<instant> <userId>"; only the instant is part of the answer.
+    result.put("reviewedAt", reviewedAt == null ? JSONObject.NULL
+        : StringUtils.substringBefore(reviewedAt, " "));
     result.put("anyPeriodOpened", anyPeriodOpened);
     result.put("anyPostedFact", anyPostedFact);
     result.put("canRegenerate", calendarId != null && !anyPeriodOpened && !anyPostedFact);
@@ -200,6 +212,7 @@ public class CalendarReviewService {
       return new Refusal(409, "The calendar is already in use (" + reference + ")");
     }
     Calendar calendar = OBDal.getInstance().get(Calendar.class, calendarId);
+    executeUpdate(DELETE_LOG_SQL, calendarId);
     executeUpdate(DELETE_PERIODS_SQL, calendarId);
     executeUpdate(DELETE_YEARS_SQL, calendarId);
     int fiscalYear = today.getMonthValue() >= startMonth ? today.getYear() : today.getYear() - 1;

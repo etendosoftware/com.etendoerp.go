@@ -944,6 +944,8 @@ Endpoints (`CalendarReviewService`, session auth, scoped to the session's tenant
 - `POST /sws/go/onboarding/calendar-review/regenerate` — body
   `{ "fiscalYearStart": "JANUARY|APRIL|JULY|OCTOBER" }`. Deletes the calendar's years and periods
   and creates one fiscal year containing today that starts on that month, then marks it reviewed.
+  The calendar's `C_PeriodControl_Log` rows go first (core `C_PERIOD_TRG2` only removes those
+  keyed by `periodno`; a classic year-level close log would otherwise block the delete).
   `400` for another value; `409` when there is no calendar, a period was ever opened, anything was
   posted, or any other table references a period or year of the calendar (FK scan over the
   catalog).
@@ -956,8 +958,9 @@ answer the new state.
 completions (core procedures, via `NeoProcessService`), by posting (`DocumentPostingService`,
 `STATUS_PeriodClosed`) and by payment registration (`MessageKeyedException` →
 `NeoResponse.error(int, OBException)` → `error.messageKeys`). The SPA turns it into a toast that
-points the owner to this row while the review is pending (others are told to ask the owner) and
-to Calendar afterwards; the MCP adds a `hint` telling the agent to ask the user before opening the
+points the owner to this row while the review is pending (others are told to ask the owner; an
+owner whose account dismissed First Steps, which is per account, goes to Calendar) and to
+Calendar afterwards; the MCP adds a `hint` telling the agent to ask the user before opening the
 period with the `openClose` action of `open-close-period-control`.
 
 ## Invoice numbering (First Steps step)

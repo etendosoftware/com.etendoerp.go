@@ -17,6 +17,8 @@
 package com.etendoerp.go.onboarding;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -31,7 +33,9 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.time.LocalDate;
+import java.util.List;
 
+import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.Session;
 import org.hibernate.query.NativeQuery;
 import org.junit.jupiter.api.AfterEach;
@@ -136,6 +140,7 @@ class CalendarReviewServiceTest {
     assertNull(service.regenerate("CLIENT", "july", "USER", OCT_14));
 
     InOrder order = inOrder(session, dal);
+    order.verify(session).createNativeQuery(CalendarReviewService.DELETE_LOG_SQL);
     order.verify(session).createNativeQuery(CalendarReviewService.DELETE_PERIODS_SQL);
     order.verify(session).createNativeQuery(CalendarReviewService.DELETE_YEARS_SQL);
     order.verify(dal).save(year);
@@ -158,5 +163,27 @@ class CalendarReviewServiceTest {
   private void verifyNothingDeleted() {
     verify(session, never()).createNativeQuery(CalendarReviewService.DELETE_PERIODS_SQL);
     verify(session, never()).createNativeQuery(CalendarReviewService.DELETE_YEARS_SQL);
+  }
+
+  /** The row is pending until reviewed; {@code reviewedAt} carries the instant, not the user. */
+  @Test
+  void stateIsPendingUntilReviewedAndAnswersOnlyTheReviewInstant() throws Exception {
+    when(query.list()).thenReturn(List.of());
+    try (MockedStatic<OnboardingInitialPeriodStateService> markers =
+        mockStatic(OnboardingInitialPeriodStateService.class)) {
+      markers.when(() -> OnboardingInitialPeriodStateService.readClientPreference(
+          OnboardingInitialPeriodStateService.REVIEW_REQUIRED_ATTRIBUTE, "CLIENT")).thenReturn("Y");
+
+      JSONObject pending = service.state("CLIENT", OCT_14);
+      assertTrue(pending.getBoolean("pending"));
+      assertTrue(pending.getBoolean("canRegenerate"));
+
+      markers.when(() -> OnboardingInitialPeriodStateService.readClientPreference(
+          CalendarReviewService.REVIEWED_ATTRIBUTE, "CLIENT"))
+          .thenReturn("2026-10-14T10:00:00Z USER");
+      JSONObject reviewed = service.state("CLIENT", OCT_14);
+      assertFalse(reviewed.getBoolean("pending"));
+      assertEquals("2026-10-14T10:00:00Z", reviewed.getString("reviewedAt"));
+    }
   }
 }
