@@ -1388,9 +1388,13 @@ public class McpToolRouter {
       Set<String> serverResolved = new HashSet<>(
           McpSchemaResponseHints.serverDefaultedNames(specName, entityName, adTab, sfEntity));
       serverResolved.addAll(McpServerResolvedFields.forCreate(sfEntity));
-      return wrapAsTextContent(McpSchemaCreateView
+      JSONObject createView = McpSchemaCreateView
           .buildResponse(specName, entityName, fieldsArray, serverResolved, isChildEntity,
-              entityAgentPrompt));
+              entityAgentPrompt);
+      // ETP-5676: the request options the entity's customization accepts on create, e.g. the
+      // product's _skipPricesSeed. Absent for every entity that declares none.
+      McpServerResolvedFields.addCreateDirectives(createView, sfEntity);
+      return wrapAsTextContent(createView);
     }
     // IMP-44: everything below is the full dump, and reaching it now requires having asked for
     // it. Omitting `view` used to land here — 39.5 kB on sales-order/header against 5.4 kB for
