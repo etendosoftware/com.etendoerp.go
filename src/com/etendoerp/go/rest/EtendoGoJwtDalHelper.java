@@ -596,6 +596,11 @@ final class EtendoGoJwtDalHelper {
   /**
    * Returns every free client owned by the account except the excluded onboarding destination.
    *
+   * <p>Every caller is looking for a purchase source, so "free" here means a free demo: a client
+   * whose plan reads free but which is positively a productive environment (a canceled one, see
+   * {@link TenantEnvironmentLifecycleService#isProductiveEnvironment}) is left out (ETP-5047). A
+   * tenant with no lifecycle type at all is kept.
+   *
    * @param accountEmail authenticated platform account email
    * @param excludedClientId client id to omit from the candidates, or {@code null}
    * @return immutable distinct free-client IDs, possibly empty
@@ -606,7 +611,10 @@ final class EtendoGoJwtDalHelper {
     for (User environmentUser : findEnvironmentUsersByAccountEmail(accountEmail)) {
       String clientId = environmentUser.getClient().getId();
       if (clientId.equals(excludedClientId)) continue;
-      if (TenantPlanService.PLAN_FREE.equals(TENANT_PLAN_SERVICE.resolvePlan(clientId))) {
+      // ETP-5047 — a canceled productive environment reads plan free too, but it is no demo:
+      // every caller looks for a purchase source, so it is left out.
+      if (TenantPlanService.PLAN_FREE.equals(TENANT_PLAN_SERVICE.resolvePlan(clientId))
+          && !ENVIRONMENT_LIFECYCLE_SERVICE.isProductiveEnvironment(clientId)) {
         freeClientIds.add(clientId);
       }
     }

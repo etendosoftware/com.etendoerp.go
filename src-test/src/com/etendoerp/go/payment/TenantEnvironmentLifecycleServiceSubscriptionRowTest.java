@@ -790,6 +790,85 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
     assertEquals(ANCHOR, snapshot.getRenewalDueAt());
   }
 
+  // ===================== purchase-source eligibility: isProductiveEnvironment ===================
+  // ETP-5047 — a canceled productive tenant reads plan "free", so the plan alone would let it pass
+  // for a demo purchase source. Eligibility asks the lifecycle type instead, read like resolve().
+
+  @Test
+  public void aCanceledProductiveIsAProductiveEnvironmentAlthoughItsPlanReadsFree() {
+    givenEveryPlanLookupSaysFree();
+    Fixture fixture = new Fixture().withClosedRow("canceled", ENDED_AT);
+
+    assertTrue(fixture.run(() -> service.isProductiveEnvironment(freshClientId())));
+    assertNeverEnteredTheDemoPath(fixture);
+  }
+
+  @Test
+  public void aRowlessTenantWithTheProductiveMarkerIsAProductiveEnvironment() {
+    // ETGO_SubscriptionModel OFF: no row, the type comes from the ETGO_EnvironmentType marker.
+    givenEveryPlanLookupSaysFree();
+    Fixture fixture = new Fixture().withPreference(
+        TenantEnvironmentLifecycleService.ENVIRONMENT_TYPE_ATTRIBUTE,
+        TenantEnvironmentLifecycleService.TYPE_PRODUCTIVE);
+
+    assertTrue(fixture.run(() -> service.isProductiveEnvironment(freshClientId())));
+  }
+
+  @Test
+  public void aRowlessTenantWithOnlyTheRetiredProductivePlanIsAProductiveEnvironment() {
+    when(tenantPlanService.resolvePlanWithoutSubscription(anyString()))
+        .thenReturn(TenantPlanService.PLAN_PRODUCTIVE);
+    Fixture fixture = new Fixture();
+
+    assertTrue(fixture.run(() -> service.isProductiveEnvironment(freshClientId())));
+  }
+
+  @Test
+  public void aLegacyDemoWithNoTypeIsNotAProductiveEnvironmentAndNothingIsWritten() {
+    // A tenant predating the lifecycle metadata: no row, no marker, free plan, no trial start.
+    // It stays a valid source, and asking must not give it a legacy-transition start.
+    givenEveryPlanLookupSaysFree();
+    Fixture fixture = new Fixture();
+
+    boolean productive = withLegacyActivation(
+        () -> fixture.run(() -> service.isProductiveEnvironment(freshClientId())));
+
+    assertFalse(productive);
+    assertTrue("eligibility is a read: " + fixture.savedPreferenceAttributes,
+        fixture.savedPreferenceAttributes.isEmpty());
+    verify(fixture.dal, never()).save(any());
+  }
+
+  @Test
+  public void aDemoWithABlankOrDemoTypeIsNotAProductiveEnvironment() {
+    givenEveryPlanLookupSaysFree();
+    for (String type : List.of("", " ", TenantEnvironmentLifecycleService.TYPE_DEMO)) {
+      Fixture fixture = new Fixture()
+          .withPreference(TenantEnvironmentLifecycleService.ENVIRONMENT_TYPE_ATTRIBUTE, type);
+
+      assertFalse("type '" + type + "'",
+          fixture.run(() -> service.isProductiveEnvironment(freshClientId())));
+    }
+  }
+
+  @Test
+  public void anUnreadableTypeFailsClosedAsProductive() {
+    Counted counted = new Counted();
+    org.mockito.Mockito.doThrow(new IllegalStateException("db down"))
+        .when(counted.subscriptions).findLatest(anyString());
+
+    assertTrue(new Fixture().run(() -> counted.lifecycle.isProductiveEnvironment(CLIENT_ID)));
+  }
+
+  @Test
+  public void theSystemClientAndABlankIdAreNotProductiveEnvironments() {
+    Fixture fixture = new Fixture().withClosedRow("canceled", ENDED_AT);
+
+    assertFalse(fixture.run(() -> service.isProductiveEnvironment("0")));
+    assertFalse(fixture.run(() -> service.isProductiveEnvironment(" ")));
+    assertFalse(fixture.run(() -> service.isProductiveEnvironment(null)));
+  }
+
   // ===================== follow-up W1': a tenant with no row skips the second row lookup ========
 
   /** A lifecycle service over a spied SubscriptionService, to count the row lookups. */

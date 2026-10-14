@@ -170,12 +170,7 @@ public class TenantEnvironmentLifecycleService {
       if (subscription.isPresent()) {
         return rowSnapshot(subscription.get());
       }
-      // No row at all: the plan can only come from the transitional preference fallback, so ask
-      // that directly instead of resolvePlan, which would repeat the row lookup (ETP-5047).
-      // ETP-5046-TRANSITIONAL-FALLBACK — the ETGO_EnvironmentType marker retires in Phase F.
-      String type = readPreference(ENVIRONMENT_TYPE_ATTRIBUTE, clientId);
-      if (TYPE_PRODUCTIVE.equalsIgnoreCase(type) || TenantPlanService.PLAN_PRODUCTIVE.equals(
-          tenantPlanService.resolvePlanWithoutSubscription(clientId))) {
+      if (isProductiveWithoutRow(clientId)) {
         return preferenceSnapshot(clientId);
       }
       // Reaching here, the plan is known to be free (the branch above returned otherwise), so the
@@ -206,6 +201,21 @@ public class TenantEnvironmentLifecycleService {
       log.warn("Could not resolve environment lifecycle for client {}", clientId, e);
       return null;
     }
+  }
+
+  /**
+   * The productive decision for a tenant with no subscription row, shared by {@link #resolve} and
+   * {@link #isProductiveEnvironment} so the two can never disagree about the same tenant.
+   *
+   * <p>No row at all: the plan can only come from the transitional preference fallback, so it is
+   * asked directly instead of through {@code resolvePlan}, which would repeat the row lookup
+   * (ETP-5047). ETP-5046-TRANSITIONAL-FALLBACK — the {@code ETGO_EnvironmentType} marker retires
+   * in Phase F.
+   */
+  private boolean isProductiveWithoutRow(String clientId) {
+    String type = readPreference(ENVIRONMENT_TYPE_ATTRIBUTE, clientId);
+    return TYPE_PRODUCTIVE.equalsIgnoreCase(type) || TenantPlanService.PLAN_PRODUCTIVE.equals(
+        tenantPlanService.resolvePlanWithoutSubscription(clientId));
   }
 
   /**
@@ -606,6 +616,46 @@ public class TenantEnvironmentLifecycleService {
       return false;
     }
     return StringUtils.isNotBlank(readPreference(ASSOCIATED_PRODUCTIVE_ATTRIBUTE, demoClientId));
+  }
+
+  /**
+   * ETP-5047 — tells whether the tenant is positively a productive environment: the type
+   * {@link #resolve} would give it, read the same way (the subscription row first, then the
+   * {@code ETGO_EnvironmentType} marker and the transitional plan fallback), but without building a
+   * snapshot and without writing anything.
+   *
+   * <p><b>Purchase-source eligibility, not access.</b> A productive environment is never the demo
+   * source of a purchase. The plan alone cannot say that: a canceled subscription reads
+   * {@code free} ({@link TenantPlanService#resolvePlan}), so a canceled productive tenant would
+   * otherwise pass for a free demo, be offered as a source, and be associated with the new
+   * environment as if it were one. The access policy and its enforcement switch play no part here:
+   * a canceled productive tenant is not a source whether its access is enforced or not.
+   *
+   * <p>The rule excludes what is positively productive; it does not require a demo marker. A
+   * tenant that predates the lifecycle metadata (no row, no or blank {@code ETGO_EnvironmentType},
+   * free plan) answers {@code false} and stays a valid source, exactly as before.
+   *
+   * <p><b>Fails closed.</b> A lookup that throws answers {@code true}: an environment whose type
+   * cannot be read is not offered as a source, which at worst turns a purchase into a clean
+   * environment instead of associating and copying the wrong tenant.
+   *
+   * @param clientId environment client id
+   * @return true when the tenant has a subscription row, open or closed, or (without a row) the
+   *     productive marker or the retired productive plan preference; false for a blank id and the
+   *     System client, which have no lifecycle
+   */
+  public boolean isProductiveEnvironment(String clientId) {
+    if (isNotATenant(clientId)) {
+      return false;
+    }
+    try {
+      return subscriptionService.findLatest(clientId).isPresent()
+          || isProductiveWithoutRow(clientId);
+    } catch (RuntimeException e) {
+      log.warn("Could not read the environment type of client {}; it is not offered as a "
+          + "purchase source", clientId, e);
+      return true;
+    }
   }
 
   /**

@@ -145,6 +145,9 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  * its new subscription's billing period after the onboarding commit, commits it on its own, and
  * survives any failure of that step.
  *
+ * <p>And the purchase-source eligibility specs (ETP-5548, ETP-5047): a spent demo or a productive
+ * environment, a canceled one included, is never the demo source of a purchase.
+ *
  * @covers com.etendoerp.go.rest.EtendoGoJwtServlet
  */
 public class EtendoGoJwtServletCoverageTest {
@@ -258,6 +261,8 @@ public class EtendoGoJwtServletCoverageTest {
         "account-1", "user@test.com");
     verify(lifecycle, times(1)).associateDemoWithProductive("STORED-DEMO", "NEW-PRODUCTIVE");
     verify(lifecycle, times(1)).isAssociatedWithProductive("STORED-DEMO");
+    // ETP-5047: the persisted source is checked for being a productive environment too.
+    verify(lifecycle, times(1)).isProductiveEnvironment("STORED-DEMO");
     verifyNoMoreInteractions(lifecycle);
     verify(profileTransfer, times(1)).copy("STORED-DEMO", "NEW-PRODUCTIVE", "ORG-1");
     verifyNoMoreInteractions(profileTransfer);
@@ -293,6 +298,39 @@ public class EtendoGoJwtServletCoverageTest {
     Object prepared = prepareOnboardingForPersistedSelection();
 
     assertNull("A spent demo is never the origin of a second productive environment",
+        getField(getField(prepared, "request"), "demoClientId"));
+    verify(lifecycle, never()).associateDemoWithProductive(anyString(), anyString());
+  }
+
+  /**
+   * ETP-5047: a purchase that persisted a canceled productive environment as its source (recorded
+   * before eligibility excluded productive environments) is already paid, so it is not refused —
+   * like the spent demo above, it becomes a clean productive environment with no source.
+   */
+  @Test
+  public void paidSetupFromAProductiveSourceContinuesWithoutASource() throws Exception {
+    CheckoutRequestStore store = mock(CheckoutRequestStore.class);
+    servlet.checkoutRequestStore = store;
+    TenantPaywallService paywall = new TenantPaywallService();
+    Field confirmation = TenantPaywallService.class.getDeclaredField("paymentConfirmation");
+    confirmation.setAccessible(true);
+    confirmation.set(paywall, (TenantPaywallService.PaymentConfirmation) (token, email, name) -> true);
+    servlet.tenantPaywallService = paywall;
+    TenantEnvironmentLifecycleService lifecycle = mock(TenantEnvironmentLifecycleService.class);
+    servlet.tenantEnvironmentLifecycleService = lifecycle;
+    when(lifecycle.isProductiveEnvironment("STORED-DEMO")).thenReturn(true);
+    when(store.hasRecordedDemoSelection("purchase-1", "account-1", "user@test.com"))
+        .thenReturn(true);
+    when(store.findDemoClientId("purchase-1", "account-1", "user@test.com"))
+        .thenReturn("STORED-DEMO");
+    when(store.claimForProvisioning("purchase-1", "account-1", "user@test.com"))
+        .thenReturn(true);
+    when(store.findProvisioningAttempt("purchase-1", "account-1", "user@test.com"))
+        .thenReturn(7L);
+
+    Object prepared = prepareOnboardingForPersistedSelection();
+
+    assertNull("A productive environment is never the origin of another productive environment",
         getField(getField(prepared, "request"), "demoClientId"));
     verify(lifecycle, never()).associateDemoWithProductive(anyString(), anyString());
   }
@@ -543,6 +581,91 @@ public class EtendoGoJwtServletCoverageTest {
     assertFalse(responseBody.has("dataTransfer"));
   }
 
+  /**
+   * ETP-5047 — a canceled productive tenant reads plan "free" (its closed row answers canceled),
+   * yet it is not a demo. A purchase from its own session is a clean productive environment, as on
+   * develop: no DEMO_SELECTION_REQUIRED, and never itself as the source, even when named.
+   */
+  @Test
+  public void purchaseFromACanceledProductiveCreatesACleanProductiveWithoutASource()
+      throws Exception {
+    assertCanceledProductiveOriginBuysClean(
+        "{\"clientName\":\"New Production\"}");
+    assertCanceledProductiveOriginBuysClean(
+        "{\"clientName\":\"New Production\",\"demoClientId\":\"CANCELED-PROD\","
+            + "\"dataTransfer\":{\"products\":true,\"contacts\":true}}");
+  }
+
+  private void assertCanceledProductiveOriginBuysClean(String body) throws Exception {
+    Account account = mock(Account.class);
+    when(account.getId()).thenReturn("account-1");
+    when(account.getEmail()).thenReturn("owner@example.test");
+    GoSessionService sessions = mock(GoSessionService.class);
+    GoSessionRecord session = new GoSessionRecord();
+    session.setAccountId("account-1");
+    session.setCsrfToken("csrf-token-value-123456");
+    session.setCtxClientId("CANCELED-PROD");
+    when(sessions.resolve("session-cookie-token")).thenReturn(session);
+
+    EtendoGoJwtServlet purchaseServlet = new EtendoGoJwtServlet(
+        mock(TransactionalAuthEmailSender.class),
+        mock(EtendoGoSsoProviderRegistry.class), sessions);
+    CheckoutRequestStore requestStore = mock(CheckoutRequestStore.class);
+    HostedCheckoutService checkout = mock(HostedCheckoutService.class);
+    DemoDataTransferService transfer = mock(DemoDataTransferService.class);
+    TenantPlanService tenantPlan = mock(TenantPlanService.class);
+    purchaseServlet.checkoutRequestStore = requestStore;
+    purchaseServlet.hostedCheckoutService = checkout;
+    purchaseServlet.demoDataTransferService = transfer;
+    purchaseServlet.tenantPlanService = tenantPlan;
+    when(tenantPlan.resolvePlan("CANCELED-PROD")).thenReturn(TenantPlanService.PLAN_FREE);
+    TenantEnvironmentLifecycleService lifecycle = mock(TenantEnvironmentLifecycleService.class);
+    purchaseServlet.tenantEnvironmentLifecycleService = lifecycle;
+    when(lifecycle.isProductiveEnvironment("CANCELED-PROD")).thenReturn(true);
+
+    JSONObject checkoutResult = new JSONObject().put("requestId", "purchase-prod-1");
+    when(checkout.createSession(eq("account-1"), eq("owner@example.test"), eq("New Production"),
+        eq("https://app.example.test"), isNull(), argThat(
+            EtendoGoJwtServletCoverageTest::selectsNoDemo)))
+        .thenReturn(checkoutResult);
+    HttpServletRequest request = jsonRequest("/billing/purchases", body);
+    when(request.getMethod()).thenReturn("POST");
+    when(request.getCookies()).thenReturn(
+        new Cookie[] { new Cookie(GoSessionSecurity.COOKIE_NAME, "session-cookie-token") });
+    when(request.getHeader(GoSessionSecurity.CSRF_HEADER)).thenReturn("csrf-token-value-123456");
+    when(request.getHeader("Origin")).thenReturn("https://app.example.test");
+    when(request.getHeader("Referer")).thenReturn(null);
+    when(request.getRequestURL()).thenReturn(new StringBuffer("https://app.example.test/sws/go/billing/purchases"));
+    ResponseCapture response = mockResponse();
+    OBDal dalInstance = mock(OBDal.class);
+    when(dalInstance.get(Client.class, "CANCELED-PROD")).thenReturn(mock(Client.class));
+
+    try (MockedStatic<OBContext> context = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class);
+        MockedStatic<PublicUrlResolver> urls = mockStatic(PublicUrlResolver.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dalInstance);
+      dal.when(() -> EtendoGoJwtDalHelper.findActiveAccountById("account-1")).thenReturn(account);
+      dal.when(() -> EtendoGoJwtDalHelper.hasOwnedEnvironmentForAccountEmail("owner@example.test"))
+          .thenReturn(true);
+      dal.when(() -> EtendoGoJwtDalHelper.clientBelongsToAccountEmail("CANCELED-PROD",
+          "owner@example.test")).thenReturn(true);
+      urls.when(PublicUrlResolver::resolveConfiguredAppBaseUrl).thenReturn("https://app.example.test");
+
+      purchaseServlet.doPost(request, response.response);
+
+      org.mockito.Mockito.verifyNoInteractions(transfer);
+    }
+
+    assertEquals(response.body(), 201, response.status);
+    JSONObject responseBody = new JSONObject(response.body());
+    assertFalse(responseBody.has("demoClientId"));
+    assertFalse(responseBody.has("dataTransfer"));
+    verify(checkout).createSession(eq("account-1"), eq("owner@example.test"),
+        eq("New Production"), eq("https://app.example.test"), isNull(),
+        argThat(EtendoGoJwtServletCoverageTest::selectsNoDemo));
+  }
+
   @Test
   public void billingPurchaseProjectionIncludesCreatedClientIdForSelectorReconciliation()
       throws Exception {
@@ -621,22 +744,31 @@ public class EtendoGoJwtServletCoverageTest {
 
   @Test
   public void billingPurchaseRejectsDemoOwnedByAnotherAccount() throws Exception {
-    assertInvalidDemoSelectionRejected(false, TenantPlanService.PLAN_FREE, false);
+    assertInvalidDemoSelectionRejected(false, TenantPlanService.PLAN_FREE, false, false);
   }
 
   @Test
   public void billingPurchaseRejectsOwnedDemoThatIsNoLongerFree() throws Exception {
-    assertInvalidDemoSelectionRejected(true, TenantPlanService.PLAN_PRODUCTIVE, false);
+    assertInvalidDemoSelectionRejected(true, TenantPlanService.PLAN_PRODUCTIVE, false, false);
   }
 
   /** ETP-5548: a demo that already originated a productive environment is not a source again. */
   @Test
   public void billingPurchaseRejectsDemoThatAlreadyOriginatedAProductive() throws Exception {
-    assertInvalidDemoSelectionRejected(true, TenantPlanService.PLAN_FREE, true);
+    assertInvalidDemoSelectionRejected(true, TenantPlanService.PLAN_FREE, true, false);
+  }
+
+  /**
+   * ETP-5047 — a canceled productive environment reads plan "free" and carries no association
+   * marker, but it is not a demo: naming it as the source of a purchase is refused.
+   */
+  @Test
+  public void billingPurchaseRejectsACanceledProductiveAsDemoSource() throws Exception {
+    assertInvalidDemoSelectionRejected(true, TenantPlanService.PLAN_FREE, false, true);
   }
 
   private void assertInvalidDemoSelectionRejected(boolean selectedDemoOwned, String selectedDemoPlan,
-      boolean selectedDemoAssociated) throws Exception {
+      boolean selectedDemoAssociated, boolean selectedDemoProductive) throws Exception {
     Account account = mock(Account.class);
     when(account.getId()).thenReturn("account-1");
     when(account.getEmail()).thenReturn("owner@example.test");
@@ -661,6 +793,8 @@ public class EtendoGoJwtServletCoverageTest {
     when(tenantPlan.resolvePlan("DEMO-1")).thenReturn(selectedDemoPlan);
     when(purchaseServlet.tenantEnvironmentLifecycleService.isAssociatedWithProductive("DEMO-1"))
         .thenReturn(selectedDemoAssociated);
+    when(purchaseServlet.tenantEnvironmentLifecycleService.isProductiveEnvironment("DEMO-1"))
+        .thenReturn(selectedDemoProductive);
 
     HttpServletRequest request = jsonRequest("/billing/purchases",
         "{\"clientName\":\"New Production\",\"demoClientId\":\"DEMO-1\"}");

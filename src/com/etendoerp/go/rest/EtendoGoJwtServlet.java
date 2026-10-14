@@ -3266,7 +3266,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
     // A demo that already originated a productive environment is spent as a source: buying again
     // from it creates a clean productive environment, exactly like buying from a productive one.
-    if (isProductiveClient(sessionClientId) || isAssociatedDemo(sessionClientId)) {
+    // ETP-5047 — so does a productive environment whose plan reads free because its subscription
+    // was canceled: it is not a demo, so it is never asked for, nor taken as, a source.
+    if (isProductiveClient(sessionClientId) || isProductiveEnvironment(sessionClientId)
+        || isAssociatedDemo(sessionClientId)) {
       return new CheckoutSelection(null, false, false);
     }
     String demoClientId = optionalDemoClientId(body);
@@ -3333,6 +3336,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
   }
 
+  /**
+   * Whether the named environment may be the demo source of a purchase: owned by the account, on
+   * the free plan, not already the origin of a productive environment (ETP-5548), and not itself a
+   * productive environment (ETP-5047 — a canceled one reads plan free, see
+   * {@link TenantEnvironmentLifecycleService#isProductiveEnvironment}).
+   */
   private boolean isOwnedFreeDemoClient(String demoClientId, String accountEmail) {
     OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
     OBContext.setAdminMode(true);
@@ -3341,10 +3350,21 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       return client != null
           && EtendoGoJwtDalHelper.clientBelongsToAccountEmail(demoClientId, accountEmail)
           && TenantPlanService.PLAN_FREE.equals(tenantPlanService.resolvePlan(demoClientId))
-          && !tenantEnvironmentLifecycleService.isAssociatedWithProductive(demoClientId);
+          && !tenantEnvironmentLifecycleService.isAssociatedWithProductive(demoClientId)
+          && !tenantEnvironmentLifecycleService.isProductiveEnvironment(demoClientId);
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /**
+   * ETP-5047 — purchase-source eligibility, not access: the lifecycle type, never the enforced
+   * access decision, so the enforcement kill switch cannot turn a productive environment into a
+   * source. Scoped like {@link #isAssociatedDemo}.
+   */
+  private boolean isProductiveEnvironment(String clientId) {
+    return SystemContext.call("the productive-environment check",
+        () -> tenantEnvironmentLifecycleService.isProductiveEnvironment(clientId));
   }
 
   /** Scoped like {@link #isProductiveNameTakenByAccount}: the caller's context is restored. */
@@ -4611,6 +4631,16 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       // environment, without a source, data transfer or demo revocation (ETP-5548).
       log.info("Demo {} already originated a productive environment; the paid setup continues "
           + "without a source", persistedDemoClientId);
+      onboardingRequest.demoClientId = null;
+      return true;
+    }
+    if (StringUtils.isNotBlank(persistedDemoClientId)
+        && isProductiveEnvironment(persistedDemoClientId)) {
+      // ETP-5047 — a purchase recorded a productive environment as its source (a canceled one
+      // reads plan free) before the checkout stopped accepting one. It is already paid, so like
+      // the spent demo above it is not refused: it becomes a clean productive environment.
+      log.info("Source {} of the paid setup is a productive environment, not a demo; the paid "
+          + "setup continues without a source", persistedDemoClientId);
       onboardingRequest.demoClientId = null;
       return true;
     }

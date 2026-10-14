@@ -441,6 +441,7 @@ class EtendoGoJwtDalHelperTest {
 
     @Mock private OBQuery<User> usersQuery;
     @Mock private OBQuery<Preference> preferenceQuery;
+    @Mock private OBQuery<Subscription> subscriptionQuery;
 
     // ETP-5640 reads the tenant plan in OBContext admin mode; with no live session the real
     // static methods NPE, so they are no-ops here — the plan lookup is stubbed through obDal.
@@ -449,6 +450,10 @@ class EtendoGoJwtDalHelperTest {
     @BeforeEach
     void mockAdminMode() {
       obContextMock = mockStatic(OBContext.class);
+      // ETP-5047: the plan and the environment type both read the subscription rows; by default
+      // no tenant has one. A spec that needs a row answers it per tenant.
+      when(obDal.createQuery(eq(Subscription.class), anyString())).thenReturn(subscriptionQuery);
+      when(subscriptionQuery.uniqueResult()).thenReturn(null);
     }
 
     @AfterEach
@@ -505,6 +510,45 @@ class EtendoGoJwtDalHelperTest {
       Set<String> result = EtendoGoJwtDalHelper.findFreeTenantIdsByAccountEmail("owner@example.test");
 
       assertEquals(Set.of("free-client-1", "free-client-2"), result);
+    }
+
+    /**
+     * ETP-5047: a canceled productive environment reads plan "free" (its closed row answers
+     * canceled) but it is not a demo, so it is never a purchase source candidate. A demo without
+     * any lifecycle type next to it still is.
+     */
+    @Test
+    @DisplayName("leaves out a canceled productive environment whose plan reads free")
+    void excludesACanceledProductiveEnvironment() {
+      Client demoClient = mock(Client.class);
+      Client canceledClient = mock(Client.class);
+      when(demoClient.getId()).thenReturn("demo-client");
+      when(canceledClient.getId()).thenReturn("canceled-productive");
+      User demoUser = mock(User.class);
+      User canceledUser = mock(User.class);
+      when(demoUser.getClient()).thenReturn(demoClient);
+      when(canceledUser.getClient()).thenReturn(canceledClient);
+      when(obDal.createQuery(eq(User.class), anyString())).thenReturn(usersQuery);
+      when(usersQuery.list()).thenReturn(List.of(demoUser, canceledUser));
+      when(obDal.createQuery(eq(Preference.class), anyString())).thenReturn(preferenceQuery);
+      when(preferenceQuery.uniqueResult()).thenReturn(null);
+      Subscription closedRow = mock(Subscription.class);
+      when(closedRow.getSubscriptionStatus()).thenReturn("canceled");
+      when(closedRow.getEndDate()).thenReturn(new java.util.Date());
+      java.util.concurrent.atomic.AtomicReference<Object> queriedClient =
+          new java.util.concurrent.atomic.AtomicReference<>();
+      org.mockito.Mockito.doAnswer(invocation -> {
+        if ("environmentClientId".equals(invocation.getArgument(0))) {
+          queriedClient.set(invocation.getArgument(1));
+        }
+        return subscriptionQuery;
+      }).when(subscriptionQuery).setNamedParameter(anyString(), any());
+      when(subscriptionQuery.uniqueResult()).thenAnswer(invocation ->
+          "canceled-productive".equals(queriedClient.get()) ? closedRow : null);
+
+      Set<String> result = EtendoGoJwtDalHelper.findFreeTenantIdsByAccountEmail("owner@example.test");
+
+      assertEquals(Set.of("demo-client"), result);
     }
   }
 

@@ -487,7 +487,8 @@ the expired session; the replacement ID is then saved on the same request. This 
 sessions from charging the same purchase and preserves the original price and environment choice.
 
 Demo selection is valid only when the request is made from an authenticated free/demo environment
-linked to the account. A productive environment cannot supply a demo selection. When one or more
+linked to the account. A productive environment cannot supply a demo selection, nor be one — a
+canceled one included, although its plan reads free (ETP-5047, below). When one or more
 free/demo environments are linked to the account, include the chosen environment's
 `AD_CLIENT_ID` as `demoClientId` in the checkout request. Selection is required in this case. The
 backend validates that it is a free/demo environment
@@ -521,6 +522,35 @@ the demo) and revokes its access. From then on the demo is spent as a source:
   demo, the other one finished first) is already paid, so onboarding does not refuse it: it drops
   the source and provisions a clean productive environment — no association, profile copy,
   revocation or data transfer.
+
+**A productive environment is never a source, even when its plan reads free (ETP-5047).** A
+canceled subscription closes the tenant's row, and a closed row reads plan `free`
+(`TenantPlanService#resolvePlan`), so the plan alone would let a canceled productive tenant pass for
+a free demo. Source eligibility therefore also asks
+`TenantEnvironmentLifecycleService#isProductiveEnvironment`, which reads the lifecycle type the same
+way `resolve` does: any subscription row, open or closed, makes the tenant productive; without a row,
+the `ETGO_EnvironmentType = PRODUCTIVE` marker or the retired `ETGO_TenantPlan` preference does, so
+the check holds while `ETGO_SubscriptionModel` is OFF too.
+
+- The rule excludes what is positively productive; it does not require a demo marker. A tenant that
+  predates the lifecycle metadata (no row, a missing or blank `ETGO_EnvironmentType`, free plan) stays
+  a valid source.
+- It is eligibility, not access: it never reads the access decision, so the access-enforcement kill
+  switch does not change it.
+- A purchase whose session is in a canceled productive environment is treated like any
+  productive-origin purchase: no `DEMO_SELECTION_REQUIRED`, any `demoClientId` / `dataTransfer` in
+  the body is ignored, and a clean productive environment is provisioned. Naming such an environment
+  as `demoClientId` from a demo session answers 400 `INVALID_DEMO_SELECTION`.
+- The account's source candidates (`EtendoGoJwtDalHelper#findFreeTenantIdsByAccountEmail`, used by
+  the paid onboarding re-check and the transfer status fallback) leave it out.
+- A purchase that recorded a productive environment as its source before this rule existed is
+  already paid, so onboarding does not refuse it: like a spent demo, it drops the source and
+  provisions a clean productive environment.
+- A lookup that fails answers "productive" (not a source): the worst outcome is a clean environment,
+  never the association of the wrong tenant.
+- `GET /sws/go/environments` keeps reporting the facts: `plan: "free"`, `environmentType:
+  "PRODUCTIVE"`, `subscriptionStatus: "EXPIRED"`. The upgrade page keys its picker on
+  `environmentType`, not only on `plan`.
 
 Paid onboarding uses `PROVISIONING_ATTEMPTS` as a durable fencing token. The claim is normally
 taken from `PAID`; if the row has remained `PROVISIONING` longer than
@@ -566,7 +596,8 @@ the browser has lost state or another demo environment has since been created.
 
 For new purchases, a recorded empty selection means that this purchase has no demo source; onboarding
 does not infer one. A saved demo ID that is no longer linked to the account or is no longer free/demo
-is rejected before provisioning starts. Legacy purchases with no saved selection marker resume the
+is rejected before provisioning starts — except a spent demo or a productive environment, which
+continue without a source (see *A productive environment is never a source* above). Legacy purchases with no saved selection marker resume the
 original purchase/session and provision without associating, copying, revoking, or transferring from
 a demo. Reopening those purchases does not prompt for a new demo choice.
 
