@@ -106,6 +106,23 @@ class CalendarReviewServiceTest {
     obDal.close();
   }
 
+  /**
+   * The native queries are mocked everywhere else, so their text is only checked here. Hibernate
+   * reads `::type` as a named parameter, and refuses a result with two columns of the same name.
+   */
+  @Test
+  void nativeQueriesStayParsableByHibernate() {
+    for (String sql : List.of(CalendarReviewService.CALENDAR_FOREIGN_KEYS_SQL,
+        CalendarReviewService.CALENDAR_SQL, CalendarReviewService.ANY_PERIOD_OPENED_SQL,
+        CalendarReviewService.DELETE_LOG_SQL, CalendarReviewService.DELETE_PERIODS_SQL,
+        CalendarReviewService.DELETE_YEARS_SQL)) {
+      assertFalse(sql.contains("::"), sql);
+    }
+    assertTrue(CalendarReviewService.CALENDAR_FOREIGN_KEYS_SQL
+        .contains("AS fk_table, CAST(a.attname AS text) AS fk_column,"));
+    assertTrue(CalendarReviewService.CALENDAR_FOREIGN_KEYS_SQL.contains("AS ref_table"));
+  }
+
   @Test
   void rejectsAnUnknownFiscalYearStart() {
     assertEquals(400, service.regenerate("CLIENT", "MARCH", "USER", OCT_14).status);

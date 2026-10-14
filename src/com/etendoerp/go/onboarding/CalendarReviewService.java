@@ -100,7 +100,10 @@ public class CalendarReviewService {
    * regenerating deletes ({@code C_PERIOD_TRG2} removes controls and log on period delete).
    */
   static final String CALENDAR_FOREIGN_KEYS_SQL =
-      "SELECT cl.relname, a.attname, ref.relname FROM pg_constraint c"
+      // Distinct aliases: Hibernate refuses a native result with two columns named `relname`.
+      // CAST, not `::`: Hibernate would read `:text` as a named parameter.
+      "SELECT CAST(cl.relname AS text) AS fk_table, CAST(a.attname AS text) AS fk_column,"
+          + " CAST(ref.relname AS text) AS ref_table FROM pg_constraint c"
           + " JOIN pg_class cl ON cl.oid = c.conrelid JOIN pg_class ref ON ref.oid = c.confrelid"
           + " JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = c.conkey[1]"
           + " WHERE c.contype = 'f' AND ref.relname IN ('c_period', 'c_year')"

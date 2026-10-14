@@ -960,7 +960,8 @@ completions (core procedures, via `NeoProcessService`), by posting (`DocumentPos
 `NeoResponse.error(int, OBException)` → `error.messageKeys`). The SPA turns it into a toast that
 points the owner to this row while the review is pending (others are told to ask the owner; an
 owner whose account dismissed First Steps, which is per account, goes to Calendar) and to
-Calendar afterwards; the MCP adds a `hint` telling the agent to ask the user before opening the
+Calendar afterwards — to the fiscal year whose period contains the document's date, so a July–June
+calendar sends a January date to the year that started the previous July; the MCP adds a `hint` telling the agent to ask the user before opening the
 period with the `openClose` action of `open-close-period-control`.
 
 ## Invoice numbering (First Steps step)
