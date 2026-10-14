@@ -46,6 +46,7 @@ class NeoBuiltInEndpointHandler {
   private final NeoDiscoveryHandler discoveryHandler;
   private final Fiscal303BoxesHandler fiscal303Handler;
   private final Fiscal349BoxesHandler fiscal349Handler;
+  private final Fiscal390BoxesHandler fiscal390Handler;
   private final TransactionalEmailService transactionalEmailService;
 
   NeoBuiltInEndpointHandler(NeoServlet servlet, NeoDiscoveryHandler discoveryHandler) {
@@ -58,9 +59,11 @@ class NeoBuiltInEndpointHandler {
     this.discoveryHandler = discoveryHandler;
     this.fiscal303Handler = new Fiscal303BoxesHandler(servlet);
     this.fiscal349Handler = new Fiscal349BoxesHandler(servlet);
+    this.fiscal390Handler = new Fiscal390BoxesHandler(servlet);
     // ETP-5438 — every declaration PUT arrives through /fiscal303/declarations whatever its
-    // model, so each handler's CRUD delegate must reach both models' snapshot compute.
-    AbstractFiscalHandler.linkSubmittedSnapshotProviders(fiscal303Handler, fiscal349Handler);
+    // model, so each handler's CRUD delegate must reach every model's snapshot compute.
+    AbstractFiscalHandler.linkSubmittedSnapshotProviders(fiscal303Handler, fiscal349Handler,
+        fiscal390Handler);
     this.transactionalEmailService = transactionalEmailService;
   }
 
@@ -102,6 +105,10 @@ class NeoBuiltInEndpointHandler {
     }
     if ("fiscal349".equals(pathInfo.specName)) {
       fiscal349Handler.handle(pathInfo.entityName, method, request, response);
+      return true;
+    }
+    if ("fiscal390".equals(pathInfo.specName)) {
+      fiscal390Handler.handle(pathInfo.entityName, method, request, response);
       return true;
     }
     if ("fiscal-models-catalog".equals(pathInfo.specName)) {
