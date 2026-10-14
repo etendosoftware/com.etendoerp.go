@@ -775,7 +775,7 @@ because develop's data-fix R42 (`20260929T190000Z__R42-paid-provisioning-commerc
 ETP-5548) re-inserts the marker for paid-provisioned tenants, including ones that already have a
 row; the runner runs R37 only for a tenant whose chain is already past R42, so R37 removes it
 (design doc §8 and §8.2, including the `run.js --fix <R42>` caveat and the residual for tenants
-that first reach R42 after the switch). The fleet therefore converges from both ends onto
+that first reach R42 after the switch, `open-and-notable-topics.md` §3.8). The fleet therefore converges from both ends onto
 one **observable end condition**: `select count(*) from ad_preference where
 attribute = 'ETGO_TenantPlan'` reaching 0, with the WARN line below silent. Both retirement paths
 remove *every* `ETGO_TenantPlan` row visible at the tenant, whatever its value or `isactive` flag —
@@ -817,9 +817,12 @@ A tenant answered by the fallback reports `plan: "productive"` with **`planKey` 
 it; inventing a key such as `"legacy-productive"` would claim a row that does not exist and would
 hide the gap from anyone reading the payload.
 
-Every resolution served by the fallback logs at **WARN**, naming the tenant and pointing at the
-backfill — one line per resolution, never per comparison. On an environment whose switch is still OFF
-that is every paying tenant, every time, and expected. Once switched, that log is the deletion signal:
+Every resolution served by the fallback logs one line naming the tenant — one line per resolution,
+never per comparison — at a level that follows the subscription-model switch (read only when the
+fallback serves a tenant, at most once per resolution or batch). With the switch **OFF** it is
+**DEBUG**: every paying tenant is recorded with the preference on purpose. With it **ON** it is
+**WARN**, pointing at the backfill, because a tenant without a row is unexpected there. Once
+switched, that WARN is the deletion signal:
 **when it stops appearing, every tenant has a subscription row** and the fallback is safe to remove. Read it
 together with the preference count above: the count says no tenant still *has* a marker, the silence
 says no tenant still *needs* one. Phase F deletes `TenantPlanPreferenceFallback`, `markProductive`,

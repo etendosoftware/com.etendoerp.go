@@ -68,11 +68,20 @@ import org.openbravo.model.ad.system.Client;
  * {@code TenantPlanService#resolvePlan} did, and a spec pins that column literally.
  *
  * <h3>Observability is the point</h3>
- * Every resolution served by this fallback is logged at {@code WARN}, naming the tenant. A silent
- * fallback would let the backfill be forgotten forever; the log is the signal that says when it is
- * safe to delete this class — when the line stops appearing, every tenant has a subscription row.
+ * Every resolution served by this fallback is logged, naming the tenant. On an environment that has
+ * switched to the subscription model ({@link SubscriptionModelSwitch} ON) the line is a {@code WARN}:
+ * a tenant without a row there is unexpected, a silent fallback would let the backfill be forgotten
+ * forever, and the line is the signal that says when it is safe to delete this class — when it stops
+ * appearing, every tenant has a subscription row. On an environment still OFF the preference path is
+ * the intended one for every paying tenant, so the same event is logged at {@code DEBUG}.
  * One line per resolution, never per comparison: the environment list reads a tenant's plan many
  * times per render, so the log lives at query time, not at read time.
+ *
+ * <p><b>Cost of the level decision.</b> The switch is a database read, so it is consulted only when
+ * the fallback actually serves a tenant — never for a tenant with a row or without a marker — and
+ * at most once per call: once per {@link #isProductive} resolution, once per {@link #productiveAmong}
+ * batch however many tenants it serves. A tenant that falls back already cost one preference query;
+ * the switch adds one more single-row lookup on the same table, only on that path.
  */
 public class TenantPlanPreferenceFallback {
 
@@ -84,11 +93,28 @@ public class TenantPlanPreferenceFallback {
   private static final String PARAM_CLIENT_ID = "clientId";
   private static final String PARAM_CLIENT_IDS = "clientIds";
 
-  /** Emitted once per tenant actually served by the fallback. Carries the grep marker. */
+  /**
+   * Emitted at WARN once per tenant actually served by the fallback, on an environment that has
+   * switched to the subscription model. Carries the grep marker.
+   */
   private static final String FALLBACK_WARNING =
       "ETP-5046-TRANSITIONAL-FALLBACK: tenant {} has no open ETGO_SUBSCRIPTION row; resolving it as"
           + " '{}' from the retired {} preference. The ETP-5046 backfill has not run for this"
           + " tenant — run it and this line disappears.";
+
+  /**
+   * The same event at DEBUG, on an environment whose subscription model is still OFF: there every
+   * paying tenant is recorded with the preference on purpose, so it is the intended path, not a gap.
+   */
+  private static final String FALLBACK_INTENDED =
+      "ETP-5046-TRANSITIONAL-FALLBACK: tenant {} resolved as '{}' from the {} preference; the"
+          + " subscription model is off in this environment, so this is the intended path.";
+
+  /**
+   * Decides the level of the line above. Package-visible and assigned rather than injected so a
+   * unit test can substitute a double, like {@code TenantPlanService#preferenceFallback}.
+   */
+  SubscriptionModelSwitch subscriptionModelSwitch = new SubscriptionModelSwitch();
 
   private static final String ACTIVE_PREFERENCE_PREDICATE =
       AND_PREF + Preference.PROPERTY_ACTIVE + " = true";
@@ -127,7 +153,7 @@ public class TenantPlanPreferenceFallback {
       if (preference == null || !holdsProductive(preference)) {
         return false;
       }
-      warnFallbackFired(clientId);
+      logFallbackServed(clientId, subscriptionModelSwitch.isOn());
       return true;
     } catch (RuntimeException e) {
       log.warn("ETP-5046-TRANSITIONAL-FALLBACK: could not read the {} preference of tenant {};"
@@ -175,9 +201,15 @@ public class TenantPlanPreferenceFallback {
       Set<String> productive = new LinkedHashSet<>();
       for (Preference preference : query.list()) {
         String tenantId = visibleAtClientId(preference);
-        if (tenantId != null && ids.contains(tenantId) && holdsProductive(preference)
-            && productive.add(tenantId)) {
-          warnFallbackFired(tenantId);
+        if (tenantId != null && ids.contains(tenantId) && holdsProductive(preference)) {
+          productive.add(tenantId);
+        }
+      }
+      if (!productive.isEmpty()) {
+        // One switch read for the whole batch, and none when nothing fell back.
+        boolean modelOn = subscriptionModelSwitch.isOn();
+        for (String tenantId : productive) {
+          logFallbackServed(tenantId, modelOn);
         }
       }
       return productive;
@@ -221,8 +253,17 @@ public class TenantPlanPreferenceFallback {
         .equalsIgnoreCase(StringUtils.trimToEmpty(preference.getSearchKey()));
   }
 
-  private static void warnFallbackFired(String clientId) {
-    log.warn(FALLBACK_WARNING, clientId, TenantPlanService.PLAN_PRODUCTIVE,
-        TenantPlanService.PREFERENCE_ATTRIBUTE);
+  /**
+   * Logs one tenant served by the fallback: WARN when the subscription model is on (a tenant
+   * without a row is unexpected there), DEBUG when it is off (the intended path).
+   */
+  private static void logFallbackServed(String clientId, boolean subscriptionModelOn) {
+    if (subscriptionModelOn) {
+      log.warn(FALLBACK_WARNING, clientId, TenantPlanService.PLAN_PRODUCTIVE,
+          TenantPlanService.PREFERENCE_ATTRIBUTE);
+    } else {
+      log.debug(FALLBACK_INTENDED, clientId, TenantPlanService.PLAN_PRODUCTIVE,
+          TenantPlanService.PREFERENCE_ATTRIBUTE);
+    }
   }
 }

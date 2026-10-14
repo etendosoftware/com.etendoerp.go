@@ -41,6 +41,12 @@ public class TenantPlanPreferenceFallbackAdminModeTest {
 
   private final TenantPlanPreferenceFallback fallback = new TenantPlanPreferenceFallback();
 
+  {
+    // Only the log level depends on the switch; its own admin-mode read is SubscriptionModelSwitch's
+    // concern and would otherwise hit this DAL double.
+    fallback.subscriptionModelSwitch = mock(SubscriptionModelSwitch.class);
+  }
+
   @Test
   public void aNonAdminCallerStillSeesTheProductiveMarker() {
     assertTrue(runAsNonAdmin(() -> fallback.isProductive(CLIENT_ID)));

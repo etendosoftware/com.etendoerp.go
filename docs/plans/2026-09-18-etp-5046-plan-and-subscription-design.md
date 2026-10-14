@@ -365,10 +365,15 @@ have one stay on it and keep being decided by it, while new tenants go back to t
 mixes both populations again and pushes Phase F further away, so it is an emergency brake, not an
 undo.
 
-**While OFF, the fallback's WARN is expected.** `TenantPlanPreferenceFallback` logs one WARN per
-resolution of a rowless productive tenant (§8.1). On a switched-off environment that is every paying
-tenant, every time, so the "silence" half of §8.1's end condition only means something once the
-switch is on.
+**The fallback's log level follows the switch.** `TenantPlanPreferenceFallback` logs one line per
+resolution of a rowless productive tenant (§8.1), with the grep marker
+`ETP-5046-TRANSITIONAL-FALLBACK`. While OFF that is every paying tenant, on purpose, so the line is
+**DEBUG** ("the subscription model is off in this environment, so this is the intended path"). While
+ON a tenant without a row is unexpected, so it is **WARN** ("… has no open ETGO_SUBSCRIPTION row …").
+The "silence" half of §8.1's end condition therefore means "no WARN" and only exists once the switch
+is on. Cost: the switch is read only when the fallback actually serves a tenant — once per
+`isProductive` resolution, once per `productiveAmong` batch — never for a tenant with a row or
+without a marker; the serving path already cost one `AD_Preference` query and adds one more.
 
 ## 7. Backfill
 
@@ -541,7 +546,7 @@ above zero, which would block Phase F forever.
 ### 8.1 The observable end condition
 
 This is the point of doing it per tenant. **It applies only on an environment that has switched
-(§6.3)**: before that every paying tenant legitimately carries a marker and trips the WARN, so Phase F
+(§6.3)**: before that every paying tenant legitimately carries a marker (logged at DEBUG), so Phase F
 also requires `ETGO_SubscriptionModel = Y` on every environment. Phase F — deleting `markProductive`,
 `retireProductivePreference`, `TenantPlanService.PREFERENCE_ATTRIBUTE`,
 `TenantPlanPreferenceFallback` and everything else carrying the grep marker
@@ -603,7 +608,8 @@ longer follows it there. If R42 matches that tenant it re-inserts a marker next 
 subscription row; harmless while the row is open (the row wins), but it keeps §8.1's count above 0
 and, once the row is closed, lets the fallback read the tenant as productive. Until a successor of
 R42 ships, re-run R37 for such a tenant (`make data-fixes FIX=R37-tenant-subscription-backfill
-CLIENT=<id>`). Recorded in the R37 header and `open-and-notable-topics.md` §2.9.
+CLIENT=<id>`). Recorded in the R37 header and `open-and-notable-topics.md` §3.8 (proper fix: a
+subscription-aware successor of R42, before Phase F).
 
 **The one exception is an operator forcing R42**: `run.js --fix <R42>` ignores chain order and the
 watermark. Whoever does that must follow it with `run.js --fix <R37> --client <same tenant>`, or
