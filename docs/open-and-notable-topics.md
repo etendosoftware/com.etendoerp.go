@@ -1500,10 +1500,10 @@ The fix asks the lifecycle type as well as the plan:
   reads only: a `findLatest` or `ETGO_EnvironmentType` read that throws answers "productive". A
   failure inside the retired `ETGO_TenantPlan` fallback (`TenantPlanPreferenceFallback#isProductive`
   via `resolvePlanWithoutSubscription`) is swallowed there and answers "not productive" —
-  fail-open, accepted 2026-10-14 (Martin Taal); it retires in Phase F. `resolveCheckoutSelection`, `isOwnedFreeDemoClient` (400
-  `INVALID_DEMO_SELECTION`), `findFreeTenantIdsByAccountEmail` and `restorePaidOnboardingSelection`
-  use it. A tenant that predates the lifecycle metadata (no row, no marker, free plan) stays a
-  valid source.
+  fail-open, accepted 2026-10-14 (Martin Taal); it retires in Phase F.
+  `resolveCheckoutSelection`, `isOwnedFreeDemoClient` (400 `INVALID_DEMO_SELECTION`),
+  `findFreeTenantIdsByAccountEmail` and `restorePaidOnboardingSelection` use it. A tenant that
+  predates the lifecycle metadata (no row, no marker, free plan) stays a valid source.
 - **SPA** (sf `a9f570e88`): `isPurchaseSourceDemo` (`lib/environmentPresentation.js`) also excludes
   `environmentType: 'PRODUCTIVE'`, and `environmentPlanLabelKey` badges it "Productive".
 
