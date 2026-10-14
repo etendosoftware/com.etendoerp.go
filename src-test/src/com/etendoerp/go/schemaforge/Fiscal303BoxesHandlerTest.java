@@ -70,6 +70,7 @@ import org.hibernate.criterion.Criterion;
 import com.etendoerp.go.schemaforge.Fiscal303BoxesHandler.BoxGroupConfig;
 import com.etendoerp.go.schemaforge.Fiscal303BoxesHandler.ComputeResult;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
+import com.etendoerp.go.schemaforge.util.RoleAccessMatrix;
 
 /**
  * Unit tests for {@link Fiscal303BoxesHandler}.
@@ -107,7 +108,7 @@ public class Fiscal303BoxesHandlerTest {
     declHandler = new FiscalDeclCrudHandler(null);
     accessMock = mockStatic(NeoAccessHelper.class);
     accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
-        eq(NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID), anyString())).thenReturn(true);
+        eq(RoleAccessMatrix.TAX_MODELS_PROXY_WINDOW_ID), anyString())).thenReturn(true);
   }
 
   @org.junit.After
@@ -461,7 +462,7 @@ public class Fiscal303BoxesHandlerTest {
     Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(servlet);
 
     accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
-        eq(NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID), eq("GET"))).thenReturn(false);
+        eq(RoleAccessMatrix.TAX_MODELS_PROXY_WINDOW_ID), eq("GET"))).thenReturn(false);
 
     h.handle("boxes", "GET", req, res);
 
