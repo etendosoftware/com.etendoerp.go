@@ -182,6 +182,12 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
         return lockError;
       }
     }
+    // ETP-5745: refuse reactivation of a fiscally-accepted invoice already rectified by a
+    // completed rectificativa.
+    NeoResponse reactivationGuard = InvoiceReactivationGuard.checkReactivation(context);
+    if (reactivationGuard != null) {
+      return reactivationGuard;
+    }
     return NeoHeaderActionRouter.dispatch(
         context,
         currencyOptionsHandler,
