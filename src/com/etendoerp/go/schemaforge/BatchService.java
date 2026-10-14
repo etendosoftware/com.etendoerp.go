@@ -342,7 +342,10 @@ public class BatchService {
     // finally: the request thread is pooled, and a leaked flag would stop the next, unrelated
     // request on that thread from ever committing.
     beginCallerOwnedTransaction();
+    // ETP-5676: per-request state shared by the operations (the callout-discard memory). Opened
+    // after the claim and closed in the same finally, so it can never outlive this request.
     TransactionTracker tracker = new TransactionTracker();
+    NeoBatchScope previousScope = NeoBatchScope.open();
     try {
       for (int i = 0; i < operations.length(); i++) {
         JSONObject failure = processOperation(i, operations.optJSONObject(i), resolvedIds, opResults,
@@ -369,6 +372,7 @@ public class BatchService {
       return failureBody(-1, null, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "Batch failed: " + e.getMessage(), null, tracker.durable());
     } finally {
+      NeoBatchScope.close(previousScope);
       endCallerOwnedTransaction();
     }
   }
