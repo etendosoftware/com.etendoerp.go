@@ -841,6 +841,55 @@ way would be a write permission grant, not a response projection, so the two are
 separate. `queryParams` is `null` for every existing 2-arg call site (write paths, tests), which is
 a no-op for `includeRequestedExtraProperties`.
 
+#### 4.3.6 An `@SQL=` foreign-key default never resolves to another tenant's row (ETP-5682)
+
+Some core `AD_Column` defaults query a client-scoped table with no `AD_Client_ID` filter. The one
+that broke production is `GL_Journal.C_DocType_ID`:
+`SELECT C_DocType_ID FROM C_DocType WHERE DocBaseType='GLJ' AND AD_ISORGINCLUDED(@AD_Org_ID@, AD_Org_ID, @#AD_Client_ID@) <> '-1' ORDER BY isdefault DESC`.
+Every tenant keeps its GLJ document type in org `0`, so the query matches the document type of
+every client and the first row is arbitrary. Classic hides it behind the combo's client filter;
+NEO evaluated it as-is, so manual journals took another tenant's document type, were numbered from
+that tenant's sequence and collided on `gl_journal_docno`. Other unscoped defaults of the same
+shape exist (e.g. the `returnToVendorShipment.documentType` `ETGO_SF_FIELD` default).
+
+`NeoDefaultTenantGuard`, called from `NeoDefaultsSqlHelper.resolveSQLDefaultWithOutcome` — the one
+choke point for `GET /defaults`, the create-time mandatory-default injection and MCP create —
+applies when the column is a foreign key (by primary key) to a **client-enabled** table and the
+context client is not `0`:
+
+- the query's rows are read in its own order, 200 at a time, and one
+  `SELECT <pk>, AD_Client_ID FROM <table> WHERE <pk> IN (…)` per batch resolves their owners;
+  the scan stops at the first acceptable row, so the usual case is one batch and one lookup.
+  There is no cap: an unscoped document-type default spans every tenant (production has more than
+  800 sales-order document types), and a cap would hide the tenant's own row past it;
+- the first row owned by the context client **or by client `0`** wins;
+- if every row belongs to another tenant, the outcome is "zero rows" (no default, the existing
+  `metadata.notes` explanation applies);
+- whenever at least one foreign row was skipped — also when the tenant's own row turns up later —
+  one WARN per resolution names the column, the table and the number of skipped rows, never the
+  ids. A recurring WARN for a column is the signal that its default needs a client-scoped
+  `defaultExpr`;
+- a row whose value is `null` is never chosen; if no non-null row is acceptable the outcome is
+  "zero rows" (without the guard a `null` first row resolves to `null` — the default is empty
+  either way, only `metadata.notes` differs);
+- a row it cannot find by primary key is accepted, and a failed lookup falls back to the first
+  row. On PostgreSQL a lookup that fails with an SQL error also aborts the transaction, exactly as
+  a failure of the default query itself would; the lookup reads only the primary key and
+  `AD_Client_ID` with names from the DAL model, so this is not expected in practice.
+
+The rule is structural (a default may never point at another tenant's row) and names no entity.
+A window can still pin the exact value with a client-scoped `defaultExpr` in its `decisions.json`
+(`simple-g-l-journal` does, for a deterministic order and no cross-tenant scan).
+
+**A row limit in the default defeats the guard.** `ORDER BY … LIMIT 1` on an unscoped query hands
+the guard a single row, usually another tenant's, so the outcome is "zero rows" instead of the
+tenant's own value. Scope such a default by `AD_Client_ID=@#AD_Client_ID@` instead of limiting it.
+
+Tests: `NeoDefaultTenantGuardTest` (applicability, ordering, batching across the 200-row boundary,
+unknown ids, lookup failure, null rows) and the `testResolveSqlDefaultOutcomeTenantGuard*` cases in
+`NeoDefaultsServiceTest`. Background and the list of known unscoped defaults:
+`etendo_schema_forge` `docs/etendo-ad/unscoped-sql-defaults.md`.
+
 ### 4.4 Selectors (FK Dropdowns)
 
 The selector service resolves foreign key references and provides searchable dropdown values.
@@ -1153,7 +1202,9 @@ role) to at least one active window that shows the attachment's table; otherwise
 window shows is allowed (WARN log). A few tables are only shown by a technical support window
 that no role template grants; for those `NeoAttachmentAuthorizer.PROXY_WINDOWS_BY_TABLE` also
 accepts the window that proxies the feature — today `ETGO_Fiscal_Decl` → Tax Report, the proxy
-Finance already holds for "Modelos fiscales" (ETP-5116), so justificante uploads keep working. For the bare-ID operations the table comes from the stored
+Finance already holds for "Modelos fiscales" (ETP-5116), so justificante uploads keep working. The window id is the shared
+`RoleAccessMatrix.TAX_MODELS_PROXY_WINDOW_ID` (ETP-5540), the same constant the roles matrix and the ETP-5546 fiscal gates read;
+the table→feature map stays hardcoded until ETP-4802 lets a GO feature declare its support tables. For the bare-ID operations the table comes from the stored
 `C_File` row, never from the request. Reads (list, download, zip, main) are unchanged. This is
 only the window-tier slice of ADR-0003; record/org scoping and the uniform `404` remain ETP-4570.
 
@@ -4483,7 +4534,68 @@ Response includes `EntitiesCreated` and `FieldsCreated` counts.
 
 ### 5.3 Custom Handlers (NeoHandler Interface)
 
-To inject custom business logic, implement the `NeoHandler` interface and annotate the class with `@Named`:
+#### 5.3.a Which binding to use — read this first
+
+**`@NeoExtension` is the binding for anything new. `@Named` + `Java_Qualifier` is the legacy one
+and is on its way out.**
+
+Both are resolved at runtime and both keep working: the annotation is looked up first and the
+qualifier remains the fallback, so nothing breaks while the two coexist. What changed is the
+default for new code, and the reason is not style:
+
+| | `@NeoExtension` | `@Named` + `Java_Qualifier` (legacy) |
+|---|---|---|
+| Where the binding lives | in the class, visible when you open it | in an `ETGO_SF_ENTITY` row, invisible from the code |
+| Splitting one handler into three | three new files, no data change | three new qualifiers, three edited rows, `export.database` |
+| Which entities reach this class | readable in the source | you have to go read the row or `ETGO_SF_ENTITY.xml` |
+| CDI scope mistakes | proxy-safe, resolved by `NeoExtensionIndex` | a normal scope makes the handler **silently skipped** (see the box below) |
+| Channel coverage | every surface, every channel, via `NeoExtensionDispatcher` | same dispatcher, resolved as fallback |
+
+Writing one:
+
+```java
+package com.example;
+
+import com.etendoerp.go.schemaforge.NeoExtension;
+import com.etendoerp.go.schemaforge.NeoHandler;
+import com.etendoerp.go.schemaforge.NeoContext;
+import com.etendoerp.go.schemaforge.NeoResponse;
+
+// spec = ETGO_SF_SPEC.Name (kebab-case), entity = ETGO_SF_ENTITY.Name
+@NeoExtension(spec = "sales-order", entity = "lines")
+public class SalesOrderLineExtension implements NeoHandler {
+
+  @Override
+  public NeoResponse handle(NeoContext context) {
+    if ("DELETE".equals(context.getHttpMethod())) {
+      // resolve the delete yourself; an empty 2xx becomes the standard confirmation
+      return NeoResponse.noContent();
+    }
+    // null falls through to the default CRUD path
+    return null;
+  }
+}
+```
+
+No row to edit and nothing to export. The class still implements `NeoHandler` exactly as before —
+the annotation changes **how the class is found**, never what it can do once found.
+
+**Migration is opportunistic, not a campaign.** Existing handlers are not being rewritten in bulk;
+one moves to the annotation when someone has a reason to open it anyway. Do not add a new
+`Java_Qualifier` binding: that is what is being retired.
+
+**Conflicts do not fail the build**, by design — a gradual migration passes through exactly those
+states. Two annotated classes claiming the same `(spec, entity)`, or an annotated pair whose row
+still names a different class by qualifier, are logged at `ERROR`. Run `make extension-parity` to
+catch them offline instead of in production.
+
+> Note: `NeoExtension`'s own javadoc describes the annotation as "additive, never a migration",
+> which was accurate as the acceptance criterion of the step that introduced it. The direction
+> above supersedes it for **new** code; the additive runtime behaviour it describes is unchanged.
+
+#### 5.3.b The legacy binding (`@Named` + `Java_Qualifier`)
+
+Still resolved, still supported, documented here because most existing handlers use it.
 
 ```java
 package com.example;
@@ -4806,6 +4918,10 @@ This is a plain duplicate-key conflict, not the concurrency conflict from §4.3.
 
   Both sign directions are `abs()`-based normalisations, not `negate()` flips, so they are **idempotent** — a caller that already normalised is never flipped back. Everything that reads a return quantity for aggregation is sign-agnostic by construction (`SUM(ABS(rl.MovementQty))` in the "already returned" availability queries of both header handlers; `resolveShipmentLineQty`'s explicit `signum()`/`abs()` split in `CreateDraftInvoiceHandler`). The one deliberate exception is the rectificative invoice line, which must stay NEGATIVE by functional decision: `ReturnShipmentUtils.addReturnInvoiceLines` forces it with `abs().negate()` (ETP-4737) and stays sign-agnostic so it keeps working for return documents created before ETP-5313.
 
+  Two more rules hold for that rectificative invoice (ETP-5729), both enforced in `ReturnShipmentUtils`:
+  - **Its taxes and totals come from the core trigger chain only.** Flushing the lines makes `C_INVOICELINE_TRG2` → `C_INVOICELINETAX_TRG` keep exactly one `C_InvoiceTax` row per rate and the header `TotalLines`/`GrandTotal` current, as for any invoice. `finalizeReturnInvoice` used to also insert an `InvoiceTax` per rate from Java (the removed `CreateDraftInvoiceHandler#recalculateTotals`), which sat next to the trigger-made row and doubled the tax and the outstanding amount at completion.
+  - **Its lines are not linked to the original order line.** `buildAndSaveInvoiceLine` still takes price and tax from the original document's order line (through `createShipmentInvoiceLine`), then clears `C_InvoiceLine.C_OrderLine_ID`. With the link, `C_INVOICE_POST` added the negative quantity to `C_OrderLine.QtyInvoiced` and the order's linked-invoice total dropped, so a fully invoiced order offered "invoice" again. The rectificative invoice reaches the return document through `M_InOutLine_ID` and the rectified invoice through `C_Invoice_Reverse`; it is deliberately no longer listed among the order's invoices.
+
 **Real-world example — `NeoExchangeRateService.hasRate` (one lookup behind two surfaces, ETP-4838):** exchange-rate availability is asked twice for the same user gesture — once by the frontend through `GET /sws/neo/validate-exchange-rate` before it applies a currency change, and once by `afterCallout()` on the order/invoice header handlers, which appends a `WARNING` message when the user edits `currency` by hand. Both now call the package-private `NeoExchangeRateService.hasRate(from, to, date)`, which reuses the endpoint's own `queryRate` — including its `AD_Client_ID IN ('0', ?)` scoping and its inverse-direction fallback — and fails **open** (returns `true`) on any error so a DB hiccup never manufactures a false warning.
 
   Previously `AbstractOrderHeaderHandler` and `AbstractInvoiceHeaderHandler` each carried a private `hasConversionRate()` copy of the query filtered by `ad_client_id = ?` alone. When ETP-4474 moved the currencyLayer rate sync to the System client, those copies went blind to it: the endpoint answered `hasRate: true` and the callout warned `noExchangeRateAvailable` for the very same pair and date. The lesson generalises — **when a handler needs an answer a NEO endpoint already computes, call the endpoint's helper, don't re-derive the query.** Two copies of a client-scoping filter is exactly the kind of drift that survives review and only surfaces when the data moves.
@@ -4833,7 +4949,7 @@ This is a plain duplicate-key conflict, not the concurrency conflict from §4.3.
 
 **Real-world example — `AbstractOrderHeaderHandler`'s GET annotations (`hasLinkedDocuments`, plus `needsPrimaryDoc`/`needsInvoiceDoc`, ETP-5295):** the shared base of `SalesOrderHeaderHandler`, `PurchaseOrderHeaderHandler` and `SalesQuotationHeaderHandler` appends three computed booleans to **every** record of **every** order GET — list and single-record alike — so the React list view can make document-flow decisions per row without any extra round trip.
 
-  - `hasLinkedDocuments` (pre-existing) — is there *any* `C_Invoice` or `M_InOut` with this `C_Order_ID`. Single-record GETs use a `LIMIT 1` query, list GETs one batch `IN` query.
+  - `hasLinkedDocuments` (pre-existing) — is there *any* `C_Invoice` or `M_InOut` with this `C_Order_ID`. Single-record GETs use a `LIMIT 1` query, list GETs one batch `IN` query. **Since ETP-5704 the single-record query is also the backend rule for Reactivate:** `AbstractOrderHeaderHandler.hasLinkedDocuments(orderId)` (static, lets a DB failure propagate) is called by `OrderReactivationGuard.refuseIfLinkedDocuments`, which `SalesOrderHeaderHandler.handle()` runs before the `DocAction` button on both channels — a POST whose *effective* DocAction is `RE` — resolved by `DocActionResolution.docActionToRun`: root `docAction` when `setDocAction` can actually write it (non-blank and accepted by `Property.checkIsValidValue` — an exact, case-sensitive member of the list — and `checkIsWritable`, the checks `BaseOBObject.set` runs), else the record's stored DocAction, which the procedure then runs (`setDocAction` swallows a refused write, so `"re"`, `" RE"` or `"XX"` run the stored action); `fieldValues` is not read, as the procedure does not read it — on an order with linked documents answers 400 `ETGO_OrderReactivateLinkedDocs`, an order id that does not exist answers 404 `Record not found` (reusing `NeoActionRecordGuard`'s not-found status and message — that guard itself only refuses another tenant's record, an unknown id passes it — signalled by `DocActionResolution.DocActionRecordNotFoundException`), and an order that cannot be loaded or resolved (no tab, no DocAction property — the action that will run is then unknown) or a linked-documents lookup that cannot run answers 500 `ETGO_OrderLinkedDocsCheckFailed` (fails closed). The quotation's RJ re-routing (`DocActionRequestSupport.requests`) reads root `docAction` first too, then the legacy `fieldValues.documentAction` / root `documentAction`, and never the stored value. The GET annotation keeps degrading to `false` on a DB error. Core's `C_Order_Post` RE branch has no such check. Only the sales order opts in; purchase orders do not call the guard.
   - `needsPrimaryDoc` / `needsInvoiceDoc` (ETP-5295) — "a shipment/receipt is still pending" and "an invoice is still pending". The names are deliberately **neutral across sales and purchase** ("primary doc" = goods shipment for a sales order, goods receipt for a purchase order — both `M_InOut`), so the one shared frontend hook that reads them (`useOrderWindow.jsx` in `etendo_schema_forge`) needs no per-window parameterization.
 
   **Why they exist.** The row kebab menu's "Gestionar envío/factura" entry derived its visibility and label from the `DeliveryStatus`/`InvoiceStatus` percent columns, while the "Gestionar" button on the detail form derives the same decision from the real documents. The two disagreed — the kebab showed or hid the entry, and picked its label, wrongly. Making the kebab issue the form's three requests *per row* was not an option, so the form's derivation moved server-side.
@@ -5154,6 +5270,51 @@ So there is no channel divergence to declare: list, count and distinct agree on 
 
 Current implementers: `ProductDefaultsHandler` (products in a system category, ETP-4967) and `ProductCategoryDefaultHandler` (the system categories themselves).
 
+#### 5.3.3 Contact summary read providers — `contacts/bp-stats` and `contacts/bp-trend` (ETP-5600)
+
+Two tab-less entities of the `contacts` spec are served whole by their pre-hook (`ContactsBpStatsHandler`, `ContactsBpTrendHandler`) and feed the contact form's summary widget and sidebar chart. Both aggregate completed/closed (`CO`/`CL`) invoices of one business partner in the current client.
+
+**Amounts are NET.** Both sum `c_invoice.totallines` (VAT excluded), the same base as the dashboard `WidgetKpisHandler` (ETP-5011), so the widget amounts, the chart and the dashboard agree. Before ETP-5600 both summed `grandtotal`.
+
+**`GET /sws/neo/contacts/bp-stats`**
+
+| Param | Required | Meaning |
+|---|---|---|
+| `businessPartnerId` | yes | `C_BPartner_ID`; blank or missing → `400` |
+| `months` | no | Period length for the summary widget. Allow-list `3` or `6`; any other value (blank, non-numeric, `12`, …) is treated as absent |
+
+Without `months` the response is the original one — two KPI entries comparing the current calendar month with the previous one:
+
+```json
+{ "response": { "count": 2, "data": [
+  { "key": "revenueThisMonth",  "label": "Revenue this month",  "value": 1200.0, "previousValue": 800.0,
+    "trend": 50.0, "format": "currency", "icon": "DollarSign" },
+  { "key": "expensesThisMonth", "label": "Expenses this month", "value": 300.0,  "previousValue": 0.0,
+    "trend": 0.0,  "format": "currency", "icon": "CreditCard" } ] } }
+```
+
+With `months=N` the two entries above are unchanged and two period KPIs are appended, plus a top-level `months`:
+
+```json
+{ "response": { "count": 4, "months": 3, "data": [
+  { "key": "revenueThisMonth", "…": "as above" },
+  { "key": "expensesThisMonth", "…": "as above" },
+  { "key": "revenue",  "label": "Revenue",  "value": 5400.0, "previousValue": 4500.0, "trend": 20.0,
+    "hasPrevious": true,  "format": "currency", "icon": "DollarSign" },
+  { "key": "expenses", "label": "Expenses", "value": 900.0,  "previousValue": 0.0,    "trend": 0.0,
+    "hasPrevious": false, "format": "currency", "icon": "CreditCard" } ] } }
+```
+
+- **Current window:** the last N calendar months including the current one, `[date_trunc('month', NOW()) - (N-1) months, NOW()]`.
+- **Comparison window:** the N calendar months immediately before it, `[start - N months, start)` — the equal-size preceding window `WidgetKpisHandler` uses (ETP-5493).
+- **`hasPrevious`** is `previousValue != 0`. When it is `false` the percentage change is undefined: `trend` is `0` and the client hides the variation chip. `trend` is otherwise `(value - previousValue) * 100 / |previousValue|`, one decimal.
+- `N` is bound as an integer query parameter; it never reaches the SQL text.
+- **Month entries vs period entries use different upper bounds.** `revenueThisMonth`/`expensesThisMonth` match on `date_trunc('month', dateinvoiced) = date_trunc('month', NOW())`, so they count the **whole** calendar month, including invoices dated later this month. The period entries (`revenue`/`expenses`) cap the current window at `dateinvoiced <= NOW()`, so a future-dated invoice in the current month appears in the month entry but not yet in the period entry. This is intentional (the month entries keep their original, pre-ETP-5600 values); a client comparing the two must not expect the current month to be a subset of the period total.
+
+**MCP.** `etendo_list(spec:"contacts", entity:"bp-stats", filters:{businessPartnerId:"…", months:3})` reaches the handler with the same params: `McpHookExecutor.buildReadProviderParams` copies every scalar `filters` entry into the provider's query params (`3` arrives as `"3"`). Omitting `months` keeps the original two-entry answer, so existing agent calls are unaffected.
+
+**`GET /sws/neo/contacts/bp-trend?businessPartnerId=…`** returns `{labels, revenue, expenses}` for the last 6 calendar months (net amounts, see above). It takes no period param.
+
 ---
 
 ## 6. Parent-Child Tab Filtering
@@ -5334,7 +5495,7 @@ NEO Headless enforces security at multiple levels:
 
 **`inventory-stock-report` is no longer on this list — resolved by a still-later ETP-5116 pass.** Same underlying gap as above (no `AD_Process`, no `AD_TAB_ID`, so `hasReportSpecAccess`'s discovery-listing fallback still applies), but this one was confirmed over-permissive in **production** — every authenticated role, including ones that should have none, could retrieve this data — so it was closed at the handler level directly rather than waiting on the generic mechanism: a brand-new pseudo-`AD_Window` (`6346B88619F948F9A42224BDB0B239FA`, 0 tabs, permission anchor only) was created, `TemplateRoleWindowAccess` grants it to Compras/Financiero/Almacén (not Ventas), and `InventoryStockReportHandler#handle` now calls `NeoAccessHelper.hasWindowAccess` on that window id explicitly at the top of the method — a real, explicit gate, not a proxy hoping the discovery-listing fallback happens to line up. The MCP tool-discovery/listing path is unaffected (still permissive, a separate and smaller informational-leak issue, tracked separately) — only the actual data-serving `handle()` call is now denied.
 
-**Fiscal models (`fiscal303`/`fiscal349`/`fiscal-models-catalog`) had NO access control at all until ETP-5546.** Unlike the two gaps above, these endpoints aren't report specs — `AbstractFiscalHandler` is a plain `NeoHandler`, so none of the `hasReportSpecAccess`/discovery-listing machinery in items 4/6 above ever applied to them, and nothing else filled the gap either: any authenticated role got `200` from `GET /fiscal303/declarations`, `GET /fiscal303/boxes`, `POST /fiscal303/submit`, `GET /fiscal349/boxes` and `POST /fiscal349/validate-vies` regardless of whether its role held the "Modelos Fiscales" grant. "Modelos Fiscales" access is represented in `AD_Window_Access` by the role's grant on the Tax Report window (`NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID = 3E8FEA1EA7404D979306C9EE7FD2E7E8`, proxy per ETP-5116 — only the Finanzas template grants it), the same convention as the other window-grant proxies in this section — but prior to ETP-5546 nothing ever checked it for these entities. Fixed with two gates, both calling the same item-3 helper (`NeoAccessHelper.hasWindowAccess(TAX_REPORT_WINDOW_ID, httpMethod)`, tiered read/write exactly as in item 3):
+**Fiscal models (`fiscal303`/`fiscal349`/`fiscal-models-catalog`) had NO access control at all until ETP-5546.** Unlike the two gaps above, these endpoints aren't report specs — `AbstractFiscalHandler` is a plain `NeoHandler`, so none of the `hasReportSpecAccess`/discovery-listing machinery in items 4/6 above ever applied to them, and nothing else filled the gap either: any authenticated role got `200` from `GET /fiscal303/declarations`, `GET /fiscal303/boxes`, `POST /fiscal303/submit`, `GET /fiscal349/boxes` and `POST /fiscal349/validate-vies` regardless of whether its role held the "Modelos Fiscales" grant. "Modelos Fiscales" access is represented in `AD_Window_Access` by the role's grant on the Tax Report window (`RoleAccessMatrix.TAX_MODELS_PROXY_WINDOW_ID = 3E8FEA1EA7404D979306C9EE7FD2E7E8`, the single backend constant since ETP-5540, proxy per ETP-5116 — only the Finanzas template grants it), the same convention as the other window-grant proxies in this section — but prior to ETP-5546 nothing ever checked it for these entities. Fixed with two gates, both calling the same item-3 helper (`NeoAccessHelper.hasWindowAccess(TAX_MODELS_PROXY_WINDOW_ID, httpMethod)`, tiered read/write exactly as in item 3):
 
 - `AbstractFiscalHandler.handle(String entityName, String method, HttpServletRequest, HttpServletResponse)` — the single entry point every `/fiscal303/*` and `/fiscal349/*` sub-route funnels through (`declarations`, `incidents`, `boxes`, `submit`, `modified`, `validate-vies`) — now checks access as the very first thing it does, before any entity routing. A denied request gets `403 Forbidden` ("Access denied") regardless of which sub-route it named.
 - `NeoBuiltInEndpointHandler.handleFiscalModelsCatalogEndpoint` — `GET`/`PUT /sws/neo/fiscal-models-catalog` isn't routed through `AbstractFiscalHandler` at all, so it needed its own, separate call to the same helper at the top of the method.
