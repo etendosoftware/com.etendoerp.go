@@ -695,6 +695,105 @@ public class ProductDefaultsHandlerTest {
     }
   }
 
+  /**
+   * Runs one create carrying {@code directive} as {@code _skipPricesSeed} (none when
+   * {@code null}) through both hooks, against a tenant with both default tariffs and no price yet.
+   *
+   * @return the versions the seed wrote a zero-priced row on
+   */
+  private static Set<PriceListVersion> seededVersionsFor(Object directive) throws Exception {
+    OBContext obContext = obContextWithClient(CLIENT1);
+    try (SeedingMocks mocks = new SeedingMocks()) {
+      mocks.withBothDefaultTariffs(obContext);
+      mocks.utilsMock.when(() -> ProductHandlerUtils.findExistingPrice(anyString(), anyString()))
+          .thenReturn(null);
+      Set<PriceListVersion> seeded = new java.util.HashSet<>();
+      when(mocks.provider.get(ProductPrice.class)).thenAnswer(invocation -> {
+        ProductPrice price = mock(ProductPrice.class);
+        org.mockito.Mockito.doAnswer(set -> seeded.add(set.getArgument(0)))
+            .when(price).setPriceListVersion(any());
+        return price;
+      });
+      JSONObject body = new JSONObject().put("name", "P");
+      if (directive != null) {
+        body.put(ProductDefaultsHandler.DIRECTIVE_SKIP_PRICES_SEED, directive);
+      }
+      NeoContext ctx = postCtx(body, obContext);
+      ProductDefaultsHandler handler = new ProductDefaultsHandler();
+
+      handler.handle(ctx);
+      assertFalse("the directive never reaches the write path, whatever its form",
+          body.has(ProductDefaultsHandler.DIRECTIVE_SKIP_PRICES_SEED));
+      ctx.setPreviousResult(NeoResponse.ok(createdRow()));
+      handler.afterHandle(ctx);
+
+      Set<PriceListVersion> named = new java.util.HashSet<>();
+      for (PriceListVersion version : seeded) {
+        named.add(version == mocks.salesVersion ? SALES : version == mocks.purchaseVersion
+            ? PURCHASE : version);
+      }
+      return named;
+    }
+  }
+
+  /** Stand-ins for "the sales / purchase default version" in {@link #seededVersionsFor}. */
+  private static final PriceListVersion SALES = mock(PriceListVersion.class);
+  private static final PriceListVersion PURCHASE = mock(PriceListVersion.class);
+
+  /**
+   * ETP-5676 list form, edge cases: only a listed default version is skipped. An empty list, a
+   * list of versions that are not the server's defaults, and a {@code "*"} inside the list (the
+   * internal skip-all marker, never a caller's id) all leave both defaults seeded; listing both
+   * skips both.
+   */
+  @Test
+  public void testSkipPricesSeedListEdgeCases() throws Exception {
+    assertEquals("empty list", Set.of(SALES, PURCHASE), seededVersionsFor(new JSONArray()));
+    assertEquals("unknown ids", Set.of(SALES, PURCHASE),
+        seededVersionsFor(new JSONArray().put("plv-unknown").put("plv-other")));
+    assertEquals("the skip-all marker inside a list is not honoured", Set.of(SALES, PURCHASE),
+        seededVersionsFor(new JSONArray().put(ProductDefaultsHandler.SKIP_ALL_TARIFFS)));
+    assertEquals("only purchase listed", Set.of(SALES),
+        seededVersionsFor(new JSONArray().put(PURCHASE_VERSION_ID)));
+    assertEquals("both listed", Set.of(),
+        seededVersionsFor(new JSONArray().put(SALES_VERSION_ID).put(PURCHASE_VERSION_ID)));
+  }
+
+  /** {@code true} (boolean or string) still skips both; any other type is ignored and seeds both. */
+  @Test
+  public void testSkipPricesSeedScalarForms() throws Exception {
+    assertEquals(Set.of(), seededVersionsFor(Boolean.TRUE));
+    assertEquals(Set.of(), seededVersionsFor("true"));
+    assertEquals("no directive", Set.of(SALES, PURCHASE), seededVersionsFor(null));
+    assertEquals(Set.of(SALES, PURCHASE), seededVersionsFor(Boolean.FALSE));
+    assertEquals(Set.of(SALES, PURCHASE), seededVersionsFor("yes"));
+    assertEquals(Set.of(SALES, PURCHASE), seededVersionsFor(1));
+    assertEquals(Set.of(SALES, PURCHASE), seededVersionsFor(SALES_VERSION_ID));
+    assertEquals(Set.of(SALES, PURCHASE),
+        seededVersionsFor(new JSONObject().put("ids", new JSONArray().put(SALES_VERSION_ID))));
+  }
+
+  /** The parsed list drops blank entries and trims ids. */
+  @Test
+  public void testConsumeSkipPricesSeedNormalisesTheList() throws Exception {
+    JSONObject body = new JSONObject().put(ProductDefaultsHandler.DIRECTIVE_SKIP_PRICES_SEED,
+        new JSONArray().put(" plv-1 ").put("").put("  ").put("plv-2"));
+
+    assertEquals(Set.of("plv-1", "plv-2"), ProductDefaultsHandler.consumeSkipPricesSeed(body));
+    assertFalse(body.has(ProductDefaultsHandler.DIRECTIVE_SKIP_PRICES_SEED));
+  }
+
+  /** The list form is stripped on PATCH too. */
+  @Test
+  public void testSkipPricesSeedListIsStrippedOnPatch() throws Exception {
+    JSONObject body = new JSONObject().put(ProductDefaultsHandler.DIRECTIVE_SKIP_PRICES_SEED,
+        new JSONArray().put(SALES_VERSION_ID));
+
+    assertNull(new ProductDefaultsHandler().handle(patchCtx(body)));
+
+    assertEquals(0, body.length());
+  }
+
   /** A batch scope left open by a failed assertion must not leak into the next test. */
   @After
   public void clearLeakedBatchScope() {
