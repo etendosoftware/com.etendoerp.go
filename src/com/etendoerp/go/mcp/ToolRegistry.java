@@ -1023,6 +1023,11 @@ public class ToolRegistry {
         "Optional, default false. true = a bulk-write hint: each create skips decorating the record "
             + "it would echo back (identifier enrichment, display flags), which only the id is read "
             + "from anyway. The response is the same either way."));
+    props.put(BatchService.PARAM_SKIP_REDUNDANT_CALLOUTS, booleanProp(
+        "Optional, default false. true = a bulk-write hint for many similar creates: a field-change "
+            + "callout is skipped once an earlier operation of this batch, with the same field and "
+            + "value, showed that every value it sets is overwritten by fields you send yourself. "
+            + "The response is the same either way; the server may ignore it."));
 
     return new McpToolDefinition(
         "etendo_batch",
