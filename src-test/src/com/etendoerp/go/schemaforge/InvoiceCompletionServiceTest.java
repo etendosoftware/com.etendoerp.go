@@ -38,6 +38,7 @@ import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.base.weld.WeldUtils;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBError;
+import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.openbravo.model.ad.ui.Process;
 
 /**
@@ -167,6 +168,47 @@ public class InvoiceCompletionServiceTest {
       assertNotNull(result);
       assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
       assertTrue(result.getBody().toString().contains("BP currency is not set"));
+    }
+  }
+
+  /**
+   * ETP-5577: the core period refusal reaches this class already translated (and its AD_PInstance
+   * rolled back), so the response must still carry {@code messageKeys: ["PeriodNotAvailable"]} —
+   * the SPA keys its "open the period" action on it. Any other rejection carries no key.
+   */
+  @Test
+  public void completeInvoice_periodNotOpen_publishesPeriodNotAvailableKey() throws Exception {
+    assertEquals("[\"PeriodNotAvailable\"]",
+        completeWithError("El Periodo no existe o no está abierto").getBody()
+            .getJSONArray("messageKeys").toString());
+    assertTrue(!completeWithError("BP currency is not set").getBody().has("messageKeys"));
+  }
+
+  private static NeoResponse completeWithError(String translatedMessage) {
+    ProcessInvoiceUtil processInvoiceUtil = mock(ProcessInvoiceUtil.class);
+    when(processInvoiceUtil.process(
+        eq("inv-period"), eq("CO"), eq(""), eq(""), eq(""), any(), any()))
+        .thenReturn(errorResult(translatedMessage));
+
+    try (MockedStatic<NeoDefaultsService> defaultsMock = Mockito.mockStatic(NeoDefaultsService.class);
+        MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class);
+        MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBMessageUtils> msgMock = Mockito.mockStatic(OBMessageUtils.class)) {
+
+      defaultsMock.when(() -> NeoDefaultsService.buildVariablesSecureApp(any()))
+          .thenReturn(new VariablesSecureApp("u", "c", "o", "r", "es_ES"));
+      weldMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(ProcessInvoiceUtil.class))
+          .thenReturn(processInvoiceUtil);
+      msgMock.when(() -> OBMessageUtils.messageBD("PeriodNotAvailable"))
+          .thenReturn("El Periodo no existe o no está abierto");
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(Process.class, PROCESS_ID_COMPLETE_INVOICE)).thenReturn(mock(Process.class));
+
+      NeoResponse result = InvoiceCompletionService.completeInvoice("inv-period", null);
+      assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
+      return result;
     }
   }
 

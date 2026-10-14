@@ -19,12 +19,15 @@ package com.etendoerp.go.schemaforge;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
+import java.util.List;
 
 import javax.servlet.http.HttpServletResponse;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.advpaymentmngt.ProcessInvoiceUtil;
 import org.openbravo.base.exception.OBException;
@@ -34,6 +37,7 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.database.ConnectionProvider;
 import org.openbravo.erpCommon.utility.OBError;
+import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.service.db.DalConnectionProvider;
@@ -99,6 +103,9 @@ final class InvoiceCompletionService {
   /** AD_Process_ID for {@code C_Invoice.DocAction}, used internally by {@link ProcessInvoiceUtil}. */
   private static final String COMPLETE_PROCESS_ID_INVOICE = "111";
 
+  /** AD_Message raised by C_INVOICE_POST (via C_CHK_OPEN_PERIOD) for a period that is not open. */
+  static final String PERIOD_NOT_AVAILABLE = "PeriodNotAvailable";
+
   private InvoiceCompletionService() {
   }
 
@@ -144,13 +151,44 @@ final class InvoiceCompletionService {
         return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
             "Completion process configuration missing");
       }
-      return NeoProcessService.translateClassicResult(result, process);
+      NeoResponse response = NeoProcessService.translateClassicResult(result, process);
+      recoverPeriodNotAvailableKey(result, response);
+      return response;
     } catch (Exception e) {
       log.error("[INVOICE-COMPLETE] Completion failed for invoice {}: {}",
           invoiceId, e.getMessage(), e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "Invoice completion failed: " + e.getMessage());
     }
+  }
+
+  /**
+   * ETP-5577: publishes {@code messageKeys: ["PeriodNotAvailable"]} on a period refusal, as the
+   * other document completions do, so the SPA can offer its way out (open the period in Calendar).
+   * {@code ProcessInvoiceUtil} hands back the core error already translated and rolls back its
+   * AD_PInstance, so the raw {@code @PeriodNotAvailable@} token is gone; the translated text of
+   * that message, in the same language, is the only identity left to recognise.
+   */
+  private static void recoverPeriodNotAvailableKey(OBError result, NeoResponse response)
+      throws JSONException {
+    if (result == null || !"Error".equalsIgnoreCase(result.getType())) {
+      return;
+    }
+    String periodMessage;
+    try {
+      periodMessage = OBMessageUtils.messageBD(PERIOD_NOT_AVAILABLE);
+    } catch (Exception e) {
+      // The key is a convenience: a failed lookup must never turn the business 400 into a 500.
+      log.debug("[INVOICE-COMPLETE] Could not resolve {}: {}", PERIOD_NOT_AVAILABLE, e.getMessage());
+      return;
+    }
+    // messageBD answers the key itself when the message cannot be resolved: never match on that.
+    if (StringUtils.isBlank(periodMessage) || PERIOD_NOT_AVAILABLE.equals(periodMessage)
+        || !StringUtils.contains(result.getMessage(), periodMessage)) {
+      return;
+    }
+    response.getBody().put(NeoProcessService.MESSAGE_KEYS,
+        new JSONArray(List.of(PERIOD_NOT_AVAILABLE)));
   }
 
   /**
