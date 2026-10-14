@@ -117,6 +117,7 @@ public class EtendoGoJwtServletBillingSubscriptionTest {
     assertTrue(body.getBoolean("cancelAtPeriodEnd"));
     assertTrue(body.isNull("graceEndsAt"));
     assertEquals(0, body.getInt("graceDaysRemaining"));
+    assertEquals(CLIENT_ID, body.getString("clientId"));
   }
 
   @Test
@@ -197,6 +198,7 @@ public class EtendoGoJwtServletBillingSubscriptionTest {
     assertTrue(body.getBoolean("hasSubscription"));
     assertTrue(body.isNull("graceEndsAt"));
     assertEquals(0, body.getInt("graceDaysRemaining"));
+    assertTrue(body.isNull("clientId"));
     verify(fixture.lifecycle, never()).resolve(anyString());
   }
 

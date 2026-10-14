@@ -1095,11 +1095,13 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       OBContext.setAdminMode(true);
       try {
         TenantEnvironmentLifecycleService.EnvironmentSnapshot snapshot = null;
+        String clientId = null;
         if (purchase.getCreatedClient() != null) {
-          snapshot = tenantEnvironmentLifecycleService.resolve(purchase.getCreatedClient().getId());
+          clientId = purchase.getCreatedClient().getId();
+          snapshot = tenantEnvironmentLifecycleService.resolve(clientId);
         }
         writeResponse(response, HttpServletResponse.SC_OK,
-            buildBillingSubscriptionJson(live, snapshot));
+            buildBillingSubscriptionJson(live, snapshot, clientId));
       } finally {
         OBContext.restorePreviousMode();
       }
@@ -1143,7 +1145,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
   private JSONObject buildBillingSubscriptionJson(
       StripeCustomerPortalService.SubscriptionDetail live,
-      TenantEnvironmentLifecycleService.EnvironmentSnapshot snapshot) throws JSONException {
+      TenantEnvironmentLifecycleService.EnvironmentSnapshot snapshot, String clientId)
+      throws JSONException {
     Instant graceEndsAt = null;
     int graceDaysRemaining = 0;
     if (snapshot != null
@@ -1164,6 +1167,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     result.put("cancelAtPeriodEnd", live.isCancelAtPeriodEnd());
     result.put("graceEndsAt", graceEndsAt == null ? JSONObject.NULL : graceEndsAt.toString());
     result.put("graceDaysRemaining", graceDaysRemaining);
+    // ETP-5734 — the company the subscription pays for, so "Mis empresas" can put the live
+    // renewal date on that company's row. Additive: existing consumers ignore it.
+    result.put(FIELD_CLIENT_ID, clientId == null ? JSONObject.NULL : clientId);
     return result;
   }
 
