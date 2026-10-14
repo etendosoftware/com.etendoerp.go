@@ -80,6 +80,8 @@ import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
  * acctschema/accounting, year, currency, tax), unknown type 400, safeId
  * validation, parseIntParam edge cases, toJsonItems with normal and null
  * values, and executeSelector with mocked NativeQuery rows.
+ *
+ * @covers com.etendoerp.go.schemaforge.ReportSelectorsServlet
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -389,7 +391,7 @@ class ReportSelectorsServletTest {
     }
 
     @Test
-    @DisplayName("warehouse query with selectedOrgId filter")
+    @DisplayName("warehouse query with selectedOrgId scopes by the warehouse's own org, not ad_org_warehouse")
     void warehouseWithOrgFilter() throws Exception {
       configureAuthenticatedGet("warehouse");
       when(request.getParameter("selectedOrgId")).thenReturn("AABB1122CCDD3344");
@@ -397,6 +399,11 @@ class ReportSelectorsServletTest {
       servlet.doGet(request, response);
 
       verify(response).setStatus(HttpServletResponse.SC_OK);
+      for (String s : capturedWarehouseSql()) {
+        assertTrue(s.contains("m_warehouse.ad_org_id IN (:selectedOrgId, '0')"), s);
+      }
+      verify(countQuery).setParameter("selectedOrgId", "AABB1122CCDD3344");
+      verify(dataQuery).setParameter("selectedOrgId", "AABB1122CCDD3344");
     }
 
     @Test
@@ -955,16 +962,69 @@ class ReportSelectorsServletTest {
     }
 
     @Test
-    @DisplayName("warehouse query with roleOrgIds filter")
-    @SuppressWarnings("unchecked")
+    @DisplayName("warehouse query with roleOrgIds filter scopes by the warehouse's own org")
     void warehouseWithRoleOrgIds() throws Exception {
       configureAuthenticatedGet("warehouse");
-      when(request.getParameter("selectedOrgId")).thenReturn("AABB1122CCDD3344");
+      when(obContext.getReadableOrganizations()).thenReturn(new String[]{ "A1B2C3", "D4E5F6" });
 
       servlet.doGet(request, response);
 
       verify(response).setStatus(HttpServletResponse.SC_OK);
+      for (String s : capturedWarehouseSql()) {
+        assertTrue(s.contains("m_warehouse.ad_org_id IN (:roleOrgIds)"), s);
+        assertFalse(s.contains(":selectedOrgId"), s);
+      }
+      verify(countQuery).setParameterList("roleOrgIds", Arrays.asList("A1B2C3", "D4E5F6"));
+      verify(dataQuery).setParameterList("roleOrgIds", Arrays.asList("A1B2C3", "D4E5F6"));
     }
+
+    @Test
+    @DisplayName("warehouse query without org params has only the client and active filters")
+    void warehouseWithoutOrgParams() throws Exception {
+      configureAuthenticatedGet("warehouse");
+      when(obContext.getReadableOrganizations()).thenReturn(new String[0]);
+
+      servlet.doGet(request, response);
+
+      verify(response).setStatus(HttpServletResponse.SC_OK);
+      for (String s : capturedWarehouseSql()) {
+        assertFalse(s.contains("m_warehouse.ad_org_id"), s);
+        assertFalse(s.contains(":selectedOrgId"), s);
+        assertFalse(s.contains(":roleOrgIds"), s);
+      }
+    }
+
+    @Test
+    @DisplayName("warehouse query with selectedOrgId and roleOrgIds applies both own-org predicates")
+    void warehouseWithSelectedOrgAndRoleOrgs() throws Exception {
+      configureAuthenticatedGet("warehouse");
+      when(request.getParameter("selectedOrgId")).thenReturn("AABB1122CCDD3344");
+      when(obContext.getReadableOrganizations()).thenReturn(new String[]{ "A1B2C3" });
+
+      servlet.doGet(request, response);
+
+      verify(response).setStatus(HttpServletResponse.SC_OK);
+      for (String s : capturedWarehouseSql()) {
+        assertTrue(s.contains(" AND m_warehouse.ad_org_id IN (:selectedOrgId, '0')"), s);
+        assertTrue(s.contains(" AND m_warehouse.ad_org_id IN (:roleOrgIds)"), s);
+      }
+    }
+  }
+
+  /** Captures the count and data SQL and asserts the invariants every warehouse query shares. */
+  private List<String> capturedWarehouseSql() {
+    ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
+    verify(session, times(2)).createNativeQuery(sql.capture());
+    List<String> all = sql.getAllValues();
+    for (String s : all) {
+      assertTrue(s.contains("FROM m_warehouse WHERE isactive='Y'"), s);
+      assertTrue(s.contains("ad_client_id = :clientId"), s);
+      assertTrue(s.contains("name ILIKE :search"), s);
+      assertFalse(s.toLowerCase().contains("ad_org_warehouse"), s);
+    }
+    verify(countQuery).setParameter("clientId", TEST_CLIENT_ID);
+    verify(dataQuery).setParameter("clientId", TEST_CLIENT_ID);
+    return all;
   }
 
   /** ETP-5455 — an outcome the shared pipeline would hand back for an authenticated request. */

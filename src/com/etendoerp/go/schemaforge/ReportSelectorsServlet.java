@@ -330,17 +330,20 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
   }
 
   private SelectorQuery buildWarehouseQuery(SelectorRequest req) {
+    // ETP-5573: a warehouse is scoped by its OWN organization (m_warehouse.ad_org_id), the same
+    // way every other Etendo GO warehouse selector (sales order, goods receipt, ...) and
+    // WarehouseLookupHelper do. It used to also require an ad_org_warehouse assignment row, but
+    // Etendo GO never creates one when a warehouse is added, so every warehouse created from the
+    // Warehouse window was silently missing from the Stock Report scope selector. For
+    // selectedOrgId the root organization ('0') is accepted too, because onboarding warehouses
+    // live there; roleOrgIds is the role's readable organizations, applied as-is.
     StringBuilder fromWhere = new StringBuilder(
         "FROM m_warehouse WHERE isactive='Y'" + ACTIVE_CLIENT_NAME_SEARCH);
     if (req.selectedOrgId != null) {
-      fromWhere.append(" AND EXISTS (SELECT 1 FROM ad_org_warehouse ow"
-          + " WHERE ow.m_warehouse_id = m_warehouse.m_warehouse_id"
-          + " AND ow.ad_org_id = :selectedOrgId)");
+      fromWhere.append(" AND m_warehouse.ad_org_id IN (:selectedOrgId, '0')");
     }
     if (!req.roleOrgIds.isEmpty()) {
-      fromWhere.append(" AND EXISTS (SELECT 1 FROM ad_org_warehouse ow"
-          + " WHERE ow.m_warehouse_id = m_warehouse.m_warehouse_id"
-          + " AND ow.ad_org_id IN (:roleOrgIds))");
+      fromWhere.append(" AND m_warehouse.ad_org_id IN (:roleOrgIds)");
     }
     return new SelectorQuery(
         "SELECT m_warehouse_id AS id, name, name AS label",
