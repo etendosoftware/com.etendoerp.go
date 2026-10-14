@@ -914,6 +914,35 @@ zero row, and `ProductPriceHandler` then found it and updated it. Sending
 - Without the matching price operations the product stays unpriced on those tariffs. That is the
   caller's choice to make; the default (`false`) keeps the ETP-5245 behaviour.
 
+**Automatic: a batch skips callouts whose output it already saw thrown away.** The create path runs
+the callout of every field present in the body (§ callout cascade). On a uniform import most of that
+work is discarded: `SL_TaxCategory_Org` (trigger `organization`) proposes the tax category and the
+product category the body already carries, and `SL_Costing_Currency` proposes the currency the
+costing customization already put there. A proposal for a field the caller sent with a non-blank
+value, or for a field the customization suppresses (`NeoHandler#protectedCreateCalloutFields`,
+ETP-5350), is never merged — so running the callout changed nothing.
+
+Inside one batch request, `NeoCalloutDiscardMemory` (held by `NeoBatchScope`, opened and closed by
+`BatchService#executeBatch`) remembers the first outcome of each callout under the key
+**(tab, trigger field, trigger value, set of fields that would keep their value at that moment)**:
+
+- if every field the callout returned was in that kept set, and it raised **no message and no
+  error**, later operations of the same batch with the **same key** skip it;
+- if anything it returned was applied, or it reported a message, the key is marked "run" and is
+  never skipped afterwards — the first observation decides;
+- a row that leaves one of the kept fields blank, or triggers with another value, has another key
+  and runs the callout;
+- the memory dies with the request (`finally`), is never consulted outside `/sws/neo/batch` and
+  `etendo_batch`, and is wired only into the create cascade (`NeoCrudHandler#executePostCalloutCascade`)
+  — not the `/defaults` endpoint, not the interactive callout, not `executeCalloutsForTriggerFields`.
+
+Logged as `[NEO-PERF] batch callout skip learned key=… outputs=…` when a key becomes skippable, and
+`[NEO-PERF] batch callout skipped N time(s) key=…` when the batch ends. The residual assumption is
+that a callout's **set of output fields** does not depend on a body field outside the key — true of
+the callouts measured here, and the reason this is confined to bulk writes. The persisted result is
+identical to running every callout, so this is not a channel divergence (§4.12.9); REST batch and
+`etendo_batch` share it because both go through `BatchService`.
+
 ### 4.4 Selectors (FK Dropdowns)
 
 The selector service resolves foreign key references and provides searchable dropdown values.

@@ -1161,6 +1161,74 @@ public class NeoDefaultsCascadeHelperTest {
   }
 
   // ===================================================================
+  // ETP-5676 — per-batch callout-discard memory
+  // ===================================================================
+
+  /** One create of a batch: organization triggers a callout that proposes {@code output}. */
+  private static void runBatchCreate(NeoCalloutDiscardMemory memory, String output,
+      boolean outputSentByCaller) throws Exception {
+    JSONObject defaults = new JSONObject();
+    defaults.put("organization", "ORG1");
+    Set<String> protectedFields = new HashSet<>();
+    protectedFields.add("organization");
+    if (outputSentByCaller) {
+      defaults.put(output, "SENT");
+      protectedFields.add(output);
+    }
+    NeoDefaultsCascadeHelper.executeCalloutCascade(mock(NeoContext.class),
+        mockTabWithTable("100"), defaults, new HashSet<>(), protectedFields,
+        Collections.<String>emptySet(), memory);
+  }
+
+  private static void stubOrganizationCallout(MockedStatic<NeoCalloutService> calloutMock,
+      MockedStatic<ModelProvider> providerMock, String output) throws Exception {
+    calloutMock.when(() -> NeoCalloutService.resolveCallout(any(), eq("organization")))
+        .thenReturn(new NeoCalloutService.CalloutInfo("com.example.Callout", "inpadOrgId",
+            "Organization"));
+    calloutMock.when(() -> NeoCalloutService.executeCallout(any(), any()))
+        .thenReturn(NeoResponse.ok(calloutBodyWith(output, "DERIVED", null)));
+    ModelProvider mockProvider = mock(ModelProvider.class);
+    providerMock.when(ModelProvider::getInstance).thenReturn(mockProvider);
+    when(mockProvider.getEntityByTableId(anyString())).thenReturn(null);
+  }
+
+  /**
+   * The premise of the skip: a callout whose only output the caller already sent changed nothing
+   * the first time, so the next operation of the same batch with the same key does not run it.
+   */
+  @Test
+  public void testBatchSkipsCalloutWhoseOutputsWereAllDiscarded() throws Exception {
+    try (MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
+         MockedStatic<ModelProvider> providerMock = mockStatic(ModelProvider.class)) {
+      stubOrganizationCallout(calloutMock, providerMock, "currency");
+      NeoCalloutDiscardMemory memory = new NeoCalloutDiscardMemory();
+
+      runBatchCreate(memory, "currency", true);
+      runBatchCreate(memory, "currency", true);
+      runBatchCreate(memory, "currency", true);
+
+      calloutMock.verify(() -> NeoCalloutService.executeCallout(any(), any()),
+          org.mockito.Mockito.times(1));
+    }
+  }
+
+  /** A callout that wrote something the first time is never skipped. */
+  @Test
+  public void testBatchKeepsRunningCalloutWithAKeptOutput() throws Exception {
+    try (MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
+         MockedStatic<ModelProvider> providerMock = mockStatic(ModelProvider.class)) {
+      stubOrganizationCallout(calloutMock, providerMock, "currency");
+      NeoCalloutDiscardMemory memory = new NeoCalloutDiscardMemory();
+
+      runBatchCreate(memory, "currency", false);
+      runBatchCreate(memory, "currency", false);
+
+      calloutMock.verify(() -> NeoCalloutService.executeCallout(any(), any()),
+          org.mockito.Mockito.times(2));
+    }
+  }
+
+  // ===================================================================
   // cascadeInteractiveCallout
   // ===================================================================
 
