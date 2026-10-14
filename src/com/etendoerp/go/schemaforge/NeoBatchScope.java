@@ -18,9 +18,12 @@
 package com.etendoerp.go.schemaforge;
 
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.function.Supplier;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.openbravo.dal.service.OBDal;
 
 /**
@@ -41,6 +44,7 @@ import org.openbravo.dal.service.OBDal;
  */
 public final class NeoBatchScope {
 
+  private static final Logger log = LogManager.getLogger(NeoBatchScope.class);
   private static final ThreadLocal<NeoBatchScope> CURRENT = new ThreadLocal<>();
 
   private final NeoCalloutDiscardMemory calloutDiscardMemory = new NeoCalloutDiscardMemory();
@@ -48,6 +52,8 @@ public final class NeoBatchScope {
   private final Map<String, Object> memo = new HashMap<>();
   /** The DAL session the memo's values were loaded in; see {@link #memoize}. */
   private Object memoSession;
+  /** Namespace to {hits, misses}, reported once when the batch closes. Insertion-ordered. */
+  private final Map<String, int[]> memoStats = new LinkedHashMap<>();
 
   private NeoBatchScope(boolean onlyReturnIds) {
     this.onlyReturnIds = onlyReturnIds;
@@ -83,6 +89,7 @@ public final class NeoBatchScope {
     NeoBatchScope closing = CURRENT.get();
     if (closing != null) {
       closing.calloutDiscardMemory.logSummary();
+      closing.logMemoSummary();
     }
     if (previous == null) {
       CURRENT.remove();
@@ -124,12 +131,49 @@ public final class NeoBatchScope {
       scope.memo.clear();
       scope.memoSession = session;
     }
+    int[] stats = scope.memoStats.computeIfAbsent(namespaceOf(key), k -> new int[2]);
     if (scope.memo.containsKey(key)) {
+      stats[0]++;
       return (T) scope.memo.get(key);
     }
+    stats[1]++;
     T value = loader.get();
     scope.memo.put(key, value);
     return value;
+  }
+
+  /**
+   * The memo namespace of a key: its first two {@code |}-separated segments (the owning class and
+   * the lookup's name, e.g. {@code …BatchService|spec}), or the whole key when it has fewer.
+   */
+  static String namespaceOf(String key) {
+    int first = key.indexOf('|');
+    int second = first < 0 ? -1 : key.indexOf('|', first + 1);
+    return second < 0 ? key : key.substring(0, second);
+  }
+
+  /** Logs one line with the memo's hits and misses per namespace; nothing when it was unused. */
+  private void logMemoSummary() {
+    if (memoStats.isEmpty()) {
+      return;
+    }
+    StringBuilder summary = new StringBuilder();
+    for (Map.Entry<String, int[]> entry : memoStats.entrySet()) {
+      if (summary.length() > 0) {
+        summary.append(", ");
+      }
+      String namespace = entry.getKey();
+      summary.append(namespace.substring(namespace.lastIndexOf('.') + 1))
+          .append(" hits=").append(entry.getValue()[0])
+          .append(" misses=").append(entry.getValue()[1]);
+    }
+    log.info("[NEO-PERF] batch memo {}", summary);
+  }
+
+  /** @return hits and misses per namespace so far, for tests */
+  static Map<String, int[]> currentMemoStats() {
+    NeoBatchScope scope = CURRENT.get();
+    return scope != null ? scope.memoStats : Map.of();
   }
 
   private static Object currentSession() {
