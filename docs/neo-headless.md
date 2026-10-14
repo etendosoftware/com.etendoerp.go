@@ -905,12 +905,15 @@ takes `_skipPricesSeed` in one of two forms:
 
 - **An array of `M_PriceList_Version` ids** — what the products import sends: the versions the
   same request prices the product on. The seed skips a direction only when the version it would
-  use for it (`PriceListVersionResolver#resolveDefaultVersionId`: the default-flagged list, org
-  before `*`, newest `ValidFromDate`) is in the list; any other default tariff is still seeded.
-  The client picks its tariff from the selector by a different rule (selector order, and for
-  sales an unflagged list is accepted), so the two can disagree — when no list is flagged
-  default, or the default list has several versions. Matching on the server's own answer is what
-  guarantees the server's default tariff is never left without a row (review W2).
+  use for it (`PriceListVersionResolver#resolveDefaultVersionId`) is in the list; any other
+  default tariff is still seeded. In Etendo GO every price list has exactly one version, so
+  "version" and "tariff" are interchangeable here. The client and the server agree whenever the
+  tenant has a default-flagged list per direction — onboarding seeds exactly one ("Tarifa de venta
+  principal", "Tarifa de compra principal"). They can disagree only when a user has since cleared
+  the **Por defecto** flag, which the Tarifas window allows: with no default the server falls
+  back to any direction-matching list (org before `*`), the client to the first one the selector
+  returns. Matching on the server's own answer keeps the server's tariff from being left without
+  a row in that case (review W2).
 - **`true`** — skip both directions unconditionally. Only for a caller that prices both of the
   server's default tariffs itself.
 
