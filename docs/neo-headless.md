@@ -912,7 +912,9 @@ takes `_skipPricesSeed` in one of two forms:
   principal", "Tarifa de compra principal"). They can disagree only when a user has since cleared
   the **Por defecto** flag, which the Tarifas window allows: with no default the server falls
   back to any direction-matching list (org before `*`), the client to the first one the selector
-  returns. Matching on the server's own answer keeps the server's tariff from being left without
+  returns. The other case is a sales flag the selector leaves null (the column is NOT NULL, so only
+  the selector can omit it): the client accepts that list for sales, the server does not. Matching
+  on the server's own answer keeps the server's tariff from being left without
   a row in that case (review W2).
 - **`true`** — skip both directions unconditionally. Only for a caller that prices both of the
   server's default tariffs itself.
