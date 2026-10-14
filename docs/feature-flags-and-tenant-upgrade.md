@@ -75,7 +75,7 @@ before. Tracing is not needed for this and defaults to disabled (`DD_TRACE_ENABL
 
 | Variable | Value | Purpose |
 |----------|-------|---------|
-| `DD_FEATURE_FLAGS_ENABLED` | `true` | Starts the agent's feature-flag subsystem **and** selects the Datadog arm here — one knob, not two that can disagree |
+| `DD_FEATURE_FLAGS_ENABLED` | `true` | Starts the agent's feature-flag subsystem **and** selects the Datadog arm here — one knob, not two that can disagree. **The only documented value is `true`** (the entrypoint and `GoRuntimeProperties.readBoolean` both also take `Y`; `1`/`yes` are rejected by both) |
 | `DD_API_KEY` | secret | Authenticates the agentless configuration fetch |
 | `DD_SITE` | e.g. `datadoghq.eu` | Datadog site of the organisation |
 | `DD_ENV` | `experimental` / `production` / … | **Chooses the Datadog environment** the flags answer from (see below) |

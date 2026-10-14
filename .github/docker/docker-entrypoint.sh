@@ -110,8 +110,11 @@ fi
 # reads; without it that arm is skipped (ConfigCat / local properties win).
 # Tracing is off unless explicitly turned on: only feature flags are wanted.
 # ─────────────────────────────────────────────
-case "$(echo "${DD_FEATURE_FLAGS_ENABLED:-false}" | tr '[:upper:]' '[:lower:]')" in
-    true|1|yes)
+# Accept exactly what GoRuntimeProperties.readBoolean accepts (trimmed, case-insensitive
+# "true" or "y"); anything else must not load the agent, or the agent would run while the
+# Java side silently stays on ConfigCat. Only "true" is documented.
+case "$(printf '%s' "${DD_FEATURE_FLAGS_ENABLED:-false}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')" in
+    true|y)
         export DD_TRACE_ENABLED="${DD_TRACE_ENABLED:-false}"
         export DD_SERVICE="${DD_SERVICE:-etendo-go}"
         if [ ! -f "$DD_JAVA_AGENT_JAR" ]; then
