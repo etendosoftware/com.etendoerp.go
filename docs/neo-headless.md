@@ -7754,7 +7754,8 @@ read.
 gross price and tax, and writes `lineGrossAmount` when the body's value is absent, zero, or already
 equal (2 decimals) to the derived one; any other value is the caller's and is kept. `lineNetAmount`
 is not touched (the policy derives it only from `invoicedQuantity`; for an order line it comes from
-the callout). This is what gives `etendo_create` a correct `lineGrossAmount` — it never reaches
+the callout, and the `C_OrderLine` trigger recomputes it — which is why both customizations declare
+it server-resolved on create, §4.12.22 point 3). This is what gives `etendo_create` a correct `lineGrossAmount` — it never reaches
 `executePostCreate`, and the shared MCP path is deliberately left as on `develop`.
 
 - **No tax in the body → abstain.** A REST or batch create reaches its pre-hook before the create
@@ -7818,38 +7819,49 @@ QA reopen data (quotation 1000008, Monitor, list 300, 21 % VAT): discount 5 → 
 quotations 1000009 by the form, 1000010 by MCP): `listPrice` 50, `unitPrice` 50, `standardPrice` 50
 on both — it was 0 / 50 / 50 by MCP.
 
-**The form never meets the rule.** Both UI line writes send `unitPrice = round6(listPrice × (1 −
-discount/100))`: the add row and the inline edit send the whole row with its `listPrice`
-(`prepareLineForPost`), and the side-panel save sends the edited keys plus that `unitPrice`, computed
-from the open line's `listPrice`. So `unitPrice == listPrice` only when the discount is 0, and the rule
-needs a non-zero discount. A tax-included list sends a non-zero `grossUnitPrice`, which is explicit.
-The only theoretical overlap is a side-panel save whose open line has a `listPrice` other than the
-stored one (a concurrent edit); the re-fire would then apply the discount to the stored list price —
-the value the form itself would have sent with fresh data.
+**The form never meets the rule.** Every UI line write sends the whole line with
+`unitPrice = round6(listPrice × (1 − discount/100))` (`prepareLineForPost`): the add row and the
+inline edit send the whole row, and the side-panel save sends the whole line too — its `lineEdits`
+is seeded from the whole open line (`DetailView.jsx`, `setLineEdits(prev => ({ ...(prev ??
+selectedLine), … }))`, ~`:3666` and ~`:3690`), so `handleSaveLine` sends every field of it,
+`discount` and `listPrice` included, plus the computed `unitPrice`. So `unitPrice == listPrice` only
+when the discount is 0, and the rule needs a non-zero discount. Because the body always carries the
+`listPrice` the `unitPrice` was computed from, and on update that patched `listPrice` is the one the
+rule compares with, a stale open line (a concurrent edit) does not change this either. A
+tax-included list sends a non-zero `grossUnitPrice`, which is explicit.
 
 The three QA-reopen rules were checked against the same payloads (`useLineGrossAmount.js`
 `computeUnitPriceForPost`; `DetailView.jsx` `buildInlineRowUpdateHandler` and `handleSaveLine`):
 
 - **`applyUnitPrice` never fires on the form.** `unitPrice` is not a form input on either entity
-  (`decisions.json` lines `unitPrice: {grid: false, form: false}`). The inline edit sends the whole
-  row, `discount` included, which excludes the rule. The side-panel save sends the edited keys plus
-  `unitPrice = round6(listPrice × (1 − discount/100))` from the open line, which is exactly the price
-  the rule compares with (the patched `listPrice` when the user edited it, the stored `discount`),
-  so it is a no-op; half a cent absorbs the float rounding.
-- **`deriveAmountsOnUpdate` changes nothing the form persists.** On REST `lineGrossAmount` is
-  read-only on both entities (`ETGO_SF_FIELD.IsReadOnly = Y`): `filterWriteRequest` drops what the
-  pre-hook writes, and `NeoCrudHandler.executeUpdate` derives it with `injectCommercialAmounts`
-  exactly as before. The inline edit carries the row's `lineGrossAmount`, so it is not even read.
+  (`decisions.json` lines `unitPrice: {grid: false, form: false}`). Both the inline edit and the
+  side-panel save send the whole line, `discount` included, which excludes the rule. Even without
+  the `discount` key it would be a no-op: the `unitPrice` sent is
+  `round6(listPrice × (1 − discount/100))`, exactly the price the rule compares with, and half a
+  cent absorbs the float rounding.
+- **`deriveAmountsOnUpdate` changes nothing the form persists.** Both UI writes carry the line's
+  `lineGrossAmount`, so the rule does not even read the stored line. And on REST `lineGrossAmount`
+  is read-only on both entities (`ETGO_SF_FIELD.IsReadOnly = Y`): `filterWriteRequest` drops
+  anything the pre-hook writes there, and `NeoCrudHandler.executeUpdate` derives it with
+  `injectCommercialAmounts` exactly as before.
 - **The `listPrice` fill never fires on the form.** The form's add-line POST always carries a
   non-zero `listPrice` for such a product (the standard price, above), and a line the user priced
   at 0 carries `unitPrice 0`.
 
 ##### Known gaps
 
-- Only `discount` and `unitPrice` re-fire `SL_Order_Amt`. An update of `orderedQuantity` alone
-  does not, so the quantity hook and price adjustments (`OrderLineQtyChangedHookObject`,
-  `PriceAdjustment` by quantity) are not re-evaluated on it; its gross amount is refreshed (step 4)
-  and the trigger derives its net amount.
+- **Parity note, not a gap — quantity edits.** Only `discount` and `unitPrice` re-fire
+  `SL_Order_Amt`; an update of `orderedQuantity` alone does not, so the quantity hook and
+  quantity-based price adjustments (`OrderLineQtyChangedHookObject`, `PriceAdjustment`,
+  `SL_Order_Amt.java` `inpqtyordered` branch) are not re-evaluated. The form does not re-evaluate
+  them either: `orderedQuantity` is one of the client-side fields of
+  `DetailView.jsx` `handleLineFieldChange` (`CLIENT_SIDE_FIELDS`, ~`:2334-2343`), which computes the
+  amounts locally and runs no callout, and the PATCH carries
+  `unitPrice = listPrice × (1 − discount/100)`. On both, the price stays and the amounts are
+  refreshed (MCP: step 4 for the gross, the `C_OrderLine` trigger for the net). Not reachable from
+  GO today anyway: this client has no `m_offer` and GO exposes no price-adjustment window (verified
+  2026-10-14). Applying quantity adjustments would need the form to run the callout first; doing
+  it only on MCP would create a divergence (§4.12.9).
 - On a REST patch from a non-UI client, `lineGrossAmount` is read-only and dropped by
   `filterWriteRequest`, so step 4 does not reach it; `executeUpdate`'s `injectCommercialAmounts`
   derives it only from what the patch itself carries.
@@ -8008,7 +8020,8 @@ view, and `McpActionsView.buildResponse(…, declared)` appends the declared ent
   customization's contracts would not be found. Not needed here (the header row's qualifier is
   `salesQuotationHeaderHandler`).
 
-**3. `tax` is not required in `view:"create"` of `quotationLine`.** The create callout cascade fires
+**3. `tax` and `lineNetAmount` are not required in `view:"create"` of `quotationLine` (nor `tax` in
+`sales-order/lines`).** The create callout cascade fires
 `SL_Order_Product` for the product, which sets the line's tax from the product, the header's order
 date and the organization — what the UI does when a product is picked. `etendo_schema` could not see
 that: its server-resolved set came from `etendo_defaults` without input plus the selector policies'
@@ -8030,10 +8043,22 @@ wrapper fields. A new generic extension point lets the customization say so:
   extension point: declare only fields the create cascade derives — a field filled only by the
   customization's own `handle()` would still be refused on `etendo_create`. (`etendo_batch` and REST run
   no such pre-check.)
-- `SalesQuotationLineHandler` declares `tax`. A caller may still send one; the create path restores
-  caller values after the cascade.
-- **Scope:** `quotationLine` only. `sales-order/lines` (`SalesOrderLineHandler`) very likely has the
-  same gap and is not changed here.
+- `SalesQuotationLineHandler` and `SalesOrderLineHandler` both declare
+  `OrderLineDiscountSupport.SERVER_RESOLVED_CREATE_FIELDS` = `tax`, `lineNetAmount` (ETP-5528, QA
+  observation: the create view listed `lineNetAmount` as required although every create without it
+  worked):
+  - **`tax`** (`C_Tax_ID`): `SL_Order_Product`, the callout of `C_OrderLine.M_Product_ID`, sets it.
+    A caller may still send one; the create path restores caller values after the cascade.
+  - **`lineNetAmount`** (`LineNetAmt`, mandatory, no AD default): `SL_Order_Amt` — the callout of
+    `PriceActual`, `QtyOrdered` and `C_Tax_ID` — publishes `inplinenetamt` when the cascade reaches
+    it from the price `SL_Order_Product` publishes, so the `etendo_create` pre-check finds it filled;
+    REST and `etendo_batch` run the same cascade in `executePostCreate`. On every channel the
+    `C_ORDERLINE_TRG` trigger then recomputes it on insert and update (`ROUND(QtyOrdered ×
+    PriceActual)` on a net list, the net of the gross on a tax-included one), so a value the caller
+    sends is **not** what is persisted — computing it is wasted work for the agent.
+  - Same table, same callouts and trigger, so the same set on both entities. On `sales-order/lines`
+    only `tax` changes the view: `lineNetAmount` is published read-only (`system`) there and is never
+    listed in `view:"create"`.
 
 **4. A tax given by name is resolved against the header.** The 422 `not_found` for
 `tax:"Entregas IVA 21%"` was missing selector context, not the duplicate name: the second tax

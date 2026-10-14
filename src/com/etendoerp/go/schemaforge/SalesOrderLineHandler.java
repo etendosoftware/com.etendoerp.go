@@ -17,6 +17,8 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.util.Set;
+
 /**
  * Customization of sales-order/lines (ETP-5528): everything
  * {@link OrderLineHandler} does, plus the order line's own price rules: the standard price of a new
@@ -56,5 +58,19 @@ public class SalesOrderLineHandler extends OrderLineHandler {
     }
     OrderLineDiscountSupport.applyLineRules(context);
     return null;
+  }
+
+  /**
+   * Same declaration as {@link SalesQuotationLineHandler#serverResolvedCreateFields()}: the two
+   * entities are the same table ({@code C_OrderLine}), with the same column callouts and trigger
+   * ({@link OrderLineDiscountSupport#SERVER_RESOLVED_CREATE_FIELDS}). On {@code sales-order/lines}
+   * it changes {@code tax}, which is editable and mandatory and so was listed as required;
+   * {@code lineNetAmount} is published read-only ({@code system}) there and never appears in
+   * {@code view:"create"}, so declaring it changes nothing visible — it is kept so the declaration
+   * stays true of the entity rather than of its current field visibility.
+   */
+  @Override
+  public Set<String> serverResolvedCreateFields() {
+    return OrderLineDiscountSupport.SERVER_RESOLVED_CREATE_FIELDS;
   }
 }

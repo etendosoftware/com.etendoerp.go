@@ -44,9 +44,6 @@ import java.util.Set;
 @NeoExtension(spec = "sales-quotation", entity = "quotationLine")
 public class SalesQuotationLineHandler extends OrderLineHandler {
 
-  /** DAL property of {@code C_OrderLine.C_Tax_ID}. */
-  private static final String FIELD_TAX = "tax";
-
   /**
    * Runs the parent's pre-hook first — a response from it still short-circuits — then the line
    * rules of {@link OrderLineDiscountSupport#applyLineRules}: the standard (and, when missing, list)
@@ -64,17 +61,21 @@ public class SalesQuotationLineHandler extends OrderLineHandler {
   }
 
   /**
-   * The tax of a new line is the server's to choose (ETP-5535): {@code SL_Order_Product}, which the
-   * create callout cascade fires for the product, sets it from the product's tax category, the
-   * header's order date and the organization — exactly what the UI does when a product is picked.
-   * {@code product} is itself required, so the source is always there. Declared here so
-   * {@code etendo_schema(view:"create")} stops listing {@code tax} as required: an agent sent looking
-   * for a tax by name finds one the server would not have picked, or none at all.
+   * The tax and the net amount of a new line are the server's to derive
+   * ({@link OrderLineDiscountSupport#SERVER_RESOLVED_CREATE_FIELDS}, ETP-5535 / ETP-5528): the
+   * create callout cascade fires {@code SL_Order_Product} for the product — which sets the tax from
+   * the product's tax category, the header's order date and the organization, exactly what the UI
+   * does when a product is picked — and {@code SL_Order_Amt} from the price it publishes, which
+   * sets {@code lineNetAmount}; the {@code C_OrderLine} trigger recomputes the net amount on insert
+   * anyway. {@code product} is itself required, so the source is always there. Declared here so
+   * {@code etendo_schema(view:"create")} stops listing them as required: an agent sent looking for a
+   * tax by name finds one the server would not have picked, and one that computes the net amount
+   * itself computes a value the trigger discards.
    *
    * <p>A caller may still send a tax; the cascade keeps a value the caller provided.
    */
   @Override
   public Set<String> serverResolvedCreateFields() {
-    return Set.of(FIELD_TAX);
+    return OrderLineDiscountSupport.SERVER_RESOLVED_CREATE_FIELDS;
   }
 }

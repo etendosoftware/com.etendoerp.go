@@ -150,6 +150,29 @@ final class OrderLineDiscountSupport {
   private static final BigDecimal HALF_CENT = new BigDecimal("0.005");
 
   /**
+   * The fields of a new sales order or quotation line the server derives on create from another
+   * field of the body, declared by both customizations through
+   * {@link NeoHandler#serverResolvedCreateFields()} so {@code etendo_schema(view:"create")} does not
+   * list them as required (ETP-5535, ETP-5528).
+   * <ul>
+   *   <li>{@code tax} ({@code C_Tax_ID}): {@code SL_Order_Product}, the callout of
+   *       {@code C_OrderLine.M_Product_ID}, sets it from the product's tax category, the header's
+   *       date and the organization.</li>
+   *   <li>{@code lineNetAmount} ({@code LineNetAmt}): {@code SL_Order_Amt}, the callout of
+   *       {@code PriceActual}, {@code QtyOrdered} and {@code C_Tax_ID}, publishes
+   *       {@code inplinenetamt} whenever the cascade reaches it from the product's price; and the
+   *       {@code C_ORDERLINE_TRG} trigger recomputes {@code LineNetAmt} on every insert and update
+   *       ({@code ROUND(QtyOrdered × PriceActual)} on a net list, the net of the gross on a
+   *       tax-included one), so a value sent by the caller is never the one persisted.</li>
+   * </ul>
+   * Both are filled by the create callout cascade, which {@code etendo_create} runs before its
+   * mandatory pre-check, and which REST and {@code etendo_batch} run in
+   * {@code NeoCrudHandler#executePostCreate}; the trigger covers every channel regardless.
+   */
+  static final Set<String> SERVER_RESOLVED_CREATE_FIELDS = Collections.unmodifiableSet(
+      new HashSet<>(Arrays.asList(FIELD_TAX, FIELD_LINE_NET_AMOUNT)));
+
+  /**
    * The standard prices the discount re-fire may not write: the form keeps them undiscounted. The
    * gross one is {@code C_OrderLine.GrossPriceStd}, DAL {@code baseGrossUnitPrice}.
    */
