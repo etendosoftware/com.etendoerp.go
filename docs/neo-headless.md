@@ -943,6 +943,8 @@ Response (rich OBUISEL selector):
 
 OBUISEL selectors with custom HQL queries are fully supported. The service uses `Session.createQuery()` to execute the custom HQL with org security filtering, validation rules, search across searchable properties, and pagination.
 
+**One item per record (ETP-5703).** A custom HQL that joins a child table returns several rows for one record — `ProductSimple` (`PricingProductPrice` join `product`) returns a product once per price-list version. `executeCustomHqlQuery` collapses the rows of a page by the record id they resolve to (first row kept), and `totalCount` is `COUNT(DISTINCT <id expression>)` whenever the projection's id column is a plain property path (`e.id`), else the row count as before. So `items` never repeats a record and `totalCount` counts records (6, not 13, for six products in two versions). Paging stays by row: a page that held duplicates comes back shorter than `limit`.
+
 **Search fragments and their alias (ETP-5670).** On a standard (non-custom) OBUISEL selector, a searchable field's `property` is a DAL path relative to the entity (`product.name`), so the search always qualifies it with the query alias (`e.product.name`), dotted or not. A `clause_left_part` (used only when `property` is blank) is raw HQL and keeps its own alias (`bp.name`). Custom-HQL selectors keep their original rule: a dotted fragment is used as written. An unqualified relative path used to bind to the outer row once the where clause was copied into the de-dup subquery of view-backed selectors (Value Field ≠ `id`), turning it into a correlated subquery that PostgreSQL re-ran once per candidate row.
 
 The service resolves `@param@` placeholders in OBUISEL HQL where clauses: `@AD_Org_ID@`, `@AD_Client_ID@`, `@AD_User_ID@`, `@AD_Role_ID@`.
@@ -2679,6 +2681,11 @@ that record's id and the create proceeds normally.
 | 0 | `NOT_FOUND` | Returns a structured `not_found` error; the write is rejected. |
 | 1 | `RESOLVED` | Value replaced in place with the matched record id; write proceeds. |
 | >1 | `AMBIGUOUS` | Returns a structured `ambiguous_fk` error carrying the candidate list; the write is rejected. |
+
+Matches are counted as **distinct record ids** (ETP-5703): a selector returning the same record as
+several rows (a custom HQL joining a child table) resolves to it instead of being ambiguous with
+itself. And before answering `AMBIGUOUS`, a value equal — ignoring case — to the label of exactly one
+candidate resolves to that candidate (`"Agua"` against `Agua` and `Agua con gas`).
 
 Both error shapes are returned as an MCP error content payload with HTTP-style
 `status: 422` (`STATUS_UNPROCESSABLE`) and a `field` naming the offending key:

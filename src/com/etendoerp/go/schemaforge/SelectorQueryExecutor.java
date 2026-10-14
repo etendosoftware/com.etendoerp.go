@@ -345,14 +345,13 @@ final class SelectorQueryExecutor {
       String search, int limit, int offset, String validationFilter,
       String contextOrganizationId, Map<String, Object> extraFilterParams) throws Exception {
 
-    // KNOWN GAP: distinct-by-valueProperty (see buildRepresentativeRowWhere / executeRichQuery) is
-    // NOT applied here. A raw custom-query selector selects multiple projected columns, so
-    // "SELECT DISTINCT" would dedupe by the full row tuple rather than by valueProperty, and pairing
-    // it with COUNT(DISTINCT valueProperty) would desync count vs. data and break paging. None of
-    // the current value-field selectors are custom_query='Y', so this path is unaffected today.
-    // A future custom-query selector whose Value Field is not the PK would still emit duplicates —
-    // fixing it safely requires collapsing rows by valueProperty at query level, not a blanket
-    // DISTINCT. Left unchanged deliberately to avoid a regression.
+    // ETP-5703: a custom-HQL selector can return several rows for ONE record — a join to a child
+    // table (the product selector joins price-list versions) multiplies them. No blanket
+    // "SELECT DISTINCT" here: the projection has many columns, so it would dedupe by the whole
+    // tuple. Instead the rows are collapsed by the record id they resolve to (first row kept, in
+    // query order), and the count is COUNT(DISTINCT <id expression>) whenever that expression is a
+    // plain property path, so count and items describe the same set of records. Paging is still by
+    // row: a page holding duplicates comes back shorter than `limit`, never with a repeated record.
     String alias = meta.entityAlias;
     String rawHql = meta.customHql.replace("@additional_filters@", "1=1");
     java.util.regex.Matcher fromMatcher = Pattern.compile("\\sFROM\\s",
@@ -370,13 +369,15 @@ final class SelectorQueryExecutor {
     String selectPart = rawHql.substring(0, fromIdx).trim();
     String[] selectExprs = selectPart.replaceFirst("(?i)^select\\s+", "").split(",");
     Map<String, Integer> colIndexMap = SelectorRowMapper.buildSelectColumnIndexMap(selectExprs);
+    Integer idColIdx = SelectorRowMapper.resolveIdColumnIndex(meta, alias, colIndexMap, selectExprs);
 
     Map<String, Object> fromParams = new HashMap<>(fromClause.getParams());
     if (extraFilterParams != null) {
       fromParams.putAll(extraFilterParams);
     }
 
-    String countHql = "SELECT COUNT(" + alias + ")" + fromClause.getHql();
+    String countHql = "SELECT " + customHqlCountExpression(alias, selectExprs, idColIdx)
+        + fromClause.getHql();
     org.hibernate.query.Query<Long> countQuery = OBDal.getInstance()
         .getSession().createQuery(countHql, Long.class);
     NeoSelectorExecutionHelper.bindNamedParameters(countQuery, fromParams);
@@ -396,7 +397,6 @@ final class SelectorQueryExecutor {
     dataQuery.setMaxResults(limit);
     dataQuery.setFirstResult(offset);
 
-    Integer idColIdx = SelectorRowMapper.resolveIdColumnIndex(meta, alias, colIndexMap, selectExprs);
     JSONArray columns = SelectorResponseSupport.buildGridColumnMetadata(meta.gridFields);
     Entity entityDef = ModelProvider.getInstance().getEntity(meta.entityName);
     JSONArray items = new JSONArray();
@@ -406,6 +406,9 @@ final class SelectorQueryExecutor {
       JSONObject item = new JSONObject();
 
       String recordId = SelectorResponseSupport.extractRecordId(row, idColIdx);
+      if (recordId != null && entityIds.contains(recordId)) {
+        continue; // ETP-5703: another row of a record already on this page
+      }
       item.put("id", recordId);
       entityIds.add(recordId);
       item.put(FIELD_LABEL,
@@ -422,6 +425,35 @@ final class SelectorQueryExecutor {
     }
 
     return SelectorResponseSupport.buildSelectorResponse(items, columns, totalCount, limit, offset);
+  }
+
+  /** A plain HQL property path ({@code e.id}, {@code e.product.id}), safe inside COUNT(DISTINCT). */
+  private static final Pattern PLAIN_PROPERTY_PATH =
+      Pattern.compile("[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z_][A-Za-z0-9_]*)+");
+
+  /**
+   * The COUNT projection of a custom-HQL selector (ETP-5703): {@code COUNT(DISTINCT <id expr>)} when
+   * the record-id column of the projection is a plain property path, so a record that the query
+   * returns as several rows is counted once; otherwise the row count {@code COUNT(<alias>)} it has
+   * always been — an arbitrary expression is not risked inside DISTINCT.
+   *
+   * @param idColIdx the projection index of the record id, or {@code null} when unresolved
+   */
+  static String customHqlCountExpression(String alias, String[] selectExprs, Integer idColIdx) {
+    if (idColIdx != null && idColIdx >= 0 && idColIdx < selectExprs.length) {
+      String expr = stripColumnAlias(selectExprs[idColIdx]);
+      if (PLAIN_PROPERTY_PATH.matcher(expr).matches()) {
+        return "COUNT(DISTINCT " + expr + ")";
+      }
+    }
+    return "COUNT(" + alias + ")";
+  }
+
+  /** {@code "e.id as id"} → {@code "e.id"}; an expression without an alias is returned trimmed. */
+  private static String stripColumnAlias(String selectExpr) {
+    String expr = selectExpr.trim();
+    int asIdx = expr.toLowerCase().lastIndexOf(" as ");
+    return asIdx >= 0 ? expr.substring(0, asIdx).trim() : expr;
   }
 
   private static String resolveRichItemId(BaseOBObject bob, SelectorMeta meta) {

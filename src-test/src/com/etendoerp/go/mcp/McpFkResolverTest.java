@@ -350,6 +350,29 @@ class McpFkResolverTest {
       }
     }
 
+    /**
+     * ETP-5703 repro: a custom-HQL selector (the product selector) returns one row per joined child,
+     * so a single product came back twice and was reported ambiguous against itself.
+     */
+    @Test
+    @DisplayName("one record returned as several rows resolves to it instead of ambiguous_fk")
+    void duplicateRowsOfOneRecordResolve() throws Exception {
+      JSONObject body = bodyWith("Agua");
+      Column column = mock(Column.class);
+      NeoResponse twoRowsOneRecord = labelledHits(UUID_ID, "Agua", UUID_ID, "Agua");
+      try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+          MockedStatic<NeoSelectorService> selector = mockStatic(NeoSelectorService.class);
+          MockedStatic<McpSchemaFieldBuilder> fields = mockStatic(McpSchemaFieldBuilder.class)) {
+        obDal.when(OBDal::getInstance).thenReturn(obDalInstance);
+        fields.when(() -> McpSchemaFieldBuilder.findColumn(adTab, KEY, dalEntity)).thenReturn(column);
+        selector.when(() -> NeoSelectorService.querySelectorByColumn(eq(column), eq(KEY), eq("Agua"),
+            anyInt(), anyInt(), any())).thenReturn(twoRowsOneRecord);
+
+        assertNull(McpFkResolver.resolveFkNames(body, dalEntity, adTab, Map.of(), log));
+        assertEquals(UUID_ID, body.getString(KEY));
+      }
+    }
+
     @Test
     @DisplayName("a skipped value ('$ref:' placeholder) is left alone without any lookup")
     void skippedValueIsUntouched() throws Exception {
