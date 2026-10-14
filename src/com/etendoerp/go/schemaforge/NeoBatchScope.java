@@ -17,6 +17,12 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.util.HashMap;
+import java.util.Map;
+import java.util.function.Supplier;
+
+import org.openbravo.dal.service.OBDal;
+
 /**
  * State that lives for exactly one {@code /sws/neo/batch} (or MCP {@code etendo_batch}) request
  * and is shared by its operations (ETP-5676).
@@ -29,8 +35,9 @@ package com.etendoerp.go.schemaforge;
  * request or leak into the next one served by the pooled thread. Outside a batch
  * {@link #current()} is {@code null} and every reader behaves exactly as before.</p>
  *
- * <p>What it holds is generic: the request's options ({@code _onlyReturnIds}) and the per-batch
- * callout-discard memory. Nothing in it names an entity.</p>
+ * <p>What it holds is generic: the request's options ({@code _onlyReturnIds}), the per-batch
+ * callout-discard memory and a lookup memo ({@link #memoize}). Nothing in it names an entity; a
+ * customization that memoizes names its own keys.</p>
  */
 public final class NeoBatchScope {
 
@@ -38,6 +45,9 @@ public final class NeoBatchScope {
 
   private final NeoCalloutDiscardMemory calloutDiscardMemory = new NeoCalloutDiscardMemory();
   private final boolean onlyReturnIds;
+  private final Map<String, Object> memo = new HashMap<>();
+  /** The DAL session the memo's values were loaded in; see {@link #memoize}. */
+  private Object memoSession;
 
   private NeoBatchScope(boolean onlyReturnIds) {
     this.onlyReturnIds = onlyReturnIds;
@@ -84,6 +94,50 @@ public final class NeoBatchScope {
   /** @return the scope of the batch running on this thread, or {@code null} outside a batch */
   public static NeoBatchScope current() {
     return CURRENT.get();
+  }
+
+  /**
+   * Resolves {@code key} once per batch request and reuses the answer for every later operation
+   * of the same batch (ETP-5676). Outside a batch it simply calls {@code loader}.
+   *
+   * <p><b>The key must carry everything the lookup depends on</b> — the client, the organisation,
+   * the entity class — so two operations that would get different answers never share one. A
+   * {@code null} answer is remembered too.</p>
+   *
+   * <p>The whole memo is dropped when the DAL session changes. A process that commits inside the
+   * batch closes the session ({@code BatchService.TransactionTracker} detects the same thing), and
+   * a DAL object loaded in the old one is detached: reusing it would fail on its first lazy read.</p>
+   *
+   * @param key    the lookup's identity; namespace it by the owning class
+   * @param loader the lookup itself
+   * @param <T>    the answer's type
+   * @return the remembered or freshly loaded answer
+   */
+  @SuppressWarnings("unchecked")
+  public static <T> T memoize(String key, Supplier<T> loader) {
+    NeoBatchScope scope = CURRENT.get();
+    if (scope == null) {
+      return loader.get();
+    }
+    Object session = currentSession();
+    if (session != scope.memoSession) {
+      scope.memo.clear();
+      scope.memoSession = session;
+    }
+    if (scope.memo.containsKey(key)) {
+      return (T) scope.memo.get(key);
+    }
+    T value = loader.get();
+    scope.memo.put(key, value);
+    return value;
+  }
+
+  private static Object currentSession() {
+    try {
+      return OBDal.getInstance().getSession();
+    } catch (Exception e) {
+      return null;
+    }
   }
 
   /**
