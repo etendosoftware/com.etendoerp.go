@@ -206,8 +206,13 @@ public class TenantEnvironmentLifecycleService {
 
   /**
    * The productive decision for a tenant with no active subscription row, shared by
-   * {@link #resolve} and {@link #isProductiveEnvironment} so the two can never disagree about the
-   * same tenant.
+   * {@link #resolve} and {@link #isProductiveEnvironment} so the two agree about the same tenant
+   * for every data shape.
+   *
+   * <p>On a read error they deliberately differ. {@link #isProductiveEnvironment} fails closed: it
+   * answers {@code true}, so the tenant is not offered as a purchase source. {@link #resolve}
+   * catches the same error and returns {@code null}, so the access decision
+   * ({@link #evaluateAccess}) treats the tenant as having no lifecycle metadata.
    *
    * <p>No active row, open or closed: the plan can only come from the transitional preference
    * fallback, so it is asked directly instead of through {@code resolvePlan}, which would repeat
@@ -625,7 +630,8 @@ public class TenantEnvironmentLifecycleService {
    * ETP-5047 — tells whether the tenant is positively a productive environment: the type
    * {@link #resolve} would give it, read the same way (the subscription row first, then the
    * {@code ETGO_EnvironmentType} marker and the transitional plan fallback), but without building a
-   * snapshot and without writing anything.
+   * snapshot and without writing anything. The two agree for every data shape; they differ only on
+   * a read error, as described below.
    *
    * <p><b>Purchase-source eligibility, not access.</b> A productive environment is never the demo
    * source of a purchase. The plan alone cannot say that: a canceled subscription reads
@@ -641,7 +647,10 @@ public class TenantEnvironmentLifecycleService {
    * <p><b>Fails closed on the type reads only.</b> A {@link SubscriptionService#findLatest} or
    * {@code ETGO_EnvironmentType} read that throws answers {@code true}: an environment whose type
    * cannot be read is not offered as a source, which at worst turns a purchase into a clean
-   * environment instead of associating and copying the wrong tenant. A genuine demo whose read
+   * environment instead of associating and copying the wrong tenant. This is a deliberate
+   * difference from {@link #resolve}: it catches the same error and returns {@code null}, so the
+   * access decision treats the tenant as having no lifecycle metadata instead of as productive.
+   * The source check fails closed; the access decision does not. A genuine demo whose read
    * fails is therefore dropped as a source without a message — accepted 2026-10-14 (Martin Taal),
    * {@code docs/open-and-notable-topics.md} §4.14. A failure inside the retired
    * {@code ETGO_TenantPlan} fallback ({@link TenantPlanService#resolvePlanWithoutSubscription}) is
