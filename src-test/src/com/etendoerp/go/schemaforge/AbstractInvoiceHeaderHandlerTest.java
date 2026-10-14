@@ -3686,4 +3686,69 @@ public class AbstractInvoiceHeaderHandlerTest {
       assertNull(change.rate());
     }
   }
+
+  /** W5: the hint names both currencies and the date, in the request language (tu register). */
+  @Test
+  public void missingRateText_namesCurrenciesAndDateInRequestLanguage() {
+    java.time.LocalDate date = java.time.LocalDate.of(2026, 10, 14);
+
+    assertEquals("No hay tasa de cambio de EUR a USD para el 14/10/2026; indica eTGOCurrencyRate.",
+        AbstractInvoiceHeaderHandler.missingRateText("es_ES", "EUR", "USD", date));
+    assertEquals("No exchange rate from EUR to USD for 2026-10-14; send eTGOCurrencyRate.",
+        AbstractInvoiceHeaderHandler.missingRateText("en_US", "EUR", "USD", date));
+  }
+
+  /**
+   * ETP-5703 W5: a foreign-currency invoice created without a rate, for a pair with no rate
+   * configured, is saved as before (nothing written, no error) and the MCP write response carries a
+   * warning in {@code messages} — inside core's {@code response} wrapper, so the flattened record
+   * the agent reads has it at the top level.
+   */
+  @Test
+  public void currencyRateDefault_createNoRateConfigured_addsWarningHintOnly() throws Exception {
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class);
+         MockedStatic<NeoExchangeRateService> rateMock =
+             Mockito.mockStatic(NeoExchangeRateService.class);
+         MockedStatic<com.etendoerp.go.schemaforge.util.NeoLanguage> langMock =
+             Mockito.mockStatic(com.etendoerp.go.schemaforge.util.NeoLanguage.class)) {
+      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      foreignInvoice(dal, "usd-id", null);
+      Currency eur = mock(Currency.class);
+      Currency usd = mock(Currency.class);
+      when(eur.getISOCode()).thenReturn("EUR");
+      when(usd.getISOCode()).thenReturn("USD");
+      when(dal.get(Currency.class, "eur-id")).thenReturn(eur);
+      when(dal.get(Currency.class, "usd-id")).thenReturn(usd);
+      curMock.when(() -> OBCurrencyUtils.getOrgCurrency("org-1")).thenReturn("eur-id");
+      rateMock.when(() -> NeoExchangeRateService.rateAsDecimal(any(), any(), any(), any()))
+          .thenReturn(null);
+      langMock.when(com.etendoerp.go.schemaforge.util.NeoLanguage::currentCode)
+          .thenReturn("es_ES");
+
+      JSONObject saved = new JSONObject().put("id", "inv-1");
+      JSONObject coreBody = new JSONObject().put("response",
+          new JSONObject().put("status", 0).put("data", new JSONArray().put(saved)));
+      NeoContext applyCtx = NeoContext.builder()
+          .httpMethod("POST").endpointType(NeoEndpointType.CRUD).recordId("inv-1")
+          .mcpOrigin(true).build();
+      applyCtx.setPreviousResult(NeoResponse.ok(coreBody));
+
+      TestHandler handler = new TestHandler();
+      handler.captureCurrencyRateDefault(createContext(new JSONObject()));
+      handler.applyCurrencyRateDefault(applyCtx);
+
+      JSONArray messages = coreBody.getJSONObject("response").getJSONArray("messages");
+      assertEquals(1, messages.length());
+      assertEquals("warning", messages.getJSONObject(0).getString("type"));
+      assertTrue(messages.getJSONObject(0).getString("text")
+          .startsWith("No hay tasa de cambio de EUR a USD para el "));
+      assertFalse(coreBody.has("messages"));
+      verify(dal, Mockito.never()).getConnection();
+    }
+  }
 }

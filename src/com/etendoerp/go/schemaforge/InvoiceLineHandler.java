@@ -91,8 +91,23 @@ public class InvoiceLineHandler implements NeoHandler {
   // instance for a given request, so a plain instance field safely carries state between them.
   private String pendingSourceInvoiceLineId;
 
+  /**
+   * Write guards and return-invoice negation ({@link #prepareLineWrite}), then — on an update that
+   * changes the quantity or price — the re-derived amounts (ETP-5703,
+   * {@link InvoiceLineAmountSupport#deriveAmountsOnUpdate}), computed from the already-negated
+   * quantity. A response from the guards still short-circuits.
+   */
   @Override
   public NeoResponse handle(NeoContext context) {
+    NeoResponse response = prepareLineWrite(context);
+    if (response != null) {
+      return response;
+    }
+    InvoiceLineAmountSupport.deriveAmountsOnUpdate(context);
+    return null;
+  }
+
+  private NeoResponse prepareLineWrite(NeoContext context) {
     if (!NeoEndpointType.CRUD.equals(context.getEndpointType())) {
       return null;
     }

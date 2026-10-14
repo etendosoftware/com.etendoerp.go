@@ -1135,10 +1135,18 @@ public abstract class AbstractInvoiceHeaderHandler {
   }
 
   /**
-   * The rate to write on the invoice: {@code rate} ({@code null} = clear it) for the org currency
-   * {@code orgCurrencyId}.
+   * What to do with the invoice's rate: when {@code write}, set it to {@code rate} ({@code null} =
+   * clear it). A {@code null} {@code rate} also means no rate is configured for
+   * {@code orgCurrencyId → docCurrencyId} on {@code date}, which the write response reports as a
+   * hint (ETP-5703 W5).
    */
-  record RateChange(BigDecimal rate, String orgCurrencyId) {
+  record RateChange(BigDecimal rate, String orgCurrencyId, String docCurrencyId, LocalDate date,
+      boolean write) {
+
+    /** No rate is configured for the pair on the date. */
+    boolean rateMissing() {
+      return rate == null;
+    }
   }
 
   /**
@@ -1237,16 +1245,21 @@ public abstract class AbstractInvoiceHeaderHandler {
         if (change == null) {
           return;
         }
-        writeCurrencyRate(invoiceId, change.rate());
-        OBDal.getInstance().getSession().refresh(invoice);
-        if (change.rate() == null) {
-          // No rate for the new currency: the row synced for the previous one is stale too.
-          ConversionRateDocumentSync.deleteAllForInvoice(invoiceId, change.orgCurrencyId());
+        if (change.write()) {
+          writeCurrencyRate(invoiceId, change.rate());
+          OBDal.getInstance().getSession().refresh(invoice);
+          if (change.rate() == null) {
+            // No rate for the new currency: the row synced for the previous one is stale too.
+            ConversionRateDocumentSync.deleteAllForInvoice(invoiceId, change.orgCurrencyId());
+          }
+          reflectInWriteResponse(context, FIELD_CURRENCY_RATE,
+              change.rate() != null ? change.rate() : JSONObject.NULL);
+          log.debug("[ETP-5703] Set eTGOCurrencyRate {} on invoice {} ({})", change.rate(),
+              invoiceId, reason);
         }
-        reflectInWriteResponse(context, FIELD_CURRENCY_RATE,
-            change.rate() != null ? change.rate() : JSONObject.NULL);
-        log.debug("[ETP-5703] Set eTGOCurrencyRate {} on invoice {} ({})", change.rate(),
-            invoiceId, reason);
+        if (change.rateMissing()) {
+          addMissingRateHint(context, change);
+        }
       } finally {
         OBContext.restorePreviousMode();
       }
@@ -1263,7 +1276,9 @@ public abstract class AbstractInvoiceHeaderHandler {
    *   <li>Never on a missing or processed invoice, one without currency or date, or one in the
    *       organization's own currency.</li>
    *   <li>{@link RateDefault#ON_CREATE}: only when the saved invoice has no rate; the looked-up
-   *       org→document rate, or nothing when none is configured (no new error).</li>
+   *       org→document rate. When none is configured nothing is written and no error is raised:
+   *       the result is a non-writing change whose {@link RateChange#rateMissing()} drives the
+   *       response hint (W5).</li>
    *   <li>{@link RateDefault#ON_CURRENCY_CHANGE}: the stored rate belongs to the previous currency,
    *       so it is replaced by the new currency's rate — or <b>cleared</b> when that currency has
    *       none. Keeping a rate of another currency would silently convert with the wrong figure and
@@ -1298,12 +1313,43 @@ public abstract class AbstractInvoiceHeaderHandler {
     BigDecimal rate = looked != null && looked.signum() > 0
         ? looked.setScale(CURRENCY_RATE_SCALE, RoundingMode.HALF_UP) : null;
     if (rate == null && stored == null) {
-      return null;
+      // Nothing to write, but the caller left the rate to the server and there is none: say so.
+      return new RateChange(null, orgCurrencyId, docCurrencyId, date, false);
     }
     if (rate != null && stored != null && rate.compareTo(stored) == 0) {
       return null;
     }
-    return new RateChange(rate, orgCurrencyId);
+    return new RateChange(rate, orgCurrencyId, docCurrencyId, date, true);
+  }
+
+  /**
+   * Adds the non-blocking "no exchange rate" hint to the write response (ETP-5703 W5): the write
+   * succeeded and its status is unchanged, but the caller left the rate to the server and none is
+   * configured, so the invoice has no rate (the exchange-rates tab stays empty). Translated to the
+   * request language ({@link NeoHints}), naming both currencies and the invoice date.
+   */
+  private static void addMissingRateHint(NeoContext context, RateChange change) {
+    NeoResponse prev = context.getPreviousResult();
+    if (prev == null || prev.getBody() == null) {
+      return;
+    }
+    String language = com.etendoerp.go.schemaforge.util.NeoLanguage.currentCode();
+    NeoHints.addMessage(prev.getBody(), context.isMcpOrigin(), NeoHints.TYPE_WARNING,
+        missingRateText(language, isoCode(change.orgCurrencyId()), isoCode(change.docCurrencyId()),
+            change.date()));
+  }
+
+  /** The hint text: currencies by ISO code, the date as the language writes it. */
+  static String missingRateText(String language, String orgIso, String docIso, LocalDate date) {
+    String pattern = NeoHints.isSpanish(language) ? "dd/MM/yyyy" : "yyyy-MM-dd";
+    return NeoHints.text("exchangeRateMissing", language, orgIso, docIso,
+        date.format(java.time.format.DateTimeFormatter.ofPattern(pattern)));
+  }
+
+  private static String isoCode(String currencyId) {
+    org.openbravo.model.common.currency.Currency currency =
+        OBDal.getInstance().get(org.openbravo.model.common.currency.Currency.class, currencyId);
+    return currency != null && currency.getISOCode() != null ? currency.getISOCode() : currencyId;
   }
 
   /** Writes the rate column of one invoice under a savepoint; {@code null} clears it. */

@@ -3636,6 +3636,24 @@ unconditionally there, so lines created or edited from the UI are now stored rou
 shown at currency precision). The header totals, summed by the DB triggers from the line amounts,
 can therefore differ by a cent from an identical document saved before ETP-5703.
 
+##### Invoice line amounts on update (ETP-5703)
+
+Changing a line's quantity or price re-derives `lineNetAmount` and `grossAmount` (same function and
+currency-precision rounding as above), on these channels:
+
+| channel | how |
+|---|---|
+| REST single `PATCH`/`PUT` | `NeoCrudHandler.executeUpdate` → `injectCommercialAmounts`, as before |
+| MCP `etendo_update` | the invoice-line customization's pre-hook — `InvoiceLineHandler.handle` → `InvoiceLineAmountSupport.deriveAmountsOnUpdate` — which `handleUpdate` dispatches with `PUT` (the shared MCP update path is unchanged). Sales and purchase lines (both bound to `invoiceLineHandler`) |
+| REST `/batch`, `etendo_batch` | create only — not applicable |
+
+The MCP derivation runs only when the body sets `invoicedQuantity`, `unitPrice` or `grossUnitPrice` to
+a value different from the stored line's; the inputs are the stored line overlaid with the patch (a
+sparse update of the quantity alone is priced with the stored price and tax). An amount the caller
+sent is kept unless it is zero or equal (at 2 decimals) to the derived one; a quantity set to 0 zeroes
+the amounts. On REST the same pre-hook runs too but persists nothing different: the amounts are
+read-only for the client, so they are stripped and `executeUpdate` re-derives them.
+
 ##### Invoice header defaults for a write that leaves them out (ETP-5703)
 
 Both invoice headers (`SalesInvoiceHeaderHandler`, `PurchaseInvoiceHeaderHandler`, shared code in
@@ -3667,6 +3685,15 @@ behaviour is unchanged. Channels as noted per field:
   `C_Conversion_Rate_Document` row removed) when the new currency has none, rather than converting
   with another currency's rate. Written by one JDBC `UPDATE` under a savepoint, without touching
   `Updated`; then the existing sync fills the `exchangeRates` tab.
+  **No rate configured → a non-blocking hint (W5).** When the rate was left to the server and none
+  exists for organization currency → document currency on the invoice date, the write still
+  succeeds with its usual status and the response carries a warning in the existing `messages`
+  array (`[{"type":"warning","text":…}]`, the envelope `BusinessPartnerHandler` and the callouts
+  already use), translated to the request language from `messages/neo_hints_<lang>.properties`
+  (`NeoHints`) — ES: *"No hay tasa de cambio de EUR a USD para el 14/10/2026; indica
+  eTGOCurrencyRate."*, EN: *"No exchange rate from EUR to USD for 2026-10-14; send
+  eTGOCurrencyRate."* REST: at the root of the body (where the SPA reads `data.messages`). MCP: inside
+  core's `response` wrapper, so the flattened record the agent gets has `messages` at its top level.
 
 ##### REST `/sws/neo/batch` is unaffected
 
