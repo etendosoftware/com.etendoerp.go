@@ -743,12 +743,12 @@ Switching, on the target environment:
    reader selects it — exactly ONE row, with `trim(value) = 'Y'` (the value is not filtered on
    purpose, so a second row or an `N` shows up instead of hiding):
    ```sql
-   select ad_preference_id, value, created from ad_preference
+   select ad_preference_id, value, created, updated from ad_preference
     where property = 'ETGO_SubscriptionModel' and ispropertylist = 'Y' and isactive = 'Y'
       and ad_client_id = '0' and coalesce(visibleat_client_id, '0') = '0'
       and coalesce(visibleat_org_id, '0') = '0' and visibleat_role_id is null
       and ad_user_id is null and ad_window_id is null
-    order by created desc;
+    order by created desc, updated desc, ad_preference_id desc;
    ```
 
 **Only a tenant's first row is switched.** A tenant that already has a subscription row — any row,

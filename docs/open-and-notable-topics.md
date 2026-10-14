@@ -221,12 +221,12 @@ purchases write `ETGO_TenantPlan`, open no row, and the lifecycle webhooks keep 
   active `ETGO_TenantPlan='PRODUCTIVE'` markers = 0; and the switch row as the reader selects it —
   exactly ONE row with `trim(value) = 'Y'`:
   ```sql
-  select ad_preference_id, value, created from ad_preference
+  select ad_preference_id, value, created, updated from ad_preference
    where property = 'ETGO_SubscriptionModel' and ispropertylist = 'Y' and isactive = 'Y'
      and ad_client_id = '0' and coalesce(visibleat_client_id, '0') = '0'
      and coalesce(visibleat_org_id, '0') = '0' and visibleat_role_id is null
      and ad_user_id is null and ad_window_id is null
-   order by created desc;
+   order by created desc, updated desc, ad_preference_id desc;
   ```
   Full checklist: design doc §6.2, rationale §6.3.
 - **One-way in practice.** Setting it back to `N` sends only tenants that have never had a row back
@@ -236,6 +236,14 @@ purchases write `ETGO_TenantPlan`, open no row, and the lifecycle webhooks keep 
   `SubscriptionService#hasAnySubscription`) is decided by it for reads and writes: its next payment
   goes to a row even with the switch OFF, or it would stay blocked behind a canceled or closed row.
   `openSubscription` has one runtime caller (the paid upgrade), which is where the gate sits.
+- **Known edge, revisit when ETP-5047 is merged:** with the switch OFF, a *failed*
+  `hasAnySubscription` lookup takes the marker path (logged at ERROR). Kept on purpose — a purchase
+  always provisions a new, rowless tenant (ETP-5548) and a SQL-level failure already rolls the
+  onboarding back — but after the 5047 merge a tenant whose only row is closed reads as canceled,
+  so a payment that reached it this way would leave it canceled. Design doc §6.3.
+- **Several switch rows:** the reader and the verification query both take the first in
+  `created desc, updated desc, ad_preference_id desc`, so the winner is deterministic even for rows
+  created in one transaction.
 - **The fallback's log line follows the switch:** DEBUG while OFF (every paying tenant falls back
   on purpose), WARN while ON (a tenant without a row is unexpected). §3.2's "silence" signal is
   therefore "no WARN on a switched environment".

@@ -303,12 +303,12 @@ optional — an environment may stay on the preference path indefinitely.
        where attribute = 'ETGO_TenantPlan' and isactive = 'Y'
          and upper(trim(value)) = 'PRODUCTIVE';
       -- after 3.4: exactly ONE row, and trim(value) = 'Y' -- the switch is ON
-      select ad_preference_id, value, created from ad_preference
+      select ad_preference_id, value, created, updated from ad_preference
        where property = 'ETGO_SubscriptionModel' and ispropertylist = 'Y' and isactive = 'Y'
          and ad_client_id = '0' and coalesce(visibleat_client_id, '0') = '0'
          and coalesce(visibleat_org_id, '0') = '0' and visibleat_role_id is null
          and ad_user_id is null and ad_window_id is null
-       order by created desc;
+       order by created desc, updated desc, ad_preference_id desc;
       ```
       The last query is the same selection `SubscriptionModelSwitch` makes, and like it does not
       filter on the value: the reader takes the newest matching row and trims it, so a second row
@@ -351,7 +351,10 @@ purchase, before it opens anything.
 stored in `AD_Preference.Property` with `ISPROPERTYLIST = 'Y'` and the Preference window offers it
 in its drop-down. Only an active row at `AD_CLIENT_ID = '0'` with no visibility narrower than the
 system — Visible-at Client empty or `0`, Visible-at Organization empty or `0`, no role, no user, no
-window — counts; the newest such row wins. A row scoped to one tenant is not an environment decision
+window — counts. If there are several, the first in `created desc, updated desc, ad_preference_id
+desc` wins: the newest row, then (two rows created in one transaction share `now()`) the most
+recently updated, then the id, so the winner is always deterministic. The §6.2 verification query
+sorts the same way, so its first row is the one the reader uses. A row scoped to one tenant is not an environment decision
 and is ignored (`ETGO_TenantPlan` is the cautionary tale: client-`0` rows that are *about* one
 tenant). The reader uses a plain criteria on the row's own `AD_CLIENT_ID`, like
 `FiscalTestModeResolver`, not `Preferences.getPreferenceValue`.
@@ -374,6 +377,15 @@ current; it runs only when the switch is OFF. A rowless tenant is decided by the
 through the transitional fallback (§8). `openSubscription` has exactly one runtime caller — the
 paid upgrade — so the gate there covers every row a tenant can get at runtime; R37 is the
 operator's own step 3.3 of §6.2.
+
+**A failed row lookup takes the marker path — on purpose.** With the switch OFF, if
+`hasAnySubscription` itself fails the purchase is recorded with the marker and the failure is logged
+at ERROR. For a tenant that did have a row that payment would be invisible behind it. Accepted
+because the case is near-unreachable: a purchase always provisions a NEW tenant (ETP-5548), which
+has no row, and a SQL-level failure has already marked the onboarding transaction for rollback, so
+the upgrade fails closed and is retried. Failing every OFF purchase on a lookup error would be the
+worse trade. To revisit when ETP-5047 is merged (register §2.9): there a tenant whose only row is
+closed reads as canceled, and a payment that reached it through this path would leave it canceled.
 
 **One-way in practice.** Turning the switch OFF again sends only tenants that have never had a row
 back to the marker; every tenant with a row stays on it, payments included. The fleet is then two
