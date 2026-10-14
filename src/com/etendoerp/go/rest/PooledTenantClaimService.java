@@ -244,7 +244,9 @@ public class PooledTenantClaimService {
     String username = EtendoGoJwtSupport.buildClientUsername(request.accountEmail(), clientName);
     User admin = adminRole.getUserContact();
     admin.setUsername(username);
-    admin.setName(StringUtils.isNotBlank(request.fullName()) ? request.fullName() : username);
+    // ETP-5689: never the username, which may carry a "+company" suffix.
+    admin.setName(EtendoGoJwtSupport.resolveOwnerDisplayName(request.fullName(), null,
+        request.accountEmail()));
     admin.setDescription(username);
     admin.setEmail(request.accountEmail());
     admin.setPassword(PasswordHash.generateHash(request.adminPassword()));
