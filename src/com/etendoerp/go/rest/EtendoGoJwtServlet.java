@@ -3490,9 +3490,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    */
   void applyPaidUpgradeSideEffects(String clientId, String starOrgId, String clientName,
       String accountEmail, String paymentToken) {
-    PaymentRecord record = recordPaymentAsSubscription(clientId, clientName, accountEmail,
+    PaymentRecord paymentRecord = recordPaymentAsSubscription(clientId, clientName, accountEmail,
         paymentToken);
-    if (record == PaymentRecord.SUBSCRIPTION) {
+    if (paymentRecord == PaymentRecord.SUBSCRIPTION) {
       // The subscription IS the record now, so the preference is retired rather than written.
       // ETP-5046-TRANSITIONAL-FALLBACK — remove this call in Phase F with the fallback itself.
       retireTenantPlanPreferenceBestEffort(clientId, clientName, accountEmail);
@@ -3502,7 +3502,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       // record that the tenant paid, and TenantPlanPreferenceFallback is what will read it back.
       throw new OBException("Paid environment '" + clientName + "' (client " + clientId
           + ") for account " + maskEmail(accountEmail)
-          + (record == PaymentRecord.PREFERENCE_BY_MODEL
+          + (paymentRecord == PaymentRecord.PREFERENCE_BY_MODEL
               // No subscription was attempted: the pre-ETP-5046 failure, in develop's words.
               ? " could not be marked as plan '"
               : " has neither a subscription nor the fallback plan marker '")
