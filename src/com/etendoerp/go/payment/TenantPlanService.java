@@ -20,6 +20,7 @@ package com.etendoerp.go.payment;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
 import org.openbravo.erpCommon.businessUtility.Preferences;
@@ -98,6 +99,11 @@ public class TenantPlanService {
   /**
    * Resolves the plan of a tenant.
    *
+   * <p>The plan is system state about the tenant, not the caller's data, so it is read in admin
+   * mode. The access checks call this before any OBContext exists (the MCP commercial block runs
+   * right after authentication) and as roles that cannot read {@code AD_Preference}; without admin
+   * mode the DAL fails there and every tenant silently reads back as free.
+   *
    * @param clientId the AD_Client to inspect
    * @return {@value #PLAN_PRODUCTIVE} when the tenant carries the productive marker, otherwise
    *     {@value #PLAN_FREE}
@@ -106,6 +112,7 @@ public class TenantPlanService {
     if (StringUtils.isBlank(clientId)) {
       return PLAN_FREE;
     }
+    OBContext.setAdminMode();
     try {
       OBQuery<Preference> query = OBDal.getInstance().createQuery(Preference.class,
           "as pref where pref." + Preference.PROPERTY_ATTRIBUTE + " = :" + PARAM_ATTRIBUTE
@@ -126,6 +133,8 @@ public class TenantPlanService {
     } catch (RuntimeException e) {
       log.warn("Could not resolve plan for tenant {}, assuming '{}'", clientId, PLAN_FREE, e);
       return PLAN_FREE;
+    } finally {
+      OBContext.restorePreviousMode();
     }
   }
 }
