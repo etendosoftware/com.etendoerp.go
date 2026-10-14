@@ -582,6 +582,37 @@ class McpToolRouterRouteTest {
             org.mockito.ArgumentMatchers.notNull(), org.mockito.ArgumentMatchers.eq(false));
       }
     }
+
+    /** ETP-5676: the etendo_batch argument reaches BatchService with the REST option's meaning. */
+    @Test
+    @DisplayName("an etendo_batch sent with _onlyReturnIds:true forwards the option")
+    void batchForwardsOnlyReturnIds() throws Exception {
+      SFSpec spec = mockSpec();
+      supportMock.when(() -> McpToolRouterSupport.findActiveSpecByName(SPEC_NAME))
+          .thenReturn(spec);
+      supportMock.when(() -> McpToolRouterSupport.hasSpecAccess(spec, "W", "POST"))
+          .thenReturn(true);
+
+      try (MockedStatic<com.etendoerp.go.schemaforge.BatchService> batchMock =
+          mockStatic(com.etendoerp.go.schemaforge.BatchService.class)) {
+        com.etendoerp.go.schemaforge.BatchService mockBatch =
+            mock(com.etendoerp.go.schemaforge.BatchService.class);
+        batchMock.when(com.etendoerp.go.schemaforge.BatchService::forBatchOnly)
+            .thenReturn(mockBatch);
+        JSONObject batchResult = new JSONObject();
+        batchResult.put("committed", true);
+        when(mockBatch.executeBatch(any(), any(), org.mockito.ArgumentMatchers.anyBoolean()))
+            .thenReturn(batchResult);
+        JSONObject args = buildBatchArgs();
+        args.put(com.etendoerp.go.schemaforge.BatchService.PARAM_ONLY_RETURN_IDS, true);
+
+        JSONObject result = router.handleBatch(args);
+
+        assertFalse(result.has("isError"));
+        org.mockito.Mockito.verify(mockBatch).executeBatch(any(),
+            org.mockito.ArgumentMatchers.notNull(), org.mockito.ArgumentMatchers.eq(true));
+      }
+    }
   }
 
   // ── etendo_discover ──────────────────────────────────────────────────────
