@@ -19,6 +19,7 @@ package com.etendoerp.go.payment;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
@@ -27,10 +28,18 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import org.hibernate.criterion.Criterion;
+import org.hibernate.criterion.Order;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -54,6 +63,7 @@ public class SubscriptionModelSwitchTest {
   private MockedStatic<OBContext> contextMock;
   private OBDal obDal;
   private final List<Criterion> restrictions = new ArrayList<>();
+  private final List<Order> orders = new ArrayList<>();
 
   @Before
   public void setUp() {
@@ -78,7 +88,10 @@ public class SubscriptionModelSwitchTest {
       restrictions.add(invocation.getArgument(0));
       return criteria;
     });
-    when(criteria.addOrder(any())).thenReturn(criteria);
+    when(criteria.addOrder(any())).thenAnswer(invocation -> {
+      orders.add(invocation.getArgument(0));
+      return criteria;
+    });
     when(criteria.setMaxResults(1)).thenReturn(criteria);
     when(criteria.uniqueResult()).thenReturn(row);
     return criteria;
@@ -143,6 +156,32 @@ public class SubscriptionModelSwitchTest {
   }
 
   @Test
+  public void aFailedReadStillRestoresTheCallersAdminMode() {
+    // The paid onboarding calls this mid-flight; an unbalanced admin mode would leak into every
+    // later step of the same request.
+    when(obDal.createCriteria(Preference.class)).thenThrow(new IllegalStateException("no session"));
+
+    new SubscriptionModelSwitch().isOn();
+
+    contextMock.verify(() -> OBContext.setAdminMode(true));
+    contextMock.verify(OBContext::restorePreviousMode);
+  }
+
+  @Test
+  public void theNewestMatchingRowWins() {
+    // An operator who adds a second row to flip the switch must see it take effect: newest first,
+    // and only that one row is read.
+    OBCriteria<Preference> criteria = criteriaReturning(rowWithValue("Y"));
+    doReturn(criteria).when(obDal).createCriteria(Preference.class);
+
+    new SubscriptionModelSwitch().isOn();
+
+    assertEquals(1, orders.size());
+    assertEquals(Preference.PROPERTY_CREATIONDATE + " desc", orders.get(0).toString());
+    verify(criteria).setMaxResults(1);
+  }
+
+  @Test
   public void readsOnlyTheSystemLevelUnrestrictedListPreference() {
     // A row scoped to a tenant, an org, a role, a user or a window is not an environment-wide
     // decision. ETGO_TenantPlan is the cautionary tale: client-0 rows that are ABOUT one tenant
@@ -176,11 +215,67 @@ public class SubscriptionModelSwitchTest {
   }
 
   @Test
-  public void theListValueIsTheOneShippedInAdRefList() {
-    // Pinned against src-db/database/sourcedata/AD_REF_LIST.xml: a renamed constant would read a
-    // key no operator can pick in the Preference window, and every environment would stay OFF.
-    assertEquals("ETGO_SubscriptionModel", SubscriptionModelSwitch.PREFERENCE_PROPERTY);
+  public void theKeyItReadsIsShippedAsAPropertyConfigurationListValue() throws IOException {
+    // A key that is not in AD_REF_LIST under the Property Configuration reference cannot be picked
+    // in the Preference window — and a renamed constant would read a key no operator can set, so
+    // every environment would stay OFF with nothing reporting it.
+    String xml = new String(Files.readAllBytes(moduleFile(AD_REF_LIST_XML)),
+        StandardCharsets.UTF_8);
+    Matcher records = Pattern.compile("<!--([0-9A-F]{32})--><AD_REF_LIST>(.*?)</AD_REF_LIST>",
+        Pattern.DOTALL).matcher(xml);
+    List<String> matching = new ArrayList<>();
+    while (records.find()) {
+      String body = records.group(2);
+      if (body.contains("<VALUE><![CDATA[" + SubscriptionModelSwitch.PREFERENCE_PROPERTY
+          + "]]></VALUE>")) {
+        assertTrue("the value must belong to the Property Configuration reference: " + body,
+            body.contains("<AD_REFERENCE_ID><![CDATA[" + PROPERTY_CONFIGURATION_REFERENCE
+                + "]]></AD_REFERENCE_ID>"));
+        assertTrue("the value must be active: " + body,
+            body.contains("<ISACTIVE><![CDATA[Y]]></ISACTIVE>"));
+        matching.add(records.group(1));
+      }
+    }
+    assertEquals("exactly one list value for " + SubscriptionModelSwitch.PREFERENCE_PROPERTY,
+        List.of(SHIPPED_REF_LIST_ID), matching);
     assertEquals("Y", SubscriptionModelSwitch.ON);
+  }
+
+  private static final String AD_REF_LIST_XML = "src-db/database/sourcedata/AD_REF_LIST.xml";
+  private static final String MODULE_DIR = "com.etendoerp.go";
+  private static final String PROPERTY_CONFIGURATION_REFERENCE =
+      "A26BA480E2014707B47257024C3CBFF7";
+  private static final String SHIPPED_REF_LIST_ID = "543C9E4BD9DB44A1AB41A575E0949CA2";
+
+  /**
+   * Locates a module file from the Etendo root or the module directory, walking up from the
+   * working directory and from this class's code-source location (same approach as
+   * {@code FiscalDeclSubmittedSnapshotColumnTest}). The Etendo-root form is tried first, because
+   * the root also has a core {@code src-db} that a bare relative path would silently resolve to.
+   */
+  private static Path moduleFile(String relative) {
+    List<Path> starts = new ArrayList<>();
+    starts.add(Paths.get("").toAbsolutePath());
+    try {
+      starts.add(Paths.get(SubscriptionModelSwitchTest.class.getProtectionDomain()
+          .getCodeSource().getLocation().toURI()));
+    } catch (Exception e) {
+      // no usable code-source location: the working directory is still tried
+    }
+    for (Path start : starts) {
+      for (Path dir = start; dir != null; dir = dir.getParent()) {
+        Path viaRoot = dir.resolve("modules").resolve(MODULE_DIR).resolve(relative);
+        if (Files.exists(viaRoot)) {
+          return viaRoot;
+        }
+        if (dir.getFileName() != null && MODULE_DIR.equals(dir.getFileName().toString())
+            && Files.exists(dir.resolve(relative))) {
+          return dir.resolve(relative);
+        }
+      }
+    }
+    fail("Cannot locate " + MODULE_DIR + "/" + relative + " from " + starts);
+    return null;
   }
 
   private static void assertContains(String applied, String expected) {
