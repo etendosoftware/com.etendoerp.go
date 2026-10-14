@@ -3751,4 +3751,57 @@ public class AbstractInvoiceHeaderHandlerTest {
       verify(dal, Mockito.never()).getConnection();
     }
   }
+
+  /**
+   * ETP-5703 QA bug: USD invoice (rate 1.47, USD→EUR rate row) updated to GBP with no GBP rate.
+   * The stale rate row must be deleted BEFORE the invoice is refreshed: refresh cascades into the
+   * invoice's rate-document collection, and a row deleted after it was loaded made the next refresh
+   * throw and roll the whole post-hook back (row kept, rate kept). Pins the order and the outcome.
+   */
+  @Test
+  public void currencyRateDefault_changeToCurrencyWithoutRate_deletesRowBeforeRefresh()
+      throws Exception {
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class);
+         MockedStatic<NeoExchangeRateService> rateMock =
+             Mockito.mockStatic(NeoExchangeRateService.class);
+         MockedStatic<ConversionRateDocumentSync> syncMock =
+             Mockito.mockStatic(ConversionRateDocumentSync.class)) {
+      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      Invoice invoice = foreignInvoice(dal, "usd-id", new BigDecimal("1.470000000000"));
+      Currency usd = mock(Currency.class);
+      Currency gbp = mock(Currency.class);
+      when(usd.getId()).thenReturn("usd-id");
+      when(gbp.getId()).thenReturn("gbp-id");
+      // The pre-hook reads the stored currency (USD, two calls); the post-hook sees the saved GBP.
+      when(invoice.getCurrency()).thenReturn(usd, usd, gbp);
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      org.hibernate.Session session = mock(org.hibernate.Session.class);
+      when(dal.getSession()).thenReturn(session);
+      java.util.List<String> order = new java.util.ArrayList<>();
+      Mockito.doAnswer(inv -> order.add("refresh")).when(session).refresh(invoice);
+      syncMock.when(() -> ConversionRateDocumentSync.deleteAllForInvoice("inv-1", "eur-id"))
+          .thenAnswer(inv -> order.add("delete"));
+      curMock.when(() -> OBCurrencyUtils.getOrgCurrency("org-1")).thenReturn("eur-id");
+      rateMock.when(() -> NeoExchangeRateService.rateAsDecimal(any(), any(), any(), any()))
+          .thenReturn(null);
+
+      TestHandler handler = new TestHandler();
+      handler.captureCurrencyRateDefault(NeoContext.builder()
+          .httpMethod("PUT").endpointType(NeoEndpointType.CRUD).recordId("inv-1")
+          .requestBody(new JSONObject().put("currency", "gbp-id")).build());
+      handler.applyCurrencyRateDefault(NeoContext.builder()
+          .httpMethod("PUT").endpointType(NeoEndpointType.CRUD).recordId("inv-1").build());
+
+      verify(ps).setNull(1, java.sql.Types.NUMERIC);
+      assertEquals(java.util.Arrays.asList("delete", "refresh"), order);
+    }
+  }
 }

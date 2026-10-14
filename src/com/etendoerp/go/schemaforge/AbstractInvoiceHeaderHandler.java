@@ -1247,14 +1247,21 @@ public abstract class AbstractInvoiceHeaderHandler {
         }
         if (change.write()) {
           writeCurrencyRate(invoiceId, change.rate());
-          // Safe: the CRUD write already flushed the invoice before afterHandle() runs, so the
-          // refresh only discards the stale in-memory rate, never a pending change. It must stay
-          // after that flush (and after the UPDATE above) — moved earlier it would drop edits.
-          OBDal.getInstance().getSession().refresh(invoice);
           if (change.rate() == null) {
             // No rate for the new currency: the row synced for the previous one is stale too.
+            // ORDER IS LOAD-BEARING (ETP-5703 QA): delete BEFORE refreshing the invoice. Refresh
+            // cascades into the invoice's conversion-rate-document collection and loads that row
+            // into the session; deleting it afterwards by JDBC left a managed entity with no row,
+            // so the next refresh (autoCreateOrUpdateConversionRateDocument) failed with "No row
+            // with the given identifier exists" and Hibernate marked the whole transaction
+            // rollback-only: the cleared rate and the delete were both rolled back (the caller's
+            // update had already been committed by the CRUD write), leaving GBP with the USD rate.
             ConversionRateDocumentSync.deleteAllForInvoice(invoiceId, change.orgCurrencyId());
           }
+          // Safe: the CRUD write already flushed (and committed) the invoice before afterHandle()
+          // runs, so the refresh only discards the stale in-memory rate, never a pending change. It
+          // must stay after that flush and after the JDBC writes above.
+          OBDal.getInstance().getSession().refresh(invoice);
           reflectInWriteResponse(context, FIELD_CURRENCY_RATE,
               change.rate() != null ? change.rate() : JSONObject.NULL);
           log.debug("[ETP-5703] Set eTGOCurrencyRate {} on invoice {} ({})", change.rate(),

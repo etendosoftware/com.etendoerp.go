@@ -141,7 +141,8 @@ public final class ProductPriceSelectorPolicy implements SelectorEnrichmentPolic
     return "SELECT pp.m_product_id,"
         + "  COALESCE(pp.pricestd, 0) AS standard_price,"
         + "  COALESCE(pp.pricelist, 0) AS list_price,"
-        + "  pl.istaxincluded AS is_tax_included"
+        + "  pl.istaxincluded AS is_tax_included,"
+        + "  COALESCE(pp.pricelimit, 0) AS limit_price"
         + " FROM m_productprice pp"
         + " JOIN m_pricelist_version plv"
         + "   ON plv.m_pricelist_version_id = pp.m_pricelist_version_id"
@@ -174,6 +175,13 @@ public final class ProductPriceSelectorPolicy implements SelectorEnrichmentPolic
         }
         aux.put("_PSTD", String.valueOf(cols[1]));
         aux.put("_PLIST", String.valueOf(cols[2]));
+        // ETP-5703: the limit too. The selector row the aux values came from is one per
+        // price-list version and, since rows are collapsed per product, may belong to any price
+        // list (a purchase one, at 0.90 instead of 1.50); all three aux prices must be the context
+        // price list's, like standardPrice/listPrice above.
+        if (cols.length > 4) {
+          aux.put("_PLIM", String.valueOf(cols[4]));
+        }
       }
     }
   }
