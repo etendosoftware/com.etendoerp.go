@@ -296,6 +296,10 @@ class FiscalDeclCrudHandler {
     // exists — a non-draft (ready/submitted/...) existing declaration is the intended
     // corrective/rectificativa case (ETP-5187) and must keep working exactly as before, via
     // resolveNextDeclSeq below, untouched by this check.
+    if (rejectDuplicateOrdinary(clientId, orgId, model, year, period, requestedDeclType,
+        response)) {
+      return;
+    }
     if (hasDraftDeclaration(clientId, orgId, model, year, period)) {
       servlet.sendError(response, HttpServletResponse.SC_CONFLICT,
           "A draft declaration already exists for this period — complete or delete it before "
@@ -332,6 +336,63 @@ class FiscalDeclCrudHandler {
 
     response.setStatus(HttpServletResponse.SC_CREATED);
     response.getWriter().write(created.toString());
+  }
+
+  /**
+   * Models that allow a single ORDINARY declaration per natural key (ETP-5716): Modelo 390, the
+   * annual summary, is filed once per exercise; any later filing for the same year is a
+   * sustitutiva/complementaria ({@code type: "com"}), which stays allowed. Modelo 303/349 are
+   * not listed — their rectificativa flow re-files an ordinary for the same period (ETP-5187).
+   */
+  static final java.util.Set<String> SINGLE_ORDINARY_MODELS = java.util.Set.of("390");
+
+  /** Error code of the 409 {@link #rejectDuplicateOrdinary} answers. */
+  static final String ERR_DUPLICATE_ORDINARY = "DUPLICATE_ORDINARY";
+
+  /**
+   * For a {@link #SINGLE_ORDINARY_MODELS} model, rejects creating a second ordinary declaration
+   * for the natural key with a {@code 409} whose body carries what the UI needs to open the
+   * existing one: {@code {"error":{"status":409,"code":"DUPLICATE_ORDINARY","message":...,
+   * "existingId":...}}} ({@code existingId} = the latest ordinary, by {@code DECL_SEQ}).
+   *
+   * @return {@code true} when the response was written and the creation must stop
+   */
+  private boolean rejectDuplicateOrdinary(String clientId, String orgId, String model, long year,
+      String period, String requestedDeclType, HttpServletResponse response) throws Exception {
+    if (!SINGLE_ORDINARY_MODELS.contains(model) || !"O".equals(requestedDeclType)) {
+      return false;
+    }
+    BaseOBObject existing = findLatestOrdinary(clientId, orgId, model, year, period);
+    if (existing == null) {
+      return false;
+    }
+    JSONObject error = new JSONObject();
+    error.put(STATUS_KEY, HttpServletResponse.SC_CONFLICT);
+    error.put(CODE_KEY, ERR_DUPLICATE_ORDINARY);
+    error.put(MESSAGE_KEY, "An ordinary Modelo " + model + " declaration already exists for "
+        + year + " — open it, or create a substitute (complementaria) declaration instead.");
+    error.put("existingId", existing.getId());
+    JSONObject body = new JSONObject();
+    body.put("error", error);
+    servlet.writeResponse(response, NeoResponse.error(HttpServletResponse.SC_CONFLICT, body));
+    return true;
+  }
+
+  /** Highest-{@code DECL_SEQ} ordinary ({@code DECL_TYPE = 'O'}) declaration, or {@code null}. */
+  private BaseOBObject findLatestOrdinary(String clientId, String orgId, String model, long year,
+      String period) {
+    BaseOBObject latest = null;
+    long maxSeq = -1L;
+    for (BaseOBObject existing : naturalKeyQuery(clientId, orgId, model, year, period).list()) {
+      String type = asString(existing.get(PROPERTY_DECLARATION_TYPE)).trim();
+      Object rawSeq = existing.get(PROPERTY_DECL_SEQ);
+      long seq = rawSeq instanceof Number ? ((Number) rawSeq).longValue() : 0L;
+      if (!"C".equals(type) && seq > maxSeq) {
+        maxSeq = seq;
+        latest = existing;
+      }
+    }
+    return latest;
   }
 
   /**

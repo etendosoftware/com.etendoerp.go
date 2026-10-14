@@ -63,6 +63,8 @@ import org.openbravo.model.common.enterprise.Organization;
  * <p>The physical {@code ETGO_Fiscal_Decl_Incident} table is not exercised here — all DAL calls
  * are mocked, matching the existing convention in {@link AbstractFiscalHandlerTest} and
  * {@code Fiscal303SubmitHandlerTest}.</p>
+ *
+ * @covers com.etendoerp.go.schemaforge.FiscalDeclCrudHandler
  */
 public class FiscalDeclCrudHandlerTest {
 
@@ -2776,6 +2778,113 @@ public class FiscalDeclCrudHandlerTest {
     when(decl.get("client")).thenReturn(client);
     when(decl.get("organization")).thenReturn(org);
     return decl;
+  }
+
+  // ── handleDeclPost — single ordinary Modelo 390 (ETP-5716) ─────────
+
+  /**
+   * POSTs {@code body} while the natural key already holds {@code existing}; returns the response
+   * written through {@code servlet.writeResponse} (null when none) and leaves {@code created}
+   * holding whether a row was saved.
+   */
+  @SuppressWarnings("unchecked")
+  private NeoResponse postWithExisting(String body, List<BaseOBObject> existing,
+      boolean[] created) throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    when(resp.getWriter()).thenReturn(new PrintWriter(new StringWriter()));
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(body)));
+    BaseOBObject newDecl = mock(BaseOBObject.class);
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+        MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      OBQuery<BaseOBObject> query = mock(OBQuery.class);
+      when(obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL), anyString()))
+          .thenReturn(query);
+      when(query.list()).thenReturn(existing);
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL)).thenReturn(newDecl);
+
+      handler.handleDeclarations("POST", req, resp);
+
+      created[0] = org.mockito.Mockito.mockingDetails(obDal).getInvocations().stream()
+          .anyMatch(i -> "save".equals(i.getMethod().getName()));
+    }
+    ArgumentCaptor<NeoResponse> captor = ArgumentCaptor.forClass(NeoResponse.class);
+    if (org.mockito.Mockito.mockingDetails(servlet).getInvocations().stream()
+        .noneMatch(i -> "writeResponse".equals(i.getMethod().getName()))) {
+      return null;
+    }
+    verify(servlet).writeResponse(eq(resp), captor.capture());
+    return captor.getValue();
+  }
+
+  private static BaseOBObject existingDecl(String id, String type, long seq, String status) {
+    BaseOBObject decl = mock(BaseOBObject.class);
+    when(decl.getId()).thenReturn(id);
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_TYPE)).thenReturn(type);
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_DECL_SEQ)).thenReturn(seq);
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS)).thenReturn(status);
+    return decl;
+  }
+
+  /**
+   * A second ordinary Modelo 390 for the same exercise is rejected with 409
+   * {@code DUPLICATE_ORDINARY} carrying the existing declaration's id, and nothing is saved —
+   * whatever the existing one's status (here: already submitted).
+   */
+  @Test
+  public void testPost390SecondOrdinaryReturns409WithExistingId() throws Exception {
+    boolean[] created = { false };
+    NeoResponse r = postWithExisting("{\"model\":\"390\",\"year\":2026,\"period\":\"0A\"}",
+        Collections.singletonList(existingDecl("DECL390", "O", 0L, "submitted")), created);
+
+    assertTrue("a structured 409 must be written", r != null);
+    assertEquals(HttpServletResponse.SC_CONFLICT, r.getHttpStatus());
+    JSONObject error = r.getBody().getJSONObject("error");
+    assertEquals(FiscalDeclCrudHandler.ERR_DUPLICATE_ORDINARY, error.getString("code"));
+    assertEquals("DECL390", error.getString("existingId"));
+    assertTrue(!error.getString("message").isEmpty());
+    assertTrue("no row may be created", !created[0]);
+  }
+
+  /** The existingId is the LATEST ordinary; a complementaria row never counts as one. */
+  @Test
+  public void testPost390DuplicateReportsLatestOrdinaryIgnoringComplementaria() throws Exception {
+    boolean[] created = { false };
+    NeoResponse r = postWithExisting("{\"model\":\"390\",\"year\":2026,\"period\":\"0A\"}",
+        Arrays.asList(existingDecl("ORD0", "O", 0L, "submitted"),
+            existingDecl("COM1", "C", 1L, "draft"),
+            existingDecl("ORD2", "O", 2L, "ready")), created);
+
+    assertEquals("ORD2", r.getBody().getJSONObject("error").getString("existingId"));
+  }
+
+  /** A substitute (type "com") Modelo 390 is still allowed next to the ordinary one. */
+  @Test
+  public void testPost390ComplementariaIsAllowedNextToOrdinary() throws Exception {
+    boolean[] created = { false };
+    NeoResponse r = postWithExisting(
+        "{\"model\":\"390\",\"year\":2026,\"period\":\"0A\",\"type\":\"com\"}",
+        Collections.singletonList(existingDecl("DECL390", "O", 0L, "submitted")), created);
+
+    assertNull(r);
+    assertTrue("the complementaria must be created", created[0]);
+  }
+
+  /** The rule is 390-only: a 2nd ordinary Modelo 303 keeps the ETP-5187 rectificativa flow. */
+  @Test
+  public void testPost303SecondOrdinaryIsStillAllowed() throws Exception {
+    boolean[] created = { false };
+    NeoResponse r = postWithExisting("{\"model\":\"303\",\"year\":2026,\"period\":\"T1\"}",
+        Collections.singletonList(existingDecl("DECL303", "O", 0L, "submitted")), created);
+
+    assertNull(r);
+    assertTrue(created[0]);
   }
 
   private static void mockContext(MockedStatic<OBContext> ctxMock, String clientId, String orgId) {
