@@ -421,7 +421,9 @@ public class BatchService {
       return failureBody(i, opId, HttpServletResponse.SC_BAD_REQUEST,
           OPS_PREFIX + i + "].id duplicates an earlier op", null, tracker.durable());
     }
-    SFSpec spec = NeoServletSupport.findSpec(specName);
+    // ETP-5676: once per batch — a 1000-row import names the same spec on every operation.
+    SFSpec spec = NeoBatchScope.memoize(BatchService.class.getName() + "|spec|"
+        + specName.toLowerCase(java.util.Locale.ROOT), () -> NeoServletSupport.findSpec(specName));
     if (spec == null) {
       return failureBody(i, opId, HttpServletResponse.SC_NOT_FOUND,
           "Spec not found: " + specName, null, tracker.durable());
@@ -745,7 +747,9 @@ public class BatchService {
    * single batch request, so all writes participate in one transaction.
    */
   private NeoResponse createRecord(SFSpec spec, String entityName, JSONObject body, String parentId) {
-    SFEntity sfEntity = findEntity(spec.getId(), entityName);
+    SFEntity sfEntity = NeoBatchScope.memoize(BatchService.class.getName() + "|entity|"
+        + spec.getId() + "|" + entityName.toLowerCase(java.util.Locale.ROOT),
+        () -> findEntity(spec.getId(), entityName));
     if (sfEntity == null) {
       return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND,
           "Entity not found in spec '" + spec.getId() + "': " + entityName);
