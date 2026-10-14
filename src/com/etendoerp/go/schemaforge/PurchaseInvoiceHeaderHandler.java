@@ -270,6 +270,7 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
         enrichHasRectifications(rec, context.getRecordId());
         InvoiceExemptTaxes.enrich(rec, context.getRecordId());
         SifSubRecordAttachments.enrich(rec, context.getRecordId());
+        InvoiceReactivationGuard.enrichReactivationBlock(rec, context.getRecordId());
       }
       return NeoResponse.ok(body);
     } catch (Exception e) {

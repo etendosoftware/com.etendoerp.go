@@ -101,10 +101,34 @@ public final class InvoiceReactivationGuard {
       return null;
     }
     try {
+      Block block = computeBlock(invoiceId);
+      return block == null ? null : reject(block.fiscalSystem, block.rectificativaDocNos);
+    } catch (JSONException e) {
+      log.warn("Could not evaluate the reactivation guard for invoice {}: {}", invoiceId,
+          e.getMessage());
+      return null;
+    }
+  }
+
+  /**
+   * The same refusal condition {@link #checkReactivation} enforces, computed once so it can also
+   * be surfaced read-only on GET (ETP-5745 follow-up) — the SPA's "Reactivar" button first
+   * un-posts a posted invoice before attempting the document action; without this, a reactivation
+   * that is doomed to fail still left the invoice un-posted as a visible side effect. Reading this
+   * from the GET response lets the button skip the un-post step entirely when it already knows
+   * the action would be refused (PM decision, ETP-5745: "if it can't reactivate, it must not do
+   * anything").
+   *
+   * @return the blocking fiscal system + completed rectificativa document numbers, or
+   *     {@code null} when the invoice is not blocked (including: not completed, read failure)
+   */
+  static Block computeBlock(String invoiceId) {
+    if (StringUtils.isBlank(invoiceId)) {
+      return null;
+    }
+    try {
       Invoice invoice = readInvoice(invoiceId);
       if (invoice == null || !Boolean.TRUE.equals(invoice.isProcessed())) {
-        // Not completed: nothing for this guard to protect — the core's own RE handling (or
-        // refusal) applies as today.
         return null;
       }
       String fiscalSystem = fiscallyAcceptedSystem(invoice);
@@ -115,11 +139,41 @@ public final class InvoiceReactivationGuard {
       if (rectificativaDocNos.isEmpty()) {
         return null;
       }
-      return reject(fiscalSystem, rectificativaDocNos);
-    } catch (RuntimeException | JSONException e) {
+      return new Block(fiscalSystem, rectificativaDocNos);
+    } catch (RuntimeException e) {
       log.warn("Could not evaluate the reactivation guard for invoice {}: {}", invoiceId,
           e.getMessage());
       return null;
+    }
+  }
+
+  /** The reason a reactivation would be refused: which fiscal system, and which rectificativa(s). */
+  static final class Block {
+    final String fiscalSystem;
+    final List<String> rectificativaDocNos;
+
+    Block(String fiscalSystem, List<String> rectificativaDocNos) {
+      this.fiscalSystem = fiscalSystem;
+      this.rectificativaDocNos = rectificativaDocNos;
+    }
+  }
+
+  /**
+   * Injects {@code reactivationBlocked} (boolean) and, when {@code true},
+   * {@code reactivationBlockedFiscalSystem} / {@code reactivationBlockedRectificativas} into the
+   * GET response — the read-only signal {@link #computeBlock} computes, so the SPA's "Reactivar"
+   * button can skip its pre-unpost step entirely instead of un-posting a reactivation it already
+   * knows will be refused.
+   *
+   * @param rec the invoice record JSON object; modified in-place
+   * @param invoiceId the primary key of the invoice being enriched
+   */
+  static void enrichReactivationBlock(JSONObject rec, String invoiceId) throws JSONException {
+    Block block = computeBlock(invoiceId);
+    rec.put("reactivationBlocked", block != null);
+    if (block != null) {
+      rec.put("reactivationBlockedFiscalSystem", block.fiscalSystem);
+      rec.put("reactivationBlockedRectificativas", new JSONArray(block.rectificativaDocNos));
     }
   }
 

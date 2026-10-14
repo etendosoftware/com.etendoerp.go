@@ -252,6 +252,7 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
         InvoiceExemptTaxes.enrich(rec, context.getRecordId());
         enrichLinkedShipments(rec, context.getRecordId());
         SifSubRecordAttachments.enrich(rec, context.getRecordId());
+        InvoiceReactivationGuard.enrichReactivationBlock(rec, context.getRecordId());
       }
       return NeoResponse.ok(body);
     } catch (Exception e) {

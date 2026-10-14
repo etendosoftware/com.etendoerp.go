@@ -20,14 +20,19 @@ package com.etendoerp.go.schemaforge;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.util.List;
 import java.util.Map;
 
@@ -62,6 +67,7 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * @covers com.etendoerp.go.schemaforge.SalesInvoiceHeaderHandler
  * @covers com.etendoerp.go.schemaforge.PurchaseInvoiceHeaderHandler
  * @covers com.etendoerp.go.schemaforge.InvoicePostingGate
+ * @covers com.etendoerp.go.schemaforge.InvoiceReactivationGuard
  */
 @RunWith(MockitoJUnitRunner.Silent.class)
 public class SalesInvoiceHeaderHandlerPostingTest {
@@ -230,5 +236,97 @@ public class SalesInvoiceHeaderHandlerPostingTest {
       assertTrue(contracts.containsKey("registerPayment"));
       assertTrue(contracts.containsKey("currencyOptions"));
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // ETP-5745 — reactivation guard wiring: handle() consults it before dispatch
+  // ---------------------------------------------------------------------------
+
+  private static NeoContext reactivateActionContext() throws Exception {
+    return NeoContext.builder()
+        .endpointType(NeoEndpointType.ACTION)
+        .httpMethod("POST")
+        .fieldName("documentAction")
+        .recordId(INVOICE_ID)
+        .requestBody(new JSONObject().put("documentAction", "RE"))
+        .build();
+  }
+
+  /**
+   * Runs {@code handler.handle(context)} with {@link OBDal} answering {@code invoice} for both
+   * the invoice read and the raw-JDBC completed-rectificativa lookup the guard performs.
+   */
+  private static NeoResponse handleReactivateWith(NeoHandler handler, Invoice invoice,
+      String... rectificativaDocNos) throws Exception {
+    try (MockedStatic<OBContext> obc = Mockito.mockStatic(OBContext.class);
+        MockedStatic<OBDal> dal = Mockito.mockStatic(OBDal.class)) {
+      OBDal obDal = mock(OBDal.class);
+      dal.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(Invoice.class, INVOICE_ID)).thenReturn(invoice);
+      Connection conn = mock(Connection.class);
+      when(obDal.getConnection()).thenReturn(conn);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      ResultSet rs = mock(ResultSet.class);
+      List<String> docNos = List.of(rectificativaDocNos);
+      int[] cursor = { -1 };
+      when(rs.next()).thenAnswer(inv -> ++cursor[0] < docNos.size());
+      when(rs.getString(1)).thenAnswer(inv -> docNos.get(cursor[0]));
+      when(ps.executeQuery()).thenReturn(rs);
+      return handler.handle(reactivateActionContext());
+    }
+  }
+
+  /**
+   * {@code handle()} must consult {@link InvoiceReactivationGuard} before
+   * {@link NeoHeaderActionRouter#dispatch}: a fiscally-accepted invoice already rectified by a
+   * completed rectificativa gets the guard's 422, not the normal {@code RE} document-action flow.
+   */
+  @Test
+  public void handleRefusesReactivationOfAFiscallyAcceptedRectifiedSalesInvoice() throws Exception {
+    Invoice invoice = mock(Invoice.class);
+    when(invoice.isProcessed()).thenReturn(true);
+    when(invoice.getAeatsiiEstado()).thenReturn("CO");
+
+    SalesInvoiceHeaderHandler handler = new SalesInvoiceHeaderHandler();
+    NeoResponse response = handleReactivateWith(handler, invoice, "RECT-5745");
+
+    assertEquals(422, response.getHttpStatus());
+    assertFalse(response.getBody().getBoolean("success"));
+    assertEquals(InvoiceReactivationGuard.MSG_REACTIVATE_FISCAL_RECTIFIED,
+        response.getBody().getJSONArray(MESSAGE_KEYS).getString(0));
+  }
+
+  /** The invoice customization applies to the purchase header exactly the same way. */
+  @Test
+  public void handleRefusesReactivationOfAFiscallyAcceptedRectifiedPurchaseInvoice()
+      throws Exception {
+    Invoice invoice = mock(Invoice.class);
+    when(invoice.isProcessed()).thenReturn(true);
+    when(invoice.getEtvfacInvoiceStatus()).thenReturn("AC");
+
+    PurchaseInvoiceHeaderHandler handler = new PurchaseInvoiceHeaderHandler();
+    NeoResponse response = handleReactivateWith(handler, invoice, "RECT-5745-AP");
+
+    assertEquals(422, response.getHttpStatus());
+    assertEquals(InvoiceReactivationGuard.MSG_REACTIVATE_FISCAL_RECTIFIED,
+        response.getBody().getJSONArray(MESSAGE_KEYS).getString(0));
+  }
+
+  /**
+   * A non-processed invoice is never blocked: the guard passes through (returns {@code null}),
+   * and with every delegate undeclared ({@code @Inject} fields left unset, as this handler is
+   * built here, not by CDI) {@link NeoHeaderActionRouter#dispatch} itself then also answers
+   * {@code null} — proving the guard did not short-circuit {@code handle()}, not just that it
+   * returned something other than its own 422.
+   */
+  @Test
+  public void handleDoesNotBlockReactivationOfADraftInvoice() throws Exception {
+    Invoice invoice = mock(Invoice.class);
+    when(invoice.isProcessed()).thenReturn(false);
+
+    NeoResponse response = handleReactivateWith(new SalesInvoiceHeaderHandler(), invoice);
+
+    assertNull("the guard must not block a draft invoice's reactivation", response);
   }
 }
