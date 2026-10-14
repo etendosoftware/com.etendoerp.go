@@ -431,25 +431,10 @@ public final class GoFeatureFlags {
     try {
       OpenFeatureAPI api = OpenFeatureAPI.getInstance();
       FeatureProvider provider = providerFactory.get();
-      // Blocking install: setProvider() alone returns before the provider is
-      // ready to evaluate, so the first read after installing can still hit the
-      // previous provider and silently answer with the code default. For a flag
-      // that gates authorisation, "not ready yet" and "disabled" must never be
-      // the same observable outcome.
-      try {
-        api.setProviderAndWait(OPENFEATURE_DOMAIN, provider);
-      } catch (ProviderNotReadyError e) {
-        // The bounded wait ran out before the first configuration arrived (Datadog's agent fetches
-        // it asynchronously). The provider stays bound in the ERROR state, every flag resolves to
-        // its false default meanwhile, and it turns READY by itself when the configuration lands.
-        // Dropping the client here instead would pin every flag false until the next restart.
-        log.warn("Feature-flag provider '{}' is not ready yet for domain '{}'; flags resolve to "
-            + "their code defaults until its first configuration arrives",
+      if (bindProvider(api, provider)) {
+        log.info("Etendo Go feature-flag provider '{}' initialized for domain '{}'",
             provider.getMetadata().getName(), OPENFEATURE_DOMAIN);
-        return api.getClient(OPENFEATURE_DOMAIN);
       }
-      log.info("Etendo Go feature-flag provider '{}' initialized for domain '{}'",
-          provider.getMetadata().getName(), OPENFEATURE_DOMAIN);
       return api.getClient(OPENFEATURE_DOMAIN);
     } catch (Exception e) {
       // Provider exceptions can contain request URLs or configuration material; keep the
@@ -457,6 +442,36 @@ public final class GoFeatureFlags {
       log.error("Could not initialize the feature-flag provider ({}); all flags resolve to their "
           + "code defaults", e.getClass().getSimpleName());
       return null;
+    }
+  }
+
+  /**
+   * Binds the provider to the {@value #OPENFEATURE_DOMAIN} domain, waiting (bounded) until it is
+   * ready.
+   *
+   * <p>Blocking install: setProvider() alone returns before the provider is ready to evaluate, so
+   * the first read after installing can still hit the previous provider and silently answer with
+   * the code default. For a flag that gates authorisation, "not ready yet" and "disabled" must
+   * never be the same observable outcome.
+   *
+   * @return {@code true} when the provider is ready; {@code false} when it is bound but still
+   *     waiting for its first configuration
+   * @throws dev.openfeature.sdk.exceptions.OpenFeatureError any other initialization failure (e.g. {@code FatalError}), which
+   *     {@link #install()} turns into "every flag off"
+   */
+  private static boolean bindProvider(OpenFeatureAPI api, FeatureProvider provider) {
+    try {
+      api.setProviderAndWait(OPENFEATURE_DOMAIN, provider);
+      return true;
+    } catch (ProviderNotReadyError e) {
+      // The bounded wait ran out before the first configuration arrived (Datadog's agent fetches
+      // it asynchronously). The provider stays bound in the ERROR state, every flag resolves to
+      // its false default meanwhile, and it turns READY by itself when the configuration lands.
+      // Dropping the client here instead would pin every flag false until the next restart.
+      log.warn("Feature-flag provider '{}' is not ready yet for domain '{}'; flags resolve to "
+          + "their code defaults until its first configuration arrives",
+          provider.getMetadata().getName(), OPENFEATURE_DOMAIN);
+      return false;
     }
   }
 
