@@ -608,7 +608,7 @@ longer follows it there. If R42 matches that tenant it re-inserts a marker next 
 subscription row; harmless while the row is open (the row wins), but it keeps §8.1's count above 0
 and, once the row is closed, lets the fallback read the tenant as productive. Until a successor of
 R42 ships, re-run R37 for such a tenant (`make data-fixes FIX=R37-tenant-subscription-backfill
-CLIENT=<id>`). Recorded in the R37 header and `open-and-notable-topics.md` §3.8 (proper fix: a
+CLIENT=<id>`). Recorded in the R37 header and `open-and-notable-topics.md` §3.13 (proper fix: a
 subscription-aware successor of R42, before Phase F).
 
 **The one exception is an operator forcing R42**: `run.js --fix <R42>` ignores chain order and the
