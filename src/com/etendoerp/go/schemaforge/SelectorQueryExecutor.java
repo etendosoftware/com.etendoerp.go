@@ -346,12 +346,12 @@ final class SelectorQueryExecutor {
       String contextOrganizationId, Map<String, Object> extraFilterParams) throws Exception {
 
     // ETP-5703: a custom-HQL selector can return several rows for ONE record — a join to a child
-    // table (the product selector joins price-list versions) multiplies them. No blanket
-    // "SELECT DISTINCT" here: the projection has many columns, so it would dedupe by the whole
-    // tuple. Instead the rows are collapsed by the record id they resolve to (first row kept, in
-    // query order), and the count is COUNT(DISTINCT <id expression>) whenever that expression is a
-    // plain property path, so count and items describe the same set of records. Paging is still by
-    // row: a page holding duplicates comes back shorter than `limit`, never with a repeated record.
+    // table (ProductSimple joins PricingProductPrice, one row per price-list version) multiplies
+    // them. No blanket "SELECT DISTINCT": the projection has many columns, so it would dedupe by the
+    // whole tuple. When the projection's record-id column is a plain property path, the query is
+    // paged by RECORD instead of by row (see pageRecordIds): count, offset, limit and hasMore all
+    // use the same unit, so no record is repeated across pages or made unreachable. Any other id
+    // expression keeps the row-based behaviour it always had.
     String alias = meta.entityAlias;
     String rawHql = meta.customHql.replace("@additional_filters@", "1=1");
     java.util.regex.Matcher fromMatcher = Pattern.compile("\\sFROM\\s",
@@ -370,52 +370,83 @@ final class SelectorQueryExecutor {
     String[] selectExprs = selectPart.replaceFirst("(?i)^select\\s+", "").split(",");
     Map<String, Integer> colIndexMap = SelectorRowMapper.buildSelectColumnIndexMap(selectExprs);
     Integer idColIdx = SelectorRowMapper.resolveIdColumnIndex(meta, alias, colIndexMap, selectExprs);
+    String idExpr = plainIdExpression(selectExprs, idColIdx);
 
     Map<String, Object> fromParams = new HashMap<>(fromClause.getParams());
     if (extraFilterParams != null) {
       fromParams.putAll(extraFilterParams);
     }
+    String searchParam = hasSearch ? "%" + search.toLowerCase() + "%" : null;
 
     String countHql = "SELECT " + customHqlCountExpression(alias, selectExprs, idColIdx)
         + fromClause.getHql();
     org.hibernate.query.Query<Long> countQuery = OBDal.getInstance()
         .getSession().createQuery(countHql, Long.class);
-    NeoSelectorExecutionHelper.bindNamedParameters(countQuery, fromParams);
-    if (hasSearch) {
-      countQuery.setParameter(PARAM_SEARCH, "%" + search.toLowerCase() + "%");
-    }
+    bindCustomHqlParams(countQuery, fromParams, searchParam);
     Long countResult = countQuery.uniqueResult();
     int totalCount = (countResult != null) ? countResult.intValue() : 0;
 
-    String dataHql = selectPart + fromClause.getHql() + " ORDER BY " + alias + "."
-        + meta.displayProperty;
-    org.hibernate.query.Query<?> dataQuery = OBDal.getInstance().getSession().createQuery(dataHql);
-    NeoSelectorExecutionHelper.bindNamedParameters(dataQuery, fromParams);
-    if (hasSearch) {
-      dataQuery.setParameter(PARAM_SEARCH, "%" + search.toLowerCase() + "%");
+    String displayOrder = alias + "." + meta.displayProperty;
+    List<Object> rows;
+    List<String> pageIds = null;
+    if (idExpr != null) {
+      List<Object> pageIdValues = pageRecordIds(fromClause.getHql(), idExpr, displayOrder,
+          fromParams, searchParam, limit, offset);
+      pageIds = new ArrayList<>();
+      for (Object value : pageIdValues) {
+        pageIds.add(idValueAsString(value));
+      }
+      rows = pageIdValues.isEmpty() ? new ArrayList<>()
+          : rowsOfRecords(selectPart, fromClause.getHql(), fromOnwards, idExpr, displayOrder,
+              fromParams, searchParam, pageIdValues);
+    } else {
+      String dataHql = selectPart + fromClause.getHql() + " ORDER BY " + displayOrder;
+      org.hibernate.query.Query<?> dataQuery = OBDal.getInstance().getSession().createQuery(dataHql);
+      bindCustomHqlParams(dataQuery, fromParams, searchParam);
+      dataQuery.setMaxResults(limit);
+      dataQuery.setFirstResult(offset);
+      rows = new ArrayList<>(dataQuery.list());
     }
-    dataQuery.setMaxResults(limit);
-    dataQuery.setFirstResult(offset);
 
     JSONArray columns = SelectorResponseSupport.buildGridColumnMetadata(meta.gridFields);
     Entity entityDef = ModelProvider.getInstance().getEntity(meta.entityName);
-    JSONArray items = new JSONArray();
-    List<String> entityIds = new ArrayList<>();
-    for (Object rawRow : dataQuery.list()) {
+    Map<String, JSONObject> itemsById = new java.util.LinkedHashMap<>();
+    List<JSONObject> rowItems = new ArrayList<>();
+    for (Object rawRow : rows) {
       Object[] row = (rawRow instanceof Object[]) ? (Object[]) rawRow : new Object[]{ rawRow };
-      JSONObject item = new JSONObject();
-
       String recordId = SelectorResponseSupport.extractRecordId(row, idColIdx);
-      if (recordId != null && entityIds.contains(recordId)) {
-        continue; // ETP-5703: another row of a record already on this page
+      if (pageIds != null && (recordId == null || itemsById.containsKey(recordId))) {
+        continue; // ETP-5703: another row of a record already taken (first row wins, ordered)
       }
+      JSONObject item = new JSONObject();
       item.put("id", recordId);
-      entityIds.add(recordId);
       item.put(FIELD_LABEL,
           SelectorRowMapper.extractDisplayLabel(row, colIndexMap, meta.displayProperty,
               entityDef, recordId));
       SelectorRowMapper.mapGridFieldsToItem(item, row, colIndexMap, meta.gridFields);
-      items.put(item);
+      if (pageIds != null) {
+        itemsById.put(recordId, item);
+      } else {
+        rowItems.add(item);
+      }
+    }
+    JSONArray items = new JSONArray();
+    List<String> entityIds = new ArrayList<>();
+    if (pageIds != null) {
+      // In page order, and only the page's records — a row of any other record (e.g. let in by
+      // operator precedence in the custom where clause) is dropped.
+      for (String pageId : pageIds) {
+        JSONObject item = itemForPageId(itemsById, pageId);
+        if (item != null && !entityIds.contains(item.getString("id"))) {
+          items.put(item);
+          entityIds.add(item.getString("id"));
+        }
+      }
+    } else {
+      for (JSONObject item : rowItems) {
+        items.put(item);
+        entityIds.add(item.optString("id", null));
+      }
     }
 
     boolean hasHqlOnlyAux = meta.auxFields.stream()
@@ -427,26 +458,121 @@ final class SelectorQueryExecutor {
     return SelectorResponseSupport.buildSelectorResponse(items, columns, totalCount, limit, offset);
   }
 
+  private static final String PARAM_PAGE_IDS = "sfPageRecordIds";
+
+  /** The FROM root alias of a custom HQL ({@code from PricingProductPrice pp} → {@code pp}). */
+  private static final Pattern FROM_ROOT_ALIAS = Pattern.compile(
+      "^\\s*FROM\\s+[A-Za-z_][\\w.]*\\s+(?:AS\\s+)?([A-Za-z_]\\w*)", Pattern.CASE_INSENSITIVE);
+
+  private static final java.util.Set<String> HQL_KEYWORDS = new java.util.HashSet<>(
+      java.util.Arrays.asList("where", "join", "left", "inner", "right", "full", "cross", "order",
+          "group", "having", "fetch", "outer"));
+
+  private static void bindCustomHqlParams(org.hibernate.query.Query<?> query,
+      Map<String, Object> params, String searchParam) {
+    NeoSelectorExecutionHelper.bindNamedParameters(query, params);
+    if (searchParam != null) {
+      query.setParameter(PARAM_SEARCH, searchParam);
+    }
+  }
+
+  /**
+   * One page of distinct record ids (ETP-5703): {@code GROUP BY <idExpr>}, ordered by the first
+   * display value of each record and then the id, so the order is total and stable across pages.
+   */
+  @SuppressWarnings("unchecked")
+  private static List<Object> pageRecordIds(String fromHql, String idExpr, String displayOrder,
+      Map<String, Object> params, String searchParam, int limit, int offset) {
+    String pageHql = "SELECT " + idExpr + fromHql + " GROUP BY " + idExpr
+        + " ORDER BY MIN(" + displayOrder + "), " + idExpr;
+    org.hibernate.query.Query<?> pageQuery = OBDal.getInstance().getSession().createQuery(pageHql);
+    bindCustomHqlParams(pageQuery, params, searchParam);
+    pageQuery.setMaxResults(limit);
+    pageQuery.setFirstResult(offset);
+    // The same id twice cannot come out of a GROUP BY; kept unique anyway, defensively.
+    return new ArrayList<Object>(new java.util.LinkedHashSet<Object>(pageQuery.list()));
+  }
+
+  /**
+   * Every row of the given records, ordered so the row kept per record is deterministic: display
+   * value, record id, then the FROM root's id when it can be read off the HQL.
+   */
+  @SuppressWarnings("unchecked")
+  private static List<Object> rowsOfRecords(String selectPart, String fromHql, String fromOnwards,
+      String idExpr, String displayOrder, Map<String, Object> params, String searchParam,
+      List<Object> pageIdValues) {
+    boolean hasWhere = Pattern.compile("\\sWHERE\\s", Pattern.CASE_INSENSITIVE)
+        .matcher(fromHql).find();
+    StringBuilder dataHql = new StringBuilder(selectPart).append(fromHql)
+        .append(hasWhere ? " AND " : " WHERE ").append(idExpr).append(" IN (:")
+        .append(PARAM_PAGE_IDS).append(")")
+        .append(" ORDER BY ").append(displayOrder).append(", ").append(idExpr);
+    String rootAlias = fromRootAlias(fromOnwards);
+    if (rootAlias != null) {
+      dataHql.append(", ").append(rootAlias).append(".id");
+    }
+    org.hibernate.query.Query<?> dataQuery = OBDal.getInstance().getSession()
+        .createQuery(dataHql.toString());
+    bindCustomHqlParams(dataQuery, params, searchParam);
+    dataQuery.setParameterList(PARAM_PAGE_IDS, pageIdValues);
+    return new ArrayList<Object>(dataQuery.list());
+  }
+
+  /** The alias of the FROM root entity, or {@code null} when it cannot be read reliably. */
+  static String fromRootAlias(String fromOnwards) {
+    Matcher m = FROM_ROOT_ALIAS.matcher(fromOnwards);
+    if (!m.find()) {
+      return null;
+    }
+    String candidate = m.group(1);
+    return HQL_KEYWORDS.contains(candidate.toLowerCase()) ? null : candidate;
+  }
+
+  private static String idValueAsString(Object value) {
+    return value instanceof BaseOBObject ? ((BaseOBObject) value).getId().toString()
+        : String.valueOf(value);
+  }
+
+  /**
+   * The item of the page id: by equal id, or — for a 64-char composite view id, which
+   * {@code extractRecordId} normalizes to its second half — by that half.
+   */
+  private static JSONObject itemForPageId(Map<String, JSONObject> itemsById, String pageId) {
+    JSONObject item = itemsById.get(pageId);
+    if (item == null && pageId != null && pageId.length() == 64) {
+      item = itemsById.get(pageId.substring(32));
+    }
+    return item;
+  }
+
   /** A plain HQL property path ({@code e.id}, {@code e.product.id}), safe inside COUNT(DISTINCT). */
   private static final Pattern PLAIN_PROPERTY_PATH =
       Pattern.compile("[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z_][A-Za-z0-9_]*)+");
 
   /**
+   * The record-id expression of the projection when it is a plain property path, else
+   * {@code null} (ETP-5703): only then is the selector counted and paged by record.
+   */
+  static String plainIdExpression(String[] selectExprs, Integer idColIdx) {
+    if (idColIdx != null && idColIdx >= 0 && idColIdx < selectExprs.length) {
+      String expr = stripColumnAlias(selectExprs[idColIdx]);
+      if (PLAIN_PROPERTY_PATH.matcher(expr).matches()) {
+        return expr;
+      }
+    }
+    return null;
+  }
+
+  /**
    * The COUNT projection of a custom-HQL selector (ETP-5703): {@code COUNT(DISTINCT <id expr>)} when
-   * the record-id column of the projection is a plain property path, so a record that the query
-   * returns as several rows is counted once; otherwise the row count {@code COUNT(<alias>)} it has
-   * always been — an arbitrary expression is not risked inside DISTINCT.
+   * the record-id column is a plain property path — the unit the selector is then paged by —
+   * otherwise the row count {@code COUNT(<alias>)} it has always been.
    *
    * @param idColIdx the projection index of the record id, or {@code null} when unresolved
    */
   static String customHqlCountExpression(String alias, String[] selectExprs, Integer idColIdx) {
-    if (idColIdx != null && idColIdx >= 0 && idColIdx < selectExprs.length) {
-      String expr = stripColumnAlias(selectExprs[idColIdx]);
-      if (PLAIN_PROPERTY_PATH.matcher(expr).matches()) {
-        return "COUNT(DISTINCT " + expr + ")";
-      }
-    }
-    return "COUNT(" + alias + ")";
+    String idExpr = plainIdExpression(selectExprs, idColIdx);
+    return idExpr != null ? "COUNT(DISTINCT " + idExpr + ")" : "COUNT(" + alias + ")";
   }
 
   /** {@code "e.id as id"} → {@code "e.id"}; an expression without an alias is returned trimmed. */

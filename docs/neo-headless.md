@@ -943,7 +943,7 @@ Response (rich OBUISEL selector):
 
 OBUISEL selectors with custom HQL queries are fully supported. The service uses `Session.createQuery()` to execute the custom HQL with org security filtering, validation rules, search across searchable properties, and pagination.
 
-**One item per record (ETP-5703).** A custom HQL that joins a child table returns several rows for one record — `ProductSimple` (`PricingProductPrice` join `product`) returns a product once per price-list version. `executeCustomHqlQuery` collapses the rows of a page by the record id they resolve to (first row kept), and `totalCount` is `COUNT(DISTINCT <id expression>)` whenever the projection's id column is a plain property path (`e.id`), else the row count as before. So `items` never repeats a record and `totalCount` counts records (6, not 13, for six products in two versions). Paging stays by row: a page that held duplicates comes back shorter than `limit`.
+**One item per record (ETP-5703).** A custom HQL that joins a child table returns several rows for one record — `ProductSimple` (`PricingProductPrice` join `product`) returns a product once per price-list version. When the projection's record-id column is a plain property path (`e.id`), `executeCustomHqlQuery` pages **by record**: (1) `COUNT(DISTINCT <id>)` is the `totalCount`; (2) one page of distinct ids — `GROUP BY <id> ORDER BY MIN(<display>), <id>` with `offset`/`limit`; (3) the rows of those ids (`<id> IN (:ids)`, ordered by display, id and the FROM root's id, so the row kept per record is deterministic), collapsed to one item per record in page order. Count, `offset`, `limit` and `hasMore` thus share one unit: no record repeats within or across pages and none becomes unreachable (6, not 13, for six products in two versions). Any other id expression keeps the previous row-based query unchanged.
 
 **Search fragments and their alias (ETP-5670).** On a standard (non-custom) OBUISEL selector, a searchable field's `property` is a DAL path relative to the entity (`product.name`), so the search always qualifies it with the query alias (`e.product.name`), dotted or not. A `clause_left_part` (used only when `property` is blank) is raw HQL and keeps its own alias (`bp.name`). Custom-HQL selectors keep their original rule: a dotted fragment is used as written. An unqualified relative path used to bind to the outer row once the where clause was copied into the de-dup subquery of view-backed selectors (Value Field ≠ `id`), turning it into a correlated subquery that PostgreSQL re-ran once per candidate row.
 
@@ -3628,6 +3628,14 @@ channel that derives these amounts — `NeoCrudHandler` create and update (REST 
 `etendo_batch`) and the line customizations that call the policy explicitly (`etendo_create`). A value
 that is already correctly rounded is unchanged.
 
+**Visible effect on the UI path (accepted).** REST single — the React form — reaches the same
+`executePostCreate` / `executeUpdate`, and `lineNetAmount` and `grossAmount` are written
+unconditionally there, so lines created or edited from the UI are now stored rounded to
+`StdPrecision` too: 3 × 1.2345 stores `lineNetAmount` 3.70, not 3.7035. That is what core's own
+`SL_Invoice_Amt` / `SL_Order_Amt` callouts store, and what the UI already displayed (amounts are
+shown at currency precision). The header totals, summed by the DB triggers from the line amounts,
+can therefore differ by a cent from an identical document saved before ETP-5703.
+
 ##### Invoice header defaults for a write that leaves them out (ETP-5703)
 
 Both invoice headers (`SalesInvoiceHeaderHandler`, `PurchaseInvoiceHeaderHandler`, shared code in
@@ -3648,12 +3656,17 @@ behaviour is unchanged. Channels as noted per field:
   a single bill-to location. The agent sends the address (one `etendo_selectors` call) or uses
   `etendo_batch`. Running the pre-hook before that check is a platform decision, pending and outside
   ETP-5703.
-- **`eTGOCurrencyRate`** (`EM_ETGO_Currency_Rate`) — on a create, or an update that changes the
-  currency, without a rate, the post-hook writes the org→document rate for the invoice date
-  (`NeoExchangeRateService.rateAsDecimal`: direct, then inverse — the lookup behind
-  `currencyOptions`, which the SPA's currency picker stages the rate from) on a draft whose currency
-  differs from the organization's, then the `C_Conversion_Rate_Document` sync runs as before and the
-  `exchangeRates` tab is filled. No rate configured → the field stays null, as before (no new error).
+- **`eTGOCurrencyRate`** (`EM_ETGO_Currency_Rate`) — when a create, or an update that changes the
+  currency, carries no rate, the post-hook resolves the org→document rate for the invoice date
+  (`NeoExchangeRateService.rateAsDecimal`: direct, then inverse — the lookup behind `currencyOptions`,
+  which the SPA's currency picker stages the rate from), rounded HALF_UP to 12 decimals (the column is
+  `NUMERIC(20,12)`, the same rounding PostgreSQL applies to the double the SPA posts). Only on a draft
+  whose currency differs from the organization's. On a **create** it fills an absent rate; no rate
+  configured → it stays null, as before (no new error). On a **currency change** the stored rate
+  belonged to the previous currency, so it is replaced by the new one's — or **cleared** (and the
+  `C_Conversion_Rate_Document` row removed) when the new currency has none, rather than converting
+  with another currency's rate. Written by one JDBC `UPDATE` under a savepoint, without touching
+  `Updated`; then the existing sync fills the `exchangeRates` tab.
 
 ##### REST `/sws/neo/batch` is unaffected
 
@@ -7840,17 +7853,19 @@ short-circuits), calls `InvoiceLineAmountSupport.deriveAmountsOnCreate` (CRUD PO
   afterwards, and for an invoice line both injectors write unconditionally (qty × price, then net ×
   (1 + rate)): whatever the pre-hook wrote is replaced by the same function over the same inputs, so
   those channels persist exactly what they did before.
-- Values are written as `BigDecimal` (`etendo_create` coerced before its pre-hook) — the policy's own
-  value, identical to `etendo_batch`'s, rounded to the invoice currency's standard precision since
-  ETP-5703.
+- Types: the policy (`NeoCommercialLinePolicy`) computes in `BigDecimal` and writes `double`s, as it
+  always did; this customization converts the value it writes back into the body to `BigDecimal`
+  (`InvoiceLineAmountSupport.writeIfStale`), the DAL type of both columns, because on `etendo_create`
+  the pre-hook runs after `coerceFieldTypes`. The value is the policy's own, identical to
+  `etendo_batch`'s, rounded to the invoice currency's standard precision since ETP-5703.
 - **Amounts only.** Prices, `standardPrice` and the line discount (`etgoDiscount`) are neither read
   for a decision nor written.
 
 | channel | sales invoice line, Fernet 18 × 10, 21 %: `lineNetAmount` / `grossAmount` |
 |---|---|
-| `etendo_create` | 180 / 217.79999999999998 (was 0 / 0); 180 / 217.80 since ETP-5703 |
-| `etendo_batch` | 180 / 217.79999999999998 (unchanged) |
-| REST single — the React form | unchanged: the add-line POST sends its own `lineNetAmount` and `grossAmount`, and `executePostCreate` re-derives both after the pre-hook as it always has |
+| `etendo_create` | 180 / 217.80 (was 0 / 0; 180 / 217.79999999999998 between ETP-5528 and ETP-5703) |
+| `etendo_batch` | 180 / 217.80 (217.79999999999998 before ETP-5703) |
+| REST single — the React form | `executePostCreate` re-derives both after the pre-hook, as it always has; since ETP-5703 the derived values are rounded to the currency precision (same 180 / 217.80 here) |
 
 The value rule lives in `LineAmountSupport`, a plain utility that names no entity or property;
 `OrderLineDiscountSupport` delegates to it, with its behaviour unchanged. The `Java_Qualifier` of

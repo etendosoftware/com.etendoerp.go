@@ -3490,9 +3490,28 @@ public class AbstractInvoiceHeaderHandlerTest {
 
   // ── ETP-5703: server-side defaults for a write that leaves them out ───────────
 
+  /** A criteria over Location whose list() answers {@code locations}. */
+  @SuppressWarnings("unchecked")
+  private static OBCriteria<Location> locationCriteria(OBDal dal,
+      java.util.List<Location> locations) {
+    OBCriteria<Location> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(Location.class)).thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.list()).thenReturn(locations);
+    return criteria;
+  }
+
+  private static NeoContext createContext(JSONObject body) {
+    return NeoContext.builder()
+        .httpMethod("POST")
+        .endpointType(NeoEndpointType.CRUD)
+        .requestBody(body)
+        .build();
+  }
+
   /**
-   * ETP-5703 repro (A): an agent creating an invoice header with only {@code businessPartner} was
-   * refused with a 422 naming {@code partnerAddress}, although the partner has exactly one bill-to
+   * ETP-5703 repro (A): an invoice header created with only {@code businessPartner} was refused
+   * with a 422 naming {@code partnerAddress}, although the partner has exactly one bill-to
    * location. The create pre-hook must fill it from that location.
    */
   @Test
@@ -3500,32 +3519,77 @@ public class AbstractInvoiceHeaderHandlerTest {
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(dal);
-      @SuppressWarnings("unchecked")
-      OBCriteria<Location> criteria = mock(OBCriteria.class);
-      when(dal.createCriteria(Location.class)).thenReturn(criteria);
-      when(criteria.add(any())).thenReturn(criteria);
       Location only = mock(Location.class);
       when(only.getId()).thenReturn("loc-1");
-      java.util.List<Location> locations = Collections.singletonList(only);
-      when(criteria.list()).thenReturn(locations);
-
+      locationCriteria(dal, Collections.singletonList(only));
       JSONObject body = new JSONObject().put("businessPartner", "bp-1");
-      NeoContext ctx = NeoContext.builder()
-          .httpMethod("POST")
-          .endpointType(NeoEndpointType.CRUD)
-          .requestBody(body)
-          .build();
 
-      AbstractInvoiceHeaderHandler.injectPartnerAddressIfMissing(ctx);
+      AbstractInvoiceHeaderHandler.injectPartnerAddressIfMissing(createContext(body));
 
       assertEquals("loc-1", body.getString("partnerAddress"));
     }
   }
 
+  /** With two bill-to locations the choice is the caller's: nothing is filled. */
+  @Test
+  public void injectPartnerAddress_twoBillToLocations_abstains() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      Location first = mock(Location.class);
+      Location second = mock(Location.class);
+      when(first.getId()).thenReturn("loc-1");
+      when(second.getId()).thenReturn("loc-2");
+      locationCriteria(dal, java.util.Arrays.asList(first, second));
+      JSONObject body = new JSONObject().put("businessPartner", "bp-1");
+
+      AbstractInvoiceHeaderHandler.injectPartnerAddressIfMissing(createContext(body));
+
+      assertFalse(body.has("partnerAddress"));
+    }
+  }
+
+  /**
+   * The caller's own address is kept, and a partner still a batch {@code $ref:} placeholder is
+   * never looked up — neither case reaches the DAL.
+   */
+  @Test
+  public void injectPartnerAddress_addressSentOrPartnerStillRef_untouchedNoLookup()
+      throws Exception {
+    JSONObject withAddress = new JSONObject().put("businessPartner", "bp-1")
+        .put("partnerAddress", "loc-caller");
+    JSONObject withRef = new JSONObject().put("businessPartner", BatchService.REF_PREFIX + "op1");
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      AbstractInvoiceHeaderHandler.injectPartnerAddressIfMissing(createContext(withAddress));
+      AbstractInvoiceHeaderHandler.injectPartnerAddressIfMissing(createContext(withRef));
+
+      assertEquals("loc-caller", withAddress.getString("partnerAddress"));
+      assertFalse(withRef.has("partnerAddress"));
+      dalMock.verifyNoInteractions();
+    }
+  }
+
+  /** The stubs of an invoice in {@code docCurrency} (org currency EUR) holding {@code stored}. */
+  private static Invoice foreignInvoice(OBDal dal, String docCurrency, BigDecimal stored) {
+    Invoice invoice = mock(Invoice.class);
+    Currency currency = mock(Currency.class);
+    Organization org = mock(Organization.class);
+    when(dal.get(Invoice.class, "inv-1")).thenReturn(invoice);
+    when(invoice.getCurrency()).thenReturn(currency);
+    when(currency.getId()).thenReturn(docCurrency);
+    when(invoice.getOrganization()).thenReturn(org);
+    when(org.getId()).thenReturn("org-1");
+    java.util.Date invoiceDate = new java.util.Date();
+    when(invoice.getInvoiceDate()).thenReturn(invoiceDate);
+    when(invoice.getETGOCurrencyRate()).thenReturn(stored);
+    when(invoice.isProcessed()).thenReturn(false);
+    return invoice;
+  }
+
   /**
    * ETP-5703 repro (D): a foreign-currency invoice created without {@code eTGOCurrencyRate} kept
-   * it null, so the conversion-rate document was never written and the exchange-rates tab stayed
-   * empty. The post-hook must default it from the org→document rate for the invoice date.
+   * it null, so the conversion-rate document was never written. The post-hook must write the
+   * org→document rate for the invoice date, at the column's scale.
    */
   @Test
   public void currencyRateDefault_createWithoutRate_writesLookedUpRate() throws Exception {
@@ -3538,37 +3602,88 @@ public class AbstractInvoiceHeaderHandlerTest {
       ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
       OBDal dal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(dal);
-
-      Invoice invoice = mock(Invoice.class);
-      Currency usd = mock(Currency.class);
-      Organization org = mock(Organization.class);
-      when(dal.get(Invoice.class, "inv-usd")).thenReturn(invoice);
-      when(invoice.getCurrency()).thenReturn(usd);
-      when(usd.getId()).thenReturn("usd-id");
-      when(invoice.getOrganization()).thenReturn(org);
-      when(org.getId()).thenReturn("org-1");
-      java.util.Date invoiceDate = new java.util.Date();
-      when(invoice.getInvoiceDate()).thenReturn(invoiceDate);
-      when(invoice.getETGOCurrencyRate()).thenReturn(null);
-      when(invoice.isProcessed()).thenReturn(false);
+      foreignInvoice(dal, "usd-id", null);
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      org.hibernate.Session session = mock(org.hibernate.Session.class);
+      when(dal.getSession()).thenReturn(session);
       curMock.when(() -> OBCurrencyUtils.getOrgCurrency("org-1")).thenReturn("eur-id");
       BigDecimal lookedUp = new BigDecimal("1.16");
       rateMock.when(() -> NeoExchangeRateService.rateAsDecimal(eq("eur-id"), eq("usd-id"),
           any(), eq("org-1"))).thenReturn(lookedUp);
 
       TestHandler handler = new TestHandler();
-      handler.captureCurrencyRateDefault(NeoContext.builder()
-          .httpMethod("POST")
-          .endpointType(NeoEndpointType.CRUD)
-          .requestBody(new JSONObject().put("currency", "usd-id"))
-          .build());
+      handler.captureCurrencyRateDefault(
+          createContext(new JSONObject().put("currency", "usd-id")));
       handler.applyCurrencyRateDefault(NeoContext.builder()
-          .httpMethod("POST")
-          .endpointType(NeoEndpointType.CRUD)
-          .recordId("inv-usd")
-          .build());
+          .httpMethod("POST").endpointType(NeoEndpointType.CRUD).recordId("inv-1").build());
 
-      verify(invoice).setETGOCurrencyRate(lookedUp);
+      verify(ps).setBigDecimal(1, new BigDecimal("1.160000000000"));
+      verify(ps).setString(2, "inv-1");
+      verify(ps).executeUpdate();
+    }
+  }
+
+  /**
+   * ETP-5703 review B2: an update USD→GBP without a rate must replace the stored USD rate with the
+   * GBP one — keeping it would convert, and re-sync the rate document, with another currency's
+   * rate. The decision is read off the stored invoice, so it is asserted on the pure rule.
+   */
+  @Test
+  public void currencyRateChange_currencyChangedWithStoredRate_replacesIt() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class);
+         MockedStatic<NeoExchangeRateService> rateMock =
+             Mockito.mockStatic(NeoExchangeRateService.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      Invoice invoice = foreignInvoice(dal, "gbp-id", new BigDecimal("1.160000000000"));
+      curMock.when(() -> OBCurrencyUtils.getOrgCurrency("org-1")).thenReturn("eur-id");
+      BigDecimal gbpRate = new BigDecimal("0.86");
+      rateMock.when(() -> NeoExchangeRateService.rateAsDecimal(eq("eur-id"), eq("gbp-id"),
+          any(), eq("org-1"))).thenReturn(gbpRate);
+
+      AbstractInvoiceHeaderHandler.RateChange onChange =
+          AbstractInvoiceHeaderHandler.resolveCurrencyRateChange(invoice,
+              AbstractInvoiceHeaderHandler.RateDefault.ON_CURRENCY_CHANGE);
+      AbstractInvoiceHeaderHandler.RateChange onCreate =
+          AbstractInvoiceHeaderHandler.resolveCurrencyRateChange(invoice,
+              AbstractInvoiceHeaderHandler.RateDefault.ON_CREATE);
+
+      assertNotNull(onChange);
+      assertEquals(0, new BigDecimal("0.86").compareTo(onChange.rate()));
+      assertEquals("eur-id", onChange.orgCurrencyId());
+      // A create never overrides a rate the saved invoice already has.
+      assertNull(onCreate);
+    }
+  }
+
+  /**
+   * B2, no rate for the new currency: the stored rate of the previous currency is cleared rather
+   * than kept.
+   */
+  @Test
+  public void currencyRateChange_currencyChangedNoRateConfigured_clearsStoredRate()
+      throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class);
+         MockedStatic<NeoExchangeRateService> rateMock =
+             Mockito.mockStatic(NeoExchangeRateService.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      Invoice invoice = foreignInvoice(dal, "jpy-id", new BigDecimal("1.160000000000"));
+      curMock.when(() -> OBCurrencyUtils.getOrgCurrency("org-1")).thenReturn("eur-id");
+      rateMock.when(() -> NeoExchangeRateService.rateAsDecimal(any(), any(), any(), any()))
+          .thenReturn(null);
+
+      AbstractInvoiceHeaderHandler.RateChange change =
+          AbstractInvoiceHeaderHandler.resolveCurrencyRateChange(invoice,
+              AbstractInvoiceHeaderHandler.RateDefault.ON_CURRENCY_CHANGE);
+
+      assertNotNull(change);
+      assertNull(change.rate());
     }
   }
 }

@@ -99,12 +99,15 @@ final class NeoCurrencyPrecision {
    * parent link in the body, or from a {@code parentId} still in the body.
    */
   static int resolve(Tab adTab, JSONObject body, String recordId) {
-    if (adTab == null || adTab.getTable() == null) {
+    // A tab without a real table id (a unit-test mock, a half-built context) has nothing to resolve
+    // against: short-circuit before touching OBContext or ModelProvider at all.
+    if (adTab == null || adTab.getTable() == null
+        || StringUtils.isBlank(adTab.getTable().getId())) {
       return DEFAULT_SCALE;
     }
     try {
       OBContext.setAdminMode(true);
-    } catch (Exception e) {
+    } catch (Exception | LinkageError e) {
       log.debug("[CURRENCY-PRECISION] No DAL context, using {} decimals: {}", DEFAULT_SCALE,
           e.getMessage());
       return DEFAULT_SCALE;
@@ -126,12 +129,22 @@ final class NeoCurrencyPrecision {
         currency = currencyOfParentId(adTab, body.optString(PARAM_PARENT_ID, null));
       }
       return scaleOf(currency);
-    } catch (Exception e) {
+    } catch (Exception | LinkageError e) {
+      // LinkageError too: an uninitialised DAL (ExceptionInInitializerError, NoClassDefFoundError)
+      // must cost a rounding default, never the write that asked for it.
       log.debug("[CURRENCY-PRECISION] Falling back to {} decimals: {}", DEFAULT_SCALE,
           e.getMessage());
       return DEFAULT_SCALE;
     } finally {
+      restoreQuietly();
+    }
+  }
+
+  private static void restoreQuietly() {
+    try {
       OBContext.restorePreviousMode();
+    } catch (Exception | LinkageError e) {
+      log.debug("[CURRENCY-PRECISION] Could not restore the previous mode: {}", e.getMessage());
     }
   }
 

@@ -895,6 +895,98 @@ public class SelectorQueryExecutorTest {
     }
   }
 
+  /**
+   * ETP-5703 review B1: with more rows than {@code limit} and {@code offset > 0}, a custom HQL
+   * selector whose rows repeat records must page by RECORD — the page of distinct ids carries the
+   * offset and limit, the data rows of those records come back unlimited and collapse to one item
+   * each in page order, and the count is records, so hasMore and the count use the same unit.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testExecuteCustomHqlQueryPagesByRecordNotByRow() throws Exception {
+    SelectorMeta meta = new SelectorMeta.Builder("Product", "name").isRich(true)
+        .isCustomQuery(true).customHql("SELECT e.id as id, e.name as name FROM Product e").build();
+
+    Query countHibQuery = mock(Query.class);
+    when(countHibQuery.uniqueResult()).thenReturn(5L);
+    Query pageQuery = mock(Query.class);
+    List<Object> pageOfIds = Arrays.asList("P3", "P4");
+    when(pageQuery.list()).thenReturn(pageOfIds);
+    Query dataQuery = mock(Query.class);
+    // Rows of the two page records, each repeated (one per price-list version), interleaved.
+    List<Object> rowsOfPage = new ArrayList<>();
+    for (String id : new String[] { "P3", "P4", "P3", "P4" }) {
+      rowsOfPage.add(new Object[] { id });
+    }
+    when(dataQuery.list()).thenReturn(rowsOfPage);
+
+    String[] hqls = new String[2];
+    Session session = mock(Session.class);
+    when(session.createQuery(anyString(), eq(Long.class))).thenReturn(countHibQuery);
+    when(session.createQuery(anyString())).thenAnswer(inv -> {
+      String hql = inv.getArgument(0);
+      if (hql.contains(" GROUP BY ")) {
+        hqls[0] = hql;
+        return pageQuery;
+      }
+      hqls[1] = hql;
+      return dataQuery;
+    });
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.getSession()).thenReturn(session);
+    Entity entityDef = mock(Entity.class);
+    ModelProvider modelProvider = mock(ModelProvider.class);
+    when(modelProvider.getEntity(anyString())).thenReturn(entityDef);
+    SelectorQueryBuilder.HqlWithParams emptyClause = SelectorQueryBuilder.HqlWithParams.empty();
+    NeoResponse expected = NeoResponse.ok(new JSONObject());
+
+    try (MockedStatic<SelectorQueryBuilder> builderMock = mockStatic(SelectorQueryBuilder.class);
+        MockedStatic<NeoSelectorExecutionHelper> helperMock =
+            mockStatic(NeoSelectorExecutionHelper.class);
+        MockedStatic<SelectorRowMapper> mapperMock = mockStatic(SelectorRowMapper.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+        MockedStatic<ModelProvider> providerMock = mockStatic(ModelProvider.class);
+        MockedStatic<SelectorResponseSupport> respMock = mockStatic(SelectorResponseSupport.class)) {
+      builderMock.when(() -> SelectorQueryBuilder.buildCustomHqlFromClause(any(), any(), any(),
+          any(), any(), any())).thenReturn(emptyClause);
+      helperMock.when(() -> NeoSelectorExecutionHelper.bindNamedParameters(any(Query.class), any()))
+          .thenAnswer(inv -> null);
+      mapperMock.when(() -> SelectorRowMapper.buildSelectColumnIndexMap(any()))
+          .thenReturn(new HashMap<>());
+      mapperMock.when(() -> SelectorRowMapper.resolveIdColumnIndex(any(), any(), any(), any()))
+          .thenReturn(0);
+      mapperMock.when(() -> SelectorRowMapper.extractDisplayLabel(any(), any(), any(), any(), any()))
+          .thenReturn("Agua");
+      mapperMock.when(() -> SelectorRowMapper.mapGridFieldsToItem(any(), any(), any(), any()))
+          .thenAnswer(inv -> null);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      providerMock.when(ModelProvider::getInstance).thenReturn(modelProvider);
+      respMock.when(() -> SelectorResponseSupport.buildGridColumnMetadata(any()))
+          .thenReturn(new JSONArray());
+      respMock.when(() -> SelectorResponseSupport.extractRecordId(any(), any()))
+          .thenAnswer(inv -> ((Object[]) inv.getArgument(0))[0]);
+      JSONArray[] capturedItems = new JSONArray[1];
+      int[] capturedCount = new int[1];
+      respMock.when(() -> SelectorResponseSupport.buildSelectorResponse(any(), any(), anyInt(),
+          anyInt(), anyInt())).thenAnswer(inv -> {
+            capturedItems[0] = inv.getArgument(0);
+            capturedCount[0] = inv.getArgument(2);
+            return expected;
+          });
+
+      SelectorQueryExecutor.execute(meta, "", 2, 2, null, "org-1", null);
+
+      org.mockito.Mockito.verify(pageQuery).setFirstResult(2);
+      org.mockito.Mockito.verify(pageQuery).setMaxResults(2);
+      org.mockito.Mockito.verify(dataQuery, never()).setMaxResults(anyInt());
+      assertTrue(hqls[1], hqls[1].contains("e.id IN (:"));
+      assertEquals(5, capturedCount[0]);
+      assertEquals(2, capturedItems[0].length());
+      assertEquals("P3", capturedItems[0].getJSONObject(0).getString("id"));
+      assertEquals("P4", capturedItems[0].getJSONObject(1).getString("id"));
+    }
+  }
+
   // ---------------------------------------------------------------
   // buildRepresentativeRowWhere — DISTINCT-by-valueProperty query building
   // ---------------------------------------------------------------

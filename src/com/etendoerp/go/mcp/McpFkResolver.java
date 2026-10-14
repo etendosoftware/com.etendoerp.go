@@ -87,6 +87,9 @@ final class McpFkResolver {
   private static final String KEY_ID = "id";
   private static final String KEY_CANDIDATES = "candidates";
   private static final String KEY_FIELD = "field";
+  /** The item keys a record is shown by: selector label, DAL identifier, search key. */
+  private static final Set<String> DISPLAY_KEYS =
+      Set.of("label", "_identifier", "searchKey", "value");
   private static final int SELECTOR_LIMIT = 10;
   private static final String LABEL_SEPARATOR = " - ";
   /** Caps how many label separators are probed, so one failed resolution stays cheap. */
@@ -331,9 +334,10 @@ final class McpFkResolver {
   }
 
   /**
-   * Case-insensitive {@link #uniqueLabelMatch} (ETP-5703): the id of the only record having a
-   * string property equal to {@code label} ignoring case, else {@code null}. Rows of the same
-   * record count once.
+   * Case-insensitive {@link #uniqueLabelMatch} (ETP-5703), restricted to the display keys
+   * ({@code label}, {@code _identifier}, {@code searchKey}, {@code value}): the id of the only
+   * record shown as {@code label} ignoring case, else {@code null}. Rows of the same record count
+   * once.
    */
   static String uniqueLabelMatchIgnoreCase(JSONArray items, String label) {
     return uniqueMatch(items, label, true);
@@ -359,7 +363,9 @@ final class McpFkResolver {
     Iterator<?> names = item.keys();
     while (names.hasNext()) {
       String name = (String) names.next();
-      if (KEY_ID.equals(name)) {
+      // The case-insensitive preference (ETP-5703) only looks at what the agent is shown as the
+      // record's name — label, identifier, search key — never at any other column of the row.
+      if (KEY_ID.equals(name) || (ignoreCase && !DISPLAY_KEYS.contains(name))) {
         continue;
       }
       Object value = item.opt(name);
