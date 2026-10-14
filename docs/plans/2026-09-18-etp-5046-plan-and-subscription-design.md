@@ -336,13 +336,18 @@ optional — an environment may stay on the preference path indefinitely.
       survival: a row assigned to a module in development is exported with it and reset by the next
       `update.database` (§6.3).
       **Done** when `select count(*) from ad_preference where attribute = 'ETGO_TenantPlan';`
-      returns 0 and the `ETP-5046-TRANSITIONAL-FALLBACK` WARN lines stop (§8.1).
+      returns 0 and the `ETP-5046-TRANSITIONAL-FALLBACK` WARN lines stop (§8.1). Rows that remain
+      are the worklist: a rowless tenant whose marker is inactive or not `productive` matches
+      neither R37 branch (§7) and needs a decision by hand; a tenant onboarded later can get its
+      marker back from R42 (§8, `open-and-notable-topics.md` §3.13).
    Run 3.3 **before** 3.4. Once the switch is ON every new purchase opens a row, so one R37 pass
    catches every tenant still on the marker. The reverse order (R37, then the switch — the order
    this checklist gave until 2026-10-14) is safe too, since rows are decided by the row and markers
    by the fallback, but a purchase made between the two steps still writes the marker and needs a
-   second R37 run; whoever migrates client by client before switching on must re-run R37 after
-   enabling the switch. Meanwhile both models coexist: the switch is system-wide, only R37 is per
+   second R37 run. Migrating client by client before switching on has the same gap: a migrated
+   tenant has a row and needs nothing more, but every other tenant that bought while the switch was
+   OFF wrote the marker, so run R37 once more for the whole environment after enabling the switch.
+   Meanwhile both models coexist: the switch is system-wide, only R37 is per
    client.
 4. **Switch to the plan catalog when ready.** In the Classic **Plans** window, create (or activate)
    a plan and enter its **Provider Price ID** — an active, recurring Stripe price with

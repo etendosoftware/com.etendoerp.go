@@ -307,8 +307,10 @@ open no row, and the lifecycle webhooks keep the `ETGO_SubscriptionStatus`/`DueA
 - **Switch first, then R37 (decided 2026-10-14, Martin Taal).** With the switch ON every new
   purchase opens a row, so one R37 pass catches every tenant still on the marker. The old order
   (R37, then the switch) is safe too, but a purchase made between the two steps still writes the
-  marker and needs a second R37 run — as does any client migrated with `CLIENT=` before the switch
-  was enabled. The switch is system-wide and only R37 is per client, so both models coexist
+  marker and needs a second R37 run. The same holds when R37 runs client by client (`CLIENT=`)
+  before the switch: a migrated tenant has a row and needs nothing more, but every other tenant that
+  bought while the switch was OFF wrote the marker, so run R37 once more for the whole environment
+  after enabling the switch. The switch is system-wide and only R37 is per client, so both models coexist
   meanwhile (readers: row first, preference fallback).
 - **One-way in practice.** Setting it back to `N` sends only tenants that have never had a row back
   to the marker; every tenant with a row stays on it, payments included. Two populations that only

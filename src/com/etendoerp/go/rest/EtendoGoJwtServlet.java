@@ -3578,7 +3578,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    *       tenant has no subscription row</b> → no row is attempted and the preference IS written,
    *       exactly as before ETP-5046. The lifecycle webhooks then keep this rowless tenant's
    *       billing state in the preference projection. Each environment stays here until its
-   *       operator has run the R37 backfill and switched the model on. A tenant that already has a
+   *       operator switches the model on (and then runs the R37 backfill for the tenants already
+   *       on the preference). A tenant that already has a
    *       row (any row) takes the subscription path below whatever the switch says, because its row
    *       is what every read answers from.</li>
    *   <li><b>Subscription write succeeds</b> → the preference is NOT written, and any stale

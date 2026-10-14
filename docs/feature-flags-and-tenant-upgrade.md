@@ -916,9 +916,11 @@ decided by the row whatever the switch says. The module ships the list value but
 a shipped row would be reset by every `update.database`.
 
 **After installing ETP-5046/5047 nothing changes in how purchases are recorded.** The switch is OFF
-(no row ships), R37 is opt-in (`-- @optIn: true`), so a plain `make data-fixes` never runs it, and
-develop has no `SubscriptionService`, so no environment has subscription rows yet. Purchases keep
-writing the `ETGO_TenantPlan` marker until the operator switches.
+(no row ships), and R37 is opt-in (`-- @optIn: true`), so a plain `make data-fixes` never runs it.
+At the time of writing (2026-10-14, before ETP-5046 reaches develop) develop has no
+`SubscriptionService`, so an environment built from develop has no subscription rows; one that ran
+an ETP-5046/5047 feature-branch build may already have some. A tenant without a row keeps writing
+the `ETGO_TenantPlan` marker until the operator switches.
 
 Switching, on the target environment — **switch first, then backfill** (order decided 2026-10-14,
 Martin Taal):
@@ -959,13 +961,18 @@ Martin Taal):
    **Done** when `select count(*) from ad_preference where attribute = 'ETGO_TenantPlan';` returns
    **0** and the `ETP-5046-TRANSITIONAL-FALLBACK` WARN lines stop. Between steps 3 and 4 those
    lines are expected: with the switch ON the fallback logs every tenant still on the marker at WARN
-   (at DEBUG while OFF), and each tenant's line stops once R37 has reached it.
+   (at DEBUG while OFF), and each tenant's line stops once R37 has reached it. Rows that remain
+   are the worklist: a tenant with no subscription row whose marker is inactive or not
+   `productive` matches neither R37 branch and needs a decision by hand, and a tenant onboarded
+   later can get its marker back from R42 (`open-and-notable-topics.md` §3.13).
 
 **Why switch first.** Once the switch is ON every new purchase opens a row, so a single R37 pass
 catches every tenant still on the marker. In the old order (R37, then the switch) a purchase made
 between the two steps still wrote the marker and needed a second R37 run. Both orders are safe —
-rows are decided by the row, markers by the fallback — but whoever migrates client by client
-*before* switching on must re-run R37 after enabling the switch.
+rows are decided by the row, markers by the fallback. Migrating client by client *before*
+switching on has the same gap: a migrated tenant has a row and needs nothing more, but every other
+tenant that bought while the switch was OFF wrote the marker, so run R37 once more for the whole
+environment after enabling the switch.
 
 Notes for the operator:
 

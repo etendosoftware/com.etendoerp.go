@@ -41,9 +41,13 @@ import org.openbravo.model.ad.domain.Preference;
  * and leaves the fleet in two populations, which is why in practice the switch is one-way.
  *
  * <p><b>Why a switch.</b> Each environment moves to the subscription model at one moment, chosen by
- * its operator, right after running the R37 backfill data-fix for its existing tenants. Until then
- * the whole fleet — new customers included — stays on the preferences, so an environment never runs
- * half its paying tenants on rows and half on preferences without someone having decided it.
+ * its operator. Until then the whole fleet — new customers included — stays on the preferences.
+ * The operator turns the switch on first and then runs the R37 backfill data-fix for the existing
+ * tenants, all at once or client by client (order decided 2026-10-14): with the switch ON no new
+ * purchase lands on the preference any more, so one backfill pass reaches every tenant still on it.
+ * The switch decides only a new purchase's first row. Running some tenants on rows and others on
+ * preferences in the meantime is deliberate and safe, because every reader answers from a tenant's
+ * row first and falls back to the preference only for a tenant that has none.
  *
  * <p><b>The row it reads.</b> A <em>list</em> preference: the key {@value #PREFERENCE_PROPERTY} is
  * registered as an {@code AD_Ref_List} value of the {@code Property Configuration} reference, so
