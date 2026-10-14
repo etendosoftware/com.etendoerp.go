@@ -105,6 +105,7 @@ import com.etendoerp.go.onboarding.OnboardingForceTestModeService;
 import com.etendoerp.go.payment.CheckoutRequestStore;
 import com.etendoerp.go.payment.ProvisioningFailureReason;
 import com.etendoerp.go.payment.EnvironmentPlanCache;
+import com.etendoerp.go.payment.SubscriptionModelSwitch;
 import com.etendoerp.go.payment.SubscriptionService;
 import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.payment.TenantPlanService;
@@ -132,8 +133,9 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  * writeEnvironmentLoginResponse).
  *
  * <p>It also owns the specs for {@code applyPaidUpgradeSideEffects} (ETP-5046): which store records
- * a paid tenant's plan, and that the per-tenant retirement of the legacy ETGO_TenantPlan preference
- * can never fail an upgrade that has already been paid for.
+ * a paid tenant's plan — decided first by the environment's subscription-model switch, then by
+ * whether the row could be opened — and that the per-tenant retirement of the legacy
+ * ETGO_TenantPlan preference can never fail an upgrade that has already been paid for.
  *
  * <p>And the specs for the scoped system context of the two ETP-5548 checks,
  * {@code isProductiveNameTakenByAccount} and {@code isAssociatedDemo}: each runs as System and
@@ -166,6 +168,15 @@ public class EtendoGoJwtServletCoverageTest {
     requestSession = mockStatic(org.openbravo.dal.core.SessionHandler.class);
     requestSession.when(org.openbravo.dal.core.SessionHandler::getInstance).thenReturn(unitSession);
     servlet.internalAlertService = mock(com.etendoerp.go.schemaforge.email.InternalAlertService.class);
+    // The real switch reads AD_Preference. The paid-upgrade specs below were written for the
+    // subscription model, so it is ON unless a spec says otherwise.
+    servlet.subscriptionModelSwitch = switchThatIs(true);
+  }
+
+  private static SubscriptionModelSwitch switchThatIs(boolean on) {
+    SubscriptionModelSwitch modelSwitch = mock(SubscriptionModelSwitch.class);
+    when(modelSwitch.isOn()).thenReturn(on);
+    return modelSwitch;
   }
 
   @After
@@ -2186,6 +2197,159 @@ public class EtendoGoJwtServletCoverageTest {
     verify(fixture.subscriptionService).openSubscription(PAID_CLIENT_ID, legacy, payer,
         "cus_legacy", "sub_legacy", "price_LEGACY_configured");
     verify(fixture.tenantPlanService, never()).markProductive(anyString(), anyString());
+  }
+
+  @Test
+  public void paidUpgradeWithTheSubscriptionModelOffWritesThePreferenceAndOpensNoRow() {
+    // ETGO_SubscriptionModel is not 'Y' in this environment: the purchase is recorded exactly as
+    // before ETP-5046 — the ETGO_TenantPlan marker, no ETGO_SUBSCRIPTION row — even though the
+    // checkout request carries a plan and the row WOULD open.
+    PaidUpgradeFixture fixture = givenPaidUpgrade(true);
+    servlet.subscriptionModelSwitch = switchThatIs(false);
+    when(fixture.tenantPlanService.markProductive(PAID_CLIENT_ID, PAID_STAR_ORG_ID))
+        .thenReturn(true);
+
+    applyPaidUpgrade();
+
+    // The only subscription call is the "does this tenant already have a row?" lookup.
+    verify(fixture.subscriptionService).hasAnySubscription(PAID_CLIENT_ID);
+    verify(fixture.subscriptionService, never())
+        .openSubscription(anyString(), any(), any(), any(), any(), any());
+    verifyNoInteractions(fixture.checkoutRequestStore);
+    verify(fixture.tenantPlanService).markProductive(PAID_CLIENT_ID, PAID_STAR_ORG_ID);
+    // The marker just written is the tenant's only record: retiring it would erase the payment.
+    verify(fixture.tenantPlanService, never()).retireProductivePreference(anyString());
+    // The rest of the paid upgrade is unchanged: lifecycle projection and the demo override.
+    verify(fixture.lifecycleService).markProductive(PAID_CLIENT_ID);
+    verify(fixture.forceTestModeService).revertTestModeForProductiveTenant(PAID_CLIENT_ID);
+  }
+
+  @Test
+  public void paidUpgradeWithTheSubscriptionModelOffIsNotLoggedAsAFailure() {
+    // OFF is the default state of every environment until its operator switches, so the
+    // preference path it takes must not read like the failed-subscription safety net.
+    PaidUpgradeFixture fixture = givenPaidUpgrade(true);
+    servlet.subscriptionModelSwitch = switchThatIs(false);
+    when(fixture.tenantPlanService.markProductive(PAID_CLIENT_ID, PAID_STAR_ORG_ID))
+        .thenReturn(true);
+    LogCapture errors = LogCapture.attachTo(EtendoGoJwtServlet.class, Level.ERROR);
+
+    try {
+      applyPaidUpgrade();
+
+      assertTrue("a switched-off environment is not an error: " + errors.messagesAt(Level.ERROR),
+          errors.messagesAt(Level.ERROR).isEmpty());
+    } finally {
+      errors.detach();
+    }
+  }
+
+  @Test
+  public void paidUpgradeWithTheSubscriptionModelOffStillAbortsWhenThePreferenceCannotBeWritten() {
+    // With no row to fall back on, the marker is the payment record: failing to write it must
+    // fail the upgrade closed (ETP-5548) exactly as on the subscription path.
+    PaidUpgradeFixture fixture = givenPaidUpgrade(true);
+    servlet.subscriptionModelSwitch = switchThatIs(false);
+    when(fixture.tenantPlanService.markProductive(PAID_CLIENT_ID, PAID_STAR_ORG_ID))
+        .thenReturn(false);
+
+    OBException failure = assertThrows(OBException.class, this::applyPaidUpgrade);
+
+    verify(fixture.subscriptionService, never())
+        .openSubscription(anyString(), any(), any(), any(), any(), any());
+    verify(fixture.lifecycleService, never()).markProductive(anyString());
+    // No subscription was attempted, so the failure reads as it did before ETP-5046.
+    assertTrue(failure.getMessage(),
+        failure.getMessage().contains("could not be marked as plan 'productive'"));
+  }
+
+  @Test
+  public void aFailedSubscriptionAndAFailedMarkerStillNameBothRecords() {
+    // The other fail-closed wording: a row WAS attempted, so the message says neither exists.
+    PaidUpgradeFixture fixture = givenPaidUpgrade(false);
+    when(fixture.tenantPlanService.markProductive(PAID_CLIENT_ID, PAID_STAR_ORG_ID))
+        .thenReturn(false);
+
+    OBException failure = assertThrows(OBException.class, this::applyPaidUpgrade);
+
+    assertTrue(failure.getMessage(),
+        failure.getMessage().contains("has neither a subscription nor the fallback plan marker"));
+  }
+
+  @Test
+  public void aTenantThatAlreadyHasARowIsRecordedOnTheRowEvenWithTheModelOff() {
+    // Every read answers from a tenant's row whenever it has one (open or closed). Recording its
+    // new payment only in the ETGO_TenantPlan marker would be invisible: a canceled or closed row
+    // would keep the paying tenant free and blocked. So the switch decides only for rowless
+    // tenants — "a tenant with a row is decided by the row" holds for writes too.
+    PaidUpgradeFixture fixture = givenPaidUpgrade(true);
+    servlet.subscriptionModelSwitch = switchThatIs(false);
+    when(fixture.subscriptionService.hasAnySubscription(PAID_CLIENT_ID)).thenReturn(true);
+
+    applyPaidUpgrade();
+
+    verify(fixture.subscriptionService)
+        .openSubscription(eq(PAID_CLIENT_ID), any(), any(), any(), any(), any());
+    verify(fixture.tenantPlanService, never()).markProductive(anyString(), anyString());
+    verify(fixture.tenantPlanService).retireProductivePreference(PAID_CLIENT_ID);
+  }
+
+  @Test
+  public void withTheModelOnTheExistingRowLookupIsNotEvenNeeded() {
+    // ON already means "open a row"; the extra lookup is only paid for on a switched-off
+    // environment.
+    PaidUpgradeFixture fixture = givenPaidUpgrade(true);
+
+    applyPaidUpgrade();
+
+    verify(fixture.subscriptionService)
+        .openSubscription(eq(PAID_CLIENT_ID), any(), any(), any(), any(), any());
+    verify(fixture.subscriptionService, never()).hasAnySubscription(anyString());
+  }
+
+  @Test
+  public void aFailedRowLookupWithTheModelOffFallsBackToTheMarkerAndIsLogged() {
+    PaidUpgradeFixture fixture = givenPaidUpgrade(true);
+    servlet.subscriptionModelSwitch = switchThatIs(false);
+    when(fixture.subscriptionService.hasAnySubscription(PAID_CLIENT_ID))
+        .thenThrow(new IllegalStateException("no session"));
+    when(fixture.tenantPlanService.markProductive(PAID_CLIENT_ID, PAID_STAR_ORG_ID))
+        .thenReturn(true);
+    LogCapture errors = LogCapture.attachTo(EtendoGoJwtServlet.class, Level.ERROR);
+
+    try {
+      applyPaidUpgrade();
+
+      verify(fixture.tenantPlanService).markProductive(PAID_CLIENT_ID, PAID_STAR_ORG_ID);
+      verify(fixture.subscriptionService, never())
+          .openSubscription(anyString(), any(), any(), any(), any(), any());
+      List<String> logged = errors.messagesAt(Level.ERROR);
+      assertEquals("the failed lookup must be searchable: " + logged, 1, logged.size());
+      assertTrue(logged.get(0), logged.get(0).contains(PAID_CLIENT_ID));
+    } finally {
+      errors.detach();
+    }
+  }
+
+  @Test
+  public void theSubscriptionModelSwitchIsReadOnEveryPurchase() {
+    // No caching: an operator who flips the switch must not need a restart. The second purchase
+    // of the same servlet instance sees the new value.
+    PaidUpgradeFixture fixture = givenPaidUpgrade(true);
+    SubscriptionModelSwitch modelSwitch = mock(SubscriptionModelSwitch.class);
+    when(modelSwitch.isOn()).thenReturn(false, true);
+    servlet.subscriptionModelSwitch = modelSwitch;
+    when(fixture.tenantPlanService.markProductive(PAID_CLIENT_ID, PAID_STAR_ORG_ID))
+        .thenReturn(true);
+
+    applyPaidUpgrade();
+    verify(fixture.subscriptionService, never())
+        .openSubscription(anyString(), any(), any(), any(), any(), any());
+
+    applyPaidUpgrade();
+    verify(fixture.subscriptionService)
+        .openSubscription(eq(PAID_CLIENT_ID), any(), any(), any(), any(), any());
+    verify(modelSwitch, times(2)).isOn();
   }
 
   /** The mocked collaborators of one paid-upgrade spec. */

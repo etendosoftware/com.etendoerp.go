@@ -56,7 +56,9 @@ import org.openbravo.test.base.OBBaseTest;
 
 import com.etendoerp.go.payment.CheckoutRequestStore;
 import com.etendoerp.go.payment.CheckoutWebhookProcessor;
+import com.etendoerp.go.payment.SubscriptionModelSwitch;
 import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
+import com.etendoerp.go.payment.TenantPlanService;
 import com.etendoerp.go.schemaforge.data.Account;
 
 /**
@@ -90,6 +92,9 @@ import com.etendoerp.go.schemaforge.data.Account;
  * write path commits. Fixtures carry the {@code etp5045-whk-} / {@code evt_etp5045whk_} markers
  * and are deleted in {@link #cleanUp()} in FK order. The environment's own live Stripe replay rows
  * are never matched by those markers and are left alone.
+ *
+ * @covers com.etendoerp.go.rest.EtendoGoJwtServlet
+ * @covers com.etendoerp.go.payment.TenantEnvironmentLifecycleService
  */
 public class CheckoutWebhookEndpointIntegrationTest extends OBBaseTest {
 
@@ -863,6 +868,88 @@ public class CheckoutWebhookEndpointIntegrationTest extends OBBaseTest {
   }
 
   /**
+   * ETP-5046 — the state of every environment until its operator switches the subscription model
+   * on: a paid purchase writes the {@code ETGO_TenantPlan} marker and opens no row (see
+   * {@code TenantContextSubscriptionWriteIntegrationTest}), so every NEW paying tenant is rowless.
+   * Its billing lifecycle must keep landing on the {@code ETGO_SubscriptionStatus} /
+   * {@code ETGO_SubscriptionDueAt} preferences; a lifecycle event must neither open a row for it nor
+   * touch the marker that makes it productive.
+   *
+   * <p>The webhook commits, so the switch cannot be forced OFF inside a rolled-back transaction
+   * here; the spec asserts instead that this database has not switched, which is the state of every
+   * environment that has not run the R37 backfill. It never writes a switch row.
+   */
+  @Test
+  public void testWithTheSwitchOffANewlyPaidRowlessTenantKeepsItsLifecycleInThePreferences()
+      throws Exception {
+    assertFalse("Precondition: this database must not have switched the subscription model on (a "
+        + "System-level " + SubscriptionModelSwitch.PREFERENCE_PROPERTY + " = 'Y' row)",
+        readSwitchAsSystem());
+    String tenantId = createTenant("switch-off");
+    markProductiveCommitted(tenantId);
+    String requestId = createPaidRequestFor(tenantId, newEmail("lifecycle-switch-off"));
+    String eventId = newEventId();
+    long periodEnd = Instant.now().getEpochSecond() - 3600;
+
+    OBContext.setOBContext((OBContext) null);
+    ResponseCapture response = deliver(paymentFailedEvent(eventId, requestId, periodEnd));
+
+    assertNull("The webhook must hand the thread back without a context", OBContext.getOBContext());
+    assertEquals(200, response.status);
+    assertEquals(APPLIED, rawEvent(eventId, "EVENT_RESULT"));
+    assertEquals("PAST_DUE",
+        rawPreference(tenantId, TenantEnvironmentLifecycleService.SUBSCRIPTION_STATUS_ATTRIBUTE));
+    assertEquals(Instant.ofEpochSecond(periodEnd).toString(),
+        rawPreference(tenantId, TenantEnvironmentLifecycleService.SUBSCRIPTION_DUE_AT_ATTRIBUTE));
+    assertNotNull(
+        rawPreference(tenantId, TenantEnvironmentLifecycleService.SUBSCRIPTION_EVENT_AT_ATTRIBUTE));
+    assertEquals("A lifecycle event must not open a row while the switch is off", 0L,
+        rawTenantCount("SELECT COUNT(*) FROM ETGO_SUBSCRIPTION WHERE ENVIRONMENT_CLIENT_ID = "
+            + ":tenant", tenantId));
+    assertEquals("The purchase's plan marker must survive the lifecycle event", 1L,
+        rawTenantCount("SELECT COUNT(*) FROM AD_PREFERENCE WHERE ATTRIBUTE = '"
+            + TenantPlanService.PREFERENCE_ATTRIBUTE + "' AND VISIBLEAT_CLIENT_ID = :tenant "
+            + "AND ISACTIVE = 'Y'", tenantId));
+  }
+
+  /** Reads the switch the way the purchase path does, as System. */
+  private static boolean readSwitchAsSystem() {
+    OBContext.setOBContext(ZERO, ZERO, ZERO, ZERO);
+    try {
+      return new SubscriptionModelSwitch().isOn();
+    } finally {
+      OBContext.setOBContext((OBContext) null);
+    }
+  }
+
+  /** What a switched-off paid purchase writes: the marker, through the real service, committed. */
+  private void markProductiveCommitted(String tenantId) {
+    OBContext.setOBContext(ZERO, ZERO, ZERO, ZERO);
+    try {
+      assertTrue("Sanity: the marker must be written",
+          new TenantPlanService().markProductive(tenantId, null));
+      OBDal.getInstance().flush();
+      OBDal.getInstance().commitAndClose();
+    } finally {
+      OBContext.setOBContext((OBContext) null);
+    }
+  }
+
+  /** @return the committed result of a {@code COUNT(*)} bound to one tenant */
+  @SuppressWarnings("rawtypes")
+  private long rawTenantCount(String sql, String tenantId) {
+    OBContext.setOBContext(ZERO, ZERO, ZERO, ZERO);
+    OBContext.setAdminMode(true);
+    try {
+      NativeQuery query = OBDal.getInstance().getSession().createNativeQuery(sql);
+      query.setParameter("tenant", tenantId);
+      return ((Number) query.uniqueResult()).longValue();
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
    * A correlated {@code invoice.payment_failed}: keyed by the subscription the paid checkout
    * recorded, carrying the invoice's own {@code period_end} as the grace anchor.
    */
@@ -1135,6 +1222,8 @@ public class CheckoutWebhookEndpointIntegrationTest extends OBBaseTest {
       for (String sql : new String[] {
           "DELETE FROM ETGO_SUBSCRIPTION WHERE ENVIRONMENT_CLIENT_ID IN " + tenants,
           "DELETE FROM AD_PREFERENCE WHERE AD_CLIENT_ID IN " + tenants,
+          // The ETGO_TenantPlan marker lives at client 0 and names the tenant here only.
+          "DELETE FROM AD_PREFERENCE WHERE VISIBLEAT_CLIENT_ID IN " + tenants,
           "DELETE FROM AD_SEQUENCE WHERE AD_CLIENT_ID IN " + tenants,
           "DELETE FROM AD_CLIENT WHERE VALUE LIKE :tenantMarker" }) {
         NativeQuery deleteTenantRows = OBDal.getInstance().getSession().createNativeQuery(sql);

@@ -41,8 +41,10 @@ import com.etendoerp.go.schemaforge.data.Subscription;
  * for "is this tenant paying" is its open {@code ETGO_SUBSCRIPTION} row, and {@link #resolvePlan}
  * reads that first, falling back to the preference only when there is no subscription at all (see
  * the transitional note below). {@link #markProductive} no longer writes a parallel truth: the
- * paid-upgrade path calls it <em>only</em> when the subscription write failed — which is exactly
- * the case {@link TenantPlanPreferenceFallback} exists to cover.
+ * paid-upgrade path calls it <em>only</em> when no subscription row records the payment — because
+ * the environment has not switched the subscription model on yet ({@link SubscriptionModelSwitch})
+ * or because the subscription write failed. Those are exactly the cases
+ * {@link TenantPlanPreferenceFallback} exists to cover.
  *
  * <p><b>The marker is retired PER TENANT, not fleet-wide.</b> A tenant leaves the transitional
  * state the moment it gains a live subscription: the R37 backfill data-fix removes its
@@ -102,10 +104,12 @@ public class TenantPlanService {
    * marker for a tenant. Called only after a payment was approved and the client exists.
    *
    * <p><b>This is now the SAFETY NET, not a second source of truth.</b> The paid-upgrade path
-   * ({@code EtendoGoJwtServlet#applyPaidUpgradeSideEffects}) calls this only when opening the
-   * tenant's subscription row FAILED. In that one case the preference is the only record that the
-   * tenant paid, and {@link TenantPlanPreferenceFallback} is the only thing that will read it back
-   * — which is precisely what the fallback exists for. On the success path the preference is not
+   * ({@code EtendoGoJwtServlet#applyPaidUpgradeSideEffects}) calls this only when no row records
+   * the payment: the environment's {@link SubscriptionModelSwitch} is OFF (the pre-ETP-5046 path,
+   * the default until the operator switches), or opening the tenant's subscription row FAILED. In
+   * both cases the preference is the only record that the tenant paid, and
+   * {@link TenantPlanPreferenceFallback} is the only thing that will read it back — which is
+   * precisely what the fallback exists for. On the success path the preference is not
    * written at all; it is {@link #retireProductivePreference retired} instead.
    *
    * <p>The caller must treat a {@code false} result as a provisioning failure. Paid onboarding

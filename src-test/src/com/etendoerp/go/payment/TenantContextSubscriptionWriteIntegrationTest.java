@@ -18,10 +18,14 @@
 package com.etendoerp.go.payment;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
+import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
 import java.math.BigDecimal;
 import java.util.Locale;
 import java.util.UUID;
@@ -36,6 +40,8 @@ import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.test.base.OBBaseTest;
 
+import com.etendoerp.go.rest.EtendoGoJwtServlet;
+import com.etendoerp.go.schemaforge.data.CheckoutRequest;
 import com.etendoerp.go.schemaforge.data.Plan;
 import com.etendoerp.go.schemaforge.data.Subscription;
 
@@ -61,11 +67,29 @@ import com.etendoerp.go.schemaforge.data.Subscription;
  *
  * <p>Fixtures are committed and removed by marker with native SQL, the same discipline as
  * {@link SubscriptionServiceIntegrationTest}; the synthetic tenants are never real clients.
+ *
+ * <p><b>The subscription-model switch decides which of the two writes happens.</b> Group 2 drives
+ * the servlet's {@code applyPaidUpgradeSideEffects} itself, from the same tenant context, with the
+ * {@link SubscriptionModelSwitch} row absent (the pre-ETP-5046 marker path) and present (the row
+ * path), with the switch absent for a tenant that already has a row — open, closed or inactive
+ * (still the row path) — and across a flip from ON back to OFF. The switch is environment-wide,
+ * so those specs commit NOTHING: the tenant, the switch row and everything the upgrade writes stay
+ * in the test's transaction, are read back through the same session, and are discarded by the
+ * rollback that opens {@link #cleanUp()}.
+ *
+ * @covers com.etendoerp.go.payment.SubscriptionService
+ * @covers com.etendoerp.go.payment.TenantPlanService
+ * @covers com.etendoerp.go.payment.SubscriptionModelSwitch
+ * @covers com.etendoerp.go.rest.EtendoGoJwtServlet
  */
 public class TenantContextSubscriptionWriteIntegrationTest extends OBBaseTest {
 
   private static final String MARKER = "ETP5046CTX-";
   private static final String ZERO = "0";
+  /** The grandfathered plan, seeded by EnsureLegacyPlanScript, so it exists in every environment. */
+  private static final String LEGACY_PLAN_ID = "219D5C8E15C64E97B2F553B228D30DD0";
+  private static final String PAYMENT_TOKEN = "etp5046ctx-checkout-request";
+  private static final String ACCOUNT_EMAIL = "etp5046ctx@example.test";
 
   private final SubscriptionService subscriptionService = new SubscriptionService();
   private final TenantPlanService tenantPlanService = new TenantPlanService();
@@ -132,6 +156,369 @@ public class TenantContextSubscriptionWriteIntegrationTest extends OBBaseTest {
     OBDal.getInstance().commitAndClose();
 
     assertEquals("The marker must be gone after the commit", 0L, planPreferenceCount(tenant));
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Group 2 — the paid upgrade itself, on either side of the subscription-model switch
+  // (nothing committed: see the class comment)
+  // ---------------------------------------------------------------------------------------------
+
+  /**
+   * With no {@code ETGO_SubscriptionModel} row the environment has not switched, so a paid upgrade
+   * is recorded exactly as before ETP-5046: the {@code ETGO_TenantPlan} marker is written, no
+   * {@code ETGO_SUBSCRIPTION} row is opened, and the checkout request is not even looked up for
+   * one. The tenant still reads back as productive — through the fallback.
+   */
+  @Test
+  public void testWithTheSwitchOffAPaidUpgradeWritesTheMarkerAndOpensNoRow() throws Exception {
+    String tenant = prepareUpgrade(false);
+    RecordingCheckoutRequestStore store = new RecordingCheckoutRequestStore(null);
+
+    setTestUserContext();
+    assertTenantContext();
+    applyPaidUpgradeSideEffects(store, tenant);
+    assertTenantContext();
+    OBDal.getInstance().flush();
+
+    assertEquals("The switched-off path writes the marker", 1L, planPreferenceCount(tenant));
+    assertEquals("and opens no subscription row", 0L, subscriptionCount(tenant));
+    assertEquals("No row is attempted, so the checkout request is never read", 0, store.finds);
+    assertEquals("The marker is what makes the tenant productive while the switch is off",
+        TenantPlanService.PLAN_PRODUCTIVE, tenantPlanService.resolvePlan(tenant));
+  }
+
+  /**
+   * With a System-level {@code ETGO_SubscriptionModel = 'Y'} row the same upgrade opens the tenant's
+   * subscription from the checkout request it was bought under, and writes no marker.
+   */
+  @Test
+  public void testWithTheSwitchOnAPaidUpgradeOpensTheRowAndWritesNoMarker() throws Exception {
+    String tenant = prepareUpgrade(true);
+
+    setTestUserContext();
+    assertTenantContext();
+    RecordingCheckoutRequestStore store =
+        new RecordingCheckoutRequestStore(checkoutRequestOn(LEGACY_PLAN_ID));
+    applyPaidUpgradeSideEffects(store, tenant);
+    assertTenantContext();
+    OBDal.getInstance().flush();
+
+    assertEquals("The switched-on path opens the tenant's subscription", 1L,
+        subscriptionCount(tenant));
+    assertEquals("The row is opened from the checkout request", 1, store.finds);
+    assertEquals("and no marker is written next to it", 0L, planPreferenceCount(tenant));
+  }
+
+  /**
+   * A tenant that already has a subscription row is decided by its rows whatever the switch says:
+   * every read answers from that row, so a marker written next to it would be a second answer that
+   * nothing reads. With the switch absent, the upgrade must still take the row path — reach
+   * {@code openSubscription}, which hands back the tenant's existing open row untouched — and write
+   * no {@code ETGO_TenantPlan} marker.
+   */
+  @Test
+  public void testWithTheSwitchOffATenantThatAlreadyHasARowIsStillRecordedOnTheRow()
+      throws Exception {
+    String tenant = prepareUpgrade(false);
+    String existingRow = insertSubscriptionRow(tenant, true, false);
+    assertTrue("Sanity: the tenant is on the row model before the upgrade",
+        hasAnySubscriptionAsSystem(tenant));
+
+    RecordingCheckoutRequestStore store = upgradeAsTenantAdmin(tenant);
+
+    assertEquals("The row path reads the checkout request to open the subscription", 1,
+        store.finds);
+    assertEquals("Still exactly one open row: the existing one is reused, not duplicated", 1L,
+        subscriptionCount(tenant));
+    assertEquals("and it is the tenant's existing row", 1L,
+        count("SELECT COUNT(*) FROM ETGO_SUBSCRIPTION WHERE ETGO_SUBSCRIPTION_ID = :id"
+            + " AND ENVIRONMENT_CLIENT_ID = :tenant AND END_DATE IS NULL",
+            "id", existingRow, "tenant", tenant));
+    assertEquals("A tenant with a row must not get the marker, even with the switch off", 0L,
+        planPreferenceCount(tenant));
+  }
+
+  /**
+   * A tenant whose only row is CLOSED ({@code END_DATE} set) is still on the row model:
+   * {@code hasAnySubscription} counts closed rows on purpose. With the switch absent the payment
+   * must open a NEW row next to the closed one — the closed row is history and stays as it is —
+   * and no marker is written.
+   */
+  @Test
+  public void testWithTheSwitchOffATenantWhoseOnlyRowIsClosedGetsANewRow() throws Exception {
+    String tenant = prepareUpgrade(false);
+    String closedRow = insertSubscriptionRow(tenant, true, true);
+    assertTrue("Sanity: a closed row still puts the tenant on the row model",
+        hasAnySubscriptionAsSystem(tenant));
+
+    RecordingCheckoutRequestStore store = upgradeAsTenantAdmin(tenant);
+
+    assertEquals("The row path reads the checkout request", 1, store.finds);
+    assertEquals("A new open, active row records the payment", 1L,
+        openActiveSubscriptionCount(tenant));
+    assertEquals("next to the closed one, not instead of it", 2L,
+        allSubscriptionCount(tenant));
+    assertEquals("The closed row is left closed", 1L,
+        count("SELECT COUNT(*) FROM ETGO_SUBSCRIPTION WHERE ETGO_SUBSCRIPTION_ID = :id"
+            + " AND END_DATE IS NOT NULL", "id", closedRow));
+    assertEquals("No marker for a tenant on the row model", 0L, planPreferenceCount(tenant));
+  }
+
+  /**
+   * A tenant whose only row is INACTIVE (open, {@code ISACTIVE = 'N'}) is on the row model too:
+   * {@code hasAnySubscription} ignores the active flag. {@code findOpen} does not see an inactive
+   * row, so the payment opens a new active row; the partial unique index
+   * {@code etgo_sub_open_envclient_uq} covers active rows only, so the two coexist without a
+   * constraint violation, and no marker is written.
+   */
+  @Test
+  public void testWithTheSwitchOffATenantWhoseOnlyRowIsInactiveGetsANewRow() throws Exception {
+    String tenant = prepareUpgrade(false);
+    String inactiveRow = insertSubscriptionRow(tenant, false, false);
+    assertTrue("Sanity: an inactive row still puts the tenant on the row model",
+        hasAnySubscriptionAsSystem(tenant));
+
+    RecordingCheckoutRequestStore store = upgradeAsTenantAdmin(tenant);
+
+    assertEquals("The row path reads the checkout request", 1, store.finds);
+    assertEquals("A new open, active row records the payment", 1L,
+        openActiveSubscriptionCount(tenant));
+    assertEquals("next to the inactive one", 2L, allSubscriptionCount(tenant));
+    assertEquals("The inactive row is left inactive", 1L,
+        count("SELECT COUNT(*) FROM ETGO_SUBSCRIPTION WHERE ETGO_SUBSCRIPTION_ID = :id"
+            + " AND ISACTIVE = 'N'", "id", inactiveRow));
+    assertEquals("No marker for a tenant on the row model", 0L, planPreferenceCount(tenant));
+  }
+
+  /**
+   * The switch only decides for tenants that have no row yet, so turning it back off is not a
+   * rollback of the row model. In one transaction: switch ON, tenant A pays and gets a row; the
+   * operator adds a newer {@code N} row; tenant A pays again and is still recorded on its row,
+   * while tenant B, who never had one, gets the marker.
+   */
+  @Test
+  public void testFlippingTheSwitchBackOffKeepsRowTenantsOnRowsAndSendsNewOnesToTheMarker()
+      throws Exception {
+    String tenantA = prepareUpgrade(true);
+    String tenantB = newUncommittedTenant();
+
+    RecordingCheckoutRequestStore firstA = upgradeAsTenantAdmin(tenantA);
+    assertEquals("Sanity: while ON, tenant A got a row", 1L, openActiveSubscriptionCount(tenantA));
+    assertEquals(1, firstA.finds);
+    String rowOfA = openActiveSubscriptionId(tenantA);
+
+    nativeUpdate("INSERT INTO AD_PREFERENCE (AD_PREFERENCE_ID, AD_CLIENT_ID, AD_ORG_ID, "
+            + "ISACTIVE, CREATED, CREATEDBY, UPDATED, UPDATEDBY, PROPERTY, VALUE, "
+            + "ISPROPERTYLIST, SELECTED) VALUES (:id, '0', '0', 'Y', now() + interval '1 second', "
+            + "'0', now(), '0', :property, 'N', 'Y', 'N')",
+        "id", newId(), "property", SubscriptionModelSwitch.PREFERENCE_PROPERTY);
+    assertFalse("Sanity: the newer 'N' row has switched the model off", readSwitchAsSystem());
+
+    RecordingCheckoutRequestStore secondA = upgradeAsTenantAdmin(tenantA);
+    assertEquals("Tenant A has a row, so its new payment takes the row path", 1, secondA.finds);
+    assertEquals("and reuses its open row", 1L, openActiveSubscriptionCount(tenantA));
+    assertEquals("without closing it and opening another", 1L, allSubscriptionCount(tenantA));
+    assertEquals("The open row is the same row as before the second payment", rowOfA,
+        openActiveSubscriptionId(tenantA));
+    assertEquals("Tenant A never gets the marker", 0L, planPreferenceCount(tenantA));
+
+    RecordingCheckoutRequestStore firstB = upgradeAsTenantAdmin(tenantB);
+    assertEquals("Tenant B has no row, so the switched-off path does not read the request", 0,
+        firstB.finds);
+    assertEquals("Tenant B gets the marker", 1L, planPreferenceCount(tenantB));
+    assertEquals("and no row", 0L, allSubscriptionCount(tenantB));
+  }
+
+  /**
+   * Runs one paid upgrade for {@code tenant} as the F&amp;B admin and flushes it, asserting the
+   * caller's context is preserved. The store answers with an unsaved request on the legacy plan.
+   */
+  private RecordingCheckoutRequestStore upgradeAsTenantAdmin(String tenant) throws Exception {
+    setTestUserContext();
+    assertTenantContext();
+    RecordingCheckoutRequestStore store =
+        new RecordingCheckoutRequestStore(checkoutRequestOn(LEGACY_PLAN_ID));
+    applyPaidUpgradeSideEffects(store, tenant);
+    assertTenantContext();
+    OBDal.getInstance().flush();
+    return store;
+  }
+
+  /**
+   * Inserts a subscription row for {@code tenant} on the legacy plan, uncommitted.
+   *
+   * @param active the {@code ISACTIVE} flag
+   * @param closed whether {@code END_DATE} is set
+   * @return the new row's id
+   */
+  private static String insertSubscriptionRow(String tenant, boolean active, boolean closed) {
+    String id = newId();
+    nativeUpdate("INSERT INTO ETGO_SUBSCRIPTION (ETGO_SUBSCRIPTION_ID, AD_CLIENT_ID, AD_ORG_ID, "
+            + "ISACTIVE, CREATED, CREATEDBY, UPDATED, UPDATEDBY, ENVIRONMENT_CLIENT_ID, "
+            + "ETGO_PLAN_ID, STATUS, START_DATE, END_DATE) VALUES (:id, '0', '0', :active, now(), "
+            + "'0', now(), '0', :tenant, :plan, :status, now() - interval '1 day', "
+            + (closed ? "now() - interval '1 hour'" : "NULL") + ")",
+        "id", id, "active", active ? "Y" : "N", "tenant", tenant, "plan", LEGACY_PLAN_ID,
+        "status", SubscriptionService.STATUS_ACTIVE);
+    return id;
+  }
+
+  private long openActiveSubscriptionCount(String tenant) {
+    return count("SELECT COUNT(*) FROM ETGO_SUBSCRIPTION WHERE ENVIRONMENT_CLIENT_ID = :tenant"
+        + " AND END_DATE IS NULL AND ISACTIVE = 'Y'", "tenant", tenant);
+  }
+
+  /** The id of {@code tenant}'s single open, active row, read as System. */
+  @SuppressWarnings("rawtypes")
+  private static String openActiveSubscriptionId(String tenant) {
+    OBContext previous = OBContext.getOBContext();
+    OBContext.setOBContext(ZERO, ZERO, ZERO, ZERO);
+    OBContext.setAdminMode(true);
+    try {
+      NativeQuery query = OBDal.getInstance().getSession().createNativeQuery(
+          "SELECT ETGO_SUBSCRIPTION_ID FROM ETGO_SUBSCRIPTION WHERE ENVIRONMENT_CLIENT_ID = :tenant"
+              + " AND END_DATE IS NULL AND ISACTIVE = 'Y'");
+      bind(query, "tenant", tenant);
+      return (String) query.uniqueResult();
+    } finally {
+      OBContext.restorePreviousMode();
+      OBContext.setOBContext(previous);
+    }
+  }
+
+  private long allSubscriptionCount(String tenant) {
+    return count("SELECT COUNT(*) FROM ETGO_SUBSCRIPTION WHERE ENVIRONMENT_CLIENT_ID = :tenant",
+        "tenant", tenant);
+  }
+
+  private static boolean hasAnySubscriptionAsSystem(String tenant) {
+    OBContext previous = OBContext.getOBContext();
+    OBContext.setOBContext(ZERO, ZERO, ZERO, ZERO);
+    try {
+      return new SubscriptionService().hasAnySubscription(tenant);
+    } finally {
+      OBContext.setOBContext(previous);
+    }
+  }
+
+  /**
+   * Starts the rolled-back scenario as System: a synthetic tenant, and the environment's switch
+   * forced to the requested state — any switch row the database carries is removed first, inside
+   * the same transaction, so the spec does not depend on how this machine is configured.
+   */
+  private String prepareUpgrade(boolean switchOn) {
+    String tenant = newUncommittedTenant();
+    nativeUpdate("DELETE FROM AD_PREFERENCE WHERE PROPERTY = :property",
+        "property", SubscriptionModelSwitch.PREFERENCE_PROPERTY);
+    if (switchOn) {
+      nativeUpdate("INSERT INTO AD_PREFERENCE (AD_PREFERENCE_ID, AD_CLIENT_ID, AD_ORG_ID, "
+              + "ISACTIVE, CREATED, CREATEDBY, UPDATED, UPDATEDBY, PROPERTY, VALUE, "
+              + "ISPROPERTYLIST, SELECTED) "
+              + "VALUES (:id, '0', '0', 'Y', now(), '0', now(), '0', :property, :value, 'Y', 'N')",
+          "id", newId(), "property", SubscriptionModelSwitch.PREFERENCE_PROPERTY,
+          "value", SubscriptionModelSwitch.ON);
+    }
+    assertEquals("Sanity: the switch is in the state this spec describes", switchOn,
+        readSwitchAsSystem());
+    assertFalse("Sanity: a fresh tenant carries no marker", planPreferenceCount(tenant) > 0);
+    return tenant;
+  }
+
+  /** A synthetic tenant, uncommitted. */
+  private static String newUncommittedTenant() {
+    String tenant = newId();
+    nativeUpdate("INSERT INTO AD_CLIENT (AD_CLIENT_ID, AD_ORG_ID, ISACTIVE, CREATED, CREATEDBY, "
+            + "UPDATED, UPDATEDBY, VALUE, NAME) "
+            + "VALUES (:id, '0', 'Y', now(), '0', now(), '0', :value, :name)",
+        "id", tenant, "value", MARKER + "switch", "name", MARKER + "switch " + tenant);
+    return tenant;
+  }
+
+  private static boolean readSwitchAsSystem() {
+    OBContext previous = OBContext.getOBContext();
+    OBContext.setOBContext(ZERO, ZERO, ZERO, ZERO);
+    try {
+      return new SubscriptionModelSwitch().isOn();
+    } finally {
+      OBContext.setOBContext(previous);
+    }
+  }
+
+  /**
+   * An unsaved checkout request carrying what the upgrade reads off a paid one, built under the
+   * caller's context.
+   */
+  private static CheckoutRequest checkoutRequestOn(String planId) {
+    CheckoutRequest request = OBProvider.getInstance().get(CheckoutRequest.class);
+    request.setPlan(readPlanAsTheCaller(planId));
+    request.setStripeCustomer("cus_" + newId().toLowerCase(Locale.ROOT));
+    request.setStripeSubscription("sub_" + newId().toLowerCase(Locale.ROOT));
+    request.setStripePrice("price_" + newId().toLowerCase(Locale.ROOT));
+    return request;
+  }
+
+  /**
+   * Runs the servlet's paid-upgrade step on a fresh servlet whose checkout request store is
+   * {@code store}.
+   *
+   * <p>Reached by reflection: the method and the store field are package-private to
+   * {@code com.etendoerp.go.rest}, and this class lives with the services it writes through. A
+   * renamed member fails here loudly ({@link NoSuchMethodException} / {@link NoSuchFieldException}),
+   * never silently.
+   */
+  private static void applyPaidUpgradeSideEffects(CheckoutRequestStore store, String tenant)
+      throws Exception {
+    EtendoGoJwtServlet servlet = new EtendoGoJwtServlet();
+    Field storeField = EtendoGoJwtServlet.class.getDeclaredField("checkoutRequestStore");
+    storeField.setAccessible(true);
+    storeField.set(servlet, store);
+    Method apply = EtendoGoJwtServlet.class.getDeclaredMethod("applyPaidUpgradeSideEffects",
+        String.class, String.class, String.class, String.class, String.class);
+    apply.setAccessible(true);
+    try {
+      apply.invoke(servlet, tenant, null, MARKER + "switch", ACCOUNT_EMAIL, PAYMENT_TOKEN);
+    } catch (InvocationTargetException e) {
+      if (e.getCause() instanceof Exception) {
+        throw (Exception) e.getCause();
+      }
+      throw e;
+    }
+  }
+
+  /** Answers every lookup with one in-memory request, and counts the lookups. */
+  private static final class RecordingCheckoutRequestStore extends CheckoutRequestStore {
+    private final CheckoutRequest request;
+    private int finds;
+
+    RecordingCheckoutRequestStore(CheckoutRequest request) {
+      this.request = request;
+    }
+
+    @Override
+    public CheckoutRequest find(String requestId, String accountEmail) {
+      finds++;
+      return request;
+    }
+  }
+
+  private long subscriptionCount(String tenant) {
+    return count("SELECT COUNT(*) FROM ETGO_SUBSCRIPTION WHERE ENVIRONMENT_CLIENT_ID = :tenant"
+        + " AND AD_CLIENT_ID = '0' AND END_DATE IS NULL", "tenant", tenant);
+  }
+
+  /** Runs one statement as System in the current transaction; never commits. */
+  @SuppressWarnings("rawtypes")
+  private static void nativeUpdate(String sql, Object... nameValuePairs) {
+    OBContext.setOBContext(ZERO, ZERO, ZERO, ZERO);
+    OBContext.setAdminMode(true);
+    try {
+      NativeQuery query = OBDal.getInstance().getSession().createNativeQuery(sql);
+      bind(query, nameValuePairs);
+      query.executeUpdate();
+    } finally {
+      OBContext.restorePreviousMode();
+      OBContext.setOBContext((OBContext) null);
+    }
   }
 
   // ---------------------------------------------------------------------------------------------

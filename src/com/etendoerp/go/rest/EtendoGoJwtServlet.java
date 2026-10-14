@@ -86,6 +86,7 @@ import com.etendoerp.go.payment.ProvisioningFailureReason;
 import com.etendoerp.go.payment.EnvironmentPlanCache;
 import com.etendoerp.go.payment.PlanCatalogService;
 import com.etendoerp.go.payment.PlanNotAvailableException;
+import com.etendoerp.go.payment.SubscriptionModelSwitch;
 import com.etendoerp.go.payment.SubscriptionService;
 import com.etendoerp.go.payment.EnvironmentAccessPolicy;
 import com.etendoerp.go.payment.SubscriptionEventOutcome;
@@ -410,6 +411,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   DevLifecycleToolService devLifecycleToolService = new DevLifecycleToolService();
   TenantPlanService tenantPlanService = new TenantPlanService();
   SubscriptionService subscriptionService = new SubscriptionService();
+  SubscriptionModelSwitch subscriptionModelSwitch = new SubscriptionModelSwitch();
   HostedCheckoutService hostedCheckoutService = new HostedCheckoutService();
   PlanCatalogService planCatalogService = new PlanCatalogService();
   CheckoutRequestStore checkoutRequestStore = new CheckoutRequestStore();
@@ -3551,6 +3553,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * written on every upgrade but read by nothing (since {@code resolvePlan} reads the subscription
    * first) is not a safety measure, it is a second answer that drifts. So:
    * <ul>
+   *   <li><b>Subscription model OFF in this environment</b> ({@link SubscriptionModelSwitch}, the
+   *       System-level {@code ETGO_SubscriptionModel} preference is not {@code Y}) <b>and the
+   *       tenant has no subscription row</b> → no row is attempted and the preference IS written,
+   *       exactly as before ETP-5046. The lifecycle webhooks then keep this rowless tenant's
+   *       billing state in the preference projection. Each environment stays here until its
+   *       operator has run the R37 backfill and switched the model on. A tenant that already has a
+   *       row (any row) takes the subscription path below whatever the switch says, because its row
+   *       is what every read answers from.</li>
    *   <li><b>Subscription write succeeds</b> → the preference is NOT written, and any stale
    *       {@code ETGO_TenantPlan} row this tenant still carries is retired
    *       ({@link TenantPlanService#retireProductivePreference}). A newly paid tenant therefore
@@ -3560,11 +3570,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    *       the one case where {@code TenantPlanPreferenceFallback} has to answer, and the one case
    *       where the marker is the only record that the tenant paid. Nothing is retired.</li>
    * </ul>
-   * Together with statement 3 of the R37 backfill this makes the cutover a per-tenant state
-   * transition with an observable end condition
-   * ({@code select count(*) from ad_preference where attribute='ETGO_TenantPlan'} reaching 0),
-   * rather than a fleet-wide flag day. Grep marker for the Phase F deletion:
-   * {@code ETP-5046-TRANSITIONAL-FALLBACK}.
+   * Once the switch is on, together with statement 3 of the R37 backfill this makes the rest of
+   * the cutover a per-tenant state transition with an observable end condition
+   * ({@code select count(*) from ad_preference where attribute='ETGO_TenantPlan'} reaching 0).
+   * The switch itself is the one environment-level moment: before it, nothing moves. Grep marker
+   * for the Phase F deletion: {@code ETP-5046-TRANSITIONAL-FALLBACK}.
    *
    * <p><b>Fails closed when the tenant would commit with contradictory metadata (ETP-5548).</b>
    * Paid provisioning is recoverable, so an exception here rolls the attempt back for a retry
@@ -3586,17 +3596,23 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    */
   void applyPaidUpgradeSideEffects(String clientId, String starOrgId, String clientName,
       String accountEmail, String paymentToken) {
-    if (openSubscriptionBestEffort(clientId, clientName, accountEmail, paymentToken)) {
+    PaymentRecord paymentRecord = recordPaymentAsSubscription(clientId, clientName, accountEmail,
+        paymentToken);
+    if (paymentRecord == PaymentRecord.SUBSCRIPTION) {
       // The subscription IS the record now, so the preference is retired rather than written.
       // ETP-5046-TRANSITIONAL-FALLBACK — remove this call in Phase F with the fallback itself.
       retireTenantPlanPreferenceBestEffort(clientId, clientName, accountEmail);
     } else if (!tenantPlanService.markProductive(clientId, starOrgId)) {
-      // ETP-5046-TRANSITIONAL-FALLBACK — the safety net, and the only path that still writes the
-      // marker: without a subscription row, this preference is the sole record that the tenant
-      // paid, and TenantPlanPreferenceFallback is what will read it back.
+      // ETP-5046-TRANSITIONAL-FALLBACK — the preference path: the subscription model is off in
+      // this environment, or the row could not be opened. Either way this preference is the sole
+      // record that the tenant paid, and TenantPlanPreferenceFallback is what will read it back.
       throw new OBException("Paid environment '" + clientName + "' (client " + clientId
-          + ") for account " + maskEmail(accountEmail) + " has neither a subscription nor the "
-          + "fallback plan marker '" + TenantPlanService.PLAN_PRODUCTIVE + "'");
+          + ") for account " + maskEmail(accountEmail)
+          + (paymentRecord == PaymentRecord.PREFERENCE_BY_MODEL
+              // No subscription was attempted: the pre-ETP-5046 failure, in develop's words.
+              ? " could not be marked as plan '"
+              : " has neither a subscription nor the fallback plan marker '")
+          + TenantPlanService.PLAN_PRODUCTIVE + "'");
     }
     if (!tenantEnvironmentLifecycleService.markProductive(clientId)) {
       throw new OBException("Paid environment '" + clientName + "' (client " + clientId
@@ -3628,6 +3644,81 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
           + "legacy {} preference could not be retired; the transitional fallback keeps answering "
           + "for it until the R37 backfill runs", clientName, clientId, maskEmail(accountEmail),
           TenantPlanService.PREFERENCE_ATTRIBUTE, e);
+    }
+  }
+
+  /** Which store recorded a paid upgrade, as decided by {@link #recordPaymentAsSubscription}. */
+  enum PaymentRecord {
+    /** An {@code ETGO_SUBSCRIPTION} row records the payment. */
+    SUBSCRIPTION,
+    /** No row was attempted: the subscription model is off and the tenant has no row. */
+    PREFERENCE_BY_MODEL,
+    /** A row was attempted and could not be opened; the preference is the safety net. */
+    PREFERENCE_AFTER_FAILED_SUBSCRIPTION
+  }
+
+  /**
+   * Records the payment as an {@code ETGO_SUBSCRIPTION} row when this environment runs the
+   * subscription model OR the tenant already has a row, and reports which store recorded it.
+   *
+   * <p><b>A tenant with a row is decided by the row — for writes too.</b> Every read
+   * ({@code resolvePlan}, the access policy, the lifecycle webhooks) answers from a tenant's row
+   * whenever it has one, so a payment recorded only in the {@code ETGO_TenantPlan} preference would
+   * be invisible for such a tenant: a canceled or closed row would keep it free and blocked while it
+   * pays. So the switch decides only for a tenant with NO row. "Has a row" means any row, open or
+   * closed, active or not ({@link SubscriptionService#hasAnySubscription}) — the same test R37's
+   * retirement branch uses, and one that stays correct whatever later tickets do to how the current
+   * row is picked.
+   *
+   * <p>With the switch off and no row, nothing is attempted and the caller writes the preference —
+   * the pre-ETP-5046 record, not a failure; it is logged at INFO, not ERROR. If the row lookup
+   * itself fails, the purchase takes that same path and the failure is logged as an error.
+   *
+   * @param clientId the tenant just created/resolved
+   * @param clientName the onboarding request's client name, for the log lines
+   * @param accountEmail the account driving onboarding, masked in the log lines
+   * @param paymentToken the checkout request id this environment was paid under
+   * @return which store recorded the payment; anything but {@link PaymentRecord#SUBSCRIPTION}
+   *     means the caller must write the preference
+   */
+  private PaymentRecord recordPaymentAsSubscription(String clientId, String clientName,
+      String accountEmail, String paymentToken) {
+    if (!subscriptionModelSwitch.isOn() && !tenantHasSubscriptionRow(clientId, clientName,
+        accountEmail)) {
+      log.info("The subscription model is off in this environment ({} is not '{}'); paid "
+          + "environment '{}' (client {}) for account {} is recorded with the {} preference",
+          SubscriptionModelSwitch.PREFERENCE_PROPERTY, SubscriptionModelSwitch.ON, clientName,
+          clientId, maskEmail(accountEmail), TenantPlanService.PREFERENCE_ATTRIBUTE);
+      return PaymentRecord.PREFERENCE_BY_MODEL;
+    }
+    return openSubscriptionBestEffort(clientId, clientName, accountEmail, paymentToken)
+        ? PaymentRecord.SUBSCRIPTION
+        : PaymentRecord.PREFERENCE_AFTER_FAILED_SUBSCRIPTION;
+  }
+
+  /**
+   * Whether the tenant already has any subscription row. Never throws: a failed lookup is logged
+   * and answered {@code false}, which keeps a switched-off environment on its preference path.
+   *
+   * <p><b>Trade-off, kept on purpose.</b> Answering {@code false} on a failed lookup means that a
+   * tenant which DID have a row would get its payment recorded only in the marker — invisible
+   * behind that row. It is accepted because the case is near-unreachable: a purchase always
+   * provisions a NEW tenant (ETP-5548), which has no row, and a SQL-level failure has already
+   * marked the onboarding transaction for rollback, so the upgrade fails closed and is retried
+   * anyway. Failing the purchase on a lookup error instead would trade that edge for failing every
+   * rowless purchase whenever the lookup misbehaves. Revisit when ETP-5047 is merged, where a
+   * tenant whose only row is closed reads as canceled: such a tenant paying through this path would
+   * stay canceled (register §2.9).
+   */
+  private boolean tenantHasSubscriptionRow(String clientId, String clientName,
+      String accountEmail) {
+    try {
+      return subscriptionService.hasAnySubscription(clientId);
+    } catch (RuntimeException e) {
+      log.error("Paid environment '{}' (client {}) for account {}: could not check for an existing "
+          + "subscription row; recording the payment with the {} preference", clientName, clientId,
+          maskEmail(accountEmail), TenantPlanService.PREFERENCE_ATTRIBUTE, e);
+      return false;
     }
   }
 

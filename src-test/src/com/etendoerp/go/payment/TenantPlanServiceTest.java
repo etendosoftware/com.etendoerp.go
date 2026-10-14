@@ -649,11 +649,17 @@ class TenantPlanServiceTest {
 
     private CapturingAppender warnings;
 
+    private final SubscriptionModelSwitch modelSwitch = mock(SubscriptionModelSwitch.class);
+
     @BeforeEach
     void captureWarnings() {
       // The fallback reads in admin mode (a non-admin role cannot read AD_Preference), which
       // needs no real session in a unit test: the outer obContextMock stubs the static.
-      warnings = CapturingAppender.attachTo(TenantPlanPreferenceFallback.class);
+      // DEBUG so the switched-off level is captured too; the specs filter by level.
+      warnings = CapturingAppender.attachTo(TenantPlanPreferenceFallback.class, Level.DEBUG);
+      // The WARN specs below describe a switched environment; the OFF specs override this.
+      when(modelSwitch.isOn()).thenReturn(true);
+      fallback.subscriptionModelSwitch = modelSwitch;
     }
 
     @AfterEach
@@ -719,6 +725,57 @@ class TenantPlanServiceTest {
       assertTrue(warned.get(0).contains(CLIENT_ID), "the tenant must be named: " + warned.get(0));
       assertTrue(warned.get(0).contains("ETP-5046"),
           "the line must point at the backfill that closes the gap: " + warned.get(0));
+    }
+
+    @Test
+    void logsAtDebugNotWarnWhileTheSubscriptionModelIsOff() {
+      // OFF is the default of every environment until its operator switches: every paying tenant
+      // is recorded with the preference on purpose, so this is the intended path, not a gap.
+      when(modelSwitch.isOn()).thenReturn(false);
+      Preference stored = preferenceFor(CLIENT_ID, TenantPlanService.PLAN_PRODUCTIVE);
+      when(obDal.createQuery(eq(Preference.class), anyString())).thenReturn(preferenceQuery);
+      when(preferenceQuery.uniqueResult()).thenReturn(stored);
+
+      assertTrue(fallback.isProductive(CLIENT_ID), "the answer does not depend on the switch");
+
+      assertTrue(warnings.messagesAt(Level.WARN).isEmpty(),
+          "a switched-off environment must not warn: " + warnings.messagesAt(Level.WARN));
+      List<String> debugged = warnings.messagesAt(Level.DEBUG);
+      assertEquals(1, debugged.size(), "still one line per resolution: " + debugged);
+      assertTrue(debugged.get(0).contains(CLIENT_ID), "the tenant must be named: " + debugged);
+      assertTrue(debugged.get(0).contains("ETP-5046-TRANSITIONAL-FALLBACK"),
+          "the grep marker stays on the line: " + debugged);
+    }
+
+    @Test
+    void readsTheSwitchOnlyWhenTheFallbackActuallyServesATenant() {
+      // The switch is a DB read: a tenant without a marker must not pay for it.
+      when(obDal.createQuery(eq(Preference.class), anyString())).thenReturn(preferenceQuery);
+      when(preferenceQuery.uniqueResult()).thenReturn(null);
+      when(preferenceQuery.list()).thenReturn(List.of());
+
+      assertFalse(fallback.isProductive(CLIENT_ID));
+      assertTrue(fallback.productiveAmong(List.of(CLIENT_ID, OTHER_CLIENT_ID)).isEmpty());
+
+      verify(modelSwitch, never()).isOn();
+    }
+
+    @Test
+    void readsTheSwitchOncePerBatchAndLogsEveryServedTenantAtDebugWhileOff() {
+      when(modelSwitch.isOn()).thenReturn(false);
+      List<Preference> stored = List.of(
+          preferenceFor(CLIENT_ID, TenantPlanService.PLAN_PRODUCTIVE),
+          preferenceFor(OTHER_CLIENT_ID, TenantPlanService.PLAN_PRODUCTIVE));
+      when(obDal.createQuery(eq(Preference.class), anyString())).thenReturn(preferenceQuery);
+      when(preferenceQuery.list()).thenReturn(stored);
+
+      assertEquals(Set.of(CLIENT_ID, OTHER_CLIENT_ID),
+          fallback.productiveAmong(List.of(CLIENT_ID, OTHER_CLIENT_ID)));
+
+      verify(modelSwitch, times(1)).isOn();
+      assertTrue(warnings.messagesAt(Level.WARN).isEmpty());
+      assertEquals(2, warnings.messagesAt(Level.DEBUG).size(),
+          "one DEBUG line per served tenant: " + warnings.messagesAt(Level.DEBUG));
     }
 
     @Test
@@ -824,9 +881,13 @@ class TenantPlanServiceTest {
     }
 
     static CapturingAppender attachTo(Class<?> type) {
+      return attachTo(type, Level.WARN);
+    }
+
+    static CapturingAppender attachTo(Class<?> type, Level level) {
       String name = type.getName();
       Level previous = LogManager.getLogger(name).getLevel();
-      Configurator.setLevel(name, Level.WARN);
+      Configurator.setLevel(name, level);
       CapturingAppender appender = new CapturingAppender(name, previous);
       appender.start();
       ((org.apache.logging.log4j.core.Logger) LogManager.getLogger(name)).addAppender(appender);

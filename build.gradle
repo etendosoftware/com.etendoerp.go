@@ -163,6 +163,7 @@ def isolatedDalTests = [
         '**/GrandfatheredSubscriptionIntegrationTest.class',
         '**/SubscriptionBackfillIdempotencyIntegrationTest.class',
         '**/SubscriptionResubscriptionIntegrationTest.class',
+        '**/SubscriptionModelSwitchIntegrationTest.class',
 ]
 
 def isolatedDalTestClasses = [
@@ -176,6 +177,7 @@ def isolatedDalTestClasses = [
         'com.etendoerp.go.payment.GrandfatheredSubscriptionIntegrationTest',
         'com.etendoerp.go.payment.SubscriptionBackfillIdempotencyIntegrationTest',
         'com.etendoerp.go.payment.SubscriptionResubscriptionIntegrationTest',
+        'com.etendoerp.go.payment.SubscriptionModelSwitchIntegrationTest',
 ]
 
 def commandLineFilterReachesIsolatedGoTest = { requestedTestPatterns ->
