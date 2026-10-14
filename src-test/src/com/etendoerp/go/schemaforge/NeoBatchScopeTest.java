@@ -70,6 +70,28 @@ public class NeoBatchScopeTest {
     }
   }
 
+  /** The close-time summary counts hits and misses per namespace (class|lookup), not per key. */
+  @Test
+  public void testMemoizeCountsHitsAndMissesPerNamespace() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getSession()).thenReturn(mock(Session.class));
+
+      NeoBatchScope previous = NeoBatchScope.open(false);
+      try {
+        NeoBatchScope.memoize("a.Owner|spec|x", () -> 1);
+        NeoBatchScope.memoize("a.Owner|spec|x", () -> 1);
+        NeoBatchScope.memoize("a.Owner|spec|y", () -> 2);
+        int[] spec = NeoBatchScope.currentMemoStats().get("a.Owner|spec");
+        assertEquals(1, spec[0]);
+        assertEquals(2, spec[1]);
+      } finally {
+        NeoBatchScope.close(previous);
+      }
+    }
+  }
+
   /** A process that commits mid-batch closes the session; DAL objects loaded before are stale. */
   @Test
   public void testMemoizeForgetsEverythingWhenTheSessionChanges() {
