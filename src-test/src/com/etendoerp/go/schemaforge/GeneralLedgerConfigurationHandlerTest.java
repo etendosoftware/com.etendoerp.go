@@ -1005,7 +1005,6 @@ class GeneralLedgerConfigurationHandlerTest {
     wireLoadCriteria(Collections.emptyList());
 
     when(generalAccounts.isSuspenseBalancingUse()).thenReturn(true);
-    when(generalAccounts.isSuspenseErrorUse()).thenReturn(false);
     when(generalAccounts.isCurrencyBalancingUse()).thenReturn(true);
     when(generalAccounts.isActive()).thenReturn(true);
     when(generalAccounts.isCreateClosing()).thenReturn(true);
@@ -1019,11 +1018,13 @@ class GeneralLedgerConfigurationHandlerTest {
 
     assertEquals("gl-acct-001", ga.getString("id"));
     assertTrue(ga.getBoolean("suspenseBalancingUse"));
-    assertFalse(ga.getBoolean("suspenseErrorUse"));
     assertTrue(ga.getBoolean("currencyBalancingUse"));
     assertTrue(ga.getBoolean("active"));
     assertTrue(ga.getBoolean("createClosing"));
     assertEquals("combo-retained", ga.getString("retainedEarning"));
+    // ETP-5682: the suspense error pair is never exposed, since core posting never reads it.
+    assertFalse(ga.has("suspenseErrorUse"));
+    assertFalse(ga.has("suspenseError"));
   }
 
   @Test
@@ -1038,6 +1039,8 @@ class GeneralLedgerConfigurationHandlerTest {
 
     JSONObject body = new JSONObject().put("generalAccounts", new JSONObject()
         .put("suspenseBalancingUse", true)
+        .put("suspenseErrorUse", true)
+        .put("suspenseError", "combo-ignored")
         .put("incomeSummary", "combo-income")
         .put("createClosing", false));
 
@@ -1046,6 +1049,9 @@ class GeneralLedgerConfigurationHandlerTest {
     assertEquals(200, response.getHttpStatus());
     verify(generalAccounts).setSuspenseBalancingUse(true);
     verify(generalAccounts).setIncomeSummary(combo);
+    // The suspense error pair is ignored on write as well.
+    verify(generalAccounts, never()).setSuspenseErrorUse(anyBoolean());
+    verify(generalAccounts, never()).setSuspenseError(any());
     verify(generalAccounts).setCreateClosing(false);
     verify(obDal).save(generalAccounts);
   }

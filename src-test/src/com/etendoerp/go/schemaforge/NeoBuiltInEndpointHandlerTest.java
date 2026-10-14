@@ -53,12 +53,15 @@ import org.openbravo.dal.service.OBDal;
 import com.etendoerp.go.schemaforge.email.TransactionalEmailService;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 import com.etendoerp.go.schemaforge.util.NeoImageHelper;
+import com.etendoerp.go.schemaforge.util.RoleAccessMatrix;
 import com.etendoerp.go.schemaforge.AmortizationPlanService;
 import com.etendoerp.go.schemaforge.NeoRequestBodyParser;
 
 /**
  * Unit tests for attachment and built-in endpoint routing in
  * {@link NeoBuiltInEndpointHandler}.
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoBuiltInEndpointHandler
  */
 public class NeoBuiltInEndpointHandlerTest {
 
@@ -462,7 +465,7 @@ public class NeoBuiltInEndpointHandlerTest {
              Mockito.mockStatic(NeoFiscalModelsCatalogService.class);
          MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
       accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
-          NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID, "GET")).thenReturn(true);
+          RoleAccessMatrix.TAX_MODELS_PROXY_WINDOW_ID, "GET")).thenReturn(true);
       catalogMock.when(NeoFiscalModelsCatalogService::getActiveModels).thenReturn(payload);
 
       boolean handled = handler.handle(new NeoServlet.NeoPathInfo("fiscal-models-catalog", null, null),
@@ -486,7 +489,7 @@ public class NeoBuiltInEndpointHandlerTest {
              Mockito.mockStatic(NeoFiscalModelsCatalogService.class);
          MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
       accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
-          NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID, "GET")).thenReturn(false);
+          RoleAccessMatrix.TAX_MODELS_PROXY_WINDOW_ID, "GET")).thenReturn(false);
 
       boolean handled = handler.handle(new NeoServlet.NeoPathInfo("fiscal-models-catalog", null, null),
           "GET", request, response);
@@ -515,7 +518,7 @@ public class NeoBuiltInEndpointHandlerTest {
          MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
 
       accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
-          NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID, "PUT")).thenReturn(true);
+          RoleAccessMatrix.TAX_MODELS_PROXY_WINDOW_ID, "PUT")).thenReturn(true);
       bodyParserMock.when(() -> NeoRequestBodyParser.readRequestBody(request))
           .thenReturn("{\"303\":true,\"349\":false}");
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
@@ -543,7 +546,7 @@ public class NeoBuiltInEndpointHandlerTest {
              Mockito.mockStatic(NeoFiscalModelsCatalogService.class);
          MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
       accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
-          NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID, "PUT")).thenReturn(false);
+          RoleAccessMatrix.TAX_MODELS_PROXY_WINDOW_ID, "PUT")).thenReturn(false);
 
       boolean handled = handler.handle(new NeoServlet.NeoPathInfo("fiscal-models-catalog", null, null),
           "PUT", request, response);
@@ -570,7 +573,7 @@ public class NeoBuiltInEndpointHandlerTest {
          MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
 
       accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
-          NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID, "PUT")).thenReturn(true);
+          RoleAccessMatrix.TAX_MODELS_PROXY_WINDOW_ID, "PUT")).thenReturn(true);
       bodyParserMock.when(() -> NeoRequestBodyParser.readRequestBody(request)).thenReturn("not-json");
       catalogMock.when(() -> NeoFiscalModelsCatalogService.saveActiveModels("not-json"))
           .thenThrow(new IllegalArgumentException("Invalid JSON body"));
@@ -594,7 +597,7 @@ public class NeoBuiltInEndpointHandlerTest {
 
     try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
       accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
-          NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID, "DELETE")).thenReturn(true);
+          RoleAccessMatrix.TAX_MODELS_PROXY_WINDOW_ID, "DELETE")).thenReturn(true);
 
       boolean handled = handler.handle(new NeoServlet.NeoPathInfo("fiscal-models-catalog", null, null),
           "DELETE", request, response);
