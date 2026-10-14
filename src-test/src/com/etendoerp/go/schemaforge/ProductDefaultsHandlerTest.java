@@ -1205,6 +1205,33 @@ public class ProductDefaultsHandlerTest {
   }
 
   /**
+   * ETP-5676: a batch sent with {@code _onlyReturnIds} reads only the new id, so the create
+   * response is not annotated and the Costing lookup behind the flag is not run.
+   */
+  @Test
+  public void testAfterHandleSkipsTheCostFlagOnAnIdsOnlyCreate() throws Exception {
+    OBContext obContext = obContextWithClient(CLIENT1);
+    try (SeedingMocks mocks = new SeedingMocks()) {
+      mocks.withBothDefaultTariffs(obContext);
+      mocks.utilsMock.when(() -> ProductHandlerUtils.findExistingPrice(anyString(), anyString()))
+          .thenReturn(mock(ProductPrice.class));
+      stubCostingCriteria(mocks.dal, Collections.emptyList());
+      NeoContext ctx = NeoContext.builder()
+          .specName("product").entityName("product")
+          .httpMethod("POST").endpointType(NeoEndpointType.CRUD)
+          .idsOnlyResponse(true)
+          .obContext(obContext).previousResult(NeoResponse.ok(singleProductBody(PRODUCT_ID)))
+          .build();
+
+      new ProductDefaultsHandler().afterHandle(ctx);
+
+      assertFalse(ctx.getPreviousResult().getBody().getJSONObject("response")
+          .getJSONArray("data").getJSONObject(0).has("etgoHasCost"));
+      verify(mocks.dal, never()).createCriteria(Costing.class);
+    }
+  }
+
+  /**
    * The other side of the create case: a product that arrives already costed (e.g. the products
    * import, which posts its cost in the same batch) is annotated {@code true}, so the banner does
    * not flash on a product that is perfectly fine.

@@ -29,34 +29,45 @@ package com.etendoerp.go.schemaforge;
  * request or leak into the next one served by the pooled thread. Outside a batch
  * {@link #current()} is {@code null} and every reader behaves exactly as before.</p>
  *
- * <p>What it holds is generic: the per-batch callout-discard memory, plus nothing that names an
- * entity.</p>
+ * <p>What it holds is generic: the request's options ({@code _onlyReturnIds}) and the per-batch
+ * callout-discard memory. Nothing in it names an entity.</p>
  */
 public final class NeoBatchScope {
 
   private static final ThreadLocal<NeoBatchScope> CURRENT = new ThreadLocal<>();
 
   private final NeoCalloutDiscardMemory calloutDiscardMemory = new NeoCalloutDiscardMemory();
+  private final boolean onlyReturnIds;
 
-  private NeoBatchScope() {
+  private NeoBatchScope(boolean onlyReturnIds) {
+    this.onlyReturnIds = onlyReturnIds;
   }
 
   /**
    * Opens a scope for the current thread. <b>Must be paired with {@link #close(NeoBatchScope)} in
    * a finally block</b>, passing the value returned here.
    *
+   * @param onlyReturnIds the request's {@code _onlyReturnIds} option
    * @return the scope that was current before (normally {@code null}), to restore on close
    */
-  static NeoBatchScope open() {
+  static NeoBatchScope open(boolean onlyReturnIds) {
     NeoBatchScope previous = CURRENT.get();
-    CURRENT.set(new NeoBatchScope());
+    CURRENT.set(new NeoBatchScope(onlyReturnIds));
     return previous;
+  }
+
+  /**
+   * @return {@code true} when the request was sent with {@code _onlyReturnIds}: each operation's
+   *     write may skip the decoration of the echoed record, since only its id is read
+   */
+  boolean isOnlyReturnIds() {
+    return onlyReturnIds;
   }
 
   /**
    * Closes the current scope, logs what it saved, and restores {@code previous}.
    *
-   * @param previous the value {@link #open()} returned
+   * @param previous the value {@link #open(boolean)} returned
    */
   static void close(NeoBatchScope previous) {
     NeoBatchScope closing = CURRENT.get();

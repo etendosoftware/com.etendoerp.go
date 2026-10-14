@@ -285,6 +285,10 @@ public class ProductDefaultsHandler implements NeoHandler {
     if (METHOD_GET.equals(context.getHttpMethod()) && !context.isReadById()) {
       return filtered;
     }
+    // ETP-5676: a batch sent with _onlyReturnIds reads only the id; the flag is for the form.
+    if (context.isIdsOnlyResponse()) {
+      return filtered;
+    }
     NeoResponse target = filtered != null ? filtered : context.getPreviousResult();
     if (target == null || target.getBody() == null) {
       return filtered;
