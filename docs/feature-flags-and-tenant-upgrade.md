@@ -739,15 +739,31 @@ Switching, on the target environment:
    (`fix_id = '20261005T180000Z__R37-tenant-subscription-backfill'`) are all `APPLIED` or
    `SKIPPED_NOT_NEEDED`, and
    `select count(*) from ad_preference where attribute = 'ETGO_TenantPlan' and isactive = 'Y' and
-   upper(trim(value)) = 'PRODUCTIVE'` returns **0**.
+   upper(trim(value)) = 'PRODUCTIVE'` returns **0**, and the switch row reads exactly as the
+   reader selects it — exactly ONE row, with `trim(value) = 'Y'` (the value is not filtered on
+   purpose, so a second row or an `N` shows up instead of hiding):
+   ```sql
+   select ad_preference_id, value, created from ad_preference
+    where property = 'ETGO_SubscriptionModel' and ispropertylist = 'Y' and isactive = 'Y'
+      and ad_client_id = '0' and coalesce(visibleat_client_id, '0') = '0'
+      and coalesce(visibleat_org_id, '0') = '0' and visibleat_role_id is null
+      and ad_user_id is null and ad_window_id is null
+    order by created desc;
+   ```
 
-**One-way in practice.** Setting the switch back to `N` only stops new rows: existing rows stay
-authoritative for their tenants, and new tenants go back to the marker — two populations again.
-Use it as an emergency brake, not as an undo. Full design: §6.2/§6.3 of
+**Only a tenant's first row is switched.** A tenant that already has a subscription row — any row,
+open or closed — is recorded on a row when it pays, whatever the switch says, because its row is
+what every read answers from; a payment recorded only in the marker would leave it blocked behind a
+canceled or closed row.
+
+**One-way in practice.** Setting the switch back to `N` sends only tenants that have never had a
+row back to the marker; every tenant with a row stays on it, payments included. Two populations that
+only grow apart — turning it back OFF undoes nothing. Full design: §6.2/§6.3 of
 `plans/2026-09-18-etp-5046-plan-and-subscription-design.md`.
 
 **The preference is the safety net, not a parallel truth — and it is retired per tenant.** With the
-switch OFF, `applyPaidUpgradeSideEffects` opens no row and calls `markProductive`, logged at INFO.
+switch OFF and no row for the tenant, `applyPaidUpgradeSideEffects` opens no row and calls
+`markProductive`, logged at INFO.
 With it ON it writes the subscription row and then:
 
 - **success** → it does *not* call `markProductive`; it calls

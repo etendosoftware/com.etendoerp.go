@@ -217,14 +217,25 @@ purchases write `ETGO_TenantPlan`, open no row, and the lifecycle webhooks keep 
 `ETGO_SubscriptionStatus`/`DueAt` preferences.
 
 - **Switching is one operator step, done once:** chain current → R37 with `FIX=` (dry run first)
-  → set the preference → verify (R37 ledger rows `APPLIED`/`SKIPPED_NOT_NEEDED`; active
-  `ETGO_TenantPlan='PRODUCTIVE'` markers = 0). Full checklist: design doc §6.2, rationale §6.3.
-- **One-way in practice.** Setting it back to `N` only stops new rows; tenants that have one keep
-  being decided by it. Both populations then grow again and Phase F moves further away — an
-  emergency brake, not an undo.
-- **Only creation is gated.** Reads are unchanged: a tenant with a row is decided by the row
-  whatever the switch says. `openSubscription` has one runtime caller (the paid upgrade), which is
-  where the gate sits.
+  → set the preference → verify, three checks: R37 ledger rows `APPLIED`/`SKIPPED_NOT_NEEDED`;
+  active `ETGO_TenantPlan='PRODUCTIVE'` markers = 0; and the switch row as the reader selects it —
+  exactly ONE row with `trim(value) = 'Y'`:
+  ```sql
+  select ad_preference_id, value, created from ad_preference
+   where property = 'ETGO_SubscriptionModel' and ispropertylist = 'Y' and isactive = 'Y'
+     and ad_client_id = '0' and coalesce(visibleat_client_id, '0') = '0'
+     and coalesce(visibleat_org_id, '0') = '0' and visibleat_role_id is null
+     and ad_user_id is null and ad_window_id is null
+   order by created desc;
+  ```
+  Full checklist: design doc §6.2, rationale §6.3.
+- **One-way in practice.** Setting it back to `N` sends only tenants that have never had a row back
+  to the marker; every tenant with a row stays on it, payments included. Two populations that only
+  grow apart, Phase F further away — turning it back OFF undoes nothing.
+- **Only a tenant's first row is gated.** A tenant with any row (open or closed,
+  `SubscriptionService#hasAnySubscription`) is decided by it for reads and writes: its next payment
+  goes to a row even with the switch OFF, or it would stay blocked behind a canceled or closed row.
+  `openSubscription` has one runtime caller (the paid upgrade), which is where the gate sits.
 - **The fallback's log line follows the switch:** DEBUG while OFF (every paying tenant falls back
   on purpose), WARN while ON (a tenant without a row is unexpected). §3.2's "silence" signal is
   therefore "no WARN on a switched environment".
@@ -480,18 +491,15 @@ again; now R37 runs only when an operator names it with `FIX=`, so nothing remov
 were present when the operator ran R37 are not affected — the runner's chain-current gate made sure
 R42 had already run for them (§3.6).
 
-**Impact.**
-- **Access and plan: unaffected while the row is open.** `resolvePlan`, the access policy and the
-  lifecycle webhooks read the open row first; the marker is never consulted for such a tenant.
+**Impact — on the marker count and the Phase F worklist, not on plan or access.**
+- **Access and plan: unaffected.** `resolvePlan`, the access policy and the lifecycle webhooks
+  answer from the tenant's row; the marker is never consulted for a tenant that has one.
 - **The switch verification breaks.** The "active `ETGO_TenantPlan='PRODUCTIVE'` markers = 0" check
   of design doc §6.2 / §2.9 goes back above 0 after the next full data-fix run, and so does §3.2's
   Phase F count — the end condition can never be reached while R42 keeps doing this.
 - **The marker's meaning gets muddied.** After the switch a marker is supposed to mean "a tenant the
   backfill has not reached" or "a purchase whose row could not be opened". An R42 marker next to a
-  row means neither, so the remaining markers stop being a reliable worklist for Phase F. And once
-  the tenant's row is closed (ETP-5047 close-on-cancel), `resolvePlan` falls through to the
-  fallback and reads the stale marker as `productive` — a canceled tenant reading as paying
-  (design doc §8).
+  row means neither, so the remaining markers stop being a reliable worklist for Phase F.
 
 **Interim workaround.** After a full `make data-fixes` on a switched environment, retire the marker
 of each such tenant by re-running R37 for it — its retirement branch removes the marker of any

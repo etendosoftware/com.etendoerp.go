@@ -342,7 +342,8 @@ purchase, before it opens anything.
 
 | Switch | What a new purchase records | Lifecycle webhooks then write |
 |---|---|---|
-| **OFF** (default: no row, or any value but `Y`, or an unreadable row) | the `ETGO_TenantPlan` marker (`markProductive`), no row, nothing retired — logged at INFO, not as a failure | the `ETGO_SubscriptionStatus` / `ETGO_SubscriptionDueAt` preferences (the tenant has no row) |
+| **OFF** (default: no row, or any value but `Y`, or an unreadable row) — tenant with **no** subscription row | the `ETGO_TenantPlan` marker (`markProductive`), no row, nothing retired — logged at INFO, not as a failure | the `ETGO_SubscriptionStatus` / `ETGO_SubscriptionDueAt` preferences (the tenant has no row) |
+| **OFF** — tenant that already has **any** row (open or closed) | a row, exactly as ON: its row is what every read answers from | the row |
 | **ON** (`Y`) | an open `ETGO_SUBSCRIPTION` row, and the tenant's marker is retired; the marker is written only if the row cannot be opened (§8) | the row (`SubscriptionService#applyLifecycleStatus`) |
 
 **The row it reads.** A *list* preference: `ETGO_SubscriptionModel` is an `AD_Ref_List` value of the
@@ -363,16 +364,21 @@ environment back. The operator's row has no module and survives deploys.
 flipping it needs no restart. A failed read is logged at ERROR and answered OFF — the pre-ETP-5046
 path, which is the safe direction.
 
-**Only creation is switched.** Reads are untouched: a tenant that has a row is decided by its row
-(`resolvePlan`, the access policy, the lifecycle webhooks) whatever the switch says, and a rowless
-tenant by the transitional fallback (§8). `openSubscription` has exactly one runtime caller — the
-paid upgrade — so the gate there covers every row a new tenant can get; R37 is the operator's own
-step 3.3 of §6.2.
+**Only a tenant's first row is switched.** A tenant that has a row — any row, open or closed,
+`SubscriptionService#hasAnySubscription` — is decided by it whatever the switch says, for reads
+(`resolvePlan`, the access policy, the lifecycle webhooks) **and for writes**: with the switch OFF
+its next payment still goes to a row, because a payment recorded only in the marker would be
+invisible behind a canceled or closed row and the paying tenant would stay blocked. The lookup is
+"any row", not "an open row", so it stays correct whatever later tickets change about which row is
+current; it runs only when the switch is OFF. A rowless tenant is decided by the switch, and read
+through the transitional fallback (§8). `openSubscription` has exactly one runtime caller — the
+paid upgrade — so the gate there covers every row a tenant can get at runtime; R37 is the
+operator's own step 3.3 of §6.2.
 
-**One-way in practice.** Turning the switch OFF again only stops new rows: tenants that already
-have one stay on it and keep being decided by it, while new tenants go back to the marker. That
-mixes both populations again and pushes Phase F further away, so it is an emergency brake, not an
-undo.
+**One-way in practice.** Turning the switch OFF again sends only tenants that have never had a row
+back to the marker; every tenant with a row stays on it, payments included. The fleet is then two
+populations that only grow apart, and Phase F moves further away, so turning it back OFF undoes
+nothing — treat the switch as one-way.
 
 **The fallback's log level follows the switch.** `TenantPlanPreferenceFallback` logs one line per
 resolution of a rowless productive tenant (§8.1), with the grep marker
@@ -519,7 +525,7 @@ preference row disappearing are the same transaction, on both paths:
 | Path | Who moves the tenant | Mechanism |
 |---|---|---|
 | Tenants that predate the subscription model — and any tenant that already has a row | `R37-tenant-subscription-backfill` | Statement 3 of `@apply`: `DELETE FROM ad_preference` scoped by `visibleat_client_id`, guarded on **any** subscription row existing for the tenant (open or closed, active or not) — same transaction as the `INSERT` when one runs |
-| Tenants that pay after the switch (§6.3) | `EtendoGoJwtServlet#applyPaidUpgradeSideEffects` | On a successful subscription write it calls `TenantPlanService#retireProductivePreference` instead of `markProductive` — it retires right after opening the row, never later. With the switch OFF it opens no row and calls `markProductive`, as on develop |
+| Tenants that pay after the switch (§6.3) | `EtendoGoJwtServlet#applyPaidUpgradeSideEffects` | On a successful subscription write it calls `TenantPlanService#retireProductivePreference` instead of `markProductive` — it retires right after opening the row, never later. With the switch OFF it opens no row and calls `markProductive`, as on develop — unless the tenant already has a row, which then records the payment as when ON (§6.3) |
 
 **Why R37's guard is "any row", not "an open row".** Until the 2026-10-05 develop merge the guard was
 an open row. Develop's `20260929T190000Z__R42-paid-provisioning-commercial-metadata.sql` (ETP-5548,
@@ -614,8 +620,9 @@ R37's retirement branch removes whatever marker R42 wrote, and R42 never runs fo
 *after* its environment switched — onboarded later, starting at the onboarding baseline
 (`ONBOARDING_PROVISIONED_THROUGH`, 2026-09-02, below R42) — runs R42 in its normal chain, and R37 no
 longer follows it there. If R42 matches that tenant it re-inserts a marker next to the tenant's
-subscription row; harmless while the row is open (the row wins), but it keeps §8.1's count above 0
-and, once the row is closed, lets the fallback read the tenant as productive. Until a successor of
+subscription row. Plan and access are unaffected — a tenant with a row is read from its row — but
+the marker keeps §8.1's count and the §6.2 verification above 0 and pollutes the Phase F worklist.
+Until a successor of
 R42 ships, re-run R37 for such a tenant (`make data-fixes FIX=R37-tenant-subscription-backfill
 CLIENT=<id>`). Recorded in the R37 header and `open-and-notable-topics.md` §3.13 (proper fix: a
 subscription-aware successor of R42, before Phase F).
