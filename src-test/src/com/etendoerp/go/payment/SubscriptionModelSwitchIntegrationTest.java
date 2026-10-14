@@ -77,6 +77,8 @@ public class SubscriptionModelSwitchIntegrationTest extends OBBaseTest {
   private static final String Y = "Y";
   private static final String N = "N";
   private static final String TENANT_MARKER = "ETP5046SW-";
+  /** Core's Sales Order window, present in every environment. */
+  private static final String SALES_ORDER_WINDOW_ID = "143";
 
   private final SubscriptionModelSwitch modelSwitch = new SubscriptionModelSwitch();
 
@@ -165,6 +167,37 @@ public class SubscriptionModelSwitchIntegrationTest extends OBBaseTest {
     insertSwitchRow(Y, Visibility.ORGANIZATION, true, 0);
 
     assertFalse(modelSwitch.isOn());
+  }
+
+  /** A row restricted to one user is that user's setting, not the environment's. */
+  @Test
+  public void testARowRestrictedToAUserIsOff() {
+    insertSwitchRow(Y, Visibility.USER, true, 0);
+
+    assertFalse(modelSwitch.isOn());
+  }
+
+  /** A row restricted to one window is a per-window setting, not the environment's. */
+  @Test
+  public void testARowRestrictedToAWindowIsOff() {
+    insertSwitchRow(Y, Visibility.WINDOW, true, 0);
+
+    assertFalse(modelSwitch.isOn());
+  }
+
+  /**
+   * The switch is a LIST preference: the key lives in {@code PROPERTY} with
+   * {@code ISPROPERTYLIST = 'Y'}. A free-text preference whose {@code ATTRIBUTE} happens to spell
+   * the same key is a different row shape and must not switch the environment.
+   */
+  @Test
+  public void testANonListRowWithTheSameKeyAsAttributeIsOff() {
+    nativeUpdate("INSERT INTO AD_PREFERENCE (AD_PREFERENCE_ID, AD_CLIENT_ID, AD_ORG_ID, ISACTIVE, "
+            + "CREATED, CREATEDBY, UPDATED, UPDATEDBY, ATTRIBUTE, VALUE, ISPROPERTYLIST, SELECTED) "
+            + "VALUES (:id, '0', '0', 'Y', now(), '0', now(), '0', :attribute, 'Y', 'N', 'N')",
+        "id", newId(), "attribute", SubscriptionModelSwitch.PREFERENCE_PROPERTY);
+
+    assertFalse("Only the list property is the switch", modelSwitch.isOn());
   }
 
   /**
@@ -265,7 +298,11 @@ public class SubscriptionModelSwitchIntegrationTest extends OBBaseTest {
     /** Client 0, visible at one role. */
     ROLE,
     /** Client 0, visible at one organization. */
-    ORGANIZATION
+    ORGANIZATION,
+    /** Client 0, restricted to one user. */
+    USER,
+    /** Client 0, restricted to one window. */
+    WINDOW
   }
 
   /**
@@ -282,6 +319,8 @@ public class SubscriptionModelSwitchIntegrationTest extends OBBaseTest {
     String visibleClient = null;
     String visibleOrg = null;
     String visibleRole = null;
+    String user = visibility == Visibility.USER ? TEST_USER_ID : null;
+    String window = visibility == Visibility.WINDOW ? SALES_ORDER_WINDOW_ID : null;
     if (visibility == Visibility.EXPLICIT_SYSTEM) {
       visibleClient = ZERO;
       visibleOrg = ZERO;
@@ -294,14 +333,15 @@ public class SubscriptionModelSwitchIntegrationTest extends OBBaseTest {
     }
     nativeUpdate("INSERT INTO AD_PREFERENCE (AD_PREFERENCE_ID, AD_CLIENT_ID, AD_ORG_ID, ISACTIVE, "
             + "CREATED, CREATEDBY, UPDATED, UPDATEDBY, PROPERTY, VALUE, ISPROPERTYLIST, SELECTED, "
-            + "VISIBLEAT_CLIENT_ID, VISIBLEAT_ORG_ID, VISIBLEAT_ROLE_ID) "
+            + "VISIBLEAT_CLIENT_ID, VISIBLEAT_ORG_ID, VISIBLEAT_ROLE_ID, AD_USER_ID, AD_WINDOW_ID) "
             + "VALUES (:id, :client, '0', :active, now() - make_interval(secs => :age), '0', "
             + "now(), '0', :property, :value, 'Y', 'N', "
             + "CAST(:visibleClient AS VARCHAR), CAST(:visibleOrg AS VARCHAR), "
-            + "CAST(:visibleRole AS VARCHAR))",
+            + "CAST(:visibleRole AS VARCHAR), CAST(:user AS VARCHAR), CAST(:window AS VARCHAR))",
         "id", newId(), "client", client, "active", active ? Y : N, "age", secondsOld,
         "property", SubscriptionModelSwitch.PREFERENCE_PROPERTY, "value", value,
-        "visibleClient", visibleClient, "visibleOrg", visibleOrg, "visibleRole", visibleRole);
+        "visibleClient", visibleClient, "visibleOrg", visibleOrg, "visibleRole", visibleRole,
+        "user", user, "window", window);
   }
 
   /**
