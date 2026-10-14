@@ -50,6 +50,11 @@ import org.openbravo.model.ad.system.Client;
  * {@link TenantPlanService#PLAN_FREE} — paid features off, wrong environment ordering, and, once
  * ETP-5047's enforcement lands, denied login.
  *
+ * <p>ETP-5047 narrowed the gap further: the reads take the tenant's open row, else its latest
+ * closed one, so a tenant whose subscription was canceled is answered from its closed row (as
+ * canceled), never from here. Only a tenant with <em>no</em> subscription row at all reaches this
+ * class.
+ *
  * <p>The backfill cannot simply be made automatic: it is deliberately gated on a human
  * re-verifying that production Stripe checkout has not gone live, because if it has, a real paying
  * cohort exists that the backfill would orphan. So the read side tolerates the gap instead, and
@@ -95,10 +100,13 @@ public class TenantPlanPreferenceFallback {
 
   /**
    * Emitted at WARN once per tenant actually served by the fallback, on an environment that has
-   * switched to the subscription model. Carries the grep marker.
+   * switched to the subscription model. Since ETP-5047 only a tenant with no subscription row at
+   * all reaches the fallback — a closed row answers for itself (as canceled) — so the line says
+   * exactly that. Carries the grep marker.
    */
   private static final String FALLBACK_WARNING =
-      "ETP-5046-TRANSITIONAL-FALLBACK: tenant {} has no open ETGO_SUBSCRIPTION row; resolving it as"
+      "ETP-5046-TRANSITIONAL-FALLBACK: tenant {} has no ETGO_SUBSCRIPTION row at all, open or"
+          + " closed; resolving it as"
           + " '{}' from the retired {} preference. The ETP-5046 backfill has not run for this"
           + " tenant — run it and this line disappears.";
 
@@ -170,8 +178,9 @@ public class TenantPlanPreferenceFallback {
    *
    * <p>The bulk path exists so the environment list keeps issuing a constant number of queries per
    * render. Looping {@link #isProductive} here would reintroduce exactly the N+1 that
-   * {@link EnvironmentPlanCache} was built to remove. Callers pass only the ids that had no open
-   * subscription, and an empty collection issues no query at all.
+   * {@link EnvironmentPlanCache} was built to remove. Callers pass only the ids that have no
+   * subscription row at all (a tenant whose latest row is closed is answered from that row, since
+   * ETP-5047), and an empty collection issues no query at all.
    *
    * <p>Deliberately not chunked, unlike {@link SubscriptionService#findOpenForClients}: the caller
    * is the per-account environment list, whose id set is a handful of tenants, and this class is

@@ -3700,15 +3700,18 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * Whether the tenant already has any subscription row. Never throws: a failed lookup is logged
    * and answered {@code false}, which keeps a switched-off environment on its preference path.
    *
-   * <p><b>Trade-off, kept on purpose.</b> Answering {@code false} on a failed lookup means that a
-   * tenant which DID have a row would get its payment recorded only in the marker — invisible
-   * behind that row. It is accepted because the case is near-unreachable: a purchase always
-   * provisions a NEW tenant (ETP-5548), which has no row, and a SQL-level failure has already
-   * marked the onboarding transaction for rollback, so the upgrade fails closed and is retried
-   * anyway. Failing the purchase on a lookup error instead would trade that edge for failing every
-   * rowless purchase whenever the lookup misbehaves. Revisit when ETP-5047 is merged, where a
-   * tenant whose only row is closed reads as canceled: such a tenant paying through this path would
-   * stay canceled (register §2.9).
+   * <p><b>Trade-off, accepted (decided 2026-10-14, recorded in register §2.9).</b> Answering
+   * {@code false} on a failed lookup means that a tenant which DID have a row would get its payment
+   * recorded only in the marker — invisible behind that row. Since ETP-5047 a tenant whose only row
+   * is closed reads as canceled, so such a tenant would stay canceled while it pays. The case is
+   * reachable in principle: a tenant can be re-opened and buy again, and a re-purchasing tenant
+   * with a closed row is exactly the one this lookup exists for. It is accepted with no code change
+   * because it fails closed in practice: on PostgreSQL a failed SQL statement aborts the
+   * transaction, so the onboarding writes that follow fail too and the upgrade fails instead of
+   * being recorded in the marker. Only a non-SQL failure raised before the statement runs could
+   * reach the marker path with a usable transaction. Failing the purchase on every lookup error
+   * instead would trade that edge for failing every rowless purchase whenever the lookup
+   * misbehaves.
    */
   private boolean tenantHasSubscriptionRow(String clientId, String clientName,
       String accountEmail) {
