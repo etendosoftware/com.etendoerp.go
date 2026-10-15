@@ -80,6 +80,7 @@ import org.openbravo.module.taxreportlauncher.erpCommon.ad_reports.OBTL_TaxRepor
 
 import com.etendoerp.go.schemaforge.data.FiscalDecl;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
+import com.etendoerp.go.schemaforge.util.RoleAccessMatrix;
 
 /**
  * Unit tests for the AEAT 303 telematic submission entity added to {@link Fiscal303BoxesHandler}
@@ -136,7 +137,7 @@ public class Fiscal303SubmitHandlerTest {
     handler = snapshotStubbed(mock(NeoServlet.class));
     accessMock = mockStatic(NeoAccessHelper.class);
     accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
-        eq(NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID), anyString())).thenReturn(true);
+        eq(RoleAccessMatrix.TAX_MODELS_PROXY_WINDOW_ID), anyString())).thenReturn(true);
   }
 
   @After
@@ -1164,7 +1165,7 @@ public class Fiscal303SubmitHandlerTest {
     Fiscal303BoxesHandler h = snapshotStubbed(servlet);
 
     accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
-        eq(NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID), eq("POST"))).thenReturn(false);
+        eq(RoleAccessMatrix.TAX_MODELS_PROXY_WINDOW_ID), eq("POST"))).thenReturn(false);
 
     try (MockedConstruction<AEAT303SubmissionService> serviceMock =
         mockConstruction(AEAT303SubmissionService.class)) {
