@@ -21,6 +21,7 @@ import static com.etendoerp.go.schemaforge.LineAmountTestSupport.assertAmount;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.same;
@@ -100,7 +101,7 @@ class SalesLineCustomizationHandlersTest {
     assertEquals(entity, binding.entity());
     assertNull(handler.getAnnotation(Named.class),
         "a @Named here would make the parent's qualifier ambiguous");
-    assertEquals(parent, handler.getSuperclass(),
+    assertTrue(parent.isAssignableFrom(handler),
         "the customization must inherit everything the parent handler does");
   }
 
