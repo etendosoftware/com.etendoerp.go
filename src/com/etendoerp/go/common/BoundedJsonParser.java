@@ -35,11 +35,14 @@ import org.codehaus.jettison.json.JSONObject;
  *
  * <p><b>How.</b> Before jettison runs, a linear scan ({@link #isWithinLimits}) refuses any text
  * whose brackets are unbalanced or mismatched, whose string is never closed, whose nesting is
- * deeper than the limit, or that carries a comment outside a string. Comments are refused because
- * jettison skips them, so they could hide brackets from the scan; none of these shapes is valid
- * JSON. Only a text that passes reaches jettison, and anything it still throws is reported as a
- * {@link MalformedJsonException}. The scan was fuzzed against jettison 1.3: no text that passes it
- * makes jettison throw an {@code Error} or hang.</p>
+ * deeper than the limit, that carries a comment outside a string, that puts a quote inside a bare
+ * token, or that goes on after its root closes. The scan reads strings and whitespace exactly where
+ * jettison does, so both see the same brackets: comments are refused because jettison skips them,
+ * and a quote inside a bare token because jettison does not open a string there. None of these
+ * shapes is valid JSON. Only a text that passes reaches jettison, and anything it still throws is
+ * reported as a {@link MalformedJsonException} whose message never echoes the text. The scan was
+ * fuzzed against jettison 1.3 (character- and token-level): no text that passes it makes jettison
+ * throw an {@code Error} or hang.</p>
  *
  * <p>Valid JSON is parsed exactly as {@code new JSONObject(String)} / {@code new JSONArray(String)}
  * would parse it, as long as it is nested no deeper than the limit.</p>
@@ -51,6 +54,12 @@ public final class BoundedJsonParser {
    * nested advanced criteria) stays well under it; jettison's stack lasts for thousands.
    */
   public static final int DEFAULT_MAX_DEPTH = 64;
+
+  /**
+   * Characters after which jettison reads a new key or value, so a quote there opens a string.
+   * {@code >} counts only as the end of {@code =>}.
+   */
+  private static final String TOKEN_STARTERS = "{[,:;=>";
 
   private BoundedJsonParser() {
   }
@@ -85,19 +94,40 @@ public final class BoundedJsonParser {
   /**
    * Linear, allocation-light scan of {@code text}: {@code true} when its brackets are balanced and
    * correctly paired, every string ({@code "} or {@code '}, escapes honoured) is closed, nesting
-   * never exceeds {@code maxDepth}, and no comment ({@code /} or {@code #}) appears outside a
-   * string. It does not validate the JSON otherwise; jettison does that afterwards.
+   * never exceeds {@code maxDepth}, no comment ({@code /} or {@code #}) appears outside a string,
+   * no quote appears inside a bare token, and nothing but whitespace follows the closed root. It
+   * does not validate the JSON otherwise; jettison does that afterwards.
+   *
+   * <p>The quote rule mirrors jettison: it opens a quoted string only where a token starts (after
+   * a structural character or at the start), while inside a bare token a quote is an ordinary
+   * character. Opening a string there would make the scan see different brackets than jettison.
+   * </p>
    */
   public static boolean isWithinLimits(String text, int maxDepth) {
-    if (text == null) {
+    if (text == null || maxDepth < 0) {
       return false;
     }
     char[] open = new char[maxDepth];
     int depth = 0;
+    boolean rootClosed = false;
+    // Last non-whitespace character outside a string; 0 at the start of the text.
+    char previous = 0;
     int i = 0;
     while (i < text.length()) {
       char c = text.charAt(i);
+      // jettison's own whitespace rule (JSONTokener#nextClean); not Character.isWhitespace, which
+      // would skip characters such as U+2028 that jettison reads as the start of a bare token.
+      if (c <= ' ') {
+        i++;
+        continue;
+      }
+      if (rootClosed || c == '/' || c == '#') {
+        return false;
+      }
       if (c == '"' || c == '\'') {
+        if (!startsToken(previous)) {
+          return false;
+        }
         i = endOfString(text, i);
         if (i == text.length()) {
           return false;
@@ -111,12 +141,18 @@ public final class BoundedJsonParser {
         if (depth == 0 || open[--depth] != (c == ']' ? '[' : '{')) {
           return false;
         }
-      } else if (c == '/' || c == '#') {
-        return false;
+        rootClosed = depth == 0;
       }
+      // "=>" separates a key from its value only as one unit; a lone '>' is part of a bare token.
+      previous = c == '>' && (i == 0 || text.charAt(i - 1) != '=') ? 'x' : c;
       i++;
     }
     return depth == 0;
+  }
+
+  /** Whether jettison starts a new token after {@code previous} (0: the start of the text). */
+  private static boolean startsToken(char previous) {
+    return previous == 0 || TOKEN_STARTERS.indexOf(previous) >= 0;
   }
 
   /** jettison's {@code JSONObject(String)} / {@code JSONArray(String)} constructor. */
@@ -134,11 +170,24 @@ public final class BoundedJsonParser {
     try {
       return constructor.parse(text);
     } catch (JSONException e) {
-      throw new MalformedJsonException(e.getMessage());
+      throw new MalformedJsonException(withoutSource(e.getMessage()));
     } catch (RuntimeException | StackOverflowError e) { // NOSONAR — see the class javadoc.
       // Not expected once the scan passed (fuzzed), kept so a parser surprise is still a 400.
       throw new MalformedJsonException("Malformed JSON");
     }
+  }
+
+  /**
+   * jettison's syntax errors end in {@code " at character N of <the whole text>"}; the text is the
+   * client's body, which an error response must not echo back (it can be large, or hold a
+   * password). Keeps only the description.
+   */
+  static String withoutSource(String message) {
+    if (message == null) {
+      return "Malformed JSON";
+    }
+    int at = message.indexOf(" at character ");
+    return at >= 0 ? message.substring(0, at) : message;
   }
 
   /**

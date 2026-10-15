@@ -102,6 +102,34 @@ public class BoundedJsonParserTest {
       assertThrows(MalformedJsonException.class, () -> BoundedJsonParser.parseObject(body));
     }
 
+    /**
+     * jettison opens a quoted string only where a token starts; inside a bare token a quote is an
+     * ordinary character. A scanner that opened a string there would see different brackets than
+     * jettison — here it would hide {@code ,[1,x} and let jettison end on a trailing comma (OOM).
+     */
+    @ParameterizedTest
+    @ValueSource(strings = { "[a',[1,x'],", "{\"a\":b'c'}", "[1\"2\"]", "{\"a\":\"b\"\"c\"}",
+        "[\u2028',[1,x']]", "[a>'x']", "[a= >'x']", ">'x'" })
+    void aQuoteInsideABareTokenIsMalformed(String body) {
+      assertThrows(MalformedJsonException.class, () -> BoundedJsonParser.parseArray(body));
+      assertThrows(MalformedJsonException.class, () -> BoundedJsonParser.parseObject(body));
+      assertFalse(BoundedJsonParser.isWithinLimits(body, 8));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = { "{\"a\":1}x", "[1],", "{} {}", "[1]]" })
+    void contentAfterTheRootClosesIsMalformed(String body) {
+      assertFalse(BoundedJsonParser.isWithinLimits(body, 8));
+    }
+
+    @Test
+    void aMalformedBodyIsNotEchoedInTheMessage() {
+      MalformedJsonException e = assertThrows(MalformedJsonException.class,
+          () -> BoundedJsonParser.parseObject("{\"password\":\"hunter2\":1}"));
+      assertFalse(e.getMessage().contains("hunter2"), e.getMessage());
+      assertFalse(e.getMessage().contains(" at character"), e.getMessage());
+    }
+
     @Test
     void inputThatIsNotAnArrayIsMalformed() {
       assertThrows(MalformedJsonException.class, () -> BoundedJsonParser.parseArray("{}"));
@@ -125,6 +153,11 @@ public class BoundedJsonParserTest {
       int depth = BoundedJsonParser.DEFAULT_MAX_DEPTH;
       String body = "{\"x\":" + "[".repeat(depth) + "]".repeat(depth) + "}";
       assertThrows(MalformedJsonException.class, () -> BoundedJsonParser.parseObject(body));
+    }
+
+    @Test
+    void aNegativeLimitAcceptsNothing() {
+      assertFalse(BoundedJsonParser.isWithinLimits("{}", -1));
     }
 
     @Test
@@ -171,6 +204,21 @@ public class BoundedJsonParserTest {
       String body = "[{\"fieldName\":\"posted\",\"operator\":\"equals\",\"value\":\"Y\"}]";
       JSONArray parsed = BoundedJsonParser.parseArray(body);
       assertEquals(new JSONArray(body).toString(), parsed.toString());
+    }
+
+    @Test
+    void unicodeEscapesParse() throws Exception {
+      assertEquals("[A", BoundedJsonParser.parseObject("{\"a\":\"\\u005b\\u0041\"}").getString("a"));
+    }
+
+    @Test
+    void anArrowSeparatorStillOpensAString() throws Exception {
+      assertEquals("v", BoundedJsonParser.parseObject("{'k'=>'v'}").getString("k"));
+    }
+
+    @Test
+    void whitespaceAroundTheRootParses() throws Exception {
+      assertEquals(1, BoundedJsonParser.parseObject(" \n{\"a\" : [ 1 , 'x' ] }\t ").length());
     }
 
     @Test

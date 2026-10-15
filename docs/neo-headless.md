@@ -5467,10 +5467,14 @@ Google sign-in), so this was a denial-of-service vector.
 
 **What is refused**, by a linear scan before jettison runs: unbalanced or mismatched brackets, an
 unterminated string, nesting deeper than **64** levels (the usage endpoint keeps its own **32**),
-and a comment (`/`, `#`) outside a string — jettison skips comments, so they could hide brackets
-from the scan. None of these is valid JSON. Anything jettison still throws on a text that passes is
-reported as `MalformedJsonException` (a `JSONException`), so a `catch (JSONException)` that already
-answered `400` keeps doing so.
+a comment (`/`, `#`) outside a string — jettison skips comments, so they could hide brackets
+from the scan —, a quote inside a bare token (jettison opens a string only where a key or value
+starts, after `{ [ , : ; = >` or at the start; elsewhere a quote is an ordinary character, and a
+scan that opened a string there would see different brackets than jettison), and anything but
+whitespace after the root closes. None of these is valid JSON. Anything jettison still throws on a
+text that passes is reported as `MalformedJsonException` (a `JSONException`), so a
+`catch (JSONException)` that already answered `400` keeps doing so. Its message never echoes the
+body: jettison's `at character N of <text>` suffix is cut.
 
 **What the client gets** is the endpoint's ordinary bad-request answer, never a `500`:
 

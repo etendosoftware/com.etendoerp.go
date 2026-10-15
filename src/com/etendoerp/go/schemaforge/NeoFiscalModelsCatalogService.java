@@ -27,6 +27,7 @@ import org.openbravo.erpCommon.utility.PropertyNotFoundException;
 import org.openbravo.model.ad.system.Client;
 
 import com.etendoerp.go.common.BoundedJsonParser;
+import com.etendoerp.go.common.MalformedJsonException;
 
 /**
  * Persists which fiscal declaration models (303, 349, ...) are active in the
@@ -88,8 +89,9 @@ class NeoFiscalModelsCatalogService {
     JSONObject parsed;
     try {
       parsed = BoundedJsonParser.parseObject(json);
-    } catch (Exception e) {
-      log.error("Invalid fiscal models catalog JSON: {}", e.getMessage(), e);
+    } catch (MalformedJsonException e) {
+      // The client's body: a 400, not a server fault worth a stack trace.
+      log.warn("Invalid fiscal models catalog JSON: {}", e.getMessage());
       throw new IllegalArgumentException("Invalid JSON body");
     }
     OBContext ctx = OBContext.getOBContext();
