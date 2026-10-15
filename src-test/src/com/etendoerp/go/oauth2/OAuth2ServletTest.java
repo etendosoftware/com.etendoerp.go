@@ -49,6 +49,8 @@ import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import javax.servlet.http.Cookie;
 
+import org.apache.logging.log4j.Level;
+import org.apache.logging.log4j.core.LogEvent;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
@@ -63,6 +65,7 @@ import com.etendoerp.go.session.GoSessionSecurity;
 import com.etendoerp.go.session.GoSessionRoleReconciler;
 import com.etendoerp.go.session.GoSessionService;
 import com.etendoerp.go.session.SessionRoleRevokedException;
+import com.etendoerp.go.usageevents.LogCapture;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 import org.openbravo.dal.service.OBDal;
@@ -1700,32 +1703,71 @@ public class OAuth2ServletTest {
    */
   @Test
   public void tokenMalformedJsonBodyReturnsBadRequest() throws Exception {
-    for (String raw : malformedBodies()) {
-      ResponseCapture resp = mockResponse();
-      HttpServletRequest req = mockRequest("POST", null);
-      when(req.getContentType()).thenReturn("application/json");
-      when(req.getReader()).thenReturn(new BufferedReader(new StringReader(raw)));
-
-      servlet.doPost(req, resp.response);
-
-      assertEquals(abbreviate(raw), 400, resp.status);
-      assertEquals("invalid_request", new JSONObject(resp.body()).getString("error"));
-    }
+    assertMalformedBodiesAnswerBadRequestQuietly(null);
   }
 
   /** POST /register (DCR) also answers without a token. */
   @Test
   public void registerMalformedJsonBodyReturnsBadRequest() throws Exception {
-    for (String raw : malformedBodies()) {
-      ResponseCapture resp = mockResponse();
-      HttpServletRequest req = mockRequest("POST", "/register");
-      when(req.getContentType()).thenReturn("application/json");
-      when(req.getReader()).thenReturn(new BufferedReader(new StringReader(raw)));
+    assertMalformedBodiesAnswerBadRequestQuietly("/register");
+  }
 
-      servlet.doPost(req, resp.response);
+  /**
+   * A syntactically valid body with a missing or wrongly typed field is still the client's error:
+   * a 400 without an ERROR, never the 500 that a response-building failure means.
+   */
+  @Test
+  public void registerValidJsonWithMissingOrWrongTypedFieldsReturnsBadRequestQuietly()
+      throws Exception {
+    List<String> bodies = List.of("{}", "{\"redirect_uris\":\"x\"}",
+        "{\"redirect_uris\":[1]}", "{\"redirect_uris\":[null]}", "{\"redirect_uris\":[[]]}",
+        "{\"redirect_uris\":{}}", "{\"client_name\":{},\"scope\":[],\"redirect_uris\":[]}");
+    try (LogCapture logs = LogCapture.of(OAuth2Servlet.class)) {
+      for (String raw : bodies) {
+        ResponseCapture resp = mockResponse();
+        HttpServletRequest req = mockRequest("POST", "/register");
+        when(req.getContentType()).thenReturn("application/json");
+        when(req.getReader()).thenReturn(new BufferedReader(new StringReader(raw)));
 
-      assertEquals(abbreviate(raw), 400, resp.status);
-      assertEquals("invalid_request", new JSONObject(resp.body()).getString("error"));
+        servlet.doPost(req, resp.response);
+
+        // invalid_request or invalid_client_metadata: either way the client's 400
+        assertEquals(raw, 400, resp.status);
+      }
+      assertEquals(List.of(), logs.messages(Level.ERROR));
+    }
+  }
+
+  /** POST /authorize parses its body before the caller is authenticated. */
+  @Test
+  public void authorizePostMalformedJsonBodyReturnsBadRequest() throws Exception {
+    assertMalformedBodiesAnswerBadRequestQuietly("/authorize");
+  }
+
+  /**
+   * A client's malformed body is a 400 and its own fault: anyone can send one to these
+   * endpoints, so it must never log an ERROR with a stack trace (a free log flood) — at most a
+   * WARN without the throwable.
+   */
+  private void assertMalformedBodiesAnswerBadRequestQuietly(String pathInfo) throws Exception {
+    try (LogCapture logs = LogCapture.of(OAuth2Servlet.class)) {
+      for (String raw : malformedBodies()) {
+        ResponseCapture resp = mockResponse();
+        HttpServletRequest req = mockRequest("POST", pathInfo);
+        when(req.getContentType()).thenReturn("application/json");
+        when(req.getReader()).thenReturn(new BufferedReader(new StringReader(raw)));
+
+        servlet.doPost(req, resp.response);
+
+        assertEquals(abbreviate(raw), 400, resp.status);
+        assertEquals("invalid_request", new JSONObject(resp.body()).getString("error"));
+      }
+      assertEquals("no ERROR for a client's malformed body", List.of(),
+          logs.messages(Level.ERROR));
+      for (LogEvent warn : logs.events(Level.WARN)) {
+        assertNull("WARN without a stack trace: " + warn.getMessage().getFormattedMessage(),
+            warn.getThrown());
+      }
     }
   }
 

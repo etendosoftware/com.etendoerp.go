@@ -1562,10 +1562,14 @@ public class OAuth2Servlet extends HttpBaseServlet {
       log.error("Error validating OAuth2 authorize request", e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
           MESSAGE_INTERNAL_SERVER_ERROR);
+    } catch (MalformedJsonException e) {
+      // The body is parsed before the caller is authenticated: a 400 without a stack trace.
+      log.warn("Malformed authorize request body: {}", e.getMessage());
+      writeMalformedBody(response);
     } catch (JSONException e) {
-      log.error("Error processing authorize request", e);
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST,
-          "Malformed request body");
+      log.error("Failed to build authorize response", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
+          MESSAGE_INTERNAL_SERVER_ERROR);
     }
   }
 
@@ -1877,10 +1881,14 @@ public class OAuth2Servlet extends HttpBaseServlet {
           e.getMessage());
     } catch (IllegalArgumentException | OBException e) {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST, e.getMessage());
+    } catch (MalformedJsonException e) {
+      // Anyone can POST here unauthenticated: the client's error, a 400 without a stack trace.
+      log.warn("Malformed DCR request body: {}", e.getMessage());
+      writeMalformedBody(response);
     } catch (JSONException e) {
-      log.error("Error processing DCR request", e);
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST,
-          "Malformed request body");
+      log.error("Failed to build DCR response", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
+          MESSAGE_INTERNAL_SERVER_ERROR);
     } catch (SQLException e) {
       log.error("Database error during DCR", e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
