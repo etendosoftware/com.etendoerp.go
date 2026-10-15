@@ -408,7 +408,10 @@ final class McpQuerySupport {
         : "e." + prop.getName();
   }
 
-  /** Append {@code e.prop = value} (or {@code e.prop.id = 'value'} for a FK), type-aware. */
+  /**
+   * Append {@code <path> = value} (or {@code <path>.id = 'value'} for a FK), type-aware, where
+   * {@code <path>} is the property's HQL path from {@link #hqlPath}.
+   */
   private static void appendEqualityCondition(StringBuilder where, Entity dalEntity,
       SFEntity sfEntity, java.util.Set<String> excluded, String key, Object value) {
     Property prop = resolveFilterProperty(dalEntity, sfEntity, excluded, key);

@@ -8543,3 +8543,8 @@ Every other property still renders as `e.<name>`; the choice is structural, neve
 **Performance:** the SQLLogic subquery runs per row inside the `WHERE`. When the entity has a stored
 twin of the same value (a stored computed column, e.g. `eTGODeliveryStatus` next to
 `deliveryStatus`), filter on the stored one: it is a physical column, read rather than recomputed.
+
+**Filtered value vs shown value on `sales-order/header`:** `AbstractOrderHeaderHandler.applyCorrectedStatusPercentages`
+(ETP-5317) rewrites `invoiceStatus`, `deliveryStatus` and `deliveryStatusPurchase` in `afterHandle()`
+for documents with a Total Discount line, so a filter on the virtual column matches the raw SQLLogic
+value and can disagree with the value shown; filter on the stored twin (`eTGODeliveryStatus`) there.

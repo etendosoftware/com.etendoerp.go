@@ -1093,6 +1093,8 @@ class McpWriteGateTest {
         Arguments.of("grandTotalAmount", false, BigDecimal.class,
             "{\"grandTotalAmount\":{\"gt\":5}}", "e.grandTotalAmount > 5"),
         Arguments.of("businessPartner", false, null, "{\"businessPartner\":\"BP-1\"}",
-            "e.businessPartner.id='BP-1'"));
+            "e.businessPartner.id='BP-1'"),
+        Arguments.of("lastShipment", true, null, "{\"lastShipment\":\"SH-1\"}",
+            proxy + "lastShipment.id='SH-1'"));
   }
 }
