@@ -42,6 +42,13 @@ public final class NeoRequestBodyParser {
   private NeoRequestBodyParser() {
   }
 
+  /**
+   * Reads the entire HTTP request body as a UTF-8 string.
+   *
+   * @param request the HTTP request whose body is read
+   * @return the request body text decoded as UTF-8
+   * @throws IOException if an I/O error occurs while reading the request input stream
+   */
   public static String readRequestBody(HttpServletRequest request) throws IOException {
     return new String(request.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
   }
@@ -49,6 +56,10 @@ public final class NeoRequestBodyParser {
   /**
    * Linear scan for array/object nesting deeper than {@code maxDepth}, ignoring brackets
    * inside JSON strings (escapes honoured). Cheap and total; it does not validate the JSON.
+   *
+   * @param body the JSON payload to inspect
+   * @param maxDepth the maximum allowed nesting depth of brackets and braces
+   * @return {@code true} if bracket or brace depth exceeds {@code maxDepth}, {@code false} otherwise
    */
   public static boolean exceedsDepth(String body, int maxDepth) {
     if (body == null) {
@@ -93,6 +104,10 @@ public final class NeoRequestBodyParser {
    * Parses {@code json} into a {@link JSONObject}, enforcing a maximum nesting depth of
    * {@value #MAX_JSON_DEPTH} and catching parser engine failures (including {@link StackOverflowError}
    * and runtime errors on truncated inputs), throwing {@link JSONException}.
+   *
+   * @param json the JSON string to parse
+   * @return the parsed {@link JSONObject}
+   * @throws JSONException if parsing fails, input is null, or depth exceeds {@value #MAX_JSON_DEPTH}
    */
   public static JSONObject parseJsonObjectSafely(String json) throws JSONException {
     return parseJsonObjectSafely(json, MAX_JSON_DEPTH);
@@ -102,6 +117,11 @@ public final class NeoRequestBodyParser {
    * Parses {@code json} into a {@link JSONObject}, enforcing a maximum nesting depth of
    * {@code maxDepth} and catching parser engine failures (including {@link StackOverflowError}
    * and runtime errors on truncated inputs), throwing {@link JSONException}.
+   *
+   * @param json the JSON string to parse
+   * @param maxDepth the maximum allowed nesting depth
+   * @return the parsed {@link JSONObject}
+   * @throws JSONException if parsing fails, input is null, or depth exceeds {@code maxDepth}
    */
   public static JSONObject parseJsonObjectSafely(String json, int maxDepth) throws JSONException {
     if (json == null) {
@@ -123,6 +143,10 @@ public final class NeoRequestBodyParser {
    * Parses {@code json} into a {@link JSONArray}, enforcing a maximum nesting depth of
    * {@value #MAX_JSON_DEPTH} and catching parser engine failures (including {@link StackOverflowError}
    * and runtime errors on truncated inputs), throwing {@link JSONException}.
+   *
+   * @param json the JSON string to parse
+   * @return the parsed {@link JSONArray}
+   * @throws JSONException if parsing fails, input is null, or depth exceeds {@value #MAX_JSON_DEPTH}
    */
   public static JSONArray parseJsonArraySafely(String json) throws JSONException {
     return parseJsonArraySafely(json, MAX_JSON_DEPTH);
@@ -132,6 +156,11 @@ public final class NeoRequestBodyParser {
    * Parses {@code json} into a {@link JSONArray}, enforcing a maximum nesting depth of
    * {@code maxDepth} and catching parser engine failures (including {@link StackOverflowError}
    * and runtime errors on truncated inputs), throwing {@link JSONException}.
+   *
+   * @param json the JSON string to parse
+   * @param maxDepth the maximum allowed nesting depth
+   * @return the parsed {@link JSONArray}
+   * @throws JSONException if parsing fails, input is null, or depth exceeds {@code maxDepth}
    */
   public static JSONArray parseJsonArraySafely(String json, int maxDepth) throws JSONException {
     if (json == null) {
@@ -149,6 +178,13 @@ public final class NeoRequestBodyParser {
     }
   }
 
+  /**
+   * Parses {@code bodyStr} into a {@link JSONObject} safely, or returns {@code null} if blank.
+   *
+   * @param bodyStr the raw JSON string or blank input
+   * @return the parsed {@link JSONObject}, or {@code null} if {@code bodyStr} is blank
+   * @throws JSONException if {@code bodyStr} is non-blank but malformed or exceeds max depth
+   */
   public static JSONObject parseOptionalJsonObject(String bodyStr) throws JSONException {
     if (StringUtils.isBlank(bodyStr)) {
       return null;
@@ -156,11 +192,25 @@ public final class NeoRequestBodyParser {
     return parseJsonObjectSafely(bodyStr);
   }
 
+  /**
+   * Parses {@code bodyStr} into a {@link JSONObject} safely, returning an empty object if blank.
+   *
+   * @param bodyStr the raw JSON string or blank input
+   * @return the parsed {@link JSONObject}, or a new empty {@link JSONObject} if blank
+   * @throws JSONException if {@code bodyStr} is non-blank but malformed or exceeds max depth
+   */
   public static JSONObject parseJsonObjectOrEmpty(String bodyStr) throws JSONException {
     JSONObject parsed = parseOptionalJsonObject(bodyStr);
     return parsed != null ? parsed : new JSONObject();
   }
 
+  /**
+   * Parses {@code bodyStr} into a {@link JSONObject} safely with default max depth.
+   *
+   * @param bodyStr the raw JSON string
+   * @return the parsed {@link JSONObject}
+   * @throws JSONException if {@code bodyStr} is null, malformed, or exceeds max depth
+   */
   public static JSONObject parseJsonObject(String bodyStr) throws JSONException {
     return parseJsonObjectSafely(bodyStr);
   }
