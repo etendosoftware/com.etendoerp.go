@@ -1010,33 +1010,46 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     Map<String, OrderLine> orderLineByProduct = buildOrderLineByProduct(linkedOrder);
     JSONArray selectedLines = new JSONArray();
     for (ShipmentInOutLine rl : receipt.getMaterialMgmtShipmentInOutLineList()) {
-      if (!rl.isActive() || rl.getProduct() == null) {
-        continue;
-      }
-      OrderLine ol = rl.getSalesOrderLine();
-      if (ol == null) {
-        ol = orderLineByProduct.get(rl.getProduct().getId());
-      }
-      if (ol == null) {
-        continue;
-      }
-      BigDecimal qty = resolveReceiptLineQty(rl, qtyOverrides);
-      // ETP-4722: quantities can be NEGATIVE since ETP-4567 removed the old
-      // min: 0 constraint (e.g. a return-style receipt line). Only an exact
-      // zero means "nothing left to invoice" — a strictly-positive check
-      // silently dropped every negative-quantity receipt line here.
-      if (qty == null || qty.compareTo(BigDecimal.ZERO) == 0) {
-        continue;
-      }
-      try {
-        selectedLines.put(MultiDocumentInvoiceSupport.buildOrderLineEntryForInOutLine(ol.getId(), rl,
-            MultiDocumentInvoiceSupport.signedLikeLine(rl, qty)));
-      } catch (Exception ex) {
-        log.warn("Failed to build selectedLine entry for receipt line {}: {}", rl.getId(),
-            ex.getMessage());
+      JSONObject entry = buildEntryForReceiptLine(rl, qtyOverrides, orderLineByProduct);
+      if (entry != null) {
+        selectedLines.put(entry);
       }
     }
     return selectedLines;
+  }
+
+  /**
+   * Builds the {@code selectedLines} entry of one receipt line, or {@code null} when the line is
+   * skipped: inactive or without product, no order line to bind to, or nothing left to invoice.
+   */
+  private JSONObject buildEntryForReceiptLine(ShipmentInOutLine rl,
+      Map<String, BigDecimal> qtyOverrides, Map<String, OrderLine> orderLineByProduct) {
+    if (!rl.isActive() || rl.getProduct() == null) {
+      return null;
+    }
+    OrderLine ol = rl.getSalesOrderLine();
+    if (ol == null) {
+      ol = orderLineByProduct.get(rl.getProduct().getId());
+    }
+    if (ol == null) {
+      return null;
+    }
+    BigDecimal qty = resolveReceiptLineQty(rl, qtyOverrides);
+    // ETP-4722: quantities can be NEGATIVE since ETP-4567 removed the old
+    // min: 0 constraint (e.g. a return-style receipt line). Only an exact
+    // zero means "nothing left to invoice" — a strictly-positive check
+    // silently dropped every negative-quantity receipt line here.
+    if (qty == null || qty.compareTo(BigDecimal.ZERO) == 0) {
+      return null;
+    }
+    try {
+      return MultiDocumentInvoiceSupport.buildOrderLineEntryForInOutLine(ol.getId(), rl,
+          MultiDocumentInvoiceSupport.signedLikeLine(rl, qty));
+    } catch (Exception ex) {
+      log.warn("Failed to build selectedLine entry for receipt line {}: {}", rl.getId(),
+          ex.getMessage());
+      return null;
+    }
   }
 
   /**

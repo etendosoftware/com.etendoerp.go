@@ -156,7 +156,10 @@ final class NeoHandlerUtils {
     if (docTypeId != null && !docTypeId.isEmpty()) {
       try {
         CSResponse cs = DocumentNoData.nextDocType(conn, docTypeId, clientId, "Y");
-        if (cs != null && "1".equals(cs.exito) && StringUtils.isNotBlank(cs.razon)) {
+        // AD_Sequence_DocType returns only the number (razon); the generated wrapper never sets
+        // exito, so testing it would reject every doctype sequence and silently fall through to the
+        // table sequence, after having already consumed a doctype number (ETP-5709).
+        if (cs != null && StringUtils.isNotBlank(cs.razon)) {
           return cs.razon;
         }
       } catch (Exception ex) {

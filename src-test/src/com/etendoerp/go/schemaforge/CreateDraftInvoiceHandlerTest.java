@@ -4930,7 +4930,7 @@ public class CreateDraftInvoiceHandlerTest {
   }
 
   /** Two shipments (no linked order): SH-ship-1 has sl-1 (10 units), SH-ship-2 has sl-2 (3 units). */
-  private static MultiShipmentHandler multiShipmentHandler(OBDal dal) {
+  private static MultiShipmentHandler multiShipmentHandler() {
     MultiShipmentHandler handler = new MultiShipmentHandler();
     handler.shipments = Arrays.asList(
         shipmentOf("ship-1", false, shipmentLine("sl-1", "10", null)),
@@ -4958,7 +4958,7 @@ public class CreateDraftInvoiceHandlerTest {
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
       pendingFor(supportMock, "ship-1", Collections.emptyMap());
       pendingFor(supportMock, "ship-2", Collections.singletonMap("sl-2", new BigDecimal("2")));
-      MultiShipmentHandler handler = multiShipmentHandler(dal);
+      MultiShipmentHandler handler = multiShipmentHandler();
 
       handler.createFromShipments(twoShipmentIds(), Collections.emptyMap(), null);
 
@@ -4977,7 +4977,7 @@ public class CreateDraftInvoiceHandlerTest {
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
       pendingFor(supportMock, "ship-1", Collections.emptyMap());
       pendingFor(supportMock, "ship-2", Collections.emptyMap());
-      MultiShipmentHandler handler = multiShipmentHandler(dal);
+      MultiShipmentHandler handler = multiShipmentHandler();
 
       try {
         handler.createFromShipments(twoShipmentIds(), Collections.emptyMap(), null);
@@ -5002,7 +5002,7 @@ public class CreateDraftInvoiceHandlerTest {
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
       supportMock.when(() -> NeoInvoiceSupport.computePendingQtyPerLineOrThrow(anyString(), eq(true)))
           .thenThrow(new OBException("Could not determine pending quantities to invoice"));
-      MultiShipmentHandler handler = multiShipmentHandler(dal);
+      MultiShipmentHandler handler = multiShipmentHandler();
 
       try {
         handler.createFromShipments(twoShipmentIds(), Collections.emptyMap(), null);
@@ -5024,7 +5024,7 @@ public class CreateDraftInvoiceHandlerTest {
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
       pendingFor(supportMock, "ship-1", Collections.singletonMap("sl-1", new BigDecimal("7")));
       pendingFor(supportMock, "ship-2", Collections.singletonMap("sl-2", new BigDecimal("3")));
-      MultiShipmentHandler handler = multiShipmentHandler(dal);
+      MultiShipmentHandler handler = multiShipmentHandler();
 
       try {
         handler.createFromShipments(twoShipmentIds(),
@@ -5048,7 +5048,7 @@ public class CreateDraftInvoiceHandlerTest {
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
       pendingFor(supportMock, "ship-1", Collections.singletonMap("sl-1", new BigDecimal("7")));
       pendingFor(supportMock, "ship-2", Collections.singletonMap("sl-2", new BigDecimal("3")));
-      MultiShipmentHandler handler = multiShipmentHandler(dal);
+      MultiShipmentHandler handler = multiShipmentHandler();
 
       handler.createFromShipments(twoShipmentIds(),
           Collections.singletonMap("sl-1", new BigDecimal("4")), null);
