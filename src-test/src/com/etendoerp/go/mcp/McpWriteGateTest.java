@@ -32,6 +32,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.stream.Stream;
 
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.AfterEach;
@@ -41,6 +42,8 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mock;
 import org.mockito.MockedStatic;
@@ -1048,5 +1051,48 @@ class McpWriteGateTest {
 
       assertEquals("e." + Entity.COMPUTED_COLUMNS_PROXY_PROPERTY + ".deliveryStatus < 100", where);
     }
+
+    /**
+     * The other two branches that render the property path, plus the regression guard: a
+     * property that is NOT computed must keep rendering exactly the HQL it rendered before the
+     * proxy was introduced ({@code e.<name>}, and {@code e.<name>.id=} for a foreign key).
+     *
+     * @param property the DAL property name, also used as the filter key
+     * @param computed whether the property is a computed column
+     * @param type     the primitive Java type, or {@code null} for a foreign key
+     * @param filter   the {@code filters} argument as JSON
+     * @param expected the exact HQL condition
+     */
+    @ParameterizedTest(name = "{0} computed={1} {3} -> {4}")
+    @MethodSource("com.etendoerp.go.mcp.McpWriteGateTest#filterPathCases")
+    @DisplayName("each filter branch renders the proxy path only for a computed property")
+    void filterBranchRendersThePathOfThePropertyKind(String property, boolean computed,
+        Class<?> type, String filter, String expected) throws Exception {
+      Property prop = declareProperty(property, property);
+      when(prop.isComputedColumn()).thenReturn(computed);
+      when(prop.isPrimitive()).thenReturn(type != null);
+      if (type != null) {
+        doReturn(type).when(prop).getPrimitiveObjectType();
+      }
+
+      String where = McpQuerySupport.buildWhereFromFilters(new JSONObject(filter), adTab,
+          specEntity(), null);
+
+      assertEquals(expected, where);
+    }
+  }
+
+  static Stream<Arguments> filterPathCases() {
+    String proxy = "e." + Entity.COMPUTED_COLUMNS_PROXY_PROPERTY + ".";
+    return Stream.of(
+        Arguments.of("deliveryStatus", true, BigDecimal.class, "{\"deliveryStatus\":100}",
+            proxy + "deliveryStatus=100"),
+        Arguments.of("deliveryStatus", true, BigDecimal.class,
+            "{\"deliveryStatus\":{\"between\":[10,20]}}",
+            proxy + "deliveryStatus between 10 and 20"),
+        Arguments.of("grandTotalAmount", false, BigDecimal.class,
+            "{\"grandTotalAmount\":{\"gt\":5}}", "e.grandTotalAmount > 5"),
+        Arguments.of("businessPartner", false, null, "{\"businessPartner\":\"BP-1\"}",
+            "e.businessPartner.id='BP-1'"));
   }
 }
