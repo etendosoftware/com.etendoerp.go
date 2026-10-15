@@ -74,6 +74,12 @@ import org.openbravo.model.common.order.Order;
  * <p>ETP-4027: the {@code Convertquotation} action is intercepted in {@code handle()} and
  * delegates to {@link ConvertQuotationIntoOrder#convertQuotationIntoSalesOrder} with
  * {@code recalculatePrices=false} so that quotation prices are preserved in the new order.
+ *
+ * <p>{@code testIsRejectDocAction_table} also guards {@link DocActionRequestSupport}, the
+ * DocAction value parsing {@code isRejectDocAction} delegates to.
+ *
+ * @covers com.etendoerp.go.schemaforge.SalesQuotationHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.DocActionRequestSupport
  */
 public class SalesQuotationHeaderHandlerTest {
 
@@ -386,7 +392,8 @@ public class SalesQuotationHeaderHandlerTest {
    * Table-driven: which requests count as "run the DocAction button with RJ". The value is read
    * from the three places action requests carry it (root {@code docAction}, root
    * {@code documentAction}, {@code fieldValues.documentAction}) and the button is named by its
-   * column or its field. Anything else — another value, the SPA's {@code fieldValues: {}}, a GET,
+   * column or its field; when root {@code docAction} and {@code fieldValues} disagree, root
+   * {@code docAction} — the value the process runs — decides. Anything else — another value, the SPA's {@code fieldValues: {}}, a GET,
    * a CRUD request, another action — must stay on the pre-ETP-5535 path.
    */
   @Test
@@ -408,6 +415,12 @@ public class SalesQuotationHeaderHandlerTest {
             "{\"documentAction\":\"RJ\"}", false },
         { "rejectQuotation action name", "POST", NeoEndpointType.ACTION, "rejectQuotation",
             "{\"docAction\":\"RJ\"}", false },
+        { "root docAction CO wins over fieldValues RJ", "POST", NeoEndpointType.ACTION,
+            "DocAction", "{\"fieldValues\":{\"documentAction\":\"RJ\"},\"docAction\":\"CO\"}",
+            false },
+        { "root docAction RJ wins over fieldValues CO", "POST", NeoEndpointType.ACTION,
+            "DocAction", "{\"fieldValues\":{\"documentAction\":\"CO\"},\"docAction\":\"RJ\"}",
+            true },
     };
     for (Object[] c : cases) {
       NeoContext ctx = NeoContext.builder()
