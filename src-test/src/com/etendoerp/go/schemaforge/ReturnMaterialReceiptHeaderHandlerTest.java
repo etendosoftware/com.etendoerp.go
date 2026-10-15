@@ -44,6 +44,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 
 import javax.servlet.http.HttpServletResponse;
 
@@ -72,6 +73,8 @@ import org.openbravo.model.common.invoice.ReversedInvoice;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
 
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
+
 /**
  * Unit tests for {@link ReturnMaterialReceiptHeaderHandler}.
  *
@@ -88,7 +91,11 @@ import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
  *   <li>{@code afterHandle()} — guard conditions, no-id enrichment, SQL empty path,
  *       SQL with rows (addShipmentToMap + addInvoiceToMap), issuerOrg enrichment on a
  *       detail GET (ETP-5124), and outer-catch path.</li>
+ *   <li>{@code actionContracts()} — every declared action is served by {@code handle()}, and the
+ *       contract refuses malformed agent calls while accepting the bodies the flow sends.</li>
  * </ul>
+ *
+ * @covers com.etendoerp.go.schemaforge.ReturnMaterialReceiptHeaderHandler
  */
 public class ReturnMaterialReceiptHeaderHandlerTest {
 
@@ -229,6 +236,68 @@ public class ReturnMaterialReceiptHeaderHandlerTest {
     NeoResponse result = handler.handle(ctx);
     assertNotNull(result);
     assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
+  }
+
+  // ── actionContracts() — published to agents, served by handle() ───────────
+
+  /**
+   * Every action published to agents is one {@code handle()} dispatches: a declared action the
+   * handler does not serve would pass the MCP's contract check and then fall through to NEO's
+   * default processing. Called with no record id and no body, each one answers its own 400.
+   */
+  @Test
+  public void testEveryDeclaredActionIsServedByHandle() {
+    Map<String, NeoActionContract> contracts = handler.actionContracts();
+    assertFalse("the return actions are published", contracts.isEmpty());
+    for (String action : contracts.keySet()) {
+      NeoContext ctx = NeoContext.builder()
+          .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+          .fieldName(action).recordId(null).build();
+      NeoResponse result = handler.handle(ctx);
+      assertNotNull(action + " is dispatched by handle()", result);
+      assertEquals(action, HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
+    }
+  }
+
+  /**
+   * The contract judges an agent's call before the handler runs: malformed bodies are refused with
+   * a 422 naming the problem, and the bodies the return flow actually sends are accepted.
+   */
+  @Test
+  public void testActionContractsJudgeAgentCalls_table() throws Exception {
+    // Columns: the action, the body sent, the key expected inside the error (null when the call
+    // is accepted) and the value that key must mention.
+    Object[][] cases = {
+        { "availableShipments", "{}", "missingParameters", "businessPartner" },
+        { "importShipmentLines", "{\"lines\":\"x\"}", "field", "lines" },
+        { "rectifiableInvoices", "{\"foo\":1}", "unknownParameters", "foo" },
+        { "availableShipments", "{\"businessPartner\":\"X\"}", null, null },
+        { "availableShipmentLines", "{\"shipmentId\":\"X\"}", null, null },
+        { "importShipmentLines",
+            "{\"lines\":[{\"sourceLineId\":\"X\",\"returnQuantity\":1}]}", null, null },
+        { "rectifiableInvoices", "{\"startRow\":0,\"pageSize\":20,\"search\":\"\"}", null,
+            null },
+        { "createReturnInvoice", "{\"originInvoices\":[\"X\"]}", null, null },
+    };
+    Map<String, NeoActionContract> contracts = handler.actionContracts();
+    for (Object[] c : cases) {
+      String action = (String) c[0];
+      String label = action + " " + c[1];
+      String errorKey = (String) c[2];
+
+      NeoResponse result = NeoActionContract.validate(contracts, action,
+          new JSONObject((String) c[1]));
+
+      if (errorKey == null) {
+        assertNull(label, result);
+      } else {
+        assertNotNull(label, result);
+        assertEquals(label, 422, result.getHttpStatus());
+        JSONObject error = result.getBody().getJSONObject("error");
+        assertTrue(label, error.has(errorKey));
+        assertTrue(label, String.valueOf(error.get(errorKey)).contains((String) c[3]));
+      }
+    }
   }
 
   // ── handleImportShipmentLines — receipt not found and no lines ────────────
@@ -670,7 +739,7 @@ public class ReturnMaterialReceiptHeaderHandlerTest {
       // il.getUnitPrice()=null → unitPrice=0; invoice.getPriceList()=null → skip resolvePriceFromPriceList
       // il.getTax()=null → resolveApplicableTax (NPE caught internally → null); unitPrice=0 → no throw
 
-      // ensureDocumentNo, getSupport().ensureLineGrossAmounts, recalculateTotals
+      // ensureDocumentNo, getSupport().ensureLineGrossAmounts
       InvoiceFromOrderSupport support = mock(InvoiceFromOrderSupport.class);
       when(handler.createDraftInvoiceHandler.getSupport()).thenReturn(support);
 

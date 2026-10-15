@@ -852,8 +852,8 @@ public class NeoProcessService {
       }
 
       // For DocAction processes: set the action on the document before calling
-      String docAction = params.optString("docAction", null);
-      if (docAction != null && !docAction.isBlank()) {
+      String docAction = DocActionResolution.requestedDocAction(params);
+      if (docAction != null) {
         String tabId = params.optString(INP_TAB_ID, null);
         if (tabId != null) {
           setDocAction(tabId, recordId, docAction);
@@ -867,7 +867,7 @@ public class NeoProcessService {
       while (keys.hasNext()) {
         String key = keys.next();
         if (RECORD_ID.equals(key) || INP_RECORD_ID.equals(key)
-            || INP_TAB_ID.equals(key) || "docAction".equals(key)) {
+            || INP_TAB_ID.equals(key) || PARAM_DOC_ACTION.equals(key)) {
           continue;
         }
         if (procParams == null) {
@@ -888,15 +888,11 @@ public class NeoProcessService {
 
   private static void setDocAction(String tabId, String recordId, String docAction) {
     try {
-      Tab tab = OBDal.getInstance().get(Tab.class, tabId);
-      if (tab != null && tab.getTable() != null) {
-        String dalEntityName = tab.getTable().getName();
-        BaseOBObject rec = OBDal.getInstance().get(dalEntityName, recordId);
-        if (rec != null && rec.getEntity().hasProperty("documentAction")) {
-          rec.set("documentAction", docAction);
-          OBDal.getInstance().save(rec);
-          OBDal.getInstance().flush();
-        }
+      BaseOBObject rec = DocActionResolution.loadDocActionRecord(tabId, recordId);
+      if (rec != null) {
+        rec.set(DocActionResolution.PROPERTY_DOCUMENT_ACTION, docAction);
+        OBDal.getInstance().save(rec);
+        OBDal.getInstance().flush();
       }
     } catch (Exception e) {
       log.warn("Could not set docAction on record: {}", e.getMessage());

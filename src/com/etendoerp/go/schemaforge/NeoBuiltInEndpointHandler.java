@@ -17,6 +17,7 @@ import org.openbravo.dal.service.OBDal;
 import com.etendoerp.go.schemaforge.email.TransactionalEmailService;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 import com.etendoerp.go.schemaforge.util.NeoImageHelper;
+import com.etendoerp.go.schemaforge.util.RoleAccessMatrix;
 
 /**
  * Routes NEO endpoints that are served directly by the servlet rather than by
@@ -165,12 +166,12 @@ class NeoBuiltInEndpointHandler {
    *
    * <p>ETP-5546: "Modelos Fiscales" access is represented by the role's grant on the Tax
    * Report window (ETP-5116 proxy) — gate both verbs on it before reaching the service, same
-   * window id {@link NeoAttachmentAuthorizer#TAX_REPORT_WINDOW_ID} the attachment authorizer
-   * already proxies through.
+   * shared window id {@link RoleAccessMatrix#TAX_MODELS_PROXY_WINDOW_ID} the attachment
+   * authorizer already proxies through (ETP-5540).
    */
   private void handleFiscalModelsCatalogEndpoint(String method,
       HttpServletRequest request, HttpServletResponse response) throws IOException {
-    if (!NeoAccessHelper.hasWindowAccess(NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID, method)) {
+    if (!NeoAccessHelper.hasWindowAccess(RoleAccessMatrix.TAX_MODELS_PROXY_WINDOW_ID, method)) {
       servlet.sendError(response, HttpServletResponse.SC_FORBIDDEN, "Access denied");
       return;
     }

@@ -52,7 +52,10 @@ public final class OnboardingFieldLimits {
   /**
    * The client name is written unchanged to {@code AD_CLIENT.NAME} NVARCHAR(60) and to
    * {@code AD_CLIENT.VALUE} / {@code AD_ORG.VALUE}, both NVARCHAR(40) — the search keys bind
-   * first. {@code AD_ROLE.NAME} additionally receives {@code clientName + " Admin"}.
+   * first. {@code AD_ROLE.NAME} additionally receives {@code clientName + " Admin"}. The trees
+   * ({@code clientName + " Product Characteristic"}) do not fit {@code AD_TREE.NAME} (60) above 37
+   * characters; the client is built under a 37-character provisioning name and the final rename
+   * truncates them to 60 ({@code PooledTenantClaimService.PLACEHOLDER_DERIVED_NAME_UPDATES}).
    */
   public static final int CLIENT_NAME = 40;
 
