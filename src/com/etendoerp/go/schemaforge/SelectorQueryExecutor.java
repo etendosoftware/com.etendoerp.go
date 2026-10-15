@@ -45,6 +45,7 @@ final class SelectorQueryExecutor {
 
   private static final Logger log = LogManager.getLogger(SelectorQueryExecutor.class);
   private static final String PARAM_SEARCH = "search";
+  private static final String ORDER_BY = " ORDER BY ";
   private static final String PARAM_SEARCH_LANG = "searchLang";
   private static final String FIELD_LABEL = "label";
   private static final String PARAM_LANGUAGE = "language";
@@ -205,7 +206,7 @@ final class SelectorQueryExecutor {
     }
     int totalCount = countQuery.count();
 
-    String dataWhere = effectiveWhere + " ORDER BY " + alias + "." + meta.displayProperty;
+    String dataWhere = effectiveWhere + ORDER_BY + alias + "." + meta.displayProperty;
     OBQuery<BaseOBObject> dataQuery = OBDal.getInstance().createQuery(meta.entityName, dataWhere);
     NeoSelectorExecutionHelper.bindNamedParameters(dataQuery, whereClause.getParams());
     NeoSelectorExecutionHelper.bindNamedParameters(dataQuery, extraFilterParams);
@@ -380,74 +381,23 @@ final class SelectorQueryExecutor {
     String searchParam = hasSearch ? "%" + search.toLowerCase() + "%" : null;
 
     String displayOrder = alias + "." + meta.displayProperty;
-    int totalCount = 0;
-    List<Object> rows = null;
-    List<String> pageIds = null;
-    if (idExpr != null && displayIsPrimitive(meta)) {
-      // Decided up front, with no query: no fallback on failure. A failing Hibernate query marks
-      // the transaction rollback-only before any catch could run, and custom-HQL selectors also run
-      // inside writes (FK-by-name resolution), so a swallowed failure would let a write report
-      // success and lose its commit. If record paging is chosen and fails, the error propagates.
-      RecordPage page = fetchRecordPage(new RecordQuery(selectPart, fromClause.getHql(),
-          fromOnwards, idExpr, displayOrder, fromParams, searchParam), limit, offset);
-      totalCount = page.totalCount;
-      pageIds = page.ids;
-      rows = page.rows;
-    } else {
-      String countHql = "SELECT COUNT(" + alias + ")" + fromClause.getHql();
-      org.hibernate.query.Query<Long> countQuery = OBDal.getInstance()
-          .getSession().createQuery(countHql, Long.class);
-      bindCustomHqlParams(countQuery, fromParams, searchParam);
-      Long countResult = countQuery.uniqueResult();
-      totalCount = (countResult != null) ? countResult.intValue() : 0;
-      String dataHql = selectPart + fromClause.getHql() + " ORDER BY " + displayOrder;
-      org.hibernate.query.Query<?> dataQuery = OBDal.getInstance().getSession().createQuery(dataHql);
-      bindCustomHqlParams(dataQuery, fromParams, searchParam);
-      dataQuery.setMaxResults(limit);
-      dataQuery.setFirstResult(offset);
-      rows = new ArrayList<>(dataQuery.list());
-    }
+    // Decided up front, with no query: no fallback on failure. A failing Hibernate query marks the
+    // transaction rollback-only before any catch could run, and custom-HQL selectors also run
+    // inside writes (FK-by-name resolution), so a swallowed failure would let a write report
+    // success and lose its commit. If record paging is chosen and fails, the error propagates.
+    RecordPage page = idExpr != null && displayIsPrimitive(meta)
+        ? fetchRecordPage(new RecordQuery(selectPart, fromClause.getHql(), fromOnwards, idExpr,
+            displayOrder, fromParams, searchParam), limit, offset)
+        : fetchRowPage(alias, new RecordQuery(selectPart, fromClause.getHql(), fromOnwards, null,
+            displayOrder, fromParams, searchParam), limit, offset);
 
     JSONArray columns = SelectorResponseSupport.buildGridColumnMetadata(meta.gridFields);
     Entity entityDef = ModelProvider.getInstance().getEntity(meta.entityName);
-    Map<String, JSONObject> itemsById = new java.util.LinkedHashMap<>();
-    List<JSONObject> rowItems = new ArrayList<>();
-    for (Object rawRow : rows) {
-      Object[] row = (rawRow instanceof Object[]) ? (Object[]) rawRow : new Object[]{ rawRow };
-      String recordId = SelectorResponseSupport.extractRecordId(row, idColIdx);
-      if (pageIds != null && (recordId == null || itemsById.containsKey(recordId))) {
-        continue; // ETP-5703: another row of a record already taken (first row wins, ordered)
-      }
-      JSONObject item = new JSONObject();
-      item.put("id", recordId);
-      item.put(FIELD_LABEL,
-          SelectorRowMapper.extractDisplayLabel(row, colIndexMap, meta.displayProperty,
-              entityDef, recordId));
-      SelectorRowMapper.mapGridFieldsToItem(item, row, colIndexMap, meta.gridFields);
-      if (pageIds != null) {
-        itemsById.put(recordId, item);
-      } else {
-        rowItems.add(item);
-      }
-    }
-    JSONArray items = new JSONArray();
     List<String> entityIds = new ArrayList<>();
-    if (pageIds != null) {
-      // In page order, and only the page's records — a row of any other record (e.g. let in by
-      // operator precedence in the custom where clause) is dropped.
-      for (String pageId : pageIds) {
-        JSONObject item = itemForPageId(itemsById, pageId);
-        if (item != null && !entityIds.contains(item.getString("id"))) {
-          items.put(item);
-          entityIds.add(item.getString("id"));
-        }
-      }
-    } else {
-      for (JSONObject item : rowItems) {
-        items.put(item);
-        entityIds.add(item.optString("id", null));
-      }
-    }
+    JSONArray items = page.ids != null
+        ? itemsByRecord(page, idColIdx, colIndexMap, meta, entityDef, entityIds)
+        : itemsByRow(page.rows, idColIdx, colIndexMap, meta, entityDef, entityIds);
+    int totalCount = page.totalCount;
 
     boolean hasHqlOnlyAux = meta.auxFields.stream()
         .anyMatch(af -> StringUtils.isBlank(af.property) && StringUtils.isNotBlank(af.hqlAlias));
@@ -456,6 +406,88 @@ final class SelectorQueryExecutor {
     }
 
     return SelectorResponseSupport.buildSelectorResponse(items, columns, totalCount, limit, offset);
+  }
+
+  /**
+   * The row-paged flow every custom-HQL selector had before ETP-5703: {@code COUNT(<alias>)} and the
+   * data query paged by row. The returned page carries no record ids ({@code ids == null}).
+   */
+  private static RecordPage fetchRowPage(String alias, RecordQuery query, int limit, int offset) {
+    RecordPage page = new RecordPage();
+    String countHql = "SELECT COUNT(" + alias + ")" + query.fromHql;
+    org.hibernate.query.Query<Long> countQuery = OBDal.getInstance()
+        .getSession().createQuery(countHql, Long.class);
+    bindCustomHqlParams(countQuery, query.params, query.searchParam);
+    Long countResult = countQuery.uniqueResult();
+    page.totalCount = (countResult != null) ? countResult.intValue() : 0;
+    String dataHql = query.selectPart + query.fromHql + ORDER_BY + query.displayOrder;
+    org.hibernate.query.Query<?> dataQuery = OBDal.getInstance().getSession().createQuery(dataHql);
+    bindCustomHqlParams(dataQuery, query.params, query.searchParam);
+    dataQuery.setMaxResults(limit);
+    dataQuery.setFirstResult(offset);
+    page.ids = null;
+    page.rows = new ArrayList<>(dataQuery.list());
+    return page;
+  }
+
+  /** A query row as an {@code Object[]} (a single-column projection comes back unwrapped). */
+  private static Object[] asRow(Object rawRow) {
+    return (rawRow instanceof Object[]) ? (Object[]) rawRow : new Object[]{ rawRow };
+  }
+
+  /** The selector item of one row: id, label and grid fields. */
+  private static JSONObject toItem(Object[] row, String recordId, Map<String, Integer> colIndexMap,
+      SelectorMeta meta, Entity entityDef) throws Exception {
+    JSONObject item = new JSONObject();
+    item.put("id", recordId);
+    item.put(FIELD_LABEL,
+        SelectorRowMapper.extractDisplayLabel(row, colIndexMap, meta.displayProperty,
+            entityDef, recordId));
+    SelectorRowMapper.mapGridFieldsToItem(item, row, colIndexMap, meta.gridFields);
+    return item;
+  }
+
+  /**
+   * Record-paged items (ETP-5703): one item per record — the first of its rows, in query order —
+   * emitted in page order, and only the page's records: a row of any other record (e.g. let in by
+   * operator precedence in the custom where clause) is dropped. Fills {@code entityIds}.
+   */
+  private static JSONArray itemsByRecord(RecordPage page, Integer idColIdx,
+      Map<String, Integer> colIndexMap, SelectorMeta meta, Entity entityDef,
+      List<String> entityIds) throws Exception {
+    Map<String, JSONObject> itemsById = new java.util.LinkedHashMap<>();
+    for (Object rawRow : page.rows) {
+      Object[] row = asRow(rawRow);
+      String recordId = SelectorResponseSupport.extractRecordId(row, idColIdx);
+      if (recordId == null || itemsById.containsKey(recordId)) {
+        continue; // another row of a record already taken (first row wins, ordered)
+      }
+      itemsById.put(recordId, toItem(row, recordId, colIndexMap, meta, entityDef));
+    }
+    JSONArray items = new JSONArray();
+    for (String pageId : page.ids) {
+      JSONObject item = itemForPageId(itemsById, pageId);
+      if (item != null && !entityIds.contains(item.getString("id"))) {
+        items.put(item);
+        entityIds.add(item.getString("id"));
+      }
+    }
+    return items;
+  }
+
+  /** Row-paged items: one per row, in query order, as before ETP-5703. Fills {@code entityIds}. */
+  private static JSONArray itemsByRow(List<Object> rows, Integer idColIdx,
+      Map<String, Integer> colIndexMap, SelectorMeta meta, Entity entityDef,
+      List<String> entityIds) throws Exception {
+    JSONArray items = new JSONArray();
+    for (Object rawRow : rows) {
+      Object[] row = asRow(rawRow);
+      String recordId = SelectorResponseSupport.extractRecordId(row, idColIdx);
+      JSONObject item = toItem(row, recordId, colIndexMap, meta, entityDef);
+      items.put(item);
+      entityIds.add(item.optString("id", null));
+    }
+    return items;
   }
 
   private static final String PARAM_PAGE_IDS = "sfPageRecordIds";
@@ -578,7 +610,7 @@ final class SelectorQueryExecutor {
     StringBuilder dataHql = new StringBuilder(query.selectPart).append(query.fromHql)
         .append(hasWhere ? " AND " : " WHERE ").append(query.idExpr).append(" IN (:")
         .append(PARAM_PAGE_IDS).append(")")
-        .append(" ORDER BY ").append(query.displayOrder).append(", ").append(query.idExpr);
+        .append(ORDER_BY).append(query.displayOrder).append(", ").append(query.idExpr);
     String rootAlias = fromRootAlias(query.fromOnwards);
     if (rootAlias != null) {
       dataHql.append(", ").append(rootAlias).append(".id");

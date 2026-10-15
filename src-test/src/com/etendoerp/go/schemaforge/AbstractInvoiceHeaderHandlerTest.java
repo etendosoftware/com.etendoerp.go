@@ -82,6 +82,7 @@ import org.openbravo.model.common.invoice.ReversedInvoice;
  * </ul>
  *
  * @covers com.etendoerp.go.schemaforge.AbstractInvoiceHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.InvoiceCurrencyRateDefaults
  */
 public class AbstractInvoiceHeaderHandlerTest {
 
@@ -3615,9 +3616,9 @@ public class AbstractInvoiceHeaderHandlerTest {
           any(), eq("org-1"))).thenReturn(lookedUp);
 
       TestHandler invoiceHandler = new TestHandler();
-      invoiceHandler.captureCurrencyRateDefault(
+      invoiceHandler.currencyRateDefaults.capture(
           createContext(new JSONObject().put("currency", "usd-id")));
-      invoiceHandler.applyCurrencyRateDefault(NeoContext.builder()
+      invoiceHandler.currencyRateDefaults.apply(NeoContext.builder()
           .httpMethod("POST").endpointType(NeoEndpointType.CRUD).recordId("inv-1").build());
 
       verify(ps).setBigDecimal(1, new BigDecimal("1.160000000000"));
@@ -3645,12 +3646,12 @@ public class AbstractInvoiceHeaderHandlerTest {
       rateMock.when(() -> NeoExchangeRateService.rateAsDecimal(eq("eur-id"), eq("gbp-id"),
           any(), eq("org-1"))).thenReturn(gbpRate);
 
-      AbstractInvoiceHeaderHandler.RateChange onChange =
-          AbstractInvoiceHeaderHandler.resolveCurrencyRateChange(invoice,
-              AbstractInvoiceHeaderHandler.RateDefault.ON_CURRENCY_CHANGE);
-      AbstractInvoiceHeaderHandler.RateChange onCreate =
-          AbstractInvoiceHeaderHandler.resolveCurrencyRateChange(invoice,
-              AbstractInvoiceHeaderHandler.RateDefault.ON_CREATE);
+      InvoiceCurrencyRateDefaults.RateChange onChange =
+          InvoiceCurrencyRateDefaults.resolveCurrencyRateChange(invoice,
+              InvoiceCurrencyRateDefaults.RateDefault.ON_CURRENCY_CHANGE);
+      InvoiceCurrencyRateDefaults.RateChange onCreate =
+          InvoiceCurrencyRateDefaults.resolveCurrencyRateChange(invoice,
+              InvoiceCurrencyRateDefaults.RateDefault.ON_CREATE);
 
       assertNotNull(onChange);
       assertEquals(0, new BigDecimal("0.86").compareTo(onChange.rate()));
@@ -3678,9 +3679,9 @@ public class AbstractInvoiceHeaderHandlerTest {
       rateMock.when(() -> NeoExchangeRateService.rateAsDecimal(any(), any(), any(), any()))
           .thenReturn(null);
 
-      AbstractInvoiceHeaderHandler.RateChange change =
-          AbstractInvoiceHeaderHandler.resolveCurrencyRateChange(invoice,
-              AbstractInvoiceHeaderHandler.RateDefault.ON_CURRENCY_CHANGE);
+      InvoiceCurrencyRateDefaults.RateChange change =
+          InvoiceCurrencyRateDefaults.resolveCurrencyRateChange(invoice,
+              InvoiceCurrencyRateDefaults.RateDefault.ON_CURRENCY_CHANGE);
 
       assertNotNull(change);
       assertNull(change.rate());
@@ -3693,9 +3694,9 @@ public class AbstractInvoiceHeaderHandlerTest {
     java.time.LocalDate date = java.time.LocalDate.of(2026, 10, 14);
 
     assertEquals("No hay tipo de cambio de EUR a USD para el 14/10/2026; indica eTGOCurrencyRate.",
-        AbstractInvoiceHeaderHandler.missingRateText("es_ES", "EUR", "USD", date));
+        InvoiceCurrencyRateDefaults.missingRateText("es_ES", "EUR", "USD", date));
     assertEquals("No exchange rate from EUR to USD for 2026-10-14; send eTGOCurrencyRate.",
-        AbstractInvoiceHeaderHandler.missingRateText("en_US", "EUR", "USD", date));
+        InvoiceCurrencyRateDefaults.missingRateText("en_US", "EUR", "USD", date));
   }
 
   /**
@@ -3739,8 +3740,8 @@ public class AbstractInvoiceHeaderHandlerTest {
       applyCtx.setPreviousResult(NeoResponse.ok(coreBody));
 
       TestHandler invoiceHandler = new TestHandler();
-      invoiceHandler.captureCurrencyRateDefault(createContext(new JSONObject()));
-      invoiceHandler.applyCurrencyRateDefault(applyCtx);
+      invoiceHandler.currencyRateDefaults.capture(createContext(new JSONObject()));
+      invoiceHandler.currencyRateDefaults.apply(applyCtx);
 
       JSONArray messages = coreBody.getJSONObject("response").getJSONArray("messages");
       assertEquals(1, messages.length());
@@ -3794,10 +3795,10 @@ public class AbstractInvoiceHeaderHandlerTest {
           .thenReturn(null);
 
       TestHandler invoiceHandler = new TestHandler();
-      invoiceHandler.captureCurrencyRateDefault(NeoContext.builder()
+      invoiceHandler.currencyRateDefaults.capture(NeoContext.builder()
           .httpMethod("PUT").endpointType(NeoEndpointType.CRUD).recordId("inv-1")
           .requestBody(new JSONObject().put("currency", "gbp-id")).build());
-      invoiceHandler.applyCurrencyRateDefault(NeoContext.builder()
+      invoiceHandler.currencyRateDefaults.apply(NeoContext.builder()
           .httpMethod("PUT").endpointType(NeoEndpointType.CRUD).recordId("inv-1").build());
 
       verify(ps).setNull(1, java.sql.Types.NUMERIC);
@@ -3869,8 +3870,8 @@ public class AbstractInvoiceHeaderHandlerTest {
 
       for (NeoContext preHook : preHooks) {
         TestHandler invoiceHandler = new TestHandler();
-        invoiceHandler.captureCurrencyRateDefault(preHook);
-        invoiceHandler.applyCurrencyRateDefault(NeoContext.builder().httpMethod(preHook.getHttpMethod())
+        invoiceHandler.currencyRateDefaults.capture(preHook);
+        invoiceHandler.currencyRateDefaults.apply(NeoContext.builder().httpMethod(preHook.getHttpMethod())
             .endpointType(NeoEndpointType.CRUD).recordId("inv-1").build());
       }
 
@@ -3894,15 +3895,15 @@ public class AbstractInvoiceHeaderHandlerTest {
       curMock.when(() -> OBCurrencyUtils.getOrgCurrency("org-1")).thenReturn("eur-id");
 
       Invoice inOrgCurrency = foreignInvoice(dal, "eur-id", null);
-      assertNull(AbstractInvoiceHeaderHandler.resolveCurrencyRateChange(inOrgCurrency,
-          AbstractInvoiceHeaderHandler.RateDefault.ON_CREATE));
+      assertNull(InvoiceCurrencyRateDefaults.resolveCurrencyRateChange(inOrgCurrency,
+          InvoiceCurrencyRateDefaults.RateDefault.ON_CREATE));
       rateMock.verifyNoInteractions();
 
       Invoice processed = foreignInvoice(dal, "usd-id", null);
       when(processed.isProcessed()).thenReturn(true);
       curMock.clearInvocations();
-      assertNull(AbstractInvoiceHeaderHandler.resolveCurrencyRateChange(processed,
-          AbstractInvoiceHeaderHandler.RateDefault.ON_CURRENCY_CHANGE));
+      assertNull(InvoiceCurrencyRateDefaults.resolveCurrencyRateChange(processed,
+          InvoiceCurrencyRateDefaults.RateDefault.ON_CURRENCY_CHANGE));
       curMock.verify(() -> OBCurrencyUtils.getOrgCurrency(anyString()), Mockito.never());
     }
   }
@@ -3925,9 +3926,9 @@ public class AbstractInvoiceHeaderHandlerTest {
       rateMock.when(() -> NeoExchangeRateService.rateAsDecimal(eq("eur-id"), eq("usd-id"),
           any(), eq("org-1"))).thenReturn(lookedUp);
 
-      AbstractInvoiceHeaderHandler.RateChange change =
-          AbstractInvoiceHeaderHandler.resolveCurrencyRateChange(invoice,
-              AbstractInvoiceHeaderHandler.RateDefault.ON_CREATE);
+      InvoiceCurrencyRateDefaults.RateChange change =
+          InvoiceCurrencyRateDefaults.resolveCurrencyRateChange(invoice,
+              InvoiceCurrencyRateDefaults.RateDefault.ON_CREATE);
 
       assertNotNull(change);
       assertTrue(change.write());
@@ -3970,8 +3971,8 @@ public class AbstractInvoiceHeaderHandlerTest {
       applyCtx.setPreviousResult(NeoResponse.ok(coreBody));
 
       TestHandler invoiceHandler = new TestHandler();
-      invoiceHandler.captureCurrencyRateDefault(createContext(new JSONObject().put("currency", "usd-id")));
-      invoiceHandler.applyCurrencyRateDefault(applyCtx);
+      invoiceHandler.currencyRateDefaults.capture(createContext(new JSONObject().put("currency", "usd-id")));
+      invoiceHandler.currencyRateDefaults.apply(applyCtx);
 
       assertEquals(0, new BigDecimal("1.16").compareTo(
           new BigDecimal(String.valueOf(saved.get("eTGOCurrencyRate")))));
