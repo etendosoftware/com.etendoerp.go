@@ -258,5 +258,10 @@ public class NeoResponseTest {
     assertFalse(error.getString("message").contains("ETPR_"));
     assertEquals("[\"PeriodNotAvailable\"]", error.getJSONArray("messageKeys").toString());
     assertEquals(400, refused.getHttpStatus());
+
+    // 401/403/404 are never a business refusal: left alone, no lookup.
+    JSONObject notFound = NeoResponse.identifyPeriodRefusal(
+        NeoResponse.error(404, "@ETPR_PeriodClosedForUnRemovePayment@")).getBody().getJSONObject("error");
+    assertFalse(notFound.has("messageKeys"));
   }
 }

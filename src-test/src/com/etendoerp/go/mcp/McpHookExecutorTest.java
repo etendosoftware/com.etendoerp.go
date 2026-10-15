@@ -236,6 +236,20 @@ public class McpHookExecutorTest {
     }
   }
 
+  /**
+   * ETP-5577: core's raw {@code @ETPR_PeriodClosedForUnRemovePayment@} is named on MCP as on REST,
+   * so the agent gets the keyed refusal and the hint, never the raw token.
+   */
+  @Test
+  public void testNeoResponseToMcpResultNamesTheRawCorePeriodToken() throws Exception {
+    JSONObject result = McpHookExecutor.neoResponseToMcpResult(
+        NeoResponse.error(400, "@ETPR_PeriodClosedForUnRemovePayment@"));
+    String text = result.getJSONArray(FIELD_CONTENT).getJSONObject(0).getString(FIELD_TEXT);
+    JSONObject envelope = new JSONObject(text);
+    assertFalse(text.contains("ETPR_"));
+    assertEquals(McpToolRouter.PERIOD_NOT_AVAILABLE_HINT, envelope.getString("hint"));
+  }
+
   /** Any other refusal keeps its envelope without the period hint. */
   @Test
   public void testNeoResponseToMcpResultHasNoPeriodHintForOtherKeys() throws Exception {

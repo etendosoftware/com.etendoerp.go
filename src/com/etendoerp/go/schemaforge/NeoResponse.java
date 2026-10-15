@@ -244,6 +244,9 @@ public class NeoResponse {
    * Core {@code Utilities.checkPeriod}'s refusal, which reaches NEO handlers untranslated and is
    * worded for removing payments whatever the action was.
    */
+  /** Statuses that are never a business refusal: not worth a message-text lookup. */
+  private static final java.util.Set<Integer> NOT_A_REFUSAL = java.util.Set.of(401, 403, 404);
+
   private static final String UNTRANSLATED_PERIOD_CLOSED = "@ETPR_PeriodClosedForUnRemovePayment@";
 
   /** Rewrites a raw {@link #UNTRANSLATED_PERIOD_CLOSED} body as {@link #periodNotAvailable(int)}. */
@@ -278,7 +281,8 @@ public class NeoResponse {
    * @return the same response, with top-level {@code messageKeys} when a period refusal was found
    */
   public static NeoResponse identifyPeriodRefusal(NeoResponse response) {
-    if (response == null || response.getHttpStatus() < 400 || response.getBody() == null) {
+    if (response == null || response.getHttpStatus() < 400 || response.getBody() == null
+        || NOT_A_REFUSAL.contains(response.getHttpStatus())) {
       return response;
     }
     JSONObject body = response.getBody();

@@ -21,7 +21,9 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -143,8 +145,26 @@ public final class NeoMessageTranslator {
     return recognized;
   }
 
-  /** Every text of an AD_Message: the base one and each translation. Empty when unreadable. */
+  /** AD_Message texts per key; they only change on a rebuild. Failed reads are not cached. */
+  private static final Map<String, List<String>> MESSAGE_TEXTS = new ConcurrentHashMap<>();
+
+  /**
+   * Every text of an AD_Message: the base one and each translation. Empty when unreadable. Cached:
+   * this runs on error responses, possibly in a session whose transaction is already aborted.
+   */
   static List<String> messageTexts(String key) {
+    List<String> cached = MESSAGE_TEXTS.get(key);
+    if (cached != null) {
+      return cached;
+    }
+    List<String> loaded = loadMessageTexts(key);
+    if (!loaded.isEmpty()) {
+      MESSAGE_TEXTS.put(key, Collections.unmodifiableList(loaded));
+    }
+    return loaded;
+  }
+
+  private static List<String> loadMessageTexts(String key) {
     try {
       OBContext.setAdminMode(true);
       try {

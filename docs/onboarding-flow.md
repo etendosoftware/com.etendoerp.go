@@ -965,7 +965,10 @@ refuses with a raw, untranslated `@ETPR_PeriodClosedForUnRemovePayment@` worded 
 payments: the cash close confirm and the reconciliation reactivate / remove-operation guards
 answer `NeoResponse.periodNotAvailable(409)` instead, and `identifyPeriodRefusal` rewrites that
 token as the keyed `PeriodNotAvailable` refusal on any other path (e.g. reactivating a reconciled
-movement). The SPA turns it into a toast that
+movement). The cash close's second check — a marked movement whose own accounting date is in a
+closed period — keeps its sentence naming the movement and adds `error.messageKeys`
+(`PeriodNotAvailable`) plus `error.periodDate` (the movement's date), so the SPA opens the fiscal
+year that holds the movement, not the close's. The SPA turns it into a toast that
 points the owner to this row while the review is pending (others are told to ask the owner; an
 owner whose account dismissed First Steps, which is per account, goes to Calendar) and to
 Calendar afterwards — to the fiscal year whose period contains the document's date, so a July–June

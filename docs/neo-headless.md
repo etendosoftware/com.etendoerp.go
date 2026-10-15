@@ -3645,6 +3645,15 @@ An operation rejected by the preprocessor is reported after the earlier operatio
 rather than before the transaction opens; nothing is left behind, and the envelope is the same
 `committed:false` + `failedAt` shape documented in §4.12.4.
 
+##### Period refusals on every channel (ETP-5577, declared)
+
+A refusal for a date with no open period is named `PeriodNotAvailable` (or `PeriodNotValid`) in
+`messageKeys` the same way on REST and MCP: `NeoResponse.identifyPeriodRefusal` runs in
+`NeoServlet.writeResponse` and in `McpHookExecutor.neoResponseToMcpResult` (before the body is flattened and the `openClose` hint is added).
+It also rewrites core `Utilities.checkPeriod`'s raw `@ETPR_PeriodClosedForUnRemovePayment@` into
+the translated, keyed refusal. Still divergent: inside an `etendo_batch` / `/sws/neo/batch` body,
+a per-operation error is not keyed — only the envelope goes through these two places.
+
 #### 4.12.10 An excluded field does not exist, on every verb (ETP-5335, IMP-39)
 
 **A field the spec excludes is absent from `etendo_schema`, refused by `etendo_list` as a filter, and
