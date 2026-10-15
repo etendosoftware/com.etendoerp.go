@@ -21,10 +21,12 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.anyString;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
 
+import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -1018,6 +1020,33 @@ class McpWriteGateTest {
         assertTrue(body.contains("reportServerOwnedFields"),
             verb + " collects the report and never attaches it to the response");
       }
+    }
+  }
+
+  // ── filters on computed columns (ETP-5705) ────────────────────────────
+
+  /**
+   * A computed column (AD SQLLogic) is a DAL property but not a mapped Hibernate one: written as
+   * {@code e.<name>} the HQL failed with "could not resolve property" and the filter answered 500.
+   * It is only reachable through the {@code _computedColumns} proxy, as in core's
+   * {@code AdvancedQueryBuilder}.
+   */
+  @Nested
+  @DisplayName("a filter on a computed column goes through the _computedColumns proxy")
+  class ComputedColumnFilters {
+
+    @Test
+    @DisplayName("a comparison operator on a computed primitive targets e._computedColumns")
+    void comparisonOnComputedColumnUsesTheProxy() throws Exception {
+      Property prop = declareProperty("deliveryStatus", "DeliveryStatus");
+      when(prop.isComputedColumn()).thenReturn(true);
+      when(prop.isPrimitive()).thenReturn(true);
+      doReturn(BigDecimal.class).when(prop).getPrimitiveObjectType();
+
+      String where = McpQuerySupport.buildWhereFromFilters(
+          fields("deliveryStatus", new JSONObject().put("lt", 100)), adTab, specEntity(), null);
+
+      assertEquals("e." + Entity.COMPUTED_COLUMNS_PROXY_PROPERTY + ".deliveryStatus < 100", where);
     }
   }
 }

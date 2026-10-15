@@ -8529,3 +8529,17 @@ is logged.
 **Not served** (answer `404 -32601` in the modern era): `subscriptions/listen`,
 `resources/templates/list`, `logging/setLevel`, tasks, MRTR. We never need client input, so a
 result is always `complete`.
+
+#### 4.12.31 `etendo_list` filters on computed (SQLLogic) columns (ETP-5705)
+
+A filter key may name a computed column (AD `SQLLogic`, `Property.isComputedColumn()`), on equality,
+`between` and the comparison operators alike. Such a property exists in the DAL model but is not a
+mapped Hibernate property, so `McpQuerySupport` writes it as `e._computedColumns.<name>`
+(`Entity.COMPUTED_COLUMNS_PROXY_PROPERTY`), the same path core's `AdvancedQueryBuilder` uses for the
+SPA grid. Before this, the HQL said `e.<name>` and the call failed with a 500 (`could not resolve
+property`), e.g. `deliveryStatus` on `sales-order/header` or `eTGODueDate` on `sales-invoice/header`.
+Every other property still renders as `e.<name>`; the choice is structural, never per entity.
+
+**Performance:** the SQLLogic subquery runs per row inside the `WHERE`. When the entity has a stored
+twin of the same value (a stored computed column, e.g. `eTGODeliveryStatus` next to
+`deliveryStatus`), filter on the stored one: it is a physical column, read rather than recomputed.

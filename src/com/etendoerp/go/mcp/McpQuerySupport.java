@@ -394,16 +394,30 @@ final class McpQuerySupport {
     return new java.util.ArrayList<>(names);
   }
 
+  /**
+   * The HQL path of a resolved filter property, rooted at the {@code e} alias.
+   *
+   * <p>ETP-5705: a computed column (AD SQLLogic) is a DAL property but not a mapped Hibernate
+   * one, so {@code e.<name>} failed with "could not resolve property" and every filter on it
+   * answered 500. Hibernate only reaches it through the {@code _computedColumns} proxy, the same
+   * path core's {@code AdvancedQueryBuilder} uses. Any other property keeps {@code e.<name>}.</p>
+   */
+  private static String hqlPath(Property prop) {
+    return prop.isComputedColumn()
+        ? "e." + Entity.COMPUTED_COLUMNS_PROXY_PROPERTY + "." + prop.getName()
+        : "e." + prop.getName();
+  }
+
   /** Append {@code e.prop = value} (or {@code e.prop.id = 'value'} for a FK), type-aware. */
   private static void appendEqualityCondition(StringBuilder where, Entity dalEntity,
       SFEntity sfEntity, java.util.Set<String> excluded, String key, Object value) {
     Property prop = resolveFilterProperty(dalEntity, sfEntity, excluded, key);
     appendAnd(where);
     if (!prop.isPrimitive()) {
-      where.append("e.").append(prop.getName()).append(".id=")
+      where.append(hqlPath(prop)).append(".id=")
           .append(McpBusinessFilters.formatHqlValue(String.class, false, value));
     } else {
-      where.append("e.").append(prop.getName()).append('=').append(
+      where.append(hqlPath(prop)).append('=').append(
           McpBusinessFilters.formatHqlValue(prop.getPrimitiveObjectType(), true, value));
     }
   }
@@ -427,7 +441,7 @@ final class McpQuerySupport {
               "the 'between' operator takes a two-element [from, to] array");
         }
         appendAnd(where);
-        where.append("e.").append(prop.getName()).append(" between ")
+        where.append(hqlPath(prop)).append(" between ")
             .append(McpBusinessFilters.formatHqlValue(type, prop.isPrimitive(), bounds.get(0)))
             .append(" and ")
             .append(McpBusinessFilters.formatHqlValue(type, prop.isPrimitive(), bounds.get(1)));
@@ -438,7 +452,7 @@ final class McpQuerySupport {
               McpBusinessFilters.operatorKeys());
         }
         appendAnd(where);
-        where.append("e.").append(prop.getName()).append(' ').append(sql).append(' ')
+        where.append(hqlPath(prop)).append(' ').append(sql).append(' ')
             .append(McpBusinessFilters.formatHqlValue(type, prop.isPrimitive(), operators.get(op)));
       }
     }
