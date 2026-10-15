@@ -82,6 +82,10 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
   private static final String FIELD_DOCUMENT_STATUS = "documentStatus";
   private static final String DOC_STATUS_COMPLETED = "CO";
   private static final String DOC_ACTION_REJECT = "RJ";
+  /** The button's column name, what the SPA posts. */
+  private static final String ACTION_CONVERT_COLUMN = "Convertquotation";
+  /** The button's field name, what an MCP {@code etendo_action} call reaches the handler under (ETP-5710). */
+  private static final String ACTION_CONVERT_FIELD = "convertquotation";
 
   /** The named actions published to agents, in presentation order (ETP-5535). */
   private static final Map<String, NeoActionContract> ACTION_CONTRACTS = buildActionContracts();
@@ -123,7 +127,7 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
     AbstractOrderHeaderHandler.syncTotalDiscountOnDocAction(context, totalDiscountService, false);
 
     if (NeoEndpointType.ACTION.equals(context.getEndpointType())
-        && "Convertquotation".equals(context.getFieldName())) {
+        && isConvertQuotationAction(context.getFieldName())) {
       return handleConvertQuotation(context.getRecordId());
     }
 
@@ -179,6 +183,10 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
    */
   static boolean isRejectDocAction(NeoContext context) {
     return DocActionRequestSupport.requests(context, DOC_ACTION_REJECT);
+  }
+
+  private static boolean isConvertQuotationAction(String action) {
+    return ACTION_CONVERT_COLUMN.equals(action) || ACTION_CONVERT_FIELD.equals(action);
   }
 
   /**
@@ -256,7 +264,7 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
   @Override
   public NeoResponse afterHandle(NeoContext context) {
     if (NeoEndpointType.ACTION.equals(context.getEndpointType())
-        && "Convertquotation".equals(context.getFieldName())) {
+        && isConvertQuotationAction(context.getFieldName())) {
       transferCurrencyRateToNewOrder(context.getRecordId());
     }
     return super.afterHandle(context);
