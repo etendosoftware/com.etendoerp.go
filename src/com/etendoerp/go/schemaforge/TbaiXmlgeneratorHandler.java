@@ -91,7 +91,7 @@ public class TbaiXmlgeneratorHandler extends AbstractLegacyInvoiceActionHandler 
    * ("Error: nif.Emisor: vacío") are never touched.
    */
   private static final Pattern QUALIFIED_EXCEPTION_PREFIX = Pattern.compile(
-      "(?:^|(?<=: ))(?:[a-z_$][\\w$]*\\.){2,}[A-Z][\\w$]*: ");
+      "(?:^|(?<=: ))(?:[a-z_$][\\w$]*+\\.){2,}+[A-Z][\\w$]*+: ");
 
   @Override
   protected NeoResponse executeAction(String recordId) throws Exception {
