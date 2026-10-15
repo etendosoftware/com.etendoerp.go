@@ -68,6 +68,7 @@ public class OnboardingInitialPeriodStateService {
   private final OnboardingPeriodControlService periodControlService;
   private final TenantEnvironmentLifecycleService lifecycleService;
 
+  /** Builds the service with its default collaborators. */
   public OnboardingInitialPeriodStateService() {
     this(new OnboardingPeriodControlService(), new TenantEnvironmentLifecycleService());
   }
@@ -82,6 +83,10 @@ public class OnboardingInitialPeriodStateService {
    * Records, inside the onboarding transaction, that the tenant's initial period state is pending
    * and whether its calendar must be reviewed.
    *
+   * @param clientId       the new tenant
+   * @param orgId          its organization
+   * @param adminUserId    the owner user
+   * @param adminRoleId    the owner role
    * @param reviewRequired productive tenant: its periods start never-opened until the owner
    *                       reviews the calendar
    */
@@ -95,12 +100,22 @@ public class OnboardingInitialPeriodStateService {
     }
   }
 
-  /** Whether the tenant's initial period state is still to be applied. */
+  /**
+   * Whether the tenant's initial period state is still to be applied.
+   *
+   * @param clientId tenant
+   * @return {@code true} while the pending marker is set
+   */
   public boolean isPending(String clientId) {
     return readClientPreference(PENDING_ATTRIBUTE, clientId) != null;
   }
 
-  /** Whether the tenant was onboarded with the calendar review required. */
+  /**
+   * Whether the tenant was onboarded with the calendar review required.
+   *
+   * @param clientId tenant
+   * @return {@code true} for a productive tenant whose calendar must be reviewed
+   */
   public boolean isReviewRequired(String clientId) {
     return VALUE_YES.equals(readClientPreference(REVIEW_REQUIRED_ATTRIBUTE, clientId));
   }
@@ -110,6 +125,7 @@ public class OnboardingInitialPeriodStateService {
    * marker. Leaves transaction handling to the caller: it commits on success and rolls back on
    * failure, so the marker survives a failure and the next login retries.
    *
+   * @param clientId tenant
    * @return {@code true} when the state was applied, {@code false} when nothing was pending
    */
   public boolean applyIfPending(String clientId) {

@@ -24,6 +24,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doCallRealMethod;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
@@ -39,6 +40,7 @@ import java.util.List;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.Session;
 import org.hibernate.query.NativeQuery;
+import com.etendoerp.go.schemaforge.util.OwnerSupport;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -97,6 +99,7 @@ class CalendarReviewServiceTest {
     doReturn(false).when(service).anyPeriodOpened("CAL");
     doReturn(false).when(service).anyPostedFact("CLIENT");
     doReturn(null).when(service).firstReferencingTable("CAL");
+    doReturn(null).when(service).firstNonOwnerEditor("CAL");
   }
 
   @AfterEach
@@ -116,7 +119,7 @@ class CalendarReviewServiceTest {
     for (String sql : List.of(CalendarReviewService.CALENDAR_FOREIGN_KEYS_SQL,
         CalendarReviewService.CALENDAR_SQL, CalendarReviewService.ANY_PERIOD_OPENED_SQL,
         CalendarReviewService.DELETE_LOG_SQL, CalendarReviewService.DELETE_PERIODS_SQL,
-        CalendarReviewService.DELETE_YEARS_SQL)) {
+        CalendarReviewService.DELETE_YEARS_SQL, CalendarReviewService.CALENDAR_EDITORS_SQL)) {
       assertFalse(sql.contains("::"), sql);
     }
     assertTrue(CalendarReviewService.CALENDAR_FOREIGN_KEYS_SQL
@@ -142,6 +145,41 @@ class CalendarReviewServiceTest {
     doReturn(true).when(service).anyPostedFact("CLIENT");
     assertEquals(409, service.regenerate("CLIENT", "JULY", "USER", OCT_14).status);
     verifyNothingDeleted();
+  }
+
+  /** A Finance user's periods (e.g. next year's) would be deleted with the calendar. */
+  @Test
+  void refusesOnceAnotherUserChangedTheCalendar() {
+    doReturn("FINANCE_USER").when(service).firstNonOwnerEditor("CAL");
+    CalendarReviewService.Refusal refusal = service.regenerate("CLIENT", "JULY", "USER", OCT_14);
+    assertEquals(409, refusal.status);
+    assertEquals("Another user already changed this calendar", refusal.message);
+    verifyNothingDeleted();
+  }
+
+  @Test
+  void theCalendarCannotBeRegeneratedOnceAnotherUserChangedIt() throws Exception {
+    when(query.list()).thenReturn(List.of());
+    doReturn("FINANCE_USER").when(service).firstNonOwnerEditor("CAL");
+    try (MockedStatic<OnboardingInitialPeriodStateService> markers =
+        mockStatic(OnboardingInitialPeriodStateService.class)) {
+      markers.when(() -> OnboardingInitialPeriodStateService.readClientPreference(
+          OnboardingInitialPeriodStateService.REVIEW_REQUIRED_ATTRIBUTE, "CLIENT")).thenReturn("Y");
+      assertFalse(service.state("CLIENT", OCT_14).getBoolean("canRegenerate"));
+    }
+  }
+
+  /** Dataset rows belong to the system users, which the query excludes; the owner is skipped. */
+  @Test
+  void onlyEditorsOtherThanTheOwnerCount() {
+    doCallRealMethod().when(service).firstNonOwnerEditor("CAL");
+    when(query.list()).thenReturn(List.of("OWNER"), List.of("OWNER", "FINANCE_USER"));
+    try (MockedStatic<OwnerSupport> owners = mockStatic(OwnerSupport.class)) {
+      owners.when(() -> OwnerSupport.isOwner("OWNER")).thenReturn(true);
+      assertNull(service.firstNonOwnerEditor("CAL"));
+      assertEquals("FINANCE_USER", service.firstNonOwnerEditor("CAL"));
+    }
+    assertTrue(CalendarReviewService.CALENDAR_EDITORS_SQL.contains("NOT IN ('0', '100')"));
   }
 
   @Test

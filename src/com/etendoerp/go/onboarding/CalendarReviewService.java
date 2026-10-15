@@ -36,6 +36,8 @@ import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.financialmgmt.calendar.Calendar;
 import org.openbravo.model.financialmgmt.calendar.Year;
 
+import com.etendoerp.go.schemaforge.util.OwnerSupport;
+
 /**
  * "Revisar calendario contable" (ETP-5577): the state of a tenant's accounting calendar review
  * and its two actions, confirming the calendar and regenerating it with another fiscal-year start.
@@ -54,7 +56,7 @@ public class CalendarReviewService {
   public static final String REVIEWED_ATTRIBUTE = "ETGO_CalendarReviewed";
 
   /** The fiscal-year starts the Calendar window offers ({@link FiscalCalendarSupport}). */
-  public static final Map<String, Integer> FISCAL_YEAR_STARTS = FiscalCalendarSupport.FISCAL_YEAR_STARTS;
+  private static final Map<String, Integer> FISCAL_YEAR_STARTS = FiscalCalendarSupport.FISCAL_YEAR_STARTS;
 
   private static final String PARAM_CLIENT_ID = "clientId";
   private static final String PARAM_CALENDAR_ID = "calendarId";
@@ -89,6 +91,18 @@ public class CalendarReviewService {
           + " OR EXISTS (SELECT 1 FROM c_periodcontrol_log l WHERE l.periodaction = 'O'"
           + " AND (l.c_period_id IN (" + CALENDAR_PERIODS + ") OR l.periodno IN ("
           + CALENDAR_PERIODS + "))) THEN 1 ELSE 0 END";
+
+  /**
+   * Everyone who created or changed a year or period of the calendar, except the system users
+   * ({@code 0}, {@code 100}) that own the onboarding dataset rows.
+   */
+  static final String CALENDAR_EDITORS_SQL =
+      "SELECT DISTINCT u FROM ("
+          + " SELECT y.createdby AS u FROM c_year y WHERE y.c_calendar_id = :calendarId"
+          + " UNION SELECT y.updatedby FROM c_year y WHERE y.c_calendar_id = :calendarId"
+          + " UNION SELECT p.createdby FROM c_period p WHERE p.c_period_id IN (" + CALENDAR_PERIODS + ")"
+          + " UNION SELECT p.updatedby FROM c_period p WHERE p.c_period_id IN (" + CALENDAR_PERIODS + ")"
+          + ") editors WHERE u NOT IN ('0', '100')";
 
   static final String ANY_POSTED_FACT_SQL =
       "SELECT CASE WHEN EXISTS (SELECT 1 FROM fact_acct f WHERE f.ad_client_id = :clientId)"
@@ -127,7 +141,9 @@ public class CalendarReviewService {
 
   /** Why a regenerate was refused; {@code null} message means it may proceed. */
   public static final class Refusal {
+    /** HTTP status the caller answers with (400 bad input, 409 calendar in use). */
     public final int status;
+    /** Human-readable reason, returned to the caller as the error message. */
     public final String message;
 
     Refusal(int status, String message) {
@@ -141,6 +157,8 @@ public class CalendarReviewService {
    *
    * @param clientId tenant
    * @param today    the caller's notion of today (the server date)
+   * @return the review state: required, reviewed, pending, canRegenerate and the current year
+   * @throws JSONException if the result cannot be built
    */
   public JSONObject state(String clientId, LocalDate today) throws JSONException {
     JSONObject result = new JSONObject();
@@ -159,7 +177,8 @@ public class CalendarReviewService {
         : StringUtils.substringBefore(reviewedAt, " "));
     result.put("anyPeriodOpened", anyPeriodOpened);
     result.put("anyPostedFact", anyPostedFact);
-    result.put("canRegenerate", calendarId != null && !anyPeriodOpened && !anyPostedFact);
+    result.put("canRegenerate", calendarId != null && !anyPeriodOpened && !anyPostedFact
+        && firstNonOwnerEditor(calendarId) == null);
     putCurrentYear(result, calendarId, today);
     return result;
   }
@@ -180,7 +199,12 @@ public class CalendarReviewService {
     result.put("fiscalYearStart", range == null ? JSONObject.NULL : range);
   }
 
-  /** Records the owner's confirmation. Nothing is opened: the owner opens periods in Calendar. */
+  /**
+   * Records the owner's confirmation. Nothing is opened: the owner opens periods in Calendar.
+   *
+   * @param clientId tenant
+   * @param userId   the confirming owner, stored with the confirmation instant
+   */
   public void confirm(String clientId, String userId) {
     markReviewed(clientId, userId);
   }
@@ -191,6 +215,10 @@ public class CalendarReviewService {
    * calendar: no period was ever opened, nothing was posted, and no row of any other table points
    * at its periods or years.
    *
+   * @param clientId        tenant
+   * @param fiscalYearStart JANUARY, APRIL, JULY or OCTOBER
+   * @param userId          the owner, recorded as the reviewer
+   * @param today           the date the new fiscal year must contain
    * @return a refusal, or {@code null} when the calendar was regenerated
    */
   public Refusal regenerate(String clientId, String fiscalYearStart, String userId,
@@ -208,6 +236,9 @@ public class CalendarReviewService {
     }
     if (anyPostedFact(clientId)) {
       return new Refusal(409, "The environment already has accounting entries");
+    }
+    if (firstNonOwnerEditor(calendarId) != null) {
+      return new Refusal(409, "Another user already changed this calendar");
     }
     String reference = firstReferencingTable(calendarId);
     if (reference != null) {
@@ -264,6 +295,22 @@ public class CalendarReviewService {
             .toInstant()))
         .list();
     return rows.isEmpty() ? null : (Object[]) rows.get(0);
+  }
+
+  /**
+   * A user other than the owner who created or changed a year or period of the calendar, or
+   * {@code null}. Regenerating would silently delete their work (e.g. a Finance user who created
+   * next year's periods), so it is refused. The owner may regenerate over their own changes.
+   */
+  String firstNonOwnerEditor(String calendarId) {
+    List<?> editors = nativeQuery(CALENDAR_EDITORS_SQL)
+        .setParameter(PARAM_CALENDAR_ID, calendarId).list();
+    for (Object editor : editors) {
+      if (editor != null && !OwnerSupport.isOwner(editor.toString())) {
+        return editor.toString();
+      }
+    }
+    return null;
   }
 
   /**

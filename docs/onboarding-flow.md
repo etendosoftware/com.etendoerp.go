@@ -951,8 +951,12 @@ Endpoints (`CalendarReviewService`, session auth, scoped to the session's tenant
   The calendar's `C_PeriodControl_Log` rows go first (core `C_PERIOD_TRG2` only removes those
   keyed by `periodno`; a classic year-level close log would otherwise block the delete).
   `400` for another value; `409` when there is no calendar, a period was ever opened, anything was
-  posted, or any other table references a period or year of the calendar (FK scan over the
-  catalog).
+  posted, any other table references a period or year of the calendar (FK scan over the
+  catalog), or a user other than the owner created or changed a year or period of it (e.g. a
+  Finance user who created next year's periods: regenerating would silently delete them). The
+  onboarding rows belong to the system users `0`/`100` and the owner may regenerate over their
+  own changes, so neither counts (`CALENDAR_EDITORS_SQL`, `firstNonOwnerEditor`). `canRegenerate`
+  in the state applies the same rule.
 
 Both `POST`s answer `403` unless the caller is the owner (`EM_ETGO_Is_Owner`) of **this** tenant:
 regenerate deletes the calendar, so owning another environment of the account is not enough. Both
@@ -973,9 +977,10 @@ movement). The cash close's second check — a marked movement whose own account
 closed period — keeps its sentence naming the movement and adds `error.messageKeys`
 (`PeriodNotAvailable`) plus `error.periodDate` (the movement's date), so the SPA opens the fiscal
 year that holds the movement, not the close's. The SPA turns it into a toast that
-points the owner to this row while the review is pending (others are told to ask the owner; an
-owner whose account dismissed First Steps, which is per account, goes to Calendar) and to
-Calendar afterwards — to the fiscal year whose period contains the document's date, so a July–June
+points the owner to this row while the review is pending (an owner whose account dismissed First
+Steps, which is per account, goes to Calendar) and everyone else, and everyone afterwards, to
+Calendar: opening a period completes the review, and the Calendar window's own access decides who
+may open one, so an admin or Finance user invited by the owner can open the first period — to the fiscal year whose period contains the document's date, so a July–June
 calendar sends a January date to the year that started the previous July; the MCP adds a `hint` telling the agent to ask the user before opening the
 period with the `openClose` action of `open-close-period-control`.
 

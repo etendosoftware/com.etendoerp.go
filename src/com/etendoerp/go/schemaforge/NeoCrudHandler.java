@@ -797,7 +797,7 @@ class NeoCrudHandler {
           errMsg + "\n" + translated, NeoMessageTranslator.PERIOD_REFUSAL_KEYS);
       if (!periodKeys.isEmpty()) {
         NeoResponse refusal = NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, translated);
-        refusal.getBody().getJSONObject("error")
+        refusal.getBody().getJSONObject(KEY_ERROR)
             .put(NeoProcessService.MESSAGE_KEYS, new JSONArray(periodKeys));
         return refusal;
       }

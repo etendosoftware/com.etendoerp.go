@@ -162,6 +162,8 @@ public final class FiscalCalendarSupport {
    * is created, and an existing one without periods gets them. {@code C_PERIOD_TRG} adds the
    * control rows; the caller normalizes afterwards.
    *
+   * @param calendar   the organization's calendar
+   * @param fiscalYear the calendar year to ensure, e.g. 2026
    * @return {@code true} when periods were created
    */
   public static boolean ensureYear(Calendar calendar, int fiscalYear) {
@@ -215,7 +217,13 @@ public final class FiscalCalendarSupport {
           + " WHERE y.c_calendar_id = :calendarId AND y.c_year_id <> :yearId"
           + " AND p.periodtype = 'S' GROUP BY y.c_year_id ORDER BY MIN(p.startdate) DESC LIMIT 1";
 
-  /** Whether twelve months from {@code start} would overlap another year of the calendar. */
+  /**
+   * Whether twelve months from {@code start} would overlap another year of the calendar.
+   *
+   * @param year  the year about to get periods (excluded from the check)
+   * @param start the first day of its first period
+   * @return {@code true} when another year of the calendar covers any of those twelve months
+   */
   public static boolean overlapsOtherYears(Year year, LocalDate start) {
     OBDal.getInstance().flush();
     Number count = (Number) OBDal.getInstance().getSession().createNativeQuery(OVERLAP_SQL)
@@ -229,7 +237,11 @@ public final class FiscalCalendarSupport {
 
   /**
    * The month the calendar's latest other year starts in, so a new year keeps the calendar's
-   * fiscal-year start; {@code null} when the calendar has no other year with periods.
+   * fiscal-year start.
+   *
+   * @param year the year about to get periods (excluded from the lookup)
+   * @return the start month (1-12), or {@code null} when the calendar has no other year with
+   *     periods
    */
   public static Integer latestStartMonth(Year year) {
     java.util.List<?> rows = OBDal.getInstance().getSession()
@@ -244,7 +256,12 @@ public final class FiscalCalendarSupport {
     return Date.from(date.atStartOfDay(ZoneId.systemDefault()).toInstant());
   }
 
-  /** True when the year already has at least one period. */
+  /**
+   * True when the year already has at least one period.
+   *
+   * @param year the year to inspect
+   * @return {@code true} when it has a period
+   */
   public static boolean hasPeriods(Year year) {
     OBCriteria<Period> criteria = OBDal.getInstance().createCriteria(Period.class);
     criteria.setFilterOnReadableClients(false);
@@ -257,6 +274,11 @@ public final class FiscalCalendarSupport {
   /**
    * Creates one period of {@code year}. Names follow the onboarding dataset ("Jan-26"; adjustment
    * periods "13th Period - 27"). The end date is derived by the database.
+   *
+   * @param year       the owning year
+   * @param periodNo   1-12 for standard periods, 13 for the adjustment period
+   * @param start      the period's first day
+   * @param periodType {@code S} standard or {@code A} adjustment
    */
   public static void createPeriod(Year year, int periodNo, LocalDate start, String periodType) {
     Period period = OBProvider.getInstance().get(Period.class);

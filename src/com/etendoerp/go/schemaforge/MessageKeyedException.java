@@ -31,7 +31,11 @@ public class MessageKeyedException extends OBException {
 
   private final String messageKey;
 
-  /** @param messageKey the {@code AD_MESSAGE.VALUE}; the message is its text in the GO locale */
+  /**
+   * Creates the exception with the message's text in the GO locale.
+   *
+   * @param messageKey the {@code AD_MESSAGE.VALUE}
+   */
   public MessageKeyedException(String messageKey) {
     super(OBMessageUtils.messageBD(messageKey));
     this.messageKey = messageKey;
