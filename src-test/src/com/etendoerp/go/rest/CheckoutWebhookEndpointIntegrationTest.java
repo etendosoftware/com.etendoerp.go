@@ -18,6 +18,7 @@
 package com.etendoerp.go.rest;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
@@ -55,6 +56,9 @@ import org.openbravo.test.base.OBBaseTest;
 
 import com.etendoerp.go.payment.CheckoutRequestStore;
 import com.etendoerp.go.payment.CheckoutWebhookProcessor;
+import com.etendoerp.go.payment.SubscriptionModelSwitch;
+import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
+import com.etendoerp.go.payment.TenantPlanService;
 import com.etendoerp.go.schemaforge.data.Account;
 
 /**
@@ -88,6 +92,9 @@ import com.etendoerp.go.schemaforge.data.Account;
  * write path commits. Fixtures carry the {@code etp5045-whk-} / {@code evt_etp5045whk_} markers
  * and are deleted in {@link #cleanUp()} in FK order. The environment's own live Stripe replay rows
  * are never matched by those markers and are left alone.
+ *
+ * @covers com.etendoerp.go.rest.EtendoGoJwtServlet
+ * @covers com.etendoerp.go.payment.TenantEnvironmentLifecycleService
  */
 public class CheckoutWebhookEndpointIntegrationTest extends OBBaseTest {
 
@@ -117,6 +124,12 @@ public class CheckoutWebhookEndpointIntegrationTest extends OBBaseTest {
   private static final String STATUS_PAID = "PAID";
 
   private static final String ENVIRONMENT = "ETP-5045 Webhook Environment";
+
+  /** Prefix on the {@code AD_CLIENT.VALUE} of every synthetic tenant this class creates. */
+  private static final String TENANT_MARKER = "ETP5046WHK-";
+  /** The grandfathered plan, seeded by EnsureLegacyPlanScript, so it exists in every environment. */
+  private static final String LEGACY_PLAN_ID = "219D5C8E15C64E97B2F553B228D30DD0";
+  private static final String PAYMENT_FAILED = "invoice.payment_failed";
 
   private final EtendoGoJwtServlet servlet = new EtendoGoJwtServlet();
   private final CheckoutRequestStore fixtureStore = new CheckoutRequestStore();
@@ -666,6 +679,242 @@ public class CheckoutWebhookEndpointIntegrationTest extends OBBaseTest {
   }
 
   // ---------------------------------------------------------------------------------------------
+  // Group 5 — a correlated lifecycle event is applied with NO OBContext on the thread (ETP-5046)
+  // ---------------------------------------------------------------------------------------------
+
+  /**
+   * The webhook is matched before the authentication chain, so it arrives with no
+   * {@link OBContext}. Develop only applied lifecycle events because the stores it called leaked a
+   * system context onto the thread; once they started restoring the caller's (null) context, the
+   * preference write NPE'd inside {@code OBQuery} and every correlated event ended {@code FAILED}
+   * with a 500. This pins the route for a tenant WITH an {@code ETGO_SUBSCRIPTION} row: the row
+   * takes the outcome, and the event watermark preference is still written.
+   */
+  @Test
+  public void testAPaymentFailureIsAppliedToTheSubscriptionRowWithNoContextOnTheThread()
+      throws Exception {
+    String tenantId = createTenant("with-row");
+    String requestId = createPaidRequestFor(tenantId, newEmail("lifecycle-row"));
+    String subscriptionId = createOpenSubscription(tenantId);
+    String eventId = newEventId();
+    long periodEnd = Instant.now().getEpochSecond() - 3600;
+
+    OBContext.setOBContext((OBContext) null);
+    ResponseCapture response = deliver(paymentFailedEvent(eventId, requestId, periodEnd));
+
+    // Checked before any fixture reader runs: those install the system context themselves.
+    assertNull("The webhook must hand the thread back without a context", OBContext.getOBContext());
+    assertEquals(200, response.status);
+    assertEquals(APPLIED, rawEvent(eventId, "EVENT_RESULT"));
+    assertEquals("past_due", rawColumn("ETGO_SUBSCRIPTION", "ETGO_SUBSCRIPTION_ID",
+        subscriptionId, "STATUS"));
+    assertEquals("The grace anchor is the end of the period the customer already paid for",
+        periodEnd * 1000L, ((Timestamp) rawColumn("ETGO_SUBSCRIPTION", "ETGO_SUBSCRIPTION_ID",
+            subscriptionId, "CURRENT_PERIOD_END")).getTime());
+    assertNull("A tenant with a row must not also get the preference projection",
+        rawPreference(tenantId, TenantEnvironmentLifecycleService.SUBSCRIPTION_STATUS_ATTRIBUTE));
+    assertNotNull("The event watermark is written on both routes",
+        rawPreference(tenantId, TenantEnvironmentLifecycleService.SUBSCRIPTION_EVENT_AT_ATTRIBUTE));
+  }
+
+  /**
+   * Same event for a tenant WITHOUT a subscription row — a productive tenant the R37 backfill has
+   * not reached: the outcome lands on the {@code ETGO_SubscriptionStatus} /
+   * {@code ETGO_SubscriptionDueAt} preferences instead, together with the event watermark.
+   */
+  @Test
+  public void testAPaymentFailureIsAppliedToThePreferencesWhenTheTenantHasNoRow()
+      throws Exception {
+    String tenantId = createTenant("no-row");
+    String requestId = createPaidRequestFor(tenantId, newEmail("lifecycle-pref"));
+    String eventId = newEventId();
+    long periodEnd = Instant.now().getEpochSecond() - 3600;
+
+    OBContext.setOBContext((OBContext) null);
+    ResponseCapture response = deliver(paymentFailedEvent(eventId, requestId, periodEnd));
+
+    // Checked before any fixture reader runs: those install the system context themselves.
+    assertNull("The webhook must hand the thread back without a context", OBContext.getOBContext());
+    assertEquals(200, response.status);
+    assertEquals(APPLIED, rawEvent(eventId, "EVENT_RESULT"));
+    assertEquals("PAST_DUE",
+        rawPreference(tenantId, TenantEnvironmentLifecycleService.SUBSCRIPTION_STATUS_ATTRIBUTE));
+    assertEquals(Instant.ofEpochSecond(periodEnd).toString(),
+        rawPreference(tenantId, TenantEnvironmentLifecycleService.SUBSCRIPTION_DUE_AT_ATTRIBUTE));
+    assertNotNull(
+        rawPreference(tenantId, TenantEnvironmentLifecycleService.SUBSCRIPTION_EVENT_AT_ATTRIBUTE));
+  }
+
+  /**
+   * ETP-5046 — the state of every environment until its operator switches the subscription model
+   * on: a paid purchase writes the {@code ETGO_TenantPlan} marker and opens no row (see
+   * {@code TenantContextSubscriptionWriteIntegrationTest}), so every NEW paying tenant is rowless.
+   * Its billing lifecycle must keep landing on the {@code ETGO_SubscriptionStatus} /
+   * {@code ETGO_SubscriptionDueAt} preferences; a lifecycle event must neither open a row for it nor
+   * touch the marker that makes it productive.
+   *
+   * <p>The webhook commits, so the switch cannot be forced OFF inside a rolled-back transaction
+   * here; the spec asserts instead that this database has not switched, which is the state of every
+   * environment that has not run the R37 backfill. It never writes a switch row.
+   */
+  @Test
+  public void testWithTheSwitchOffANewlyPaidRowlessTenantKeepsItsLifecycleInThePreferences()
+      throws Exception {
+    assertFalse("Precondition: this database must not have switched the subscription model on (a "
+        + "System-level " + SubscriptionModelSwitch.PREFERENCE_PROPERTY + " = 'Y' row)",
+        readSwitchAsSystem());
+    String tenantId = createTenant("switch-off");
+    markProductiveCommitted(tenantId);
+    String requestId = createPaidRequestFor(tenantId, newEmail("lifecycle-switch-off"));
+    String eventId = newEventId();
+    long periodEnd = Instant.now().getEpochSecond() - 3600;
+
+    OBContext.setOBContext((OBContext) null);
+    ResponseCapture response = deliver(paymentFailedEvent(eventId, requestId, periodEnd));
+
+    assertNull("The webhook must hand the thread back without a context", OBContext.getOBContext());
+    assertEquals(200, response.status);
+    assertEquals(APPLIED, rawEvent(eventId, "EVENT_RESULT"));
+    assertEquals("PAST_DUE",
+        rawPreference(tenantId, TenantEnvironmentLifecycleService.SUBSCRIPTION_STATUS_ATTRIBUTE));
+    assertEquals(Instant.ofEpochSecond(periodEnd).toString(),
+        rawPreference(tenantId, TenantEnvironmentLifecycleService.SUBSCRIPTION_DUE_AT_ATTRIBUTE));
+    assertNotNull(
+        rawPreference(tenantId, TenantEnvironmentLifecycleService.SUBSCRIPTION_EVENT_AT_ATTRIBUTE));
+    assertEquals("A lifecycle event must not open a row while the switch is off", 0L,
+        rawTenantCount("SELECT COUNT(*) FROM ETGO_SUBSCRIPTION WHERE ENVIRONMENT_CLIENT_ID = "
+            + ":tenant", tenantId));
+    assertEquals("The purchase's plan marker must survive the lifecycle event", 1L,
+        rawTenantCount("SELECT COUNT(*) FROM AD_PREFERENCE WHERE ATTRIBUTE = '"
+            + TenantPlanService.PREFERENCE_ATTRIBUTE + "' AND VISIBLEAT_CLIENT_ID = :tenant "
+            + "AND ISACTIVE = 'Y'", tenantId));
+  }
+
+  /** Reads the switch the way the purchase path does, as System. */
+  private static boolean readSwitchAsSystem() {
+    OBContext.setOBContext(ZERO, ZERO, ZERO, ZERO);
+    try {
+      return new SubscriptionModelSwitch().isOn();
+    } finally {
+      OBContext.setOBContext((OBContext) null);
+    }
+  }
+
+  /** What a switched-off paid purchase writes: the marker, through the real service, committed. */
+  private void markProductiveCommitted(String tenantId) {
+    OBContext.setOBContext(ZERO, ZERO, ZERO, ZERO);
+    try {
+      assertTrue("Sanity: the marker must be written",
+          new TenantPlanService().markProductive(tenantId, null));
+      OBDal.getInstance().flush();
+      OBDal.getInstance().commitAndClose();
+    } finally {
+      OBContext.setOBContext((OBContext) null);
+    }
+  }
+
+  /** @return the committed result of a {@code COUNT(*)} bound to one tenant */
+  @SuppressWarnings("rawtypes")
+  private long rawTenantCount(String sql, String tenantId) {
+    OBContext.setOBContext(ZERO, ZERO, ZERO, ZERO);
+    OBContext.setAdminMode(true);
+    try {
+      NativeQuery query = OBDal.getInstance().getSession().createNativeQuery(sql);
+      query.setParameter("tenant", tenantId);
+      return ((Number) query.uniqueResult()).longValue();
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * A correlated {@code invoice.payment_failed}: keyed by the subscription the paid checkout
+   * recorded, carrying the invoice's own {@code period_end} as the grace anchor.
+   */
+  private String paymentFailedEvent(String eventId, String requestId, long periodEnd) {
+    return "{"
+        + "\"id\":\"" + eventId + "\","
+        + "\"type\":\"" + PAYMENT_FAILED + "\","
+        + "\"created\":" + Instant.now().getEpochSecond() + ","
+        + "\"data\":{\"object\":{"
+        + "  \"id\":\"in_" + eventId + "\","
+        + "  \"customer\":\"cus_" + requestId + "\","
+        + "  \"subscription\":\"sub_" + requestId + "\","
+        + "  \"period_end\":" + periodEnd
+        + "}}}";
+  }
+
+  /**
+   * Creates a synthetic tenant, never a real one: a fixture on a real tenant could leave it
+   * looking past due. The {@code AD_CLIENT} insert trigger adds its sequences; cleanup removes them.
+   */
+  private String createTenant(String label) {
+    String id = UUID.randomUUID().toString().replace("-", "").toUpperCase(java.util.Locale.ROOT);
+    nativeUpdateCommitted("INSERT INTO AD_CLIENT (AD_CLIENT_ID, AD_ORG_ID, ISACTIVE, CREATED, "
+            + "CREATEDBY, UPDATED, UPDATEDBY, VALUE, NAME) "
+            + "VALUES (:id, '0', 'Y', now(), '0', now(), '0', :value, :name)",
+        "id", id, "value", TENANT_MARKER + label, "name", TENANT_MARKER + label + " " + id);
+    return id;
+  }
+
+  /** A checkout request that was paid and provisioned into {@code tenantId}. */
+  private String createPaidRequestFor(String tenantId, String email) {
+    String requestId = createRequest(email);
+    nativeUpdateCommitted("UPDATE ETGO_CHECKOUT_REQUEST SET CREATED_CLIENT_ID = :tenant, "
+            + "STRIPE_CUSTOMER_ID = :customer, STRIPE_SUBSCRIPTION_ID = :subscription "
+            + "WHERE REQUEST_ID = :requestId",
+        "tenant", tenantId, "customer", "cus_" + requestId, "subscription", "sub_" + requestId,
+        "requestId", requestId);
+    return requestId;
+  }
+
+  /** An open, active subscription row on the grandfathered plan. */
+  private String createOpenSubscription(String tenantId) {
+    String id = UUID.randomUUID().toString().replace("-", "").toUpperCase(java.util.Locale.ROOT);
+    nativeUpdateCommitted("INSERT INTO ETGO_SUBSCRIPTION (ETGO_SUBSCRIPTION_ID, AD_CLIENT_ID, "
+            + "AD_ORG_ID, ISACTIVE, CREATED, CREATEDBY, UPDATED, UPDATEDBY, ENVIRONMENT_CLIENT_ID, "
+            + "ETGO_PLAN_ID, STATUS, START_DATE) VALUES (:id, '0', '0', 'Y', now(), '0', now(), "
+            + "'0', :tenant, :plan, 'active', now() - interval '1 day')",
+        "id", id, "tenant", tenantId, "plan", LEGACY_PLAN_ID);
+    return id;
+  }
+
+  /** @return the committed value of a lifecycle preference of the tenant, or null */
+  private Object rawPreference(String tenantId, String attribute) {
+    OBContext.setOBContext(ZERO, ZERO, ZERO, ZERO);
+    OBContext.setAdminMode(true);
+    try {
+      @SuppressWarnings("rawtypes")
+      NativeQuery query = OBDal.getInstance().getSession().createNativeQuery(
+          "SELECT VALUE FROM AD_PREFERENCE WHERE AD_CLIENT_ID = :tenant AND ATTRIBUTE = :attribute"
+              + " AND ISACTIVE = 'Y'");
+      query.setParameter("tenant", tenantId);
+      query.setParameter("attribute", attribute);
+      query.setMaxResults(1);
+      return query.uniqueResult();
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  @SuppressWarnings("rawtypes")
+  private void nativeUpdateCommitted(String sql, Object... nameValuePairs) {
+    OBContext.setOBContext(ZERO, ZERO, ZERO, ZERO);
+    OBContext.setAdminMode(true);
+    try {
+      NativeQuery query = OBDal.getInstance().getSession().createNativeQuery(sql);
+      for (int i = 0; i + 1 < nameValuePairs.length; i += 2) {
+        query.setParameter((String) nameValuePairs[i], nameValuePairs[i + 1]);
+      }
+      query.executeUpdate();
+      OBDal.getInstance().flush();
+      OBDal.getInstance().commitAndClose();
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  // ---------------------------------------------------------------------------------------------
   // Fixtures
   // ---------------------------------------------------------------------------------------------
 
@@ -688,6 +937,7 @@ public class CheckoutWebhookEndpointIntegrationTest extends OBBaseTest {
   private String createRequest(String email) {
     String accountId = createAccount(email);
     String requestId = REQUEST_MARKER + UUID.randomUUID().toString().replace("-", "");
+    // No plan: this fixture exercises webhook correlation, which does not read one.
     fixtureStore.recordRequested(requestId, accountId, email, ENVIRONMENT,
         new CheckoutRequestStore.RequestOptions(null, false, false, false, null));
     fixtureStore.recordSessionCreated(requestId, "cs_" + requestId);
@@ -827,6 +1077,21 @@ public class CheckoutWebhookEndpointIntegrationTest extends OBBaseTest {
           .createNativeQuery("DELETE FROM ETGO_CHECKOUT_REQUEST WHERE REQUEST_ID LIKE :marker");
       deleteRequests.setParameter("marker", REQUEST_MARKER + "%");
       deleteRequests.executeUpdate();
+
+      // Synthetic tenants: their subscription rows and lifecycle preferences, the sequences the
+      // AD_CLIENT insert trigger created, then the clients themselves.
+      String tenants = "(SELECT AD_CLIENT_ID FROM AD_CLIENT WHERE VALUE LIKE :tenantMarker)";
+      for (String sql : new String[] {
+          "DELETE FROM ETGO_SUBSCRIPTION WHERE ENVIRONMENT_CLIENT_ID IN " + tenants,
+          "DELETE FROM AD_PREFERENCE WHERE AD_CLIENT_ID IN " + tenants,
+          // The ETGO_TenantPlan marker lives at client 0 and names the tenant here only.
+          "DELETE FROM AD_PREFERENCE WHERE VISIBLEAT_CLIENT_ID IN " + tenants,
+          "DELETE FROM AD_SEQUENCE WHERE AD_CLIENT_ID IN " + tenants,
+          "DELETE FROM AD_CLIENT WHERE VALUE LIKE :tenantMarker" }) {
+        NativeQuery deleteTenantRows = OBDal.getInstance().getSession().createNativeQuery(sql);
+        deleteTenantRows.setParameter("tenantMarker", TENANT_MARKER + "%");
+        deleteTenantRows.executeUpdate();
+      }
 
       NativeQuery deleteAccounts = OBDal.getInstance()
           .getSession()

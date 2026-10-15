@@ -159,6 +159,10 @@ def isolatedDalTests = [
         '**/CreateGoodsReceiptHandlerNegativeQuantityIntegrationTest.class',
         '**/CreatePurchaseInvoiceHandlerNegativeQuantityIntegrationTest.class',
         '**/AbstractInvoiceHeaderHandlerOriginInvoiceIntegrationTest.class',
+        '**/SubscriptionServiceIntegrationTest.class',
+        '**/GrandfatheredSubscriptionIntegrationTest.class',
+        '**/SubscriptionBackfillIdempotencyIntegrationTest.class',
+        '**/SubscriptionModelSwitchIntegrationTest.class',
 ]
 
 def isolatedDalTestClasses = [
@@ -168,6 +172,10 @@ def isolatedDalTestClasses = [
         'com.etendoerp.go.schemaforge.CreateGoodsReceiptHandlerNegativeQuantityIntegrationTest',
         'com.etendoerp.go.schemaforge.CreatePurchaseInvoiceHandlerNegativeQuantityIntegrationTest',
         'com.etendoerp.go.schemaforge.AbstractInvoiceHeaderHandlerOriginInvoiceIntegrationTest',
+        'com.etendoerp.go.payment.SubscriptionServiceIntegrationTest',
+        'com.etendoerp.go.payment.GrandfatheredSubscriptionIntegrationTest',
+        'com.etendoerp.go.payment.SubscriptionBackfillIdempotencyIntegrationTest',
+        'com.etendoerp.go.payment.SubscriptionModelSwitchIntegrationTest',
 ]
 
 def commandLineFilterReachesIsolatedGoTest = { requestedTestPatterns ->

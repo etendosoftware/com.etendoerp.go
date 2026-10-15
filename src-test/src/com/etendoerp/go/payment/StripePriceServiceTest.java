@@ -22,6 +22,7 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -31,6 +32,8 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.Test;
 import org.mockito.MockedStatic;
+
+import com.etendoerp.go.schemaforge.data.Plan;
 
 /** Contract tests for retrieving the exact recurring Stripe Price configured for checkout. */
 class StripePriceServiceTest {
@@ -131,16 +134,24 @@ class StripePriceServiceTest {
     try (CheckoutStripeServer stripe = new CheckoutStripeServer();
         MockedStatic<CheckoutConfiguration> configuration = mockStatic(CheckoutConfiguration.class)) {
       configuration.when(CheckoutConfiguration::isConfigured).thenReturn(true);
-      configuration.when(CheckoutConfiguration::priceId).thenReturn("price_retrieved");
+      configuration.when(CheckoutConfiguration::priceId).thenReturn("price_current_config");
       configuration.when(CheckoutConfiguration::secretKey).thenReturn("sk_test_server_only");
       configuration.when(CheckoutConfiguration::apiBaseUrl).thenReturn(stripe.baseUrl());
       configuration.when(CheckoutConfiguration::mode).thenReturn("subscription");
       CheckoutRequestStore store = mock(CheckoutRequestStore.class);
+      // The price comes off the plan catalog row the buyer named, never off the configuration.
+      Plan plan = mock(Plan.class);
+      when(plan.getSearchKey()).thenReturn("productive-monthly");
+      when(plan.getProviderPriceID()).thenReturn("price_retrieved");
+      PlanCatalogService catalog = mock(PlanCatalogService.class);
+      when(catalog.findPurchasablePlan("productive-monthly")).thenReturn(Optional.of(plan));
+      when(catalog.hasProviderPrice(plan)).thenReturn(true);
       HostedCheckoutService checkout = new HostedCheckoutService();
       checkout.checkoutRequestStore = store;
+      checkout.planCatalogService = catalog;
 
       JSONObject result = checkout.createSession("account-1", "owner@example.test", "Acme",
-          "https://app.example.test");
+          "https://app.example.test", "productive-monthly");
 
       assertEquals("price_retrieved", result.getString("priceId"));
       assertTrue(stripe.checkoutForm.get().contains("line_items%5B0%5D%5Bprice%5D=price_retrieved"),
@@ -150,7 +161,7 @@ class StripePriceServiceTest {
       String requestId = result.getString("requestId");
       verify(store).recordRequested(eq(requestId), eq("account-1"), eq("owner@example.test"),
           eq("Acme"), eq(new CheckoutRequestStore.RequestOptions(null, true, false, false,
-              "price_retrieved")));
+              "price_retrieved")), eq(plan));
       verify(store).recordSessionCreated(eq(requestId), eq(null), eq("cs_created"));
     }
   }
