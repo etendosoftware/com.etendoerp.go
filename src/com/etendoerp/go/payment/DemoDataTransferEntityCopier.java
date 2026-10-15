@@ -13,6 +13,7 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
+import org.openbravo.erpCommon.utility.OBCurrencyUtils;
 import org.hibernate.criterion.Order;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.model.ad.access.User;
@@ -20,6 +21,7 @@ import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.businesspartner.Category;
 import org.openbravo.model.common.businesspartner.Location;
+import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.plm.Product;
 import org.openbravo.model.common.plm.ProductCategory;
@@ -87,6 +89,7 @@ final class DemoDataTransferEntityCopier {
         targetContact.setOrganization(targetOrg);
       }
       copyBusinessPartnerFields(contact, targetContact);
+      targetContact.setCurrency(targetContactCurrency(contact.getCurrency(), targetOrg));
       targetContact.setBusinessPartnerCategory(targetBusinessPartnerCategory(
           contact.getBusinessPartnerCategory(), target, targetOrg));
       OBDal.getInstance().save(targetContact);
@@ -277,6 +280,22 @@ final class DemoDataTransferEntityCopier {
         "Name2", DESCRIPTION_PROPERTY, "URL", "ReferenceNo", "Customer", "Vendor", "Employee",
         "EtgoIdentifier", "EtgoIsperson", "EtgoFirstname", "EtgoLastname", "EtgoEmail",
         "EtgoPhone", "EtgoWeb");
+  }
+
+  /**
+   * ETP-5768 — the copy runs through DAL as System, so the NEO create hook that defaults a new
+   * contact's currency (BusinessPartnerHandler.injectOrgCurrency) never fires, and Core refuses to
+   * complete an invoice, order, shipment or payment for a contact without one (InitBPCurrencyLnk).
+   * Currencies are System rows, so the source one is reused as is; a blank or tenant-owned source
+   * currency falls back to the target organization's currency, the same default the hook applies.
+   */
+  private Currency targetContactCurrency(Currency source, Organization targetOrg) {
+    if (source != null && ZERO_ID.equals(source.getClient().getId())) return source;
+    String orgCurrencyId = OBCurrencyUtils.getOrgCurrency(targetOrg.getId());
+    if (orgCurrencyId == null || orgCurrencyId.isBlank()) {
+      throw new IllegalStateException("Target organization has no currency for migrated contacts");
+    }
+    return OBDal.getInstance().getProxy(Currency.class, orgCurrencyId);
   }
 
   /** Copies the address rows shown in the Contact window's Location/Address tab. */
