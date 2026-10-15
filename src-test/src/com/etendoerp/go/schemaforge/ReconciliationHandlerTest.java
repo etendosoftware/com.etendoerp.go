@@ -3548,6 +3548,9 @@ public class ReconciliationHandlerTest {
     // ETP-5577 — keyed, so the SPA offers to open the period; never core's raw @ETPR_…@ token.
     assertEquals("PeriodNotAvailable", response.getBody().getJSONObject("error")
         .getJSONArray("messageKeys").getString(0));
+    // …and the text still says which action was refused, for a caller that reads it (MCP).
+    assertTrue(response.getBody().getJSONObject("error").getString("message")
+        .startsWith("The reconciliation cannot be reactivated"));
     verify(handler, never()).undoReconciliation(any(), any(), any());
   }
 

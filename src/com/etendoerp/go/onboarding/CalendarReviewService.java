@@ -53,9 +53,8 @@ public class CalendarReviewService {
 
   public static final String REVIEWED_ATTRIBUTE = "ETGO_CalendarReviewed";
 
-  /** The fiscal-year starts the Calendar window offers (quarters only, decision Q1). */
-  public static final Map<String, Integer> FISCAL_YEAR_STARTS = Map.of(
-      "JANUARY", 1, "APRIL", 4, "JULY", 7, "OCTOBER", 10);
+  /** The fiscal-year starts the Calendar window offers ({@link FiscalCalendarSupport}). */
+  public static final Map<String, Integer> FISCAL_YEAR_STARTS = FiscalCalendarSupport.FISCAL_YEAR_STARTS;
 
   private static final String PARAM_CLIENT_ID = "clientId";
   private static final String PARAM_CALENDAR_ID = "calendarId";

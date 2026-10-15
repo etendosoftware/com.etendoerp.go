@@ -43,14 +43,7 @@ final class FiscalYearPeriodsHandler {
   private static final String FIELD_FISCAL_YEAR_START = "FISCALYEARSTART";
   private static final String FIELD_CREATE_ADJUSTMENT = "CREATEADJUSTMENT";
   private static final String RANGE_JANUARY = "JANUARY";
-  private static final String RANGE_APRIL = "APRIL";
-  private static final String RANGE_JULY = "JULY";
-  private static final String RANGE_OCTOBER = "OCTOBER";
-  private static final Map<String, Integer> START_MONTHS = Map.of(
-      RANGE_JANUARY, 1,
-      RANGE_APRIL, 4,
-      RANGE_JULY, 7,
-      RANGE_OCTOBER, 10);
+  private static final Map<String, Integer> START_MONTHS = FiscalCalendarSupport.FISCAL_YEAR_STARTS;
 
   boolean handles(NeoContext context) {
     return context != null && context.getEndpointType() == NeoEndpointType.ACTION

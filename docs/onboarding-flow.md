@@ -925,7 +925,8 @@ A productive tenant starts with every accounting period never-opened (ETP-5577, 
 `PeriodNotAvailable` until a period is opened. The "Revisar calendario contable" First Steps row
 lets the owner settle the calendar first: keep it, or replace it with one fiscal year that starts
 in another quarter (a company whose fiscal year is not January–December). It is not a checklist
-id: the server derives its state.
+id: the server derives its state. It ships unflagged by decision (2026-10-14): the initial period state, this
+step and the refusal recovery land in one release, so a flag would guard nothing.
 
 - **`required`** — the tenant carries `ETGO_CalendarReviewRequired` (productive signups since
   ETP-5577). Only then is the row shown.
@@ -960,10 +961,10 @@ completions (core procedures, via `NeoProcessService`; classic processes that ha
 `NeoResponse.error(int, OBException)` → `error.messageKeys`). Any other handler that turns a core
 refusal into `error(400, e.getMessage())` loses the key; `NeoServlet.writeResponse` restores it
 with `NeoResponse.identifyPeriodRefusal`, which recognises the text of `PeriodNotAvailable` /
-`PeriodNotValid` in any language on an error body that names no keys. Core `Utilities.checkPeriod`
+`PeriodNotValid` in any language on an error body that names no keys (4xx business refusals only: 401/403/404 and 5xx are skipped; the AD_Message texts are cached per key). Core `Utilities.checkPeriod`
 refuses with a raw, untranslated `@ETPR_PeriodClosedForUnRemovePayment@` worded for removing
 payments: the cash close confirm and the reconciliation reactivate / remove-operation guards
-answer `NeoResponse.periodNotAvailable(409)` instead, and `identifyPeriodRefusal` rewrites that
+answer `NeoResponse.periodNotAvailable(409, <the refused action>)` instead (the keyed refusal, its text prefixed with what could not be done, for a caller that reads it), and `identifyPeriodRefusal` rewrites that
 token as the keyed `PeriodNotAvailable` refusal on any other path (e.g. reactivating a reconciled
 movement). The cash close's second check — a marked movement whose own accounting date is in a
 closed period — keeps its sentence naming the movement and adds `error.messageKeys`

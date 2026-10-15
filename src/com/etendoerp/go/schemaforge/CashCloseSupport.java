@@ -369,7 +369,8 @@ final class CashCloseSupport {
     } catch (OBException e) {
       log.warn("cash close confirm blocked by closed period for account {}: {}", account.getId(),
           e.getMessage());
-      return NeoResponse.periodNotAvailable(HttpServletResponse.SC_CONFLICT);
+      return NeoResponse.periodNotAvailable(HttpServletResponse.SC_CONFLICT,
+          "The cash close cannot be confirmed");
     }
     // The check above only covers the CLOSE date. A movement dated before the close keeps its own
     // accounting date (only post-dated ones get pushed forward, further down), so it can sit in a

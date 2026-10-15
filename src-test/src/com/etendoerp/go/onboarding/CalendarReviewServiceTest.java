@@ -17,6 +17,7 @@
 package com.etendoerp.go.onboarding;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -201,6 +202,41 @@ class CalendarReviewServiceTest {
       JSONObject reviewed = service.state("CLIENT", OCT_14);
       assertFalse(reviewed.getBoolean("pending"));
       assertEquals("2026-10-14T10:00:00Z", reviewed.getString("reviewedAt"));
+    }
+  }
+
+  @Test
+  void confirmingTwiceIsHarmlessAndTheTenantStaysReviewed() throws Exception {
+    when(query.list()).thenReturn(List.of());
+    assertDoesNotThrow(() -> {
+      service.confirm("CLIENT", "USER");
+      service.confirm("CLIENT", "USER");
+    });
+    prefs.verify(() -> Preferences.setPreferenceValue(eq(CalendarReviewService.REVIEWED_ATTRIBUTE),
+        anyString(), eq(false), any(Client.class), any(), any(), any(), any(), any()),
+        org.mockito.Mockito.times(2));
+    try (MockedStatic<OnboardingInitialPeriodStateService> markers =
+        mockStatic(OnboardingInitialPeriodStateService.class)) {
+      markers.when(() -> OnboardingInitialPeriodStateService.readClientPreference(
+          OnboardingInitialPeriodStateService.REVIEW_REQUIRED_ATTRIBUTE, "CLIENT")).thenReturn("Y");
+      markers.when(() -> OnboardingInitialPeriodStateService.readClientPreference(
+          CalendarReviewService.REVIEWED_ATTRIBUTE, "CLIENT"))
+          .thenReturn("2026-10-14T10:00:00Z USER");
+      JSONObject state = service.state("CLIENT", OCT_14);
+      assertTrue(state.getBoolean("reviewed"));
+      assertFalse(state.getBoolean("pending"));
+    }
+  }
+
+  /** A demo tenant is never onboarded with the review required, so it has nothing pending. */
+  @Test
+  void aTenantWithoutTheReviewRequiredMarkerHasNoPendingReview() throws Exception {
+    when(query.list()).thenReturn(List.of());
+    try (MockedStatic<OnboardingInitialPeriodStateService> markers =
+        mockStatic(OnboardingInitialPeriodStateService.class)) {
+      JSONObject state = service.state("CLIENT", OCT_14);
+      assertFalse(state.getBoolean("required"));
+      assertFalse(state.getBoolean("pending"));
     }
   }
 }

@@ -20,6 +20,7 @@ package com.etendoerp.go.schemaforge;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
@@ -35,6 +36,7 @@ public class NeoResponse {
 
   private static final String MESSAGE_FIELD = "message";
   private static final String MESSAGE_KEYS_FIELD = "messageKeys";
+  private static final String ERROR_FIELD = "error";
 
   private int httpStatus;
   private JSONObject body;
@@ -134,7 +136,7 @@ public class NeoResponse {
       JSONObject errorObj = new JSONObject();
       errorObj.put(MESSAGE_FIELD, message);
       errorObj.put("status", status);
-      errorBody.put("error", errorObj);
+      errorBody.put(ERROR_FIELD, errorObj);
       return new NeoResponse(status, errorBody);
     } catch (JSONException e) {
       return new NeoResponse(status, null);
@@ -164,7 +166,7 @@ public class NeoResponse {
     NeoResponse response = error(status, e.getMessage());
     if (e instanceof MessageKeyedException && response.body != null) {
       try {
-        response.body.getJSONObject("error").put("messageKeys",
+        response.body.getJSONObject(ERROR_FIELD).put(MESSAGE_KEYS_FIELD,
             new JSONArray().put(((MessageKeyedException) e).getMessageKey()));
       } catch (JSONException ignored) {
         // the plain error body is still a valid answer
@@ -183,10 +185,24 @@ public class NeoResponse {
    * @return a NeoResponse with the PeriodNotAvailable text in the session language and its key
    */
   public static NeoResponse periodNotAvailable(int status) {
+    return periodNotAvailable(status, null);
+  }
+
+  /**
+   * {@link #periodNotAvailable(int)} prefixed with the action that was refused, so a caller that
+   * reads the text (an MCP agent) learns what failed and not only why. The SPA words it by key.
+   *
+   * @param status  the HTTP status code
+   * @param refused what could not be done (e.g. "The reconciliation cannot be reactivated"); may be
+   *                {@code null}
+   * @return a NeoResponse with the prefixed PeriodNotAvailable text and its key
+   */
+  public static NeoResponse periodNotAvailable(int status, String refused) {
     String key = NeoMessageTranslator.PERIOD_REFUSAL_KEYS.get(0);
-    NeoResponse response = error(status, NeoMessageTranslator.safeParseTranslation("@" + key + "@"));
+    String reason = NeoMessageTranslator.safeParseTranslation("@" + key + "@");
+    NeoResponse response = error(status, refused == null ? reason : refused + ": " + reason);
     try {
-      response.body.getJSONObject("error").put(MESSAGE_KEYS_FIELD, new JSONArray().put(key));
+      response.body.getJSONObject(ERROR_FIELD).put(MESSAGE_KEYS_FIELD, new JSONArray().put(key));
     } catch (JSONException ignored) {
       // the plain error body is still a valid answer
     }
@@ -228,7 +244,7 @@ public class NeoResponse {
     if (body.has(MESSAGE_FIELD)) {
       return response;
     }
-    JSONObject error = body.optJSONObject("error");
+    JSONObject error = body.optJSONObject(ERROR_FIELD);
     if (error == null) {
       return response;
     }
@@ -240,19 +256,19 @@ public class NeoResponse {
     return response;
   }
 
+  /** Statuses that are never a business refusal: not worth a message-text lookup. */
+  private static final Set<Integer> NOT_A_REFUSAL = Set.of(401, 403, 404);
+
   /**
    * Core {@code Utilities.checkPeriod}'s refusal, which reaches NEO handlers untranslated and is
    * worded for removing payments whatever the action was.
    */
-  /** Statuses that are never a business refusal: not worth a message-text lookup. */
-  private static final java.util.Set<Integer> NOT_A_REFUSAL = java.util.Set.of(401, 403, 404);
-
   private static final String UNTRANSLATED_PERIOD_CLOSED = "@ETPR_PeriodClosedForUnRemovePayment@";
 
   /** Rewrites a raw {@link #UNTRANSLATED_PERIOD_CLOSED} body as {@link #periodNotAvailable(int)}. */
   private static NeoResponse asPeriodNotAvailable(NeoResponse response, JSONObject body,
       JSONObject error) {
-    JSONObject keyed = periodNotAvailable(response.getHttpStatus()).body.optJSONObject("error");
+    JSONObject keyed = periodNotAvailable(response.getHttpStatus()).body.optJSONObject(ERROR_FIELD);
     try {
       for (JSONObject target : new JSONObject[] { body, error }) {
         if (target != null && (target == error || body.has(MESSAGE_FIELD) || error == null)) {
@@ -286,13 +302,17 @@ public class NeoResponse {
       return response;
     }
     JSONObject body = response.getBody();
-    JSONObject error = body.optJSONObject("error");
+    JSONObject error = body.optJSONObject(ERROR_FIELD);
     if (body.has(MESSAGE_KEYS_FIELD) || (error != null && error.has(MESSAGE_KEYS_FIELD))) {
       return response;
     }
     String text = body.optString(MESSAGE_FIELD, error != null ? error.optString(MESSAGE_FIELD, "") : "");
     if (text.contains(UNTRANSLATED_PERIOD_CLOSED)) {
       return asPeriodNotAvailable(response, body, error);
+    }
+    if (response.getHttpStatus() >= 500) {
+      // a server failure is not a business refusal, and its session may be unusable
+      return response;
     }
     List<String> keys = NeoMessageTranslator.recognizeMessageKeys(text,
         NeoMessageTranslator.PERIOD_REFUSAL_KEYS);

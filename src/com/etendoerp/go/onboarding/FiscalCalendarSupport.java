@@ -21,6 +21,7 @@ import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.Date;
 import java.util.Locale;
+import java.util.Map;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -38,6 +39,13 @@ import org.openbravo.model.financialmgmt.calendar.Year;
  * calendar to exactly one row per (period, organization, document base type).
  */
 public final class FiscalCalendarSupport {
+
+  /**
+   * The fiscal-year starts offered (quarters only, decision Q1), by the Calendar window's
+   * "Create periods" and by the calendar review's regenerate.
+   */
+  public static final Map<String, Integer> FISCAL_YEAR_STARTS = Map.of(
+      "JANUARY", 1, "APRIL", 4, "JULY", 7, "OCTOBER", 10);
 
   private static final Logger log = LogManager.getLogger(FiscalCalendarSupport.class);
   private static final String PERIOD_TYPE_STANDARD = "S";

@@ -239,6 +239,11 @@ public class NeoResponseTest {
       NeoResponse other = NeoResponse.identifyPeriodRefusal(NeoResponse.error(400, "boom"));
       assertFalse(other.getBody().has("messageKeys"));
 
+      // A 5xx is a server failure, not a refusal: no message-text lookup, no key.
+      NeoResponse failed = NeoResponse.identifyPeriodRefusal(
+          NeoResponse.error(500, "El Periodo no existe o no está abierto"));
+      assertFalse(failed.getBody().has("messageKeys"));
+
       JSONObject keyed = new JSONObject().put("message", "El Periodo no existe o no está abierto")
           .put("messageKeys", new org.codehaus.jettison.json.JSONArray().put("Other"));
       assertEquals("[\"Other\"]", NeoResponse.identifyPeriodRefusal(NeoResponse.error(400, keyed))

@@ -39,6 +39,7 @@ import java.util.Collections;
 import java.util.Date;
 import java.util.List;
 
+import org.junit.After;
 import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.openbravo.base.exception.OBException;
@@ -71,6 +72,12 @@ public class OnboardingPeriodControlServiceTest {
   // ---------------------------------------------------------------------------
   // 1. Context validation
   // ---------------------------------------------------------------------------
+
+  /** Tests install mock contexts on the thread; clear it so other classes in the JVM start clean. */
+  @After
+  public void clearThreadLocalContext() {
+    OBContext.setOBContext((OBContext) null);
+  }
 
   @Test
   public void testWireFailsWhenClientIdIsMissing() {
