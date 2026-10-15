@@ -955,7 +955,7 @@ regenerate deletes the calendar, so owning another environment of the account is
 answer the new state.
 
 **When a refusal still happens.** `PeriodNotAvailable` is published in `messageKeys` by document
-completions (core procedures, via `NeoProcessService`; invoices via `InvoiceCompletionService`, which recognises the already-translated core text because `ProcessInvoiceUtil` rolls back the AD_PInstance that held the raw token), by posting (`DocumentPostingService`,
+completions (core procedures, via `NeoProcessService`; classic processes that hand their error over already translated — `ProcessInvoiceUtil`, `FIN_AddPaymentFromJournal`, the latter in English whatever the user's language — are recognised from the message text in any language by `NeoMessageTranslator.recognizeMessageKeys`, in `translateClassicResult`), by a refused save (`NeoCrudHandler` answers 400 with `PeriodNotValid`, which `GL_JOURNAL_CHK_RESTRICT_TRG` raises for the same condition, instead of a 500), by posting (`DocumentPostingService`,
 `STATUS_PeriodClosed`) and by payment registration (`MessageKeyedException` →
 `NeoResponse.error(int, OBException)` → `error.messageKeys`). The SPA turns it into a toast that
 points the owner to this row while the review is pending (others are told to ask the owner; an

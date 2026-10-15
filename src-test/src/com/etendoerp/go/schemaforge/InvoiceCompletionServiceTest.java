@@ -38,7 +38,6 @@ import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.base.weld.WeldUtils;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBError;
-import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.openbravo.model.ad.ui.Process;
 
 /**
@@ -193,14 +192,17 @@ public class InvoiceCompletionServiceTest {
     try (MockedStatic<NeoDefaultsService> defaultsMock = Mockito.mockStatic(NeoDefaultsService.class);
         MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class);
         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
-        MockedStatic<OBMessageUtils> msgMock = Mockito.mockStatic(OBMessageUtils.class)) {
+        MockedStatic<com.etendoerp.go.schemaforge.util.NeoMessageTranslator> translator =
+            Mockito.mockStatic(com.etendoerp.go.schemaforge.util.NeoMessageTranslator.class,
+                Mockito.CALLS_REAL_METHODS)) {
 
       defaultsMock.when(() -> NeoDefaultsService.buildVariablesSecureApp(any()))
           .thenReturn(new VariablesSecureApp("u", "c", "o", "r", "es_ES"));
       weldMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(ProcessInvoiceUtil.class))
           .thenReturn(processInvoiceUtil);
-      msgMock.when(() -> OBMessageUtils.messageBD("PeriodNotAvailable"))
-          .thenReturn("El Periodo no existe o no está abierto");
+      translator.when(() -> com.etendoerp.go.schemaforge.util.NeoMessageTranslator
+          .recognizeMessageKeys(eq("El Periodo no existe o no está abierto"), any()))
+          .thenReturn(java.util.List.of("PeriodNotAvailable"));
 
       OBDal dal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(dal);

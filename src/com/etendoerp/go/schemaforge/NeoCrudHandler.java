@@ -61,6 +61,7 @@ import com.etendoerp.go.schemaforge.util.NeoErrorSanitizer;
 import com.etendoerp.go.schemaforge.util.NeoListIdentifierHelper;
 import com.etendoerp.go.schemaforge.util.NeoListReferenceError;
 import com.etendoerp.go.schemaforge.util.NeoLocatorIdentifierHelper;
+import com.etendoerp.go.schemaforge.util.NeoMessageTranslator;
 import com.etendoerp.go.schemaforge.util.NeoMethodPolicy;
 import com.etendoerp.go.schemaforge.util.NeoRecordVersion;
 import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
@@ -788,6 +789,17 @@ class NeoCrudHandler {
       // IMP-24's `missingFields` envelope (IMP-23 §9.4).
       if (NeoErrorSanitizer.isNotNullViolationMessage(translated)) {
         return buildNotNullViolationResponse(translated, adTab);
+      }
+      // ETP-5577: a trigger refusing the document's date (GL_JOURNAL_CHK_RESTRICT_TRG raises
+      // @PeriodNotValid@ when the period is not open) is the caller's data to fix — a 400 carrying
+      // the refusal's identity, so the SPA can offer to open the period, not an unclassified 500.
+      List<String> periodKeys = NeoMessageTranslator.recognizeMessageKeys(
+          errMsg + "\n" + translated, NeoMessageTranslator.PERIOD_REFUSAL_KEYS);
+      if (!periodKeys.isEmpty()) {
+        NeoResponse refusal = NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, translated);
+        refusal.getBody().getJSONObject("error")
+            .put(NeoProcessService.MESSAGE_KEYS, new JSONArray(periodKeys));
+        return refusal;
       }
       // DefaultJsonDataService catches a unique-constraint violation internally and
       // returns it as a normal RPC failure response (this branch), never as a thrown

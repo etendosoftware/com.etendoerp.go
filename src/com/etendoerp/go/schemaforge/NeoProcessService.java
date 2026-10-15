@@ -59,6 +59,7 @@ import org.openbravo.service.db.DalBaseProcess;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
+import com.etendoerp.go.schemaforge.util.NeoMessageTranslator;
 
 /**
  * Service for executing AD_Process definitions via the Neo headless API.
@@ -1113,6 +1114,14 @@ public class NeoProcessService {
           safeParseTranslation(StringUtils.defaultString(error.getMessage())));
 
       if (ERROR.equalsIgnoreCase(error.getType())) {
+        // ETP-5577 — a classic process hands its error over already translated (ProcessInvoiceUtil,
+        // FIN_AddPaymentFromJournal), so a period refusal is recognised from its text: the SPA
+        // keys the "open the period" way out, and its own wording, on this identity.
+        List<String> periodKeys = NeoMessageTranslator.recognizeMessageKeys(
+            error.getMessage(), NeoMessageTranslator.PERIOD_REFUSAL_KEYS);
+        if (!periodKeys.isEmpty()) {
+          result.put(MESSAGE_KEYS, new JSONArray(periodKeys));
+        }
         return new NeoResponse(400, result);
       }
       return NeoResponse.ok(result);
