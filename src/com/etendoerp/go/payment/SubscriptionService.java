@@ -86,6 +86,9 @@ public class SubscriptionService {
   /** The HQL alias and {@code where} every row query of this class starts with. */
   private static final String WHERE_SUB = "as sub where sub.";
 
+  /** The {@code .id = :} fragment that binds an id property to a named parameter. */
+  private static final String ID_EQUALS_PARAM = ".id = :";
+
   private static final String OPEN_ROW_PREDICATE =
       " and sub." + Subscription.PROPERTY_ENDDATE + " is null"
           + " and sub." + Subscription.PROPERTY_ACTIVE + " = true";
@@ -129,7 +132,7 @@ public class SubscriptionService {
     OBContext.setAdminMode(true);
     try {
       OBQuery<Subscription> query = OBDal.getInstance().createQuery(Subscription.class,
-          WHERE_SUB + Subscription.PROPERTY_ENVIRONMENTCLIENT + ".id = :"
+          WHERE_SUB + Subscription.PROPERTY_ENVIRONMENTCLIENT + ID_EQUALS_PARAM
               + PARAM_CLIENT_ID + OPEN_ROW_PREDICATE);
       query.setNamedParameter(PARAM_CLIENT_ID, StringUtils.trimToEmpty(environmentClientId));
       query.setFilterOnReadableClients(false);
@@ -194,7 +197,7 @@ public class SubscriptionService {
     OBContext.setAdminMode(true);
     try {
       OBQuery<Subscription> query = OBDal.getInstance().createQuery(Subscription.class,
-          WHERE_SUB + Subscription.PROPERTY_ENVIRONMENTCLIENT + ".id = :"
+          WHERE_SUB + Subscription.PROPERTY_ENVIRONMENTCLIENT + ID_EQUALS_PARAM
               + PARAM_CLIENT_ID + CLOSED_ROW_PREDICATE + LATEST_CLOSED_ORDER);
       query.setNamedParameter(PARAM_CLIENT_ID, StringUtils.trimToEmpty(environmentClientId));
       query.setFilterOnReadableClients(false);
@@ -272,7 +275,7 @@ public class SubscriptionService {
     OBContext.setAdminMode(true);
     try {
       OBQuery<Subscription> query = OBDal.getInstance().createQuery(Subscription.class,
-          "as sub where sub." + Subscription.PROPERTY_ENVIRONMENTCLIENT + ".id = :"
+          WHERE_SUB + Subscription.PROPERTY_ENVIRONMENTCLIENT + ID_EQUALS_PARAM
               + PARAM_CLIENT_ID);
       query.setNamedParameter(PARAM_CLIENT_ID, StringUtils.trimToEmpty(environmentClientId));
       query.setFilterOnReadableClients(false);
