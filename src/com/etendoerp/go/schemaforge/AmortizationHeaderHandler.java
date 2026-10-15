@@ -166,11 +166,11 @@ public class AmortizationHeaderHandler implements NeoHandler {
   static String rewritePostedInCriteria(String rawCriteria) throws JSONException {
     String trimmed = rawCriteria.trim();
     if (trimmed.startsWith("[")) {
-      JSONArray arr = new JSONArray(trimmed);
+      JSONArray arr = NeoRequestBodyParser.parseJsonArraySafely(trimmed);
       rewriteCriteriaArray(arr);
       return arr.toString();
     }
-    JSONObject obj = new JSONObject(trimmed);
+    JSONObject obj = NeoRequestBodyParser.parseJsonObjectSafely(trimmed);
     rewriteCriteriaObject(obj);
     return obj.toString();
   }

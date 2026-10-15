@@ -34,6 +34,7 @@ import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.ad.ui.Process;
 
 import com.etendoerp.go.schemaforge.NeoProcessService;
+import com.etendoerp.go.schemaforge.NeoRequestBodyParser;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.NeoServlet;
 import com.etendoerp.go.schemaforge.NeoServlet.NeoPathInfo;
@@ -127,7 +128,7 @@ public final class NeoButtonActionHelper {
     String bodyStr = cachedBody instanceof String
         ? (String) cachedBody
         : new String(request.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
-    JSONObject params = StringUtils.isNotBlank(bodyStr) ? new JSONObject(bodyStr) : null;
+    JSONObject params = NeoRequestBodyParser.parseOptionalJsonObject(bodyStr);
     return executeButtonActionCore(entity, pathInfo.recordId, pathInfo.actionName, params);
   }
 

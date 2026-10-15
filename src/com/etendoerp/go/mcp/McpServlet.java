@@ -46,6 +46,7 @@ import com.etendoerp.go.oauth2.ApiScopes;
 import com.etendoerp.go.oauth2.OAuth2Filter;
 import com.etendoerp.go.payment.EnvironmentAccessPolicy;
 import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
+import com.etendoerp.go.schemaforge.NeoRequestBodyParser;
 import com.etendoerp.go.session.GoLegacyBearer;
 import com.etendoerp.go.session.GoNeoAuth;
 import com.etendoerp.go.session.GoSessionAuthResult;
@@ -181,7 +182,7 @@ public class McpServlet extends HttpServlet {
     McpUsageTelemetry.setCurrentSessionKey(
         StringUtils.trimToNull(request.getHeader(McpUsageTelemetry.HEADER_SESSION_ID)));
     try {
-      JSONObject rpcMessage = new JSONObject(body);
+      JSONObject rpcMessage = NeoRequestBodyParser.parseJsonObjectSafely(body);
       method = rpcMessage.optString("method", "");
       Object id = rpcMessage.opt("id");
       callParams = rpcMessage.optJSONObject("params");
@@ -264,7 +265,7 @@ public class McpServlet extends HttpServlet {
   private String writeRpcError(HttpServletResponse response, String body, int code,
       String message, int httpStatus, JSONObject data) throws IOException {
     try {
-      Object rpcId = new JSONObject(body).opt("id");
+      Object rpcId = NeoRequestBodyParser.parseJsonObjectSafely(body).opt("id");
       JSONObject error = buildJsonRpcError(rpcId, code, message);
       if (data != null) {
         error.getJSONObject("error").put("data", data);

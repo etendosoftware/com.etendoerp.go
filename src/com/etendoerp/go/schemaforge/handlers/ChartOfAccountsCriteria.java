@@ -25,6 +25,8 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.query.NativeQuery;
 
+import com.etendoerp.go.schemaforge.NeoRequestBodyParser;
+
 /**
  * Pure-function helpers for building the SQL WHERE clause and ORDER BY from SmartClient
  * Advanced Criteria payloads, plus the {@code applySqlParameters} utility used by
@@ -89,7 +91,9 @@ class ChartOfAccountsCriteria {
 
   private static Object parseCriteriaPayload(String rawCriteria) throws Exception {
     String trimmed = rawCriteria.trim();
-    return trimmed.startsWith("[") ? new JSONArray(trimmed) : new JSONObject(trimmed);
+    return trimmed.startsWith("[")
+        ? NeoRequestBodyParser.parseJsonArraySafely(trimmed)
+        : NeoRequestBodyParser.parseJsonObjectSafely(trimmed);
   }
 
   private static String buildCriteriaSql(Object node, Map<String, Object> sqlParams,

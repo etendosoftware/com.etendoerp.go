@@ -671,7 +671,7 @@ class Fiscal303SubmissionSupport {
       while ((line = reader.readLine()) != null) sb.append(line);
     }
     String raw = sb.toString();
-    return raw.isEmpty() ? new JSONObject() : new JSONObject(raw);
+    return raw.isEmpty() ? new JSONObject() : NeoRequestBodyParser.parseJsonObjectSafely(raw);
   }
 
   private void writeJson(HttpServletResponse response, int status, JSONObject body)

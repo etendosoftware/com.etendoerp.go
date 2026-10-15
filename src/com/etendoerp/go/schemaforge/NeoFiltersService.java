@@ -81,7 +81,7 @@ class NeoFiltersService {
     JSONObject all = loadAll();
     try {
       JSONObject windowPresets = all.has(windowName) ? all.getJSONObject(windowName) : new JSONObject();
-      windowPresets.put(presetName, new JSONObject(filtersJson));
+      windowPresets.put(presetName, NeoRequestBodyParser.parseJsonObjectSafely(filtersJson));
       all.put(windowName, windowPresets);
     } catch (Exception e) {
       log.error("Invalid filters JSON for window {}, preset {}: {}", windowName, presetName, e.getMessage(), e);
@@ -117,7 +117,7 @@ class NeoFiltersService {
           PREF_KEY, false,
           ctx.getCurrentClient(), ctx.getCurrentOrganization(),
           ctx.getUser(), ctx.getRole(), null);
-      return new JSONObject(raw);
+      return NeoRequestBodyParser.parseJsonObjectSafely(raw);
     } catch (PropertyNotFoundException e) {
       return new JSONObject();
     } catch (PropertyException e) {

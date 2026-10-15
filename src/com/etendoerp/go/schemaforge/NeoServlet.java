@@ -15,6 +15,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.http.entity.ContentType;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.MatchMode;
 import org.hibernate.criterion.Restrictions;
@@ -184,6 +185,9 @@ public class NeoServlet extends HttpBaseServlet {
         return;
       }
       requestRouter.handleSpecRequest(pathInfo, method, request, response);
+    } catch (JSONException | StackOverflowError e) { // NOSONAR — malformed or deep JSON is a client bad request
+      log.debug("Invalid JSON body in NEO request: {}", e.getMessage());
+      sendError(response, HttpServletResponse.SC_BAD_REQUEST, "Invalid JSON body: " + e.getMessage());
     } catch (Exception e) {
       log.error("Error processing NEO request: {}", e.getMessage(), e);
       sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, NeoErrorSanitizer.sanitize(e));

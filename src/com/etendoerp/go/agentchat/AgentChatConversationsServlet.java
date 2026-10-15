@@ -39,6 +39,7 @@ import com.etendoerp.copilot.util.ConversationWriteUtils;
 import com.etendoerp.go.common.CorsUtils;
 import com.etendoerp.go.common.JwtAuthUtils;
 import com.etendoerp.go.common.ServletResponseUtils;
+import com.etendoerp.go.schemaforge.NeoRequestBodyParser;
 
 /**
  * History of the Etendo agent chat, stored in the Copilot conversation tables
@@ -212,6 +213,6 @@ public class AgentChatConversationsServlet extends HttpBaseServlet {
 
   private static JSONObject readBody(HttpServletRequest request) throws IOException, JSONException {
     String raw = new String(request.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
-    return StringUtils.isBlank(raw) ? new JSONObject() : new JSONObject(raw);
+    return StringUtils.isBlank(raw) ? new JSONObject() : NeoRequestBodyParser.parseJsonObjectSafely(raw);
   }
 }
