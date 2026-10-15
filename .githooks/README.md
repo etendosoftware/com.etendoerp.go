@@ -38,7 +38,7 @@ git config --get core.hooksPath     # debe imprimir: .githooks
 
 Antes del paso 1, el hook resuelve la **rama destino** del push (`lib/target-branch.sh`, igual que
 en etendo_schema_forge): `PRE_PUSH_TARGET` si está definida, si no la base del PR abierto de la rama
-(vía `gh`), si no `main` para `main` y `hotfix/*`, y `develop` para el resto. Contra esa rama chequea
+(vía `gh`), si no `main` para `main`, `hotfix/*` y el corte (`mergeblock/*`), y `develop` para el resto. Contra esa rama chequea
 conflictos (`git merge-tree`) y mide el diff de relevancia, Sonar y la cobertura de líneas cambiadas.
 
 El paso 1b nunca reemplaza al 3: el 3 sigue siendo la fuente de verdad para el
