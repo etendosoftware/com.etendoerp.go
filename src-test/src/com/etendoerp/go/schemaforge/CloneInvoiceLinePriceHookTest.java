@@ -153,4 +153,30 @@ public class CloneInvoiceLinePriceHookTest {
     verify(clonedLine1).setListPrice(new BigDecimal("30.00"));
     verify(clonedLine2).setListPrice(new BigDecimal("15.50"));
   }
+
+  /**
+   * The copy is a fresh record: it must not point at the invoice it corrects (SII) nor at the
+   * source invoice line a credit/rectification line was derived from.
+   */
+  @Test
+  public void testPostCopyClearsLinksToOtherDocuments() throws Exception {
+    CloneRecordHook delegate = mock(CloneRecordHook.class);
+    Invoice original = mock(Invoice.class);
+    Invoice placeholder = mock(Invoice.class);
+    Invoice clone = mock(Invoice.class);
+    when(original.getInvoiceLineList()).thenReturn(new ArrayList<InvoiceLine>());
+    InvoiceLine clonedLine = mock(InvoiceLine.class);
+    List<InvoiceLine> cloneLines = new ArrayList<>();
+    cloneLines.add(clonedLine);
+    when(clone.getInvoiceLineList()).thenReturn(cloneLines);
+    when(delegate.postCopy(original, placeholder)).thenReturn(clone);
+
+    new CloneInvoiceLinePriceHook(delegate).postCopy(original, placeholder);
+
+    verify(clone).setAeatsiiInvoice(null);
+    verify(clone).setSalesOrder(null);
+    verify(clonedLine).setETGOSourceInvoiceLine(null);
+    verify(clonedLine).setSalesOrderLine(null);
+    verify(clonedLine).setGoodsShipmentLine(null);
+  }
 }

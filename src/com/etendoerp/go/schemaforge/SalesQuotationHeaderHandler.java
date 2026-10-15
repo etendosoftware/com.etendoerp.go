@@ -152,6 +152,8 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
 
   private static Map<String, NeoActionContract> buildActionContracts() {
     Map<String, NeoActionContract> contracts = new LinkedHashMap<>();
+    contracts.put(CreateDraftInvoiceHandler.QUOTATION_CONTRACT.getName(),
+        CreateDraftInvoiceHandler.QUOTATION_CONTRACT);
     contracts.put(RejectQuotationHandler.CONTRACT.getName(), RejectQuotationHandler.CONTRACT);
     contracts.put(CreateRejectReasonHandler.CONTRACT.getName(), CreateRejectReasonHandler.CONTRACT);
     return Collections.unmodifiableMap(contracts);

@@ -111,8 +111,8 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
   /**
    * The actions this header serves through its delegates, declared for agents (ETP-5558): the
    * invoice payment actions, {@code currencyOptions}, the follow-up document actions
-   * ({@link FollowUpSupport#actionContracts()}, ETP-5576) and {@code post} / {@code unpost}
-   * (ETP-5692). Published by the MCP next to the AD
+   * ({@link FollowUpSupport#actionContracts()}, ETP-5576), {@code post} / {@code unpost}
+   * (ETP-5692) and {@code cloneRecord} (ETP-5709). Published by the MCP next to the AD
    * buttons; REST and the SPA do not read it.
    */
   @Override
@@ -124,6 +124,8 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
     // ETP-5692: post / unpost were served (DocumentPostingService) but undeclared, so an agent
     // had to guess them; the raw `posted` AD button is hidden by MCP_CONFIG in their favour.
     contracts.putAll(InvoicePostingGate.CONTRACTS);
+    // ETP-5709: cloneRecord was served (see handle) but undeclared.
+    contracts.put(NeoCloneRecordHandler.CONTRACT.getName(), NeoCloneRecordHandler.CONTRACT);
     return contracts;
   }
 

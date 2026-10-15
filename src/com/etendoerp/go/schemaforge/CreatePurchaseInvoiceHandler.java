@@ -22,7 +22,6 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -57,6 +56,9 @@ import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
 import org.openbravo.model.pricing.pricelist.PriceList;
 import org.openbravo.service.db.DalConnectionProvider;
 
+import com.etendoerp.go.schemaforge.util.DocumentStatusGuard;
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
+
 /**
  * NeoHandler that creates a draft Purchase Invoice from a Purchase Order or Goods Receipt.
  * Invoked as an ACTION endpoint via:
@@ -75,6 +77,8 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
   private static final String SPEC_GOODS_RECEIPT = "goods-receipt";
   private static final String FIELD_ORDERED_QUANTITY = "orderedQuantity";
   private static final String PARAM_RECEIPT_IDS = "receiptIds";
+  private static final String PARAM_PRICE_LIST_ID = "priceListId";
+  private static final String PARAM_LINES = "lines";
   private static final String ERR_RECORD_ID_REQUIRED = "Record ID is required";
   private static final String KEY_RESPONSE = "response";
   private static final String ERR_NO_AP_INVOICE_DOC_TYPE = "No AP Invoice document type found";
@@ -88,6 +92,83 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
   private static final String ERR_PRICE_LIST_REQUIRED =
       "No Price List could be resolved for this invoice: select a tariff or configure "
           + "a default Price List for the Business Partner";
+  /**
+   * What an agent reads about {@code createPurchaseInvoice} on a purchase order (ETP-5709): no
+   * parameters. The MCP publishes it and judges the call against it; REST and the SPA do not
+   * validate against it.
+   */
+  static final NeoActionContract ORDER_CONTRACT = NeoActionContract.write(ACTION_NAME,
+      "Creates a purchase invoice from the lines of this purchase order that are still pending "
+          + "invoicing and COMPLETES it in the same call (created AND completed, there is no "
+          + "draft step), returning 201 with {id, documentNo, documentStatus}. Precondition: the "
+          + "order is completed (status CO), otherwise 400 naming its status. It is independent of createGoodsReceipt: an order can be "
+          + "invoiced without being received, received without being invoiced, or both. Typical "
+          + "sequence for an order: documentAction (confirm) -> createGoodsReceipt -> "
+          + "createPurchaseInvoice. A line is invoiced only for what is still pending (ordered "
+          + "minus invoiced, same sign as the ordered quantity): an already-invoiced or "
+          + "over-invoiced line is never invoiced again, so a second call does not duplicate "
+          + "the invoice and, once nothing is pending, answers 400 'No pending lines to invoice "
+          + "in this purchase order'. Only COMPLETED invoices count as invoiced: an invoice "
+          + "left in draft by other means does not reduce what is pending.")
+      .withIdDescription("the id of the purchase order to invoice");
+
+  /**
+   * The goods-receipt variant of {@code createPurchaseInvoice} (ETP-5709): the optional body keys
+   * {@link #createFromReceipt} / {@link #createFromReceipts} read — {@code receiptIds},
+   * {@code priceListId} and {@code lines}. The SPA posts {@code priceListId} (and
+   * {@code receiptIds} from the bulk action), so all three are declared.
+   */
+  static final NeoActionContract RECEIPT_CONTRACT = NeoActionContract.write(ACTION_NAME,
+      "Creates a purchase invoice from this goods receipt (or from several receipts together, "
+          + "see receiptIds) and COMPLETES it in the same call (created AND completed, there is "
+          + "no draft step), returning 201 with {id, documentNo, documentStatus}. Precondition: "
+          + "the receipt is completed (status CO; every receipt of receiptIds), otherwise 400 naming "
+          + "the receipt and its status. It is independent of the order's own createPurchaseInvoice: "
+          + "only the receipt, only the invoice, or both can be generated for an order. It "
+          + "invoices only what is still pending on each receipt line (received minus invoiced, "
+          + "draft invoices included), so a second call does not duplicate the invoice: once "
+          + "nothing is pending it answers 400 'Goods receipt <no> has nothing left to invoice' "
+          + "(several receipts: 'Goods receipts <no>, <no> have nothing left to invoice'). By "
+          + "default it invoices the pending quantity of every line. The invoice is scoped to the "
+          + "lines of the receipt(s) sent: other receipts of the same order line are not "
+          + "invoiced. An invoice generated from a receipt cannot have its quantities edited "
+          + "afterwards (reactivating it does not allow it), so give any partial quantity here, "
+          + "at creation.",
+      NeoActionContract.Param.array(PARAM_RECEIPT_IDS, NeoActionContract.TYPE_STRING, false,
+          "Ids of the goods receipts to invoice together in ONE invoice (all of the same business "
+              + "partner). When sent, exactly these receipts are invoiced, so include this one. "
+              + "Omit to invoice only this receipt."),
+      NeoActionContract.Param.optional(PARAM_PRICE_LIST_ID, NeoActionContract.TYPE_STRING,
+          "Id of the purchase price list to price the invoice with. Only required when none can "
+              + "be resolved (receipts without a common order and a business partner without a "
+              + "default purchase tariff); otherwise the order's or partner's list is used."),
+      NeoActionContract.Param.array(PARAM_LINES, NeoActionContract.TYPE_OBJECT, false,
+          "Partial invoicing, honoured exactly (a receipt of 3 with quantity 1 gives an invoice "
+              + "of 1): [{receiptLineId, quantity}] with the quantity to invoice per "
+              + "receipt line, for a single receipt, several (receiptIds) or one without a "
+              + "purchase order alike. A quantity above what is still pending for that line, with the "
+              + "opposite sign to the line, or for a line with nothing pending is refused with "
+              + "400 naming the line and its pending quantity (it is never capped silently), and "
+              + "so is a list none of whose entries has a receiptLineId and a non-zero quantity. "
+              + "Omit to invoice the pending quantity of every line."))
+      .withIdDescription("the id of the goods receipt to invoice");
+
+  private static final String ERR_ORDER_NOT_COMPLETED =
+      "Purchase order %s is not completed (status %s): complete it before creating the invoice";
+  private static final String ERR_RECEIPT_NOTHING_TO_INVOICE =
+      "Goods receipt %s has nothing left to invoice: every line is already invoiced or covered "
+          + "by a draft invoice";
+  private static final String ERR_RECEIPTS_NOTHING_TO_INVOICE =
+      "Goods receipts %s have nothing left to invoice: every line is already invoiced or "
+          + "covered by a draft invoice";
+  private static final String ERR_LINE_EXCEEDS_PENDING =
+      "Cannot invoice %s: requested quantity %s, but the quantity still pending to invoice is %s "
+          + "(already invoiced or covered by a draft invoice)";
+  private static final String ERR_LINES_UNUSABLE =
+      "'lines' was sent but none of its entries has a receiptLineId and a non-zero quantity";
+  private static final String ERR_RECEIPT_NOT_COMPLETED =
+      "Goods receipt %s is not completed (status %s): complete it before creating the invoice";
+
   @Inject
   InvoiceFromOrderSupport invoiceFromOrderSupport;
 
@@ -348,7 +429,7 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
   }
 
   private PriceList resolvePriceListOverride(JSONObject body) {
-    String priceListId = body != null ? body.optString("priceListId", null) : null;
+    String priceListId = body != null ? body.optString(PARAM_PRICE_LIST_ID, null) : null;
     if (StringUtils.isBlank(priceListId)) {
       return null;
     }
@@ -360,6 +441,8 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     if (order == null) {
       throw new OBException("Purchase order not found: " + orderId);
     }
+    DocumentStatusGuard.requireCompleted(order.getDocumentNo(), order.getDocumentStatus(),
+        ERR_ORDER_NOT_COMPLETED);
 
     JSONArray selectedLines = buildSelectedLines(order);
     if (selectedLines.length() == 0) {
@@ -423,11 +506,14 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     BigDecimal invoiced = ol.getInvoicedQuantity() != null ? ol.getInvoicedQuantity() : BigDecimal.ZERO;
     BigDecimal pending  = ordered.subtract(invoiced);
     // ETP-4567: ordered/invoiced quantities can be NEGATIVE (return-style lines,
-    // since ETP-4567 removed the min:0 constraint on order lines). Only an exact
-    // zero means "nothing left to invoice" — a strictly-positive check silently
-    // dropped every negative-quantity line, so a fully-negative-total PO ended up
-    // with an empty selectedLines and wrongly threw "No pending lines to invoice".
-    return pending.compareTo(BigDecimal.ZERO) != 0 ? pending : null;
+    // since ETP-4567 removed the min:0 constraint on order lines), so "nothing left" is not
+    // "pending <= 0".
+    // ETP-5709: but a pending quantity only counts when it has the SAME sign as the ordered
+    // quantity. A line ordered 2 and invoiced 4 has pending -2: it is over-invoiced, not
+    // pending, and selecting it would create an invoice line of -2. Same sign rule as
+    // InOutLineFromOrderFactory uses for receipts; a legit negative line (ordered -3, invoiced
+    // 0 -> pending -3) keeps the ordered sign and is still invoiced.
+    return pending.signum() != 0 && pending.signum() == ordered.signum() ? pending : null;
   }
 
   // Discard the placeholder doc type ('0' = "** New **", docBasetype="---")
@@ -496,9 +582,22 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
    *     Business Partners
    */
   protected List<ShipmentInOut> loadAndValidateReceipts(List<String> receiptIds) {
-    return MultiDocumentInvoiceSupport.loadAndValidateSameBusinessPartner(receiptIds,
-        "Goods receipt not found: ", "No goods receipts provided",
+    List<ShipmentInOut> receipts = MultiDocumentInvoiceSupport.loadAndValidateSameBusinessPartner(
+        receiptIds, "Goods receipt not found: ", "No goods receipts provided",
         "All goods receipts must belong to the same Business Partner");
+    requireReceiptsCompleted(receipts);
+    return receipts;
+  }
+
+  /**
+   * ETP-5709: every receipt that feeds an invoice must be completed — checked for the single and
+   * the multi-receipt path alike, before anything is created.
+   */
+  private static void requireReceiptsCompleted(List<ShipmentInOut> receipts) {
+    for (ShipmentInOut receipt : receipts) {
+      DocumentStatusGuard.requireCompleted(receipt.getDocumentNo(),
+          receipt.getDocumentStatus(), ERR_RECEIPT_NOT_COMPLETED);
+    }
   }
 
   /**
@@ -535,9 +634,11 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     ShipmentInOut first = receipts.get(0);
 
     Map<String, BigDecimal> qtyOverrides = parseLineOverrides(body);
+    MultiDocumentInvoiceSupport.requireParsedLines(body, PARAM_LINES, qtyOverrides,
+        ERR_LINES_UNUSABLE);
 
     // Seed per-receipt pending quantities — the multi-receipt twin of the ETP-5381 seeding in
-    // createFromReceipt (line 426 area): a QUANTITY SOURCE, not a duplicate-invoice guard.
+    // #createFromReceipt (the {@code qtyOverrides.isEmpty()} branch): a QUANTITY SOURCE, not a duplicate-invoice guard.
     // Core's own pending-quantity logic (raised qtyinvoiced once the first invoice is
     // confirmed) is what actually blocks a genuine re-invoice. Uses the throwing variant
     // (computePendingQtyPerLineOrThrow) deliberately: the swallowing variant returns an empty
@@ -548,11 +649,20 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     for (ShipmentInOut r : receipts) {
       pendingQtyMap.putAll(NeoInvoiceSupport.computePendingQtyPerLineOrThrow(r.getId(), true));
     }
+    // ETP-5709: explicit quantities are validated against what is pending, never silently
+    // capped; and the map is authoritative, so a line absent from it (nothing pending) is
+    // skipped by buildInOutLineSelection instead of being invoiced in full.
+    MultiDocumentInvoiceSupport.requireOverridesWithinPending(receipts, qtyOverrides, pendingQtyMap,
+        ERR_LINE_EXCEEDS_PENDING);
 
     JSONArray selectedLines = MultiDocumentInvoiceSupport.buildInOutLineSelection(receipts, qtyOverrides,
         pendingQtyMap, log);
     if (selectedLines.length() == 0) {
-      throw new OBException("No hay líneas pendientes de facturar en estos albaranes de compra");
+      List<String> docNos = new ArrayList<>();
+      for (ShipmentInOut r : receipts) {
+        docNos.add(r.getDocumentNo());
+      }
+      throw new OBException(String.format(ERR_RECEIPTS_NOTHING_TO_INVOICE, String.join(", ", docNos)));
     }
 
     Invoice invoice = createInvoiceHeaderFromReceipts(first, receipts);
@@ -772,19 +882,37 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     if (receipt == null) {
       throw new OBException("Goods receipt not found: " + receiptId);
     }
+    requireReceiptsCompleted(List.of(receipt));
 
     Map<String, BigDecimal> qtyOverrides = parseLineOverrides(body);
+    MultiDocumentInvoiceSupport.requireParsedLines(body, PARAM_LINES, qtyOverrides,
+        ERR_LINES_UNUSABLE);
     // ETP-5381: when the caller sends no explicit line quantities — which is what the UI always
     // does, it posts only priceListId — seed them from the receipt's pending quantities. This is
     // not a duplicate-invoice guard but a correctness fix: resolveReceiptLineQty otherwise falls
     // back to the FULL movementQuantity, so unlike the order path this one never consulted what
     // was already invoiced. Its javadoc already promised the map came from
     // computePendingQtyPerLine; it was simply never wired up.
-    // Nothing pending leaves the map empty, and the existing "no lines to invoice" check below
-    // rejects the request. The throwing variant is used so a DB failure surfaces as such instead
-    // of being mistaken for "nothing left to invoice".
+    // Nothing pending leaves the map EMPTY, and an empty map downstream means "no overrides,
+    // invoice the full movement quantity" — so "nothing left to invoice" must be refused HERE,
+    // before any line is built: no later check can tell the two apart (the "no lines" checks
+    // below only fire on an empty selection, which a full-quantity fallback never produces; a
+    // second call used to create a second identical invoice, ETP-5709). The throwing variant is
+    // used so a DB failure surfaces as such instead of being mistaken for "nothing left".
+    // Drafts count as covered (includeDrafts=true), hence the wording of the message.
+    // ETP-5709: the pending map is computed for explicit lines too, to refuse (400, not a
+    // silent cap) a quantity above what is pending.
+    Map<String, BigDecimal> pending = NeoInvoiceSupport.computePendingQtyPerLineOrThrow(receiptId,
+        true);
     if (qtyOverrides.isEmpty()) {
-      qtyOverrides = NeoInvoiceSupport.computePendingQtyPerLineOrThrow(receiptId, true);
+      qtyOverrides = pending;
+      if (qtyOverrides.isEmpty()) {
+        throw new OBException(String.format(ERR_RECEIPT_NOTHING_TO_INVOICE,
+            receipt.getDocumentNo()));
+      }
+    } else {
+      MultiDocumentInvoiceSupport.requireOverridesWithinPending(List.of(receipt), qtyOverrides,
+          pending, ERR_LINE_EXCEEDS_PENDING);
     }
 
     Order linkedOrder = receipt.getSalesOrder();
@@ -868,20 +996,19 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
    *       but the header still carries {@code C_Order_ID}).</li>
    * </ol>
    *
-   * <p>Quantities are accumulated per order line ID so that multiple receipt lines
-   * mapping to the same order line produce a single entry instead of duplicates.
-   * Receipt lines absent from {@code qtyOverrides} are skipped when the map is
-   * non-empty: a missing entry means the line has zero pending qty.
+   * <p>ETP-5709: ONE entry PER receipt line, each bound to its receipt line
+   * ({@code shipmentInOutLine}) — see {@link MultiDocumentInvoiceSupport#buildOrderLineEntryForInOutLine}
+   * for why. They used to be accumulated per order line without that binding, which made the
+   * native process discard the requested quantity and invoice every receipt of the order line in
+   * full. Receipt lines absent from {@code qtyOverrides} are skipped when the map is non-empty: a
+   * missing entry means the line has zero pending qty.
    *
    * @param linkedOrder the purchase order linked to the receipt header; may be null
    */
   protected JSONArray buildSelectedLinesFromReceipt(ShipmentInOut receipt,
       Map<String, BigDecimal> qtyOverrides, Order linkedOrder) {
     Map<String, OrderLine> orderLineByProduct = buildOrderLineByProduct(linkedOrder);
-    // Accumulate by order line ID: multiple receipt lines for the same product / order line
-    // must not produce duplicate selectedLines entries — CreateInvoiceLinesFromProcess
-    // creates one invoice line per entry and does not deduplicate.
-    Map<String, BigDecimal> accumulated = new LinkedHashMap<>();
+    JSONArray selectedLines = new JSONArray();
     for (ShipmentInOutLine rl : receipt.getMaterialMgmtShipmentInOutLineList()) {
       if (!rl.isActive() || rl.getProduct() == null) {
         continue;
@@ -890,26 +1017,23 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
       if (ol == null) {
         ol = orderLineByProduct.get(rl.getProduct().getId());
       }
-      if (ol != null) {
-        BigDecimal qty = resolveReceiptLineQty(rl, qtyOverrides);
-        // ETP-4722: quantities can be NEGATIVE since ETP-4567 removed the old
-        // min: 0 constraint (e.g. a return-style receipt line). Only an exact
-        // zero means "nothing left to invoice" — a strictly-positive check
-        // silently dropped every negative-quantity receipt line here.
-        if (qty != null && qty.compareTo(BigDecimal.ZERO) != 0) {
-          accumulated.merge(ol.getId(), qty, BigDecimal::add);
-        }
+      if (ol == null) {
+        continue;
       }
-    }
-    JSONArray selectedLines = new JSONArray();
-    for (Map.Entry<String, BigDecimal> e : accumulated.entrySet()) {
+      BigDecimal qty = resolveReceiptLineQty(rl, qtyOverrides);
+      // ETP-4722: quantities can be NEGATIVE since ETP-4567 removed the old
+      // min: 0 constraint (e.g. a return-style receipt line). Only an exact
+      // zero means "nothing left to invoice" — a strictly-positive check
+      // silently dropped every negative-quantity receipt line here.
+      if (qty == null || qty.compareTo(BigDecimal.ZERO) == 0) {
+        continue;
+      }
       try {
-        JSONObject entry = new JSONObject();
-        entry.put("id", e.getKey());
-        entry.put(FIELD_ORDERED_QUANTITY, e.getValue().toPlainString());
-        selectedLines.put(entry);
+        selectedLines.put(MultiDocumentInvoiceSupport.buildOrderLineEntryForInOutLine(ol.getId(), rl,
+            MultiDocumentInvoiceSupport.signedLikeLine(rl, qty)));
       } catch (Exception ex) {
-        log.warn("Failed to build selectedLine entry for order line {}: {}", e.getKey(), ex.getMessage());
+        log.warn("Failed to build selectedLine entry for receipt line {}: {}", rl.getId(),
+            ex.getMessage());
       }
     }
     return selectedLines;
@@ -1016,9 +1140,12 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     if (!rl.isActive() || rl.getProduct() == null || rl.getUOM() == null) {
       return null;
     }
-    BigDecimal qty = qtyOverrides.containsKey(rl.getId())
-        ? qtyOverrides.get(rl.getId())
-        : rl.getMovementQuantity();
+    // A non-empty map is an explicit list of what to invoice (explicit lines, or the pending
+    // quantities): a line absent from it is skipped, as in the with-PO path. Only an EMPTY map
+    // (a direct caller with no quantities) means the full movement quantity.
+    BigDecimal qty = qtyOverrides.isEmpty()
+        ? rl.getMovementQuantity()
+        : qtyOverrides.get(rl.getId());
     // ETP-4722: same sign-unaware bug as buildSelectedLinesFromReceipt above —
     // only an exact zero means "nothing to invoice", negative qty is valid.
     if (qty == null || qty.compareTo(BigDecimal.ZERO) == 0) {
@@ -1049,7 +1176,7 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     if (body == null) {
       return overrides;
     }
-    JSONArray linesArr = body.optJSONArray("lines");
+    JSONArray linesArr = body.optJSONArray(PARAM_LINES);
     if (linesArr == null) {
       return overrides;
     }

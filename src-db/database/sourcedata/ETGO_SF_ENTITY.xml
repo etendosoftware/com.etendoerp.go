@@ -2158,6 +2158,7 @@
 <!--6102D47FD12A4162858D948885F80544-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--6102D47FD12A4162858D948885F80544-->  <JAVA_QUALIFIER><![CDATA[goodsReceiptHeaderHandler]]></JAVA_QUALIFIER>
 <!--6102D47FD12A4162858D948885F80544-->  <SEQNO><![CDATA[10]]></SEQNO>
+<!--6102D47FD12A4162858D948885F80544-->  <MCP_CONFIG><![CDATA[{"actions":{"redirect":{"invoicefromshipment":"createPurchaseInvoice"},"redirectReason":"The classic invoice-from-receipt process creates a SALES invoice from a purchase receipt, does not mark the receipt as invoiced and can report success without creating anything; createPurchaseInvoice creates a completed purchase invoice from this receipt","reason":"Classic invoicefromshipment is not the purchase flow; use createPurchaseInvoice"}}]]></MCP_CONFIG>
 <!--6102D47FD12A4162858D948885F80544--></ETGO_SF_ENTITY>
 
 <!--612D7AA586DC4B5BA58C1D960B3DB333--><ETGO_SF_ENTITY>
@@ -2411,6 +2412,7 @@
 <!--6882D245E7964685A14DCF0ACD66FB13-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--6882D245E7964685A14DCF0ACD66FB13-->  <JAVA_QUALIFIER><![CDATA[goodsShipmentHeaderHandler]]></JAVA_QUALIFIER>
 <!--6882D245E7964685A14DCF0ACD66FB13-->  <SEQNO><![CDATA[10]]></SEQNO>
+<!--6882D245E7964685A14DCF0ACD66FB13-->  <MCP_CONFIG><![CDATA[{"actions":{"redirect":{"Invoicefromshipment":"createDraftInvoice"},"redirectReason":"The classic invoice-from-shipment process is not the path the app uses and bypasses its checks (nothing-left-to-invoice refusal, partial quantities); createDraftInvoice creates and completes the sales invoice from this shipment","reason":"Classic Invoicefromshipment is not the supported agent path; use createDraftInvoice"}}]]></MCP_CONFIG>
 <!--6882D245E7964685A14DCF0ACD66FB13--></ETGO_SF_ENTITY>
 
 <!--68D42504C89B4EF9945814E3B31C917C--><ETGO_SF_ENTITY>
@@ -5399,6 +5401,7 @@ Manual movements of the account (a deposit or a withdrawal booked against a G/L 
 <!--F1775FF66155444992AC0B1E38CFA3BB-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--F1775FF66155444992AC0B1E38CFA3BB-->  <JAVA_QUALIFIER><![CDATA[purchaseOrderHeaderHandler]]></JAVA_QUALIFIER>
 <!--F1775FF66155444992AC0B1E38CFA3BB-->  <SEQNO><![CDATA[10]]></SEQNO>
+<!--F1775FF66155444992AC0B1E38CFA3BB-->  <MCP_CONFIG><![CDATA[{"actions":{"redirect":{"RM_ReceiveMaterials":"createGoodsReceipt","RM_CreateInvoice":"createPurchaseInvoice"},"reasons":{"RM_ReceiveMaterials":"Classic button with no process connected for the agent; createGoodsReceipt creates a draft goods receipt from this order","RM_CreateInvoice":"Classic button, undocumented for the agent; createPurchaseInvoice creates a completed purchase invoice from this order"},"redirectReason":"Classic purchase-order buttons are not the supported agent path","reason":"Classic purchase-order buttons are not the supported agent path; use createGoodsReceipt / createPurchaseInvoice"}}]]></MCP_CONFIG>
 <!--F1775FF66155444992AC0B1E38CFA3BB--></ETGO_SF_ENTITY>
 
 <!--F25F57EA043045CD8E34377220D5BF36--><ETGO_SF_ENTITY>

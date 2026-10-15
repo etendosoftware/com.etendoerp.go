@@ -89,6 +89,8 @@ import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
  * </ul>
  *
  * @covers com.etendoerp.go.schemaforge.SalesInvoiceHeaderHandler
+ *
+ * @covers com.etendoerp.go.schemaforge.SalesInvoiceHeaderHandler
  */
 public class SalesInvoiceHeaderHandlerTest {
 
@@ -1475,5 +1477,18 @@ public class SalesInvoiceHeaderHandlerTest {
   public void responseEnrichedFields_declaresFollowUpAndSubtypeKey() {
     assertEquals(java.util.Set.of("followUp", "arInvoiceSubtype"),
         new SalesInvoiceHeaderHandler().responseEnrichedFields());
+  }
+
+  @Test
+  public void actionContracts_declareCloneRecordNextToTheExistingOnes() throws Exception {
+    Map<String, com.etendoerp.go.schemaforge.util.NeoActionContract> contracts = new SalesInvoiceHeaderHandler().actionContracts();
+
+    assertNotNull("cloneRecord is served by handle() and must be declared (ETP-5709)",
+        contracts.get("cloneRecord"));
+    assertEquals("POST", contracts.get("cloneRecord").getHttpMethod());
+    assertTrue(contracts.get("cloneRecord").getParams().isEmpty());
+    assertTrue("the existing declarations are kept",
+        contracts.keySet().containsAll(List.of("currencyOptions", "post", "unpost")));
+    assertNull(com.etendoerp.go.schemaforge.util.NeoActionContract.validate(contracts, "cloneRecord", new org.codehaus.jettison.json.JSONObject()));
   }
 }

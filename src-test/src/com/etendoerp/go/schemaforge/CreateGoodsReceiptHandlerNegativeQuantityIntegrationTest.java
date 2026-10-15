@@ -149,7 +149,8 @@ public class CreateGoodsReceiptHandlerNegativeQuantityIntegrationTest extends OB
     TestableHandler handler = new TestableHandler();
     handler.locatorToReturn = locator;
     List<InOutLineFromOrderFactory.PendingOrderLine> pendingLines =
-        InOutLineFromOrderFactory.collectPendingLines(order);
+        InOutLineFromOrderFactory.collectPendingLines(order, false,
+            new java.util.LinkedHashSet<String>());
     handler.createReceiptLines(receipt, pendingLines, handler.locatorToReturn);
 
     OBDal.getInstance().flush();
