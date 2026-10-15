@@ -260,8 +260,8 @@ class EtendoGoJwtSupportTest {
         + "the oldest one")
     void entryRoleIsTheHeldDefaultRole() throws JSONException {
       mockRoleListQuery(Arrays.asList(
-          new Object[]{ "role-oldest", "Oldest", "org-1", "Main Org" },
-          new Object[]{ "role-default", "Default", "org-1", "Main Org" }));
+          new Object[]{ "role-oldest", "Oldest", "org-1", "Main Org", "N" },
+          new Object[]{ "role-default", "Default", "org-1", "Main Org", "N" }));
       mockUserDefaultRole("role-default");
 
       try (MockedConstruction<UserRoleCompositionService> composition = mockConstruction(
@@ -278,8 +278,8 @@ class EtendoGoJwtSupportTest {
     @DisplayName("ETP-5096: a user with no default role enters with the oldest one")
     void entryRoleFallsBackToTheOldestWithNoDefault() throws JSONException {
       mockRoleListQuery(Arrays.asList(
-          new Object[]{ "role-oldest", "Oldest", null, null },
-          new Object[]{ "role-newer", "Newer", null, null }));
+          new Object[]{ "role-oldest", "Oldest", null, null, "N" },
+          new Object[]{ "role-newer", "Newer", null, null, "N" }));
       mockUserDefaultRole(null);
 
       try (MockedConstruction<UserRoleCompositionService> composition = mockConstruction(
