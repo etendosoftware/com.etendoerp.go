@@ -85,7 +85,6 @@ import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.invoice.InvoiceLine;
-import org.openbravo.model.common.invoice.InvoiceTax;
 import org.openbravo.model.common.order.Order;
 import org.openbravo.model.common.order.OrderLine;
 import org.openbravo.model.common.plm.Product;
@@ -3717,101 +3716,6 @@ public class CreateDraftInvoiceHandlerTest {
           .thenThrow(new RuntimeException("query error"));
 
       assertNull(new CreateDraftInvoiceHandler().findLinkedInvoiceLine("sl-err"));
-    }
-  }
-
-  // ── recalculateTotals ─────────────────────────────────────────────────────
-
-  @Test
-  public void testRecalculateTotalsNoLinesSetsTotalsToZero() {
-    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDalMock.when(OBDal::getInstance).thenReturn(dal);
-      Currency currency = mock(Currency.class);
-      when(currency.getStandardPrecision()).thenReturn(2L);
-      Invoice invoice = mock(Invoice.class);
-      when(invoice.getCurrency()).thenReturn(currency);
-      when(invoice.getInvoiceLineList()).thenReturn(Collections.emptyList());
-
-      new CreateDraftInvoiceHandler().recalculateTotals(invoice);
-      verify(invoice).setSummedLineAmount(new BigDecimal("0.00"));
-      verify(invoice).setGrandTotalAmount(new BigDecimal("0.00"));
-      verify(dal).save(invoice);
-    }
-  }
-
-  @Test
-  public void testRecalculateTotalsLineWithoutTaxAccumulatesNet() {
-    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDalMock.when(OBDal::getInstance).thenReturn(dal);
-      Currency currency = mock(Currency.class);
-      when(currency.getStandardPrecision()).thenReturn(2L);
-      InvoiceLine il = mock(InvoiceLine.class);
-      when(il.getInvoicedQuantity()).thenReturn(new BigDecimal("2"));
-      when(il.getUnitPrice()).thenReturn(new BigDecimal("50"));
-      when(il.getLineNetAmount()).thenReturn(new BigDecimal("100"));
-      when(il.getTax()).thenReturn(null);
-      Invoice invoice = mock(Invoice.class);
-      when(invoice.getCurrency()).thenReturn(currency);
-      when(invoice.getInvoiceLineList()).thenReturn(Collections.singletonList(il));
-
-      new CreateDraftInvoiceHandler().recalculateTotals(invoice);
-      verify(invoice).setSummedLineAmount(new BigDecimal("100.00"));
-      verify(invoice).setGrandTotalAmount(new BigDecimal("100.00"));
-    }
-  }
-
-  @Test
-  public void testRecalculateTotalsCreatesInvoiceTaxAndBackfillsLineNetAmount() {
-    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
-        MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDalMock.when(OBDal::getInstance).thenReturn(dal);
-
-      OBProvider provider = mock(OBProvider.class);
-      InvoiceTax invoiceTax = mock(InvoiceTax.class);
-      obProviderMock.when(OBProvider::getInstance).thenReturn(provider);
-      when(provider.get(InvoiceTax.class)).thenReturn(invoiceTax);
-
-      Currency currency = mock(Currency.class);
-      when(currency.getStandardPrecision()).thenReturn(2L);
-
-      TaxRate taxRate = mock(TaxRate.class);
-      when(taxRate.getId()).thenReturn("tax-1");
-      when(taxRate.getRate()).thenReturn(new BigDecimal("21"));
-      when(taxRate.isSummaryLevel()).thenReturn(false);
-
-      TaxRate summaryTax = mock(TaxRate.class);
-      when(summaryTax.isSummaryLevel()).thenReturn(true);
-
-      InvoiceLine lineWithoutNet = mock(InvoiceLine.class);
-      when(lineWithoutNet.getInvoicedQuantity()).thenReturn(new BigDecimal("2"));
-      when(lineWithoutNet.getUnitPrice()).thenReturn(new BigDecimal("10"));
-      when(lineWithoutNet.getLineNetAmount()).thenReturn(null);
-      when(lineWithoutNet.getTax()).thenReturn(taxRate);
-
-      InvoiceLine summaryLine = mock(InvoiceLine.class);
-      when(summaryLine.getInvoicedQuantity()).thenReturn(BigDecimal.ONE);
-      when(summaryLine.getUnitPrice()).thenReturn(new BigDecimal("50"));
-      when(summaryLine.getLineNetAmount()).thenReturn(new BigDecimal("50"));
-      when(summaryLine.getTax()).thenReturn(summaryTax);
-
-      Invoice invoice = mock(Invoice.class);
-      when(invoice.getCurrency()).thenReturn(currency);
-      when(invoice.getInvoiceLineList()).thenReturn(Arrays.asList(lineWithoutNet, summaryLine));
-      when(invoice.getClient()).thenReturn(mock(Client.class));
-      when(invoice.getOrganization()).thenReturn(mock(Organization.class));
-
-      new CreateDraftInvoiceHandler().recalculateTotals(invoice);
-
-      verify(lineWithoutNet).setLineNetAmount(new BigDecimal("20.00"));
-      verify(invoiceTax).setTaxableAmount(new BigDecimal("20.00"));
-      verify(invoiceTax).setTaxAmount(new BigDecimal("4.20"));
-      verify(invoice).setSummedLineAmount(new BigDecimal("70.00"));
-      verify(invoice).setGrandTotalAmount(new BigDecimal("74.20"));
-      verify(dal).save(invoiceTax);
-      verify(dal).save(invoice);
     }
   }
 

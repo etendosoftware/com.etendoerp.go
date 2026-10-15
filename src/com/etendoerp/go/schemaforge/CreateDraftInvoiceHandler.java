@@ -26,7 +26,6 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -55,8 +54,6 @@ import org.openbravo.service.db.DalConnectionProvider;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.invoice.InvoiceLine;
-import org.openbravo.model.common.invoice.InvoiceTax;
-import org.openbravo.model.financialmgmt.tax.TaxRate;
 import org.openbravo.model.common.order.Order;
 import org.openbravo.model.common.order.OrderLine;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
@@ -1652,56 +1649,5 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
       log.warn("Could not find linked invoice line for shipment line {}: {}", shipmentLineId, e.getMessage());
       return null;
     }
-  }
-
-  protected void recalculateTotals(Invoice invoice) {
-    int precision = invoice.getCurrency().getStandardPrecision().intValue();
-    Map<String, BigDecimal> taxBaseMap = new LinkedHashMap<>();
-    Map<String, TaxRate> taxRateMap = new LinkedHashMap<>();
-    BigDecimal totalLines = BigDecimal.ZERO;
-
-    for (InvoiceLine il : invoice.getInvoiceLineList()) {
-      BigDecimal qty = il.getInvoicedQuantity() != null ? il.getInvoicedQuantity() : BigDecimal.ZERO;
-      BigDecimal price = il.getUnitPrice() != null ? il.getUnitPrice() : BigDecimal.ZERO;
-      BigDecimal lineNet;
-      if (il.getLineNetAmount() == null || il.getLineNetAmount().compareTo(BigDecimal.ZERO) == 0) {
-        lineNet = qty.multiply(price).setScale(precision, RoundingMode.HALF_UP);
-        il.setLineNetAmount(lineNet);
-        OBDal.getInstance().save(il);
-      } else {
-        lineNet = il.getLineNetAmount();
-      }
-      totalLines = totalLines.add(lineNet);
-      TaxRate tax = il.getTax();
-      if (tax != null && Boolean.FALSE.equals(tax.isSummaryLevel())) {
-        taxBaseMap.merge(tax.getId(), lineNet, BigDecimal::add);
-        taxRateMap.putIfAbsent(tax.getId(), tax);
-      }
-    }
-
-    BigDecimal totalTax = BigDecimal.ZERO;
-    long lineNo = 10;
-    for (Map.Entry<String, TaxRate> entry : taxRateMap.entrySet()) {
-      TaxRate tax = entry.getValue();
-      BigDecimal taxBase = taxBaseMap.get(entry.getKey());
-      BigDecimal rate = tax.getRate() != null ? tax.getRate() : BigDecimal.ZERO;
-      BigDecimal taxAmt = taxBase.multiply(rate).divide(new BigDecimal("100"), precision, RoundingMode.HALF_UP);
-      InvoiceTax it = OBProvider.getInstance().get(InvoiceTax.class);
-      it.setClient(invoice.getClient());
-      it.setOrganization(invoice.getOrganization());
-      it.setInvoice(invoice);
-      it.setTax(tax);
-      it.setLineNo(lineNo);
-      it.setTaxableAmount(taxBase.setScale(precision, RoundingMode.HALF_UP));
-      it.setTaxAmount(taxAmt);
-      it.setRecalculate(false);
-      OBDal.getInstance().save(it);
-      totalTax = totalTax.add(taxAmt);
-      lineNo += 10;
-    }
-
-    invoice.setSummedLineAmount(totalLines.setScale(precision, RoundingMode.HALF_UP));
-    invoice.setGrandTotalAmount(totalLines.add(totalTax).setScale(precision, RoundingMode.HALF_UP));
-    OBDal.getInstance().save(invoice);
   }
 }

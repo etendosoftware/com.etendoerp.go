@@ -57,8 +57,11 @@ import java.util.Map;
  * 3E8FEA1EA7404D979306C9EE7FD2E7E8} (Tax Report) for "Modelos fiscales". Neither Schema-Forge-only
  * page has a window of its own — the grant is a deliberate proxy, not a literal match — mirroring
  * the same pattern {@code SFRolesOverview} already uses for its own read-side resolution (see
- * that class's {@code FISCAL_MONITOR_PROXY_WINDOW_ID}/{@code TAX_MODELS_PROXY_WINDOW_ID}, the
- * same two ids).</p>
+ * {@code RoleAccessMatrix}'s {@code FISCAL_MONITOR_PROXY_WINDOW_ID}/{@code
+ * TAX_MODELS_PROXY_WINDOW_ID}, the same two ids). The grant rows below keep the literal ids on
+ * purpose, as does the {@code EnsureSystemRoleTemplatesScript} modulescript copy, which cannot
+ * import module classes; {@code TAX_MODELS_PROXY_WINDOW_ID} is the shared constant every gate
+ * reads (ETP-5540).</p>
  *
  * <p><b>"Configuración fiscal" was also in that windowless-gap list, and ETP-5116 resolved it for
  * Finance too — but as a direct grant of 3 real sibling windows, not a single proxy.</b> Confirmed

@@ -27,7 +27,10 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.lang.reflect.Field;
@@ -50,10 +53,16 @@ import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
+import org.openbravo.base.model.Entity;
+import org.openbravo.base.model.Property;
+import org.openbravo.base.structure.BaseOBObject;
+import org.openbravo.base.validation.ValidationException;
 import org.openbravo.client.kernel.RequestContext;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.OBMessageUtils;
+import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.ad.ui.Window;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
@@ -68,9 +77,16 @@ import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
  *       the hasLinkedDocuments annotation logic for both single-record and list responses</li>
  * </ul>
  *
+ * <p>{@code handle()} is also covered, including the Reactivate refusal on orders with linked
+ * documents.
+ *
  * @covers com.etendoerp.go.schemaforge.SalesOrderHeaderHandler
  * @covers com.etendoerp.go.schemaforge.CreateShipmentHandler
  * @covers com.etendoerp.go.schemaforge.CreateDraftInvoiceHandler
+ * @covers com.etendoerp.go.schemaforge.OrderReactivationGuard
+ * @covers com.etendoerp.go.schemaforge.AbstractOrderHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.DocActionRequestSupport
+ * @covers com.etendoerp.go.schemaforge.DocActionResolution
  */
 public class SalesOrderHeaderHandlerTest {
 
@@ -607,6 +623,157 @@ public class SalesOrderHeaderHandlerTest {
     when(mockClone.handle(ctx)).thenReturn(null);
 
     assertNull(handler.handle(ctx));
+  }
+
+  // ── Reactivate (DocAction RE) refused on orders with linked documents ──────
+
+  /** Sentinel for the stored-DocAction column of the table below: loading the record throws. */
+  private static final String STORED_READ_FAILS = "<stored read fails>";
+  /** Sentinel for the stored-DocAction column: the context carries no tab to resolve. */
+  private static final String NO_TAB = "<no tab>";
+  /** Sentinel for the stored-DocAction column: the tab resolves, the record does not exist. */
+  private static final String RECORD_NOT_FOUND = "<record not found>";
+  /** Sentinel for the stored-DocAction column: the record exists, its entity has no DocAction. */
+  private static final String NO_DOC_ACTION_PROPERTY = "<no documentAction property>";
+  /** Property-check column of the table below: the requested value is not a member of the list. */
+  private static final String NOT_IN_LIST = "not in list";
+  /** Property-check column of the table below: the property refuses any write. */
+  private static final String NOT_WRITABLE = "not writable";
+
+  /**
+   * Reactivate guard through {@code handle()}: it decides on the DocAction the DAL will actually
+   * write and the DB procedure run — root {@code docAction} when non-blank and accepted by the
+   * {@code documentAction} property ({@code checkIsValidValue} + {@code checkIsWritable}, the
+   * checks {@code BaseOBObject.set} runs), else the record's stored {@code DocAction} — never on
+   * {@code fieldValues.documentAction}. A refusal is 400 and never reaches the action router; a
+   * lookup that cannot run is 500 (fail closed). The record is resolved as
+   * {@code DocActionResolution.docActionToRun} does: tab → table name → record →
+   * {@code documentAction}; a tab or record that cannot be resolved leaves the action unknown and
+   * is refused with 500, while a record with nothing stored is not an error. An order id that
+   * does not exist answers 404 {@code Record not found} whatever DocAction is sent — the same
+   * answer {@code NeoActionRecordGuard} gives an unknown id.
+   */
+  @Test
+  public void testHandleReactivateIsGuardedByLinkedDocuments_table() throws Exception {
+    final String orderId = "order-re-1";
+    final String tabId = "tab-order";
+    final String entityName = "Order";
+    // Columns: the label, the body sent, the stored DocAction, the property check on the requested
+    // value (null when it is accepted), whether linked documents exist (null when the query
+    // throws) and the expected status (null when the request falls through to the router).
+    Object[][] cases = {
+        { "root RE with linked docs is refused",
+            "{\"docAction\":\"RE\"}", "CO", null, Boolean.TRUE, 400 },
+        { "root RE wins over fieldValues CO",
+            "{\"fieldValues\":{\"documentAction\":\"CO\"},\"docAction\":\"RE\"}", "CO", null,
+            Boolean.TRUE, 400 },
+        { "written root CO wins over fieldValues RE and the stored RE",
+            "{\"fieldValues\":{\"documentAction\":\"RE\"},\"docAction\":\"CO\"}", "RE", null,
+            Boolean.TRUE, null },
+        { "empty body runs the stored RE and is refused",
+            "{}", "RE", null, Boolean.TRUE, 400 },
+        { "fieldValues RE without root runs the stored CO",
+            "{\"fieldValues\":{\"documentAction\":\"RE\"}}", "CO", null, Boolean.TRUE, null },
+        { "root RE without linked docs falls through",
+            "{\"docAction\":\"RE\"}", "CO", null, Boolean.FALSE, null },
+        { "unreadable record fails closed even when docAction is sent",
+            "{\"docAction\":\"RE\"}", STORED_READ_FAILS, null, Boolean.TRUE, 500 },
+        { "failed linked-docs lookup fails closed",
+            "{\"docAction\":\"RE\"}", "CO", null, null, 500 },
+        { "root re outside the list is not written, the stored RE runs and is refused",
+            "{\"docAction\":\"re\"}", "RE", NOT_IN_LIST, Boolean.TRUE, 400 },
+        { "root CO on a non-writable property is not written, the stored RE runs and is refused",
+            "{\"docAction\":\"CO\"}", "RE", NOT_WRITABLE, Boolean.TRUE, 400 },
+        { "root RE with no resolvable tab fails closed",
+            "{\"docAction\":\"RE\"}", NO_TAB, null, Boolean.TRUE, 500 },
+        { "root RE on an unknown order id answers 404",
+            "{\"docAction\":\"RE\"}", RECORD_NOT_FOUND, null, Boolean.TRUE, 404 },
+        { "root CO on an unknown order id answers 404, not the router",
+            "{\"docAction\":\"CO\"}", RECORD_NOT_FOUND, null, Boolean.TRUE, 404 },
+        { "root RE on a record whose entity has no DocAction fails closed",
+            "{\"docAction\":\"RE\"}", NO_DOC_ACTION_PROPERTY, null, Boolean.TRUE, 500 },
+        { "empty body on a record with nothing stored falls through",
+            "{}", null, null, Boolean.TRUE, null },
+    };
+    for (Object[] c : cases) {
+      String label = (String) c[0];
+      JSONObject body = new JSONObject((String) c[1]);
+      String stored = (String) c[2];
+      String propertyCheck = (String) c[3];
+      Boolean linked = (Boolean) c[4];
+      Integer expectedStatus = (Integer) c[5];
+      boolean noTab = NO_TAB.equals(stored);
+
+      NeoCloneRecordHandler router = mock(NeoCloneRecordHandler.class);
+      SalesOrderHeaderHandler handler = handlerWithMockClone(router);
+      Tab tab = mock(Tab.class);
+      when(tab.getId()).thenReturn(tabId);
+      NeoContext ctx = NeoContext.builder()
+          .specName("sales-order").entityName("header")
+          .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+          .fieldName("DocAction").recordId(orderId).adTab(noTab ? null : tab)
+          .requestBody(body)
+          .build();
+
+      OBDal dal = mock(OBDal.class);
+      if (STORED_READ_FAILS.equals(stored)) {
+        when(dal.get(Tab.class, tabId)).thenThrow(new IllegalStateException("DAL down"));
+      } else if (!noTab) {
+        Table table = mock(Table.class);
+        when(table.getName()).thenReturn(entityName);
+        when(tab.getTable()).thenReturn(table);
+        Property property = mock(Property.class);
+        String requested = body.optString("docAction", null);
+        if (NOT_IN_LIST.equals(propertyCheck)) {
+          doThrow(new ValidationException()).when(property).checkIsValidValue(requested);
+        } else if (NOT_WRITABLE.equals(propertyCheck)) {
+          doThrow(new ValidationException()).when(property).checkIsWritable();
+        }
+        Entity entity = mock(Entity.class);
+        when(entity.hasProperty("documentAction"))
+            .thenReturn(!NO_DOC_ACTION_PROPERTY.equals(stored));
+        when(entity.getProperty("documentAction")).thenReturn(property);
+        BaseOBObject order = mock(BaseOBObject.class);
+        when(order.getEntity()).thenReturn(entity);
+        when(order.get("documentAction")).thenReturn(stored);
+        when(dal.get(Tab.class, tabId)).thenReturn(tab);
+        when(dal.get(entityName, orderId))
+            .thenReturn(RECORD_NOT_FOUND.equals(stored) ? null : order);
+      }
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      if (linked == null) {
+        when(ps.executeQuery()).thenThrow(new SQLException("DB down"));
+      } else {
+        when(ps.executeQuery()).thenReturn(rs);
+        when(rs.next()).thenReturn(linked);
+      }
+
+      try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+          MockedStatic<OBContext> obCtxMock = Mockito.mockStatic(OBContext.class);
+          MockedStatic<OBMessageUtils> msgMock = Mockito.mockStatic(OBMessageUtils.class)) {
+        obDalMock.when(OBDal::getInstance).thenReturn(dal);
+        msgMock.when(() -> OBMessageUtils.messageBD(anyString())).thenReturn("refused");
+
+        NeoResponse result = handler.handle(ctx);
+
+        if (expectedStatus == null) {
+          assertNull(label, result);
+          verify(router).handle(ctx);
+        } else {
+          assertNotNull(label, result);
+          assertEquals(label, expectedStatus.intValue(), result.getHttpStatus());
+          if (expectedStatus == 404) {
+            assertEquals(label, NeoActionRecordGuard.MSG_RECORD_NOT_FOUND,
+                result.getBody().getJSONObject("error").getString("message"));
+          }
+          verify(router, never()).handle(any());
+        }
+      }
+    }
   }
 
   // ── ETP-5238: paymentMethod SELECTOR is independent of Financial Account ────

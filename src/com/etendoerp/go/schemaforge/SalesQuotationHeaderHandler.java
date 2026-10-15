@@ -27,7 +27,6 @@ import java.util.Map;
 import javax.inject.Inject;
 import javax.inject.Named;
 
-import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
@@ -82,9 +81,6 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
   private static final Logger log = LogManager.getLogger(SalesQuotationHeaderHandler.class);
   private static final String FIELD_DOCUMENT_STATUS = "documentStatus";
   private static final String DOC_STATUS_COMPLETED = "CO";
-  private static final String ACTION_DOC_ACTION = "DocAction";
-  private static final String FIELD_DOCUMENT_ACTION = "documentAction";
-  private static final String PARAM_DOC_ACTION = "docAction";
   private static final String DOC_ACTION_REJECT = "RJ";
 
   /** The named actions published to agents, in presentation order (ETP-5535). */
@@ -170,41 +166,19 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
    * uses, {@link RejectQuotationHandler#reject}, which takes the reason in the same body. Both the
    * MCP and the REST action reach this handler, so both channels get it.</p>
    *
-   * <p>The value is read where the action requests carry it: {@code docAction} at the root (the
-   * {@code actionParameter} {@code etendo_schema} advertises for the button), {@code documentAction}
-   * at the root, or {@code fieldValues.documentAction}. The button is named by its column
-   * ({@code DocAction}) or its field ({@code documentAction}), as {@code findButtonColumn} accepts
-   * both. A {@code DocAction} request without an explicit {@code RJ} — the SPA's
+   * <p>Where the value and the button name are read from is {@link DocActionRequestSupport#requests}
+   * (extracted from this class in ETP-5704): root {@code docAction} first — the key the process
+   * itself runs — then {@code fieldValues.documentAction}, then root {@code documentAction}. Until
+   * ETP-5704 {@code fieldValues.documentAction} was read first, so a body naming RJ there and CO in
+   * {@code docAction} was rejected instead of completed. The record's stored DocAction never
+   * triggers the rejection. A {@code DocAction} request without an explicit {@code RJ} — the SPA's
    * {@code SendToEvaluationModal} sends {@code fieldValues: {}} — is not affected.</p>
    *
    * @param context the request
    * @return {@code true} for a POST ACTION on the DocAction button asking for {@code RJ}
    */
   static boolean isRejectDocAction(NeoContext context) {
-    if (!NeoEndpointType.ACTION.equals(context.getEndpointType())
-        || !"POST".equals(context.getHttpMethod())) {
-      return false;
-    }
-    String action = context.getFieldName();
-    if (!ACTION_DOC_ACTION.equals(action) && !FIELD_DOCUMENT_ACTION.equals(action)) {
-      return false;
-    }
-    return DOC_ACTION_REJECT.equals(requestedDocAction(context.getRequestBody()));
-  }
-
-  private static String requestedDocAction(JSONObject body) {
-    if (body == null) {
-      return null;
-    }
-    JSONObject fieldValues = body.optJSONObject("fieldValues");
-    String nested = fieldValues != null
-        ? StringUtils.trimToNull(fieldValues.optString(FIELD_DOCUMENT_ACTION, null)) : null;
-    if (nested != null) {
-      return nested;
-    }
-    String root = StringUtils.trimToNull(body.optString(PARAM_DOC_ACTION, null));
-    return root != null ? root
-        : StringUtils.trimToNull(body.optString(FIELD_DOCUMENT_ACTION, null));
+    return DocActionRequestSupport.requests(context, DOC_ACTION_REJECT);
   }
 
   /**
