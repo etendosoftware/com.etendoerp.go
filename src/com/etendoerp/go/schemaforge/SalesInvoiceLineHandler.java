@@ -34,8 +34,8 @@ package com.etendoerp.go.schemaforge;
  * <p>No {@code @Named}: the parent's {@code invoiceLineHandler} name is not inherited, and a second
  * bean carrying it would make the name ambiguous. The per-request state the parent carries from
  * {@code handle} into {@code afterHandle} (the imported source line) is kept: every channel runs
- * both hooks on the one instance its pre-dispatch resolved. {@code purchase-invoice/lines} is not
- * annotated and stays on {@link InvoiceLineHandler} alone.
+ * both hooks on the one instance its pre-dispatch resolved. {@code purchase-invoice/lines} has its
+ * own customization, {@link PurchaseInvoiceLineHandler} (ETP-5585), which does not derive amounts.
  */
 @NeoExtension(spec = "sales-invoice", entity = "lines")
 public class SalesInvoiceLineHandler extends InvoiceLineHandler {

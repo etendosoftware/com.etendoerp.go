@@ -2641,6 +2641,73 @@ the hidden `Processing` column, also Process 167) stays `discarded`, and is not 
 calendar has no separate *open/close all* button, and `openClose` already runs Process 167, which
 does exactly that for the period.
 
+##### 4.12.1.7 Default tax for a purchase invoice line — `defaultTax` (ETP-5585)
+
+The OCR invoice flow knows the vendor's address, the invoice date, the percentage printed on the
+document and sometimes a product, but not which `C_Tax` the form would pick. `defaultTax` answers
+that with the form's own rules instead of the client guessing from a rate.
+
+`POST /sws/neo/purchase-invoice/lines/new/action/defaultTax` — a declared **read** action
+(`PurchaseInvoiceLineHandler.DEFAULT_TAX`, `mutating:false`); nothing is persisted. The record id is
+always `new` (as `currencyOptions`, §4.12.1.3, and so it passes `NeoActionRecordGuard`). It is a
+POST because the action hook context only carries the request body (`NeoHookDispatcher.buildHookContext`;
+the body is parsed only for POST in `NeoSubEndpointDispatcher`). Any other method is a **405**.
+
+| Body | Type | |
+|---|---|---|
+| **`partnerAddressId`** | string | the vendor's `C_BPartner_Location_ID` |
+| `invoiceDate` | `yyyy-MM-dd` | default: today |
+| `rate` | number | the extracted percentage, e.g. `21` |
+| `productId` | string | optional |
+
+Organization and client always come from the session (§4.12.17), never from the body.
+
+Response, in the `{"response":{"data":...}}` wrapper:
+`{taxId, identifier, rate, taxCategoryId, taxCategory, summary, source, candidates}`.
+`identifier` is the tax's DAL identifier (`C_Tax.Name`, what `LineCalloutTaxRateHelper` publishes as
+`tax$_identifier`); `candidates` has the same shape minus `source`/`candidates`.
+
+**Algorithm** (`DefaultTaxResolver`; generic — only structural columns, `isSOTrx` is a parameter,
+`N` here):
+
+1. Candidate categories: active `C_TaxCategory` of the session client or System, included in the
+   session organization by the same `ad_isorgincluded` rule `c_gettax` applies.
+2. One round trip: `c_gettax(null, date, org, null, loc, loc, null, 'N', null, null, <category>)`
+   per category (the 11-argument form, `p_taxcat_id` last — `Tax.get` does not expose it, so the SQL
+   is called directly), joined to `c_tax` for rate, `IsSummary` and name. With a product, also
+   `c_gettax(product, ...)` — what `SL_Invoice_Product` does.
+3. No `rate`: the product's determination (`PRODUCT_CATEGORY`), else the default category's
+   (`IsDefault='Y'`, the client's own before System; `DEFAULT_CATEGORY`), else `taxId: null` with
+   `NO_CONTEXT`.
+4. With `rate`, the pool also gets the **tie siblings** of every answered tax
+   (`DefaultTaxResolver.fetchTieSiblings`): `c_gettax` returns ONE row per category, and when two
+   taxes tie on everything its `ORDER BY` looks at, it keeps an arbitrary one. In the default
+   category `IVA Normal`, `Adquisiciones IVA+RE 21+5.2%` (26.2, summary) shadows `Adquisiciones IVA 21%`
+   — the plain 21% was never offered, and another category's 21% won instead (the OCR modal
+   preselected `Adquisición B.Inmuebles 21%`). A sibling is an active, non-child tax of the same
+   category equal to an answered one on BP tax category, purchase/sales type, cash VAT, countries,
+   regions, owner client/org, default and withholding flags, and valid on the invoice date
+   (`ValidFrom <= invoiceDate`). `ValidFrom` is deliberately NOT a tie column: in `IVA Super Reducido`
+   `c_gettax` answers a rate-0 compensation tax from 2016, which would otherwise hide the plain
+   `Adquisiciones IVA 4%` from 2000. A sibling of the product's
+   answer counts as the product's category. Then only determinations within 0.005 of the rate compete, ranked by (1) the product's,
+   (2) a default category's (the client's own before the System one), (3) non-summary before summary, (4) the category with more active
+   client products, (5) category name, then — inside one category — the most recent `ValidFrom`
+   (as `c_gettax` orders), then the tax name. The first wins — source `PRODUCT_CATEGORY` or
+   `DEFAULT_CATEGORY` if it won on tier 1 or 2, `RATE_MATCH` otherwise; the rest (one per tax, at
+   most 5) are `candidates`; none is `taxId: null` with `NO_MATCH`.
+
+**Errors.** Parameters judged by `NeoActionContract.validate` inside the handler (so REST and MCP
+alike): unknown or missing parameter, wrong type, an impossible date → **422**. A
+`partnerAddressId` or `productId` that does not exist or belongs to another tenant → **404** `Record
+not found` (`c_gettax` would read any id). No determination, no rate match, or an organization
+without an `AD_OrgInfo` location → **200** with `taxId: null` and the source. The function is total:
+a failing query is rolled back to a savepoint and answered as no determination.
+
+Expected on the GOClient vendor location `4380CC6D925841E99BB516C78E7717CF`: 21 → *Adquisiciones IVA
+21%*, 10 → *Adquisiciones IVA 10%*, 0 → *Adquisiciones interiores exentas (art 22)*, 4 → *Adquisiciones IVA 4%*. `NO_MATCH` is the generic answer when no purchase tax can be
+determined for the requested rate.
+
 #### 4.12.2 `etendo_discover` → `primaryEntity` — the root entity of a window spec (IMP-9)
 
 A window spec (`SPEC_TYPE = 'W'`) can include several entities (Header, Lines, …). To create a
@@ -3423,6 +3490,13 @@ this fix.
 the shared REST path (`BatchService` → `NeoCrudHandler.handleDefault`). ETP-5335 switched the tool
 off because they had drifted apart in both directions and keeping one write path correct is cheaper
 than keeping two in step. ETP-5415 closed enough of that gap to turn it back on — **not all of it**.
+
+> **`defaultTax` (ETP-5585) does not diverge.** It is a read action of `purchase-invoice/lines`
+> resolved through `NeoExtensionDispatcher` like every other; REST and MCP run the same handler and
+> the same validation. `etendo_batch` has no ACTION surface, so there is nothing to compare.
+> Discovery note: `NeoActionContract.resolve` publishes the contracts of the first entity of the spec
+> that declares any (`header`, §4.12.1.3), so `defaultTax` is callable but not listed by
+> `etendo_schema(view:"actions")` for `purchase-invoice`.
 
 ##### Closed (ETP-5415)
 
@@ -8101,6 +8175,12 @@ from `NeoExtensionIndex.warnOnQualifierDisagreement`, and a conflict line in `ma
 re-fired either (sales invoice lines only get their amounts derived on create, above — no discount
 re-fire): they had this behaviour only on the unreleased ETP-5528 branch, through the removed
 MCP-layer class, so this is no regression against `develop`.
+
+**Binding of `purchase-invoice/lines` (ETP-5585).** `PurchaseInvoiceLineHandler` —
+`@NeoExtension(spec = "purchase-invoice", entity = "lines")`, extending `InvoiceLineHandler` — serves
+the `defaultTax` action (§4.12.1.7) and leaves everything else to the parent. As for
+`sales-invoice/lines`, the row keeps `Java_Qualifier = invoiceLineHandler` and the class carries no
+`@Named`; the same `warnOnQualifierDisagreement` ERROR line is logged on resolution.
 
 #### 4.12.21 `Convertquotation` leaves the new sales order in Draft on every channel (ETP-5528)
 
