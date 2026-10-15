@@ -2641,6 +2641,73 @@ the hidden `Processing` column, also Process 167) stays `discarded`, and is not 
 calendar has no separate *open/close all* button, and `openClose` already runs Process 167, which
 does exactly that for the period.
 
+##### 4.12.1.7 Default tax for a purchase invoice line — `defaultTax` (ETP-5585)
+
+The OCR invoice flow knows the vendor's address, the invoice date, the percentage printed on the
+document and sometimes a product, but not which `C_Tax` the form would pick. `defaultTax` answers
+that with the form's own rules instead of the client guessing from a rate.
+
+`POST /sws/neo/purchase-invoice/lines/new/action/defaultTax` — a declared **read** action
+(`PurchaseInvoiceLineHandler.DEFAULT_TAX`, `mutating:false`); nothing is persisted. The record id is
+always `new` (as `currencyOptions`, §4.12.1.3, and so it passes `NeoActionRecordGuard`). It is a
+POST because the action hook context only carries the request body (`NeoHookDispatcher.buildHookContext`;
+the body is parsed only for POST in `NeoSubEndpointDispatcher`). Any other method is a **405**.
+
+| Body | Type | |
+|---|---|---|
+| **`partnerAddressId`** | string | the vendor's `C_BPartner_Location_ID` |
+| `invoiceDate` | `yyyy-MM-dd` | default: today |
+| `rate` | number | the extracted percentage, e.g. `21` |
+| `productId` | string | optional |
+
+Organization and client always come from the session (§4.12.17), never from the body.
+
+Response, in the `{"response":{"data":...}}` wrapper:
+`{taxId, identifier, rate, taxCategoryId, taxCategory, summary, source, candidates}`.
+`identifier` is the tax's DAL identifier (`C_Tax.Name`, what `LineCalloutTaxRateHelper` publishes as
+`tax$_identifier`); `candidates` has the same shape minus `source`/`candidates`.
+
+**Algorithm** (`DefaultTaxResolver`; generic — only structural columns, `isSOTrx` is a parameter,
+`N` here):
+
+1. Candidate categories: active `C_TaxCategory` of the session client or System, included in the
+   session organization by the same `ad_isorgincluded` rule `c_gettax` applies.
+2. One round trip: `c_gettax(null, date, org, null, loc, loc, null, 'N', null, null, <category>)`
+   per category (the 11-argument form, `p_taxcat_id` last — `Tax.get` does not expose it, so the SQL
+   is called directly), joined to `c_tax` for rate, `IsSummary` and name. With a product, also
+   `c_gettax(product, ...)` — what `SL_Invoice_Product` does.
+3. No `rate`: the product's determination (`PRODUCT_CATEGORY`), else the default category's
+   (`IsDefault='Y'`, the client's own before System; `DEFAULT_CATEGORY`), else `taxId: null` with
+   `NO_CONTEXT`.
+4. With `rate`, the pool also gets the **tie siblings** of every answered tax
+   (`DefaultTaxResolver.fetchTieSiblings`): `c_gettax` returns ONE row per category, and when two
+   taxes tie on everything its `ORDER BY` looks at, it keeps an arbitrary one. In the default
+   category `IVA Normal`, `Adquisiciones IVA+RE 21+5.2%` (26.2, summary) shadows `Adquisiciones IVA 21%`
+   — the plain 21% was never offered, and another category's 21% won instead (the OCR modal
+   preselected `Adquisición B.Inmuebles 21%`). A sibling is an active, non-child tax of the same
+   category equal to an answered one on BP tax category, purchase/sales type, cash VAT, countries,
+   regions, owner client/org, default and withholding flags, and valid on the invoice date
+   (`ValidFrom <= invoiceDate`). `ValidFrom` is deliberately NOT a tie column: in `IVA Super Reducido`
+   `c_gettax` answers a rate-0 compensation tax from 2016, which would otherwise hide the plain
+   `Adquisiciones IVA 4%` from 2000. A sibling of the product's
+   answer counts as the product's category. Then only determinations within 0.005 of the rate compete, ranked by (1) the product's,
+   (2) a default category's (the client's own before the System one), (3) non-summary before summary, (4) the category with more active
+   client products, (5) category name, then — inside one category — the most recent `ValidFrom`
+   (as `c_gettax` orders), then the tax name. The first wins — source `PRODUCT_CATEGORY` or
+   `DEFAULT_CATEGORY` if it won on tier 1 or 2, `RATE_MATCH` otherwise; the rest (one per tax, at
+   most 5) are `candidates`; none is `taxId: null` with `NO_MATCH`.
+
+**Errors.** Parameters judged by `NeoActionContract.validate` inside the handler (so REST and MCP
+alike): unknown or missing parameter, wrong type, an impossible date → **422**. A
+`partnerAddressId` or `productId` that does not exist or belongs to another tenant → **404** `Record
+not found` (`c_gettax` would read any id). No determination, no rate match, or an organization
+without an `AD_OrgInfo` location → **200** with `taxId: null` and the source. The function is total:
+a failing query is rolled back to a savepoint and answered as no determination.
+
+Expected on the GOClient vendor location `4380CC6D925841E99BB516C78E7717CF`: 21 → *Adquisiciones IVA
+21%*, 10 → *Adquisiciones IVA 10%*, 0 → *Adquisiciones interiores exentas (art 22)*, 4 → *Adquisiciones IVA 4%*. `NO_MATCH` is the generic answer when no purchase tax can be
+determined for the requested rate.
+
 #### 4.12.2 `etendo_discover` → `primaryEntity` — the root entity of a window spec (IMP-9)
 
 A window spec (`SPEC_TYPE = 'W'`) can include several entities (Header, Lines, …). To create a
@@ -3429,6 +3496,13 @@ the shared REST path (`BatchService` → `NeoCrudHandler.handleDefault`). ETP-53
 off because they had drifted apart in both directions and keeping one write path correct is cheaper
 than keeping two in step. ETP-5415 closed enough of that gap to turn it back on — **not all of it**.
 
+> **`defaultTax` (ETP-5585) does not diverge.** It is a read action of `purchase-invoice/lines`
+> resolved through `NeoExtensionDispatcher` like every other; REST and MCP run the same handler and
+> the same validation. `etendo_batch` has no ACTION surface, so there is nothing to compare.
+> Discovery note: `NeoActionContract.resolve` publishes the contracts of the first entity of the spec
+> that declares any (`header`, §4.12.1.3), so `defaultTax` is callable but not listed by
+> `etendo_schema(view:"actions")` for `purchase-invoice`.
+
 ##### Closed (ETP-5415)
 
 | step | how |
@@ -3671,9 +3745,10 @@ Known gaps, still open after the measurement (details in §4.12.20):
 
 - `etendo_create` with a discount still answers `supersededDefaults: {discount: …}` and its hint,
   although the discount is applied.
-- With an explicit `unitPrice`, `listPrice` persists as the defaults cascade left it (usually 0):
-  `McpLinePriceInjector` abstains when the agent sent a price. Pre-existing, unchanged from
-  `develop`.
+- With an explicit `unitPrice` other than the product's standard price, `listPrice` persists as
+  the defaults cascade left it (usually 0): `McpLinePriceInjector` abstains when the agent sent a
+  price. Pre-existing, unchanged from `develop`. (A product whose price list entry has no list
+  price now gets its standard price as `listPrice`, as in the form — QA reopen CP-8, §4.12.20.)
 - Each resolution logs one ERROR line tagged `(warn)` from
   `NeoExtensionIndex.warnOnQualifierDisagreement`, because the `Java_Qualifier` is kept on purpose.
 
@@ -3711,7 +3786,8 @@ It shares `BatchService` and passes **no** preprocessor, so none of the MCP comp
 apply to it. That is by decision — the underlying defects live in the shared selector-aux path the
 React frontend also uses, and changing what the frontend persists is out of scope. The ETP-5528
 customizations (§4.12.20) do run on REST batch — they are entity pre-hooks, not MCP compensations —
-but they only act on a missing or stale value, so REST batch results do not change. `BatchService`
+but they only act on a missing or stale value (with the two declared exceptions of §4.12.20,
+*Where a caller's value is replaced*), so REST batch results do not change. `BatchService`
 itself holds no knowledge of who supplies a preprocessor or what it does.
 
 **Declared narrowing (ETP-5558) — fiscal and regulatory integrations stay limited for agents.**
@@ -7831,19 +7907,26 @@ and amounts as the same line entered in the form. Two gaps broke that:
 |---|---|---|
 | `lineGrossAmount` 0 ("Importe bruto de línea 0,00"), even without a discount, and copied as 0 into the order converted from the quotation | `SL_Order_Amt` publishes `grossUnitPrice × qty`, which is 0 on a net price list, and the `C_OrderLine` trigger only derives the gross for tax-included lists. REST fills it with `NeoCommercialLinePolicy.injectCommercialAmounts` in `executePostCreate`; `etendo_create` is a separate pipeline and never called it. | **In the entities' own customizations**, not in shared code: the sales order and quotation line pre-hook calls `injectCommercialAmounts` explicitly (T12) on every create (`deriveAmountsOnCreate`, below). `McpToolRouter.handleCreate` is left as on `develop` and does not call it, so no other entity's `etendo_create` changes. |
 | `unitPrice` stayed 18 and `lineNetAmount` 180 (expected 17.10 / 171); `standardPrice` 0 on create and discounted on update (expected 18) | The only code that turns a discount into a price is the core callout `SL_Order_Amt`. The form runs it (it computes the discounted `unitPrice` client-side and sends it); a caller that sends only `discount` reaches no path that runs it. | **In the entities' own customizations**, below, on every channel — by the form's own rule, not by knowing which keys the caller sent. |
+| QA reopen CP-7: `etendo_update orderedQuantity:6` (list 300, discount 20) persisted net 1440 but kept the previous `lineGrossAmount` 1161.60 (expected 1742.40) | The `C_OrderLine` trigger derives `LineNetAmt = qty × PriceActual` on a net list; nothing on the `etendo_update` path derives the gross unless a discount re-fire ran. | `deriveAmountsOnUpdate`, below. |
+| QA reopen CP-8: a product whose price list entry has list price 0 and standard price 50 was created with `listPrice 0` (the form persists 50), so the list-based subtotal and discount did not add up, also in the order converted from it | `McpLinePriceInjector` copies the entry's `PriceList` (0). The form never keeps a 0 there: it copies the selector's standard price into `listPrice` and puts it back when the product callout answers 0 (sources below). | `setStandardPriceOnCreate`, below. |
+| QA reopen CP-9: `etendo_update unitPrice:270` (list 300, discount 20, qty 5) kept discount 20 and gross 1452 (expected 10 and 1633.50) | `SL_Order_Amt` derives the discount from `inppriceactual`, but only when that field changes in a form; a sparse patch runs no callout. | `applyUnitPrice`, below. |
 
 ##### The rules live in two customizations
 
 `SalesOrderLineHandler` — `@NeoExtension(spec = "sales-order", entity = "lines")` — and
 `SalesQuotationLineHandler` — `@NeoExtension(spec = "sales-quotation", entity = "quotationLine")`.
-Two classes because the annotation is not repeatable; both extend `OrderLineHandler`, so they keep
+Two classes because the annotation is not repeatable; both are empty bindings over the abstract,
+unannotated `SalesOrderLineCustomization`, which holds the pre-hook and `serverResolvedCreateFields`
+once (it is never a bean nor an index entry). It extends `OrderLineHandler`, so both keep
 its GET filter and `productCode`, its `afterCallout` tax rate and its PATCH gross-price fix, and both
 call the same entity helper `OrderLineDiscountSupport` explicitly (T12). Nothing is selected by a
 property-name guard; the former `McpLineAmountSupport`, which was, is deleted.
 `McpLinePriceInjector` is **not** part of this: it stays a shared MCP compensation, selected by a
 `hasProperty` guard, for every commercial line — tolerated until migration M4 and unchanged here.
 
-The pre-hook (`handle`, CREATE and UPDATE surfaces, every channel) runs, after the parent's:
+The pre-hook (`handle`, CREATE and UPDATE surfaces, every channel) runs, after the parent's, the
+steps below in this order — both customizations call the single entry point
+`OrderLineDiscountSupport.applyLineRules`, so the order lives once:
 
 1. **`setStandardPriceOnCreate`** (create only). Sets `standardPrice` to the standard price of the
    product in the parent order's price list at the order date (`FinancialUtils.getProductPrice`,
@@ -7853,7 +7936,26 @@ The pre-hook (`handle`, CREATE and UPDATE surfaces, every channel) runs, after t
    sends the product callout's value, which is the same one. Without it `etendo_create` persisted
    `PriceStd 0`, or, with an explicit `unitPrice 20`, 20 (the defaults cascade copies `priceActual`
    into `inppricestd`). The parent is `salesOrder` on `etendo_create`, `parentId` on REST and batch.
-   `unitPrice` is never touched, and `listPrice` is not set (it is editable on both entities).
+   `unitPrice` is never touched.
+   **`listPrice`** (`listPriceFromStandard`, QA reopen CP-8) is editable on both entities, so it is
+   filled in one state only — the one the form itself corrects: the price list entry has list
+   price 0 and a non-zero standard price, the body's `listPrice` is absent or 0, and the body's
+   `unitPrice` **is** that standard price. It is then set to the standard price. This is the form's
+   rule, traced to source: picking a product copies the selector's `standardPrice` into both
+   `unitPrice` and `listPrice` (`DataTable.jsx` `updateSnapshotWithSelectedItem`,
+   `EntityForm.jsx` `applyLookupAuxData`, `detailViewHelpers.jsx` `mergeSelectorContextFields`);
+   the product callout `SL_Order_Product` then answers `inppricelist` = the selector's `_PLIST`
+   (0 here, `SL_Order_Product.java:67,107`), and `detailViewHelpers.jsx`
+   `applyProductCalloutPriceAdjustments` puts the standard price back whenever that list price is
+   null or 0. Not filled for a caller's own `unitPrice` (any other value — which list price the
+   form would show then depends on what the user typed), nor for a line priced at 0
+   (`listPrice 0` with `unitPrice 0`). Because it runs first, a discount sent with such a product
+   is then applied by step 2 (list 50, `discount 5` → 47.50), as in the form.
+   **It overwrites an explicit `listPrice: 0`.** The pre-hook cannot tell the 0 that
+   `McpLinePriceInjector` (or the defaults cascade) left in the body from a 0 the caller sent, so a
+   caller that sends `listPrice: 0` together with `unitPrice` equal to the catalog standard price
+   gets `listPrice` = that standard price. This is deliberate and is what the form does: it never
+   persists a list price of 0 next to a standard price for such a product.
    Abstains on a tax-included list (its standard price is gross, `standardPrice` is net), and when
    product, order, list or price are missing.
 2. **`applyDiscount`**. Re-fires `SL_Order_Amt` for `discount` through the shared
@@ -7866,8 +7968,11 @@ The pre-hook (`handle`, CREATE and UPDATE surfaces, every channel) runs, after t
 
    Any other `unitPrice` is the caller's price and wins. A non-zero `grossUnitPrice` is an explicit
    price too (tax-included lists) and wins; a zero one is not (a net list carries 0 there).
-   **Accepted edge case:** a caller that deliberately sends `unitPrice == listPrice` with a non-zero
-   discount gets the discount applied — what the form does with those two values.
+   **Accepted edge case — the caller's `unitPrice` is replaced:** a body (create, or an update
+   patch) that sends `unitPrice == listPrice` (the stored list price overlaid with the patch, on
+   update) together with a **non-zero** `discount` is read as undiscounted and repriced — the
+   caller's `unitPrice` is overwritten with the discounted price (`unitPrice` is not protected in
+   this re-fire). This predates the QA reopen and is what the form does with those two values.
 
 What the re-fire may write:
 
@@ -7905,12 +8010,38 @@ Amounts after the re-fire:
   their pre-hook.
 - A line with no list price is left alone: the callout would discount from 0.
 
-**3. `deriveAmountsOnCreate`** (create only, **every** create, with or without a discount). Calls
+**3. `applyUnitPrice`** (update only, QA reopen CP-9). An update whose patch carries `unitPrice`,
+no `discount` key and no explicit gross price, on a line with a list price, where that price is
+**not** the one the line already has — `listPrice × (1 − discount/100)` over the stored line
+overlaid with the patch, within half a cent (`shouldDeriveDiscountFromPrice`). It re-fires
+`SL_Order_Amt` for `unitPrice` (`inppriceactual`), the branch that derives
+`discount = (listPrice − unitPrice) / listPrice` with core's price adjustments and precision:
+
+- every body key is protected, **`unitPrice` included** — the price is the caller's, only the
+  discount and the amounts follow it;
+- `standardPrice` / `baseGrossUnitPrice` are suppressed and the callout's input standard price is
+  aligned with the new price, exactly as in step 2, so the `discount` it publishes, chained back into
+  its own `inpdiscount` branch, finds nothing left to change;
+- amounts as on a discount update: `lineNetAmount` from the callout, `lineGrossAmount` derived
+  over the final quantity, price and tax, never over an amount the patch carries.
+
+A tax-included list carries its list price on the gross side (`listPrice` 0), so the rule
+abstains there, as the discount re-fire does.
+
+**4. `deriveAmountsOnUpdate`** (update only, QA reopen CP-7), when neither re-fire above ran. A patch
+that carries `orderedQuantity`, `unitPrice`, `grossUnitPrice` or `tax` and no `lineGrossAmount`
+gets `lineGrossAmount` derived with `injectCommercialAmounts` over the stored line overlaid with the
+patch. `lineNetAmount` is not written: on a net list the `C_OrderLine` trigger already derives it
+(`LineNetAmt = QtyOrdered × PriceActual`). A patch that sends its own `lineGrossAmount` is not even
+read.
+
+**5. `deriveAmountsOnCreate`** (create only, **every** create, with or without a discount). Calls
 `NeoCommercialLinePolicy.injectCommercialAmounts` explicitly (T12) over the final quantity, price,
 gross price and tax, and writes `lineGrossAmount` when the body's value is absent, zero, or already
 equal (2 decimals) to the derived one; any other value is the caller's and is kept. `lineNetAmount`
 is not touched (the policy derives it only from `invoicedQuantity`; for an order line it comes from
-the callout). This is what gives `etendo_create` a correct `lineGrossAmount` — it never reaches
+the callout, and the `C_OrderLine` trigger recomputes it — which is why both customizations declare
+it server-resolved on create, §4.12.22 point 3). This is what gives `etendo_create` a correct `lineGrossAmount` — it never reaches
 `executePostCreate`, and the shared MCP path is deliberately left as on `develop`.
 
 - **No tax in the body → abstain.** A REST or batch create reaches its pre-hook before the create
@@ -7927,6 +8058,20 @@ the callout). This is what gives `etendo_create` a correct `lineGrossAmount` —
 `SL_Order_Product` and `SL_Order_Amt` fire there but cannot revert them. `injectCommercialAmounts`
 then derives `lineGrossAmount` from the discounted price, with the tax the cascade resolved (the
 customization abstained on it, having no tax yet).
+
+##### Where a caller's value is replaced
+
+The rules keep what the caller sent, **with exactly two exceptions**, both because the body cannot
+say whether a value is the caller's or one the server left there, and both matching the form:
+
+1. `listPrice: 0` sent with `unitPrice` equal to the catalog standard price, on a product whose
+   price list entry has list price 0 → `listPrice` becomes the standard price (step 1).
+2. `unitPrice` equal to the (undiscounted) `listPrice` sent with a non-zero `discount`, on create or
+   update → `unitPrice` becomes the discounted price (step 2).
+
+`standardPrice` and `baseGrossUnitPrice` are read-only, so they are never the caller's. Amounts the
+caller sent are judged by value on create (an amount equal to the server-derived one at 2 decimals
+is recomputed, step 2 and step 5) and never overwritten on update.
 
 ##### What each channel gets
 
@@ -7946,23 +8091,66 @@ Fernet, list = standard price 18, net list, 21 % VAT, qty 10. `std` = `standardP
 | discount 0 → 5 | 17.10 / 171 / 206.91 |
 | discount 5 → 10 | 16.20 / 162 / 196.02 |
 | discount 5 → 0 | 18 / 180 / 217.80 |
-| `unitPrice 20` only | 20, amounts not refreshed (known gap below) |
+| `orderedQuantity 6` only, at discount 5 | 17.10 / 102.60 / 124.15 (gross derived, step 4) |
+| `tax` only | gross derived at the new rate (step 4) |
+| `unitPrice 16.20` only, from discount 5 | discount 10, 16.20 / 162 / 196.02 (step 3) |
+| `unitPrice 17.10` only, at discount 5 (the price it already has) | no re-fire; gross derived (step 4) |
+| `discount 5` + `unitPrice 20` | discount 5 kept, 20 kept (the caller's price); gross derived over 20 (step 4) |
 
-**The form never meets the rule.** Both UI line writes send `unitPrice = round6(listPrice × (1 −
-discount/100))`: the add row and the inline edit send the whole row with its `listPrice`
-(`prepareLineForPost`), and the side-panel save sends the edited keys plus that `unitPrice`, computed
-from the open line's `listPrice`. So `unitPrice == listPrice` only when the discount is 0, and the rule
-needs a non-zero discount. A tax-included list sends a non-zero `grossUnitPrice`, which is explicit.
-The only theoretical overlap is a side-panel save whose open line has a `listPrice` other than the
-stored one (a concurrent edit); the re-fire would then apply the discount to the stored list price —
-the value the form itself would have sent with fresh data.
+QA reopen data (quotation 1000008, Monitor, list 300, 21 % VAT): discount 5 → 20 → `orderedQuantity
+6` gives net 1440 / gross 1742.40; `unitPrice 270` on qty 5 at discount 20 gives discount 10, net
+1350, gross 1633.50.
+
+`etendo_create` of a product whose price list entry has list price 0 and standard price 50 (QA
+quotations 1000009 by the form, 1000010 by MCP): `listPrice` 50, `unitPrice` 50, `standardPrice` 50
+on both — it was 0 / 50 / 50 by MCP.
+
+**The form never meets the rule.** Every UI line write sends the whole line with
+`unitPrice = round6(listPrice × (1 − discount/100))` (`prepareLineForPost`): the add row and the
+inline edit send the whole row, and the side-panel save sends the whole line too — its `lineEdits`
+is seeded from the whole open line (`DetailView.jsx`, `setLineEdits(prev => ({ ...(prev ??
+selectedLine), … }))`, ~`:3666` and ~`:3690`), so `handleSaveLine` sends every field of it,
+`discount` and `listPrice` included, plus the computed `unitPrice`. So `unitPrice == listPrice` only
+when the discount is 0, and the rule needs a non-zero discount. Because the body always carries the
+`listPrice` the `unitPrice` was computed from, and on update that patched `listPrice` is the one the
+rule compares with, a stale open line (a concurrent edit) does not change this either. A
+tax-included list sends a non-zero `grossUnitPrice`, which is explicit.
+
+The three QA-reopen rules were checked against the same payloads (`useLineGrossAmount.js`
+`computeUnitPriceForPost`; `DetailView.jsx` `buildInlineRowUpdateHandler` and `handleSaveLine`):
+
+- **`applyUnitPrice` never fires on the form.** `unitPrice` is not a form input on either entity
+  (`decisions.json` lines `unitPrice: {grid: false, form: false}`). Both the inline edit and the
+  side-panel save send the whole line, `discount` included, which excludes the rule. Even without
+  the `discount` key it would be a no-op: the `unitPrice` sent is
+  `round6(listPrice × (1 − discount/100))`, exactly the price the rule compares with, and half a
+  cent absorbs the float rounding.
+- **`deriveAmountsOnUpdate` changes nothing the form persists.** Both UI writes carry the line's
+  `lineGrossAmount`, so the rule does not even read the stored line. And on REST `lineGrossAmount`
+  is read-only on both entities (`ETGO_SF_FIELD.IsReadOnly = Y`): `filterWriteRequest` drops
+  anything the pre-hook writes there, and `NeoCrudHandler.executeUpdate` derives it with
+  `injectCommercialAmounts` exactly as before.
+- **The `listPrice` fill never fires on the form.** The form's add-line POST always carries a
+  non-zero `listPrice` for such a product (the standard price, above), and a line the user priced
+  at 0 carries `unitPrice 0`.
 
 ##### Known gaps
 
-- Only a change to `discount` re-fires `SL_Order_Amt`. An update that changes only
-  `orderedQuantity` or `unitPrice` does not; on `etendo_update` its amounts are not refreshed.
+- **Parity note, not a gap — quantity edits.** Only `discount` and `unitPrice` re-fire
+  `SL_Order_Amt`; an update of `orderedQuantity` alone does not, so the quantity hook and
+  quantity-based price adjustments (`OrderLineQtyChangedHookObject`, `PriceAdjustment`,
+  `SL_Order_Amt.java` `inpqtyordered` branch) are not re-evaluated. The form does not re-evaluate
+  them either: `orderedQuantity` is one of the client-side fields of
+  `DetailView.jsx` `handleLineFieldChange` (`CLIENT_SIDE_FIELDS`, ~`:2334-2343`), which computes the
+  amounts locally and runs no callout, and the PATCH carries
+  `unitPrice = listPrice × (1 − discount/100)`. On both, the price stays and the amounts are
+  refreshed (MCP: step 4 for the gross, the `C_OrderLine` trigger for the net). Not reachable from
+  GO today anyway: this client has no `m_offer` and GO exposes no price-adjustment window (verified
+  2026-10-14). Applying quantity adjustments would need the form to run the callout first; doing
+  it only on MCP would create a divergence (§4.12.9).
 - On a REST patch from a non-UI client, `lineGrossAmount` is read-only and dropped by
-  `filterWriteRequest`, so it is not refreshed there.
+  `filterWriteRequest`, so step 4 does not reach it; `executeUpdate`'s `injectCommercialAmounts`
+  derives it only from what the patch itself carries.
 - A tax-included price list: `standardPrice` is not filled, and `etendo_create` gets no price from
   `McpLinePriceInjector` either, so the rule usually abstains (no list price).
 - `etendo_create` with a discount still answers `supersededDefaults: {discount: {sent: 5, callout: 0}}`
@@ -7970,11 +8158,13 @@ the value the form itself would have sent with fresh data.
   on the router's own context (`McpToolRouter.handleCreate`, reported with
   `ctx.getSupersededDefaults()`); the customization only receives the hook context, which does not
   share it, and reaching it would be ETP-5415 plumbing. Declared, not fixed.
-- With an explicit `unitPrice`, `listPrice` persists as the defaults cascade left it (usually 0):
-  `McpLinePriceInjector` abstains when the agent sent a price, and the selector-aux values the
-  cascade reads have no price-list context. Unchanged from `develop`. Not filled by the
-  customization because `listPrice` is editable on both entities, so a 0 in the body cannot be told
-  apart from a caller's 0.
+- With an explicit `unitPrice` other than the product's standard price, `listPrice` persists as the
+  defaults cascade left it (usually 0): `McpLinePriceInjector` abstains when the agent sent a price,
+  and the selector-aux values the cascade reads have no price-list context. Unchanged from
+  `develop`. Not filled because `listPrice` is editable on both entities and the form's own value
+  then depends on what the user typed; only the "product just picked" state is filled (step 1).
+- `applyUnitPrice` is update-only. A create with an explicit `unitPrice` below the list price and
+  no discount keeps discount 0, as before.
 - The rule compares `unitPrice` with the line's `listPrice`. A price list whose standard price
   differs from its list price gives `McpLinePriceInjector`'s `unitPrice` (the standard price) ≠
   `listPrice`, so a discount sent to `etendo_create` / `etendo_batch` on such a list is not applied.
@@ -8034,6 +8224,12 @@ from `NeoExtensionIndex.warnOnQualifierDisagreement`, and a conflict line in `ma
 re-fired either (invoice lines get their discount and amounts from `InvoiceLineAmountSupport`, §4.12.31 — not
 a `SL_Order_Amt` re-fire): they had this behaviour only on the unreleased ETP-5528 branch, through the removed
 MCP-layer class, so this is no regression against `develop`.
+
+**Binding of `purchase-invoice/lines` (ETP-5585).** `PurchaseInvoiceLineHandler` —
+`@NeoExtension(spec = "purchase-invoice", entity = "lines")`, extending `InvoiceLineHandler` — serves
+the `defaultTax` action (§4.12.1.7) and leaves everything else to the parent. As for
+`sales-invoice/lines`, the row keeps `Java_Qualifier = invoiceLineHandler` and the class carries no
+`@Named`; the same `warnOnQualifierDisagreement` ERROR line is logged on resolution.
 
 #### 4.12.21 `Convertquotation` leaves the new sales order in Draft on every channel (ETP-5528)
 
@@ -8116,7 +8312,8 @@ view, and `McpActionsView.buildResponse(…, declared)` appends the declared ent
   customization's contracts would not be found. Not needed here (the header row's qualifier is
   `salesQuotationHeaderHandler`).
 
-**3. `tax` is not required in `view:"create"` of `quotationLine`.** The create callout cascade fires
+**3. `tax` and `lineNetAmount` are not required in `view:"create"` of `quotationLine` (nor `tax` in
+`sales-order/lines`).** The create callout cascade fires
 `SL_Order_Product` for the product, which sets the line's tax from the product, the header's order
 date and the organization — what the UI does when a product is picked. `etendo_schema` could not see
 that: its server-resolved set came from `etendo_defaults` without input plus the selector policies'
@@ -8138,10 +8335,22 @@ wrapper fields. A new generic extension point lets the customization say so:
   extension point: declare only fields the create cascade derives — a field filled only by the
   customization's own `handle()` would still be refused on `etendo_create`. (`etendo_batch` and REST run
   no such pre-check.)
-- `SalesQuotationLineHandler` declares `tax`. A caller may still send one; the create path restores
-  caller values after the cascade.
-- **Scope:** `quotationLine` only. `sales-order/lines` (`SalesOrderLineHandler`) very likely has the
-  same gap and is not changed here.
+- `SalesQuotationLineHandler` and `SalesOrderLineHandler` both declare
+  `OrderLineDiscountSupport.SERVER_RESOLVED_CREATE_FIELDS` = `tax`, `lineNetAmount` (ETP-5528, QA
+  observation: the create view listed `lineNetAmount` as required although every create without it
+  worked):
+  - **`tax`** (`C_Tax_ID`): `SL_Order_Product`, the callout of `C_OrderLine.M_Product_ID`, sets it.
+    A caller may still send one; the create path restores caller values after the cascade.
+  - **`lineNetAmount`** (`LineNetAmt`, mandatory, no AD default): `SL_Order_Amt` — the callout of
+    `PriceActual`, `QtyOrdered` and `C_Tax_ID` — publishes `inplinenetamt` when the cascade reaches
+    it from the price `SL_Order_Product` publishes, so the `etendo_create` pre-check finds it filled;
+    REST and `etendo_batch` run the same cascade in `executePostCreate`. On every channel the
+    `C_ORDERLINE_TRG` trigger then recomputes it on insert and update (`ROUND(QtyOrdered ×
+    PriceActual)` on a net list, the net of the gross on a tax-included one), so a value the caller
+    sends is **not** what is persisted — computing it is wasted work for the agent.
+  - Same table, same callouts and trigger, so the same set on both entities. On `sales-order/lines`
+    only `tax` changes the view: `lineNetAmount` is published read-only (`system`) there and is never
+    listed in `view:"create"`.
 
 **4. A tax given by name is resolved against the header.** The 422 `not_found` for
 `tax:"Entregas IVA 21%"` was missing selector context, not the duplicate name: the second tax

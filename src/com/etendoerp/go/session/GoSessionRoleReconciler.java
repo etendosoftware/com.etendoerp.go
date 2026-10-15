@@ -44,6 +44,10 @@ public class GoSessionRoleReconciler {
 
   private static final Logger log = LogManager.getLogger(GoSessionRoleReconciler.class);
 
+  /** Why a non-rebindable credential (a legacy JWT) whose role was revoked is refused. */
+  public static final String MSG_TOKEN_ROLE_REVOKED =
+      "The token role is no longer assigned to the user";
+
   /**
    * The organization and warehouse a user gets by default when entering with a role.
    *
@@ -157,6 +161,25 @@ public class GoSessionRoleReconciler {
     log.info("Rebound session {} of user {} from revoked role {} to role {}", sessionRecord.getId(),
         userId, previousRoleId, replacementRoleId);
     return true;
+  }
+
+  /**
+   * ETP-5270 — the check {@link #reconcile} starts with, for a credential that cannot be rebound.
+   * A legacy JWT carries its role in a signed claim: the role cannot be swapped in place the way a
+   * session record's can, so a token whose role was revoked is refused instead, and the client has
+   * to sign in or refresh to get a token for the role the user holds now.
+   *
+   * @param userId the {@code AD_User} id the credential names
+   * @param roleId the {@code AD_Role} id the credential names
+   * @param clientId the {@code AD_Client} id the credential names
+   * @throws SessionRoleRevokedException when any id is missing, or the user no longer holds the
+   *     role in that client
+   */
+  public void requireHeldRole(String userId, String roleId, String clientId) {
+    if (StringUtils.isAnyBlank(userId, roleId, clientId)
+        || !directory.isEligible(userId, roleId, clientId)) {
+      throw new SessionRoleRevokedException(MSG_TOKEN_ROLE_REVOKED);
+    }
   }
 
   private String findReplacementRole(String userId, String clientId) {

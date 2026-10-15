@@ -53,7 +53,7 @@ final class LineAmountTestSupport {
    * the returned mock and must close it (try-with-resources).
    */
   static MockedStatic<OBDal> taxRate(double rate) throws SQLException {
-    return taxRate(rate, null);
+    return taxRate(rate, mock(OBDal.class));
   }
 
   /** Id the stored line of {@link #taxRate(double, InvoiceLine)} answers to. */
@@ -68,6 +68,15 @@ final class LineAmountTestSupport {
     if (storedLine != null) {
       when(dal.get(InvoiceLine.class, STORED_LINE_ID)).thenReturn(storedLine);
     }
+    return taxRate(rate, dal);
+  }
+
+  /**
+   * {@link #taxRate(double)} over a caller-built {@link OBDal} mock, for a test that also stubs
+   * other reads on it (a stored line, a product). The caller stubs {@code dal} before or after this
+   * call, never inside a {@code thenReturn}.
+   */
+  static MockedStatic<OBDal> taxRate(double rate, OBDal dal) throws SQLException {
     Connection conn = mock(Connection.class);
     PreparedStatement ps = mock(PreparedStatement.class);
     ResultSet rs = mock(ResultSet.class);
