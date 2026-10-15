@@ -12,8 +12,9 @@
 #                                        1. PRE_PUSH_TARGET, when set
 #                                        2. the base of the branch's open PR (gh, when installed and
 #                                           signed in; PRE_PUSH_TARGET_LOOKUP=0 skips it)
-#                                        3. main for main itself and hotfix/*, the rule CI uses when
-#                                           there is no PR yet (offline-regen-check.yml)
+#                                        3. main for main itself, hotfix/* and the daily cut
+#                                           (mergeblock/*), the rule CI uses when there is no PR yet
+#                                           (offline-regen-check.yml)
 #                                        4. develop
 #   check_target_conflicts <branch>    fetches origin/<branch> and exits the hook when HEAD does not
 #                                      merge into it cleanly (git merge-tree, no working-tree change)
@@ -44,7 +45,7 @@ target_branch() {
     esac
   fi
   case "$branch" in
-    main|hotfix/*) printf 'main' ;;
+    main|hotfix/*|mergeblock/*) printf 'main' ;;
     *) printf 'develop' ;;
   esac
 }
