@@ -1,0 +1,74 @@
+/*
+ * *************************************************************************
+ * The contents of this file are subject to the Etendo License
+ * (the "License"), you may not use this file except in compliance with
+ * the License.
+ * You may obtain a copy of the License at
+ * https://github.com/etendosoftware/etendo_core/blob/main/legal/Etendo_license.txt
+ * Software distributed under the License is distributed on an
+ * "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing rights
+ * and limitations under the License.
+ * All portions are Copyright (C) 2021-2026 FUTIT SERVICES, S.L
+ * All Rights Reserved.
+ * Contributor(s): Futit Services S.L.
+ * *************************************************************************
+ */
+
+package com.etendoerp.go.schemaforge;
+
+import java.util.Set;
+
+/**
+ * The customization shared by the sales order line entities that opt in (ETP-5528):
+ * {@link SalesOrderLineHandler} ({@code sales-order/lines}) and {@link SalesQuotationLineHandler}
+ * ({@code sales-quotation/quotationLine}). Everything {@link OrderLineHandler} does, plus the order
+ * line's own price rules (see {@link OrderLineDiscountSupport}).
+ *
+ * <p>Abstract and not annotated, so it is never a bean nor an index entry: each concrete subclass
+ * carries its own {@link NeoExtension} (the annotation is not repeatable and not inherited), and
+ * {@code NeoExtensionIndex} reads it off the bean class. {@code purchase-order/lines} does not
+ * extend it and stays on {@link OrderLineHandler} alone.
+ */
+abstract class SalesOrderLineCustomization extends OrderLineHandler {
+
+  /**
+   * Runs the parent's pre-hook first — a response from it still short-circuits — then the line
+   * rules of {@link OrderLineDiscountSupport#applyLineRules}: the standard (and, when missing, list)
+   * price of a new line, a discount its price does not reflect yet, the discount a new price
+   * implies, and the gross amount of a new or updated line. The order lives there, once.
+   */
+  @Override
+  public NeoResponse handle(NeoContext context) {
+    NeoResponse response = super.handle(context);
+    if (response != null) {
+      return response;
+    }
+    OrderLineDiscountSupport.applyLineRules(context);
+    return null;
+  }
+
+  /**
+   * The tax and the net amount of a new line are the server's to derive
+   * ({@link OrderLineDiscountSupport#SERVER_RESOLVED_CREATE_FIELDS}, ETP-5535 / ETP-5528): the
+   * create callout cascade fires {@code SL_Order_Product} for the product — which sets the tax from
+   * the product's tax category, the header's order date and the organization, exactly what the UI
+   * does when a product is picked — and {@code SL_Order_Amt} from the price it publishes, which
+   * sets {@code lineNetAmount}; the {@code C_OrderLine} trigger recomputes the net amount on insert
+   * anyway. {@code product} is itself required, so the source is always there. Declared here so
+   * {@code etendo_schema(view:"create")} stops listing them as required: an agent sent looking for a
+   * tax by name finds one the server would not have picked, and one that computes the net amount
+   * itself computes a value the trigger discards.
+   *
+   * <p>Both entities are the same table, with the same column callouts and trigger. On
+   * {@code sales-order/lines} {@code lineNetAmount} is published read-only ({@code system}) and
+   * never appears in {@code view:"create"}, so there the declaration only changes {@code tax};
+   * it is kept so it stays true of the entity rather than of its current field visibility.
+   *
+   * <p>A caller may still send a tax; the cascade keeps a value the caller provided.
+   */
+  @Override
+  public Set<String> serverResolvedCreateFields() {
+    return OrderLineDiscountSupport.SERVER_RESOLVED_CREATE_FIELDS;
+  }
+}

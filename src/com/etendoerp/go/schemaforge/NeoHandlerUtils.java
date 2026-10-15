@@ -304,7 +304,7 @@ final class NeoHandlerUtils {
    * result is absent, collect the ids, bail when empty, loop the rows, return
    * {@code NeoResponse.ok(previousResult.getBody())}, log-and-passthrough on failure — was
    * byte-identical in three handlers ({@code MatchedInvoiceHandler},
-   * {@code PaymentScheduleDetailHandler}, {@code BinContentsHandler}) and tripped
+   * {@code PaymentScheduleDetailHandler} and a former bin-contents handler) and tripped
    * SonarQube's duplicated-lines-on-new-code gate, the same way
    * {@link #enrichLinesWithProductCode} was extracted before it.
    *
