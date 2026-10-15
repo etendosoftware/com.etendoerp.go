@@ -12,6 +12,9 @@ name: Branch Merge Policy
 #
 # ETP-5695: the daily cut reaches main as mergeblock/ETP-XXXX, a cut of develop at a chosen
 # commit with main merged in (docs/branch-workflow.md § Daily Cut), so main accepts it too.
+# develop -> main stays allowed on purpose while the team switches to the cut: this file takes
+# effect the day ETP-5695 reaches develop, before Jenkins and the branch protection move to the
+# cut. Drop 'develop' from the main list after the first cut that goes through mergeblock/*.
 #
 # Self-contained (no external service) — intended to eventually replace the
 # equivalent rule in Git Police, alongside the local pre-push checks and the
