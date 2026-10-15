@@ -28,6 +28,8 @@ import org.openbravo.model.ad.access.User;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.ad.system.Client;
 
+import com.etendoerp.go.common.BoundedJsonParser;
+
 /**
  * Persists named filter presets per window per user via AD_PREFERENCE.
  *
@@ -81,7 +83,7 @@ class NeoFiltersService {
     JSONObject all = loadAll();
     try {
       JSONObject windowPresets = all.has(windowName) ? all.getJSONObject(windowName) : new JSONObject();
-      windowPresets.put(presetName, new JSONObject(filtersJson));
+      windowPresets.put(presetName, BoundedJsonParser.parseObject(filtersJson));
       all.put(windowName, windowPresets);
     } catch (Exception e) {
       log.error("Invalid filters JSON for window {}, preset {}: {}", windowName, presetName, e.getMessage(), e);

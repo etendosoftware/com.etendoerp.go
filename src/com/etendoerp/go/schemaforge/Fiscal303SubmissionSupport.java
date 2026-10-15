@@ -47,6 +47,7 @@ import org.openbravo.module.aeat303.es.presentation.AEAT303SubmissionService;
 import org.openbravo.module.taxreportlauncher.TaxReport;
 import org.openbravo.module.taxreportlauncher.erpCommon.ad_reports.OBTL_TaxReport_I;
 
+import com.etendoerp.go.common.BoundedJsonParser;
 import com.etendoerp.go.schemaforge.data.FiscalDecl;
 import com.etendoerp.go.schemaforge.util.NeoMessageTranslator;
 
@@ -671,7 +672,7 @@ class Fiscal303SubmissionSupport {
       while ((line = reader.readLine()) != null) sb.append(line);
     }
     String raw = sb.toString();
-    return raw.isEmpty() ? new JSONObject() : new JSONObject(raw);
+    return raw.isEmpty() ? new JSONObject() : BoundedJsonParser.parseObject(raw);
   }
 
   private void writeJson(HttpServletResponse response, int status, JSONObject body)

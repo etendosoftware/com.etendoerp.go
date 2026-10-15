@@ -62,7 +62,9 @@ import com.etendoerp.go.auth.DalWarehouseResolver;
 import com.etendoerp.go.auth.EnvironmentAuthOutcome;
 import com.etendoerp.go.auth.EnvironmentRequestAuthenticator;
 import com.etendoerp.go.auth.SurfacePolicy;
+import com.etendoerp.go.common.BoundedJsonParser;
 import com.etendoerp.go.common.CorsUtils;
+import com.etendoerp.go.common.MalformedJsonException;
 import com.etendoerp.go.common.ProtocolErrorAdapters;
 import com.etendoerp.go.common.PublicUrlResolver;
 import com.etendoerp.go.schemaforge.data.com.etendoerp.go.schemaforge.data.OAuth2Client;
@@ -462,6 +464,8 @@ public class OAuth2Servlet extends HttpBaseServlet {
 
       handleClientCredentialsGrant(response, clientId, clientSecret, scopeParam);
 
+    } catch (MalformedJsonException e) {
+      writeMalformedBody(response);
     } catch (JSONException e) {
       log.error("Failed to build OAuth2 response", e);
         writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
@@ -634,6 +638,8 @@ public class OAuth2Servlet extends HttpBaseServlet {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST, e.getMessage());
     } catch (AuthException e) {
       writeError(response, e.statusCode, ERROR_ACCESS_DENIED, e.getMessage());
+    } catch (MalformedJsonException e) {
+      writeMalformedBody(response);
     } catch (SQLException | JSONException e) {
       log.error("Error creating public API key", e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
@@ -678,6 +684,8 @@ public class OAuth2Servlet extends HttpBaseServlet {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST, e.getMessage());
     } catch (AuthException e) {
       writeError(response, e.statusCode, ERROR_ACCESS_DENIED, e.getMessage());
+    } catch (MalformedJsonException e) {
+      writeMalformedBody(response);
     } catch (SQLException | JSONException e) {
       log.error("Error updating public API key", e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
@@ -1096,6 +1104,8 @@ public class OAuth2Servlet extends HttpBaseServlet {
 
     } catch (AuthException e) {
       writeError(response, e.statusCode, ERROR_ACCESS_DENIED, e.getMessage());
+    } catch (MalformedJsonException e) {
+      writeMalformedBody(response);
     } catch (SQLException | JSONException e) {
       log.error("Error creating OAuth2 client", e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
@@ -1166,6 +1176,8 @@ public class OAuth2Servlet extends HttpBaseServlet {
 
     } catch (AuthException e) {
       writeError(response, e.statusCode, ERROR_ACCESS_DENIED, e.getMessage());
+    } catch (MalformedJsonException e) {
+      writeMalformedBody(response);
     } catch (SQLException | JSONException e) {
       log.error("Error updating OAuth2 client", e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
@@ -1279,6 +1291,8 @@ public class OAuth2Servlet extends HttpBaseServlet {
 
     } catch (AuthException e) {
       writeError(response, e.statusCode, ERROR_ACCESS_DENIED, e.getMessage());
+    } catch (MalformedJsonException e) {
+      writeMalformedBody(response);
     } catch (SQLException | JSONException e) {
       log.error("Error regenerating OAuth2 client secret", e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
@@ -1364,6 +1378,8 @@ public class OAuth2Servlet extends HttpBaseServlet {
 
     } catch (AuthException e) {
       writeError(response, e.statusCode, ERROR_ACCESS_DENIED, e.getMessage());
+    } catch (MalformedJsonException e) {
+      writeMalformedBody(response);
     } catch (SQLException | JSONException e) {
       log.error("Error revoking OAuth2 tokens", e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
@@ -1423,6 +1439,8 @@ public class OAuth2Servlet extends HttpBaseServlet {
 
     } catch (AuthException e) {
       writeError(response, e.statusCode, ERROR_ACCESS_DENIED, e.getMessage());
+    } catch (MalformedJsonException e) {
+      writeMalformedBody(response);
     } catch (SQLException | JSONException e) {
       log.error("Error during OAuth2 token introspection", e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
@@ -2131,7 +2149,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
         sb.append(line);
       }
     }
-    return new JSONObject(sb.toString());
+    return BoundedJsonParser.parseObject(sb.toString());
   }
 
   /**
@@ -2149,6 +2167,16 @@ public class OAuth2Servlet extends HttpBaseServlet {
   /**
    * Write an RFC 6749 error response.
    */
+  /**
+   * A request body the client sent is not JSON (or breaks the parser): its error, a 400
+   * {@code invalid_request}, never the 500 that a {@code JSONException} from our own response
+   * building means.
+   */
+  private void writeMalformedBody(HttpServletResponse response) throws IOException {
+    writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST,
+        "Malformed request body");
+  }
+
   private void writeError(HttpServletResponse response, int status, String error,
       String description) throws IOException {
     ProtocolErrorAdapters.writeOAuthError(response, status, error, description);

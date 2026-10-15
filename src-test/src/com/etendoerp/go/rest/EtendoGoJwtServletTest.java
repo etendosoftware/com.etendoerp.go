@@ -65,12 +65,15 @@ import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 
+import com.etendoerp.go.common.BoundedJsonParserTest;
 import com.etendoerp.go.common.PublicUrlResolver;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.data.AccountIdentity;
 
 /**
  * Unit tests for {@link EtendoGoJwtServlet}.
+ *
+ * @covers com.etendoerp.go.rest.EtendoGoJwtServlet
  */
 public class EtendoGoJwtServletTest {
 
@@ -495,6 +498,29 @@ public class EtendoGoJwtServletTest {
     assertEquals(400, resp.status);
     JSONObject respBody = new JSONObject(resp.body());
     assertEquals("INVALID_REQUEST", respBody.getJSONObject("error").getString("code"));
+  }
+
+  /**
+   * /register and /login answer without a token, so a body that breaks jettison itself
+   * (StackOverflowError / OutOfMemoryError, which escape every catch (Exception)) must still be
+   * their ordinary 400.
+   */
+  @Test
+  public void unauthenticatedParserBreakingJsonReturnsBadRequest() throws Exception {
+    for (String path : new String[] { "/register", "/login" }) {
+      for (String raw : (Iterable<String>) BoundedJsonParserTest.stackBreakingBodies()::iterator) {
+        ResponseCapture resp = mockResponse();
+        HttpServletRequest req = mockRequest(path);
+        when(req.getContentType()).thenReturn("application/json");
+        when(req.getReader()).thenReturn(new BufferedReader(new StringReader(raw)));
+
+        servlet.doPost(req, resp.response);
+
+        assertEquals(path, 400, resp.status);
+        assertEquals(path, "INVALID_REQUEST",
+            new JSONObject(resp.body()).getJSONObject("error").getString("code"));
+      }
+    }
   }
 
   // ===================== POST /login =====================

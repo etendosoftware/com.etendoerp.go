@@ -41,7 +41,9 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Timestamp;
+import java.util.ArrayList;
 import java.util.Base64;
+import java.util.List;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -54,6 +56,7 @@ import org.mockito.MockedStatic;
 
 import com.auth0.jwt.interfaces.Claim;
 import com.auth0.jwt.interfaces.DecodedJWT;
+import com.etendoerp.go.common.BoundedJsonParserTest;
 import com.etendoerp.go.common.PublicUrlResolver;
 import com.etendoerp.go.session.GoSessionRecord;
 import com.etendoerp.go.session.GoSessionSecurity;
@@ -1686,6 +1689,54 @@ public class OAuth2ServletTest {
 
     JSONObject body = new JSONObject(resp.body());
     assertFalse(body.getBoolean("active"));
+  }
+
+  // ===================== malformed JSON bodies (unauthenticated endpoints) =====================
+
+  /**
+   * POST /token answers without a token, so a body that breaks jettison (StackOverflowError /
+   * OutOfMemoryError, which escape every catch (Exception)) must be a plain 400, and so must any
+   * other body that is not JSON: it was a 500 before.
+   */
+  @Test
+  public void tokenMalformedJsonBodyReturnsBadRequest() throws Exception {
+    for (String raw : malformedBodies()) {
+      ResponseCapture resp = mockResponse();
+      HttpServletRequest req = mockRequest("POST", null);
+      when(req.getContentType()).thenReturn("application/json");
+      when(req.getReader()).thenReturn(new BufferedReader(new StringReader(raw)));
+
+      servlet.doPost(req, resp.response);
+
+      assertEquals(abbreviate(raw), 400, resp.status);
+      assertEquals("invalid_request", new JSONObject(resp.body()).getString("error"));
+    }
+  }
+
+  /** POST /register (DCR) also answers without a token. */
+  @Test
+  public void registerMalformedJsonBodyReturnsBadRequest() throws Exception {
+    for (String raw : malformedBodies()) {
+      ResponseCapture resp = mockResponse();
+      HttpServletRequest req = mockRequest("POST", "/register");
+      when(req.getContentType()).thenReturn("application/json");
+      when(req.getReader()).thenReturn(new BufferedReader(new StringReader(raw)));
+
+      servlet.doPost(req, resp.response);
+
+      assertEquals(abbreviate(raw), 400, resp.status);
+      assertEquals("invalid_request", new JSONObject(resp.body()).getString("error"));
+    }
+  }
+
+  private static List<String> malformedBodies() {
+    List<String> bodies = new ArrayList<>(BoundedJsonParserTest.stackBreakingBodies().toList());
+    bodies.add("not json");
+    return bodies;
+  }
+
+  private static String abbreviate(String raw) {
+    return raw.length() > 40 ? raw.substring(0, 40) + "..." : raw;
   }
 
   // ===================== POST /register (DCR) =====================

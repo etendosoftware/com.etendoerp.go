@@ -42,6 +42,7 @@ import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
 import org.openbravo.model.financialmgmt.calendar.Period;
 import org.openbravo.module.taxreportlauncher.TaxReport;
 
+import com.etendoerp.go.common.MalformedJsonException;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 import com.etendoerp.go.schemaforge.util.NeoMessageTranslator;
 import com.etendoerp.go.schemaforge.util.RoleAccessMatrix;
@@ -302,6 +303,8 @@ abstract class AbstractFiscalHandler {
       } else {
         declHandler.handleIncidents(method, request, response);
       }
+    } catch (MalformedJsonException e) {
+      servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST, "Invalid JSON body");
     } catch (Exception e) {
       log.error("Error in /" + getModelKey() + "/" + entityName, e);
       servlet.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, userMessage(e));
@@ -417,6 +420,12 @@ abstract class AbstractFiscalHandler {
     } catch (AlreadySubmittedException e) {
       try {
         servlet.sendError(response, HttpServletResponse.SC_CONFLICT, e.getMessage());
+      } catch (Exception ioEx) {
+        throw new FiscalHandlerException(ioEx);
+      }
+    } catch (MalformedJsonException e) {
+      try {
+        servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST, "Invalid JSON body");
       } catch (Exception ioEx) {
         throw new FiscalHandlerException(ioEx);
       }

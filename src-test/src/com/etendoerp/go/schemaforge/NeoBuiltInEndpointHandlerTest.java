@@ -50,6 +50,7 @@ import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.dal.service.OBDal;
 
+import com.etendoerp.go.common.BoundedJsonParserTest;
 import com.etendoerp.go.schemaforge.email.TransactionalEmailService;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 import com.etendoerp.go.schemaforge.util.NeoImageHelper;
@@ -194,6 +195,20 @@ public class NeoBuiltInEndpointHandlerTest {
     assertNull(description);
     verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_BAD_REQUEST),
         contains("Invalid JSON body"));
+  }
+
+  /**
+   * Verifies that a body which breaks jettison itself (StackOverflowError / OutOfMemoryError,
+   * never seen by a catch (Exception)) is still a 400 and never reaches the parser.
+   */
+  @Test
+  public void readDescriptionFromBodySendsBadRequestForParserBreakingJson() throws Exception {
+    for (String body : (Iterable<String>) BoundedJsonParserTest.stackBreakingBodies()::iterator) {
+      HttpServletResponse response = mock(HttpServletResponse.class);
+      assertNull(readDescription(body, response));
+      verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_BAD_REQUEST),
+          contains("Invalid JSON body"));
+    }
   }
 
   /**

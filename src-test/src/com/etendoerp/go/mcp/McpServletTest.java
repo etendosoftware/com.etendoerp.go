@@ -38,6 +38,7 @@ import java.io.StringReader;
 import java.io.StringWriter;
 import java.lang.reflect.Method;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -56,6 +57,7 @@ import org.mockito.MockedStatic;
 import org.mockito.MockedConstruction;
 import org.openbravo.dal.core.OBContext;
 
+import com.etendoerp.go.common.BoundedJsonParserTest;
 import com.etendoerp.go.common.PublicUrlResolver;
 import com.etendoerp.go.oauth2.OAuth2Filter;
 import com.etendoerp.go.payment.EnvironmentAccessPolicy;
@@ -1203,16 +1205,27 @@ public class McpServletTest {
     }
   }
 
+  /**
+   * A body that is not JSON is the client's error: JSON-RPC parse error {@code -32700} with a null
+   * id (none can be read from it) and HTTP 400, never a 500. That includes a body that breaks
+   * jettison itself (StackOverflowError / OutOfMemoryError, which escape every catch (Exception)).
+   */
   @Test
-  public void doPostMalformedJsonReturnsInternalError() throws Exception {
-    setOAuth2FilterAttributes("user1", "role1", "client1", "org1", "neo:read");
-    setRequestBody("this is not valid json {{{");
+  public void doPostMalformedJsonReturnsParseError() throws Exception {
+    List<String> bodies = new ArrayList<>(BoundedJsonParserTest.stackBreakingBodies().toList());
+    bodies.add("this is not valid json {{{");
+    for (String raw : bodies) {
+      setUp();
+      setOAuth2FilterAttributes("user1", "role1", "client1", "org1", "neo:read");
+      setRequestBody(raw);
 
-    servlet.doPost(request, response);
+      servlet.doPost(request, response);
 
-    verify(response).setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
-    String body = getResponseBody();
-    assertTrue(body.contains("error"));
+      verify(response).setStatus(HttpServletResponse.SC_BAD_REQUEST);
+      JSONObject rpc = new JSONObject(getResponseBody());
+      assertEquals(McpServlet.JSON_RPC_PARSE_ERROR, rpc.getJSONObject("error").getInt("code"));
+      assertTrue(rpc.isNull("id"));
+    }
   }
 
   @Test

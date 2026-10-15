@@ -38,6 +38,7 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBQuery;
 import org.openbravo.dal.service.OBDal;
 
+import com.etendoerp.go.common.BoundedJsonParser;
 import com.etendoerp.go.schemaforge.data.FiscalDecl;
 
 class FiscalDeclCrudHandler {
@@ -1070,6 +1071,6 @@ class FiscalDeclCrudHandler {
       String line;
       while ((line = reader.readLine()) != null) sb.append(line);
     }
-    return new JSONObject(sb.toString());
+    return BoundedJsonParser.parseObject(sb.toString());
   }
 }

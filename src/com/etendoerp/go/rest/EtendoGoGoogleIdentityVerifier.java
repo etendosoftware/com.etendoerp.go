@@ -43,6 +43,8 @@ import com.google.api.client.googleapis.auth.oauth2.GoogleIdTokenVerifier;
 import com.google.api.client.http.javanet.NetHttpTransport;
 import com.google.api.client.json.gson.GsonFactory;
 
+import com.etendoerp.go.common.BoundedJsonParser;
+
 /**
  * Verifies Google Identity Services sign-in responses.
  *
@@ -116,7 +118,7 @@ final class EtendoGoGoogleIdentityVerifier implements EtendoGoSsoAssertionVerifi
   private static GoogleSignInBody parseJsonBody(String rawBody)
       throws EtendoGoSsoAssertionException {
     try {
-      JSONObject body = new JSONObject(StringUtils.defaultString(rawBody));
+      JSONObject body = BoundedJsonParser.parseObject(StringUtils.defaultString(rawBody));
       return new GoogleSignInBody(StringUtils.trimToNull(body.optString(FIELD_CREDENTIAL, null)),
           StringUtils.trimToNull(body.optString(FIELD_CSRF_TOKEN, null)),
           StringUtils.trimToNull(body.optString(FIELD_CLIENT_ID, null)));

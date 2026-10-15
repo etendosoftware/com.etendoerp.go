@@ -25,6 +25,8 @@ import javax.servlet.http.HttpServletRequest;
 import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONObject;
 
+import com.etendoerp.go.common.BoundedJsonParser;
+
 /**
  * JSON request-body parsing helpers extracted from {@link NeoServlet}.
  * Move here: readRequestBody, parseOptionalJsonObject, parseJsonObjectOrEmpty,
@@ -52,6 +54,6 @@ public final class NeoRequestBodyParser {
   }
 
   static JSONObject parseJsonObject(String bodyStr) throws Exception {
-    return new JSONObject(bodyStr);
+    return BoundedJsonParser.parseObject(bodyStr);
   }
 }

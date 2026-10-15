@@ -31,11 +31,16 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import com.etendoerp.go.common.MalformedJsonException;
+
 /**
  * Unit tests for {@link NeoRequestBodyParser}.
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoRequestBodyParser
  */
 class NeoRequestBodyParserTest {
 
@@ -111,6 +116,14 @@ class NeoRequestBodyParserTest {
     void invalidJsonThrowsException() {
       assertThrows(Exception.class, () ->
           invokeStatic("parseJsonObject", new Class<?>[]{ String.class }, "not json"));
+    }
+
+    /** Every NEO caller maps a JSONException to its 400; an Error would escape all of them. */
+    @ParameterizedTest
+    @MethodSource("com.etendoerp.go.common.BoundedJsonParserTest#stackBreakingBodies")
+    void parserBreakingJsonThrowsMalformedJson(String body) {
+      assertThrows(MalformedJsonException.class,
+          () -> NeoRequestBodyParser.parseJsonObject(body));
     }
   }
 }

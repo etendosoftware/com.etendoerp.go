@@ -26,6 +26,8 @@ import org.openbravo.erpCommon.utility.PropertyException;
 import org.openbravo.erpCommon.utility.PropertyNotFoundException;
 import org.openbravo.model.ad.system.Client;
 
+import com.etendoerp.go.common.BoundedJsonParser;
+
 /**
  * Persists which fiscal declaration models (303, 349, ...) are active in the
  * Fiscal Models catalog, scoped per <b>Client</b> (tenant) via AD_PREFERENCE —
@@ -85,7 +87,7 @@ class NeoFiscalModelsCatalogService {
   static void saveActiveModels(String json) {
     JSONObject parsed;
     try {
-      parsed = new JSONObject(json);
+      parsed = BoundedJsonParser.parseObject(json);
     } catch (Exception e) {
       log.error("Invalid fiscal models catalog JSON: {}", e.getMessage(), e);
       throw new IllegalArgumentException("Invalid JSON body");
