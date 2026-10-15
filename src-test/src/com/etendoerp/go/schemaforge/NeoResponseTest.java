@@ -31,6 +31,8 @@ import org.mockito.MockedStatic;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
 
+import com.etendoerp.go.schemaforge.util.NeoMessageTranslator;
+
 /**
  * Unit tests for {@link NeoResponse}.
  */
@@ -215,5 +217,46 @@ public class NeoResponseTest {
     JSONObject error = r.getBody().getJSONObject("error");
     assertEquals("boom", error.getString("message"));
     assertFalse(error.has("messageKeys"));
+  }
+
+  /**
+   * ETP-5577: a handler answering {@code error(400, e.getMessage())} loses the core's
+   * {@code @PeriodNotAvailable@}; the response is named from its text on the way out. A 2xx, and a
+   * body that already names its keys, are left alone.
+   */
+  @Test
+  public void identifyPeriodRefusal_namesTheRefusalFromItsText() throws JSONException {
+    try (MockedStatic<NeoMessageTranslator> translator = mockStatic(NeoMessageTranslator.class)) {
+      translator.when(() -> NeoMessageTranslator.recognizeMessageKeys(
+          "El Periodo no existe o no está abierto", NeoMessageTranslator.PERIOD_REFUSAL_KEYS))
+          .thenReturn(java.util.List.of("PeriodNotAvailable"));
+
+      NeoResponse refused = NeoResponse.identifyPeriodRefusal(
+          NeoResponse.error(400, "El Periodo no existe o no está abierto"));
+      assertEquals("[\"PeriodNotAvailable\"]",
+          refused.getBody().getJSONArray("messageKeys").toString());
+
+      NeoResponse other = NeoResponse.identifyPeriodRefusal(NeoResponse.error(400, "boom"));
+      assertFalse(other.getBody().has("messageKeys"));
+
+      JSONObject keyed = new JSONObject().put("message", "El Periodo no existe o no está abierto")
+          .put("messageKeys", new org.codehaus.jettison.json.JSONArray().put("Other"));
+      assertEquals("[\"Other\"]", NeoResponse.identifyPeriodRefusal(NeoResponse.error(400, keyed))
+          .getBody().getJSONArray("messageKeys").toString());
+    }
+  }
+
+  /**
+   * ETP-5577: core {@code Utilities.checkPeriod}'s raw {@code @ETPR_PeriodClosedForUnRemovePayment@}
+   * never reaches the user: it is rewritten as the keyed PeriodNotAvailable refusal.
+   */
+  @Test
+  public void identifyPeriodRefusal_rewritesTheRawCorePeriodClosedToken() throws JSONException {
+    NeoResponse refused = NeoResponse.identifyPeriodRefusal(
+        NeoResponse.error(400, "@ETPR_PeriodClosedForUnRemovePayment@"));
+    JSONObject error = refused.getBody().getJSONObject("error");
+    assertFalse(error.getString("message").contains("ETPR_"));
+    assertEquals("[\"PeriodNotAvailable\"]", error.getJSONArray("messageKeys").toString());
+    assertEquals(400, refused.getHttpStatus());
   }
 }

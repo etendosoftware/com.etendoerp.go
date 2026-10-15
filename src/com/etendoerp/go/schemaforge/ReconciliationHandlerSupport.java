@@ -520,9 +520,7 @@ final class ReconciliationHandlerSupport {
       } catch (OBException e) {
         log.warn("removeOperation blocked by closed period for reconciliation {}: {}", r.getId(),
             e.getMessage());
-        return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
-            "The accounting period is closed and the operation cannot be un-reconciled: "
-                + e.getMessage());
+        return NeoResponse.periodNotAvailable(HttpServletResponse.SC_CONFLICT);
       }
     }
     return null;

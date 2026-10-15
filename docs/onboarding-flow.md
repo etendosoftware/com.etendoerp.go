@@ -957,7 +957,15 @@ answer the new state.
 **When a refusal still happens.** `PeriodNotAvailable` is published in `messageKeys` by document
 completions (core procedures, via `NeoProcessService`; classic processes that hand their error over already translated — `ProcessInvoiceUtil`, `FIN_AddPaymentFromJournal`, the latter in English whatever the user's language — are recognised from the message text in any language by `NeoMessageTranslator.recognizeMessageKeys`, in `translateClassicResult`), by a refused save (`NeoCrudHandler` answers 400 with `PeriodNotValid`, which `GL_JOURNAL_CHK_RESTRICT_TRG` raises for the same condition, instead of a 500), by posting (`DocumentPostingService`,
 `STATUS_PeriodClosed`) and by payment registration (`MessageKeyedException` →
-`NeoResponse.error(int, OBException)` → `error.messageKeys`). The SPA turns it into a toast that
+`NeoResponse.error(int, OBException)` → `error.messageKeys`). Any other handler that turns a core
+refusal into `error(400, e.getMessage())` loses the key; `NeoServlet.writeResponse` restores it
+with `NeoResponse.identifyPeriodRefusal`, which recognises the text of `PeriodNotAvailable` /
+`PeriodNotValid` in any language on an error body that names no keys. Core `Utilities.checkPeriod`
+refuses with a raw, untranslated `@ETPR_PeriodClosedForUnRemovePayment@` worded for removing
+payments: the cash close confirm and the reconciliation reactivate / remove-operation guards
+answer `NeoResponse.periodNotAvailable(409)` instead, and `identifyPeriodRefusal` rewrites that
+token as the keyed `PeriodNotAvailable` refusal on any other path (e.g. reactivating a reconciled
+movement). The SPA turns it into a toast that
 points the owner to this row while the review is pending (others are told to ask the owner; an
 owner whose account dismissed First Steps, which is per account, goes to Calendar) and to
 Calendar afterwards — to the fiscal year whose period contains the document's date, so a July–June

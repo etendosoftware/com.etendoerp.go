@@ -307,6 +307,9 @@ public class CashCloseHandlerTest {
         BigDecimal.ZERO, BigDecimal.ZERO);
 
     assertEquals(HttpServletResponse.SC_CONFLICT, res.getHttpStatus());
+    // ETP-5577 — keyed, so the SPA offers to open the period.
+    assertEquals("PeriodNotAvailable", res.getBody().getJSONObject("error")
+        .getJSONArray("messageKeys").getString(0));
     verify(handler, never()).findLineInClosedPeriod(any());
   }
 
