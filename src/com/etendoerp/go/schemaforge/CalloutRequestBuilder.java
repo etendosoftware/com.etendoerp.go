@@ -43,6 +43,7 @@ import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.Utility;
 import org.openbravo.model.ad.datamodel.Column;
+import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.service.db.DalConnectionProvider;
 
@@ -101,6 +102,14 @@ class CalloutRequestBuilder {
       params.put("inpwindowId", new String[]{ adTab.getWindow().getId() });
     }
 
+    // ETP-5658: the classic UI sends a set of per-tab standard properties with every callout
+    // request (ob-view-tab.js.ftl standardProperties). Core callouts read them, so without this
+    // NEO either throws or silently skips their checks: SL_AdvPayment_Document and
+    // SimpleCallout.addDocumentNo build the document-number table name from inpkeyColumnId, and
+    // SL_IsDefault needs inpTableId/inpkeyColumnId/inpKeyName. Returns the inpKeyName so the
+    // record id can be fed into it below.
+    String keyInpName = addTabStandardProperties(adTab, params);
+
     // Inject essential context params from OBContext (security boundary — always authoritative)
     OBContext obCtx = OBContext.getOBContext();
     String normalizedOrgId = resolveEffectiveCalloutOrgId(obCtx);
@@ -141,6 +150,13 @@ class CalloutRequestBuilder {
     // ship-to location, and fell through to its "any tax flagged IsDefault" branch — a silently
     // wrong tax rate on every order line created through NEO or MCP.
     injectParentTabParams(adTab, formState, params);
+
+    // ETP-5658: feed the current record id into the param named by inpKeyName, so callouts that use
+    // it to identify the record being edited (SL_IsDefault excludes it from its duplicate count)
+    // work under NEO, where the id travels in formState.id instead of a key field. MUST run before
+    // fillMissingColumnDefaults: that pass fills every column, including the key column, with an
+    // empty default and would block the injection through the containsKey guard.
+    injectCurrentRecordKey(adTab, formState, keyInpName, params);
 
     // Fill whatever the body and the parent record did not provide with the child's AD defaults.
     fillMissingColumnDefaults(adTab, obCtx, maps.columns, params);
@@ -584,6 +600,132 @@ class CalloutRequestBuilder {
       return ((BaseOBObject) val).getId().toString();
     }
     return toClassicParamValue(val);
+  }
+
+  // ── Tab standard properties (ETP-5658) ─────────────────────────────
+
+  /**
+   * Add the per-tab standard properties the classic UI sends with every callout request
+   * ({@code ob-view-tab.js.ftl} {@code standardProperties}): {@code inpTableId} always, plus
+   * {@code inpkeyColumnId}, {@code inpKeyName}, {@code keyColumnName} and {@code keyProperty} when
+   * the tab's table resolves to a DAL entity with a primary-key property.
+   *
+   * <p>Core callouts read these: {@code SL_AdvPayment_Document} and
+   * {@code SimpleCallout.addDocumentNo} derive the document-number table name from
+   * {@code inpkeyColumnId} (and fail when it is missing), and {@code SL_IsDefault} needs
+   * {@code inpTableId}, {@code inpkeyColumnId} and {@code inpKeyName}. Without them those callouts
+   * fail or silently skip their checks under NEO.</p>
+   *
+   * <p>Nothing already present in {@code params} is overwritten, so a value supplied by the client
+   * body always wins.</p>
+   *
+   * @return the computed {@code inpKeyName}, or {@code null} when the key cannot be resolved
+   */
+  private static String addTabStandardProperties(Tab adTab, Map<String, String[]> params) {
+    Table table = adTab.getTable();
+    if (table == null) {
+      return null;
+    }
+    putParamIfAbsent(params, "inpTableId", table.getId());
+    Property keyProperty = resolveKeyProperty(table.getId());
+    if (keyProperty == null) {
+      return null;
+    }
+    String keyColumnName = keyProperty.getColumnName();
+    if (keyColumnName == null || keyColumnName.isEmpty()) {
+      return null;
+    }
+    String keyInpName = NeoCalloutService.toInpName(keyColumnName);
+    putParamIfAbsent(params, "inpkeyColumnId", keyColumnName);
+    putParamIfAbsent(params, "inpKeyName", keyInpName);
+    putParamIfAbsent(params, "keyColumnName", keyColumnName);
+    putParamIfAbsent(params, "keyProperty", keyProperty.getName());
+    return keyInpName;
+  }
+
+  /**
+   * Resolve the DAL primary-key property of a table — the classic UI's "key property" — matching
+   * {@code OBViewTab.getKeyProperty()}. Returns {@code null} when the table has no resolvable
+   * entity or no id property (e.g. a datasource-based tab), so the caller adds nothing key-related.
+   */
+  private static Property resolveKeyProperty(String tableId) {
+    try {
+      Entity entity = ModelProvider.getInstance().getEntityByTableId(tableId);
+      if (entity == null) {
+        return null;
+      }
+      List<Property> idProperties = entity.getIdProperties();
+      if (idProperties != null && !idProperties.isEmpty()) {
+        return idProperties.get(0);
+      }
+      for (Property prop : entity.getProperties()) {
+        if (prop.isId()) {
+          return prop;
+        }
+      }
+    } catch (Exception e) {
+      log.debug("Could not resolve key property for table {}: {}", tableId, e.getMessage());
+    }
+    return null;
+  }
+
+  /**
+   * Populate the param named by {@code inpKeyName} with the current record id, so callouts that use
+   * it to identify the record being edited work under NEO — where the id travels in
+   * {@code formState.id} instead of a key field — as they do in the classic UI.
+   * {@code SL_IsDefault} reads it to exclude the current record from its duplicate-default count;
+   * without it a second default record is not rejected.
+   *
+   * <p>The client body always wins: the param is left untouched when already present.</p>
+   *
+   * <p><b>Child-tab ambiguity.</b> On a child tab {@code formState.id} is the row's own id when the
+   * row already exists, but the parent record's id when the row is new (the SPA merges the header
+   * id into a new row's state). They are told apart by comparing with the parent key param
+   * {@link #injectParentTabParams} already populated: when the tab's parent key carries exactly this
+   * id, it is the parent's and must not be used as the child's own key. When it cannot be
+   * distinguished, injecting nothing is safe — callouts then count all existing rows, which is the
+   * correct "is there already a default?" answer for a record that does not exist yet.</p>
+   */
+  static void injectCurrentRecordKey(Tab adTab, JSONObject formState, String keyInpName,
+      Map<String, String[]> params) {
+    if (keyInpName == null || formState == null || params.containsKey(keyInpName)) {
+      return;
+    }
+    String recordId = formState.optString("id", "");
+    if (recordId.isEmpty()) {
+      return;
+    }
+    String parentKeyInp = resolveParentKeyInpName(adTab);
+    if (parentKeyInp != null && recordId.equals(paramValue(params, parentKeyInp))) {
+      return;
+    }
+    params.put(keyInpName, new String[]{ recordId });
+  }
+
+  /**
+   * The {@code inp*} name of the parent record's key column for a child tab, or {@code null} for a
+   * header tab. Mirrors the parent key {@link #injectParentTabParams} builds (the parent table's
+   * {@code <DBTableName>_ID}) so the two always agree on the param they inspect.
+   */
+  private static String resolveParentKeyInpName(Tab adTab) {
+    Tab parentTab = findParentTab(adTab);
+    if (parentTab == null || parentTab.getTable() == null) {
+      return null;
+    }
+    return NeoCalloutService.toInpName(parentTab.getTable().getDBTableName() + "_ID");
+  }
+
+  /** Add {@code value} under {@code key} only when the key is not already present. */
+  private static void putParamIfAbsent(Map<String, String[]> params, String key, String value) {
+    if (value != null && !params.containsKey(key)) {
+      params.put(key, new String[]{ value });
+    }
+  }
+
+  /** First value of a multi-valued param, or {@code null} when absent/empty. */
+  private static String paramValue(Map<String, String[]> params, String key) {
+    String[] holder = params.get(key);
+    return holder != null && holder.length > 0 ? holder[0] : null;
   }
 
   // ── Auxiliary values ───────────────────────────────────────────────
