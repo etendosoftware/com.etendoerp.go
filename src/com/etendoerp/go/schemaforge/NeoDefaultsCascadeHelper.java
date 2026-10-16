@@ -34,12 +34,12 @@ public class NeoDefaultsCascadeHelper {
 
   private static final Logger log = LogManager.getLogger(NeoDefaultsCascadeHelper.class);
   private static final int MAX_CALLOUT_CHAIN_DEPTH = 5;
-  private static final String FIELD_VALUE = "value";
+  static final String FIELD_VALUE = "value";
   private static final String FIELD_IDENTIFIER = "_identifier";
   private static final String IDENTIFIER_SUFFIX = "$_identifier";
-  private static final String KEY_UPDATES = "updates";
-  private static final String KEY_COMBOS = "combos";
-  private static final String KEY_SELECTED = "selected";
+  static final String KEY_UPDATES = "updates";
+  static final String KEY_COMBOS = "combos";
+  static final String KEY_SELECTED = "selected";
 
   private NeoDefaultsCascadeHelper() {
   }
@@ -583,8 +583,9 @@ public class NeoDefaultsCascadeHelper {
         return;
       }
       if (discardKey != null) {
-        cCtx.discardMemory.record(discardKey, calloutOutputs(calloutBody), keptFields,
-            calloutReported(calloutBody));
+        cCtx.discardMemory.recordOutcome(discardKey,
+            NeoCalloutDiscardMemory.calloutOutputs(calloutBody), keptFields,
+            NeoCalloutDiscardMemory.calloutReported(calloutBody));
       }
 
       mergeCalloutUpdates(calloutBody, cCtx.formState, cCtx.defaults, cCtx.seqFields,
@@ -632,40 +633,6 @@ public class NeoDefaultsCascadeHelper {
       }
     }
     return kept;
-  }
-
-  /** The fields a callout response would write: valued updates and combos with a selection. */
-  private static Set<String> calloutOutputs(JSONObject calloutBody) {
-    Set<String> outputs = new HashSet<>();
-    JSONObject updates = calloutBody.optJSONObject(KEY_UPDATES);
-    if (updates != null) {
-      Iterator<String> keys = updates.keys();
-      while (keys.hasNext()) {
-        String key = keys.next();
-        JSONObject entry = updates.optJSONObject(key);
-        if (entry != null && entry.has(FIELD_VALUE)) {
-          outputs.add(key);
-        }
-      }
-    }
-    JSONObject combos = calloutBody.optJSONObject(KEY_COMBOS);
-    if (combos != null) {
-      Iterator<String> keys = combos.keys();
-      while (keys.hasNext()) {
-        String key = keys.next();
-        JSONObject combo = combos.optJSONObject(key);
-        if (combo != null && combo.has(KEY_SELECTED)) {
-          outputs.add(key);
-        }
-      }
-    }
-    return outputs;
-  }
-
-  /** Whether a callout response carries a message or an error — never skippable. */
-  private static boolean calloutReported(JSONObject calloutBody) {
-    JSONArray messages = calloutBody.optJSONArray("messages");
-    return (messages != null && messages.length() > 0) || calloutBody.has("error");
   }
 
   private static void mergeCalloutUpdates(JSONObject calloutBody, JSONObject formState,

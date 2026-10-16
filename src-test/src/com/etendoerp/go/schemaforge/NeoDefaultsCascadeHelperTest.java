@@ -1489,14 +1489,14 @@ public class NeoDefaultsCascadeHelperTest {
     NeoCalloutDiscardMemory memory = new NeoCalloutDiscardMemory();
     assertFalse("an unseen key runs", memory.shouldSkip("k"));
 
-    memory.record("k", Set.of("a"), Set.of("a", "b"), false);
-    memory.record("k", Set.of("c"), Set.of("a"), false);
+    memory.recordOutcome("k", Set.of("a"), Set.of("a", "b"), false);
+    memory.recordOutcome("k", Set.of("c"), Set.of("a"), false);
     assertTrue("the first outcome decides", memory.shouldSkip("k"));
 
-    memory.record("reported", Set.of("a"), Set.of("a"), true);
+    memory.recordOutcome("reported", Set.of("a"), Set.of("a"), true);
     assertFalse(memory.shouldSkip("reported"));
 
-    memory.record("kept", Set.of("a", "c"), Set.of("a"), false);
+    memory.recordOutcome("kept", Set.of("a", "c"), Set.of("a"), false);
     assertFalse(memory.shouldSkip("kept"));
   }
 
