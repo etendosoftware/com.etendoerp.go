@@ -1966,6 +1966,71 @@ public class FiscalDeclCrudHandlerTest {
   }
 
   /**
+   * ETP-5725 (reopened QA review, W1) — the COMBINED case: a draft sibling AND a presented
+   * corrective sibling exist simultaneously for the same natural key (in practice this means a
+   * 3rd declaration for the period, since the pre-existing ETP-5272 one-draft-per-period guard
+   * caps drafts at one — e.g. the presented corrective sibling here, then a brand-new draft
+   * opened for the same period before this reactivation). {@link
+   * FiscalDeclCrudHandler#findReactivationBlockReason} resolves this deterministically because it
+   * scans ALL siblings and computes both {@code draftSiblingExists}/
+   * {@code presentedCorrectiveSiblingExists} BEFORE either {@code if} fires — the draft check is
+   * evaluated first, so draft wins regardless of what else is present. Reactivating the
+   * ORDINARIA here (not corrective itself), which would ALSO independently qualify for
+   * {@code corrective_sibling_presented} if the draft sibling weren't present — this test pins
+   * that draft takes priority over that ALSO-true condition, not just over "no other condition".
+   */
+  @Test
+  public void testHandleDeclPutReactivateBlockedByDraftWinsOverPresentedCorrectiveSibling()
+      throws Exception {
+    BaseOBObject decl = declOwnedBy("client1", "org1");
+    when(decl.getId()).thenReturn("decl1");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS)).thenReturn("submitted");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_FISCAL_MODEL)).thenReturn("349");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_FISCAL_YEAR)).thenReturn(2026L);
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_PERIOD)).thenReturn("T1");
+    // No manualData -> isEffectivelyCorrective reads it as NOT corrective (the ordinaria), same
+    // as testHandleDeclPutReactivateOrdinariaBlockedByPresentedCorrectiveSibling above — this
+    // test's whole point is that the draft sibling ALSO present changes nothing about that.
+
+    BaseOBObject presentedCorrectiveSibling = mock(BaseOBObject.class);
+    when(presentedCorrectiveSibling.getId()).thenReturn("decl2");
+    when(presentedCorrectiveSibling.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS))
+        .thenReturn("submitted");
+    JSONObject siblingManualData = new JSONObject()
+        .put("identification", new JSONObject().put("sustitutiva", true));
+    when(presentedCorrectiveSibling.get(FiscalDeclCrudHandler.PROPERTY_MANUAL_DATA))
+        .thenReturn(siblingManualData.toString());
+
+    BaseOBObject draftSibling = mock(BaseOBObject.class);
+    when(draftSibling.getId()).thenReturn("decl3");
+    when(draftSibling.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS)).thenReturn("draft");
+
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    when(req.getParameter("id")).thenReturn("decl1");
+    when(req.getReader())
+        .thenReturn(new BufferedReader(new StringReader("{\"status\":\"draft\"}")));
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
+      OBQuery<BaseOBObject> query = mockQueryReturning(presentedCorrectiveSibling, draftSibling);
+      when(obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL), anyString()))
+          .thenReturn(query);
+
+      handler.handleDeclarations("PUT", req, resp);
+
+      verify(servlet).sendError(any(), eq(HttpServletResponse.SC_CONFLICT),
+          org.mockito.ArgumentMatchers.contains("[reason=sibling_exists]"));
+      verify(decl, never()).set(eq(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS), any());
+      verify(obDal, never()).commitAndClose();
+    }
+  }
+
+  /**
    * "Reactivar declaración" (current {@code submitted}, new {@code draft}, non-telematic) must
    * remain unaffected by this new guard — it only special-cases an INCOMING submitted-family
    * status, and {@code draft} is not one. {@link #rejectTelematicReactivation} is what already
