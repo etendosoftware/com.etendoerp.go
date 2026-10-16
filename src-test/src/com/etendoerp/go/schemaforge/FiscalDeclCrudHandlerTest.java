@@ -2365,6 +2365,59 @@ public class FiscalDeclCrudHandlerTest {
     assertEquals("", out.body);
   }
 
+  /**
+   * ETP-5725 (reopened QA review, BUG-1) — the hole QA demonstrated: POST (CREATE) bypasses
+   * {@link FiscalDeclCrudHandler#rejectCorrectiveConsistencyViolation} entirely (that guard only
+   * runs on PUT), so a declaration created DIRECTLY with a {@code SUBMITTED_STATUSES} status used
+   * to never have the corrective/ordinaria consistency rule enforced on it at all — not at
+   * creation, and not afterward either, since that PUT guard deliberately bails out once
+   * {@code previousStatus} is already submitted-family. This pins the mirror-rule direction
+   * (only one presented ordinaria per period): creating a 2nd ordinaria straight into
+   * {@code submitted_ack} for a period that already has a presented ordinaria sibling must be
+   * rejected with 409, and nothing must be saved.
+   *
+   * <p>POST never accepts {@code manualData}/identification at creation time (confirmed: no
+   * {@code MANUAL_DATA_KEY} handling anywhere in {@code handleDeclPost}), so a freshly created
+   * row can never read as "effectively corrective" — the corrective-without-ordinaria direction
+   * of the rule is structurally impossible to hit via POST, not merely untested. No separate test
+   * exists for that direction at this endpoint because there is nothing for it to exercise.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testPostAsSecondOrdinariaIntoSubmittedStatusReturns409() throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(postBody("submitted_ack"))));
+
+    BaseOBObject presentedOrdinariaSibling = mock(BaseOBObject.class);
+    when(presentedOrdinariaSibling.getId()).thenReturn("decl1");
+    when(presentedOrdinariaSibling.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS))
+        .thenReturn("submitted");
+    // No manualData on the sibling -> not corrective -> a genuine presented ordinaria.
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+        MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      OBQuery<BaseOBObject> query = mockQueryReturning(presentedOrdinariaSibling);
+      when(obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL), anyString()))
+          .thenReturn(query);
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+
+      handler.handleDeclarations("POST", req, resp);
+
+      verify(servlet).sendError(any(), eq(HttpServletResponse.SC_CONFLICT),
+          org.mockito.ArgumentMatchers.contains("as ordinaria"));
+      verify(provider, never()).get(anyString());
+      verify(obDal, never()).save(any());
+      verify(obDal, never()).commitAndClose();
+      verify(resp, never()).setStatus(HttpServletResponse.SC_CREATED);
+    }
+  }
+
   /** declToJson exposes a stored snapshot as a parsed nested object. */
   @Test
   public void testDeclToJsonExposesSubmittedSnapshot() throws Exception {
