@@ -19,8 +19,10 @@ package com.etendoerp.go.schemaforge;
 
 /**
  * Customization of sales-invoice/lines (ETP-5528): everything {@link InvoiceLineHandler} does, plus
- * the amounts of a new line — {@code lineNetAmount} and {@code grossAmount} — which
- * {@code etendo_create} never derives through the shared path (see {@link InvoiceLineAmountSupport}).
+ * the discounted price and the amounts of a written line — {@code lineNetAmount} and
+ * {@code grossAmount} — which {@code etendo_create} never derives through the shared path, and the
+ * recalculation of those amounts on an update (see {@link InvoiceLineAmountSupport}; ETP-5710 added
+ * the discount and the update, and {@link PurchaseInvoiceLineHandler} shares them).
  *
  * <p><b>Binding.</b> Resolved by {@link NeoExtension} on every channel, ahead of the row's
  * {@code Java_Qualifier}. The row still carries {@code invoiceLineHandler}, on purpose: several
@@ -35,15 +37,17 @@ package com.etendoerp.go.schemaforge;
  * bean carrying it would make the name ambiguous. The per-request state the parent carries from
  * {@code handle} into {@code afterHandle} (the imported source line) is kept: every channel runs
  * both hooks on the one instance its pre-dispatch resolved. {@code purchase-invoice/lines} has its
- * own customization, {@link PurchaseInvoiceLineHandler} (ETP-5585), which does not derive amounts.
+ * own customization, {@link PurchaseInvoiceLineHandler}, which shares these amount rules and adds
+ * the {@code defaultTax} action (ETP-5585).
  */
 @NeoExtension(spec = "sales-invoice", entity = "lines")
 public class SalesInvoiceLineHandler extends InvoiceLineHandler {
 
   /**
-   * Runs the parent's pre-hook first — a response from it still short-circuits — then derives the
-   * amounts of a new line. The order matters: on a return invoice the parent negates the quantity,
-   * and the amounts are derived from the negated one.
+   * Runs the parent's pre-hook first — a response from it still short-circuits — then prices and
+   * derives the amounts of a created line, or recalculates those of an updated one. The order
+   * matters: on a return invoice the parent negates the quantity, and the amounts are derived from
+   * the negated one.
    */
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -51,7 +55,6 @@ public class SalesInvoiceLineHandler extends InvoiceLineHandler {
     if (response != null) {
       return response;
     }
-    InvoiceLineAmountSupport.deriveAmountsOnCreate(context);
-    return null;
+    return InvoiceLineAmountSupport.deriveAmountsOnWrite(context);
   }
 }

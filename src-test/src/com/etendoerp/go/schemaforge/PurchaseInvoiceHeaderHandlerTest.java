@@ -75,6 +75,7 @@ import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
 
 /**
  * Unit tests for {@link PurchaseInvoiceHeaderHandler}.
@@ -1120,6 +1121,55 @@ public class PurchaseInvoiceHeaderHandlerTest {
   }
 
   /**
+   * ETP-5710: a completion whose invoice still has a line with a quantity and a price but a net
+   * amount of 0 is refused (422) BEFORE the total discount is recalculated and before the document
+   * action runs — it used to complete with a total of 0, no payment plan and paymentComplete = Y.
+   */
+  @Test
+  public void handle_completionWithLinesWithoutAmount_isRefusedBeforeAnythingRuns()
+      throws Exception {
+    JSONObject body = new JSONObject().put("documentAction", "CO");
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PATCH")
+        .endpointType(NeoEndpointType.CRUD)
+        .recordId("inv-zero-lines")
+        .requestBody(body)
+        .build();
+    ProcessInvoiceUtil processInvoiceUtil = mock(ProcessInvoiceUtil.class);
+
+    try (MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<NeoDefaultsService> defaultsMock = Mockito.mockStatic(NeoDefaultsService.class);
+         MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
+      obContextMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      obContextMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(true, false);
+      when(rs.getLong(1)).thenReturn(10L);
+      weldMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(ProcessInvoiceUtil.class))
+          .thenReturn(processInvoiceUtil);
+
+      NeoResponse result = handler.handle(ctx);
+
+      assertNotNull(result);
+      assertEquals(422, result.getHttpStatus());
+      Mockito.verify(totalDiscountService, Mockito.never()).recalculate(anyString(),
+          anyBoolean());
+      Mockito.verify(processInvoiceUtil, Mockito.never()).process(any(), any(), any(), any(),
+          any(), any(), any());
+    }
+  }
+
+  /**
    * Non-completion requests must not trigger discount recalculation at all — only the CO path
    * does (guarded by {@code applyTotalDiscountBeforeComplete}'s own completion check).
    */
@@ -1526,5 +1576,19 @@ public class PurchaseInvoiceHeaderHandlerTest {
   public void responseEnrichedFields_declaresFollowUpAndSubtypeKey() {
     assertEquals(java.util.Set.of("followUp", "apInvoiceSubtype"),
         new PurchaseInvoiceHeaderHandler().responseEnrichedFields());
+  }
+
+  @Test
+  public void actionContracts_declareCloneRecordNextToTheExistingOnes() {
+    java.util.Map<String, NeoActionContract> contracts =
+        new PurchaseInvoiceHeaderHandler().actionContracts();
+
+    NeoActionContract clone = contracts.get("cloneRecord");
+    assertNotNull("cloneRecord is served by handle() and must be declared (ETP-5709)", clone);
+    assertEquals("POST", clone.getHttpMethod());
+    assertTrue(clone.getParams().isEmpty());
+    assertTrue("the existing declarations are kept",
+        contracts.keySet().containsAll(java.util.List.of("currencyOptions", "post", "unpost")));
+    assertNull(NeoActionContract.validate(contracts, "cloneRecord", new JSONObject()));
   }
 }

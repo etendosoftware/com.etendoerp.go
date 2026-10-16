@@ -163,6 +163,7 @@ public class CreatePurchaseInvoiceHandlerTest {
   /** Stub an Order with the minimum header data the factory expects. */
   private static Order mockOrderWithHeaderData() {
     Order order = mock(Order.class);
+    when(order.getDocumentStatus()).thenReturn("CO");
     when(order.getClient()).thenReturn(mock(Client.class));
     when(order.getOrganization()).thenReturn(mock(Organization.class));
     when(order.getBusinessPartner()).thenReturn(mock(BusinessPartner.class));
@@ -343,6 +344,7 @@ public class CreatePurchaseInvoiceHandlerTest {
 
       Currency receiptCurrency = mock(Currency.class);
       ShipmentInOut receipt = mock(ShipmentInOut.class);
+      when(receipt.getDocumentStatus()).thenReturn("CO");
       when(receipt.getSalesOrder()).thenReturn(linkedOrder);
       when(receipt.getMaterialMgmtShipmentInOutLineList()).thenReturn(Collections.singletonList(rl));
       when(receipt.getEtgoCurrency()).thenReturn(receiptCurrency);
@@ -572,6 +574,7 @@ public class CreatePurchaseInvoiceHandlerTest {
 
   private static ShipmentInOut receiptWith(ShipmentInOutLine... lines) {
     ShipmentInOut receipt = mock(ShipmentInOut.class);
+    when(receipt.getDocumentStatus()).thenReturn("CO");
     when(receipt.getMaterialMgmtShipmentInOutLineList())
         .thenReturn(Arrays.asList(lines));
     return receipt;
@@ -793,6 +796,70 @@ public class CreatePurchaseInvoiceHandlerTest {
     assertEquals(1, result.length());
     assertEquals("ol-pending", result.getJSONObject(0).getString("id"));
     assertEquals("3", result.getJSONObject(0).getString("orderedQuantity"));
+  }
+
+  private static Order orderWithLine(BigDecimal ordered, BigDecimal invoiced) {
+    OrderLine line = mock(OrderLine.class);
+    when(line.isActive()).thenReturn(true);
+    when(line.getProduct()).thenReturn(mock(Product.class));
+    when(line.getId()).thenReturn("ol-1");
+    when(line.getOrderedQuantity()).thenReturn(ordered);
+    when(line.getInvoicedQuantity()).thenReturn(invoiced);
+    Order order = mock(Order.class);
+    when(order.getOrderLineList()).thenReturn(Collections.singletonList(line));
+    return order;
+  }
+
+  /**
+   * ETP-5709 (item 3): a line ordered 2 and invoiced 4 has pending -2 — over-invoiced, not
+   * pending. It used to be selected and would have created a -2 invoice line.
+   */
+  @Test
+  public void buildSelectedLines_overInvoicedLine_isNotSelected() {
+    Order order = orderWithLine(BigDecimal.valueOf(2), BigDecimal.valueOf(4));
+
+    assertEquals(0, new CreatePurchaseInvoiceHandler().buildSelectedLines(order).length());
+  }
+
+  /** ETP-5709 — same rule for a negative (return-style) line over-invoiced in its own direction. */
+  @Test
+  public void buildSelectedLines_overInvoicedNegativeLine_isNotSelected() {
+    Order order = orderWithLine(BigDecimal.valueOf(-3), BigDecimal.valueOf(-5));
+
+    assertEquals(0, new CreatePurchaseInvoiceHandler().buildSelectedLines(order).length());
+  }
+
+  /** ETP-4722/ETP-4567 must keep working: ordered -3, invoiced 0 is a legit -3 pending line. */
+  @Test
+  public void buildSelectedLines_legitNegativeLine_isStillInvoiced() throws JSONException {
+    Order order = orderWithLine(BigDecimal.valueOf(-3), BigDecimal.ZERO);
+
+    JSONArray result = new CreatePurchaseInvoiceHandler().buildSelectedLines(order);
+
+    assertEquals(1, result.length());
+    assertEquals("-3", result.getJSONObject(0).getString("orderedQuantity"));
+  }
+
+  /** Order-route pending is ORDERED-based (ordered - invoiced): a partially received line stays pending in full. */
+  @Test
+  public void buildSelectedLines_isOrderedBasedNotReceivedBased() throws JSONException {
+    Order order = orderWithLine(BigDecimal.valueOf(5), BigDecimal.ZERO);
+    when(order.getOrderLineList().get(0).getDeliveredQuantity()).thenReturn(BigDecimal.valueOf(3));
+
+    JSONArray result = new CreatePurchaseInvoiceHandler().buildSelectedLines(order);
+
+    assertEquals("5", result.getJSONObject(0).getString("orderedQuantity"));
+  }
+
+  /** A partially invoiced negative line keeps its remaining (negative) quantity. */
+  @Test
+  public void buildSelectedLines_partiallyInvoicedNegativeLine_keepsRemainingNegativeQuantity()
+      throws JSONException {
+    Order order = orderWithLine(BigDecimal.valueOf(-3), BigDecimal.valueOf(-1));
+
+    JSONArray result = new CreatePurchaseInvoiceHandler().buildSelectedLines(order);
+
+    assertEquals("-2", result.getJSONObject(0).getString("orderedQuantity"));
   }
 
   // ── createFromOrder — propagateOrderRateToInvoice wiring ────────────────────
@@ -1035,6 +1102,7 @@ public class CreatePurchaseInvoiceHandlerTest {
 
   private static ShipmentInOut receiptNoPoWith(BusinessPartner bp, ShipmentInOutLine... lines) {
     ShipmentInOut receipt = mock(ShipmentInOut.class);
+    when(receipt.getDocumentStatus()).thenReturn("CO");
     when(receipt.getBusinessPartner()).thenReturn(bp);
     when(receipt.getClient()).thenReturn(mock(Client.class));
     when(receipt.getMaterialMgmtShipmentInOutLineList()).thenReturn(Arrays.asList(lines));
@@ -1262,6 +1330,7 @@ public class CreatePurchaseInvoiceHandlerTest {
 
       Currency receiptCurrency = mock(Currency.class);
       ShipmentInOut receipt = mock(ShipmentInOut.class);
+      when(receipt.getDocumentStatus()).thenReturn("CO");
       when(receipt.getSalesOrder()).thenReturn(linkedOrder);
       when(receipt.getMaterialMgmtShipmentInOutLineList()).thenReturn(Collections.singletonList(rl));
       when(receipt.getEtgoCurrency()).thenReturn(receiptCurrency);
@@ -1403,6 +1472,8 @@ public class CreatePurchaseInvoiceHandlerTest {
           BigDecimal.valueOf(5), ol2);
 
       ShipmentInOut receipt = mock(ShipmentInOut.class);
+
+      when(receipt.getDocumentStatus()).thenReturn("CO");
       when(receipt.getSalesOrder()).thenReturn(linkedOrder);
       when(receipt.getMaterialMgmtShipmentInOutLineList()).thenReturn(Arrays.asList(rl1, rl2));
       when(receipt.getEtgoCurrency()).thenReturn(mock(Currency.class));
@@ -1427,12 +1498,44 @@ public class CreatePurchaseInvoiceHandlerTest {
   }
 
   /**
-   * ETP-5381 — the seeding is a FALLBACK: an explicit per-line quantity in the request body wins
-   * and the pending-quantity query is never issued. A user invoicing 2 of 10 units must get 2.
+   * Builds a completed receipt linked to a purchase order, registered in {@code dal} under
+   * {@code receiptId}, for the {@code createFromReceipt} explicit-{@code lines} tests.
+   */
+  private static ShipmentInOut stubReceiptWithOrder(OBDal dal, String receiptId, String poId,
+      ShipmentInOutLine... lines) {
+    Order linkedOrder = mockOrderWithHeaderData();
+    when(linkedOrder.getId()).thenReturn(poId);
+    ShipmentInOut receipt = mock(ShipmentInOut.class);
+    when(receipt.getDocumentNo()).thenReturn("GR-" + receiptId);
+    when(receipt.getDocumentStatus()).thenReturn("CO");
+    when(receipt.getSalesOrder()).thenReturn(linkedOrder);
+    when(receipt.getMaterialMgmtShipmentInOutLineList()).thenReturn(Arrays.asList(lines));
+    when(receipt.getEtgoCurrency()).thenReturn(mock(Currency.class));
+    when(dal.get(eq(ShipmentInOut.class), eq(receiptId))).thenReturn(receipt);
+    return receipt;
+  }
+
+  private static ShipmentInOutLine receiptLineWithOrderLine(String id, String movementQty) {
+    OrderLine ol = mock(OrderLine.class);
+    when(ol.getId()).thenReturn("ol-" + id);
+    ShipmentInOutLine rl = mockReceiptLine(id, true, mock(Product.class),
+        new BigDecimal(movementQty), ol);
+    when(rl.getLineNo()).thenReturn(10L);
+    return rl;
+  }
+
+  private static JSONObject explicitLines(String lineId, String quantity) throws JSONException {
+    return new JSONObject().put("lines", new JSONArray()
+        .put(new JSONObject().put("receiptLineId", lineId).put("quantity", quantity)));
+  }
+
+  /**
+   * ETP-5709 — an explicit quantity within what is pending is used VERBATIM (2 of 10 means 2),
+   * and the pending query is now issued for it too, because that is what the quantity is
+   * validated against. (Before ETP-5709 explicit lines skipped the query entirely.)
    */
   @Test
-  @SuppressWarnings("unchecked")
-  public void createFromReceipt_explicitLines_doesNotSeedFromPending() throws JSONException {
+  public void createFromReceipt_explicitLinesWithinPending_usedVerbatim() throws JSONException {
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
         MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class);
         MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
@@ -1443,37 +1546,318 @@ public class CreatePurchaseInvoiceHandlerTest {
       Session session = mock(Session.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
       when(dal.getSession()).thenReturn(session);
-
-      Order linkedOrder = mockOrderWithHeaderData();
-      when(linkedOrder.getId()).thenReturn("po-explicit");
-
-      OrderLine ol1 = mock(OrderLine.class);
-      when(ol1.getId()).thenReturn("ol-1");
-      ShipmentInOutLine rl1 = mockReceiptLine("rl-1", true, mock(Product.class),
-          BigDecimal.valueOf(10), ol1);
-
-      ShipmentInOut receipt = mock(ShipmentInOut.class);
-      when(receipt.getSalesOrder()).thenReturn(linkedOrder);
-      when(receipt.getMaterialMgmtShipmentInOutLineList()).thenReturn(Collections.singletonList(rl1));
-      when(receipt.getEtgoCurrency()).thenReturn(mock(Currency.class));
-      when(dal.get(eq(ShipmentInOut.class), eq("receipt-explicit"))).thenReturn(receipt);
-
+      stubReceiptWithOrder(dal, "receipt-explicit", "po-explicit",
+          receiptLineWithOrderLine("rl-1", "10"));
+      stubPendingQtyPerLine(supportMock, "receipt-explicit", "rl-1", BigDecimal.TEN);
       stubInvoiceCreationCollaborators(session, obContextMock, obProviderMock, weldUtilsMock,
           "user-explicit", "AP-EXPLICIT-1");
 
       TestableHandler handler = new TestableHandler();
       handler.docTypeToReturn = mock(DocumentType.class);
 
-      JSONObject body = new JSONObject().put("lines", new JSONArray()
-          .put(new JSONObject().put("receiptLineId", "rl-1").put("quantity", "2")));
-
-      handler.createFromReceipt("receipt-explicit", body);
+      handler.createFromReceipt("receipt-explicit", explicitLines("rl-1", "2"));
 
       assertEquals("Explicit overrides must be used verbatim",
           Collections.singletonMap("rl-1", new BigDecimal("2")), handler.receivedReceiptOverrides);
       assertEquals("2",
           handler.capturedReceiptSelectedLines.getJSONObject(0).getString("orderedQuantity"));
-      supportMock.verifyNoInteractions();
+      supportMock.verify(() -> NeoInvoiceSupport.computePendingQtyPerLineOrThrow("receipt-explicit",
+          true));
+    }
+  }
+
+  /**
+   * ETP-5709 (item 5) — an explicit quantity above what is pending is a 400 naming the line and
+   * the pending quantity, never a silent cap and never an over-invoice. Nothing is built.
+   */
+  @Test
+  public void createFromReceipt_explicitQuantityAbovePending_answers400NamingLineAndPending()
+      throws JSONException {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class);
+        MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<NeoInvoiceSupport> supportMock = Mockito.mockStatic(NeoInvoiceSupport.class);
+        MockedStatic<WeldUtils> weldUtilsMock = Mockito.mockStatic(WeldUtils.class)) {
+
+      OBDal dal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getSession()).thenReturn(session);
+      stubReceiptWithOrder(dal, "receipt-over", "po-over", receiptLineWithOrderLine("rl-1", "10"));
+      stubPendingQtyPerLine(supportMock, "receipt-over", "rl-1", new BigDecimal("4"));
+      stubInvoiceCreationCollaborators(session, obContextMock, obProviderMock, weldUtilsMock,
+          "user-over", "AP-OVER-1");
+
+      TestableHandler handler = new TestableHandler();
+      handler.docTypeToReturn = mock(DocumentType.class);
+
+      try {
+        handler.createFromReceipt("receipt-over", explicitLines("rl-1", "5"));
+        fail("5 requested but only 4 pending must be refused");
+      } catch (OBException expected) {
+        assertTrue(expected.getMessage(), expected.getMessage().contains("GR-receipt-over"));
+        assertTrue(expected.getMessage(), expected.getMessage().contains("requested quantity 5"));
+        assertTrue(expected.getMessage(), expected.getMessage().contains("pending to invoice is 4"));
+      }
+      assertNull("nothing may be built for a refused request", handler.capturedReceiptSelectedLines);
+    }
+  }
+
+  /** ETP-5709 (item 5) — explicit lines on a receipt with nothing pending: 400, not an invoice. */
+  @Test
+  public void createFromReceipt_explicitLinesButNothingPending_answers400() throws JSONException {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class);
+        MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<NeoInvoiceSupport> supportMock = Mockito.mockStatic(NeoInvoiceSupport.class);
+        MockedStatic<WeldUtils> weldUtilsMock = Mockito.mockStatic(WeldUtils.class)) {
+
+      OBDal dal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getSession()).thenReturn(session);
+      stubReceiptWithOrder(dal, "receipt-done", "po-done", receiptLineWithOrderLine("rl-1", "10"));
+      supportMock.when(() -> NeoInvoiceSupport.computePendingQtyPerLineOrThrow(eq("receipt-done"),
+          eq(true))).thenReturn(Collections.emptyMap());
+      stubInvoiceCreationCollaborators(session, obContextMock, obProviderMock, weldUtilsMock,
+          "user-done", "AP-DONE-1");
+
+      TestableHandler handler = new TestableHandler();
+      handler.docTypeToReturn = mock(DocumentType.class);
+
+      try {
+        handler.createFromReceipt("receipt-done", explicitLines("rl-1", "1"));
+        fail("a line with nothing pending must not be invoiceable by explicit request");
+      } catch (OBException expected) {
+        assertTrue(expected.getMessage(), expected.getMessage().contains("pending to invoice is 0"));
+      }
+      assertNull(handler.capturedReceiptSelectedLines);
+    }
+  }
+
+  // ── ETP-5709: the invoice is scoped to THIS receipt's lines, at the requested quantity ──────
+  //
+  // Core replaces an order-line entry that carries no `shipmentInOutLine` by EVERY related
+  // not-yet-invoiced receipt line at its full uninvoiced quantity, silently discarding the
+  // quantity we sent (live: receipt lowered to 3, lines [{rl, 1}] -> invoice of 3). An entry that
+  // names its receipt line is used as is, so each receipt line gets its own entry.
+
+  /** Runs createFromReceipt for one receipt line (movement {@code movement}) and returns the entries. */
+  private static JSONArray selectedLinesForSingleReceiptLine(String movement, String pending,
+      JSONObject body) {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class);
+        MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<NeoInvoiceSupport> supportMock = Mockito.mockStatic(NeoInvoiceSupport.class);
+        MockedStatic<WeldUtils> weldUtilsMock = Mockito.mockStatic(WeldUtils.class)) {
+      OBDal dal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getSession()).thenReturn(session);
+      stubReceiptWithOrder(dal, "receipt-scope", "po-scope", receiptLineWithOrderLine("rl-1", movement));
+      stubPendingQtyPerLine(supportMock, "receipt-scope", "rl-1", new BigDecimal(pending));
+      stubInvoiceCreationCollaborators(session, obContextMock, obProviderMock, weldUtilsMock,
+          "user-scope", "AP-SCOPE-1");
+      TestableHandler handler = new TestableHandler();
+      handler.docTypeToReturn = mock(DocumentType.class);
+      handler.createFromReceipt("receipt-scope", body);
+      return handler.capturedReceiptSelectedLines;
+    }
+  }
+
+  /** The reported case: receipt of 3, `lines` asks for 1 -> ONE entry of 1 bound to that receipt line. */
+  @Test
+  public void createFromReceipt_partialExplicitQuantity_emitsEntryBoundToTheReceiptLine()
+      throws JSONException {
+    JSONArray selected = selectedLinesForSingleReceiptLine("3", "3", explicitLines("rl-1", "1"));
+
+    assertEquals(1, selected.length());
+    assertEquals("ol-rl-1", selected.getJSONObject(0).getString("id"));
+    assertEquals("1", selected.getJSONObject(0).getString("orderedQuantity"));
+    assertEquals("without shipmentInOutLine core would replace this entry by the full receipt",
+        "rl-1", selected.getJSONObject(0).getString("shipmentInOutLine"));
+  }
+
+  @Test
+  public void createFromReceipt_noLines_emitsPendingQuantityBoundToTheReceiptLine()
+      throws JSONException {
+    JSONArray selected = selectedLinesForSingleReceiptLine("3", "2", null);
+
+    assertEquals(1, selected.length());
+    assertEquals("2", selected.getJSONObject(0).getString("orderedQuantity"));
+    assertEquals("rl-1", selected.getJSONObject(0).getString("shipmentInOutLine"));
+  }
+
+  /** Two receipt lines of the SAME order line are no longer folded into one order-line entry. */
+  @Test
+  public void buildSelectedLinesFromReceipt_twoReceiptLinesOfOneOrderLine_emitTwoEntries()
+      throws JSONException {
+    OrderLine ol = mock(OrderLine.class);
+    when(ol.getId()).thenReturn("ol-1");
+    ShipmentInOutLine rlA = mockReceiptLine("rl-a", true, mock(Product.class), BigDecimal.valueOf(2), ol);
+    ShipmentInOutLine rlB = mockReceiptLine("rl-b", true, mock(Product.class), BigDecimal.valueOf(3), ol);
+
+    JSONArray result = new CreatePurchaseInvoiceHandler().buildSelectedLinesFromReceipt(
+        receiptWith(rlA, rlB), Collections.emptyMap(), null);
+
+    assertEquals(2, result.length());
+    assertEquals("ol-1", result.getJSONObject(0).getString("id"));
+    assertEquals("2", result.getJSONObject(0).getString("orderedQuantity"));
+    assertEquals("rl-a", result.getJSONObject(0).getString("shipmentInOutLine"));
+    assertEquals("ol-1", result.getJSONObject(1).getString("id"));
+    assertEquals("3", result.getJSONObject(1).getString("orderedQuantity"));
+    assertEquals("rl-b", result.getJSONObject(1).getString("shipmentInOutLine"));
+  }
+
+  /** ETP-4722 regression: a negative (return-style) receipt line keeps its sign, in full or partial. */
+  @Test
+  public void createFromReceipt_negativeLine_keepsSignWhetherPendingSeededOrExplicit()
+      throws JSONException {
+    // the pending map is magnitude-only, the invoice line must still be negative
+    JSONArray seeded = selectedLinesForSingleReceiptLine("-3", "3", null);
+    assertEquals("-3", seeded.getJSONObject(0).getString("orderedQuantity"));
+    assertEquals("rl-1", seeded.getJSONObject(0).getString("shipmentInOutLine"));
+
+    JSONArray partial = selectedLinesForSingleReceiptLine("-3", "3", explicitLines("rl-1", "-1"));
+    assertEquals("-1", partial.getJSONObject(0).getString("orderedQuantity"));
+  }
+
+  /**
+   * ETP-4722 + ETP-5709: a return-style receipt line of -3 with an explicit partial of -1 emits ONE
+   * entry of -1 (sign kept, the requested quantity and not the pending one) bound to its receipt
+   * line, so the native process cannot swap it for the full line.
+   */
+  @Test
+  public void createFromReceipt_negativePartial_emitsNegativeRequestedQuantityBoundToTheLine()
+      throws JSONException {
+    JSONArray selected = selectedLinesForSingleReceiptLine("-3", "3", explicitLines("rl-1", "-1"));
+
+    assertEquals(1, selected.length());
+    JSONObject entry = selected.getJSONObject(0);
+    assertEquals("ol-rl-1", entry.getString("id"));
+    assertEquals("-1", entry.getString("orderedQuantity"));
+    assertEquals("rl-1", entry.getString("shipmentInOutLine"));
+  }
+
+  /** The whole pending magnitude requested explicitly (-3 on -3) is accepted and stays negative. */
+  @Test
+  public void createFromReceipt_negativeExplicitEqualToPending_isAcceptedAndNegative()
+      throws JSONException {
+    JSONArray selected = selectedLinesForSingleReceiptLine("-3", "3", explicitLines("rl-1", "-3"));
+
+    assertEquals("-3", selected.getJSONObject(0).getString("orderedQuantity"));
+  }
+
+  /**
+   * A requested magnitude above pending (-4 on a -3 line) is a 400 naming the line and the pending
+   * quantity signed like the line (-3); no selection is built and nothing is saved.
+   */
+  @Test
+  public void createFromReceipt_negativeQuantityAbovePending_answers400NamingLineAndSignedPending() {
+    OBException e = refusedForSingleReceiptLine("-3", "3", "-4");
+
+    assertTrue(e.getMessage(), e.getMessage().contains("GR-receipt-scope"));
+    assertTrue(e.getMessage(), e.getMessage().contains("requested quantity -4"));
+    assertTrue(e.getMessage(), e.getMessage().contains("pending to invoice is -3"));
+  }
+
+  /** The opposite sign (+1 on a -3 line) is refused too, with the same naming; nothing is built. */
+  @Test
+  public void createFromReceipt_oppositeSignOnNegativeLine_answers400NamingLineAndSignedPending() {
+    OBException e = refusedForSingleReceiptLine("-3", "3", "1");
+
+    assertTrue(e.getMessage(), e.getMessage().contains("GR-receipt-scope"));
+    assertTrue(e.getMessage(), e.getMessage().contains("requested quantity 1"));
+    assertTrue(e.getMessage(), e.getMessage().contains("pending to invoice is -3"));
+  }
+
+  /** Runs createFromReceipt with a refused explicit quantity and asserts nothing was built/saved. */
+  private static OBException refusedForSingleReceiptLine(String movement, String pending,
+      String requested) {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class);
+        MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<NeoInvoiceSupport> supportMock = Mockito.mockStatic(NeoInvoiceSupport.class);
+        MockedStatic<WeldUtils> weldUtilsMock = Mockito.mockStatic(WeldUtils.class)) {
+      OBDal dal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getSession()).thenReturn(session);
+      stubReceiptWithOrder(dal, "receipt-scope", "po-scope", receiptLineWithOrderLine("rl-1", movement));
+      stubPendingQtyPerLine(supportMock, "receipt-scope", "rl-1", new BigDecimal(pending));
+      stubInvoiceCreationCollaborators(session, obContextMock, obProviderMock, weldUtilsMock,
+          "user-scope", "AP-SCOPE-1");
+      TestableHandler handler = new TestableHandler();
+      handler.docTypeToReturn = mock(DocumentType.class);
+      try {
+        handler.createFromReceipt("receipt-scope", explicitLines("rl-1", requested));
+      } catch (OBException expected) {
+        assertNull("nothing may be built for a refused request", handler.capturedReceiptSelectedLines);
+        Mockito.verify(dal, Mockito.never()).save(Mockito.any());
+        return expected;
+      } catch (JSONException e) {
+        throw new IllegalStateException(e);
+      }
+      fail("quantity " + requested + " on a " + movement + " line must be refused");
+      return null;
+    }
+  }
+
+  /** orderQuantity / operativeQuantity follow the invoiced fraction, as core's getInOutLineJson does. */
+  @Test
+  public void buildSelectedLinesFromReceipt_scalesOrderAndOperativeQuantitiesToTheInvoicedFraction()
+      throws JSONException {
+    OrderLine ol = mock(OrderLine.class);
+    when(ol.getId()).thenReturn("ol-1");
+    ShipmentInOutLine rl = mockReceiptLine("rl-1", true, mock(Product.class), BigDecimal.valueOf(4), ol);
+    when(rl.getOrderQuantity()).thenReturn(BigDecimal.valueOf(8));
+    when(rl.getOperativeQuantity()).thenReturn(BigDecimal.valueOf(40));
+    UOM aum = mock(UOM.class);
+    when(aum.getId()).thenReturn("aum-1");
+    when(rl.getOperativeUOM()).thenReturn(aum);
+
+    JSONArray result = new CreatePurchaseInvoiceHandler().buildSelectedLinesFromReceipt(
+        receiptWith(rl), Collections.singletonMap("rl-1", BigDecimal.ONE), null);
+
+    JSONObject entry = result.getJSONObject(0);
+    assertEquals("1", entry.getString("orderedQuantity"));
+    assertEquals(0, new BigDecimal(entry.getString("orderQuantity")).compareTo(BigDecimal.valueOf(2)));
+    assertEquals(0, new BigDecimal(entry.getString("operativeQuantity")).compareTo(BigDecimal.TEN));
+    assertEquals("aum-1", entry.getString("operativeUOM"));
+  }
+
+  /**
+   * ETP-5709 — a {@code lines} array that parses to nothing (zero quantity here) used to leave an
+   * empty override map, i.e. "no lines requested", and the whole pending receipt was invoiced.
+   */
+  @Test
+  public void createFromReceipt_linesThatParseToNothing_answers400InsteadOfInvoicingEverything()
+      throws JSONException {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class);
+        MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<NeoInvoiceSupport> supportMock = Mockito.mockStatic(NeoInvoiceSupport.class);
+        MockedStatic<WeldUtils> weldUtilsMock = Mockito.mockStatic(WeldUtils.class)) {
+
+      OBDal dal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getSession()).thenReturn(session);
+      stubReceiptWithOrder(dal, "receipt-zero", "po-zero", receiptLineWithOrderLine("rl-1", "10"));
+      stubPendingQtyPerLine(supportMock, "receipt-zero", "rl-1", BigDecimal.TEN);
+      stubInvoiceCreationCollaborators(session, obContextMock, obProviderMock, weldUtilsMock,
+          "user-zero", "AP-ZERO-1");
+
+      TestableHandler handler = new TestableHandler();
+      handler.docTypeToReturn = mock(DocumentType.class);
+
+      try {
+        handler.createFromReceipt("receipt-zero", explicitLines("rl-1", "0"));
+        fail("lines with no usable entry must be refused, not read as 'invoice everything'");
+      } catch (OBException expected) {
+        assertTrue(expected.getMessage(), expected.getMessage().contains("'lines' was sent"));
+      }
+      assertNull(handler.capturedReceiptSelectedLines);
     }
   }
 
@@ -1632,6 +2016,7 @@ public class CreatePurchaseInvoiceHandlerTest {
       when(bp2.getId()).thenReturn("bp-2");
 
       ShipmentInOut r1 = mock(ShipmentInOut.class);
+      when(r1.getDocumentStatus()).thenReturn("CO");
       when(r1.getBusinessPartner()).thenReturn(bp1);
       ShipmentInOut r2 = mock(ShipmentInOut.class);
       when(r2.getBusinessPartner()).thenReturn(bp2);
@@ -1681,6 +2066,7 @@ public class CreatePurchaseInvoiceHandlerTest {
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
 
       ShipmentInOut r1 = mock(ShipmentInOut.class);
+      when(r1.getDocumentStatus()).thenReturn("CO");
       when(r1.getBusinessPartner()).thenReturn(mock(BusinessPartner.class));
       when(dal.get(eq(ShipmentInOut.class), eq("r-1"))).thenReturn(r1);
 
@@ -2216,6 +2602,7 @@ public class CreatePurchaseInvoiceHandlerTest {
 
   private static ShipmentInOut mockReceiptForBulk(String id, BusinessPartner bp, ShipmentInOutLine... lines) {
     ShipmentInOut r = mock(ShipmentInOut.class);
+    when(r.getDocumentStatus()).thenReturn("CO");
     when(r.getId()).thenReturn(id);
     when(r.getBusinessPartner()).thenReturn(bp);
     when(r.getMaterialMgmtShipmentInOutLineList()).thenReturn(Arrays.asList(lines));
@@ -2315,6 +2702,161 @@ public class CreatePurchaseInvoiceHandlerTest {
       verify(process).createInvoiceLinesFromDocumentLines(
           linesCaptor.capture(), eq(invoice), eq(ShipmentInOutLine.class));
       assertEquals("both receipts' lines must be selected", 2, linesCaptor.getValue().length());
+    }
+  }
+
+  /**
+   * Shared setup for the ETP-5709 multi-receipt tests: two receipts of the same partner (GR-1
+   * with l-1 of 10 units, GR-2 with l-2 of 3 units), the line-creation process mocked, and a
+   * header stub whose invoice has a price list so that a path which fails to refuse the request
+   * runs to the end and is caught by the assertions instead of dying on an NPE.
+   */
+  private static class MultiReceiptFixture {
+    final OBDal dal = mock(OBDal.class);
+    final CreateInvoiceLinesFromProcess process = mock(CreateInvoiceLinesFromProcess.class);
+    final HeaderStubHandler handler = new HeaderStubHandler();
+
+    MultiReceiptFixture(MockedStatic<OBDal> obDalMock, MockedStatic<WeldUtils> weldUtilsMock) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getSession()).thenReturn(mock(Session.class));
+      BusinessPartner bp = mock(BusinessPartner.class);
+      when(bp.getId()).thenReturn("bp-1");
+      ShipmentInOutLine line1 = mockReceiptLine("l-1", true, mock(Product.class), BigDecimal.TEN,
+          null);
+      when(line1.getLineNo()).thenReturn(10L);
+      ShipmentInOutLine line2 = mockReceiptLine("l-2", true, mock(Product.class),
+          BigDecimal.valueOf(3), null);
+      when(line2.getLineNo()).thenReturn(10L);
+      ShipmentInOut r1 = mockReceiptForBulk("r-1", bp, line1);
+      when(r1.getDocumentNo()).thenReturn("GR-1");
+      ShipmentInOut r2 = mockReceiptForBulk("r-2", bp, line2);
+      when(r2.getDocumentNo()).thenReturn("GR-2");
+      when(dal.get(eq(ShipmentInOut.class), eq("r-1"))).thenReturn(r1);
+      when(dal.get(eq(ShipmentInOut.class), eq("r-2"))).thenReturn(r2);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getPriceList()).thenReturn(mock(PriceList.class));
+      handler.headerToReturn = invoice;
+      weldUtilsMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(
+          CreateInvoiceLinesFromProcess.class)).thenReturn(process);
+    }
+
+    void pending(MockedStatic<NeoInvoiceSupport> supportMock, String receiptId,
+        Map<String, BigDecimal> pending) {
+      supportMock.when(() -> NeoInvoiceSupport.computePendingQtyPerLineOrThrow(eq(receiptId),
+          eq(true))).thenReturn(pending);
+    }
+  }
+
+  /**
+   * ETP-5709 (item 1) — every line already invoiced. The pending map omits fully-invoiced lines,
+   * and an absent line used to be read as "fully pending, invoice the movement quantity", so the
+   * bulk action created a duplicate of the invoice. Now: 400 naming the receipts, nothing built.
+   */
+  @Test
+  public void createFromReceipts_everyLineAlreadyInvoiced_answers400NamingReceiptsAndBuildsNothing() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<NeoInvoiceSupport> supportMock = Mockito.mockStatic(NeoInvoiceSupport.class);
+        MockedStatic<WeldUtils> weldUtilsMock = Mockito.mockStatic(WeldUtils.class)) {
+      MultiReceiptFixture f = new MultiReceiptFixture(obDalMock, weldUtilsMock);
+      f.pending(supportMock, "r-1", Collections.emptyMap());
+      f.pending(supportMock, "r-2", Collections.emptyMap());
+
+      try {
+        f.handler.createFromReceipts(Arrays.asList("r-1", "r-2"), null);
+        fail("two fully-invoiced receipts must not produce a second invoice");
+      } catch (OBException expected) {
+        assertTrue(expected.getMessage(), expected.getMessage().contains("GR-1, GR-2"));
+        assertTrue(expected.getMessage(), expected.getMessage().contains("nothing left to invoice"));
+      }
+      assertNull("no header may be built", f.handler.receivedReceiptsForHeader);
+      verify(f.process, never()).createInvoiceLinesFromDocumentLines(any(), any(), any());
+    }
+  }
+
+  /** ETP-5709 (item 1) — only the line that still has pending quantity is invoiced, at that quantity. */
+  @Test
+  public void createFromReceipts_oneLineInvoicedOnePending_invoicesOnlyThePendingLine()
+      throws JSONException {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<NeoInvoiceSupport> supportMock = Mockito.mockStatic(NeoInvoiceSupport.class);
+        MockedStatic<WeldUtils> weldUtilsMock = Mockito.mockStatic(WeldUtils.class)) {
+      MultiReceiptFixture f = new MultiReceiptFixture(obDalMock, weldUtilsMock);
+      f.pending(supportMock, "r-1", Collections.emptyMap());
+      f.pending(supportMock, "r-2", Collections.singletonMap("l-2", BigDecimal.valueOf(3)));
+
+      f.handler.createFromReceipts(Arrays.asList("r-1", "r-2"), null);
+
+      ArgumentCaptor<JSONArray> captor = ArgumentCaptor.forClass(JSONArray.class);
+      verify(f.process).createInvoiceLinesFromDocumentLines(captor.capture(), any(),
+          eq(ShipmentInOutLine.class));
+      assertEquals("the invoiced line must not come back", 1, captor.getValue().length());
+      assertEquals("l-2", captor.getValue().getJSONObject(0).getString("id"));
+      assertEquals("3", captor.getValue().getJSONObject(0).getString("orderedQuantity"));
+    }
+  }
+
+  /** ETP-5709 (item 5) — explicit quantity above pending on the bulk path: 400, nothing built. */
+  @Test
+  public void createFromReceipts_explicitQuantityAbovePending_answers400BeforeBuildingHeader()
+      throws JSONException {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<NeoInvoiceSupport> supportMock = Mockito.mockStatic(NeoInvoiceSupport.class);
+        MockedStatic<WeldUtils> weldUtilsMock = Mockito.mockStatic(WeldUtils.class)) {
+      MultiReceiptFixture f = new MultiReceiptFixture(obDalMock, weldUtilsMock);
+      f.pending(supportMock, "r-1", Collections.singletonMap("l-1", BigDecimal.valueOf(7)));
+      f.pending(supportMock, "r-2", Collections.singletonMap("l-2", BigDecimal.valueOf(3)));
+
+      try {
+        f.handler.createFromReceipts(Arrays.asList("r-1", "r-2"), explicitLines("l-1", "8"));
+        fail("8 requested but only 7 pending must be refused");
+      } catch (OBException expected) {
+        assertTrue(expected.getMessage(), expected.getMessage().contains("GR-1"));
+        assertTrue(expected.getMessage(), expected.getMessage().contains("requested quantity 8"));
+        assertTrue(expected.getMessage(), expected.getMessage().contains("pending to invoice is 7"));
+      }
+      assertNull(f.handler.receivedReceiptsForHeader);
+      verify(f.process, never()).createInvoiceLinesFromDocumentLines(any(), any(), any());
+    }
+  }
+
+  /** ETP-5709 (item 5) — a partial explicit quantity within pending is honoured as sent. */
+  @Test
+  public void createFromReceipts_explicitQuantityWithinPending_isInvoicedAsSent()
+      throws JSONException {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<NeoInvoiceSupport> supportMock = Mockito.mockStatic(NeoInvoiceSupport.class);
+        MockedStatic<WeldUtils> weldUtilsMock = Mockito.mockStatic(WeldUtils.class)) {
+      MultiReceiptFixture f = new MultiReceiptFixture(obDalMock, weldUtilsMock);
+      f.pending(supportMock, "r-1", Collections.singletonMap("l-1", BigDecimal.valueOf(7)));
+      f.pending(supportMock, "r-2", Collections.singletonMap("l-2", BigDecimal.valueOf(3)));
+
+      f.handler.createFromReceipts(Arrays.asList("r-1", "r-2"), explicitLines("l-1", "4"));
+
+      ArgumentCaptor<JSONArray> captor = ArgumentCaptor.forClass(JSONArray.class);
+      verify(f.process).createInvoiceLinesFromDocumentLines(captor.capture(), any(),
+          eq(ShipmentInOutLine.class));
+      assertEquals(1, captor.getValue().length());
+      assertEquals("4", captor.getValue().getJSONObject(0).getString("orderedQuantity"));
+    }
+  }
+
+  /** ETP-5709 — {@code lines} that parse to nothing must not widen into "invoice all pending". */
+  @Test
+  public void createFromReceipts_linesThatParseToNothing_answers400() throws JSONException {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<NeoInvoiceSupport> supportMock = Mockito.mockStatic(NeoInvoiceSupport.class);
+        MockedStatic<WeldUtils> weldUtilsMock = Mockito.mockStatic(WeldUtils.class)) {
+      MultiReceiptFixture f = new MultiReceiptFixture(obDalMock, weldUtilsMock);
+      f.pending(supportMock, "r-1", Collections.singletonMap("l-1", BigDecimal.valueOf(7)));
+      f.pending(supportMock, "r-2", Collections.singletonMap("l-2", BigDecimal.valueOf(3)));
+
+      try {
+        f.handler.createFromReceipts(Arrays.asList("r-1", "r-2"), explicitLines("l-1", "0"));
+        fail("lines with no usable entry must be refused");
+      } catch (OBException expected) {
+        assertTrue(expected.getMessage(), expected.getMessage().contains("'lines' was sent"));
+      }
+      verify(f.process, never()).createInvoiceLinesFromDocumentLines(any(), any(), any());
     }
   }
 
@@ -2444,6 +2986,231 @@ public class CreatePurchaseInvoiceHandlerTest {
 
       assertSame("different linked orders must fall back to the Business Partner's own "
           + "purchase defaults, exactly like createFromReceiptNoPo", expected, result);
+    }
+  }
+
+  // ── source must be completed (ETP-5709) ───────────────────────────────────
+
+  @Test
+  public void createFromOrder_nonCompletedOrder_throwsNamingNumberAndStatusAndSavesNothing() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      Order order = mock(Order.class);
+      when(order.getDocumentStatus()).thenReturn("DR");
+      when(order.getDocumentNo()).thenReturn("PO-9");
+      when(dal.get(Order.class, "o-draft")).thenReturn(order);
+
+      OBException e = expectObException(
+          () -> new CreatePurchaseInvoiceHandler().createFromOrder("o-draft"));
+
+      org.junit.Assert.assertTrue(e.getMessage(), e.getMessage().contains("PO-9") && e.getMessage().contains("DR"));
+      Mockito.verify(dal, Mockito.never()).save(Mockito.any());
+    }
+  }
+
+  @Test
+  public void createFromReceipt_nonCompletedReceipt_throws() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      ShipmentInOut receipt = mock(ShipmentInOut.class);
+      when(receipt.getDocumentStatus()).thenReturn("DR");
+      when(receipt.getDocumentNo()).thenReturn("GR-3");
+      when(dal.get(eq(ShipmentInOut.class), eq("r-draft"))).thenReturn(receipt);
+
+      OBException e = expectObException(
+          () -> new CreatePurchaseInvoiceHandler().createFromReceipt("r-draft", null));
+
+      org.junit.Assert.assertTrue(e.getMessage(), e.getMessage().contains("GR-3") && e.getMessage().contains("DR"));
+      Mockito.verify(dal, Mockito.never()).save(Mockito.any());
+    }
+  }
+
+  @Test
+  public void createFromReceipts_oneNonCompletedIdAmongSeveral_throwsBeforeAnything() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      BusinessPartner bp = mock(BusinessPartner.class);
+      when(bp.getId()).thenReturn("bp-1");
+      ShipmentInOut ok = mockReceiptForBulk("r-ok", bp);
+      ShipmentInOut draft = mockReceiptForBulk("r-draft", bp);
+      when(draft.getDocumentStatus()).thenReturn("DR");
+      when(draft.getDocumentNo()).thenReturn("GR-4");
+      when(dal.get(eq(ShipmentInOut.class), eq("r-ok"))).thenReturn(ok);
+      when(dal.get(eq(ShipmentInOut.class), eq("r-draft"))).thenReturn(draft);
+
+      OBException e = expectObException(
+          () -> new CreatePurchaseInvoiceHandler()
+              .createFromReceipts(Arrays.asList("r-ok", "r-draft"), new JSONObject()));
+
+      org.junit.Assert.assertTrue(e.getMessage(), e.getMessage().contains("GR-4") && e.getMessage().contains("DR"));
+      Mockito.verify(dal, Mockito.never()).save(Mockito.any());
+    }
+  }
+
+  @Test
+  public void createFromOrder_closedOrder_throwsNamingNumberAndClAndSavesNothing() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      Order order = mock(Order.class);
+      when(order.getDocumentStatus()).thenReturn("CL");
+      when(order.getDocumentNo()).thenReturn("PO-CL-9");
+      when(dal.get(Order.class, "o-closed")).thenReturn(order);
+
+      OBException e = expectObException(
+          () -> new CreatePurchaseInvoiceHandler().createFromOrder("o-closed"));
+
+      org.junit.Assert.assertTrue(e.getMessage(),
+          e.getMessage().contains("PO-CL-9") && e.getMessage().contains("CL"));
+      Mockito.verify(dal, Mockito.never()).save(Mockito.any());
+      Mockito.verify(order, Mockito.never()).getOrderLineList();
+    }
+  }
+
+  @Test
+  public void createFromReceipt_closedReceipt_throwsNamingNumberAndClAndSavesNothing() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      ShipmentInOut receipt = mock(ShipmentInOut.class);
+      when(receipt.getDocumentStatus()).thenReturn("CL");
+      when(receipt.getDocumentNo()).thenReturn("GR-CL-3");
+      when(dal.get(eq(ShipmentInOut.class), eq("r-closed"))).thenReturn(receipt);
+
+      OBException e = expectObException(
+          () -> new CreatePurchaseInvoiceHandler().createFromReceipt("r-closed", null));
+
+      org.junit.Assert.assertTrue(e.getMessage(),
+          e.getMessage().contains("GR-CL-3") && e.getMessage().contains("CL"));
+      Mockito.verify(dal, Mockito.never()).save(Mockito.any());
+    }
+  }
+
+  private static OBException expectObException(Runnable call) {
+    try {
+      call.run();
+    } catch (OBException e) {
+      return e;
+    }
+    throw new AssertionError("expected an OBException");
+  }
+
+  // ── nothing left to invoice must not read as "invoice everything" (ETP-5709 live bug) ──
+
+  /**
+   * Repro of the live duplicate-invoice bug: a goods receipt whose every line is already invoiced
+   * has an EMPTY pending map, and the empty map used to be read as "no overrides, invoice the full
+   * movement quantity", so a second call created a second identical invoice.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void createFromReceipt_nothingPendingAndNoExplicitLines_throwsAndInvoicesNothing() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<NeoInvoiceSupport> supportMock = Mockito.mockStatic(NeoInvoiceSupport.class)) {
+      supportMock.when(() -> NeoInvoiceSupport.computePendingQtyPerLineOrThrow(
+          eq("receipt-done"), eq(true))).thenReturn(Collections.emptyMap());
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Order linkedOrder = mockOrderWithHeaderData();
+      OrderLine ol1 = mock(OrderLine.class);
+      when(ol1.getId()).thenReturn("ol-1");
+      ShipmentInOutLine rl1 = mockReceiptLine("rl-1", true, mock(Product.class),
+          BigDecimal.valueOf(2), ol1);
+      ShipmentInOut receipt = receiptWith(rl1);
+      when(receipt.getDocumentNo()).thenReturn("GR-35");
+      when(receipt.getSalesOrder()).thenReturn(linkedOrder);
+      when(dal.get(eq(ShipmentInOut.class), eq("receipt-done"))).thenReturn(receipt);
+
+      TestableHandler handler = new TestableHandler();
+      OBException e = expectObException(() -> handler.createFromReceipt("receipt-done", null));
+
+      org.junit.Assert.assertTrue(e.getMessage(), e.getMessage().contains("GR-35"));
+      org.junit.Assert.assertNull("no invoice lines may be built",
+          handler.capturedReceiptSelectedLines);
+      Mockito.verify(dal, Mockito.never()).save(Mockito.any());
+    }
+  }
+
+  /** Same guard on the branch of a receipt with no linked purchase order. */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void createFromReceipt_nothingPending_noPoBranch_neverReachesNoPoCreation() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<NeoInvoiceSupport> supportMock = Mockito.mockStatic(NeoInvoiceSupport.class)) {
+      supportMock.when(() -> NeoInvoiceSupport.computePendingQtyPerLineOrThrow(
+          eq("receipt-nopo-done"), eq(true))).thenReturn(Collections.emptyMap());
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      ShipmentInOut receipt = receiptNoPoWith(mock(BusinessPartner.class),
+          mockNoPoLine(BigDecimal.valueOf(2)));
+      when(receipt.getDocumentNo()).thenReturn("GR-36");
+      when(dal.get(eq(ShipmentInOut.class), eq("receipt-nopo-done"))).thenReturn(receipt);
+
+      final boolean[] reached = {false};
+      TestableHandler handler = new TestableHandler() {
+        @Override
+        protected Invoice createFromReceiptNoPo(ShipmentInOut r, Map<String, BigDecimal> q,
+            JSONObject body) {
+          reached[0] = true;
+          return null;
+        }
+      };
+      OBException e = expectObException(() -> handler.createFromReceipt("receipt-nopo-done", null));
+
+      org.junit.Assert.assertTrue(e.getMessage(), e.getMessage().contains("GR-36"));
+      org.junit.Assert.assertFalse("must fail before the no-PO creation", reached[0]);
+    }
+  }
+
+  /**
+   * No-PO branch with a NON-empty map: a line absent from it is fully invoiced and must be
+   * skipped, not invoiced again at its full movement quantity.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void createFromReceiptNoPo_lineAbsentFromNonEmptyMap_isSkipped() throws JSONException {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class);
+        MockedStatic<WeldUtils> weldUtilsMock = Mockito.mockStatic(WeldUtils.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getSession()).thenReturn(mock(Session.class));
+
+      BusinessPartner bp = mock(BusinessPartner.class);
+      when(bp.getPurchasePricelist()).thenReturn(mock(PriceList.class));
+      ShipmentInOutLine pending = mockNoPoLine(BigDecimal.valueOf(5));
+      when(pending.getId()).thenReturn("rl-pending");
+      ShipmentInOutLine done = mockNoPoLine(BigDecimal.valueOf(7));
+      when(done.getId()).thenReturn("rl-done");
+      ShipmentInOut receipt = receiptNoPoWith(bp, pending, done);
+      Currency receiptCurrency = mock(Currency.class);
+      when(receipt.getEtgoCurrency()).thenReturn(receiptCurrency);
+      stubApInvoiceDocType(dal, mock(DocumentType.class));
+
+      OBProvider provider = mock(OBProvider.class);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getDocumentNo()).thenReturn("AP-NOPO-3");
+      when(invoice.getCurrency()).thenReturn(receiptCurrency);
+      obProviderMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(Invoice.class)).thenReturn(invoice);
+      CreateInvoiceLinesFromProcess process = mock(CreateInvoiceLinesFromProcess.class);
+      weldUtilsMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(
+          CreateInvoiceLinesFromProcess.class)).thenReturn(process);
+
+      new CreatePurchaseInvoiceHandler().createFromReceiptNoPo(receipt,
+          Collections.singletonMap("rl-pending", new BigDecimal("2")));
+
+      org.mockito.ArgumentCaptor<JSONArray> captor = org.mockito.ArgumentCaptor.forClass(JSONArray.class);
+      verify(process).createInvoiceLinesFromDocumentLines(captor.capture(), any(),
+          eq(ShipmentInOutLine.class));
+      assertEquals(1, captor.getValue().length());
+      assertEquals("rl-pending", captor.getValue().getJSONObject(0).getString("id"));
+      assertEquals("2", captor.getValue().getJSONObject(0).getString("orderedQuantity"));
     }
   }
 }

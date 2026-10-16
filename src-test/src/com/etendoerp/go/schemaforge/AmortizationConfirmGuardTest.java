@@ -152,6 +152,14 @@ public class AmortizationConfirmGuardTest {
     assertRejected(response, "ETGO_AmortizationNoLines", "Has no amortization lines");
   }
 
+  /** ETP-5710: an MCP etendo_action call reaches the guard under the button's field name. */
+  @Test
+  public void testConfirmByFieldNameWithNoLinesIsRejected() {
+    amortization("N", Collections.emptyList());
+    NeoResponse response = AmortizationConfirmGuard.validateBeforeAction(actionContext("processed", RECORD_ID));
+    assertRejected(response, "ETGO_AmortizationNoLines", "Has no amortization lines");
+  }
+
   @Test
   public void testConfirmWithNullLinesIsRejected() {
     amortization("N", null);

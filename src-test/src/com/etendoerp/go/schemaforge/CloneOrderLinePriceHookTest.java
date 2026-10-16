@@ -153,4 +153,85 @@ public class CloneOrderLinePriceHookTest {
     verify(clonedLine1).setListPrice(new BigDecimal("30.00"));
     verify(clonedLine2).setListPrice(new BigDecimal("15.50"));
   }
+
+  // ── postCopy() — invoicing / delivery state that the core hook leaves behind ─────
+
+  /**
+   * The core hook zeroes the line quantities and the header delivered flag but copies the header
+   * "invoiced" flag and the line delivery / invoice dates, so a draft copy of a fully invoiced
+   * order would look invoiced.
+   */
+  @Test
+  public void testPostCopyResetsInvoicedFlagAndLineDates() throws Exception {
+    CloneRecordHook delegate = mock(CloneRecordHook.class);
+    Order original = mock(Order.class);
+    Order placeholder = mock(Order.class);
+    Order clone = mock(Order.class);
+    when(original.getOrderLineList()).thenReturn(new ArrayList<OrderLine>());
+    OrderLine clonedLine = mock(OrderLine.class);
+    List<OrderLine> cloneLines = new ArrayList<>();
+    cloneLines.add(clonedLine);
+    when(clone.getOrderLineList()).thenReturn(cloneLines);
+    when(delegate.postCopy(original, placeholder)).thenReturn(clone);
+
+    new CloneOrderLinePriceHook(delegate).postCopy(original, placeholder);
+
+    verify(clone).setReinvoice(false);
+    verify(clonedLine).setDateDelivered(null);
+    verify(clonedLine).setInvoiceDate(null);
+  }
+
+  /**
+   * The copy is a fresh record: it must not point at the source's related documents (the
+   * quotation it came from, the order it cancelled or replaced, a reversed invoice, the
+   * SO/PO counterpart line, the quotation line, a shipment line).
+   */
+  @Test
+  public void testPostCopyClearsLinksToOtherDocuments() throws Exception {
+    CloneRecordHook delegate = mock(CloneRecordHook.class);
+    Order original = mock(Order.class);
+    Order placeholder = mock(Order.class);
+    Order clone = mock(Order.class);
+    when(original.getOrderLineList()).thenReturn(new ArrayList<OrderLine>());
+    OrderLine clonedLine = mock(OrderLine.class);
+    List<OrderLine> cloneLines = new ArrayList<>();
+    cloneLines.add(clonedLine);
+    when(clone.getOrderLineList()).thenReturn(cloneLines);
+    when(delegate.postCopy(original, placeholder)).thenReturn(clone);
+
+    new CloneOrderLinePriceHook(delegate).postCopy(original, placeholder);
+
+    verify(clone).setQuotation(null);
+    verify(clone).setCancelledorder(null);
+    verify(clone).setCancelled(false);
+    verify(clone).setReplacedorder(null);
+    verify(clone).setReplacementorder(null);
+    verify(clone).setEtvfacReversedInvoice(null);
+    verify(clonedLine).setSOPOReference(null);
+    verify(clonedLine).setQuotationLine(null);
+    verify(clonedLine).setGoodsShipmentLine(null);
+    verify(clonedLine).setReplacedorderline(null);
+  }
+
+  /**
+   * The core hook moves the order date to today but copies the accounting date, so the copy would
+   * post with an accounting date earlier than its own order date. The copy's accounting date must
+   * equal its new order date.
+   */
+  @Test
+  public void testPostCopyAlignsAccountingDateWithNewOrderDate() throws Exception {
+    CloneRecordHook delegate = mock(CloneRecordHook.class);
+    Order original = mock(Order.class);
+    Order placeholder = mock(Order.class);
+    Order clone = mock(Order.class);
+    when(original.getOrderLineList()).thenReturn(new ArrayList<OrderLine>());
+    when(clone.getOrderLineList()).thenReturn(new ArrayList<OrderLine>());
+    java.util.Date today = new java.util.Date();
+    when(clone.getOrderDate()).thenReturn(today);
+    when(delegate.postCopy(original, placeholder)).thenReturn(clone);
+
+    new CloneOrderLinePriceHook(delegate).postCopy(original, placeholder);
+
+    verify(clone).setAccountingDate(today);
+  }
 }

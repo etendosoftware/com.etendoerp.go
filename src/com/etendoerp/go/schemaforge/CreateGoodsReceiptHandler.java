@@ -36,6 +36,9 @@ import org.openbravo.model.common.enterprise.Locator;
 import org.openbravo.model.common.order.Order;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 
+import com.etendoerp.go.schemaforge.util.DocumentStatusGuard;
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
+
 /**
  * NeoHandler that creates a Goods Receipt (ShipmentInOut) in Draft status
  * from a Purchase Order. Invoked as an ACTION endpoint via:
@@ -47,6 +50,24 @@ public class CreateGoodsReceiptHandler implements NeoHandler {
   private static final Logger log = LogManager.getLogger(CreateGoodsReceiptHandler.class);
   private static final String ACTION_NAME = "createGoodsReceipt";
   private static final String SPEC_PURCHASE_ORDER = "purchase-order";
+
+  /**
+   * What an agent reads about {@code createGoodsReceipt} on a purchase order (ETP-5709). The
+   * MCP publishes it and judges the call against it (no parameters); REST and the SPA do not
+   * validate against it.
+   */
+  static final NeoActionContract CONTRACT = NeoActionContract.write(ACTION_NAME,
+      "Creates a goods receipt in DRAFT (not completed) from the lines of this purchase order "
+          + "that are still pending receipt, and returns 201 with {id, documentNo}. Precondition: "
+          + "the order is completed (status CO), otherwise 400 naming its status. It is independent of createPurchaseInvoice: an order can be "
+          + "received without being invoiced, invoiced without being received, or both. Typical "
+          + "sequence for an order: documentAction (confirm) -> createGoodsReceipt -> "
+          + "createPurchaseInvoice. Quantities already covered by a receipt, including a draft "
+          + "one, are not duplicated: when nothing is pending the call answers 400 (naming the "
+          + "draft receipt when one covers everything) instead of creating another receipt. "
+          + "Complete the receipt afterwards with documentAction (docAction CO) on the "
+          + "goods-receipt spec.")
+      .withIdDescription("the id of the purchase order to receive");
 
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -78,9 +99,13 @@ public class CreateGoodsReceiptHandler implements NeoHandler {
         // OBDal.save(receipt) left an empty, orphaned receipt behind whenever the
         // order had zero pending lines (Hibernate flushes the managed header on
         // commit regardless of the 400 this method returns).
+        DocumentStatusGuard.requireCompleted(order.getDocumentNo(), order.getDocumentStatus(),
+            "Purchase order %s is not completed (status %s): complete it before creating a goods receipt");
         InOutLineFromOrderFactory.PendingLinesResult result =
-            InOutLineFromOrderFactory.resolvePendingLinesAndLocator(order,
-                "No pending lines to receive in this purchase order", this::findDefaultLocator);
+            InOutLineFromOrderFactory.resolvePendingLinesAndLocator(order, false,
+                "No pending lines to receive in this purchase order",
+                "All pending quantities of this purchase order are already in draft goods receipt %s",
+                this::findDefaultLocator);
 
         ShipmentInOut receipt = createReceiptHeader(order);
         OBDal.getInstance().save(receipt);

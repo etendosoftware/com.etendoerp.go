@@ -60,6 +60,7 @@ import org.openbravo.model.ad.ui.Tab;
 import com.etendoerp.go.schemaforge.CurrencyOptionsHandler;
 import com.etendoerp.go.schemaforge.NeoActionRecordGuard;
 import com.etendoerp.go.schemaforge.NeoExtensionDispatcher;
+import com.etendoerp.go.schemaforge.NeoExtensionRequest;
 import com.etendoerp.go.schemaforge.NeoExtensionResult;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoHandler;
@@ -651,6 +652,132 @@ class McpWindowDeclaredActionsTest {
         assertTrue(result.toString().contains("ran"), result.toString());
         dispatch.verify(() -> NeoExtensionDispatcher.dispatch(any()));
       }
+    }
+
+    // ── ETP-5710: the customization sees the button under the name the SPA posts ──
+
+    /**
+     * Runs {@code etendo_action} up to the customization and returns the context it receives. The
+     * dispatcher answers with a response, so nothing past it (the process) runs.
+     */
+    private NeoContext contextSeenBy(String action, String mcpConfig) throws Exception {
+      return contextSeenBy(action, mcpConfig, new JSONObject().put("docAction", "CO"));
+    }
+
+    private NeoContext contextSeenBy(String action, String mcpConfig, JSONObject parameters)
+        throws Exception {
+      current = entity("W", mcpConfig);
+      java.util.concurrent.atomic.AtomicReference<NeoContext> seen =
+          new java.util.concurrent.atomic.AtomicReference<>();
+      try (MockedStatic<NeoExtensionDispatcher> dispatch =
+               mockStatic(NeoExtensionDispatcher.class);
+          MockedStatic<NeoActionRecordGuard> guard = mockStatic(NeoActionRecordGuard.class)) {
+        guard.when(() -> NeoActionRecordGuard.refusalFor(any(), anyString())).thenReturn(null);
+        dispatch.when(() -> NeoExtensionDispatcher.dispatch(any())).thenAnswer(inv -> {
+          seen.set(inv.<NeoExtensionRequest>getArgument(0).context());
+          return new NeoExtensionResult(null, NeoResponse.ok(new JSONObject()), null);
+        });
+        JSONObject args = new JSONObject().put("entity", ENTITY).put("id", "INV-1")
+            .put("action", action).put("parameters", parameters);
+        new McpToolRouter().handleAction(SPEC, args);
+      }
+      assertNotNull(seen.get(), "the customization was reached for " + action);
+      return seen.get();
+    }
+
+    @ParameterizedTest(name = "typed as {0}")
+    @CsvSource({ "DocAction", "documentAction" })
+    @DisplayName("an AD button reaches the customization under its field name, whichever way it"
+        + " was typed")
+    void buttonReachesTheCustomizationUnderItsFieldName(String typed) throws Exception {
+      NeoContext seen = contextSeenBy(typed, null);
+
+      assertEquals("documentAction", seen.getFieldName());
+      assertEquals("INV-1", seen.getRecordId());
+      assertEquals("CO", seen.getRequestBody().getString("docAction"),
+          "the body is the agent's, untouched");
+      assertTrue(seen.isMcpOrigin());
+    }
+
+    @Test
+    @DisplayName("the button is still fired under the name the agent typed")
+    void buttonIsFiredUnderTheTypedName() throws Exception {
+      current = entity("W", null);
+      try (MockedStatic<NeoExtensionDispatcher> dispatch =
+               mockStatic(NeoExtensionDispatcher.class);
+          MockedStatic<NeoActionRecordGuard> guard = mockStatic(NeoActionRecordGuard.class)) {
+        guard.when(() -> NeoActionRecordGuard.refusalFor(any(), anyString())).thenReturn(null);
+        dispatch.when(() -> NeoExtensionDispatcher.dispatch(any())).thenReturn(
+            new NeoExtensionResult(null, null, null));
+        buttonMock.when(() -> NeoButtonActionHelper.executeButtonActionCore(any(), anyString(),
+            anyString(), any())).thenReturn(NeoResponse.ok(new JSONObject()));
+        supportMock.when(() -> McpToolRouterSupport.mapNeoResponseToActionResult(any()))
+            .thenReturn(new JSONObject());
+        JSONObject args = new JSONObject().put("entity", ENTITY).put("id", "INV-1")
+            .put("action", "DocAction");
+        try {
+          new McpToolRouter().handleAction(SPEC, args);
+        } catch (RuntimeException ignored) {
+          // the post-processing is not what this test is about
+        }
+        buttonMock.verify(() -> NeoButtonActionHelper.executeButtonActionCore(any(),
+            eq("INV-1"), eq("DocAction"), any()));
+      }
+    }
+
+    @Test
+    @DisplayName("a name that is no button of the entity reaches the customization as typed")
+    void unknownNameIsLeftAlone() throws Exception {
+      assertEquals("cloneRecord", contextSeenBy("cloneRecord", null).getFieldName());
+    }
+
+    @ParameterizedTest(name = "redirected button typed as {0}")
+    @CsvSource({ "EM_APRM_Addpayment", "aPRMAddpayment" })
+    @DisplayName("a redirected button is refused under either spelling, before any customization")
+    void redirectedButtonIsStillRefusedUnderEverySpelling(String typed) throws Exception {
+      current = entity("W", HIDE_PIS);
+      try (MockedStatic<NeoExtensionDispatcher> dispatch =
+               mockStatic(NeoExtensionDispatcher.class)) {
+        JSONObject args = new JSONObject().put("entity", ENTITY).put("id", "INV-1")
+            .put("action", typed);
+        McpRoutingException e = assertThrows(McpRoutingException.class,
+            () -> new McpToolRouter().handleAction(SPEC, args));
+        assertTrue(e.toEnvelope().getString(McpConstants.KEY_HINT).contains("registerPayment"));
+        dispatch.verify(() -> NeoExtensionDispatcher.dispatch(any()), never());
+      }
+    }
+
+    @ParameterizedTest(name = "hidden button typed as {0}")
+    @CsvSource({ "EM_Psd2_Generate_Bank_Payment", "psd2GenerateBankPayment" })
+    @DisplayName("a hidden button is refused under either spelling, before any customization")
+    void hiddenButtonIsStillRefusedUnderEverySpelling(String typed) throws Exception {
+      current = entity("W", HIDE_PIS);
+      try (MockedStatic<NeoExtensionDispatcher> dispatch =
+               mockStatic(NeoExtensionDispatcher.class)) {
+        JSONObject args = new JSONObject().put("entity", ENTITY).put("id", "INV-1")
+            .put("action", typed);
+        assertThrows(McpRoutingException.class,
+            () -> new McpToolRouter().handleAction(SPEC, args));
+        dispatch.verify(() -> NeoExtensionDispatcher.dispatch(any()), never());
+      }
+    }
+
+    @Test
+    @DisplayName("a declared contract keeps precedence: a contract describing the button is run"
+        + " under its declared name")
+    void declaredContractKeepsPrecedence() throws Exception {
+      Map<String, NeoActionContract> withButtonContract = new LinkedHashMap<>(contracts());
+      withButtonContract.put("documentAction",
+          NeoActionContract.write("documentAction", "Completes the document",
+              NeoActionContract.Param.optional("docAction", NeoActionContract.TYPE_STRING,
+                  "the value")));
+      when(handler.actionContracts()).thenReturn(withButtonContract);
+
+      assertEquals("documentAction", contextSeenBy("DocAction", null).getFieldName());
+      assertEquals("registerPayment", contextSeenBy("registerPayment", null,
+          new JSONObject().put("scheduleId", "S").put("actual_payment", 10)).getFieldName());
+      assertEquals("GET", contextSeenBy("currencyOptions", null, new JSONObject())
+          .getHttpMethod());
     }
   }
 
