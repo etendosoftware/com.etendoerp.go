@@ -56,10 +56,10 @@ import org.codehaus.jettison.json.JSONObject;
  * {@code negate()} flips, so applying them twice is harmless. That is deliberate: the same
  * quantity crosses several layers (action handler → shared import helper → CRUD handler) and a
  * caller that already normalised the value must not flip it back. It is the same reasoning
- * behind {@code ReturnShipmentUtils.addReturnInvoiceLines}' {@code abs().negate()} (ETP-4737).
+ * behind {@code ReturnInvoiceSupport.addReturnInvoiceLines}' {@code abs().negate()} (ETP-4737).
  *
  * <p><b>Not covered here:</b> the rectificative invoice line, which keeps NEGATIVE quantities
- * by functional decision — that lives in {@code ReturnShipmentUtils.addReturnInvoiceLines}.
+ * by functional decision — that lives in {@code ReturnInvoiceSupport.addReturnInvoiceLines}.
  */
 final class ReturnLineQuantityPolicy {
 
