@@ -19,11 +19,14 @@ package com.etendoerp.go.mcp;
 
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.Map;
 import java.util.Set;
 import java.util.function.Function;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONException;
+import org.codehaus.jettison.json.JSONObject;
 
 import com.etendoerp.go.schemaforge.NeoExtensionChannel;
 import com.etendoerp.go.schemaforge.NeoExtensionDispatcher;
@@ -90,6 +93,39 @@ final class McpServerResolvedFields {
   }
 
   /**
+   * The create-body directives the entity's customization declares
+   * ({@link NeoHandler#createDirectives()}, ETP-5676): request options its pre-hook reads and
+   * strips, so the write verbs must not report them unknown and {@code etendo_schema} publishes them.
+   *
+   * @param sfEntity the Schema Forge entity; {@code null} answers an empty map
+   * @return directive name to description, never {@code null}
+   */
+  static Map<String, String> createDirectives(SFEntity sfEntity) {
+    if (sfEntity == null) {
+      return Collections.emptyMap();
+    }
+    return declaredByCustomization(sfEntity, NeoExtensionSurface.CREATE,
+        NeoHandler::createDirectives, "create directive", Collections.emptyMap());
+  }
+
+  /**
+   * Adds the entity's {@link #createDirectives} to a {@code view:"create"} response as
+   * {@code directives}, omitting the key when there are none so every other entity's response is
+   * unchanged.
+   *
+   * @param createView the response being built, mutated in place
+   * @param sfEntity   the Schema Forge entity
+   * @throws JSONException if the response cannot be written
+   */
+  static void addCreateDirectives(JSONObject createView, SFEntity sfEntity) throws JSONException {
+    Map<String, String> directives = createDirectives(sfEntity);
+    if (createView == null || directives.isEmpty()) {
+      return;
+    }
+    createView.put("directives", new JSONObject(directives));
+  }
+
+  /**
    * The customization's own declaration, looked up quietly: a resolution failure must not break
    * {@code etendo_schema}, a create or a read for an entity that declares nothing. Answering empty
    * is the safe direction — on create the field stays {@code required}, on read an undeclared name
@@ -102,6 +138,12 @@ final class McpServerResolvedFields {
 
   private static Set<String> declaredByCustomization(SFEntity sfEntity,
       NeoExtensionSurface surface, Function<NeoHandler, Set<String>> declaration, String what) {
+    return declaredByCustomization(sfEntity, surface, declaration, what,
+        Collections.<String>emptySet());
+  }
+
+  private static <T> T declaredByCustomization(SFEntity sfEntity, NeoExtensionSurface surface,
+      Function<NeoHandler, T> declaration, String what, T none) {
     try {
       SFSpec spec = sfEntity.getETGOSFSpec();
       NeoHandler customization = NeoExtensionDispatcher.resolveOnly(NeoExtensionRequest.builder()
@@ -111,12 +153,12 @@ final class McpServerResolvedFields {
           .surface(surface)
           .channel(NeoExtensionChannel.MCP)
           .build());
-      Set<String> declared = customization != null ? declaration.apply(customization) : null;
-      return declared != null ? declared : Collections.emptySet();
+      T declared = customization != null ? declaration.apply(customization) : null;
+      return declared != null ? declared : none;
     } catch (Exception e) {
       log.warn("Could not read the {} fields of entity '{}': {}", what, sfEntity.getName(),
           e.getMessage());
-      return Collections.emptySet();
+      return none;
     }
   }
 }

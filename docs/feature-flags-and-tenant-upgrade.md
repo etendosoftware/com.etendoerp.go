@@ -70,6 +70,7 @@ Declare every flag's key as a constant on `GoFeatureFlags` and add its row here.
 | `bp-portal-link` | `etendo.go.flags.bp-portal-link` | `ETGO_FLAG_BP_PORTAL_LINK` | absent ⇒ **`false`** |
 | `onboarding-tenant-pool` | `etendo.go.flags.onboarding-tenant-pool` | `ETGO_FLAG_ONBOARDING_TENANT_POOL` | absent ⇒ **`false`** |
 | `mcp-modern-era-disabled` | `etendo.go.flags.mcp-modern-era-disabled` | `ETGO_FLAG_MCP_MODERN_ERA_DISABLED` | absent ⇒ **`false`** (dual-era on) |
+| `batch-callout-skip-disabled` | `etendo.go.flags.batch-callout-skip-disabled` | `ETGO_FLAG_BATCH_CALLOUT_SKIP_DISABLED` | absent ⇒ **`false`** (opt-in skip honoured) |
 | *(pattern for a new flag)* | `etendo.go.flags.<key>` | `ETGO_FLAG_<KEY>` | absent ⇒ **`false`** |
 
 `bp-portal-link` (ETP-5267) decides whether a `sales-invoice-send` email carries a link to the
@@ -251,6 +252,23 @@ level only (evaluated with an empty context) — never target it per account, be
 cache the era per origin and one origin serves every tenant. Its only caller is
 `McpRequestEra.modernEnabled()`. Retire it, keeping the modern path, once the modern era is stable in
 production. Full reference: [`neo-headless.md`](neo-headless.md) §4.12.30.
+
+### `batch-callout-skip-disabled` (ETP-5676) — backend-only kill switch, inverted
+
+Turns off the per-batch redundant-callout skip: `true` makes every `/sws/neo/batch` and
+`etendo_batch` request run every create-cascade callout, even one sent with
+`_skipRedundantCallouts: true`. Unset or `false` honours that opt-in; a batch without it never
+skips anything either way. Inverted for the same reason as `mcp-modern-era-disabled`: a missing
+flag or an unreachable control plane must not change behaviour. Environment level (empty context),
+evaluated once per batch; its only caller is `NeoBatchScope.calloutSkipKillSwitchOn()`. Retire it,
+keeping the skip, once the skip has run on real tenant imports without a wrong default. Full
+reference: [`neo-headless.md`](neo-headless.md) §4.3.6.
+
+To flip it: set it to `true` in ConfigCat (live within one 60 s poll). The local value
+(`etendo.go.flags.batch-callout-skip-disabled=true` in `Openbravo.properties`, or
+`ETGO_FLAG_BATCH_CALLOUT_SKIP_DISABLED=true`, plus a Tomcat restart) is read **only where no
+ConfigCat SDK key is configured**: `GoFeatureFlags#createProvider()` installs one provider, ConfigCat
+when `etendo.go.configcat.sdkKey` resolves, `PropertiesFeatureProvider` otherwise, never both.
 
 ## 2. The onboarding paywall
 

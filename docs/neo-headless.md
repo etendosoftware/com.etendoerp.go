@@ -889,6 +889,125 @@ Tests: `NeoDefaultTenantGuardTest` (applicability, ordering, batching across the
 unknown ids, lookup failure, null rows) and the `testResolveSqlDefaultOutcomeTenantGuard*` cases in
 `NeoDefaultsServiceTest`. Background and the list of known unscoped defaults:
 `etendo_schema_forge` `docs/etendo-ad/unscoped-sql-defaults.md`.
+#### 4.3.6 Bulk writes through `/sws/neo/batch` — per-row cost options (ETP-5676)
+
+Measured on the products import (1000 products in 10-row chunks, 4 operations per row —
+`product`, `salesPrice`, `purchasePrice`, `cost`): about 800 ms of server time per row, 515 ms of
+it in the product create. This section lists what a bulk caller can do about it and what the batch
+does on its own.
+
+**`_skipPricesSeed` — product create directive.** `ProductDefaultsHandler#afterHandle` gives every
+new product a zero-priced `M_ProductPrice` row on the default sales and purchase tariffs
+(ETP-5245), with a flush and core's price observer per row. A caller that writes the product's
+prices in the same request (the import does) made each price write twice: the seed inserted the
+zero row, and `ProductPriceHandler` then found it and updated it. The **product create body**
+takes `_skipPricesSeed` in one of two forms:
+
+- **An array of `M_PriceList_Version` ids** — what the products import sends: the versions the
+  same request prices the product on. The seed skips a direction only when the version it would
+  use for it (`PriceListVersionResolver#resolveDefaultVersionId`) is in the list; any other
+  default tariff is still seeded. In Etendo GO every price list has exactly one version, so
+  "version" and "tariff" are interchangeable here. The client and the server agree whenever the
+  tenant has a default-flagged list per direction — onboarding seeds exactly one ("Tarifa de venta
+  principal", "Tarifa de compra principal"). They can disagree only when a user has since cleared
+  the **Por defecto** flag, which the Tarifas window allows: with no default the server falls
+  back to any direction-matching list (org before `*`), the client to the first one the selector
+  returns. The other case is a sales flag the selector leaves null (the column is NOT NULL, so only
+  the selector can omit it): the client accepts that list for sales, the server does not. Matching
+  on the server's own answer keeps the server's tariff from being left without
+  a row in that case (review W2).
+- **`true`** — skip both directions unconditionally. Only for a caller that prices both of the
+  server's default tariffs itself.
+
+- Read and removed by the product customization's pre-hook (`handle()`), so it never reaches the
+  field filter or the DAL. It is honoured on create only: on a PATCH (REST) or `etendo_update`
+  (MCP) it is accepted, stripped and ignored — no seed runs on an update anyway.
+- Same behaviour on REST single (`POST /sws/neo/product/product`), REST batch and MCP
+  (`etendo_create`, `etendo_batch`): all three hand the same body to the same customization.
+- Declared through `NeoHandler#createDirectives()`. That declaration is what lets the MCP write
+  verbs accept it without reporting it in `unknownFields`, and what `etendo_schema(view:"create")`
+  publishes as `directives: { _skipPricesSeed: "<description>" }` on `product/product`. An entity
+  declaring no directive gets no `directives` key — its response is unchanged.
+- With `true` and no matching price operations the product stays unpriced on those tariffs —
+  the caller's choice. Absent (or `false`, or an empty array) keeps the ETP-5245 behaviour.
+
+**`_onlyReturnIds` — batch request option.** A top-level boolean next to `operations`
+(`POST /sws/neo/batch {"operations":[…], "_onlyReturnIds": true}`; MCP `etendo_batch` takes the
+same argument). Default `false`.
+
+The batch **response is ids-only either way** — `{committed, operations:[{id, ok, recordId}]}` — and
+`BatchService` reads nothing but `response.data[0].id` from each operation. What the option changes
+is the work done to produce a record nobody reads: with it, each create operation
+
+- skips `NeoLocatorIdentifierHelper.enrichLocatorIdentifiers` in
+  `NeoCrudHandler#executeJsonServiceAndBuildResponse` (it loads every `ETGO_SF_FIELD` of the entity
+  and resolves warehouse names, per row);
+- carries `NeoContext#isIdsOnlyResponse() == true`, so a customization can skip its own
+  display-only decoration — the product customization skips the `etgoHasCost` annotation and its
+  `M_Costing` lookup.
+
+`NeoFieldFilter#filterGetResponse` still runs: it renames DAL properties to the API keys a
+customization's `afterHandle` reads, so skipping it would change what the hook sees. No existing
+NEO field-projection parameter applies to a write (`fields:[…]` / `view` are MCP read projections,
+`_extraProperties` a GET-only key), so none was reused. The option is read once per request and kept
+in `NeoBatchScope`; it never affects REST single or MCP `etendo_create`.
+
+**Opt-in: `_skipRedundantCallouts` — a batch skips callouts whose output it already saw thrown
+away.** Optional top-level boolean of the batch request (REST body, MCP `etendo_batch` argument),
+default `false`: **without it every batch runs every callout, exactly as before ETP-5676.** The
+products/contacts import sends it; OCR and every other caller do not. The server-side kill switch
+`batch-callout-skip-disabled` (`GoFeatureFlags#FLAG_BATCH_CALLOUT_SKIP_DISABLED`, environment level,
+backend-only) overrides the request: unset or `false` honours the opt-in, `true` turns the skip off
+for every batch. It is evaluated once per batch, when `NeoBatchScope` opens.
+To flip it: set it to `true` in ConfigCat (live within one 60 s poll). The local value
+(`etendo.go.flags.batch-callout-skip-disabled=true` in `Openbravo.properties`, or
+`ETGO_FLAG_BATCH_CALLOUT_SKIP_DISABLED=true`, plus a Tomcat restart) is read **only where no
+ConfigCat SDK key is configured**: `GoFeatureFlags#createProvider()` installs one provider, ConfigCat
+when `etendo.go.configcat.sdkKey` resolves, `PropertiesFeatureProvider` otherwise, never both.
+
+The create path runs
+the callout of every field present in the body (§ callout cascade). On a uniform import most of that
+work is discarded: `SL_TaxCategory_Org` (trigger `organization`) proposes the tax category and the
+product category the body already carries, and `SL_Costing_Currency` proposes the currency the
+costing customization already put there. A proposal for a field the caller sent with a non-blank
+value, or for a field the customization suppresses (`NeoHandler#protectedCreateCalloutFields`,
+ETP-5350), is never merged — so running the callout changed nothing.
+
+Inside one batch request, `NeoCalloutDiscardMemory` (held by `NeoBatchScope`, opened and closed by
+`BatchService#executeBatch`) remembers the first outcome of each callout under the key
+**(tab, trigger field, trigger value, set of fields that would keep their value at that moment)**:
+
+- if every field the callout returned was in that kept set, and it raised **no message and no
+  error**, later operations of the same batch with the **same key** skip it;
+- if anything it returned was applied, or it reported a message, the key is marked "run" and is
+  never skipped afterwards — the first observation decides;
+- a row that leaves one of the kept fields blank, or triggers with another value, has another key
+  and runs the callout;
+- the memory exists only when the request opted in and the kill switch is off; it dies with the
+  request (`finally`), is never consulted outside `/sws/neo/batch` and `etendo_batch`, and is wired only into the create cascade (`NeoCrudHandler#executePostCalloutCascade`)
+  — not the `/defaults` endpoint, not the interactive callout, not `executeCalloutsForTriggerFields`.
+
+Logged as `[NEO-PERF] batch callout skip learned key=… outputs=…` when a key becomes skippable, and
+`[NEO-PERF] batch callout skipped N time(s) key=…` when the batch ends. The residual assumption is
+that a callout's **set of output fields** does not depend on a body field outside the key — true of
+the callouts measured here, and the reason this is confined to bulk writes. **Under that
+assumption** the persisted result is identical to running every callout, so this is not a channel
+divergence (§4.12.9); a callout whose output set does depend on such a field could be skipped on a
+row where it would have written something. REST batch and
+`etendo_batch` share it because both go through `BatchService`.
+
+**Automatic: per-batch lookup memo.** `NeoBatchScope.memoize(key, loader)` answers a lookup once per
+batch request and reuses it for every later operation; outside a batch it just calls the loader. Used
+for `BatchService`'s `findSpec` / `findEntity` (keyed by spec name, and spec id + entity name) and, in
+the product customization, for the default `uOM` / `taxCategory` (keyed by entity class + client) and
+the default sales/purchase tariff version (keyed by direction + client + current organisation). The
+rule for any new use: the key carries everything the lookup reads, namespaced by the owning class, so
+two operations that would get different answers never share one. The memo is dropped whenever the
+DAL session changes — a process committing mid-batch closes it, and a DAL object loaded before that
+is detached.
+When the batch closes it logs one line with the hits and misses per namespace (owning class +
+lookup name), e.g. `[NEO-PERF] batch memo BatchService|spec hits=39 misses=1, BatchService|entity
+hits=36 misses=4, …`; nothing is logged for a batch that memoized nothing.
 
 ### 4.4 Selectors (FK Dropdowns)
 

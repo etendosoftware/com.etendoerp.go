@@ -3851,7 +3851,7 @@ class NeoCrudHandlerTest {
            MockedStatic<DocTypeResolver> docTypeMock =
                Mockito.mockStatic(DocTypeResolver.class)) {
         cascadeMock.when(() -> NeoDefaultsCascadeHelper.executeCalloutCascade(
-            any(), any(), any(), any(), any(), any())).then(invocation -> null);
+            any(), any(), any(), any(), any(), any(), any())).then(invocation -> null);
         cascadeMock.when(() -> NeoDefaultsCascadeHelper.removeEmptyFkValues(
             any(), any())).then(invocation -> null);
         docTypeMock.when(() -> DocTypeResolver.reapplyDocTypeFromTabFilter(
@@ -3864,7 +3864,7 @@ class NeoCrudHandlerTest {
 
         // Verify cascade was called (no exception)
         cascadeMock.verify(() -> NeoDefaultsCascadeHelper.executeCalloutCascade(
-            any(), any(), any(), any(), any(), any()));
+            any(), any(), any(), any(), any(), any(), any()));
       }
     }
 
@@ -3883,7 +3883,7 @@ class NeoCrudHandlerTest {
            MockedStatic<DocTypeResolver> docTypeMock =
                Mockito.mockStatic(DocTypeResolver.class)) {
         cascadeMock.when(() -> NeoDefaultsCascadeHelper.executeCalloutCascade(
-            any(), any(), any(), any(), any(), any())).then(invocation -> null);
+            any(), any(), any(), any(), any(), any(), any())).then(invocation -> null);
         cascadeMock.when(() -> NeoDefaultsCascadeHelper.removeEmptyFkValues(
             any(), any())).then(invocation -> null);
         docTypeMock.when(() -> DocTypeResolver.reapplyDocTypeFromTabFilter(
@@ -3897,7 +3897,45 @@ class NeoCrudHandlerTest {
 
         // Should not throw NPE
         cascadeMock.verify(() -> NeoDefaultsCascadeHelper.executeCalloutCascade(
-            any(), any(), any(), any(), any(), any()));
+            any(), any(), any(), any(), any(), any(), any()));
+      }
+    }
+
+    /**
+     * ETP-5676: inside a batch the cascade gets the batch's callout-discard memory; outside one it
+     * gets {@code null}, so a single REST or MCP create runs every callout as before.
+     */
+    @Test
+    @DisplayName("Hands the cascade the batch's discard memory only inside a batch")
+    void passesTheBatchDiscardMemoryOnlyInsideABatch() throws Exception {
+      Tab adTab = mock(Tab.class);
+      JSONObject body = new JSONObject();
+      NeoContext context = buildContext("POST", null, adTab, mock(SFEntity.class), body, null);
+      Class<?>[] signature = { JSONObject.class, Tab.class, NeoContext.class,
+          java.util.Set.class, java.util.Set.class };
+
+      try (MockedStatic<NeoDefaultsCascadeHelper> cascadeMock =
+               Mockito.mockStatic(NeoDefaultsCascadeHelper.class);
+           MockedStatic<DocTypeResolver> docTypeMock =
+               Mockito.mockStatic(DocTypeResolver.class)) {
+        invokePrivate(handler, "executePostCalloutCascade", signature,
+            body, adTab, context, Collections.emptySet(), Collections.emptySet());
+        cascadeMock.verify(() -> NeoDefaultsCascadeHelper.executeCalloutCascade(
+            eq(context), eq(adTab), any(), any(), any(), any(),
+            org.mockito.ArgumentMatchers.isNull()));
+
+        NeoBatchScope previous = NeoBatchScope.open(false, true);
+        try {
+          NeoCalloutDiscardMemory memory = NeoBatchScope.currentCalloutDiscardMemory();
+          assertNotNull(memory);
+          invokePrivate(handler, "executePostCalloutCascade", signature,
+              body, adTab, context, Collections.emptySet(), Collections.emptySet());
+          cascadeMock.verify(() -> NeoDefaultsCascadeHelper.executeCalloutCascade(
+              eq(context), eq(adTab), any(), any(), any(), any(),
+              org.mockito.ArgumentMatchers.same(memory)));
+        } finally {
+          NeoBatchScope.close(previous);
+        }
       }
     }
 
