@@ -36,6 +36,8 @@ import org.openbravo.model.ad.ui.Tab;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
+import com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy;
 
 /**
  * Tests for {@link BatchService}.
@@ -238,9 +240,15 @@ public class BatchServiceTest {
     when(criteria.list()).thenReturn(java.util.List.of(entity));
 
     try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
-         MockedStatic<NeoServletSupport> supportMock = mockStatic(NeoServletSupport.class)) {
+         MockedStatic<NeoServletSupport> supportMock = mockStatic(NeoServletSupport.class);
+         MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class);
+         MockedStatic<NeoAccountingAccessPolicy> acctMock =
+             mockStatic(NeoAccountingAccessPolicy.class)) {
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
       supportMock.when(() -> NeoServletSupport.findSpec("monitor-verifactu")).thenReturn(spec);
+      accessMock.when(() -> NeoAccessHelper.hasWindowAccessForSpec(spec, "POST")).thenReturn(true);
+      acctMock.when(() -> NeoAccountingAccessPolicy.isEntityNameAllowed(spec, "header"))
+          .thenReturn(true);
 
       JSONObject result = service.executeBatch(ops);
 
@@ -250,6 +258,48 @@ public class BatchServiceTest {
       assertEquals(405, error.getInt("status"));
       // The detail carries the canonical REST wording produced by NeoMethodPolicy.
       assertTrue(error.toString().contains("POST not enabled for header"));
+    }
+  }
+
+  /** ETP-5772: REST /batch runs under admin mode, so it must check spec access itself. */
+  @Test
+  public void executeBatchRefusesCreateWithoutSpecAccess() throws Exception {
+    assertBatchCreateRefused(false, true);
+  }
+
+  /** ETP-5648: an accounting entity the role cannot see is refused even inside a batch. */
+  @Test
+  public void executeBatchRefusesCreateOnHiddenAccountingEntity() throws Exception {
+    assertBatchCreateRefused(true, false);
+  }
+
+  private void assertBatchCreateRefused(boolean specAccess, boolean accountingAllowed)
+      throws Exception {
+    BatchService service = BatchService.forBatchOnly();
+    JSONObject op = new JSONObject();
+    op.put("id", "op1");
+    op.put("spec", "product");
+    op.put("entity", "accounting");
+    op.put("body", new JSONObject());
+    JSONArray ops = new JSONArray().put(op);
+    SFSpec spec = mock(SFSpec.class);
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<NeoServletSupport> supportMock = mockStatic(NeoServletSupport.class);
+         MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class);
+         MockedStatic<NeoAccountingAccessPolicy> acctMock =
+             mockStatic(NeoAccountingAccessPolicy.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(mock(OBDal.class));
+      supportMock.when(() -> NeoServletSupport.findSpec("product")).thenReturn(spec);
+      accessMock.when(() -> NeoAccessHelper.hasWindowAccessForSpec(spec, "POST"))
+          .thenReturn(specAccess);
+      acctMock.when(() -> NeoAccountingAccessPolicy.isEntityNameAllowed(spec, "accounting"))
+          .thenReturn(accountingAllowed);
+
+      JSONObject result = service.executeBatch(ops);
+
+      assertFalse(result.getBoolean("committed"));
+      assertEquals(403, result.getJSONObject("error").getInt("status"));
     }
   }
 

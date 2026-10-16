@@ -45,6 +45,8 @@ import org.openbravo.service.json.DefaultJsonDataService;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
+import com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy;
 import com.etendoerp.go.schemaforge.util.NeoMethodPolicy;
 
 /**
@@ -720,6 +722,17 @@ public class BatchService {
    * single batch request, so all writes participate in one transaction.
    */
   private NeoResponse createRecord(SFSpec spec, String entityName, JSONObject body, String parentId) {
+    // ETP-5772: /batch runs under admin mode, so DAL's own write check is off; without this the
+    // REST batch reached any spec, unlike MCP etendo_batch (authorizeSpecAccess per op).
+    if (!NeoAccessHelper.hasWindowAccessForSpec(spec, NeoMethodPolicy.METHOD_POST)) {
+      return NeoResponse.error(HttpServletResponse.SC_FORBIDDEN,
+          "Access denied to spec for current role");
+    }
+    // ETP-5648: MCP etendo_batch swallows the findIncludedEntity refusal, so this is the gate.
+    if (!NeoAccountingAccessPolicy.isEntityNameAllowed(spec, entityName)) {
+      return NeoResponse.error(HttpServletResponse.SC_FORBIDDEN,
+          "Access denied to accounting entity for current role");
+    }
     SFEntity sfEntity = findEntity(spec.getId(), entityName);
     if (sfEntity == null) {
       return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND,

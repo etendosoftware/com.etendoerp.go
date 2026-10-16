@@ -76,6 +76,7 @@ import com.etendoerp.go.schemaforge.NeoSelectorService;
 import com.etendoerp.go.schemaforge.NeoVectorSearchEndpoint;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy;
 import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
 import com.etendoerp.go.schemaforge.util.NeoReportCallability;
 import com.etendoerp.go.schemaforge.util.NeoReportParam;
@@ -634,6 +635,33 @@ class McpToolRouterRouteTest {
       String text = result.getJSONArray("content").getJSONObject(0).getString("text");
       JSONObject body = new JSONObject(text);
       assertEquals(1, body.getInt("count"));
+    }
+
+    @Test
+    @DisplayName("etendo_discover hides a spec whose entities are all hidden accounting (ETP-5648)")
+    @SuppressWarnings("unchecked")
+    void discoverHidesAllAccountingSpec() throws Exception {
+      SFSpec spec = mockSpec();
+      OBCriteria<SFSpec> specCriteria = mock(OBCriteria.class);
+      when(mockOBDal.createCriteria(SFSpec.class)).thenReturn(specCriteria);
+      when(specCriteria.list()).thenReturn(List.of(spec));
+      supportMock.when(() -> McpToolRouterSupport.hasSpecAccess(eq(spec), eq("W")))
+          .thenReturn(true);
+      List<SFEntity> included = List.of(mock(SFEntity.class));
+      supportMock.when(() -> McpToolRouterSupport.listIncludedEntities(SPEC_ID))
+          .thenReturn(included);
+      try (MockedStatic<NeoAccountingAccessPolicy> policyMock =
+          mockStatic(NeoAccountingAccessPolicy.class)) {
+        policyMock.when(() -> NeoAccountingAccessPolicy.visibleEntities(included))
+            .thenReturn(Collections.emptyList());
+
+        JSONObject body = new JSONObject(router.route("etendo_discover", null, READ_SCOPES)
+            .getJSONArray("content").getJSONObject(0).getString("text"));
+
+        assertEquals(0, body.getInt("count"));
+      }
+      supportMock.verify(() -> McpToolRouterSupport.buildDiscoverSpec(
+          any(), any(), any(), any(), any()), never());
     }
 
     // ── IMP-53 (ETP-5639): etendo_discover({spec}) narrows the catalog ──────
