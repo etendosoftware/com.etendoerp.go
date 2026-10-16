@@ -100,15 +100,21 @@ public final class CompletedInvoiceWriteFence {
   private static final String FIELD_PROJECT = "project";
   private static final String FIELD_COSTCENTER = "costcenter";
   private static final String FIELD_DESCRIPTION = "description";
+  private static final String FIELD_AEATSII_ERROR_REGISTRAL = "aeatsiiErrorRegistral";
 
   /**
    * Header fields both invoice windows can still change once completed: the
    * {@code keepSaveWhenCompletedFields} of sales-invoice ({@code accountingDate}, {@code project},
    * {@code costcenter}) plus {@code description}, the window's {@code notesField}, which the notes
-   * panel saves on a completed document by design (ETP-5205).
+   * panel saves on a completed document by design (ETP-5205), plus {@code aeatsiiErrorRegistral}
+   * ("Modificada error registral") — a document already accepted by the SII must still be
+   * flaggable as corrected-by-registry-error after completion; that flag is what Classic's own
+   * reactivation gate requires before it allows reactivating an SII-accepted invoice at all
+   * (ETP-5745).
    */
   private static final Set<String> HEADER_EDITABLE_WHEN_COMPLETED = orderedSet(
-      FIELD_ACCOUNTING_DATE, FIELD_PROJECT, FIELD_COSTCENTER, FIELD_DESCRIPTION);
+      FIELD_ACCOUNTING_DATE, FIELD_PROJECT, FIELD_COSTCENTER, FIELD_DESCRIPTION,
+      FIELD_AEATSII_ERROR_REGISTRAL);
 
   /**
    * Purchase-invoice header: the above plus {@code orderReference} (the supplier's invoice
