@@ -5568,14 +5568,26 @@ Because the scan refuses anything after the root closes, such a value is a `400`
 path and this module never send it. An external REST client must send a single criteria object
 (combine conditions inside it, e.g. with an `AdvancedCriteria` `and`).
 
-Valid JSON within the depth limit parses exactly as before. **Out of scope by design:** JSON the
-server itself stored or produced (preferences, onboarding drafts, MCP config, `manualData`,
-re-serialized bodies), payloads whose signature is verified before parsing (checkout webhook,
-document download token), and responses from external providers.
-Trusted-input exemptions that stay on raw jettison: stored onboarding drafts and First Steps,
-saved filter presets, the fiscal models catalog, `FiscalDecl` `manualData`, and signature-verified
-webhooks. The checkout webhook payload and the batch path's re-serialized content still go through
-`NeoRequestBodyParser` as defense in depth.
+**Logging.** A refused text is logged once at `WARN`, with no stack trace and without the body —
+it is the client's mistake, not a server fault. `ERROR` with a stack trace stays for failures after
+a successful parse.
+
+**Not every parameter fails the request.** A malformed `valueMaps` on an export is ignored and the
+file is written with raw codes (§4.3 *File export*); the refusal above only removes the crash.
+
+**Two neighbouring type errors answer 4xx too (ETP-5475).** On `PUT /oauth2/clients/{id}` and
+`PUT /oauth2/api-keys/{id}`, an `isActive` that is not a boolean is a `400` `invalid_request`
+*Malformed request body* (it was a `500` with a stack trace). A Google sign-in credential that is
+not a parseable ID token is a `401` *Invalid Google credential* with one quiet `WARN`, as any other
+rejected credential.
+
+Valid JSON within the depth limit parses exactly as before. **Out of scope by design**, still on raw
+jettison: JSON the server itself stored or produced — the stored copy of onboarding drafts, First
+Steps, saved filter presets, the fiscal models catalog and `FiscalDecl` `manualData`, MCP config —,
+the document download token (its signature is verified before its payload is parsed), and responses
+from external providers. The *writes* of filter presets, the fiscal models catalog and `FiscalDecl`
+bodies come from the client and are bounded. The checkout webhook payload (signature-verified) and
+the batch path's re-serialized content still go through `NeoRequestBodyParser` as defense in depth.
 
 **For new code:** parse a client's JSON with `BoundedJsonParser.parseObject` / `parseArray`. A
 `catch (JSONException)` that means "server error" must catch `MalformedJsonException` first.
