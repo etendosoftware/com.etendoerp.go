@@ -23,7 +23,9 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.TreeMap;
+import java.util.TreeSet;
 
 import org.apache.commons.lang3.StringUtils;
 import org.openbravo.model.financialmgmt.tax.TaxRate;
@@ -84,6 +86,20 @@ final class Fiscal390BoxesCalculator {
 
     /** {@code {base, cuota}} of posted invoices of the year for those taxes (never null). */
     BigDecimal[] amounts(TaxReportParameter parameter, List<TaxRate> taxes);
+
+    /**
+     * Called each time a figure of {@code parameter} for {@code taxes} is placed in a box: its
+     * base went to {@code baseBox} and its cuota to {@code cuotaBox} (either may be
+     * {@code null}). The figure is the sum of the {@link #amounts} calls for those taxes — for a
+     * split element's total, of every rate placed. A figure that is skipped (zero, unsupported
+     * rate, negative volume base, no box) is never reported. No-op by default; the Facturas tab
+     * ({@link Fiscal390SourcesSupport}) uses it to attribute each invoice line to the boxes it
+     * feeds, so that the lines of a box add up to that box.
+     */
+    default void placed(TaxReportParameter parameter, List<TaxRate> taxes, Integer baseBox,
+        Integer cuotaBox) {
+      // no-op
+    }
   }
 
   /** Outcome of {@link #compute}. */
@@ -91,6 +107,8 @@ final class Fiscal390BoxesCalculator {
     final Map<Integer, BigDecimal> boxes = new TreeMap<>();
     final Fiscal390DerivedBoxes.InvoiceFigures figures = new Fiscal390DerivedBoxes.InvoiceFigures();
     final List<Map<String, String>> warnings = new ArrayList<>();
+    /** The boxes filled from invoices (before the derived ones are added), ascending. */
+    final Set<Integer> invoiceBoxes = new TreeSet<>();
     String mode;
   }
 
@@ -111,6 +129,7 @@ final class Fiscal390BoxesCalculator {
     for (Map.Entry<Integer, BigDecimal> e : raw.entrySet()) {
       r.boxes.put(e.getKey(), e.getValue().setScale(2, RoundingMode.HALF_UP));
     }
+    r.invoiceBoxes.addAll(raw.keySet());
     r.mode = Fiscal390DerivedBoxes.apply(r.boxes, r.figures, inputs);
     return r;
   }
@@ -134,7 +153,7 @@ final class Fiscal390BoxesCalculator {
         if (isZero(amounts)) {
           continue;
         }
-        place(raw, r, p, element, Fiscal390BoxLayout.TIPO_X, amounts, null);
+        place(engine, raw, r, p, taxes, element, Fiscal390BoxLayout.TIPO_X, amounts, null);
         if (deductible) {
           r.figures.deductibleCuotas = r.figures.deductibleCuotas.add(amounts[1]);
         }
@@ -147,6 +166,7 @@ final class Fiscal390BoxesCalculator {
       List<TaxRate> taxes, boolean deductible, Map<Integer, BigDecimal> raw, Result r) {
     BigDecimal totalBase = BigDecimal.ZERO;
     BigDecimal totalCuota = BigDecimal.ZERO;
+    List<TaxRate> placedTaxes = new ArrayList<>();
     for (Map.Entry<BigDecimal, List<TaxRate>> byRate : splitByRate(taxes).entrySet()) {
       BigDecimal[] amounts = engine.amounts(p, byRate.getValue());
       if (isZero(amounts)) {
@@ -157,7 +177,8 @@ final class Fiscal390BoxesCalculator {
         r.warnings.add(warning(WARNING_UNSUPPORTED_RATE, p, byRate.getKey()));
         continue;
       }
-      place(raw, r, p, element, tipo, amounts, byRate.getKey());
+      place(engine, raw, r, p, byRate.getValue(), element, tipo, amounts, byRate.getKey());
+      placedTaxes.addAll(byRate.getValue());
       totalBase = totalBase.add(amounts[0]);
       totalCuota = totalCuota.add(amounts[1]);
       if (ELEMENT_RECARGO.equals(element)) {
@@ -167,7 +188,7 @@ final class Fiscal390BoxesCalculator {
     boolean withTotal = Boolean.TRUE.equals(p.isAeat390Istotal())
         && (totalBase.signum() != 0 || totalCuota.signum() != 0);
     if (withTotal) {
-      place(raw, r, p, element, Fiscal390BoxLayout.TOTAL,
+      place(engine, raw, r, p, placedTaxes, element, Fiscal390BoxLayout.TOTAL,
           new BigDecimal[] { totalBase, totalCuota }, null);
     }
     // calculateSumDeducciones reads a split element's Total — absent when not aeat390Istotal.
@@ -200,7 +221,7 @@ final class Fiscal390BoxesCalculator {
         continue;
       }
       if (Boolean.TRUE.equals(p.isAeat390IsBIAndCuota())) {
-        place(raw, r, p, element, Fiscal390BoxLayout.TIPO_X, amounts, null);
+        place(engine, raw, r, p, taxes, element, Fiscal390BoxLayout.TIPO_X, amounts, null);
         continue;
       }
       Integer box = Fiscal390BoxLayout.box(element);
@@ -209,6 +230,7 @@ final class Fiscal390BoxesCalculator {
         continue;
       }
       raw.merge(box, amounts[0], BigDecimal::add);
+      engine.placed(p, taxes, box, null);
       if (volume) {
         BigDecimal signed = Fiscal390DerivedBoxes.VOLUME_SUBTRACTED_BOXES.contains(box)
             ? amounts[0].negate() : amounts[0];
@@ -217,8 +239,10 @@ final class Fiscal390BoxesCalculator {
     }
   }
 
-  private static void place(Map<Integer, BigDecimal> raw, Result r, TaxReportParameter p,
-      String element, String tipo, BigDecimal[] amounts, BigDecimal rate) {
+  @SuppressWarnings("java:S107") // the walk's whole state; a holder object would only hide it
+  private static void place(Engine engine, Map<Integer, BigDecimal> raw, Result r,
+      TaxReportParameter p, List<TaxRate> taxes, String element, String tipo, BigDecimal[] amounts,
+      BigDecimal rate) {
     Integer baseBox = Fiscal390BoxLayout.box(element, tipo, Fiscal390BoxLayout.BI);
     Integer cuotaBox = Fiscal390BoxLayout.box(element, tipo, Fiscal390BoxLayout.CUOTA);
     if (baseBox == null && cuotaBox == null) {
@@ -231,6 +255,7 @@ final class Fiscal390BoxesCalculator {
     if (cuotaBox != null) {
       raw.merge(cuotaBox, amounts[1], BigDecimal::add);
     }
+    engine.placed(p, taxes, baseBox, cuotaBox);
   }
 
   /**

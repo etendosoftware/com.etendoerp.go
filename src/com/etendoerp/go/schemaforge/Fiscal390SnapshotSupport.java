@@ -27,8 +27,8 @@ import org.codehaus.jettison.json.JSONObject;
  *
  * <p>The payload is fixed-size (no per-invoice arrays yet), so the snapshot keeps it whole —
  * including {@code taxReport}, which is how a submitted declaration records the report (and so
- * the layout/class) its figures were computed with. A future per-invoice drilldown plugs in
- * through {@link #excludedLists}, exactly like Modelo 303's {@code sources}.
+ * the layout/class) its figures were computed with. The per-invoice drilldown is its own
+ * endpoint ({@link Fiscal390SourcesSupport}), so it never enters this payload or the snapshot.
  *
  * <p>The live payload uses the inputs stored on the declaration ({@code manualData.aeatInputs}):
  * the snapshot is taken when the declaration is presented, from what was saved by then.
@@ -55,7 +55,8 @@ class Fiscal390SnapshotSupport implements FiscalSnapshotSupport {
    *   "mode":    "liquidation" | "territory",
    *   "taxReport": { "searchKey": "AEAT390_2025_Y", "layoutYear": 2025, "fallback": true },
    *   "inputs":  { "&lt;AEAT390 input key&gt;": "&lt;amount&gt;", ... },
-   *   "warnings": [ { "code": "UNSUPPORTED_RATE"|"NO_BOX", "parameter": "...", "rate": "..." } ] }
+   *   "warnings": [ { "code": "UNSUPPORTED_RATE"|"NO_BOX", "parameter": "...", "rate": "..." } ],
+   *   "invoiceBoxes": [ 1, 3, ... ] }   // boxes filled from invoices: the Facturas tab can list them
    * </pre>
    */
   static JSONObject buildResponse(Fiscal390BoxesCalculator.Result result,
@@ -93,6 +94,7 @@ class Fiscal390SnapshotSupport implements FiscalSnapshotSupport {
     root.put("taxReport", report);
     root.put("inputs", inputsJson);
     root.put("warnings", warnings);
+    root.put("invoiceBoxes", new JSONArray(result.invoiceBoxes));
     return root;
   }
 
