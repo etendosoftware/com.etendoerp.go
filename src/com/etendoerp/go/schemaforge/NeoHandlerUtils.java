@@ -156,7 +156,10 @@ final class NeoHandlerUtils {
     if (docTypeId != null && !docTypeId.isEmpty()) {
       try {
         CSResponse cs = DocumentNoData.nextDocType(conn, docTypeId, clientId, "Y");
-        if (cs != null && "1".equals(cs.exito) && StringUtils.isNotBlank(cs.razon)) {
+        // AD_Sequence_DocType returns only the number (razon); the generated wrapper never sets
+        // exito, so testing it would reject every doctype sequence and silently fall through to the
+        // table sequence, after having already consumed a doctype number (ETP-5709).
+        if (cs != null && StringUtils.isNotBlank(cs.razon)) {
           return cs.razon;
         }
       } catch (Exception ex) {
@@ -304,7 +307,7 @@ final class NeoHandlerUtils {
    * result is absent, collect the ids, bail when empty, loop the rows, return
    * {@code NeoResponse.ok(previousResult.getBody())}, log-and-passthrough on failure — was
    * byte-identical in three handlers ({@code MatchedInvoiceHandler},
-   * {@code PaymentScheduleDetailHandler}, {@code BinContentsHandler}) and tripped
+   * {@code PaymentScheduleDetailHandler} and a former bin-contents handler) and tripped
    * SonarQube's duplicated-lines-on-new-code gate, the same way
    * {@link #enrichLinesWithProductCode} was extracted before it.
    *

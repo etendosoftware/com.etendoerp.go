@@ -40,7 +40,6 @@ import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBDateUtils;
 import org.openbravo.erpCommon.utility.OBError;
-import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.DocumentType;
@@ -372,7 +371,7 @@ final class AddPaymentService {
       String docBaseType = docType.getDocumentCategory();
       if (!FIN_Utility.isPeriodOpen(org.getClient().getId(), docBaseType, org.getId(),
           OBDateUtils.formatDate(paymentDate))) {
-        throw new OBException(OBMessageUtils.messageBD("PeriodNotAvailable"));
+        throw new MessageKeyedException("PeriodNotAvailable");
       }
     } catch (OBException e) {
       throw e;

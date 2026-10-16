@@ -45,7 +45,6 @@ import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBDateUtils;
 import org.openbravo.erpCommon.utility.OBError;
-import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.invoice.Invoice;
@@ -173,7 +172,7 @@ public final class PaymentRegistrationService {
           isReceipt);
       return builtPaymentResponse(payment);
     } catch (OBException e) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, e);
     }
   }
 
@@ -1040,7 +1039,7 @@ public final class PaymentRegistrationService {
 
       if (!FIN_Utility.isPeriodOpen(invoice.getClient().getId(), docBaseType,
           invoice.getOrganization().getId(), strDate)) {
-        throw new OBException(OBMessageUtils.messageBD("PeriodNotAvailable"));
+        throw new MessageKeyedException("PeriodNotAvailable");
       }
     } catch (OBException e) {
       throw e;

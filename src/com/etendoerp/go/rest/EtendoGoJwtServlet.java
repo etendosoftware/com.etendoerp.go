@@ -39,6 +39,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.time.Instant;
+import java.time.LocalDate;
 
 import javax.servlet.http.Cookie;
 import javax.servlet.http.HttpServletRequest;
@@ -95,6 +96,8 @@ import com.etendoerp.go.onboarding.OnboardingForceTestModeService;
 import com.etendoerp.go.onboarding.OnboardingFiscalDataSetupService;
 import com.etendoerp.go.onboarding.OnboardingOrgInfoService;
 import com.etendoerp.go.onboarding.OnboardingMarkOrgReadyService;
+import com.etendoerp.go.onboarding.CalendarReviewService;
+import com.etendoerp.go.onboarding.OnboardingInitialPeriodStateService;
 import com.etendoerp.go.onboarding.OnboardingPeriodControlService;
 import com.etendoerp.go.onboarding.OnboardingCostingScheduleService;
 import com.etendoerp.go.onboarding.OnboardingWarehouseAddressService;
@@ -108,6 +111,7 @@ import com.etendoerp.go.onboarding.OnboardingSequenceGeneratorService;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.data.AccountIdentity;
 import com.etendoerp.go.schemaforge.email.EmailContractCommandSupport;
+import com.etendoerp.go.schemaforge.util.OwnerSupport;
 import com.etendoerp.go.session.GoSessionAuthResult;
 import com.etendoerp.go.session.GoSessionAuthenticator;
 import com.etendoerp.go.session.GoLegacyBearer;
@@ -121,6 +125,7 @@ import com.etendoerp.go.session.SessionRoleRevokedException;
 import com.auth0.jwt.JWT;
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.etendoerp.go.usageevents.SessionLoginUsage;
+import com.etendoerp.go.schemaforge.util.OwnerSupport;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
@@ -296,6 +301,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String CONTRACT_NEW_ACCOUNT = "new-account";
   private static final String SSO_PREFIX = "/sso/";
   private static final String PATH_ONBOARDING_DRAFT = "/onboarding/draft";
+  /** ETP-5734 — opt-in query parameter of {@code GET /environments}. */
+  private static final String PARAM_DETAILS = "details";
   /** Maximum accepted age of a Stripe-Signature timestamp, per the provider's guidance. */
   private static final long CHECKOUT_WEBHOOK_TOLERANCE_SECONDS = 300;
   /** The event types that confirm a hosted-checkout payment; every other type is ignored. */
@@ -340,6 +347,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String[] FIRST_STEPS_IDS = { "company-data", "fiscal-config", FIELD_PRODUCTS,
       FIELD_CONTACTS, "invoice-sequence", "team" };
   private static final String PATH_ONBOARDING_COMPANY_DATA = "/onboarding/company-data";
+  private static final String PATH_CALENDAR_REVIEW = "/onboarding/calendar-review";
   private static final String FIELD_COMPANY_DATA = "companyData";
 
   OnboardingDatasetImportService onboardingDatasetImportService = new OnboardingDatasetImportService();
@@ -350,6 +358,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       new OnboardingAccountingWiringService();
   OnboardingPeriodControlService onboardingPeriodControlService =
       new OnboardingPeriodControlService();
+  OnboardingInitialPeriodStateService onboardingInitialPeriodStateService =
+      new OnboardingInitialPeriodStateService();
+  CalendarReviewService calendarReviewService = new CalendarReviewService();
   OnboardingSequenceGeneratorService onboardingSequenceGeneratorService =
       new OnboardingSequenceGeneratorService();
   OnboardingMarkOrgReadyService onboardingMarkOrgReadyService =
@@ -466,6 +477,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleGetCompanyData(request, response);
     } else if (isPath(path, "/demo-data-transfer")) {
       handleDemoDataTransferStatus(request, response);
+    } else if (isPath(path, PATH_CALENDAR_REVIEW)) {
+      handleCalendarReviewState(request, response);
     } else if (isPath(path, "/environments")) {
       handleEnvironments(request, response);
     } else {
@@ -673,6 +686,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleBillingPortal(request, response);
     } else if (isPath(path, "/demo-data-transfer/retry")) {
       handleDemoDataTransferRetry(request, response);
+    } else if (isPath(path, PATH_CALENDAR_REVIEW + "/confirm")) {
+      handleCalendarReviewAction(request, response, false);
+    } else if (isPath(path, PATH_CALENDAR_REVIEW + "/regenerate")) {
+      handleCalendarReviewAction(request, response, true);
     } else if (isPath(path, "/checkout/sessions")) {
       handleCheckoutSession(request, response);
     } else if (isPath(path, "/company-invitations")) {
@@ -1092,11 +1109,13 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       OBContext.setAdminMode(true);
       try {
         TenantEnvironmentLifecycleService.EnvironmentSnapshot snapshot = null;
+        String clientId = null;
         if (purchase.getCreatedClient() != null) {
-          snapshot = tenantEnvironmentLifecycleService.resolve(purchase.getCreatedClient().getId());
+          clientId = purchase.getCreatedClient().getId();
+          snapshot = tenantEnvironmentLifecycleService.resolve(clientId);
         }
         writeResponse(response, HttpServletResponse.SC_OK,
-            buildBillingSubscriptionJson(live, snapshot));
+            buildBillingSubscriptionJson(live, snapshot, clientId));
       } finally {
         OBContext.restorePreviousMode();
       }
@@ -1140,7 +1159,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
   private JSONObject buildBillingSubscriptionJson(
       StripeCustomerPortalService.SubscriptionDetail live,
-      TenantEnvironmentLifecycleService.EnvironmentSnapshot snapshot) throws JSONException {
+      TenantEnvironmentLifecycleService.EnvironmentSnapshot snapshot, String clientId)
+      throws JSONException {
     Instant graceEndsAt = null;
     int graceDaysRemaining = 0;
     if (snapshot != null
@@ -1161,6 +1181,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     result.put("cancelAtPeriodEnd", live.isCancelAtPeriodEnd());
     result.put("graceEndsAt", graceEndsAt == null ? JSONObject.NULL : graceEndsAt.toString());
     result.put("graceDaysRemaining", graceDaysRemaining);
+    // ETP-5734 — the company the subscription pays for, so "Mis empresas" can put the live
+    // renewal date on that company's row. Additive: existing consumers ignore it.
+    result.put(FIELD_CLIENT_ID, clientId == null ? JSONObject.NULL : clientId);
     return result;
   }
 
@@ -2927,6 +2950,90 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     });
   }
 
+  /**
+   * GET /sws/go/onboarding/calendar-review (ETP-5577) — the accounting calendar review state of
+   * the session's tenant (see {@link CalendarReviewService#state}), plus {@code isOwner}: any user
+   * of the tenant may read it (the posting-error guidance tells non-owners to ask the owner), only
+   * the owner may act on it.
+   */
+  private void handleCalendarReviewState(HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    runWithAuthenticatedContext(request, response, "get calendar review", authenticated -> {
+      TenantSession session = resolveTenantSession(request, response, authenticated);
+      if (session == null) return;
+      JSONObject result = calendarReviewService.state(session.clientId, LocalDate.now());
+      result.put("isOwner", tenantOwnerUserId(request, authenticated, session.clientId) != null);
+      writeSuccessStatus(response, result);
+    });
+  }
+
+  /**
+   * POST /sws/go/onboarding/calendar-review/confirm and …/regenerate (ETP-5577). Owner of THIS
+   * tenant only: owning another environment of the account is not enough, regenerate deletes the
+   * calendar. Regenerate takes {@code {"fiscalYearStart": "JANUARY|APRIL|JULY|OCTOBER"}} and
+   * answers 409 when anything already depends on the calendar.
+   */
+  private void handleCalendarReviewAction(HttpServletRequest request,
+      HttpServletResponse response, boolean regenerate) throws IOException {
+    runWithAuthenticatedContext(request, response, "calendar review", authenticated -> {
+      TenantSession session = resolveTenantSession(request, response, authenticated);
+      if (session == null) return;
+      String userId = tenantOwnerUserId(request, authenticated, session.clientId);
+      if (userId == null) {
+        writeError(response, HttpServletResponse.SC_FORBIDDEN,
+            "Only the owner of this environment can review its calendar");
+        return;
+      }
+      if (regenerate) {
+        String fiscalYearStart = readJsonBody(request).optString("fiscalYearStart", "");
+        CalendarReviewService.Refusal refusal = calendarReviewService.regenerate(
+            session.clientId, fiscalYearStart, userId, LocalDate.now());
+        if (refusal != null) {
+          EtendoGoDalHelper.rollbackDalChanges("calendar regenerate", null, log);
+          writeError(response, refusal.status, refusal.message);
+          return;
+        }
+      } else {
+        calendarReviewService.confirm(session.clientId, userId);
+      }
+      EtendoGoDalHelper.commitDalChanges("calendar review", log);
+      // Same shape as the GET: the caller is the owner, or it would have been refused above.
+      JSONObject result = calendarReviewService.state(session.clientId, LocalDate.now());
+      result.put("isOwner", true);
+      writeSuccessStatus(response, result);
+    });
+  }
+
+  /**
+   * The caller's {@code AD_User} in {@code clientId} when that user is the tenant's owner, else
+   * {@code null}. The user comes from the credential (the cookie session's environment user, or a
+   * legacy bearer's {@code user} claim), never from the request body.
+   */
+  private String tenantOwnerUserId(HttpServletRequest request, AuthenticatedAccount authenticated,
+      String clientId) {
+    String userId = null;
+    if (authenticated.sessionRecord != null) {
+      userId = authenticated.sessionRecord.getUserId();
+    } else {
+      DecodedJWT jwt = bearerTenantClaims(request);
+      userId = jwt == null ? null : jwt.getClaim("user").asString();
+    }
+    return ownerOfTenant(userId, clientId);
+  }
+
+  /**
+   * {@code userId} when that user belongs to {@code clientId} and is its owner, else {@code null}.
+   * Owning another environment of the same account does not count.
+   */
+  static String ownerOfTenant(String userId, String clientId) {
+    if (StringUtils.isBlank(userId)) {
+      return null;
+    }
+    User user = OBDal.getInstance().get(User.class, userId);
+    return user != null && user.getClient() != null && clientId.equals(user.getClient().getId())
+        && OwnerSupport.isOwner(userId) ? userId : null;
+  }
+
   /** Reclaims failed or stranded transfer work; payment and tenant provisioning are never repeated. */
   private void handleDemoDataTransferRetry(HttpServletRequest request,
       HttpServletResponse response) throws IOException {
@@ -3270,9 +3377,13 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * Returns 200 with environments linked to the account, each carrying its plan
    * ("free" | "productive"), plus the account email as the flag-targeting identity.
    * Links via AD_User.username matching the account email.
+   *
+   * <p>ETP-5734 — {@code ?details=true} also appends the per-company fields of
+   * {@link EnvironmentDetails}. Opt-in so the list every app load reads stays as cheap as before.
    */
   private void handleEnvironments(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
+    boolean withDetails = Boolean.parseBoolean(request.getParameter(PARAM_DETAILS));
     if (!hasAnyCredential(request)) {
       writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_AUTHORIZATION_HEADER);
       return;
@@ -3299,7 +3410,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       Map<String, Date> unfinishedPaidClients = findUnfinishedPaidClients(account);
       for (User environmentUser : environmentUsers) {
         if (!isUnfinishedPaidEnvironment(environmentUser.getClient(), unfinishedPaidClients)) {
-          addEnvironmentEntries(envArray, environmentUser);
+          addEnvironmentEntries(envArray, environmentUser, withDetails);
         }
       }
 
@@ -3326,17 +3437,32 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
   /** One entry per business organization of the user's client, or one without when it has none. */
   private static void addEnvironmentEntries(org.codehaus.jettison.json.JSONArray envArray,
-      User environmentUser) throws JSONException {
+      User environmentUser, boolean withDetails) throws JSONException {
     Client client = environmentUser.getClient();
+    JSONObject details = withDetails
+        ? EnvironmentDetails.resolve(client.getId(), environmentUser,
+            OwnerSupport.isOwner(environmentUser.getId()))
+        : null;
     List<Organization> organizations =
         EtendoGoJwtDalHelper.findNonStarOrganizations(client.getId());
     if (organizations.isEmpty()) {
-      envArray.put(EtendoGoJwtDalHelper.buildEnvironmentJson(client, null, environmentUser));
+      envArray.put(withEnvironmentDetails(
+          EtendoGoJwtDalHelper.buildEnvironmentJson(client, null, environmentUser), details));
       return;
     }
     for (Organization organization : organizations) {
-      envArray.put(EtendoGoJwtDalHelper.buildEnvironmentJson(client, organization, environmentUser));
+      envArray.put(withEnvironmentDetails(
+          EtendoGoJwtDalHelper.buildEnvironmentJson(client, organization, environmentUser),
+          details));
     }
+  }
+
+  private static JSONObject withEnvironmentDetails(JSONObject env, JSONObject details)
+      throws JSONException {
+    if (details != null && env != null) {
+      EnvironmentDetails.merge(env, details);
+    }
+    return env;
   }
 
   /**
@@ -3651,9 +3777,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     log.info("[ONBOARDING-PERF] phase=onboarding_residual mode={} correlationId={} clientId={} "
         + "elapsedMs={}", mode, correlationId, clientId,
         elapsedMillis(residualStartedAt));
-    if (!paidUpgrade) {
-      openDemoTrialPeriodsBestEffort(clientId, orgId, adminContext);
-    }
+    // Before completeCommittedOnboarding and the sample data, which needs a demo's open periods.
+    applyInitialPeriodStateBestEffort(clientId);
     completeCommittedOnboarding(accountId, accountEmail, onboardingRequest, clientId, paidUpgrade,
         preparation.provisioningClaim, demoSourceClientId);
     // ETP-5426: after the commit (a failure here can no longer undo the tenant) and before the
@@ -3717,6 +3842,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     } else if (!tenantEnvironmentLifecycleService.markDemoReady(clientId, Instant.now())) {
       throw new IllegalStateException("Could not initialize demo trial lifecycle");
     }
+    // ETP-5577: in the onboarding transaction, so the markers exist exactly when the tenant does.
+    onboardingInitialPeriodStateService.markPending(clientId, orgId, adminContext.adminUserId,
+        adminContext.adminRoleId, preparation.paidUpgrade);
     if (provisioningName != null) {
       // After every step that names something after the client, and in the final transaction,
       // so a failure leaves the client under its provisioning name for the retry to find.
@@ -3726,29 +3854,45 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
-   * ETP-5575 — opens a demo's fiscal periods through the end of its trial, pooled or classic. The
-   * chain only opens through the month the tenant was built, so a signup at the end of a month, or
-   * a pooled tenant built in an earlier month, could not post during the rest of its trial.
+   * ETP-5577 — applies the tenant's initial fiscal-period state (see
+   * {@link OnboardingInitialPeriodStateService}): a demo's periods through the end of its trial
+   * (ETP-5575); for a productive tenant, its signup years, all left never-opened until the owner
+   * reviews the calendar. Runs after the onboarding commit, and again on environment login while the
+   * state is still pending.
    *
-   * <p>Runs after the onboarding commit, in its own transaction, and never fails the onboarding:
-   * the tenant is already committed with the chain's window, so on any failure (the commit
-   * included, which is why it sits inside the try) this step rolls back only itself and the
-   * tenant keeps today's behaviour. The started/done markers make a step that never finished
-   * visible in the logs.
+   * <p>Runs in its own transaction and never fails the caller: the tenant is already committed, so
+   * on any failure (the commit included, which is why it sits inside the try) this step rolls back
+   * only itself and its pending marker survives for the next login. The started/done markers make a
+   * step that never finished visible in the logs.
    */
-  void openDemoTrialPeriodsBestEffort(String clientId, String orgId,
-      OnboardingProvisioningChain.AdminContext adminContext) {
-    log.info("ETP-5575 demo period window started for client {}", clientId);
+  void applyInitialPeriodStateBestEffort(String clientId) {
     try {
-      onboardingPeriodControlService.openDemoTrialWindow(clientId, orgId,
-          adminContext.adminUserId, adminContext.adminRoleId, resolveTrialStart(clientId),
-          tenantEnvironmentLifecycleService.configuration().getTrialDays());
-      EtendoGoDalHelper.commitDalChanges("demo period window", log);
-      log.info("ETP-5575 demo period window done for client {}", clientId);
+      if (onboardingInitialPeriodStateService.applyIfPending(clientId)) {
+        EtendoGoDalHelper.commitDalChanges("initial period state", log);
+        log.info("ETP-5577 initial period state done for client {}", clientId);
+      }
     } catch (Exception e) { // NOSONAR - best effort: the committed tenant must survive any failure
-      log.error("ETP-5575 demo period window failed for client {}", clientId, e);
-      EtendoGoDalHelper.rollbackDalChanges("demo period window", e, log);
+      log.error("ETP-5577 initial period state failed for client {}", clientId, e);
+      EtendoGoDalHelper.rollbackDalChanges("initial period state", e, log);
     }
+  }
+
+  /**
+   * ETP-5577 — retries a tenant's initial period state on environment login while it is still
+   * pending (its post-onboarding step failed). Last on the success path: the login's own work is
+   * committed first, so a failure here rolls back only the retry. Never throws.
+   */
+  void retryInitialPeriodStateOnLogin(String clientId) {
+    try {
+      if (clientId == null || !onboardingInitialPeriodStateService.isPending(clientId)) {
+        return;
+      }
+      EtendoGoDalHelper.commitDalChanges("environment login", log);
+    } catch (Exception e) { // NOSONAR - the login answer is already written
+      log.warn("ETP-5577 could not check the initial period state of client {}", clientId, e);
+      return;
+    }
+    applyInitialPeriodStateBestEffort(clientId);
   }
 
   /**
@@ -3785,18 +3929,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       sendProgress(writer, PROGRESS_SAMPLE_DATA, PROGRESS_WARNING,
           "Sample data could not be loaded");
     }
-  }
-
-  /**
-   * The demo's stored trial start ({@code ETGO_DemoTrialStartedAt}), which {@code markDemoReady}
-   * keeps from the first successful onboarding, so a resumed demo keeps its original window. Falls
-   * back to now when it cannot be read.
-   */
-  private Instant resolveTrialStart(String clientId) {
-    TenantEnvironmentLifecycleService.EnvironmentSnapshot snapshot =
-        tenantEnvironmentLifecycleService.resolve(clientId);
-    Instant startedAt = snapshot != null ? snapshot.getTrialStartedAt() : null;
-    return startedAt != null ? startedAt : Instant.now();
   }
 
   /**
@@ -4341,9 +4473,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         writeError(response, HttpServletResponse.SC_NOT_FOUND, "User not found");
         return;
       }
-      Role role = roleListData.getFirstRoleId() != null
-          ? OBDal.getInstance().get(Role.class, roleListData.getFirstRoleId())
-          : null;
+      String entryRoleId = roleListData.getEntryRoleId();
+      Role role = entryRoleId != null ? OBDal.getInstance().get(Role.class, entryRoleId) : null;
       String jwtToken = SecureWebServicesUtils.generateToken(user, role);
 
       JSONObject result = new JSONObject();
@@ -4351,6 +4482,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       result.put(FIELD_ROLE_LIST, roleListData.getRoleArray());
       writeResponse(response, HttpServletResponse.SC_OK, result);
       recordLegacyEnvironmentLogin(jwtToken, startNanos);
+      retryInitialPeriodStateOnLogin(user.getClient() != null ? user.getClient().getId() : null);
     } finally {
       OBContext.restorePreviousMode();
     }
@@ -5275,6 +5407,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       result.put(FIELD_CSRF_TOKEN, entered.getCsrfToken());
       writeResponse(response, HttpServletResponse.SC_OK, result);
       recordCookieEnvironmentLogin(entered.getRecord(), startNanos);
+      retryInitialPeriodStateOnLogin(entered.getRecord().getCtxClientId());
     } catch (RuntimeException e) {
       EtendoGoDalHelper.rollbackDalChanges("session environment", e, log);
       log.error("Database error during environment switch", e);
@@ -5319,14 +5452,17 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
   /**
    * Resolve and validate the requested role (and, if given, organization) for an environment
-   * switch: defaults to the user's first role when none is requested, checks the role is one of
-   * the user's own, and that the requested organization (if any) belongs to that role. Writes the
-   * matching error response and returns {@code null} when the request is invalid.
+   * switch: defaults to the user's entry role when none is requested (see
+   * {@link #defaultEntryRoleId}), checks the role is one of the user's own, and that the requested
+   * organization (if any) belongs to that role. Writes the matching error response and returns
+   * {@code null} when the request is invalid.
    */
   private Role resolveRequestedRole(EtendoGoJwtSupport.RoleListData roleListData,
       String requestedRoleId, String requestedOrgId, HttpServletResponse response)
       throws IOException, JSONException {
-    String roleId = requestedRoleId.isEmpty() ? roleListData.getFirstRoleId() : requestedRoleId;
+    String roleId = requestedRoleId.isEmpty()
+        ? defaultEntryRoleId(roleListData, requestedOrgId)
+        : requestedRoleId;
     JSONObject selectedRole = findRole(roleListData.getRoleArray(), roleId);
     if (roleId == null || selectedRole == null) {
       writeError(response, HttpServletResponse.SC_FORBIDDEN,
@@ -5344,6 +5480,26 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
           "Requested role is not available to this user");
     }
     return role;
+  }
+
+  /**
+   * ETP-5096 — the role an entry with no explicit role uses: the user's default role
+   * ({@link EtendoGoJwtSupport.RoleListData#getEntryRoleId()}), not the oldest one. The client
+   * always sends its first organization, so when the default role cannot open that organization
+   * the oldest role (the one entry used before) is kept: a user who could enter must not start
+   * getting a 403 because their default role is narrower.
+   */
+  private static String defaultEntryRoleId(EtendoGoJwtSupport.RoleListData roleListData,
+      String requestedOrgId) throws JSONException {
+    String entryRoleId = roleListData.getEntryRoleId();
+    if (requestedOrgId.isEmpty() || entryRoleId == null
+        || entryRoleId.equals(roleListData.getFirstRoleId())) {
+      return entryRoleId;
+    }
+    JSONObject entryRole = findRole(roleListData.getRoleArray(), entryRoleId);
+    return entryRole != null && roleContainsOrganization(entryRole, requestedOrgId)
+        ? entryRoleId
+        : roleListData.getFirstRoleId();
   }
 
   /**
