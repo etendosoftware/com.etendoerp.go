@@ -31,6 +31,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
@@ -56,6 +57,8 @@ final class NeoReturnReceiptService {
 
   private static final Logger log = LogManager.getLogger(NeoReturnReceiptService.class);
   private static final String ACTION_NAME = "createReturn";
+  static final String RETURN_ALREADY_EXISTS_CODE = "RETURN_ALREADY_EXISTS";
+  static final String RETURN_ALREADY_EXISTS_KEY = "ETGO_ReturnAlreadyExists";
 
   private NeoReturnReceiptService() {
   }
@@ -100,9 +103,9 @@ final class NeoReturnReceiptService {
           return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "No lines specified");
         }
 
-        if (hasExistingReturn(shipmentId)) {
-          return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
-              "A return already exists for shipment: " + shipmentId);
+        String existingReturnNo = findExistingReturnDocumentNo(shipmentId);
+        if (existingReturnNo != null) {
+          return returnAlreadyExists(source, existingReturnNo);
         }
 
         DocumentType docType = findReturnDocType(source, salesTransaction);
@@ -270,23 +273,63 @@ final class NeoReturnReceiptService {
     return results.isEmpty() ? null : results.get(0);
   }
 
-  private static boolean hasExistingReturn(String shipmentId) {
-    String sql = "SELECT COUNT(*) FROM m_inout io"
+  /**
+   * Builds the 409 sent when the shipment already has a return (ETP-5729 CP-12).
+   *
+   * <p>The message names both documents by their document number — never by internal ID — so
+   * it reads sensibly on every channel (REST, batch, MCP). The SPA does not show this English
+   * sentence: it renders its own locale from {@code messageKeys} + {@code messageParams}
+   * ({@code backendErrors.js} key route), the "prefer a structured code" rule of
+   * {@code docs/i18n-guide.md}. {@code ETGO_ReturnAlreadyExists} is a stable identity, not an
+   * AD_MESSAGE search key.
+   */
+  private static NeoResponse returnAlreadyExists(ShipmentInOut source, String existingReturnNo) {
+    String shipmentNo = StringUtils.defaultIfBlank(source.getDocumentNo(), "");
+    String message = StringUtils.isBlank(existingReturnNo)
+        ? "A return already exists for shipment " + shipmentNo + "."
+        : "A return (" + existingReturnNo + ") already exists for shipment " + shipmentNo + ".";
+    try {
+      JSONObject params = new JSONObject();
+      params.put("documentNo", shipmentNo);
+      params.put("returnDocumentNo", existingReturnNo);
+
+      JSONObject error = new JSONObject();
+      error.put("status", HttpServletResponse.SC_CONFLICT);
+      error.put("code", RETURN_ALREADY_EXISTS_CODE);
+      error.put("message", message);
+      error.put("messageKeys", new JSONArray().put(RETURN_ALREADY_EXISTS_KEY));
+      error.put("messageParams", params);
+
+      JSONObject body = new JSONObject();
+      body.put("error", error);
+      return NeoResponse.error(HttpServletResponse.SC_CONFLICT, body);
+    } catch (JSONException e) {
+      return NeoResponse.error(HttpServletResponse.SC_CONFLICT, message);
+    }
+  }
+
+  /**
+   * Returns the document number of an active return already created from {@code shipmentId}
+   * ({@code ""} when the row has none), or {@code null} when there is no such return.
+   */
+  private static String findExistingReturnDocumentNo(String shipmentId) {
+    String sql = "SELECT io.documentno FROM m_inout io"
         + " JOIN m_inoutline iol ON iol.m_inout_id = io.m_inout_id"
         + " WHERE iol.canceled_inoutline_id IN"
         + " (SELECT m_inoutline_id FROM m_inoutline WHERE m_inout_id = ?)"
-        + " AND io.isactive = 'Y'";
+        + " AND io.isactive = 'Y'"
+        + " ORDER BY io.created DESC LIMIT 1";
     try {
       Connection conn = OBDal.getInstance().getConnection();
       try (PreparedStatement ps = conn.prepareStatement(sql)) {
         ps.setString(1, shipmentId);
         try (ResultSet rs = ps.executeQuery()) {
-          return rs.next() && rs.getInt(1) > 0;
+          return rs.next() ? StringUtils.defaultString(rs.getString(1)) : null;
         }
       }
     } catch (Exception e) {
       log.warn("Could not check for existing return of {}: {}", shipmentId, e.getMessage());
-      return false;
+      return null;
     }
   }
 

@@ -17,6 +17,7 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
@@ -58,6 +59,9 @@ import org.openbravo.service.db.DalConnectionProvider;
  * <p>All tests run without a real DB. Static collaborators (OBDal, OBContext, Utility) are
  * replaced with Mockito mocks via try-with-resources {@code MockedStatic} blocks, following
  * the same pattern used throughout this test suite.
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoReturnReceiptService
+ * @covers com.etendoerp.go.schemaforge.CreateReturnReceiptHandler
  */
 public class NeoReturnReceiptServiceTest {
 
@@ -265,13 +269,13 @@ public class NeoReturnReceiptServiceTest {
   }
 
   /**
-   * When hasExistingReturn detects an existing return (Connection.prepareStatement throws so the
-   * private method returns false, meaning the code continues — but we verify the 409 branch by
-   * making the PreparedStatement succeed and return a count > 0).
+   * When findExistingReturnDocumentNo finds an existing return the method must return 409
+   * Conflict (ETP-5729 CP-12): a structured body with a stable code, the
+   * {@code ETGO_ReturnAlreadyExists} message key and both document numbers as params, and an
+   * English message that names the shipment by document number — never by internal ID.
    *
    * Strategy: mock the Connection returned by OBDal.getInstance().getConnection() so that
-   * executeQuery on the PreparedStatement delivers a ResultSet with count=1.  That causes
-   * hasExistingReturn to return true and the method must return 409 Conflict.
+   * executeQuery on the PreparedStatement delivers a ResultSet with one row.
    */
   @Test
   public void testCreateReturn_existingReturn_returns409() throws Exception {
@@ -295,10 +299,11 @@ public class NeoReturnReceiptServiceTest {
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
 
       ShipmentInOut source = mock(ShipmentInOut.class);
-      when(source.getId()).thenReturn("ship-1");
+      when(source.getId()).thenReturn("542A36A5BA994D92A9F1E1DF4780DD37");
+      when(source.getDocumentNo()).thenReturn("1000035");
       when(dal.get(eq(ShipmentInOut.class), eq("ship-1"))).thenReturn(source);
 
-      // Wire hasExistingReturn: Connection → PreparedStatement → ResultSet with count=1
+      // Wire findExistingReturnDocumentNo: Connection → PreparedStatement → ResultSet with a row
       Connection conn = mock(Connection.class);
       PreparedStatement ps = mock(PreparedStatement.class);
       java.sql.ResultSet rs = mock(java.sql.ResultSet.class);
@@ -306,7 +311,7 @@ public class NeoReturnReceiptServiceTest {
       when(conn.prepareStatement(anyString())).thenReturn(ps);
       when(ps.executeQuery()).thenReturn(rs);
       when(rs.next()).thenReturn(true);
-      when(rs.getInt(1)).thenReturn(1);
+      when(rs.getString(1)).thenReturn("1000006");
 
       obContextMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(inv -> null);
       obContextMock.when(OBContext::restorePreviousMode).thenAnswer(inv -> null);
@@ -315,6 +320,16 @@ public class NeoReturnReceiptServiceTest {
 
       assertEquals("Expected 409 when an existing return already exists",
           HttpServletResponse.SC_CONFLICT, result.getHttpStatus());
+      JSONObject error = result.getBody().getJSONObject("error");
+      assertEquals("RETURN_ALREADY_EXISTS", error.getString("code"));
+      assertEquals("ETGO_ReturnAlreadyExists", error.getJSONArray("messageKeys").getString(0));
+      assertEquals("1000035", error.getJSONObject("messageParams").getString("documentNo"));
+      assertEquals("1000006", error.getJSONObject("messageParams").getString("returnDocumentNo"));
+      String message = error.getString("message");
+      assertEquals("A return (1000006) already exists for shipment 1000035.", message);
+      assertFalse("The message must not leak the internal shipment ID",
+          message.contains("542A36A5BA994D92A9F1E1DF4780DD37"));
+      verify(dal, never()).save(any());
     }
   }
 
@@ -524,19 +539,19 @@ public class NeoReturnReceiptServiceTest {
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // hasExistingReturn — silent exception path
+  // findExistingReturnDocumentNo — silent exception path
   // ─────────────────────────────────────────────────────────────────────────────
 
   /**
-   * When the DB Connection throws on prepareStatement, hasExistingReturn silently returns false
+   * When the DB Connection throws on prepareStatement, findExistingReturnDocumentNo silently returns null
    * and the main flow continues past the 409 check. We verify this by confirming the response is
    * NOT 409 (it becomes 400 because no valid lines can be added without a real DB, which triggers
    * the OBException path).
    *
-   * This test exercises the exception-swallowing branch of hasExistingReturn.
+   * This test exercises the exception-swallowing branch of findExistingReturnDocumentNo.
    */
   @Test
-  public void testCreateReturn_hasExistingReturn_connectionThrows_continuesPastConflictCheck()
+  public void testCreateReturn_findExistingReturnDocumentNo_connectionThrows_continuesPastConflictCheck()
       throws Exception {
     JSONObject body = new JSONObject();
     body.put("lines", new JSONArray().put(
@@ -561,7 +576,7 @@ public class NeoReturnReceiptServiceTest {
       when(source.getId()).thenReturn("ship-1");
       when(dal.get(eq(ShipmentInOut.class), eq("ship-1"))).thenReturn(source);
 
-      // Connection.prepareStatement throws → hasExistingReturn catches it and returns false
+      // Connection.prepareStatement throws → findExistingReturnDocumentNo catches it and returns null
       Connection conn = mock(Connection.class);
       when(dal.getConnection()).thenReturn(conn);
       when(conn.prepareStatement(anyString())).thenThrow(new SQLException("simulated SQL error"));
@@ -576,7 +591,7 @@ public class NeoReturnReceiptServiceTest {
       NeoResponse result = NeoReturnReceiptService.createReturn(ctx, "goods-shipment", true, "C-");
 
       // Must NOT be 409 — the conflict check was bypassed due to the swallowed exception
-      assertEquals("Expected code other than 409 when hasExistingReturn swallows SQL error",
+      assertEquals("Expected code other than 409 when findExistingReturnDocumentNo swallows SQL error",
           HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
     }
   }
