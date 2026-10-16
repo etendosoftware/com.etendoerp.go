@@ -54,22 +54,45 @@ public final class NeoCurrencyTotals {
   /** Looks up the multiply rate from one currency id to another; {@code null} when none usable. */
   @FunctionalInterface
   public interface RateLookup {
+    /**
+     * Looks up a rate.
+     *
+     * @param fromCurrencyId the source {@code C_Currency_ID}
+     * @param toCurrencyId the target {@code C_Currency_ID}
+     * @return the multiply rate, or {@code null} when none is usable
+     */
     BigDecimal rate(String fromCurrencyId, String toCurrencyId);
   }
 
   /** The currency totals are converted into; {@code precision} rounds each converted subtotal. */
   public static class TargetCurrency {
+    /** The {@code C_Currency_ID} of the target currency. */
     public final String id;
+    /** The ISO code of the target currency. */
     public final String iso;
+    /** Standard precision (decimal places) every converted subtotal is rounded to. */
     public final int precision;
 
+    /**
+     * Creates a target currency.
+     *
+     * @param id the {@code C_Currency_ID}
+     * @param iso the ISO code
+     * @param precision the standard precision used to round converted subtotals
+     */
     public TargetCurrency(String id, String iso, int precision) {
       this.id = id;
       this.iso = iso;
       this.precision = precision;
     }
 
-    /** Whether the given currency is this one (by id, or by ISO code as a fallback). */
+    /**
+     * Whether the given currency is this one (by id, or by ISO code as a fallback).
+     *
+     * @param currencyId the {@code C_Currency_ID} to compare
+     * @param currencyIso the ISO code to compare when the ids differ
+     * @return {@code true} when the currency is this target
+     */
     public boolean matches(String currencyId, String currencyIso) {
       return StringUtils.equals(id, currencyId)
           || (StringUtils.isNotEmpty(iso) && StringUtils.equals(iso, currencyIso));
@@ -78,10 +101,20 @@ public final class NeoCurrencyTotals {
 
   /** An amount already summed in its original currency. */
   public static final class Subtotal {
+    /** The {@code C_Currency_ID} the amount is expressed in. */
     public final String currencyId;
+    /** The ISO code of that currency. */
     public final String currencyIso;
+    /** The summed amount in the original currency; never {@code null}. */
     public final BigDecimal total;
 
+    /**
+     * Creates a subtotal.
+     *
+     * @param currencyId the {@code C_Currency_ID} of the amount
+     * @param currencyIso the ISO code of the amount's currency
+     * @param total the summed amount; {@code null} is treated as zero
+     */
     public Subtotal(String currencyId, String currencyIso, BigDecimal total) {
       this.currencyId = currencyId;
       this.currencyIso = currencyIso;
@@ -94,9 +127,13 @@ public final class NeoCurrencyTotals {
    * the first subtotal's ISO code ({@code null} when there are none).
    */
   public static final class Converted {
+    /** The folded total, in the target currency (or the raw sum without a target). */
     public final BigDecimal total;
+    /** The ISO code the total is labelled with; may be {@code null}. */
     public final String iso;
+    /** Whether a non-zero foreign-currency subtotal was converted into the total. */
     public final boolean approximate;
+    /** ISO codes left out of the total because no usable rate exists. */
     public final List<String> missingRateCurrencies;
 
     Converted(BigDecimal total, String iso, boolean approximate, List<String> missing) {
@@ -110,6 +147,11 @@ public final class NeoCurrencyTotals {
   private final RateLookup rates;
   private final Map<String, BigDecimal> rateCache = new HashMap<>();
 
+  /**
+   * Creates a converter.
+   *
+   * @param rates the rate source, called at most once per currency pair
+   */
   public NeoCurrencyTotals(RateLookup rates) {
     this.rates = rates;
   }

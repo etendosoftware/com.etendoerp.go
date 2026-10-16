@@ -66,6 +66,12 @@ final class PaymentListSummary {
   /** Voided payments: left out of every bucket. */
   static final String VOID_STATUS = "RPVOID";
 
+  private static final String KEY_AMOUNT = "amount";
+  private static final String KEY_COUNT = "count";
+  private static final String KEY_TOTAL = "total";
+  private static final String KEY_APPROXIMATE = "approximate";
+  private static final String KEY_LABEL = "label";
+
   /** Server-side constant select for {@link NeoListAggregateQuery#groupBy}; alias {@code e}. */
   static final String SELECT = "e.currency.id, e.currency.iSOCode, e.paymentMethod.id, "
       + "e.paymentMethod.name, e.status, sum(e.amount), count(e.id)";
@@ -134,7 +140,7 @@ final class PaymentListSummary {
     JSONObject summary = new JSONObject();
     summary.put("orgCurrencyIso", total.iso == null ? JSONObject.NULL : total.iso);
     summary.put("rowCount", totalCount + pendingCount);
-    summary.put("total", bucket(total, totalCount));
+    summary.put(KEY_TOTAL, bucket(total, totalCount));
     summary.put("pending", bucket(pend, pendingCount));
     summary.put("draftCount", pendingCount);
     summary.put("byMethod", byMethod(deposited, org, converter));
@@ -144,9 +150,9 @@ final class PaymentListSummary {
 
   private static JSONObject bucket(Converted converted, long count) throws JSONException {
     JSONObject bucket = new JSONObject();
-    bucket.put("amount", converted.total);
-    bucket.put("approximate", converted.approximate);
-    bucket.put("count", count);
+    bucket.put(KEY_AMOUNT, converted.total);
+    bucket.put(KEY_APPROXIMATE, converted.approximate);
+    bucket.put(KEY_COUNT, count);
     JSONArray missing = new JSONArray();
     converted.missingRateCurrencies.forEach(missing::put);
     bucket.put("missingRateCurrencies", missing);
@@ -165,14 +171,14 @@ final class PaymentListSummary {
       Converted converted = converter.convert(subtotals(methodGroups), org);
       JSONObject row = new JSONObject();
       row.put("id", entry.getKey());
-      row.put("label", methodGroups.get(0).methodLabel);
-      row.put("amount", converted.total);
-      row.put("approximate", converted.approximate);
-      row.put("count", countOf(methodGroups));
+      row.put(KEY_LABEL, methodGroups.get(0).methodLabel);
+      row.put(KEY_AMOUNT, converted.total);
+      row.put(KEY_APPROXIMATE, converted.approximate);
+      row.put(KEY_COUNT, countOf(methodGroups));
       rows.add(row);
     }
-    rows.sort(Comparator.comparing((JSONObject r) -> (BigDecimal) r.opt("amount")).reversed()
-        .thenComparing(r -> r.optString("label", null), Comparator.nullsLast(String::compareTo)));
+    rows.sort(Comparator.comparing((JSONObject r) -> (BigDecimal) r.opt(KEY_AMOUNT)).reversed()
+        .thenComparing(r -> r.optString(KEY_LABEL, null), Comparator.nullsLast(String::compareTo)));
     return new JSONArray(rows);
   }
 
@@ -194,8 +200,8 @@ final class PaymentListSummary {
     for (Map.Entry<String, List<Group>> entry : entries) {
       JSONObject row = new JSONObject();
       row.put("currencyIso", entry.getValue().get(0).currencyIso);
-      row.put("total", amountOf(entry.getValue()));
-      row.put("count", countOf(entry.getValue()));
+      row.put(KEY_TOTAL, amountOf(entry.getValue()));
+      row.put(KEY_COUNT, countOf(entry.getValue()));
       rows.put(row);
     }
     return rows;
