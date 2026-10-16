@@ -66,6 +66,9 @@ import org.openbravo.module.taxreportlauncher.TaxReportParameter;
  *       ({@link Fiscal390PreloadSupport});</li>
  *   <li>{@code POST submit?year=&period=0A&id=} — the AEAT telematic filing
  *       ({@link Fiscal390SubmissionSupport}); POST-only, like {@code /fiscal303/submit};</li>
+ *   <li>{@code POST validate?year=&period=0A&id=} — recomputes the rule incidents of a draft
+ *       ({@link Fiscal390IncidentsSupport}); {@code generate} and {@code submit} refuse while a
+ *       blocking rule holds;</li>
  *   <li>{@code GET modified?year=&period=0A&since=} — the shared invoice-change probe.</li>
  * </ul>
  *
@@ -99,6 +102,7 @@ class Fiscal390BoxesHandler extends AbstractFiscalHandler {
   private final Fiscal390SubmissionSupport submissionSupport;
   private final Fiscal390SourcesSupport sourcesSupport;
   private final Fiscal390PreloadSupport preloadSupport;
+  private final Fiscal390IncidentsSupport incidentsSupport;
 
   Fiscal390BoxesHandler(NeoServlet servlet) {
     super(servlet);
@@ -107,6 +111,7 @@ class Fiscal390BoxesHandler extends AbstractFiscalHandler {
     this.submissionSupport = new Fiscal390SubmissionSupport(this);
     this.sourcesSupport = new Fiscal390SourcesSupport(this);
     this.preloadSupport = new Fiscal390PreloadSupport(this);
+    this.incidentsSupport = new Fiscal390IncidentsSupport(this);
   }
 
   @Override
@@ -114,18 +119,27 @@ class Fiscal390BoxesHandler extends AbstractFiscalHandler {
     return BOXES.equals(entityName) || GENERATE.equals(entityName) || MODIFIED.equals(entityName)
         || Fiscal390SubmissionSupport.SUBMIT.equals(entityName)
         || Fiscal390SourcesSupport.SOURCES.equals(entityName)
-        || Fiscal390PreloadSupport.PRELOAD.equals(entityName);
+        || Fiscal390PreloadSupport.PRELOAD.equals(entityName)
+        || Fiscal390IncidentsSupport.VALIDATE.equals(entityName);
   }
 
-  /** {@code submit} files the declaration with the AEAT: POST-only (see the 303 handler). */
+  /**
+   * {@code submit} files the declaration with the AEAT and {@code validate} rewrites its rule
+   * incidents: POST-only (see the 303 handler).
+   */
   @Override
   protected boolean allowsPost(String entityName) {
-    return Fiscal390SubmissionSupport.SUBMIT.equals(entityName);
+    return isWrite(entityName);
   }
 
   @Override
   protected boolean allowsGet(String entityName) {
-    return !Fiscal390SubmissionSupport.SUBMIT.equals(entityName);
+    return !isWrite(entityName);
+  }
+
+  private static boolean isWrite(String entityName) {
+    return Fiscal390SubmissionSupport.SUBMIT.equals(entityName)
+        || Fiscal390IncidentsSupport.VALIDATE.equals(entityName);
   }
 
   @Override
@@ -136,6 +150,21 @@ class Fiscal390BoxesHandler extends AbstractFiscalHandler {
   /** The file generation, shared by {@code generate} and the telematic submission. */
   Fiscal390GenerateSupport generateSupport() {
     return generateSupport;
+  }
+
+  /** The telematic filing (and its ownership check, shared with {@code validate}). */
+  Fiscal390SubmissionSupport submissionSupport() {
+    return submissionSupport;
+  }
+
+  /** The year's 303s, read by the preload and by the incident rules. */
+  Fiscal390PreloadSupport preloadSupport() {
+    return preloadSupport;
+  }
+
+  /** The incident rules: {@code validate} and the generate / submit guards. */
+  Fiscal390IncidentsSupport incidentsSupport() {
+    return incidentsSupport;
   }
 
   @Override
@@ -157,14 +186,19 @@ class Fiscal390BoxesHandler extends AbstractFiscalHandler {
           response.getWriter().write(out.toString());
         } else if (GENERATE.equals(entityName)) {
           guardNotAlreadySubmitted(orgId, year, period, MODEL);
-          generateSupport.handleGenerate(orgId, year, mergedInputs(year, period, request),
-              response);
+          Map<String, String> inputs = mergedInputs(year, period, request);
+          if (incidentsSupport().rejectGenerate(orgId, year, period, inputs, response)) {
+            return;
+          }
+          generateSupport().handleGenerate(orgId, year, inputs, response);
         } else if (Fiscal390SourcesSupport.SOURCES.equals(entityName)) {
           sourcesSupport.handle(orgId, year, period, request, response);
         } else if (Fiscal390PreloadSupport.PRELOAD.equals(entityName)) {
           preloadSupport.handle(orgId, year, period, request, response);
         } else if (Fiscal390SubmissionSupport.SUBMIT.equals(entityName)) {
           submissionSupport.handleSubmit(orgId, year, period, request, response);
+        } else if (Fiscal390IncidentsSupport.VALIDATE.equals(entityName)) {
+          incidentsSupport().handleValidate(orgId, year, request, response);
         } else {
           long sinceMs = Long.parseLong(request.getParameter(SINCE_KEY));
           handleModified(orgId, year, period, new Date(sinceMs), response);

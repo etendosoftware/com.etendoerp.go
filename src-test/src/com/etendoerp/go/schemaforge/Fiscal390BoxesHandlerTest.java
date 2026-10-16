@@ -25,6 +25,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -226,6 +227,51 @@ public class Fiscal390BoxesHandlerTest {
 
     verify(servlet).sendError(resp, HttpServletResponse.SC_CONFLICT, "already submitted");
     verify(handler, never()).storedInputs(anyInt(), anyString());
+  }
+
+  /** {@code validate} rewrites the rule incidents: POST-only. */
+  @Test
+  public void testValidateIsAKnownPostOnlyEntity() throws Exception {
+    assertTrue(handler.isKnownEntity(Fiscal390IncidentsSupport.VALIDATE));
+    assertTrue(handler.allowsPost(Fiscal390IncidentsSupport.VALIDATE));
+    HttpServletResponse resp = response(new StringWriter());
+    handler.handle(Fiscal390IncidentsSupport.VALIDATE, "GET", request("0A"), resp);
+    verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED),
+        anyString());
+  }
+
+  /** generate is refused (by the incidents guard) while a blocking rule holds: no file. */
+  @Test
+  public void testGenerateWithBlockingIncidentsGeneratesNothing() throws Exception {
+    doNothing().when(handler).guardNotAlreadySubmitted("org1", 2026, "0A", "390");
+    doReturn(new LinkedHashMap<String, String>()).when(handler).storedInputs(2026, "0A");
+    Fiscal390IncidentsSupport incidents = mock(Fiscal390IncidentsSupport.class);
+    doReturn(incidents).when(handler).incidentsSupport();
+    Fiscal390GenerateSupport generate = mock(Fiscal390GenerateSupport.class);
+    doReturn(generate).when(handler).generateSupport();
+    HttpServletResponse resp = response(new StringWriter());
+    when(incidents.rejectGenerate(eq("org1"), eq(2026), eq("0A"), anyMap(), eq(resp)))
+        .thenReturn(true);
+
+    handler.handle(Fiscal390BoxesHandler.GENERATE, "GET", request("0A"), resp);
+
+    verify(generate, never()).handleGenerate(anyString(), anyInt(), anyMap(), any());
+  }
+
+  /** Without blocking incidents the file is generated from the same merged inputs. */
+  @Test
+  public void testGenerateWithoutBlockingIncidentsGenerates() throws Exception {
+    doNothing().when(handler).guardNotAlreadySubmitted("org1", 2026, "0A", "390");
+    doReturn(new LinkedHashMap<String, String>()).when(handler).storedInputs(2026, "0A");
+    Fiscal390IncidentsSupport incidents = mock(Fiscal390IncidentsSupport.class);
+    doReturn(incidents).when(handler).incidentsSupport();
+    Fiscal390GenerateSupport generate = mock(Fiscal390GenerateSupport.class);
+    doReturn(generate).when(handler).generateSupport();
+    HttpServletResponse resp = response(new StringWriter());
+
+    handler.handle(Fiscal390BoxesHandler.GENERATE, "GET", request("0A"), resp);
+
+    verify(generate).handleGenerate(eq("org1"), eq(2026), anyMap(), eq(resp));
   }
 
   /** No yearly 390 report up to the exercise: a clear error naming the year. */

@@ -18,6 +18,7 @@ package com.etendoerp.go.schemaforge;
 
 import java.text.SimpleDateFormat;
 import java.util.Date;
+import java.util.List;
 import java.util.Map;
 import java.util.TimeZone;
 
@@ -27,10 +28,8 @@ import javax.servlet.http.HttpServletResponse;
 import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.exception.OBException;
-import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
-import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.module.aeat303.es.presentation.AEAT303SubmissionRequestBuilder;
 import org.openbravo.module.aeat303.es.presentation.AEAT303SubmissionResult;
@@ -53,8 +52,9 @@ import com.etendoerp.go.schemaforge.util.NeoMessageTranslator;
  * <p>Flow (production):
  * <ol>
  *   <li>guards: declaration exists, belongs to the session org, is a 390 of that year; not
- *       already submitted ({@code ALREADY_SUBMITTED}); no blocking incident
- *       ({@code BLOCKING_INCIDENTS}); presenter NIF/name present ({@code MISSING_PRESENTER});
+ *       already submitted ({@code ALREADY_SUBMITTED}); no blocking rule incident, evaluated
+ *       fresh from the stored inputs ({@code BLOCKING_INCIDENTS},
+ *       {@link Fiscal390IncidentsSupport}); presenter NIF/name present ({@code MISSING_PRESENTER});
  *       the organization has a certificate ({@code NO_CERTIFICATE});</li>
  *   <li>the file is regenerated server-side from the declaration's STORED inputs
  *       ({@code manualData.aeatInputs}) — never from the request, so the file Hacienda receives
@@ -122,7 +122,8 @@ class Fiscal390SubmissionSupport {
     String presenterNif = StringUtils.trimToEmpty(body.optString("presenterNif", ""));
     String presenterName = StringUtils.trimToEmpty(body.optString("presenterName", ""));
 
-    if (rejectProductionPreconditions(decl, testMode, presenterNif, presenterName, response)) {
+    if (rejectProductionPreconditions(orgId, year, decl, testMode, presenterNif, presenterName,
+        response)) {
       return;
     }
 
@@ -236,8 +237,9 @@ class Fiscal390SubmissionSupport {
    * blocking incidents, presenter identification. Writes the error and returns {@code true} when
    * the request was rejected. Test mode never changes the declaration, so it trips none.
    */
-  private boolean rejectProductionPreconditions(FiscalDecl decl, boolean testMode,
-      String presenterNif, String presenterName, HttpServletResponse response) throws Exception {
+  private boolean rejectProductionPreconditions(String orgId, int year, FiscalDecl decl,
+      boolean testMode, String presenterNif, String presenterName, HttpServletResponse response)
+      throws Exception {
     if (testMode) {
       return false;
     }
@@ -249,10 +251,12 @@ class Fiscal390SubmissionSupport {
                   + " create a substitute declaration."));
       return true;
     }
-    if (countBlockingIncidents(decl.getId()) > 0) {
-      FiscalAeatSubmissionSupport.writeJson(response, HttpServletResponse.SC_CONFLICT,
-          FiscalAeatSubmissionSupport.failureJson(false, ERR_BLOCKING_INCIDENTS,
-              "The declaration has blocking incidents: resolve them before submitting."));
+    List<Fiscal390IncidentRules.Incident> blocking = blockingRuleIncidents(orgId, year, decl);
+    if (!blocking.isEmpty()) {
+      JSONObject failure = FiscalAeatSubmissionSupport.failureJson(false, ERR_BLOCKING_INCIDENTS,
+          "The declaration has blocking incidents: resolve them before submitting.");
+      failure.put("incidents", Fiscal390IncidentsSupport.toJson(blocking));
+      FiscalAeatSubmissionSupport.writeJson(response, HttpServletResponse.SC_CONFLICT, failure);
       return true;
     }
     if (StringUtils.isBlank(presenterNif) || StringUtils.isBlank(presenterName)) {
@@ -265,21 +269,15 @@ class Fiscal390SubmissionSupport {
   }
 
   /**
-   * Blocking RULE incidents of the declaration — blocking rows (a blank severity counts as
-   * blocking, like the Incidencias tab) that are not AEAT answers: the AEAT-origin rows
-   * ({@code AEAT-<code>}) are informative and never block a new attempt.
+   * The blocking RULE incidents of the declaration, evaluated fresh from its STORED inputs — the
+   * ones the file is built from ({@link Fiscal390IncidentsSupport#blockingIncidents}). The stored
+   * AEAT answers ({@code AEAT-<code>}) are informative and never block a new attempt.
    */
-  long countBlockingIncidents(String declId) {
-    OBQuery<BaseOBObject> query = OBDal.getInstance().createQuery(
-        FiscalDeclCrudHandler.ENTITY_FISCAL_DECL_INCIDENT,
-        FiscalDeclCrudHandler.PROPERTY_INCIDENT_DECL + ".id = :declId and (coalesce("
-            + FiscalDeclCrudHandler.PROPERTY_INCIDENT_SEVERITY + ", '') = '' or "
-            + FiscalDeclCrudHandler.PROPERTY_INCIDENT_SEVERITY + " = :block) and "
-            + FiscalDeclCrudHandler.PROPERTY_INCIDENT_CODE + " not like :aeat");
-    query.setNamedParameter("declId", declId);
-    query.setNamedParameter("block", FiscalDeclCrudHandler.SEVERITY_BLOCK);
-    query.setNamedParameter("aeat", FiscalDeclCrudHandler.AEAT_INCIDENT_CODE_PREFIX + "%");
-    return query.count();
+  List<Fiscal390IncidentRules.Incident> blockingRuleIncidents(String orgId, int year,
+      FiscalDecl decl) throws Exception {
+    String manualData = decl.getManualData();
+    return owner.incidentsSupport().blockingIncidents(orgId, year, manualData,
+        Fiscal390BoxesHandler.readStoredInputs(manualData));
   }
 
   /** Replaces the AEAT incidents with this answer's; a failure is logged, never thrown. */

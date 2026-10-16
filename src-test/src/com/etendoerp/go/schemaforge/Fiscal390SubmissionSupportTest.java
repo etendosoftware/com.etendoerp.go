@@ -39,6 +39,7 @@ import java.io.StringReader;
 import java.io.StringWriter;
 import java.lang.reflect.Field;
 import java.util.Date;
+import java.util.List;
 import java.util.Map;
 
 import javax.servlet.http.HttpServletRequest;
@@ -113,7 +114,7 @@ public class Fiscal390SubmissionSupportTest {
     service = mock(AEAT303SubmissionService.class);
     when(service.hasOrgCertificate(any())).thenReturn(true);
     doReturn(service).when(support).newSubmissionService();
-    doReturn(0L).when(support).countBlockingIncidents(DECL_ID);
+    doReturn(List.of()).when(support).blockingRuleIncidents(eq("org1"), eq(2026), any());
 
     decl = mock(FiscalDecl.class);
     Client client = mock(Client.class);
@@ -333,7 +334,9 @@ public class Fiscal390SubmissionSupportTest {
 
   @Test
   public void testBlockingIncidentsRejectTheFiling() throws Exception {
-    doReturn(2L).when(support).countBlockingIncidents(DECL_ID);
+    doReturn(List.of(new Fiscal390IncidentRules.Incident(Fiscal390IncidentRules.NO_MAIN_IAE,
+        Fiscal390IncidentRules.SEVERITY_BLOCK, "no main IAE")))
+        .when(support).blockingRuleIncidents(eq("org1"), eq(2026), any());
     StringWriter out = new StringWriter();
     HttpServletResponse resp = response(out);
 
@@ -341,7 +344,25 @@ public class Fiscal390SubmissionSupportTest {
 
     verify(resp).setStatus(HttpServletResponse.SC_CONFLICT);
     assertEquals(Fiscal390SubmissionSupport.ERR_BLOCKING_INCIDENTS, json.getString("errorCode"));
+    assertEquals(Fiscal390IncidentRules.NO_MAIN_IAE,
+        json.getJSONArray("incidents").getJSONObject(0).getString("code"));
     verify(service, never()).submitProduction(any());
+  }
+
+  /** Test mode (ServValiDos) never changes the declaration, so the blocking guard is skipped. */
+  @Test
+  public void testBlockingIncidentsDoNotStopAValidationRun() throws Exception {
+    doReturn(List.of(new Fiscal390IncidentRules.Incident(Fiscal390IncidentRules.NO_MAIN_IAE,
+        Fiscal390IncidentRules.SEVERITY_BLOCK, "no main IAE")))
+        .when(support).blockingRuleIncidents(eq("org1"), eq(2026), any());
+    when(service.submitValidation(anyString(), anyString(), anyString(), anyString(),
+        anyString())).thenReturn(success(true));
+    StringWriter out = new StringWriter();
+
+    submit("{\"testMode\":true}", response(out), out);
+
+    verify(service).submitValidation(anyString(), anyString(), anyString(), anyString(),
+        anyString());
   }
 
   @Test
@@ -417,21 +438,28 @@ public class Fiscal390SubmissionSupportTest {
     verify(declHandler).replaceAeatIncidentsNoCommit(eq(decl), any(), any());
   }
 
-  /** The blocking guard counts only rule incidents: AEAT-origin rows are excluded by code. */
+  /**
+   * The blocking guard is evaluated fresh from the STORED inputs (the ones the file is built
+   * from), never from the stored incident rows — so a stored AEAT answer cannot block the retry.
+   */
   @Test
-  public void testBlockingIncidentCountExcludesAeatRows() {
-    @SuppressWarnings("unchecked")
-    org.openbravo.dal.service.OBQuery<org.openbravo.base.structure.BaseOBObject> query =
-        mock(org.openbravo.dal.service.OBQuery.class);
-    ArgumentCaptor<String> hql = ArgumentCaptor.forClass(String.class);
-    when(obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL_INCIDENT), hql.capture()))
-        .thenReturn(query);
-    when(query.count()).thenReturn(1);
+  public void testBlockingGuardEvaluatesTheStoredInputs() throws Exception {
+    Fiscal390IncidentsSupport incidents = mock(Fiscal390IncidentsSupport.class);
+    doReturn(incidents).when(handler).incidentsSupport();
+    when(incidents.blockingIncidents(eq("org1"), eq(2026), anyString(), anyMap()))
+        .thenReturn(List.of());
     Fiscal390SubmissionSupport real = new Fiscal390SubmissionSupport(handler);
 
-    assertEquals(1L, real.countBlockingIncidents(DECL_ID));
-    assertTrue(hql.getValue().contains("code not like :aeat"));
-    verify(query).setNamedParameter("aeat", "AEAT-%");
+    String manualData = decl.getManualData();
+    assertTrue(real.blockingRuleIncidents("org1", 2026, decl).isEmpty());
+
+    @SuppressWarnings("unchecked")
+    ArgumentCaptor<Map<String, String>> inputs = ArgumentCaptor.forClass(Map.class);
+    verify(incidents).blockingIncidents(eq("org1"), eq(2026), eq(manualData),
+        inputs.capture());
+    assertEquals("5", inputs.getValue().get("INGRESAR_01"));
+    verify(obDal, never()).createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL_INCIDENT),
+        anyString());
   }
 
   // ── manualData.submission ───────────────────────────────────────────

@@ -97,15 +97,18 @@ class Fiscal390PreloadSupport {
 
   /** The preload payload for the exercise (see {@code aeat-390-endpoints.md}). */
   JSONObject buildPayload(String orgId, int year, boolean monthlyReturn) throws Exception {
+    return toJson(aggregateYear(orgId, year, monthlyReturn), year, monthlyReturn);
+  }
+
+  /** The aggregation of the exercise's 303s — the preload, and the 390 incident rules' input. */
+  Fiscal390PreloadAggregator.Result aggregateYear(String orgId, int year, boolean monthlyReturn) {
     Map<Fiscal390PreloadAggregator.Decl303, BaseOBObject> loaded = loadDeclarations(year);
     List<Fiscal390PreloadAggregator.Decl303> winners =
         Fiscal390PreloadAggregator.selectWinners(loaded.keySet());
     for (Fiscal390PreloadAggregator.Decl303 d : winners) {
       resolveBoxes(d, loaded.get(d), orgId, year);
     }
-    Fiscal390PreloadAggregator.Result result =
-        Fiscal390PreloadAggregator.aggregate(winners, monthlyReturn);
-    return toJson(result, year, monthlyReturn);
+    return Fiscal390PreloadAggregator.aggregate(winners, monthlyReturn);
   }
 
   // ── Loading ─────────────────────────────────────────────────────────────
