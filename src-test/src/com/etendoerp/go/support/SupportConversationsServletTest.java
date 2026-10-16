@@ -52,6 +52,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.junit.jupiter.params.ParameterizedTest;
 import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.openbravo.base.provider.OBProvider;
@@ -80,6 +82,8 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  * classes (stubbing only the getters each handler actually reads) rather than instantiating them.
  * Outbound ADK/Jira calls are mocked via {@link SupportIntegrationClient} static mocks so tests
  * never touch the network.
+ *
+ * @covers com.etendoerp.go.support.SupportConversationsServlet
  */
 class SupportConversationsServletTest {
 
@@ -1116,6 +1120,22 @@ class SupportConversationsServletTest {
         new SupportConversationsServlet().doPost(request, response);
       }
 
+      assertTrue(capture.toString().contains("Invalid JSON body"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = { "{\"x\":[", "[[", "{\"a\":[}", "{\"a\":1}#" })
+    @DisplayName("A body that breaks the JSON parser returns 400")
+    void parserBreakingBody(String body) throws Exception {
+      StringWriter capture = new StringWriter();
+      HttpServletResponse response = mockResponse(capture);
+      HttpServletRequest request = authenticatedRequest("/conversations", body);
+
+      try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth()) {
+        new SupportConversationsServlet().doPost(request, response);
+      }
+
+      verify(response).setStatus(HttpServletResponse.SC_BAD_REQUEST);
       assertTrue(capture.toString().contains("Invalid JSON body"));
     }
 

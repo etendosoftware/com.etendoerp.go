@@ -25,6 +25,8 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.io.BufferedReader;
@@ -32,6 +34,7 @@ import java.io.PrintWriter;
 import java.io.StringReader;
 import java.io.StringWriter;
 import java.time.Instant;
+import java.util.List;
 
 import javax.servlet.http.Cookie;
 import javax.servlet.http.HttpServletRequest;
@@ -43,6 +46,13 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.MockedStatic;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.dal.service.OBQuery;
+import org.openbravo.model.ad.access.Role;
+import org.openbravo.model.ad.access.User;
+import org.openbravo.model.ad.access.UserRoles;
+import org.openbravo.model.ad.system.Client;
+import org.openbravo.model.common.enterprise.Organization;
 
 import com.auth0.jwt.interfaces.Claim;
 import com.auth0.jwt.interfaces.DecodedJWT;
@@ -50,6 +60,7 @@ import com.etendoerp.go.auth.EnvironmentRequestAuthenticator;
 import com.etendoerp.go.auth.WarehouseResolver;
 import com.etendoerp.go.payment.EnvironmentAccessPolicy.Decision;
 import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
+import com.etendoerp.go.schemaforge.data.com.etendoerp.go.schemaforge.data.OAuth2Client;
 import com.etendoerp.go.schemaforge.util.NeoLanguage;
 import com.etendoerp.go.session.GoSessionAuthenticator;
 import com.etendoerp.go.session.GoSessionRecord;
@@ -67,6 +78,8 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  * {@code NEO_AUXILIARY} plus the System Administrator check).
  *
  * <p>No database: the pipeline is built over mocked collaborators and the statics are mocked.
+ *
+ * @covers com.etendoerp.go.oauth2.OAuth2Servlet
  */
 class OAuth2ServletManagementAuthTest {
 
@@ -189,6 +202,72 @@ class OAuth2ServletManagementAuthTest {
     Response resp = run(bearer("GET", "/api-keys"));
 
     assertEquals(401, resp.status);
+  }
+
+  // ===================== /api-keys malformed JSON body =====================
+
+  /**
+   * An authenticated API-key create or update whose body is not JSON (or breaks the parser) is the
+   * caller's {@code invalid_request} 400, not the 500 a {@code JSONException} from building the
+   * response means; the key is never looked up or written.
+   */
+  @Test
+  void apiKeyWritesWithAMalformedJsonBodyAre400() throws Exception {
+    when(sessionService.resolve(SESSION_TOKEN)).thenReturn(session("0"));
+    when(lifecycle.evaluateAccess(eq(CLIENT_ID), eq(true), any(Instant.class)))
+        .thenReturn(Decision.ALLOWED);
+    OBDal dal = activeApiKeyOwnerDal();
+
+    try (MockedStatic<OBDal> dalStatic = mockStatic(OBDal.class)) {
+      dalStatic.when(OBDal::getInstance).thenReturn(dal);
+      for (String raw : new String[] { "{\"x\":[", "[[", "not json" }) {
+        Response created = run(cookie("POST", "/api-keys", CSRF, raw));
+        assertEquals(400, created.status, "POST /api-keys " + raw);
+        assertEquals("Malformed request body", created.description());
+
+        Response updated = new Response();
+        servlet.doPut(cookie("PUT", "/api-keys/key-1", CSRF, raw), updated.response);
+        assertEquals(400, updated.status, "PUT /api-keys/key-1 " + raw);
+        assertEquals("Malformed request body", updated.description());
+      }
+      verify(dal, never()).save(any());
+    }
+  }
+
+  /** A DAL whose user, role "0", client, org and role assignment are all active, plus key-1. */
+  @SuppressWarnings("unchecked")
+  private static OBDal activeApiKeyOwnerDal() {
+    OBDal dal = mock(OBDal.class);
+    User user = mock(User.class);
+    when(user.isActive()).thenReturn(true);
+    Role role = mock(Role.class);
+    when(role.isActive()).thenReturn(true);
+    Client client = mock(Client.class);
+    when(client.isActive()).thenReturn(true);
+    when(client.getId()).thenReturn(CLIENT_ID);
+    Organization org = mock(Organization.class);
+    when(org.isActive()).thenReturn(true);
+    when(org.getId()).thenReturn(ORG_ID);
+    when(dal.get(User.class, USER_ID)).thenReturn(user);
+    when(dal.get(Role.class, "0")).thenReturn(role);
+    when(dal.get(Client.class, CLIENT_ID)).thenReturn(client);
+    when(dal.get(Organization.class, ORG_ID)).thenReturn(org);
+
+    UserRoles assignment = mock(UserRoles.class);
+    when(assignment.getClient()).thenReturn(client);
+    when(assignment.getOrganization()).thenReturn(org);
+    OBQuery<UserRoles> assignments = mock(OBQuery.class);
+    when(assignments.list()).thenReturn(List.of(assignment));
+    when(dal.createQuery(eq(UserRoles.class), anyString())).thenReturn(assignments);
+
+    OAuth2Client key = mock(OAuth2Client.class);
+    when(key.getId()).thenReturn("key-1");
+    when(key.getName()).thenReturn("Key");
+    when(key.isActive()).thenReturn(true);
+    OBQuery<OAuth2Client> keys = mock(OBQuery.class);
+    when(keys.uniqueResult()).thenReturn(key);
+    when(dal.createQuery(eq(OAuth2Client.class), anyString())).thenReturn(keys);
+    return dal;
   }
 
   // ===================== fixtures =====================

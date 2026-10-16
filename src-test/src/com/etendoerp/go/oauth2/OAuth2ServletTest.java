@@ -28,6 +28,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -1768,6 +1769,50 @@ public class OAuth2ServletTest {
         assertNull("WARN without a stack trace: " + warn.getMessage().getFormattedMessage(),
             warn.getThrown());
       }
+    }
+  }
+
+  /**
+   * The admin management endpoints (client create/update/regenerate-secret, revoke, introspect)
+   * read a JSON body after authenticating: a malformed one is the caller's {@code invalid_request}
+   * 400, not the 500 their {@code JSONException} catch means for a response-building failure.
+   */
+  @Test
+  public void adminManagementMalformedJsonBodyReturnsBadRequest() throws Exception {
+    String[][] endpoints = {
+        { "POST", "/clients" },
+        { "PUT", "/clients/" + TEST_CLIENT_DB_ID },
+        { "PUT", "/clients/" + TEST_CLIENT_DB_ID + "/regenerate-secret" },
+        { "POST", "/revoke" },
+        { "POST", "/introspect" } };
+    DecodedJWT jwt = mockJwt(ADMIN_USER_ID, ADMIN_ROLE_ID);
+    OBDal obDal = mock(OBDal.class);
+
+    try (MockedStatic<SecureWebServicesUtils> swsMock = mockStatic(SecureWebServicesUtils.class);
+         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      swsMock.when(() -> SecureWebServicesUtils.decodeToken(ADMIN_TOKEN)).thenReturn(jwt);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+
+      for (String[] endpoint : endpoints) {
+        for (String raw : new String[] { "{\"x\":[", "[[", "not json" }) {
+          ResponseCapture resp = mockResponse();
+          HttpServletRequest req = mockRequest(endpoint[0], endpoint[1]);
+          when(req.getHeader("Authorization")).thenReturn("Bearer " + ADMIN_TOKEN);
+          when(req.getContentType()).thenReturn("application/json");
+          when(req.getReader()).thenReturn(new BufferedReader(new StringReader(raw)));
+
+          if ("PUT".equals(endpoint[0])) {
+            servlet.doPut(req, resp.response);
+          } else {
+            servlet.doPost(req, resp.response);
+          }
+
+          String label = endpoint[0] + " " + endpoint[1] + " " + raw;
+          assertEquals(label, 400, resp.status);
+          assertEquals(label, "invalid_request", new JSONObject(resp.body()).getString("error"));
+        }
+      }
+      verify(obDal, never()).getConnection();
     }
   }
 

@@ -23,6 +23,8 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
@@ -37,18 +39,33 @@ import java.io.ByteArrayInputStream;
 import java.io.StringReader;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 
 import javax.servlet.ReadListener;
 import javax.servlet.ServletInputStream;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
+import org.apache.logging.log4j.Level;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.core.LogEvent;
+import org.apache.logging.log4j.core.Logger;
+import org.apache.logging.log4j.core.appender.AbstractAppender;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Before;
 import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
+import org.openbravo.base.secureApp.VariablesSecureApp;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.businessUtility.Preferences;
+import org.openbravo.model.ad.access.Role;
+import org.openbravo.model.ad.access.User;
+import org.openbravo.model.ad.system.Client;
+import org.openbravo.model.ad.ui.Window;
+import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.common.BoundedJsonParserTest;
 import com.etendoerp.go.schemaforge.email.TransactionalEmailService;
@@ -424,6 +441,56 @@ public class NeoBuiltInEndpointHandlerTest {
       verify(dal).flush();
       verify(servlet).writeResponse(eq(response), isNull());
     }
+  }
+
+  /**
+   * A preset body the client sent malformed is a 400 logged at WARN — not an ERROR with a stack
+   * trace — and nothing is persisted or flushed. Runs the real {@link NeoFiltersService}.
+   */
+  @Test
+  public void handleFiltersPutMalformedBodyIsBadRequestLoggedAtWarn() throws Exception {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    HttpServletResponse response = mock(HttpServletResponse.class);
+    OBDal dal = mock(OBDal.class);
+    List<Level> levels = new ArrayList<>();
+    Logger serviceLogger = (Logger) LogManager.getLogger(NeoFiltersService.class);
+    AbstractAppender capture = new AbstractAppender("capture-filters-preset", null, null, true,
+        org.apache.logging.log4j.core.config.Property.EMPTY_ARRAY) {
+      @Override
+      public void append(LogEvent event) {
+        levels.add(event.getLevel());
+      }
+    };
+    capture.start();
+    serviceLogger.addAppender(capture);
+
+    try (MockedStatic<NeoRequestBodyParser> bodyParserMock = Mockito.mockStatic(NeoRequestBodyParser.class);
+        MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<Preferences> prefMock = Mockito.mockStatic(Preferences.class);
+        MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+
+      bodyParserMock.when(() -> NeoRequestBodyParser.readRequestBody(request)).thenReturn("{\"x\":[");
+      ctxMock.when(OBContext::getOBContext).thenReturn(mock(OBContext.class));
+      prefMock.when(() -> Preferences.getPreferenceValue(anyString(), anyBoolean(), (Client) any(),
+          (Organization) any(), (User) any(), (Role) any(), (Window) any())).thenReturn("{}");
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      boolean handled = handler.handle(new NeoServlet.NeoPathInfo("filters", "sales-order", "my-preset"),
+          "PUT", request, response);
+
+      assertTrue(handled);
+      verify(servlet).sendError(response, HttpServletResponse.SC_BAD_REQUEST, "Invalid JSON body");
+      verify(servlet, never()).writeResponse(any(), any());
+      verify(dal, never()).flush();
+      prefMock.verify(() -> Preferences.setPreferenceValue(anyString(), anyString(), anyBoolean(),
+          (Client) any(), (Organization) any(), (User) any(), (Role) any(), (Window) any(),
+          (VariablesSecureApp) any()), never());
+    } finally {
+      serviceLogger.removeAppender(capture);
+      capture.stop();
+    }
+
+    assertEquals(List.of(Level.WARN), levels);
   }
 
   /**

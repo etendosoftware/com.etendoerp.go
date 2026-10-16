@@ -639,6 +639,71 @@ class NeoCrudHandlerTest {
       verify(servlet, never()).writeResponse(any(), any());
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = { "{\"x\":[", "[[", "{\"a\":[}", "[{\"f\":1/*x*/}]" })
+    @DisplayName("Sends 400 for a malformed criteria before any handler or datasource runs")
+    void malformedCriteriaSends400BeforeDispatch(String criteria) throws Exception {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getId()).thenReturn("SPEC-1");
+
+      SFEntity entity = createMockEntity(true, false, false, false, false, false);
+      when(entity.getADTab()).thenReturn(mock(Tab.class));
+      when(entity.getJavaQualifier()).thenReturn("myHook");
+      when(servlet.findEntity("SPEC-1", "orders")).thenReturn(entity);
+      Map<String, String> params = new HashMap<>();
+      params.put("criteria", criteria);
+      when(servlet.extractQueryParams(any())).thenReturn(params);
+
+      NeoServlet.NeoPathInfo pathInfo = new NeoServlet.NeoPathInfo(
+          "testSpec", "orders", null);
+      HttpServletResponse response = mock(HttpServletResponse.class);
+
+      handler.handleWindowEntityCrud(spec, pathInfo, "GET",
+          mock(HttpServletRequest.class), response);
+
+      verify(servlet).sendError(response, HttpServletResponse.SC_BAD_REQUEST,
+          "Invalid criteria: malformed JSON");
+      verify(servlet, never()).handleWithHooks(anyString(), any(), any(), any());
+      verify(servlet, never()).writeResponse(any(), any());
+    }
+
+    @Test
+    @DisplayName("A well-formed criteria reaches the handler")
+    void wellFormedCriteriaIsDispatched() throws Exception {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getId()).thenReturn("SPEC-1");
+
+      SFEntity entity = createMockEntity(true, false, false, false, false, false);
+      when(entity.getADTab()).thenReturn(mock(Tab.class));
+      when(entity.getJavaQualifier()).thenReturn("myHook");
+      when(servlet.findEntity("SPEC-1", "orders")).thenReturn(entity);
+      Map<String, String> params = new HashMap<>();
+      params.put("criteria", "[{\"fieldName\":\"name\",\"operator\":\"iContains\",\"value\":\"a\"}]");
+      when(servlet.extractQueryParams(any())).thenReturn(params);
+      when(servlet.handleWithHooks(anyString(), any(), any(), any())).thenReturn(null);
+
+      NeoServlet.NeoPathInfo pathInfo = new NeoServlet.NeoPathInfo(
+          "testSpec", "orders", null);
+      HttpServletResponse response = mock(HttpServletResponse.class);
+
+      handler.handleWindowEntityCrud(spec, pathInfo, "GET",
+          mock(HttpServletRequest.class), response);
+
+      verify(servlet).handleWithHooks(eq("myHook"), any(), any(), any());
+      verify(servlet, never()).sendError(any(), Mockito.anyInt(), anyString());
+    }
+
+    @Test
+    @DisplayName("isCriteriaWithinLimits accepts an absent or blank criteria and refuses a deep one")
+    void isCriteriaWithinLimitsBoundaries() {
+      assertTrue(NeoCrudHandler.isCriteriaWithinLimits(null));
+      assertTrue(NeoCrudHandler.isCriteriaWithinLimits(new HashMap<>()));
+      assertTrue(NeoCrudHandler.isCriteriaWithinLimits(Map.of("criteria", "  ")));
+      assertTrue(NeoCrudHandler.isCriteriaWithinLimits(Map.of("criteria", "{\"a\":1}")));
+      String tooDeep = "[".repeat(65) + "]".repeat(65);
+      assertFalse(NeoCrudHandler.isCriteriaWithinLimits(Map.of("criteria", tooDeep)));
+    }
+
     @Test
     @DisplayName("Does not write response when dispatchCrudRequest returns null")
     void nullDispatchResponseNotWritten() throws Exception {

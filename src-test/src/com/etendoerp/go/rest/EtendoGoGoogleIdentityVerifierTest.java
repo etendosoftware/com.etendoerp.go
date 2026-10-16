@@ -31,8 +31,12 @@ import javax.servlet.http.HttpServletResponse;
 
 import org.junit.Test;
 
+import com.etendoerp.go.common.BoundedJsonParserTest;
+
 /**
  * Unit tests for {@link EtendoGoGoogleIdentityVerifier}.
+ *
+ * @covers com.etendoerp.go.rest.EtendoGoGoogleIdentityVerifier
  */
 public class EtendoGoGoogleIdentityVerifierTest {
 
@@ -113,6 +117,26 @@ public class EtendoGoGoogleIdentityVerifierTest {
       return;
     }
     throw new AssertionError("Expected SSO assertion exception");
+  }
+
+  /** A JSON body that breaks the parser is a bad request, before the credential is validated. */
+  @Test
+  public void malformedJsonBodyReturnsBadRequest() {
+    EtendoGoGoogleIdentityVerifier verifier = new EtendoGoGoogleIdentityVerifier(configured(),
+        (credential, configuration) -> {
+          throw new AssertionError("the credential must not be validated");
+        });
+    HttpServletRequest request = request("application/json");
+
+    BoundedJsonParserTest.stackBreakingBodies().filter(body -> body.length() < 100)
+        .forEach(body -> {
+          try {
+            verifier.verify(request, body);
+            throw new AssertionError("Expected SSO assertion exception for " + body);
+          } catch (EtendoGoSsoAssertionException e) {
+            assertEquals(body, HttpServletResponse.SC_BAD_REQUEST, e.getStatusCode());
+          }
+        });
   }
 
   @Test
