@@ -3,8 +3,8 @@
 ETP-5716 — backend base of Modelo 390 in "Modelos Fiscales". Same architecture as Modelo 303
 (`aeat-303-submit-endpoint.md`): a NEO built-in handler (`Fiscal390BoxesHandler`, routed by
 `NeoBuiltInEndpointHandler`) on top of the classic module `org.openbravo.module.aeat390.es`.
-Telematic submission, 303 preload, incident rules and an invoice-sources tab are NOT part of this
-step; the extension points they plug into are listed at the end.
+Telematic submission, 303 preload and incident rules are NOT part of this step; the extension
+points they plug into are listed at the end. The invoices (Facturas) tab is `GET /fiscal390/sources`.
 
 ## Routes
 
@@ -14,6 +14,7 @@ All routes require the "Modelos Fiscales" grant (Tax Report window, same gate as
 |---|---|---|
 | `GET` | `/fiscal390/boxes?year=&period=0A[&<input>=…]` | box preview (`Fiscal390BoxesHandler`) |
 | `GET` | `/fiscal390/generate?year=&period=0A[&<input>=…]` | TXT file (`Fiscal390GenerateSupport`) |
+| `GET` | `/fiscal390/sources?year=&period=0A[&box=&type=&tax=&q=&page=&pageSize=]` | Facturas tab (`Fiscal390SourcesSupport`) |
 | `GET` | `/fiscal390/modified?year=&period=0A&since=` | shared invoice-change probe |
 | `GET/POST/PUT/DELETE` | `/fiscal390/declarations` (= `/fiscal303/declarations`) | shared `FiscalDeclCrudHandler` |
 | `GET` | `/fiscal390/incidents?id=` | shared `FiscalDeclCrudHandler` |
@@ -24,7 +25,7 @@ Declarations use `model: "390"`, `period: "0A"`.
 
 | Status | When |
 |---|---|
-| `400` | `period` is not `0A`; an input is not a number (message names it) |
+| `400` | `period` is not `0A`; an input is not a number (message names it); `sources` with a non-numeric `box`/`page`/`pageSize` or `pageSize` outside 0–500 |
 | `404` / `405` | unknown entity / wrong method (`generate` is GET-only) |
 | `409` | `generate` when the latest declaration of the year is submitted (shared ETP-5438 guard) |
 | `409 DUPLICATE_ORDINARY` | `POST /declarations` of a 2nd ordinary 390 for the same org/year — see below |
@@ -85,9 +86,13 @@ the snapshot is taken before the PUT's `manualData` is applied.
   "mode":    "liquidation | territory",
   "taxReport": { "searchKey": "AEAT390_2025_Y", "layoutYear": 2025, "fallback": true },
   "inputs":  { "LIQANUAL_VAT_IMPORT": "40" },
-  "warnings": [ { "code": "UNSUPPORTED_RATE | NO_BOX", "parameter": "VAT_PURCHASE_NORMAL", "rate": "3.00" } ]
+  "warnings": [ { "code": "UNSUPPORTED_RATE | NO_BOX", "parameter": "VAT_PURCHASE_NORMAL", "rate": "3.00" } ],
+  "invoiceBoxes": [ 3, 4, 5, 6, 33, 34, 99 ]
 }
 ```
+
+`invoiceBoxes` lists the boxes filled from invoices (not the derived/echoed ones): the boxes the
+Facturas tab can list lines for ("Ver facturas" in the Casillas tab).
 
 Box keys are AEAT box numbers without leading zeros. Amounts are 2-decimal strings.
 
@@ -142,6 +147,56 @@ Classic quirks with [661] in territory mode:
 - not reproduced: the TXT also prints the liquidation-section [84]/[86] slots as `0 − [661]`; the
   preview only reports the territory [84].
 
+## `GET /fiscal390/sources` — the Facturas tab
+
+The invoice-tax lines behind the invoice boxes. **Not a second query**: the same
+`Fiscal390BoxesCalculator` walk runs, but each figure is built from the lines classic
+`calculateAmounts` adds to its CSV object (`AEAT390CSV.addAEAT390CSVLine`, overridden in memory by
+`Fiscal390SourcesSupport.CapturingCsv`) — the per-line, already signed and rounded amounts classic
+sums into that figure. `Engine.placed(parameter, taxes, baseBox, cuotaBox)` (no-op for the boxes
+endpoint) then attributes those lines to the boxes the figure landed in. Consequences:
+
+- **for each box, the sum of `boxAmounts[box]` over its rows equals the box value** (acceptance
+  criterion; `Fiscal390SourcesSupportTest#testPerBoxSumsEqualCalculatorBoxValues`);
+- inclusion is classic's: posted invoices of the 12 periods with accounting facts — normal,
+  negative, reversal and credit-memo lines, cash-VAT lines per payment;
+- a line whose figure feeds no box (zero, `UNSUPPORTED_RATE`, negative volume base, `NO_BOX`) is
+  not listed; derived boxes ([47], [64], [65], [84]…[108]) have no lines.
+
+Query parameters (all optional besides `year`/`period`): `box` (AEAT box number), `type`
+(`sales` | `purchase`, from the invoice's `isSOTrx`), `tax` (`C_Tax_ID`), `q` (case-insensitive
+substring of document number, business partner or tax name), `page` (1-based, default 1),
+`pageSize` (default 50, max 500, `0` = every row — used by the CSV export).
+
+```json
+{
+  "rows": [ {
+    "id": "<C_InvoiceTax_ID>[#n]", "invoiceTaxId": "…", "invoiceId": "…", "ref": "F001",
+    "date": "2026-01-15", "accountingDate": "2026-01-15", "type": "sales | purchase",
+    "party": "Acme", "docType": "AR Invoice", "taxId": "…", "tax": "IVA 21%", "rate": "21",
+    "base": "1000.00", "vat": "210.00", "total": "1210.00",
+    "boxes": "5,6,33,34,99", "boxAmounts": { "5": "1000.00", "6": "210.00", "33": "1000.00", "34": "210.00", "99": "1000.00" }
+  } ],
+  "count": 128, "page": 1, "pageSize": 50,
+  "totals": { "base": "…", "vat": "…", "total": "…", "box": "<sum of boxAmounts[box]; only with box=>" },
+  "boxes":  { "5": "1400.00", "6": "294.00", "…": "…" },
+  "taxes":  [ { "id": "…", "name": "IVA 10%", "rate": "10" } ],
+  "submitted": false
+}
+```
+
+One row per `C_INVOICETAX` line (a line is usually counted by several parameters — rate box,
+element total, volume box; an intra-EU acquisition on both the accrued and the deductible side —
+and lists every box it feeds). Should a line be counted with different amounts by different
+parameters, it gets one row per distinct amount (`id` suffixed `#2`, …). `totals` are over every
+filtered row, not just the page; `boxes` and `taxes` are unfiltered (box chips and the Impuesto
+filter). Inputs (`manualData.aeatInputs`) do not affect invoice boxes, so they are not read.
+
+**Submitted declarations** — consistent with Modelo 303, whose snapshot keeps only the
+`sourceCount` of its per-invoice drilldown: once the latest declaration of the year is submitted
+with a snapshot, the endpoint answers `submitted: true` with no rows (a live list could no longer
+add up to the frozen boxes). The frontend shows the "per-invoice detail is not kept" note.
+
 ## `GET /fiscal390/generate`
 
 Reflective call of the resolved report's `javaClassName` (`OBTL_TaxReport_I
@@ -179,5 +234,5 @@ aeat390. Run `update.database` before any `export.database`, or the export drops
   the same `generateElectronicFile` path; snapshot is already provided for model `390`.
 - 303 preload: fill `manualData.aeatInputs` (`INGRESAR_xx`, `DEVOLVER_xx`, …).
 - Incidents: `warnings` + `FiscalDeclCrudHandler.replaceIncidents`.
-- Invoice sources tab: add the array to the payload and declare it in
-  `Fiscal390SnapshotSupport.excludedLists` so the snapshot stays bounded.
+- Invoice sources tab: done as its own endpoint (`GET /fiscal390/sources`, above), so the boxes
+  payload and its snapshot stay fixed-size.
