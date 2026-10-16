@@ -41,6 +41,8 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.ui.Tab;
 
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
+
 /**
  * Generic NEO handler that clones any record into a new draft using the
  * {@link CloneRecordHook} infrastructure, mirroring how the classic
@@ -68,6 +70,19 @@ public class NeoCloneRecordHandler implements NeoHandler {
   private static final Logger log = LogManager.getLogger(NeoCloneRecordHandler.class);
   static final String ACTION_NAME = "cloneRecord";
   private static final String PROP_DOCUMENT_NO = "documentNo";
+
+  /**
+   * What an agent reads about {@code cloneRecord} (ETP-5709). Generic on purpose: the handler
+   * serves every spec that routes to it, so the text names none. The MCP publishes it and judges
+   * the call against it; REST and the SPA do not validate against it.
+   */
+  static final NeoActionContract CONTRACT = NeoActionContract.write(ACTION_NAME,
+      "Clones this record into a NEW DRAFT copy and returns 201 with {id}. The copy gets its own "
+          + "new document number, starts in draft whatever the status of the source (even if it "
+          + "is completed) and carries none of the source's related documents (receipts, "
+          + "invoices, payments, postings). It is a fresh record: complete it afterwards with "
+          + "documentAction. Calling it twice creates two copies.")
+      .withIdDescription("the id of the record to clone");
 
   @Inject
   @Any

@@ -75,6 +75,7 @@ import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
 
 /**
  * Unit tests for {@link PurchaseInvoiceHeaderHandler}.
@@ -1526,5 +1527,19 @@ public class PurchaseInvoiceHeaderHandlerTest {
   public void responseEnrichedFields_declaresFollowUpAndSubtypeKey() {
     assertEquals(java.util.Set.of("followUp", "apInvoiceSubtype"),
         new PurchaseInvoiceHeaderHandler().responseEnrichedFields());
+  }
+
+  @Test
+  public void actionContracts_declareCloneRecordNextToTheExistingOnes() {
+    java.util.Map<String, NeoActionContract> contracts =
+        new PurchaseInvoiceHeaderHandler().actionContracts();
+
+    NeoActionContract clone = contracts.get("cloneRecord");
+    assertNotNull("cloneRecord is served by handle() and must be declared (ETP-5709)", clone);
+    assertEquals("POST", clone.getHttpMethod());
+    assertTrue(clone.getParams().isEmpty());
+    assertTrue("the existing declarations are kept",
+        contracts.keySet().containsAll(java.util.List.of("currencyOptions", "post", "unpost")));
+    assertNull(NeoActionContract.validate(contracts, "cloneRecord", new JSONObject()));
   }
 }
