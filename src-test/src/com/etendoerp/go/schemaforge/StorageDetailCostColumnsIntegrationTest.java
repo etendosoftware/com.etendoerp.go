@@ -35,6 +35,7 @@ import java.util.UUID;
 
 import org.junit.After;
 import org.junit.Before;
+import org.junit.Ignore;
 import org.junit.Test;
 import org.openbravo.base.session.OBPropertiesProvider;
 import org.openbravo.test.base.OBBaseTest;
@@ -71,6 +72,7 @@ import org.openbravo.test.base.OBBaseTest;
  *
  * @covers com.etendoerp.go.schemaforge.NeoCrudHandler
  */
+@Ignore("Disabled at the QA team's request (ETP-5776)")
 public class StorageDetailCostColumnsIntegrationTest extends OBBaseTest {
 
   private static final String COST_COLUMN_ID = "0629983CB2A04B5ABE6666FD67642A89";
