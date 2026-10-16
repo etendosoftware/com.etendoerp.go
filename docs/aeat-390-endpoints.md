@@ -3,10 +3,10 @@
 ETP-5716 — backend base of Modelo 390 in "Modelos Fiscales". Same architecture as Modelo 303
 (`aeat-303-submit-endpoint.md`): a NEO built-in handler (`Fiscal390BoxesHandler`, routed by
 `NeoBuiltInEndpointHandler`) on top of the classic module `org.openbravo.module.aeat390.es`.
-The incident rules are NOT part of this step; the extension points they plug into are listed at
-the end. The invoices (Facturas) tab is `GET /fiscal390/sources`; the AEAT telematic filing is
+The invoices (Facturas) tab is `GET /fiscal390/sources`; the AEAT telematic filing is
 `POST /fiscal390/submit`; the preload from the year's Modelo 303s and the cuadre with them is
-`GET /fiscal390/preload`.
+`GET /fiscal390/preload`; the incident rules are computed by `POST /fiscal390/validate` and
+enforced by the `generate` / `submit` guards (see "Incidents").
 
 ## Routes
 
@@ -19,6 +19,7 @@ All routes require the "Modelos Fiscales" grant (Tax Report window, same gate as
 | `GET` | `/fiscal390/sources?year=&period=0A[&box=&type=&tax=&q=&page=&pageSize=]` | Facturas tab (`Fiscal390SourcesSupport`) |
 | `GET` | `/fiscal390/preload?year=&period=0A[&monthlyReturn=Y\|N]` | 303 preload + cuadre (`Fiscal390PreloadSupport`, `Fiscal390PreloadAggregator`) |
 | `POST` | `/fiscal390/submit?year=&period=0A&id=` | AEAT telematic filing (`Fiscal390SubmissionSupport`) |
+| `POST` | `/fiscal390/validate?year=&period=0A&id=` | recompute the rule incidents (`Fiscal390IncidentsSupport`) |
 | `GET` | `/fiscal390/modified?year=&period=0A&since=` | shared invoice-change probe |
 | `GET/POST/PUT/DELETE` | `/fiscal390/declarations` (= `/fiscal303/declarations`) | shared `FiscalDeclCrudHandler` |
 | `GET` | `/fiscal390/incidents?id=` | shared `FiscalDeclCrudHandler` |
@@ -32,6 +33,7 @@ Declarations use `model: "390"`, `period: "0A"`.
 | `400` | `period` is not `0A`; an input is not a number (message names it); `sources` with a non-numeric `box`/`page`/`pageSize` or `pageSize` outside 0–500 |
 | `404` / `405` | unknown entity / wrong method (`generate` is GET-only, `submit` POST-only) |
 | `409` | `generate` when the latest declaration of the year is submitted (shared ETP-5438 guard) |
+| `409 BLOCKING_INCIDENTS` | `generate` while a blocking rule holds — body `{ error: { status, code, message, incidents: [...] } }` (see "Incidents") |
 | `409 DUPLICATE_ORDINARY` | `POST /declarations` of a 2nd ordinary 390 for the same org/year — see below |
 | `500` | no 390 tax report up to the year, incomplete fiscal calendar, classic validation errors (translated AD message, e.g. missing main IAE activity) |
 
@@ -235,7 +237,7 @@ Flow of a production filing:
    | Status | `errorCode` | When |
    |---|---|---|
    | `409` | `ALREADY_SUBMITTED` | status is in the submitted family — correct it with a substitute |
-   | `409` | `BLOCKING_INCIDENTS` | the declaration has a blocking RULE incident (`block` or blank severity, code not `AEAT-…`) |
+   | `409` | `BLOCKING_INCIDENTS` | a blocking RULE holds for the STORED inputs — evaluated fresh, never from the stored rows (see "Incidents"); the answer carries `incidents` |
    | `400` | `MISSING_PRESENTER` | `presenterNif` / `presenterName` blank |
    | `409` | `NO_CERTIFICATE` | the organization has no stored certificate |
    | `500` | `SUBMISSION_FAILED` | the file could not be generated |
@@ -260,13 +262,14 @@ none. They are coded `AEAT-<AEAT code>` (`FiscalDeclCrudHandler.AEAT_INCIDENT_CO
 `replaceAeatIncidentsNoCommit`), which does two things:
 
 - only `AEAT-…` rows are replaced, so the model's own rule incidents are kept;
-- they never block: the `BLOCKING_INCIDENTS` guard (and the page's Generar / Presentar gate) count
-  only rule incidents, so a stored AEAT error does not block the retry that fixes it. This is the
-  same outcome as 303, which stores AEAT errors with the raw code and does not gate its filing on
-  stored incidents at all. 303 keeps the raw code and `replaceIncidentsNoCommit` (unchanged).
+- they never block: the `BLOCKING_INCIDENTS` guard evaluates the rules (never the stored rows) and
+  the page's Generar / Presentar gate counts only rule incidents, so a stored AEAT error does not
+  block the retry that fixes it. This is the same outcome as 303, which stores AEAT errors with the
+  raw code and does not gate its filing on stored incidents at all. 303 keeps the raw code and
+  `replaceIncidentsNoCommit` (unchanged).
 
-Whoever writes the 390 rule incidents must not wipe the `AEAT-…` rows (or accepts that a rule
-recompute clears the last AEAT answer). Test mode (`testMode: true`, ServValiDos with
+The rule recompute (`replaceRuleIncidentsNoCommit`, "Incidents" below) is the mirror: it replaces
+every row that is NOT `AEAT-…`, so the last AEAT answer survives it. Test mode (`testMode: true`, ServValiDos with
 `MODELO = 390`) never changes the declaration itself; a returned draft PDF is attached as
 `TEST-justificante-390-<year>-0A.pdf`.
 
@@ -380,8 +383,8 @@ are the state's share ([66] = [64] × [65] %), so in territory mode the counterp
 (= [92] + [659] − [93], [92] = [84] × [87] %). The identity does not depend on the [85]/[662]
 split, so an unknown carry does not by itself create a difference. The 390 side is the result on
 screen (live inputs), so the comparison is done by the frontend; `reconcile(annualResult,
-expectedResult)` in `Fiscal390PreloadAggregator` gives the same answer server-side for the
-incidents phase ("Diferencia con los 303").
+expectedResult)` in `Fiscal390PreloadAggregator` gives the same answer server-side: the
+`DIFF_303` incident ("Incidents").
 
 ### Response
 
@@ -408,6 +411,90 @@ incidents phase ("Diferencia con los 303").
 `DEVOLVER_xx` keys are present only with `monthlyReturn`. `expectedResult` is `null` when no 303
 of the year could be used. Tests: `Fiscal390PreloadAggregatorTest`.
 
+## Incidents
+
+The Modelo 390 rules are computed by the backend — the single source of truth — in
+`Fiscal390IncidentRules` (pure: every input is a `Facts` field) from facts loaded by
+`Fiscal390IncidentsSupport`: the organization exactly as classic reads it (`AEAT390ReportDao`
+NIF / org info / legal representatives, `AEAT390Utility.getEpigraphOrgInfo` activities), the
+inputs the file is built from, the boxes payload (`warnings`, `annualResult`), the year's 303s
+(`Fiscal390PreloadSupport.aggregateYear`) and two invoice queries. A source that fails to load
+leaves its facts unknown and its rules silent (logged); a boxes failure is itself the blocking
+incident `COMPUTE_FAILED`.
+
+A rule is **blocking** when classic rejects (or crashes on) the same data while generating the
+file, or the AEAT rejects it; otherwise it is a **warning**.
+
+| Code | Severity | Source (classic / AEAT) | Action |
+|---|---|---|---|
+| `NO_MAIN_IAE` | block | `AEAT390_NoOrgMainActivity`; TXT page 1 `getEpigraphOrgInfo(org, true).get(0)` | organization `iae` |
+| `IAE_WITHOUT_CODE` `{activity}` | block | `AEAT390_Activity_Code_Mandatory` (main + every other activity) | organization `iae` |
+| `TOO_MANY_IAE` `{count, max: 5}` | block | the TXT writer keeps the main + 5 others in a 6-slot array: a 6th crashes (Jira listed it as a warning; it is blocking because classic fails) | organization `iae` |
+| `UNSUPPORTED_RATE` `{parameter, rate}` | block | calculator warning; classic aborts on that rate | — |
+| `COMPUTE_FAILED` `{message}` | block | the boxes cannot be computed (non-numeric input, incomplete calendar, no tax report) | — |
+| `SUBSTITUTE_ID_INVALID` `{length: 13}` | block | `AEAT390_NoSuplementaryNumber`; AEAT needs 13 digits. Substitute = `ISSUPPLEMENTARY`/`ISRECTIFICATION` = Y or `identification.sustitutiva`; identifier = `SUPPLEMENTARYNO`, else `identification.formerStatement` | — |
+| `TERRITORY_PERCENT_MAX` `{box, max: 99}` | block | `AEAT390_99_Percentage_Individual` | box [87]–[91] |
+| `TERRITORY_PERCENT_SUM` `{sum}` | block | `AEAT390_100_Percentage_Sum` (only when some % > 0) | box [87] |
+| `NO_ORG_NIF` | block | `AEAT390_NoOrgTaxId` | organization `identity` |
+| `PERSON_NAME_MISSING` | block | DB check `EM_AEAT390_ISPERSON_MAND_CH` (defensive: the DB already refuses it) | organization `modelo390` |
+| `PERSON_REPRESENTATIVE_INCOMPLETE` | block | DB check `EM_AEAT390_REPR_FIS_CH` (defensive) | organization `modelo390` |
+| `COMPENSATION_NEGATIVE` `{box}` | block | `AEAT390_AmtPreviousLiqAnualYearNegative` / `AmtPreviousYearNegative` | box [85] / [93] |
+| `COMPENSATION_WITH_TERRITORY` | block | `AEAT390_BothTerritoryAndLiqAnual` | box [85] |
+| `COMPENSATION_BOTH` | block | `AEAT390_BothAmtPrevious` | box [93] |
+| `REFUND_WITHOUT_MONTHLY_REGISTER` | block | `AEAT390_MonthlyReturn_Check` | box [96] |
+| `LAST_PERIOD_REFUND_CONFLICT` | block | `AEAT390_TotalLastPeriod_Check` | box [97] |
+| `UNPOSTED_INVOICES` `{count, sales, purchase, documents}` | warn | issued invoices (`CO`/`CL`/`VO`, processed) of the exercise with `posted <> 'Y'`: classic and the boxes only read posted ones. `documents` = the first 5 numbers | invoices `{sales, purchase}` |
+| `MISSING_303` `{periods}` | warn | preload `missingPeriods` | box [95] |
+| `DIFF_303` `{difference, expected, result, tolerance, box}` | warn | `Fiscal390PreloadAggregator.reconcile` of the stored-inputs result ([86], or [94]) with `expectedResult`, beyond 1,00 € | box [86] / [94] |
+| `INACTIVE_TAX_WITH_OPERATIONS` `{tax, invoices}` | warn | an inactive `C_Tax` linked to this report by `OBTL_Tax_Parameter` with posted invoices in the exercise: classic `get390TaxesOrderByRate` reads active taxes only, so they are silently left out | — |
+| `NO_LEGAL_REPRESENTATIVE` | warn | legal entity with no active legal representative (a natural person needs none) | organization `modelo390` |
+| `NAME_TRUNCATED` `{field, limit, label?}` | warn | `AEAT390String` cuts: razón social 37, first name / each surname 15, natural-person representative 37 (only with a NIF), legal representative 36 (first 3 by line, `label` = NIF). Measured on what the file keeps (upper case, accents folded, `[^A-Z0-9. ]` dropped) | organization `identity` / `modelo390` |
+| `BOX98_WITH_96_97` | warn | AEAT instructions: [98] empty when [96] or [97] has an amount | box [98] |
+| `NO_BOX` `{parameter, rate}` | warn | calculator warning: a figure the form has no box for (kept in the totals) | — |
+
+The SII-active warning stays on the catalog activation (not repeated as an incident).
+
+### `POST /fiscal390/validate?year=&period=0A&id=`
+
+Recomputes every rule of a **draft** from its STORED `manualData` (save first), replaces its rule
+incidents (`FiscalDeclCrudHandler.replaceRuleIncidentsNoCommit`: every row whose code is NOT
+`AEAT-…`; the last AEAT answer is kept) and commits. Answers every incident of the declaration in
+the `GET /incidents` shape plus `frozen`:
+
+```json
+{ "frozen": false,
+  "data": [ { "code": "TERRITORY_PERCENT_SUM", "severity": "block", "message": "The territory percentages add up to 90 %, not 100 %",
+              "params": { "sum": "90" }, "action": { "type": "box", "box": 87 } },
+            { "code": "AEAT-E390001", "severity": "warn", "message": "NIF no identificado" } ] }
+```
+
+A **submitted** declaration's incidents are frozen: nothing is recomputed or written, `frozen:
+true`. `400` without `id`; `404` for a declaration that is not a 390 of the year of the session
+org. The page calls it on opening a draft and after every successful save.
+
+**Stored shape.** A rule incident is one `ETGO_FISCAL_DECL_INCIDENT` row: `CODE` = rule code,
+`SEVERITY`, and `MESSAGE` = `{"text": <English fallback>, "params": {...}, "action": {...}}`
+(`FiscalDeclCrudHandler.structuredMessage`) — no new column. The shared read path
+(`GET /fiscal<model>/incidents`, `incidentsJson` / `putMessageFields`) unfolds such a message into
+`message` + `params` + `action`; any other message (an AEAT answer, a 303 row) is returned as-is.
+`action.type` is `box` (`box`), `sources` (`box`, the Facturas tab filtered by it — no rule uses it
+today: the lines behind the affected incidents are, by definition, not in that tab),
+`organization` (`section`: `identity` | `iae` | `modelo390`) or `invoices` (`sales`, `purchase`).
+
+### Guards
+
+`generate` and `submit` (production) evaluate the **blocking** rules fresh — never from the stored
+rows, which can be older than the last change to the organization — for the inputs the file is
+built from: `generate` the stored inputs of the latest declaration overridden by the request,
+`submit` the stored inputs (`Fiscal390IncidentsSupport.blockingIncidents`; the warnings' sources
+— 303s, invoice queries — are not loaded). While one holds, `generate` answers `409` with
+`error.code = BLOCKING_INCIDENTS` and `error.incidents`, and `submit` the failure JSON with
+`errorCode = BLOCKING_INCIDENTS` and `incidents`. Nothing is written by a guard. Test mode
+(`testMode: true`, ServValiDos) is not guarded, as before. Tests: `Fiscal390IncidentRulesTest`
+(every rule, positive and negative), `Fiscal390IncidentsSupportTest`,
+`FiscalDeclCrudHandlerTest` (replace keeps `AEAT-…`, structured message),
+`Fiscal390BoxesHandlerTest` (generate guard), `Fiscal390SubmissionSupportTest`.
+
 ## One ordinary per exercise
 
 `FiscalDeclCrudHandler.SINGLE_ORDINARY_MODELS = {"390"}`: `POST /declarations` of an ordinary
@@ -432,8 +519,8 @@ aeat390. Run `update.database` before any `export.database`, or the export drops
 
 - Submission: done (`POST /fiscal390/submit`, above).
 - 303 preload: done (`GET /fiscal390/preload`, above).
-- Incidents: `warnings` + `FiscalDeclCrudHandler.replaceIncidents`. The preload gives
-  "Faltan 303 del ejercicio" (`missingPeriods`) and "Diferencia con los 303"
-  (`Fiscal390PreloadAggregator.reconcile` against the computed [86]/[94]).
+- Incidents: done (`POST /fiscal390/validate` and the guards, above). A new rule is a method in
+  `Fiscal390IncidentRules`, its facts in `Fiscal390IncidentsSupport.loadFacts`, and its text
+  `fm.m390.incident.<CODE>` in the frontend locales.
 - Invoice sources tab: done as its own endpoint (`GET /fiscal390/sources`, above), so the boxes
   payload and its snapshot stay fixed-size.
