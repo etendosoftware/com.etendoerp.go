@@ -5561,6 +5561,13 @@ body: jettison's `at character N of <text>` suffix is cut.
 | `/sws/go/*` | `400`, as before for any malformed body |
 | `/oauth2/*` | `400` `invalid_request` *Malformed request body* — the token and client-management endpoints answered `500` for any malformed body before |
 
+**Multi-criteria joined by `__;__` are rejected.** Core's datasource accepts several JSON
+criteria in one `criteria` parameter, joined by `JsonConstants.IN_PARAMETER_SEPARATOR` (`__;__`).
+Because the scan refuses anything after the root closes, such a value is a `400`
+`Invalid criteria: malformed JSON`. This is deliberate and not supported: the SPA, core's NEO
+path and this module never send it. An external REST client must send a single criteria object
+(combine conditions inside it, e.g. with an `AdvancedCriteria` `and`).
+
 Valid JSON within the depth limit parses exactly as before. **Out of scope by design:** JSON the
 server itself stored or produced (preferences, onboarding drafts, MCP config, `manualData`,
 re-serialized bodies), payloads whose signature is verified before parsing (checkout webhook,
