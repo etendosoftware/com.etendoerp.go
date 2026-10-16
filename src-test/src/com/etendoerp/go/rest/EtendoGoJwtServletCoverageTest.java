@@ -1193,6 +1193,45 @@ public class EtendoGoJwtServletCoverageTest {
     assertNotNull(body.getJSONArray("roleList"));
   }
 
+  /** ETP-5096 — the token is minted for the user's default role, not for the oldest one. */
+  @Test
+  public void envLoginMintsTheJwtForTheDefaultRoleNotTheOldest() throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = mockRequest("/login");
+    when(req.getHeader("Authorization")).thenReturn("Bearer valid-token");
+    when(req.getParameter("userId")).thenReturn("user-1");
+
+    User user = mock(User.class);
+    Role defaultRole = mock(Role.class);
+    EtendoGoJwtSupport.RoleListData roleListData =
+        new EtendoGoJwtSupport.RoleListData("oldest-role", "default-role", new JSONArray());
+
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.get(User.class, "user-1")).thenReturn(user);
+    when(obDal.get(Role.class, "default-role")).thenReturn(defaultRole);
+
+    try (var ctxMock = mockStatic(OBContext.class);
+         var supportMock = mockStatic(EtendoGoJwtSupport.class);
+         var dalMock = mockStatic(EtendoGoJwtDalHelper.class);
+         var obDalMock = mockStatic(OBDal.class);
+         var swsMock = mockStatic(SecureWebServicesUtils.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubAuthenticatedAccount(dalMock);
+      supportMock.when(() -> EtendoGoJwtSupport.isEnvironmentUserOwnedByAccount(
+          "user@test.com", "user-1")).thenReturn(true);
+      supportMock.when(() -> EtendoGoJwtSupport.loadRoleListData("user-1"))
+          .thenReturn(roleListData);
+      swsMock.when(() -> SecureWebServicesUtils.generateToken(user, defaultRole))
+          .thenReturn("jwt-default-role");
+
+      servlet.doGet(req, resp.response);
+    }
+
+    assertEquals(200, resp.status);
+    assertEquals("jwt-default-role", new JSONObject(resp.body()).getString("token"));
+    verify(obDal, never()).get(Role.class, "oldest-role");
+  }
+
   @Test
   public void envLoginUserNotFoundReturnsNotFound() throws Exception {
     ResponseCapture resp = mockResponse();
