@@ -2518,6 +2518,8 @@ public class EtendoGoJwtServletCoverageTest {
     servlet.onboardingOrgInfoService = mock(com.etendoerp.go.onboarding.OnboardingOrgInfoService.class);
     servlet.onboardingWarehouseAddressService = mock(com.etendoerp.go.onboarding.OnboardingWarehouseAddressService.class);
     servlet.onboardingCostingScheduleService = mock(com.etendoerp.go.onboarding.OnboardingCostingScheduleService.class);
+    servlet.onboardingInitialPeriodStateService =
+        mock(com.etendoerp.go.onboarding.OnboardingInitialPeriodStateService.class);
     if (failAfterCommit) doThrow(new RuntimeException("post-commit scheduler failure"))
         .when(servlet.onboardingCostingScheduleService).activateSchedule("client-1");
     Currency currency = mock(Currency.class); when(currency.getId()).thenReturn("currency-1");

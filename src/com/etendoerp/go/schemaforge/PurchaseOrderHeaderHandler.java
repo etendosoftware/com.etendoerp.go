@@ -17,10 +17,14 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.util.LinkedHashMap;
+import java.util.Map;
+
 import javax.inject.Inject;
 import javax.inject.Named;
 
 import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
 
 /**
  * NeoHandler for the Purchase Order header entity.
@@ -65,6 +69,21 @@ public class PurchaseOrderHeaderHandler extends AbstractOrderHeaderHandler {
   @Override
   protected boolean isSalesTransaction() {
     return false;
+  }
+
+  /**
+   * The actions this header serves through its delegates, declared for agents (ETP-5709):
+   * {@code createGoodsReceipt}, {@code createPurchaseInvoice} and {@code cloneRecord}. Published
+   * by the MCP next to the AD buttons; REST and the SPA do not read it.
+   */
+  @Override
+  public Map<String, NeoActionContract> actionContracts() {
+    Map<String, NeoActionContract> contracts = new LinkedHashMap<>();
+    contracts.put(CreateGoodsReceiptHandler.CONTRACT.getName(), CreateGoodsReceiptHandler.CONTRACT);
+    contracts.put(CreatePurchaseInvoiceHandler.ORDER_CONTRACT.getName(),
+        CreatePurchaseInvoiceHandler.ORDER_CONTRACT);
+    contracts.put(NeoCloneRecordHandler.CONTRACT.getName(), NeoCloneRecordHandler.CONTRACT);
+    return contracts;
   }
 
   @Override

@@ -240,12 +240,12 @@ final class McpConstants {
    * own step — a create path that silently persists a zero gross amount is a data bug worth
    * landing on its own evidence rather than inside a re-enablement. ETP-5528 left this shared path
    * as it is: sales order and sales quotation lines get the amounts from their own customizations
-   * ({@code OrderLineDiscountSupport}) on every create, and so do sales invoice lines
-   * ({@code SalesInvoiceLineHandler} → {@code InvoiceLineAmountSupport}: {@code lineNetAmount} and
-   * {@code grossAmount}). Every other entity still does not on {@code etendo_create}, as on
-   * {@code develop} — purchase invoice lines and purchase order lines included (a purchase invoice
-   * line still persists {@code lineNetAmount 0} / {@code grossAmount 0}) — see
-   * {@code neo-headless.md} §4.12.9 and §4.12.20.
+   * ({@code OrderLineDiscountSupport}) on every create, and so do sales and purchase invoice lines
+   * ({@code SalesInvoiceLineHandler} / {@code PurchaseInvoiceLineHandler} →
+   * {@code InvoiceLineAmountSupport}: the discounted price, {@code lineNetAmount} and
+   * {@code grossAmount}, recalculated on an update too — ETP-5710). Every other entity still does
+   * not on {@code etendo_create}, as on {@code develop} — purchase order lines included (ETP-5727)
+   * — see {@code neo-headless.md} §4.12.9 and §4.12.20.
    *
    * <p>The guard against this drifting again is {@code NeoExtensionParityTest} (E4), which asserts
    * over the execution trace that one customization is reached by every channel. It cannot see a
@@ -456,9 +456,9 @@ final class McpConstants {
    * executed under the old name.
    */
   static final Set<String> TOOLS_RENAMED_FROM_NEO = Set.of(
-      "etendo_discover", TOOL_NEO_LIST, TOOL_NEO_GET, TOOL_NEO_CREATE, TOOL_NEO_UPDATE,
-      TOOL_NEO_DELETE, TOOL_NEO_SELECTORS, TOOL_NEO_DEFAULTS, TOOL_NEO_SCHEMA, "etendo_batch",
-      "etendo_action", TOOL_NEO_WIDGET, TOOL_NEO_VECTOR_SEARCH, TOOL_NEO_FEEDBACK,
+      TOOL_NEO_DISCOVER, TOOL_NEO_LIST, TOOL_NEO_GET, TOOL_NEO_CREATE, TOOL_NEO_UPDATE,
+      TOOL_NEO_DELETE, TOOL_NEO_SELECTORS, TOOL_NEO_DEFAULTS, TOOL_NEO_SCHEMA, TOOL_NEO_BATCH,
+      TOOL_NEO_ACTION, TOOL_NEO_WIDGET, TOOL_NEO_VECTOR_SEARCH, TOOL_NEO_FEEDBACK,
       TOOL_NEO_UPLOAD_IMAGE, TOOL_NEO_REQUEST_IMAGE_UPLOAD, TOOL_NEO_GET_IMAGE_UPLOAD,
       TOOL_GENERATE_AMORTIZATION_PLAN);
 
