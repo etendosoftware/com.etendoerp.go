@@ -86,6 +86,7 @@ public class Fiscal390SubmissionSupportTest {
   private FiscalDecl decl;
   private OBDal obDal;
   private AttachImplementationManager attachManager;
+  private FiscalDeclCrudHandler declHandler;
 
   private MockedStatic<OBDal> obDalMock;
   private MockedStatic<OBContext> obContextMock;
@@ -101,6 +102,8 @@ public class Fiscal390SubmissionSupportTest {
     doReturn("org1").when(handler).declarationOrgId();
     generateSupport = mock(Fiscal390GenerateSupport.class);
     doReturn(generateSupport).when(handler).generateSupport();
+    declHandler = mock(FiscalDeclCrudHandler.class);
+    doReturn(declHandler).when(handler).declHandler();
     when(generateSupport.generateContent(eq("org1"), eq(2026), anyMap()))
         .thenReturn(new Fiscal390GenerateSupport.Generated(FILE, null));
     doReturn(new JSONObject("{\"boxes\":{\"86\":\"10.00\"},\"summary\":{\"annualResult\":\"10.00\"}}"))
@@ -264,6 +267,7 @@ public class Fiscal390SubmissionSupportTest {
     assertEquals("Ayelen", submission.getString("user"));
     assertEquals("aeat_telematic", submission.getString("method"));
     verify(attachManager).upload(any(), eq("TAB1"), eq(DECL_ID), eq("org1"), any());
+    verify(declHandler).replaceAeatIncidentsNoCommit(eq(decl), any(), any());
     verify(obDal).commitAndClose();
 
     assertEquals("SUCCESS", json.getString("status"));
@@ -273,7 +277,10 @@ public class Fiscal390SubmissionSupportTest {
 
   // ── AEAT error ──────────────────────────────────────────────────────
 
-  /** The AEAT rejects the filing: nothing on the declaration changes, the errors come back. */
+  /**
+   * The AEAT rejects the filing: the declaration status/data do not change, the errors come back
+   * and are stored as AEAT incidents (committed), like 303.
+   */
   @Test
   public void testAeatErrorKeepsDraft() throws Exception {
     AEAT303SubmissionResult r = new AEAT303SubmissionResult();
@@ -288,7 +295,10 @@ public class Fiscal390SubmissionSupportTest {
     assertEquals("E390001: NIF no identificado", json.getJSONArray("errors").getString(0));
     verify(decl, never()).setDeclarationStatus(anyString());
     verify(decl, never()).setManualData(anyString());
-    verify(obDal, never()).commitAndClose();
+    verify(declHandler).replaceAeatIncidentsNoCommit(decl,
+        java.util.Collections.singletonList("E390001: NIF no identificado"),
+        java.util.Collections.emptyList());
+    verify(obDal).commitAndClose();
     verify(attachManager, never()).upload(any(), anyString(), anyString(), anyString(), any());
   }
 
@@ -404,6 +414,24 @@ public class Fiscal390SubmissionSupportTest {
     verify(handler, never()).computePayload(anyString(), anyInt(), anyMap());
     verify(decl, never()).setDeclarationStatus(anyString());
     verify(attachManager).upload(any(), eq("TAB1"), eq(DECL_ID), eq("org1"), any());
+    verify(declHandler).replaceAeatIncidentsNoCommit(eq(decl), any(), any());
+  }
+
+  /** The blocking guard counts only rule incidents: AEAT-origin rows are excluded by code. */
+  @Test
+  public void testBlockingIncidentCountExcludesAeatRows() {
+    @SuppressWarnings("unchecked")
+    org.openbravo.dal.service.OBQuery<org.openbravo.base.structure.BaseOBObject> query =
+        mock(org.openbravo.dal.service.OBQuery.class);
+    ArgumentCaptor<String> hql = ArgumentCaptor.forClass(String.class);
+    when(obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL_INCIDENT), hql.capture()))
+        .thenReturn(query);
+    when(query.count()).thenReturn(1);
+    Fiscal390SubmissionSupport real = new Fiscal390SubmissionSupport(handler);
+
+    assertEquals(1L, real.countBlockingIncidents(DECL_ID));
+    assertTrue(hql.getValue().contains("code not like :aeat"));
+    verify(query).setNamedParameter("aeat", "AEAT-%");
   }
 
   // ── manualData.submission ───────────────────────────────────────────

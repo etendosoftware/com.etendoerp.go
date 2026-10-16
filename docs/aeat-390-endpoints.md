@@ -233,7 +233,7 @@ Flow of a production filing:
    | Status | `errorCode` | When |
    |---|---|---|
    | `409` | `ALREADY_SUBMITTED` | status is in the submitted family — correct it with a substitute |
-   | `409` | `BLOCKING_INCIDENTS` | the declaration has a `block` incident (blank severity counts as `block`) |
+   | `409` | `BLOCKING_INCIDENTS` | the declaration has a blocking RULE incident (`block` or blank severity, code not `AEAT-…`) |
    | `400` | `MISSING_PRESENTER` | `presenterNif` / `presenterName` blank |
    | `409` | `NO_CERTIFICATE` | the organization has no stored certificate |
    | `500` | `SUBMISSION_FAILED` | the file could not be generated |
@@ -249,12 +249,24 @@ Flow of a production filing:
    `submissionMethod = aeat_telematic`, `fileName = justificante-390-<year>-0A.pdf`, the snapshot,
    `manualData.submission` (below) and attaches the justificante PDF to the declaration.
 5. AEAT rejects (`200`, `status: "ERROR"`, `errors[]` as returned by the AEAT, code included):
-   **nothing changes** — the declaration stays a draft.
+   the declaration stays a draft; only its AEAT incidents change (below).
 
-Unlike 303, AEAT errors are **not** copied into the declaration incidents: the 390 incidents are
-the model's own blocking/warning rules, and a stored blocking AEAT error would block the very
-retry that fixes it. Test mode (`testMode: true`, ServValiDos with `MODELO = 390`) never touches
-the declaration; a returned draft PDF is attached as `TEST-justificante-390-<year>-0A.pdf`.
+**AEAT incidents.** Like 303, every attempt that reaches the AEAT — validation and production,
+accepted or rejected — replaces the declaration's AEAT incidents with the returned `errors`
+(`block`) and `warnings` (`warn`), committed with the rest of the write; a clean answer leaves
+none. They are coded `AEAT-<AEAT code>` (`FiscalDeclCrudHandler.AEAT_INCIDENT_CODE_PREFIX`,
+`replaceAeatIncidentsNoCommit`), which does two things:
+
+- only `AEAT-…` rows are replaced, so the model's own rule incidents are kept;
+- they never block: the `BLOCKING_INCIDENTS` guard (and the page's Generar / Presentar gate) count
+  only rule incidents, so a stored AEAT error does not block the retry that fixes it. This is the
+  same outcome as 303, which stores AEAT errors with the raw code and does not gate its filing on
+  stored incidents at all. 303 keeps the raw code and `replaceIncidentsNoCommit` (unchanged).
+
+Whoever writes the 390 rule incidents must not wipe the `AEAT-…` rows (or accepts that a rule
+recompute clears the last AEAT answer). Test mode (`testMode: true`, ServValiDos with
+`MODELO = 390`) never changes the declaration itself; a returned draft PDF is attached as
+`TEST-justificante-390-<year>-0A.pdf`.
 
 The response is the 303 shape (`status`, `testMode`, `csv`, `presentationDate`,
 `registryNumber`, `justificanteNumber`, `pdfBase64`, `pdfDownloadFailed`, `errors`, `warnings`)
@@ -267,14 +279,17 @@ are shared with 303 in `FiscalAeatSubmissionSupport`.
 The filing data of a submitted 390, shown in the "Presentación en la AEAT" card:
 
 ```json
-{ "method": "aeat_telematic" | "manual_ext", "presentationDate": "…", "justificante": "3901234567890",
+{ "method": "aeat_telematic" | "manual", "presentationDate": "…", "justificante": "3901234567890",
   "csv": "…", "registryNumber": "…", "user": "…", "submittedAt": "2027-01-15T09:20:30Z" }
 ```
 
 Written by the backend on a telematic filing (`user` = the session user's name). On "Registrar
 como presentada" the frontend writes it (justificante, date, user; no CSV) with a `PUT
-manualData`, and only then sends the status `PUT` (`status = submitted_ext`, `submissionMethod =
-manual_ext`) — the two are never the same request (see "User inputs").
+manualData`, and only then sends the status `PUT` — the same status and method as the 303/349
+manual registration: `submitted_ack` + `manual_ack` when the justificante PDF is attached,
+`submitted` + `manual_no_receipt` otherwise. The two are never the same request (see "User
+inputs"). A manually registered 390 can therefore be reactivated ("Reactivar declaración"); a
+telematic one (`aeat_telematic`) cannot (`rejectTelematicReactivation`).
 
 ### Substitute declaration
 

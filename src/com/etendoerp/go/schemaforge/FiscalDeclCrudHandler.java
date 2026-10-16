@@ -1014,8 +1014,35 @@ class FiscalDeclCrudHandler {
     for (BaseOBObject inc : queryIncidents(declId)) {
       OBDal.getInstance().remove(inc);
     }
-    insertIncidents(decl, errors, SEVERITY_BLOCK);
-    insertIncidents(decl, warnings, SEVERITY_WARN);
+    insertIncidents(decl, errors, SEVERITY_BLOCK, "");
+    insertIncidents(decl, warnings, SEVERITY_WARN, "");
+  }
+
+  /**
+   * Code prefix of the incidents a model stores from an AEAT answer when it must tell them apart
+   * from its own rule incidents (ETP-5716, Modelo 390): {@code "AEAT-" + <AEAT code>}. Such rows
+   * are informative — they never block a new filing attempt (the retry is what fixes them); only
+   * the model's own blocking rules do. Modelo 303 does not use it (its AEAT incidents keep the raw
+   * AEAT code, and nothing gates its filing on stored incidents).
+   */
+  static final String AEAT_INCIDENT_CODE_PREFIX = "AEAT-";
+
+  /**
+   * Replaces ONLY the AEAT-origin incidents ({@link #AEAT_INCIDENT_CODE_PREFIX}) of {@code decl}
+   * with {@code errors} ({@link #SEVERITY_BLOCK}) and {@code warnings} ({@link #SEVERITY_WARN}),
+   * coded {@code AEAT-<code>} — the model's own rule incidents are kept. Called on every AEAT
+   * attempt (validation and production), so a clean answer leaves no AEAT incident. Does not
+   * commit (same single-transaction contract as {@link #replaceIncidentsNoCommit}).
+   */
+  void replaceAeatIncidentsNoCommit(BaseOBObject decl, List<String> errors, List<String> warnings) {
+    String declId = String.valueOf(decl.getId());
+    for (BaseOBObject inc : queryIncidents(declId)) {
+      if (asString(inc.get(PROPERTY_INCIDENT_CODE)).startsWith(AEAT_INCIDENT_CODE_PREFIX)) {
+        OBDal.getInstance().remove(inc);
+      }
+    }
+    insertIncidents(decl, errors, SEVERITY_BLOCK, AEAT_INCIDENT_CODE_PREFIX);
+    insertIncidents(decl, warnings, SEVERITY_WARN, AEAT_INCIDENT_CODE_PREFIX);
   }
 
   /**
@@ -1025,7 +1052,8 @@ class FiscalDeclCrudHandler {
    * (the caller is responsible for the delete step), so calling it twice with different severities
    * accumulates rather than replaces.
    */
-  private void insertIncidents(BaseOBObject decl, List<String> rawEntries, String severity) {
+  private void insertIncidents(BaseOBObject decl, List<String> rawEntries, String severity,
+      String codePrefix) {
     for (String raw : new LinkedHashSet<>(rawEntries)) {
       String[] parsed = splitAeatError(raw);
       BaseOBObject inc = (BaseOBObject) OBProvider.getInstance().get(ENTITY_FISCAL_DECL_INCIDENT);
@@ -1034,7 +1062,7 @@ class FiscalDeclCrudHandler {
       inc.set(PROPERTY_CREATED_BY, OBContext.getOBContext().getUser());
       inc.set(PROPERTY_UPDATED_BY, OBContext.getOBContext().getUser());
       inc.set(PROPERTY_INCIDENT_DECL, decl);
-      inc.set(PROPERTY_INCIDENT_CODE, parsed[0]);
+      inc.set(PROPERTY_INCIDENT_CODE, codePrefix + parsed[0]);
       inc.set(PROPERTY_INCIDENT_MESSAGE, parsed[1]);
       inc.set(PROPERTY_INCIDENT_SEVERITY, severity);
       OBDal.getInstance().save(inc);

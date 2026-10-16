@@ -68,10 +68,15 @@ import com.etendoerp.go.schemaforge.util.NeoMessageTranslator;
  *       come back in the response.</li>
  * </ol>
  *
- * <p>Unlike 303, the AEAT errors are NOT copied into the declaration incidents: the 390
- * incidents are the model's own blocking/warning rules, and a blocking AEAT error stored there
- * would block the very retry that fixes it. Test mode (ServValiDos) never touches the
- * declaration; a returned draft PDF is attached with a {@code TEST-} prefix.
+ * <p>Like 303, every attempt that reaches the AEAT (validation and production) replaces the
+ * declaration's AEAT incidents with the returned errors ({@code block}) and warnings
+ * ({@code warn}), in the same transaction as the rest of the write — a clean answer leaves none.
+ * They are coded {@code AEAT-<code>} ({@link FiscalDeclCrudHandler#AEAT_INCIDENT_CODE_PREFIX})
+ * and only those rows are replaced, so the model's own rule incidents are kept; and the
+ * {@code BLOCKING_INCIDENTS} guard ignores them, so a stored AEAT error never blocks the retry
+ * that fixes it (303 does not gate its filing on stored incidents either). Test mode
+ * (ServValiDos) never changes the declaration itself; a returned draft PDF is attached with a
+ * {@code TEST-} prefix.
  */
 class Fiscal390SubmissionSupport {
 
@@ -190,14 +195,15 @@ class Fiscal390SubmissionSupport {
       return;
     }
 
+    persistAeatIncidentsBestEffort(decl, result);
     if (result.isSuccessful()) {
       if (testMode) {
         attachIfPresent(decl, org, "TEST-" + justificanteFileName(year, period), result);
       } else {
         persistSuccessfulSubmission(decl, org, year, period, result, snapshot);
       }
-      commitBestEffort(declId);
     }
+    commitBestEffort(declId);
 
     FiscalAeatSubmissionSupport.writeJson(response, HttpServletResponse.SC_OK,
         FiscalAeatSubmissionSupport.resultJson(result,
@@ -259,18 +265,32 @@ class Fiscal390SubmissionSupport {
   }
 
   /**
-   * Blocking incidents of the declaration — the same rows (and the same "a blank severity is
-   * blocking" default) the Incidencias tab counts.
+   * Blocking RULE incidents of the declaration — blocking rows (a blank severity counts as
+   * blocking, like the Incidencias tab) that are not AEAT answers: the AEAT-origin rows
+   * ({@code AEAT-<code>}) are informative and never block a new attempt.
    */
   long countBlockingIncidents(String declId) {
     OBQuery<BaseOBObject> query = OBDal.getInstance().createQuery(
         FiscalDeclCrudHandler.ENTITY_FISCAL_DECL_INCIDENT,
         FiscalDeclCrudHandler.PROPERTY_INCIDENT_DECL + ".id = :declId and (coalesce("
             + FiscalDeclCrudHandler.PROPERTY_INCIDENT_SEVERITY + ", '') = '' or "
-            + FiscalDeclCrudHandler.PROPERTY_INCIDENT_SEVERITY + " = :block)");
+            + FiscalDeclCrudHandler.PROPERTY_INCIDENT_SEVERITY + " = :block) and "
+            + FiscalDeclCrudHandler.PROPERTY_INCIDENT_CODE + " not like :aeat");
     query.setNamedParameter("declId", declId);
     query.setNamedParameter("block", FiscalDeclCrudHandler.SEVERITY_BLOCK);
+    query.setNamedParameter("aeat", FiscalDeclCrudHandler.AEAT_INCIDENT_CODE_PREFIX + "%");
     return query.count();
+  }
+
+  /** Replaces the AEAT incidents with this answer's; a failure is logged, never thrown. */
+  void persistAeatIncidentsBestEffort(FiscalDecl decl, AEAT303SubmissionResult result) {
+    try {
+      owner.declHandler().replaceAeatIncidentsNoCommit(decl, result.getErrors(),
+          result.getWarnings());
+    } catch (Exception e) {
+      AbstractFiscalHandler.log.error(
+          "Could not persist AEAT incidents for declaration " + decl.getId(), e);
+    }
   }
 
   /**

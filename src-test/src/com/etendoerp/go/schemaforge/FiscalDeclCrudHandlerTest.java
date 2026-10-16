@@ -323,6 +323,50 @@ public class FiscalDeclCrudHandlerTest {
   }
 
   /**
+   * ETP-5716 — the Modelo 390 replaces only its AEAT-origin incidents ({@code AEAT-<code>}): a rule
+   * incident survives, the stale AEAT row goes, and the new rows are coded with the prefix and
+   * nothing is committed (the caller commits once).
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testReplaceAeatIncidentsKeepsRuleIncidentsAndPrefixesTheCode() {
+    BaseOBObject decl = mock(BaseOBObject.class);
+    when(decl.getId()).thenReturn("decl1");
+    BaseOBObject staleAeat = mock(BaseOBObject.class);
+    when(staleAeat.get(FiscalDeclCrudHandler.PROPERTY_INCIDENT_CODE)).thenReturn("AEAT-E1");
+    BaseOBObject rule = mock(BaseOBObject.class);
+    when(rule.get(FiscalDeclCrudHandler.PROPERTY_INCIDENT_CODE)).thenReturn("NO_MAIN_IAE");
+    BaseOBObject newInc = mock(BaseOBObject.class);
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+        MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      OBQuery<BaseOBObject> query = mock(OBQuery.class);
+      when(obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL_INCIDENT), anyString()))
+          .thenReturn(query);
+      when(query.list()).thenReturn(Arrays.asList(staleAeat, rule));
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL_INCIDENT)).thenReturn(newInc);
+
+      handler.replaceAeatIncidentsNoCommit(decl,
+          Collections.singletonList("E390001 - NIF no identificado"),
+          Collections.singletonList("W1 - Aviso"));
+
+      verify(obDal).remove(staleAeat);
+      verify(obDal, never()).remove(rule);
+      verify(newInc).set(FiscalDeclCrudHandler.PROPERTY_INCIDENT_CODE, "AEAT-E390001");
+      verify(newInc).set(FiscalDeclCrudHandler.PROPERTY_INCIDENT_CODE, "AEAT-W1");
+      verify(newInc).set(FiscalDeclCrudHandler.PROPERTY_INCIDENT_SEVERITY,
+          FiscalDeclCrudHandler.SEVERITY_WARN);
+      verify(obDal, never()).commitAndClose();
+    }
+  }
+
+  /**
    * A successful submission carries empty {@code errors} AND {@code warnings} lists — the
    * declaration must end up with zero incident rows: only the delete step runs, nothing is
    * (re)inserted. Covers the case where a PRIOR attempt left both blocking and non-blocking rows
