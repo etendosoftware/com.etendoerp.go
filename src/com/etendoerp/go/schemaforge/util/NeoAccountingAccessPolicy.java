@@ -83,8 +83,8 @@ public final class NeoAccountingAccessPolicy {
   }
 
   /**
-   * Whether {@code role} may see accounting entities. Resolve it once per request or listing
-   * and pass it to {@link #isEntityVisible(SFEntity, boolean)} when looping over entities.
+   * Whether {@code role} may see accounting entities. Costs one query (the role flag) unless the
+   * role is admin/client-admin, so callers check {@link #isAccountingEntity(SFEntity)} first.
    *
    * @param role the current role ({@code null} → denied)
    * @return {@code true} for admin/client-admin, or when {@code EM_ETGO_Show_Acct_Fields = 'Y'}
@@ -109,14 +109,6 @@ public final class NeoAccountingAccessPolicy {
     query.setParameter("roleId", role.getId());
     List<Object> results = query.getResultList();
     return !results.isEmpty() && results.get(0) != null && "Y".equals(results.get(0).toString());
-  }
-
-  /**
-   * Whether {@code entity} may be listed/served for a role whose accounting visibility was
-   * already resolved with {@link #canSeeAccounting(Role)}.
-   */
-  public static boolean isEntityVisible(SFEntity entity, boolean canSeeAccounting) {
-    return canSeeAccounting || !isAccountingEntity(entity);
   }
 
   /**

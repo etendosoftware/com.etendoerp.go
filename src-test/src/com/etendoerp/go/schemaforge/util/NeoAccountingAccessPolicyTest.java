@@ -168,14 +168,6 @@ class NeoAccountingAccessPolicyTest {
   }
 
   @Test
-  void isEntityVisibleUsesThePreResolvedFlag() {
-    SFEntity acct = entity(1, true);
-    assertFalse(NeoAccountingAccessPolicy.isEntityVisible(acct, false));
-    assertTrue(NeoAccountingAccessPolicy.isEntityVisible(acct, true));
-    assertTrue(NeoAccountingAccessPolicy.isEntityVisible(entity(0, true), false));
-  }
-
-  @Test
   @SuppressWarnings("unchecked")
   void entityNameLookupFailsClosedOnAnyAccountingMatch() {
     OBCriteria<SFEntity> criteria = mock(OBCriteria.class);
