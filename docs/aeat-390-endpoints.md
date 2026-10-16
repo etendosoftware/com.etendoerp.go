@@ -3,8 +3,9 @@
 ETP-5716 — backend base of Modelo 390 in "Modelos Fiscales". Same architecture as Modelo 303
 (`aeat-303-submit-endpoint.md`): a NEO built-in handler (`Fiscal390BoxesHandler`, routed by
 `NeoBuiltInEndpointHandler`) on top of the classic module `org.openbravo.module.aeat390.es`.
-Telematic submission, 303 preload and incident rules are NOT part of this step; the extension
-points they plug into are listed at the end. The invoices (Facturas) tab is `GET /fiscal390/sources`.
+The 303 preload and the incident rules are NOT part of this step; the extension points they plug
+into are listed at the end. The invoices (Facturas) tab is `GET /fiscal390/sources`; the AEAT
+telematic filing is `POST /fiscal390/submit`.
 
 ## Routes
 
@@ -15,6 +16,7 @@ All routes require the "Modelos Fiscales" grant (Tax Report window, same gate as
 | `GET` | `/fiscal390/boxes?year=&period=0A[&<input>=…]` | box preview (`Fiscal390BoxesHandler`) |
 | `GET` | `/fiscal390/generate?year=&period=0A[&<input>=…]` | TXT file (`Fiscal390GenerateSupport`) |
 | `GET` | `/fiscal390/sources?year=&period=0A[&box=&type=&tax=&q=&page=&pageSize=]` | Facturas tab (`Fiscal390SourcesSupport`) |
+| `POST` | `/fiscal390/submit?year=&period=0A&id=` | AEAT telematic filing (`Fiscal390SubmissionSupport`) |
 | `GET` | `/fiscal390/modified?year=&period=0A&since=` | shared invoice-change probe |
 | `GET/POST/PUT/DELETE` | `/fiscal390/declarations` (= `/fiscal303/declarations`) | shared `FiscalDeclCrudHandler` |
 | `GET` | `/fiscal390/incidents?id=` | shared `FiscalDeclCrudHandler` |
@@ -26,7 +28,7 @@ Declarations use `model: "390"`, `period: "0A"`.
 | Status | When |
 |---|---|
 | `400` | `period` is not `0A`; an input is not a number (message names it); `sources` with a non-numeric `box`/`page`/`pageSize` or `pageSize` outside 0–500 |
-| `404` / `405` | unknown entity / wrong method (`generate` is GET-only) |
+| `404` / `405` | unknown entity / wrong method (`generate` is GET-only, `submit` POST-only) |
 | `409` | `generate` when the latest declaration of the year is submitted (shared ETP-5438 guard) |
 | `409 DUPLICATE_ORDINARY` | `POST /declarations` of a 2nd ordinary 390 for the same org/year — see below |
 | `500` | no 390 tax report up to the year, incomplete fiscal calendar, classic validation errors (translated AD message, e.g. missing main IAE activity) |
@@ -208,6 +210,88 @@ returned temp file is deleted, and the content is served through the shared
 report name, which carries the layout year. Response headers `X-Fiscal-Tax-Report` and
 `X-Fiscal-Layout-Year` report the resolved report.
 
+## `POST /fiscal390/submit` — AEAT telematic filing
+
+Request body (JSON): `{ testMode, idi, presenterNif, presenterName }` — the same shape as
+`/fiscal303/submit` (see `aeat-303-submit-endpoint.md`), without `nrc`: a 390 is informative (the
+payment was settled by the last 303), so it is never sent.
+
+The AEAT protocol is the classic one, reused, not copied: `AEAT303SubmissionService` (module
+`org.openbravo.module.aeat303.es`) speaks the generic direct-presentation services, and its
+`ProductionSubmissionRequest.Builder#modelo` / `submitValidation(modelo, …)` select the model —
+here `MODELO = 390`, `PERIODO = 0A`, `NRC = ""`. Endpoints, mutual TLS with the organization
+certificate (`ETSG_Certificate`), `FIR = FirmaBasica`, response parsing and the justificante PDF
+download are identical to 303. `ETSG_ForceTestMode = Y` on the client routes a production call to
+the AEAT test environment (`prewww1.aeat.es/.../PresBasicaDos`), exactly like 303.
+
+Flow of a production filing:
+
+1. Guards: `id` present (`400`); the declaration exists, belongs to the client and to the org
+   declarations are stored under, is a 390 of `year` (`404`). Then, each answered with the
+   submission-failure JSON of 303 (`status: "ERROR"`, `errorCode`):
+
+   | Status | `errorCode` | When |
+   |---|---|---|
+   | `409` | `ALREADY_SUBMITTED` | status is in the submitted family — correct it with a substitute |
+   | `409` | `BLOCKING_INCIDENTS` | the declaration has a `block` incident (blank severity counts as `block`) |
+   | `400` | `MISSING_PRESENTER` | `presenterNif` / `presenterName` blank |
+   | `409` | `NO_CERTIFICATE` | the organization has no stored certificate |
+   | `500` | `SUBMISSION_FAILED` | the file could not be generated |
+   | `500` | `SNAPSHOT_FAILED` | the figures could not be frozen — nothing was sent to the AEAT |
+   | `502` | `SUBMISSION_FAILED` | transport / non-JSON answer from the AEAT |
+
+2. The file is generated server-side from the declaration's **stored** `manualData.aeatInputs`
+   (never from the request): the frontend saves pending changes before opening the flow, so the
+   filed file, the snapshot and what the user saved are the same inputs.
+3. The submission snapshot is computed from those inputs and validated against the column
+   BEFORE the AEAT call (ETP-5438 rule).
+4. AEAT accepts (`200`, `status: "SUCCESS"`): one commit stores `status = submitted_ack`,
+   `submissionMethod = aeat_telematic`, `fileName = justificante-390-<year>-0A.pdf`, the snapshot,
+   `manualData.submission` (below) and attaches the justificante PDF to the declaration.
+5. AEAT rejects (`200`, `status: "ERROR"`, `errors[]` as returned by the AEAT, code included):
+   **nothing changes** — the declaration stays a draft.
+
+Unlike 303, AEAT errors are **not** copied into the declaration incidents: the 390 incidents are
+the model's own blocking/warning rules, and a stored blocking AEAT error would block the very
+retry that fixes it. Test mode (`testMode: true`, ServValiDos with `MODELO = 390`) never touches
+the declaration; a returned draft PDF is attached as `TEST-justificante-390-<year>-0A.pdf`.
+
+The response is the 303 shape (`status`, `testMode`, `csv`, `presentationDate`,
+`registryNumber`, `justificanteNumber`, `pdfBase64`, `pdfDownloadFailed`, `errors`, `warnings`)
+with `declarationData = { fiscalYear, period, declarationType, resultAmount }` (`resultAmount` =
+the snapshot's `summary.annualResult`, production only). The JSON builders and the PDF attachment
+are shared with 303 in `FiscalAeatSubmissionSupport`.
+
+### `manualData.submission`
+
+The filing data of a submitted 390, shown in the "Presentación en la AEAT" card:
+
+```json
+{ "method": "aeat_telematic" | "manual_ext", "presentationDate": "…", "justificante": "3901234567890",
+  "csv": "…", "registryNumber": "…", "user": "…", "submittedAt": "2027-01-15T09:20:30Z" }
+```
+
+Written by the backend on a telematic filing (`user` = the session user's name). On "Registrar
+como presentada" the frontend writes it (justificante, date, user; no CSV) with a `PUT
+manualData`, and only then sends the status `PUT` (`status = submitted_ext`, `submissionMethod =
+manual_ext`) — the two are never the same request (see "User inputs").
+
+### Substitute declaration
+
+"Crear declaración sustitutiva" on a submitted 390 is a plain `POST /declarations` with
+`type: "com"` (allowed next to the ordinary, see below) followed by a `PUT manualData` that copies
+the inputs and sets `identification = { sustitutiva: true, formerStatement: <13-digit
+justificante> }` plus the classic flags (`ISSUPPLEMENTARY = Y`, `SUPPLEMENTARYNO`). A draft of the
+exercise already existing answers `409` (shared ETP-5272 guard).
+
+### Live test against the AEAT test environment
+
+Never run against production while developing. With the user's test certificate stored for the
+organization (Fiscal configuration → certificate) and the client preference `ETSG_ForceTestMode =
+Y`, a production filing goes to `prewww1.aeat.es`. "Validar sin presentar" uses ServValiDos
+(`prewww2.aeat.es`, no certificate). Unit tests mock `AEAT303SubmissionService`
+(`Fiscal390SubmissionSupportTest`); nothing in the suite reaches the network.
+
 ## One ordinary per exercise
 
 `FiscalDeclCrudHandler.SINGLE_ORDINARY_MODELS = {"390"}`: `POST /declarations` of an ordinary
@@ -230,8 +314,7 @@ aeat390. Run `update.database` before any `export.database`, or the export drops
 
 ## Extension points for the next steps
 
-- Submission: `Fiscal390BoxesHandler.isKnownEntity`/`allowsPost` (add `submit`, POST-only) and
-  the same `generateElectronicFile` path; snapshot is already provided for model `390`.
+- Submission: done (`POST /fiscal390/submit`, above).
 - 303 preload: fill `manualData.aeatInputs` (`INGRESAR_xx`, `DEVOLVER_xx`, …).
 - Incidents: `warnings` + `FiscalDeclCrudHandler.replaceIncidents`.
 - Invoice sources tab: done as its own endpoint (`GET /fiscal390/sources`, above), so the boxes

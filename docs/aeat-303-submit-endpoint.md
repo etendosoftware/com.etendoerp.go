@@ -161,6 +161,15 @@ followed by an automatic authenticated GET to fetch the actual PDF bytes) and it
 `pdfDownloadFailed` degradation (submission still counted successful, PDF just missing) — Go's
 handler does not need to know any of that, it only reads the final `AEAT303SubmissionResult`.
 
+**Model parameter (ETP-5716).** The classic service is not 303-specific on the wire:
+PresBasicaDos / ServValiDos are generic direct-presentation services. `ProductionSubmissionRequest
+.Builder#modelo(...)` and `submitValidation(modelo, …)` select the model; both default to `303`,
+so this endpoint (which never sets it) sends exactly what it always did. Modelo 390 uses them with
+`390` / `0A` — see `aeat-390-endpoints.md`. The response JSON builders and the justificante PDF
+attachment of this endpoint now live in `FiscalAeatSubmissionSupport` (moved verbatim, shared with
+`/fiscal390/submit`); `Fiscal303BoxesHandler#buildSubmissionResultJson`/`buildFailureJson` and
+`Fiscal303SubmissionSupport#attachJustificante` delegate to it.
+
 ## Certificate flow: no session-upload fallback here
 
 Classic's popup flow supports two certificate sources: the organization's stored certificate
