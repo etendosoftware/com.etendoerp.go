@@ -717,8 +717,8 @@ class CalloutRequestBuilder {
 
   /** Add {@code value} under {@code key} only when the key is not already present. */
   private static void putParamIfAbsent(Map<String, String[]> params, String key, String value) {
-    if (value != null && !params.containsKey(key)) {
-      params.put(key, new String[]{ value });
+    if (value != null) {
+      params.computeIfAbsent(key, k -> new String[]{ value });
     }
   }
 
