@@ -1597,6 +1597,24 @@ class NeoCrudHandlerTest {
     }
 
     @Test
+    @DisplayName("ETP-5577: a period refusal is a 400 carrying its message key, not a 500")
+    void returns400WithKeyForPeriodRefusal() throws Exception {
+      try (MockedStatic<org.openbravo.erpCommon.utility.OBMessageUtils> msgMock =
+          Mockito.mockStatic(org.openbravo.erpCommon.utility.OBMessageUtils.class)) {
+        msgMock.when(() -> org.openbravo.erpCommon.utility.OBMessageUtils.messageBD(
+            org.mockito.ArgumentMatchers.anyString()))
+            .thenReturn("Periodo no válido para esta fecha de contabilidad");
+
+        NeoResponse result = invokeCheckResponse(failureWithMessage("@PeriodNotValid@"));
+
+        assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
+        JSONObject error = result.getBody().getJSONObject("error");
+        assertEquals("Periodo no válido para esta fecha de contabilidad", error.getString("message"));
+        assertEquals("[\"PeriodNotValid\"]", error.getJSONArray("messageKeys").toString());
+      }
+    }
+
+    @Test
     @DisplayName("Returns 409 when translated message reports a duplicate-key violation")
     void returns409ForDuplicateKeyMessage() throws Exception {
       JSONObject error = new JSONObject();

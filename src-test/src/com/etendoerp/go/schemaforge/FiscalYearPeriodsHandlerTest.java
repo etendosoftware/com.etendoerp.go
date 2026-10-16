@@ -35,6 +35,8 @@ import java.util.Date;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import org.junit.After;
+import org.junit.Before;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
@@ -45,8 +47,29 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.financialmgmt.calendar.Period;
 import org.openbravo.model.financialmgmt.calendar.Year;
 
-/** Unit tests for {@link FiscalYearPeriodsHandler}. */
+import com.etendoerp.go.onboarding.FiscalCalendarSupport;
+
+/**
+ * Unit tests for {@link FiscalYearPeriodsHandler}.
+ *
+ * @covers com.etendoerp.go.schemaforge.FiscalYearPeriodsHandler
+ */
 public class FiscalYearPeriodsHandlerTest {
+
+  /** Real period creation; the two calendar queries (ETP-5577) are stubbed per test. */
+  private MockedStatic<FiscalCalendarSupport> support;
+
+  @Before
+  public void stubCalendarQueries() {
+    support = Mockito.mockStatic(FiscalCalendarSupport.class, Mockito.CALLS_REAL_METHODS);
+    support.when(() -> FiscalCalendarSupport.overlapsOtherYears(any(), any())).thenReturn(false);
+    support.when(() -> FiscalCalendarSupport.latestStartMonth(any())).thenReturn(null);
+  }
+
+  @After
+  public void closeCalendarQueries() {
+    support.close();
+  }
 
   private static final String YEAR_ID = "year-id-1";
 
@@ -70,10 +93,69 @@ public class FiscalYearPeriodsHandlerTest {
     org.codehaus.jettison.json.JSONObject values = new org.codehaus.jettison.json.JSONObject()
         .put("FISCALYEARSTART", "JANUARY");
 
-    NeoResponse response = new FiscalYearPeriodsHandler().handle(buildCreatePeriodsContext(values));
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(mock(OBDal.class));
+      NeoResponse response = new FiscalYearPeriodsHandler().handle(
+          buildCreatePeriodsContext(values));
 
-    assertNull(response);
-    assertTrue(!values.has("FISCALYEARSTART"));
+      assertNull(response);
+      assertTrue(!values.has("FISCALYEARSTART"));
+    }
+  }
+
+  @Test
+  public void createPeriodsRejectsAYearOverlappingAnotherYearOnTheJanuaryPathToo()
+      throws Exception {
+    org.codehaus.jettison.json.JSONObject values = new org.codehaus.jettison.json.JSONObject()
+        .put("FISCALYEARSTART", "JANUARY");
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      Year year = calendarYear(dal, "2027");
+      support.when(() -> FiscalCalendarSupport.overlapsOtherYears(year, LocalDate.of(2027, 1, 1)))
+          .thenReturn(true);
+
+      NeoResponse response = new FiscalYearPeriodsHandler().handle(
+          buildCreatePeriodsContext(values));
+
+      assertEquals(409, response.getHttpStatus());
+      assertTrue("never delegated to the core process", values.has("FISCALYEARSTART"));
+    }
+  }
+
+  @Test
+  public void createPeriodsWithoutARangeKeepsTheCalendarsFiscalYearStart() throws Exception {
+    org.codehaus.jettison.json.JSONObject values = new org.codehaus.jettison.json.JSONObject();
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      OBProvider provider = mock(OBProvider.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      obProviderMock.when(OBProvider::getInstance).thenReturn(provider);
+      Year year = calendarYear(dal, "2027");
+      support.when(() -> FiscalCalendarSupport.latestStartMonth(year)).thenReturn(7);
+      support.when(() -> FiscalCalendarSupport.hasPeriods(year)).thenReturn(false);
+      List<Period> periods = new ArrayList<>();
+      when(provider.get(Period.class)).thenAnswer(invocation -> {
+        Period period = mock(Period.class);
+        periods.add(period);
+        return period;
+      });
+
+      NeoResponse response = new FiscalYearPeriodsHandler().handle(
+          buildCreatePeriodsContext(values));
+
+      assertEquals(200, response.getHttpStatus());
+      assertPeriodStartDate(periods.get(0), LocalDate.of(2027, 7, 1));
+    }
+  }
+
+  private static Year calendarYear(OBDal dal, String fiscalYear) {
+    Year year = mock(Year.class);
+    when(year.getCalendar()).thenReturn(mock(org.openbravo.model.financialmgmt.calendar.Calendar.class));
+    when(year.getFiscalYear()).thenReturn(fiscalYear);
+    when(dal.get(eq(Year.class), anyString())).thenReturn(year);
+    return year;
   }
 
   @Test

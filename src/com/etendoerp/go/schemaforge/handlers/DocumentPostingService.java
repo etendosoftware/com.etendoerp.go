@@ -562,6 +562,13 @@ public class DocumentPostingService {
   private static final String MSG_OTHER_POSTING_PROCESS_ACTIVE = "OtherPostingProcessActive";
 
   /**
+   * {@code AD_MESSAGE.VALUE} core resolves for {@code STATUS_PeriodClosed}: the accounting date
+   * falls in a period that is not open. ETP-5577: a productive tenant starts with every period
+   * never-opened, so the SPA keys its "go open the period" guidance on this identity.
+   */
+  private static final String MSG_PERIOD_NOT_AVAILABLE = "PeriodNotAvailable";
+
+  /**
    * Stable identity sent as the failure's {@code messageKeys} when {@code AcctServer} refused a
    * document that is not processed yet (a draft) — ETP-5692. A plain string, deliberately NOT an
    * AD_MESSAGE record: the text is plain English ({@link #TEXT_DOCUMENT_NOT_PROCESSED}), like this
@@ -699,6 +706,12 @@ public class DocumentPostingService {
         message = localizedLocked;
       }
     }
+    if (AcctServer.STATUS_PeriodClosed.equals(acct.getStatus())) {
+      String localizedPeriod = localizedMessage(MSG_PERIOD_NOT_AVAILABLE);
+      if (StringUtils.isNotBlank(localizedPeriod)) {
+        message = localizedPeriod;
+      }
+    }
     // ETP-5436: 'D' on a Goods Movement means the same "cost not yet calculated" condition
     // MSG_NOT_CALCULATED_COST already describes (see its javadoc) — reuse it rather than a
     // second hardcoded message.
@@ -715,7 +728,8 @@ public class DocumentPostingService {
   /**
    * Failure result for a failed {@code acct.post()}. Every status keeps core's (re-localized, see
    * {@link #errorMessageOf}) message and no identity, except {@code STATUS_DocumentLocked}, which
-   * names {@code OtherPostingProcessActive} (ETP-5529), and {@code STATUS_InvalidAccount}: core's
+   * names {@code OtherPostingProcessActive} (ETP-5529), {@code STATUS_PeriodClosed}, which names
+   * {@code PeriodNotAvailable} (ETP-5577), and {@code STATUS_InvalidAccount}: core's
    * accounting engine does not always say which entity caused that failure — {@code
    * DocInOut#createFact} (and other {@code Doc*} subclasses) can leave an account null and fall
    * through to {@code AcctServer#post}'s generic {@code setMessageResult(conn, vars, getStatus(),
@@ -738,6 +752,9 @@ public class DocumentPostingService {
     String message = errorMessageOf(acct);
     if (AcctServer.STATUS_DocumentLocked.equals(acct.getStatus())) {
       return new PostResult(false, message, List.of(MSG_OTHER_POSTING_PROCESS_ACTIVE));
+    }
+    if (AcctServer.STATUS_PeriodClosed.equals(acct.getStatus())) {
+      return new PostResult(false, message, List.of(MSG_PERIOD_NOT_AVAILABLE));
     }
     if (!AcctServer.STATUS_InvalidAccount.equals(acct.getStatus())) {
       return new PostResult(false, message);

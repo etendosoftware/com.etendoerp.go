@@ -3545,8 +3545,12 @@ public class ReconciliationHandlerTest {
     NeoResponse response = handler.reactivate(reactivateBody(ACC_ID, LINE_ID));
 
     assertEquals(409, response.getHttpStatus());
+    // ETP-5577 — keyed, so the SPA offers to open the period; never core's raw @ETPR_…@ token.
+    assertEquals("PeriodNotAvailable", response.getBody().getJSONObject("error")
+        .getJSONArray("messageKeys").getString(0));
+    // …and the text still says which action was refused, for a caller that reads it (MCP).
     assertTrue(response.getBody().getJSONObject("error").getString("message")
-        .contains("period is closed"));
+        .startsWith("The reconciliation cannot be reactivated"));
     verify(handler, never()).undoReconciliation(any(), any(), any());
   }
 
@@ -4433,8 +4437,8 @@ public class ReconciliationHandlerTest {
     NeoResponse response = handler.removeOperation(removeBody(ACC_ID, LINE_ID, "T1"));
 
     assertEquals(409, response.getHttpStatus());
-    assertTrue(response.getBody().getJSONObject("error").getString("message")
-        .contains("period is closed"));
+    assertEquals("PeriodNotAvailable", response.getBody().getJSONObject("error")
+        .getJSONArray("messageKeys").getString(0));
     verify(handler, never()).undoReconciliation(any(), any(), any());
   }
 
@@ -4771,8 +4775,8 @@ public class ReconciliationHandlerTest {
     }
 
     assertEquals(409, response.getHttpStatus());
-    assertTrue(response.getBody().getJSONObject("error").getString("message")
-        .contains("period is closed"));
+    assertEquals("PeriodNotAvailable", response.getBody().getJSONObject("error")
+        .getJSONArray("messageKeys").getString(0));
   }
 
   // ── failure REASON travelling with the 200 (un-reconcile / reactivate) ───────
