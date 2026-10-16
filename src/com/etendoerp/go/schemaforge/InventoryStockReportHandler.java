@@ -148,8 +148,15 @@ public class InventoryStockReportHandler implements NeoHandler {
           + "p.name AS product_name, "
           + "COALESCE(uomt.name, uom.name, '') AS uom_name, "
           + "COALESCE(SUM(sd.qtyonhand), 0) AS qty_on_hand, "
-          + "COALESCE(cost.cost, 0) AS unit_cost, "
-          + "COALESCE(SUM(sd.qtyonhand), 0) * COALESCE(cost.cost, 0) AS total_valuation "
+          // ETP-5555 — unit cost comes from etgo_product_cost(), the same function behind
+          // M_Product.EM_Etgo_Cost (product list), so every surface shows one number. It
+          // replaces a DISTINCT ON over m_costing filtered by ispermanent='Y', which hid the
+          // cost of any hand-entered (non-permanent) line and applied future-dated costs.
+          // Called in the SELECT list (once per output group, p.m_product_id is grouped).
+          // A product with no cost yields NULL for both unit_cost and total_valuation, so the
+          // report shows a blank instead of a misleading 0.
+          + "etgo_product_cost(p.m_product_id) AS unit_cost, "
+          + "COALESCE(SUM(sd.qtyonhand), 0) * etgo_product_cost(p.m_product_id) AS total_valuation "
           + "FROM m_product p "
           + "CROSS JOIN m_warehouse wh "
           + "LEFT JOIN c_uom uom ON uom.c_uom_id = p.c_uom_id "
@@ -158,16 +165,6 @@ public class InventoryStockReportHandler implements NeoHandler {
           + "LEFT JOIN m_locator l ON l.m_warehouse_id = wh.m_warehouse_id "
           + "LEFT JOIN m_storage_detail sd ON sd.m_locator_id = l.m_locator_id "
           + "  AND sd.m_product_id = p.m_product_id AND sd.ad_org_id IN (:orgIds) "
-          + "LEFT JOIN ( "
-          // m_costing.price is the SPECIFIC transaction's own price — NOT the current
-          // weighted-average cost Classic shows (Costing tab "Cost" column, Warehouse
-          // window "Coste"). .cost is the recalculated running average valid from
-          // datefrom onward, which is what a stock valuation must use.
-          + "  SELECT DISTINCT ON (mc.m_product_id) mc.m_product_id, mc.cost "
-          + "  FROM m_costing mc "
-          + "  WHERE mc.ispermanent = 'Y' "
-          + "  ORDER BY mc.m_product_id, mc.datefrom DESC "
-          + ") cost ON cost.m_product_id = p.m_product_id "
           + "WHERE p.ad_client_id = :clientId AND p.isactive = 'Y' "
           + "  AND (p.ad_org_id = '0' OR p.ad_org_id IN (:orgIds)) "
           // ETP-4967: excludes products under a category flagged EM_Etgo_IsSystemCategory='Y'
@@ -189,7 +186,7 @@ public class InventoryStockReportHandler implements NeoHandler {
           // ("subquery uses ungrouped column"). Both are 1:1 with p.value/wh.name already,
           // so this changes nothing about which rows get grouped together.
           "GROUP BY wh.name, wh.m_warehouse_id, pc.name, p.value, p.name, p.m_product_id, "
-          + "uom.name, uomt.name, cost.cost "
+          + "uom.name, uomt.name "
           + "HAVING (COALESCE(SUM(sd.qtyonhand), 0) <> 0 "
           + "  OR (:includeZeroStock = true AND EXISTS ( "
           + "    SELECT 1 FROM m_transaction t "
@@ -284,8 +281,8 @@ public class InventoryStockReportHandler implements NeoHandler {
       item.put("product", row[3]);
       item.put("uom", row[4]);
       item.put("qtyOnHand", toBigDecimal(row[5]));
-      item.put("unitCost", toBigDecimal(row[6]));
-      item.put("totalValuation", toBigDecimal(row[7]));
+      item.put("unitCost", row[6] == null ? JSONObject.NULL : toBigDecimal(row[6]));
+      item.put("totalValuation", row[7] == null ? JSONObject.NULL : toBigDecimal(row[7]));
       data.put(item);
     }
     return data;
