@@ -325,6 +325,43 @@ length on every read rather than stored, so changing it — including the 15 →
 deadline of existing demos too, not only new ones. The renewal grace window is separate:
 `etendo.go.billing.grace.days` (`ETGO_BILLING_GRACE_DAYS`), 15 days.
 
+### Trial notices (ETP-5453)
+
+The owner of a demo is emailed before the trial ends and once it has ended, by the background
+process **Demo Trial Notices** (`ETGO_DemoTrialNotices`, `DemoTrialNoticeProcess`).
+It is **scheduled by hand**, once per instance: in Classic, as System Administrator, open
+**Process Request**, create a record for *Demo Trial Notices* with timing *Scheduled*, frequency
+*Daily* and a morning start time, and press *Schedule Process*. Nothing schedules it at startup on
+purpose: production is updated by delta and never restarted, so a startup hook would never run
+there. An instance where nobody scheduled it sends no notices at all.
+
+- **Who is checked:** every active client carrying `ETGO_DemoTrialStartedAt` or
+  `ETGO_LegacyTransitionStartedAt`. `DemoTrialNoticePlanner` decides from
+  `EnvironmentAccessPolicy`, so the email and the access gate cannot disagree about when a trial
+  ends.
+- **What is sent:** a reminder when the days left (rounded up, as the picker shows them) fit a
+  threshold — `etendo.go.demo.trial.reminder.days` (`ETGO_DEMO_TRIAL_REMINDER_DAYS`), default `3,1`
+  — and the expiry notice once the decision becomes `DEMO_TRIAL_EXPIRED`. The smallest fitting
+  threshold wins, so a missed run is caught up the next day. The expiry notice goes out only during
+  the first 3 days after the end: older demos are never mailed out of the blue, including on the
+  first run after a deploy.
+- **Who is never notified:** productive environments, inactive clients, tenants with no lifecycle
+  metadata, and any demo associated with a productive environment. A demo is never converted:
+  paying creates a new productive environment and the old demo is cut at once, so its owner must not
+  be told that the trial "ended".
+- **Recipient and language:** the platform account (`ETGO_ACCOUNT`) behind the client's owner
+  (`AD_User.EM_ETGO_Is_Owner`), in the client's language (`AD_Client.AD_Language`). Onboarding does
+  not set that column today, so the notices currently go out in Spanish, the email fallback.
+- **Idempotency:** contract `demo-trial-notice`, keyed on client, trial start and milestone
+  (`reminder-3`, `reminder-1`, `expired`) in `ETGO_Email_Safety`. A re-run, a restart or a retry
+  sends nothing new; a trial restarted with a new start is notified again.
+- **Best effort:** each environment commits on its own. A failed send is logged, counted in the
+  run's result (a warning, not an error) and retried on the next run.
+- **Not callable from the browser:** the contract accepts only a System-context caller and
+  re-derives the owed notice itself; the command carries nothing but `clientId`.
+
+Local verification, case by case: `etendo_schema_forge/docs/etp-5396-local-lifecycle-tool.md`.
+
 For legacy free tenants, enforcement is opt-in through `etendo.go.demo.transition.activation.at`
 (`ETGO_DEMO_TRANSITION_ACTIVATION_AT`), an ISO-8601 UTC instant selected during rollout. The first
 lifecycle read persists that instant per tenant as `ETGO_LegacyTransitionStartedAt`; the configured
