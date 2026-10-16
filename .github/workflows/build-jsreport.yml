@@ -52,10 +52,13 @@ jobs:
 
       - name: Force ECS redeploy
         run: |
+          # ETP-5180: since the two-environment cut (ETP-5028) develop feeds the
+          # experimental cluster, which is now pre-production. Staging is retired.
           if [[ "${{ github.ref_name }}" == "develop" ]]; then
-            CLUSTER=etendo-staging
-          else
             CLUSTER=etendo-experimental
+          else
+            echo "::error::No ECS cluster mapped for ref '${{ github.ref_name }}'"
+            exit 1
           fi
 
           aws ecs update-service \
