@@ -60,6 +60,7 @@ import org.mockito.MockedStatic;
 import com.auth0.jwt.interfaces.Claim;
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.etendoerp.go.common.BoundedJsonParserTest;
+import com.etendoerp.go.common.MalformedJsonException;
 import com.etendoerp.go.common.PublicUrlResolver;
 import com.etendoerp.go.session.GoSessionRecord;
 import com.etendoerp.go.session.GoSessionSecurity;
@@ -1223,6 +1224,68 @@ public class OAuth2ServletTest {
     assertEquals(TEST_CLIENT_DB_ID, body.getString("id"));
     assertEquals("Updated Name", body.getString("name"));
     assertEquals(TEST_CLIENT_ID, body.getString("clientId"));
+  }
+
+  /**
+   * A non-boolean {@code isActive} is the caller's 400, not the 500 + ERROR stack trace a
+   * {@code JSONException} from {@code getBoolean} used to fall into; nothing is written.
+   */
+  @Test
+  public void updateClientWithNonBooleanIsActiveReturnsBadRequestQuietly() throws Exception {
+    DecodedJWT jwt = mockJwt(ADMIN_USER_ID, ADMIN_ROLE_ID);
+    ResultSet findRs = mock(ResultSet.class);
+    when(findRs.next()).thenReturn(true);
+    when(findRs.getString("etgo_oauth2_client_id")).thenReturn(TEST_CLIENT_DB_ID);
+    when(findRs.getString("client_identifier")).thenReturn(TEST_CLIENT_ID);
+    when(findRs.getString("isactive")).thenReturn("Y");
+    PreparedStatement ps = mock(PreparedStatement.class);
+    when(ps.executeQuery()).thenReturn(findRs);
+    Connection conn = mock(Connection.class);
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.getConnection()).thenReturn(conn);
+
+    try (MockedStatic<SecureWebServicesUtils> swsMock = mockStatic(SecureWebServicesUtils.class);
+         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         LogCapture logs = LogCapture.of(OAuth2Servlet.class)) {
+      swsMock.when(() -> SecureWebServicesUtils.decodeToken(ADMIN_TOKEN)).thenReturn(jwt);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+
+      for (String raw : new String[] { "{\"isActive\":\"maybe\"}", "{\"isActive\":1}",
+          "{\"isActive\":[]}", "{\"isActive\":{}}" }) {
+        ResponseCapture resp = mockResponse();
+        HttpServletRequest req = mockRequest("PUT", "/clients/" + TEST_CLIENT_DB_ID);
+        when(req.getHeader("Authorization")).thenReturn("Bearer " + ADMIN_TOKEN);
+        when(req.getContentType()).thenReturn("application/json");
+        when(req.getReader()).thenReturn(new BufferedReader(new StringReader(raw)));
+
+        servlet.doPut(req, resp.response);
+
+        assertEquals(raw, 400, resp.status);
+        assertEquals(raw, "invalid_request", new JSONObject(resp.body()).getString("error"));
+      }
+      assertEquals(List.of(), logs.messages(Level.ERROR));
+      for (LogEvent warn : logs.events(Level.WARN)) {
+        assertNull(warn.getMessage().getFormattedMessage(), warn.getThrown());
+      }
+    }
+    verify(ps, never()).executeUpdate();
+  }
+
+  /** The shared reader behind PUT /clients and PUT /api-keys: a client type error is malformed. */
+  @Test
+  public void requireBooleanFieldRejectsNonBooleansAsMalformed() throws Exception {
+    assertTrue(OAuth2Servlet.requireBooleanField(new JSONObject("{\"f\":true}"), "f"));
+    assertFalse(OAuth2Servlet.requireBooleanField(new JSONObject("{\"f\":\"false\"}"), "f"));
+    for (String raw : new String[] { "{\"f\":\"maybe\"}", "{\"f\":1}", "{\"f\":null}",
+        "{\"f\":[]}" }) {
+      try {
+        OAuth2Servlet.requireBooleanField(new JSONObject(raw), "f");
+        throw new AssertionError("Expected MalformedJsonException for " + raw);
+      } catch (MalformedJsonException expected) {
+        assertEquals("f must be a boolean", expected.getMessage());
+      }
+    }
   }
 
   // ===================== doDelete /clients/{id} =====================

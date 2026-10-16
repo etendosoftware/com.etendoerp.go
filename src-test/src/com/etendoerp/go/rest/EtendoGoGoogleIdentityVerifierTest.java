@@ -18,6 +18,7 @@ package com.etendoerp.go.rest;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -29,9 +30,12 @@ import javax.servlet.http.Cookie;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
+import org.apache.logging.log4j.Level;
+import org.apache.logging.log4j.core.LogEvent;
 import org.junit.Test;
 
 import com.etendoerp.go.common.BoundedJsonParserTest;
+import com.etendoerp.go.usageevents.LogCapture;
 
 /**
  * Unit tests for {@link EtendoGoGoogleIdentityVerifier}.
@@ -137,6 +141,33 @@ public class EtendoGoGoogleIdentityVerifierTest {
             assertEquals(body, HttpServletResponse.SC_BAD_REQUEST, e.getStatusCode());
           }
         });
+  }
+
+  /**
+   * A credential that is not even a JWT is the caller's input on an unauthenticated endpoint: a
+   * quiet 401 from the real Google validator, rejected before any key is fetched, never a runtime
+   * exception escaping to the container nor a log line carrying a stack trace.
+   */
+  @Test
+  public void malformedCredentialIsUnauthorizedWithoutAStackTrace() {
+    EtendoGoGoogleIdentityVerifier verifier = new EtendoGoGoogleIdentityVerifier(configured(),
+        new EtendoGoGoogleIdentityVerifier.GoogleApiCredentialValidator());
+    HttpServletRequest request = request("application/json");
+
+    try (LogCapture logs = LogCapture.of(EtendoGoGoogleIdentityVerifier.class)) {
+      for (String credential : new String[] { "garbage", "a.b.c", "!!.??.##" }) {
+        try {
+          verifier.verify(request, "{\"credential\":\"" + credential + "\"}");
+          throw new AssertionError("Expected SSO assertion exception for " + credential);
+        } catch (EtendoGoSsoAssertionException e) {
+          assertEquals(credential, HttpServletResponse.SC_UNAUTHORIZED, e.getStatusCode());
+        }
+      }
+      assertEquals(Collections.emptyList(), logs.messages(Level.ERROR));
+      for (LogEvent warn : logs.events(Level.WARN)) {
+        assertNull(warn.getMessage().getFormattedMessage(), warn.getThrown());
+      }
+    }
   }
 
   @Test

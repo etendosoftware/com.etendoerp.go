@@ -663,7 +663,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
           ? PublicApiKeyPolicy.normalizeName(body.optString("name", null))
           : existing.getString("name");
       boolean active = body.has(FIELD_IS_ACTIVE)
-          ? body.getBoolean(FIELD_IS_ACTIVE) : existing.getBoolean(FIELD_IS_ACTIVE);
+          ? requireBooleanField(body, FIELD_IS_ACTIVE) : existing.getBoolean(FIELD_IS_ACTIVE);
       if (active && !name.equals(existing.getString("name"))
           && publicApiKeyNameExists(context, name)) {
         writeError(response, HttpServletResponse.SC_CONFLICT, ERROR_INVALID_REQUEST,
@@ -685,6 +685,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
     } catch (AuthException e) {
       writeError(response, e.statusCode, ERROR_ACCESS_DENIED, e.getMessage());
     } catch (MalformedJsonException e) {
+      log.warn("Malformed public API key update request body: {}", e.getMessage());
       writeMalformedBody(response);
     } catch (SQLException | JSONException e) {
       log.error("Error updating public API key", e);
@@ -1140,7 +1141,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
       String redirectUrisJson = body.optString(
           FIELD_REDIRECT_URIS_JSON, existing.optString(FIELD_REDIRECT_URIS_JSON, "[]"));
       boolean isActive = body.has(FIELD_IS_ACTIVE)
-          ? body.getBoolean(FIELD_IS_ACTIVE)
+          ? requireBooleanField(body, FIELD_IS_ACTIVE)
           : existing.getBoolean(FIELD_IS_ACTIVE);
 
       Connection conn = OBDal.getInstance().getConnection();
@@ -1177,6 +1178,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
     } catch (AuthException e) {
       writeError(response, e.statusCode, ERROR_ACCESS_DENIED, e.getMessage());
     } catch (MalformedJsonException e) {
+      log.warn("Malformed OAuth2 client update request body: {}", e.getMessage());
       writeMalformedBody(response);
     } catch (SQLException | JSONException e) {
       log.error("Error updating OAuth2 client", e);
@@ -2145,6 +2147,20 @@ public class OAuth2Servlet extends HttpBaseServlet {
 
 
   // --- JSON/HTTP helpers ---
+
+  /**
+   * Read a boolean the client sent. A value of another type is the client's malformed body (a
+   * quiet 400), not the server-side {@code JSONException} that {@code getBoolean} would raise and
+   * the handlers' catch turns into a 500 with a stack trace.
+   */
+  static boolean requireBooleanField(JSONObject body, String field)
+      throws MalformedJsonException {
+    try {
+      return body.getBoolean(field);
+    } catch (JSONException e) {
+      throw new MalformedJsonException(field + " must be a boolean");
+    }
+  }
 
   /**
    * Parse the request body as JSON.
