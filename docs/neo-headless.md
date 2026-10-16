@@ -5572,6 +5572,10 @@ Valid JSON within the depth limit parses exactly as before. **Out of scope by de
 server itself stored or produced (preferences, onboarding drafts, MCP config, `manualData`,
 re-serialized bodies), payloads whose signature is verified before parsing (checkout webhook,
 document download token), and responses from external providers.
+Trusted-input exemptions that stay on raw jettison: stored onboarding drafts and First Steps,
+saved filter presets, the fiscal models catalog, `FiscalDecl` `manualData`, and signature-verified
+webhooks. The checkout webhook payload and the batch path's re-serialized content still go through
+`NeoRequestBodyParser` as defense in depth.
 
 **For new code:** parse a client's JSON with `BoundedJsonParser.parseObject` / `parseArray`. A
 `catch (JSONException)` that means "server error" must catch `MalformedJsonException` first.

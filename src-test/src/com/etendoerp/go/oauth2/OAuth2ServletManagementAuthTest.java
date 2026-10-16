@@ -18,6 +18,8 @@
 package com.etendoerp.go.oauth2;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -40,6 +42,8 @@ import javax.servlet.http.Cookie;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
+import org.apache.logging.log4j.Level;
+import org.apache.logging.log4j.core.LogEvent;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -67,6 +71,7 @@ import com.etendoerp.go.session.GoSessionRecord;
 import com.etendoerp.go.session.GoSessionRoleReconciler;
 import com.etendoerp.go.session.GoSessionSecurity;
 import com.etendoerp.go.session.GoSessionService;
+import com.etendoerp.go.usageevents.LogCapture;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
@@ -229,6 +234,37 @@ class OAuth2ServletManagementAuthTest {
         servlet.doPut(cookie("PUT", "/api-keys/key-1", CSRF, raw), updated.response);
         assertEquals(400, updated.status, "PUT /api-keys/key-1 " + raw);
         assertEquals("Malformed request body", updated.description());
+      }
+      verify(dal, never()).save(any());
+    }
+  }
+
+  /**
+   * A well-formed update whose {@code isActive} is not a boolean is the caller's malformed body: a
+   * quiet 400 {@code invalid_request} (WARN, no stack trace), not the 500 + ERROR a
+   * {@code JSONException} from {@code getBoolean} fell into; the key is never written.
+   */
+  @Test
+  void apiKeyUpdateWithANonBooleanIsActiveIsAQuiet400() throws Exception {
+    when(sessionService.resolve(SESSION_TOKEN)).thenReturn(session("0"));
+    when(lifecycle.evaluateAccess(eq(CLIENT_ID), eq(true), any(Instant.class)))
+        .thenReturn(Decision.ALLOWED);
+    OBDal dal = activeApiKeyOwnerDal();
+
+    try (MockedStatic<OBDal> dalStatic = mockStatic(OBDal.class);
+         LogCapture logs = LogCapture.of(OAuth2Servlet.class)) {
+      dalStatic.when(OBDal::getInstance).thenReturn(dal);
+      for (String raw : new String[] { "{\"isActive\":\"maybe\"}", "{\"isActive\":1}",
+          "{\"isActive\":[]}" }) {
+        Response updated = new Response();
+        servlet.doPut(cookie("PUT", "/api-keys/key-1", CSRF, raw), updated.response);
+        assertEquals(400, updated.status, "PUT /api-keys/key-1 " + raw);
+        assertEquals("Malformed request body", updated.description());
+      }
+      assertEquals(List.of(), logs.messages(Level.ERROR));
+      assertFalse(logs.events(Level.WARN).isEmpty(), "the rejection is logged at WARN");
+      for (LogEvent warn : logs.events(Level.WARN)) {
+        assertNull(warn.getThrown(), warn.getMessage().getFormattedMessage());
       }
       verify(dal, never()).save(any());
     }
