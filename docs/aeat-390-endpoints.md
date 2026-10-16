@@ -3,9 +3,10 @@
 ETP-5716 — backend base of Modelo 390 in "Modelos Fiscales". Same architecture as Modelo 303
 (`aeat-303-submit-endpoint.md`): a NEO built-in handler (`Fiscal390BoxesHandler`, routed by
 `NeoBuiltInEndpointHandler`) on top of the classic module `org.openbravo.module.aeat390.es`.
-The 303 preload and the incident rules are NOT part of this step; the extension points they plug
-into are listed at the end. The invoices (Facturas) tab is `GET /fiscal390/sources`; the AEAT
-telematic filing is `POST /fiscal390/submit`.
+The incident rules are NOT part of this step; the extension points they plug into are listed at
+the end. The invoices (Facturas) tab is `GET /fiscal390/sources`; the AEAT telematic filing is
+`POST /fiscal390/submit`; the preload from the year's Modelo 303s and the cuadre with them is
+`GET /fiscal390/preload`.
 
 ## Routes
 
@@ -16,6 +17,7 @@ All routes require the "Modelos Fiscales" grant (Tax Report window, same gate as
 | `GET` | `/fiscal390/boxes?year=&period=0A[&<input>=…]` | box preview (`Fiscal390BoxesHandler`) |
 | `GET` | `/fiscal390/generate?year=&period=0A[&<input>=…]` | TXT file (`Fiscal390GenerateSupport`) |
 | `GET` | `/fiscal390/sources?year=&period=0A[&box=&type=&tax=&q=&page=&pageSize=]` | Facturas tab (`Fiscal390SourcesSupport`) |
+| `GET` | `/fiscal390/preload?year=&period=0A[&monthlyReturn=Y\|N]` | 303 preload + cuadre (`Fiscal390PreloadSupport`, `Fiscal390PreloadAggregator`) |
 | `POST` | `/fiscal390/submit?year=&period=0A&id=` | AEAT telematic filing (`Fiscal390SubmissionSupport`) |
 | `GET` | `/fiscal390/modified?year=&period=0A&since=` | shared invoice-change probe |
 | `GET/POST/PUT/DELETE` | `/fiscal390/declarations` (= `/fiscal303/declarations`) | shared `FiscalDeclCrudHandler` |
@@ -307,6 +309,105 @@ Y`, a production filing goes to `prewww1.aeat.es`. "Validar sin presentar" uses 
 (`prewww2.aeat.es`, no certificate). Unit tests mock `AEAT303SubmissionService`
 (`Fiscal390SubmissionSupportTest`); nothing in the suite reaches the network.
 
+## `GET /fiscal390/preload` — preload from the 303s and the cuadre
+
+The Modelo 303 self-assessments of the exercise, the 390 inputs they determine and the result the
+390 should reach to agree with them. Read-only, nothing is stored: the frontend applies the
+values to `manualData.aeatInputs` (only to the inputs the user did not change) and records them in
+`manualData.aeatPreloaded` (origin "Modificado" / Restaurar).
+
+### Which 303s, which boxes
+
+- **Declarations:** every `ETGO_Fiscal_Decl` with `model = 303` of the org (the org declarations
+  are stored under, `declarationOrgId`) and year. Per period the latest **submitted** one wins
+  (highest `DECL_SEQ`); a period with none submitted uses its latest draft. `superseded` counts the
+  other declarations of the period.
+- **Boxes of a period:** submitted with a submission snapshot → the frozen `boxes`
+  (`source: snapshot`); draft, or a legacy submitted one without snapshot → computed live like
+  `GET /fiscal303/boxes` (`source: live`, one classic compute per period). Either way the
+  declaration's `manualData.manualOverrides` go on top and the 303 derivation runs
+  (`Fiscal390PreloadAggregator.effectiveBoxes`, the Java port of the frontend
+  `applyOverrides` + `recomputeDerivedBoxes`: 45, 46, 64, 66 = 64 × 65 %, 69 = 66 + 77 − 78 + 68 +
+  108, 71 = 69 − 70 + 109 − 112; boxes 70/77/78/109/110/111 floored at 0). A live compute that fails
+  (e.g. no 303 tax report) leaves that period out with `source: error` and `COMPUTE_FAILED`.
+- **Figure of a period = [69]**, not [71]: a rectificativa subtracts in [70] what the replaced
+  declaration declared, so [69] is the period's full result after its compensation [78]. For an
+  ordinary 303, [70] = [109] = [112] = 0 and [69] = [71]. `tipo_declaracion`
+  (`manualData.identification`) tells a credit to compensate from a refund.
+- **Periodicity / missing periods:** monthly when the year has any monthly 303, else quarterly. A
+  quarter covers its three months, so a year that switched to monthly is not short. The periods
+  not covered are `missingPeriods` (+ `MISSING_303`).
+
+### 303 → 390 mapping
+
+| 390 input (box) | From the 303s | Justification |
+|---|---|---|
+| `INGRESAR_<mm>` (Σ = [95]) | [69] > 0 of the period, in its closing month (T1 → 03 … T4 → 12) | AEAT [95]: "suma de las cantidades a ingresar … de las autoliquidaciones periódicas del ejercicio", including deferred or unpaid ones. Classic only has per-month inputs and only their sum is filed |
+| `DEVOLVER_<mm>` (Σ = [96]) | [69] < 0 with tipo `D`/`V`/`X`, only when `monthlyReturn` | AEAT [96]: refunds requested by declarants in the monthly refund register, the last period included. Classic rejects `DEVOLVER_xx` without `ISMONTHLYRETURN` (`AEAT390_MonthlyReturn_Check`) |
+| `TOTAL_LASTPERIOD` [97] | \|[69]\| of the LAST period (T4/12) when it is a credit (tipo not `D`/`V`/`X`) | AEAT [97]: "si el resultado de la última autoliquidación fue a compensar" |
+| `TOTAL_LASTPERIOD_DEVOLVER` [98] | \|[69]\| of the last period when a refund and NOT in the monthly register | AEAT [98]; "si ha consignado alguna cantidad en las casillas 96 ó 97 no cumplimente la 98" — a registered declarant's last refund goes to `DEVOLVER_12` |
+| `LIQANUAL_COMPENSATION` [85] — or `COMMON_TERRITORY_COMPENSATION` [93] in territory mode | the part of Σ[78] that consumed prior-year credits | AEAT [85]/[93]: credits "generadas en ejercicios anteriores y aplicadas en el ejercicio (… consignado en la casilla 78 de alguna de las autoliquidaciones)" |
+| `LIQANUAL_ENDCOMPENSATION` [662] | credits generated in a non-last period of the year and never applied | AEAT [662]: "cuotas a compensar generadas en el ejercicio en alguno de los períodos … distintos del último cuando no se hubiesen aplicado" |
+| `COMMON_TERRITORY` [87] | last 303 [65] (= [107], ETP-5391), default 100 | only when Σ last 303 [89]–[92] > 0; otherwise no territory key is sent |
+| `ALAVA` [88] / `GUIPUZCOA` [89] / `VIZCAYA` [90] / `NAVARRA` [91] | last 303 [89] / [90] / [91] / [92] | ETP-5391 last-period territorial boxes, same order |
+
+[85]/[662] come from one walk in period order: each [78] consumes the prior-year carry first —
+the first 303's [110] ("cuotas pendientes de compensación de periodos anteriores") — then the
+credits generated earlier in the year. When the first 303 has no [110] the carry is unknown and
+every [78] is taken as prior-year (the literal AEAT text); `carryOverKnown: false` +
+`PRIOR_CARRY_UNKNOWN`. A refund (`D`/`V`/`X`) outside the last period without the monthly register
+cannot be a 390 refund: it is treated as a credit and reported (`REFUND_WITHOUT_MONTHLY_REGISTER`).
+Keys whose source is unknown are omitted, not zero: with the last 303 missing there is no
+`TOTAL_LASTPERIOD`, `TOTAL_LASTPERIOD_DEVOLVER` nor territory key (`LAST_PERIOD_MISSING`).
+
+`monthlyReturn` (`Y`/`N`) is the on-screen `ISMONTHLYRETURN`; omitted, the stored one is used.
+
+### Cuadre
+
+```
+expectedResult = [95] − [96] − [97] − [98] − [662]        (all from the 303s)
+cuadre:  annualResult − expectedResult,  annualResult = [86]  (territory mode: [94])
+OK when |difference| ≤ 1,00 €  (Fiscal390PreloadAggregator.RECONCILIATION_TOLERANCE,
+                                frontend RECONCILIATION_TOLERANCE_390; Jira: rule pending)
+```
+
+Why these boxes: over the year Σ303[69] = Σ([66] + [77] + [68] + [108]) − Σ[78], and
+Σ303[69] = [95] − [96] − [97] − [98] − (credits generated in non-last periods). Those credits
+are either applied later in the year (Σ[78] − [85]) or still pending ([662]). The annual result
+is [86] = [84] + [659] − [85] with [84] ≈ Σ([66] + [68] + [108]) and [659] ≈ Σ[77] (deferred import
+VAT), so [86] ≈ Σ303[69] + (Σ[78] − [85]) = [95] − [96] − [97] − [98] − [662]. The 303 figures
+are the state's share ([66] = [64] × [65] %), so in territory mode the counterpart is [94]
+(= [92] + [659] − [93], [92] = [84] × [87] %). The identity does not depend on the [85]/[662]
+split, so an unknown carry does not by itself create a difference. The 390 side is the result on
+screen (live inputs), so the comparison is done by the frontend; `reconcile(annualResult,
+expectedResult)` in `Fiscal390PreloadAggregator` gives the same answer server-side for the
+incidents phase ("Diferencia con los 303").
+
+### Response
+
+```json
+{
+  "year": 2026, "periodicity": "quarterly", "monthlyReturn": false,
+  "declarations": [ {
+    "id": "…", "period": "T1", "month": "03", "status": "submitted", "submitted": true,
+    "source": "snapshot | live | error", "superseded": 0, "tipo": "I",
+    "result": "120.00", "periodResult": "120.00", "kind": "pay | compensate | refund | zero",
+    "compensationApplied": "0.00", "error": "<only with source=error>"
+  } ],
+  "missingPeriods": [ "T4" ], "lastPeriod": "T4 | null",
+  "inputs": { "INGRESAR_01": "0.00", "…": "…", "INGRESAR_12": "0.00", "LIQANUAL_COMPENSATION": "0.00",
+              "LIQANUAL_ENDCOMPENSATION": "0.00", "TOTAL_LASTPERIOD": "0.00", "TOTAL_LASTPERIOD_DEVOLVER": "0.00" },
+  "totals": { "85": "0.00", "95": "…", "96": "…", "97": "…", "98": "…", "662": "…" },
+  "territory": false, "carryOverKnown": true,
+  "expectedResult": "…", "tolerance": "1.00",
+  "warnings": [ { "code": "MISSING_303 | LAST_PERIOD_MISSING | DRAFT_303 | PRIOR_CARRY_UNKNOWN | REFUND_WITHOUT_MONTHLY_REGISTER | COMPUTE_FAILED", "periods": "T4" } ]
+}
+```
+
+`result` is the 303's own [71] (what its screen shows); `periodResult` is [69], the figure used.
+`DEVOLVER_xx` keys are present only with `monthlyReturn`. `expectedResult` is `null` when no 303
+of the year could be used. Tests: `Fiscal390PreloadAggregatorTest`.
+
 ## One ordinary per exercise
 
 `FiscalDeclCrudHandler.SINGLE_ORDINARY_MODELS = {"390"}`: `POST /declarations` of an ordinary
@@ -330,7 +431,9 @@ aeat390. Run `update.database` before any `export.database`, or the export drops
 ## Extension points for the next steps
 
 - Submission: done (`POST /fiscal390/submit`, above).
-- 303 preload: fill `manualData.aeatInputs` (`INGRESAR_xx`, `DEVOLVER_xx`, …).
-- Incidents: `warnings` + `FiscalDeclCrudHandler.replaceIncidents`.
+- 303 preload: done (`GET /fiscal390/preload`, above).
+- Incidents: `warnings` + `FiscalDeclCrudHandler.replaceIncidents`. The preload gives
+  "Faltan 303 del ejercicio" (`missingPeriods`) and "Diferencia con los 303"
+  (`Fiscal390PreloadAggregator.reconcile` against the computed [86]/[94]).
 - Invoice sources tab: done as its own endpoint (`GET /fiscal390/sources`, above), so the boxes
   payload and its snapshot stay fixed-size.
