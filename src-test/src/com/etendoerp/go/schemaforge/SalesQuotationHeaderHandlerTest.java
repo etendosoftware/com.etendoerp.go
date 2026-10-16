@@ -1165,4 +1165,41 @@ public class SalesQuotationHeaderHandlerTest {
         .httpMethod("GET").endpointType(NeoEndpointType.CRUD).recordId(QUOTATION_ID).build();
     assertNull(new SalesQuotationHeaderHandler().handle(ctx));
   }
+
+  /**
+   * ETP-5703: the point-4 QA case came from quotations (ETP-5535). A batch create with only
+   * {@code businessPartner}, for a partner with a single location, gets partnerAddress and
+   * invoiceAddress from it — the same pre-hook default as the sales order.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void handleCreateWithSingleLocationFillsPartnerAndInvoiceAddress() throws Exception {
+    try (org.mockito.MockedStatic<org.openbravo.dal.service.OBDal> obDal =
+        org.mockito.Mockito.mockStatic(org.openbravo.dal.service.OBDal.class)) {
+      org.openbravo.dal.service.OBDal dal =
+          org.mockito.Mockito.mock(org.openbravo.dal.service.OBDal.class);
+      obDal.when(org.openbravo.dal.service.OBDal::getInstance).thenReturn(dal);
+      org.openbravo.model.common.businesspartner.Location only =
+          org.mockito.Mockito.mock(org.openbravo.model.common.businesspartner.Location.class);
+      org.mockito.Mockito.when(only.getId()).thenReturn("loc-1");
+      org.openbravo.dal.service.OBCriteria<org.openbravo.model.common.businesspartner.Location>
+          criteria = org.mockito.Mockito.mock(org.openbravo.dal.service.OBCriteria.class);
+      org.mockito.Mockito.when(
+          dal.createCriteria(org.openbravo.model.common.businesspartner.Location.class))
+          .thenReturn(criteria);
+      org.mockito.Mockito.when(criteria.add(org.mockito.ArgumentMatchers.any()))
+          .thenReturn(criteria);
+      java.util.List<org.openbravo.model.common.businesspartner.Location> locations =
+          java.util.Collections.singletonList(only);
+      org.mockito.Mockito.when(criteria.list()).thenReturn(locations);
+      JSONObject body = new JSONObject().put("businessPartner", "bp-1");
+      NeoContext ctx = NeoContext.builder().httpMethod("POST")
+          .endpointType(NeoEndpointType.CRUD).requestBody(body).build();
+
+      org.junit.Assert.assertNull(new SalesQuotationHeaderHandler().handle(ctx));
+
+      org.junit.Assert.assertEquals("loc-1", body.getString("partnerAddress"));
+      org.junit.Assert.assertEquals("loc-1", body.getString("invoiceAddress"));
+    }
+  }
 }

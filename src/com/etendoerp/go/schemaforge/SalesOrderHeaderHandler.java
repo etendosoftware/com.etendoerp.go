@@ -20,6 +20,9 @@ package com.etendoerp.go.schemaforge;
 import javax.inject.Inject;
 import javax.inject.Named;
 
+import org.openbravo.model.common.businesspartner.Location;
+import org.openbravo.model.common.order.Order;
+
 import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
 
 /**
@@ -78,6 +81,15 @@ public class SalesOrderHeaderHandler extends AbstractOrderHeaderHandler {
     if (reactivationRefusal != null) {
       return reactivationRefusal;
     }
+    // ETP-5703: a create that names a business partner but no address (an agent; the SPA always
+    // sends one) gets the partner's only ship-to location — the AD rule of
+    // C_Order.C_BPartner_Location_ID is "C_BPartner Location - Ship To" — and, only then, a bill-to
+    // for BillTo_ID ("C_BPartner Location - Bill To") that is never left empty (see
+    // PartnerLocationDefaults#alignBillTo). REST single and batch; etendo_create keeps its 422
+    // (declared divergence, neo-headless.md §4.12.9).
+    PartnerLocationDefaults.fillShipToAndBillTo(context, Order.PROPERTY_PARTNERADDRESS,
+        Location.PROPERTY_SHIPTOADDRESS, Order.PROPERTY_INVOICEADDRESS,
+        Location.PROPERTY_INVOICETOADDRESS);
     AbstractOrderHeaderHandler.mirrorAccountingDate(context);
     AbstractOrderHeaderHandler.applyTotalDiscountBeforeComplete(context, totalDiscountService, false);
     return NeoHeaderActionRouter.dispatch(

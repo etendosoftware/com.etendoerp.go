@@ -1629,7 +1629,8 @@ public class ReactivatePaymentHandlerTest {
         MockedStatic<ModelProvider> models = Mockito.mockStatic(ModelProvider.class);
         MockedStatic<PaymentRemovalUtil> removal = Mockito.mockStatic(PaymentRemovalUtil.class);
         MockedStatic<PisDeferredPaymentService> pis = Mockito.mockStatic(
-            PisDeferredPaymentService.class, Mockito.CALLS_REAL_METHODS)) {
+            PisDeferredPaymentService.class, Mockito.CALLS_REAL_METHODS);
+        MockedStatic<OBContext> ctx = Mockito.mockStatic(OBContext.class)) {
       stubButton(buttons, models, "em_etpr_remove_payment", "eTPRRemovePayment");
 
       NeoResponse result = runRemove(buttonCtx("em_etpr_remove_payment", "pay-void", true),
@@ -1647,7 +1648,8 @@ public class ReactivatePaymentHandlerTest {
   @Test
   public void unknownActionWithEntityIsLeftToDefaultPath() {
     try (MockedStatic<NeoButtonActionHelper> buttons =
-             Mockito.mockStatic(NeoButtonActionHelper.class)) {
+             Mockito.mockStatic(NeoButtonActionHelper.class);
+        MockedStatic<OBContext> ctx = Mockito.mockStatic(OBContext.class)) {
       buttons.when(() -> NeoButtonActionHelper.findButtonColumn(ENTITY_ID, "somethingElse"))
           .thenReturn(null);
 
@@ -1661,7 +1663,8 @@ public class ReactivatePaymentHandlerTest {
   public void otherButtonByColumnNameIsLeftToDefaultPath() {
     try (MockedStatic<NeoButtonActionHelper> buttons =
              Mockito.mockStatic(NeoButtonActionHelper.class);
-        MockedStatic<ModelProvider> models = Mockito.mockStatic(ModelProvider.class)) {
+        MockedStatic<ModelProvider> models = Mockito.mockStatic(ModelProvider.class);
+        MockedStatic<OBContext> ctx = Mockito.mockStatic(OBContext.class)) {
       stubButton(buttons, models, "Posted", "posted");
 
       assertNull(new ReactivatePaymentHandler().handle(buttonCtx("Posted", "pay-1", true)));
