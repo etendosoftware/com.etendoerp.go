@@ -61,6 +61,9 @@ import org.openbravo.module.taxreportlauncher.TaxReportParameter;
  *   <li>{@code GET sources?year=&period=0A[&box=&type=&tax=&q=&page=&pageSize=]} — the
  *       invoice-tax lines behind the invoice-derived boxes, from the same box walk
  *       ({@link Fiscal390SourcesSupport});</li>
+ *   <li>{@code GET preload?year=&period=0A[&monthlyReturn=Y|N]} — the year's Modelo 303
+ *       declarations and the 390 inputs they preload, plus the expected result for the cuadre
+ *       ({@link Fiscal390PreloadSupport});</li>
  *   <li>{@code POST submit?year=&period=0A&id=} — the AEAT telematic filing
  *       ({@link Fiscal390SubmissionSupport}); POST-only, like {@code /fiscal303/submit};</li>
  *   <li>{@code GET modified?year=&period=0A&since=} — the shared invoice-change probe.</li>
@@ -95,6 +98,7 @@ class Fiscal390BoxesHandler extends AbstractFiscalHandler {
   private final Fiscal390GenerateSupport generateSupport;
   private final Fiscal390SubmissionSupport submissionSupport;
   private final Fiscal390SourcesSupport sourcesSupport;
+  private final Fiscal390PreloadSupport preloadSupport;
 
   Fiscal390BoxesHandler(NeoServlet servlet) {
     super(servlet);
@@ -102,13 +106,15 @@ class Fiscal390BoxesHandler extends AbstractFiscalHandler {
     this.generateSupport = new Fiscal390GenerateSupport(this);
     this.submissionSupport = new Fiscal390SubmissionSupport(this);
     this.sourcesSupport = new Fiscal390SourcesSupport(this);
+    this.preloadSupport = new Fiscal390PreloadSupport(this);
   }
 
   @Override
   protected boolean isKnownEntity(String entityName) {
     return BOXES.equals(entityName) || GENERATE.equals(entityName) || MODIFIED.equals(entityName)
         || Fiscal390SubmissionSupport.SUBMIT.equals(entityName)
-        || Fiscal390SourcesSupport.SOURCES.equals(entityName);
+        || Fiscal390SourcesSupport.SOURCES.equals(entityName)
+        || Fiscal390PreloadSupport.PRELOAD.equals(entityName);
   }
 
   /** {@code submit} files the declaration with the AEAT: POST-only (see the 303 handler). */
@@ -155,6 +161,8 @@ class Fiscal390BoxesHandler extends AbstractFiscalHandler {
               response);
         } else if (Fiscal390SourcesSupport.SOURCES.equals(entityName)) {
           sourcesSupport.handle(orgId, year, period, request, response);
+        } else if (Fiscal390PreloadSupport.PRELOAD.equals(entityName)) {
+          preloadSupport.handle(orgId, year, period, request, response);
         } else if (Fiscal390SubmissionSupport.SUBMIT.equals(entityName)) {
           submissionSupport.handleSubmit(orgId, year, period, request, response);
         } else {

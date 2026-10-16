@@ -75,6 +75,7 @@ import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
  * @covers com.etendoerp.go.schemaforge.Fiscal390BoxesHandler
  * @covers com.etendoerp.go.schemaforge.Fiscal390GenerateSupport
  * @covers com.etendoerp.go.schemaforge.Fiscal390SnapshotSupport
+ * @covers com.etendoerp.go.schemaforge.Fiscal390PreloadSupport
  */
 public class Fiscal390BoxesHandlerTest {
 
@@ -143,6 +144,17 @@ public class Fiscal390BoxesHandlerTest {
     HttpServletResponse resp = response(new StringWriter());
     handler.handle("operators", "GET", request("0A"), resp);
     verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_NOT_FOUND), anyString());
+  }
+
+  /** {@code preload} (303 preload + cuadre, Fiscal390PreloadSupport) is a GET-only entity. */
+  @Test
+  public void testPreloadIsAKnownGetOnlyEntity() throws Exception {
+    assertTrue(handler.isKnownEntity(Fiscal390PreloadSupport.PRELOAD));
+    assertTrue(handler.allowsGet(Fiscal390PreloadSupport.PRELOAD));
+    HttpServletResponse resp = response(new StringWriter());
+    handler.handle(Fiscal390PreloadSupport.PRELOAD, "POST", request("0A"), resp);
+    verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED),
+        anyString());
   }
 
   @Test
