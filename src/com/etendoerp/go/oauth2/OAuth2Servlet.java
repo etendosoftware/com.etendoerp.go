@@ -159,6 +159,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
     private static final String MESSAGE_INTERNAL_SERVER_ERROR = "Internal server error";
     private static final String MESSAGE_UNKNOWN_ENDPOINT = "Unknown endpoint: ";
     private static final String MESSAGE_CLIENT_NOT_FOUND = "Client not found: ";
+    private static final String MESSAGE_MALFORMED_JSON = "Malformed request body";
     private static final String PATH_AUTHORIZE = "/authorize";
   private static final String ERROR_INVALID_CLIENT = "invalid_client";
   private static final String ERROR_INVALID_SCOPE = "invalid_scope";
@@ -432,7 +433,10 @@ public class OAuth2Servlet extends HttpBaseServlet {
       String contentType = request.getContentType();
       JSONObject body = null;
       if (contentType != null && contentType.contains(APPLICATION_JSON)) {
-        body = parseJsonBody(request);
+        body = parseJsonBodyOrWriteError(request, response);
+        if (body == null) {
+          return;
+        }
         grantType = body.optString("grant_type", null);
         clientId = body.optString(FIELD_CLIENT_ID_REQUEST, null);
         clientSecret = body.optString("client_secret", null);
@@ -464,8 +468,6 @@ public class OAuth2Servlet extends HttpBaseServlet {
 
       handleClientCredentialsGrant(response, clientId, clientSecret, scopeParam);
 
-    } catch (MalformedJsonException e) {
-      writeMalformedBody(response);
     } catch (JSONException e) {
       log.error("Failed to build OAuth2 response", e);
         writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
@@ -587,7 +589,10 @@ public class OAuth2Servlet extends HttpBaseServlet {
       throws IOException {
     try {
       PublicApiKeyContext context = requirePublicApiKeyContext(request);
-      JSONObject body = parseJsonBody(request);
+      JSONObject body = parseJsonBodyOrWriteError(request, response);
+      if (body == null) {
+        return;
+      }
       String name = PublicApiKeyPolicy.normalizeName(body.optString("name", null));
       Set<String> capabilities = parsePublicCapabilities(body);
       validatePublicCapabilities(context, capabilities);
@@ -638,8 +643,6 @@ public class OAuth2Servlet extends HttpBaseServlet {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST, e.getMessage());
     } catch (AuthException e) {
       writeError(response, e.statusCode, ERROR_ACCESS_DENIED, e.getMessage());
-    } catch (MalformedJsonException e) {
-      writeMalformedBody(response);
     } catch (SQLException | JSONException e) {
       log.error("Error creating public API key", e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
@@ -658,7 +661,10 @@ public class OAuth2Servlet extends HttpBaseServlet {
         writeError(response, HttpServletResponse.SC_NOT_FOUND, ERROR_NOT_FOUND, MESSAGE_API_KEY_NOT_FOUND);
         return;
       }
-      JSONObject body = parseJsonBody(request);
+      JSONObject body = parseJsonBodyOrWriteError(request, response);
+      if (body == null) {
+        return;
+      }
       String name = body.has("name")
           ? PublicApiKeyPolicy.normalizeName(body.optString("name", null))
           : existing.getString("name");
@@ -1039,7 +1045,10 @@ public class OAuth2Servlet extends HttpBaseServlet {
       EnvironmentAuthOutcome admin = requireAdmin(request);
       String adminUserId = admin.getUserId();
 
-      JSONObject body = parseJsonBody(request);
+      JSONObject body = parseJsonBodyOrWriteError(request, response);
+      if (body == null) {
+        return;
+      }
       String name = body.optString("name", null);
       String adUserId = body.optString(FIELD_AD_USER_ID, null);
       String adRoleId = body.optString(FIELD_AD_ROLE_ID, null);
@@ -1105,8 +1114,6 @@ public class OAuth2Servlet extends HttpBaseServlet {
 
     } catch (AuthException e) {
       writeError(response, e.statusCode, ERROR_ACCESS_DENIED, e.getMessage());
-    } catch (MalformedJsonException e) {
-      writeMalformedBody(response);
     } catch (SQLException | JSONException e) {
       log.error("Error creating OAuth2 client", e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
@@ -1124,7 +1131,10 @@ public class OAuth2Servlet extends HttpBaseServlet {
     try {
       String adminUserId = requireAdmin(request).getUserId();
 
-      JSONObject body = parseJsonBody(request);
+      JSONObject body = parseJsonBodyOrWriteError(request, response);
+      if (body == null) {
+        return;
+      }
 
       // Verify client exists
       JSONObject existing = findClientById(id);
@@ -1248,7 +1258,10 @@ public class OAuth2Servlet extends HttpBaseServlet {
       boolean revokeTokens = true;
       String contentType = request.getContentType();
       if (contentType != null && contentType.contains(APPLICATION_JSON)) {
-        JSONObject body = parseJsonBody(request);
+        JSONObject body = parseJsonBodyOrWriteError(request, response);
+        if (body == null) {
+          return;
+        }
         revokeTokens = body.optBoolean("revokeExistingTokens", true);
       }
 
@@ -1293,8 +1306,6 @@ public class OAuth2Servlet extends HttpBaseServlet {
 
     } catch (AuthException e) {
       writeError(response, e.statusCode, ERROR_ACCESS_DENIED, e.getMessage());
-    } catch (MalformedJsonException e) {
-      writeMalformedBody(response);
     } catch (SQLException | JSONException e) {
       log.error("Error regenerating OAuth2 client secret", e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
@@ -1354,7 +1365,10 @@ public class OAuth2Servlet extends HttpBaseServlet {
     try {
       requireAdmin(request);
 
-      JSONObject body = parseJsonBody(request);
+      JSONObject body = parseJsonBodyOrWriteError(request, response);
+      if (body == null) {
+        return;
+      }
       String clientIdentifier = body.optString(FIELD_CLIENT_ID, null);
 
       if (clientIdentifier == null || clientIdentifier.trim().isEmpty()) {
@@ -1380,8 +1394,6 @@ public class OAuth2Servlet extends HttpBaseServlet {
 
     } catch (AuthException e) {
       writeError(response, e.statusCode, ERROR_ACCESS_DENIED, e.getMessage());
-    } catch (MalformedJsonException e) {
-      writeMalformedBody(response);
     } catch (SQLException | JSONException e) {
       log.error("Error revoking OAuth2 tokens", e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
@@ -1399,7 +1411,10 @@ public class OAuth2Servlet extends HttpBaseServlet {
     try {
       requireAdmin(request);
 
-      JSONObject body = parseJsonBody(request);
+      JSONObject body = parseJsonBodyOrWriteError(request, response);
+      if (body == null) {
+        return;
+      }
       String token = body.optString(FIELD_TOKEN, null);
 
       if (token == null || token.trim().isEmpty()) {
@@ -1441,8 +1456,6 @@ public class OAuth2Servlet extends HttpBaseServlet {
 
     } catch (AuthException e) {
       writeError(response, e.statusCode, ERROR_ACCESS_DENIED, e.getMessage());
-    } catch (MalformedJsonException e) {
-      writeMalformedBody(response);
     } catch (SQLException | JSONException e) {
       log.error("Error during OAuth2 token introspection", e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
@@ -1840,7 +1853,10 @@ public class OAuth2Servlet extends HttpBaseServlet {
   private void handleRegister(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
     try {
-      JSONObject body = parseJsonBody(request);
+      JSONObject body = parseJsonBodyOrWriteError(request, response);
+      if (body == null) {
+        return;
+      }
       String clientName = body.optString("client_name", "MCP Client");
       String scopes = OAuth2ClientPolicy.normalizeClientScopes(
           body.optString(FIELD_SCOPE, null), ApiScopes.ALL, VALID_SCOPES);
@@ -1883,10 +1899,6 @@ public class OAuth2Servlet extends HttpBaseServlet {
           e.getMessage());
     } catch (IllegalArgumentException | OBException e) {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST, e.getMessage());
-    } catch (MalformedJsonException e) {
-      // Anyone can POST here unauthenticated: the client's error, a 400 without a stack trace.
-      log.warn("Malformed DCR request body: {}", e.getMessage());
-      writeMalformedBody(response);
     } catch (JSONException e) {
       log.error("Failed to build DCR response", e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
@@ -2165,7 +2177,8 @@ public class OAuth2Servlet extends HttpBaseServlet {
   /**
    * Parse the request body as JSON.
    */
-  private JSONObject parseJsonBody(HttpServletRequest request) throws IOException, JSONException {
+  private JSONObject parseJsonBody(HttpServletRequest request)
+      throws IOException, MalformedJsonException {
     StringBuilder sb = new StringBuilder();
     try (BufferedReader reader = request.getReader()) {
       String line;
@@ -2174,6 +2187,27 @@ public class OAuth2Servlet extends HttpBaseServlet {
       }
     }
     return BoundedJsonParser.parseObject(sb.toString());
+  }
+
+  /**
+   * Parse the request body as JSON, writing a 400 {@code invalid_request} if the client sent a
+   * malformed one.
+   *
+   * @param request the HTTP request whose body is parsed
+   * @param response the HTTP response used to write an error if parsing fails
+   * @return the parsed {@link JSONObject}, or {@code null} if an error was written
+   * @throws IOException if reading the request body fails
+   */
+  private JSONObject parseJsonBodyOrWriteError(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    try {
+      return parseJsonBody(request);
+    } catch (MalformedJsonException e) {
+      // The client's error, a 400 without a stack trace; the message never echoes the body.
+      log.warn("Malformed {} request body: {}", request.getPathInfo(), e.getMessage());
+      writeMalformedBody(response);
+      return null;
+    }
   }
 
   /**
@@ -2198,7 +2232,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
    */
   private void writeMalformedBody(HttpServletResponse response) throws IOException {
     writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST,
-        "Malformed request body");
+        MESSAGE_MALFORMED_JSON);
   }
 
   private void writeError(HttpServletResponse response, int status, String error,

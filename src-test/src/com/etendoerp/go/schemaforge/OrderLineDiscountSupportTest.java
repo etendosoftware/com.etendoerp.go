@@ -20,15 +20,25 @@ package com.etendoerp.go.schemaforge;
 import static com.etendoerp.go.schemaforge.LineAmountTestSupport.assertAmount;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
+import java.util.Date;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -38,8 +48,17 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.MockedStatic;
+import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.financial.FinancialUtils;
 import org.openbravo.model.ad.ui.Tab;
+import org.openbravo.model.common.order.Order;
+import org.openbravo.model.common.order.OrderLine;
+import org.openbravo.model.common.plm.Product;
+import org.openbravo.model.pricing.pricelist.PriceList;
+import org.openbravo.model.pricing.pricelist.ProductPrice;
+import org.openbravo.service.json.DataResolvingMode;
+import org.openbravo.service.json.DataToJsonConverter;
 
 import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
 
@@ -53,6 +72,12 @@ import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
  * cascade helper's trigger-field tests; what is pinned here is every decision around it, which is
  * where the live bugs were (a discount applied over an explicit price, a discount 0 that did not
  * restore the list price, a stale gross kept as if it were the caller's).
+ *
+ * <p>QA reopen (CP-7, CP-8, CP-9): an update of the quantity alone left a stale gross, a product
+ * with no list price was created with {@code listPrice 0}, and an update of the price alone kept
+ * the old discount. Each has its own section below, with the form's own payload as a no-op row.
+ *
+ * @covers com.etendoerp.go.schemaforge.OrderLineDiscountSupport
  */
 class OrderLineDiscountSupportTest {
 
@@ -401,5 +426,278 @@ class OrderLineDiscountSupportTest {
         label + ": the caller's tax is untouched");
     assertEquals("P1", body.get(OrderLineDiscountSupport.FIELD_PRODUCT),
         label + ": the caller's product is untouched");
+  }
+
+  // ── CP-8: a product with no list price gets its standard price as list price, as in the form ──
+
+  static Stream<Arguments> listPriceFromStandardRows() {
+    return Stream.of(
+        Arguments.of("no catalog list price, priced at the standard price → the standard price",
+            "{\"unitPrice\":50,\"listPrice\":0}", "0", "50", "50"),
+        Arguments.of("listPrice absent → the standard price", "{\"unitPrice\":50}", "0", "50",
+            "50"),
+        Arguments.of("no list price entry at all → the standard price", "{\"unitPrice\":50}", null,
+            "50", "50"),
+        Arguments.of("the form already sends it → untouched",
+            "{\"unitPrice\":50,\"listPrice\":50}", "0", "50", null),
+        Arguments.of("a line priced at 0 by the user → untouched",
+            "{\"unitPrice\":0,\"listPrice\":0}", "0", "50", null),
+        Arguments.of("the caller's own price → untouched", "{\"unitPrice\":60,\"listPrice\":0}",
+            "0", "50", null),
+        Arguments.of("the catalog has a list price → untouched",
+            "{\"unitPrice\":18,\"listPrice\":0}", "18", "18", null),
+        Arguments.of("no standard price either → untouched", "{\"unitPrice\":0}", "0", "0", null));
+  }
+
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("listPriceFromStandardRows")
+  void listPriceFromStandard(String label, String body, String catalogList, String catalogStd,
+      String expected) throws Exception {
+    BigDecimal listPrice = OrderLineDiscountSupport.listPriceFromStandard(new JSONObject(body),
+        catalogList == null ? null : new BigDecimal(catalogList), new BigDecimal(catalogStd));
+
+    assertEquals(expected == null ? null : new BigDecimal(expected), listPrice, label);
+  }
+
+  /**
+   * QA quotations 1000010 (MCP) vs 1000009 (UI), "Servicio de instalación": price list entry with
+   * list price 0 and standard price 50. The MCP body (after {@code McpLinePriceInjector}) must end
+   * as the UI one does: list 50, standard 50. The UI body is the no-op row.
+   */
+  static Stream<Arguments> createWithoutCatalogListPrice() {
+    return Stream.of(
+        Arguments.of("etendo_create after the price injector",
+            "{\"product\":\"P1\",\"salesOrder\":\"O1\",\"unitPrice\":50,\"listPrice\":0}"),
+        Arguments.of("the form's add-line POST (unchanged)",
+            "{\"product\":\"P1\",\"parentId\":\"O1\",\"unitPrice\":50,\"listPrice\":50,"
+                + "\"discount\":0}"));
+  }
+
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("createWithoutCatalogListPrice")
+  void setStandardPriceOnCreateFillsTheListPriceAsTheForm(String label, String body)
+      throws Exception {
+    JSONObject json = new JSONObject(body);
+    OBDal dal = mock(OBDal.class);
+    Product product = mock(Product.class);
+    Order order = mock(Order.class);
+    PriceList priceList = mock(PriceList.class);
+    ProductPrice price = mock(ProductPrice.class);
+    Date orderDate = new Date();
+    when(dal.get(Product.class, "P1")).thenReturn(product);
+    when(dal.get(Order.class, "O1")).thenReturn(order);
+    when(order.getOrderDate()).thenReturn(orderDate);
+    when(order.getPriceList()).thenReturn(priceList);
+    when(order.isSalesTransaction()).thenReturn(Boolean.TRUE);
+    when(priceList.isPriceIncludesTax()).thenReturn(Boolean.FALSE);
+    when(price.getListPrice()).thenReturn(BigDecimal.ZERO);
+    when(price.getStandardPrice()).thenReturn(new BigDecimal("50"));
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+        MockedStatic<FinancialUtils> financial = mockStatic(FinancialUtils.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      financial.when(() -> FinancialUtils.getProductPrice(eq(product), eq(orderDate),
+          anyBoolean(), eq(priceList), eq(false))).thenReturn(price);
+
+      OrderLineDiscountSupport.setStandardPriceOnCreate(ctx("POST", NeoEndpointType.CRUD, json));
+    }
+
+    assertAmount(label, "50", json, OrderLineDiscountSupport.FIELD_LIST_PRICE);
+    assertAmount(label, "50", json, OrderLineDiscountSupport.FIELD_STANDARD_PRICE);
+    assertAmount(label, "50", json, OrderLineDiscountSupport.FIELD_UNIT_PRICE);
+  }
+
+  // ── CP-7: an update of quantity, price or tax refreshes the gross ─────
+
+  private static final String LINE_ID = "L1";
+
+  /**
+   * QA quotation 1000008 line 10, Monitor: list 300, discount 20 → price 240, qty 10, 21 % VAT,
+   * with the stale gross QA saw (1161.60).
+   */
+  private static final String STORED_MONITOR_LINE = "{\"orderedQuantity\":10,\"listPrice\":300,"
+      + "\"discount\":20,\"unitPrice\":240,\"tax\":\"" + TAX_ID + "\",\"lineNetAmount\":2400,"
+      + "\"lineGrossAmount\":1161.6}";
+
+  /**
+   * Stubs {@code dal} to answer the stored line {@value #LINE_ID}, and opens a static
+   * {@link OBProvider} whose converter reads it as {@code stored}. Every mock is a local stubbed on
+   * its own line (no nested stubbing); the caller closes the returned mock.
+   */
+  private static MockedStatic<OBProvider> storedLine(OBDal dal, String stored) throws Exception {
+    OrderLine line = mock(OrderLine.class);
+    DataToJsonConverter converter = mock(DataToJsonConverter.class);
+    OBProvider provider = mock(OBProvider.class);
+    JSONObject storedJson = new JSONObject(stored);
+    when(dal.get(OrderLine.class, LINE_ID)).thenReturn(line);
+    when(converter.toJsonObject(line, DataResolvingMode.FULL)).thenReturn(storedJson);
+    when(provider.get(DataToJsonConverter.class)).thenReturn(converter);
+    MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class);
+    providerMock.when(OBProvider::getInstance).thenReturn(provider);
+    return providerMock;
+  }
+
+  private static NeoContext updateCtx(String method, JSONObject body, Tab adTab) {
+    return NeoContext.builder()
+        .specName(SPEC)
+        .entityName(ENTITY)
+        .httpMethod(method)
+        .endpointType(NeoEndpointType.CRUD)
+        .recordId(LINE_ID)
+        .requestBody(body)
+        .adTab(adTab)
+        .build();
+  }
+
+  static Stream<Arguments> amountsOnInputUpdate() {
+    return Stream.of(
+        Arguments.of("CP-7: quantity alone → gross over the new quantity (6 × 240 × 1.21)",
+            "PATCH", "{\"orderedQuantity\":6}", false, "1742.40", 1),
+        Arguments.of("PUT behaves as PATCH", "PUT", "{\"orderedQuantity\":6}", false, "1742.40",
+            1),
+        Arguments.of("form side panel: applyUnitPrice abstains, the gross reuses its read",
+            "PATCH", "{\"orderedQuantity\":6,\"unitPrice\":240}", true, "1742.40", 1),
+        Arguments.of("a gross the caller sent is kept, nothing read", "PATCH",
+            "{\"orderedQuantity\":6,\"lineGrossAmount\":1000}", false, "1000", 0),
+        Arguments.of("no amount input in the patch → untouched, nothing read", "PATCH",
+            "{\"description\":\"x\"}", false, null, 0));
+  }
+
+  /**
+   * Through {@code applyLineRules}: no discount, so the discount re-fire never runs. With a tab,
+   * {@code applyUnitPrice} reads the stored line and abstains (the price is the one the line
+   * already has); the stored line is read at most once per request either way.
+   */
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("amountsOnInputUpdate")
+  void updateOfAnAmountInputRefreshesTheGross(String label, String method, String body,
+      boolean withTab, String expectedGross, int expectedReads) throws Exception {
+    JSONObject json = new JSONObject(body);
+    OBDal dal = mock(OBDal.class);
+    Tab tab = withTab ? mock(Tab.class) : null;
+
+    try (MockedStatic<OBDal> dalMock = LineAmountTestSupport.taxRate(21.0, dal);
+        MockedStatic<OBProvider> provider = storedLine(dal, STORED_MONITOR_LINE);
+        MockedStatic<NeoDefaultsCascadeHelper> cascade = mockStatic(NeoDefaultsCascadeHelper.class)) {
+      OrderLineDiscountSupport.applyLineRules(updateCtx(method, json, tab));
+
+      cascade.verifyNoInteractions();
+    }
+
+    assertAmount(label, expectedGross, json, OrderLineDiscountSupport.FIELD_LINE_GROSS_AMOUNT);
+    assertAmount(label, null, json, OrderLineDiscountSupport.FIELD_LINE_NET_AMOUNT);
+    verify(dal, times(expectedReads)).get(OrderLine.class, LINE_ID);
+  }
+
+  // ── CP-9: an update of the price alone derives the discount ───────────
+
+  /** Stored: list 300, discount 20, price 240, qty 5. */
+  static Stream<Arguments> discountFromPriceRule() {
+    return Stream.of(
+        Arguments.of("CP-9: a new price alone → derive the discount", "{\"unitPrice\":270}",
+            true),
+        Arguments.of("back to the list price → derive the discount", "{\"unitPrice\":300}", true),
+        Arguments.of("form side panel, quantity edited: the price it computes is the current one",
+            "{\"orderedQuantity\":6,\"unitPrice\":240}", false),
+        Arguments.of("form side panel, list price edited: idem over the new list price",
+            "{\"listPrice\":200,\"unitPrice\":160}", false),
+        Arguments.of("form float rounding, within half a cent", "{\"unitPrice\":240.000001}",
+            false),
+        Arguments.of("form inline edit carries the discount",
+            "{\"discount\":20,\"unitPrice\":270}", false),
+        Arguments.of("explicit gross price", "{\"unitPrice\":270,\"grossUnitPrice\":326.7}",
+            false),
+        Arguments.of("no list price", "{\"listPrice\":0,\"unitPrice\":270}", false),
+        Arguments.of("no unitPrice", "{\"orderedQuantity\":6}", false));
+  }
+
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("discountFromPriceRule")
+  void shouldDeriveDiscountFromPrice(String label, String patch, boolean expected)
+      throws Exception {
+    JSONObject body = new JSONObject(patch);
+    JSONObject formState = new JSONObject(
+        "{\"orderedQuantity\":5,\"listPrice\":300,\"discount\":20,\"unitPrice\":240}");
+    Iterator<String> keys = body.keys();
+    while (keys.hasNext()) {
+      String key = keys.next();
+      formState.put(key, body.get(key));
+    }
+
+    assertEquals(expected, OrderLineDiscountSupport.shouldDeriveDiscountFromPrice(body, formState),
+        label);
+  }
+
+  /**
+   * QA CP-9: line at list 300, discount 20, qty 5 → {@code etendo_update unitPrice:270}. The
+   * re-fire is stubbed with what {@code SL_Order_Amt} answers on {@code inppriceactual} (discount
+   * 10, net 1350, gross {@code grossUnitPrice × qty} = 0 on a net list); pinned here is that it is
+   * fired for {@code unitPrice}, keeps the caller's price, reads the new price as its standard
+   * price, and that the gross is then derived: 1350 × 1.21 = 1633.50.
+   */
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("priceUpdateMethods")
+  void updateOfThePriceAloneDerivesTheDiscount(String method) throws Exception {
+    JSONObject body = new JSONObject("{\"unitPrice\":270}");
+    JSONObject calloutWrites = new JSONObject(
+        "{\"discount\":\"10\",\"lineNetAmount\":\"1350\",\"lineGrossAmount\":\"0\"}");
+    OBDal dal = mock(OBDal.class);
+    Tab tab = mock(Tab.class);
+    List<Object> triggers = new ArrayList<>();
+    Set<String> protectedKeys = new HashSet<>();
+    List<Object> inputStandardPrice = new ArrayList<>();
+
+    try (MockedStatic<OBDal> dalMock = LineAmountTestSupport.taxRate(21.0, dal);
+        MockedStatic<OBProvider> provider = storedLine(dal, "{\"orderedQuantity\":5,"
+            + "\"listPrice\":300,\"discount\":20,\"unitPrice\":240,\"standardPrice\":300,"
+            + "\"tax\":\"" + TAX_ID + "\",\"lineGrossAmount\":1452}");
+        MockedStatic<NeoDefaultsCascadeHelper> cascade = mockStatic(NeoDefaultsCascadeHelper.class);
+        MockedStatic<NeoTypeCoercionHelper> coercion = mockStatic(NeoTypeCoercionHelper.class)) {
+      cascade.when(() -> NeoDefaultsCascadeHelper.executeCalloutsForTriggerFields(any(), any(),
+          any(), any(), any(), any(), any())).thenAnswer(inv -> {
+            JSONObject formState = inv.getArgument(2);
+            inputStandardPrice.add(formState.opt(OrderLineDiscountSupport.FIELD_STANDARD_PRICE));
+            triggers.addAll(inv.<Collection<Object>>getArgument(4));
+            protectedKeys.addAll(inv.<Set<String>>getArgument(5));
+            JSONObject target = inv.getArgument(3);
+            Iterator<String> it = calloutWrites.keys();
+            while (it.hasNext()) {
+              String key = it.next();
+              if (!protectedKeys.contains(key)) {
+                target.put(key, calloutWrites.get(key));
+              }
+            }
+            return null;
+          });
+      coercion.when(() -> NeoTypeCoercionHelper.coerceTypes(any(JSONObject.class), anyString()))
+          .thenAnswer(inv -> {
+            JSONObject data = inv.getArgument(0);
+            Iterator<String> it = data.keys();
+            while (it.hasNext()) {
+              String key = it.next();
+              data.put(key, new BigDecimal(data.getString(key)));
+            }
+            return null;
+          });
+
+      OrderLineDiscountSupport.applyLineRules(updateCtx(method, body, tab));
+    }
+
+    assertEquals(Arrays.asList(OrderLineDiscountSupport.FIELD_UNIT_PRICE), triggers,
+        "the re-fire is for the price");
+    assertTrue(protectedKeys.contains(OrderLineDiscountSupport.FIELD_UNIT_PRICE),
+        "the caller's price is protected");
+    assertEquals(0, new BigDecimal("270").compareTo(
+        new BigDecimal(String.valueOf(inputStandardPrice.get(0)))),
+        "the callout reads the new price as its standard price, or it misreads the discount");
+    assertAmount("unitPrice", "270", body, OrderLineDiscountSupport.FIELD_UNIT_PRICE);
+    assertAmount("discount", "10", body, OrderLineDiscountSupport.FIELD_DISCOUNT);
+    assertAmount("lineNetAmount", "1350", body, OrderLineDiscountSupport.FIELD_LINE_NET_AMOUNT);
+    assertAmount("lineGrossAmount", "1633.50", body,
+        OrderLineDiscountSupport.FIELD_LINE_GROSS_AMOUNT);
+  }
+
+  static Stream<String> priceUpdateMethods() {
+    return Stream.of("PATCH", "PUT");
   }
 }

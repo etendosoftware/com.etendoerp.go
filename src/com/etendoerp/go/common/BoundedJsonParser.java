@@ -88,7 +88,16 @@ public final class BoundedJsonParser {
    * @throws MalformedJsonException when {@code text} is null, malformed, too deep, or not an array
    */
   public static JSONArray parseArray(String text) throws MalformedJsonException {
-    return parse(text, DEFAULT_MAX_DEPTH, JSONArray::new);
+    return parseArray(text, DEFAULT_MAX_DEPTH);
+  }
+
+  /**
+   * Parses {@code text} as a JSON array, nested at most {@code maxDepth} levels.
+   *
+   * @throws MalformedJsonException when {@code text} is null, malformed, too deep, or not an array
+   */
+  public static JSONArray parseArray(String text, int maxDepth) throws MalformedJsonException {
+    return parse(text, maxDepth, JSONArray::new);
   }
 
   /**

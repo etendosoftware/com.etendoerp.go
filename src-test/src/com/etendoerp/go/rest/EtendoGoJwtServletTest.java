@@ -22,6 +22,7 @@ import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -32,6 +33,7 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -50,6 +52,7 @@ import java.util.Collections;
 import java.util.Date;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -69,6 +72,7 @@ import com.etendoerp.go.common.BoundedJsonParserTest;
 import com.etendoerp.go.common.PublicUrlResolver;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.data.AccountIdentity;
+import com.etendoerp.go.schemaforge.util.OwnerSupport;
 
 /**
  * Unit tests for {@link EtendoGoJwtServlet}.
@@ -1935,8 +1939,39 @@ public class EtendoGoJwtServletTest {
 
   @Test
   public void environmentsSuccessExpandsEachNonStarOrganization() throws Exception {
+    JSONArray environments = requestEnvironmentsWithTwoOrganizations(null,
+        detailsMock -> detailsMock.verify(
+            () -> EnvironmentDetails.resolve(anyString(), any(User.class), anyBoolean()), never()));
+
+    assertEquals(2, environments.length());
+    assertEquals("ORG-1", environments.getJSONObject(0).getString("orgId"));
+    assertEquals("ORG-2", environments.getJSONObject(1).getString("orgId"));
+    assertFalse(environments.getJSONObject(0).has("userCount"));
+  }
+
+  /** ETP-5734: {@code ?details=true} resolves the details once per company, not per organization. */
+  @Test
+  public void environmentsWithDetailsMergesThemIntoEveryOrganizationEntry() throws Exception {
+    JSONArray environments = requestEnvironmentsWithTwoOrganizations("true",
+        detailsMock -> detailsMock.verify(
+            () -> EnvironmentDetails.resolve(eq("CLIENT-1"), any(User.class), eq(true)), times(1)));
+
+    assertEquals(2, environments.length());
+    assertEquals(4, environments.getJSONObject(0).getInt("userCount"));
+    assertEquals(4, environments.getJSONObject(1).getInt("userCount"));
+    assertEquals("ORG-2", environments.getJSONObject(1).getString("orgId"));
+  }
+
+  /**
+   * GET /environments for an account owning one company with two non-star organizations.
+   * {@code EnvironmentDetails.resolve} is stubbed to a fixed {@code userCount}; {@code merge} runs
+   * for real. {@code verifyDetails} runs while the static mocks are still open.
+   */
+  private JSONArray requestEnvironmentsWithTwoOrganizations(String detailsParam,
+      Consumer<MockedStatic<EnvironmentDetails>> verifyDetails) throws Exception {
     ResponseCapture resp = mockResponse();
     HttpServletRequest req = authenticatedRequest("/environments", "valid-token");
+    when(req.getParameter("details")).thenReturn(detailsParam);
     Account account = mock(Account.class);
     when(account.getEmail()).thenReturn("user@test.com");
     User environmentUser = mock(User.class);
@@ -1951,7 +1986,10 @@ public class EtendoGoJwtServletTest {
     when(client.getName()).thenReturn("Client One");
 
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class);
+         MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class);
+         MockedStatic<EnvironmentDetails> detailsMock =
+             mockStatic(EnvironmentDetails.class, CALLS_REAL_METHODS)) {
       dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("valid-token"))
           .thenReturn(account);
       dalMock.when(() -> EtendoGoJwtDalHelper.findEnvironmentUsersByAccountEmail("user@test.com"))
@@ -1960,8 +1998,8 @@ public class EtendoGoJwtServletTest {
           .thenReturn(List.of(firstOrg, secondOrg));
       // Not thenCallRealMethod(): the real implementation now also resolves the tenant plan
       // and lifecycle snapshot through private static OBDal-backed services (ETP-4686), which
-      // this unit test has no DB context for. Only orgId/orgName are asserted below, so a
-      // minimal fixture built from the same arguments is enough.
+      // this unit test has no DB context for. Only orgId/orgName are asserted, so a minimal
+      // fixture built from the same arguments is enough.
       dalMock.when(() -> EtendoGoJwtDalHelper.buildEnvironmentJson(any(Client.class),
           any(Organization.class), any(User.class))).thenAnswer(invocation -> {
             Organization org = invocation.getArgument(1);
@@ -1970,15 +2008,16 @@ public class EtendoGoJwtServletTest {
             env.put("orgName", org.getName());
             return env;
           });
+      ownerMock.when(() -> OwnerSupport.isOwner("USER-1")).thenReturn(true);
+      detailsMock.when(() -> EnvironmentDetails.resolve(anyString(), any(User.class), anyBoolean()))
+          .thenReturn(new JSONObject().put("userCount", 4));
 
       servlet.doGet(req, resp.response);
+      verifyDetails.accept(detailsMock);
     }
 
     assertEquals(200, resp.status);
-    JSONArray environments = new JSONObject(resp.body()).getJSONArray("environments");
-    assertEquals(2, environments.length());
-    assertEquals("ORG-1", environments.getJSONObject(0).getString("orgId"));
-    assertEquals("ORG-2", environments.getJSONObject(1).getString("orgId"));
+    return new JSONObject(resp.body()).getJSONArray("environments");
   }
 
   // ===================== Helpers =====================

@@ -109,6 +109,7 @@ import com.etendoerp.go.onboarding.OnboardingSequenceGeneratorService;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.data.AccountIdentity;
 import com.etendoerp.go.schemaforge.email.EmailContractCommandSupport;
+import com.etendoerp.go.schemaforge.util.OwnerSupport;
 import com.etendoerp.go.session.GoSessionAuthResult;
 import com.etendoerp.go.session.GoSessionAuthenticator;
 import com.etendoerp.go.session.GoLegacyBearer;
@@ -297,6 +298,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String CONTRACT_NEW_ACCOUNT = "new-account";
   private static final String SSO_PREFIX = "/sso/";
   private static final String PATH_ONBOARDING_DRAFT = "/onboarding/draft";
+  /** ETP-5734 — opt-in query parameter of {@code GET /environments}. */
+  private static final String PARAM_DETAILS = "details";
   /** Maximum accepted age of a Stripe-Signature timestamp, per the provider's guidance. */
   private static final long CHECKOUT_WEBHOOK_TOLERANCE_SECONDS = 300;
   /** The event types that confirm a hosted-checkout payment; every other type is ignored. */
@@ -1093,11 +1096,13 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       OBContext.setAdminMode(true);
       try {
         TenantEnvironmentLifecycleService.EnvironmentSnapshot snapshot = null;
+        String clientId = null;
         if (purchase.getCreatedClient() != null) {
-          snapshot = tenantEnvironmentLifecycleService.resolve(purchase.getCreatedClient().getId());
+          clientId = purchase.getCreatedClient().getId();
+          snapshot = tenantEnvironmentLifecycleService.resolve(clientId);
         }
         writeResponse(response, HttpServletResponse.SC_OK,
-            buildBillingSubscriptionJson(live, snapshot));
+            buildBillingSubscriptionJson(live, snapshot, clientId));
       } finally {
         OBContext.restorePreviousMode();
       }
@@ -1141,7 +1146,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
   private JSONObject buildBillingSubscriptionJson(
       StripeCustomerPortalService.SubscriptionDetail live,
-      TenantEnvironmentLifecycleService.EnvironmentSnapshot snapshot) throws JSONException {
+      TenantEnvironmentLifecycleService.EnvironmentSnapshot snapshot, String clientId)
+      throws JSONException {
     Instant graceEndsAt = null;
     int graceDaysRemaining = 0;
     if (snapshot != null
@@ -1162,6 +1168,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     result.put("cancelAtPeriodEnd", live.isCancelAtPeriodEnd());
     result.put("graceEndsAt", graceEndsAt == null ? JSONObject.NULL : graceEndsAt.toString());
     result.put("graceDaysRemaining", graceDaysRemaining);
+    // ETP-5734 — the company the subscription pays for, so "Mis empresas" can put the live
+    // renewal date on that company's row. Additive: existing consumers ignore it.
+    result.put(FIELD_CLIENT_ID, clientId == null ? JSONObject.NULL : clientId);
     return result;
   }
 
@@ -3271,9 +3280,13 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * Returns 200 with environments linked to the account, each carrying its plan
    * ("free" | "productive"), plus the account email as the flag-targeting identity.
    * Links via AD_User.username matching the account email.
+   *
+   * <p>ETP-5734 — {@code ?details=true} also appends the per-company fields of
+   * {@link EnvironmentDetails}. Opt-in so the list every app load reads stays as cheap as before.
    */
   private void handleEnvironments(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
+    boolean withDetails = Boolean.parseBoolean(request.getParameter(PARAM_DETAILS));
     if (!hasAnyCredential(request)) {
       writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_AUTHORIZATION_HEADER);
       return;
@@ -3300,7 +3313,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       Map<String, Date> unfinishedPaidClients = findUnfinishedPaidClients(account);
       for (User environmentUser : environmentUsers) {
         if (!isUnfinishedPaidEnvironment(environmentUser.getClient(), unfinishedPaidClients)) {
-          addEnvironmentEntries(envArray, environmentUser);
+          addEnvironmentEntries(envArray, environmentUser, withDetails);
         }
       }
 
@@ -3327,17 +3340,32 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
   /** One entry per business organization of the user's client, or one without when it has none. */
   private static void addEnvironmentEntries(org.codehaus.jettison.json.JSONArray envArray,
-      User environmentUser) throws JSONException {
+      User environmentUser, boolean withDetails) throws JSONException {
     Client client = environmentUser.getClient();
+    JSONObject details = withDetails
+        ? EnvironmentDetails.resolve(client.getId(), environmentUser,
+            OwnerSupport.isOwner(environmentUser.getId()))
+        : null;
     List<Organization> organizations =
         EtendoGoJwtDalHelper.findNonStarOrganizations(client.getId());
     if (organizations.isEmpty()) {
-      envArray.put(EtendoGoJwtDalHelper.buildEnvironmentJson(client, null, environmentUser));
+      envArray.put(withEnvironmentDetails(
+          EtendoGoJwtDalHelper.buildEnvironmentJson(client, null, environmentUser), details));
       return;
     }
     for (Organization organization : organizations) {
-      envArray.put(EtendoGoJwtDalHelper.buildEnvironmentJson(client, organization, environmentUser));
+      envArray.put(withEnvironmentDetails(
+          EtendoGoJwtDalHelper.buildEnvironmentJson(client, organization, environmentUser),
+          details));
     }
+  }
+
+  private static JSONObject withEnvironmentDetails(JSONObject env, JSONObject details)
+      throws JSONException {
+    if (details != null && env != null) {
+      EnvironmentDetails.merge(env, details);
+    }
+    return env;
   }
 
   /**
@@ -4342,9 +4370,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         writeError(response, HttpServletResponse.SC_NOT_FOUND, "User not found");
         return;
       }
-      Role role = roleListData.getFirstRoleId() != null
-          ? OBDal.getInstance().get(Role.class, roleListData.getFirstRoleId())
-          : null;
+      String entryRoleId = roleListData.getEntryRoleId();
+      Role role = entryRoleId != null ? OBDal.getInstance().get(Role.class, entryRoleId) : null;
       String jwtToken = SecureWebServicesUtils.generateToken(user, role);
 
       JSONObject result = new JSONObject();
@@ -5320,14 +5347,17 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
   /**
    * Resolve and validate the requested role (and, if given, organization) for an environment
-   * switch: defaults to the user's first role when none is requested, checks the role is one of
-   * the user's own, and that the requested organization (if any) belongs to that role. Writes the
-   * matching error response and returns {@code null} when the request is invalid.
+   * switch: defaults to the user's entry role when none is requested (see
+   * {@link #defaultEntryRoleId}), checks the role is one of the user's own, and that the requested
+   * organization (if any) belongs to that role. Writes the matching error response and returns
+   * {@code null} when the request is invalid.
    */
   private Role resolveRequestedRole(EtendoGoJwtSupport.RoleListData roleListData,
       String requestedRoleId, String requestedOrgId, HttpServletResponse response)
       throws IOException, JSONException {
-    String roleId = requestedRoleId.isEmpty() ? roleListData.getFirstRoleId() : requestedRoleId;
+    String roleId = requestedRoleId.isEmpty()
+        ? defaultEntryRoleId(roleListData, requestedOrgId)
+        : requestedRoleId;
     JSONObject selectedRole = findRole(roleListData.getRoleArray(), roleId);
     if (roleId == null || selectedRole == null) {
       writeError(response, HttpServletResponse.SC_FORBIDDEN,
@@ -5345,6 +5375,26 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
           "Requested role is not available to this user");
     }
     return role;
+  }
+
+  /**
+   * ETP-5096 — the role an entry with no explicit role uses: the user's default role
+   * ({@link EtendoGoJwtSupport.RoleListData#getEntryRoleId()}), not the oldest one. The client
+   * always sends its first organization, so when the default role cannot open that organization
+   * the oldest role (the one entry used before) is kept: a user who could enter must not start
+   * getting a 403 because their default role is narrower.
+   */
+  private static String defaultEntryRoleId(EtendoGoJwtSupport.RoleListData roleListData,
+      String requestedOrgId) throws JSONException {
+    String entryRoleId = roleListData.getEntryRoleId();
+    if (requestedOrgId.isEmpty() || entryRoleId == null
+        || entryRoleId.equals(roleListData.getFirstRoleId())) {
+      return entryRoleId;
+    }
+    JSONObject entryRole = findRole(roleListData.getRoleArray(), entryRoleId);
+    return entryRole != null && roleContainsOrganization(entryRole, requestedOrgId)
+        ? entryRoleId
+        : roleListData.getFirstRoleId();
   }
 
   /**
