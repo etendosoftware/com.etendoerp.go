@@ -3232,8 +3232,10 @@ The shape and the rules are in §4.12.1.3.
 | `financial-account/transaction` | `etprReactivateTransaction`, `etprRemoveTransaction`, `posted`, `etblkpBulkposting` | — | the UI's movements are reactivated, deleted and recorded through the account's movement flow; for agents, the account's `reactivateMovement` / `deleteMovement` / `createMovement` (§4.12.1.4). What stays for agents is `post` / `unpost` — `etendo_action(spec:'financial-account', entity:'transaction', id:<transactionId>, action:'post'\|'unpost', parameters:{})`, served by the `document-posting` qualifier (`DocumentPostingService`, as the SPA's kebab). They are handler-served, not declared contracts, so `view:"actions"` does not list them |
 | `open-close-period-control/documents` | `openClose`, `processNow` | — | the calendar has no per-document-type open/close since ETP-4948; the period's own `openClose` (§4.12.1.6) opens or closes every document type at once |
 | `financial-account/account` | `aPRMImportBankFile`, `aPRMMatchTransactions`, `aPRMMatchTransactionsForce`, `aPRMReconcile`, `aprmAddMultiplePayments`, `pSD2GetBankstatement`, `pSD2GetConsent`, `psd2ReconnectFa`, `psd2GetConnections`, `psd2RefreshConnections` | `aprmFundsTrans` → `transferFunds` (§4.12.1.5) | the window offers none of its Core buttons: statements go through `bank-statements`, reconciliation through `bank-reconciliation`, manual movements through the entity's own declared movement actions (§4.12.1.4); PSD2 consent and reconnection need SCA. It has no `verbs` section: create, update and delete stay (the SPA uses them) |
-| `goods-receipt/header` | — | redirect `invoicefromshipment` → `createPurchaseInvoice` (ETP-5709) | the classic *Invoicefromshipment* process, fired on a purchase receipt, creates a **sales** invoice (`isSotrx = true`), does not mark the receipt as invoiced and can report success without creating anything. The target is the header's declared `createPurchaseInvoice` (`GoodsReceiptHeaderHandler`), which creates a purchase invoice from the receipt and completes it in the same call. The return specs (`return-material-receipt`, `return-to-vendor-shipment`) carry the same classic button and are not redirected yet (ETP-5711) |
+| `goods-receipt/header` | — | redirect `invoicefromshipment` → `createPurchaseInvoice` (ETP-5709) | the classic *Invoicefromshipment* process, fired on a purchase receipt, creates a **sales** invoice (`isSotrx = true`), does not mark the receipt as invoiced and can report success without creating anything. The target is the header's declared `createPurchaseInvoice` (`GoodsReceiptHeaderHandler`), which creates a purchase invoice from the receipt and completes it in the same call. The return specs (`return-material-receipt`, `return-to-vendor-shipment`) carry the same classic button and are redirected to their own `createReturnInvoice` (ETP-5712, next two rows) |
 | `goods-shipment/goodsShipment` | — | redirect `Invoicefromshipment` → `createDraftInvoice` (ETP-5709) | the classic process bypasses every guard of the handler's own path (completed-status check, nothing-pending 400, scoping to the shipment's own lines, honoured partial `lines`), so agents are sent to `createDraftInvoice`, now declared by `GoodsShipmentHeaderHandler.actionContracts()` (`CreateDraftInvoiceHandler.SHIPMENT_CONTRACT`: optional `shipmentIds[]`, `priceListId`, `lines[{shipmentLineId, quantity}]`). The key is the AD column name `Invoicefromshipment`, the only spelling both `McpActionsView.namesOf` (listing) and `McpDeclaredActions.namesOf` (call) accept. The other sales specs keep the classic button |
+| `return-to-vendor-shipment/returnToVendorShipment` | — | redirect `RM_Shipment_Pickedit` → `importReceiptLines` (ETP-5711), `GenerateTo` and `Invoicefromshipment` → `createReturnInvoice` (ETP-5712); `reasons` for the last two | *Pick/Edit Lines* has no process connected. `GenerateTo` (AD_Process 154, *Generate Invoice from Shipment*, `isdisplayed = N` in the tab) and `Invoicefromshipment` (no process) are the classic ways to invoice a shipment; on a return they would not build the factura rectificativa the app builds (negative lines, link to the invoice it rectifies, confirmed). The target is the header's declared `createReturnInvoice` (§4.12.33). Keys are AD column names |
+| `return-material-receipt/returnMaterialReceipt` | — | redirect `RM_Receipt_PickEdit` → `importShipmentLines` (ETP-5711), `GenerateTo` and `Invoicefromshipment` → `createReturnInvoice` (ETP-5712); `reasons` for the last two | the sales mirror of the previous row |
 | `purchase-order/header` | — | redirect `rMReceiveMaterials` → `createGoodsReceipt`, `rMCreateInvoice` → `createPurchaseInvoice` (ETP-5709) | the classic *Receive Materials* button has no process connected for an agent, and *Create Invoice* is undocumented for it. The targets are the header's declared contracts (`PurchaseOrderHeaderHandler`): `createGoodsReceipt` creates a DRAFT receipt, `createPurchaseInvoice` creates AND completes a purchase invoice. The preconditions (source must be completed, draft-aware pending quantity) are described in the ETP-5709 paragraphs of §4.12.9 and apply to a redirected call exactly as to a direct one |
 
 **A redirect target is not validated at runtime (ETP-5709).** `McpActionsSection.validateRedirect` only requires each target to be a non-blank string; it never checks that the target is an action the entity serves. A typo or a renamed action still loads, and the agent is then told to call something that answers 404. Every `redirect` target must therefore be an action the entity declares (an `actionContracts()` entry or a handler-served action). Also, `reason` is mandatory in every `actions` section, `redirect`-only ones included: `validate` rejects a section without it, and an unusable section fails the entity closed (§4.12.6). `redirectReason` and `reasons` refine the text per action; they do not replace `reason`.
@@ -4941,7 +4943,7 @@ This is a plain duplicate-key conflict, not the concurrency conflict from §4.3.
 
   `InternalConsumptionLineHandler` (ETP-5445) reuses the same helper for core's `SL_Internal_Consumption_Product`, which copies the product's on-hand stock (`inpmProductId_QTY`) into `inpmovementqty` — but **gated to the product trigger only** (`isProductTrigger` accepts the request's `field` as the DAL property `product`, the column `M_Product_ID`, or its `inp` name, case-insensitive, mirroring `NeoCalloutService#resolveCallout`). Unlike the `M_InOutLine` windows, this line has a second callout that legitimately writes `movementQuantity`: `SL_Internal_Consumption_Conversion` on `M_Product_Uom_Id` / `QuantityOrder` converts the second-UOM quantity into the base-UOM movement quantity, and stripping it would silently drop the conversion. The shared helper is deliberately left ungated because its other callers have no such conversion callout — when adding a new caller, check the line's callout list for a legitimate `movementQuantity` writer first.
 
-  Both sign directions are `abs()`-based normalisations, not `negate()` flips, so they are **idempotent** — a caller that already normalised is never flipped back. Everything that reads a return quantity for aggregation is sign-agnostic by construction (`SUM(ABS(rl.MovementQty))` in the "already returned" availability queries of both header handlers; `resolveShipmentLineQty`'s explicit `signum()`/`abs()` split in `CreateDraftInvoiceHandler`). The one deliberate exception is the rectificative invoice line, which must stay NEGATIVE by functional decision: `ReturnShipmentUtils.addReturnInvoiceLines` forces it with `abs().negate()` (ETP-4737) and stays sign-agnostic so it keeps working for return documents created before ETP-5313.
+  Both sign directions are `abs()`-based normalisations, not `negate()` flips, so they are **idempotent** — a caller that already normalised is never flipped back. Everything that reads a return quantity for aggregation is sign-agnostic by construction (`SUM(ABS(rl.MovementQty))` in the "already returned" availability queries of both header handlers; `resolveShipmentLineQty`'s explicit `signum()`/`abs()` split in `CreateDraftInvoiceHandler`). The one deliberate exception is the rectificative invoice line, which must stay NEGATIVE by functional decision: `ReturnInvoiceSupport.addReturnInvoiceLines` forces it with `abs().negate()` (ETP-4737) and stays sign-agnostic so it keeps working for return documents created before ETP-5313.
 
   Two more rules hold for that rectificative invoice (ETP-5729), both enforced in `ReturnShipmentUtils`:
   - **Its taxes and totals come from the core trigger chain only.** Flushing the lines makes `C_INVOICELINE_TRG2` → `C_INVOICELINETAX_TRG` keep exactly one `C_InvoiceTax` row per rate and the header `TotalLines`/`GrandTotal` current, as for any invoice. `finalizeReturnInvoice` used to also insert an `InvoiceTax` per rate from Java (the removed `CreateDraftInvoiceHandler#recalculateTotals`), which sat next to the trigger-made row and doubled the tax and the outstanding amount at completion.
@@ -8965,8 +8967,8 @@ ANY return line pointed at the shipment, which also blocked a second partial ret
 |---|---|
 | `goods-receipt/goodsReceipt` | `documentAction`, `createPurchaseInvoice`, **`createPurchaseReturn`**, `cloneRecord` |
 | `goods-shipment/goodsShipment` | `documentAction`, `createDraftInvoice`, **`createReturn`**, `cloneRecord` |
-| `return-to-vendor-shipment/returnToVendorShipment` | `availableReceipts`, `availableReceiptLines` (`receiptId` + `businessPartner`), `importReceiptLines`, `rectifiableInvoices`, `createReturnInvoice`, `documentAction` (CO) |
-| `return-material-receipt/returnMaterialReceipt` | the five it already declared + `documentAction` (CO) |
+| `return-to-vendor-shipment/returnToVendorShipment` | `availableReceipts`, `availableReceiptLines` (`receiptId` + `businessPartner`), `importReceiptLines`, `rectifiableInvoices`, `createReturnInvoice`, `documentAction` (CO; the text of both return headers is `ReturnCompletionContract`, ETP-5712) |
+| `return-material-receipt/returnMaterialReceipt` | `availableShipments`, `availableShipmentLines` (`shipmentId`), `importShipmentLines`, `rectifiableInvoices`, `createReturnInvoice`, `documentAction` (CO) |
 
 `createPurchaseReturn` / `createReturn` share one contract builder (`ReturnFromDocumentSupport.contract`): `lines`
 optional `[{lineId, returnQuantity}]`, `reason` optional. Both spec agent prompts
@@ -8975,7 +8977,7 @@ optional `[{lineId, returnQuantity}]`, `reason` optional. Both spec agent prompt
 **`MCP_CONFIG` redirects** (`ETGO_SF_ENTITY`): the classic buttons `RM_Shipment_Pickedit` (Return to Vendor
 Shipment, "Pick/Edit Lines") and `RM_Receipt_PickEdit` (Return Material Receipt) have no process connected; they
 redirect to `importReceiptLines` / `importShipmentLines`. The goods receipt/shipment copies of those columns are
-`isdisplayed = N` and are not touched.
+`isdisplayed = N` and are not touched. ETP-5712 adds `GenerateTo` and `Invoicefromshipment` → `createReturnInvoice` to the same JSON (§4.12.33).
 
 **Create from the document** (`ReturnFromDocumentSupport.plan`): `lines` omitted or empty returns **everything still
 returnable** of every active product line (a line with nothing left is skipped); `lines` given returns exactly those,
@@ -9053,3 +9055,76 @@ is `discarded` in both windows): loose lines can no longer be created, but ones 
 capped against. Every line linked to a receipt/shipment arrives by import or by create-from-the-document, both capped.
 `etendo_batch` has no ACTION surface and no update, so the actions and the quantity edit are not reachable through it;
 its `create` on a return line is refused like REST's.
+
+#### 4.12.33 The factura rectificativa of a return: separate action, discoverable, warned, never at zero (ETP-5712)
+
+*Factura rectificativa* = Corrective Purchase Invoice (API rectificative) for the return to a vendor,
+Corrective Sales Invoice (ARI rectificative) for the customer return. Both return headers
+(`return-to-vendor-shipment/returnToVendorShipment`, `return-material-receipt/returnMaterialReceipt`) serve it
+with `createReturnInvoice`; the code is shared in `ReturnInvoiceSupport.createReturnInvoice`.
+
+**Flow (decided, not a flag).** Confirming the return (`documentAction`, `docAction: "CO"`) books the stock movement
+and nothing else; the factura rectificativa is a SEPARATE `createReturnInvoice` call made afterwards, exactly like
+the SPA's two calls. An agent that confirmed and stopped believed the refund was done, so the text now says it:
+- `documentAction` of both return headers is `ReturnCompletionContract` (return-specific). It says confirming does
+  NOT create the factura rectificativa and names `rectifiableInvoices` -> `createReturnInvoice`. It is a separate
+  class because `InOutCompletionContract` is shared with goods receipt / goods shipment and keeps its own text, which
+  must not mention returns. Neither class names an entity.
+- The `FLOW` text carried by every return action's description repeats it, and so do both spec agent prompts
+  (`agent-prompts/*/spec.md`, mirrored in `ETGO_SF_SPEC.AGENT_PROMPT`).
+
+**Duplicates are allowed, and reported.** ETP-5381 removed the duplicate guard on purpose (a return can legitimately
+have more than one rectificativa); that stays. What changes is that it can no longer happen unseen:
+`createReturnInvoice`'s description tells the agent to check `hasReturnInvoice` (`rectifiableInvoices`) /
+`returnInvoices` (header GET) first, and the answer lists `previousReturnInvoices`: the non-voided invoices the return
+had BEFORE this call, from the same query as `returnInvoices` / `hasReturnInvoice`
+(`ReturnShipmentUtils.fetchPreviousReturnInvoices`; unlike the enrichment it propagates a failure, answering 400, so a
+failed lookup is never read as "first one").
+
+**Response (200).** `{id, documentNo, documentStatus}` as before, plus:
+
+| Key | Value |
+|---|---|
+| `documentType` | name of the document type used |
+| `isSalesTransaction` | `false` purchase side, `true` sales side |
+| `grandTotalAmount`, `totalLines` | gross and net amounts; negative, it refunds. Read AFTER the completion from a refreshed entity (the DB triggers compute the totals during it) |
+| `linkedReturnId`, `returnDocumentNo` | the return it refunds (its lines are the invoice lines' `M_InOutLine_ID`) |
+| `rectifiedInvoices` | `[{id, documentNo}]`, the invoices linked through `C_Invoice_Reverse` |
+| `previousReturnInvoices` | `[{id, documentNo, documentStatus}]`, see above |
+
+The invoice is left COMPLETED (decision kept from ETP-5381). The SPA carries `grandTotalAmount` as `invoice.amount`
+(`ConfirmInOutModal.runConfirm`; it was always `null` before because the key was never sent). No component renders it
+today, so there is nothing to format; a future display of it must go through `formatCurrency`.
+
+**Zero-amount guard.** `ReturnInvoiceSupport.refuseIfUnpriced` refuses with **422** `error.code
+returnInvoiceWithoutAmount` when ANY product line with a quantity would end at a unit price of 0, instead of
+creating and confirming a rectificativa of 0. It judges per line (one unpriced product among priced ones still
+refunds the wrong amount), the same stance as `InvoiceCompletionLineGuard` (ETP-5710), and it runs BEFORE the first
+`save`: it probes each line with the very sources `buildAndSaveInvoiceLine` uses (order line / source invoice line via
+`createShipmentInvoiceLine`, then the source invoice line, then the price list `standardPrice`) on a transient line,
+so a refusal persists nothing. Probe and line build share ONE resolver (`resolveLinePricing`), so they cannot drift. A deliberately free product therefore
+cannot be refunded through this action. Shape:
+`{error:{status:422, code:"returnInvoiceWithoutAmount", message:"The corrective invoice (factura rectificativa) cannot
+be created: no price could be found for Agua, Sal, so it would be confirmed with a zero amount. Set a price for those
+products (on the invoice being rectified or in its price list) and try again.", products:["Agua","Sal"]}}`. The SPA
+maps the sentence in `backendErrors.js` (`backendError.returnInvoiceWithoutAmount`).
+
+**The other refusals** (unchanged status codes): not completed 400, no product lines 400, no origin invoice
+**400** with `ERR_RECTIFIED_INVOICE_REQUIRED`, whose text now says what happened and what to do: `This return has no
+invoice to rectify: the document it returns has not been invoiced, so the factura rectificativa has nothing to link
+to. Invoice the original document first, or pass originInvoices with the id of an invoice from rectifiableInvoices.`
+(the SPA key `backendError.rectifiedInvoiceRequired` is keyed on this sentence).
+
+**Failure after the first save.** From the first `save` of the invoice on, any failure (a rejected completion, a hook throwing at runtime, a flush error) makes `createReturnInvoice` call `OBDal.getInstance().rollbackAndClose()` before re-throwing the same exception, so the request filter can never commit a draft rectificativa; the core completion already rolls back on most refusals, but not on a `ServletException` or a runtime failure, and a second rollback is harmless (it never throws, it is guarded). The error is answered exactly as before (400 / 500 by the handler); the success path does not roll back.
+
+**Classic buttons.** `GenerateTo` and `Invoicefromshipment` of `M_InOut` are redirected to `createReturnInvoice` on both
+headers (`MCP_CONFIG.actions.redirect` + a per-button `reasons` entry, next to the ETP-5711 Pick/Edit redirect in the
+same JSON); see the redirect table of §4.12.1.3 (rows for both return entities).
+
+**Channels.** REST, `etendo_batch` and MCP reach the same handlers through `NeoExtensionDispatcher`: no new
+divergence to declare in §4.12.9. The contracts and the redirects only affect what the MCP publishes; REST and the SPA
+still call the handlers as before.
+
+**Deployment.** `MCP_CONFIG` and `AGENT_PROMPT` are data rows (`ETGO_SF_ENTITY`, `ETGO_SF_SPEC`), shipped by the module's
+sourcedata XML; a database that already holds the ETP-5711 values gets the new ones through that sourcedata
+(`update.database`), and the XML edited in this change is the single source.

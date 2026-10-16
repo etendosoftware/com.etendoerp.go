@@ -476,15 +476,36 @@ class McpConfigSourcedataTest {
   private static final String RETURN_TO_VENDOR_HEADER = "40D5EE72A0F24464BABD21886059F3D8";
   private static final String RETURN_MATERIAL_HEADER = "963A22BC87B144E18470530BA256FA78";
 
+  /**
+   * ETP-5712: both return headers carry the classic M_InOut buttons that would invoice from the
+   * return — {@code GenerateTo} (AD_Process 154, "Generate Invoice from Shipment", hidden in the
+   * tab) and {@code Invoicefromshipment} (no process). Neither is an agent path: each is redirected
+   * to the header's own {@code createReturnInvoice}, with its own reason, keyed by AD column name
+   * (the one spelling the listing and the call-time refusal both accept).
+   */
+  private static void assertClassicInvoiceButtonsRedirectToCreateReturnInvoice(JSONObject actions,
+      JSONObject redirect) throws JSONException {
+    assertEquals("createReturnInvoice", redirect.getString("GenerateTo"));
+    assertEquals("createReturnInvoice", redirect.getString("Invoicefromshipment"));
+    JSONObject reasons = actions.getJSONObject(McpActionsSection.KEY_REASONS);
+    for (String button : List.of("GenerateTo", "Invoicefromshipment")) {
+      String reason = reasons.optString(button, "");
+      assertFalse(reason.isBlank(), "a reason for " + button);
+      assertTrue(reason.contains("createReturnInvoice"), button + ": " + reason);
+      assertTrue(reason.contains("factura rectificativa"), button + ": " + reason);
+    }
+  }
+
   @Test
   @DisplayName("return-to-vendor-shipment redirects the classic Pick/Edit Lines button, which has no"
       + " process, to importReceiptLines, which its handler declares")
   void returnToVendorRedirectsPickEditToImportReceiptLines() throws IOException, JSONException {
     JSONObject redirect = redirectOf(RETURN_TO_VENDOR_HEADER);
-    assertEquals(1, redirect.length());
+    assertEquals(3, redirect.length());
     assertEquals("importReceiptLines", redirect.getString("RM_Shipment_Pickedit"));
     JSONObject actions = payloadOf(RETURN_TO_VENDOR_HEADER).getJSONObject(McpActionsSection.NAME);
     assertFalse(actions.optString(McpActionsSection.KEY_REDIRECT_REASON, "").isBlank());
+    assertClassicInvoiceButtonsRedirectToCreateReturnInvoice(actions, redirect);
     assertTargetsAreDeclared(RETURN_TO_VENDOR_HEADER,
         new ReturnToVendorShipmentHeaderHandler().actionContracts().keySet());
     assertResolvesCleanly(RETURN_TO_VENDOR_HEADER);
@@ -496,10 +517,11 @@ class McpConfigSourcedataTest {
   void returnMaterialReceiptRedirectsPickEditToImportShipmentLines()
       throws IOException, JSONException {
     JSONObject redirect = redirectOf(RETURN_MATERIAL_HEADER);
-    assertEquals(1, redirect.length());
+    assertEquals(3, redirect.length());
     assertEquals("importShipmentLines", redirect.getString("RM_Receipt_PickEdit"));
     JSONObject actions = payloadOf(RETURN_MATERIAL_HEADER).getJSONObject(McpActionsSection.NAME);
     assertFalse(actions.optString(McpActionsSection.KEY_REDIRECT_REASON, "").isBlank());
+    assertClassicInvoiceButtonsRedirectToCreateReturnInvoice(actions, redirect);
     assertTargetsAreDeclared(RETURN_MATERIAL_HEADER,
         new ReturnMaterialReceiptHeaderHandler().actionContracts().keySet());
     assertResolvesCleanly(RETURN_MATERIAL_HEADER);
@@ -633,8 +655,10 @@ class McpConfigSourcedataTest {
   }
 
   @Test
-  @DisplayName("only goods-receipt and goods-shipment redirect invoicefromshipment")
-  void invoiceFromShipmentRedirectIsOnlyOnTheTwoGoodsDocuments() throws IOException, JSONException {
+  @DisplayName("invoicefromshipment is redirected only on the two goods documents (to their own"
+      + " invoice action) and on the two return headers (to createReturnInvoice, ETP-5712)")
+  void invoiceFromShipmentRedirectIsOnlyOnTheGoodsAndReturnDocuments()
+      throws IOException, JSONException {
     for (String[] row : authoredPayloads()) {
       JSONObject body = new JSONObject(row[1]);
       JSONObject actions = body.optJSONObject(McpActionsSection.NAME);
@@ -645,9 +669,16 @@ class McpConfigSourcedataTest {
       }
       for (String key : keysOf(redirect)) {
         if (key.equalsIgnoreCase("invoicefromshipment")) {
-          assertTrue(row[0].equals("ETGO_SF_ENTITY.xml#" + GOODS_RECEIPT_HEADER)
-              || row[0].equals("ETGO_SF_ENTITY.xml#" + GOODS_SHIPMENT_HEADER),
-              "invoicefromshipment must not be redirected outside the goods documents: " + row[0]);
+          boolean goods = row[0].equals("ETGO_SF_ENTITY.xml#" + GOODS_RECEIPT_HEADER)
+              || row[0].equals("ETGO_SF_ENTITY.xml#" + GOODS_SHIPMENT_HEADER);
+          boolean returns = row[0].equals("ETGO_SF_ENTITY.xml#" + RETURN_TO_VENDOR_HEADER)
+              || row[0].equals("ETGO_SF_ENTITY.xml#" + RETURN_MATERIAL_HEADER);
+          assertTrue(goods || returns,
+              "invoicefromshipment must not be redirected outside the goods and return documents: "
+                  + row[0]);
+          if (returns) {
+            assertEquals("createReturnInvoice", redirect.getString(key), row[0]);
+          }
         }
       }
     }
