@@ -76,6 +76,7 @@ import com.etendoerp.go.schemaforge.NeoSelectorService;
 import com.etendoerp.go.schemaforge.NeoVectorSearchEndpoint;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy;
 import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
 import com.etendoerp.go.schemaforge.util.NeoReportCallability;
 import com.etendoerp.go.schemaforge.util.NeoReportParam;
@@ -649,13 +650,16 @@ class McpToolRouterRouteTest {
       List<SFEntity> included = List.of(mock(SFEntity.class));
       supportMock.when(() -> McpToolRouterSupport.listIncludedEntities(SPEC_ID))
           .thenReturn(included);
-      supportMock.when(() -> McpToolRouterSupport.visibleEntities(included))
-          .thenReturn(Collections.emptyList());
+      try (MockedStatic<NeoAccountingAccessPolicy> policyMock =
+          mockStatic(NeoAccountingAccessPolicy.class)) {
+        policyMock.when(() -> NeoAccountingAccessPolicy.visibleEntities(included))
+            .thenReturn(Collections.emptyList());
 
-      JSONObject body = new JSONObject(router.route("etendo_discover", null, READ_SCOPES)
-          .getJSONArray("content").getJSONObject(0).getString("text"));
+        JSONObject body = new JSONObject(router.route("etendo_discover", null, READ_SCOPES)
+            .getJSONArray("content").getJSONObject(0).getString("text"));
 
-      assertEquals(0, body.getInt("count"));
+        assertEquals(0, body.getInt("count"));
+      }
       supportMock.verify(() -> McpToolRouterSupport.buildDiscoverSpec(
           any(), any(), any(), any(), any()), never());
     }

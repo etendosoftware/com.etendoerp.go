@@ -19,7 +19,6 @@ package com.etendoerp.go.mcp;
 
 import java.util.Iterator;
 import java.util.List;
-import java.util.stream.Collectors;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -45,7 +44,6 @@ import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoBooleanFormat;
-import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 import com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import com.etendoerp.go.schemaforge.util.NeoReportCallability;
@@ -147,18 +145,7 @@ final class McpToolRouterSupport {
    * @return the visible entities in {@code seqNo} order
    */
   static List<SFEntity> listVisibleEntities(String specId) {
-    return visibleEntities(listIncludedEntities(specId));
-  }
-
-  static List<SFEntity> visibleEntities(List<SFEntity> included) {
-    if (included == null
-        || included.stream().noneMatch(NeoAccountingAccessPolicy::isAccountingEntity)
-        || NeoAccountingAccessPolicy.canSeeAccounting(NeoAccessHelper.resolveCurrentRole())) {
-      return included;
-    }
-    return included.stream()
-        .filter(entity -> !NeoAccountingAccessPolicy.isAccountingEntity(entity))
-        .collect(Collectors.toList());
+    return NeoAccountingAccessPolicy.visibleEntities(listIncludedEntities(specId));
   }
 
   /**
@@ -168,7 +155,7 @@ final class McpToolRouterSupport {
   static boolean isHiddenAccountingSpec(SFSpec spec) {
     // Fail-open like the other catalog predicates: the real refusal is in findIncludedEntity.
     List<SFEntity> included = McpSupportInternals.safeListIncludedEntities(spec);
-    return !included.isEmpty() && visibleEntities(included).isEmpty();
+    return !included.isEmpty() && NeoAccountingAccessPolicy.visibleEntities(included).isEmpty();
   }
 
   static List<SFEntity> listIncludedEntities(String specId) {

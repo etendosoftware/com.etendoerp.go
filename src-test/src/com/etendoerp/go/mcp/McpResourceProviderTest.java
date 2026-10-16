@@ -95,7 +95,6 @@ class McpResourceProviderTest {
         .thenCallRealMethod();
     routerSupportMock.when(() -> McpToolRouterSupport.listVisibleEntities(anyString()))
         .thenCallRealMethod();
-    routerSupportMock.when(() -> McpToolRouterSupport.visibleEntities(any())).thenCallRealMethod();
 
     obDalMock.when(OBDal::getInstance).thenReturn(obDal);
   }

@@ -20,6 +20,7 @@ package com.etendoerp.go.schemaforge.util;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Collectors;
 
 import org.hibernate.criterion.Restrictions;
 import org.hibernate.query.NativeQuery;
@@ -114,9 +115,31 @@ public final class NeoAccountingAccessPolicy {
   /**
    * Whether the current role may reach {@code entity}. The role flag is only read when the
    * entity is an accounting one, so non-accounting entities cost no query.
+   *
+   * @param entity the entity the request targets
+   * @return {@code false} when {@code entity} is an accounting entity the role cannot see
    */
   public static boolean isEntityAllowed(SFEntity entity) {
     return !isAccountingEntity(entity) || canSeeAccounting(NeoAccessHelper.resolveCurrentRole());
+  }
+
+  /**
+   * The entities of {@code entities} the current role may see. The role flag is only read when
+   * the list holds an accounting entity, so a spec without one costs no query.
+   *
+   * @param entities the entities to filter; may be {@code null}
+   * @return {@code entities} itself when nothing is hidden, otherwise a new list without the
+   *     accounting entities
+   */
+  public static List<SFEntity> visibleEntities(List<SFEntity> entities) {
+    if (entities == null
+        || entities.stream().noneMatch(NeoAccountingAccessPolicy::isAccountingEntity)
+        || canSeeAccounting(NeoAccessHelper.resolveCurrentRole())) {
+      return entities;
+    }
+    return entities.stream()
+        .filter(entity -> !isAccountingEntity(entity))
+        .collect(Collectors.toList());
   }
 
   /**

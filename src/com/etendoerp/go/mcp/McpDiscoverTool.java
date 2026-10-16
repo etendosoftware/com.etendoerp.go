@@ -32,6 +32,7 @@ import org.openbravo.dal.service.OBDal;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy;
 
 /**
  * The {@code etendo_discover} tool handler and its spec selection (IMP-53), split out of
@@ -78,7 +79,7 @@ final class McpDiscoverTool {
       // is not advertised at all.
       List<SFEntity> includedEntities = "W".equals(specType)
           ? McpToolRouterSupport.listIncludedEntities(spec.getId()) : null;
-      List<SFEntity> visibleEntities = McpToolRouterSupport.visibleEntities(includedEntities);
+      List<SFEntity> visibleEntities = NeoAccountingAccessPolicy.visibleEntities(includedEntities);
       if (includedEntities != null && !includedEntities.isEmpty() && visibleEntities.isEmpty()) {
         continue;
       }

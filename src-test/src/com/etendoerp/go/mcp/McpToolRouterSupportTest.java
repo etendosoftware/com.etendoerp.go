@@ -730,6 +730,7 @@ class McpToolRouterSupportTest {
       policyMock = mockStatic(NeoAccountingAccessPolicy.class);
       policyMock.when(() -> NeoAccountingAccessPolicy.isAccountingEntity(accounting))
           .thenReturn(true);
+      policyMock.when(() -> NeoAccountingAccessPolicy.visibleEntities(any())).thenCallRealMethod();
       accessMock = mockStatic(NeoAccessHelper.class);
     }
 
@@ -767,19 +768,19 @@ class McpToolRouterSupportTest {
     void visibleEntitiesDropsAccountingWithoutTheCapability() {
       canSee(false);
       assertEquals(List.of(header),
-          McpToolRouterSupport.visibleEntities(List.of(header, accounting)));
+          NeoAccountingAccessPolicy.visibleEntities(List.of(header, accounting)));
     }
 
     @Test
     void visibleEntitiesKeepsEverythingWithTheCapability() {
       canSee(true);
       assertEquals(List.of(header, accounting),
-          McpToolRouterSupport.visibleEntities(List.of(header, accounting)));
+          NeoAccountingAccessPolicy.visibleEntities(List.of(header, accounting)));
     }
 
     @Test
     void aSpecWithoutAccountingNeverReadsTheRoleFlag() {
-      McpToolRouterSupport.visibleEntities(List.of(header));
+      NeoAccountingAccessPolicy.visibleEntities(List.of(header));
       policyMock.verify(() -> NeoAccountingAccessPolicy.canSeeAccounting(any()), never());
     }
 
