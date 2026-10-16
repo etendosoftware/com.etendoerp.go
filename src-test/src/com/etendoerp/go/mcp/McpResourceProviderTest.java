@@ -90,6 +90,12 @@ class McpResourceProviderTest {
     obDalMock = mockStatic(OBDal.class);
     routerSupportMock = mockStatic(McpToolRouterSupport.class);
     schemaFieldBuilderMock = mockStatic(McpSchemaFieldBuilder.class);
+    // ETP-5648: the visible-entity filter is real; it reads whatever listIncludedEntities yields.
+    routerSupportMock.when(() -> McpToolRouterSupport.listIncludedEntities(anyString()))
+        .thenCallRealMethod();
+    routerSupportMock.when(() -> McpToolRouterSupport.listVisibleEntities(anyString()))
+        .thenCallRealMethod();
+    routerSupportMock.when(() -> McpToolRouterSupport.visibleEntities(any())).thenCallRealMethod();
 
     obDalMock.when(OBDal::getInstance).thenReturn(obDal);
   }

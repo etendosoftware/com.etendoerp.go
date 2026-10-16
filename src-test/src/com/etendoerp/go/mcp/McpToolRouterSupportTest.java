@@ -23,9 +23,11 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.when;
 
 import java.lang.reflect.Modifier;
@@ -49,6 +51,7 @@ import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
+import org.openbravo.base.exception.OBSecurityException;
 import org.openbravo.base.model.Property;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
@@ -56,6 +59,8 @@ import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.ad.ui.Window;
 
+import com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy;
+import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 import com.etendoerp.go.schemaforge.NeoActionSurface;
 import com.etendoerp.go.schemaforge.NeoSelectorService;
 import com.etendoerp.go.schemaforge.data.SFEntity;
@@ -702,6 +707,100 @@ class McpToolRouterSupportTest {
       assertFalse(McpToolRouterSupport.isReadOnlySpec(Collections.emptyList()));
       assertTrue(McpToolRouterSupport.isReadOnlySpec(List.of(tabBackedEntity(false))));
       assertFalse(McpToolRouterSupport.isReadOnlySpec(List.of(tabBackedEntity(true))));
+    }
+  }
+
+  // ─── accounting entities (ETP-5648) ─────────────────────────────────
+
+  @Nested
+  @DisplayName("accounting entities follow the showAccountingFields capability (ETP-5648)")
+  class AccountingVisibility {
+
+    @Mock private OBDal mockOBDal;
+    private MockedStatic<OBDal> obDalMock;
+    private MockedStatic<NeoAccountingAccessPolicy> policyMock;
+    private MockedStatic<NeoAccessHelper> accessMock;
+    private final SFEntity header = tabBackedEntity(true);
+    private final SFEntity accounting = tabBackedEntity(true);
+
+    @BeforeEach
+    void setUp() {
+      obDalMock = mockStatic(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(mockOBDal);
+      policyMock = mockStatic(NeoAccountingAccessPolicy.class);
+      policyMock.when(() -> NeoAccountingAccessPolicy.isAccountingEntity(accounting))
+          .thenReturn(true);
+      accessMock = mockStatic(NeoAccessHelper.class);
+    }
+
+    @AfterEach
+    void tearDown() {
+      obDalMock.close();
+      policyMock.close();
+      accessMock.close();
+    }
+
+    private void canSee(boolean value) {
+      policyMock.when(() -> NeoAccountingAccessPolicy.canSeeAccounting(any())).thenReturn(value);
+    }
+
+    @Test
+    void findIncludedEntityRefusesAHiddenAccountingEntity() {
+      stubEntityCriteria(mockOBDal, List.of(accounting));
+      policyMock.when(() -> NeoAccountingAccessPolicy.isEntityAllowed(accounting))
+          .thenReturn(false);
+
+      assertThrows(OBSecurityException.class,
+          () -> McpToolRouterSupport.findIncludedEntity("spec-1", "accounting"));
+    }
+
+    @Test
+    void findIncludedEntityServesAnAllowedEntity() {
+      stubEntityCriteria(mockOBDal, List.of(accounting));
+      policyMock.when(() -> NeoAccountingAccessPolicy.isEntityAllowed(accounting))
+          .thenReturn(true);
+
+      assertSame(accounting, McpToolRouterSupport.findIncludedEntity("spec-1", "accounting"));
+    }
+
+    @Test
+    void visibleEntitiesDropsAccountingWithoutTheCapability() {
+      canSee(false);
+      assertEquals(List.of(header),
+          McpToolRouterSupport.visibleEntities(List.of(header, accounting)));
+    }
+
+    @Test
+    void visibleEntitiesKeepsEverythingWithTheCapability() {
+      canSee(true);
+      assertEquals(List.of(header, accounting),
+          McpToolRouterSupport.visibleEntities(List.of(header, accounting)));
+    }
+
+    @Test
+    void aSpecWithoutAccountingNeverReadsTheRoleFlag() {
+      McpToolRouterSupport.visibleEntities(List.of(header));
+      policyMock.verify(() -> NeoAccountingAccessPolicy.canSeeAccounting(any()), never());
+    }
+
+    @Test
+    void anAllAccountingSpecIsHiddenFromTheCatalog() {
+      canSee(false);
+      stubEntityCriteria(mockOBDal, List.of(accounting));
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getId()).thenReturn("end-year-close-id");
+
+      assertTrue(McpToolRouterSupport.isHiddenAccountingSpec(spec));
+    }
+
+    @Test
+    void aMixedSpecStaysInTheCatalog() {
+      canSee(false);
+      stubEntityCriteria(mockOBDal, List.of(header, accounting));
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getId()).thenReturn("product-id");
+
+      assertFalse(McpToolRouterSupport.isHiddenAccountingSpec(spec));
     }
   }
 

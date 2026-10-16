@@ -636,6 +636,30 @@ class McpToolRouterRouteTest {
       assertEquals(1, body.getInt("count"));
     }
 
+    @Test
+    @DisplayName("etendo_discover hides a spec whose entities are all hidden accounting (ETP-5648)")
+    @SuppressWarnings("unchecked")
+    void discoverHidesAllAccountingSpec() throws Exception {
+      SFSpec spec = mockSpec();
+      OBCriteria<SFSpec> specCriteria = mock(OBCriteria.class);
+      when(mockOBDal.createCriteria(SFSpec.class)).thenReturn(specCriteria);
+      when(specCriteria.list()).thenReturn(List.of(spec));
+      supportMock.when(() -> McpToolRouterSupport.hasSpecAccess(eq(spec), eq("W")))
+          .thenReturn(true);
+      List<SFEntity> included = List.of(mock(SFEntity.class));
+      supportMock.when(() -> McpToolRouterSupport.listIncludedEntities(SPEC_ID))
+          .thenReturn(included);
+      supportMock.when(() -> McpToolRouterSupport.visibleEntities(included))
+          .thenReturn(Collections.emptyList());
+
+      JSONObject body = new JSONObject(router.route("etendo_discover", null, READ_SCOPES)
+          .getJSONArray("content").getJSONObject(0).getString("text"));
+
+      assertEquals(0, body.getInt("count"));
+      supportMock.verify(() -> McpToolRouterSupport.buildDiscoverSpec(
+          any(), any(), any(), any(), any()), never());
+    }
+
     // ── IMP-53 (ETP-5639): etendo_discover({spec}) narrows the catalog ──────
 
     private static final String OTHER_SPEC = "purchase-order";
