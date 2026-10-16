@@ -127,12 +127,21 @@ final class AmortizationConfirmGuard {
   }
 
   /**
+   * The button is named by its column ({@code Processed}, what the SPA posts) or by its field
+   * ({@code processed}, what an MCP {@code etendo_action} call reaches the handler under —
+   * ETP-5710).
+   */
+  private static boolean isProcessedButton(String action) {
+    return ACTION_FIELD_PROCESSED.equals(action) || BODY_PROPERTY_PROCESSED.equals(action);
+  }
+
+  /**
    * Validates lines before letting a confirm (not reactivate) action proceed. See class javadoc
    * for the confirm-vs-reactivate detection and the three checks themselves.
    */
   private static NeoResponse validateLinesBeforeConfirm(NeoContext context) {
     if (!NeoEndpointType.ACTION.equals(context.getEndpointType())
-        || !ACTION_FIELD_PROCESSED.equals(context.getFieldName())) {
+        || !isProcessedButton(context.getFieldName())) {
       return null;
     }
     String recordId = context.getRecordId();

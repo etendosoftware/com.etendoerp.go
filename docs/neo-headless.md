@@ -3547,7 +3547,7 @@ not: `etendo_create` does not run it in shared code, so it is in the table below
 
 | step | in `etendo_create` | in `etendo_batch` | consequence |
 |---|---|---|---|
-| `NeoCommercialLinePolicy.injectCommercialAmounts` | **no** in shared code — only from the customizations of sales order, sales quotation and sales invoice lines (ETP-5528, §4.12.20) | yes | `etendo_batch` runs it in `NeoCrudHandler.executePostCreate`; `etendo_create` never reaches that method — it is a separate pipeline. Since ETP-5528, sales order and sales quotation lines get the amounts on every create from their own customizations (`OrderLineDiscountSupport.deriveAmountsOnCreate`), and so do sales invoice lines (`SalesInvoiceLineHandler` → `InvoiceLineAmountSupport.deriveAmountsOnCreate`). Every other entity is as on `develop`: a generic commercial line persists `lineGrossAmount = 0` on a net price list, and purchase order and purchase invoice lines still do not get it (measured 2026-09-30: purchase order line gross 0, purchase invoice line net / gross 0 / 0). Declared, not fixed in shared code. (`grossUnitPrice` still persists as 0 on both verbs — a separate, undiagnosed defect, not a divergence) |
+| `NeoCommercialLinePolicy.injectCommercialAmounts` | **no** in shared code — only from the customizations of sales order, sales quotation, sales invoice and purchase invoice lines (ETP-5528, ETP-5710, §4.12.20, §4.12.31) | yes | `etendo_batch` runs it in `NeoCrudHandler.executePostCreate`; `etendo_create` never reaches that method — it is a separate pipeline. Since ETP-5528, sales order and sales quotation lines get the amounts on every create from their own customizations (`OrderLineDiscountSupport.deriveAmountsOnCreate`), and so do sales and purchase invoice lines (`SalesInvoiceLineHandler` / `PurchaseInvoiceLineHandler` → `InvoiceLineAmountSupport.deriveAmountsOnCreate`; purchase since ETP-5710). Every other entity is as on `develop`: a generic commercial line persists `lineGrossAmount = 0` on a net price list, and purchase order lines still do not get it (measured 2026-09-30: purchase order line gross 0; the purchase invoice line 0 / 0 of that measurement is fixed by ETP-5710). Declared, not fixed in shared code. (`grossUnitPrice` still persists as 0 on both verbs — a separate, undiagnosed defect, not a divergence) |
 | `buildInvalidDatesError` | yes | **no** | no explicit 422 for an unreadable or ambiguous date (ETP-4793 / IMP-24). Type coercion itself does run on the shared path (`executePostCreate` → `coerceTypes`), so the value is not silently mangled — the agent just gets a less precise failure |
 | the `warehouse` default | *Almacén Secundario* | *Almacén Principal* | observed with an identical body, 2026-09-28. Not yet diagnosed: it may be a genuine divergence in the defaults chain or a session dependency. Recorded here so it is not rediscovered as new |
 | `user` create — invitation (ETP-4830, declared by ETP-5194) | invitation committed by the post-hook | same, but mid-batch | the invitation's `commitAndClose()` commits every earlier operation of the batch, so a later failure answers `atomic: false` (§4.12.4.1). Same behaviour on REST `/batch`; declared, not changed. The ETP-5194 email correction is an update, which batch does not perform |
@@ -3665,6 +3665,30 @@ The transfer (§4.12.1.5) follows the same pattern:
 | `OpenClose` (DB column name) | Classic button path, not the handler (fails in `OB.OpenClose.openClose`) | the contract's alias: run as `openClose` by the handler |
 | `N`, `docAction` or any undeclared key | reaches the handler (unread keys ignored; `N` goes to Process 167) | **422** before anything runs |
 | `documents.openClose` | served | **405** — `MCP_CONFIG.actions` hides it (not offered by the calendar) |
+
+##### Closed: an AD button reaches the customization under its field name on MCP (ETP-5710)
+
+`etendo_schema` advertises a button under its DB column name (`action: "DocAction"`) and the REST
+action route reaches the customization under the name in its URL — the SPA posts `documentAction`
+for the document-action button. `McpToolRouter.handleAction` used to hand the agent's string to the
+customization as it was typed, so a completion typed `DocAction` was invisible to the header
+handler (`AbstractOrderHeaderHandler.isActionDocumentActionComplete` and
+`InvoiceCalloutHelper.isInvoiceCompleteAction` compare with `documentAction`): the total-discount
+lines were never materialised and `InvoiceCompletionLineGuard` never ran, while the native process
+completed the document. Since ETP-5710 `McpDeclaredActions.customizationNameOf` resolves the button
+the way `NeoButtonActionHelper.findButtonColumn` does and `handleAction` dispatches the
+customization under its DAL property name, whichever spelling was typed. Structure only (AD column
+to DAL property); no entity name. Order of events is unchanged: `MCP_CONFIG` hidden/redirect checks
+and the declared-contract match run first, on the typed name, so a redirected button is still
+refused under every spelling and a declared contract keeps its own name. The button itself is
+still fired under the typed name. REST is untouched. A name that resolves to no button reaches the
+customization as typed.
+
+Customizations that compared with a DB column literal were made tolerant of both spellings:
+`AmortizationConfirmGuard` (`Processed` / `processed`) and `SalesQuotationHeaderHandler`
+(`Convertquotation` / `convertquotation`). `AbstractOrderHeaderHandler.syncTotalDiscountOnDocAction`
+(the quotation's `DocAction` path) also serves an MCP call that arrives under `documentAction` when
+it is not a completion (a completion is recalculated once by `applyTotalDiscountBeforeComplete`).
 
 ##### Follow-up — NEO create does not evaluate the tab's auxiliary inputs (REST only, separate ticket)
 
@@ -8196,9 +8220,9 @@ from `NeoExtensionIndex.warnOnQualifierDisagreement`, and a conflict line in `ma
 
 ##### Scope
 
-`purchase-order/lines` stays on `OrderLineHandler`, untouched. Return lines and invoice lines are not
-re-fired either (sales invoice lines only get their amounts derived on create, above — no discount
-re-fire): they had this behaviour only on the unreleased ETP-5528 branch, through the removed
+`purchase-order/lines` stays on `OrderLineHandler`, untouched (ETP-5727). Return lines and invoice lines are not
+re-fired either (invoice lines get their discount and amounts from `InvoiceLineAmountSupport`, §4.12.31 — not
+a `SL_Order_Amt` re-fire): they had this behaviour only on the unreleased ETP-5528 branch, through the removed
 MCP-layer class, so this is no regression against `develop`.
 
 **Binding of `purchase-invoice/lines` (ETP-5585).** `PurchaseInvoiceLineHandler` —
@@ -8763,3 +8787,150 @@ is logged.
 **Not served** (answer `404 -32601` in the modern era): `subscriptions/listen`,
 `resources/templates/list`, `logging/setLevel`, tasks, MRTR. We never need client input, so a
 result is always `complete`.
+
+#### 4.12.31 Invoice line discount, amounts and the completion guard (ETP-5710)
+
+**The defect.** A purchase invoice line an agent wrote persisted `lineNetAmount 0` / `grossAmount 0`
+(or the *undiscounted* amount). The header total, the `C_InvoiceTax` rows and the payment plan are
+sums of the lines (trigger `c_invoiceline_trg2`), so the invoice completed with a total of 0, no
+payment plan and `paymentComplete = Y` — shown as paid — with no warning. Four causes, all measured
+live: (1) `purchase-invoice/lines` ran the plain `InvoiceLineHandler`, which derives nothing;
+(2) `EM_Etgo_Discount` (`etgoDiscount`) has no callout and no database function reads it — the SPA
+computes `unitPrice` and the gross client side; (3) an update (`etendo_update`, PATCH, PUT) never
+recomputed an amount; (4) nothing refused to complete such an invoice.
+
+**Where the behaviour lives** (shared support called explicitly, T12 — no entity name and no property-name
+guard in a shared service):
+
+| What | Class |
+|---|---|
+| purchase invoice line customization | `PurchaseInvoiceLineHandler` — `@NeoExtension(spec = "purchase-invoice", entity = "lines")`, extends `InvoiceLineHandler`, no `@Named` |
+| sales invoice line customization (since ETP-5528; now also discount + update) | `SalesInvoiceLineHandler` |
+| price + amounts, create and update | `InvoiceLineAmountSupport.deriveAmountsOnWrite` (shared by both) |
+| completion guard | `InvoiceCompletionLineGuard`, called first by `PurchaseInvoiceHeaderHandler` and `SalesInvoiceHeaderHandler` |
+
+**Precedence between the annotation and the row's qualifier.** The row `purchase-invoice/lines` keeps
+`Java_Qualifier = invoiceLineHandler`, exactly as the sales row does. `NeoExtensionDispatcher.resolve`
+asks `NeoExtensionIndex.resolve(spec, entity, qualifier)` first and falls back to the qualifier only on a
+miss, so the annotation wins on every dispatched surface and channel; direct qualifier readers (the MCP
+read post-hook, the REST CRUD gate, the field filter, `protectedCreateCalloutFields`) keep resolving the
+inherited parent. Cost: one `(warn)` ERROR line per resolution from
+`NeoExtensionIndex.warnOnQualifierDisagreement` (§4.12.20).
+
+##### Order of events on create
+
+On `etendo_create` and on each `etendo_batch` operation the shared price injector
+(`McpLinePriceInjector`) runs **before** the entity pre-hook (`McpToolRouter.handleCreate` and
+`preprocessBatchOperation`), so the pre-hook already sees the price the server resolved from the parent's
+price list (`unitPrice` = standard price, `listPrice` = list price). The derivation therefore lives in
+`handle()`; no `afterHandle` is needed. A line created with only a product and a quantity is priced.
+On REST and the batch endpoint `executePostCreate` runs the same policy over the same inputs afterwards
+and writes the same values.
+
+##### The discount rule
+
+Applied only when the line has a non-zero `etgoDiscount` and no non-zero `grossUnitPrice` (an explicit
+gross price wins, as on order lines). `L` = `listPrice`, `U` = `unitPrice`, `d` = `etgoDiscount`;
+`U'` = `L × (1 − d/100)`, rounded to 6 decimals (the SPA's `toFixed(6)`).
+
+| Create body | Result | Why |
+|---|---|---|
+| `U` absent or 0, `L` ≠ 0 | `U = U'` | the form's own rule |
+| `U == L` (≠ 0) | `U = U'` | the discount has not been applied yet — what `etendo_create` carries after the price injector |
+| `U ≠ L`, both ≠ 0 | `U` kept | a price the caller chose; **the SPA's body** (already-discounted `U` together with `L`) — never discounted twice |
+| `L` absent or 0, `U` ≠ 0 | `L = U`, `U = U × (1 − d/100)` | there is no list price, so the price sent is the list price: `unitPrice 25`, 2 % → 24.50, net 245.00 |
+| both 0 | nothing | nothing to discount |
+
+On **update** the patch is overlaid on the stored line. The price is re-derived only when the patch
+re-prices the line: it carries `etgoDiscount` or `listPrice` without a `unitPrice` (`U = U'`), or a
+`unitPrice` equal to the non-zero list price. Any other `unitPrice`, or a patch with none of these keys,
+leaves the price alone. The "the price sent is the list price" row is **create-only**: a stored
+discounted price with no list price (a legacy line) would otherwise be discounted again by an unrelated
+edit. Accepted edge case (same as order lines): a caller that deliberately sends `unitPrice == listPrice`
+with a discount gets the discount applied.
+
+**Discount range.** `etgoDiscount` must be within **[0, 100]**. A create (POST) or update (PATCH, PUT) whose
+body carries a discount outside that range is refused **before** anything is derived, with **422**,
+`error.code = invalidLineDiscount`, message `The line discount must be between 0 and 100 (percent).`
+Above 100 the derived price would be negative; below 0 the discount would act as a markup. The SPA already
+caps the field; REST and MCP now agree. `0` and `100` are valid (100 → `unitPrice 0`, net 0); an absent or
+`null` discount is left alone. `InvoiceLineAmountSupport.deriveAmountsOnWrite` returns the 422 and both line
+handlers return it from `handle()`.
+
+##### Amounts and update recalculation
+
+`lineNetAmount` and `grossAmount` come from `NeoCommercialLinePolicy.injectCommercialAmounts` over the
+line's final quantity, price, gross price and tax, rounded to 2 decimals. `lineNetAmount` needs no tax;
+`grossAmount` is written only when the line has one. On create an amount is written only when the body's
+is absent, zero, equal to the derived one, or — when a discount changed the price — equal to what the
+undiscounted price yields (what the defaults cascade computed); any other value is the caller's.
+A derived **0** is written too when the discount itself took the price to 0 (`etgoDiscount = 100`): the
+net and gross are 0 on purpose, and the amounts the cascade computed from the undiscounted price (net 10,
+gross 12.10) are replaced; without a discount a derived 0 still means "no price or quantity yet" and is
+left alone. The shared policy leaves `grossAmount` indeterminate when the net is 0, so
+`InvoiceLineAmountSupport` sets the gross to 0 whenever the net derives to exactly 0 and no explicit gross
+price exists (100 % discount, free line, quantity edited to 0). Measured live before the fix (purchase
+invoice 10000081, Agua 1 × 10, 100 %): `priceactual 0` but `linenetamt 10`, header total 12.10.
+On update the amounts of the **final** line are recomputed whenever the patch carries `invoicedQuantity`,
+`unitPrice`, `listPrice`, `etgoDiscount`, `grossUnitPrice` or `tax`; an amount the patch itself carries is
+kept. Worked numbers: 10 × 25 at 2 %, IVA 21 % → `unitPrice 24.50`, net 245.00, gross 296.45; quantity
+patched to 20 → net 490.00, gross 592.90; no price sent, price list 11, quantity 1, 2 % → 10.78.
+Return lines keep their sign (the parent negates the quantity first). Sales invoice lines get the
+discount and the update recalculation too (same class of bug, same support, one call).
+
+##### Completion guard
+
+`InvoiceCompletionLineGuard.refuseIfLinesHaveNoAmount` runs in the header `handle()` of both invoice
+windows, before the total discount is recalculated and before the document action. For a completion
+(`documentAction = CO`, CRUD or ACTION endpoint) it refuses with **422**, `error.code =
+invoiceLinesWithoutAmount`, when an active product line has `|quantity × price| ≥ 0.005` and
+`LineNetAmt = 0`. A zero price (free sample), a zero quantity and a negative (return) line pass, unless the line's net is 0
+with a non-zero `quantity × price` (the check uses the absolute value, so it is refused). If the check
+itself cannot run, the completion proceeds (fail open).
+
+The lines are named **by product**, because the line numbers are internal and no UI shows them. The
+English message (what MCP agents read) is `The invoice cannot be completed: the lines of Agua, Cerveza,
+Queso Sardo have a quantity and a price but a net amount of 0, so the totals would be wrong. Save those
+lines again so the amount is recalculated, then complete.` A product is its name (search key when the
+name is blank); two offending lines of the same product are told apart by quantity (`Agua (×3)`,
+`Agua (×5)`). `error.lines` is now a structured list `[{ "line": 10, "product": "Agua",
+"quantity": "3" }, ...]` instead of the former array of line numbers (nothing in this repo read it).
+The SPA translates the sentence through `translateBackendError` (`backendError.invoiceLinesWithoutAmount`),
+so the form, the row quick action and a single-record bulk completion show it in the UI locale.
+
+##### Edge cases of an update (PATCH / PUT) on a discounted line
+
+- A PATCH carrying only `unitPrice` on a line with a stored discount keeps that price as-is: the
+  caller's price wins and is not re-derived or discounted.
+- A PATCH carrying only `etgoDiscount` re-derives the price from the stored list price
+  (`U = L × (1 − d/100)`), overwriting a price that was chosen by hand.
+- **Known limitation.** When an explicit non-zero `grossUnitPrice` is sent (tax-included price lists), the
+  server does not apply the discount: the gross price wins, as on order lines.
+
+##### Global discount (`etgoTotalDiscount`)
+
+The supported mechanism is the header percentage `etgoTotalDiscount`: before completion
+`AbstractOrderHeaderHandler.applyTotalDiscountBeforeComplete` → `TotalDiscountService.recalculate` deletes
+the previous `ETGO_DTO` lines and creates one negative line per tax group from `SUM(linenetamt)`, skipping
+groups whose net is 0. With the nets at 0 (this bug) every group was skipped, which is why no discount
+line existed. With correct nets: groups 9.00 / 22.00 / 200.00 at 5 % → -0.45 / -1.10 / -10.00, subtotal
+231.00 → 219.45 (`TotalDiscountServiceTest`). The `basicDiscounts` entity on the invoice is the core
+Classic `C_InvoiceDiscount` tab; the SPA does not use it and this change does not touch it.
+
+##### Completion over MCP typed as `DocAction` (ETP-5710 follow-up)
+
+Live: an invoice completed through `etendo_action` with `action: "DocAction"` (the name
+`etendo_schema` advertises; the tool's own example says `documentAction`) skipped both the global
+discount and the guard above, because the customization was dispatched under the typed name. The
+channel divergence is removed in §4.12.9 ("Closed: an AD button reaches the customization under its
+field name"): both spellings now reach `PurchaseInvoiceHeaderHandler` / `SalesInvoiceHeaderHandler`
+as `documentAction`. The order path matched in the same log because the call there carried `documentAction` (the
+tool's example); the log does not record the typed name, so that is inferred from the code.
+
+##### Declared divergences
+
+None between channels: REST, batch and MCP all reach `PurchaseInvoiceLineHandler` /
+`SalesInvoiceLineHandler` through `NeoExtensionDispatcher`. Out of scope and still as before:
+`taxableAmount` of invoices generated from receipts (core function), purchase **order** lines (ETP-5727;
+`InvoiceLineAmountSupport` / `LineAmountSupport` are written to be reusable), the default tax
+(ETP-5726).

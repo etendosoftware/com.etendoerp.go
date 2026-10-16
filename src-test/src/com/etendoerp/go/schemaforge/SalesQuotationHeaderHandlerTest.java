@@ -501,6 +501,36 @@ public class SalesQuotationHeaderHandlerTest {
     verify(process).convertQuotationIntoSalesOrder(false, "q-001");
   }
 
+  /** ETP-5710: an MCP etendo_action call reaches the handler under the button's field name. */
+  @Test
+  public void testHandle_convertQuotationByFieldName_preservesQuotationPrices() throws Exception {
+    ConvertQuotationIntoOrder process = mock(ConvertQuotationIntoOrder.class);
+    Order order = mock(Order.class);
+    when(order.getId()).thenReturn("order-001");
+    when(order.getDocumentNo()).thenReturn("SO-001");
+    when(process.convertQuotationIntoSalesOrder(eq(false), eq("q-001"))).thenReturn(order);
+
+    SalesQuotationHeaderHandler handler = fullyWiredHandler(
+        mock(TotalDiscountService.class),
+        mock(NeoCloneRecordHandler.class),
+        mock(CurrencyOptionsHandler.class),
+        mock(CreateDraftInvoiceHandler.class),
+        mock(RejectQuotationHandler.class),
+        mock(CreateRejectReasonHandler.class));
+    setField(handler, "convertQuotationProcess", process);
+
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+        .fieldName("convertquotation").recordId("q-001").build();
+
+    NeoResponse result = handler.handle(ctx);
+
+    // Non-null proves handle() short-circuited the default button handler.
+    assertNotNull(result);
+    // recalculatePrices=false is the critical invariant — quotation prices must be kept.
+    verify(process).convertQuotationIntoSalesOrder(false, "q-001");
+  }
+
   // ── ETP-5528: the converted order is reactivated to Draft ─────────────────
 
   /**

@@ -1098,6 +1098,57 @@ public class SalesInvoiceHeaderHandlerTest {
   }
 
   /**
+   * ETP-5710 (same risk as the purchase side): a completion whose invoice still has a line with a
+   * quantity and a price but a net amount of 0 is refused (422) before the total discount is
+   * recalculated and before the document action runs.
+   */
+  @Test
+  public void handle_completionWithLinesWithoutAmount_isRefusedBeforeAnythingRuns()
+      throws Exception {
+    JSONObject body = new JSONObject().put("documentAction", "CO");
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PATCH")
+        .endpointType(NeoEndpointType.CRUD)
+        .recordId("ar-inv-zero-lines")
+        .requestBody(body)
+        .build();
+    ProcessInvoiceUtil processInvoiceUtil = mock(ProcessInvoiceUtil.class);
+    TotalDiscountService totalDiscountService = mock(TotalDiscountService.class);
+    SalesInvoiceHeaderHandler handler = handlerWithTotalDiscountMock(totalDiscountService);
+
+    try (MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<NeoDefaultsService> defaultsMock = Mockito.mockStatic(NeoDefaultsService.class);
+         MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
+      obContextMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      obContextMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(true, false);
+      when(rs.getLong(1)).thenReturn(10L);
+      weldMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(ProcessInvoiceUtil.class))
+          .thenReturn(processInvoiceUtil);
+
+      NeoResponse result = handler.handle(ctx);
+
+      assertNotNull(result);
+      assertEquals(422, result.getHttpStatus());
+      Mockito.verify(totalDiscountService, Mockito.never()).recalculate(anyString(),
+          anyBoolean());
+      Mockito.verify(processInvoiceUtil, Mockito.never()).process(any(), any(), any(), any(),
+          any(), any(), any());
+    }
+  }
+
+  /**
    * Non-completion requests must not trigger discount recalculation at all — only the CO path
    * does (guarded by {@code applyTotalDiscountBeforeComplete}'s own completion check).
    */

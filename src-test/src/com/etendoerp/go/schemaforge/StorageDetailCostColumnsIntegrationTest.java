@@ -101,7 +101,7 @@ public class StorageDetailCostColumnsIntegrationTest extends OBBaseTest {
         + " AND NOT EXISTS (SELECT 1 FROM m_costing c WHERE c.m_product_id = sd.m_product_id)"
         + " GROUP BY sd.m_product_id ORDER BY count(*), sd.m_product_id LIMIT 1");
     costProduct = string("SELECT sd.m_product_id FROM m_storage_detail sd"
-        + " WHERE etgo_product_cost(sd.m_product_id) IS NOT NULL"
+        + " WHERE sd.qtyonhand > 0 AND etgo_product_cost(sd.m_product_id) IS NOT NULL"
         + " GROUP BY sd.m_product_id ORDER BY count(*), sd.m_product_id LIMIT 1");
     currencyId = string("SELECT c_currency_id FROM m_costing LIMIT 1");
     assertNotNull("The database must hold a product with stock and no cost", noCostProduct);
