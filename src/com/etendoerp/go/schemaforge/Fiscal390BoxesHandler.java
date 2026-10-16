@@ -58,6 +58,9 @@ import org.openbravo.module.taxreportlauncher.TaxReportParameter;
  *   <li>{@code GET generate?year=&period=0A[&<AEAT390 input>=...]} — the AEAT TXT file, through
  *       the classic report class ({@link Fiscal390GenerateSupport}); rejected with 409 once the
  *       declaration is submitted;</li>
+ *   <li>{@code GET sources?year=&period=0A[&box=&type=&tax=&q=&page=&pageSize=]} — the
+ *       invoice-tax lines behind the invoice-derived boxes, from the same box walk
+ *       ({@link Fiscal390SourcesSupport});</li>
  *   <li>{@code GET modified?year=&period=0A&since=} — the shared invoice-change probe.</li>
  * </ul>
  *
@@ -88,16 +91,19 @@ class Fiscal390BoxesHandler extends AbstractFiscalHandler {
   static final Pattern REPORT_KEY_PATTERN = Pattern.compile("^AEAT390_(\\d{4})_Y$");
 
   private final Fiscal390GenerateSupport generateSupport;
+  private final Fiscal390SourcesSupport sourcesSupport;
 
   Fiscal390BoxesHandler(NeoServlet servlet) {
     super(servlet);
     this.snapshotSupport = new Fiscal390SnapshotSupport();
     this.generateSupport = new Fiscal390GenerateSupport(this);
+    this.sourcesSupport = new Fiscal390SourcesSupport(this);
   }
 
   @Override
   protected boolean isKnownEntity(String entityName) {
-    return BOXES.equals(entityName) || GENERATE.equals(entityName) || MODIFIED.equals(entityName);
+    return BOXES.equals(entityName) || GENERATE.equals(entityName) || MODIFIED.equals(entityName)
+        || Fiscal390SourcesSupport.SOURCES.equals(entityName);
   }
 
   @Override
@@ -126,6 +132,8 @@ class Fiscal390BoxesHandler extends AbstractFiscalHandler {
           guardNotAlreadySubmitted(orgId, year, period, MODEL);
           generateSupport.handleGenerate(orgId, year, mergedInputs(year, period, request),
               response);
+        } else if (Fiscal390SourcesSupport.SOURCES.equals(entityName)) {
+          sourcesSupport.handle(orgId, year, period, request, response);
         } else {
           long sinceMs = Long.parseLong(request.getParameter(SINCE_KEY));
           handleModified(orgId, year, period, new Date(sinceMs), response);
