@@ -303,6 +303,30 @@ class FiscalDeclCrudHandler {
       return;
     }
 
+    // ETP-5725 (reopened QA review, BUG-1) — a declaration can be created with ANY status
+    // directly via POST, not just "draft". `rejectCorrectiveConsistencyViolation` (the PUT-path
+    // guard) deliberately bails out once `previousStatus` is already in SUBMITTED_STATUSES
+    // (re-presentation is a different, already-blocked case — see its own javadoc), so a
+    // declaration created DIRECTLY as submitted-family can NEVER have this rule enforced on it
+    // afterward by any PUT either: it is "already submitted" from its very first write. POST
+    // does not accept `manualData`/identification at creation time — no MANUAL_DATA_KEY handling
+    // exists anywhere in this method — so "effectively corrective" is always {@code false} here;
+    // the corrective-without-ordinaria direction of the rule is structurally impossible to hit
+    // via POST, not merely unchecked (nothing to check: a freshly created row can never read as
+    // corrective). The MIRROR rule (only one presented ordinaria per period) is not structurally
+    // impossible, though, and is exactly what QA demonstrated: a direct POST with
+    // status=submitted_ack for a period that already has a presented ordinaria sibling bypassed
+    // it entirely, with no later guard able to catch it. `excludeId` is {@code null} — this row
+    // does not exist yet, so there is nothing of its own to exclude from the sibling search.
+    if (SUBMITTED_STATUSES.contains(status)) {
+      String violation = checkCorrectiveConsistency(clientId, orgId, model, year, period, null,
+          false);
+      if (violation != null) {
+        servlet.sendError(response, HttpServletResponse.SC_CONFLICT, violation + ": (new)");
+        return;
+      }
+    }
+
     // ETP-5187 — a 2nd (or later) declaration for the same model/year/period used to 500 on
     // ETGO_FISCAL_DECL_UQ (unique on client/org/model/year/period/DECL_TYPE) because the frontend
     // never sent a differentiator and every declaration defaulted to DECL_TYPE='O'. A follow-up
@@ -680,11 +704,17 @@ class FiscalDeclCrudHandler {
    * factored into ONE method so every entry point that can leave a declaration's corrective/
    * ordinaria identification inconsistent with its siblings' presented statuses enforces it the
    * SAME way — {@link #rejectCorrectiveConsistencyViolation} (save/present, via {@code PUT
-   * /fiscal{model}/declarations}) and {@link AbstractFiscalHandler#guardCorrectiveConsistency}
+   * /fiscal{model}/declarations}), {@link AbstractFiscalHandler#guardCorrectiveConsistency}
    * (the {@code generate} file-generation reads for both models, which have no declaration id
-   * of their own to exclude — see that method's own javadoc). Originally two near-duplicate
-   * guards (one per direction); unified once "Guardar" and "Generar fichero" needed the identical
-   * check and a 3rd+4th call site made the duplication worse rather than better.
+   * of their own to exclude — see that method's own javadoc), {@link
+   * Fiscal303SubmissionSupport#handleSubmit} (the real AEAT telematic filing, 303-only), and
+   * {@link #handleDeclPost} (CREATE, {@code POST /fiscal{model}/declarations} — a declaration
+   * created directly with a {@code SUBMITTED_STATUSES} status is "already submitted" from its
+   * very first write, so {@link #rejectCorrectiveConsistencyViolation}'s own early-exit on an
+   * already-submitted {@code previousStatus} can never run on it afterward; this call is what
+   * actually enforces the rule in that case — see {@code handleDeclPost}'s own comment). Originally
+   * two near-duplicate guards (one per direction); unified once "Guardar" and "Generar fichero"
+   * needed the identical check and more call sites made the duplication worse rather than better.
    *
    * @param excludeId the id of the declaration this check is FOR, excluded from its own sibling
    *                   search so a row doesn't see itself as a sibling of itself. May be
