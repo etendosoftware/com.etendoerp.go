@@ -77,7 +77,15 @@ import org.openbravo.base.structure.BaseOBObject;
  *   <li>legacy fallback — {@code APC} (Credit Note) or {@code API} + isReturn (Return Invoice) → RECTIFICATIVA</li>
  *   <li>otherwise → FAC (Standard Invoice)</li>
  * </ul>
+ *
+ * <p><b>Binding.</b> Resolved by {@link NeoExtension} on every channel, ahead of the row's
+ * {@code Java_Qualifier}. The row still carries {@code purchaseInvoiceHeaderHandler}, on purpose:
+ * several readers look the qualifier up directly instead of going through
+ * {@code NeoExtensionDispatcher}, and they keep resolving this same class (its own {@code @Named}
+ * is that qualifier), so those surfaces behave exactly as before. See {@code neo-headless.md}
+ * §5.3.a.
  */
+@NeoExtension(spec = "purchase-invoice", entity = "header")
 @Named("purchaseInvoiceHeaderHandler")
 public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler implements NeoHandler {
 
