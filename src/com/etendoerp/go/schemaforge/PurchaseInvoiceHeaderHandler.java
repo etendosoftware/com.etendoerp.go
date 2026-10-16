@@ -171,6 +171,12 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
     // commitment; a receipt — especially an unconfirmed one — is not. See
     // AbstractInvoiceHeaderHandler's "removed" note for the full rationale. Over-invoicing relative
     // to the ORDER is still rejected, by the core, in C_INVOICE_POST (@QtyInvoicedHigherOrdered@).
+    // ETP-5710: refuse to complete an invoice with a line that kept a net amount of 0 next to a
+    // quantity and a price — before the discount is recalculated and before the document action runs.
+    NeoResponse unpricedLines = InvoiceCompletionLineGuard.refuseIfLinesHaveNoAmount(context);
+    if (unpricedLines != null) {
+      return unpricedLines;
+    }
     // Must run BEFORE completeInvoiceIfNeeded: the discount line has to reflect the final set of
     // product lines before ProcessInvoiceUtil.process() completes/posts the document (ETP-4388).
     AbstractOrderHeaderHandler.applyTotalDiscountBeforeComplete(context, totalDiscountService, true);

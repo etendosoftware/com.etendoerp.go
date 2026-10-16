@@ -1766,8 +1766,16 @@ public class McpToolRouter {
         : NeoActionContract.DEFAULT_HTTP_METHOD;
     // ETP-5587: a contract that describes an AD button is run under its declared name, whichever
     // spelling the agent typed — the customization discriminates on that name.
+    // ETP-5710: any other AD button reaches the customization under its field name — what the
+    // REST path carries for the document-action button — so a call typed by DB column name
+    // ("DocAction", what etendo_schema advertises) is not invisible to it. The button itself is
+    // still fired under the typed name, which findButtonColumn resolves either way.
+    String firedName = actionName;
     if (declared != null) {
       actionName = declared.getName();
+      firedName = actionName;
+    } else {
+      actionName = McpDeclaredActions.customizationNameOf(sfEntity, actionName);
     }
     // ETP-5558: another tenant's record is a 404 before the customization or the button sees it,
     // the same check the REST action path runs (NeoHookDispatcher).
@@ -1800,7 +1808,7 @@ public class McpToolRouter {
     }
 
     NeoResponse neoResponse = NeoButtonActionHelper.executeButtonActionCore(
-        sfEntity, recordId, actionName, actionParams);
+        sfEntity, recordId, firedName, actionParams);
 
     JSONObject actionResult = McpToolRouterSupport.mapNeoResponseToActionResult(neoResponse);
 

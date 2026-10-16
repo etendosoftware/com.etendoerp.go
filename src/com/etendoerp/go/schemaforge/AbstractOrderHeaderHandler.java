@@ -236,7 +236,7 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
     if (!NeoEndpointType.ACTION.equals(context.getEndpointType())) {
       return;
     }
-    if (!"DocAction".equals(context.getFieldName())) {
+    if (!isDocActionButtonName(context)) {
       return;
     }
     String recordId = context.getRecordId();
@@ -250,6 +250,23 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
     } catch (Exception e) {
       log.error("Error syncing total discount on DocAction for {} id={}", docType, recordId, e);
     }
+  }
+
+  /**
+   * Whether the request names the DocAction button the way {@link #syncTotalDiscountOnDocAction}
+   * serves it: by its column ({@code DocAction}, what the SPA's quotation modal posts) or — on an
+   * MCP call only — by its field name, which is what {@code etendo_action} reaches a customization
+   * under whichever spelling the agent typed (ETP-5710). A completion by field name is already
+   * recalculated by {@link #applyTotalDiscountBeforeComplete}, so it is left to that. REST is
+   * untouched: only the MCP origin widens the match.
+   */
+  private static boolean isDocActionButtonName(NeoContext context) {
+    String name = context.getFieldName();
+    if ("DocAction".equals(name)) {
+      return true;
+    }
+    return context.isMcpOrigin() && FIELD_DOCUMENT_ACTION.equals(name)
+        && !isActionDocumentActionComplete(context);
   }
 
   // -----------------------------------------------------------------------
