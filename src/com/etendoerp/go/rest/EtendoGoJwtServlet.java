@@ -3084,7 +3084,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
     // A demo that already originated a productive environment is spent as a source: buying again
     // from it creates a clean productive environment, exactly like buying from a productive one.
-    if (isProductiveClient(sessionClientId) || isAssociatedDemo(sessionClientId)) {
+    // So is a demo the account was only invited into (ETP-5743): it is not the buyer's to copy.
+    if (isProductiveClient(sessionClientId) || isAssociatedDemo(sessionClientId)
+        || !isOwnedClient(sessionClientId, authenticated.account.getEmail())) {
       return new CheckoutSelection(null, false, false);
     }
     String demoClientId = optionalDemoClientId(body);
@@ -3151,13 +3153,27 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
   }
 
+  private boolean isOwnedClient(String clientId, String accountEmail) {
+    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
+    OBContext.setAdminMode(true);
+    try {
+      return EtendoGoJwtDalHelper.clientOwnedByAccountEmail(clientId, accountEmail);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * A purchase source is copied into the buyer's new environment and then locked, so the account
+   * must own it: being invited into it is not enough (ETP-5743).
+   */
   private boolean isOwnedFreeDemoClient(String demoClientId, String accountEmail) {
     OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
     OBContext.setAdminMode(true);
     try {
       Client client = OBDal.getInstance().get(Client.class, demoClientId);
       return client != null
-          && EtendoGoJwtDalHelper.clientBelongsToAccountEmail(demoClientId, accountEmail)
+          && EtendoGoJwtDalHelper.clientOwnedByAccountEmail(demoClientId, accountEmail)
           && TenantPlanService.PLAN_FREE.equals(tenantPlanService.resolvePlan(demoClientId))
           && !tenantEnvironmentLifecycleService.isAssociatedWithProductive(demoClientId);
     } finally {
