@@ -79,8 +79,9 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
   private static final Logger log = LogManager.getLogger(SupportConversationsServlet.class);
 
   private static final String CONTENT_TYPE_JSON = "application/json";
-  private static final EnvironmentRequestAuthenticator AUTHENTICATOR =
-      new EnvironmentRequestAuthenticator();
+  /** Package-visible so tests can swap the database-backed role lookups for a fake (ETP-5270:
+   * a legacy JWT's role is now checked against {@code AD_User_Roles} on every request). */
+  static EnvironmentRequestAuthenticator authenticator = new EnvironmentRequestAuthenticator();
   private static final String CHARSET_UTF8      = "UTF-8";
   private static final String FIELD_MESSAGE     = "message";
   private static final String FIELD_MESSAGES    = "messages";
@@ -711,7 +712,7 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
    */
   private AuthContext authenticate(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
-    EnvironmentAuthOutcome outcome = AUTHENTICATOR.identify(request, SurfacePolicy.NEO_AUXILIARY);
+    EnvironmentAuthOutcome outcome = authenticator.identify(request, SurfacePolicy.NEO_AUXILIARY);
     if (!outcome.isAuthenticated()) {
       log.warn("Support chat: refused ({}): {}", outcome.getHttpStatus(), outcome.getMessage());
       writeError(response, outcome.getHttpStatus(), outcome.getMessage());

@@ -61,6 +61,7 @@ import com.etendoerp.go.schemaforge.NeoExtensionSurface;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.ProductDefaultsHandler;
+import com.etendoerp.go.schemaforge.SalesOrderLineHandler;
 import com.etendoerp.go.schemaforge.SalesQuotationLineHandler;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
@@ -87,6 +88,8 @@ import com.etendoerp.go.schemaforge.selector.policy.NeoSelectorPolicy;
  * customization declares ({@link McpServerResolvedFields#createDirectives}, ETP-5676).</p>
  *
  * @covers com.etendoerp.go.mcp.McpServerResolvedFields
+ * @covers com.etendoerp.go.schemaforge.SalesQuotationLineHandler
+ * @covers com.etendoerp.go.schemaforge.SalesOrderLineHandler
  */
 @DisplayName("ETP-5368 / ETP-5535 — server-resolved fields in view:\"create\" and etendo_create")
 class McpSchemaServerResolvedFieldsTest {
@@ -169,15 +172,25 @@ class McpSchemaServerResolvedFieldsTest {
   // ── ETP-5535: McpServerResolvedFields.forCreate ─────────────────────────
 
   /**
-   * The policy's names and the customization's declaration are one set. The real
-   * {@link SalesQuotationLineHandler} is the customization, so its {@code tax} declaration is
-   * exercised through the reader that consumes it.
+   * Rows: the real order-line customizations, both bound to {@code C_OrderLine}. Each declares
+   * {@code tax} (set by {@code SL_Order_Product}) and {@code lineNetAmount} (set by
+   * {@code SL_Order_Amt} in the create cascade, and recomputed by the {@code C_OrderLine} trigger).
    */
-  @Test
+  static Stream<Arguments> orderLineCustomizations() {
+    return Stream.of(
+        Arguments.of("sales-quotation/quotationLine", new SalesQuotationLineHandler()),
+        Arguments.of("sales-order/lines", new SalesOrderLineHandler()));
+  }
+
+  /**
+   * The policy's names and the customization's declaration are one set. The real customization is
+   * used, so its declaration is exercised through the reader that consumes it.
+   */
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("orderLineCustomizations")
   @DisplayName("forCreate is the union of the policy's names and the customization's declaration")
-  void forCreateUnionsPolicyAndCustomization() {
+  void forCreateUnionsPolicyAndCustomization(String entity, NeoHandler customization) {
     SFEntity sfEntity = quotationLineEntity();
-    NeoHandler customization = new SalesQuotationLineHandler();
 
     try (MockedStatic<NeoSelectorPolicy> policy = mockStatic(NeoSelectorPolicy.class);
         MockedStatic<NeoExtensionDispatcher> dispatcher =
@@ -186,7 +199,8 @@ class McpSchemaServerResolvedFieldsTest {
           .thenReturn(Set.of("locationAddress"));
       dispatcher.when(() -> NeoExtensionDispatcher.resolveOnly(any())).thenReturn(customization);
 
-      assertEquals(Set.of("locationAddress", "tax"), McpServerResolvedFields.forCreate(sfEntity));
+      assertEquals(Set.of("locationAddress", "tax", "lineNetAmount"),
+          McpServerResolvedFields.forCreate(sfEntity), entity);
     }
   }
 

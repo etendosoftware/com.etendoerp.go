@@ -70,12 +70,19 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  * was unified: support used to name the missing claim; every surface now answers
  * {@value #MSG_MISSING_CLAIMS}, still with 401.)
  *
+ * <p>ETP-5489 — one deliberate exception: a failure in the bind step, after the credential has
+ * resolved, is a 500 ({@link EnvironmentAuthOutcome.Status#CONTEXT_UNAVAILABLE}), no longer a 401.
+ * The session behind it is valid, and a 401 made the client log it out and re-enter it in a loop.
+ *
  * <p>ETP-5395 — a cookie session's role is bound once, at environment entry, and every one of
  * these surfaces used to authorize the request with it unconditionally. Resolving a cookie now
  * also runs {@link GoSessionRoleReconciler}, which rebinds a role an admin has since revoked to
  * one the user still holds (or refuses the request, {@code 401}, when none is left) — once, here,
  * so every {@link SurfacePolicy} gets it for free rather than each cookie-consuming call site
  * wiring it in on its own.
+ *
+ * <p>ETP-5270 — a legacy JWT gets the same check. Its role is a signed claim and cannot be rebound,
+ * so a token whose role was revoked is refused ({@code 401}) rather than authorized with it.
  */
 public class EnvironmentRequestAuthenticator {
 
@@ -87,6 +94,7 @@ public class EnvironmentRequestAuthenticator {
   static final String MSG_MISSING_CLAIMS = "Invalid token: missing required claims";
   static final String MSG_INVALID_TOKEN = "Invalid or expired token";
   static final String MSG_INSUFFICIENT_SCOPE = "Insufficient scope or invalid token context";
+  static final String MSG_CONTEXT_UNAVAILABLE = "Environment context could not be established";
   /**
    * Prefix of the 402 answer for a commercially blocked environment, followed by the
    * {@link EnvironmentAccessPolicy.Decision} name. Public because every surface that refuses a
@@ -150,7 +158,7 @@ public class EnvironmentRequestAuthenticator {
     try {
       return bind(request, policy, resolution.identity);
     } catch (RuntimeException e) {
-      return refusedFor(e, resolution.identity.scheme);
+      return contextUnavailableFor(e, resolution.identity.scheme);
     }
   }
 
@@ -249,7 +257,7 @@ public class EnvironmentRequestAuthenticator {
     }
   }
 
-  private static Resolution fromJwt(DecodedJWT jwt) {
+  private Resolution fromJwt(DecodedJWT jwt) {
     // The switch retires exactly this credential, and only this one is counted as a legacy
     // use: the counter is what says when turning the switch off is safe.
     if (!GoLegacyBearer.isEnabled()) {
@@ -261,6 +269,10 @@ public class EnvironmentRequestAuthenticator {
     if (identity.isIncomplete()) {
       return Resolution.refused(Status.UNAUTHENTICATED, MSG_MISSING_CLAIMS, AuthScheme.JWT);
     }
+    // ETP-5270 — the claim is the role at login; a signature still valid says nothing about
+    // whether an admin has revoked it since. Throws SessionRoleRevokedException, answered 401
+    // with its own message by authenticate()/identify(), like a cookie with no role left.
+    sessionRoleReconciler.requireHeldRole(identity.userId, identity.roleId, identity.clientId);
     return Resolution.of(identity);
   }
 
@@ -344,6 +356,20 @@ public class EnvironmentRequestAuthenticator {
     log.warn("Environment authentication failed: {}", e.getMessage());
     String message = e instanceof OBException ? e.getMessage() : MSG_INVALID_TOKEN;
     return EnvironmentAuthOutcome.refused(Status.UNAUTHENTICATED, message, scheme);
+  }
+
+  /**
+   * ETP-5489 — a failure AFTER the credential resolved: the session is fine, the server could not
+   * build its context (ETP-5488 was an {@code OBSecurityException} reading a preference while
+   * binding). Answered 500, never 401, so the client does not log a live session out. Always the
+   * generic message: unlike {@link #refusedFor}, the OBExceptions raised here come from the
+   * platform core (entity access, "Current Client ... is not active!") and the trace is logged.
+   */
+  private static EnvironmentAuthOutcome contextUnavailableFor(RuntimeException e,
+      AuthScheme scheme) {
+    log.error("Environment context could not be established for an authenticated request", e);
+    return EnvironmentAuthOutcome.refused(Status.CONTEXT_UNAVAILABLE, MSG_CONTEXT_UNAVAILABLE,
+        scheme);
   }
 
   /** The credential's claims, whatever carried them. */

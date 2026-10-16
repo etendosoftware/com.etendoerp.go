@@ -36,6 +36,38 @@ import org.openbravo.erpCommon.utility.OBMessageUtils;
  */
 public class NeoMessageTranslatorTest {
 
+  private static final List<String> PERIOD_KEYS = NeoMessageTranslator.PERIOD_REFUSAL_KEYS;
+
+  /** ETP-5577: a raw {@code @Key@} token names the refusal without any catalog lookup. */
+  @Test
+  public void recognizeMessageKeys_rawToken() {
+    assertEquals(List.of("PeriodNotValid"),
+        NeoMessageTranslator.recognizeMessageKeys("@PeriodNotValid@", PERIOD_KEYS));
+  }
+
+  /**
+   * ETP-5577: a classic process may hand the refusal over translated in ANOTHER language than the
+   * user's (FIN_AddPaymentFromJournal answers in English to a Spanish user), so every translation
+   * of the message counts; unrelated text, and an unreadable catalog, name nothing.
+   */
+  @Test
+  public void recognizeMessageKeys_translatedTextInAnyLanguage() {
+    try (MockedStatic<NeoMessageTranslator> translator =
+        mockStatic(NeoMessageTranslator.class, org.mockito.Mockito.CALLS_REAL_METHODS)) {
+      translator.when(() -> NeoMessageTranslator.messageTexts("PeriodNotAvailable"))
+          .thenReturn(Arrays.asList("The Period does not exist or it is not opened",
+              "El Periodo no existe o no está abierto", null));
+      translator.when(() -> NeoMessageTranslator.messageTexts("PeriodNotValid"))
+          .thenReturn(Collections.emptyList());
+
+      assertEquals(List.of("PeriodNotAvailable"), NeoMessageTranslator.recognizeMessageKeys(
+          "The Period does not exist or it is not opened", PERIOD_KEYS));
+      assertTrue(NeoMessageTranslator.recognizeMessageKeys("BP currency is not set", PERIOD_KEYS)
+          .isEmpty());
+      assertTrue(NeoMessageTranslator.recognizeMessageKeys(null, PERIOD_KEYS).isEmpty());
+    }
+  }
+
   private static final String KEY = "@AEAT349_Phone_Contact_Mandatory@";
   private static final String TRANSLATED =
       "Debe indicar la persona de contacto y el teléfono de la declaración.";

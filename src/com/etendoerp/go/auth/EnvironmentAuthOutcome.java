@@ -37,7 +37,13 @@ public final class EnvironmentAuthOutcome {
     CSRF_REJECTED(HttpServletResponse.SC_FORBIDDEN),
     UNAUTHENTICATED(HttpServletResponse.SC_UNAUTHORIZED),
     /** javax.servlet predates RFC 7231 and has no constant for 402. */
-    PAYMENT_REQUIRED(402);
+    PAYMENT_REQUIRED(402),
+    /**
+     * ETP-5489 — the credential is valid but the server could not set up its context. Not a 401:
+     * a client reads 401 as "your session is gone" and logs the user out, which against a session
+     * that is still alive is a logout/re-entry loop.
+     */
+    CONTEXT_UNAVAILABLE(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
 
     private final int httpStatus;
 

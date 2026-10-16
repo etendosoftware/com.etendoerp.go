@@ -194,11 +194,11 @@ class McpActionsViewTest {
         JSONObject action = actions.getJSONObject(i);
         names.add(action.has("name") ? action.getString("name") : action.getString("action"));
       }
-      assertEquals(List.of("completeAction", "cancelAction", "rejectQuotation",
-          "createRejectReason"), names);
+      assertEquals(List.of("completeAction", "cancelAction", "createDraftInvoice",
+          "rejectQuotation", "createRejectReason"), names);
       assertTrue(actions.getJSONObject(2).has("parameters"));
-      assertEquals(4, response.getInt("actionCount"));
-      assertEquals(4, response.getInt(McpActionsView.KEY_INVOKABLE_COUNT));
+      assertEquals(5, response.getInt("actionCount"));
+      assertEquals(5, response.getInt(McpActionsView.KEY_INVOKABLE_COUNT));
       assertTrue(response.getString("declaredActionsHint").contains("etendo_action"));
     }
 
