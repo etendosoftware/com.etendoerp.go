@@ -147,6 +147,7 @@ public class FiscalDeclCrudHandlerTest {
       mockContext(ctxMock, "client1", "org1");
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(null);
 
       handler.handleIncidents("GET", req, resp);
@@ -174,6 +175,7 @@ public class FiscalDeclCrudHandlerTest {
       mockContext(ctxMock, "client1", "org1");
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
 
       handler.handleIncidents("GET", req, resp);
@@ -211,6 +213,7 @@ public class FiscalDeclCrudHandlerTest {
       mockContext(ctxMock, "client1", "org1");
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
 
       OBQuery<BaseOBObject> query = mock(OBQuery.class);
@@ -259,6 +262,7 @@ public class FiscalDeclCrudHandlerTest {
       mockContext(ctxMock, "client1", "org1");
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
 
       OBQuery<BaseOBObject> query = mock(OBQuery.class);
@@ -289,6 +293,7 @@ public class FiscalDeclCrudHandlerTest {
       mockContext(ctxMock, "client1", "org1");
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
 
       OBQuery<BaseOBObject> query = mock(OBQuery.class);
       when(obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL_INCIDENT), anyString()))
@@ -338,6 +343,7 @@ public class FiscalDeclCrudHandlerTest {
       mockContext(ctxMock, "client1", "org1");
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
 
       OBQuery<BaseOBObject> query = mock(OBQuery.class);
       when(obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL_INCIDENT), anyString()))
@@ -371,6 +377,7 @@ public class FiscalDeclCrudHandlerTest {
       mockContext(ctxMock, "client1", "org1");
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
 
       OBQuery<BaseOBObject> query = mock(OBQuery.class);
       when(obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL_INCIDENT), anyString()))
@@ -418,6 +425,7 @@ public class FiscalDeclCrudHandlerTest {
       mockContext(ctxMock, "client1", "org1");
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
 
       OBQuery<BaseOBObject> query = mock(OBQuery.class);
       when(obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL_INCIDENT), anyString()))
@@ -459,6 +467,7 @@ public class FiscalDeclCrudHandlerTest {
       mockContext(ctxMock, "client1", "org1");
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
 
       OBQuery<BaseOBObject> query = mock(OBQuery.class);
       when(obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL_INCIDENT), anyString()))
@@ -498,6 +507,7 @@ public class FiscalDeclCrudHandlerTest {
       mockContext(ctxMock, "client1", "org1");
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       OBProvider provider = mock(OBProvider.class);
       providerMock.when(OBProvider::getInstance).thenReturn(provider);
       when(provider.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL_INCIDENT)).thenReturn(newInc);
@@ -541,6 +551,7 @@ public class FiscalDeclCrudHandlerTest {
       mockContext(ctxMock, "client1", "org1");
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
 
       handler.handleDeclarations("PUT", req, resp);
@@ -577,6 +588,7 @@ public class FiscalDeclCrudHandlerTest {
       mockContext(ctxMock, "client1", "org1");
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
 
       handler.handleDeclarations("PUT", req, resp);
@@ -612,6 +624,7 @@ public class FiscalDeclCrudHandlerTest {
       mockContext(ctxMock, "client1", "org1");
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
 
       handler.handleDeclarations("PUT", req, resp);
@@ -646,6 +659,7 @@ public class FiscalDeclCrudHandlerTest {
       mockContext(ctxMock, "client1", "org1");
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
 
       handler.handleDeclarations("PUT", req, resp);
@@ -682,6 +696,7 @@ public class FiscalDeclCrudHandlerTest {
       mockContext(ctxMock, "client1", "org1");
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
 
       handler.handleDeclarations("PUT", req, resp);
@@ -716,6 +731,7 @@ public class FiscalDeclCrudHandlerTest {
       mockContext(ctxMock, "client1", "org1");
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
 
       handler.handleDeclarations("PUT", req, resp);
@@ -754,6 +770,7 @@ public class FiscalDeclCrudHandlerTest {
       mockContext(ctxMock, "client1", "org1");
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
 
       handler.handleDeclarations("PUT", req, resp);
@@ -783,6 +800,7 @@ public class FiscalDeclCrudHandlerTest {
       mockContext(ctxMock, "client1", "org1");
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
 
       handler.handleDeclarations("PUT", req, resp);
@@ -814,6 +832,7 @@ public class FiscalDeclCrudHandlerTest {
       mockContext(ctxMock, "client1", "org1");
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
 
       handler.handleDeclarations("PUT", req, resp);
@@ -843,6 +862,7 @@ public class FiscalDeclCrudHandlerTest {
       mockContext(ctxMock, "client1", "org1");
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
 
       handler.handleDeclarations("PUT", req, resp);
@@ -873,6 +893,7 @@ public class FiscalDeclCrudHandlerTest {
       mockContext(ctxMock, "client1", "org1");
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
 
       handler.handleDeclarations("PUT", req, resp);
@@ -903,6 +924,7 @@ public class FiscalDeclCrudHandlerTest {
       mockContext(ctxMock, "client1", "org1");
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
 
       handler.handleDeclarations("PUT", req, resp);
@@ -931,6 +953,7 @@ public class FiscalDeclCrudHandlerTest {
       mockContext(ctxMock, "client1", "org1");
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
 
       handler.handleDeclarations("PUT", req, resp);
@@ -964,6 +987,7 @@ public class FiscalDeclCrudHandlerTest {
       mockContext(ctxMock, "client1", "org1");
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
 
       handler.handleDeclarations("PUT", req, resp);
@@ -991,6 +1015,7 @@ public class FiscalDeclCrudHandlerTest {
       mockContext(ctxMock, "client1", "org1");
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
 
       handler.handleDeclarations("PUT", req, resp);
@@ -1018,6 +1043,7 @@ public class FiscalDeclCrudHandlerTest {
       mockContext(ctxMock, "client1", "org1");
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
 
       handler.handleDeclarations("PUT", req, resp);
@@ -1045,6 +1071,7 @@ public class FiscalDeclCrudHandlerTest {
       mockContext(ctxMock, "client1", "org1");
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
 
       handler.handleDeclarations("PUT", req, resp);
@@ -1076,6 +1103,7 @@ public class FiscalDeclCrudHandlerTest {
       mockContext(ctxMock, "client1", "org1");
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
 
       handler.handleDeclarations("PUT", req, resp);
@@ -1110,6 +1138,7 @@ public class FiscalDeclCrudHandlerTest {
       mockContext(ctxMock, "client1", "org1");
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
 
       handler.handleDeclarations("PUT", req, resp);
@@ -1142,6 +1171,7 @@ public class FiscalDeclCrudHandlerTest {
       mockContext(ctxMock, "client1", "org1");
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
 
       handler.handleDeclarations("PUT", req, resp);
@@ -1170,6 +1200,7 @@ public class FiscalDeclCrudHandlerTest {
       mockContext(ctxMock, "client1", "org1");
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
 
       handler.handleDeclarations("PUT", req, resp);
@@ -1205,6 +1236,7 @@ public class FiscalDeclCrudHandlerTest {
       mockContext(ctxMock, "client1", "org1");
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
 
       handler.handleDeclarations("PUT", req, resp);
@@ -1237,6 +1269,7 @@ public class FiscalDeclCrudHandlerTest {
       mockContext(ctxMock, "client1", "org1");
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
 
       handler.handleDeclarations("PUT", req, resp);
@@ -1269,6 +1302,7 @@ public class FiscalDeclCrudHandlerTest {
       mockContext(ctxMock, "client1", "org1");
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
 
       handler.handleDeclarations("PUT", req, resp);
@@ -1309,6 +1343,7 @@ public class FiscalDeclCrudHandlerTest {
       mockContext(ctxMock, "client1", "org1");
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
 
       handler.handleDeclarations("PUT", req, resp);
@@ -1342,6 +1377,7 @@ public class FiscalDeclCrudHandlerTest {
       mockContext(ctxMock, "client1", "org1");
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
 
       handler.handleDeclarations("PUT", req, resp);
@@ -1376,6 +1412,7 @@ public class FiscalDeclCrudHandlerTest {
       mockContext(ctxMock, "client1", "org1");
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
 
       handler.handleDeclarations("PUT", req, resp);
@@ -1412,6 +1449,7 @@ public class FiscalDeclCrudHandlerTest {
       mockContext(ctxMock, "client1", "org1");
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
 
       handler.handleDeclarations("PUT", req, resp);
@@ -1446,6 +1484,7 @@ public class FiscalDeclCrudHandlerTest {
       mockContext(ctxMock, "client1", "org1");
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
 
       handler.handleDeclarations("PUT", req, resp);
@@ -1487,6 +1526,7 @@ public class FiscalDeclCrudHandlerTest {
       mockContext(ctxMock, "client1", "org1");
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
 
       handler.handleDeclarations("PUT", req, resp);
@@ -1514,6 +1554,7 @@ public class FiscalDeclCrudHandlerTest {
       mockContext(ctxMock, "client1", "org1");
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
 
       handler.handleDeclarations("PUT", req, resp);
@@ -1539,6 +1580,7 @@ public class FiscalDeclCrudHandlerTest {
       mockContext(ctxMock, "client1", "org1");
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
 
       handler.handleDeclarations("PUT", req, resp);
@@ -1569,6 +1611,7 @@ public class FiscalDeclCrudHandlerTest {
       mockContext(ctxMock, "client1", "org1");
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
 
       handler.handleDeclarations("PUT", req, resp);
@@ -1577,6 +1620,349 @@ public class FiscalDeclCrudHandlerTest {
     verify(servlet, never()).sendError(any(), anyInt(), anyString());
     verify(decl).set(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS, "submitted");
     assertEquals("{\"ok\":true}", sw.toString());
+  }
+
+  // ── handleDeclPut (rejectCorrectiveConsistencyViolation, ETP-5725 reopened QA) ──────
+  //
+  // Covers the round that closed the "ni guardar ni generar fichero deberían poderse hacer" gap
+  // (Bug 1) and its mirror ("only one ordinaria per period"). Both directions are enforced by the
+  // SAME shared method, {@link FiscalDeclCrudHandler#checkCorrectiveConsistency}, fired from
+  // {@code rejectCorrectiveConsistencyViolation} on EVERY PUT that leaves the declaration NOT
+  // already in SUBMITTED_STATUSES — including a plain manualData-only save with no {@code status}
+  // key at all (the exact shape {@code persistEditableFields}/{@code persistManualData} send),
+  // which is the gap the OLD status-key-gated version of this guard missed. Model-agnostic — these
+  // tests exercise the rule once via the 303 {@code rectificativa} field name; the generate
+  // endpoint tests in {@link Fiscal303BoxesHandlerTest}/{@link Fiscal349BoxesHandlerTest} cover
+  // each model's own distinct request-param wiring instead of duplicating this same business-rule
+  // assertion per model.
+
+  /**
+   * "Guardar" (manualData-only PUT, no {@code status} key) on a brand-new declaration manually
+   * marked {@code rectificativa: true} with NO presented ordinaria sibling for the period at
+   * all — the exact Bug 1 repro (QA: "created the FIRST declaration ever for a period, checked
+   * Autoliquidación rectificativa, clicked Guardar — it succeeded"). Must now be rejected: no
+   * manualData write, no commit.
+   */
+  @Test
+  public void testHandleDeclPutSaveCorrectiveWithoutPresentedOrdinariaReturns409() throws Exception {
+    BaseOBObject decl = declOwnedBy("client1", "org1");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS)).thenReturn("draft");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_FISCAL_MODEL)).thenReturn("303");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_FISCAL_YEAR)).thenReturn(2026L);
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_PERIOD)).thenReturn("T1");
+
+    OBDal[] obDalOut = new OBDal[1];
+    String response = putDecl(decl, "{\"manualData\":{\"identification\":{\"rectificativa\":true}}}",
+        obDalOut);
+
+    verify(servlet).sendError(any(), eq(HttpServletResponse.SC_CONFLICT),
+        org.mockito.ArgumentMatchers.contains("corrective declaration"));
+    verify(decl, never()).set(eq(FiscalDeclCrudHandler.PROPERTY_MANUAL_DATA), any());
+    verify(obDalOut[0], never()).commitAndClose();
+    assertTrue("response body should still be the error JSON, not an ok:true",
+        response == null || !response.contains("\"ok\":true"));
+  }
+
+  /**
+   * The mirror rule: "Guardar" on a declaration left as a genuine ORDINARIA (no rectificativa/
+   * sustitutiva) while ANOTHER ordinaria is already presented for the same period — the "Solo
+   * puede haber una ordinaria por periodo" case. Also rejected.
+   */
+  @Test
+  public void testHandleDeclPutSaveOrdinariaWhenAnotherOrdinariaAlreadyPresentedReturns409()
+      throws Exception {
+    BaseOBObject decl = declOwnedBy("client1", "org1");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS)).thenReturn("draft");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_FISCAL_MODEL)).thenReturn("303");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_FISCAL_YEAR)).thenReturn(2026L);
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_PERIOD)).thenReturn("T1");
+    when(decl.getId()).thenReturn("decl1");
+
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    when(req.getParameter("id")).thenReturn("decl1");
+    when(req.getReader()).thenReturn(new BufferedReader(
+        new StringReader("{\"manualData\":{\"identification\":{\"rectificativa\":false}}}")));
+
+    BaseOBObject presentedOrdinariaSibling = mock(BaseOBObject.class);
+    when(presentedOrdinariaSibling.getId()).thenReturn("decl2");
+    when(presentedOrdinariaSibling.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS))
+        .thenReturn("submitted");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
+      OBQuery<BaseOBObject> query = mockQueryReturning(presentedOrdinariaSibling);
+      when(obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL), anyString()))
+          .thenReturn(query);
+
+      handler.handleDeclarations("PUT", req, resp);
+
+      verify(servlet).sendError(any(), eq(HttpServletResponse.SC_CONFLICT),
+          org.mockito.ArgumentMatchers.contains("as ordinaria"));
+      verify(decl, never()).set(eq(FiscalDeclCrudHandler.PROPERTY_MANUAL_DATA), any());
+      verify(obDal, never()).commitAndClose();
+    }
+  }
+
+  /**
+   * The inverse of the Bug 1 repro: a corrective declaration IS allowed to save when a presented
+   * ordinaria sibling genuinely exists — this is the normal, valid rectificativa flow and must
+   * keep working exactly as before this round.
+   */
+  @Test
+  public void testHandleDeclPutSaveCorrectiveWithPresentedOrdinariaSucceeds() throws Exception {
+    BaseOBObject decl = declOwnedBy("client1", "org1");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS)).thenReturn("draft");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_FISCAL_MODEL)).thenReturn("303");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_FISCAL_YEAR)).thenReturn(2026L);
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_PERIOD)).thenReturn("T1");
+    when(decl.getId()).thenReturn("decl1");
+
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    StringWriter sw = new StringWriter();
+    when(resp.getWriter()).thenReturn(new PrintWriter(sw));
+    when(req.getParameter("id")).thenReturn("decl1");
+    when(req.getReader()).thenReturn(new BufferedReader(
+        new StringReader("{\"manualData\":{\"identification\":{\"rectificativa\":true}}}")));
+
+    BaseOBObject presentedOrdinariaSibling = mock(BaseOBObject.class);
+    when(presentedOrdinariaSibling.getId()).thenReturn("decl2");
+    when(presentedOrdinariaSibling.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS))
+        .thenReturn("submitted");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
+      OBQuery<BaseOBObject> query = mockQueryReturning(presentedOrdinariaSibling);
+      when(obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL), anyString()))
+          .thenReturn(query);
+
+      handler.handleDeclarations("PUT", req, resp);
+
+      verify(servlet, never()).sendError(any(), anyInt(), anyString());
+      verify(decl).set(eq(FiscalDeclCrudHandler.PROPERTY_MANUAL_DATA), anyString());
+      verify(obDal).commitAndClose();
+    }
+  }
+
+  /**
+   * A plain ordinaria saved with no conflicting presented sibling at all — the overwhelmingly
+   * common case — must keep succeeding unaffected by either direction of this rule.
+   */
+  @Test
+  public void testHandleDeclPutSaveOrdinariaWithNoSiblingsSucceeds() throws Exception {
+    BaseOBObject decl = declOwnedBy("client1", "org1");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS)).thenReturn("draft");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_FISCAL_MODEL)).thenReturn("303");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_FISCAL_YEAR)).thenReturn(2026L);
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_PERIOD)).thenReturn("T1");
+
+    OBDal[] obDalOut = new OBDal[1];
+    putDecl(decl, "{\"manualData\":{\"identification\":{\"tipo_declaracion\":\"N\"}}}", obDalOut);
+
+    verify(servlet, never()).sendError(any(), anyInt(), anyString());
+    verify(decl).set(eq(FiscalDeclCrudHandler.PROPERTY_MANUAL_DATA), anyString());
+    verify(obDalOut[0]).commitAndClose();
+  }
+
+  /**
+   * The guard must NOT re-run (and must NOT touch the sibling query at all) once the declaration
+   * is ALREADY in SUBMITTED_STATUSES — an edit to another field (here, {@code fileExternal}) on an
+   * already-presented declaration is unaffected regardless of what its persisted identification
+   * looks like. {@code stubNoSiblings} is deliberately NOT called here: if the guard incorrectly
+   * ran anyway, the unstubbed {@code createQuery} would NPE and fail this test loudly instead of
+   * silently passing.
+   */
+  @Test
+  public void testHandleDeclPutOnAlreadySubmittedDeclarationSkipsCorrectiveConsistencyCheck()
+      throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    StringWriter sw = new StringWriter();
+    when(resp.getWriter()).thenReturn(new PrintWriter(sw));
+    when(req.getParameter("id")).thenReturn("decl1");
+    when(req.getReader())
+        .thenReturn(new BufferedReader(new StringReader("{\"fileExternal\":true}")));
+
+    BaseOBObject decl = declOwnedBy("client1", "org1");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS)).thenReturn("submitted");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
+
+      handler.handleDeclarations("PUT", req, resp);
+    }
+
+    verify(servlet, never()).sendError(any(), anyInt(), anyString());
+    verify(decl).set(FiscalDeclCrudHandler.PROPERTY_FILE_EXTERNAL, true);
+  }
+
+  // ── handleDeclPut (findReactivationBlockReason — asymmetric rule, ETP-5725 reopened QA) ────
+  //
+  // A LATER manual-testing fix (same ticket) found the first version of this guard had
+  // over-corrected: it blocked reactivating EITHER declaration whenever ANY sibling existed. The
+  // correct rule is asymmetric — see {@link FiscalDeclCrudHandler#findReactivationBlockReason}'s
+  // own javadoc for the exact per-case logic these tests assert on.
+
+  /**
+   * Reactivating the ORDINARIA (not corrective) while a PRESENTED corrective sibling exists is
+   * blocked — the real Bug 2/4 scenario: the corrective references the ordinaria it corrects, so
+   * pulling the ordinaria back to draft would orphan it. Reason tag must be
+   * {@code corrective_sibling_presented} (the frontend's UX-message branch key).
+   */
+  @Test
+  public void testHandleDeclPutReactivateOrdinariaBlockedByPresentedCorrectiveSibling()
+      throws Exception {
+    BaseOBObject decl = declOwnedBy("client1", "org1");
+    when(decl.getId()).thenReturn("decl1");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS)).thenReturn("submitted");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_FISCAL_MODEL)).thenReturn("349");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_FISCAL_YEAR)).thenReturn(2026L);
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_PERIOD)).thenReturn("T1");
+    // No manualData -> isEffectivelyCorrective reads it as NOT corrective (the ordinaria).
+
+    BaseOBObject presentedCorrectiveSibling = mock(BaseOBObject.class);
+    when(presentedCorrectiveSibling.getId()).thenReturn("decl2");
+    when(presentedCorrectiveSibling.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS))
+        .thenReturn("submitted");
+    JSONObject siblingManualData = new JSONObject()
+        .put("identification", new JSONObject().put("sustitutiva", true));
+    when(presentedCorrectiveSibling.get(FiscalDeclCrudHandler.PROPERTY_MANUAL_DATA))
+        .thenReturn(siblingManualData.toString());
+
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    when(req.getParameter("id")).thenReturn("decl1");
+    when(req.getReader())
+        .thenReturn(new BufferedReader(new StringReader("{\"status\":\"draft\"}")));
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
+      OBQuery<BaseOBObject> query = mockQueryReturning(presentedCorrectiveSibling);
+      when(obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL), anyString()))
+          .thenReturn(query);
+
+      handler.handleDeclarations("PUT", req, resp);
+
+      verify(servlet).sendError(any(), eq(HttpServletResponse.SC_CONFLICT),
+          org.mockito.ArgumentMatchers.contains("[reason=corrective_sibling_presented]"));
+      verify(decl, never()).set(eq(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS), any());
+      verify(obDal, never()).commitAndClose();
+    }
+  }
+
+  /**
+   * THE CRITICAL ASYMMETRIC CASE — reactivating the CORRECTIVE (sustitutiva/rectificativa) itself
+   * must be ALLOWED even though its ordinaria sibling is presented: the ordinaria stays valid as
+   * the base declaration underneath it. This is the exact scenario a later manual-testing round
+   * found wrongly blocked by the first (symmetric) version of this guard.
+   */
+  @Test
+  public void testHandleDeclPutReactivateCorrectiveNotBlockedByPresentedOrdinariaSibling()
+      throws Exception {
+    BaseOBObject decl = declOwnedBy("client1", "org1");
+    when(decl.getId()).thenReturn("decl2");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS)).thenReturn("submitted");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_FISCAL_MODEL)).thenReturn("349");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_FISCAL_YEAR)).thenReturn(2026L);
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_PERIOD)).thenReturn("T1");
+    JSONObject declManualData = new JSONObject()
+        .put("identification", new JSONObject().put("sustitutiva", true));
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_MANUAL_DATA)).thenReturn(declManualData.toString());
+
+    BaseOBObject presentedOrdinariaSibling = mock(BaseOBObject.class);
+    when(presentedOrdinariaSibling.getId()).thenReturn("decl1");
+    when(presentedOrdinariaSibling.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS))
+        .thenReturn("submitted");
+
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    StringWriter sw = new StringWriter();
+    when(resp.getWriter()).thenReturn(new PrintWriter(sw));
+    when(req.getParameter("id")).thenReturn("decl2");
+    when(req.getReader())
+        .thenReturn(new BufferedReader(new StringReader("{\"status\":\"draft\"}")));
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl2")).thenReturn(decl);
+      OBQuery<BaseOBObject> query = mockQueryReturning(presentedOrdinariaSibling);
+      when(obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL), anyString()))
+          .thenReturn(query);
+
+      handler.handleDeclarations("PUT", req, resp);
+    }
+
+    verify(servlet, never()).sendError(any(), anyInt(), anyString());
+    verify(decl).set(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS, "draft");
+    assertEquals("{\"ok\":true}", sw.toString());
+  }
+
+  /**
+   * A DRAFT sibling blocks reactivation of EITHER declaration, regardless of corrective/ordinaria
+   * identity — rule 3, unchanged by the asymmetric-rule fix. Exercised here reactivating the
+   * CORRECTIVE (the case the asymmetric fix just allowed through for a PRESENTED sibling) to
+   * prove the draft case is still an independent, un-relaxed block. Reason tag {@code
+   * sibling_exists}.
+   */
+  @Test
+  public void testHandleDeclPutReactivateBlockedByDraftSiblingEvenForCorrective() throws Exception {
+    BaseOBObject decl = declOwnedBy("client1", "org1");
+    when(decl.getId()).thenReturn("decl2");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS)).thenReturn("submitted");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_FISCAL_MODEL)).thenReturn("349");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_FISCAL_YEAR)).thenReturn(2026L);
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_PERIOD)).thenReturn("T1");
+    JSONObject declManualData = new JSONObject()
+        .put("identification", new JSONObject().put("sustitutiva", true));
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_MANUAL_DATA)).thenReturn(declManualData.toString());
+
+    BaseOBObject draftSibling = mock(BaseOBObject.class);
+    when(draftSibling.getId()).thenReturn("decl3");
+    when(draftSibling.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS)).thenReturn("draft");
+
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    when(req.getParameter("id")).thenReturn("decl2");
+    when(req.getReader())
+        .thenReturn(new BufferedReader(new StringReader("{\"status\":\"draft\"}")));
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl2")).thenReturn(decl);
+      OBQuery<BaseOBObject> query = mockQueryReturning(draftSibling);
+      when(obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL), anyString()))
+          .thenReturn(query);
+
+      handler.handleDeclarations("PUT", req, resp);
+
+      verify(servlet).sendError(any(), eq(HttpServletResponse.SC_CONFLICT),
+          org.mockito.ArgumentMatchers.contains("[reason=sibling_exists]"));
+      verify(decl, never()).set(eq(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS), any());
+      verify(obDal, never()).commitAndClose();
+    }
   }
 
   /**
@@ -1604,6 +1990,7 @@ public class FiscalDeclCrudHandlerTest {
       mockContext(ctxMock, "client1", "org1");
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
 
       handler.handleDeclarations("PUT", req, resp);
@@ -1632,6 +2019,7 @@ public class FiscalDeclCrudHandlerTest {
       mockContext(ctxMock, "client1", "org1");
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
       handler.handleDeclarations("PUT", req, resp);
       if (obDalOut != null) {
@@ -1947,6 +2335,7 @@ public class FiscalDeclCrudHandlerTest {
     try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       OBQuery<BaseOBObject> query = mock(OBQuery.class);
       when(obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL), anyString()))
           .thenReturn(query);
@@ -1976,6 +2365,7 @@ public class FiscalDeclCrudHandlerTest {
     try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       OBQuery<BaseOBObject> query = mock(OBQuery.class);
       when(obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL), anyString()))
           .thenReturn(query);
@@ -1998,6 +2388,7 @@ public class FiscalDeclCrudHandlerTest {
     try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       OBQuery<BaseOBObject> query = mock(OBQuery.class);
       when(obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL), anyString()))
           .thenReturn(query);
@@ -2179,6 +2570,7 @@ public class FiscalDeclCrudHandlerTest {
       mockContext(ctxMock, "client1", "org1");
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
 
       handler.handleDeclarations("PUT", req, resp);
@@ -2265,6 +2657,7 @@ public class FiscalDeclCrudHandlerTest {
       mockContext(ctxMock, "client1", "org1");
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
 
       handler.handleDeclarations("PUT", req, resp);
@@ -2344,6 +2737,7 @@ public class FiscalDeclCrudHandlerTest {
       mockContext(ctxMock, "client1", "org1");
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "declA")).thenReturn(declA);
       when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "declB")).thenReturn(declB);
 
@@ -2371,6 +2765,7 @@ public class FiscalDeclCrudHandlerTest {
     try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       OBQuery<BaseOBObject> query = mock(OBQuery.class);
       when(obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL), anyString()))
           .thenReturn(query);
@@ -2389,6 +2784,7 @@ public class FiscalDeclCrudHandlerTest {
     try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       OBQuery<BaseOBObject> query = mock(OBQuery.class);
       when(obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL), anyString()))
           .thenReturn(query);
@@ -2412,6 +2808,7 @@ public class FiscalDeclCrudHandlerTest {
     try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       OBQuery<BaseOBObject> query = mock(OBQuery.class);
       when(obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL), anyString()))
           .thenReturn(query);
@@ -2445,6 +2842,7 @@ public class FiscalDeclCrudHandlerTest {
     try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       OBQuery<BaseOBObject> query = mock(OBQuery.class);
       when(obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL), anyString()))
           .thenReturn(query);
@@ -2481,6 +2879,7 @@ public class FiscalDeclCrudHandlerTest {
       mockContext(ctxMock, "client1", "org1");
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       OBQuery<BaseOBObject> query = mock(OBQuery.class);
       when(obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL), anyString()))
           .thenReturn(query);
@@ -2526,6 +2925,7 @@ public class FiscalDeclCrudHandlerTest {
       mockContext(ctxMock, "client1", "org1");
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       OBQuery<BaseOBObject> query = mock(OBQuery.class);
       when(obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL), anyString()))
           .thenReturn(query);
@@ -2574,6 +2974,7 @@ public class FiscalDeclCrudHandlerTest {
       mockContext(ctxMock, "client1", "org1");
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       OBQuery<BaseOBObject> query = mock(OBQuery.class);
       when(obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL), anyString()))
           .thenReturn(query);
@@ -2619,6 +3020,7 @@ public class FiscalDeclCrudHandlerTest {
       mockContext(ctxMock, "client1", "org1");
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       OBQuery<BaseOBObject> query = mock(OBQuery.class);
       when(obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL), anyString()))
           .thenReturn(query);
@@ -2665,6 +3067,7 @@ public class FiscalDeclCrudHandlerTest {
       mockContext(ctxMock, "client1", "org1");
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       OBQuery<BaseOBObject> query = mock(OBQuery.class);
       when(obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL), anyString()))
           .thenReturn(query);
@@ -2702,6 +3105,7 @@ public class FiscalDeclCrudHandlerTest {
       mockContext(ctxMock, "client1", "org1");
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
 
       handler.handleDeclarations("DELETE", req, resp);
@@ -2730,6 +3134,7 @@ public class FiscalDeclCrudHandlerTest {
       mockContext(ctxMock, "client1", "org1");
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
 
       handler.handleDeclarations("DELETE", req, resp);
@@ -2751,6 +3156,7 @@ public class FiscalDeclCrudHandlerTest {
       mockContext(ctxMock, "client1", "org1");
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubNoSiblings(obDal);
       when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "missing-id")).thenReturn(null);
 
       handler.handleDeclarations("DELETE", req, resp);
@@ -2787,5 +3193,47 @@ public class FiscalDeclCrudHandlerTest {
     Organization org = mock(Organization.class);
     when(org.getId()).thenReturn(orgId);
     when(ctx.getCurrentOrganization()).thenReturn(org);
+  }
+
+  /**
+   * ETP-5725 (reopened QA fix) — stubs {@code obDal.createQuery(ENTITY_FISCAL_DECL, ...)} (the
+   * shared {@code naturalKeyQuery} helper every sibling-aware guard added in this round funnels
+   * through — {@link FiscalDeclCrudHandler#checkCorrectiveConsistency} via
+   * {@code rejectCorrectiveConsistencyViolation}, and {@code findReactivationBlockReason} via
+   * {@code rejectReactivationWithSibling}) to report NO sibling declarations at all.
+   *
+   * <p>Call this right after stubbing {@code OBDal::getInstance} in any test that exercises
+   * {@code handleDeclPut} — it matches the implicit assumption nearly every PUT test in this file
+   * already made before these guards existed ("there is only one declaration for this period"),
+   * so a PUT that this guard must not reject keeps succeeding exactly as before. Harmless (simply
+   * unused) in a test that never reaches a sibling-aware guard at all (GET/DELETE/incident
+   * tests, or a PUT short-circuited earlier by {@code rejectTelematicReactivation}/
+   * {@code rejectRepresentation}).
+   *
+   * <p>A test that specifically wants sibling behavior (a draft or presented sibling actually
+   * exists) overrides this with its own, more specific {@code createQuery}/{@code query.list()}
+   * stub AFTER calling this one — Mockito resolves overlapping stubs on the same matcher to the
+   * LAST one registered, so the test-specific stub wins. See the {@code checkCorrectiveConsistency}
+   * and {@code findReactivationBlockReason} test groups below for examples.
+   */
+  @SuppressWarnings("unchecked")
+  private static void stubNoSiblings(OBDal obDal) {
+    OBQuery<BaseOBObject> query = mock(OBQuery.class);
+    when(obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL), anyString()))
+        .thenReturn(query);
+    when(query.list()).thenReturn(Collections.emptyList());
+  }
+
+  /**
+   * Builds an {@code OBQuery} mock whose {@code .list()} returns exactly the given sibling
+   * row(s) — for a test that specifically wants {@code naturalKeyQuery} to find one. The caller
+   * still has to wire it onto {@code obDal.createQuery(...)} itself (after any earlier
+   * {@link #stubNoSiblings} call, so the test-specific stub wins — see that method's own doc).
+   */
+  @SuppressWarnings("unchecked")
+  private static OBQuery<BaseOBObject> mockQueryReturning(BaseOBObject... siblings) {
+    OBQuery<BaseOBObject> query = mock(OBQuery.class);
+    when(query.list()).thenReturn(Arrays.asList(siblings));
+    return query;
   }
 }
