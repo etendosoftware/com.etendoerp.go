@@ -1165,4 +1165,42 @@ public class SalesQuotationHeaderHandlerTest {
         .httpMethod("GET").endpointType(NeoEndpointType.CRUD).recordId(QUOTATION_ID).build();
     assertNull(new SalesQuotationHeaderHandler().handle(ctx));
   }
+
+  // ── declared action contracts (ETP-5709) ──────────────────────────────────
+
+  /** createDraftInvoice is published next to the reject actions, which stay declared. */
+  @Test
+  public void actionContracts_declaresInvoiceAndKeepsRejectActions() {
+    Map<String, com.etendoerp.go.schemaforge.util.NeoActionContract> contracts =
+        new SalesQuotationHeaderHandler().actionContracts();
+
+    assertEquals(List.of("createDraftInvoice", "rejectQuotation", "createRejectReason"),
+        List.copyOf(contracts.keySet()));
+    com.etendoerp.go.schemaforge.util.NeoActionContract invoice = contracts.get("createDraftInvoice");
+    assertSame(CreateDraftInvoiceHandler.QUOTATION_CONTRACT, invoice);
+    assertTrue("a quotation is invoiced in full: no parameters", invoice.getParams().isEmpty());
+    String description = invoice.getDescription();
+    assertTrue("must warn the invoice is completed despite the name",
+        description.contains("COMPLETES") && description.contains("despite the name"));
+    assertTrue("must name the status the quotation ends in", description.contains("ETGO_CI"));
+    assertTrue("must name the required status", description.contains("UE"));
+  }
+
+  /** The body the SPA posts ({}) and a valid partial body pass; an unknown key is a 422. */
+  @Test
+  public void actionContracts_acceptTheSpaBodyAndRejectUnknownKeys() throws Exception {
+    Map<String, com.etendoerp.go.schemaforge.util.NeoActionContract> contracts =
+        new SalesQuotationHeaderHandler().actionContracts();
+
+    assertNull(com.etendoerp.go.schemaforge.util.NeoActionContract.validate(contracts,
+        "createDraftInvoice", new JSONObject()));
+    assertEquals(com.etendoerp.go.schemaforge.util.NeoActionContract.SC_UNPROCESSABLE,
+        com.etendoerp.go.schemaforge.util.NeoActionContract.validate(contracts,
+            "createDraftInvoice", new JSONObject().put("lines",
+                new JSONArray().put(new JSONObject().put("orderLineId", "L1").put("quantity", "2"))))
+            .getHttpStatus());
+    assertEquals(com.etendoerp.go.schemaforge.util.NeoActionContract.SC_UNPROCESSABLE,
+        com.etendoerp.go.schemaforge.util.NeoActionContract.validate(contracts,
+            "createDraftInvoice", new JSONObject().put("priceListId", "P1")).getHttpStatus());
+  }
 }

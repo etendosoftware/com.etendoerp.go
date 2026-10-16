@@ -122,7 +122,15 @@ public class CreateDraftInvoiceHandlerPriceListRequiredIntegrationTest extends O
     Currency currency = bp.getPriceList().getCurrency();
     bp.setPriceList(null);
 
-    ShipmentInOut shipment = createUnsavedShipmentWithNoLinkedOrder(bp, currency);
+    // ETP-5709: only a COMPLETED shipment reaches the price-list guard (the CO guard of
+    // loadAndValidateShipments answers first for any other status).
+    // The DB refuses to INSERT a processed document (m_inout_chk_restrictions_trg), so it is
+    // inserted as a draft and then moved to completed, as the real flow does.
+    ShipmentInOut shipment = createUnsavedShipmentWithNoLinkedOrder(bp, currency, "DR", false);
+    OBDal.getInstance().save(shipment);
+    OBDal.getInstance().flush();
+    shipment.setDocumentStatus("CO");
+    shipment.setProcessed(true);
     OBDal.getInstance().save(shipment);
     OBDal.getInstance().flush();
 
@@ -147,6 +155,34 @@ public class CreateDraftInvoiceHandlerPriceListRequiredIntegrationTest extends O
   }
 
   /**
+   * ETP-5709: a shipment that is not completed is refused by the CO guard of
+   * {@code loadAndValidateShipments} before anything is created or priced.
+   */
+  @Test
+  public void createFromShipmentsRefusesDraftShipmentAndPersistsNothing() {
+    BusinessPartner bp = OBDal.getInstance().get(BusinessPartner.class, BPARTNER_ID);
+    Currency currency = bp.getPriceList().getCurrency();
+    ShipmentInOut shipment = createUnsavedShipmentWithNoLinkedOrder(bp, currency, "DR", false);
+    OBDal.getInstance().save(shipment);
+    OBDal.getInstance().flush();
+
+    long invoiceCountBefore = countInvoicesFor(bp);
+
+    try {
+      new CreateDraftInvoiceHandler().createFromShipments(
+          Collections.singletonList(shipment.getId()), Collections.emptyMap(), null);
+      fail("Expected an OBException for a shipment that is not completed");
+    } catch (OBException e) {
+      String message = e.getMessage();
+      org.junit.Assert.assertTrue(message, message.contains(shipment.getDocumentNo())
+          && message.contains("no está completado") && message.contains("DR"));
+    }
+
+    assertEquals("no invoice must be persisted when the shipment is not completed",
+        invoiceCountBefore, countInvoicesFor(bp));
+  }
+
+  /**
    * Builds and persists (but never completes/invoices) a real, header-only Goods Shipment with
    * no linked Sales Order — {@code C_Order_ID} is left null, which is the branch of {@code
    * createFromShipments} that reaches {@code ensurePriceListResolved} (a single shipment WITH a
@@ -154,7 +190,8 @@ public class CreateDraftInvoiceHandlerPriceListRequiredIntegrationTest extends O
    * shipment lines are added: the guard throws before {@code addShipmentLinesToInvoice} — the
    * only step in this flow needing a live Weld/CDI container — is ever reached.
    */
-  private ShipmentInOut createUnsavedShipmentWithNoLinkedOrder(BusinessPartner bp, Currency currency) {
+  private ShipmentInOut createUnsavedShipmentWithNoLinkedOrder(BusinessPartner bp, Currency currency,
+      String documentStatus, boolean processed) {
     Client client = OBContext.getOBContext().getCurrentClient();
     Organization org = OBContext.getOBContext().getCurrentOrganization();
     Warehouse warehouse = OBDal.getInstance().get(Warehouse.class, WAREHOUSE_ID);
@@ -176,8 +213,8 @@ public class CreateDraftInvoiceHandlerPriceListRequiredIntegrationTest extends O
     shipment.setDocumentNo("GS-ETP4942-" + System.currentTimeMillis());
     shipment.setSalesTransaction(true);
     // No setSalesOrder() call — deliberately no linked Sales Order.
-    shipment.setProcessed(false);
-    shipment.setDocumentStatus("DR");
+    shipment.setProcessed(processed);
+    shipment.setDocumentStatus(documentStatus);
     shipment.setMovementType("C+");
     shipment.setEtgoCurrency(currency);
     return shipment;
