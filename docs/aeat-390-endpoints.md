@@ -61,8 +61,14 @@ The values the user types (compensations, territory percentages, monthly results
 `LIQANUAL_NoCurrentTypeAMOUNT` [661], `COMMON_TERRITORY`/`ALAVA`/`GUIPUZCOA`/`VIZCAYA`/`NAVARRA`
 [87–91], `COMMON_TERRITORY_COMPENSATION` [93], `INGRESAR_01..12`, `DEVOLVER_01..12`,
 `TOTAL_LASTPERIOD` [97], `TOTAL_LASTPERIOD_DEVOLVER` [98], `LIQANUAL_ENDCOMPENSATION` [662],
-`390REAGYP` [101], `390OTHER_UEMENBER` [112], `390USED_GOODS` [227], `390TRAVEL_AGENCY` [228],
+`390REAGYP` [101], `390USED_GOODS` [227], `390TRAVEL_AGENCY` [228],
 `390OPSUJETASCONOSS` [127], `390OPSINTRAGRUPO` [128], `OPER_MONTHLYRETURN` [111].
+
+`390OTHER_UEMENBER` (old box [112], *Entregas de bienes objeto de instalación o montaje en otros
+Estados miembros*) is NOT read: box [112] is not part of the 2025 model (AEAT record design
+DR390e2025), and classic only prints it from the obsolete 2015/2018 page-6 writers that
+`AEAT390Report2021.generateTXTPage6` replaced. A stored value is ignored. (The 2026 model
+reintroduces a box [112] with a different meaning — not covered here.)
 
 They are read from the latest declaration's `manualData.aeatInputs` (object key → string value,
 decimal comma accepted) and, for `boxes`/`generate`, overridden by query parameters of the same
@@ -107,23 +113,34 @@ Classic computes these on the bean or while writing TXT page 6
 
 ```
 [47] = [34] + Σ recargo-equivalencia cuotas + [44]   (only the RE cuotas when [34] is empty)
-[64] = Σ deductible cuotas (split element Total cuota, non-split element cuota)
+[64] = Σ deductible cuotas (split element Total cuota, non-split element cuota) + [661]
 [65] = [47] − [64]
 liquidation mode (no territory percentage):
-  [84] = [65] + [658] − [661]
+  [84] = [65] + [658]
   [85] = LIQANUAL_COMPENSATION (only when ≥ 0.01)
-  [86] = [84] + [659] − [85]
+  [86] = [84] + [659] − LIQANUAL_COMPENSATION
 territory mode (any of [87]–[91] > 0):
-  [84] = [65] + [658]            (classic does not subtract [661] here)
+  [84] = [65] + [661] + [658]    (classic does not take [661] off this slot)
   [92] = round2([84] × [87] / 100), HALF_UP
   [94] = [92] + [659] − [93]
 [95] = Σ INGRESAR_01..12      [96] = Σ DEVOLVER_01..12
 [108] = [99]+[653]+[103]+[104]+[105]+[110]+[125]+[126] − [106] − [107]
-        + [127] + [128] + [101] + [227] + [228]          ([112] is not added, as in classic)
+        + [127] + [128] + [101] + [227] + [228]
 ```
 
-Classic quirk not reproduced: in territory mode the TXT also prints the liquidation-section
-[84]/[86] slots as `0 − [661]`.
+[661] (*cuotas deducibles en virtud de resolución administrativa o sentencia firmes con tipos no
+vigentes*) is not in classic's bean totals (`SumDeducciones`, `ResRegGeneral`): the TXT writer
+adds it to [64] and takes it off [65] while printing page 4 (`AEAT390Report2018.generateTXTPage4`)
+and takes it off the liquidation [84]/[86] while printing page 6
+(`AEAT390Report2021.generateTXTPage6`). The preview reproduces what the file prints, so in
+liquidation mode [84] = [65] + [658] holds.
+
+Classic quirks with [661] in territory mode:
+- the territory [84] (and so [92]/[94]) is printed from `Administraciones.SumResultados`, which
+  never subtracts [661], so the file shows [84] = [65] + [661] + [658]. The preview shows the same
+  value (screen = file); it is a classic inconsistency, not a GO formula choice.
+- not reproduced: the TXT also prints the liquidation-section [84]/[86] slots as `0 − [661]`; the
+  preview only reports the territory [84].
 
 ## `GET /fiscal390/generate`
 

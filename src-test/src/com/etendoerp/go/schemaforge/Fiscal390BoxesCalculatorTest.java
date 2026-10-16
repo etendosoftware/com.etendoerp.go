@@ -307,9 +307,11 @@ public class Fiscal390BoxesCalculatorTest {
     assertBox(r, 99, "1700");
     assertBox(r, 106, "300");
     assertNull("negative base is dropped, as in classic", r.boxes.get(103));
-    // 1700 - 300 + 10 + 20 + 30 + 40 + 50; [112] is echoed but not added
+    // 1700 - 300 + 10 + 20 + 30 + 40 + 50
     assertBox(r, 108, "1550");
-    assertBox(r, 112, "999");
+    // [112] is not in the 2025 model and classic never writes it: the obsolete input is ignored
+    assertNull(r.boxes.get(112));
+    assertFalse(Fiscal390DerivedBoxes.INPUT_KEYS.contains("390OTHER_UEMENBER"));
   }
 
   /** BI-and-cuota taxable parameters place the TipoX pair. */
@@ -329,7 +331,10 @@ public class Fiscal390BoxesCalculatorTest {
 
   // ── derived boxes ───────────────────────────────────────────────────
 
-  /** Liquidation mode: [84] = 65+658-661, [86] = 84+659-85, inputs echoed. */
+  /**
+   * Liquidation mode, as the classic file writes it: [661] is added to [64] and taken off [65]
+   * (TXT page 4), then [84] = 65+658 and [86] = 84+659-85 carry it with no second subtraction.
+   */
   @Test
   public void testLiquidationModeBoxes84To86() {
     Fiscal390BoxesCalculator.Result r = Fiscal390BoxesCalculator.compute(typicalYear(),
@@ -337,7 +342,9 @@ public class Fiscal390BoxesCalculatorTest {
             "LIQANUAL_VAT_IMPORT", "40", "LIQANUAL_COMPENSATION", "100"));
 
     assertEquals(Fiscal390DerivedBoxes.MODE_LIQUIDATION, r.mode);
-    assertBox(r, 84, "260");   // 256.18 + 10 - 6.18
+    assertBox(r, 64, "89.68");  // 83.50 + 6.18
+    assertBox(r, 65, "250");    // 339.68 - 89.68
+    assertBox(r, 84, "260");   // 250 + 10
     assertBox(r, 85, "100");
     assertBox(r, 86, "200");   // 260 + 40 - 100
     assertBox(r, 658, "10");
@@ -356,7 +363,11 @@ public class Fiscal390BoxesCalculatorTest {
     assertNull(boxes.get(85));
   }
 
-  /** Territory mode: [84] = 65+658, [92] = 84*87/100, [94] = 92+659-93; no [85]/[86]. */
+  /**
+   * Territory mode: [64]/[65] carry [661] as in liquidation mode, but the territory [84] is
+   * classic's Administraciones.SumResultados, which never subtracts it ([84] = 65+661+658, the
+   * documented classic quirk); [92] = 84*87/100, [94] = 92+659-93; no [85]/[86].
+   */
   @Test
   public void testTerritoryModeBoxes84To94() {
     Fiscal390BoxesCalculator.Result r = Fiscal390BoxesCalculator.compute(typicalYear(),
@@ -365,7 +376,9 @@ public class Fiscal390BoxesCalculatorTest {
             "COMMON_TERRITORY_COMPENSATION", "5"));
 
     assertEquals(Fiscal390DerivedBoxes.MODE_TERRITORY, r.mode);
-    assertBox(r, 84, "266.18");  // 256.18 + 10, no 661 subtraction here
+    assertBox(r, 64, "89.68");   // 83.50 + 6.18
+    assertBox(r, 65, "250");     // 339.68 - 89.68
+    assertBox(r, 84, "266.18");  // 339.68 - 83.50 + 10: the file does not take 661 off here
     assertBox(r, 87, "60");
     assertBox(r, 91, "40");
     assertBox(r, 92, "159.71");  // 266.18 * 60 / 100 = 159.708 -> HALF_UP
@@ -448,6 +461,8 @@ public class Fiscal390BoxesCalculatorTest {
     assertEquals(Integer.valueOf(62), Fiscal390BoxLayout.box("RectifDeducciones", "TipoX", "Cuota"));
     assertEquals(Integer.valueOf(99), Fiscal390BoxLayout.box("OpRegGeneral"));
     assertNull(Fiscal390BoxLayout.box("RegOrdinario", "Tipo8", "BI"));
+    assertNull("[112] is not printed from 2021 on", Fiscal390BoxLayout.box(
+        "EntregasBienesInstalacionOtrosEM"));
   }
 
   /**

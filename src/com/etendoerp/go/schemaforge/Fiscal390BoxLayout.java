@@ -49,6 +49,10 @@ import java.util.Map;
  *
  * <p>Note: box 632 is where classic writes {@code AdqIntracomunitariasBienesInversion.Tipo10.Cuota};
  * the reference data lists "662" for that parameter, a typo in metadata that is never read.
+ *
+ * <p>Box 112 ({@code EntregasBienesInstalacionOtrosEM}) is deliberately absent: only the 2015 and
+ * 2018 page-6 writers print it, and {@code AEAT390Report2021#generateTXTPage6} replaced that page
+ * without calling them, so no layout from 2021 on (nor the AEAT DR390e2025 record design) has it.
  */
 final class Fiscal390BoxLayout {
 
@@ -200,8 +204,6 @@ final class Fiscal390BoxLayout {
     put(m, "ComRegAgricGanadPesca.TipoX.Cuota", 61);
     // EntregasBienesInmuebles
     put(m, "EntregasBienesInmuebles", 106);
-    // EntregasBienesInstalacionOtrosEM
-    put(m, "EntregasBienesInstalacionOtrosEM", 112);
     // EntregasBienesInversion
     put(m, "EntregasBienesInversion", 107);
     // EntregasCriterioCajaBase

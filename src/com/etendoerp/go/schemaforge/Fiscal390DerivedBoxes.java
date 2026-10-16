@@ -38,20 +38,28 @@ import org.apache.commons.lang3.StringUtils;
  * <pre>
  * [47]  = [34] + sum of every recargo-equivalencia cuota + [44]     (only RE cuotas when [34] is empty)
  * [64]  = sum of the deductible cuotas (each split element's Total cuota, each non-split element's cuota)
+ *         + [661]
  * [65]  = [47] - [64]
  * LIQUIDATION mode (no territory percentage given):
- *   [84] = [65] + [658] - [661]
+ *   [84] = [65] + [658]
  *   [85] = LIQANUAL_COMPENSATION (only when &gt;= 0.01)
- *   [86] = [65] + [658] + [659] - [85] - [661]   (= [84] + [659] - [85])
+ *   [86] = [84] + [659] - LIQANUAL_COMPENSATION
  * TERRITORY mode (any of [87]-[91] &gt; 0):
- *   [84] = [65] + [658]                          (classic does not subtract [661] here)
+ *   [84] = [65] + [661] + [658]                (classic does not take [661] off this slot)
  *   [92] = round2([84] * [87] / 100)            (HALF_UP)
  *   [94] = [92] + [659] - [93]
  * [95]  = INGRESAR_01 + ... + INGRESAR_12
  * [96]  = DEVOLVER_01 + ... + DEVOLVER_12
  * [108] = invoice volume ([99]+[653]+[103]+[104]+[105]+[110]+[125]+[126] - [106] - [107])
- *         + [127] + [128] + [101] + [227] + [228]  ([112] is NOT added, as in classic)
+ *         + [127] + [128] + [101] + [227] + [228]
  * </pre>
+ * [661] (cuotas deducibles por resolución firme con tipos no vigentes) is NOT part of the bean's
+ * {@code SumDeducciones}/{@code ResRegGeneral}: classic adds it to [64] and takes it off [65] only
+ * while writing TXT page 4 ({@code AEAT390Report2018#generateTXTPage4}), and takes it off the
+ * liquidation [84]/[86] while writing page 6 ({@code AEAT390Report2021#generateTXTPage6}). The
+ * territory [84] (and therefore [92]/[94]) is printed from {@code Administraciones.SumResultados},
+ * which never subtracts it — so in territory mode with a [661] the file is internally inconsistent
+ * ([84] != [65] + [658]). The preview prints exactly what the file prints for every box it shows.
  * Known classic quirk NOT reproduced: in TERRITORY mode the TXT also prints the liquidation-mode
  * [84]/[86] slots as {@code 0 - [661]}; the preview only reports the territory [84].
  */
@@ -124,8 +132,11 @@ final class Fiscal390DerivedBoxes {
       Map<String, BigDecimal> inputs) {
     BigDecimal box47 = figures.totalCuotas34 == null ? figures.recargoCuotas
         : figures.totalCuotas34.add(figures.recargoCuotas).add(figures.modRecargoCuota);
-    BigDecimal box64 = figures.deductibleCuotas;
-    BigDecimal box65 = box47.subtract(box64);
+    BigDecimal noCurrentType = in(inputs, LIQANUAL_NO_CURRENT_TYPE_AMOUNT);
+    // Classic's ResRegGeneral: [47] minus the deductible cuotas, before [661].
+    BigDecimal resRegGeneral = box47.subtract(figures.deductibleCuotas);
+    BigDecimal box64 = figures.deductibleCuotas.add(noCurrentType);
+    BigDecimal box65 = resRegGeneral.subtract(noCurrentType);
     put(boxes, 47, box47);
     put(boxes, 64, box64);
     put(boxes, 65, box65);
@@ -141,16 +152,15 @@ final class Fiscal390DerivedBoxes {
       for (Map.Entry<String, Integer> echo : TERRITORY_ECHO_BOXES.entrySet()) {
         putIfNonZero(boxes, echo.getValue(), in(inputs, echo.getKey()));
       }
-      BigDecimal box84 = box65.add(regularization);
+      BigDecimal box84 = resRegGeneral.add(regularization);
       BigDecimal box92 = box84.multiply(in(inputs, COMMON_TERRITORY))
           .divide(ONE_HUNDRED, 2, RoundingMode.HALF_UP);
       put(boxes, 84, box84);
       put(boxes, 92, box92);
       put(boxes, 94, box92.add(vatImport).subtract(in(inputs, COMMON_TERRITORY_COMPENSATION)));
     } else {
-      BigDecimal noCurrentType = in(inputs, LIQANUAL_NO_CURRENT_TYPE_AMOUNT);
       BigDecimal compensation = in(inputs, LIQANUAL_COMPENSATION);
-      BigDecimal box84 = box65.add(regularization).subtract(noCurrentType);
+      BigDecimal box84 = box65.add(regularization);
       put(boxes, 84, box84);
       if (compensation.compareTo(ONE_CENT) >= 0) {
         put(boxes, 85, compensation);
@@ -237,7 +247,6 @@ final class Fiscal390DerivedBoxes {
     m.put("TOTAL_LASTPERIOD", 97);
     m.put("TOTAL_LASTPERIOD_DEVOLVER", 98);
     m.put("LIQANUAL_ENDCOMPENSATION", 662);
-    m.put("390OTHER_UEMENBER", 112);
     m.put(REAGYP, 101);
     m.put(USED_GOODS, 227);
     m.put(TRAVEL_AGENCY, 228);
