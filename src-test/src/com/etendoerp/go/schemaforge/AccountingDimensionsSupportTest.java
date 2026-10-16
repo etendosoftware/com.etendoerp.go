@@ -45,12 +45,14 @@ import java.util.function.Supplier;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.After;
+import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.mockito.junit.MockitoJUnitRunner;
 import org.mockito.stubbing.OngoingStubbing;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.plm.Product;
 import org.openbravo.model.financialmgmt.accounting.Costcenter;
@@ -79,6 +81,8 @@ import org.openbravo.model.project.Project;
  * <p>Both flat queries are driven through a mocked JDBC {@link Connection}, told apart by whether
  * they scope through {@code fin_financial_account}. JUnit 4 + the Silent runner mirror the sibling
  * handler tests, and {@code clearInlineMocks()} keeps the module's single test JVM heap flat.
+ *
+ * @covers com.etendoerp.go.schemaforge.AccountingDimensionsSupport
  */
 @RunWith(MockitoJUnitRunner.Silent.class)
 public class AccountingDimensionsSupportTest {
@@ -99,6 +103,16 @@ public class AccountingDimensionsSupportTest {
    * Releases the inline mock-maker references created during the test. Without this they accumulate
    * across the module's single test JVM and push the fork past its heap cap.
    */
+  /**
+   * The rule tests rely on there being no session context: with none, {@code TenantOwnership}
+   * accepts the mocked entities instead of checking their tenant. Stated here so a context another
+   * class left on the thread cannot make them fail in the shared test JVM.
+   */
+  @Before
+  public void startWithoutSessionContext() {
+    OBContext.setOBContext((OBContext) null);
+  }
+
   @After
   public void clearMocks() {
     Mockito.framework().clearInlineMocks();

@@ -22,13 +22,20 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
 import org.junit.jupiter.api.Test;
+import org.mockito.MockedStatic;
 import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.scheduling.ProcessBundle;
 
+import com.etendoerp.go.common.GoRuntimeProperties;
 import com.etendoerp.go.onboarding.pool.FakeTenantPoolStore;
+import com.etendoerp.go.onboarding.pool.TenantPoolConfigTest;
 import com.etendoerp.go.onboarding.pool.TenantPoolFiller;
 
-/** ETP-5389 — the filler process is inert while the flag is off. */
+/**
+ * ETP-5389 — the filler process is inert while the flag is off.
+ *
+ * @covers com.etendoerp.go.rest.TenantPoolFillProcess
+ */
 public class TenantPoolFillProcessTest {
 
   @Test
@@ -47,7 +54,10 @@ public class TenantPoolFillProcessTest {
     ProcessBundle bundle = mock(ProcessBundle.class, org.mockito.Mockito.CALLS_REAL_METHODS);
     TestProcess process = new TestProcess(true);
 
-    process.doExecute(bundle);
+    // The filler is asked for the configured pool size; read as unset, that is the default of 3.
+    try (MockedStatic<GoRuntimeProperties> props = TenantPoolConfigTest.poolSizeUnset()) {
+      process.doExecute(bundle);
+    }
 
     assertTrue(process.fillerCreated);
     OBError result = (OBError) bundle.getResult();
