@@ -70,9 +70,17 @@ import com.etendoerp.psd2.bank.integration.data.PisPayment;
 
 /**
  * Shared {@code NeoHandler} for the payment Reactivate, Confirm, and Remove actions, used
- * by both the payment-in (cobros) and payment-out (pagos) windows. Any payment header
- * entity that registers {@code JAVA_QUALIFIER = 'payment-reactivate'} on its
- * {@code ETGO_SF_ENTITY} record routes through this handler.
+ * by both the payment-in (cobros) and payment-out (pagos) windows.
+ *
+ * <p><b>Binding.</b> The behaviour lives here; the {@code (spec, entity)} binding lives in the two
+ * concrete subclasses, {@link PaymentInReactivateHandler} ({@code payment-in/finPayment}) and
+ * {@link PaymentOutReactivateHandler} ({@code payment-out/header}), each carrying its own
+ * {@link com.etendoerp.go.schemaforge.NeoExtension} because the annotation is not repeatable (the
+ * same shape {@code SalesOrderLineHandler}/{@code SalesQuotationLineHandler} use). Both ETGO_SF_ENTITY
+ * rows still carry {@code JAVA_QUALIFIER = 'payment-reactivate'} on purpose: readers that look the
+ * qualifier up directly instead of going through {@code NeoExtensionDispatcher} keep resolving this
+ * class, whose behaviour the subclasses inherit unchanged, so those surfaces behave exactly as
+ * before. See {@code neo-headless.md} §5.3.a.
  *
  * <p><b>Reactivate ({@code etprReactivatePayment}):</b> The backing process
  * {@code com.etendoerp.payment.removal.handler.ReactivatePayment} requires a mandatory

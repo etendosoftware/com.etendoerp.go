@@ -54,9 +54,8 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * (ETP-4239, converting the former report-style spec from ETP-4096).
  *
  * <p>It is registered against the {@code account} header entity of the
- * {@code financial-account} spec via {@code ETGO_SF_ENTITY.Java_Qualifier =
- * "financialAccountHeaderHandler"}, so it runs as a pre/post hook around the
- * generic CRUD persistence — the same way {@code SalesInvoiceHeaderHandler}
+ * {@code financial-account} spec (see the binding paragraph below), so it runs as a pre/post hook
+ * around the generic CRUD persistence — the same way {@code SalesInvoiceHeaderHandler}
  * does. Both the HTTP CRUD path ({@code NeoCrudHandler.handleWithHooks}) and the
  * MCP write path ({@code McpToolRouter}) invoke {@link #handle(NeoContext)}.
  *
@@ -87,7 +86,15 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * semantics still exist but moved onto the update path: a {@code PATCH
  * {"active": false}} runs the same open-reconciliations guard the old DELETE-based
  * archive used to run (see {@link #validateAndEnrichUpdate}).
+ *
+ * <p><b>Binding.</b> Resolved by {@link NeoExtension} on every channel, ahead of the row's
+ * {@code Java_Qualifier}. The row still carries {@code financialAccountHeaderHandler}, on purpose:
+ * several readers look the qualifier up directly instead of going through
+ * {@code NeoExtensionDispatcher}, and they keep resolving this same class (its own {@code @Named}
+ * is that qualifier), so those surfaces behave exactly as before. See {@code neo-headless.md}
+ * §5.3.a.
  */
+@NeoExtension(spec = "financial-account", entity = "account")
 @Named("financialAccountHeaderHandler")
 public class FinancialAccountHandler implements NeoHandler {
 

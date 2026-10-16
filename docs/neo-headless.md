@@ -4614,6 +4614,35 @@ catch them offline instead of in production.
 > which was accurate as the acceptance criterion of the step that introduced it. The direction
 > above supersedes it for **new** code; the additive runtime behaviour it describes is unchanged.
 
+**Migrated so far (ETP-5588).** Six `(spec, entity)` pairs now bind by annotation, on the class that
+already served them:
+
+| `(spec, entity)` | class |
+|---|---|
+| `financial-account` / `account` | `FinancialAccountHandler` |
+| `sales-invoice` / `header` | `SalesInvoiceHeaderHandler` |
+| `purchase-invoice` / `header` | `PurchaseInvoiceHeaderHandler` |
+| `open-close-period-control` / `periodControl` | `PeriodOpenCloseHandler` |
+| `payment-in` / `finPayment` | `PaymentInReactivateHandler` |
+| `payment-out` / `header` | `PaymentOutReactivateHandler` |
+
+`ReactivatePaymentHandler` serves two entities, and the annotation is not repeatable, so its
+behaviour stays in that class and each entity is bound by a concrete (empty) subclass — the same
+shape `SalesOrderLineHandler`/`SalesQuotationLineHandler` use (§4.12.20).
+
+**Every one of those `ETGO_SF_ENTITY` rows keeps its `JAVA_QUALIFIER`, on purpose.** Several readers
+resolve the qualifier *directly*, without going through `NeoExtensionDispatcher`: the REST CRUD gate
+(`NeoCrudHandler.dispatchCrudRequestInternal` only calls `handleWithHooks` when a qualifier exists),
+the MCP read post-hook (`McpHookExecutor.resolveEntityHandler`), `NeoFieldFilter`'s read-only
+rejection and `protectedCreateCalloutFields` (§4.12.20). For the four single-class migrations the
+qualifier names the same class the annotation does, so those readers resolve exactly what they
+resolved before and no disagreement is logged. For the payment split they name the shared
+`ReactivatePaymentHandler`, whose behaviour the two subclasses inherit unchanged; the price is one
+`(warn)` ERROR line per resolution from `NeoExtensionIndex.warnOnQualifierDisagreement` and one
+CONFLICT line from `make extension-parity` for those two pairs — the same benign cost the sales-line
+customizations already pay. Clearing the qualifier is therefore *not* the migration: it would switch
+the customization off on the REST single path and drop the field filter on MCP reads.
+
 #### 5.3.b The legacy binding (`@Named` + `Java_Qualifier`)
 
 Still resolved, still supported, documented here because most existing handlers use it.
