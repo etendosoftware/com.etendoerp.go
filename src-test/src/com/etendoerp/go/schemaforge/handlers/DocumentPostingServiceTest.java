@@ -213,6 +213,45 @@ public class DocumentPostingServiceTest {
   }
 
   /**
+   * ETP-5577: a document dated in a period that is not open ({@code STATUS_PeriodClosed}) is
+   * re-localized like a locked one and names {@code PeriodNotAvailable}, so the SPA can send the
+   * user to open the period.
+   */
+  @Test
+  public void postReLocalizesPeriodClosedMessageAndSendsItsKey() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    Connection con = mock(Connection.class);
+    when(conn.getTransactionConnection()).thenReturn(con);
+
+    AcctServer acct = mock(AcctServer.class);
+    acct.errors = 0;
+    when(acct.post(eq("rec-1"), eq(false), any(), any(), any())).thenReturn(false);
+    when(acct.getStatus()).thenReturn(AcctServer.STATUS_PeriodClosed);
+    OBError err = new OBError();
+    err.setMessage("Period does not exist or is not open");
+    when(acct.getMessageResult()).thenReturn(err);
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      stubObContext(obc, "es_ES");
+      acctStatic
+          .when(() -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(acct);
+      msgMock.when(() -> OBMessageUtils.messageBD("PeriodNotAvailable"))
+          .thenReturn("El Periodo no existe o no está abierto");
+
+      DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
+
+      assertFalse(r.ok());
+      assertEquals("El Periodo no existe o no está abierto", r.message());
+      assertEquals(List.of("PeriodNotAvailable"), r.messageKeys());
+    }
+  }
+
+  /**
    * ETP-5529: when the GO-locale lookup yields nothing, the locked-document failure keeps core's
    * own text (never an empty message) and still names its identity.
    */
@@ -651,9 +690,9 @@ public class DocumentPostingServiceTest {
     acct.errors = 1;
     acct.C_BPartner_ID = "bp-1";
     when(acct.post(anyString(), eq(false), any(), any(), any())).thenReturn(true);
-    when(acct.getStatus()).thenReturn(AcctServer.STATUS_PeriodClosed);
+    when(acct.getStatus()).thenReturn(AcctServer.STATUS_NotBalanced);
     OBError err = new OBError();
-    err.setMessage("Period is closed.");
+    err.setMessage("Document is not balanced.");
     when(acct.getMessageResult()).thenReturn(err);
 
     try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
@@ -665,7 +704,7 @@ public class DocumentPostingServiceTest {
       DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
 
       assertFalse(r.ok());
-      assertEquals("Period is closed.", r.message());
+      assertEquals("Document is not balanced.", r.message());
       assertTrue(r.messageKeys().isEmpty());
       assertTrue(r.messageParams().isEmpty());
     }
@@ -771,9 +810,9 @@ public class DocumentPostingServiceTest {
     AcctServer acct = mock(AcctServer.class);
     acct.errors = 1;
     when(acct.post(anyString(), eq(false), any(), any(), any())).thenReturn(true);
-    when(acct.getStatus()).thenReturn(AcctServer.STATUS_PeriodClosed);
+    when(acct.getStatus()).thenReturn(AcctServer.STATUS_NotBalanced);
     OBError err = new OBError();
-    err.setMessage("Period is closed.");
+    err.setMessage("Document is not balanced.");
     when(acct.getMessageResult()).thenReturn(err);
 
     try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
@@ -786,7 +825,7 @@ public class DocumentPostingServiceTest {
       DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
 
       assertFalse(r.ok());
-      assertEquals("Period is closed.", r.message());
+      assertEquals("Document is not balanced.", r.message());
       msgMock.verify(() -> OBMessageUtils.messageBD("InvalidAccount"), never());
     }
   }

@@ -20,13 +20,17 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
 
 import java.io.PrintWriter;
 import java.io.StringWriter;
 
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.mockito.MockedStatic;
 import org.openbravo.base.exception.OBException;
+import org.openbravo.dal.service.OBDal;
 import org.openbravo.service.db.ImportResult;
 
 import com.etendoerp.go.onboarding.OnboardingAccountingWiringService;
@@ -178,6 +182,48 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
         < ndjson.indexOf("Organization is ready"));
     assertTrue(ndjson.indexOf("Organization is ready")
         < ndjson.indexOf("Fiscal data ready"));
+  }
+
+  @Test
+  public void testEnsureOnboardingDatasetNormalizesPeriodControlsAfterOrgReady() {
+    CountingMarkOrgReadyService markReadyService = new CountingMarkOrgReadyService();
+    TestServlet servlet = new TestServlet(new SuccessfulImportService(),
+        new CountingSequenceGeneratorService(), markReadyService,
+        new CountingFiscalDataSetupService());
+    int[] readyCountAtNormalize = { -1 };
+    servlet.onboardingPeriodControlService = new NoOpPeriodControlService() {
+      @Override
+      public void normalize(String clientId, String orgId, String adminUserId,
+          String adminRoleId) {
+        readyCountAtNormalize[0] = markReadyService.markCount;
+      }
+    };
+
+    assertTrue(servlet.ensureOnboardingDataset(new PrintWriter(new StringWriter()), "CLIENT-1",
+        "ORG-1", "USER-1", "ROLE-1", null));
+    assertEquals(1, readyCountAtNormalize[0]);
+  }
+
+  @Test
+  public void testEnsureOnboardingDatasetFailsWhenPeriodControlNormalizationFails() {
+    TestServlet servlet = new TestServlet(new SuccessfulImportService(),
+        new CountingSequenceGeneratorService(), new CountingMarkOrgReadyService(),
+        new CountingFiscalDataSetupService());
+    servlet.onboardingPeriodControlService = new NoOpPeriodControlService() {
+      @Override
+      public void normalize(String clientId, String orgId, String adminUserId,
+          String adminRoleId) {
+        throw new OBException("normalize boom");
+      }
+    };
+    StringWriter output = new StringWriter();
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(mock(OBDal.class));
+      assertFalse(servlet.ensureOnboardingDataset(new PrintWriter(output), "CLIENT-1", "ORG-1",
+          "USER-1", "ROLE-1", null));
+    }
+    assertTrue(output.toString().contains("normalize boom"));
   }
 
   @Test
@@ -824,10 +870,15 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
     }
   }
 
-  private static final class NoOpPeriodControlService extends OnboardingPeriodControlService {
+  private static class NoOpPeriodControlService extends OnboardingPeriodControlService {
     @Override
     public void wire(String clientId, String orgId, String adminUserId, String adminRoleId) {
       // no-op: DAL wiring is covered by OnboardingPeriodControlServiceTest
+    }
+
+    @Override
+    public void normalize(String clientId, String orgId, String adminUserId, String adminRoleId) {
+      // no-op: covered by OnboardingPeriodControlServiceTest and FiscalCalendarSupport
     }
   }
 

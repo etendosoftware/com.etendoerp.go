@@ -65,8 +65,15 @@ import org.openbravo.model.common.enterprise.Organization;
 
 import com.auth0.jwt.interfaces.Claim;
 import com.auth0.jwt.interfaces.DecodedJWT;
+import com.etendoerp.go.auth.DalWarehouseResolver;
+import com.etendoerp.go.auth.EnvironmentRequestAuthenticator;
+import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.schemaforge.data.SupportConversation;
 import com.etendoerp.go.schemaforge.data.SupportMessage;
+import com.etendoerp.go.session.GoSessionAuthenticator;
+import com.etendoerp.go.session.GoSessionRoleReconciler;
+import com.etendoerp.go.session.GoSessionService;
+import com.etendoerp.go.session.JdbcGoSessionStore;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
@@ -107,6 +114,22 @@ class SupportConversationsServletTest {
   void restoreRealBackgroundTasks() {
     SupportConversationsServlet.backgroundTaskRunner =
         (threadName, task) -> new Thread(task, threadName).start();
+  }
+
+  /** ETP-5270 — the pipeline now checks a JWT's role against {@code AD_User_Roles}; this class
+   * mocks the DAL per test, so the role lookups are swapped for a fake that finds the role held.
+   * Everything else is the production wiring. */
+  @BeforeEach
+  void useFakeRoleLookups() {
+    SupportConversationsServlet.authenticator = new EnvironmentRequestAuthenticator(
+        new GoSessionAuthenticator(new GoSessionService(new JdbcGoSessionStore())),
+        new TenantEnvironmentLifecycleService(), new DalWarehouseResolver(),
+        mock(GoSessionRoleReconciler.class));
+  }
+
+  @AfterEach
+  void restoreRealRoleLookups() {
+    SupportConversationsServlet.authenticator = new EnvironmentRequestAuthenticator();
   }
 
   private static HttpServletResponse mockResponse(StringWriter capture) throws Exception {

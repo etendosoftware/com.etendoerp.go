@@ -1,0 +1,38 @@
+<?xml version="1.0"?>
+  <database name="FUNCTION ETGO_STORAGE_DETAIL_VALUATION">
+    <function name="ETGO_STORAGE_DETAIL_VALUATION" type="NUMERIC" volatility="STABLE">
+      <parameter name="p_m_storage_detail_id" type="VARCHAR" mode="in">
+        <default/>
+      </parameter>
+      <body><![CDATA[v_result NUMBER;
+BEGIN
+  -- ETP-5555. Feeds M_Storage_Detail.EM_Etgo_Valuation (Computation_Mode = 'S', Refresh_Mode = 'S').
+  --
+  -- The unit cost is NOT redefined here: it is whatever etgo_product_cost() returns for
+  -- the row's product, the same function behind M_Product.EM_Etgo_Cost (product list) and
+  -- the stock report. Changing that function changes every surface at once (then run
+  -- ad_scd_rebuild for the stored columns).
+  --
+  -- TOTAL FUNCTION. Refresh_Mode = 'S' runs inside the transaction that wrote the source
+  -- row, so an exception here would roll that transaction back. Every edge case resolves to
+  -- a value, never to an error: a null id or an unknown id answers null, and a product with
+  -- no cost answers null ("no cost" is shown empty, never as 0).
+  -- Value: QtyOnHand of the row x the product's unit cost. Null when the product has no cost.
+
+  IF p_m_storage_detail_id IS NULL THEN
+    RETURN NULL;
+  END IF;
+
+  SELECT sd.qtyonhand * etgo_product_cost(sd.m_product_id) INTO v_result
+  FROM   m_storage_detail sd
+  WHERE  sd.m_storage_detail_id = p_m_storage_detail_id;
+
+  RETURN v_result;
+
+EXCEPTION
+  WHEN OTHERS THEN
+    RETURN NULL;
+END ETGO_STORAGE_DETAIL_VALUATION
+]]></body>
+    </function>
+  </database>

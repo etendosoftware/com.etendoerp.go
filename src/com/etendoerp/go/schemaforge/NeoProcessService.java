@@ -59,6 +59,7 @@ import org.openbravo.service.db.DalBaseProcess;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
+import com.etendoerp.go.schemaforge.util.NeoMessageTranslator;
 
 /**
  * Service for executing AD_Process definitions via the Neo headless API.
@@ -851,8 +852,8 @@ public class NeoProcessService {
       }
 
       // For DocAction processes: set the action on the document before calling
-      String docAction = params.optString("docAction", null);
-      if (docAction != null && !docAction.isBlank()) {
+      String docAction = DocActionResolution.requestedDocAction(params);
+      if (docAction != null) {
         String tabId = params.optString(INP_TAB_ID, null);
         if (tabId != null) {
           setDocAction(tabId, recordId, docAction);
@@ -866,7 +867,7 @@ public class NeoProcessService {
       while (keys.hasNext()) {
         String key = keys.next();
         if (RECORD_ID.equals(key) || INP_RECORD_ID.equals(key)
-            || INP_TAB_ID.equals(key) || "docAction".equals(key)) {
+            || INP_TAB_ID.equals(key) || PARAM_DOC_ACTION.equals(key)) {
           continue;
         }
         if (procParams == null) {
@@ -887,15 +888,11 @@ public class NeoProcessService {
 
   private static void setDocAction(String tabId, String recordId, String docAction) {
     try {
-      Tab tab = OBDal.getInstance().get(Tab.class, tabId);
-      if (tab != null && tab.getTable() != null) {
-        String dalEntityName = tab.getTable().getName();
-        BaseOBObject rec = OBDal.getInstance().get(dalEntityName, recordId);
-        if (rec != null && rec.getEntity().hasProperty("documentAction")) {
-          rec.set("documentAction", docAction);
-          OBDal.getInstance().save(rec);
-          OBDal.getInstance().flush();
-        }
+      BaseOBObject rec = DocActionResolution.loadDocActionRecord(tabId, recordId);
+      if (rec != null) {
+        rec.set(DocActionResolution.PROPERTY_DOCUMENT_ACTION, docAction);
+        OBDal.getInstance().save(rec);
+        OBDal.getInstance().flush();
       }
     } catch (Exception e) {
       log.warn("Could not set docAction on record: {}", e.getMessage());
@@ -1113,6 +1110,14 @@ public class NeoProcessService {
           safeParseTranslation(StringUtils.defaultString(error.getMessage())));
 
       if (ERROR.equalsIgnoreCase(error.getType())) {
+        // ETP-5577 — a classic process hands its error over already translated (ProcessInvoiceUtil,
+        // FIN_AddPaymentFromJournal), so a period refusal is recognised from its text: the SPA
+        // keys the "open the period" way out, and its own wording, on this identity.
+        List<String> periodKeys = NeoMessageTranslator.recognizeMessageKeys(
+            error.getMessage(), NeoMessageTranslator.PERIOD_REFUSAL_KEYS);
+        if (!periodKeys.isEmpty()) {
+          result.put(MESSAGE_KEYS, new JSONArray(periodKeys));
+        }
         return new NeoResponse(400, result);
       }
       return NeoResponse.ok(result);

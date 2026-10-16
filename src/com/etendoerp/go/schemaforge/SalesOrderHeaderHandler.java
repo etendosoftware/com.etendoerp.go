@@ -17,10 +17,14 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.util.LinkedHashMap;
+import java.util.Map;
+
 import javax.inject.Inject;
 import javax.inject.Named;
 
 import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
 
 /**
  * NeoHandler for the Sales Order header entity.
@@ -41,6 +45,11 @@ import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
  *
  * <p>GET post-hook (hasLinkedDocuments, plus the ETP-5295 needsPrimaryDoc/needsInvoiceDoc
  * annotations) is inherited from {@link AbstractOrderHeaderHandler}.
+ *
+ * <p>ETP-5704: Reactivate ({@code DocAction} = {@code RE}) on an order with linked shipments or
+ * invoices is refused before the button runs — see {@link OrderReactivationGuard}. Same rule as
+ * the {@code hasLinkedDocuments} flag the SPA hides the action with; REST and MCP both reach this
+ * pre-hook.
  */
 @Named("salesOrderHeaderHandler")
 public class SalesOrderHeaderHandler extends AbstractOrderHeaderHandler {
@@ -60,12 +69,33 @@ public class SalesOrderHeaderHandler extends AbstractOrderHeaderHandler {
   @Inject
   private TotalDiscountService totalDiscountService;
 
+  /**
+   * The actions this header serves through its delegates, declared for agents (ETP-5709):
+   * {@code createShipment}, {@code createDraftInvoice} and {@code cloneRecord}. Published by the
+   * MCP next to the AD buttons; REST and the SPA do not read it.
+   */
+  @Override
+  public Map<String, NeoActionContract> actionContracts() {
+    Map<String, NeoActionContract> contracts = new LinkedHashMap<>();
+    contracts.put(CreateShipmentHandler.CONTRACT.getName(), CreateShipmentHandler.CONTRACT);
+    contracts.put(CreateDraftInvoiceHandler.ORDER_CONTRACT.getName(),
+        CreateDraftInvoiceHandler.ORDER_CONTRACT);
+    contracts.put(NeoCloneRecordHandler.CONTRACT.getName(), NeoCloneRecordHandler.CONTRACT);
+    return contracts;
+  }
+
   @Override
   public NeoResponse handle(NeoContext context) {
     NeoResponse paymentMethodSelector = PaymentMethodSelectorSupport.handleIfPaymentMethodSelector(context,
         PaymentMethodSelectorSupport.DirectionFallback.WINDOW);
     if (paymentMethodSelector != null) {
       return paymentMethodSelector;
+    }
+    // ETP-5704: Reactivate is refused when the order has linked shipments or invoices — the rule
+    // the SPA already applies by hiding the action, now enforced for every channel.
+    NeoResponse reactivationRefusal = OrderReactivationGuard.refuseIfLinkedDocuments(context);
+    if (reactivationRefusal != null) {
+      return reactivationRefusal;
     }
     AbstractOrderHeaderHandler.mirrorAccountingDate(context);
     AbstractOrderHeaderHandler.applyTotalDiscountBeforeComplete(context, totalDiscountService, false);
