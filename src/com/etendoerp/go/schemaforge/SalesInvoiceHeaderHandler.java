@@ -71,7 +71,15 @@ import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
  *       {@link InvoicePendingResolver} + {@link InOutFollowUpCreator} ({@code SALES}): the draft
  *       goods shipment for the still-pending quantities (ETP-5576)</li>
  * </ul>
+ *
+ * <p><b>Binding.</b> Resolved by {@link NeoExtension} on every channel, ahead of the row's
+ * {@code Java_Qualifier}. The row still carries {@code salesInvoiceHeaderHandler}, on purpose:
+ * several readers look the qualifier up directly instead of going through
+ * {@code NeoExtensionDispatcher}, and they keep resolving this same class (its own {@code @Named}
+ * is that qualifier), so those surfaces behave exactly as before. See {@code neo-headless.md}
+ * §5.3.a.
  */
+@NeoExtension(spec = "sales-invoice", entity = "header")
 @Named("salesInvoiceHeaderHandler")
 public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler implements NeoHandler {
 
