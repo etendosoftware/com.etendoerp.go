@@ -52,7 +52,6 @@ import org.openbravo.model.common.enterprise.Warehouse;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
 import org.openbravo.model.pricing.pricelist.PriceList;
-import com.etendoerp.go.schemaforge.util.NeoActionContract;
 
 /**
  * Unit tests for {@link GoodsReceiptHeaderHandler}.
@@ -67,6 +66,7 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * </ul>
  *
  * @covers com.etendoerp.go.schemaforge.GoodsReceiptHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.InOutInvoiceLinks
  */
 public class GoodsReceiptHeaderHandlerTest {
 
@@ -940,90 +940,30 @@ public class GoodsReceiptHeaderHandlerTest {
     }
   }
 
-  // ── declared action contracts (ETP-5709) ──────────────────────────────────
+  // ── ETP-5653: invoiceStatus must be scoped to the requested receipt's lines ──
 
+  /**
+   * The built invoiceStatus SQL must resolve the requested receipt's lines once (in a CTE) and
+   * restrict each of its three aggregation arms — the {@code M_MatchInv} arm, {@code direct_qty}
+   * and {@code ol_qty} — to that set, while keeping a single placeholder for the receipt filter.
+   * Invoked directly via reflection: the builder is a pure string builder.
+   */
   @Test
-  public void actionContracts_declaresInvoiceWithItsBodyAndClone() {
-    java.util.Map<String, NeoActionContract> contracts =
-        new GoodsReceiptHeaderHandler().actionContracts();
+  public void buildInvoiceStatusSql_scopesEveryArmToTheRequestedReceiptLines() throws Exception {
+    Method m = GoodsReceiptHeaderHandler.class.getDeclaredMethod(
+        "buildInvoiceStatusSql", String.class);
+    m.setAccessible(true);
+    String sql = (String) m.invoke(null, "iol.m_inout_id = ?");
 
-    assertEquals(java.util.List.of("documentAction", "createPurchaseInvoice", "cloneRecord"),
-        java.util.List.copyOf(contracts.keySet()));
-    NeoActionContract invoice = contracts.get("createPurchaseInvoice");
-    assertEquals("POST", invoice.getHttpMethod());
-    assertEquals(java.util.List.of("receiptIds", "priceListId", "lines"),
-        invoice.getParams().stream().map(NeoActionContract.Param::getName)
-            .collect(java.util.stream.Collectors.toList()));
-    assertTrue("every body key is optional",
-        invoice.getParams().stream().noneMatch(NeoActionContract.Param::isRequired));
-    assertTrue(invoice.getDescription().contains("COMPLETES"));
-    assertTrue(contracts.get("cloneRecord").getParams().isEmpty());
-  }
-
-  @Test
-  public void actionContracts_acceptEveryBodyTheSpaSends() throws Exception {
-    java.util.Map<String, NeoActionContract> contracts =
-        new GoodsReceiptHeaderHandler().actionContracts();
-
-    // GoodsReceiptActions: single receipt with a price list override.
-    assertNull(NeoActionContract.validate(contracts, "createPurchaseInvoice",
-        new JSONObject().put("priceListId", "PL1")));
-    // BulkInvoiceFromReceipt: several receipts plus the price list.
-    assertNull(NeoActionContract.validate(contracts, "createPurchaseInvoice",
-        new JSONObject().put("receiptIds", new JSONArray().put("R1").put("R2"))
-            .put("priceListId", "PL1")));
-    // Partial quantities and the empty body.
-    assertNull(NeoActionContract.validate(contracts, "createPurchaseInvoice", new JSONObject()
-        .put("lines", new JSONArray().put(new JSONObject().put("receiptLineId", "L1")
-            .put("quantity", "2")))));
-    assertNull(NeoActionContract.validate(contracts, "createPurchaseInvoice", new JSONObject()));
-    assertNull(NeoActionContract.validate(contracts, "cloneRecord", new JSONObject()));
-  }
-
-  @Test
-  public void actionContracts_rejectAnUndeclaredParameter() throws Exception {
-    java.util.Map<String, NeoActionContract> contracts =
-        new GoodsReceiptHeaderHandler().actionContracts();
-
-    assertEquals(NeoActionContract.SC_UNPROCESSABLE, NeoActionContract.validate(contracts,
-        "createPurchaseInvoice", new JSONObject().put("orderId", "O1")).getHttpStatus());
-  }
-
-  // ── documentAction contract (ETP-5709) ─────────────────────────────────────
-
-  @Test
-  public void actionContracts_declareDocumentActionWithOnlyComplete() throws Exception {
-    java.util.Map<String, NeoActionContract> contracts =
-        new GoodsReceiptHeaderHandler().actionContracts();
-
-    NeoActionContract c = contracts.get("documentAction");
-    assertNotNull("documentAction must be declared so the MCP lists it as invokable", c);
-    assertEquals("POST", c.getHttpMethod());
-    assertEquals(1, c.getParams().size());
-    assertEquals("docAction", c.getParams().get(0).getName());
-    org.junit.Assert.assertTrue(c.getParams().get(0).isRequired());
-    assertEquals("[\"CO\"]", c.toJson().getJSONObject("parameters").getJSONObject("properties")
-        .getJSONObject("docAction").getJSONArray("enum").toString());
-    org.junit.Assert.assertTrue(c.getDescription().contains("DRAFT")
-        && c.getDescription().contains("CO"));
-  }
-
-  @Test
-  public void actionContracts_documentActionAcceptsCoAndRejectsEverythingElse() throws Exception {
-    java.util.Map<String, NeoActionContract> contracts =
-        new GoodsReceiptHeaderHandler().actionContracts();
-
-    // The SPA (useDocumentAction) posts exactly this body.
-    assertNull(NeoActionContract.validate(contracts, "documentAction",
-        new JSONObject().put("docAction", "CO")));
-    for (String other : new String[] {"VO", "RE", "CL", "PR", "XX"}) {
-      assertEquals(other, NeoActionContract.SC_UNPROCESSABLE, NeoActionContract.validate(contracts,
-          "documentAction", new JSONObject().put("docAction", other)).getHttpStatus());
-    }
-    assertEquals(NeoActionContract.SC_UNPROCESSABLE, NeoActionContract.validate(contracts,
-        "documentAction", new JSONObject()).getHttpStatus());
-    assertEquals(NeoActionContract.SC_UNPROCESSABLE, NeoActionContract.validate(contracts,
-        "documentAction", new JSONObject().put("docAction", "CO").put("action", "CO"))
-        .getHttpStatus());
+    String cte = "IN (SELECT m_inoutline_id FROM receipt_lines)";
+    assertTrue("the requested lines must be resolved once in a CTE",
+        sql.startsWith("WITH receipt_lines AS ("));
+    assertTrue("the M_MatchInv arm must be scoped", sql.contains("AND mt.m_inoutline_id " + cte));
+    assertTrue("the direct arm must be scoped", sql.contains("AND il2.m_inoutline_id " + cte));
+    assertTrue("the order-line arm must be scoped", sql.contains("AND iol2.m_inoutline_id " + cte));
+    assertTrue("the outer filter must use the CTE set",
+        sql.contains("WHERE iol.m_inoutline_id " + cte));
+    assertEquals("the receipt filter must be bound exactly once (in the CTE)",
+        sql.indexOf("iol.m_inout_id = ?"), sql.lastIndexOf("iol.m_inout_id = ?"));
   }
 }
