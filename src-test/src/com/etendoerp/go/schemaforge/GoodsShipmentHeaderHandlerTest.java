@@ -22,6 +22,7 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
+import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -1029,5 +1030,38 @@ public class GoodsShipmentHeaderHandlerTest {
       assertEquals("PL-CLIENT-DEFAULT", shipmentRec.getString("resolvedPriceListId"));
       assertEquals("Client Default Price List", shipmentRec.getString("resolvedPriceList$_identifier"));
     }
+  }
+
+  // ── ETP-5653: invoiceStatus must be scoped to the requested shipment's lines ──
+  //
+  // Every aggregation arm of buildInvoiceStatusSql() groups by m_inoutline_id, so restricting
+  // each arm to the requested shipment's lines keeps or drops whole groups and never changes a
+  // sum — but it lets the planner read only those lines instead of aggregating every invoice in
+  // the instance. The private builder is invoked directly via reflection: it is a pure string
+  // builder, which isolates the scope clause from the surrounding afterHandle() mock chain.
+
+  /**
+   * The built invoiceStatus SQL must resolve the requested shipment's lines once (in a CTE) and
+   * restrict each of its three aggregation arms — {@code msi_qty}, {@code direct_qty},
+   * {@code ol_qty} — to that set, while keeping a single placeholder for the shipment filter
+   * (the CTE carries it; the outer clause uses the CTE set instead).
+   */
+  @Test
+  public void buildInvoiceStatusSql_scopesEveryArmToTheRequestedShipmentLines() throws Exception {
+    Method m = GoodsShipmentHeaderHandler.class.getDeclaredMethod(
+        "buildInvoiceStatusSql", String.class);
+    m.setAccessible(true);
+    String sql = (String) m.invoke(null, "iol.m_inout_id = ?");
+
+    String cte = "IN (SELECT m_inoutline_id FROM shipment_lines)";
+    assertTrue("the requested lines must be resolved once in a CTE",
+        sql.startsWith("WITH shipment_lines AS ("));
+    assertTrue("the match arm must be scoped", sql.contains("AND msi.m_inoutline_id " + cte));
+    assertTrue("the direct arm must be scoped", sql.contains("AND il2.m_inoutline_id " + cte));
+    assertTrue("the order-line arm must be scoped", sql.contains("AND iol2.m_inoutline_id " + cte));
+    assertTrue("the outer filter must use the CTE set",
+        sql.contains("WHERE iol.m_inoutline_id " + cte));
+    assertEquals("the shipment filter must be bound exactly once (in the CTE)",
+        sql.indexOf("iol.m_inout_id = ?"), sql.lastIndexOf("iol.m_inout_id = ?"));
   }
 }

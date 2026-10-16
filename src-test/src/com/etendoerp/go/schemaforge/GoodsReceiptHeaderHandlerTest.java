@@ -66,6 +66,7 @@ import org.openbravo.model.pricing.pricelist.PriceList;
  * </ul>
  *
  * @covers com.etendoerp.go.schemaforge.GoodsReceiptHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.InOutInvoiceLinks
  */
 public class GoodsReceiptHeaderHandlerTest {
 
@@ -937,5 +938,32 @@ public class GoodsReceiptHeaderHandlerTest {
       assertTrue("invoiceStatus must read M_MatchInv", statusSql.contains("FROM m_matchinv mt"));
       assertFalse("invoiceStatus must not read M_MatchSI", statusSql.contains("m_matchsi"));
     }
+  }
+
+  // ── ETP-5653: invoiceStatus must be scoped to the requested receipt's lines ──
+
+  /**
+   * The built invoiceStatus SQL must resolve the requested receipt's lines once (in a CTE) and
+   * restrict each of its three aggregation arms — the {@code M_MatchInv} arm, {@code direct_qty}
+   * and {@code ol_qty} — to that set, while keeping a single placeholder for the receipt filter.
+   * Invoked directly via reflection: the builder is a pure string builder.
+   */
+  @Test
+  public void buildInvoiceStatusSql_scopesEveryArmToTheRequestedReceiptLines() throws Exception {
+    Method m = GoodsReceiptHeaderHandler.class.getDeclaredMethod(
+        "buildInvoiceStatusSql", String.class);
+    m.setAccessible(true);
+    String sql = (String) m.invoke(null, "iol.m_inout_id = ?");
+
+    String cte = "IN (SELECT m_inoutline_id FROM receipt_lines)";
+    assertTrue("the requested lines must be resolved once in a CTE",
+        sql.startsWith("WITH receipt_lines AS ("));
+    assertTrue("the M_MatchInv arm must be scoped", sql.contains("AND mt.m_inoutline_id " + cte));
+    assertTrue("the direct arm must be scoped", sql.contains("AND il2.m_inoutline_id " + cte));
+    assertTrue("the order-line arm must be scoped", sql.contains("AND iol2.m_inoutline_id " + cte));
+    assertTrue("the outer filter must use the CTE set",
+        sql.contains("WHERE iol.m_inoutline_id " + cte));
+    assertEquals("the receipt filter must be bound exactly once (in the CTE)",
+        sql.indexOf("iol.m_inout_id = ?"), sql.lastIndexOf("iol.m_inout_id = ?"));
   }
 }
