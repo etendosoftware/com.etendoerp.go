@@ -60,6 +60,7 @@ import org.openbravo.model.financialmgmt.payment.FIN_PaymentScheduleDetail;
 import org.openbravo.model.financialmgmt.payment.FIN_Reconciliation;
 
 import com.etendoerp.go.schemaforge.util.NeoDateFormat;
+import com.etendoerp.go.schemaforge.util.NeoMessageTranslator;
 
 /**
  * Stateless helpers backing {@link CashCloseHandler} — the dispatch wrappers (OBContext admin mode
@@ -368,20 +369,27 @@ final class CashCloseSupport {
     } catch (OBException e) {
       log.warn("cash close confirm blocked by closed period for account {}: {}", account.getId(),
           e.getMessage());
-      return NeoResponse.error(HttpServletResponse.SC_CONFLICT, e.getMessage());
+      return NeoResponse.periodNotAvailable(HttpServletResponse.SC_CONFLICT,
+          "The cash close cannot be confirmed");
     }
     // The check above only covers the CLOSE date. A movement dated before the close keeps its own
     // accounting date (only post-dated ones get pushed forward, further down), so it can sit in a
     // period that is already closed even when the close date's period is open — that would pass
     // here and then blow up at posting time. Classic guards the same case with
     // linesInNotAvailablePeriod (@APRM_PeriodNotAvailableClearedItem@).
-    String blockedLine = handler.findLineInClosedPeriod(draft);
+    CashCloseHandler.BlockedLine blockedLine = handler.findLineInClosedPeriod(draft);
     if (blockedLine != null) {
       log.warn("cash close confirm blocked: line {} of reconciliation {} is in a closed period",
-          blockedLine, draft.getId());
-      return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
-          "The movement \"" + blockedLine + "\" has an accounting date in a closed period. "
-              + "Reopen that period or unmark the movement before confirming the close.");
+          blockedLine.identifier(), draft.getId());
+      NeoResponse refused = NeoResponse.error(HttpServletResponse.SC_CONFLICT,
+          "The movement \"" + blockedLine.identifier() + "\" has an accounting date in a closed "
+              + "period. Reopen that period or unmark the movement before confirming the close.");
+      // ETP-5577 — keyed, and dated by the MOVEMENT (not the close), so the SPA can open the
+      // fiscal year that holds it while keeping this message, which names the movement.
+      JSONObject error = refused.getBody().getJSONObject("error");
+      error.put("messageKeys", new JSONArray().put(NeoMessageTranslator.PERIOD_REFUSAL_KEYS.get(0)));
+      error.put("periodDate", formatIsoDate(blockedLine.accountingDate()));
+      return refused;
     }
 
     BigDecimal diff = difference(openingBalance, clearedNet(handler, draft), declaredBalance);

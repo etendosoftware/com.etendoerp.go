@@ -5,7 +5,8 @@ Use this procedure only for a purchase that is already `PROVISIONED` and whose t
 the existing transfer worker; it does not create a checkout or charge the account. A failed job
 already has `POST /sws/go/demo-data-transfer/retry` and must not be recovered this way.
 
-A selected Contacts transfer includes the Business Partner fields, its Contact/Person (`AD_User`)
+A selected Contacts transfer includes the Business Partner fields (with its currency, or the
+target organization's when the source has none — ETP-5768), its Contact/Person (`AD_User`)
 rows, and its Location/Address rows with their `C_Location` address data. Contact login credentials
 and passwords are not transferred. Product and contact progress reads use the most recently updated
 status preference because older retries may leave duplicate preference rows.

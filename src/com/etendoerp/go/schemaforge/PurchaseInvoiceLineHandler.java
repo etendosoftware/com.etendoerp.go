@@ -43,9 +43,14 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import com.etendoerp.go.schemaforge.util.NeoActionContract.Param;
 
 /**
- * Customization of purchase-invoice/lines (ETP-5585): everything {@link InvoiceLineHandler} does,
- * plus the {@code defaultTax} read action — the tax a line should default to when only the vendor
- * address, the date, an extracted percentage and maybe a product are known (the OCR invoice flow).
+ * Customization of purchase-invoice/lines: everything {@link InvoiceLineHandler} does, plus
+ * (ETP-5710) the discounted price and the amounts of a written line — {@code lineNetAmount} and
+ * {@code grossAmount} — and their recalculation on update, which nothing on the server derived for
+ * a purchase line (a line an agent wrote persisted {@code LineNetAmt 0}, so the header total, the
+ * tax rows and the payment plan came out wrong). The rules live in
+ * {@link InvoiceLineAmountSupport}, shared with {@link SalesInvoiceLineHandler}. And (ETP-5585) the
+ * {@code defaultTax} read action — the tax a line should default to when only the vendor address,
+ * the date, an extracted percentage and maybe a product are known (the OCR invoice flow).
  *
  * <pre>POST /sws/neo/purchase-invoice/lines/new/action/defaultTax</pre>
  *
@@ -55,9 +60,15 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract.Param;
  * against its contract, checks tenant ownership of the ids it was handed and shapes the response.
  * Org and client always come from the session, never from the body.</p>
  *
- * <p><b>Binding.</b> {@link NeoExtension}, no {@code @Named} — same as
- * {@link SalesInvoiceLineHandler}; the row keeps {@code invoiceLineHandler} on purpose (see
- * {@code neo-headless.md} §4.12.20).</p>
+ * <p><b>Binding.</b> Resolved by {@link NeoExtension} on every channel, ahead of the row's
+ * {@code Java_Qualifier} ({@code NeoExtensionDispatcher.resolve} asks {@code NeoExtensionIndex}
+ * first and falls back to the qualifier only on a miss). The row still carries
+ * {@code invoiceLineHandler}, on purpose and exactly as {@link SalesInvoiceLineHandler}'s does:
+ * several readers look the qualifier up directly instead of going through the dispatcher, and they
+ * keep resolving the parent class, whose behaviour this class inherits unchanged. The price is the
+ * ERROR line {@code NeoExtensionIndex.warnOnQualifierDisagreement} logs on each resolution; see
+ * {@code neo-headless.md} §4.12.20. No {@code @Named}: the parent's name is not inherited and a
+ * second bean carrying it would make it ambiguous.
  */
 @NeoExtension(spec = "purchase-invoice", entity = "lines")
 public class PurchaseInvoiceLineHandler extends InvoiceLineHandler {
@@ -101,7 +112,10 @@ public class PurchaseInvoiceLineHandler extends InvoiceLineHandler {
   }
 
   /**
-   * Serves {@code defaultTax}; anything else is the parent's pre-hook, unchanged.
+   * Serves {@code defaultTax} directly. Anything else runs the parent's pre-hook first — a
+   * response from it still short-circuits — then prices and derives the amounts of a created line,
+   * or recalculates those of an updated one. The order matters: on a return invoice the parent
+   * negates the quantity, and the amounts are derived from the negated one.
    */
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -109,7 +123,11 @@ public class PurchaseInvoiceLineHandler extends InvoiceLineHandler {
         && ACTION_DEFAULT_TAX.equals(context.getFieldName())) {
       return defaultTax(context);
     }
-    return super.handle(context);
+    NeoResponse response = super.handle(context);
+    if (response != null) {
+      return response;
+    }
+    return InvoiceLineAmountSupport.deriveAmountsOnWrite(context);
   }
 
   private NeoResponse defaultTax(NeoContext context) {

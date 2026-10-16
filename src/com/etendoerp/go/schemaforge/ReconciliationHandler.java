@@ -1236,9 +1236,8 @@ public class ReconciliationHandler implements NeoHandler {
     } catch (OBException e) {
       log.warn("reactivate blocked by closed period for reconciliation {}: {}", rec.getId(),
           e.getMessage());
-      return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
-          "The accounting period is closed and the reconciliation cannot be reactivated: "
-              + e.getMessage());
+      return NeoResponse.periodNotAvailable(HttpServletResponse.SC_CONFLICT,
+          "The reconciliation cannot be reactivated");
     }
 
     // Unpost BEFORE anything is captured: ResetAccounting runs native SQL and clears the session, so

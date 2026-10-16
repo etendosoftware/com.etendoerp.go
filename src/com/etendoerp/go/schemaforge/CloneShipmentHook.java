@@ -28,6 +28,7 @@ import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
 
 import javax.enterprise.context.ApplicationScoped;
+import java.math.BigDecimal;
 import java.util.Calendar;
 import java.util.Date;
 
@@ -66,6 +67,8 @@ public class CloneShipmentHook extends CloneRecordHook {
     clone.setDocumentNo(null);
     clone.setSalesOrder(null);
     clone.setMovementDate(today);
+    // DateAcct was copied from the source: align it with the new movement date.
+    clone.setAccountingDate(today);
     clone.setCompletelyInvoiced(false);
     clone.setInvoice(null);
     clone.setCreationDate(new Date());
@@ -77,9 +80,15 @@ public class CloneShipmentHook extends CloneRecordHook {
       clonedLine.setCanceledInoutLine(null);
       // m_inoutline_trg enforces MovementQtyCheck: total delivered for an order line cannot
       // exceed QtyOrdered. Preserving C_OrderLine_ID on a new line would double-count the
-      // delivered quantity and fail the trigger. Invoice creation falls back to product matching
-      // against the header's C_Order_ID link (CreatePurchaseInvoiceHandler.buildSelectedLinesFromReceipt).
+      // delivered quantity and fail the trigger. The header's C_Order_ID is cleared above too, so
+      // the copy has no linked order at all: a purchase invoice from the cloned receipt takes the
+      // no-purchase-order path (CreatePurchaseInvoiceHandler.createFromReceiptNoPo), not the
+      // order-line matching of buildSelectedLinesFromReceipt.
       clonedLine.setSalesOrderLine(null);
+      // The source's invoicing counters describe invoices the copy does not have (no invoice
+      // line, no M_MatchInv row): a copy must not look invoiced.
+      clonedLine.setInvoiceQuantity(BigDecimal.ZERO);
+      clonedLine.setReinvoice(false);
       clonedLine.setCreationDate(new Date());
       clonedLine.setUpdated(new Date());
       clonedLine.setCreatedBy(currentUser);

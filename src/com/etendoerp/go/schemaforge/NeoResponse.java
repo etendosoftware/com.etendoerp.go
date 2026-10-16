@@ -18,10 +18,16 @@
 package com.etendoerp.go.schemaforge;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.base.exception.OBException;
+
+import com.etendoerp.go.schemaforge.util.NeoMessageTranslator;
 
 /**
  * Wrapper for NEO Headless API responses.
@@ -29,6 +35,8 @@ import org.codehaus.jettison.json.JSONObject;
 public class NeoResponse {
 
   private static final String MESSAGE_FIELD = "message";
+  private static final String MESSAGE_KEYS_FIELD = "messageKeys";
+  private static final String ERROR_FIELD = "error";
 
   private int httpStatus;
   private JSONObject body;
@@ -128,7 +136,7 @@ public class NeoResponse {
       JSONObject errorObj = new JSONObject();
       errorObj.put(MESSAGE_FIELD, message);
       errorObj.put("status", status);
-      errorBody.put("error", errorObj);
+      errorBody.put(ERROR_FIELD, errorObj);
       return new NeoResponse(status, errorBody);
     } catch (JSONException e) {
       return new NeoResponse(status, null);
@@ -144,6 +152,61 @@ public class NeoResponse {
    */
   public static NeoResponse error(int status, JSONObject body) {
     return new NeoResponse(status, body);
+  }
+
+  /**
+   * Builds an error response from a business exception: like {@link #error(int, String)}, plus
+   * {@code error.messageKeys} when the exception is a {@link MessageKeyedException}.
+   *
+   * @param status the HTTP status code
+   * @param e      the business exception
+   * @return a NeoResponse with the exception's message and, when known, its identity
+   */
+  public static NeoResponse error(int status, OBException e) {
+    NeoResponse response = error(status, e.getMessage());
+    if (e instanceof MessageKeyedException && response.body != null) {
+      try {
+        response.body.getJSONObject(ERROR_FIELD).put(MESSAGE_KEYS_FIELD,
+            new JSONArray().put(((MessageKeyedException) e).getMessageKey()));
+      } catch (JSONException ignored) {
+        // the plain error body is still a valid answer
+      }
+    }
+    return response;
+  }
+
+  /**
+   * ETP-5577 — the refusal for a date with no open period, keyed {@code PeriodNotAvailable} so the
+   * SPA offers to open it. For handlers that check the period themselves: core's
+   * {@code Utilities.checkPeriod} throws a raw {@code @ETPR_PeriodClosedForUnRemovePayment@} that
+   * is neither translated nor about the action being refused.
+   *
+   * @param status the HTTP status code
+   * @return a NeoResponse with the PeriodNotAvailable text in the session language and its key
+   */
+  public static NeoResponse periodNotAvailable(int status) {
+    return periodNotAvailable(status, null);
+  }
+
+  /**
+   * {@link #periodNotAvailable(int)} prefixed with the action that was refused, so a caller that
+   * reads the text (an MCP agent) learns what failed and not only why. The SPA words it by key.
+   *
+   * @param status  the HTTP status code
+   * @param refused what could not be done (e.g. "The reconciliation cannot be reactivated"); may be
+   *                {@code null}
+   * @return a NeoResponse with the prefixed PeriodNotAvailable text and its key
+   */
+  public static NeoResponse periodNotAvailable(int status, String refused) {
+    String key = NeoMessageTranslator.PERIOD_REFUSAL_KEYS.get(0);
+    String reason = NeoMessageTranslator.safeParseTranslation("@" + key + "@");
+    NeoResponse response = error(status, refused == null ? reason : refused + ": " + reason);
+    try {
+      response.body.getJSONObject(ERROR_FIELD).put(MESSAGE_KEYS_FIELD, new JSONArray().put(key));
+    } catch (JSONException ignored) {
+      // the plain error body is still a valid answer
+    }
+    return response;
   }
 
   /**
@@ -181,7 +244,7 @@ public class NeoResponse {
     if (body.has(MESSAGE_FIELD)) {
       return response;
     }
-    JSONObject error = body.optJSONObject("error");
+    JSONObject error = body.optJSONObject(ERROR_FIELD);
     if (error == null) {
       return response;
     }
@@ -189,6 +252,76 @@ public class NeoResponse {
       body.put(MESSAGE_FIELD, error.optString(MESSAGE_FIELD, "Request failed"));
     } catch (JSONException ignored) {
       // Best-effort normalization: fall back to the original (unnormalized) body.
+    }
+    return response;
+  }
+
+  /** Statuses that are never a business refusal: not worth a message-text lookup. */
+  private static final Set<Integer> NOT_A_REFUSAL = Set.of(401, 403, 404);
+
+  /**
+   * Core {@code Utilities.checkPeriod}'s refusal, which reaches NEO handlers untranslated and is
+   * worded for removing payments whatever the action was.
+   */
+  private static final String UNTRANSLATED_PERIOD_CLOSED = "@ETPR_PeriodClosedForUnRemovePayment@";
+
+  /** Rewrites a raw {@link #UNTRANSLATED_PERIOD_CLOSED} body as {@link #periodNotAvailable(int)}. */
+  private static NeoResponse asPeriodNotAvailable(NeoResponse response, JSONObject body,
+      JSONObject error) {
+    JSONObject keyed = periodNotAvailable(response.getHttpStatus()).body.optJSONObject(ERROR_FIELD);
+    try {
+      for (JSONObject target : new JSONObject[] { body, error }) {
+        if (target != null && (target == error || body.has(MESSAGE_FIELD) || error == null)) {
+          target.put(MESSAGE_FIELD, keyed.getString(MESSAGE_FIELD));
+          target.put(MESSAGE_KEYS_FIELD, keyed.getJSONArray(MESSAGE_KEYS_FIELD));
+        }
+      }
+    } catch (JSONException ignored) {
+      // the plain error body is still a valid answer
+    }
+    return response;
+  }
+
+  /**
+   * ETP-5577 — names a period refusal ({@code messageKeys}) on an error response that carries
+   * none, so the SPA can offer to open the period whatever handler answered.
+   *
+   * <p>Most handlers turn a core {@code OBException} into {@code error(400, e.getMessage())}: the
+   * core resolved its {@code @PeriodNotAvailable@} into prose, and the identity is lost. The text
+   * is recognised in any language ({@link NeoMessageTranslator#recognizeMessageKeys}). A body that
+   * already names its keys is left alone, and nothing here can fail the response. Core's raw,
+   * untranslated {@code @ETPR_PeriodClosedForUnRemovePayment@} is rewritten as {@code
+   * PeriodNotAvailable}, text included.
+   *
+   * @param response the response about to be written; may be {@code null}
+   * @return the same response, with top-level {@code messageKeys} when a period refusal was found
+   */
+  public static NeoResponse identifyPeriodRefusal(NeoResponse response) {
+    if (response == null || response.getHttpStatus() < 400 || response.getBody() == null
+        || NOT_A_REFUSAL.contains(response.getHttpStatus())) {
+      return response;
+    }
+    JSONObject body = response.getBody();
+    JSONObject error = body.optJSONObject(ERROR_FIELD);
+    if (body.has(MESSAGE_KEYS_FIELD) || (error != null && error.has(MESSAGE_KEYS_FIELD))) {
+      return response;
+    }
+    String text = body.optString(MESSAGE_FIELD, error != null ? error.optString(MESSAGE_FIELD, "") : "");
+    if (text.contains(UNTRANSLATED_PERIOD_CLOSED)) {
+      return asPeriodNotAvailable(response, body, error);
+    }
+    if (response.getHttpStatus() >= 500) {
+      // a server failure is not a business refusal, and its session may be unusable
+      return response;
+    }
+    List<String> keys = NeoMessageTranslator.recognizeMessageKeys(text,
+        NeoMessageTranslator.PERIOD_REFUSAL_KEYS);
+    if (!keys.isEmpty()) {
+      try {
+        body.put(MESSAGE_KEYS_FIELD, new JSONArray(keys));
+      } catch (JSONException ignored) {
+        // the plain error body is still a valid answer
+      }
     }
     return response;
   }

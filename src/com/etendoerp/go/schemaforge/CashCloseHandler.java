@@ -251,13 +251,17 @@ public class CashCloseHandler implements NeoHandler {
   }
 
   /**
-   * The identifier of the first line of {@code draft} whose accounting date falls in a closed
-   * period, or {@code null} when every line is postable. Mirrors Classic's
+   * The first line of {@code draft} whose accounting date falls in a closed period, or
+   * {@code null} when every line is postable. Mirrors Classic's
    * {@code Reconciliation.linesInNotAvailablePeriod} verbatim — same view, same
    * {@code c_chk_open_period} DB function, same {@code 'REC'} document category — so the two
    * flows accept and reject exactly the same closes.
    */
-  String findLineInClosedPeriod(FIN_Reconciliation draft) {
+  /** A cleared line whose accounting date has no open period: what to name, and which date. */
+  record BlockedLine(String identifier, Date accountingDate) {
+  }
+
+  BlockedLine findLineInClosedPeriod(FIN_Reconciliation draft) {
     OBQuery<FIN_ReconciliationLine_v> query = OBDal.getInstance()
         .createQuery(FIN_ReconciliationLine_v.class,
             " as rl where rl.reconciliation.id = :reconciliationId"
@@ -266,7 +270,8 @@ public class CashCloseHandler implements NeoHandler {
         .setNamedParameter("reconciliationId", draft.getId())
         .setMaxResult(1);
     List<FIN_ReconciliationLine_v> blocked = query.list();
-    return blocked.isEmpty() ? null : blocked.get(0).getIdentifier();
+    return blocked.isEmpty() ? null
+        : new BlockedLine(blocked.get(0).getIdentifier(), blocked.get(0).getTransactionDate());
   }
 
   void doRollbackAndClose() {

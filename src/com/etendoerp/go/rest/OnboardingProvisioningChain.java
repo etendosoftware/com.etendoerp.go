@@ -68,7 +68,7 @@ public class OnboardingProvisioningChain {
    * changes onboarding never hands out a tenant built by the previous code. <b>Bump it whenever a
    * step is added, removed, reordered or changes what it provisions.</b>
    */
-  public static final String CHAIN_REVISION = "2026-09-24.1";
+  public static final String CHAIN_REVISION = "2026-10-14.1";
 
   /**
    * The provisioning version a pooled tenant is stamped with and claimed by: this chain's revision
@@ -373,6 +373,10 @@ public class OnboardingProvisioningChain {
     if (!markOrgReady(sink, clientId, orgId, adminUserId, adminRoleId)) {
       return false;
     }
+    // ETP-5577: after markOrgReady, the last step that can add period-control rows.
+    if (!normalizePeriodControls(sink, clientId, orgId, adminUserId, adminRoleId)) {
+      return false;
+    }
     if (!setupFiscalData(sink, clientId, orgId, adminUserId, adminRoleId)) {
       return false;
     }
@@ -472,6 +476,17 @@ public class OnboardingProvisioningChain {
     } catch (Exception e) {
       EtendoGoDalHelper.rollbackDalChanges("onboarding period-control wiring", e, log);
       return fail(sink, PROGRESS_PERIOD_CONTROL, e, "Organization period-control wiring failed");
+    }
+  }
+
+  boolean normalizePeriodControls(OnboardingProgressSink sink, String clientId, String orgId,
+      String adminUserId, String adminRoleId) {
+    try {
+      onboardingPeriodControlService.normalize(clientId, orgId, adminUserId, adminRoleId);
+      return true;
+    } catch (Exception e) {
+      EtendoGoDalHelper.rollbackDalChanges("onboarding period-control normalization", e, log);
+      return fail(sink, PROGRESS_PERIOD_CONTROL, e, "Period-control normalization failed");
     }
   }
 

@@ -171,6 +171,50 @@ public class InvoiceCompletionServiceTest {
   }
 
   /**
+   * ETP-5577: the core period refusal reaches this class already translated (and its AD_PInstance
+   * rolled back), so the response must still carry {@code messageKeys: ["PeriodNotAvailable"]} —
+   * the SPA keys its "open the period" action on it. Any other rejection carries no key.
+   */
+  @Test
+  public void completeInvoice_periodNotOpen_publishesPeriodNotAvailableKey() throws Exception {
+    assertEquals("[\"PeriodNotAvailable\"]",
+        completeWithError("El Periodo no existe o no está abierto").getBody()
+            .getJSONArray("messageKeys").toString());
+    assertTrue(!completeWithError("BP currency is not set").getBody().has("messageKeys"));
+  }
+
+  private static NeoResponse completeWithError(String translatedMessage) {
+    ProcessInvoiceUtil processInvoiceUtil = mock(ProcessInvoiceUtil.class);
+    when(processInvoiceUtil.process(
+        eq("inv-period"), eq("CO"), eq(""), eq(""), eq(""), any(), any()))
+        .thenReturn(errorResult(translatedMessage));
+
+    try (MockedStatic<NeoDefaultsService> defaultsMock = Mockito.mockStatic(NeoDefaultsService.class);
+        MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class);
+        MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<com.etendoerp.go.schemaforge.util.NeoMessageTranslator> translator =
+            Mockito.mockStatic(com.etendoerp.go.schemaforge.util.NeoMessageTranslator.class,
+                Mockito.CALLS_REAL_METHODS)) {
+
+      defaultsMock.when(() -> NeoDefaultsService.buildVariablesSecureApp(any()))
+          .thenReturn(new VariablesSecureApp("u", "c", "o", "r", "es_ES"));
+      weldMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(ProcessInvoiceUtil.class))
+          .thenReturn(processInvoiceUtil);
+      translator.when(() -> com.etendoerp.go.schemaforge.util.NeoMessageTranslator
+          .recognizeMessageKeys(eq("El Periodo no existe o no está abierto"), any()))
+          .thenReturn(java.util.List.of("PeriodNotAvailable"));
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(Process.class, PROCESS_ID_COMPLETE_INVOICE)).thenReturn(mock(Process.class));
+
+      NeoResponse result = InvoiceCompletionService.completeInvoice("inv-period", null);
+      assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
+      return result;
+    }
+  }
+
+  /**
    * AD_Process 111 missing is a broken installation, not a user error: the completion may well
    * have run, so the response must be a 500 rather than a 400 that invites a retry.
    */
