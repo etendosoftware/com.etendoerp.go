@@ -327,6 +327,13 @@ class NeoCrudHandler {
           ? NeoFieldFilter.forEntity(context.getSfEntity(), dalEntityName, context.getQueryParams())
           : NeoFieldFilter.forEntity(context.getSfEntity(), dalEntityName);
       Map<String, String> params = buildDalParams(context, adTab, dalEntityName);
+      if ("GET".equals(context.getHttpMethod()) && context.getRecordId() == null
+          && !params.containsKey(JsonConstants.DISTINCT_PARAMETER)
+          && !params.containsKey(JsonConstants.SUMMARY_PARAMETER)) {
+        // ETP-5778: let a customization's afterHandle aggregate the whole filtered set, not just
+        // the page. FK dropdowns (_distinct) and grid summaries (_summary) never need it.
+        NeoListAggregateQuery.remember(context, params);
+      }
 
       return executeJsonServiceAndBuildResponse(
           context, adTab, dalEntityName, fieldFilter, jsonService, params);

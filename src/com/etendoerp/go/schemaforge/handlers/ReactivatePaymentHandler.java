@@ -55,8 +55,10 @@ import org.openbravo.model.financialmgmt.payment.FIN_PaymentScheduleDetail;
 
 import com.etendoerp.go.schemaforge.NeoActionRecordGuard;
 import com.etendoerp.go.schemaforge.NeoContext;
+import com.etendoerp.go.schemaforge.NeoCurrencyTotals;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoHandler;
+import com.etendoerp.go.schemaforge.NeoListAggregateQuery;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.PaymentInvoiceApplications;
 import com.etendoerp.go.schemaforge.PaymentRegistrationService;
@@ -235,6 +237,7 @@ public class ReactivatePaymentHandler implements NeoHandler {
   private static final String HTTP_GET = "GET";
   private static final String KEY_RESPONSE = "response";
   private static final String KEY_DATA = "data";
+  private static final String KEY_SUMMARY = "summary";
 
   /**
    * Pre-hook: intercepts {@code etprReactivatePayment} (injects {@code action = "RE"}),
@@ -708,7 +711,7 @@ public class ReactivatePaymentHandler implements NeoHandler {
   @Override
   public NeoResponse afterHandle(NeoContext context) {
     if (isListGet(context)) {
-      return injectLockFlagOnList(context);
+      return enrichList(context);
     }
     if (!isSingleRecordGet(context)) {
       return null;
@@ -735,28 +738,76 @@ public class ReactivatePaymentHandler implements NeoHandler {
   }
 
   /**
-   * List counterpart of {@link #afterHandle}: adds {@link #FIELD_PIS_LOCKED} and
-   * {@link #FIELD_INVOICE_ID} to every row.
+   * List counterpart of {@link #afterHandle}: adds the whole-set {@code response.summary}
+   * (ETP-5778), then {@link #FIELD_PIS_LOCKED} and {@link #FIELD_INVOICE_ID} to every row.
    *
-   * <p>The other enrichments stay single-record — they each cost a query and the grid does not show
-   * them. This one is worth it because the grid's kebab offers Reactivate and its row actions offer
-   * Delete, and it is answered for the whole page in one query.
+   * <p>The other row enrichments stay single-record — they each cost a query and the grid does not
+   * show them. The lock flags are worth it because the grid's kebab offers Reactivate and its row
+   * actions offer Delete, and they are answered for the whole page in one query. The summary is
+   * injected even when the page is empty, so the sidebar can show a zeroed panel.
    *
    * @return the enriched response, or {@code null} to leave the previous result untouched
    */
-  private NeoResponse injectLockFlagOnList(NeoContext context) {
+  private NeoResponse enrichList(NeoContext context) {
     try {
       JSONObject body = context.getPreviousResult().getBody();
+      boolean changed = false;
       JSONArray dataArr = extractDataArray(body);
-      if (dataArr == null || dataArr.length() == 0) {
-        return null;
+      if (dataArr != null && dataArr.length() > 0) {
+        injectLockFlags(dataArr);
+        changed = true;
       }
-      injectLockFlags(dataArr);
-      return NeoResponse.ok(body);
+      // Last on purpose: if the grouped query fails in Postgres (timeout, SQL error) the
+      // transaction is aborted, and any query after it would fail too. The lock flags must not
+      // be the casualty.
+      changed |= injectSummaryQuietly(context, body);
+      return changed ? NeoResponse.ok(body) : null;
     } catch (Exception e) {
-      log.error("Could not flag bank-transfer-locked payments on the list response", e);
+      log.error("Could not enrich the payment list response", e);
       return null;
     }
+  }
+
+  /**
+   * Adds {@code response.summary}. A failure is logged and swallowed: the list must never fail
+   * because its sidebar could not be computed.
+   *
+   * @return whether the summary was added
+   */
+  private boolean injectSummaryQuietly(NeoContext context, JSONObject body) {
+    try {
+      JSONObject wrapper = body.optJSONObject(KEY_RESPONSE);
+      List<PaymentListSummary.Group> groups = loadSummaryGroups(context);
+      if (wrapper == null || groups == null) {
+        return false;
+      }
+      NeoCurrencyTotals.TargetCurrency org = resolveOrgCurrency();
+      wrapper.put(KEY_SUMMARY,
+          PaymentListSummary.build(groups, org, new NeoCurrencyTotals(this::lookupRate)));
+      return true;
+    } catch (Exception e) {
+      log.warn("Could not build the payment list summary: {}", e.getMessage());
+      return false;
+    }
+  }
+
+  /**
+   * Package-private seam: the grouped rows over the list's filtered set, or {@code null} when this
+   * request did not go through the default list path.
+   */
+  List<PaymentListSummary.Group> loadSummaryGroups(NeoContext context) {
+    NeoListAggregateQuery query = NeoListAggregateQuery.of(context);
+    return query == null ? null : PaymentListSummary.load(query);
+  }
+
+  /** Package-private seam: the organization's functional currency, or {@code null}. */
+  NeoCurrencyTotals.TargetCurrency resolveOrgCurrency() {
+    return NeoCurrencyTotals.resolveOrgCurrency();
+  }
+
+  /** Package-private seam: today's multiply rate between two currency ids, or {@code null}. */
+  BigDecimal lookupRate(String fromCurrencyId, String toCurrencyId) {
+    return NeoCurrencyTotals.todayMultiplyRate(fromCurrencyId, toCurrencyId);
   }
 
   /**

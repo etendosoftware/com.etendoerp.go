@@ -1108,6 +1108,119 @@ public class ReactivatePaymentHandlerTest {
     assertNull(new ReactivatePaymentHandler().afterHandle(ctx));
   }
 
+  private static PaymentListSummary.Group summaryGroup(String status, String amount, long count) {
+    return new PaymentListSummary.Group("eur", "EUR", "cash", "Cash", status,
+        new BigDecimal(amount), count);
+  }
+
+  /** A handler whose summary seams are stubbed, so no DAL or rate table is needed. */
+  private static ReactivatePaymentHandler summaryHandler(
+      List<PaymentListSummary.Group> groups) {
+    ReactivatePaymentHandler handler = spy(new ReactivatePaymentHandler());
+    Mockito.doReturn(groups).when(handler).loadSummaryGroups(any(NeoContext.class));
+    Mockito.doReturn(new com.etendoerp.go.schemaforge.NeoCurrencyTotals.TargetCurrency("eur",
+        "EUR", 2)).when(handler).resolveOrgCurrency();
+    Mockito.doReturn(null).when(handler).lookupRate(anyString(), anyString());
+    return handler;
+  }
+
+  /** The sidebar must be able to show a zeroed panel for a filter that matches nothing. */
+  @Test
+  public void afterHandleInjectsTheSummaryOnAnEmptyList() throws JSONException {
+    JSONObject body = new JSONObject().put("response",
+        new JSONObject().put("data", new JSONArray()));
+    NeoContext ctx = getCtx(null, "GET");
+    ctx.setPreviousResult(NeoResponse.ok(body));
+
+    NeoResponse result = summaryHandler(List.of()).afterHandle(ctx);
+
+    assertNotNull(result);
+    JSONObject summary = result.getBody().getJSONObject("response").getJSONObject("summary");
+    assertEquals(0, summary.getInt("rowCount"));
+    assertEquals("EUR", summary.getString("orgCurrencyIso"));
+  }
+
+  @Test
+  public void afterHandleSummaryReflectsTheGroupedRowsAndLockFlagsStillApply()
+      throws JSONException {
+    JSONObject body = singleRecordBody("pay-1");
+    NeoContext ctx = getCtx(null, "GET");
+    ctx.setPreviousResult(NeoResponse.ok(body));
+
+    NeoResponse result = summaryHandler(
+        List.of(summaryGroup("RPR", "10.00", 2), summaryGroup("RPAP", "5.00", 1)))
+            .afterHandle(ctx);
+
+    JSONObject response = result.getBody().getJSONObject("response");
+    assertEquals(3, response.getJSONObject("summary").getInt("rowCount"));
+    assertEquals(1, response.getJSONObject("summary").getInt("draftCount"));
+    assertTrue(response.getJSONArray("data").getJSONObject(0).has("pisLocked"));
+  }
+
+  /** The list must never fail because its sidebar could not be computed. */
+  @Test
+  public void afterHandleSwallowsASummaryFailureAndStillInjectsLockFlags()
+      throws JSONException {
+    JSONObject body = singleRecordBody("pay-1");
+    NeoContext ctx = getCtx(null, "GET");
+    ctx.setPreviousResult(NeoResponse.ok(body));
+    ReactivatePaymentHandler handler = spy(new ReactivatePaymentHandler());
+    Mockito.doThrow(new IllegalStateException("boom")).when(handler)
+        .loadSummaryGroups(any(NeoContext.class));
+
+    NeoResponse result = handler.afterHandle(ctx);
+
+    assertNotNull(result);
+    JSONObject response = result.getBody().getJSONObject("response");
+    assertFalse(response.has("summary"));
+    assertTrue(response.getJSONArray("data").getJSONObject(0).has("pisLocked"));
+  }
+
+  /** Lock flags run first: a summary that aborts the transaction must not cost them. */
+  @Test
+  public void afterHandleInjectsLockFlagsBeforeTheSummaryRuns() throws JSONException {
+    JSONObject body = singleRecordBody("pay-1");
+    NeoContext ctx = getCtx(null, "GET");
+    ctx.setPreviousResult(NeoResponse.ok(body));
+    ReactivatePaymentHandler handler = spy(new ReactivatePaymentHandler());
+    final boolean[] flagsPresentWhenSummaryLoads = new boolean[1];
+    Mockito.doAnswer(inv -> {
+      flagsPresentWhenSummaryLoads[0] = body.getJSONObject("response").getJSONArray("data")
+          .getJSONObject(0).has("pisLocked");
+      return List.of();
+    }).when(handler).loadSummaryGroups(any(NeoContext.class));
+    Mockito.doReturn(null).when(handler).resolveOrgCurrency();
+
+    handler.afterHandle(ctx);
+
+    assertTrue(flagsPresentWhenSummaryLoads[0]);
+  }
+
+  @Test
+  public void afterHandleLeavesAnEmptyListUntouchedWhenTheSummaryFails() throws JSONException {
+    JSONObject body = new JSONObject().put("response",
+        new JSONObject().put("data", new JSONArray()));
+    NeoContext ctx = getCtx(null, "GET");
+    ctx.setPreviousResult(NeoResponse.ok(body));
+    ReactivatePaymentHandler handler = spy(new ReactivatePaymentHandler());
+    Mockito.doThrow(new IllegalStateException("boom")).when(handler)
+        .loadSummaryGroups(any(NeoContext.class));
+
+    assertNull(handler.afterHandle(ctx));
+  }
+
+  /** Without the handover attribute (MCP list path) nothing is aggregated. */
+  @Test
+  public void afterHandleAddsNoSummaryWhenNoAggregateQueryWasRemembered() throws JSONException {
+    JSONObject body = singleRecordBody("pay-1");
+    NeoContext ctx = getCtx(null, "GET");
+    ctx.setPreviousResult(NeoResponse.ok(body));
+
+    NeoResponse result = new ReactivatePaymentHandler().afterHandle(ctx);
+
+    assertFalse(result.getBody().getJSONObject("response").has("summary"));
+  }
+
   /**
    * Non-GET methods (e.g. the Reactivate/Confirm ACTION requests handled by the pre-hook)
    * must not be touched by the post-hook.
