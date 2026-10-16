@@ -77,7 +77,7 @@ final class FinancialAccountTransactionsSupport {
     } catch (OBException e) {
       log.warn("{} business error: {}", logContext, e.getMessage());
       OBDal.getInstance().rollbackAndClose();
-      return NeoResponse.error(400, e.getMessage());
+      return NeoResponse.error(400, e);
     } catch (Exception e) {
       log.error("Error during {}", logContext, e);
       OBDal.getInstance().rollbackAndClose();
