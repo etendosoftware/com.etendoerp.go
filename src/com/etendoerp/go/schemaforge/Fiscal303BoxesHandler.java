@@ -18,7 +18,6 @@ package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -30,7 +29,6 @@ import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
 import org.apache.commons.lang3.StringUtils;
-import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.service.OBDal;
@@ -70,7 +68,7 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
   /** Shared by {@code handleSubmit}'s body parsing (Fiscal303SubmissionSupport) and this class's
    *  {@link #buildSubmissionResultJson}/{@link #buildFailureJson} JSON-shape helpers — extracted
    *  (ETP-4456, SonarQube java:S1192) so the literal isn't duplicated across the two classes. */
-  static final String PARAM_TEST_MODE = "testMode";
+  static final String PARAM_TEST_MODE = FiscalAeatSubmissionSupport.PARAM_TEST_MODE;
   /** AEAT declaration type character for "a ingresar" (type I): the only type that uses NRC. */
   private static final String DECLARATION_TYPE_INGRESO = "I";
 
@@ -214,45 +212,13 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
   /** Builds the response for a submission that reached the AEAT (successfully or not). */
   JSONObject buildSubmissionResultJson(AEAT303SubmissionResult result,
       AEAT303DeclarationData data) throws Exception {
-    boolean testMode = result.isTestMode();
-    boolean successful = result.isSuccessful();
-    String status;
-    if (!successful) {
-      status = "ERROR";
-    } else if (testMode) {
-      status = "TEST_SUCCESS";
-    } else {
-      status = "SUCCESS";
-    }
-
-    JSONObject o = new JSONObject();
-    o.put("status", status);
-    o.put(PARAM_TEST_MODE, testMode);
-    o.put("csv", StringUtils.defaultString(result.getCsv()));
-    o.put("presentationDate", StringUtils.defaultString(result.getPresentationDate()));
-    o.put("registryNumber", StringUtils.defaultString(result.getRegistryNumber()));
-    o.put("justificanteNumber", StringUtils.defaultString(result.getJustificanteNumber()));
-    byte[] pdf = result.getPdfContent();
-    o.put("pdfBase64", pdf != null ? Base64.getEncoder().encodeToString(pdf) : JSONObject.NULL);
-    o.put("pdfDownloadFailed", result.isPdfDownloadFailed());
-    o.put("errors", new JSONArray(result.getErrors()));
-    o.put("warnings", new JSONArray(result.getWarnings()));
-    o.put("declarationData", declarationDataJson(data));
-    return o;
+    return FiscalAeatSubmissionSupport.resultJson(result, declarationDataJson(data));
   }
 
   /** Builds the response for a submission that failed before (or without) reaching the AEAT. */
   JSONObject buildFailureJson(boolean testMode, String errorCode, String message)
       throws Exception {
-    JSONObject o = new JSONObject();
-    o.put("status", "ERROR");
-    o.put(PARAM_TEST_MODE, testMode);
-    o.put("errorCode", errorCode);
-    JSONArray errors = new JSONArray();
-    errors.put(StringUtils.defaultString(message));
-    o.put("errors", errors);
-    o.put("warnings", new JSONArray());
-    return o;
+    return FiscalAeatSubmissionSupport.failureJson(testMode, errorCode, message);
   }
 
   // ── Package-private helpers (tested directly) ─────────────────────────────

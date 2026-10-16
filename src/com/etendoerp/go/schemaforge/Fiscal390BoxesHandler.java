@@ -61,6 +61,8 @@ import org.openbravo.module.taxreportlauncher.TaxReportParameter;
  *   <li>{@code GET sources?year=&period=0A[&box=&type=&tax=&q=&page=&pageSize=]} — the
  *       invoice-tax lines behind the invoice-derived boxes, from the same box walk
  *       ({@link Fiscal390SourcesSupport});</li>
+ *   <li>{@code POST submit?year=&period=0A&id=} — the AEAT telematic filing
+ *       ({@link Fiscal390SubmissionSupport}); POST-only, like {@code /fiscal303/submit};</li>
  *   <li>{@code GET modified?year=&period=0A&since=} — the shared invoice-change probe.</li>
  * </ul>
  *
@@ -91,24 +93,43 @@ class Fiscal390BoxesHandler extends AbstractFiscalHandler {
   static final Pattern REPORT_KEY_PATTERN = Pattern.compile("^AEAT390_(\\d{4})_Y$");
 
   private final Fiscal390GenerateSupport generateSupport;
+  private final Fiscal390SubmissionSupport submissionSupport;
   private final Fiscal390SourcesSupport sourcesSupport;
 
   Fiscal390BoxesHandler(NeoServlet servlet) {
     super(servlet);
     this.snapshotSupport = new Fiscal390SnapshotSupport();
     this.generateSupport = new Fiscal390GenerateSupport(this);
+    this.submissionSupport = new Fiscal390SubmissionSupport(this);
     this.sourcesSupport = new Fiscal390SourcesSupport(this);
   }
 
   @Override
   protected boolean isKnownEntity(String entityName) {
     return BOXES.equals(entityName) || GENERATE.equals(entityName) || MODIFIED.equals(entityName)
+        || Fiscal390SubmissionSupport.SUBMIT.equals(entityName)
         || Fiscal390SourcesSupport.SOURCES.equals(entityName);
+  }
+
+  /** {@code submit} files the declaration with the AEAT: POST-only (see the 303 handler). */
+  @Override
+  protected boolean allowsPost(String entityName) {
+    return Fiscal390SubmissionSupport.SUBMIT.equals(entityName);
+  }
+
+  @Override
+  protected boolean allowsGet(String entityName) {
+    return !Fiscal390SubmissionSupport.SUBMIT.equals(entityName);
   }
 
   @Override
   protected String getModelKey() {
     return "fiscal390";
+  }
+
+  /** The file generation, shared by {@code generate} and the telematic submission. */
+  Fiscal390GenerateSupport generateSupport() {
+    return generateSupport;
   }
 
   @Override
@@ -134,6 +155,8 @@ class Fiscal390BoxesHandler extends AbstractFiscalHandler {
               response);
         } else if (Fiscal390SourcesSupport.SOURCES.equals(entityName)) {
           sourcesSupport.handle(orgId, year, period, request, response);
+        } else if (Fiscal390SubmissionSupport.SUBMIT.equals(entityName)) {
+          submissionSupport.handleSubmit(orgId, year, period, request, response);
         } else {
           long sinceMs = Long.parseLong(request.getParameter(SINCE_KEY));
           handleModified(orgId, year, period, new Date(sinceMs), response);

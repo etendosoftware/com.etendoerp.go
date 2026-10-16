@@ -78,6 +78,32 @@ class Fiscal390GenerateSupport {
 
   void handleGenerate(String orgId, int year, Map<String, String> inputs,
       HttpServletResponse response) throws Exception {
+    Generated generated = generateContent(orgId, year, inputs);
+    response.setHeader(HEADER_TAX_REPORT, generated.taxReport.searchKey);
+    response.setHeader(HEADER_LAYOUT_YEAR, String.valueOf(generated.taxReport.layoutYear));
+    HashMap<String, Object> single = new HashMap<>();
+    single.put("file", generated.content);
+    owner.writeGeneratedFile(single, fileName(year) + ".txt", response);
+  }
+
+  /** The generated TXT content and the report it was generated with. */
+  static final class Generated {
+    final String content;
+    final AbstractFiscalHandler.ResolvedTaxReport taxReport;
+
+    Generated(String content, AbstractFiscalHandler.ResolvedTaxReport taxReport) {
+      this.content = content;
+      this.taxReport = taxReport;
+    }
+  }
+
+  /**
+   * Generates the Modelo 390 TXT content through the classic report class — the body of
+   * {@link #handleGenerate}, also used by the telematic submission
+   * ({@link Fiscal390SubmissionSupport}), which never trusts a client-supplied file.
+   */
+  Generated generateContent(String orgId, int year, Map<String, String> inputs)
+      throws Exception {
     AbstractFiscalHandler.ResolvedTaxReport taxReport = owner.resolveTaxReport390(orgId, year);
     AcctSchema acctSchema = owner.resolveAcctSchema();
     List<Period> periods = owner.resolvePeriods(orgId, year, AbstractFiscalHandler.ANNUAL_PERIOD);
@@ -97,12 +123,7 @@ class Fiscal390GenerateSupport {
     } finally {
       deleteReturnedFiles(result);
     }
-
-    response.setHeader(HEADER_TAX_REPORT, taxReport.searchKey);
-    response.setHeader(HEADER_LAYOUT_YEAR, String.valueOf(taxReport.layoutYear));
-    HashMap<String, Object> single = new HashMap<>();
-    single.put("file", content);
-    owner.writeGeneratedFile(single, fileName + ".txt", response);
+    return new Generated(content, taxReport);
   }
 
   /** Instantiates the classic report class. Package-private so tests can replace it. */
