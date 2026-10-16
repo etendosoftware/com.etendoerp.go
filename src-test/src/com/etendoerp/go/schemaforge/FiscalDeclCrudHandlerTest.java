@@ -18,6 +18,7 @@ package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -364,6 +365,75 @@ public class FiscalDeclCrudHandlerTest {
           FiscalDeclCrudHandler.SEVERITY_WARN);
       verify(obDal, never()).commitAndClose();
     }
+  }
+
+  /**
+   * ETP-5716 — the mirror of the AEAT replace: a rule recompute replaces only the rule incidents
+   * and keeps the {@code AEAT-<code>} rows of the last AEAT answer; nothing is committed.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testReplaceRuleIncidentsKeepsAeatRows() {
+    BaseOBObject decl = mock(BaseOBObject.class);
+    when(decl.getId()).thenReturn("decl1");
+    BaseOBObject aeat = mock(BaseOBObject.class);
+    when(aeat.get(FiscalDeclCrudHandler.PROPERTY_INCIDENT_CODE)).thenReturn("AEAT-E1");
+    BaseOBObject staleRule = mock(BaseOBObject.class);
+    when(staleRule.get(FiscalDeclCrudHandler.PROPERTY_INCIDENT_CODE)).thenReturn("NO_MAIN_IAE");
+    BaseOBObject newInc = mock(BaseOBObject.class);
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+        MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      OBQuery<BaseOBObject> query = mock(OBQuery.class);
+      when(obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL_INCIDENT), anyString()))
+          .thenReturn(query);
+      when(query.list()).thenReturn(Arrays.asList(aeat, staleRule));
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL_INCIDENT)).thenReturn(newInc);
+
+      handler.replaceRuleIncidentsNoCommit(decl, Collections.singletonList(
+          new FiscalDeclCrudHandler.RuleIncidentRow("DIFF_303", FiscalDeclCrudHandler.SEVERITY_WARN,
+              "{\"text\":\"diff\"}")));
+
+      verify(obDal).remove(staleRule);
+      verify(obDal, never()).remove(aeat);
+      verify(newInc).set(FiscalDeclCrudHandler.PROPERTY_INCIDENT_CODE, "DIFF_303");
+      verify(newInc).set(FiscalDeclCrudHandler.PROPERTY_INCIDENT_MESSAGE, "{\"text\":\"diff\"}");
+      verify(newInc).set(FiscalDeclCrudHandler.PROPERTY_INCIDENT_SEVERITY,
+          FiscalDeclCrudHandler.SEVERITY_WARN);
+      verify(obDal, never()).commitAndClose();
+    }
+  }
+
+  /** A structured message is unfolded into message + params + action; a plain one is kept. */
+  @Test
+  public void testStructuredMessageRoundTrip() throws Exception {
+    java.util.Map<String, Object> params = new java.util.LinkedHashMap<>();
+    params.put("box", 87);
+    java.util.Map<String, Object> action = new java.util.LinkedHashMap<>();
+    action.put("type", "box");
+    action.put("box", 87);
+    String stored = FiscalDeclCrudHandler.structuredMessage("Sum is 90 %", params, action);
+
+    org.codehaus.jettison.json.JSONObject out = new org.codehaus.jettison.json.JSONObject();
+    FiscalDeclCrudHandler.putMessageFields(out, stored);
+    assertEquals("Sum is 90 %", out.getString("message"));
+    assertEquals(87, out.getJSONObject("params").getInt("box"));
+    assertEquals("box", out.getJSONObject("action").getString("type"));
+
+    org.codehaus.jettison.json.JSONObject plain = new org.codehaus.jettison.json.JSONObject();
+    FiscalDeclCrudHandler.putMessageFields(plain, "{not json} El NIF no es valido");
+    assertEquals("{not json} El NIF no es valido", plain.getString("message"));
+    assertFalse(plain.has("params"));
+
+    org.codehaus.jettison.json.JSONObject noText = new org.codehaus.jettison.json.JSONObject();
+    FiscalDeclCrudHandler.putMessageFields(noText, "{\"a\":1}");
+    assertEquals("{\"a\":1}", noText.getString("message"));
   }
 
   /**

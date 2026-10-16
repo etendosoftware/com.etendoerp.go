@@ -935,17 +935,80 @@ class FiscalDeclCrudHandler {
     if (decl == null) {
       return;
     }
+    JSONObject out = new JSONObject();
+    out.put("data", incidentsJson(id));
+    response.getWriter().write(out.toString());
+  }
+
+  /**
+   * The persisted incidents of {@code declId} in the read shape of {@link #handleIncidents}:
+   * {@code [{code, message, severity[, params][, action]}]}. A structured message
+   * ({@link #structuredMessage}) is unfolded: {@code message} is its text and its
+   * {@code params}/{@code action} are returned alongside; a plain message (an AEAT answer) is
+   * returned as-is.
+   */
+  JSONArray incidentsJson(String declId) throws JSONException {
     JSONArray arr = new JSONArray();
-    for (BaseOBObject inc : queryIncidents(id)) {
+    for (BaseOBObject inc : queryIncidents(declId)) {
       JSONObject o = new JSONObject();
       o.put(CODE_KEY,     asString(inc.get(PROPERTY_INCIDENT_CODE)));
-      o.put(MESSAGE_KEY,  asString(inc.get(PROPERTY_INCIDENT_MESSAGE)));
+      putMessageFields(o, asString(inc.get(PROPERTY_INCIDENT_MESSAGE)));
       o.put(SEVERITY_KEY, resolveSeverity(inc));
       arr.put(o);
     }
-    JSONObject out = new JSONObject();
-    out.put("data", arr);
-    response.getWriter().write(out.toString());
+    return arr;
+  }
+
+  /** Key of the human-readable text inside a {@link #structuredMessage}. */
+  static final String STRUCTURED_TEXT_KEY = "text";
+  static final String PARAMS_KEY = "params";
+  static final String ACTION_KEY = "action";
+
+  /**
+   * The {@code MESSAGE} of an incident a model computes itself (ETP-5716, Modelo 390 rules):
+   * {@code {"text": <fallback text>, "params": {...}, "action": {...}}} as JSON, so the reader can
+   * translate the incident by its code with its parameters and offer the action — without a new
+   * column. {@code params}/{@code action} are omitted when {@code null}.
+   */
+  static String structuredMessage(String text, java.util.Map<String, ?> params,
+      java.util.Map<String, ?> action) throws JSONException {
+    JSONObject o = new JSONObject();
+    o.put(STRUCTURED_TEXT_KEY, StringUtils.defaultString(text));
+    if (params != null && !params.isEmpty()) {
+      o.put(PARAMS_KEY, new JSONObject(params));
+    }
+    if (action != null && !action.isEmpty()) {
+      o.put(ACTION_KEY, new JSONObject(action));
+    }
+    return o.toString();
+  }
+
+  /**
+   * Puts {@code message} (and, for a {@link #structuredMessage}, {@code params} / {@code action})
+   * into {@code out}. Anything that is not a JSON object with a string {@code text} is a plain
+   * message.
+   */
+  static void putMessageFields(JSONObject out, String stored) throws JSONException {
+    String trimmed = StringUtils.trimToEmpty(stored);
+    if (trimmed.startsWith("{")) {
+      try {
+        JSONObject parsed = new JSONObject(trimmed);
+        Object text = parsed.opt(STRUCTURED_TEXT_KEY);
+        if (text instanceof String) {
+          out.put(MESSAGE_KEY, text);
+          if (parsed.optJSONObject(PARAMS_KEY) != null) {
+            out.put(PARAMS_KEY, parsed.getJSONObject(PARAMS_KEY));
+          }
+          if (parsed.optJSONObject(ACTION_KEY) != null) {
+            out.put(ACTION_KEY, parsed.getJSONObject(ACTION_KEY));
+          }
+          return;
+        }
+      } catch (JSONException e) {
+        // not structured: a plain message that happens to start with a brace
+      }
+    }
+    out.put(MESSAGE_KEY, stored);
   }
 
   /**
@@ -1045,6 +1108,27 @@ class FiscalDeclCrudHandler {
     insertIncidents(decl, warnings, SEVERITY_WARN, AEAT_INCIDENT_CODE_PREFIX);
   }
 
+  /** One incident a model computes itself: code, severity and its {@link #structuredMessage}. */
+  record RuleIncidentRow(String code, String severity, String message) {
+  }
+
+  /**
+   * Replaces the incidents a model computes itself (every row whose code is NOT
+   * {@link #AEAT_INCIDENT_CODE_PREFIX}) with {@code rows} — the mirror of
+   * {@link #replaceAeatIncidentsNoCommit}: the last AEAT answer is kept. Does not commit.
+   */
+  void replaceRuleIncidentsNoCommit(BaseOBObject decl, List<RuleIncidentRow> rows) {
+    String declId = String.valueOf(decl.getId());
+    for (BaseOBObject inc : queryIncidents(declId)) {
+      if (!asString(inc.get(PROPERTY_INCIDENT_CODE)).startsWith(AEAT_INCIDENT_CODE_PREFIX)) {
+        OBDal.getInstance().remove(inc);
+      }
+    }
+    for (RuleIncidentRow row : rows) {
+      insertIncident(decl, row.code(), row.message(), row.severity());
+    }
+  }
+
   /**
    * Inserts one {@code ETGO_Fiscal_Decl_Incident} row per DISTINCT (order-preserving) entry in
    * {@code rawEntries}, tagged with {@code severity}. Shared insertion logic for both the error
@@ -1056,17 +1140,21 @@ class FiscalDeclCrudHandler {
       String codePrefix) {
     for (String raw : new LinkedHashSet<>(rawEntries)) {
       String[] parsed = splitAeatError(raw);
-      BaseOBObject inc = (BaseOBObject) OBProvider.getInstance().get(ENTITY_FISCAL_DECL_INCIDENT);
-      inc.set(PROPERTY_CLIENT, OBContext.getOBContext().getCurrentClient());
-      inc.set(PROPERTY_ORGANIZATION, OBContext.getOBContext().getCurrentOrganization());
-      inc.set(PROPERTY_CREATED_BY, OBContext.getOBContext().getUser());
-      inc.set(PROPERTY_UPDATED_BY, OBContext.getOBContext().getUser());
-      inc.set(PROPERTY_INCIDENT_DECL, decl);
-      inc.set(PROPERTY_INCIDENT_CODE, codePrefix + parsed[0]);
-      inc.set(PROPERTY_INCIDENT_MESSAGE, parsed[1]);
-      inc.set(PROPERTY_INCIDENT_SEVERITY, severity);
-      OBDal.getInstance().save(inc);
+      insertIncident(decl, codePrefix + parsed[0], parsed[1], severity);
     }
+  }
+
+  private void insertIncident(BaseOBObject decl, String code, String message, String severity) {
+    BaseOBObject inc = (BaseOBObject) OBProvider.getInstance().get(ENTITY_FISCAL_DECL_INCIDENT);
+    inc.set(PROPERTY_CLIENT, OBContext.getOBContext().getCurrentClient());
+    inc.set(PROPERTY_ORGANIZATION, OBContext.getOBContext().getCurrentOrganization());
+    inc.set(PROPERTY_CREATED_BY, OBContext.getOBContext().getUser());
+    inc.set(PROPERTY_UPDATED_BY, OBContext.getOBContext().getUser());
+    inc.set(PROPERTY_INCIDENT_DECL, decl);
+    inc.set(PROPERTY_INCIDENT_CODE, code);
+    inc.set(PROPERTY_INCIDENT_MESSAGE, message);
+    inc.set(PROPERTY_INCIDENT_SEVERITY, severity);
+    OBDal.getInstance().save(inc);
   }
 
   /**
