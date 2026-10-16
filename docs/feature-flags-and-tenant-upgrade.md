@@ -434,8 +434,10 @@ current cost and their prices, and active contacts are copied under target clien
 global units and tax categories remain global references. Only prices on the demo's **default**
 sales and purchase price lists are migrated (the newest version of each), onto the target's
 default lists; prices on any other list are left behind. A contact address reuses only an
-address row already used by another contact, never the organization's fiscal address. Missing
-required target references fail the job with a visible reason.
+address row already used by another contact, never the organization's fiscal address. A contact
+keeps its source currency, else gets the target organization's (ETP-5768): the copy runs as
+System and bypasses the NEO hook that defaults it, and Core refuses to complete any document for
+a contact without one. Missing required target references fail the job with a visible reason.
 
 Each product and each contact is committed on its own, so the First Steps counters move while
 the job runs. A failure therefore rolls back only the item in progress and leaves the earlier

@@ -197,6 +197,56 @@ class CompanyInvitationServiceTest {
   }
 
   @Test
+  @DisplayName("account invitation list carries the company id, the send date and the inviter "
+      + "(ETP-5734)")
+  void testListInvitationsForAccountCarriesInvitationOrigin() throws Exception {
+    Account account = mock(Account.class);
+    when(account.getEmail()).thenReturn("member@example.com");
+
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn("client-1");
+    when(client.getName()).thenReturn("Ferreteria Sol");
+    User inviter = mock(User.class);
+    when(inviter.getName()).thenReturn("Marta Sol");
+    when(inviter.getEmail()).thenReturn("marta@ferreteriasol.es");
+
+    Invitation withOrigin = mock(Invitation.class);
+    when(withOrigin.getId()).thenReturn("invitation-1");
+    when(withOrigin.getStatus()).thenReturn("SENT");
+    when(withOrigin.getClient()).thenReturn(client);
+    when(withOrigin.getCreationDate()).thenReturn(new Date(0L));
+    when(withOrigin.getCreatedBy()).thenReturn(inviter);
+
+    // A record with no creator or creation date must still be listed, just without those keys.
+    Invitation withoutOrigin = mock(Invitation.class);
+    when(withoutOrigin.getId()).thenReturn("invitation-2");
+    when(withoutOrigin.getStatus()).thenReturn("PENDING");
+
+    OBDal dal = mock(OBDal.class);
+    OBQuery<Invitation> query = mock(OBQuery.class);
+    when(dal.createQuery(eq(Invitation.class), anyString())).thenReturn(query);
+    when(query.list()).thenReturn(List.of(withOrigin, withoutOrigin));
+
+    try (MockedStatic<OBDal> obDal = org.mockito.Mockito.mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+
+      JSONObject response = new CompanyInvitationService().listInvitationsForAccount(account);
+
+      JSONObject first = response.getJSONArray("invitations").getJSONObject(0);
+      assertEquals("client-1", first.getString("clientId"));
+      assertEquals("1970-01-01T00:00:00Z", first.getString("invitedAt"));
+      assertEquals("Marta Sol", first.getString("inviterName"));
+      assertEquals("marta@ferreteriasol.es", first.getString("inviterEmail"));
+
+      JSONObject second = response.getJSONArray("invitations").getJSONObject(1);
+      assertEquals("invitation-2", second.getString("id"));
+      assertFalse(second.has("clientId"));
+      assertFalse(second.has("invitedAt"));
+      assertFalse(second.has("inviterName"));
+    }
+  }
+
+  @Test
   @DisplayName("resolveInvitation rejects blank token")
   void testResolveInvitationBlank() throws Exception {
     CompanyInvitationService service = new CompanyInvitationService();
