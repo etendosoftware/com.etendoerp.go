@@ -80,6 +80,9 @@ import org.openbravo.service.db.CallStoredProcedure;
  * org.openbravo.test.inventoryStatus.InventoryStatusTest}), reusing the SAME QA Testing
  * client/org and "Spain East warehouse" (has exactly one default AND active locator, "M01")
  * those two tests already validated works for this stored procedure.
+ *
+ * @covers com.etendoerp.go.schemaforge.ReturnLineQuantityPolicy
+ * @covers com.etendoerp.go.schemaforge.CreatePurchaseReturnHandler
  */
 public class ReturnLineQuantitySignIntegrationTest extends WeldBaseTest {
 
@@ -178,7 +181,7 @@ public class ReturnLineQuantitySignIntegrationTest extends WeldBaseTest {
     OBDal.getInstance().refresh(shipmentLine);
 
     DocumentType invDocType = ReturnShipmentUtils.findReturnDocTypeForOrg(
-        shipment.getOrganization().getId(), "ARI", true, false, false);
+        shipment.getClient(), shipment.getOrganization().getId(), "ARI", true, false, false);
     assertNotNull("test fixture requires an active, non-return AR Invoice doc type",
         invDocType);
     Invoice invoice = buildMinimalInvoiceHeader(shipment, invDocType, "ETP5313S2INV");
@@ -269,6 +272,7 @@ public class ReturnLineQuantitySignIntegrationTest extends WeldBaseTest {
     ShipmentInOut receipt = cloneDraftReceiptHeader("ETP5313S5RCP");
     ShipmentInOutLine receiptLine = addReceiptLine(receipt, product, new BigDecimal("30"));
     completeInOut(receipt);
+    OBDal.getInstance().refresh(receipt);
     OBDal.getInstance().refresh(receiptLine);
 
     JSONObject requestBody = new JSONObject().put("lines", new JSONArray().put(

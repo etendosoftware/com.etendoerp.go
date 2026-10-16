@@ -22,9 +22,7 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
-import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -38,11 +36,7 @@ import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
-import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
-import org.openbravo.model.common.enterprise.Locator;
-import org.openbravo.model.common.enterprise.Warehouse;
-import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 
 /**
  * Unit tests for {@link ReturnToVendorShipmentLineHandler}.
@@ -54,6 +48,9 @@ import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
  *   <li>{@code afterHandle()} — guard conditions, movementQuantity sign flip, and the SQL
  *       enrichment paths for orderQuantity and productCode injection.</li>
  * </ul>
+ *
+ * @covers com.etendoerp.go.schemaforge.ReturnToVendorShipmentLineHandler
+ * @covers com.etendoerp.go.schemaforge.ReturnableQuantity
  */
 public class ReturnToVendorShipmentLineHandlerTest {
 
@@ -137,27 +134,6 @@ public class ReturnToVendorShipmentLineHandlerTest {
     assertFalse("product field should be removed for PUT", body.has("product"));
   }
 
-  // ── handle() — POST keeps product ─────────────────────────────────────────
-
-  /**
-   * POST with a positive movementQuantity: the value is negated but the "product" field
-   * is kept (only PUT/PATCH strip it).
-   */
-  @Test
-  public void testHandlePostNegatesQtyButKeepsProduct() throws Exception {
-    JSONObject body = new JSONObject()
-        .put("movementQuantity", 7.0)
-        .put("product", "prod-2");
-    NeoContext ctx = NeoContext.builder()
-        .httpMethod("POST").endpointType(NeoEndpointType.CRUD)
-        .requestBody(body).build();
-
-    HANDLER.handle(ctx);
-
-    assertEquals(-7.0, body.getDouble("movementQuantity"), 0.0001);
-    assertTrue("product field must be kept for POST", body.has("product"));
-  }
-
   // ── handle() — PATCH negation and product removal ─────────────────────────
 
   /**
@@ -223,6 +199,60 @@ public class ReturnToVendorShipmentLineHandlerTest {
     NeoResponse result = HANDLER.handle(ctx);
 
     assertNull(result);
+  }
+
+  // ── handle() — over-return cap on a quantity edit (ETP-5711) ───────────────
+
+  /**
+   * A line of 4 returned out of a source line of 10 whose other returns hold 3: the line may grow
+   * up to 7 (its own 4 does not count against it) and not one unit more.
+   */
+  @Test
+  public void testQuantityEditWithinWhatIsLeftIsAcceptedExcludingTheLineItself() throws Exception {
+    java.util.List<String> excluded = new java.util.ArrayList<>();
+
+    NeoResponse result = ReturnedQuantityTestSupport.editLineQuantity(HANDLER, "PATCH", "7",
+        "10", "3", "4", excluded);
+
+    assertNull("an edit within the remainder passes through to the default CRUD", result);
+    assertEquals(java.util.List.of("ret-line-1"), excluded);
+  }
+
+  @Test
+  public void testQuantityEditAboveWhatIsLeftIsRefusedWith422() throws Exception {
+    for (String method : new String[] {"PATCH", "PUT"}) {
+      NeoResponse result = ReturnedQuantityTestSupport.editLineQuantity(HANDLER, method, "8",
+          "10", "3", "4", new java.util.ArrayList<>());
+
+      assertNotNull(method, result);
+      assertEquals(method, 422, result.getHttpStatus());
+      JSONObject error = result.getBody().getJSONObject("error");
+      assertEquals("returnQuantityExceedsAvailable", error.getString("code"));
+      assertEquals(8, error.getDouble("requested"), 0.0001);
+      assertEquals(7, error.getDouble("available"), 0.0001);
+      assertTrue(error.getString("message"), error.getString("message").contains("Agua"));
+    }
+  }
+
+  /** The SPA may send the stored (negative) sign; the cap compares magnitudes. */
+  @Test
+  public void testQuantityEditWithNegativeStoredSignIsCappedByMagnitude() throws Exception {
+    NeoResponse result = ReturnedQuantityTestSupport.editLineQuantity(HANDLER, "PUT", "-8",
+        "10", "3", "4", new java.util.ArrayList<>());
+
+    assertNotNull(result);
+    assertEquals(422, result.getHttpStatus());
+  }
+
+  /** Create (POST) and edits that do not touch the quantity never ask the database. */
+  @Test
+  public void testQuantityCapIgnoresCreateAndEditsWithoutQuantity() {
+    JSONObject withoutQuantity = new JSONObject();
+    NeoContext patchOther = NeoContext.builder().httpMethod("PATCH")
+        .endpointType(NeoEndpointType.CRUD).recordId("ret-line-1")
+        .requestBody(withoutQuantity).build();
+
+    assertNull(HANDLER.handle(patchOther));
   }
 
   // ── afterHandle() — guard conditions ──────────────────────────────────────
@@ -411,120 +441,42 @@ public class ReturnToVendorShipmentLineHandlerTest {
     }
   }
 
-  // ── handle() — storageBin default injection (ETP-4863) ───────────────────
+  // ── handle() — a line is never created directly (ETP-5711) ───────────────
 
   /**
-   * Reproduces ETP-4863: confirming a Return to Vendor Shipment (Devolución de Compra) with
-   * the header on the PRINCIPAL warehouse must never leave the created line's {@code
-   * storageBin} pointing at a different (e.g. stale session-cached "secondary") warehouse.
-   * Unlike {@link GoodsReceiptLineHandler} and {@link GoodsShipmentLineHandler}, this handler
-   * implements {@link NeoHandler} directly (does not extend {@code AbstractInOutLineHandler}),
-   * so it never inherited the ETP-4671 locator-defaulting fix. handle() must default {@code
-   * storageBin} to the header warehouse's own default locator on POST when missing, exactly
-   * like the other two M_InOutLine-based line handlers.
+   * The window only adds lines through "Add from document" / create-from-document, which link every
+   * line to the line it returns and cap it. A direct POST of a line (REST, batch or MCP) would create
+   * an unlinked, uncapped one: it is refused whatever the body says.
    */
-  @SuppressWarnings("unchecked")
   @Test
-  public void testHandlePostInjectsWarehouseDefaultLocatorWhenStorageBinMissing() throws Exception {
-    JSONObject body = new JSONObject().put("parentId", "return-1").put("product", "prod-1");
+  public void testHandlePostIsRefusedWith422AndPointsAtTheImportActions() throws Exception {
+    JSONObject body = new JSONObject().put("parentId", "return-1").put("product", "prod-1")
+        .put("movementQuantity", 6.0);
     NeoContext ctx = NeoContext.builder().httpMethod("POST").endpointType(NeoEndpointType.CRUD)
         .requestBody(body).build();
 
-    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDalMock.when(OBDal::getInstance).thenReturn(dal);
-      ShipmentInOut header = mock(ShipmentInOut.class);
-      Warehouse warehouse = mock(Warehouse.class);
-      Locator locator = mock(Locator.class);
-      when(dal.get(eq(ShipmentInOut.class), eq("return-1"))).thenReturn(header);
-      when(header.getWarehouse()).thenReturn(warehouse);
-      when(warehouse.getId()).thenReturn("wh-principal");
-      when(locator.getId()).thenReturn("loc-default-wh-principal");
-      OBCriteria criteria = mock(OBCriteria.class);
-      when(dal.createCriteria(Locator.class)).thenReturn(criteria);
-      when(criteria.add(any())).thenReturn(criteria);
-      when(criteria.addOrder(any())).thenReturn(criteria);
-      when(criteria.setMaxResults(1)).thenReturn(criteria);
-      when(criteria.uniqueResult()).thenReturn(locator);
+    NeoResponse refusal = HANDLER.handle(ctx);
 
-      assertNull(HANDLER.handle(ctx));
-      assertEquals("A return-to-vendor-shipment line's storageBin must always resolve to the "
-          + "header warehouse's own default locator, never to a stale session-cached warehouse",
-          "loc-default-wh-principal", body.getString("storageBin"));
-    }
+    assertNotNull(refusal);
+    assertEquals(422, refusal.getHttpStatus());
+    JSONObject error = refusal.getBody().getJSONObject("error");
+    assertEquals("returnLineRequiresImport", error.getString("code"));
+    assertTrue(error.getString("message"), error.getString("message").contains("importReceiptLines"));
+    assertTrue(error.getString("message"), error.getString("message").contains("createPurchaseReturn"));
+    assertEquals("the refused body is not touched", 6.0, body.getDouble("movementQuantity"), 0.0001);
+    assertFalse(body.has("storageBin"));
   }
 
-  /**
-   * handle() POST must not override an explicit storageBin already supplied on the request
-   * when it ALREADY belongs to the header's warehouse (ETP-4863 BUG-1: the guarantee is about
-   * the warehouse, not about forcing every line onto the warehouse's single "default" locator).
-   */
-  @SuppressWarnings("unchecked")
+  /** Only the creation is refused: editing a line and every non-CRUD POST keep working. */
   @Test
-  public void testHandlePostDoesNotOverrideExplicitStorageBin() throws Exception {
-    JSONObject body = new JSONObject().put("parentId", "return-1")
-        .put("storageBin", "loc-explicit");
-    NeoContext ctx = NeoContext.builder().httpMethod("POST").endpointType(NeoEndpointType.CRUD)
-        .requestBody(body).build();
-
-    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDalMock.when(OBDal::getInstance).thenReturn(dal);
-      ShipmentInOut header = mock(ShipmentInOut.class);
-      Warehouse warehouse = mock(Warehouse.class);
-      when(dal.get(eq(ShipmentInOut.class), eq("return-1"))).thenReturn(header);
-      when(header.getWarehouse()).thenReturn(warehouse);
-      when(warehouse.getId()).thenReturn("wh-1");
-      Locator existingLocator = mock(Locator.class);
-      when(dal.get(eq(Locator.class), eq("loc-explicit"))).thenReturn(existingLocator);
-      when(existingLocator.getWarehouse()).thenReturn(warehouse);
-
-      assertNull(HANDLER.handle(ctx));
-      assertEquals("loc-explicit", body.getString("storageBin"));
-      Mockito.verify(dal, Mockito.never()).createCriteria(Locator.class);
+  public void testHandleStillAllowsEditsAndNonCrudPosts() throws Exception {
+    for (String method : new String[] {"PUT", "PATCH"}) {
+      NeoContext edit = NeoContext.builder().httpMethod(method).endpointType(NeoEndpointType.CRUD)
+          .requestBody(new JSONObject().put("description", "x")).build();
+      assertNull(method, HANDLER.handle(edit));
     }
-  }
-
-  /**
-   * Interaction edge case (QA): this handler is the only one of the 4 M_InOutLine-based line
-   * handlers whose {@code handle()} runs BOTH the new ETP-4863 locator guard AND the
-   * pre-existing movementQuantity-negation logic on the same POST. Neither the "inject locator"
-   * test nor the "negate qty" tests above exercise a realistic create payload carrying both a
-   * missing {@code storageBin} and a positive {@code movementQuantity} at once — this proves
-   * the two behaviors compose correctly (both fire, neither short-circuits the other) instead
-   * of assuming it from two tests that never overlap on the same request body.
-   */
-  @SuppressWarnings("unchecked")
-  @Test
-  public void testHandlePostInjectsLocatorAndNegatesQuantityTogether() throws Exception {
-    JSONObject body = new JSONObject().put("parentId", "return-1")
-        .put("product", "prod-1").put("movementQuantity", 6.0);
-    NeoContext ctx = NeoContext.builder().httpMethod("POST").endpointType(NeoEndpointType.CRUD)
-        .requestBody(body).build();
-
-    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDalMock.when(OBDal::getInstance).thenReturn(dal);
-      ShipmentInOut header = mock(ShipmentInOut.class);
-      Warehouse warehouse = mock(Warehouse.class);
-      Locator locator = mock(Locator.class);
-      when(dal.get(eq(ShipmentInOut.class), eq("return-1"))).thenReturn(header);
-      when(header.getWarehouse()).thenReturn(warehouse);
-      when(warehouse.getId()).thenReturn("wh-principal");
-      when(locator.getId()).thenReturn("loc-default-wh-principal");
-      OBCriteria criteria = mock(OBCriteria.class);
-      when(dal.createCriteria(Locator.class)).thenReturn(criteria);
-      when(criteria.add(any())).thenReturn(criteria);
-      when(criteria.addOrder(any())).thenReturn(criteria);
-      when(criteria.setMaxResults(1)).thenReturn(criteria);
-      when(criteria.uniqueResult()).thenReturn(locator);
-
-      assertNull(HANDLER.handle(ctx));
-
-      assertEquals("loc-default-wh-principal", body.getString("storageBin"));
-      assertEquals(-6.0, body.getDouble("movementQuantity"), 0.0001);
-      assertTrue("product must be kept for POST (only PUT/PATCH strip it)",
-          body.has("product"));
-    }
+    NeoContext callout = NeoContext.builder().httpMethod("POST")
+        .endpointType(NeoEndpointType.CALLOUT).requestBody(new JSONObject()).build();
+    assertNull(HANDLER.handle(callout));
   }
 }

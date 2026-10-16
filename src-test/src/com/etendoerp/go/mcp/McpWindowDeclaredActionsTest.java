@@ -58,6 +58,8 @@ import org.openbravo.model.ad.domain.Reference;
 import org.openbravo.model.ad.ui.Tab;
 
 import com.etendoerp.go.schemaforge.CurrencyOptionsHandler;
+import com.etendoerp.go.schemaforge.GoodsReceiptHeaderHandler;
+import com.etendoerp.go.schemaforge.GoodsShipmentHeaderHandler;
 import com.etendoerp.go.schemaforge.NeoActionRecordGuard;
 import com.etendoerp.go.schemaforge.NeoExtensionDispatcher;
 import com.etendoerp.go.schemaforge.NeoExtensionRequest;
@@ -66,6 +68,8 @@ import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.PurchaseInvoiceHeaderHandler;
+import com.etendoerp.go.schemaforge.ReturnMaterialReceiptHeaderHandler;
+import com.etendoerp.go.schemaforge.ReturnToVendorShipmentHeaderHandler;
 import com.etendoerp.go.schemaforge.SalesInvoiceHeaderHandler;
 import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
 import com.etendoerp.go.schemaforge.data.SFEntity;
@@ -381,6 +385,62 @@ class McpWindowDeclaredActionsTest {
           new JSONObject());
       assertNotNull(c);
       assertEquals("GET", c.getHttpMethod());
+    }
+
+    /**
+     * ETP-5711: the return flow (both directions) is judged by the contracts the real handlers
+     * declare — the lines of an import and of a create-from-document are optional or typed arrays,
+     * and an undeclared key is a 422 before anything runs.
+     */
+    @ParameterizedTest(name = "{0} {1} {2}")
+    @CsvSource(delimiter = '|', value = {
+        "return-to-vendor | availableReceipts     | {\"businessPartner\":\"BP\"} |",
+        "return-to-vendor | availableReceipts     | {}                    | missing:businessPartner",
+        "return-to-vendor | importReceiptLines    | {\"lines\":[{\"sourceLineId\":\"a\",\"returnQuantity\":1}]} |",
+        "return-to-vendor | importReceiptLines    | {\"foo\":1}             | foo",
+        "return-to-vendor | documentAction        | {\"docAction\":\"CO\"}  |",
+        "return-material  | availableShipments    | {\"businessPartner\":\"BP\"} |",
+        "return-material  | importShipmentLines   | {\"lines\":[{\"sourceLineId\":\"a\",\"returnQuantity\":1}]} |",
+        "return-material  | documentAction        | {\"docAction\":\"CO\"}  |",
+        "goods-receipt    | createPurchaseReturn  | {}                    |",
+        "goods-receipt    | createPurchaseReturn  | {\"lines\":[{\"lineId\":\"a\",\"returnQuantity\":1}],\"reason\":\"x\"} |",
+        "goods-receipt    | createPurchaseReturn  | {\"foo\":1}             | foo",
+        "goods-shipment   | createReturn          | {}                    |",
+        "goods-shipment   | createReturn          | {\"foo\":1}             | foo" })
+    void returnFlowActionsAreJudgedByTheirDeclaredContracts(String window, String action,
+        String body, String refusal) throws Exception {
+      Map<String, NeoActionContract> declared;
+      switch (window) {
+        case "return-to-vendor":
+          declared = new ReturnToVendorShipmentHeaderHandler().actionContracts();
+          break;
+        case "return-material":
+          declared = new ReturnMaterialReceiptHeaderHandler().actionContracts();
+          break;
+        case "goods-receipt":
+          declared = new GoodsReceiptHeaderHandler().actionContracts();
+          break;
+        default:
+          declared = new GoodsShipmentHeaderHandler().actionContracts();
+          break;
+      }
+      when(handler.actionContracts()).thenReturn(declared);
+      SFEntity e = entity("W", null);
+      JSONObject params = new JSONObject(body);
+
+      if (refusal == null) {
+        NeoActionContract contract = McpDeclaredActions.precheck(e, action, params);
+        assertNotNull(contract, action + " is a declared action");
+        assertEquals(action, contract.getName());
+        return;
+      }
+      McpRoutingException refused = assertThrows(McpRoutingException.class,
+          () -> McpDeclaredActions.precheck(e, action, params));
+      JSONObject env = refused.toEnvelope();
+      assertEquals(422, env.getInt(McpConstants.KEY_STATUS));
+      String key = refusal.startsWith("missing:") ? refusal.substring("missing:".length())
+          : refusal;
+      assertTrue(env.toString().contains(key), env.toString());
     }
 
     @Test
