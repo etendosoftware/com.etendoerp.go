@@ -18,6 +18,8 @@
 package com.etendoerp.go.schemaforge;
 
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
@@ -25,6 +27,8 @@ import java.util.TreeSet;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONObject;
 
 /**
  * Remembers, for the length of one batch request, which create-cascade callouts produced nothing
@@ -94,7 +98,7 @@ final class NeoCalloutDiscardMemory {
    * @param keptFields    the fields that kept their value over any output
    * @param reported      whether the callout raised a message or an error
    */
-  void record(String key, Set<String> outputs, Set<String> keptFields, boolean reported) {
+  void recordOutcome(String key, Set<String> outputs, Set<String> keptFields, boolean reported) {
     if (decisions.containsKey(key)) {
       return;
     }
@@ -105,6 +109,40 @@ final class NeoCalloutDiscardMemory {
           + "by a caller-sent or suppressed field; later operations with this key skip it",
           key, new TreeSet<>(outputs));
     }
+  }
+
+  /** The fields a callout response would write: valued updates and combos with a selection. */
+  static Set<String> calloutOutputs(JSONObject calloutBody) {
+    Set<String> outputs = new HashSet<>();
+    JSONObject updates = calloutBody.optJSONObject(NeoDefaultsCascadeHelper.KEY_UPDATES);
+    if (updates != null) {
+      Iterator<String> keys = updates.keys();
+      while (keys.hasNext()) {
+        String key = keys.next();
+        JSONObject entry = updates.optJSONObject(key);
+        if (entry != null && entry.has(NeoDefaultsCascadeHelper.FIELD_VALUE)) {
+          outputs.add(key);
+        }
+      }
+    }
+    JSONObject combos = calloutBody.optJSONObject(NeoDefaultsCascadeHelper.KEY_COMBOS);
+    if (combos != null) {
+      Iterator<String> keys = combos.keys();
+      while (keys.hasNext()) {
+        String key = keys.next();
+        JSONObject combo = combos.optJSONObject(key);
+        if (combo != null && combo.has(NeoDefaultsCascadeHelper.KEY_SELECTED)) {
+          outputs.add(key);
+        }
+      }
+    }
+    return outputs;
+  }
+
+  /** Whether a callout response carries a message or an error — never skippable. */
+  static boolean calloutReported(JSONObject calloutBody) {
+    JSONArray messages = calloutBody.optJSONArray("messages");
+    return (messages != null && messages.length() > 0) || calloutBody.has("error");
   }
 
   /** Logs how many callout runs the batch saved, one line per skipped key. */
