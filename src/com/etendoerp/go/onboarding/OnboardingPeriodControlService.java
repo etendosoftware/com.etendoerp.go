@@ -56,13 +56,12 @@ import java.util.List;
  * tenant's client name ("GOOrg Calendar" → "&lt;client&gt; Calendar"), mirroring the chart rebrand
  * in {@link OnboardingAccountingWiringService}.
  *
- * <p>Finally it opens every fiscal period up to and including the current month (driven by today's
- * date) and leaves later periods never-opened, so the onboarded tenant starts with the correct
- * year-to-date open regardless of when onboarding runs. This is the preventive counterpart of the
- * frozen R3-periodcontrol corrective data-fix.
- *
- * <p>For demo signups, {@link #openDemoTrialWindow} later widens that window to the whole trial
- * (ETP-5575). It runs after the onboarding commit, open-only, for pooled and classic demos alike.
+ * <p>Finally it leaves every period never-opened (ETP-5577). The chain also builds pooled tenants,
+ * before anyone knows whether a demo or a productive onboarding will claim them, so it must not
+ * decide which periods are open. That happens after the onboarding commit:
+ * {@link #openDemoTrialWindow} for demos (ETP-5575) and {@link #applyProductiveInitialState} for
+ * productive tenants. {@link #normalize} then leaves one control row per period, organization and
+ * document base type, whichever copies the dataset import and the core triggers produced.
  *
  * <p>Accounting-schema (general-ledger) wiring is out of scope here — that belongs to Gap A1 and
  * lives in {@link OnboardingAccountingWiringService}.
@@ -106,7 +105,7 @@ public class OnboardingPeriodControlService extends OnboardingContextSupport {
       }
       enablePeriodControl(org, calendar);
       rebrandImportedCalendarName(org, calendar);
-      openPeriodsThroughCurrentMonth(calendar);
+      resetPeriodsToNeverOpened(calendar);
       flushChanges();
     });
   }
@@ -114,18 +113,17 @@ public class OnboardingPeriodControlService extends OnboardingContextSupport {
   /**
    * Opens the fiscal periods a demo tenant needs for its whole trial (ETP-5575).
    *
-   * <p>{@link #wire} opens periods through the month the tenant is <em>built</em>. That is too short
-   * for a demo: a trial lasts {@code trialDays}, so a signup at the end of a month cannot post the
-   * next month, and a pooled tenant built in one month and claimed in the next keeps the build
-   * month's window. This method runs after the onboarding commit, for demo signups only, and opens
-   * every never-opened period whose start is on or before the trial end.
+   * <p>{@link #wire} leaves every period never-opened (ETP-5577), because the chain also builds
+   * pooled tenants that may become productive. This method runs after the onboarding commit, for
+   * demo signups only, and opens every never-opened period whose start is on or before the trial
+   * end, so the demo can post during its whole trial.
    *
    * <p>It only opens: a control row is flipped from never-opened ({@code 'N'}) to open, and rows a
    * user closed ({@code 'C'}) or closed permanently ({@code 'P'}) are never touched. Every control row
-   * of a period is considered, so the duplicated rows a tenant carries today (the dataset copy plus
-   * the copy {@code AD_ORG_READY} inserts) all end up open. Posting needs any open row and costing
-   * reads any non-open row as closed, so both must be open. Years are not created: when the trial end
-   * falls beyond the calendar's last period, what exists is opened and a warning is logged.
+   * of a period is considered, so a duplicated row (see {@link #normalize}) ends up open too:
+   * posting needs any open row and costing reads any non-open row as closed. Years are not created
+   * (ETP-5744): when the trial end falls beyond the calendar's last period, what exists is opened
+   * and a warning is logged.
    *
    * @param clientId    demo client identifier
    * @param orgId       demo organization identifier
@@ -140,15 +138,7 @@ public class OnboardingPeriodControlService extends OnboardingContextSupport {
       throw new OBException("Missing trial start for demo period window of client " + clientId);
     }
     runInTenantContext(clientId, orgId, adminUserId, adminRoleId, () -> {
-      Organization org = resolveOrganization(orgId);
-      if (org == null) {
-        throw new OBException("Organization not found for demo period window: " + orgId);
-      }
-      Calendar calendar = org.getCalendar() != null ? org.getCalendar()
-          : resolveImportedCalendar(org);
-      if (calendar == null) {
-        throw new OBException("No calendar found for demo period window of client " + clientId);
-      }
+      Calendar calendar = resolveOrgCalendar(clientId, orgId);
       Date trialEnd = Date.from(trialStart.plus(Duration.ofDays(Math.max(trialDays, 0))));
       List<Period> periods = resolveCalendarPeriods(calendar);
       if (!coversDate(periods, trialEnd)) {
@@ -198,9 +188,9 @@ public class OnboardingPeriodControlService extends OnboardingContextSupport {
   }
 
   /**
-   * Open-only variant of {@link #openPeriodsThroughCurrentMonth}: for every period starting on or
-   * before {@code cutoff}, flips its never-opened control rows to open and leaves every other row
-   * alone. Later periods are not touched. The period's own {@code openclose} flag is then
+   * Open-only: for every period starting on or before {@code cutoff}, flips its never-opened
+   * control rows to open and leaves every other row alone. Later periods are not touched. The
+   * period's own {@code openclose} flag is then
    * recomputed from its controls: open ({@code 'C'}) only when every control row is open, as the core
    * open/close process does.
    */
@@ -291,30 +281,74 @@ public class OnboardingPeriodControlService extends OnboardingContextSupport {
   }
 
   /**
-   * Opens every fiscal period of the imported calendar whose start date is not in the future, i.e.
-   * all periods up to and including the current month, and leaves later periods never-opened. The
-   * GOClient source snapshot only opens a fixed prefix of the year (it was authored at a point in
-   * time), so without this the freshly onboarded tenant would have the wrong months open relative to
-   * the current date.
+   * Leaves the organization's calendar with exactly one control row per (period, organization,
+   * document base type) (ETP-5577). Runs after {@code markOrgReady}: the dataset import and the core
+   * {@code AD_ORG_READY} / {@code C_PERIOD_TRG} insertions can each bring a full copy, and a
+   * duplicated period shows as "Mixto" and cannot be opened by the user alone.
    *
-   * <p>This is the preventive counterpart of the frozen corrective data-fix (R3-periodcontrol),
-   * which opens a static prefix (through June). Here the cut-off is dynamic — driven by "today" — so
-   * a tenant onboarded in any month gets exactly the year-to-date open.
-   *
-   * <ul>
-   *   <li>open period: {@code C_PERIOD.openclose='C'}; each {@code C_PERIODCONTROL}
-   *       {@code periodstatus='O'}, {@code openclose='C'}</li>
-   *   <li>closed period: {@code C_PERIOD.openclose='O'}; each {@code C_PERIODCONTROL}
-   *       {@code periodstatus='N'}, {@code openclose='O'}</li>
-   * </ul>
-   *
-   * {@code periodaction} stays {@code 'N'} (no action) in both states.
+   * @param clientId    target client identifier
+   * @param orgId       target organization identifier
+   * @param adminUserId administrator user for DAL context
+   * @param adminRoleId administrator role for DAL context
    */
-  protected void openPeriodsThroughCurrentMonth(Calendar calendar) {
-    Date today = currentDate();
+  public void normalize(String clientId, String orgId, String adminUserId, String adminRoleId) {
+    runInTenantContext(clientId, orgId, adminUserId, adminRoleId, () -> {
+      Calendar calendar = resolveOrgCalendar(clientId, orgId);
+      flushChanges();
+      FiscalCalendarSupport.normalizePeriodControls(calendar.getId());
+    });
+  }
+
+  /**
+   * Initial period state of a productive tenant (ETP-5577), after the onboarding commit. Makes sure
+   * the calendar covers the signup year: every calendar year in [now - 1 day, now + 1 day], because
+   * the tenant's timezone is unknown and a 31 December / 1 January signup must get both years.
+   * Normalizes the controls last. Every period stays never-opened: the owner chooses what to open
+   * after reviewing the calendar in "Primeros pasos".
+   *
+   * @param clientId         productive client identifier
+   * @param orgId            productive organization identifier
+   * @param adminUserId      administrator user for DAL context
+   * @param adminRoleId      administrator role for DAL context
+   */
+  public void applyProductiveInitialState(String clientId, String orgId, String adminUserId,
+      String adminRoleId) {
+    runInTenantContext(clientId, orgId, adminUserId, adminRoleId, () -> {
+      Calendar calendar = resolveOrgCalendar(clientId, orgId);
+      Instant now = currentDate().toInstant();
+      int firstYear = now.minus(Duration.ofDays(1)).atZone(ZoneId.systemDefault()).getYear();
+      int lastYear = now.plus(Duration.ofDays(1)).atZone(ZoneId.systemDefault()).getYear();
+      for (int year = firstYear; year <= lastYear; year++) {
+        FiscalCalendarSupport.ensureYear(calendar, year);
+      }
+      // Last, and native: it recomputes every period's open/close flag from the surviving rows.
+      flushChanges();
+      FiscalCalendarSupport.normalizePeriodControls(calendar.getId());
+    });
+  }
+
+  private Calendar resolveOrgCalendar(String clientId, String orgId) {
+    Organization org = resolveOrganization(orgId);
+    if (org == null) {
+      throw new OBException("Organization not found for period control: " + orgId);
+    }
+    Calendar calendar = org.getCalendar() != null ? org.getCalendar()
+        : resolveImportedCalendar(org);
+    if (calendar == null) {
+      throw new OBException("No calendar found for period control of client " + clientId);
+    }
+    return calendar;
+  }
+
+  /**
+   * Force-writes every period of the calendar and all its control rows to never-opened
+   * ({@code C_PERIOD.openclose='O'}; each {@code C_PERIODCONTROL} {@code periodstatus='N'},
+   * {@code periodaction='N'}, {@code openclose='O'}). The GOClient dataset ships some months open,
+   * and the chain must not decide which periods are open (see the class Javadoc).
+   */
+  protected void resetPeriodsToNeverOpened(Calendar calendar) {
     for (Period period : resolveCalendarPeriods(calendar)) {
-      boolean open = !period.getStartingDate().after(today);
-      applyPeriodOpenState(period, open);
+      applyPeriodOpenState(period, false);
     }
   }
 

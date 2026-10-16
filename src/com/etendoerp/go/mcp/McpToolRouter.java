@@ -2117,6 +2117,34 @@ public class McpToolRouter {
     }
   }
 
+  /** Recovery hint for a refusal keyed {@code PeriodNotAvailable} (ETP-5577). */
+  static final String PERIOD_NOT_AVAILABLE_HINT = "The date falls in an accounting period that is "
+      + "not open (a new company starts with every period never-opened). Do not open it on your "
+      + "own: ask the user first. If they agree, find the period with etendo_list on spec "
+      + "'open-close-period-control', entity 'periodControl', then call etendo_action on it with "
+      + "action 'openClose' and openClose = 'O', and retry.";
+
+  private static final String PERIOD_NOT_AVAILABLE_KEY = "PeriodNotAvailable";
+
+  /**
+   * ETP-5577: a refusal keyed {@code PeriodNotAvailable} — wherever the key sits, top level or
+   * under a nested {@code error} — gets a {@code hint} naming the {@code openClose} action, unless
+   * the body already carries one.
+   */
+  private static void addPeriodNotAvailableHint(JSONObject body) throws JSONException {
+    if (body == null || body.has(McpConstants.KEY_HINT)) {
+      return;
+    }
+    JSONObject nested = body.optJSONObject(McpConstants.KEY_ERROR);
+    JSONArray keys = body.optJSONArray("messageKeys");
+    if (keys == null && nested != null) {
+      keys = nested.optJSONArray("messageKeys");
+    }
+    if (keys != null && keys.toString().contains('"' + PERIOD_NOT_AVAILABLE_KEY + '"')) {
+      body.put(McpConstants.KEY_HINT, PERIOD_NOT_AVAILABLE_HINT);
+    }
+  }
+
   /**
    * Wrap a JSON error body as MCP tool result content with the {@code isError} flag.
    *
@@ -2129,6 +2157,7 @@ public class McpToolRouter {
    */
   static JSONObject wrapAsErrorContent(JSONObject body) {
     try {
+      addPeriodNotAvailableHint(body);
       return wrapAsErrorContent(McpResponseSanitizer.render(body));
     } catch (JSONException e) {
       throw new McpToolException(ERROR_BUILDING_CONTENT, e);

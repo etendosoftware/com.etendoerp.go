@@ -592,6 +592,8 @@ final class McpHookExecutor {
     // content wrappers covers every NeoResponse-carrying path funnelled through here — a handler's
     // body is produced by the same core serialiser that puts `$ref` on a row.
     if (neoResponse.getHttpStatus() >= 400) {
+      // ETP-5577 — named as REST's NeoServlet.writeResponse does, before the body is flattened.
+      NeoResponse.identifyPeriodRefusal(neoResponse);
       return McpToolRouter.wrapAsErrorContent(McpToolRouterSupport
           .toMcpHandlerError(neoResponse.getBody(), neoResponse.getHttpStatus()));
     }
