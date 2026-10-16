@@ -21,6 +21,7 @@ import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.when;
 
 import java.util.Arrays;
@@ -213,7 +214,10 @@ public class NeoCurrencyPrecisionTest {
     modelProviderStatic.verify(ModelProvider::getInstance, never());
   }
 
-  /** A failing DAL (admin mode or model lookup) costs the default scale, never an exception. */
+  /**
+   * A failing DAL (admin mode or model lookup) costs the default scale, never an exception, and
+   * never a leaked admin mode: a throwing {@code setAdminMode} has already pushed it.
+   */
   @Test
   public void failuresNeverThrow() throws Exception {
     modelProviderStatic.when(ModelProvider::getInstance)
@@ -223,7 +227,16 @@ public class NeoCurrencyPrecisionTest {
 
     obContext.when(() -> OBContext.setAdminMode(anyBoolean()))
         .thenThrow(new NoClassDefFoundError("OBContext"));
+    obContext.clearInvocations();
     assertEquals(NeoCurrencyPrecision.DEFAULT_SCALE,
         NeoCurrencyPrecision.resolve(lineTab, new JSONObject(), "line-1"));
+    obContext.verify(OBContext::restorePreviousMode, times(1));
+
+    // setAdminMode pushes before it throws: the currency-id lookup must pop it too, untouched DAL.
+    obContext.clearInvocations();
+    assertEquals(NeoCurrencyPrecision.DEFAULT_SCALE,
+        NeoCurrencyPrecision.scaleOfCurrencyId("EUR"));
+    obContext.verify(OBContext::restorePreviousMode, times(1));
+    obDalStatic.verify(OBDal::getInstance, never());
   }
 }

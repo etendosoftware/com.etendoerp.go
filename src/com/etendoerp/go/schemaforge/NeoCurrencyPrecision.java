@@ -89,13 +89,18 @@ final class NeoCurrencyPrecision {
     return memoize(() -> scaleOfCurrencyId(currencyId.trim()));
   }
 
-  /** {@link #forCurrencyId}'s lookup; total. */
+  /**
+   * {@link #forCurrencyId}'s lookup; total. The admin mode is restored even when
+   * {@code setAdminMode} itself throws, since it has already been pushed by then.
+   */
   static int scaleOfCurrencyId(String currencyId) {
     try {
       OBContext.setAdminMode(true);
     } catch (Exception | LinkageError e) {
       log.debug("[CURRENCY-PRECISION] No DAL context, using {} decimals: {}", DEFAULT_SCALE,
           e.getMessage());
+      // setAdminMode pushes the mode before it can throw: pop it, or it leaks to the thread.
+      restoreQuietly();
       return DEFAULT_SCALE;
     }
     try {
@@ -128,7 +133,8 @@ final class NeoCurrencyPrecision {
   /**
    * Resolves the precision, most specific first: a currency the body itself carries, the stored
    * record's own currency (update), then the parent's currency — from the stored record, from the
-   * parent link in the body, or from a {@code parentId} still in the body.
+   * parent link in the body, or from a {@code parentId} still in the body. The admin mode is
+   * restored even when {@code setAdminMode} itself throws, since it has already been pushed.
    */
   static int resolve(Tab adTab, JSONObject body, String recordId) {
     // A tab without a real table id (a unit-test mock, a half-built context) has nothing to resolve
@@ -142,6 +148,8 @@ final class NeoCurrencyPrecision {
     } catch (Exception | LinkageError e) {
       log.debug("[CURRENCY-PRECISION] No DAL context, using {} decimals: {}", DEFAULT_SCALE,
           e.getMessage());
+      // setAdminMode pushes the mode before it can throw: pop it, or it leaks to the thread.
+      restoreQuietly();
       return DEFAULT_SCALE;
     }
     try {
