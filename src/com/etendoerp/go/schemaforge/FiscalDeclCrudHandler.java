@@ -207,20 +207,31 @@ class FiscalDeclCrudHandler {
    * "35068-mensaje"}) is recommended before touching this pattern again. */
   private static final Pattern AEAT_ERROR_PATTERN = Pattern.compile("^(\\S+)\\s*-\\s*(.+)$");
 
-  private static final String PROPERTY_CLIENT = "client";
-  private static final String PROPERTY_ORGANIZATION = "organization";
+  static final String PROPERTY_CLIENT = "client";
+  static final String PROPERTY_ORGANIZATION = "organization";
   private static final String PROPERTY_CREATED_BY = "createdBy";
   private static final String PROPERTY_UPDATED = "updated";
   private static final String PROPERTY_UPDATED_BY = "updatedBy";
   private static final String JSON_CONTENT_TYPE = "application/json;charset=UTF-8";
   private static final String MODEL_KEY         = "model";
   private static final String PERIOD_KEY        = "period";
-  private static final String STATUS_KEY        = "status";
+  static final String STATUS_KEY        = "status";
   private static final String FILE_NAME_KEY     = "fileName";
   private static final String FILE_EXTERNAL_KEY = "fileExternal";
   private static final String PARAM_CLIENT_ID   = "clientId";
   private static final String PARAM_ORG_ID      = "orgId";
-  private static final String MANUAL_DATA_KEY   = "manualData";
+  static final String MANUAL_DATA_KEY   = "manualData";
+  /**
+   * JSON key for the {@code manualData.identification} nested object, and the two boolean-ish
+   * corrective/ordinaria flags it carries (303's {@code rectificativa}, 349's {@code
+   * sustitutiva}) — ETP-5725 (reopened QA review, Sonar java:S1192): each literal was duplicated
+   * 3-4 times across {@link FiscalDeclCorrectiveConsistencySupport} and
+   * {@link FiscalDeclReactivationSupport} before this fix. Package-private: both support classes
+   * read them directly off {@code FiscalDeclCrudHandler}.
+   */
+  static final String IDENTIFICATION_KEY = "identification";
+  static final String RECTIFICATIVA_KEY  = "rectificativa";
+  static final String SUSTITUTIVA_KEY    = "sustitutiva";
   private static final String SUBMISSION_METHOD_KEY = "submissionMethod";
   private static final String SUBMITTED_SNAPSHOT_KEY = "submittedSnapshot";
   private static final String CODE_KEY          = "code";
@@ -229,17 +240,44 @@ class FiscalDeclCrudHandler {
   private static final String MISSING_ID_PARAM  = "Missing param: id";
   private static final String DECL_NOT_FOUND_PREFIX = "Declaration not found: ";
 
-  private final NeoServlet servlet;
+  /**
+   * Package-private (not {@code private}): {@link FiscalDeclCorrectiveConsistencySupport},
+   * {@link FiscalDeclReactivationSupport} and {@link FiscalDeclManualDataValidationSupport} all
+   * call {@code owner.servlet.sendError(...)} directly, the same access pattern
+   * {@code Fiscal303SubmissionSupport} already uses against {@code Fiscal303BoxesHandler}'s own
+   * (there, {@code protected}) {@code servlet} field.
+   */
+  final NeoServlet servlet;
   /**
    * ETP-5438 submission snapshot handling for this table (transition, lookup, parsing) —
    * extracted to {@link FiscalSubmittedSnapshotSupport} to keep this class under the SonarQube
    * {@code java:S1448} method-count threshold.
    */
   final FiscalSubmittedSnapshotSupport snapshots;
+  /**
+   * ETP-5725 (reopened QA review, Sonar java:S1448) — this class had grown to 46 methods (limit
+   * 35) across this ticket's several rounds, mixing the core CRUD flow with 3 cohesive-but-large
+   * guard clusters. Extracted the same way {@link #snapshots} already was, and the same way
+   * {@code Fiscal349BoxesHandler} splits off {@code Fiscal349ViesSupport}/
+   * {@code Fiscal349GenerateSupport}: one {@code *Support} class per cluster, each holding a
+   * reference back to this class (the {@code owner}) for the primitives (
+   * {@link #naturalKeyQuery}, {@link #parseManualData}, {@link #extractIdentification}, {@link
+   * #getRelatedId}, {@link #asString}/{@link #asLong}, {@link #servlet}) it still needs — none of
+   * those primitives moved, since all three clusters (and the methods staying on this class)
+   * share them.
+   */
+  final FiscalDeclCorrectiveConsistencySupport correctiveConsistencySupport;
+  /** See {@link #correctiveConsistencySupport}'s own javadoc for the extraction rationale. */
+  final FiscalDeclReactivationSupport reactivationSupport;
+  /** See {@link #correctiveConsistencySupport}'s own javadoc for the extraction rationale. */
+  final FiscalDeclManualDataValidationSupport manualDataValidationSupport;
 
   FiscalDeclCrudHandler(NeoServlet servlet) {
     this.servlet = servlet;
     this.snapshots = new FiscalSubmittedSnapshotSupport(this, servlet);
+    this.correctiveConsistencySupport = new FiscalDeclCorrectiveConsistencySupport(this);
+    this.reactivationSupport = new FiscalDeclReactivationSupport(this, correctiveConsistencySupport);
+    this.manualDataValidationSupport = new FiscalDeclManualDataValidationSupport(this);
   }
 
   void handleDeclarations(String method, HttpServletRequest request,
@@ -303,24 +341,23 @@ class FiscalDeclCrudHandler {
       return;
     }
 
-    // ETP-5725 (reopened QA review, BUG-1) — a declaration can be created with ANY status
-    // directly via POST, not just "draft". `rejectCorrectiveConsistencyViolation` (the PUT-path
-    // guard) deliberately bails out once `previousStatus` is already in SUBMITTED_STATUSES
-    // (re-presentation is a different, already-blocked case — see its own javadoc), so a
-    // declaration created DIRECTLY as submitted-family can NEVER have this rule enforced on it
-    // afterward by any PUT either: it is "already submitted" from its very first write. POST
-    // does not accept `manualData`/identification at creation time — no MANUAL_DATA_KEY handling
-    // exists anywhere in this method — so "effectively corrective" is always {@code false} here;
-    // the corrective-without-ordinaria direction of the rule is structurally impossible to hit
-    // via POST, not merely unchecked (nothing to check: a freshly created row can never read as
-    // corrective). The MIRROR rule (only one presented ordinaria per period) is not structurally
-    // impossible, though, and is exactly what QA demonstrated: a direct POST with
-    // status=submitted_ack for a period that already has a presented ordinaria sibling bypassed
-    // it entirely, with no later guard able to catch it. `excludeId` is {@code null} — this row
-    // does not exist yet, so there is nothing of its own to exclude from the sibling search.
+    // ETP-5725 (reopened QA review, BUG-1) — a declaration can be created with any status
+    // directly via POST, not only draft. The PUT-path consistency guard deliberately bails out
+    // once the previous status is already submitted-family (re-presentation is a different,
+    // already-blocked case — see its own javadoc), so a declaration created directly in a
+    // submitted-family status can never have this rule enforced on it afterward by any PUT
+    // either: it starts out already submitted from its very first write. POST never accepts
+    // manual data or identification at creation time, so a freshly created row can never read as
+    // corrective — the corrective-without-ordinaria direction of the rule is structurally
+    // impossible to hit via POST, not merely unchecked. The mirror rule, only one presented
+    // ordinaria per period, is not structurally impossible though, and is exactly what QA
+    // demonstrated: a direct POST creating a declaration already submitted for a period that
+    // already has a presented ordinaria sibling bypassed it entirely, with no later guard able to
+    // catch it. The exclude-id argument below is passed as null since this row does not exist yet
+    // and there is nothing of its own to exclude from the sibling search.
     if (SUBMITTED_STATUSES.contains(status)) {
-      String violation = checkCorrectiveConsistency(clientId, orgId, model, year, period, null,
-          false);
+      String violation = correctiveConsistencySupport.checkCorrectiveConsistency(clientId, orgId,
+          model, year, period, null, false);
       if (violation != null) {
         servlet.sendError(response, HttpServletResponse.SC_CONFLICT, violation + ": (new)");
         return;
@@ -393,7 +430,7 @@ class FiscalDeclCrudHandler {
    * {@code " = :year and "}, {@code " = :period"}) is defined exactly once instead of copy-pasted
    * across the 3 call sites.
    */
-  private static OBQuery<BaseOBObject> naturalKeyQuery(String clientId, String orgId,
+  static OBQuery<BaseOBObject> naturalKeyQuery(String clientId, String orgId,
       String model, long year, String period) {
     OBQuery<BaseOBObject> query = OBDal.getInstance().createQuery(ENTITY_FISCAL_DECL,
         "client.id = :clientId and organization.id = :orgId and " + PROPERTY_FISCAL_MODEL
@@ -495,22 +532,23 @@ class FiscalDeclCrudHandler {
     }
     JSONObject body = readJsonBody(request);
     String previousStatus = asString(decl.get(PROPERTY_DECLARATION_STATUS));
-    if (rejectTelematicReactivation(decl, body, id, response)) {
+    if (reactivationSupport.rejectTelematicReactivation(decl, body, id, response)) {
       return;
     }
-    if (rejectReactivationWithSibling(decl, body, previousStatus, id, response)) {
+    if (reactivationSupport.rejectReactivationWithSibling(decl, body, previousStatus, id, response)) {
       return;
     }
     if (rejectRepresentation(decl, body, id, response)) {
       return;
     }
-    if (rejectCorrectiveConsistencyViolation(decl, body, previousStatus, id, response)) {
+    if (correctiveConsistencySupport.rejectCorrectiveConsistencyViolation(decl, body,
+        previousStatus, id, response)) {
       return;
     }
-    if (rejectNegativeManualBoxes(body, id, response)) {
+    if (manualDataValidationSupport.rejectNegativeManualBoxes(body, id, response)) {
       return;
     }
-    if (rejectOversizedIdentificationFields(body, id, response)) {
+    if (manualDataValidationSupport.rejectOversizedIdentificationFields(body, id, response)) {
       return;
     }
     String newStatus = body.has(STATUS_KEY) ? body.getString(STATUS_KEY) : null;
@@ -530,34 +568,6 @@ class FiscalDeclCrudHandler {
   }
 
   /**
-   * Guards "Reactivar declaración" (ETP-5338), which reverts a presented declaration back to
-   * draft via this same PUT path ({@code status: "draft"}). Defense in depth, mirroring
-   * {@link #handleDeclDelete}'s draft-only guard: the frontend already hides the Reactivar action
-   * for {@code aeat_telematic} declarations ({@code FmRowActions.jsx} / {@code FmListPage.jsx}),
-   * but this is what actually prevents one from being reopened regardless of what the client
-   * sends — reactivating a declaration that was genuinely filed with the AEAT would desync this
-   * table from what Hacienda has on record, which is unrecoverable from here.
-   *
-   * @return {@code true} if the PUT was rejected (a 409 was already sent to {@code response} and
-   *         the caller must stop processing); {@code false} if the request may proceed.
-   */
-  private boolean rejectTelematicReactivation(BaseOBObject decl, JSONObject body, String id,
-      HttpServletResponse response) throws Exception {
-    boolean hasStatus = body.has(STATUS_KEY);
-    String status = hasStatus ? body.getString(STATUS_KEY) : null;
-    if (!hasStatus || !DEFAULT_STATUS.equals(status)) {
-      return false;
-    }
-    String currentSubmissionMethod = asString(decl.get(PROPERTY_SUBMISSION_METHOD));
-    if (!SUBMISSION_METHOD_AEAT_TELEMATIC.equals(currentSubmissionMethod)) {
-      return false;
-    }
-    servlet.sendError(response, HttpServletResponse.SC_CONFLICT,
-        "Cannot reactivate a declaration filed via AEAT telematic submission: " + id);
-    return true;
-  }
-
-  /**
    * Blocks re-presenting a declaration that is already in a {@link #SUBMITTED_STATUSES} status
    * (ETP-5438) — "block re-presentation once already submitted". Defense in depth: the frontend
    * already hides "Registrar/Presentar" once {@code isSubmitted} ({@code FmModel303Page.jsx} /
@@ -567,7 +577,8 @@ class FiscalDeclCrudHandler {
    * <p>Only fires when BOTH the current status and the incoming one are in
    * {@link #SUBMITTED_STATUSES} — a transition INTO the submitted family from {@code draft}/
    * {@code ready} (the normal, first-time presentation) is unaffected, and so is the existing
-   * "Reactivar declaración" transition BACK to {@code draft} ({@link #rejectTelematicReactivation}
+   * "Reactivar declaración" transition BACK to {@code draft} ({@link
+   * FiscalDeclReactivationSupport#rejectTelematicReactivation}
    * already guards that one on its own, narrower, terms). Deliberately model-agnostic — the same
    * {@code ETGO_Fiscal_Decl} table and PUT path serve both Modelo 303 and Modelo 349, and nothing
    * about "you cannot re-present an already-presented declaration" is specific to either.
@@ -592,398 +603,20 @@ class FiscalDeclCrudHandler {
   }
 
   /**
-   * ETP-5725 (reopened QA fix) — Bug 2/4: blocks "Reactivar declaración" (status back to
-   * {@link #DEFAULT_STATUS}) whenever ANY other declaration — draft or presented alike — already
-   * exists for the same natural key ({@code AD_CLIENT_ID, AD_ORG_ID, MODEL, FISCAL_YEAR, PERIOD})
-   * — but the rule is ASYMMETRIC, not "any sibling blocks either declaration". See
-   * {@link #findReactivationBlockReason} for the exact per-case logic; this method only resolves
-   * {@code decl}'s own corrective/ordinaria identity and delegates the sibling scan to it.
-   *
-   * <p>QA's original repro (349): declaration A (ordinaria) presented, declaration B (correctly
-   * auto-defaulted Sustitutiva) presented for the same period. Reactivating A used to succeed and
-   * revert it to draft while a presented corrective sibling (B) was left pointing at a period
-   * whose ordinaria no longer exists — an AEAT-invalid state (a corrective with nothing to
-   * correct, the same invariant {@link #rejectCorrectiveConsistencyViolation} enforces going
-   * forward). That is Bug 2/4: reactivating the ORDINARIA while a PRESENTED corrective sibling
-   * exists must be blocked.
-   *
-   * <p>A LATER manual-testing fix (same ticket, same day) found the first version of this guard
-   * had over-corrected: it blocked reactivating EITHER declaration whenever ANY sibling existed,
-   * which wrongly blocked reactivating the CORRECTIVE itself while its ordinaria sibling was
-   * presented — but a corrective's ordinaria stays valid underneath it regardless (the
-   * corrective references it, "Identificador declaración anterior"; revising/resubmitting the
-   * correction doesn't invalidate the base declaration it corrects). Only a DRAFT sibling (of
-   * either declaration, any type) is unsafe regardless of which one is being reactivated — it
-   * would violate the existing one-draft-per-period rule (ETP-5272) the moment the reactivated
-   * row also becomes a draft.
-   *
-   * <p>This guard is model-agnostic by construction: it branches on corrective/ordinaria
-   * identity (structural, read off {@code manualData.identification}), never on which
-   * model/entity is involved.
-   *
-   * @return {@code true} if the PUT was rejected (a 409 was already sent to {@code response} and
-   *         the caller must stop processing); {@code false} if the request may proceed.
-   */
-  private boolean rejectReactivationWithSibling(BaseOBObject decl, JSONObject body,
-      String previousStatus, String id, HttpServletResponse response) throws Exception {
-    boolean hasStatus = body.has(STATUS_KEY);
-    String status = hasStatus ? body.getString(STATUS_KEY) : null;
-    if (!hasStatus || !DEFAULT_STATUS.equals(status) || !SUBMITTED_STATUSES.contains(previousStatus)) {
-      return false;
-    }
-    String clientId = getRelatedId(decl, PROPERTY_CLIENT);
-    String orgId = getRelatedId(decl, PROPERTY_ORGANIZATION);
-    String model = asString(decl.get(PROPERTY_FISCAL_MODEL));
-    long year = asLong(decl.get(PROPERTY_FISCAL_YEAR));
-    String period = asString(decl.get(PROPERTY_PERIOD));
-    boolean declIsCorrective = isEffectivelyCorrective(decl, body);
-    String reason = findReactivationBlockReason(decl, declIsCorrective, clientId, orgId, model,
-        year, period);
-    if (reason != null) {
-      servlet.sendError(response, HttpServletResponse.SC_CONFLICT,
-          "Cannot reactivate [reason=" + reason + "]: another declaration already exists for "
-              + "this period: " + id);
-      return true;
-    }
-    return false;
-  }
-
-  /**
-   * ETP-5725 (reopened QA fix, corrected per later manual testing) — the asymmetric sibling scan
-   * behind {@link #rejectReactivationWithSibling}:
-   * <ul>
-   *   <li>A DRAFT sibling (any type — ordinaria or corrective) ALWAYS blocks, regardless of
-   *       {@code declIsCorrective} — tagged {@code "sibling_exists"}.</li>
-   *   <li>Otherwise, a PRESENTED corrective sibling blocks ONLY when {@code decl} itself is NOT
-   *       corrective (i.e. {@code decl} is the ordinaria) — tagged
-   *       {@code "corrective_sibling_presented"}. Reactivating the corrective itself is NEVER
-   *       blocked by a presented sibling, including its own presented ordinaria: the ordinaria
-   *       stays valid as the base declaration underneath it.</li>
-   * </ul>
-   * {@code servlet.sendError}'s message only ever reaches the frontend as plain English text
-   * ({@code error.message}, not a structured field — this package has no JSON-body
-   * {@code sendError} overload), so the returned reason is tagged into that message as a stable,
-   * machine-parseable {@code [reason=...]} marker that {@code FmListPage.jsx}'s
-   * {@code handleConfirmReactivate} extracts via {@code parseServerMessage} + a small regex,
-   * instead of either guessing from the status code alone (409 is ambiguous between the two
-   * reasons) or hand-rolling a second JSON error shape.
-   *
-   * @return the block reason, or {@code null} when reactivation may proceed.
-   */
-  private String findReactivationBlockReason(BaseOBObject decl, boolean declIsCorrective,
-      String clientId, String orgId, String model, long year, String period) {
-    OBQuery<BaseOBObject> query = naturalKeyQuery(clientId, orgId, model, year, period);
-    boolean draftSiblingExists = false;
-    boolean presentedCorrectiveSiblingExists = false;
-    for (BaseOBObject existing : query.list()) {
-      if (isSameDeclaration(existing, decl)) {
-        continue;
-      }
-      String siblingStatus = asString(existing.get(PROPERTY_DECLARATION_STATUS));
-      if (DEFAULT_STATUS.equals(siblingStatus)) {
-        draftSiblingExists = true;
-      } else if (SUBMITTED_STATUSES.contains(siblingStatus)) {
-        JSONObject siblingIdent = parseManualData(existing).optJSONObject("identification");
-        if (identFlagTrue(siblingIdent, "rectificativa") || identFlagTrue(siblingIdent, "sustitutiva")) {
-          presentedCorrectiveSiblingExists = true;
-        }
-      }
-    }
-    if (draftSiblingExists) {
-      return "sibling_exists";
-    }
-    if (!declIsCorrective && presentedCorrectiveSiblingExists) {
-      return "corrective_sibling_presented";
-    }
-    return null;
-  }
-
-  /**
-   * ETP-5725 (reopened QA fix) — the shared business rule behind Bug 1 ("a corrective needs a
-   * presented ordinaria to correct") and its mirror ("only one presented ordinaria per period"),
-   * factored into ONE method so every entry point that can leave a declaration's corrective/
-   * ordinaria identification inconsistent with its siblings' presented statuses enforces it the
-   * SAME way — {@link #rejectCorrectiveConsistencyViolation} (save/present, via {@code PUT
-   * /fiscal{model}/declarations}), {@link AbstractFiscalHandler#guardCorrectiveConsistency}
-   * (the {@code generate} file-generation reads for both models, which have no declaration id
-   * of their own to exclude — see that method's own javadoc), {@link
-   * Fiscal303SubmissionSupport#handleSubmit} (the real AEAT telematic filing, 303-only), and
-   * {@link #handleDeclPost} (CREATE, {@code POST /fiscal{model}/declarations} — a declaration
-   * created directly with a {@code SUBMITTED_STATUSES} status is "already submitted" from its
-   * very first write, so {@link #rejectCorrectiveConsistencyViolation}'s own early-exit on an
-   * already-submitted {@code previousStatus} can never run on it afterward; this call is what
-   * actually enforces the rule in that case — see {@code handleDeclPost}'s own comment). Originally
-   * two near-duplicate guards (one per direction); unified once "Guardar" and "Generar fichero"
-   * needed the identical check and more call sites made the duplication worse rather than better.
-   *
-   * @param excludeId the id of the declaration this check is FOR, excluded from its own sibling
-   *                   search so a row doesn't see itself as a sibling of itself. May be
-   *                   {@code null} ({@code generate} has no declaration id, only org/year/period —
-   *                   the caller resolves the LATEST declaration's id instead, if one exists).
-   * @param effectivelyCorrective whether the identification THIS check is evaluating (the PUT
-   *                              body's own {@code manualData.identification}, or the
-   *                              {@code generate} request's own corrective/ordinaria param) marks
-   *                              it as rectificativa (303) / sustitutiva (349).
-   * @return a human-readable violation message if the rule is broken, or {@code null} when the
-   *         state is valid and the caller may proceed.
-   */
-  String checkCorrectiveConsistency(String clientId, String orgId, String model, long year,
-      String period, String excludeId, boolean effectivelyCorrective) {
-    boolean presentedOrdinariaSiblingExists =
-        hasPresentedOrdinariaSibling(excludeId, clientId, orgId, model, year, period);
-    if (effectivelyCorrective && !presentedOrdinariaSiblingExists) {
-      return "Cannot save/present a corrective declaration (rectificativa/sustitutiva) without a "
-          + "presented ordinaria declaration for the same period";
-    }
-    if (!effectivelyCorrective && presentedOrdinariaSiblingExists) {
-      return "Cannot save/present as ordinaria: another ordinaria declaration is already "
-          + "presented for this period";
-    }
-    return null;
-  }
-
-  /**
-   * ETP-5725 (reopened QA fix) — enforces {@link #checkCorrectiveConsistency} on EVERY PUT that
-   * leaves (or finds) the declaration NOT already in {@link #SUBMITTED_STATUSES} — i.e. "Guardar"
-   * (a plain manualData save, no status change at all: {@code body} carries no {@code status} key
-   * and this fires regardless) AND "Registrar/Presentar" (the genuine first-time transition INTO
-   * {@link #SUBMITTED_STATUSES}) ALIKE, closing the gap QA found: the save path's PUT body never
-   * carries a {@code status} key (see {@code persistEditableFields}/{@code persistManualData} on
-   * the frontend), so the original version of this guard — gated on {@code body.has(STATUS_KEY)}
-   * — never fired for "Guardar", only for "Registrar/Presentar". A plain save could therefore
-   * PERSIST a corrective-without-ordinaria (or duplicate-ordinaria) state even though presenting
-   * it was already correctly blocked.
-   *
-   * <p>Skips entirely once the declaration is ALREADY in {@link #SUBMITTED_STATUSES}
-   * ({@code previousStatus}) — re-presentation is a different, already-blocked case
-   * ({@link #rejectRepresentation}), and a reactivation (submitted → draft) is a different rule
-   * entirely ({@link #rejectReactivationWithSibling}); neither needs this check re-run.
-   *
-   * @return {@code true} if the PUT was rejected (a 409 was already sent to {@code response} and
-   *         the caller must stop processing); {@code false} if the request may proceed.
-   */
-  private boolean rejectCorrectiveConsistencyViolation(BaseOBObject decl, JSONObject body,
-      String previousStatus, String id, HttpServletResponse response) throws Exception {
-    if (SUBMITTED_STATUSES.contains(previousStatus)) {
-      return false;
-    }
-    boolean effectivelyCorrective = isEffectivelyCorrective(decl, body);
-    String clientId = getRelatedId(decl, PROPERTY_CLIENT);
-    String orgId = getRelatedId(decl, PROPERTY_ORGANIZATION);
-    String model = asString(decl.get(PROPERTY_FISCAL_MODEL));
-    long year = asLong(decl.get(PROPERTY_FISCAL_YEAR));
-    String period = asString(decl.get(PROPERTY_PERIOD));
-    String excludeId = decl.getId() != null ? String.valueOf(decl.getId()) : null;
-    String violation = checkCorrectiveConsistency(clientId, orgId, model, year, period, excludeId,
-        effectivelyCorrective);
-    if (violation != null) {
-      servlet.sendError(response, HttpServletResponse.SC_CONFLICT, violation + ": " + id);
-      return true;
-    }
-    return false;
-  }
-
-  /**
-   * {@code true} when AT LEAST ONE declaration sharing the given natural key — OTHER than
-   * {@code excludeId}, if given — is currently in {@link #SUBMITTED_STATUSES} AND is itself a
-   * genuine ordinaria (not rectificativa/sustitutiva). Used by
-   * {@link #checkCorrectiveConsistency}, shared by every one of its callers (PUT save/present,
-   * both models' {@code generate}).
-   */
-  private boolean hasPresentedOrdinariaSibling(String excludeId, String clientId, String orgId,
-      String model, long year, String period) {
-    OBQuery<BaseOBObject> query = naturalKeyQuery(clientId, orgId, model, year, period);
-    for (BaseOBObject existing : query.list()) {
-      if (excludeId != null && excludeId.equals(idOf(existing))) {
-        continue;
-      }
-      String status = asString(existing.get(PROPERTY_DECLARATION_STATUS));
-      if (!SUBMITTED_STATUSES.contains(status)) {
-        continue;
-      }
-      JSONObject persistedIdent = parseManualData(existing).optJSONObject("identification");
-      if (!identFlagTrue(persistedIdent, "rectificativa") && !identFlagTrue(persistedIdent, "sustitutiva")) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  /** {@code candidate}'s id as a {@code String}, or {@code null} when it has none yet. */
-  private static String idOf(BaseOBObject candidate) {
-    return candidate.getId() != null ? String.valueOf(candidate.getId()) : null;
-  }
-
-  /** {@code true} when {@code candidate} and {@code decl} are the same persisted row. */
-  private static boolean isSameDeclaration(BaseOBObject candidate, BaseOBObject decl) {
-    return candidate.getId() != null && candidate.getId().equals(decl.getId());
-  }
-
-  /**
-   * Resolves whether {@code decl} is EFFECTIVELY marked as a correction (303
-   * {@code rectificativa} / 349 {@code sustitutiva}) for the purposes of
-   * {@link #rejectCorrectiveConsistencyViolation} — the incoming PUT body's own
-   * {@code manualData.identification}, when the caller sent one in THIS same request, takes
-   * precedence over the already-persisted value; otherwise falls back to what is already stored
-   * on {@code decl}. In the real flow ({@code FmModel303Page.jsx}/{@code FmModel349Page.jsx}'s
-   * {@code persistEditableFields}) the identification is flushed in its OWN prior PUT before the
-   * status-changing one reaches here, so the persisted branch is what normally fires — the body
-   * branch exists so a single combined PUT (status + manualData together) is equally covered.
-   */
-  private boolean isEffectivelyCorrective(BaseOBObject decl, JSONObject body) {
-    JSONObject bodyIdent = extractIdentification(body);
-    JSONObject ident = bodyIdent != null ? bodyIdent : parseManualData(decl).optJSONObject("identification");
-    return identFlagTrue(ident, "rectificativa") || identFlagTrue(ident, "sustitutiva");
-  }
-
-  /**
-   * Reads a boolean-ish identification flag (303's {@code rectificativa} is a real boolean;
-   * 349's {@code sustitutiva} has been observed as either a boolean {@code true} or the string
-   * {@code "Y"} — mirrors the exact two-shape check {@code FmListPage.jsx}'s
-   * {@code resolveDeclTypeLabel} already applies on the frontend for the same field).
-   */
-  private static boolean identFlagTrue(JSONObject ident, String key) {
-    if (ident == null || !ident.has(key) || ident.isNull(key)) {
-      return false;
-    }
-    Object value = ident.opt(key);
-    if (value instanceof Boolean) {
-      return (Boolean) value;
-    }
-    if (value instanceof String) {
-      return "true".equalsIgnoreCase((String) value) || "Y".equalsIgnoreCase((String) value);
-    }
-    return false;
-  }
-
-  // ETP-5393 Bug C — boxes the classic AEAT303Report engine hard-rejects when negative:
-  // box 111 "Rectificación – Importe" (AEAT303Report2024.java:276-278,
-  // @AEAT303_Negative_Not_Allowed_For_111@) and box 77 "IVA a la importación liquidado por la
-  // Aduana pendiente de ingreso" (AEAT303Report2015.java:149-162,
-  // @AEAT303_Negative_IVA_IMPORT_ADUANA@). The GO previsualización's manualOverrides had no
-  // equivalent server-side check at all — unlike setManualDataIfPresent's tolerant handling of a
-  // malformed manualData blob, a negative value here is a real business-rule violation the caller
-  // must be told about, not silently swallowed.
-  //
-  // ETP-5438 (AEAT spec audit) — boxes 70, 78, 109 and 110 are ALSO declared "Num" (numérico sin
-  // signo / unsigned) in the official Modelo 303 "Diseño de registro" (DR303e26v101 v1.01, the
-  // spec bundled with this ticket), exactly like 111 and 77 — the same class of bug ETP-5393 Bug C
-  // fixed for those two, just not caught at the time because the audit that found it (casilla-by-
-  // casilla cross-check of every editable box's AEAT type against this guard's coverage) hadn't
-  // been done yet. Added to the SAME set/mechanism rather than a parallel one, per the AEAT type
-  // legend confirmed in the spec's own "Nota" footer on every page: "1. Los campos deben ser A
-  // (Alfabético) An (Alfanumérico), Num (Numérico sin signo) o N (Numérico con signo)."
-  private static final java.util.Set<String> NEGATIVE_NOT_ALLOWED_BOX_KEYS =
-      java.util.Set.of("111", "77", "70", "78", "109", "110");
-
-  /**
-   * Rejects a PUT whose {@code manualData.manualOverrides} sets box 111 or box 77 to a negative
-   * value — see {@link #NEGATIVE_NOT_ALLOWED_BOX_KEYS}. A missing/malformed {@code manualData} or
-   * {@code manualOverrides} is not this method's concern (left to {@link #setManualDataIfPresent}'s
-   * existing tolerant handling); this only fires when one of the two watched boxes is present and
-   * parses to a negative number.
-   *
-   * @return {@code true} if the PUT was rejected (a 400 was already sent to {@code response} and
-   *         the caller must stop processing); {@code false} if the request may proceed.
-   */
-  private boolean rejectNegativeManualBoxes(JSONObject body, String id, HttpServletResponse response)
-      throws IOException {
-    if (!body.has(MANUAL_DATA_KEY) || body.isNull(MANUAL_DATA_KEY)) {
-      return false;
-    }
-    JSONObject manualData = body.optJSONObject(MANUAL_DATA_KEY);
-    JSONObject overrides = manualData != null ? manualData.optJSONObject("manualOverrides") : null;
-    if (overrides == null) {
-      return false;
-    }
-    for (String boxKey : NEGATIVE_NOT_ALLOWED_BOX_KEYS) {
-      if (!overrides.has(boxKey) || overrides.isNull(boxKey)) {
-        continue;
-      }
-      double value = overrides.optDouble(boxKey, 0d);
-      if (!Double.isNaN(value) && value < 0) {
-        servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
-            "Box " + boxKey + " does not accept negative values: " + id);
-        return true;
-      }
-    }
-    return false;
-  }
-
-  /**
    * Reads {@code manualData.identification} out of a PUT body, or {@code null} if
-   * {@code manualData} (or {@code identification} within it) is absent/malformed — used by
-   * {@link #rejectOversizedIdentificationFields} below, the ETP-5438 sibling of
-   * {@link #rejectNegativeManualBoxes}'s own {@code manualOverrides} read.
+   * {@code manualData} (or {@code identification} within it) is absent/malformed. Package-private
+   * (not {@code private}): used both by {@link FiscalDeclManualDataValidationSupport
+   * #rejectOversizedIdentificationFields} and, indirectly, by {@link
+   * FiscalDeclCorrectiveConsistencySupport#isEffectivelyCorrective} — a true cross-cluster
+   * primitive, kept here rather than duplicated or forced into either {@code *Support} class.
    */
-  private JSONObject extractIdentification(JSONObject body) {
+  JSONObject extractIdentification(JSONObject body) {
     if (!body.has(MANUAL_DATA_KEY) || body.isNull(MANUAL_DATA_KEY)) {
       return null;
     }
     JSONObject manualData = body.optJSONObject(MANUAL_DATA_KEY);
-    return manualData != null ? manualData.optJSONObject("identification") : null;
+    return manualData != null ? manualData.optJSONObject(IDENTIFICATION_KEY) : null;
   }
-
-  // ETP-5438 (AEAT spec audit) — max lengths for the alphanumeric ("An") identification fields,
-  // read straight off the official Modelo 303 "Diseño de registro" (DR303e26v101 v1.01): the
-  // DID page for the 6 bank_* fields (SWIFT-BIC 11, IBAN 34 — "Nota 6: Para el IBAN español
-  // deberá empezar por ES y únicamente se usan las primeras 24 posiciones", Bank name 70, Bank
-  // address 35, City 30, Country code 2) and page 3 for nro_justificante (13, "Número
-  // justificante identificativo de la autoliquidación anterior"). Same rationale as
-  // NEGATIVE_NOT_ALLOWED_BOX_KEYS above: the classic AEAT engine's fixed-width record slots make
-  // an oversized value a real business-rule violation, not a cosmetic nit — better to reject it
-  // here, where the user can still fix it, than have it silently truncated (or rejected outright)
-  // at file-generation time.
-  private static final java.util.Map<String, Integer> IDENTIFICATION_MAX_LENGTHS = buildIdentificationMaxLengths();
-
-  private static java.util.Map<String, Integer> buildIdentificationMaxLengths() {
-    java.util.Map<String, Integer> m = new java.util.LinkedHashMap<>();
-    m.put("bank_iban", 34);
-    m.put("bank_swift_bic", 11);
-    m.put("bank_nombre", 70);
-    m.put("bank_direccion", 35);
-    m.put("bank_ciudad", 30);
-    m.put("bank_pais", 2);
-    m.put("nro_justificante", 13);
-    return java.util.Collections.unmodifiableMap(m);
-  }
-
-  /**
-   * Rejects a PUT whose {@code manualData.identification} carries a value longer than its AEAT
-   * fixed-width slot (ETP-5438) — see {@link #IDENTIFICATION_MAX_LENGTHS}. A missing/malformed
-   * {@code manualData}/{@code identification}, or a field simply absent from the payload, is not
-   * this method's concern (same tolerant precedent as {@link #rejectNegativeManualBoxes}).
-   *
-   * @return {@code true} if the PUT was rejected (a 400 was already sent to {@code response} and
-   *         the caller must stop processing); {@code false} if the request may proceed.
-   */
-  private boolean rejectOversizedIdentificationFields(JSONObject body, String id,
-      HttpServletResponse response) throws IOException {
-    JSONObject identification = extractIdentification(body);
-    if (identification == null) {
-      return false;
-    }
-    for (java.util.Map.Entry<String, Integer> entry : IDENTIFICATION_MAX_LENGTHS.entrySet()) {
-      String key = entry.getKey();
-      if (!identification.has(key) || identification.isNull(key)) {
-        continue;
-      }
-      String value = identification.optString(key, "");
-      if (value.length() > entry.getValue()) {
-        servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
-            "Field " + key + " exceeds its max length of " + entry.getValue() + " characters: " + id);
-        return true;
-      }
-    }
-    return false;
-  }
-
-  // ETP-5438 (AEAT spec audit) — bank_sepa ("Devolución - Marca SEPA") is also declared a
-  // single-digit Num field on the DID page restricted to a 4-value enum (spec's own "Nota 2:
-  // Devolución marca SEPA" table: 0 Vacía, 1 Cuenta España, 2 Unión Europea SEPA, 3 Resto
-  // Países) in the same audit that found the gaps above. That fix (a `rejectInvalidBankSepa`
-  // guard here, paired with a `type: 'select'` conversion in fm303Layouts.js) was reverted from
-  // this ticket — it is being handled under a separate ticket instead. Do not re-add it here.
 
   /**
    * Applies every scalar (non-{@code manualData}) optional field {@link #handleDeclPut} accepts —
@@ -1333,7 +966,7 @@ class FiscalDeclCrudHandler {
    * {@code decl.get(...)} that returned something other than a String would already have failed
    * earlier, in {@link #asString}, not in this parse step.
    */
-  private static JSONObject parseManualData(BaseOBObject decl) {
+  static JSONObject parseManualData(BaseOBObject decl) {
     String raw = asString(decl.get(PROPERTY_MANUAL_DATA));
     try {
       return StringUtils.isNotBlank(raw) ? new JSONObject(raw) : new JSONObject();
@@ -1342,7 +975,7 @@ class FiscalDeclCrudHandler {
     }
   }
 
-  private static String getRelatedId(BaseOBObject decl, String property) {
+  static String getRelatedId(BaseOBObject decl, String property) {
     Object related = decl.get(property);
     return related instanceof BaseOBObject && ((BaseOBObject) related).getId() != null
         ? String.valueOf(((BaseOBObject) related).getId()) : "";
@@ -1363,7 +996,8 @@ class FiscalDeclCrudHandler {
    * Same contract as {@link #asInt} but for {@link #PROPERTY_FISCAL_YEAR}, which
    * {@link #naturalKeyQuery} expects as a {@code long} (matching {@code handleDeclPost}'s own
    * {@code body.getLong("year")} read) — added for the ETP-5725 reopened-QA natural-key lookups
-   * ({@link #rejectReactivationWithSibling}, {@link #rejectCorrectiveConsistencyViolation}).
+   * ({@link FiscalDeclReactivationSupport#rejectReactivationWithSibling}, {@link
+   * FiscalDeclCorrectiveConsistencySupport#rejectCorrectiveConsistencyViolation}).
    */
   static long asLong(Object value) {
     return value instanceof Number ? ((Number) value).longValue() : 0L;

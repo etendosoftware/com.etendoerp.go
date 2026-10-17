@@ -141,7 +141,7 @@ abstract class AbstractFiscalHandler {
    * ETP-5725 (reopened QA fix) — shared defense-in-depth for {@code generate} (file generation,
    * both {@code /fiscal303/generate} and {@code /fiscal349/generate}): rejects a request whose
    * EFFECTIVE corrective/ordinaria identification would violate the same business rule enforced
-   * on the {@code PUT} path by {@link FiscalDeclCrudHandler#checkCorrectiveConsistency} ("a
+   * on the {@code PUT} path by {@link FiscalDeclCorrectiveConsistencySupport#checkCorrectiveConsistency} ("a
    * corrective declaration needs a presented ordinaria to correct" / "only one presented
    * ordinaria per period") — see that method's javadoc for the rule itself. {@code generate} is
    * the actual AEAT submission artifact (the literal file the user uploads to the AEAT portal),
@@ -171,8 +171,8 @@ abstract class AbstractFiscalHandler {
     BaseOBObject latest = declHandler().findLatestDeclaration(clientId, declarationOrgId(), model,
         year, period);
     String excludeId = latest != null && latest.getId() != null ? String.valueOf(latest.getId()) : null;
-    String violation = declHandler().checkCorrectiveConsistency(clientId, declarationOrgId(),
-        model, year, period, excludeId, effectivelyCorrective);
+    String violation = declHandler().correctiveConsistencySupport.checkCorrectiveConsistency(
+        clientId, declarationOrgId(), model, year, period, excludeId, effectivelyCorrective);
     if (violation != null) {
       throw new AlreadySubmittedException(
           violation + " for org=" + orgId + " year=" + year + " period=" + period

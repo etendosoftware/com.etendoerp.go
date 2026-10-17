@@ -147,7 +147,7 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
         // ETP-5725 (reopened QA fix) — "Generar fichero 303" produces the literal AEAT
         // submission artifact, not a preview, so it must be gated by the same
         // corrective/ordinaria consistency rule as "Guardar"/"Registrar/Presentar"
-        // (FiscalDeclCrudHandler#checkCorrectiveConsistency). The frontend's own identChecks
+        // (FiscalDeclCorrectiveConsistencySupport#checkCorrectiveConsistency). The frontend's own identChecks
         // state is what this request describes (generate303File never flushes a save first),
         // forwarded as the dedicated, unambiguous `Rectificativa=Y` param — unlike
         // `IsComplementary`, which this same request also sets for the UNRELATED legacy

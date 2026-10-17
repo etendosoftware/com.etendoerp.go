@@ -280,7 +280,7 @@ class Fiscal303SubmissionSupport {
 
     // ETP-5725 (reopened QA review, Blocker B1) — this is the REAL AEAT telematic filing
     // (production and test-mode validation alike), distinct from the manual "Registrar/
-    // Presentar" PUT-present flow (FiscalDeclCrudHandler#rejectCorrectiveConsistencyViolation)
+    // Presentar" PUT-present flow (FiscalDeclCorrectiveConsistencySupport#rejectCorrectiveConsistencyViolation)
     // and from the "Generar fichero" preview (Fiscal303BoxesHandler#dispatch's GENERATE branch,
     // just above). Before this fix neither of those guards ever ran on this endpoint: a direct
     // call to /fiscal303/submit with a valid declId (or any future frontend path that reaches

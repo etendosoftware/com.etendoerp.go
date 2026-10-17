@@ -1625,13 +1625,13 @@ public class FiscalDeclCrudHandlerTest {
   // ── handleDeclPut (rejectCorrectiveConsistencyViolation, ETP-5725 reopened QA) ──────
   //
   // Covers the round that closed the "ni guardar ni generar fichero deberían poderse hacer" gap
-  // (Bug 1) and its mirror ("only one ordinaria per period"). Both directions are enforced by the
-  // SAME shared method, {@link FiscalDeclCrudHandler#checkCorrectiveConsistency}, fired from
-  // {@code rejectCorrectiveConsistencyViolation} on EVERY PUT that leaves the declaration NOT
-  // already in SUBMITTED_STATUSES — including a plain manualData-only save with no {@code status}
-  // key at all (the exact shape {@code persistEditableFields}/{@code persistManualData} send),
-  // which is the gap the OLD status-key-gated version of this guard missed. Model-agnostic — these
-  // tests exercise the rule once via the 303 {@code rectificativa} field name; the generate
+  // (Bug 1) and its mirror ("only one ordinaria per period"). Both directions are enforced by one
+  // shared method, {@link FiscalDeclCorrectiveConsistencySupport#checkCorrectiveConsistency},
+  // fired from {@code rejectCorrectiveConsistencyViolation} on every PUT that leaves the
+  // declaration not already submitted — including a plain manual-data-only save that carries no
+  // status key at all (the exact shape the real "Guardar" and "manualData" UI actions send),
+  // which is the gap the older status-key-gated version of this guard missed. Model-agnostic —
+  // these tests exercise the rule once via the 303 {@code rectificativa} field name; the generate
   // endpoint tests in {@link Fiscal303BoxesHandlerTest}/{@link Fiscal349BoxesHandlerTest} cover
   // each model's own distinct request-param wiring instead of duplicating this same business-rule
   // assertion per model.
@@ -1813,7 +1813,7 @@ public class FiscalDeclCrudHandlerTest {
   //
   // A LATER manual-testing fix (same ticket) found the first version of this guard had
   // over-corrected: it blocked reactivating EITHER declaration whenever ANY sibling existed. The
-  // correct rule is asymmetric — see {@link FiscalDeclCrudHandler#findReactivationBlockReason}'s
+  // correct rule is asymmetric — see {@link FiscalDeclReactivationSupport#findReactivationBlockReason}'s
   // own javadoc for the exact per-case logic these tests assert on.
 
   /**
@@ -1970,14 +1970,15 @@ public class FiscalDeclCrudHandlerTest {
    * corrective sibling exist simultaneously for the same natural key (in practice this means a
    * 3rd declaration for the period, since the pre-existing ETP-5272 one-draft-per-period guard
    * caps drafts at one — e.g. the presented corrective sibling here, then a brand-new draft
-   * opened for the same period before this reactivation). {@link
-   * FiscalDeclCrudHandler#findReactivationBlockReason} resolves this deterministically because it
-   * scans ALL siblings and computes both {@code draftSiblingExists}/
-   * {@code presentedCorrectiveSiblingExists} BEFORE either {@code if} fires — the draft check is
-   * evaluated first, so draft wins regardless of what else is present. Reactivating the
-   * ORDINARIA here (not corrective itself), which would ALSO independently qualify for
-   * {@code corrective_sibling_presented} if the draft sibling weren't present — this test pins
-   * that draft takes priority over that ALSO-true condition, not just over "no other condition".
+   * opened for the same period before this reactivation). {@code
+   * FiscalDeclReactivationSupport#findReactivationBlockReason} resolves this deterministically:
+   * it scans every sibling in a single pass, tracking the draft-exists and presented-corrective-
+   * exists outcomes independently and only deciding which reason to report once the whole scan
+   * is done, with the draft outcome checked first — so the presence of a draft sibling always
+   * wins, regardless of what else is present. Reactivating the ORDINARIA here (not the corrective
+   * itself) would ALSO independently qualify for the presented-corrective-sibling reason if the
+   * draft sibling weren't present — this test pins that the draft case takes priority over that
+   * also-true outcome, not just over the simpler "nothing else is present" case.
    */
   @Test
   public void testHandleDeclPutReactivateBlockedByDraftWinsOverPresentedCorrectiveSibling()
@@ -2367,7 +2368,7 @@ public class FiscalDeclCrudHandlerTest {
 
   /**
    * ETP-5725 (reopened QA review, BUG-1) — the hole QA demonstrated: POST (CREATE) bypasses
-   * {@link FiscalDeclCrudHandler#rejectCorrectiveConsistencyViolation} entirely (that guard only
+   * {@link FiscalDeclCorrectiveConsistencySupport#rejectCorrectiveConsistencyViolation} entirely (that guard only
    * runs on PUT), so a declaration created DIRECTLY with a {@code SUBMITTED_STATUSES} status used
    * to never have the corrective/ordinaria consistency rule enforced on it at all — not at
    * creation, and not afterward either, since that PUT guard deliberately bails out once
@@ -3316,7 +3317,7 @@ public class FiscalDeclCrudHandlerTest {
   /**
    * ETP-5725 (reopened QA fix) — stubs {@code obDal.createQuery(ENTITY_FISCAL_DECL, ...)} (the
    * shared {@code naturalKeyQuery} helper every sibling-aware guard added in this round funnels
-   * through — {@link FiscalDeclCrudHandler#checkCorrectiveConsistency} via
+   * through — {@link FiscalDeclCorrectiveConsistencySupport#checkCorrectiveConsistency} via
    * {@code rejectCorrectiveConsistencyViolation}, and {@code findReactivationBlockReason} via
    * {@code rejectReactivationWithSibling}) to report NO sibling declarations at all.
    *

@@ -2205,7 +2205,7 @@ public class Fiscal303BoxesHandlerTest {
   //
   // "Generar fichero 303" produces the literal AEAT submission artifact (not a preview), so it
   // must be gated by the same corrective/ordinaria consistency rule as "Guardar"/"Registrar/
-  // Presentar" (FiscalDeclCrudHandler#checkCorrectiveConsistency). `generate` has no persisted
+  // Presentar" (FiscalDeclCorrectiveConsistencySupport#checkCorrectiveConsistency). `generate` has no persisted
   // declaration to trust at call time (the frontend's handleGenerate never flushes a save
   // first), so the guard reads a DEDICATED, unambiguous `Rectificativa` request param —
   // deliberately NOT the pre-existing `IsComplementary`, which this same request also sets for
