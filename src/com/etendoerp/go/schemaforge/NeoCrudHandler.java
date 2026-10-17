@@ -238,7 +238,7 @@ class NeoCrudHandler {
           .entityName(neoContext.getEntityName())
           .httpMethod(neoContext.getHttpMethod())
           .recordId(neoContext.getRecordId())
-          .requestBody(new JSONObject(bodyStr))
+          .requestBody(NeoRequestBodyParser.parseJsonObjectSafely(bodyStr))
           .queryParams(neoContext.getQueryParams())
           .adTab(neoContext.getAdTab())
           .sfEntity(neoContext.getSfEntity())
@@ -1329,7 +1329,7 @@ class NeoCrudHandler {
       return;
     }
     try {
-      JSONArray arr = new JSONArray(criteria);
+      JSONArray arr = NeoRequestBodyParser.parseJsonArraySafely(criteria);
       if (normalizeBooleanCriteriaArray(arr, entityDef)) {
         params.put(CRITERIA_PARAM, arr.toString());
       }

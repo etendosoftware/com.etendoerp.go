@@ -49,6 +49,7 @@ import com.etendoerp.go.auth.SurfacePolicy;
 import com.etendoerp.go.common.ConfigPropertyReader;
 import com.etendoerp.go.common.EtendoGoCorsServlet;
 import com.etendoerp.go.common.ProtocolErrorAdapters;
+import com.etendoerp.go.schemaforge.NeoRequestBodyParser;
 import com.etendoerp.go.schemaforge.data.SupportConversation;
 import com.etendoerp.go.schemaforge.data.SupportMessage;
 
@@ -991,7 +992,7 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
       }
       String s = sb.toString().trim();
       if (s.isEmpty()) return new JSONObject();
-      return new JSONObject(s);
+      return NeoRequestBodyParser.parseJsonObjectSafely(s);
     } catch (Exception e) {
       return null;
     }
@@ -1005,7 +1006,7 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
       while ((line = reader.readLine()) != null) sb.append(line);
     }
     try {
-      return new JSONObject(sb.toString());
+      return NeoRequestBodyParser.parseJsonObjectSafely(sb.toString());
     } catch (JSONException e) {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST, "Invalid JSON body");
       return null;

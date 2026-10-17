@@ -63,7 +63,7 @@ class NeoFiscalModelsCatalogService {
       String raw = Preferences.getPreferenceValue(
           PREF_KEY, false,
           client, null, null, null, null);
-      return NeoResponse.ok(new JSONObject(raw));
+      return NeoResponse.ok(NeoRequestBodyParser.parseJsonObjectSafely(raw));
     } catch (PropertyNotFoundException e) {
       return NeoResponse.ok(new JSONObject());
     } catch (PropertyException e) {
@@ -85,7 +85,7 @@ class NeoFiscalModelsCatalogService {
   static void saveActiveModels(String json) {
     JSONObject parsed;
     try {
-      parsed = new JSONObject(json);
+      parsed = NeoRequestBodyParser.parseJsonObjectSafely(json);
     } catch (Exception e) {
       log.error("Invalid fiscal models catalog JSON: {}", e.getMessage(), e);
       throw new IllegalArgumentException("Invalid JSON body");

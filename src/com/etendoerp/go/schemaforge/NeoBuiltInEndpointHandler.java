@@ -524,7 +524,7 @@ class NeoBuiltInEndpointHandler {
       return Optional.empty();
     }
     try {
-      JSONObject json = new JSONObject(body);
+      JSONObject json = NeoRequestBodyParser.parseJsonObjectSafely(body);
       if (!json.has(IS_MAIN_FIELD) || json.isNull(IS_MAIN_FIELD)) {
         servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
             "Required field: isMain");
@@ -574,7 +574,7 @@ class NeoBuiltInEndpointHandler {
       return null;
     }
     try {
-      JSONObject json = new JSONObject(body);
+      JSONObject json = NeoRequestBodyParser.parseJsonObjectSafely(body);
       if (!json.has(DESCRIPTION_FIELD) || json.isNull(DESCRIPTION_FIELD)) {
         return null;
       }
@@ -619,7 +619,7 @@ class NeoBuiltInEndpointHandler {
     String assetId;
     try {
       String body = readBody(request);
-      JSONObject json = new JSONObject(body);
+      JSONObject json = NeoRequestBodyParser.parseJsonObjectSafely(body);
       assetId = json.optString("assetId", null);
     } catch (Exception e) {
       servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,

@@ -195,7 +195,7 @@ class NeoDisplayLogicHandler {
       if (body == null || body.trim().isEmpty()) {
         return new JSONObject();
       }
-      JSONObject bodyJson = new JSONObject(body);
+      JSONObject bodyJson = NeoRequestBodyParser.parseJsonObjectSafely(body);
       return bodyJson.has("fieldValues")
           ? bodyJson.getJSONObject("fieldValues")
           : new JSONObject();

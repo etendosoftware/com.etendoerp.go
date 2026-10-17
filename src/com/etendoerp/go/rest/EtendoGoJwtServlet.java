@@ -108,6 +108,7 @@ import com.etendoerp.go.onboarding.OnboardingCompanyDataService;
 import com.etendoerp.go.onboarding.OnboardingCompanyProfileTransferService;
 import com.etendoerp.go.onboarding.OnboardingSampleDataService;
 import com.etendoerp.go.onboarding.OnboardingSequenceGeneratorService;
+import com.etendoerp.go.schemaforge.NeoRequestBodyParser;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.data.AccountIdentity;
 import com.etendoerp.go.schemaforge.email.EmailContractCommandSupport;
@@ -2791,7 +2792,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       return JSONObject.NULL;
     }
     try {
-      return new JSONObject(storedDraft);
+      return NeoRequestBodyParser.parseJsonObjectSafely(storedDraft);
     } catch (JSONException e) {
       log.warn("Stored onboarding draft for account {} is not valid JSON; ignoring",
           account.getId());
@@ -2895,7 +2896,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       return JSONObject.NULL;
     }
     try {
-      return new JSONObject(storedFirstSteps);
+      return NeoRequestBodyParser.parseJsonObjectSafely(storedFirstSteps);
     } catch (JSONException e) {
       log.warn("Stored first steps for account {} is not valid JSON; ignoring", account.getId());
       return JSONObject.NULL;
@@ -5185,7 +5186,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    */
   private JSONObject readJsonBody(HttpServletRequest request)
       throws IOException, JSONException {
-    return new JSONObject(readRawBody(request));
+    return NeoRequestBodyParser.parseJsonObjectSafely(readRawBody(request));
   }
 
   private String readRawBody(HttpServletRequest request) throws IOException {

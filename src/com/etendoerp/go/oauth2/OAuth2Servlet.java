@@ -65,6 +65,7 @@ import com.etendoerp.go.auth.SurfacePolicy;
 import com.etendoerp.go.common.CorsUtils;
 import com.etendoerp.go.common.ProtocolErrorAdapters;
 import com.etendoerp.go.common.PublicUrlResolver;
+import com.etendoerp.go.schemaforge.NeoRequestBodyParser;
 import com.etendoerp.go.schemaforge.data.com.etendoerp.go.schemaforge.data.OAuth2Client;
 import com.etendoerp.go.schemaforge.data.com.etendoerp.go.schemaforge.data.OAuth2Token;
 import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
@@ -157,6 +158,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
     private static final String MESSAGE_INTERNAL_SERVER_ERROR = "Internal server error";
     private static final String MESSAGE_UNKNOWN_ENDPOINT = "Unknown endpoint: ";
     private static final String MESSAGE_CLIENT_NOT_FOUND = "Client not found: ";
+    private static final String MESSAGE_MALFORMED_JSON = "Malformed JSON body: ";
     private static final String PATH_AUTHORIZE = "/authorize";
   private static final String ERROR_INVALID_CLIENT = "invalid_client";
   private static final String ERROR_INVALID_SCOPE = "invalid_scope";
@@ -430,7 +432,10 @@ public class OAuth2Servlet extends HttpBaseServlet {
       String contentType = request.getContentType();
       JSONObject body = null;
       if (contentType != null && contentType.contains(APPLICATION_JSON)) {
-        body = parseJsonBody(request);
+        body = parseJsonBodyOrWriteError(request, response);
+        if (body == null) {
+          return;
+        }
         grantType = body.optString("grant_type", null);
         clientId = body.optString(FIELD_CLIENT_ID_REQUEST, null);
         clientSecret = body.optString("client_secret", null);
@@ -583,7 +588,10 @@ public class OAuth2Servlet extends HttpBaseServlet {
       throws IOException {
     try {
       PublicApiKeyContext context = requirePublicApiKeyContext(request);
-      JSONObject body = parseJsonBody(request);
+      JSONObject body = parseJsonBodyOrWriteError(request, response);
+      if (body == null) {
+        return;
+      }
       String name = PublicApiKeyPolicy.normalizeName(body.optString("name", null));
       Set<String> capabilities = parsePublicCapabilities(body);
       validatePublicCapabilities(context, capabilities);
@@ -652,7 +660,10 @@ public class OAuth2Servlet extends HttpBaseServlet {
         writeError(response, HttpServletResponse.SC_NOT_FOUND, ERROR_NOT_FOUND, MESSAGE_API_KEY_NOT_FOUND);
         return;
       }
-      JSONObject body = parseJsonBody(request);
+      JSONObject body = parseJsonBodyOrWriteError(request, response);
+      if (body == null) {
+        return;
+      }
       String name = body.has("name")
           ? PublicApiKeyPolicy.normalizeName(body.optString("name", null))
           : existing.getString("name");
@@ -1030,7 +1041,10 @@ public class OAuth2Servlet extends HttpBaseServlet {
       EnvironmentAuthOutcome admin = requireAdmin(request);
       String adminUserId = admin.getUserId();
 
-      JSONObject body = parseJsonBody(request);
+      JSONObject body = parseJsonBodyOrWriteError(request, response);
+      if (body == null) {
+        return;
+      }
       String name = body.optString("name", null);
       String adUserId = body.optString(FIELD_AD_USER_ID, null);
       String adRoleId = body.optString(FIELD_AD_ROLE_ID, null);
@@ -1113,7 +1127,10 @@ public class OAuth2Servlet extends HttpBaseServlet {
     try {
       String adminUserId = requireAdmin(request).getUserId();
 
-      JSONObject body = parseJsonBody(request);
+      JSONObject body = parseJsonBodyOrWriteError(request, response);
+      if (body == null) {
+        return;
+      }
 
       // Verify client exists
       JSONObject existing = findClientById(id);
@@ -1234,7 +1251,10 @@ public class OAuth2Servlet extends HttpBaseServlet {
       boolean revokeTokens = true;
       String contentType = request.getContentType();
       if (contentType != null && contentType.contains(APPLICATION_JSON)) {
-        JSONObject body = parseJsonBody(request);
+        JSONObject body = parseJsonBodyOrWriteError(request, response);
+        if (body == null) {
+          return;
+        }
         revokeTokens = body.optBoolean("revokeExistingTokens", true);
       }
 
@@ -1338,7 +1358,10 @@ public class OAuth2Servlet extends HttpBaseServlet {
     try {
       requireAdmin(request);
 
-      JSONObject body = parseJsonBody(request);
+      JSONObject body = parseJsonBodyOrWriteError(request, response);
+      if (body == null) {
+        return;
+      }
       String clientIdentifier = body.optString(FIELD_CLIENT_ID, null);
 
       if (clientIdentifier == null || clientIdentifier.trim().isEmpty()) {
@@ -1381,7 +1404,10 @@ public class OAuth2Servlet extends HttpBaseServlet {
     try {
       requireAdmin(request);
 
-      JSONObject body = parseJsonBody(request);
+      JSONObject body = parseJsonBodyOrWriteError(request, response);
+      if (body == null) {
+        return;
+      }
       String token = body.optString(FIELD_TOKEN, null);
 
       if (token == null || token.trim().isEmpty()) {
@@ -1816,7 +1842,10 @@ public class OAuth2Servlet extends HttpBaseServlet {
   private void handleRegister(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
     try {
-      JSONObject body = parseJsonBody(request);
+      JSONObject body = parseJsonBodyOrWriteError(request, response);
+      if (body == null) {
+        return;
+      }
       String clientName = body.optString("client_name", "MCP Client");
       String scopes = OAuth2ClientPolicy.normalizeClientScopes(
           body.optString(FIELD_SCOPE, null), ApiScopes.ALL, VALID_SCOPES);
@@ -2131,7 +2160,26 @@ public class OAuth2Servlet extends HttpBaseServlet {
         sb.append(line);
       }
     }
-    return new JSONObject(sb.toString());
+    return NeoRequestBodyParser.parseJsonObjectSafely(sb.toString());
+  }
+
+  /**
+   * Parse the request body as JSON, writing a 400 Bad Request error if parsing fails.
+   *
+   * @param request the HTTP request whose body is parsed
+   * @param response the HTTP response used to write an error if parsing fails
+   * @return the parsed {@link JSONObject}, or {@code null} if an error was written
+   * @throws IOException if reading the request body fails
+   */
+  private JSONObject parseJsonBodyOrWriteError(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    try {
+      return parseJsonBody(request);
+    } catch (JSONException e) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST,
+          MESSAGE_MALFORMED_JSON + e.getMessage());
+      return null;
+    }
   }
 
   /**

@@ -1041,7 +1041,7 @@ class FiscalDeclCrudHandler {
   private static JSONObject parseManualData(BaseOBObject decl) {
     String raw = asString(decl.get(PROPERTY_MANUAL_DATA));
     try {
-      return StringUtils.isNotBlank(raw) ? new JSONObject(raw) : new JSONObject();
+      return StringUtils.isNotBlank(raw) ? NeoRequestBodyParser.parseJsonObjectSafely(raw) : new JSONObject();
     } catch (JSONException e) {
       return new JSONObject();
     }
@@ -1070,6 +1070,6 @@ class FiscalDeclCrudHandler {
       String line;
       while ((line = reader.readLine()) != null) sb.append(line);
     }
-    return new JSONObject(sb.toString());
+    return NeoRequestBodyParser.parseJsonObjectSafely(sb.toString());
   }
 }

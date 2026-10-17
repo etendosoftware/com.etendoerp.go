@@ -304,7 +304,7 @@ public class SurveyConfigServlet extends HttpBaseServlet {
       while ((line = reader.readLine()) != null) sb.append(line);
     }
     try {
-      return new JSONObject(sb.toString());
+      return NeoRequestBodyParser.parseJsonObjectSafely(sb.toString());
     } catch (JSONException e) {
       sendError(response, HttpServletResponse.SC_BAD_REQUEST, "Invalid JSON body");
       return null;
