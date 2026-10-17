@@ -117,6 +117,7 @@ shape minus `declarationData`/`csv`/etc:
 | (none — plain `sendError`, no JSON body) | `400` | `id` query param missing/blank | Not a `buildFailureJson` shape — a bare `sendError`, matches the sibling entities' convention |
 | (none — plain `sendError`, no JSON body) | `404` | `id` doesn't resolve to a declaration belonging to the current client/org (`belongsTo`) | Same as above — no JSON body |
 | `MISSING_PRESENTER` | `400` | Production (`testMode=false`) and either `presenterNif` or `presenterName` is blank | Test mode never triggers this — presenter fields are optional there |
+| (none — plain `sendError`, no JSON body) | `409` | The corrective/ordinaria consistency rule is violated — see "Corrective/ordinaria consistency guard" below | Checked for BOTH `testMode` values (unlike every other row in this table, which is production-only) — a test-mode filing of an inconsistent declaration is just as wrong a state to validate as a production one |
 | `NO_CERTIFICATE` | `409` | Production and `AEAT303SubmissionService.hasOrgCertificate(org)` is false | Checked **before** constructing `AEAT303SubmissionService` for the actual submission — session-cert upload is NOT supported by this endpoint (see below) |
 | `ALREADY_SUBMITTED` | `409` | Production and the declaration's `DeclarationStatus` is already in the submitted family (`submitted`, `submitted_ext`, `submitted_ack`) | The idempotency guard (BUG-1 fix, widened in ETP-5438) — see dedicated section below |
 | `SNAPSHOT_FAILED` | `500` | Production, file generated, but the submission snapshot (the `GET /fiscal303/boxes` figures) could not be computed or would not fit the column | Checked **before** the AEAT call — the declaration is never sent to Hacienda without its frozen figures (ETP-5438). See "Submission snapshot" below |
@@ -223,6 +224,29 @@ The frontend surfaces this with a dedicated message (`fm.aeat.error.alreadySubmi
 locales) instead of dumping the generic AEAT error list, and — like `MISSING_PRESENTER` but unlike
 `NO_CERTIFICATE` — shows no "go to fiscal-config" shortcut button (that stays correctly gated to
 `NO_CERTIFICATE` only, since a certificate is not what's missing here).
+
+## Corrective/ordinaria consistency guard (ETP-5725 reopened, review Blocker B1)
+
+Added in the same reopened round as the two guards below it, after review found this endpoint was
+the one call site that could still file an invalid declaration with the AEAT even though the
+manual "Registrar/Presentar" (`PUT /fiscal{model}/declarations`) and "Generar fichero" (`generate`)
+paths were already gated: a corrective (rectificativa) declaration filed with no presented
+ordinaria for the same period, or a second ordinaria filed when one was already presented.
+`handleSubmit` now calls the same `AbstractFiscalHandler#guardCorrectiveConsistency` the `generate`
+branch uses, right after the resubmission/missing-presenter guard and before the certificate check
+or any AEAT call — reading the declaration's effective corrective/ordinaria identification from
+the request's own `Rectificativa=Y` param (not a persisted row — see the full rationale in
+`../../../schema_forge/docs/generated-custom-windows/fiscal-models.md`, "Hard corrective/ordinaria
+consistency + asymmetric reactivation guard"). Unlike `ALREADY_SUBMITTED`/`MISSING_PRESENTER`/
+`NO_CERTIFICATE`, this check runs for **both** `testMode` values — a test-mode filing of an
+inconsistent declaration validates the same wrong state against AEAT as a production one would, so
+there is no reason to let test mode bypass it. On violation it throws the reused
+`AlreadySubmittedException` and is caught by the shared `runDispatch`, producing a plain `409`
+`sendError` with **no JSON body** (same shape as the `id`-missing/404 rows above, not the
+`buildFailureJson` shape the other `errorCode`s use) — the frontend's `AeatSubmitFlow.jsx` falls
+back to its generic AEAT-error display for this case, since there is no `errorCode` to switch on.
+The full business rule (both directions, the other 3 call sites, the reactivation guard, and the
+UX) lives in the fiscal-models functional guide, not duplicated here.
 
 ## Persistence
 

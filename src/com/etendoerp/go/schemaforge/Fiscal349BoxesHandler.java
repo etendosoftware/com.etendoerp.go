@@ -136,6 +136,13 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
         response.getWriter().write(result.toString());
       } else if (GENERATE.equals(entityName)) {
         guardNotAlreadySubmitted(orgId, year, period);
+        // ETP-5725 (reopened QA fix) — same rule and rationale as Fiscal303BoxesHandler's own
+        // generate guard (see its comment): "Generar fichero 349" is the literal AEAT
+        // submission artifact. 349's generate request already always sends an unambiguous
+        // `substitutive` param ("Y"/"N", see generate349File/AEAT3492010Report.generateLine1),
+        // unlike 303's overloaded `IsComplementary` — no new param needed here.
+        boolean effectivelyCorrective = "Y".equalsIgnoreCase(request.getParameter("substitutive"));
+        guardCorrectiveConsistency(orgId, year, period, "349", effectivelyCorrective);
         handleGenerate(orgId, year, period, request, response);
       } else if (VALIDATE_VIES.equals(entityName)) {
         JSONObject result = viesSupport.handleValidateVies(this, orgId, year, period);
