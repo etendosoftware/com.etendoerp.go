@@ -434,7 +434,7 @@ nothing for a new tenant.
 lists named "Tarifa de venta/compra principal", both shipping `ISDEFAULT='Y'`
 so each is the default for its direction (ETP-5190 — the Product window's Price
 tab resolves the tariff through that flag); a **single** warehouse
-"Almacen Principal" (value `AG`) with one locator; **no** sample products —
+"Almacén Principal" (value `AG`) with one locator; **no** sample products —
 only the internal `ETGO_DTO` "Discount" product the inline-discount feature
 resolves at runtime, which is not sample data and must never be removed; **no**
 default financial accounts (a consequence a tenant must accept: it cannot
