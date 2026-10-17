@@ -17,39 +17,145 @@ additional environment, and how an environment's commercial plan is recorded.
 | Layer | Choice |
 |-------|--------|
 | Application API | **OpenFeature** — `dev.openfeature:sdk:1.20.1` (the real SDK, not a lookalike) |
-| Control plane | **Local configuration**, via `PropertiesFeatureProvider` |
-| Evaluation | In-process. No network call, no background thread, no polling. |
+| Control plane | **Datadog Feature Flags** → **ConfigCat** → **local configuration**, first usable arm wins (see *The swap point*) |
+| Evaluation | In-process on every arm. The hosted arms evaluate against an in-memory snapshot refreshed in the background; a flag check is never a network call. |
 
 Application code never imports an OpenFeature type. It calls one entry point:
 
 ```java
 boolean enabled = GoFeatureFlags.isEnabled(
-    GoFeatureFlags.FLAG_TENANT_UPGRADE,
+    GoFeatureFlags.FLAG_BP_PORTAL_LINK,
     FeatureFlagContext.forAccount(accountEmail));
 ```
 
-The hosted control plane (Mixpanel Feature Flags with local evaluation and polling, per team plan
-§5.6) is **deliberately deferred**. Standing up OpenFeature first means the migration later is a
-provider swap rather than a rewrite of every call site.
-
 ### The swap point
 
-`GoFeatureFlags.createProvider()` is the **only** place that decides which provider backs the API:
+`GoFeatureFlags.createProvider()` is the **only** place that decides which provider backs the API.
+It installs exactly one provider, the first arm whose prerequisites are all met
+(`GoFeatureFlags.selectProvider(...)`):
 
-```java
-private static FeatureProvider createProvider() {
-  return new PropertiesFeatureProvider();
-}
-```
+| # | Arm | Selected when | Provider |
+|---|-----|---------------|----------|
+| 1 | **Datadog** (ETP-5751) | `DD_FEATURE_FLAGS_ENABLED=true` (or `-Ddd.feature.flags.enabled=true`) **and** `dd-java-agent` is loaded in the JVM | `datadog.trace.api.openfeature.Provider` (`com.datadoghq:dd-openfeature`) |
+| 2 | **ConfigCat** (ETP-5267) | `etendo.go.configcat.sdkKey` / `ETGO_CONFIGCAT_SDK_KEY` is set and not blank | `ConfigCatProvider` (`dev.openfeature.contrib.providers:configcat:0.1.1`) |
+| 3 | **Local properties** | neither of the above | `PropertiesFeatureProvider` |
 
-Moving to a hosted control plane means returning a different `FeatureProvider` from that one method,
-plus adding its dependency in `build.gradle`. Nothing else in `GoFeatureFlags`, nothing else in the
-package, and no caller anywhere changes.
+Two rules govern the order, and they point in opposite directions on purpose:
 
-Keep it that way. Provider-specific concerns — credentials, polling schedules, caches, retry and
-staleness handling — belong **inside** the provider. Any provider bound here must honour the
-guarantees below: never block the calling thread on I/O, never throw, and resolve to the caller's
-default when it cannot answer.
+- **A missing prerequisite skips an arm.** The Datadog switch on in a JVM without the agent (dev, CI,
+  e2e, a local Tomcat) falls through to ConfigCat, then to local properties, and logs a `WARN` that
+  names `DD_FEATURE_FLAGS_ENABLED`. A blank SDK key falls through the same way. Absent configuration
+  is not an error.
+- **A selected arm that breaks turns every flag off.** Once a hosted arm is installed, a failure to
+  initialize it (a wrong ConfigCat key, a Datadog provider that cannot start) resolves every flag to
+  its `false` code default. It never falls through to a lower arm whose local value might say `true`
+  — that is the ETP-4966 shape and must never be "improved" into a fallback that allows.
+
+The agent check is a class probe, not a configuration read: `dd-openfeature` is only a bridge to
+classes that `dd-java-agent` puts on the bootstrap class path
+(`datadog.trace.api.featureflag.FeatureFlaggingGateway`), which no public jar ships. Without them the
+provider can never become ready, so installing it would silently turn every flag off.
+
+Moving to another control plane still means returning a different `FeatureProvider` from that one
+method, plus its dependency in `build.gradle`. Nothing else in `GoFeatureFlags`, nothing else in the
+package, and no caller anywhere changes. Keep it that way. Provider-specific concerns — credentials,
+polling schedules, caches, retry and staleness handling — belong **inside** the provider. Any
+provider bound here must honour the guarantees below: never block the calling thread on I/O beyond
+the bounded first wait, never throw, and resolve to the caller's default when it cannot answer.
+
+### Datadog Feature Flags (ETP-5751)
+
+The flags live in the Datadog Feature Flags product. `dd-openfeature` is a thin OpenFeature
+provider; the flag configuration is fetched by **`dd-java-agent`**, which must be loaded with
+`-javaagent`. The runtime image (`.github/docker/Dockerfile.runtime`) bakes the agent in at
+`/opt/datadog/dd-java-agent.jar` with a pinned version and SHA-256, and
+`.github/docker/docker-entrypoint.sh` appends `-javaagent:` to `CATALINA_OPTS` **only when
+`DD_FEATURE_FLAGS_ENABLED` is true** — an environment without the `DD_*` variables starts exactly as
+before. Tracing is not needed for this and defaults to disabled (`DD_TRACE_ENABLED=false`).
+
+| Variable | Value | Purpose |
+|----------|-------|---------|
+| `DD_FEATURE_FLAGS_ENABLED` | `true` | Starts the agent's feature-flag subsystem **and** selects the Datadog arm here — one knob, not two that can disagree. **The only documented value is `true`** (the entrypoint and `GoRuntimeProperties.readBoolean` both also take `Y`; `1`/`yes` are rejected by both) |
+| `DD_API_KEY` | secret | Authenticates the agentless configuration fetch |
+| `DD_SITE` | e.g. `datadoghq.eu` | Datadog site of the organisation |
+| `DD_ENV` | `experimental` / `production` / … | **Chooses the Datadog environment** the flags answer from (see below) |
+| `DD_SERVICE` | `etendo-go` | Service identity |
+| `DD_VERSION` | image version | Optional, reported with evaluations |
+| `DD_TRACE_ENABLED` | `false` | No APM tracing — only feature flags |
+
+**`DD_ENV` → Datadog environment.** Each Datadog environment declares the `DD_ENV` values it answers
+to (its *queries*). Flags do not target services: every service whose `DD_ENV` matches an
+environment reads that environment's flag state.
+
+| ECS deployment | `DD_ENV` | Datadog environment |
+|----------------|----------|---------------------|
+| experimental | `experimental` | Experimental |
+| production | `production` | Production (also answers to `prod`) |
+| staging | `staging` | Staging (also answers to `stage`) — **disabled** in Datadog |
+
+Only **Experimental** and **Production** are enabled in Datadog today; Staging and Development are
+disabled, so a JVM whose `DD_ENV` points at them resolves every flag to its `false` code default —
+the same result as a `DD_ENV` that matches no environment, which is not an error either. The web
+client maps `VITE_APP_ENV` onto the same environments. Check the queries in Datadog before
+introducing a new value.
+
+**Targeting.** Datadog has no reserved user fields: the targeting key drives percentage bucketing
+and every rule matches a flat attribute **by its exact, case-sensitive name**. The rules in the
+Datadog project match on lowercase `email`, so `FeatureFlagContext.forAccount(...)` publishes the
+account email as the targeting key, as `email` (Datadog, **lowercased** with `Locale.ROOT` — rule
+values are matched case-sensitively and every value in the Datadog project is lowercase) **and** as
+`Email` (ConfigCat, as stored — see *Per-account targeting* below). Drop `Email` only when ConfigCat is retired.
+
+**Data sent to Datadog.** Evaluation is in-process, but the agent reports flag exposures and
+evaluations to Datadog with the evaluation context — the account email included — so that context
+leaves the JVM. The web client sends the same attributes from the browser (see
+`docs/feature-flags.md` in the functional repo). This is accepted under the same Datadog data
+processing as our logs and RUM.
+
+**Startup.** Installing the provider waits at most 5 s (`DATADOG_MAX_INIT_WAIT_SECONDS`; Datadog's
+own default is 30 s) for the first configuration. If it has not arrived, the provider stays
+installed, every flag reads `false` meanwhile, and it turns ready by itself as soon as the agent
+delivers the configuration — no restart. After that, flag changes in Datadog reach the JVM without a
+restart.
+
+> **VERSION LOCK — `dd-openfeature` MUST equal the deployed `dd-java-agent` version** (currently
+> **1.66.0**). The provider
+> calls into the agent's internal bootstrap classes, which carry no compatibility guarantee across
+> versions. The version is pinned once, as `ext.ddJavaAgentVersion` in this module's `build.gradle`.
+> `deploy-staging.yml` reads it and passes it to the image build as `--build-arg
+> DD_JAVA_AGENT_VERSION`, and `Dockerfile.runtime` verifies the download against its pinned
+> `DD_JAVA_AGENT_SHA256` — so bumping the Gradle pin without updating the checksum **fails the image
+> build** instead of shipping a mismatch. Update both in the same change (and the mirror copy in
+> `etendo-go-infraestructure/docker/Dockerfile.runtime`). A mismatch that did reach runtime would
+> show as "every flag off" or a `LinkageError` at the first evaluation.
+
+**Where the image is built.** `deploy-staging.yml` builds the staging image from
+`.github/docker/` of this module. The experimental and production images are built on their build
+servers from `/opt/docker-build`, whose copies have diverged: the agent block of
+`Dockerfile.runtime` and the `DD_FEATURE_FLAGS_ENABLED` block of `docker-entrypoint.sh` are
+**patched into** those copies by hand, never copied over whole.
+
+**Applying the variables.** Every `DD_*` is read from the process environment, not from
+`Openbravo.properties`, so each one is applied with `setup-env-var.sh apply --no-entrypoint` and no
+`--prop`. `DD_API_KEY` is a per-environment secret, `etendo/<env>/datadog-api-key`;
+`DD_FEATURE_FLAGS_ENABLED=true` goes last, with `--deploy`. Experimental first, then the smoke check
+— including the *proof it reads Datadog and not ConfigCat* (a targeting rule that makes a flag
+diverge between the two control planes for one tester) — and only then production. Full procedure:
+`etendo-go-infraestructure/COMO-REEMPLAZAR-AL-TUTI.md`, section *Datadog Feature Flags (ETP-5751)*.
+
+**Rollback.** Remove `DD_FEATURE_FLAGS_ENABLED` from the task definition (or set it to `false`) and
+redeploy. The entrypoint stops loading the agent and the backend falls back to ConfigCat (while
+`ETGO_CONFIGCAT_SDK_KEY` is set) or to local properties. No image rebuild is needed. The web
+client's rollback is independent: the `VITE_FLAGS_PROVIDER=configcat` Actions variable plus a
+redeploy.
+
+### ConfigCat (ETP-5267)
+
+`etendo.go.configcat.sdkKey` (JVM system property or `Openbravo.properties`) or the environment
+variable `ETGO_CONFIGCAT_SDK_KEY` selects ConfigCat when the Datadog arm is not selected. Note the
+spelling: **`sdkKey`**, camel case — `etendo.go.configcat.sdk-key` is not read. While Datadog rolls
+out, ConfigCat stays as the second arm so an environment whose image has not gained the agent keeps
+reading hosted flags.
 
 The provider is bound to the OpenFeature **domain** `etendo-go` rather than the global default
 provider, so this module cannot clobber a provider installed by another module.
@@ -60,7 +166,8 @@ A flag `my-flag` is read from `etendo.go.flags.my-flag`, resolved in priority or
 property, `Openbravo.properties`, environment variable `ETGO_FLAG_MY_FLAG` (uppercased, every
 non-alphanumeric character replaced by `_`). See `com.etendoerp.go.common.GoRuntimeProperties`.
 
-These local properties are a **plain boolean per environment**. Per-account targeting is a ConfigCat
+These local properties are a **plain boolean per environment**, and they are read **only on the local
+arm** — wherever Datadog or ConfigCat is selected they are inert. Per-account targeting is a hosted-arm
 concern only — see **Per-account targeting** below for why there is deliberately no local equivalent.
 
 Declare every flag's key as a constant on `GoFeatureFlags` and add its row here.
@@ -74,10 +181,11 @@ Declare every flag's key as a constant on `GoFeatureFlags` and add its row here.
 
 `bp-portal-link` (ETP-5267) decides whether a `sales-invoice-send` email carries a link to the
 Business Partner self-service portal. It is **targeted per sending account** and false for everyone
-until a ConfigCat targeting rule names that account's email, so day-to-day enablement happens in the
-ConfigCat dashboard and takes effect without a restart. Where no SDK key is configured the flag
-degrades to the local per-environment boolean above, which has no per-account notion — so a shared
-environment needs ConfigCat set up before the link is switched on for anyone. It is
+until a targeting rule on the hosted control plane (Datadog, or ConfigCat while it remains a
+fallback) names that account's email, so day-to-day enablement happens in that dashboard and takes
+effect without a restart. Where no hosted arm is selected the flag degrades to the local
+per-environment boolean above, which has no per-account notion — so a shared environment needs a
+hosted arm set up before the link is switched on for anyone. It is
 **backend-only** — no key in the web client's `flag-keys.js`, nothing in the
 browser reads it, and none must be added. It gates the link only: the portal route, the three
 `/sws/portal/*` endpoints, the `etgo_portal_access` table and the revoke action all ship
@@ -94,7 +202,11 @@ indistinguishable from a disabled feature — which is how a charged account got
 Accepted affirmatives: `true`, `Y`, `yes`, `1`. Accepted negatives: `false`, `N`, `no`, `0`
 (case-insensitive).
 
-### Per-account targeting (ETP-5267) — ConfigCat only, deliberately
+### Per-account targeting (ETP-5267) — hosted arms only, deliberately
+
+> ETP-5751 added the Datadog arm and the lowercase `email` attribute it matches on (see *Datadog
+> Feature Flags* above). Everything below about ConfigCat's `Email` still holds while ConfigCat is a
+> fallback arm.
 
 This module publishes the account identity into every evaluation, so a hosted provider can target on
 it: `FeatureFlagContext.forAccount(...)` sets the `ETGO_ACCOUNT` email as the OpenFeature
@@ -117,15 +229,16 @@ iteration of ETP-5267 added an `etendo.go.flags.<key>.emails` allowlist to
 Consequences to hold onto:
 
 - **A dev box needs no targeting.** It has one user, so the plain boolean is enough there.
-- **A shared environment must have ConfigCat configured before the flag is switched on**, because
-  the local arm can only answer "everyone" or "nobody".
-- **Evaluation is in-memory and costs no network call.** ConfigCat's `autoPoll` fetches in the
-  background (60 s here, `CONFIGCAT_POLL_SECONDS`) and evaluates against the in-memory snapshot, so
-  a flag check inside request handling is a map lookup.
-- **A flag that does not exist in ConfigCat resolves to its code default, `false`** — asking for an
-  undefined key is never an error.
-- **Creating a flag or changing a targeting rule is visible within one poll interval, with no
-  restart.** That, not the local properties, is the day-to-day path.
+- **A shared environment must have a hosted arm (Datadog, or ConfigCat while it remains the
+  fallback) configured before the flag is switched on**, because the local arm can only answer
+  "everyone" or "nobody".
+- **Evaluation is in-memory and costs no network call.** `dd-java-agent` keeps the Datadog
+  configuration in memory and refreshes it in the background; ConfigCat's `autoPoll` does the same
+  every 60 s (`CONFIGCAT_POLL_SECONDS`). A flag check inside request handling is a map lookup.
+- **A flag that does not exist on the hosted control plane resolves to its code default, `false`** —
+  asking for an undefined key is never an error.
+- **Creating a flag or changing a targeting rule takes effect with no restart** (on ConfigCat,
+  within one poll interval). That, not the local properties, is the day-to-day path.
 
 ### Targeting key — still OPEN for any future flag, no longer blocking this capability
 
@@ -185,6 +298,8 @@ flag read on both ends still needs the frontend half of ETP-4693 first.
 | Flag not configured | Code default (`false`) |
 | Flag configured with a non-boolean value | Code default, with a `PARSE_ERROR` on the evaluation so a typo is visible rather than silently reading as "disabled" |
 | Provider registration failed | No provider bound; every flag resolves to its default |
+| Hosted provider not ready within the bounded first wait | Provider stays bound; every flag resolves to its default until the first configuration arrives, then it serves live values |
+| Datadog switched on but `dd-java-agent` not loaded | The Datadog arm is skipped (logged `WARN`); the next arm is selected |
 | Unknown flag key, type mismatch, unexpected error | Default |
 
 Every flag's code default is **`false`**, so with no configuration at all a gated feature stays
@@ -235,8 +350,8 @@ choice. The recovery procedure is in
 
 Switches onboarding between the classic from-scratch path (off) and claiming a pre-provisioned
 tenant from `ETGO_TENANT_POOL` (on). Evaluated through `TenantPoolConfig.isEnabled(accountEmail)`
-at two points: the onboarding claim (with the signup's account, so ConfigCat can target it per
-account) and every run of the "Tenant Pool Filler" background process (account-less). Off, the
+at two points: the onboarding claim (with the signup's account, so the hosted control plane can target
+it per account) and every run of the "Tenant Pool Filler" background process (account-less). Off, the
 claim never touches the pool and the filler run does nothing — onboarding is byte-for-byte the
 classic path. The pool size and the other knobs are plain runtime properties, not flags. Full
 reference: [`onboarding-flow.md`](onboarding-flow.md), "Tenant pool".
