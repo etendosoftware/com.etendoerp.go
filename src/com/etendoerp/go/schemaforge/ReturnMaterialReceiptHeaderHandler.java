@@ -91,9 +91,12 @@ public class ReturnMaterialReceiptHeaderHandler extends AbstractReturnDocumentHe
   private static final String FLOW = " Flow to create a customer return (the UI's): create the "
       + "returnMaterialReceipt header with etendo_create (businessPartner and partnerAddress; the "
       + "rest is defaulted — etendo_schema view:\"create\" is the authority on what it needs); "
-      + "availableShipments -> availableShipmentLines -> importShipmentLines on the new header; "
+      + "availableShipments -> availableShipmentLines -> importShipmentLines on the new header (it "
+      + "may take lines from several shipments of the same customer); "
       + "confirm it with the DocAction button (docAction CO); then rectifiableInvoices -> "
-      + "createReturnInvoice to refund it with a rectificative invoice.";
+      + "createReturnInvoice to refund it with a rectificative invoice. To return from ONE shipment "
+      + "without this flow, call createReturn on that goods shipment: it creates the draft "
+      + "return with its lines linked in one step.";
 
   /**
    * The handler-served actions published to agents (ETP-5704), in flow order. The SPA reaches the
@@ -117,16 +120,19 @@ public class ReturnMaterialReceiptHeaderHandler extends AbstractReturnDocumentHe
         .withIdDescription(ID_NOT_USED));
     contracts.put(ACTION_AVAILABLE_LINES, NeoActionContract.read(ACTION_AVAILABLE_LINES,
         "Lists the lines of a shipment that can still be returned: {data:[{id, product, uOM, "
-            + "movementQuantity}]}, where movementQuantity is the quantity still returnable. "
-            + "Step 2." + FLOW,
+            + "movementQuantity}]}, where movementQuantity is the quantity still returnable (what "
+            + "other non-voided returns, drafts included, already hold is subtracted). Step 2."
+            + FLOW,
         NeoActionContract.Param.required("shipmentId", NeoActionContract.TYPE_STRING,
             "Id of a shipment returned by availableShipments."))
         .withIdDescription(ID_NOT_USED));
     contracts.put(ACTION_IMPORT_LINES, NeoActionContract.write(ACTION_IMPORT_LINES,
         "Adds return lines to a draft return receipt, each copied from a shipment line (product, "
             + "UOM, the link to the line it returns). Lines without a sourceLineId or with a "
-            + "returnQuantity of 0 or less are skipped. Returns {data:{importedCount}}. Step 3."
-            + FLOW,
+            + "returnQuantity of 0 or less are skipped. More than what is still returnable of a "
+            + "source line (the same line listed twice counts both) answers 422 "
+            + "returnQuantityExceedsAvailable naming the product, the requested and the available "
+            + "quantity, and adds nothing. Returns {data:{importedCount}}. Step 3." + FLOW,
         NeoActionContract.Param.array("lines", NeoActionContract.TYPE_OBJECT, true,
             "Each {sourceLineId, returnQuantity}: sourceLineId is the id of a line from "
                 + "availableShipmentLines, returnQuantity a positive number not above its "
@@ -153,6 +159,7 @@ public class ReturnMaterialReceiptHeaderHandler extends AbstractReturnDocumentHe
             "Ids of the invoices it rectifies, from rectifiableInvoices. Default: the invoice "
                 + "auto-detected from the returned shipment lines; refused when none is found."))
         .withIdDescription("The id of the completed return receipt."));
+    contracts.put(InOutCompletionContract.CONTRACT.getName(), InOutCompletionContract.CONTRACT);
     return Collections.unmodifiableMap(contracts);
   }
 
@@ -244,27 +251,7 @@ public class ReturnMaterialReceiptHeaderHandler extends AbstractReturnDocumentHe
           return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "No lines specified");
         }
 
-        long nextLineNo = ReturnShipmentUtils.fetchMaxLineNo(receiptId) + 10;
-        int imported = 0;
-
-        for (int i = 0; i < requestedLines.length(); i++) {
-          JSONObject req = requestedLines.getJSONObject(i);
-          String sourceLineId = req.optString("sourceLineId", null);
-          BigDecimal qty = BigDecimal.valueOf(req.optDouble("returnQuantity", 0));
-          ShipmentInOutLine sourceLine = sourceLineId != null
-              ? OBDal.getInstance().get(ShipmentInOutLine.class, sourceLineId) : null;
-          if (sourceLineId == null || qty.compareTo(BigDecimal.ZERO) <= 0 || sourceLine == null) continue;
-
-          ReturnShipmentUtils.buildAndSaveReturnLine(receipt, sourceLine, nextLineNo, qty);
-          nextLineNo += 10;
-          imported++;
-        }
-
-        OBDal.getInstance().flush();
-
-        JSONObject data = new JSONObject();
-        data.put("importedCount", imported);
-        return ReturnShipmentUtils.wrapOkData(data);
+        return ReturnShipmentUtils.importReturnLines(receipt, receiptId, requestedLines);
 
       } finally {
         OBContext.restorePreviousMode();
@@ -420,7 +407,7 @@ public class ReturnMaterialReceiptHeaderHandler extends AbstractReturnDocumentHe
         // ETP-4737: resolves the unified "Factura Rectificativa" (ARI + isRectificative) doc
         // type, replacing the legacy ARI_RM ("Return Material Sales Invoice") lookup.
         DocumentType docType = ReturnShipmentUtils.findReturnDocTypeForOrg(
-            receipt.getOrganization().getId(), "ARI", true, false, true);
+            receipt.getClient(), receipt.getOrganization().getId(), "ARI", true, false, true);
         if (docType == null) {
           return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
               "No rectificative invoice document type found for this organization");

@@ -45,6 +45,8 @@ import org.junit.jupiter.api.Test;
 import com.etendoerp.go.schemaforge.GoodsReceiptHeaderHandler;
 import com.etendoerp.go.schemaforge.GoodsShipmentHeaderHandler;
 import com.etendoerp.go.schemaforge.PurchaseOrderHeaderHandler;
+import com.etendoerp.go.schemaforge.ReturnMaterialReceiptHeaderHandler;
+import com.etendoerp.go.schemaforge.ReturnToVendorShipmentHeaderHandler;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 
@@ -69,6 +71,8 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  * @covers com.etendoerp.go.mcp.McpEntityConfig
  * @covers com.etendoerp.go.schemaforge.PurchaseOrderHeaderHandler
  * @covers com.etendoerp.go.schemaforge.GoodsReceiptHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.ReturnToVendorShipmentHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.ReturnMaterialReceiptHeaderHandler
  */
 @DisplayName("MCP_CONFIG sourcedata")
 class McpConfigSourcedataTest {
@@ -467,6 +471,38 @@ class McpConfigSourcedataTest {
     assertTargetsAreDeclared(GOODS_RECEIPT_HEADER,
         new GoodsReceiptHeaderHandler().actionContracts().keySet());
     assertResolvesCleanly(GOODS_RECEIPT_HEADER);
+  }
+
+  private static final String RETURN_TO_VENDOR_HEADER = "40D5EE72A0F24464BABD21886059F3D8";
+  private static final String RETURN_MATERIAL_HEADER = "963A22BC87B144E18470530BA256FA78";
+
+  @Test
+  @DisplayName("return-to-vendor-shipment redirects the classic Pick/Edit Lines button, which has no"
+      + " process, to importReceiptLines, which its handler declares")
+  void returnToVendorRedirectsPickEditToImportReceiptLines() throws IOException, JSONException {
+    JSONObject redirect = redirectOf(RETURN_TO_VENDOR_HEADER);
+    assertEquals(1, redirect.length());
+    assertEquals("importReceiptLines", redirect.getString("RM_Shipment_Pickedit"));
+    JSONObject actions = payloadOf(RETURN_TO_VENDOR_HEADER).getJSONObject(McpActionsSection.NAME);
+    assertFalse(actions.optString(McpActionsSection.KEY_REDIRECT_REASON, "").isBlank());
+    assertTargetsAreDeclared(RETURN_TO_VENDOR_HEADER,
+        new ReturnToVendorShipmentHeaderHandler().actionContracts().keySet());
+    assertResolvesCleanly(RETURN_TO_VENDOR_HEADER);
+  }
+
+  @Test
+  @DisplayName("return-material-receipt redirects the classic Pick/Edit Lines button, which has no"
+      + " process, to importShipmentLines, which its handler declares")
+  void returnMaterialReceiptRedirectsPickEditToImportShipmentLines()
+      throws IOException, JSONException {
+    JSONObject redirect = redirectOf(RETURN_MATERIAL_HEADER);
+    assertEquals(1, redirect.length());
+    assertEquals("importShipmentLines", redirect.getString("RM_Receipt_PickEdit"));
+    JSONObject actions = payloadOf(RETURN_MATERIAL_HEADER).getJSONObject(McpActionsSection.NAME);
+    assertFalse(actions.optString(McpActionsSection.KEY_REDIRECT_REASON, "").isBlank());
+    assertTargetsAreDeclared(RETURN_MATERIAL_HEADER,
+        new ReturnMaterialReceiptHeaderHandler().actionContracts().keySet());
+    assertResolvesCleanly(RETURN_MATERIAL_HEADER);
   }
 
   @Test

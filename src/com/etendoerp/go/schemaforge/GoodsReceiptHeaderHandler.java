@@ -82,8 +82,9 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
 
   /**
    * The actions this header serves through its delegates, declared for agents (ETP-5709):
-   * {@code documentAction} (CO only, {@link InOutCompletionContract}), {@code createPurchaseInvoice}
-   * and {@code cloneRecord}. Published by the MCP next to the AD
+   * {@code documentAction} (CO only, {@link InOutCompletionContract}), {@code createPurchaseInvoice},
+   * {@code createPurchaseReturn} ({@link CreatePurchaseReturnHandler#CONTRACT}, ETP-5711) and
+   * {@code cloneRecord}. Published by the MCP next to the AD
    * buttons; REST and the SPA do not read it.
    */
   @Override
@@ -92,6 +93,8 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
     contracts.put(InOutCompletionContract.CONTRACT.getName(), InOutCompletionContract.CONTRACT);
     contracts.put(CreatePurchaseInvoiceHandler.RECEIPT_CONTRACT.getName(),
         CreatePurchaseInvoiceHandler.RECEIPT_CONTRACT);
+    contracts.put(CreatePurchaseReturnHandler.CONTRACT.getName(),
+        CreatePurchaseReturnHandler.CONTRACT);
     contracts.put(NeoCloneRecordHandler.CONTRACT.getName(), NeoCloneRecordHandler.CONTRACT);
     return contracts;
   }

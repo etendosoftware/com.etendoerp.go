@@ -45,6 +45,7 @@ import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.businessUtility.Tax;
 import org.openbravo.erpCommon.utility.OBCurrencyUtils;
+import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.DocumentType;
@@ -241,6 +242,10 @@ final class ReturnShipmentUtils {
    * Resolves the document type to use for an auto-generated return invoice, scoped to the
    * given organization (falling back to org {@code '0'}, then to the first active candidate).
    *
+   * @param client              the client of the source document; the lookup is restricted to its document
+   *                            types. Every client owns its own types (and org {@code '0'} exists in every
+   *                            client), so without it another client's type can win and the return consumes
+   *                            that client's document sequence
    * @param orgId               the shipment/receipt's organization id
    * @param docCategory         the {@code DocBaseType} to match (e.g. {@code "ARC"}, {@code "APC"})
    * @param isSales             whether to match sales-side ({@code true}) or purchase-side document types
@@ -253,13 +258,16 @@ final class ReturnShipmentUtils {
    *     installed — see {@link RectificativeSupport#isColumnPresent()}), so the lookup degrades
    *     gracefully to the plain category-based match in deployments without the module.
    */
-  static DocumentType findReturnDocTypeForOrg(String orgId, String docCategory,
+  static DocumentType findReturnDocTypeForOrg(Client client, String orgId, String docCategory,
       boolean isSales, boolean requireReturn, boolean requireRectificative) {
     OBCriteria<DocumentType> crit = OBDal.getInstance().createCriteria(DocumentType.class)
         .add(Restrictions.eq(DocumentType.PROPERTY_DOCUMENTCATEGORY, docCategory))
         .add(Restrictions.eq(DocumentType.PROPERTY_SALESTRANSACTION, isSales))
         .add(Restrictions.eq(DocumentType.PROPERTY_ACTIVE, true));
     crit.add(Restrictions.eq(DocumentType.PROPERTY_RETURN, requireReturn));
+    if (client != null) {
+      crit.add(Restrictions.eq(DocumentType.PROPERTY_CLIENT, client));
+    }
     if (requireRectificative && RectificativeSupport.isColumnPresent()) {
       crit.add(Restrictions.eq(DocumentType.PROPERTY_ETSGISRECTIFICATIVE, true));
     }
@@ -393,6 +401,64 @@ final class ReturnShipmentUtils {
         NeoReturnReceiptService.createReturnLineShell(doc, sourceLine, lineNo);
     retLine.setMovementQuantity(ReturnLineQuantityPolicy.toStoredQuantity(qty));
     OBDal.getInstance().save(retLine);
+  }
+
+  /** One usable entry of an import request: the source line and the quantity to return. */
+  private static final class ImportEntry {
+    final ShipmentInOutLine sourceLine;
+    final BigDecimal quantity;
+
+    ImportEntry(ShipmentInOutLine sourceLine, BigDecimal quantity) {
+      this.sourceLine = sourceLine;
+      this.quantity = quantity;
+    }
+  }
+
+  /**
+   * The shared body of {@code importReceiptLines} / {@code importShipmentLines}: adds one return
+   * line per usable entry of {@code requested} ({@code {sourceLineId, returnQuantity}}) to the
+   * draft return {@code returnDoc}, each linked to the source line it returns.
+   *
+   * <p>ETP-5711: the quantities asked of each source line (a line listed twice counts both, and the
+   * lines the return already holds are counted by the database) are checked against what is still
+   * returnable BEFORE anything is created, through {@link ReturnableQuantity}. An over-return is a
+   * 422 and creates nothing, not even the entries that were fine. Entries without a source line
+   * id, with a quantity that is not a positive number, or naming a line that does not exist are
+   * skipped, as before.
+   *
+   * @return {@code {response:{data:{importedCount}}}}, or the 422 of the cap
+   */
+  static NeoResponse importReturnLines(ShipmentInOut returnDoc, String returnId,
+      JSONArray requested) throws Exception {
+    long nextLineNo = fetchMaxLineNo(returnId) + 10;
+    List<ImportEntry> entries = new ArrayList<>();
+    ReturnableQuantity.Requests requests = new ReturnableQuantity.Requests();
+    for (int i = 0; i < requested.length(); i++) {
+      JSONObject req = requested.getJSONObject(i);
+      String sourceLineId = req.optString("sourceLineId", null);
+      BigDecimal qty = ReturnableQuantity.parseQuantity(req.opt("returnQuantity"));
+      ShipmentInOutLine sourceLine = sourceLineId != null
+          ? OBDal.getInstance().get(ShipmentInOutLine.class, sourceLineId) : null;
+      if (sourceLine == null || qty == null || qty.signum() <= 0) {
+        continue;
+      }
+      entries.add(new ImportEntry(sourceLine, qty));
+      requests.add(sourceLine, qty);
+    }
+    NeoResponse refusal = ReturnableQuantity.refuseIfExceeds(requests);
+    if (refusal != null) {
+      return refusal;
+    }
+    for (ImportEntry entry : entries) {
+      // ETP-5313: the stored sign is owned by ReturnLineQuantityPolicy, applied inside
+      // buildAndSaveReturnLine — pass the user-facing POSITIVE quantity.
+      buildAndSaveReturnLine(returnDoc, entry.sourceLine, nextLineNo, entry.quantity);
+      nextLineNo += 10;
+    }
+    OBDal.getInstance().flush();
+    JSONObject data = new JSONObject();
+    data.put("importedCount", entries.size());
+    return wrapOkData(data);
   }
 
   // ---------------------------------------------------------------------------
