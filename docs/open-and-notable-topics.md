@@ -198,8 +198,7 @@ production checkout has gone live, those rows describe real payers, and the adop
 read each one's subscription from Stripe and record its price, amount and currency. That is
 ETP-5048's local-to-provider reconciliation (PRD §9.3: read the real Stripe state of every locally
 active subscription and correct it locally), which fills the missing price on its first run;
-`StripeApiClient` makes the read cheap. Until ETP-5048 lands such rows stay priceless — harmless
-for access, which reads `STATUS` alone, and visible only in billing records and quota snapshots.
+`StripeApiClient` makes the read cheap. **Delivered in ETP-5048:** the reconciliation's local-to-provider phase fills `PROVIDER_PRICE_ID`, `SNAPSHOT_AMOUNT` and `SNAPSHOT_CURRENCY` from the subscription's first item price on every open row where they are NULL, once, audited as a `reconcile:subscription-price:<sub>` billing event (`plans/2026-10-18-etp-5048-billing-reconciliation-design.md` §5). Until it has run on an environment such rows stay priceless — harmless for access, which reads `STATUS` alone, and visible only in billing records and quota snapshots.
 
 ### 🟠 2.5 `./gradlew test` needs JDK 17, not the default 21
 
