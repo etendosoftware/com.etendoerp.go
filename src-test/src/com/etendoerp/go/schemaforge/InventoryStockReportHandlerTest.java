@@ -642,6 +642,86 @@ class InventoryStockReportHandlerTest {
   }
 
   /**
+   * ETP-5555: a product with no cost yields NULL unit_cost and total_valuation; the response
+   * must carry JSON null for both (not 0) while qtyOnHand stays a number. Mixed rows keep each
+   * value distinct: a real 0 cost stays 0, a missing cost stays null.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void testNullCostRowsEmitJsonNullAndKeepRealZeroDistinct() throws Exception {
+    List<Object[]> rows = Arrays.asList(
+        new Object[]{ "WH", "Cat", "P001", "With cost", "Unit",
+            new BigDecimal("10"), new BigDecimal("2.50"), new BigDecimal("25.00") },
+        new Object[]{ "WH", "Cat", "P002", "No cost", "Unit",
+            new BigDecimal("7"), null, null },
+        new Object[]{ "WH", "Cat", "P003", "Zero cost", "Unit",
+            new BigDecimal("4"), BigDecimal.ZERO, BigDecimal.ZERO });
+    mockQueryReturning(rows);
+
+    NeoResponse response = handler.handle(postContext(new JSONObject()));
+
+    assertEquals(200, response.getHttpStatus());
+    JSONArray data = response.getBody().getJSONObject("response").getJSONArray("data");
+    assertEquals(3, data.length());
+
+    JSONObject withCost = data.getJSONObject(0);
+    assertEquals(new BigDecimal("2.50"), withCost.get("unitCost"));
+    assertEquals(new BigDecimal("25.00"), withCost.get("totalValuation"));
+
+    JSONObject noCost = data.getJSONObject(1);
+    assertTrue(noCost.isNull("unitCost"));
+    assertTrue(noCost.isNull("totalValuation"));
+    assertEquals(JSONObject.NULL, noCost.get("unitCost"));
+    assertEquals(JSONObject.NULL, noCost.get("totalValuation"));
+    assertEquals(new BigDecimal("7"), noCost.get("qtyOnHand"));
+
+    JSONObject zeroCost = data.getJSONObject(2);
+    assertFalse(zeroCost.isNull("unitCost"));
+    assertFalse(zeroCost.isNull("totalValuation"));
+    assertEquals(BigDecimal.ZERO, zeroCost.get("unitCost"));
+    assertEquals(BigDecimal.ZERO, zeroCost.get("totalValuation"));
+  }
+
+  /**
+   * ETP-5555: a null quantity still falls back to 0 even when the cost is null.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void testNullQtyOnHandFallsBackToZeroWhileCostStaysNull() throws Exception {
+    mockQueryReturning(Collections.singletonList(
+        new Object[]{ "WH", "Cat", "P004", "Product", "Unit", null, null, null }));
+
+    NeoResponse response = handler.handle(postContext(new JSONObject()));
+
+    JSONObject item = response.getBody().getJSONObject("response").getJSONArray("data")
+        .getJSONObject(0);
+    assertEquals(BigDecimal.ZERO, item.get("qtyOnHand"));
+    assertTrue(item.isNull("unitCost"));
+    assertTrue(item.isNull("totalValuation"));
+  }
+
+  /**
+   * ETP-5555: unit cost comes from etgo_product_cost(p.m_product_id); the old permanent-costing
+   * subquery over m_costing is gone and cost.cost is no longer part of the GROUP BY.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void testSqlUsesProductCostFunctionNotCostingSubquery() throws Exception {
+    mockQueryReturning(Collections.emptyList());
+
+    handler.handle(postContext(new JSONObject()));
+
+    ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
+    verify(session).createNativeQuery(sql.capture());
+    String lower = sql.getValue().toLowerCase();
+    assertTrue(lower.contains("etgo_product_cost(p.m_product_id) as unit_cost"));
+    assertTrue(lower.contains("* etgo_product_cost(p.m_product_id) as total_valuation"));
+    assertFalse(lower.contains("m_costing"));
+    assertFalse(lower.contains("ispermanent"));
+    assertFalse(lower.contains("cost.cost"));
+  }
+
+  /**
    * Verifies that the response wraps data in a "response" object with "data" and "count".
    */
   @Test

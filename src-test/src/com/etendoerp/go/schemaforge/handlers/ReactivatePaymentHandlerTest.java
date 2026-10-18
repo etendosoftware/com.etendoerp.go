@@ -1536,6 +1536,10 @@ public class ReactivatePaymentHandlerTest {
   // etendo_schema publishes each button as {name: <property>, action: <DB column>}, and the button
   // lookup accepts either spelling. Matched on the property name alone, the column spelling skipped
   // this handler: Reactivate ran without action=RE and Eliminar without the agent's gate.
+  //
+  // Every test here mocks OBContext too: resolving the column enters admin mode before the lookup,
+  // and the real OBContext needs an initialized DAL. Without the mock these tests only passed when
+  // an earlier DB-backed test had left the DAL up in the same JVM, and failed alone or in goTestUnit.
 
   private static final String ENTITY_ID = "entity-payment";
 
@@ -1629,7 +1633,8 @@ public class ReactivatePaymentHandlerTest {
         MockedStatic<ModelProvider> models = Mockito.mockStatic(ModelProvider.class);
         MockedStatic<PaymentRemovalUtil> removal = Mockito.mockStatic(PaymentRemovalUtil.class);
         MockedStatic<PisDeferredPaymentService> pis = Mockito.mockStatic(
-            PisDeferredPaymentService.class, Mockito.CALLS_REAL_METHODS)) {
+            PisDeferredPaymentService.class, Mockito.CALLS_REAL_METHODS);
+        MockedStatic<OBContext> ctx = Mockito.mockStatic(OBContext.class)) {
       stubButton(buttons, models, "em_etpr_remove_payment", "eTPRRemovePayment");
 
       NeoResponse result = runRemove(buttonCtx("em_etpr_remove_payment", "pay-void", true),
@@ -1647,7 +1652,8 @@ public class ReactivatePaymentHandlerTest {
   @Test
   public void unknownActionWithEntityIsLeftToDefaultPath() {
     try (MockedStatic<NeoButtonActionHelper> buttons =
-             Mockito.mockStatic(NeoButtonActionHelper.class)) {
+             Mockito.mockStatic(NeoButtonActionHelper.class);
+        MockedStatic<OBContext> ctx = Mockito.mockStatic(OBContext.class)) {
       buttons.when(() -> NeoButtonActionHelper.findButtonColumn(ENTITY_ID, "somethingElse"))
           .thenReturn(null);
 
@@ -1661,7 +1667,8 @@ public class ReactivatePaymentHandlerTest {
   public void otherButtonByColumnNameIsLeftToDefaultPath() {
     try (MockedStatic<NeoButtonActionHelper> buttons =
              Mockito.mockStatic(NeoButtonActionHelper.class);
-        MockedStatic<ModelProvider> models = Mockito.mockStatic(ModelProvider.class)) {
+        MockedStatic<ModelProvider> models = Mockito.mockStatic(ModelProvider.class);
+        MockedStatic<OBContext> ctx = Mockito.mockStatic(OBContext.class)) {
       stubButton(buttons, models, "Posted", "posted");
 
       assertNull(new ReactivatePaymentHandler().handle(buttonCtx("Posted", "pay-1", true)));

@@ -83,7 +83,12 @@ class NeoAuthenticator {
           denial.errorBody(EnvironmentAccessGuard.Denial.STATUS)));
       return false;
     }
-    log.warn("Unauthorized NEO request: {}", outcome.getMessage());
+    if (outcome.getStatus() == EnvironmentAuthOutcome.Status.CONTEXT_UNAVAILABLE) {
+      // Already logged with its stack trace by the authenticator; not an auth refusal.
+      log.debug("NEO request context unavailable: {}", outcome.getMessage());
+    } else {
+      log.warn("Unauthorized NEO request: {}", outcome.getMessage());
+    }
     servlet.sendError(response, outcome.getHttpStatus(), outcome.getMessage());
     return false;
   }

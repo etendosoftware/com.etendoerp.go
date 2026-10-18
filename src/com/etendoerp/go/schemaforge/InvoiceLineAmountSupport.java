@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.util.Arrays;
 import java.util.List;
 
@@ -26,20 +27,62 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.invoice.InvoiceLine;
 
 /**
- * Amount derivation of a created sales invoice line, for the one customization that calls it:
- * {@link SalesInvoiceLineHandler} (ETP-5528).
+ * Price and amount derivation of a written invoice line, for the customizations that call it
+ * explicitly: {@link SalesInvoiceLineHandler} (ETP-5528) and {@link PurchaseInvoiceLineHandler}
+ * (ETP-5710).
  *
  * <p><b>Entity knowledge, called explicitly.</b> The keys here are {@code C_InvoiceLine}'s:
- * {@code invoicedQuantity}, {@code lineNetAmount} ({@code LineNetAmt}) and {@code grossAmount}
- * ({@code Line_Gross_Amount}). It is reached only from that customization (ETP-5415 T12), never
- * from a shared write path, and no entity is selected here by a property-name guard. Purchase
- * invoice lines stay on the plain {@link InvoiceLineHandler} and never get here.
+ * {@code invoicedQuantity}, {@code unitPrice}, {@code listPrice}, {@code etgoDiscount},
+ * {@code lineNetAmount} ({@code LineNetAmt}) and {@code grossAmount} ({@code Line_Gross_Amount}).
+ * It is reached only from those customizations (ETP-5415 T12), never from a shared write path, and
+ * no entity is selected here by a property-name guard. Value rules shared with the order lines live
+ * in {@link LineAmountSupport}; the order-line counterpart of the discount rule is
+ * {@link OrderLineDiscountSupport}.
  *
- * <p><b>Amounts only.</b> Prices, the standard price and the line discount ({@code etgoDiscount})
- * are not read for any decision and never written.
+ * <p><b>Why a line needs this at all.</b> Nothing on the server turns quantity, price and discount
+ * into the line's amounts: the SPA computes them client side, and {@code etendo_create} /
+ * {@code etendo_update} never reach {@code NeoCrudHandler#executePostCreate}, where the REST create
+ * gets them. {@code EM_Etgo_Discount} has no callout and no database function reads it. A line an
+ * agent wrote therefore persisted {@code LineNetAmt 0} (or the undiscounted amount) and the header
+ * totals, the tax rows and the payment plan summed those zeros (ETP-5710).
+ *
+ * <p><b>The discount rule</b> (the form's own: {@code unitPrice = listPrice × (1 − etgoDiscount /
+ * 100)}, {@code computeUnitPriceForPost}). Applied only when the line carries a non-zero discount
+ * and no non-zero {@code grossUnitPrice} (an explicit gross price wins, as on order lines). On a
+ * <b>create</b>, with {@code L} the list price and {@code U} the unit price in the body:
+ * <ul>
+ *   <li>{@code U} absent or 0, {@code L} non-zero → {@code U = L × (1 − d/100)};</li>
+ *   <li>{@code U == L} (non-zero) → the discount has not been applied to it yet:
+ *       {@code U = L × (1 − d/100)}. This is what {@code etendo_create} / {@code etendo_batch}
+ *       carry once the shared price injector has written the price list's price;</li>
+ *   <li>{@code U != L}, both non-zero → {@code U} is a price the caller chose, and it wins. This
+ *       is the SPA's body (it sends the already-discounted {@code U} together with {@code L}), so
+ *       the discount is never applied twice;</li>
+ *   <li>{@code L} absent or 0, {@code U} non-zero → there is no list price to discount from, so the
+ *       price sent is the list price: {@code L = U}, {@code U = U × (1 − d/100)} (10 × 25 at 2 %
+ *       → 24.50, net 245.00). An agent that has only a price and a discount to give gets what it
+ *       asked for;</li>
+ *   <li>both 0 → nothing to discount.</li>
+ * </ul>
+ * On an <b>update</b> the patch is overlaid on the stored line and the price is re-derived only
+ * when the patch itself re-prices the line — it carries {@code etgoDiscount} or {@code listPrice}
+ * without a {@code unitPrice} (→ {@code U = L × (1 − d/100)}), or a {@code unitPrice} equal to the
+ * non-zero list price. A patch that sends another {@code unitPrice}, or none of these keys, leaves
+ * the price alone: the "price is the list price" reading above is create-only, because a stored
+ * discounted price with no list price (a legacy line) would otherwise be discounted again by an
+ * unrelated edit. The derived price is rounded to 6 decimals, as the SPA does. Accepted edge case:
+ * a caller that deliberately sends {@code unitPrice == listPrice} together with a discount gets the
+ * discount applied.
+ *
+ * <p><b>The amounts.</b> {@link NeoCommercialLinePolicy#injectCommercialAmounts} over the line's
+ * final quantity, price, gross price and tax, rounded to {@value LineAmountSupport#AMOUNT_SCALE}
+ * decimals. {@code lineNetAmount} needs no tax; {@code grossAmount} is written only when the line
+ * has one (a REST or batch create reaches its pre-hook before the create cascade resolves it, and
+ * {@code executePostCreate} derives the gross afterwards).
  */
 final class InvoiceLineAmountSupport {
 
@@ -47,16 +90,34 @@ final class InvoiceLineAmountSupport {
 
   static final String FIELD_INVOICED_QTY = InvoiceLine.PROPERTY_INVOICEDQUANTITY;
   static final String FIELD_UNIT_PRICE = InvoiceLine.PROPERTY_UNITPRICE;
+  static final String FIELD_LIST_PRICE = InvoiceLine.PROPERTY_LISTPRICE;
+  static final String FIELD_DISCOUNT = InvoiceLine.PROPERTY_ETGODISCOUNT;
   static final String FIELD_GROSS_UNIT_PRICE = InvoiceLine.PROPERTY_GROSSUNITPRICE;
   static final String FIELD_TAX = InvoiceLine.PROPERTY_TAX;
   static final String FIELD_LINE_NET_AMOUNT = InvoiceLine.PROPERTY_LINENETAMOUNT;
   static final String FIELD_GROSS_AMOUNT = InvoiceLine.PROPERTY_GROSSAMOUNT;
 
+  /** The scale of a derived unit price: the one the SPA posts ({@code toFixed(6)}). */
+  static final int PRICE_SCALE = 6;
+
+  /** {@code error.code} of the 422 returned for a discount outside 0..100. */
+  static final String ERROR_INVALID_DISCOUNT = "invalidLineDiscount";
+  static final int MIN_DISCOUNT = 0;
+  static final int MAX_DISCOUNT = 100;
+  private static final int SC_UNPROCESSABLE = 422;
+
   private static final String METHOD_POST = "POST";
+  private static final String METHOD_PATCH = "PATCH";
+  private static final String METHOD_PUT = "PUT";
+  private static final BigDecimal HUNDRED = BigDecimal.valueOf(100);
 
   /** The inputs {@link NeoCommercialLinePolicy#injectCommercialAmounts} reads for an invoice line. */
   private static final List<String> AMOUNT_INPUTS = Arrays.asList(FIELD_INVOICED_QTY,
       FIELD_UNIT_PRICE, FIELD_GROSS_UNIT_PRICE, FIELD_TAX);
+
+  /** A patch that carries none of these cannot change an amount of the line. */
+  private static final List<String> AMOUNT_TRIGGERS = Arrays.asList(FIELD_INVOICED_QTY,
+      FIELD_UNIT_PRICE, FIELD_LIST_PRICE, FIELD_DISCOUNT, FIELD_GROSS_UNIT_PRICE, FIELD_TAX);
 
   /** The amounts it derives for one, in the order it derives them (net first, gross from it). */
   static final List<String> AMOUNT_OUTPUTS = Arrays.asList(FIELD_LINE_NET_AMOUNT,
@@ -66,35 +127,89 @@ final class InvoiceLineAmountSupport {
   }
 
   /**
-   * Derives {@code lineNetAmount} and {@code grossAmount} on every create of a sales invoice line,
-   * calling {@link NeoCommercialLinePolicy#injectCommercialAmounts} explicitly (T12) over the
-   * line's quantity, price, gross price and tax.
+   * The one call an invoice-line customization makes in its pre-hook: derives on a create
+   * ({@link #deriveAmountsOnCreate}) or recalculates on an update ({@link #deriveAmountsOnUpdate}),
+   * and does nothing for any other request.
+   */
+  static NeoResponse deriveAmountsOnWrite(NeoContext ctx) {
+    NeoResponse refusal = refuseIfDiscountOutOfRange(ctx);
+    if (refusal != null) {
+      return refusal;
+    }
+    deriveAmountsOnCreate(ctx);
+    deriveAmountsOnUpdate(ctx);
+    return null;
+  }
+
+  /**
+   * Refuses a create or update whose body carries an {@code etgoDiscount} outside
+   * [{@value #MIN_DISCOUNT}, {@value #MAX_DISCOUNT}]: above 100 the derived price would be negative
+   * and below 0 it would act as a markup. The SPA caps the field; REST and MCP did not. 0 and 100
+   * are valid (100 gives a price of 0); an absent or null discount is left alone.
+   *
+   * @return a 422 with {@code error.code = invalidLineDiscount}, or {@code null} to proceed
+   */
+  static NeoResponse refuseIfDiscountOutOfRange(NeoContext ctx) {
+    if (ctx == null || !NeoEndpointType.CRUD.equals(ctx.getEndpointType())) {
+      return null;
+    }
+    String method = ctx.getHttpMethod();
+    boolean write = METHOD_POST.equals(method) || METHOD_PATCH.equals(method)
+        || METHOD_PUT.equals(method);
+    JSONObject body = ctx.getRequestBody();
+    if (!write || body == null) {
+      return null;
+    }
+    BigDecimal discount = LineAmountSupport.decimal(body.opt(FIELD_DISCOUNT));
+    if (discount == null || (discount.signum() >= 0 && discount.compareTo(HUNDRED) <= 0)) {
+      return null;
+    }
+    return invalidDiscount();
+  }
+
+  private static NeoResponse invalidDiscount() {
+    String message = "The line discount must be between 0 and 100 (percent).";
+    try {
+      JSONObject error = new JSONObject();
+      error.put("status", SC_UNPROCESSABLE);
+      error.put("code", ERROR_INVALID_DISCOUNT);
+      error.put("message", message);
+      return NeoResponse.error(SC_UNPROCESSABLE, new JSONObject().put("error", error));
+    } catch (JSONException e) {
+      return NeoResponse.error(SC_UNPROCESSABLE, message);
+    }
+  }
+
+  /**
+   * Applies the discount rule and derives {@code lineNetAmount} and {@code grossAmount} on every
+   * create of an invoice line, calling {@link NeoCommercialLinePolicy#injectCommercialAmounts}
+   * explicitly (T12) over the line's quantity, price, gross price and tax.
    *
    * <p><b>Why here.</b> {@code etendo_create} is a separate pipeline from the REST create path and
    * never reaches {@code NeoCrudHandler#executePostCreate}, where every other channel gets these
    * amounts. Without this a line an agent created persisted {@code LineNetAmt = 0} and
    * {@code Line_Gross_Amount = 0} (Fernet at 18, qty 10, 21 %: {@code etendo_batch} 180 / 217.8,
-   * {@code etendo_create} 0 / 0). The fix lives in this customization, not in the shared MCP path,
+   * {@code etendo_create} 0 / 0). The fix lives in these customizations, not in the shared MCP path,
    * so no other entity changes.
+   *
+   * <p><b>Sees the server-resolved price.</b> On {@code etendo_create} and {@code etendo_batch} the
+   * shared price injector has already written {@code unitPrice} / {@code listPrice} from the
+   * parent's price list when this pre-hook runs (it runs after {@code injectIfMissing} in both
+   * {@code handleCreate} and {@code preprocessBatchOperation}), so a line created with only a
+   * product and a quantity is priced here too.
    *
    * <p><b>Never overwrites the caller.</b> Each amount is written only when
    * {@link LineAmountSupport#isStaleAmount} judges the body's value server-derived — absent, zero,
-   * or already equal (at 2 decimals) to what the policy derives — and only when the derived value
-   * is non-zero, so a line without a price or quantity is left for the rest of the pipeline. The
-   * derivation reads a view that carries only the inputs, never the body's amounts, the same as the
-   * order-line customization: a stale non-zero amount would otherwise read as the caller's.
+   * or already equal (at 2 decimals) to what the policy derives, or, when a discount changed the
+   * price, to what it derives from the price BEFORE the discount (the amount the defaults cascade
+   * computed from the undiscounted price) — and only when the derived value is non-zero, so a line
+   * without a price or quantity is left for the rest of the pipeline. The derivation reads a view
+   * that carries only the inputs, never the body's amounts: a stale non-zero amount would otherwise
+   * read as the caller's.
    *
-   * <p><b>No double computation.</b> Without a {@code tax} in the body — a REST or batch create
-   * reaches its pre-hook before the create cascade resolves one — this abstains, and
-   * {@code executePostCreate} derives both amounts after its cascade, as it always has. With a tax,
-   * {@code executePostCreate} runs the same function over the same inputs afterwards and writes the
-   * same values, so the pre-hook's write changes nothing on those channels. On {@code etendo_create}
-   * the tax is mandatory and already resolved by the defaults cascade when the pre-hook runs.
-   *
-   * <p><b>Typed values.</b> On {@code etendo_create} the pre-hook runs after
-   * {@code coerceFieldTypes}, so the amounts are written as {@link BigDecimal}, the DAL type of
-   * both columns. The value is the policy's own, unrounded, exactly what {@code etendo_batch}
-   * persists for the same line.
+   * <p><b>No double computation.</b> {@code executePostCreate} runs the same function over the same
+   * inputs afterwards on the REST and batch channels and writes the same values, so the pre-hook's
+   * write changes nothing there.
    *
    * <p>Total: never throws.
    *
@@ -106,15 +221,20 @@ final class InvoiceLineAmountSupport {
       return;
     }
     JSONObject body = ctx.getRequestBody();
-    if (body == null || body.isNull(FIELD_TAX)
-        || StringUtils.isBlank(body.optString(FIELD_TAX, null))) {
+    if (body == null) {
       return;
     }
     try {
-      JSONObject view = amountInputs(body);
-      NeoCommercialLinePolicy.injectCommercialAmounts(view);
+      JSONObject undiscounted = amountsOf(amountInputs(body));
+      boolean discounted = applyDiscount(body, body, true);
+      JSONObject derived = amountsOf(amountInputs(body));
+      zeroGrossFollowsZeroNet(derived);
+      boolean withGross = hasTax(body);
       for (String out : AMOUNT_OUTPUTS) {
-        writeIfStale(body, out, view.opt(out));
+        if (!FIELD_GROSS_AMOUNT.equals(out) || withGross) {
+          writeIfStale(body, out, derived.opt(out), discounted ? undiscounted.opt(out) : null,
+              discounted);
+        }
       }
     } catch (Exception e) {
       log.warn("[INVOICE-LINE-AMOUNTS] Could not derive the line amounts on {} {}: {}",
@@ -123,28 +243,205 @@ final class InvoiceLineAmountSupport {
   }
 
   /**
-   * Writes {@code derived} into {@code key} when it is a non-zero number and the body's current
-   * value is stale ({@link LineAmountSupport#isStaleAmount}).
+   * Recalculates the line on a PATCH / PUT that changes something its amounts depend on — quantity,
+   * price, list price, discount, gross price or tax — over the stored line overlaid with the patch
+   * (the same shape as {@code OrderLineDiscountSupport.updateFormState}), and writes back the
+   * price (see the class javadoc for when it is re-derived) and the amounts the caller did not
+   * send. A sparse update reaches no derivation that sees the whole line, so without this a line
+   * whose quantity was patched from 10 to 20 kept the amount of 10 and the header total stayed
+   * where it was (ETP-5710).
+   *
+   * <p>An amount the patch carries is the caller's and is kept. A patch with none of the inputs, a
+   * line that cannot be read or a request that is not a CRUD update is left untouched. Total:
+   * never throws.
+   *
+   * @param ctx the pre-hook context; its request body is mutated in place
    */
-  static void writeIfStale(JSONObject body, String key, Object derived) throws JSONException {
-    BigDecimal value = LineAmountSupport.decimal(derived);
-    if (value == null || value.signum() == 0) {
+  static void deriveAmountsOnUpdate(NeoContext ctx) {
+    if (ctx == null || !NeoEndpointType.CRUD.equals(ctx.getEndpointType())
+        || !(METHOD_PATCH.equals(ctx.getHttpMethod()) || METHOD_PUT.equals(ctx.getHttpMethod()))
+        || StringUtils.isBlank(ctx.getRecordId())) {
       return;
     }
-    if (LineAmountSupport.isStaleAmount(body.opt(key), value)) {
-      body.put(key, value);
+    JSONObject body = ctx.getRequestBody();
+    if (body == null || AMOUNT_TRIGGERS.stream().noneMatch(body::has)) {
+      return;
+    }
+    try {
+      JSONObject state = storedInputs(ctx.getRecordId());
+      if (state == null) {
+        return;
+      }
+      JSONObject sent = new JSONObject(body.toString());
+      overlay(state, body);
+      if (applyDiscount(body, state, false)) {
+        state.put(FIELD_UNIT_PRICE, body.get(FIELD_UNIT_PRICE));
+      }
+      JSONObject derived = amountsOf(amountInputs(state));
+      zeroGrossFollowsZeroNet(derived);
+      for (String out : AMOUNT_OUTPUTS) {
+        BigDecimal value = LineAmountSupport.decimal(derived.opt(out));
+        if (value != null && !sent.has(out)) {
+          body.put(out, value.setScale(LineAmountSupport.AMOUNT_SCALE, RoundingMode.HALF_UP));
+        }
+      }
+    } catch (Exception e) {
+      log.warn("[INVOICE-LINE-AMOUNTS] Could not recalculate the line {} on {} {}: {}",
+          ctx.getRecordId(), ctx.getSpecName(), ctx.getEntityName(), e.getMessage());
     }
   }
 
+  /**
+   * The discount rule of the class javadoc: rewrites {@code unitPrice} in {@code patch} (and, on a
+   * create that had no list price, {@code listPrice}) when the line's discount is not reflected in
+   * its price yet.
+   *
+   * @param patch  the request body; mutated in place
+   * @param state  the line as it will be stored — {@code patch} itself on a create, the stored line
+   *               overlaid with the patch on an update
+   * @param create whether this is a create
+   * @return {@code true} when {@code unitPrice} was rewritten
+   */
+  static boolean applyDiscount(JSONObject patch, JSONObject state, boolean create)
+      throws JSONException {
+    BigDecimal discount = LineAmountSupport.decimal(state.opt(FIELD_DISCOUNT));
+    if (discount == null || discount.signum() == 0
+        || !LineAmountSupport.isZero(state.opt(FIELD_GROSS_UNIT_PRICE))) {
+      return false;
+    }
+    BigDecimal list = nonZero(state.opt(FIELD_LIST_PRICE));
+    BigDecimal unit = nonZero(state.opt(FIELD_UNIT_PRICE));
+    BigDecimal base = create ? createBase(patch, list, unit) : updateBase(patch, list, unit);
+    if (base == null) {
+      return false;
+    }
+    BigDecimal factor = HUNDRED.subtract(discount);
+    patch.put(FIELD_UNIT_PRICE, base.multiply(factor).divide(HUNDRED, PRICE_SCALE,
+        RoundingMode.HALF_UP));
+    return true;
+  }
+
+  /** The price to discount on a create, or {@code null} when the price is the caller's. */
+  private static BigDecimal createBase(JSONObject body, BigDecimal list, BigDecimal unit)
+      throws JSONException {
+    if (unit == null) {
+      return list;
+    }
+    if (list == null) {
+      body.put(FIELD_LIST_PRICE, unit);
+      return unit;
+    }
+    return unit.compareTo(list) == 0 ? list : null;
+  }
+
+  /** The price to discount on an update, or {@code null} when the patch does not re-price. */
+  private static BigDecimal updateBase(JSONObject patch, BigDecimal list, BigDecimal unit) {
+    if (list == null) {
+      return null;
+    }
+    if (patch.has(FIELD_UNIT_PRICE) && !patch.isNull(FIELD_UNIT_PRICE)) {
+      return unit != null && unit.compareTo(list) == 0 ? list : null;
+    }
+    return patch.has(FIELD_DISCOUNT) || patch.has(FIELD_LIST_PRICE) ? list : null;
+  }
+
+  /**
+   * The policy leaves {@code grossAmount} indeterminate when the net is 0 (it cannot tell a missing
+   * price from a free line), so a line whose net derived to exactly 0 — a 100 % discount, a free
+   * line, a quantity edited to 0 — would keep its previous gross. A net of 0 with no explicit gross
+   * price means a gross of 0.
+   */
+  private static void zeroGrossFollowsZeroNet(JSONObject derived) throws JSONException {
+    BigDecimal net = LineAmountSupport.decimal(derived.opt(FIELD_LINE_NET_AMOUNT));
+    if (net != null && net.signum() == 0 && !derived.has(FIELD_GROSS_AMOUNT)
+        && LineAmountSupport.isZero(derived.opt(FIELD_GROSS_UNIT_PRICE))) {
+      derived.put(FIELD_GROSS_AMOUNT, 0);
+    }
+  }
+
+  /** The amounts the policy derives over {@code inputs}, never the stored ones. */
+  private static JSONObject amountsOf(JSONObject inputs) {
+    NeoCommercialLinePolicy.injectCommercialAmounts(inputs);
+    return inputs;
+  }
+
+  /**
+   * Writes {@code derived} into {@code key} when it is a non-zero number and the body's current
+   * value is stale ({@link LineAmountSupport#isStaleAmount}) or equal to {@code beforeDiscount}.
+   * A derived 0 is written only when {@code zeroIsDeliberate} — the discount itself took the price
+   * to 0 (100 %), so the amount is 0 on purpose and an amount of the undiscounted price must not
+   * survive. Without a discount a derived 0 means "no price or quantity yet" and is left for the
+   * rest of the pipeline.
+   */
+  static void writeIfStale(JSONObject body, String key, Object derived, Object beforeDiscount,
+      boolean zeroIsDeliberate) throws JSONException {
+    BigDecimal value = LineAmountSupport.decimal(derived);
+    if (value == null || (value.signum() == 0 && !zeroIsDeliberate)) {
+      return;
+    }
+    Object current = body.opt(key);
+    if (LineAmountSupport.isStaleAmount(current, value)
+        || LineAmountSupport.sameAmountAtScale(current, beforeDiscount)) {
+      body.put(key, value.setScale(LineAmountSupport.AMOUNT_SCALE, RoundingMode.HALF_UP));
+    }
+  }
+
+  private static boolean hasTax(JSONObject body) {
+    return !body.isNull(FIELD_TAX) && StringUtils.isNotBlank(body.optString(FIELD_TAX, null));
+  }
+
+  private static BigDecimal nonZero(Object value) {
+    BigDecimal decimal = LineAmountSupport.decimal(value);
+    return decimal == null || decimal.signum() == 0 ? null : decimal;
+  }
+
   /** The amount inputs of the line, never the amounts themselves. */
-  private static JSONObject amountInputs(JSONObject body) throws JSONException {
+  private static JSONObject amountInputs(JSONObject source) throws JSONException {
     JSONObject view = new JSONObject();
     for (String key : AMOUNT_INPUTS) {
-      Object value = body.opt(key);
+      Object value = source.opt(key);
       if (value != null && !JSONObject.NULL.equals(value)) {
         view.put(key, value);
       }
     }
     return view;
+  }
+
+  /** {@code patch} over {@code state}, key by key. */
+  private static void overlay(JSONObject state, JSONObject patch) throws JSONException {
+    java.util.Iterator<String> keys = patch.keys();
+    while (keys.hasNext()) {
+      String key = keys.next();
+      state.put(key, patch.get(key));
+    }
+  }
+
+  /**
+   * The stored line's inputs, in the shape of a body (DAL property names, a foreign key as its id).
+   *
+   * @return the inputs, or {@code null} when the line cannot be read
+   */
+  private static JSONObject storedInputs(String lineId) throws JSONException {
+    InvoiceLine line = OBDal.getInstance().get(InvoiceLine.class, lineId);
+    if (line == null) {
+      return null;
+    }
+    JSONObject state = new JSONObject();
+    putIfPresent(state, FIELD_INVOICED_QTY, line.getInvoicedQuantity());
+    putIfPresent(state, FIELD_UNIT_PRICE, line.getUnitPrice());
+    putIfPresent(state, FIELD_LIST_PRICE, line.getListPrice());
+    putIfPresent(state, FIELD_DISCOUNT, line.getEtgoDiscount());
+    putIfPresent(state, FIELD_GROSS_UNIT_PRICE, line.getGrossUnitPrice());
+    if (line.getTax() != null) {
+      state.put(FIELD_TAX, line.getTax().getId());
+    }
+    return state;
+  }
+
+  private static void putIfPresent(JSONObject target, String key, BigDecimal value)
+      throws JSONException {
+    if (value != null) {
+      target.put(key, value);
+    }
   }
 }

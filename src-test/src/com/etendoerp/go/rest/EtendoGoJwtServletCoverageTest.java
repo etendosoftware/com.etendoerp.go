@@ -1436,6 +1436,45 @@ public class EtendoGoJwtServletCoverageTest {
     assertNotNull(body.getJSONArray("roleList"));
   }
 
+  /** ETP-5096 — the token is minted for the user's default role, not for the oldest one. */
+  @Test
+  public void envLoginMintsTheJwtForTheDefaultRoleNotTheOldest() throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = mockRequest("/login");
+    when(req.getHeader("Authorization")).thenReturn("Bearer valid-token");
+    when(req.getParameter("userId")).thenReturn("user-1");
+
+    User user = mock(User.class);
+    Role defaultRole = mock(Role.class);
+    EtendoGoJwtSupport.RoleListData roleListData =
+        new EtendoGoJwtSupport.RoleListData("oldest-role", "default-role", new JSONArray());
+
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.get(User.class, "user-1")).thenReturn(user);
+    when(obDal.get(Role.class, "default-role")).thenReturn(defaultRole);
+
+    try (var ctxMock = mockStatic(OBContext.class);
+         var supportMock = mockStatic(EtendoGoJwtSupport.class);
+         var dalMock = mockStatic(EtendoGoJwtDalHelper.class);
+         var obDalMock = mockStatic(OBDal.class);
+         var swsMock = mockStatic(SecureWebServicesUtils.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubAuthenticatedAccount(dalMock);
+      supportMock.when(() -> EtendoGoJwtSupport.isEnvironmentUserOwnedByAccount(
+          "user@test.com", "user-1")).thenReturn(true);
+      supportMock.when(() -> EtendoGoJwtSupport.loadRoleListData("user-1"))
+          .thenReturn(roleListData);
+      swsMock.when(() -> SecureWebServicesUtils.generateToken(user, defaultRole))
+          .thenReturn("jwt-default-role");
+
+      servlet.doGet(req, resp.response);
+    }
+
+    assertEquals(200, resp.status);
+    assertEquals("jwt-default-role", new JSONObject(resp.body()).getString("token"));
+    verify(obDal, never()).get(Role.class, "oldest-role");
+  }
+
   @Test
   public void envLoginUserNotFoundReturnsNotFound() throws Exception {
     ResponseCapture resp = mockResponse();
@@ -3652,6 +3691,10 @@ public class EtendoGoJwtServletCoverageTest {
     servlet.tenantEnvironmentLifecycleService = mock(TenantEnvironmentLifecycleService.class);
     servlet.onboardingForceTestModeService = mock(OnboardingForceTestModeService.class);
     servlet.onboardingOrgInfoService = mock(com.etendoerp.go.onboarding.OnboardingOrgInfoService.class);
+    // ETP-5577 (develop) — finishTenantMetadata marks the initial period state pending, which
+    // writes an AD_Preference; a mock keeps the staged run DB-free.
+    servlet.onboardingInitialPeriodStateService =
+        mock(com.etendoerp.go.onboarding.OnboardingInitialPeriodStateService.class);
     return new PaidOnboardingStage(response, request, store);
   }
 
@@ -3716,6 +3759,8 @@ public class EtendoGoJwtServletCoverageTest {
     servlet.onboardingOrgInfoService = mock(com.etendoerp.go.onboarding.OnboardingOrgInfoService.class);
     servlet.onboardingWarehouseAddressService = mock(com.etendoerp.go.onboarding.OnboardingWarehouseAddressService.class);
     servlet.onboardingCostingScheduleService = mock(com.etendoerp.go.onboarding.OnboardingCostingScheduleService.class);
+    servlet.onboardingInitialPeriodStateService =
+        mock(com.etendoerp.go.onboarding.OnboardingInitialPeriodStateService.class);
     if (failAfterCommit) doThrow(new RuntimeException("post-commit scheduler failure"))
         .when(servlet.onboardingCostingScheduleService).activateSchedule("client-1");
     Currency currency = mock(Currency.class); when(currency.getId()).thenReturn("currency-1");
