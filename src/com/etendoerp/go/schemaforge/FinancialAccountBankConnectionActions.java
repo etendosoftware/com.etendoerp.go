@@ -98,12 +98,14 @@ class FinancialAccountBankConnectionActions {
             + "an agent cannot do it). If the bank connection is shared by several accounts, it "
             + "is unlinked from this one instead and cannot be reconnected: read the returned "
             + "reconnectable flag. Use it to release the account for manual bank statements, which a "
-            + "connected account refuses. It does not delete the account. Safe to repeat. "
+            + "connected account refuses. It does not delete the account. Repeating it on an "
+            + "account that is still soft-disconnected is safe (200); once the account is "
+            + "unlinked there is nothing left to disconnect and it answers 404. "
             + "Returns {disconnected, permanent, reconnectable}.")
         .withIdDescription(idDescription));
     contracts.put(DELETE_ACTION, NeoActionContract.write(DELETE_ACTION,
         "PERMANENTLY deletes this account's bank connection, exactly as the account's Borrar "
-            + "conexion bancaria option does: the connection is deleted at the bank aggregator "
+            + "conexi\u00f3n bancaria option does: the connection is deleted at the bank aggregator "
             + "(Salt Edge) and the account is unlinked. This is irreversible and cannot be "
             + "undone: if the account is connected again, movements of periods already "
             + "reconciled may be imported again and create duplicates. Do not call it on your "

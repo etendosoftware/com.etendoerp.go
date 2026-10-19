@@ -127,6 +127,23 @@ class FinancialAccountBankConnectionActionsTest {
     }
 
     @Test
+    @DisplayName("disconnectBank states that repeating is safe only while soft-disconnected, then 404")
+    void disconnectDescribesRepeatSemantics() {
+      String d = FinancialAccountBankConnectionActions.actionContracts()
+          .get("disconnectBank").getDescription();
+      assertTrue(d.contains("still soft-disconnected"), d);
+      assertTrue(d.contains("answers 404"), d);
+    }
+
+    @Test
+    @DisplayName("deleteBankConnection names the UI option with its accented label")
+    void deleteUsesTheAccentedUiLabel() {
+      String d = FinancialAccountBankConnectionActions.actionContracts()
+          .get("deleteBankConnection").getDescription();
+      assertTrue(d.contains("Borrar conexi\u00f3n bancaria"), d);
+    }
+
+    @Test
     @DisplayName("an undeclared parameter is answered 422 by the shared validator")
     void undeclaredParameter() throws Exception {
       NeoResponse r = NeoActionContract.validate(
