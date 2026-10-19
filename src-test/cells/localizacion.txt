@@ -1,0 +1,38 @@
+# Célula: localizacion
+# Localización (Ayelen, Ruben, Isaias, Jorge Bravo): impuestos, modelos 303/349, SII, TicketBAI, Verifactu, rectificativas.
+# Una clase de test por línea (nombre completo). Las *IntegrationTest / *DbTest son de integración;
+# el resto, con mocks. Ejecutar: ./gradlew goCellTest -Pcell=localizacion [-Pkind=mock|integration|all]
+
+# --- con mocks (27)
+com.etendoerp.go.schemaforge.AbstractFiscalHandlerTest
+com.etendoerp.go.schemaforge.CorrectInvoiceHandlerTest
+com.etendoerp.go.schemaforge.DefaultTaxResolverTest
+com.etendoerp.go.schemaforge.Fiscal303BoxesHandlerTest
+com.etendoerp.go.schemaforge.Fiscal303SnapshotSupportTest
+com.etendoerp.go.schemaforge.Fiscal303SourcesSupportTest
+com.etendoerp.go.schemaforge.Fiscal303SubmitHandlerTest
+com.etendoerp.go.schemaforge.Fiscal349BoxesHandlerTest
+com.etendoerp.go.schemaforge.Fiscal349SnapshotSupportTest
+com.etendoerp.go.schemaforge.Fiscal349ViesValidationTest
+com.etendoerp.go.schemaforge.FiscalDeclCrudHandlerTest
+com.etendoerp.go.schemaforge.FiscalDeclSubmittedSnapshotColumnTest
+com.etendoerp.go.schemaforge.FiscalHandlerExceptionTest
+com.etendoerp.go.schemaforge.FiscalSubmittedSnapshotSupportTest
+com.etendoerp.go.schemaforge.LineCalloutTaxRateHelperTest
+com.etendoerp.go.schemaforge.MarkSubsanationHandlerTest
+com.etendoerp.go.schemaforge.NeoFiscalModelsCatalogServiceTest
+com.etendoerp.go.schemaforge.RectificativeSupportTest
+com.etendoerp.go.schemaforge.SiiSendHandlerTest
+com.etendoerp.go.schemaforge.SiiTbaiAutoSendScheduleServiceTest
+com.etendoerp.go.schemaforge.TaxReportHandlerTest
+com.etendoerp.go.schemaforge.TbaiXmlgeneratorHandlerTest
+com.etendoerp.go.schemaforge.VerifactuConfigReadyHandlerTest
+com.etendoerp.go.schemaforge.handlers.SiiConfigDeactivateHandlerTest
+com.etendoerp.go.schemaforge.handlers.TaxSifOverrideHandlerTest
+com.etendoerp.go.schemaforge.handlers.TbaiConfigSequenceHandlerTest
+com.etendoerp.go.schemaforge.selector.policy.InvoiceLineTaxSifSelectorPolicyTest
+
+# --- integración (BD) (2)
+com.etendoerp.go.schemaforge.EtgoGetDeliveryStatusFunctionIntegrationTest
+com.etendoerp.go.schemaforge.EtgoGetTbaiStatusFunctionIntegrationTest
+

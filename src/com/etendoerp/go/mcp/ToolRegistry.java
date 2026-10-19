@@ -45,6 +45,7 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.ui.Process;
 
 import com.etendoerp.go.oauth2.ApiScopes;
+import com.etendoerp.go.schemaforge.BatchService;
 import com.etendoerp.go.schemaforge.NeoVectorSearchEndpoint;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
@@ -201,7 +202,8 @@ public class ToolRegistry {
     if (McpToolRouterSupport.isCatalogExcludedSpec(spec)) {
       return;
     }
-    if (!NeoAccessUtils.hasWindowAccessForSpec(spec, "GET")) {
+    if (!NeoAccessUtils.hasWindowAccessForSpec(spec, "GET")
+        || McpToolRouterSupport.isHiddenAccountingSpec(spec)) {
       return;
     }
     accessibleWindowSpecs.add(spec.getName());
@@ -1017,6 +1019,16 @@ public class ToolRegistry {
 
     Map<String, Object> props = new LinkedHashMap<>();
     props.put("operations", operationsProp);
+    // ETP-5676: same name and meaning as the REST /sws/neo/batch body option.
+    props.put(BatchService.PARAM_ONLY_RETURN_IDS, booleanProp(
+        "Optional, default false. true = a bulk-write hint: each create skips decorating the record "
+            + "it would echo back (identifier enrichment, display flags), which only the id is read "
+            + "from anyway. The response is the same either way."));
+    props.put(BatchService.PARAM_SKIP_REDUNDANT_CALLOUTS, booleanProp(
+        "Optional, default false. true = a bulk-write hint for many similar creates: a field-change "
+            + "callout is skipped once an earlier operation of this batch, with the same field and "
+            + "value, showed that every value it sets is overwritten by fields you send yourself. "
+            + "The response is the same either way; the server may ignore it."));
 
     return new McpToolDefinition(
         "etendo_batch",
