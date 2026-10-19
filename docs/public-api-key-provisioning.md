@@ -17,8 +17,11 @@ These are management endpoints of the signed-in user, under the `NEO_DATA` surfa
 - the Etendo bearer JWT, while the legacy bearer switch allows it.
 
 OAuth2 access tokens issued to an API key are **not** accepted here. A commercially blocked
-environment answers `402`. The Etendo OpenAPI document declares both schemes on every operation
-(`goSession`, `bearerAuth`).
+environment answers `402`. In the Etendo OpenAPI document every operation carries the
+`bearerAuth` security requirement, and its description states the session-cookie alternative
+(`__Host-go_session` plus `X-Go-CSRF` on writes). The cookie is not declared as a components
+security scheme: the OpenAPI controller serializes with a plain Jackson mapper that writes swagger
+enums by name (`"APIKEY"`, `"COOKIE"`), which is not valid OpenAPI.
 
 ## Contract
 
@@ -105,7 +108,11 @@ Owner rules, per user, tenant, and organization:
   rename of an active key — always against the *other* active keys, so a key never conflicts
   with itself: a case-only rename (`production` → `Production`) is accepted.
 
-Both checks and the write are serialized per owner within an application node.
+Both checks and the write are serialized per owner, but only on a best-effort basis: the lock
+is held within one application node and released before the request's transaction commits, and
+there is no database constraint behind it. **Known limitation:** concurrent creates or
+reactivations by the same owner (on two nodes, or racing the commit on one) can exceed 10 active
+keys or produce two active keys with the same name.
 
 Secrets are stored only as hashes, are excluded from list/get/update/error/audit payloads, and
 are never written to logs. Lifecycle audit events contain only the event name and non-secret IDs.
