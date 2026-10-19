@@ -26,6 +26,7 @@ import static org.junit.Assert.fail;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.util.Map;
 import java.util.UUID;
 
 import org.junit.After;
@@ -54,9 +55,11 @@ import com.etendoerp.go.schemaforge.data.com.etendoerp.go.schemaforge.data.OAuth
  * (client and organization {@code 0}), the tokens are inserted with the same columns as
  * {@code OAuth2Servlet.SQL_INSERT_TOKEN} and a real tenant organization. Everything runs in the
  * test's transaction and {@link #rollBack()} discards it: {@code OBBaseTest} would otherwise commit
- * a successful test.
+ * a successful test. The one exception is the rotate rollback case, which must commit its fixture
+ * to have a previous state to return to and deletes it explicitly afterwards.
  *
  * @covers com.etendoerp.go.oauth2.PublicApiKeyStore
+ * @covers com.etendoerp.go.oauth2.OAuth2Filter
  */
 public class PublicApiKeyStoreIntegrationTest extends OBBaseTest {
 
@@ -73,6 +76,7 @@ public class PublicApiKeyStoreIntegrationTest extends OBBaseTest {
 
   private final PublicApiKeyStore store = new PublicApiKeyStore();
   private String tenantOrgId;
+  private PublicApiKeyContext context;
   private String keyId;
 
   @Before
@@ -87,15 +91,8 @@ public class PublicApiKeyStoreIntegrationTest extends OBBaseTest {
       tenantOrgId = rs.getString(1);
       tenantClientId = rs.getString(2);
     }
-    PublicApiKeyContext context =
-        new PublicApiKeyContext(OWNER_USER_ID, SYSTEM_ROLE_ID, tenantClientId, tenantOrgId);
-    String marker = UUID.randomUUID().toString().replace("-", "");
-    OAuth2Client key = store.create(context, "etp5781-it-" + marker,
-        "etgo-it-" + marker.substring(0, 16), OAuth2Utils.hashSecret("secret"),
-        "neo:public-api-key etendo:read");
-    keyId = key.getId();
-    insertToken("access-a-" + marker, "refresh-a-" + marker);
-    insertToken("access-b-" + marker, "refresh-b-" + marker);
+    context = new PublicApiKeyContext(OWNER_USER_ID, SYSTEM_ROLE_ID, tenantClientId, tenantOrgId);
+    keyId = createKeyWithTwoTokens();
   }
 
   @After
@@ -131,6 +128,81 @@ public class PublicApiKeyStoreIntegrationTest extends OBBaseTest {
     assertNull(OBDal.getInstance().get(OAuth2Client.class, keyId));
   }
 
+  /** Revoking one key's tokens must not touch the tokens of any other key. */
+  @Test
+  public void revokeTokensLeavesTheTokensOfAnotherKeyValid() throws Exception {
+    String otherKeyId = createKeyWithTwoTokens();
+
+    assertEquals(2, store.revokeTokens(keyId, OWNER_USER_ID));
+
+    assertEquals(2, countTokens(otherKeyId, "is_revoked = 'N'"));
+    assertEquals(0, countTokens(otherKeyId, "is_revoked = 'Y'"));
+  }
+
+  /** Deleting one key must leave every other key and all of its tokens in place. */
+  @Test
+  public void deleteLeavesAnotherKeyAndItsTokensInPlace() throws Exception {
+    String otherKeyId = createKeyWithTwoTokens();
+
+    store.delete(OBDal.getInstance().get(OAuth2Client.class, keyId));
+
+    assertEquals(0, countTokens("1 = 1"));
+    assertEquals(2, countTokens(otherKeyId, "is_revoked = 'N'"));
+    OBDal.getInstance().getSession().clear();
+    assertNotNull(OBDal.getInstance().get(OAuth2Client.class, otherKeyId));
+  }
+
+  /**
+   * The acceptance criterion end to end: a bearer token that resolves through the same lookup
+   * the MCP and public API filters use stops resolving once its key's tokens are revoked.
+   */
+  @Test
+  public void aRevokedTokenNoLongerValidates() throws Exception {
+    String plainToken = "plain-" + UUID.randomUUID();
+    insertToken(keyId, OAuth2Utils.hashToken(plainToken), "refresh-" + UUID.randomUUID());
+
+    Map<String, String> identity = OAuth2Filter.validateToken(plainToken);
+    assertNotNull("a valid token of an active key must resolve before the revoke", identity);
+    assertEquals(OWNER_USER_ID, identity.get(OAuth2Filter.ATTR_USER_ID));
+    assertEquals(tenantOrgId, identity.get(OAuth2Filter.ATTR_ORG_ID));
+
+    store.revokeTokens(keyId, OWNER_USER_ID);
+
+    assertNull("a revoked token must not resolve", OAuth2Filter.validateToken(plainToken));
+  }
+
+  /**
+   * The rotate sequence on a key that has tokens: save() of the new secret flushes (the key is a
+   * client-0 row, unlike its tokens), and when the request then fails the servlet's
+   * rollbackAndClose() restores both the old secret and the still-valid tokens.
+   */
+  @Test
+  public void rotateOfAUsedKeyPersistsTheNewSecretAndARollbackRestoresEverything()
+      throws Exception {
+    // The fixture must outlive the rollback under test, so it is committed and removed below.
+    OBDal.getInstance().commitAndClose();
+    try {
+      String previousHash = secretHash(keyId);
+      OAuth2Client key = store.findOwned(keyId, context);
+      assertNotNull(key);
+      String newHash = OAuth2Utils.hashSecret("rotated-" + UUID.randomUUID());
+
+      key.setClientSecretHash(newHash);
+      store.save(key, OWNER_USER_ID);
+      assertEquals(newHash, secretHash(keyId));
+      assertEquals(2, store.revokeTokens(keyId, OWNER_USER_ID));
+      assertEquals(0, countTokens("is_revoked = 'N'"));
+
+      OBDal.getInstance().rollbackAndClose();
+
+      assertEquals(previousHash, secretHash(keyId));
+      assertEquals(2, countTokens("is_revoked = 'N'"));
+      assertEquals(0, countTokens("is_revoked = 'Y'"));
+    } finally {
+      deleteCommittedKey(keyId);
+    }
+  }
+
   /**
    * Pins the root cause, so the SQL path is not "simplified" back to DAL: changing one of these
    * tokens through OBDal is refused. If this ever starts passing, the DAL accepts such rows and
@@ -157,12 +229,24 @@ public class PublicApiKeyStoreIntegrationTest extends OBBaseTest {
     }
   }
 
-  private void insertToken(String accessHash, String refreshHash) throws Exception {
+  /** Creates an owned key through the store, as the servlet does, with two valid tokens. */
+  private String createKeyWithTwoTokens() throws Exception {
+    String marker = UUID.randomUUID().toString().replace("-", "");
+    OAuth2Client key = store.create(context, "etp5781-it-" + marker,
+        "etgo-it-" + marker.substring(0, 16), OAuth2Utils.hashSecret("secret"),
+        "neo:public-api-key etendo:read");
+    insertToken(key.getId(), "access-a-" + marker, "refresh-a-" + marker);
+    insertToken(key.getId(), "access-b-" + marker, "refresh-b-" + marker);
+    return key.getId();
+  }
+
+  private void insertToken(String forKeyId, String accessHash, String refreshHash)
+      throws Exception {
     try (PreparedStatement ps = connection().prepareStatement(INSERT_TOKEN)) {
       ps.setString(1, tenantOrgId);
       ps.setString(2, OWNER_USER_ID);
       ps.setString(3, OWNER_USER_ID);
-      ps.setString(4, keyId);
+      ps.setString(4, forKeyId);
       ps.setString(5, accessHash);
       ps.setString(6, refreshHash);
       ps.executeUpdate();
@@ -170,14 +254,44 @@ public class PublicApiKeyStoreIntegrationTest extends OBBaseTest {
   }
 
   private int countTokens(String condition) throws Exception {
+    return countTokens(keyId, condition);
+  }
+
+  private int countTokens(String ofKeyId, String condition) throws Exception {
     try (PreparedStatement ps = connection().prepareStatement(
         "SELECT count(*) FROM etgo_oauth2_token WHERE etgo_oauth2_client_id = ? AND " + condition)) {
-      ps.setString(1, keyId);
+      ps.setString(1, ofKeyId);
       try (ResultSet rs = ps.executeQuery()) {
         rs.next();
         return rs.getInt(1);
       }
     }
+  }
+
+  private static String secretHash(String ofKeyId) throws Exception {
+    try (PreparedStatement ps = connection().prepareStatement(
+        "SELECT client_secret_hash FROM etgo_oauth2_client WHERE etgo_oauth2_client_id = ?")) {
+      ps.setString(1, ofKeyId);
+      try (ResultSet rs = ps.executeQuery()) {
+        assertTrue("the key must exist", rs.next());
+        return rs.getString(1);
+      }
+    }
+  }
+
+  /** Removes a committed key and its tokens, discarding whatever the failed test left open. */
+  private static void deleteCommittedKey(String committedKeyId) throws Exception {
+    OBDal.getInstance().rollbackAndClose();
+    try (PreparedStatement tokens = connection().prepareStatement(
+        PublicApiKeyStore.SQL_DELETE_TOKENS);
+        PreparedStatement key = connection().prepareStatement(
+            "DELETE FROM etgo_oauth2_client WHERE etgo_oauth2_client_id = ?")) {
+      tokens.setString(1, committedKeyId);
+      tokens.executeUpdate();
+      key.setString(1, committedKeyId);
+      key.executeUpdate();
+    }
+    OBDal.getInstance().commitAndClose();
   }
 
   private static Connection connection() {

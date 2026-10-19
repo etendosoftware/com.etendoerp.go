@@ -30,6 +30,7 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -2571,6 +2572,15 @@ public class OAuth2ServletTest {
     verify(apiKeyStore, never()).revokeTokens(anyString(), anyString());
   }
 
+  @Test
+  public void revokeTokensOfAKeyThatIsNotOwnedIsNotFound() throws Exception {
+    ResponseCapture resp = callApiKeys("POST", "/api-keys/someone-else/revoke-tokens", null);
+
+    assertEquals(404, resp.status);
+    assertEquals("not_found", new JSONObject(resp.body()).getString("error"));
+    verify(apiKeyStore, never()).revokeTokens(anyString(), anyString());
+  }
+
   /** ETP-5781 — revoke-tokens of a used key answered 500. */
   @Test
   public void revokeTokensOfAUsedPublicApiKeyReportsHowManyWereRevoked() throws Exception {
@@ -2605,6 +2615,7 @@ public class OAuth2ServletTest {
     JSONObject body = new JSONObject(resp.body());
     assertFalse(body.getBoolean("deleted"));
     assertEquals("gone", body.getString("id"));
+    verify(apiKeyStore, never()).delete(any());
   }
 
   /** ETP-5781 — PUT answered {@code "capabilities": []}; it must return the stored ones. */
@@ -2666,6 +2677,24 @@ public class OAuth2ServletTest {
     assertBadRequest(callApiKeys("PUT", "/api-keys/key-1", "{\"isActive\":null}"));
   }
 
+  @Test
+  public void updatePublicApiKeyWithANonObjectBodyIsABadRequest() throws Exception {
+    ownedKey("key-1", "Production", READ_WRITE_SCOPES, true);
+    assertBadRequest(callApiKeys("PUT", "/api-keys/key-1", "[1]"));
+  }
+
+  @Test
+  public void updatePublicApiKeyWithANonStringNameIsABadRequest() throws Exception {
+    ownedKey("key-1", "Production", READ_WRITE_SCOPES, true);
+    assertBadRequest(callApiKeys("PUT", "/api-keys/key-1", "{\"name\":42}"));
+  }
+
+  @Test
+  public void updatePublicApiKeyWithANumericIsActiveIsABadRequest() throws Exception {
+    ownedKey("key-1", "Production", READ_WRITE_SCOPES, true);
+    assertBadRequest(callApiKeys("PUT", "/api-keys/key-1", "{\"isActive\":1}"));
+  }
+
   /** ETP-5781 — reactivating skipped the 10-active-keys limit. */
   @Test
   public void reactivatingAKeyBeyondTheActiveLimitIsAConflict() throws Exception {
@@ -2709,6 +2738,110 @@ public class OAuth2ServletTest {
 
     assertEquals(200, resp.status);
     assertTrue(new JSONObject(resp.body()).getBoolean("isActive"));
+    verify(apiKeyStore).save(key, KEY_USER_ID);
+  }
+
+  /** The limit counts the OTHER active keys: one below it leaves room for this one. */
+  @Test
+  public void reactivatingAKeyWithOneOtherActiveKeyLessThanTheLimitSucceeds() throws Exception {
+    OAuth2Client key = ownedKey("key-1", "Dormant", READ_WRITE_SCOPES, false);
+    List<OAuth2Client> owned =
+        ownedWithOtherActiveKeys(key, PublicApiKeyPolicy.MAX_ACTIVE_KEYS_PER_OWNER - 1);
+    when(apiKeyStore.ownedKeys(any())).thenReturn(owned);
+
+    ResponseCapture resp = callApiKeys("PUT", "/api-keys/key-1", "{\"isActive\":true}");
+
+    assertEquals(200, resp.status);
+    assertTrue(new JSONObject(resp.body()).getBoolean("isActive"));
+    verify(apiKeyStore).save(key, KEY_USER_ID);
+  }
+
+  /**
+   * An inactive key does not take part in the name check, so it may be renamed to an active
+   * key's name; the collision is then caught when it is reactivated.
+   */
+  @Test
+  public void renamingAnInactiveKeyToAnActiveKeysNameIsAcceptedUntilItIsReactivated()
+      throws Exception {
+    OAuth2Client key = ownedKey("key-1", "Dormant", READ_WRITE_SCOPES, false);
+    List<OAuth2Client> owned = Arrays.asList(key, otherKey("key-2", "Production", true));
+    when(apiKeyStore.ownedKeys(any())).thenReturn(owned);
+
+    ResponseCapture rename = callApiKeys("PUT", "/api-keys/key-1", "{\"name\":\"production\"}");
+
+    assertEquals(200, rename.status);
+    JSONObject renamed = new JSONObject(rename.body());
+    assertEquals("production", renamed.getString("name"));
+    assertFalse(renamed.getBoolean("isActive"));
+
+    ResponseCapture reactivate = callApiKeys("PUT", "/api-keys/key-1", "{\"isActive\":true}");
+
+    assertEquals(409, reactivate.status);
+    assertTrue(errorDescription(reactivate).contains("name already exists"));
+    assertFalse(key.isActive());
+    verify(apiKeyStore, times(1)).save(key, KEY_USER_ID);
+  }
+
+  /** Deactivating never adds an active key, so it is not subject to the limit at all. */
+  @Test
+  public void deactivatingAKeyWhileAtTheActiveLimitSucceeds() throws Exception {
+    OAuth2Client key = ownedKey("key-1", "Production", READ_WRITE_SCOPES, true);
+    List<OAuth2Client> owned =
+        ownedWithOtherActiveKeys(key, PublicApiKeyPolicy.MAX_ACTIVE_KEYS_PER_OWNER - 1);
+    when(apiKeyStore.ownedKeys(any())).thenReturn(owned);
+
+    ResponseCapture resp = callApiKeys("PUT", "/api-keys/key-1", "{\"isActive\":false}");
+
+    assertEquals(200, resp.status);
+    assertFalse(new JSONObject(resp.body()).getBoolean("isActive"));
+    verify(apiKeyStore).save(key, KEY_USER_ID);
+    verify(apiKeyStore, never()).ownedKeys(any());
+  }
+
+  /** The SPA sends name and isActive together: a reactivation with a fresh name still counts. */
+  @Test
+  public void renameAndReactivateInOnePutIsCheckedAgainstTheActiveLimit() throws Exception {
+    OAuth2Client key = ownedKey("key-1", "Dormant", READ_WRITE_SCOPES, false);
+    List<OAuth2Client> owned =
+        ownedWithOtherActiveKeys(key, PublicApiKeyPolicy.MAX_ACTIVE_KEYS_PER_OWNER);
+    when(apiKeyStore.ownedKeys(any())).thenReturn(owned);
+
+    ResponseCapture resp = callApiKeys("PUT", "/api-keys/key-1",
+        "{\"name\":\"Fresh name\",\"isActive\":true}");
+
+    assertEquals(409, resp.status);
+    assertTrue(errorDescription(resp).contains("maximum number of active public API keys"));
+    verify(apiKeyStore, never()).save(any(), anyString());
+  }
+
+  @Test
+  public void renameAndReactivateInOnePutIsCheckedAgainstTheOtherActiveNames() throws Exception {
+    OAuth2Client key = ownedKey("key-1", "Dormant", READ_WRITE_SCOPES, false);
+    List<OAuth2Client> owned = Arrays.asList(key, otherKey("key-2", "Production", true));
+    when(apiKeyStore.ownedKeys(any())).thenReturn(owned);
+
+    ResponseCapture resp = callApiKeys("PUT", "/api-keys/key-1",
+        "{\"name\":\" PRODUCTION \",\"isActive\":true}");
+
+    assertEquals(409, resp.status);
+    assertTrue(errorDescription(resp).contains("name already exists"));
+    verify(apiKeyStore, never()).save(any(), anyString());
+  }
+
+  @Test
+  public void renameAndReactivateInOnePutAppliesBothWhenNeitherConflicts() throws Exception {
+    OAuth2Client key = ownedKey("key-1", "Dormant", READ_WRITE_SCOPES, false);
+    List<OAuth2Client> owned =
+        ownedWithOtherActiveKeys(key, PublicApiKeyPolicy.MAX_ACTIVE_KEYS_PER_OWNER - 1);
+    when(apiKeyStore.ownedKeys(any())).thenReturn(owned);
+
+    ResponseCapture resp = callApiKeys("PUT", "/api-keys/key-1",
+        "{\"name\":\"Fresh name\",\"isActive\":true}");
+
+    assertEquals(200, resp.status);
+    JSONObject body = new JSONObject(resp.body());
+    assertEquals("Fresh name", body.getString("name"));
+    assertTrue(body.getBoolean("isActive"));
     verify(apiKeyStore).save(key, KEY_USER_ID);
   }
 
@@ -2832,6 +2965,16 @@ public class OAuth2ServletTest {
     OAuth2Client key = apiKey(id, name, scopes, active);
     when(apiKeyStore.findOwned(eq(id), any())).thenReturn(key);
     return key;
+  }
+
+  /** The key itself plus {@code count} other active keys with distinct names. */
+  private static List<OAuth2Client> ownedWithOtherActiveKeys(OAuth2Client key, int count) {
+    List<OAuth2Client> owned = new ArrayList<>();
+    owned.add(key);
+    for (int i = 0; i < count; i++) {
+      owned.add(otherKey("other-" + i, "Other " + i, true));
+    }
+    return owned;
   }
 
   private static OAuth2Client otherKey(String id, String name, boolean active) {
