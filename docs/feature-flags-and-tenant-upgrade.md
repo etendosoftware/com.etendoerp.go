@@ -71,6 +71,7 @@ Declare every flag's key as a constant on `GoFeatureFlags` and add its row here.
 | `environment-access-enforcement-off` | `etendo.go.flags.environment-access-enforcement-off` | `ETGO_FLAG_ENVIRONMENT_ACCESS_ENFORCEMENT_OFF` | absent ⇒ **`false`** = enforcing (an OFF switch — see its section below) |
 | `onboarding-tenant-pool` | `etendo.go.flags.onboarding-tenant-pool` | `ETGO_FLAG_ONBOARDING_TENANT_POOL` | absent ⇒ **`false`** |
 | `mcp-modern-era-disabled` | `etendo.go.flags.mcp-modern-era-disabled` | `ETGO_FLAG_MCP_MODERN_ERA_DISABLED` | absent ⇒ **`false`** (dual-era on) |
+| `billing-reconciliation-schedule` | `etendo.go.flags.billing-reconciliation-schedule` | `ETGO_FLAG_BILLING_RECONCILIATION_SCHEDULE` | absent ⇒ **`false`** (no schedule is planted) |
 | *(pattern for a new flag)* | `etendo.go.flags.<key>` | `ETGO_FLAG_<KEY>` | absent ⇒ **`false`** |
 
 `bp-portal-link` (ETP-5267) decides whether a `sales-invoice-send` email carries a link to the
@@ -383,6 +384,20 @@ cache the era per origin and one origin serves every tenant. Its only caller is
 `McpRequestEra.modernEnabled()`. Retire it, keeping the modern path, once the modern era is stable in
 production. Full reference: [`neo-headless.md`](neo-headless.md) §4.12.30.
 
+### `billing-reconciliation-schedule` (ETP-5048) — backend-only, strictly off by default
+
+Whether the billing reconciliation (`ETGO_BillingReconciliation`) is scheduled. While the flag is
+off, `BillingReconciliationScheduleStartup` plants no process request. Turning it on takes effect at
+the **next restart**, when the System request is planted (hourly by default,
+`etendo.go.billing.reconcile.interval.minutes`). An operator can also schedule the process by hand in
+the Process Request window at any time. As a safety net, a run of the planted request does nothing
+while the flag is off, so turning it off stops the scheduled work without a restart; the row then
+fires as a no-op until someone unschedules it. A run started from the Classic menu
+**Billing Reconciliation**, or from an operator's own Process Request, is never gated. Environment
+level, evaluated with an empty context. Its callers are `BillingReconciliationScheduleStartup` and
+`BillingReconciliationProcess`. Design of record:
+[`plans/2026-10-18-etp-5048-billing-reconciliation-design.md`](plans/2026-10-18-etp-5048-billing-reconciliation-design.md).
+
 ## 2. The onboarding paywall
 
 ### Local pooled failure fixture
@@ -694,6 +709,7 @@ fixed `failureReason` describing that code:
 | `provisioning_failed` | The last attempt recorded a diagnostic failure | `true`, unless its `failureCode` is non-retryable |
 | `stalled` | The provisioning lease expired without a diagnostic failure | `true` |
 | `provisioned` | The request is terminal and carries its created client id | `false` |
+| `expired` | ETP-5048: the billing reconciliation closed the request after the provider confirmed its session expired unpaid (`CHECKOUT_STATUS = EXPIRED`); a new purchase starts a new request | `false` |
 
 **Failure codes (ETP-5548).** The raw cause of a failed attempt (exception text, internal ids,
 SQL) stays in `ETGO_CHECKOUT_REQUEST.FAILURE_REASON` for operations and is never returned. The row

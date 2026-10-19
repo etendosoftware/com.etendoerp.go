@@ -204,6 +204,21 @@ public final class GoFeatureFlags {
   public static final String FLAG_MCP_MODERN_ERA_DISABLED = "mcp-modern-era-disabled";
 
   /**
+   * ETP-5048 — whether the billing reconciliation is scheduled. Strictly off by default (and off
+   * on every failure of this class): while it is off {@code BillingReconciliationScheduleStartup}
+   * plants no process request, so turning it on takes effect at the next restart. The process also
+   * checks it on every run of that fixed request, so turning it off stops the scheduled work
+   * without a restart. A run an operator starts from the Classic menu, or from a Process Request
+   * of their own, is never gated. Environment level, evaluated with an empty context;
+   * locally {@code etendo.go.flags.billing-reconciliation-schedule} /
+   * {@code ETGO_FLAG_BILLING_RECONCILIATION_SCHEDULE}. Backend-only. Its callers are
+   * {@code BillingReconciliationScheduleStartup} and
+   * {@code BillingReconciliationProcess}.
+   */
+  public static final String FLAG_BILLING_RECONCILIATION_SCHEDULE =
+      "billing-reconciliation-schedule";
+
+  /**
    * ConfigCat SDK key. Set ⇒ flags come from ConfigCat and can be flipped without a restart; unset
    * ⇒ {@link PropertiesFeatureProvider} resolves them from local configuration.
    */
