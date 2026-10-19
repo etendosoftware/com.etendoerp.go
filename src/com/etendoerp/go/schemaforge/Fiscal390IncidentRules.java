@@ -491,7 +491,10 @@ final class Fiscal390IncidentRules {
 
   /**
    * The text as classic writes it ({@code AEAT390String}: upper case, accented vowels folded,
-   * every character outside {@code [A-Z0-9. ]} — Ñ included — dropped). Only its length matters.
+   * every character outside {@code [A-Z0-9. ]} — Ñ included — dropped, then every run of blanks
+   * collapsed to one space and both ends trimmed). Only its length matters, so it must match what
+   * the file writes: a double space in the master data, or one left behind by a dropped character
+   * ("A - B"), does not count.
    */
   static String fileText(String text) {
     if (text == null) {
@@ -503,7 +506,9 @@ final class Fiscal390IncidentRules {
         .replaceAll("[\u00CD\u00CC\u00CF\u00CE]", "I")
         .replaceAll("[\u00D3\u00D2\u00D6\u00D4]", "O")
         .replaceAll("[\u00DA\u00D9\u00DC\u00DB]", "U")
-        .replaceAll("[^a-zA-Z0-9. ]", "");
+        .replaceAll("[^a-zA-Z0-9. ]", "")
+        .replaceAll("\\s+", " ")
+        .trim();
   }
 
   // ── Helpers ──────────────────────────────────────────────────────────────

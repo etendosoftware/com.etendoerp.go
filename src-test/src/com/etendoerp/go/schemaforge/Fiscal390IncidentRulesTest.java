@@ -325,6 +325,22 @@ public class Fiscal390IncidentRulesTest {
   }
 
   @Test
+  public void testFileTextCollapsesBlanksLikeTheClassicWriter() {
+    assertEquals("CONSERVAS DE PESCADO Y OTROS PRODUCTOS MARINOS",
+        Fiscal390IncidentRules.fileText("Conservas de pescado y otros  productos marinos"));
+    assertEquals("A B", Fiscal390IncidentRules.fileText("  a - b  "));
+    assertEquals("", Fiscal390IncidentRules.fileText("   "));
+    assertEquals("", Fiscal390IncidentRules.fileText(null));
+  }
+
+  @Test
+  public void testBlanksThatCollapseDoNotCountTowardsTheLimit() {
+    // 37 letters plus spaces and dropped characters that the file does not write
+    f.taxpayerName = "  " + "A".repeat(18) + "  -  " + "B".repeat(18) + "  ";
+    assertTrue(codes().isEmpty());
+  }
+
+  @Test
   public void testLongRepresentativeNameWarnsWithItsNif() {
     f.representatives = List.of(
         new Fiscal390IncidentRules.Representative("12345678Z", "A".repeat(37)));
