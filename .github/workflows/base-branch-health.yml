@@ -70,10 +70,20 @@ jobs:
             let total = 0;
 
             // ── 1. Check runs (GitHub Actions) ──────────────────────────────
+            // Only the latest run of each check counts. A commit can carry several
+            // runs of the same check: re-runs, and PR events from a PR whose head is
+            // this commit (the develop → main cut PR, re-opened once labeled). An old
+            // failure that a later run of the same check replaced must not keep the
+            // base branch red. Check run ids grow over time: the highest is the latest.
             const checkRuns = await github.paginate(github.rest.checks.listForRef, {
               owner, repo, ref: sha, per_page: 100,
             });
+            const latestRuns = new Map();
             for (const run of checkRuns) {
+              const seen = latestRuns.get(run.name);
+              if (!seen || run.id > seen.id) latestRuns.set(run.name, run);
+            }
+            for (const run of latestRuns.values()) {
               total++;
               if (run.status !== 'completed') {
                 pending.push(`${run.name} (check run: ${run.status})`);
