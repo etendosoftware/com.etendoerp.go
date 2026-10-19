@@ -168,6 +168,39 @@ final class TenantOwnership {
         && (entity.isClientEnabled() || Client.ENTITY_NAME.equals(entity.getName()));
   }
 
+  /**
+   * Whether an existing row belongs to the current client and a writable organization.
+   * Readable System rows are legitimate references, but are not writable by another client.
+   * No session, unknown ownership or missing write scope fails closed.
+   */
+  static boolean isWritableByCurrentTenant(BaseOBObject row) {
+    OBContext context = OBContext.getOBContext();
+    if (row == null || context == null || context.getCurrentClient() == null) {
+      return false;
+    }
+    String currentClient = context.getCurrentClient().getId();
+    if (currentClient == null) {
+      return false;
+    }
+    if (row instanceof Client && !currentClient.equals(row.getId())) {
+      return false;
+    }
+    if (row instanceof ClientEnabled) {
+      Client client = ((ClientEnabled) row).getClient();
+      if (client == null || !currentClient.equals(client.getId())) {
+        return false;
+      }
+    } else if (!(row instanceof Client) && !"0".equals(currentClient)) {
+      // Tables without a client are shared platform data, not tenant-owned writable rows.
+      return false;
+    }
+    Organization organization = row instanceof Organization
+        ? (Organization) row
+        : row instanceof OrganizationEnabled ? ((OrganizationEnabled) row).getOrganization() : null;
+    return organization == null || (context.getWritableOrganizations() != null
+        && context.getWritableOrganizations().contains(organization.getId()));
+  }
+
   private static boolean hasReadableClient(BaseOBObject entity, OBContext context) {
     if (!(entity instanceof ClientEnabled)) {
       return true;

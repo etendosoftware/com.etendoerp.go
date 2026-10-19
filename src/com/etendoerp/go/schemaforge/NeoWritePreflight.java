@@ -42,7 +42,7 @@ import com.etendoerp.go.schemaforge.util.NeoValidationErrorResponseBuilder;
  * callers of this class, each before it dispatches to a customization:
  * <ul>
  *   <li>{@code NeoCrudHandler.dispatchCrudRequestInternal} — REST {@code POST}/{@code PUT}/
- *       {@code PATCH} on {@code /sws/neo/{spec}/{entity}}, with or without a customization;</li>
+ *       {@code PATCH}/{@code DELETE} on {@code /sws/neo/{spec}/{entity}}, with or without a customization;</li>
  *   <li>{@code BatchService.createRecord} — each create of REST {@code /sws/neo/batch} and of MCP
  *       {@code etendo_batch}.</li>
  * </ul>
@@ -73,6 +73,14 @@ final class NeoWritePreflight {
    * @return the response to send instead of dispatching, or {@code null}
    */
   static NeoResponse refusalFor(NeoContext context) {
+    if (context != null && ("PUT".equals(context.getHttpMethod())
+        || "PATCH".equals(context.getHttpMethod()) || "DELETE".equals(context.getHttpMethod()))) {
+      NeoResponse targetRefusal = NeoActionRecordGuard.writeRefusalFor(
+          context.getSfEntity(), context.getRecordId());
+      if (targetRefusal != null) {
+        return targetRefusal;
+      }
+    }
     if (context == null || !isCreateOrUpdate(context.getHttpMethod())
         || OBContext.getOBContext() == null) {
       // No session means no request to check (NeoReferenceOwnership fails open there too).

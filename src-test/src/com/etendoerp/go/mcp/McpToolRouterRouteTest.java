@@ -1017,6 +1017,24 @@ class McpToolRouterRouteTest {
       String text = result.getJSONArray("content").getJSONObject(0).getString("text");
       assertTrue(text.contains("id"));
     }
+    @Test
+    @DisplayName("etendo_update rejects blank and null-string versions before record lookup")
+    void updateRejectsUnusableVersion() throws Exception {
+      setupSpecLookup(mockSpec());
+      for (String updated : new String[] { "", "  ", "null" }) {
+        JSONObject args = buildCrudArgs();
+        args.put("id", "record-id");
+        args.put("fields", new JSONObject());
+        args.put("updated", updated);
+
+        JSONObject result = router.route("etendo_update", args, WRITE_SCOPES);
+
+        assertTrue(result.getBoolean("isError"));
+        JSONObject envelope = new JSONObject(contentText(result));
+        assertEquals(422, envelope.getInt("status"));
+        assertTrue(envelope.getString("detail").contains("updated"), envelope.toString());
+      }
+    }
   }
 
   // ── etendo_delete ────────────────────────────────────────────────────────

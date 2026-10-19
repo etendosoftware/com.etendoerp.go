@@ -28,6 +28,9 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.io.ByteArrayInputStream;
@@ -75,13 +78,16 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  * through {@link BatchService#executeBatch}, so the refusal is proven where it happens: before any
  * customization runs. Both shipped entities used here have one — {@code sales-order/lines}
  * ({@code orderLineHandler}) and {@code contacts/locationAddress}
- * ({@code contactsLocationAddressHandler}, which persists on its own).
+ * ({@code contactsLocationAddressHandler}, which persists on its own). Target-mutation cases
+ * stop at a mocked customization boundary: real DAL ownership and reference preflight run, but
+ * the boundary returns a sentinel response so neither refused nor permitted fixtures are mutated.
  *
  * <p>Nothing here is meant to persist. A refused write writes nothing by construction, every test
  * rolls back in {@link #rollBack()}, and the batch case adds an operation that always fails, so even
  * a regression that let the first one through is rolled back rather than committed.
  *
  * @covers com.etendoerp.go.schemaforge.NeoReferenceOwnership
+ * @covers com.etendoerp.go.schemaforge.NeoActionRecordGuard
  * @covers com.etendoerp.go.schemaforge.NeoWritePreflight
  */
 public class NeoReferenceOwnershipIntegrationTest extends WeldBaseTest {
@@ -106,6 +112,7 @@ public class NeoReferenceOwnershipIntegrationTest extends WeldBaseTest {
   private Tab linesTab;
   private String foreignOrderId;
   private String foreignPartnerId;
+  private boolean requestAdminMode;
 
   @Before
   public void loadFixtures() {
@@ -120,11 +127,23 @@ public class NeoReferenceOwnershipIntegrationTest extends WeldBaseTest {
     assumeNotNull("the sample data has no Sales Order Lines tab", linesTab);
     assumeNotNull("the sample data has no order of the QA Testing client", foreignOrderId);
     assumeNotNull("the sample data has no partner of the QA Testing client", foreignPartnerId);
+
+    // These direct handler calls bypass NeoServlet, which opens this mode after authentication.
+    // Keep the authenticated test user, client and organizations; only mirror the request seam.
+    OBContext.setAdminMode();
+    requestAdminMode = true;
   }
 
   @After
   public void rollBack() {
-    OBDal.getInstance().rollbackAndClose();
+    try {
+      OBDal.getInstance().rollbackAndClose();
+    } finally {
+      if (requestAdminMode) {
+        OBContext.restorePreviousMode();
+        requestAdminMode = false;
+      }
+    }
   }
 
   // ── REST single, through the customization of sales-order/lines ────────────
@@ -241,6 +260,82 @@ public class NeoReferenceOwnershipIntegrationTest extends WeldBaseTest {
         .put("currency", EURO_ID);
 
     assertNull(NeoReferenceOwnership.refuseUnownedReferences(linesTab, fields, TEST_ORDER_ID));
+  }
+
+  /** All REST mutations refuse inaccessible targets before customization or version handling. */
+  @Test
+  public void testMutationTargetsAreRefusedBeforeCustomizationWithoutChangingRows() throws Exception {
+    SFSpec spec = NeoServletSupport.findSpec(SALES_ORDER);
+    assertNotNull("the shipped sales-order spec is required", spec);
+    SFEntity entity = orderEntity(spec.getId());
+    assertNotNull("the shipped order entity is required", entity);
+    Order foreignOrder = OBDal.getInstance().get(Order.class, foreignOrderId);
+    String descriptionBefore = foreignOrder.getDescription();
+    for (String method : new String[] { "PUT", "PATCH", "DELETE" }) {
+      NeoResponse foreign = restTargetWrite(spec, entity, method, foreignOrderId, false);
+      NeoResponse missing = restTargetWrite(spec, entity, method, SequenceIdData.getUUID(), false);
+      assertEquals(method, 404, foreign.getHttpStatus());
+      assertEquals(method, 404, missing.getHttpStatus());
+      assertEquals(method, missing.getBody().toString(), foreign.getBody().toString());
+      assertNotNull(OBDal.getInstance().get(Order.class, foreignOrderId));
+      assertEquals(descriptionBefore, foreignOrder.getDescription());
+    }
+  }
+
+  /** Own targets and a simple System currency reference still reach the customization seam. */
+  @Test
+  public void testOwnMutationWithSystemReferenceReachesCustomization() throws Exception {
+    SFSpec spec = NeoServletSupport.findSpec(SALES_ORDER);
+    assertNotNull("the shipped sales-order spec is required", spec);
+    SFEntity entity = orderEntity(spec.getId());
+    assertNotNull("the shipped order entity is required", entity);
+    for (String method : new String[] { "PUT", "PATCH", "DELETE" }) {
+      NeoResponse response = restTargetWrite(spec, entity, method, TEST_ORDER_ID, true);
+      assertEquals(method, 200, response.getHttpStatus());
+      assertTrue(response.getBody().getBoolean("reachedCustomization"));
+    }
+    assertNotNull(OBDal.getInstance().get(Order.class, TEST_ORDER_ID));
+  }
+
+  private static SFEntity orderEntity(String specId) {
+    OBCriteria<SFEntity> criteria = OBDal.getInstance().createCriteria(SFEntity.class);
+    criteria.add(Restrictions.eq(SFEntity.PROPERTY_ETGOSFSPEC + ".id", specId));
+    for (SFEntity entity : criteria.list()) {
+      if (entity.getADTab() != null && entity.getADTab().getTable() != null
+          && "C_Order".equalsIgnoreCase(entity.getADTab().getTable().getDBTableName())) {
+        return entity;
+      }
+    }
+    return null;
+  }
+
+  /** Stop at the hook seam so even an unexpected acceptance cannot mutate sample fixtures. */
+  private NeoResponse restTargetWrite(SFSpec spec, SFEntity entity, String method, String id,
+      boolean expectCustomization) throws Exception {
+    NeoServlet servlet = mock(NeoServlet.class);
+    AtomicReference<NeoResponse> written = new AtomicReference<>();
+    when(servlet.findEntity(spec.getId(), entity.getName())).thenReturn(entity);
+    when(servlet.extractQueryParams(any())).thenReturn(new HashMap<>());
+    when(servlet.handleWithHooks(anyString(), any(NeoContext.class), any(), any()))
+        .thenReturn(NeoResponse.ok(new JSONObject().put("reachedCustomization", true)));
+    doAnswer(inv -> {
+      written.set(inv.getArgument(1));
+      return null;
+    }).when(servlet).writeResponse(any(), any());
+    doAnswer(inv -> {
+      written.set(NeoResponse.error((int) inv.getArgument(1), (String) inv.getArgument(2)));
+      return null;
+    }).when(servlet).sendError(any(), anyInt(), anyString());
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    when(request.getInputStream()).thenReturn(inputStreamOf(
+        new JSONObject().put("currency", EURO_ID).toString()));
+    new NeoCrudHandler(servlet).handleWindowEntityCrud(spec,
+        new NeoServlet.NeoPathInfo(SALES_ORDER, entity.getName(), id), method,
+        request, mock(HttpServletResponse.class));
+    verify(servlet, expectCustomization ? times(1) : never())
+        .handleWithHooks(anyString(), any(NeoContext.class), any(), any());
+    assertNotNull("the REST response must be captured", written.get());
+    return written.get();
   }
 
   // ── helpers ────────────────────────────────────────────────────────────────

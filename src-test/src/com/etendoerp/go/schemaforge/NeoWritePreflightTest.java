@@ -69,6 +69,7 @@ public class NeoWritePreflightTest {
   private static final String PARENT_ID = "parentId";
 
   private MockedStatic<NeoReferenceOwnership> ownership;
+  private MockedStatic<NeoActionRecordGuard> targets;
   private MockedStatic<NeoFieldFilter> fieldFilters;
   private MockedStatic<OBContext> obContext;
   private Tab adTab;
@@ -77,6 +78,7 @@ public class NeoWritePreflightTest {
   @Before
   public void setUp() {
     ownership = mockStatic(NeoReferenceOwnership.class);
+    targets = mockStatic(NeoActionRecordGuard.class);
     fieldFilters = mockStatic(NeoFieldFilter.class);
     obContext = mockStatic(OBContext.class);
     obContext.when(OBContext::getOBContext).thenReturn(mock(OBContext.class));
@@ -97,6 +99,7 @@ public class NeoWritePreflightTest {
   @After
   public void tearDown() {
     ownership.close();
+    targets.close();
     fieldFilters.close();
     obContext.close();
     Mockito.framework().clearInlineMocks();
@@ -122,7 +125,7 @@ public class NeoWritePreflightTest {
     return fields;
   }
 
-  /** Reads and deletes run no reference check. */
+  /** Reads and deletes run no reference check (delete has a separate target guard). */
   @Test
   public void testIgnoresNonWriteMethods() {
     assertNull(NeoWritePreflight.refusalFor(context("GET", null, null)));
@@ -230,4 +233,15 @@ public class NeoWritePreflightTest {
     String message = response.getBody().getJSONObject("error").getString("message");
     assertTrue(message, message.contains("refered to but not present in the import set"));
   }
+  @Test
+  public void deleteMustRejectAnUnknownTargetBeforeDispatch() {
+    NeoContext request = NeoContext.builder().httpMethod("DELETE").recordId("missing")
+        .adTab(adTab).sfEntity(sfEntity).build();
+    targets.when(() -> NeoActionRecordGuard.writeRefusalFor(sfEntity, "missing"))
+        .thenCallRealMethod();
+    NeoResponse refusal = NeoWritePreflight.refusalFor(request);
+    assertNotNull("An unresolved target must not reach a customization", refusal);
+    assertEquals(404, refusal.getHttpStatus());
+  }
+
 }

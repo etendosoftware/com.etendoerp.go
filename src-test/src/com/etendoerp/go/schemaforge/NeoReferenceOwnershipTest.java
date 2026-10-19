@@ -310,6 +310,38 @@ public class NeoReferenceOwnershipTest {
         body(PROP_PARTNER, nested), null));
   }
 
+  @Test
+  public void testRefusesNestedSystemMutationButAcceptsInertReferenceMetadata() throws Exception {
+    Property name = mock(Property.class);
+    when(name.isPrimitive()).thenReturn(true);
+    when(partnerEntity.getProperty("name", false)).thenReturn(name);
+    JSONObject reference = new JSONObject().put("id", SYSTEM_PARTNER_ID)
+        .put("_entityName", PARTNER).put("_identifier", "Shared partner");
+    assertNull(NeoReferenceOwnership.refuseUnownedReferences(lineTab,
+        body(PROP_PARTNER, reference), null));
+    assertNotNull(NeoReferenceOwnership.refuseUnownedReferences(lineTab,
+        body(PROP_PARTNER, new JSONObject(reference.toString()).put("name", "changed")), null));
+  }
+
+  @Test
+  public void testRefusesSecondaryWritePathsButKeepsDirectReferenceId() throws Exception {
+    assertNotNull(NeoReferenceOwnership.refuseUnownedReferences(lineTab,
+        body("partner.name", "changed"), null));
+    assertNotNull(NeoReferenceOwnership.refuseUnownedReferences(lineTab,
+        body("partner.parent.id", FOREIGN_HEADER_ID), null));
+    assertNull(NeoReferenceOwnership.refuseUnownedReferences(lineTab,
+        body("partner.id", SYSTEM_PARTNER_ID), null));
+  }
+
+  @Test
+  public void testRefusesNestedCreationAndEntityOverrides() throws Exception {
+    assertNotNull(NeoReferenceOwnership.refuseUnownedReferences(lineTab,
+        body(PROP_PARTNER, new JSONObject().put("_new", true).put("id", OWN_PARTNER_ID)), null));
+    assertNotNull(NeoReferenceOwnership.refuseUnownedReferences(lineTab,
+        body(PROP_PARTNER, new JSONObject().put("id", OWN_PARTNER_ID)
+            .put("_entityName", "DifferentEntity")), null));
+  }
+
   /** A plain {@code id} key is the written record itself, not a reference. */
   @Test
   public void testIgnoresTheWrittenRecordsOwnId() throws Exception {

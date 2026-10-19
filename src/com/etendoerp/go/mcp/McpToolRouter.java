@@ -902,6 +902,10 @@ public class McpToolRouter {
     String recordId = args.getString("id");
     JSONObject fields = args.getJSONObject(McpConstants.PARAM_FIELDS);
     String updated = args.getString(McpConstants.PARAM_UPDATED);
+    if (StringUtils.isBlank(updated) || "null".equals(updated)) {
+      throw McpRoutingException.missingArgument(
+          "Missing required argument: " + McpConstants.PARAM_UPDATED, McpConstants.PARAM_UPDATED);
+    }
 
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
     SFEntity sfEntity = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, entityName);
@@ -909,6 +913,11 @@ public class McpToolRouter {
     // role-level check — so the entity-level flag consulted here is ISPUT.
     McpToolRouterSupport.requireMethodEnabled(spec, sfEntity, HTTP_METHOD_PUT);
     Tab adTab = McpWriteRequestSupport.getAdTabOrThrow(sfEntity, entityName);
+    NeoResponse targetRefusal = NeoActionRecordGuard.writeRefusalFor(sfEntity, recordId);
+    if (targetRefusal != null) {
+      return McpHookExecutor.neoResponseToMcpResult(targetRefusal);
+    }
+
 
     String dalEntityName = adTab.getTable().getName();
     DefaultJsonDataService jsonService = DefaultJsonDataService.getInstance();
@@ -1049,6 +1058,11 @@ public class McpToolRouter {
     // ETP-4254: entity-level DELETE flag, refused before any DAL work happens.
     McpToolRouterSupport.requireMethodEnabled(spec, sfEntity, HTTP_METHOD_DELETE);
     Tab adTab = McpWriteRequestSupport.getAdTabOrThrow(sfEntity, entityName);
+    NeoResponse targetRefusal = NeoActionRecordGuard.writeRefusalFor(sfEntity, recordId);
+    if (targetRefusal != null) {
+      return McpHookExecutor.neoResponseToMcpResult(targetRefusal);
+    }
+
 
     String dalEntityName = adTab.getTable().getName();
     DefaultJsonDataService jsonService = DefaultJsonDataService.getInstance();

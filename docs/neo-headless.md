@@ -892,6 +892,32 @@ unknown ids, lookup failure, null rows) and the `testResolveSqlDefaultOutcomeTen
 
 #### 4.3.7 A write never references another tenant's row (ETP-5785)
 
+**Update and delete targets.** Before customization hooks, optimistic-version reads or persistence,
+REST `PUT`/`PATCH`/`DELETE` and MCP `etendo_update`/`etendo_delete` call
+`NeoActionRecordGuard.writeRefusalFor`. REST does so from `NeoWritePreflight`; MCP calls the same
+guard before resolving write fields. A missing target and a target outside the caller's write
+scope both produce `404 Record not found`, without returning record data. A missing session, an
+unresolved DAL model or an ownership lookup failure also refuses the write.
+
+Target write scope requires the record's client to equal the current client and its organization,
+when present, to belong to the caller's writable organizations. Readable System (`0`) records may
+be referenced by tenant records, but that readability does not grant permission to update or
+delete them. Tables without a client are writable through this guard only from the System client.
+Existing entity method and role gates still apply. MCP updates also reject blank `updated` values
+and the literal string `"null"` with the existing `422` missing-argument envelope; these values
+cannot disable optimistic locking.
+
+The rules below concern references supplied by the caller, separately from the target record.
+
+**References do not write secondary records.** Scalar FK values and direct `reference.id` keys
+remain supported, including System references. An object reference must contain an `id`, may carry
+inert metadata such as `_identifier` and a matching `_entityName`, and must not request creation or
+set mutable DAL properties. Nested creates, entity-name overrides, arrays supplied as references,
+and paths beyond a direct `reference.id` (for example `reference.name` or `a.b.id`) are refused
+before hooks with the existing validation envelope (REST 400 / MCP 422). Update the related record
+through its own resource instead. This restriction prevents core's JSON converter from turning a
+reference into a secondary write performed in admin mode.
+
 Core resolves a foreign-key value of a write body with a bare `OBDal.get` (`JsonToDataConverter`),
 which applies no client filter, and `OBInterceptor` skips its referenced-organization check on
 insert. The parent of a child create was read the same way (`NeoParentValuesLoader`). With
@@ -928,8 +954,8 @@ present and differ, both are checked.
 server-derived value is added) and `parentId`. A body key is a reference when the
 DAL model says so — a non-primitive, non-one-to-many property, reached directly or through a dotted
 path the way core reads it (`a.id` sets `a`, so `a`'s referenced property decides the lookup;
-`a.b` walks `a`), or a nested object with an `id`, string or number (core reads it with `getString`
-and writes into that row) — and its target entity is client-enabled or is the client entity. No entity, table or property is named. Skipped
+`a.b` walks `a`), or an id-only nested object with an `id`, string or number (core reads it with `getString`) —
+and its target entity is client-enabled or is the client entity. No entity, table or property is named. Skipped
 without a lookup: shared reference data (not client-enabled), blank / `"null"` values, the `"0"`
 sentinel, an unsubstituted batch `$ref:`, and placeholder literals no id can match (an unresolved
 `@Token@` AD default, a `<…>` sequence preview). `parentId` is checked against the parent tab's

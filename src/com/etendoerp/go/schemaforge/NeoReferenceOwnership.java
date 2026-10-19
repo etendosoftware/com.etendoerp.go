@@ -62,7 +62,9 @@ import org.openbravo.service.json.JsonConstants;
  * property of the written entity, reached directly or through a {@code a.b.id} path — and its target
  * is tenant-scoped ({@link TenantOwnership#isTenantScoped(Entity)}). No entity, table or property is
  * named here. A nested JSON object with an {@code id} is checked as the row it addresses, and its
- * own keys are walked the same way, because core writes into that row too.
+ * mutable keys are refused: core would otherwise write into that row too. Nested creates and
+ * multi-hop writes are refused; scalar references, direct {@code a.id} and inert metadata remain
+ * supported.
  *
  * <p><b>Cost.</b> One lookup per distinct reference the request sets — never per foreign key of
  * the entity, and server-derived values (defaults, callouts) are not looked at. A reference by id
@@ -117,6 +119,9 @@ public final class NeoReferenceOwnership {
     if (written == null) {
       return null;
     }
+    if (hasSecondaryWrite(written, requestFields)) {
+      return secondaryWriteResponse();
+    }
     Set<Reference> references = new LinkedHashSet<>();
     collectParent(adTab, parentId, references);
     collectFields(written, requestFields, references);
@@ -139,6 +144,80 @@ public final class NeoReferenceOwnership {
     } catch (RuntimeException e) {
       log.debug("Ownership probe on {} failed: {}", entityName, e.getMessage());
       return false;
+    }
+  }
+
+  /**
+   * References may select rows, never mutate or create them. Core's converter also accepts
+   * nested objects and multi-hop paths as writes, which cannot be authorized from a reference
+   * value alone. Keep scalar/direct id references and inert metadata; fail closed otherwise.
+   */
+  private static boolean hasSecondaryWrite(Entity entity, JSONObject fields) {
+    if (fields == null) {
+      return false;
+    }
+    Iterator<?> keys = fields.keys();
+    while (keys.hasNext()) {
+      String key = String.valueOf(keys.next());
+      String[] path = StringUtils.split(key, PATH_SEPARATOR);
+      if (path == null || path.length == 0) {
+        continue;
+      }
+      Property property = entity.getProperty(path[0], false);
+      if (property == null || !isPersistedReference(property)) {
+        continue;
+      }
+      if (path.length > 1 && !(path.length == 2 && JsonConstants.ID.equals(path[1]))) {
+        return true;
+      }
+      Object value = fields.opt(key);
+      if (value instanceof JSONArray) {
+        return true;
+      }
+      if (value instanceof JSONObject && !isIdOnlyReference(property.getTargetEntity(),
+          (JSONObject) value)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private static boolean isIdOnlyReference(Entity target, JSONObject value) {
+    if (!value.has(JsonConstants.ID) || value.isNull(JsonConstants.ID)
+        || value.optBoolean(JsonConstants.NEW_INDICATOR, false)) {
+      return false;
+    }
+    String named = value.optString(JsonConstants.ENTITYNAME, target.getName());
+    if (!target.getName().equals(named)) {
+      return false;
+    }
+    Iterator<?> keys = value.keys();
+    while (keys.hasNext()) {
+      String key = String.valueOf(keys.next());
+      if (key.indexOf(PATH_SEPARATOR) >= 0) {
+        return false;
+      }
+      Property property = target.getProperty(key, false);
+      // Core ignores unknown metadata such as _identifier. It consumes _entityName/_new
+      // before writing fields; those controls were checked above.
+      if (property != null && !property.isId() && !property.isAuditInfo()
+          && !property.isOneToMany() && !property.isInactive() && !property.isProxy()) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private static String secondaryWriteResponse() {
+    try {
+      JSONObject errors = new JSONObject().put(JsonConstants.ID,
+          "Nested writes are not supported; use scalar or id-only references");
+      JSONObject response = new JSONObject()
+          .put(JsonConstants.RESPONSE_STATUS, JsonConstants.RPCREQUEST_STATUS_VALIDATION_ERROR)
+          .put(JsonConstants.RESPONSE_ERRORS, errors);
+      return new JSONObject().put(JsonConstants.RESPONSE_RESPONSE, response).toString();
+    } catch (JSONException e) {
+      throw new IllegalStateException("Could not build the refusal body", e);
     }
   }
 
