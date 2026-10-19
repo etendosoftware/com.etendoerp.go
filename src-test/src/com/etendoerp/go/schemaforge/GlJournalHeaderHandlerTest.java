@@ -128,7 +128,7 @@ public class GlJournalHeaderHandlerTest {
     body.put("documentAction", "VO");
     NeoResponse response = handler.handle(actionContext("documentAction", body));
     assertEquals(422, response.getHttpStatus());
-    assertTrue(response.getBody().toString().contains("docAction"));
+    assertTrue(response.getBody().toString().contains("docAction 'VO' is not allowed"));
   }
 
   @Test

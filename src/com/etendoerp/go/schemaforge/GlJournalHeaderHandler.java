@@ -161,7 +161,9 @@ public class GlJournalHeaderHandler implements NeoHandler {
       String docAction = resolveDocAction(context.getRequestBody());
       if (docAction == null) {
         // The process defaults a missing inpdocaction to CO: anything else must not reach it.
-        return NeoResponse.error(422, "docAction is required for the G/L journal document action:"
+        String sent = rawDocAction(context.getRequestBody());
+        return NeoResponse.error(422, (sent.isEmpty() ? "docAction is required"
+            : "docAction '" + sent + "' is not allowed") + " for the G/L journal document action:"
             + " CO (complete) or RE (reactivate).");
       }
       return runDocumentAction(context, docAction);
@@ -341,16 +343,21 @@ public class GlJournalHeaderHandler implements NeoHandler {
    * any other value.
    */
   private static String resolveDocAction(JSONObject body) {
-    if (body == null) {
-      return null;
-    }
-    JSONObject fieldValues = body.optJSONObject("fieldValues");
-    String docAction = fieldValues != null
-        ? fieldValues.optString(FIELD_DOCUMENT_ACTION, "")
-        : body.optString("docAction", body.optString(FIELD_DOCUMENT_ACTION, ""));
+    String docAction = rawDocAction(body);
     return DOC_ACTION_COMPLETE.equals(docAction) || DOC_ACTION_REACTIVATE.equals(docAction)
         ? docAction
         : null;
+  }
+
+  /** The docAction value as sent, or "" when absent. */
+  private static String rawDocAction(JSONObject body) {
+    if (body == null) {
+      return "";
+    }
+    JSONObject fieldValues = body.optJSONObject("fieldValues");
+    return fieldValues != null
+        ? fieldValues.optString(FIELD_DOCUMENT_ACTION, "")
+        : body.optString("docAction", body.optString(FIELD_DOCUMENT_ACTION, ""));
   }
 
   /**
