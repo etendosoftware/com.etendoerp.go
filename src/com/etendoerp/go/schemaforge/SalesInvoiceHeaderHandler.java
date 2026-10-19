@@ -100,6 +100,12 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
   @Inject
   private CurrencyOptionsHandler currencyOptionsHandler;
 
+  @Inject
+  private ImportOrderLinesIntoInvoiceHandler importOrderLinesHandler;
+
+  @Inject
+  private ImportInOutLinesIntoInvoiceHandler importShipmentLinesHandler;
+
   /** Package-private seam so unit tests can inject a mocked {@link DocumentPostingService}. */
   void setPostingService(DocumentPostingService postingService) {
     this.postingService = postingService;
@@ -123,6 +129,9 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
     contracts.putAll(InvoicePostingGate.CONTRACTS);
     // ETP-5709: cloneRecord was served (see handle) but undeclared.
     contracts.put(NeoCloneRecordHandler.CONTRACT.getName(), NeoCloneRecordHandler.CONTRACT);
+    // ETP-5713: import the pending lines of a completed order / goods shipment into this draft.
+    contracts.putAll(ImportOrderLinesIntoInvoiceHandler.contracts(true));
+    contracts.putAll(ImportInOutLinesIntoInvoiceHandler.contracts(true));
     return contracts;
   }
 
@@ -185,7 +194,8 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
       return reactivationGuard;
     }
     return NeoHeaderActionRouter.dispatch(context, currencyOptionsHandler, cloneRecordHandler,
-        registerPaymentHandler, siiSendHandler, tbaiXmlgeneratorHandler, followUp.actionHandler());
+        registerPaymentHandler, siiSendHandler, tbaiXmlgeneratorHandler, importOrderLinesHandler,
+        importShipmentLinesHandler, followUp.actionHandler());
   }
 
   /**

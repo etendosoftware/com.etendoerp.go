@@ -487,6 +487,67 @@ class McpWindowDeclaredActionsTest {
       assertEquals(unknownParameter, unknown.getString(0));
     }
 
+    /**
+     * ETP-5713: the line imports of the four windows are judged by the contracts the real handlers
+     * declare. {@code lines} is optional, the source id is required, and an undeclared key — or
+     * the other side's id key — is a 422 before anything runs.
+     */
+    @ParameterizedTest(name = "{0} {1} {2}")
+    @CsvSource(delimiter = '|', value = {
+        "goods-receipt     | availableOrders        | {}                    |",
+        "goods-receipt     | availableOrderLines    | {\"orderId\":\"o\"}     |",
+        "goods-receipt     | availableOrderLines    | {}                    | missing:orderId",
+        "goods-receipt     | importOrderLines       | {\"orderId\":\"o\"}     |",
+        "goods-receipt     | importOrderLines       | {\"orderId\":\"o\",\"lines\":[{\"sourceLineId\":\"a\",\"quantity\":1}]} |",
+        "goods-receipt     | importOrderLines       | {\"lines\":[]}          | missing:orderId",
+        "goods-receipt     | importOrderLines       | {\"orderId\":\"o\",\"foo\":1} | foo",
+        "goods-shipment    | importOrderLines       | {\"orderId\":\"o\"}     |",
+        "goods-shipment    | importOrderLines       | {\"foo\":1}             | foo",
+        "purchase-invoice  | importOrderLines       | {\"orderId\":\"o\"}     |",
+        "purchase-invoice  | importReceiptLines     | {\"receiptId\":\"r\"}   |",
+        "purchase-invoice  | importReceiptLines     | {\"shipmentId\":\"r\"}  | shipmentId",
+        "purchase-invoice  | availableReceiptLines  | {\"receiptId\":\"r\"}   |",
+        "purchase-invoice  | availableReceipts      | {}                    |",
+        "sales-invoice     | importOrderLines       | {\"orderId\":\"o\"}     |",
+        "sales-invoice     | importShipmentLines    | {\"shipmentId\":\"s\",\"lines\":[{\"sourceLineId\":\"a\",\"quantity\":1}]} |",
+        "sales-invoice     | importShipmentLines    | {\"receiptId\":\"s\"}   | receiptId",
+        "sales-invoice     | availableShipments     | {}                    |" })
+    void lineImportActionsAreJudgedByTheirDeclaredContracts(String window, String action,
+        String body, String refusal) throws Exception {
+      Map<String, NeoActionContract> declared;
+      switch (window.trim()) {
+        case "goods-receipt":
+          declared = new GoodsReceiptHeaderHandler().actionContracts();
+          break;
+        case "goods-shipment":
+          declared = new GoodsShipmentHeaderHandler().actionContracts();
+          break;
+        case "purchase-invoice":
+          declared = new PurchaseInvoiceHeaderHandler().actionContracts();
+          break;
+        default:
+          declared = new SalesInvoiceHeaderHandler().actionContracts();
+          break;
+      }
+      when(handler.actionContracts()).thenReturn(declared);
+      SFEntity e = entity("W", null);
+      JSONObject params = new JSONObject(body);
+
+      if (refusal == null) {
+        NeoActionContract contract = McpDeclaredActions.precheck(e, action.trim(), params);
+        assertNotNull(contract, action + " is a declared action");
+        assertEquals(action.trim(), contract.getName());
+        return;
+      }
+      McpRoutingException refused = assertThrows(McpRoutingException.class,
+          () -> McpDeclaredActions.precheck(e, action.trim(), params));
+      JSONObject env = refused.toEnvelope();
+      assertEquals(422, env.getInt(McpConstants.KEY_STATUS));
+      String key = refusal.startsWith("missing:") ? refusal.substring("missing:".length())
+          : refusal;
+      assertTrue(env.toString().contains(key.trim()), env.toString());
+    }
+
     @Test
     @DisplayName("an unusable MCP_CONFIG refuses every action (fail closed)")
     void unusableConfigFailsClosed() {

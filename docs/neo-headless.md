@@ -3227,13 +3227,13 @@ The shape and the rules are in §4.12.1.3.
 
 | Entity | `hidden` | `values` / `redirect` | Why |
 |---|---|---|---|
-| `sales-invoice/header`, `purchase-invoice/header` | the five PIS actions, `psd2GenerateBankPayment`, `posted` (ETP-5692) | redirect `aPRMAddpayment` → `registerPayment`; `reasons.posted` | PIS needs a person to authorize at the bank (SCA); Classic's *Add Payment* is not the Etendo payment flow. `posted` is the AD button behind the *Posted* column — a blind toggle that answered "Process completed successfully" on a draft while doing nothing, and that the window never shows. Agents book and unbook the invoice with the header's **declared** `post` / `unpost` contracts instead (`InvoicePostingGate.CONTRACTS`, §4.12.29). `posted` has its own `reasons` entry naming both, so a refusal on it never carries the PIS sentence, and the section `reason` stays the PIS one. The `posted` *field* (curated `readOnly`) stays readable in `view:"full"` / `fields:[…]` as a plain value (§4.12.1.3) |
+| `sales-invoice/header`, `purchase-invoice/header` | the five PIS actions, `psd2GenerateBankPayment`, `posted` (ETP-5692) | redirect `aPRMAddpayment` → `registerPayment`; `Createfromorders` → `importOrderLines`, `Createfrominouts` → `importShipmentLines` (sales) / `importReceiptLines` (purchase), `CreateFrom` → `importOrderLines` (ETP-5713, §4.12.34); `reasons.posted` and one reason per Create From button | PIS needs a person to authorize at the bank (SCA); Classic's *Add Payment* is not the Etendo payment flow. `posted` is the AD button behind the *Posted* column — a blind toggle that answered "Process completed successfully" on a draft while doing nothing, and that the window never shows. Agents book and unbook the invoice with the header's **declared** `post` / `unpost` contracts instead (`InvoicePostingGate.CONTRACTS`, §4.12.29). `posted` has its own `reasons` entry naming both, so a refusal on it never carries the PIS sentence, and the section `reason` stays the PIS one. The `posted` *field* (curated `readOnly`) stays readable in `view:"full"` / `fields:[…]` as a plain value (§4.12.1.3) |
 | `payment-in/finPayment`, `payment-out/header` | `psd2GenerateBankPayment`, `aPRMAddScheduledpayments`, `aprmExecutepayment`, `aPRMReversePayment`, `aPRMReconcilePayment`, `aeatsiiSend`, `etblkpBulkposting`, `posted`, `retryPisPayment`, `pisPaymentStatus` | `aPRMProcessPayment: ["P"]` | agents get exactly the window's three buttons, all with `parameters:{}`: *Confirmar* (`aPRMProcessPayment`), *Reactivar* (`etprReactivatePayment`) and *Eliminar* (`eTPRRemovePayment`). *Eliminar* is offered with the UI's own gate: the trash icon and the row action call it at every status except `RPVOID` and except when `pisLocked`, so `ReactivatePaymentHandler` refuses an agent with **422** in those two cases (same `isLifecycleLockedByTransfer` predicate the GET emits as `pisLocked`). On a processed payment it reactivates and then deletes it, and it gives **no** consumed credit back — exactly as in the UI; the invoice's `deletePayment` still deletes a draft and does give the credit back. `retryPisPayment` / `pisPaymentStatus` (served by `ReactivatePaymentHandler` on the payment record) are PIS, hidden like every PIS action under the fiscal/bank-integration criterion (§4.12.9). Payments are created and allocated through `registerPayment` on the invoice header. `values` keeps the catalogue honest but is **not** a safety boundary: `ReactivatePaymentHandler` always sends `action:"P"` for `aPRMProcessPayment` and ignores what the agent passes |
 | `financial-account/transaction` | `etprReactivateTransaction`, `etprRemoveTransaction`, `posted`, `etblkpBulkposting` | — | the UI's movements are reactivated, deleted and recorded through the account's movement flow; for agents, the account's `reactivateMovement` / `deleteMovement` / `createMovement` (§4.12.1.4). What stays for agents is `post` / `unpost` — `etendo_action(spec:'financial-account', entity:'transaction', id:<transactionId>, action:'post'\|'unpost', parameters:{})`, served by the `document-posting` qualifier (`DocumentPostingService`, as the SPA's kebab). They are handler-served, not declared contracts, so `view:"actions"` does not list them |
 | `open-close-period-control/documents` | `openClose`, `processNow` | — | the calendar has no per-document-type open/close since ETP-4948; the period's own `openClose` (§4.12.1.6) opens or closes every document type at once |
 | `financial-account/account` | `aPRMImportBankFile`, `aPRMMatchTransactions`, `aPRMMatchTransactionsForce`, `aPRMReconcile`, `aprmAddMultiplePayments`, `pSD2GetBankstatement`, `pSD2GetConsent`, `psd2ReconnectFa`, `psd2GetConnections`, `psd2RefreshConnections` | `aprmFundsTrans` → `transferFunds` (§4.12.1.5) | the window offers none of its Core buttons: statements go through `bank-statements`, reconciliation through `bank-reconciliation`, manual movements through the entity's own declared movement actions (§4.12.1.4); PSD2 consent and reconnection need SCA. It has no `verbs` section: create, update and delete stay (the SPA uses them) |
-| `goods-receipt/header` | — | redirect `invoicefromshipment` → `createPurchaseInvoice` (ETP-5709) | the classic *Invoicefromshipment* process, fired on a purchase receipt, creates a **sales** invoice (`isSotrx = true`), does not mark the receipt as invoiced and can report success without creating anything. The target is the header's declared `createPurchaseInvoice` (`GoodsReceiptHeaderHandler`), which creates a purchase invoice from the receipt and completes it in the same call. The return specs (`return-material-receipt`, `return-to-vendor-shipment`) carry the same classic button and are not redirected yet (ETP-5711) |
-| `goods-shipment/goodsShipment` | — | redirect `Invoicefromshipment` → `createDraftInvoice` (ETP-5709) | the classic process bypasses every guard of the handler's own path (completed-status check, nothing-pending 400, scoping to the shipment's own lines, honoured partial `lines`), so agents are sent to `createDraftInvoice`, now declared by `GoodsShipmentHeaderHandler.actionContracts()` (`CreateDraftInvoiceHandler.SHIPMENT_CONTRACT`: optional `shipmentIds[]`, `priceListId`, `lines[{shipmentLineId, quantity}]`). The key is the AD column name `Invoicefromshipment`, the only spelling both `McpActionsView.namesOf` (listing) and `McpDeclaredActions.namesOf` (call) accept. The other sales specs keep the classic button |
+| `goods-receipt/header` | — | redirect `invoicefromshipment` → `createPurchaseInvoice` (ETP-5709); `CreateFrom` → `importOrderLines` with its own reason (ETP-5713, §4.12.34) | the classic *Invoicefromshipment* process, fired on a purchase receipt, creates a **sales** invoice (`isSotrx = true`), does not mark the receipt as invoiced and can report success without creating anything. The target is the header's declared `createPurchaseInvoice` (`GoodsReceiptHeaderHandler`), which creates a purchase invoice from the receipt and completes it in the same call. The return specs (`return-material-receipt`, `return-to-vendor-shipment`) carry the same classic button and are not redirected yet (ETP-5711) |
+| `goods-shipment/goodsShipment` | — | redirect `Invoicefromshipment` → `createDraftInvoice` (ETP-5709); `CreateFrom` → `importOrderLines` with its own reason (ETP-5713, §4.12.34) | the classic process bypasses every guard of the handler's own path (completed-status check, nothing-pending 400, scoping to the shipment's own lines, honoured partial `lines`), so agents are sent to `createDraftInvoice`, now declared by `GoodsShipmentHeaderHandler.actionContracts()` (`CreateDraftInvoiceHandler.SHIPMENT_CONTRACT`: optional `shipmentIds[]`, `priceListId`, `lines[{shipmentLineId, quantity}]`). The key is the AD column name `Invoicefromshipment`, the only spelling both `McpActionsView.namesOf` (listing) and `McpDeclaredActions.namesOf` (call) accept. The other sales specs keep the classic button |
 | `purchase-order/header` | — | redirect `rMReceiveMaterials` → `createGoodsReceipt`, `rMCreateInvoice` → `createPurchaseInvoice` (ETP-5709) | the classic *Receive Materials* button has no process connected for an agent, and *Create Invoice* is undocumented for it. The targets are the header's declared contracts (`PurchaseOrderHeaderHandler`): `createGoodsReceipt` creates a DRAFT receipt, `createPurchaseInvoice` creates AND completes a purchase invoice. The preconditions (source must be completed, draft-aware pending quantity) are described in the ETP-5709 paragraphs of §4.12.9 and apply to a redirected call exactly as to a direct one |
 
 **A redirect target is not validated at runtime (ETP-5709).** `McpActionsSection.validateRedirect` only requires each target to be a non-blank string; it never checks that the target is an action the entity serves. A typo or a renamed action still loads, and the agent is then told to call something that answers 404. Every `redirect` target must therefore be an action the entity declares (an `actionContracts()` entry or a handler-served action). Also, `reason` is mandatory in every `actions` section, `redirect`-only ones included: `validate` rejects a section without it, and an unusable section fails the entity closed (§4.12.6). `redirectReason` and `reasons` refine the text per action; they do not replace `reason`.
@@ -3551,6 +3551,7 @@ not: `etendo_create` does not run it in shared code, so it is in the table below
 | `buildInvalidDatesError` | yes | **no** | no explicit 422 for an unreadable or ambiguous date (ETP-4793 / IMP-24). Type coercion itself does run on the shared path (`executePostCreate` → `coerceTypes`), so the value is not silently mangled — the agent just gets a less precise failure |
 | the `warehouse` default | *Almacén Secundario* | *Almacén Principal* | observed with an identical body, 2026-09-28. Not yet diagnosed: it may be a genuine divergence in the defaults chain or a session dependency. Recorded here so it is not rediscovered as new |
 | `user` create — invitation (ETP-4830, declared by ETP-5194) | invitation committed by the post-hook | same, but mid-batch | the invitation's `commitAndClose()` commits every earlier operation of the batch, so a later failure answers `atomic: false` (§4.12.4.1). Same behaviour on REST `/batch`; declared, not changed. The ETP-5194 email correction is an update, which batch does not perform |
+| line creation of receipts, shipments and invoices (ETP-5713) | the lines CRUD, which is what the SPA's "Add from ..." modals post one line at a time: **not capped** by the server (the modal limits the quantity client-side), invoice-line `salesOrderLine` / `goodsShipmentLine` and header `salesOrder` refused as `read_only_field` on MCP | `etendo_batch` reaches the same CRUD: same refusals, same lack of cap | the declared import actions (`importOrderLines`, `importReceiptLines`, `importShipmentLines`, §4.12.34) are the MCP way to create linked lines: capped by what is pending (drafts included), linked, one transaction. They are served by the same delegates on REST and MCP, so the two channels agree on them; what differs is the CRUD line create, which the actions deliberately do not reuse |
 
 This is a **declared** list, not an unknown one: the point is that the next person to touch either
 path can see what is deliberately unequal. Closing a row means adding the step to
@@ -9015,7 +9016,7 @@ and a header create without it succeeds on REST, batch and MCP. No Java.
 **Concurrency (the lock).** Reading the returned total and inserting the lines are two steps, so two concurrent
 creates / imports on the same source line could both pass the cap. Every path therefore calls
 `ReturnableQuantity.lockSourceLines` BEFORE it reads the total: `SELECT M_InOutLine_ID FROM M_InOutLine WHERE
-M_InOutLine_ID = ? FOR UPDATE` for every source line of the request, in ascending id order (two requests with
+M_InOutLine_ID = ? FOR NO KEY UPDATE` (ETP-5713 changed it from `FOR UPDATE`: a foreign-key insert that points at the line, an invoice line or a match row, takes `FOR KEY SHARE` on it and must not wait for a return; two returns of the same line still serialise) for every source line of the request, in ascending id order (two requests with
 overlapping lines never wait on each other in opposite orders, so no deadlock). It runs on `OBDal.getConnection()`,
 the connection of the very transaction that goes on to insert the return lines, and is released when it ends; the
 second request waits at the lock and then reads a total that includes the first one's lines (READ COMMITTED sees
@@ -9053,3 +9054,190 @@ is `discarded` in both windows): loose lines can no longer be created, but ones 
 capped against. Every line linked to a receipt/shipment arrives by import or by create-from-the-document, both capped.
 `etendo_batch` has no ACTION surface and no update, so the actions and the quantity edit are not reachable through it;
 its `create` on a return line is refused like REST's.
+
+
+#### 4.12.34 Import lines from a source document into a draft (ETP-5713)
+
+**The defect.** An agent could not do what the SPA's "Add from order / receipt / shipment" modals do. Those modals
+create the lines one by one through the lines CRUD with a link field (`salesOrderLine` / `goodsShipmentLine`) and then
+PATCH the header, none of it atomic and none of it capped by the server. Over MCP that path is closed on purpose
+(`salesOrderLine` / `goodsShipmentLine` of an invoice line and the header `salesOrder` are `readOnly` / `system`,
+refused as `read_only_field`), and Classic's `Createfromorders` / `Createfrominouts` buttons are OBUIAPP pick-and-edit
+processes an agent cannot run, while the plain `CreateFrom` has no process at all. The only linked way in was the
+one-step create-from-document (ETP-5709: `createGoodsReceipt`, `createPurchaseInvoice`, `createDraftInvoice`), which
+needs no draft but also cannot take lines from several documents or choose quantities per line on an existing one.
+
+**Published to MCP** (contracts declared by the handlers' `actionContracts()`; explicit delegates dispatched through
+`NeoHeaderActionRouter`, no entity name in shared code, no new `Java_Qualifier`):
+
+| Spec / entity | Actions added (in flow order) | Delegate |
+|---|---|---|
+| `goods-receipt/goodsReceipt` | `availableOrders`, `availableOrderLines`, `importOrderLines` | `ImportOrderLinesIntoInOutHandler` |
+| `goods-shipment/goodsShipment` | `availableOrders`, `availableOrderLines`, `importOrderLines` | `ImportOrderLinesIntoInOutHandler` |
+| `purchase-invoice/header` | `availableOrders`, `availableOrderLines`, `importOrderLines`; `availableReceipts`, `availableReceiptLines`, `importReceiptLines` | `ImportOrderLinesIntoInvoiceHandler`, `ImportInOutLinesIntoInvoiceHandler` |
+| `sales-invoice/header` | `availableOrders`, `availableOrderLines`, `importOrderLines`; `availableShipments`, `availableShipmentLines`, `importShipmentLines` | same two delegates |
+
+The three delegates extend `AbstractLineImportHandler` and share `DocumentLineImport` (request, preconditions, cap,
+header-link rule, response). Direction (purchase or sales) is read from the target document, never from the entity.
+The `id` of `etendo_action` is always the **draft target** document; discovery needs no `businessPartner` (it is the
+target's).
+
+**Body and answers.** `importOrderLines`: `{orderId, lines?:[{sourceLineId, quantity}]}`; `importReceiptLines`:
+`{receiptId, lines?}`; `importShipmentLines`: `{shipmentId, lines?}`. `lines` omitted or empty imports **everything
+still pending**; given, it imports **exactly** those lines (the same line twice is summed; an entry without
+`sourceLineId` or with a missing / zero / non-numeric `quantity` is refused, never skipped). The answer is
+`{data:{importedCount, lines:[{id, sourceLineId, product, productName, quantity}], headerLinked, salesOrder?}}`
+(`salesOrder` is the order the header points at NOW when it has one; `headerLinked` is `true` only when an imported
+line belongs to that order, so the answer never claims a link to an order none of the lines is from).
+`availableOrders` / `availableReceipts` / `availableShipments` answer
+`{data:[{id, documentNo, date, businessPartner, businessPartner$_identifier, currency, pendingLines}], hasMore, limit,
+scanLimit}`, the `available*Lines` answer `{data:[{id, lineNo, product, product$_identifier, uOM, pendingQuantity}],
+hasMore:false, limit, scanLimit}`, where the line `id` is the `sourceLineId` the import takes. **Discovery is a bounded
+scan**: it reads the `scanLimit` (200) most recent completed candidates of the target's partner, client and currency and
+returns at most `limit` (50) documents, filtered by the same pending rule the import enforces. `hasMore` is `true` when
+the page stopped at its row limit with candidates left, or when the scan itself reached `scanLimit` (older candidates may
+exist that it never read). What is listed is accepted by the import; what is not listed may still be importable when the
+caller knows its id. Return orders and return documents are never listed.
+
+**Preconditions** (each a **422** `error = {status, code, message, ...}`, checked before anything is written):
+
+| `error.code` | When |
+|---|---|
+| `importTargetNotDraft` | the target document is not `DR` (`DocumentStatusGuard.requireStatus`) |
+| `importSourceNotCompleted` | the source order / receipt / shipment is not `CO` |
+| `importBusinessPartnerMismatch` | source and target belong to different business partners |
+| `importCurrencyMismatch` | different currencies (receipt / shipment `etgoCurrency`, invoice and order `currency`), compared when both carry one |
+| `importDirectionMismatch` | a sales source into a purchase target or the reverse; a return document or a return ORDER (`DocumentType.isReturn`) is never importable into an invoice; the action of the other side (`importShipmentLines` on a purchase invoice) |
+| `importPriceListRequired` | the target invoice has no price list |
+| `importNoStorageBin` | a stockable line was planned but the target's warehouse has no active bin (receipt / shipment) |
+| `importInvalidLine` | an entry of `lines` is not understood, or a required id (`orderId`, `receiptId`, `shipmentId`) is missing (this one is a **400**) |
+| `importDocumentNotFound` | the target or the source does not exist **for the caller's client** (**404**): a document of another client answers exactly like a missing one (admin mode reads across clients, so the delegates check `OBContext.getCurrentClient()` and the discovery queries filter by it) |
+| `importLineNotInDocument` | a `sourceLineId` that is not a line of the source |
+| `importNothingPending` | no `lines` and nothing left to import (names the covering drafts when that is why) |
+| `importQuantityExceedsPending` | more than what is pending of a line; extra keys `product`, `requested`, `pending`, `sourceLineId` |
+| `importQuantityNotHonoured` | order / receipt to invoice only: the native process created other quantities than planned; everything is rolled back |
+
+Example: `Cannot import 11 of Agua: only 10 is still pending on this line (quantities already in draft documents count as taken).`
+An unforeseen failure is rolled back whole and answers a generic **500** (`An internal error occurred while importing
+lines`); the text of a database error never reaches the response.
+
+**The cap is the pending quantity, drafts included** (user decision; the same rule the SPA's receipt modal shows):
+
+| Import | pending(line) |
+|---|---|
+| order to receipt / shipment | `ordered - delivered -` every line of every DRAFT receipt / shipment of the same direction pointing at the order line (the target's own lines included), same sign as the order line — `InOutLineFromOrderFactory.collectPendingLines`, the rule of "create from the order" |
+| order to invoice | `ordered - invoiced -` every line of every DRAFT invoice of the same direction pointing at the order line (the target's included). The one-step `createPurchaseInvoice` / `createDraftInvoice` ignore drafts because they complete in the same call; an import into a draft cannot |
+| receipt / shipment to invoice | `NeoInvoiceSupport.computePendingQtyPerLineOrThrow(inOut, includeDrafts = true)`: the movement quantity minus completed invoices, match rows and draft invoices (the target's own lines included), capped by the line's own movement quantity and signed like it. The window's modal offered the full movement quantity |
+
+The check validates **every** requested line before the first write: one line over its pending refuses the whole
+request and **nothing is created**. Importing the same source line again is allowed while it stays under the cap (the
+target's own lines count as taken, so the cap handles it). The source lines are locked (`SELECT ... FOR NO KEY UPDATE`,
+ascending ids, on the DAL's connection, `DocumentLineImport.lockOrderLines` / `lockInOutLines`) **before** the pending
+total is read, so two concurrent imports of the same line serialise and the second reads a total that includes the
+first one's lines. The order lines are then **refreshed** (`Session.refresh`) so the invoiced / delivered quantities
+the cap reads are the ones committed by the import that held the lock, not the ones loaded before waiting for it.
+**Why `NO KEY UPDATE`:** `FOR UPDATE` conflicts with the `FOR KEY SHARE` a foreign-key insert takes on the referenced
+row. An import that locked order lines and then inserted an invoice line (FK to the order line) could wait for one that
+locked movement lines and inserted a line pointing at the same order line, a cycle that PostgreSQL broke by aborting one
+with a deadlock. `FOR NO KEY UPDATE` still conflicts with itself (imports of the same line serialise) and does not
+conflict with a key-share insert. The ETP-5711 `ReturnableQuantity.lockSourceLines` had the same exposure (a return held
+`FOR UPDATE` on the receipt line while an invoice line pointing at it waited) and was switched too; it only locks
+`M_InOutLine` rows in ascending order and inserts rows that reference them, so no cycle with the import paths exists. *Known limit:* as in §4.12.32, the ascending order holds within one request, not across several
+requests of one transaction.
+
+**Pending moves on completion.** `C_OrderLine.QtyDelivered` / `QtyInvoiced` and the match rows (`M_MatchInv`,
+`M_MatchPO`) only change when the receipt / shipment / invoice is COMPLETED. Importing into a draft therefore lowers
+the "pending including drafts", not the delivered or invoiced quantity; the real quantities move when the target is
+completed, and a draft that is voided or deleted gives its quantity back. Importing **never** completes anything.
+
+**How the lines are created.**
+
+- *Order to receipt / shipment:* `InOutLineFromOrderFactory.createAndLinkLine` (now returns the saved line): product,
+  UOM, `salesOrderLine`, description, the storage bin anchored to the TARGET's warehouse (stockable lines only; a
+  service line keeps no bin), then `InvoiceLineLinker.linkPendingInvoiceLinesToInout`.
+- *Order or receipt / shipment to invoice:* the native `CreateInvoiceLinesFromProcess` on the existing draft, the
+  process the one-step actions already use (`OrderLine` entries for an order, `ShipmentInOutLine` entries for a
+  receipt / shipment, like the multi-document actions). It copies product, UOM, tax and the unit / list / standard and
+  gross prices **exactly** from the order line, links the invoice line to its order line and movement line, and keeps
+  the invoice's order reference. It is deliberately NOT the lines CRUD: a line written through the lines handler gets
+  its amounts derived again by `InvoiceLineAmountSupport`, and a line whose unit price equals its list price and
+  carries a discount would be discounted twice (ETP-5710). The native process never recomputes a price from a
+  discount, so the unit price is the order's, once, and the discount is not lost either:
+  `InvoiceFromOrderSupport.copyLineDiscountsFromOrder(invoice, newLineIds)` adds the display percentage
+  (`EM_Etgo_Discount`) to the NEW lines only (the lines already on the invoice are not touched), and
+  `ensureLineGrossAmounts(invoice, newLineIds)` fills a missing gross of the NEW lines only (a deliberate zero line or a
+  negative line already in the draft keeps its gross; the whole-invoice pass of the one-step actions is not used here).
+  There is **no** `linkInvoiceLinesToExistingInouts` back-fill: the movement link is whatever the native process (bound
+  entries) set, and the remainder is deliberately unlinked. After creation the lines are summed per source line and
+  checked against the plan (`importQuantityNotHonoured` rolls back on a mismatch).
+- *Order lines with deliveries not yet invoiced (distribution):* an invoice is importable from the order AND from the
+  receipt / shipment, in the normal order, receipt, invoice flow. For each requested order line the quantity is
+  distributed first over that order line's COMPLETED receipt / shipment lines, oldest first (movement date, then id),
+  each up to its OWN pending (the same figure `importReceiptLines` / `importShipmentLines` use: movement minus
+  completed invoices, match rows and drafts, the target's lines included; same product, unit and sign as the order
+  line). Those slices are native entries bound to the movement line (`shipmentInOutLine`), so the invoice line gets
+  `goodsShipmentLine` AND `salesOrderLine` and the receipt / shipment shows as invoiced. What is left (ordered and not
+  delivered, or delivered but already taken by another draft) is invoiced against the order line alone, in a SECOND
+  native call. The order cap is unchanged (`ordered - invoiced - drafts`), so with order 10, receipt 6 invoiced in a
+  DRAFT, the order line has 4 pending and an import of it creates one line of 4 bound only to the order line; a second
+  import of the same remainder finds `importNothingPending` (drafts count). Lines omitted distribute every pending line the same way.
+  **Why a marker:** the native process replaces a plain order-line entry by every completed, not yet invoiced movement
+  line of that order line at THEIR quantity, and it ignores drafts, so a receipt line fully covered by another draft is
+  still "not invoiced" for it and would be swapped in (live: request 4 became 6). An entry that already names a
+  movement line is never swapped, so a remainder entry of an order line that has such lines carries one of them as a
+  marker (`shipmentInOutLine`) and the link is removed again right after the line is created
+  (`unmarkRemainder`): quantity from the entry, price / tax / UOM / discount from the order line as always, the invoice
+  line ends up pointing at the order line only (the receipt cap would otherwise count it twice). The unmark is asserted:
+  if any line of the remainder call still points at a movement line the whole import is rolled back with
+  `importQuantityNotHonoured`, never left silent; the marker is picked deterministically (`order by il.id`). The real
+  native process is exercised by `ImportOrderLinesIntoInvoiceHandlerIntegrationTest` (order 10, receipt 6 invoiced in a
+  draft, import of the order gives one line of 4 with `goodsShipmentLine` NULL; run with `goIsolatedDalTest`), so a
+  change of the native swap rule in core is caught. Nothing is refused for
+  having deliveries. The source movement lines are locked (`FOR NO KEY UPDATE`, sorted) with the order lines before their
+  pending is read, and the back-fill `linkInvoiceLinesToExistingInouts` is NOT run (it would bind the remainder to a
+  movement line).
+- *No double invoicing across the two paths.* The order cap sums every DRAFT invoice line pointing at the order line
+  (`salesOrderLine`), bound to a movement line or not; the receipt / shipment cap counts, by `m_inoutline_id`, every
+  non-voided non-closed invoice line (drafts included) plus the drafts of the same order line. Lines created by
+  `importOrderLines` carry both links, lines created by `importReceiptLines` / `importShipmentLines` get their order
+  line from the movement line (native process), so each path sees what the other created. Known conservative effect:
+  the receipt cap attributes the drafts of an order line to every movement line of it in that document, so it may
+  report less pending than exists, never more.
+
+**Header link.** For receipt / shipment the target's `salesOrder` is set when ALL the lines it holds come from ONE
+order and the header has none or the same one (`DocumentLineImport.resolveHeaderLink`); with several orders it is left
+empty, and a link this import set earlier is cleared once a second order joins (a link to an order none of the lines
+comes from is somebody else's and is kept). The order's Documents panel finds receipts / shipments by that header
+link (`purchaseRelatedDocs.js`, `salesRelatedDocs.js`), so without it an imported receipt was invisible there. The
+sales shipment modal of the SPA does not link the header (a pre-existing inconsistency, not touched). For invoices
+the native process sets / clears the invoice's order reference (one order: linked; several: empty); invoices are also
+found by their lines (`OrderInvoiceListSupport.listInvoices`). `salesOrder` / `headerLinked` report the truth (see the
+response above): a header that links order X while the lines come only from order Y answers `headerLinked:false,
+salesOrder:X`. For an
+invoice imported from an order, the header's `etgoTotalDiscount` takes the order's when it is positive and the invoice
+has none yet (or the same one), as the modal's `afterImport` does; the discount line itself is materialised when the
+invoice is completed. A receipt / shipment imported into an invoice does NOT carry the order's `etgoTotalDiscount`
+(only the order import does), as in the window.
+
+**Over-delivered order lines (receipt / shipment import).** `InOutLineFromOrderFactory.pendingQuantityFor` computes
+`ordered - delivered` and keeps any non-zero result, so a line ordered 5 and delivered 7 reads as a pending of -2. The
+order import into a receipt / shipment applies the invoice side's guard (a pending only counts with the SAME sign as the
+ordered quantity; a negative order line keeps its negative pending) in discovery AND import, so such a line is neither
+listed nor imported as a -2 line. **The one-step `createGoodsReceipt` / `createShipment` (ETP-5709) share the factory and
+therefore the flip**: they would offer that line as a -2 receipt line. Not changed here (it would change ETP-5709
+behaviour); reported as a follow-up.
+
+**`MCP_CONFIG` redirects** (`ETGO_SF_ENTITY`, keyed by the AD column name, one reason per button, none ending in a
+period): `goods-receipt/goodsReceipt` and `goods-shipment/goodsShipment` `CreateFrom` → `importOrderLines`;
+`purchase-invoice/header` `Createfromorders` → `importOrderLines`, `Createfrominouts` → `importReceiptLines`,
+`CreateFrom` → `importOrderLines`; `sales-invoice/header` the same with `importShipmentLines`. Existing redirects and
+hidden entries are kept. The spec prompts of the four windows (`schema_forge/agent-prompts/<window>/spec.md`, referenced
+by `decisions.json -> window.agentPrompt`, persisted in `ETGO_SF_SPEC.AGENT_PROMPT`) describe the flow and name the
+one-step alternatives, which remain valid: `createGoodsReceipt` / `createShipment` on the order, `createPurchaseInvoice`
+/ `createDraftInvoice` on an order or receipt / shipment (created AND completed in one call).
+
+**Channels.** REST (ACTION sub-endpoint) and MCP reach the same delegates through `NeoExtensionDispatcher`; the
+contracts only judge the MCP call, and `etendo_batch` has no ACTION surface. No new divergence between them; the one
+that matters (the lines CRUD is uncapped, the actions are) is declared in the §4.12.9 table.
+
+*Not done here (follow-up):* the sales shipment modal should link the header like the receipt one.

@@ -160,6 +160,7 @@ def isolatedDalTests = [
         '**/CreatePurchaseInvoiceHandlerNegativeQuantityIntegrationTest.class',
         '**/AbstractInvoiceHeaderHandlerOriginInvoiceIntegrationTest.class',
         '**/NeoCloneRecordHandlerInvoiceLinksIntegrationTest.class',
+        '**/ImportOrderLinesIntoInvoiceHandlerIntegrationTest.class',
 ]
 
 def isolatedDalTestClasses = [
@@ -170,6 +171,7 @@ def isolatedDalTestClasses = [
         'com.etendoerp.go.schemaforge.CreatePurchaseInvoiceHandlerNegativeQuantityIntegrationTest',
         'com.etendoerp.go.schemaforge.AbstractInvoiceHeaderHandlerOriginInvoiceIntegrationTest',
         'com.etendoerp.go.schemaforge.NeoCloneRecordHandlerInvoiceLinksIntegrationTest',
+        'com.etendoerp.go.schemaforge.ImportOrderLinesIntoInvoiceHandlerIntegrationTest',
 ]
 
 def commandLineFilterReachesIsolatedGoTest = { requestedTestPatterns ->
