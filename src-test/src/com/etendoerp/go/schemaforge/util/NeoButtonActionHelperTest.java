@@ -865,6 +865,45 @@ class NeoButtonActionHelperTest {
       assertNotNull(result);
       assertEquals("Processing", result.getDBColumnName());
     }
+
+    /** A button column of C_Order whose DAL property differs from its pushed qualifier. */
+    private Column orderButton(String dbName, String property) {
+      Column column = mock(Column.class);
+      when(column.getDBColumnName()).thenReturn(dbName);
+      org.openbravo.model.ad.domain.Reference button = mock(org.openbravo.model.ad.domain.Reference.class);
+      when(button.getId()).thenReturn("28");
+      when(column.getReference()).thenReturn(button);
+      Table table = mock(Table.class);
+      when(table.getDBTableName()).thenReturn("C_Order");
+      when(column.getTable()).thenReturn(table);
+      Entity dal = mock(Entity.class);
+      org.openbravo.base.model.Property prop = mock(org.openbravo.base.model.Property.class);
+      when(prop.getName()).thenReturn(property);
+      when(dal.getPropertyByColumnName(dbName)).thenReturn(prop);
+      when(ModelProvider.getInstance().getEntityByTableName("C_Order")).thenReturn(dal);
+      return column;
+    }
+
+    @Test
+    @DisplayName("ETP-5669: should match a button by its DAL property when the qualifier differs")
+    void shouldMatchButtonByDalProperty() {
+      Column column = orderButton("RM_CreateInvoice", "createInvoice");
+      setupFieldCriteria(new ArrayList<>(List.of(createMockField(column, "rMCreateInvoice"))));
+
+      assertEquals(column, NeoButtonActionHelper.findButtonColumn("entity1", "createInvoice"));
+    }
+
+    @Test
+    @DisplayName("ETP-5669: a DAL property match never shadows an exact DB column match")
+    void exactMatchWinsOverDalProperty() {
+      Column byProperty = orderButton("RM_CreateInvoice", "Processing");
+      Column exact = mock(Column.class);
+      when(exact.getDBColumnName()).thenReturn("Processing");
+      setupFieldCriteria(new ArrayList<>(List.of(createMockField(byProperty, "rMCreateInvoice"),
+          createMockField(exact, "processNow"))));
+
+      assertEquals(exact, NeoButtonActionHelper.findButtonColumn("entity1", "Processing"));
+    }
   }
 
   // ── loadEntityFields ──────────────────────────────────────────────────

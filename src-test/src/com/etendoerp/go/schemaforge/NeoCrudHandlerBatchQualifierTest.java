@@ -338,6 +338,38 @@ class NeoCrudHandlerBatchQualifierTest {
   }
 
   @Test
+  @DisplayName("ETP-5669: a fallback pick is not protected from the cascade; a real default is")
+  @SuppressWarnings("unchecked")
+  void fallbackPicksAreNotProtectedFromTheCascade() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("accountingDate", "2026-06-20");
+    Tab adTab = mock(Tab.class);
+    NeoContext context = contextWithQualifier(adTab, "   ", body);
+
+    try (Pipeline pipeline = new Pipeline()) {
+      // After the defaults pass the body holds a first-combo-row period and a genuine default.
+      pipeline.crudHelper.when(() -> NeoCrudHelper.snapshotMandatoryBodyFields(any(), any()))
+          .thenReturn(new HashSet<>(Set.of("period", "organization")));
+      pipeline.mandatoryDefaults.when(() -> NeoMandatoryDefaultsService.injectMandatoryDefaults(
+          any(), any(), any(), any(), anyBoolean())).thenAnswer(inv -> {
+            context.addFallbackDefault("period");
+            return null;
+          });
+
+      executePostCreateToTheDalWrite(new NeoCrudHandler(null), context, adTab,
+          passThroughFilter(body));
+
+      ArgumentCaptor<Set<String>> protectedFields = ArgumentCaptor.forClass(Set.class);
+      pipeline.cascade.verify(() -> NeoDefaultsCascadeHelper.executeCalloutCascade(eq(context),
+          eq(adTab), any(), any(), protectedFields.capture(), any(), any()));
+      assertFalse(protectedFields.getValue().contains("period"),
+          "the DateAcct callout must be free to replace the first-row period");
+      assertTrue(protectedFields.getValue().contains("organization"),
+          "a genuine default stays protected (ETP-4258)");
+    }
+  }
+
+  @Test
   @DisplayName("The cascade sees the body the field filter returned")
   void theFilteredBodyIsWhatTheCascadeSees() throws Exception {
     JSONObject body = new JSONObject();

@@ -27,6 +27,9 @@ import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
+import org.openbravo.base.model.Entity;
+import org.openbravo.base.model.ModelProvider;
+import org.openbravo.base.model.Property;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Column;
@@ -238,14 +241,21 @@ public final class NeoButtonActionHelper {
 
   /**
    * Finds the AD column that corresponds to the given action name within an entity.
-   * Matches against both the DB column name and the field's Java qualifier.
+   * Matches against the DB column name and the field's Java qualifier first; then, for button
+   * columns only, against the DAL property name.
+   *
+   * <p>ETP-5669: {@code etendo_schema} advertises a button by its DAL property, and the pushed
+   * qualifier does not always equal it (e.g. {@code C_Order.RM_CreateInvoice}: qualifier
+   * {@code rMCreateInvoice}, property {@code createInvoice}). The second pass never shadows an
+   * exact match of the first.
    *
    * @param entityId   the ID of the entity to search within
-   * @param actionName the action identifier (DB column name or camelCase Java qualifier)
+   * @param actionName the action identifier (DB column name, Java qualifier or DAL property)
    * @return the matching {@link org.openbravo.model.ad.datamodel.Column}, or {@code null} if not found
    */
   public static Column findButtonColumn(String entityId, String actionName) {
-    for (SFField field : loadEntityFields(entityId)) {
+    List<SFField> fields = loadEntityFields(entityId);
+    for (SFField field : fields) {
       Column column = field.getADColumn();
       if (column == null) continue;
       // Match by DB column name (e.g. "Processing") or by camelCase field name (e.g. "processNow")
@@ -254,6 +264,32 @@ public final class NeoButtonActionHelper {
         return column;
       }
     }
+    for (SFField field : fields) {
+      Column column = field.getADColumn();
+      if (column != null && column.getReference() != null
+          && "28".equals((String) column.getReference().getId())
+          && actionName.equals(propertyNameOf(column))) {
+        return column;
+      }
+    }
     return null;
+  }
+
+  /**
+   * The DAL property name of a column (e.g. {@code documentAction} for {@code GL_Journal.DocAction}),
+   * or {@code null} when the table or column is not in the runtime model.
+   *
+   * @param column the AD column
+   * @return the property name, or {@code null}
+   */
+  public static String propertyNameOf(Column column) {
+    try {
+      Entity dal = ModelProvider.getInstance()
+          .getEntityByTableName(column.getTable().getDBTableName());
+      Property property = dal == null ? null : dal.getPropertyByColumnName(column.getDBColumnName());
+      return property == null ? null : property.getName();
+    } catch (RuntimeException e) {
+      return null;
+    }
   }
 }

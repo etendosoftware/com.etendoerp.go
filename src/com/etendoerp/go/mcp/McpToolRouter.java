@@ -1288,7 +1288,14 @@ public class McpToolRouter {
     if (declaredActionsSchema != null) {
       return declaredActionsSchema;
     }
-    McpToolRouterSupport.validateArgs(args, McpConstants.PARAM_ENTITY);
+    // ETP-5669: an absent view is named together with an absent entity, not one call later. A
+    // present entity keeps the view check below, which lists the views.
+    boolean viewMissing = args == null
+        || args.optString(McpActionsView.PARAM_VIEW, "").trim().isEmpty();
+    McpToolRouterSupport.validateArgs(args, viewMissing && (args == null
+        || !args.has(McpConstants.PARAM_ENTITY) || args.isNull(McpConstants.PARAM_ENTITY))
+            ? new String[] { McpConstants.PARAM_ENTITY, McpActionsView.PARAM_VIEW }
+            : new String[] { McpConstants.PARAM_ENTITY });
 
     String entityName = args.getString(McpConstants.PARAM_ENTITY);
 

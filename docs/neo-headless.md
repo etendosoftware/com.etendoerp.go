@@ -299,6 +299,18 @@ original POST (including one forced by upstream logic before the request reached
 rectifying-document key per ETP-4783) is in the step-1 snapshot and stays protected from being
 overwritten by a re-cascaded callout.
 
+**REST / batch create (`NeoCrudHandler#executePostCreate`).** This path runs the defaults pass
+without its cascade and then its own cascade, protecting the caller's fields **plus** every
+mandatory field present after the defaults (ETP-4258, so a genuine field/session/parent default —
+e.g. an asset's `calculateType` — is not replaced by a callout). Since ETP-5669 a mandatory field
+the defaults pass filled with a **placeholder** — the first combo row (`tryInjectFirstFromLookup`)
+or the safe-type fallback — is recorded on the context (`NeoContext#getFallbackDefaults`) and left
+**out** of that protected set: it only satisfies NOT NULL, so a callout may refine it. Reference
+case: `etendo_batch` created G/L journals in the first open period (Apr-26) whatever the
+accounting date, because `SL_Journal_Period`'s answer for `period` was discarded. Side effect,
+intended: e.g. `A_Asset.Amortizationtype` / `Assetschedule` (no AD default) now follow the asset
+group's callout, as the SPA form shows.
+
 **PUT / PATCH update** -- `PUT|PATCH /{specName}/{entityName}/{recordId}`
 
 Both PUT and PATCH are delegated to DataSourceServlet's PUT handler internally. PATCH is handled via a `service()` override that intercepts the PATCH method at the Servlet API level.
@@ -3796,7 +3808,13 @@ The transfer (§4.12.1.5) follows the same pattern:
 
 ##### Closed: an AD button reaches the customization under its field name on MCP (ETP-5710)
 
-`etendo_schema` advertises a button under its DB column name (`action: "DocAction"`) and the REST
+Until ETP-5669, `etendo_schema` advertised a button under its DB column name (`action: "DocAction"`);
+it now advertises the field (DAL property) name (`action: "documentAction"`, `column` keeps
+`"DocAction"`), and `etendo_action` accepts both. `NeoButtonActionHelper.findButtonColumn` matches
+the DB column name and the pushed `Java_Qualifier` first and then, for button columns only, the DAL
+property — the qualifier is computed by the extractor and differs from the DAL name on some
+buttons (`C_Order.RM_CreateInvoice`: qualifier `rMCreateInvoice`, property `createInvoice`), so
+without that second pass the advertised name could not be fired. The REST
 action route reaches the customization under the name in its URL — the SPA posts `documentAction`
 for the document-action button. `McpToolRouter.handleAction` used to hand the agent's string to the
 customization as it was typed, so a completion typed `DocAction` was invisible to the header
@@ -4063,6 +4081,13 @@ A refusal for a date with no open period is named `PeriodNotAvailable` (or `Peri
 It also rewrites core `Utilities.checkPeriod`'s raw `@ETPR_PeriodClosedForUnRemovePayment@` into
 the translated, keyed refusal. Still divergent: inside an `etendo_batch` / `/sws/neo/batch` body,
 a per-operation error is not keyed — only the envelope goes through these two places.
+
+Not a period refusal: completing a G/L journal whose **stored** period does not contain its
+accounting date. Core's trigger would answer `PeriodNotValid`, which the SPA words as "open the
+period" — wrong advice when the period is open but is the wrong one. `GlJournalHeaderHandler`
+refuses CO first with its own plain key `ETGO_GLJournalPeriodMismatch` and `messageParams`
+`{period, accountingDate}` (ETP-5669); a body that already names its keys is left alone by
+`identifyPeriodRefusal`.
 
 #### 4.12.10 An excluded field does not exist, on every verb (ETP-5335, IMP-39)
 

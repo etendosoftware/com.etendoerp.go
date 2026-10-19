@@ -243,7 +243,7 @@ class McpSchemaReportActionsTest {
     specDeclaresNoActions();
     McpRoutingException ex = assertThrows(McpRoutingException.class,
         () -> handleSchema(new JSONObject()));
-    assertTrue(ex.getMessage().contains("Missing required argument: entity"));
+    assertTrue(ex.getMessage().contains("Missing required arguments: entity, view"));
     support.verify(() -> McpToolRouterSupport.listIncludedEntities(anyString()), never());
   }
 
@@ -267,7 +267,7 @@ class McpSchemaReportActionsTest {
         .thenReturn(List.of(other));
     McpRoutingException ex = assertThrows(McpRoutingException.class,
         () -> handleSchema(new JSONObject()));
-    assertTrue(ex.getMessage().contains("Missing required argument: entity"), ex.getMessage());
+    assertTrue(ex.getMessage().contains("Missing required arguments: entity, view"), ex.getMessage());
   }
 
   @Test
@@ -309,7 +309,7 @@ class McpSchemaReportActionsTest {
     when(spec.getSpecType()).thenReturn("W");
     McpRoutingException ex = assertThrows(McpRoutingException.class,
         () -> handleSchema(new JSONObject()));
-    assertTrue(ex.getMessage().contains("Missing required argument: entity"));
+    assertTrue(ex.getMessage().contains("Missing required arguments: entity, view"));
   }
 
   @Test

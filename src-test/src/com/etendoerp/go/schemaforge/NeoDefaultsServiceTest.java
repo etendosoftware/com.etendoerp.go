@@ -3817,12 +3817,20 @@ public class NeoDefaultsServiceTest {
       parentMock.when(() -> NeoParentValuesLoader.load(adTab, null))
           .thenReturn(java.util.Collections.emptyMap());
 
+      cascadeMock.when(() -> NeoDefaultsCascadeHelper.injectSafeTypeDefault(
+          eq(body), eq("processingStatus"), eq(flagCol))).thenAnswer(inv -> {
+            body.put("processingStatus", "N");
+            return null;
+          });
+
       NeoMandatoryDefaultsService.injectMandatoryDefaults(body, adTab, ctx);
 
       // The mandatory column must reach the safe-type fallback — proving the !mandatory gate
       // does NOT short-circuit mandatory columns (NOT NULL parity preserved).
       cascadeMock.verify(() -> NeoDefaultsCascadeHelper.injectSafeTypeDefault(
           eq(body), eq("processingStatus"), eq(flagCol)));
+      // ETP-5669: and the placeholder is recorded, so the create's cascade may refine it.
+      assertTrue(ctx.getFallbackDefaults().contains("processingStatus"));
     }
   }
 
