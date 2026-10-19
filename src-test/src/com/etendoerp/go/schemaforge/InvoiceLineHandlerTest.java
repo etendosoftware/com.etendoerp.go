@@ -1652,9 +1652,11 @@ class InvoiceLineHandlerTest {
   // ---------------------------------------------------------------------------
 
   /**
-   * ETP-5703: on a return invoice, an update of a line's quantity to 3 is negated first (-3) and the
-   * amounts are then derived from the negated quantity with the stored price and tax: -4.50 net,
-   * -5.45 gross. Deriving before the negation would persist positive amounts on a negative line.
+   * ETP-5703: on a return invoice, an update of a line's quantity to 3 is negated first (-3) by this
+   * class's pre-hook and the amounts are then derived — by the line customization that extends it
+   * ({@link SalesInvoiceLineHandler}, after {@code super.handle}) — from the negated quantity with
+   * the stored price and tax: -4.50 net, -5.45 gross. Deriving before the negation would persist
+   * positive amounts on a negative line.
    */
   @Test
   void returnInvoiceUpdateDerivesAmountsFromTheNegatedQuantity() throws Exception {
@@ -1688,7 +1690,7 @@ class InvoiceLineHandlerTest {
       when(obDal.get(InvoiceLine.class, "line-r")).thenReturn(line);
       when(obDal.get(Invoice.class, "inv-r")).thenReturn(invoice);
 
-      assertNull(handler.handle(context));
+      assertNull(new SalesInvoiceLineHandler().handle(context));
     }
 
     assertEquals(-3.0, body.getDouble("invoicedQuantity"), 0.001);

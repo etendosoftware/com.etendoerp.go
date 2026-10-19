@@ -20,6 +20,18 @@ for _key in "$HOOKS_TRAILER_KEY" "Checks"; do
   fi
 done
 
+# The message format Git Police checks on the PR (lib/git-conventions.sh), enforced here so a
+# wrong message never needs rewriting after a push.
+. "$SCRIPT_DIR/lib/git-conventions.sh"
+MSG_PROBLEM="$(commit_message_problem "$MSG_FILE")"
+if [ -n "$MSG_PROBLEM" ]; then
+  echo "❌ commit-msg: the commit message does not follow the Etendo convention: $MSG_PROBLEM."
+  echo "   Example: Feature ETP-1234: Add the onboarding step for the tax ID"
+  echo "   The message is kept in $MSG_FILE; fix it and commit again with:"
+  echo "     git commit -e -F \"$MSG_FILE\"        (add --amend when amending)"
+  exit 1
+fi
+
 PROOF="$(hooks_read_proof || true)"
 if [ -z "$PROOF" ]; then
   # No proof: pre-commit did not run (hooks not installed, or --no-verify).

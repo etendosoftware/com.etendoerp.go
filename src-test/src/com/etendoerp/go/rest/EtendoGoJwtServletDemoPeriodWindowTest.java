@@ -17,11 +17,7 @@
 package com.etendoerp.go.rest;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
@@ -30,92 +26,70 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import java.time.Instant;
-
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 import org.mockito.MockedStatic;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.service.OBDal;
 
-import com.etendoerp.go.onboarding.OnboardingPeriodControlService;
-import com.etendoerp.go.payment.EnvironmentAccessPolicy;
-import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
+import com.etendoerp.go.onboarding.OnboardingInitialPeriodStateService;
 
 /**
- * ETP-5575 — the post-commit, best-effort step that opens a demo's periods through its trial end.
- * It must use the stored trial start and the configured trial days, commit on its own, and never
- * let a failure (its own or its commit's) escape to the onboarding.
+ * ETP-5575 / ETP-5577 — the post-commit, best-effort step that applies a new tenant's initial
+ * period state, and its retry on environment login. It must commit on its own and never let a
+ * failure (its own or its commit's) escape to the onboarding or the login.
+ *
+ * @covers com.etendoerp.go.rest.EtendoGoJwtServlet
  */
 class EtendoGoJwtServletDemoPeriodWindowTest {
 
-  private static final Instant STARTED = Instant.parse("2026-09-30T10:00:00Z");
-
   private EtendoGoJwtServlet servlet;
-  private OnboardingPeriodControlService periods;
-  private TenantEnvironmentLifecycleService lifecycle;
-  private OnboardingProvisioningChain.AdminContext admin;
+  private OnboardingInitialPeriodStateService initialState;
 
   @BeforeEach
   void setUp() {
     servlet = new EtendoGoJwtServlet(mock(TransactionalAuthEmailSender.class));
-    periods = mock(OnboardingPeriodControlService.class);
-    lifecycle = mock(TenantEnvironmentLifecycleService.class);
-    servlet.onboardingPeriodControlService = periods;
-    servlet.tenantEnvironmentLifecycleService = lifecycle;
-    when(lifecycle.configuration()).thenReturn(new EnvironmentAccessPolicy.Configuration(15, 7));
-    admin = new OnboardingProvisioningChain.AdminContext();
-    admin.adminUserId = "ADMIN-USER";
-    admin.adminRoleId = "ADMIN-ROLE";
+    initialState = mock(OnboardingInitialPeriodStateService.class);
+    servlet.onboardingInitialPeriodStateService = initialState;
   }
 
   @Test
-  void opensTheWindowFromTheStoredTrialStartAndCommitsIt() {
-    TenantEnvironmentLifecycleService.EnvironmentSnapshot snapshot = demoSnapshot(STARTED);
-    when(lifecycle.resolve("DEMO")).thenReturn(snapshot);
+  void appliesThePendingStateAndCommitsIt() {
+    when(initialState.applyIfPending("CLIENT")).thenReturn(true);
     OBDal dal = mock(OBDal.class);
 
     try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
       obDal.when(OBDal::getInstance).thenReturn(dal);
-      servlet.openDemoTrialPeriodsBestEffort("DEMO", "ORG-1", admin);
+      servlet.applyInitialPeriodStateBestEffort("CLIENT");
     }
 
-    InOrder order = inOrder(periods, dal);
-    order.verify(periods).openDemoTrialWindow("DEMO", "ORG-1", "ADMIN-USER", "ADMIN-ROLE",
-        STARTED, 15);
+    InOrder order = inOrder(initialState, dal);
+    order.verify(initialState).applyIfPending("CLIENT");
     order.verify(dal).commitAndClose();
     verify(dal, never()).rollbackAndClose();
   }
 
   @Test
-  void fallsBackToNowWhenTheTrialStartCannotBeRead() {
-    when(lifecycle.resolve("DEMO")).thenReturn(null);
-    Instant before = Instant.now();
-
-    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
-      obDal.when(OBDal::getInstance).thenReturn(mock(OBDal.class));
-      servlet.openDemoTrialPeriodsBestEffort("DEMO", "ORG-1", admin);
-    }
-
-    ArgumentCaptor<Instant> start = ArgumentCaptor.forClass(Instant.class);
-    verify(periods).openDemoTrialWindow(eq("DEMO"), eq("ORG-1"), eq("ADMIN-USER"),
-        eq("ADMIN-ROLE"), start.capture(), eq(15));
-    assertFalse(start.getValue().isBefore(before), "the fallback start is now");
-  }
-
-  @Test
-  void aFailingWindowIsRolledBackAndNeverEscapes() {
-    TenantEnvironmentLifecycleService.EnvironmentSnapshot snapshot = demoSnapshot(STARTED);
-    when(lifecycle.resolve("DEMO")).thenReturn(snapshot);
-    doThrow(new OBException("boom")).when(periods).openDemoTrialWindow(anyString(), anyString(),
-        anyString(), anyString(), any(Instant.class), anyInt());
+  void nothingPendingCommitsNothing() {
     OBDal dal = mock(OBDal.class);
 
     try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
       obDal.when(OBDal::getInstance).thenReturn(dal);
-      assertDoesNotThrow(() -> servlet.openDemoTrialPeriodsBestEffort("DEMO", "ORG-1", admin));
+      servlet.applyInitialPeriodStateBestEffort("CLIENT");
+    }
+
+    verify(dal, never()).commitAndClose();
+  }
+
+  @Test
+  void aFailingStepIsRolledBackAndNeverEscapes() {
+    when(initialState.applyIfPending("CLIENT")).thenThrow(new OBException("boom"));
+    OBDal dal = mock(OBDal.class);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      assertDoesNotThrow(() -> servlet.applyInitialPeriodStateBestEffort("CLIENT"));
     }
 
     verify(dal, never()).commitAndClose();
@@ -124,41 +98,51 @@ class EtendoGoJwtServletDemoPeriodWindowTest {
 
   @Test
   void aFailingCommitIsRolledBackAndNeverEscapes() {
-    TenantEnvironmentLifecycleService.EnvironmentSnapshot snapshot = demoSnapshot(STARTED);
-    when(lifecycle.resolve("DEMO")).thenReturn(snapshot);
+    when(initialState.applyIfPending("CLIENT")).thenReturn(true);
     OBDal dal = mock(OBDal.class);
     doThrow(new IllegalStateException("commit boom")).when(dal).commitAndClose();
 
     try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
       obDal.when(OBDal::getInstance).thenReturn(dal);
-      assertDoesNotThrow(() -> servlet.openDemoTrialPeriodsBestEffort("DEMO", "ORG-1", admin));
+      assertDoesNotThrow(() -> servlet.applyInitialPeriodStateBestEffort("CLIENT"));
     }
 
     verify(dal).rollbackAndClose();
   }
 
   @Test
-  void aFailingTrialConfigurationNeverEscapes() {
-    TenantEnvironmentLifecycleService.EnvironmentSnapshot snapshot = demoSnapshot(STARTED);
-    when(lifecycle.resolve("DEMO")).thenReturn(snapshot);
-    when(lifecycle.configuration()).thenThrow(new IllegalStateException("config boom"));
+  void loginWithNothingPendingTouchesNoTransaction() {
     OBDal dal = mock(OBDal.class);
 
     try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
       obDal.when(OBDal::getInstance).thenReturn(dal);
-      assertDoesNotThrow(() -> servlet.openDemoTrialPeriodsBestEffort("DEMO", "ORG-1", admin));
+      servlet.retryInitialPeriodStateOnLogin("CLIENT");
     }
 
-    verify(dal).rollbackAndClose();
-    verify(periods, never()).openDemoTrialWindow(anyString(), anyString(), anyString(),
-        anyString(), any(Instant.class), anyInt());
+    verify(dal, never()).commitAndClose();
+    verify(initialState, never()).applyIfPending(anyString());
   }
 
-  private static TenantEnvironmentLifecycleService.EnvironmentSnapshot demoSnapshot(
-      Instant startedAt) {
-    TenantEnvironmentLifecycleService.EnvironmentSnapshot snapshot =
-        mock(TenantEnvironmentLifecycleService.EnvironmentSnapshot.class);
-    when(snapshot.getTrialStartedAt()).thenReturn(startedAt);
-    return snapshot;
+  @Test
+  void loginCommitsItsOwnWorkBeforeRetryingAPendingState() {
+    when(initialState.isPending("CLIENT")).thenReturn(true);
+    when(initialState.applyIfPending("CLIENT")).thenThrow(new OBException("boom"));
+    OBDal dal = mock(OBDal.class);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      assertDoesNotThrow(() -> servlet.retryInitialPeriodStateOnLogin("CLIENT"));
+    }
+
+    InOrder order = inOrder(dal, initialState);
+    order.verify(dal).commitAndClose();
+    order.verify(initialState).applyIfPending("CLIENT");
+    order.verify(dal).rollbackAndClose();
+  }
+
+  @Test
+  void loginWithoutAClientDoesNothing() {
+    assertDoesNotThrow(() -> servlet.retryInitialPeriodStateOnLogin(null));
+    verify(initialState, never()).isPending(anyString());
   }
 }

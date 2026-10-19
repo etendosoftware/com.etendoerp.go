@@ -49,6 +49,26 @@ public class CloneInvoiceLinePriceHook extends CloneLinePriceHook {
     super(delegate);
   }
 
+  /**
+   * After the core clone: a fresh record points at none of the source's related documents
+   * (ETP-5709). The core hook already unlinks the order and the shipment line; this also clears
+   * the corrected-invoice link and the source invoice line a credit line was derived from.
+   */
+  @Override
+  public BaseOBObject postCopy(BaseOBObject originalRecord, BaseOBObject newRecord)
+      throws Exception {
+    BaseOBObject copied = super.postCopy(originalRecord, newRecord);
+    Invoice clone = (Invoice) copied;
+    clone.setAeatsiiInvoice(null);
+    clone.setSalesOrder(null);
+    for (InvoiceLine line : clone.getInvoiceLineList()) {
+      line.setETGOSourceInvoiceLine(null);
+      line.setSalesOrderLine(null);
+      line.setGoodsShipmentLine(null);
+    }
+    return copied;
+  }
+
   @Override
   protected void restoreListPrices(BaseOBObject originalRecord, BaseOBObject copied) {
     List<InvoiceLine> sourceLines = ((Invoice) originalRecord).getInvoiceLineList();

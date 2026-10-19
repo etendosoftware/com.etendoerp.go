@@ -82,6 +82,8 @@ import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
  * documents, and the create pre-hook's partnerAddress/invoiceAddress default (ETP-5703).
  *
  * @covers com.etendoerp.go.schemaforge.SalesOrderHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.CreateShipmentHandler
+ * @covers com.etendoerp.go.schemaforge.CreateDraftInvoiceHandler
  * @covers com.etendoerp.go.schemaforge.OrderReactivationGuard
  * @covers com.etendoerp.go.schemaforge.AbstractOrderHeaderHandler
  * @covers com.etendoerp.go.schemaforge.DocActionRequestSupport
@@ -1065,5 +1067,39 @@ public class SalesOrderHeaderHandlerTest {
 
       assertEquals("bill-chosen", body.getString("invoiceAddress"));
     }
+  }
+
+  // ── declared action contracts (ETP-5709) ──────────────────────────────────
+
+  @Test
+  public void actionContracts_declaresShipmentInvoiceAndClone() {
+    Map<String, com.etendoerp.go.schemaforge.util.NeoActionContract> contracts = new SalesOrderHeaderHandler().actionContracts();
+
+    assertEquals(List.of("createShipment", "createDraftInvoice", "cloneRecord"),
+        List.copyOf(contracts.keySet()));
+    for (com.etendoerp.go.schemaforge.util.NeoActionContract c : contracts.values()) {
+      assertEquals("POST", c.getHttpMethod());
+    }
+    assertTrue(contracts.get("createShipment").getParams().isEmpty());
+    assertTrue(contracts.get("cloneRecord").getParams().isEmpty());
+    assertTrue(contracts.get("createShipment").getDescription().contains("DRAFT"));
+    String invoice = contracts.get("createDraftInvoice").getDescription();
+    assertTrue("must warn that the invoice is completed despite the name",
+        invoice.contains("COMPLETES") && invoice.contains("despite the name"));
+    assertEquals(List.of("lines"), contracts.get("createDraftInvoice").getParams().stream()
+        .map(com.etendoerp.go.schemaforge.util.NeoActionContract.Param::getName).collect(java.util.stream.Collectors.toList()));
+  }
+
+  @Test
+  public void actionContracts_acceptEveryBodyTheSpaSends() throws Exception {
+    Map<String, com.etendoerp.go.schemaforge.util.NeoActionContract> contracts = new SalesOrderHeaderHandler().actionContracts();
+
+    for (String action : contracts.keySet()) {
+      assertNull(action, com.etendoerp.go.schemaforge.util.NeoActionContract.validate(contracts, action, new JSONObject()));
+    }
+    assertNull(com.etendoerp.go.schemaforge.util.NeoActionContract.validate(contracts, "createDraftInvoice", new JSONObject().put("lines",
+        new JSONArray().put(new JSONObject().put("orderLineId", "L1").put("quantity", "2")))));
+    assertEquals(com.etendoerp.go.schemaforge.util.NeoActionContract.SC_UNPROCESSABLE, com.etendoerp.go.schemaforge.util.NeoActionContract.validate(contracts,
+        "createShipment", new JSONObject().put("warehouseId", "W1")).getHttpStatus());
   }
 }

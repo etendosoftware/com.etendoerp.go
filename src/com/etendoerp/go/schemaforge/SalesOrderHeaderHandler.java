@@ -17,6 +17,9 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.util.LinkedHashMap;
+import java.util.Map;
+
 import javax.inject.Inject;
 import javax.inject.Named;
 
@@ -24,6 +27,7 @@ import org.openbravo.model.common.businesspartner.Location;
 import org.openbravo.model.common.order.Order;
 
 import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
 
 /**
  * NeoHandler for the Sales Order header entity.
@@ -67,6 +71,21 @@ public class SalesOrderHeaderHandler extends AbstractOrderHeaderHandler {
 
   @Inject
   private TotalDiscountService totalDiscountService;
+
+  /**
+   * The actions this header serves through its delegates, declared for agents (ETP-5709):
+   * {@code createShipment}, {@code createDraftInvoice} and {@code cloneRecord}. Published by the
+   * MCP next to the AD buttons; REST and the SPA do not read it.
+   */
+  @Override
+  public Map<String, NeoActionContract> actionContracts() {
+    Map<String, NeoActionContract> contracts = new LinkedHashMap<>();
+    contracts.put(CreateShipmentHandler.CONTRACT.getName(), CreateShipmentHandler.CONTRACT);
+    contracts.put(CreateDraftInvoiceHandler.ORDER_CONTRACT.getName(),
+        CreateDraftInvoiceHandler.ORDER_CONTRACT);
+    contracts.put(NeoCloneRecordHandler.CONTRACT.getName(), NeoCloneRecordHandler.CONTRACT);
+    return contracts;
+  }
 
   @Override
   public NeoResponse handle(NeoContext context) {
