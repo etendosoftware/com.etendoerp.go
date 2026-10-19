@@ -647,12 +647,7 @@ public class McpToolRouter {
     // got a 422 for parent-derived fields it was never told to send. Copied into `fields`
     // rather than handled separately so there stays exactly ONE downstream reader of it (the
     // resolveParentFK block below); the top-level argument wins, because it is the declared one.
-    if (args.has(McpConstants.PARAM_PARENT_ID) && !args.isNull(McpConstants.PARAM_PARENT_ID)) {
-      String topLevelParentId = args.getString(McpConstants.PARAM_PARENT_ID);
-      if (StringUtils.isNotBlank(topLevelParentId)) {
-        fields.put(McpConstants.PARAM_PARENT_ID, topLevelParentId);
-      }
-    }
+    copyTopLevelParentId(args, fields);
 
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
     SFEntity sfEntity = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, entityName);
@@ -882,6 +877,24 @@ public class McpToolRouter {
     McpWriteRequestSupport.reportSupersededDefaults(flat, ctx.getSupersededDefaults());
     McpWriteRequestSupport.reportServerOwnedFields(flat, serverOwnedFields);
     return wrapAsTextContent(flat);
+  }
+
+  /**
+   * IMP-40: copies a non-blank top-level {@code parentId} argument into {@code fields}, where it
+   * overrides any {@code parentId} the fields already carry.
+   *
+   * @param args   the tool arguments
+   * @param fields the record fields of the create
+   * @throws JSONException if the argument cannot be read or copied
+   */
+  private static void copyTopLevelParentId(JSONObject args, JSONObject fields)
+      throws JSONException {
+    if (args.has(McpConstants.PARAM_PARENT_ID) && !args.isNull(McpConstants.PARAM_PARENT_ID)) {
+      String topLevelParentId = args.getString(McpConstants.PARAM_PARENT_ID);
+      if (StringUtils.isNotBlank(topLevelParentId)) {
+        fields.put(McpConstants.PARAM_PARENT_ID, topLevelParentId);
+      }
+    }
   }
 
   // ── etendo_update ────────────────────────────────────────────────────────

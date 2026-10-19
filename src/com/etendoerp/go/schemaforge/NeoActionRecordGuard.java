@@ -83,6 +83,11 @@ public final class NeoActionRecordGuard {
    * Strict CRUD target guard, before customization dispatch or optimistic-version reads.
    * Unlike actions, CRUD always addresses a row in its tab: missing rows/model/session are refused.
    * Write ownership uses the current client and writable organizations, never readable System data.
+   *
+   * @param entity   the SchemaForge entity whose tab holds the targeted row
+   * @param recordId the id of the row the CRUD request writes or deletes
+   * @return a 404 when the row is missing, unresolvable or not writable by the current tenant, or
+   *         {@code null} when the write may proceed
    */
   public static NeoResponse writeRefusalFor(SFEntity entity, String recordId) {
     if (entity == null || StringUtils.isBlank(recordId) || OBContext.getOBContext() == null) {

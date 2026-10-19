@@ -159,27 +159,34 @@ public final class NeoReferenceOwnership {
     Iterator<?> keys = fields.keys();
     while (keys.hasNext()) {
       String key = String.valueOf(keys.next());
-      String[] path = StringUtils.split(key, PATH_SEPARATOR);
-      if (path == null || path.length == 0) {
-        continue;
-      }
-      Property property = entity.getProperty(path[0], false);
-      if (property == null || !isPersistedReference(property)) {
-        continue;
-      }
-      if (path.length > 1 && !(path.length == 2 && JsonConstants.ID.equals(path[1]))) {
-        return true;
-      }
-      Object value = fields.opt(key);
-      if (value instanceof JSONArray) {
-        return true;
-      }
-      if (value instanceof JSONObject && !isIdOnlyReference(property.getTargetEntity(),
-          (JSONObject) value)) {
+      if (isSecondaryWriteKey(entity, key, fields.opt(key))) {
         return true;
       }
     }
     return false;
+  }
+
+  /**
+   * One key of {@link #hasSecondaryWrite}: true when it writes through a persisted reference with
+   * a multi-hop path, a list, or an object carrying more than the referenced row's id.
+   */
+  private static boolean isSecondaryWriteKey(Entity entity, String key, Object value) {
+    String[] path = StringUtils.split(key, PATH_SEPARATOR);
+    if (path == null || path.length == 0) {
+      return false;
+    }
+    Property property = entity.getProperty(path[0], false);
+    if (property == null || !isPersistedReference(property)) {
+      return false;
+    }
+    if (path.length > 1 && !(path.length == 2 && JsonConstants.ID.equals(path[1]))) {
+      return true;
+    }
+    if (value instanceof JSONArray) {
+      return true;
+    }
+    return value instanceof JSONObject
+        && !isIdOnlyReference(property.getTargetEntity(), (JSONObject) value);
   }
 
   private static boolean isIdOnlyReference(Entity target, JSONObject value) {
@@ -321,20 +328,20 @@ public final class NeoReferenceOwnership {
    * when it carries one — and writes the object's other keys into it, so both the row and those
    * keys are checked.
    */
-  private static void collectNested(Entity declared, JSONObject record, Set<Reference> out) {
+  private static void collectNested(Entity declared, JSONObject nested, Set<Reference> out) {
     Entity entity = declared;
-    String named = record.optString(JsonConstants.ENTITYNAME, null);
+    String named = nested.optString(JsonConstants.ENTITYNAME, null);
     if (StringUtils.isNotBlank(named)) {
       Entity resolved = ModelProvider.getInstance().getEntity(named, false);
       if (resolved != null) {
         entity = resolved;
       }
     }
-    boolean isNew = record.optBoolean(JsonConstants.NEW_INDICATOR, false);
-    if (!isNew && record.has(JsonConstants.ID)) {
-      addReference(entity, null, record.opt(JsonConstants.ID), out);
+    boolean isNew = nested.optBoolean(JsonConstants.NEW_INDICATOR, false);
+    if (!isNew && nested.has(JsonConstants.ID)) {
+      addReference(entity, null, nested.opt(JsonConstants.ID), out);
     }
-    collectFields(entity, record, out);
+    collectFields(entity, nested, out);
   }
 
   /** The referenced property when it is not the target's id (rare), else {@code null}. */
@@ -345,8 +352,8 @@ public final class NeoReferenceOwnership {
 
   private static void addReference(Entity target, Property referencedProperty, Object raw,
       Set<Reference> out) {
-    // A number is an id too: core reads a nested object's id with getString, so {"id": 1000000}
-    // resolves the row "1000000".
+    // A number is an id too: core reads a nested object's id with getString, so a numeric id
+    // such as 1000000 resolves the row whose id is the text 1000000.
     if (!(raw instanceof String || raw instanceof Number)
         || !TenantOwnership.isTenantScoped(target)) {
       return;

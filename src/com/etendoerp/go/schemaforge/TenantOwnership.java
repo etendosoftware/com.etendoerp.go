@@ -194,11 +194,17 @@ final class TenantOwnership {
       // Tables without a client are shared platform data, not tenant-owned writable rows.
       return false;
     }
-    Organization organization = row instanceof Organization
-        ? (Organization) row
-        : row instanceof OrganizationEnabled ? ((OrganizationEnabled) row).getOrganization() : null;
+    Organization organization = owningOrganization(row);
     return organization == null || (context.getWritableOrganizations() != null
         && context.getWritableOrganizations().contains(organization.getId()));
+  }
+
+  /** The organization a row belongs to: itself for an organization, else its own, if any. */
+  private static Organization owningOrganization(BaseOBObject row) {
+    if (row instanceof Organization) {
+      return (Organization) row;
+    }
+    return row instanceof OrganizationEnabled ? ((OrganizationEnabled) row).getOrganization() : null;
   }
 
   private static boolean hasReadableClient(BaseOBObject entity, OBContext context) {
