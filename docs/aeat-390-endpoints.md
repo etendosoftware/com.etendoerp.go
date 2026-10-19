@@ -443,11 +443,11 @@ file, or the AEAT rejects it; otherwise it is a **warning**.
 | `COMPENSATION_BOTH` | block | `AEAT390_BothAmtPrevious` | box [93] |
 | `REFUND_WITHOUT_MONTHLY_REGISTER` | block | `AEAT390_MonthlyReturn_Check` | box [96] |
 | `LAST_PERIOD_REFUND_CONFLICT` | block | `AEAT390_TotalLastPeriod_Check` | box [97] |
+| `NO_LEGAL_REPRESENTATIVE` | block | AEAT `PAR012` ("Las declaraciones de personas jurídicas deben incluir al menos el NIF de un representante"): a legal entity (`AEAT390_ISPERSON` <> Y) none of whose legal representatives the file carries (the first 3 active `OREP_Representative_Info` rows by `LINE`) has a NIF (`TAXID`). Classic generates the file anyway; the AEAT rejects it. A natural person needs none | organization `modelo390` |
 | `UNPOSTED_INVOICES` `{count, sales, purchase, documents}` | warn | issued invoices (`CO`/`CL`/`VO`, processed) of the exercise with `posted <> 'Y'`: classic and the boxes only read posted ones. `documents` = the first 5 numbers | invoices `{sales, purchase}` |
 | `MISSING_303` `{periods}` | warn | preload `missingPeriods` | box [95] |
 | `DIFF_303` `{difference, expected, result, tolerance, box}` | warn | `Fiscal390PreloadAggregator.reconcile` of the stored-inputs result ([86], or [94]) with `expectedResult`, beyond 1,00 € | box [86] / [94] |
 | `INACTIVE_TAX_WITH_OPERATIONS` `{tax, invoices}` | warn | an inactive `C_Tax` linked to this report by `OBTL_Tax_Parameter` with posted invoices in the exercise: classic `get390TaxesOrderByRate` reads active taxes only, so they are silently left out | — |
-| `NO_LEGAL_REPRESENTATIVE` | warn | legal entity with no active legal representative (a natural person needs none) | organization `modelo390` |
 | `NAME_TRUNCATED` `{field, limit, label?}` | warn | `AEAT390String` cuts: razón social 37, first name / each surname 15, natural-person representative 37 (only with a NIF), legal representative 36 (first 3 by line, `label` = NIF). Measured on what the file keeps (upper case, accents folded, `[^A-Z0-9. ]` dropped) | organization `identity` / `modelo390` |
 | `BOX98_WITH_96_97` | warn | AEAT instructions: [98] empty when [96] or [97] has an amount | box [98] |
 | `NO_BOX` `{parameter, rate}` | warn | calculator warning: a figure the form has no box for (kept in the totals) | — |

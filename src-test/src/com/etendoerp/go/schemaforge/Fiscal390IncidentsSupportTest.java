@@ -226,11 +226,28 @@ public class Fiscal390IncidentsSupportTest {
     assertTrue(body, body.contains(Fiscal390IncidentRules.NO_ORG_NIF));
   }
 
+  /** A legal entity with no representative NIF blocks the file (AEAT PAR012). */
+  @Test
+  public void testGenerateGuardBlocksLegalEntityWithoutRepresentative() throws Exception {
+    Fiscal390IncidentRules.Facts facts = cleanFacts();
+    facts.representatives = List.of(new Fiscal390IncidentRules.Representative(null, "R"));
+    doReturn(facts).when(support).loadFacts(eq("org1"), eq(2026), any(), anyMap(), eq(false));
+    HttpServletResponse resp = response(new StringWriter());
+
+    assertTrue(support.rejectGenerate("org1", 2026, "0A", Map.of(), resp));
+
+    ArgumentCaptor<NeoResponse> sent = ArgumentCaptor.forClass(NeoResponse.class);
+    verify(servlet).writeResponse(eq(resp), sent.capture());
+    String body = String.valueOf(sent.getValue().getBody());
+    assertTrue(body, body.contains(Fiscal390IncidentRules.NO_LEGAL_REPRESENTATIVE));
+  }
+
   /** Warnings never block the file. */
   @Test
   public void testGenerateGuardLetsWarningsThrough() throws Exception {
     Fiscal390IncidentRules.Facts facts = cleanFacts();
-    facts.representatives = List.of(); // NO_LEGAL_REPRESENTATIVE: a warning
+    // INACTIVE_TAX_WITH_OPERATIONS: a warning
+    facts.inactiveTaxes = List.of(new Fiscal390IncidentRules.InactiveTax("IVA 4%", 2L));
     doReturn(facts).when(support).loadFacts(eq("org1"), eq(2026), any(), anyMap(), eq(false));
     HttpServletResponse resp = response(new StringWriter());
 

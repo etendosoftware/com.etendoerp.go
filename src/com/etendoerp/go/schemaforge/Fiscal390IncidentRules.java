@@ -79,6 +79,11 @@ final class Fiscal390IncidentRules {
   static final String REFUND_WITHOUT_MONTHLY_REGISTER = "REFUND_WITHOUT_MONTHLY_REGISTER";
   /** Classic {@code AEAT390_TotalLastPeriod_Check}: DEVOLVER_12 together with [97]. */
   static final String LAST_PERIOD_REFUND_CONFLICT = "LAST_PERIOD_REFUND_CONFLICT";
+  /**
+   * AEAT {@code PAR012}: a legal entity must declare the NIF of at least one legal
+   * representative, so one with no active representative carrying a NIF is rejected.
+   */
+  static final String NO_LEGAL_REPRESENTATIVE = "NO_LEGAL_REPRESENTATIVE";
 
   // ── Warnings ─────────────────────────────────────────────────────────────
   /** Invoices of the exercise not posted: classic (and the boxes) leave them out. */
@@ -89,8 +94,6 @@ final class Fiscal390IncidentRules {
   static final String DIFF_303 = "DIFF_303";
   /** An inactive tax rate of the 390 configuration with posted operations in the exercise. */
   static final String INACTIVE_TAX_WITH_OPERATIONS = "INACTIVE_TAX_WITH_OPERATIONS";
-  /** A legal entity with no active legal representative. */
-  static final String NO_LEGAL_REPRESENTATIVE = "NO_LEGAL_REPRESENTATIVE";
   /** An identity text longer than the length classic cuts it to in the file. */
   static final String NAME_TRUNCATED = "NAME_TRUNCATED";
   /** AEAT instructions: [98] must be empty when [96] or [97] has an amount. */
@@ -276,10 +279,6 @@ final class Fiscal390IncidentRules {
           + tax.invoices() + " posted invoices in the exercise; they are left out of the 390")
           .param("tax", tax.name()).param("invoices", tax.invoices()));
     }
-    if (!f.person && f.representatives.isEmpty()) {
-      out.add(warn(NO_LEGAL_REPRESENTATIVE, "The organization has no legal representative")
-          .action(ACTION_ORGANIZATION, PARAM_SECTION, SECTION_390));
-    }
     truncations(f, out);
     if (hasAmount(f, KEY_LAST_PERIOD_REFUND)
         && (hasAmount(f, KEY_LAST_PERIOD) || anyMonthlyRefund(f))) {
@@ -304,6 +303,7 @@ final class Fiscal390IncidentRules {
           .action(ACTION_ORGANIZATION, PARAM_SECTION, SECTION_IDENTITY));
     }
     if (!f.person) {
+      legalRepresentative(f, out);
       return;
     }
     if (StringUtils.isBlank(f.firstName) || StringUtils.isBlank(f.surname1)) {
@@ -314,6 +314,20 @@ final class Fiscal390IncidentRules {
     if (StringUtils.isBlank(f.personRepNif) != StringUtils.isBlank(f.personRepName)) {
       out.add(block(PERSON_REPRESENTATIVE_INCOMPLETE,
           "The representative needs both the NIF and the name")
+          .action(ACTION_ORGANIZATION, PARAM_SECTION, SECTION_390));
+    }
+  }
+
+  /**
+   * AEAT {@code PAR012}: a legal entity needs at least one active legal representative with a
+   * NIF — a representative row without one does not count, since the NIF is what the AEAT checks.
+   */
+  private static void legalRepresentative(Facts f, List<Incident> out) {
+    boolean anyWithNif = f.representatives.stream()
+        .anyMatch(r -> StringUtils.isNotBlank(r.nif()));
+    if (!anyWithNif) {
+      out.add(block(NO_LEGAL_REPRESENTATIVE,
+          "A legal entity must declare the NIF of at least one legal representative")
           .action(ACTION_ORGANIZATION, PARAM_SECTION, SECTION_390));
     }
   }

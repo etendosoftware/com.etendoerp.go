@@ -85,6 +85,38 @@ public class Fiscal390IncidentRulesTest {
     assertEquals("iae", inc.action.get("section"));
   }
 
+  /** AEAT PAR012: a legal entity must declare the NIF of at least one representative. */
+  @Test
+  public void testLegalEntityWithoutRepresentativeBlocks() {
+    f.representatives = List.of();
+    Fiscal390IncidentRules.Incident inc = only(Fiscal390IncidentRules.NO_LEGAL_REPRESENTATIVE);
+    assertEquals(Fiscal390IncidentRules.SEVERITY_BLOCK, inc.severity);
+    assertEquals("organization", inc.action.get("type"));
+    assertEquals("modelo390", inc.action.get("section"));
+    assertEquals(1, Fiscal390IncidentRules.blocking(f).size());
+    assertTrue(Fiscal390IncidentRules.warnings(f).isEmpty());
+  }
+
+  /** A representative row counts only when it carries a NIF: PAR012 checks the NIF. */
+  @Test
+  public void testRepresentativeWithoutNifDoesNotCount() {
+    f.representatives = List.of(new Fiscal390IncidentRules.Representative(null, "Ana Ruiz"),
+        new Fiscal390IncidentRules.Representative("  ", "Luis Gil"));
+    assertTrue(only(Fiscal390IncidentRules.NO_LEGAL_REPRESENTATIVE).isBlocking());
+    f.representatives = List.of(new Fiscal390IncidentRules.Representative(null, "Ana Ruiz"),
+        new Fiscal390IncidentRules.Representative("12345678Z", "Luis Gil"));
+    assertTrue(codes().toString(), codes().isEmpty());
+  }
+
+  @Test
+  public void testNaturalPersonWithoutRepresentativeIsFine() {
+    f.person = true;
+    f.firstName = "Ana";
+    f.surname1 = "Ruiz";
+    f.representatives = List.of();
+    assertTrue(codes().isEmpty());
+  }
+
   @Test
   public void testActivityWithoutCodeBlocks() {
     f.otherActivities.add(new Fiscal390IncidentRules.Activity("Hosteleria", false));
@@ -295,22 +327,6 @@ public class Fiscal390IncidentRulesTest {
     Fiscal390IncidentRules.Incident inc =
         only(Fiscal390IncidentRules.INACTIVE_TAX_WITH_OPERATIONS);
     assertEquals(4L, inc.params.get("invoices"));
-  }
-
-  @Test
-  public void testLegalEntityWithoutRepresentativeWarns() {
-    f.representatives = List.of();
-    Fiscal390IncidentRules.Incident inc = only(Fiscal390IncidentRules.NO_LEGAL_REPRESENTATIVE);
-    assertEquals("modelo390", inc.action.get("section"));
-  }
-
-  @Test
-  public void testNaturalPersonWithoutRepresentativeIsFine() {
-    f.person = true;
-    f.firstName = "Ana";
-    f.surname1 = "Ruiz";
-    f.representatives = List.of();
-    assertTrue(codes().isEmpty());
   }
 
   @Test
