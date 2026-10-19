@@ -449,6 +449,32 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
     return true;
   }
 
+  /**
+   * Redirects a list filter on each status percentage {@link #applyCorrectedStatusPercentages}
+   * rewrites to its stored computed twin (ETP-5705).
+   *
+   * <p>The three virtual columns are rewritten after the query, so a filter on them matched the
+   * raw core value: sales orders shown at {@code deliveryStatus = 100} matched
+   * {@code deliveryStatus < 100}. The stored twins ({@code EM_ETGO_Invoice_Status},
+   * {@code EM_ETGO_Delivery_Status}, {@code EM_ETGO_Deliv_Status_Purchase}) are computed by
+   * {@code ETGO_GET_ORDER_INVOICE_STATUS} / {@code ETGO_GET_ORDER_DELIVERY_STATUS} /
+   * {@code ETGO_GET_PO_DELIVERY_STATUS}, which apply exactly the exclusion and the cancelled /
+   * zero-quantity guards that {@link #batchComputeStatusPercentages} applies, so they hold the
+   * value this handler displays. They are {@code NULL} on an order that never had a line (the
+   * refresh is triggered by {@code C_OrderLine}); the shared filter falls back to the virtual
+   * value there, which is {@code 0} — again what is displayed.</p>
+   *
+   * @param context the read context (unused: the mapping is the same for every read)
+   * @return the three displayed properties, each mapped to its stored twin
+   */
+  @Override
+  public Map<String, String> filterAliases(NeoContext context) {
+    return Map.of(
+        FIELD_INVOICE_STATUS, Order.PROPERTY_ETGOINVOICESTATUS,
+        FIELD_DELIVERY_STATUS, Order.PROPERTY_ETGODELIVERYSTATUS,
+        FIELD_DELIVERY_STATUS_PURCHASE, Order.PROPERTY_ETGODELIVSTATUSPURCHASE);
+  }
+
   @Override
   public NeoResponse afterHandle(NeoContext context) {
     syncLineCurrenciesOnCurrencyPatch(context);

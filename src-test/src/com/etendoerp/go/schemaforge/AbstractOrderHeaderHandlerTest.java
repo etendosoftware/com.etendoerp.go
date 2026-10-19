@@ -34,6 +34,8 @@ import org.junit.Test;
  *
  * Tests verify which combinations of endpoint type, HTTP method, field name, and
  * request body cause TotalDiscountService.recalculate() to fire — and which do not.
+ *
+ * @covers com.etendoerp.go.schemaforge.AbstractOrderHeaderHandler
  */
 public class AbstractOrderHeaderHandlerTest {
 
@@ -493,6 +495,31 @@ public class AbstractOrderHeaderHandlerTest {
   @Test
   public void calculatePercentage_zeroInvoiced_returnsZero() {
     assertEquals(0L, AbstractOrderHeaderHandler.calculatePercentage(0, 5, false));
+  }
+
+  // ── filterAliases (ETP-5705) ────────────────────────────────────────────────
+
+  /**
+   * Each status percentage afterHandle rewrites is filtered on the DAL property of its stored
+   * twin, in every order header handler: an MCP filter on the virtual column would otherwise
+   * match the raw core value instead of the corrected one the list shows. The targets are the
+   * generated property names of EM_ETGO_Invoice_Status, EM_ETGO_Delivery_Status and
+   * EM_ETGO_Deliv_Status_Purchase — an unknown target fails every filtered read on these specs.
+   */
+  @Test
+  public void filterAliases_mapsEachCorrectedStatusToItsStoredTwin() {
+    java.util.Map<String, String> expected = java.util.Map.of(
+        "invoiceStatus", "eTGOInvoiceStatus",
+        "deliveryStatus", "eTGODeliveryStatus",
+        "deliveryStatusPurchase", "eTGODelivStatusPurchase");
+    for (Class<? extends AbstractOrderHeaderHandler> handlerClass : java.util.List.of(
+        SalesOrderHeaderHandler.class, PurchaseOrderHeaderHandler.class,
+        SalesQuotationHeaderHandler.class)) {
+      AbstractOrderHeaderHandler handler = mock(handlerClass,
+          org.mockito.Mockito.CALLS_REAL_METHODS);
+
+      assertEquals(handlerClass.getSimpleName(), expected, handler.filterAliases(null));
+    }
   }
 
   // ── helpers ───────────────────────────────────────────────────────────────
