@@ -417,6 +417,21 @@ public class EtendoGoJwtServletCoverageTest {
    */
   @Test
   public void purchaseFromAnAlreadyAssociatedDemoCreatesACleanProductive() throws Exception {
+    assertCleanProductivePurchaseFromSessionDemo(true, true);
+  }
+
+  /**
+   * ETP-5743: a demo the account was only invited into is not the buyer's to copy. Buying from
+   * inside it creates a clean productive environment, even when the request names it as source.
+   */
+  @Test
+  public void purchaseFromADemoTheAccountIsOnlyInvitedIntoCreatesACleanProductive()
+      throws Exception {
+    assertCleanProductivePurchaseFromSessionDemo(false, false);
+  }
+
+  private void assertCleanProductivePurchaseFromSessionDemo(boolean sessionDemoAssociated,
+      boolean sessionDemoOwned) throws Exception {
     Account account = mock(Account.class);
     when(account.getId()).thenReturn("account-1");
     when(account.getEmail()).thenReturn("owner@example.test");
@@ -441,7 +456,7 @@ public class EtendoGoJwtServletCoverageTest {
     when(tenantPlan.resolvePlan("SPENT-DEMO")).thenReturn(TenantPlanService.PLAN_FREE);
     TenantEnvironmentLifecycleService lifecycle = mock(TenantEnvironmentLifecycleService.class);
     purchaseServlet.tenantEnvironmentLifecycleService = lifecycle;
-    when(lifecycle.isAssociatedWithProductive("SPENT-DEMO")).thenReturn(true);
+    when(lifecycle.isAssociatedWithProductive("SPENT-DEMO")).thenReturn(sessionDemoAssociated);
 
     JSONObject checkoutResult = new JSONObject().put("requestId", "purchase-prod-1");
     when(checkout.createSession(eq("account-1"), eq("owner@example.test"), eq("New Production"),
@@ -467,6 +482,8 @@ public class EtendoGoJwtServletCoverageTest {
           .thenReturn(true);
       dal.when(() -> EtendoGoJwtDalHelper.clientBelongsToAccountEmail("SPENT-DEMO", "owner@example.test"))
           .thenReturn(true);
+      dal.when(() -> EtendoGoJwtDalHelper.clientOwnedByAccountEmail("SPENT-DEMO", "owner@example.test"))
+          .thenReturn(sessionDemoOwned);
       urls.when(PublicUrlResolver::resolveConfiguredAppBaseUrl).thenReturn("https://app.example.test");
 
       purchaseServlet.doPost(request, response.response);
@@ -547,6 +564,8 @@ public class EtendoGoJwtServletCoverageTest {
           .thenReturn(true);
       dal.when(() -> EtendoGoJwtDalHelper.clientBelongsToAccountEmail("FREE-1", "owner@example.test"))
           .thenReturn(true);
+      dal.when(() -> EtendoGoJwtDalHelper.clientOwnedByAccountEmail("FREE-1", "owner@example.test"))
+          .thenReturn(true);
 
       purchaseServlet.doPost(request, response.response);
 
@@ -563,22 +582,32 @@ public class EtendoGoJwtServletCoverageTest {
 
   @Test
   public void billingPurchaseRejectsDemoOwnedByAnotherAccount() throws Exception {
-    assertInvalidDemoSelectionRejected(false, TenantPlanService.PLAN_FREE, false);
+    assertInvalidDemoSelectionRejected(false, false, TenantPlanService.PLAN_FREE, false);
+  }
+
+  /**
+   * ETP-5743: an invited member has a user in the owner's demo, but choosing it as the source
+   * would copy and lock someone else's environment.
+   */
+  @Test
+  public void billingPurchaseRejectsDemoTheAccountIsOnlyInvitedInto() throws Exception {
+    assertInvalidDemoSelectionRejected(true, false, TenantPlanService.PLAN_FREE, false);
   }
 
   @Test
   public void billingPurchaseRejectsOwnedDemoThatIsNoLongerFree() throws Exception {
-    assertInvalidDemoSelectionRejected(true, TenantPlanService.PLAN_PRODUCTIVE, false);
+    assertInvalidDemoSelectionRejected(true, true, TenantPlanService.PLAN_PRODUCTIVE, false);
   }
 
   /** ETP-5548: a demo that already originated a productive environment is not a source again. */
   @Test
   public void billingPurchaseRejectsDemoThatAlreadyOriginatedAProductive() throws Exception {
-    assertInvalidDemoSelectionRejected(true, TenantPlanService.PLAN_FREE, true);
+    assertInvalidDemoSelectionRejected(true, true, TenantPlanService.PLAN_FREE, true);
   }
 
-  private void assertInvalidDemoSelectionRejected(boolean selectedDemoOwned, String selectedDemoPlan,
-      boolean selectedDemoAssociated) throws Exception {
+  private void assertInvalidDemoSelectionRejected(boolean selectedDemoMember,
+      boolean selectedDemoOwned, String selectedDemoPlan, boolean selectedDemoAssociated)
+      throws Exception {
     Account account = mock(Account.class);
     when(account.getId()).thenReturn("account-1");
     when(account.getEmail()).thenReturn("owner@example.test");
@@ -628,7 +657,11 @@ public class EtendoGoJwtServletCoverageTest {
           .thenReturn(true);
       dal.when(() -> EtendoGoJwtDalHelper.clientBelongsToAccountEmail("FREE-1",
           "owner@example.test")).thenReturn(true);
+      dal.when(() -> EtendoGoJwtDalHelper.clientOwnedByAccountEmail("FREE-1",
+          "owner@example.test")).thenReturn(true);
       dal.when(() -> EtendoGoJwtDalHelper.clientBelongsToAccountEmail("DEMO-1",
+          "owner@example.test")).thenReturn(selectedDemoMember);
+      dal.when(() -> EtendoGoJwtDalHelper.clientOwnedByAccountEmail("DEMO-1",
           "owner@example.test")).thenReturn(selectedDemoOwned);
       urls.when(PublicUrlResolver::resolveConfiguredAppBaseUrl).thenReturn("https://app.example.test");
 

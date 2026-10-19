@@ -447,6 +447,23 @@ the demo) and revokes its access. From then on the demo is spent as a source:
   the source and provisions a clean productive environment — no association, profile copy,
   revocation or data transfer.
 
+**Only the demo's owner may give it away (ETP-5743).** An invited member has an environment user
+in the owner's demo, so matching the account email alone is not proof of ownership: the purchase
+copies the demo's profile and data and then locks it. Every purchase-source check therefore
+requires the account's user in that demo to carry `AD_User.EM_ETGO_Is_Owner = 'Y'`
+(`EtendoGoJwtDalHelper.clientOwnedByAccountEmail`):
+
+- `GET /sws/go/environments` reports `ownedByAccount: false` for a demo the account was only
+  invited into, and the upgrade page leaves it out of the source picker.
+- A purchase whose session is in such a demo is a clean productive purchase, exactly like one from
+  a spent demo: the body's `demoClientId` / `dataTransfer` are ignored.
+- Naming such a demo as `demoClientId` answers 400 `INVALID_DEMO_SELECTION`.
+- Onboarding resolves a paid purchase's recorded source against the account's **owned** free demos
+  only, so a selection recorded before this rule is refused with `DEMO_SELECTION_REQUIRED` (409)
+  instead of copying another owner's demo.
+- A tenant created before the owner flag existed (ETP-4830) has no owner at all. For those the
+  account email match is still accepted, until a backfill assigns an owner.
+
 Paid onboarding uses `PROVISIONING_ATTEMPTS` as a durable fencing token. The claim is normally
 taken from `PAID`; if the row has remained `PROVISIONING` longer than
 `etendo.go.billing.provisioning.lease.minutes` (`ETGO_BILLING_PROVISIONING_LEASE_MINUTES`), it is
