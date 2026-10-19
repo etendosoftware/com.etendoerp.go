@@ -1080,6 +1080,88 @@ class McpWriteGateTest {
 
       assertEquals(expected, where);
     }
+
+    /**
+     * A customization's {@code filterAliases} redirects every filter shape on the virtual column
+     * to {@code coalesce(<stored twin>, <virtual>)}: the twin holds the value afterHandle shows,
+     * and the virtual is the fallback for a row whose twin was never computed. The key is matched
+     * on the resolved property, so the column-name spelling is redirected too, and an alias for a
+     * different property leaves the filter exactly as it was.
+     *
+     * @param filter   the {@code filters} argument as JSON
+     * @param aliasKey the property the declared alias redirects
+     * @param expected the exact HQL condition
+     */
+    @ParameterizedTest(name = "{0} alias on {1} -> {2}")
+    @MethodSource("com.etendoerp.go.mcp.McpWriteGateTest#aliasedFilterCases")
+    @DisplayName("an aliased filter compares the stored twin, falling back to the virtual")
+    void aliasedFilterComparesTheStoredTwin(String filter, String aliasKey, String expected)
+        throws Exception {
+      declareStatusTwins();
+      java.util.Map<String, String> applied = new java.util.LinkedHashMap<>();
+
+      String where = McpQuerySupport.buildWhereFromFilters(new JSONObject(filter), adTab,
+          specEntity(), java.util.Map.of(aliasKey, "eTGODeliveryStatus"), applied, null);
+
+      assertEquals(expected, where);
+      assertEquals("deliveryStatus".equals(aliasKey)
+          ? java.util.Map.of("deliveryStatus", "eTGODeliveryStatus") : java.util.Map.of(), applied);
+    }
+
+    @Test
+    @DisplayName("an applied alias is reported in the response as filter / evaluatedOn")
+    void appliedAliasIsReportedInTheResponse() throws Exception {
+      declareStatusTwins();
+      java.util.Map<String, String> applied = new java.util.LinkedHashMap<>();
+      McpQuerySupport.buildWhereFromFilters(fields("deliveryStatus", new JSONObject().put("lt", 100)),
+          adTab, specEntity(), java.util.Map.of("deliveryStatus", "eTGODeliveryStatus"), applied,
+          null);
+      JSONObject body = new JSONObject();
+
+      McpQuerySupport.attachFilterAliases(body, applied);
+
+      JSONObject note = body.getJSONArray(McpQuerySupport.KEY_FILTER_ALIASES).getJSONObject(0);
+      assertEquals("deliveryStatus", note.getString("filter"));
+      assertEquals("eTGODeliveryStatus", note.getString("evaluatedOn"));
+      assertTrue(note.getString("reason").contains("eTGODeliveryStatus"), note.toString());
+    }
+
+    @Test
+    @DisplayName("an alias naming no property of the entity fails the read instead of the raw filter")
+    void aliasToAMissingPropertyFailsTheRead() throws Exception {
+      declareStatusTwins();
+
+      IllegalStateException ex = assertThrows(IllegalStateException.class,
+          () -> McpQuerySupport.buildWhereFromFilters(fields("deliveryStatus", 100), adTab,
+              specEntity(), java.util.Map.of("deliveryStatus", "noSuchTwin"), null, null));
+
+      assertTrue(ex.getMessage().contains("noSuchTwin"), ex.getMessage());
+    }
+
+    /** The virtual {@code deliveryStatus} (computed) and its stored twin (a mapped column). */
+    private void declareStatusTwins() {
+      Property virtual = declareProperty("deliveryStatus", "DeliveryStatus");
+      when(virtual.isComputedColumn()).thenReturn(true);
+      when(virtual.isPrimitive()).thenReturn(true);
+      doReturn(Long.class).when(virtual).getPrimitiveObjectType();
+      Property stored = declareProperty("eTGODeliveryStatus", "EM_ETGO_Delivery_Status");
+      when(stored.isComputedColumn()).thenReturn(false);
+      when(stored.isPrimitive()).thenReturn(true);
+      doReturn(Long.class).when(stored).getPrimitiveObjectType();
+    }
+  }
+
+  static Stream<Arguments> aliasedFilterCases() {
+    String aliased = "coalesce(e.eTGODeliveryStatus, e." + Entity.COMPUTED_COLUMNS_PROXY_PROPERTY
+        + ".deliveryStatus)";
+    return Stream.of(
+        Arguments.of("{\"deliveryStatus\":100}", "deliveryStatus", aliased + "=100"),
+        Arguments.of("{\"deliveryStatus\":{\"lt\":100}}", "deliveryStatus", aliased + " < 100"),
+        Arguments.of("{\"deliveryStatus\":{\"between\":[10,20]}}", "deliveryStatus",
+            aliased + " between 10 and 20"),
+        Arguments.of("{\"DeliveryStatus\":100}", "deliveryStatus", aliased + "=100"),
+        Arguments.of("{\"deliveryStatus\":100}", "invoiceStatus",
+            "e." + Entity.COMPUTED_COLUMNS_PROXY_PROPERTY + ".deliveryStatus=100"));
   }
 
   static Stream<Arguments> filterPathCases() {
