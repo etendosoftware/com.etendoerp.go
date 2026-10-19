@@ -3844,6 +3844,10 @@ declares `eTGOInvoiceStatus` / `eTGODeliveryStatus` on `EM_ETGO_*`; purchase ord
 `decisions.json` lists `eTGOInvoiceStatus` / `eTGODelivStatusPurchase`). A REST caller that filters
 on the virtual column gets the raw value; filter on the stored twin instead.
 
+`orderBy` is not aliased on **either** channel: sorting on `deliveryStatus` (and the other two)
+uses the raw virtual value on MCP and REST alike, and can disagree with the order of the values
+shown. Filters are aliased on MCP; sorts are not, anywhere.
+
 #### 4.12.10 An excluded field does not exist, on every verb (ETP-5335, IMP-39)
 
 **A field the spec excludes is absent from `etendo_schema`, refused by `etendo_list` as a filter, and
@@ -9024,6 +9028,12 @@ against `coalesce(<target>, <virtual>)`:
 - **The target is not checked against the spec's excluded fields.** It is declared by the server,
   and the condition only compares the value the caller is already shown.
 - A named `status` filter is never aliased: it is a hand-authored fragment, not a property.
+- **The target must have the filtered property's type** (both primitive with the same Java type,
+  or both references); the value is formatted for the filtered property. A mismatch fails the
+  read (500) like a missing target.
+- **`orderBy` is NOT aliased.** Only filters are redirected: `orderBy: "deliveryStatus"` still
+  sorts on the raw virtual value, so the order can disagree with the values shown on exactly the
+  rows `afterHandle` corrects. Sort on the twin (`orderBy: "eTGODeliveryStatus"`) when it matters.
 
 **Transparency.** Every alias actually applied is reported next to the rows, the same way the
 `namedFilters` block reports a named filter (IMP-50):
@@ -9032,7 +9042,7 @@ against `coalesce(<target>, <virtual>)`:
 "filterAliases": [{
   "filter": "deliveryStatus",
   "evaluatedOn": "eTGODeliveryStatus",
-  "reason": "The filter on deliveryStatus was evaluated on eTGODeliveryStatus, which holds the value this list shows for deliveryStatus; the database value of deliveryStatus is corrected after the query, so it can differ from the value shown."
+  "reason": "The filter on deliveryStatus was evaluated on eTGODeliveryStatus, which holds the value this list shows for deliveryStatus."
 }]
 ```
 
@@ -9053,5 +9063,13 @@ for all three columns. One theoretical gap remains: the handler reads the summed
 `ResultSet.getLong`, truncating a fractional sum, while the functions divide the exact numerics — an
 order with fractional quantities could show a percentage one point off its twin. No such order
 exists in the measured data; the twin is the more exact of the two.
+
+**Header-only changes do not refresh the twins.** Their `AD_COLUMN_COMP_DEPENDENCY` rows watch only
+`C_OrderLine` (`SOURCE_TABLE_ID = 260`; verified 2026-10-19, one row per twin). A change made on
+the `C_Order` row alone — `iscancelled` or `cancelledorder_id` set without touching any line —
+leaves the twin at its previous value, while `afterHandle` (and the virtual column) already
+answer `0` for a cancelled order. On that path the aliased filter can still disagree with the
+value shown. Not confirmed either way whether every cancel flow also writes the lines; not fixed
+here (it is an AD dependency change, not a filter change).
 
 REST does not apply the aliases — a declared divergence, §4.12.9.

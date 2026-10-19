@@ -500,25 +500,17 @@ public class AbstractOrderHeaderHandlerTest {
   // ── filterAliases (ETP-5705) ────────────────────────────────────────────────
 
   /**
-   * Each status percentage afterHandle rewrites is filtered on the DAL property of its stored
-   * twin, in every order header handler: an MCP filter on the virtual column would otherwise
-   * match the raw core value instead of the corrected one the list shows. The targets are the
-   * generated property names of EM_ETGO_Invoice_Status, EM_ETGO_Delivery_Status and
-   * EM_ETGO_Deliv_Status_Purchase — an unknown target fails every filtered read on these specs.
+   * The aliases live with applyCorrectedStatusPercentages, which every order header handler
+   * inherits; a subclass that overrode filterAliases would keep the rewrite in afterHandle but
+   * filter on the raw virtual value again. So each handler must use the base declaration.
    */
   @Test
-  public void filterAliases_mapsEachCorrectedStatusToItsStoredTwin() {
-    java.util.Map<String, String> expected = java.util.Map.of(
-        "invoiceStatus", "eTGOInvoiceStatus",
-        "deliveryStatus", "eTGODeliveryStatus",
-        "deliveryStatusPurchase", "eTGODelivStatusPurchase");
+  public void filterAliases_isInheritedUnchangedByEveryOrderHeaderHandler() throws Exception {
     for (Class<? extends AbstractOrderHeaderHandler> handlerClass : java.util.List.of(
         SalesOrderHeaderHandler.class, PurchaseOrderHeaderHandler.class,
         SalesQuotationHeaderHandler.class)) {
-      AbstractOrderHeaderHandler handler = mock(handlerClass,
-          org.mockito.Mockito.CALLS_REAL_METHODS);
-
-      assertEquals(handlerClass.getSimpleName(), expected, handler.filterAliases(null));
+      assertEquals(handlerClass.getSimpleName(), AbstractOrderHeaderHandler.class,
+          handlerClass.getMethod("filterAliases", NeoContext.class).getDeclaringClass());
     }
   }
 

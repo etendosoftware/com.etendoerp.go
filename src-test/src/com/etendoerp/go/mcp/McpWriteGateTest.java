@@ -1126,16 +1126,27 @@ class McpWriteGateTest {
       assertTrue(note.getString("reason").contains("eTGODeliveryStatus"), note.toString());
     }
 
-    @Test
-    @DisplayName("an alias naming no property of the entity fails the read instead of the raw filter")
-    void aliasToAMissingPropertyFailsTheRead() throws Exception {
+    /**
+     * A misdeclared alias fails the read instead of filtering on the raw value: a target that is
+     * not a property of the entity, or one of another type than the filtered property (the value
+     * is formatted for the filtered property, so a String target would compare a Long literal).
+     *
+     * @param target the declared alias target
+     */
+    @ParameterizedTest(name = "deliveryStatus -> {0}")
+    @ValueSource(strings = { "noSuchTwin", "documentNo" })
+    @DisplayName("an alias to a missing or differently typed property fails the read")
+    void misdeclaredAliasFailsTheRead(String target) throws Exception {
       declareStatusTwins();
+      Property text = declareProperty("documentNo", "DocumentNo");
+      when(text.isPrimitive()).thenReturn(true);
+      doReturn(String.class).when(text).getPrimitiveObjectType();
 
       IllegalStateException ex = assertThrows(IllegalStateException.class,
           () -> McpQuerySupport.buildWhereFromFilters(fields("deliveryStatus", 100), adTab,
-              specEntity(), java.util.Map.of("deliveryStatus", "noSuchTwin"), null, null));
+              specEntity(), java.util.Map.of("deliveryStatus", target), null, null));
 
-      assertTrue(ex.getMessage().contains("noSuchTwin"), ex.getMessage());
+      assertTrue(ex.getMessage().contains(target), ex.getMessage());
     }
 
     /** The virtual {@code deliveryStatus} (computed) and its stored twin (a mapped column). */

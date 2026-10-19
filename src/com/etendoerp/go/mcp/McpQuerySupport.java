@@ -462,15 +462,17 @@ final class McpQuerySupport {
    * <p>Matched on the resolved property name, so a caller that spells the key as its DB column
    * name is redirected too. The target is not checked against the spec's excluded fields: it is
    * declared by the server, and the condition only compares the value the caller is already
-   * shown. A target that is not a property of the entity is a customization bug, not a caller
-   * mistake, so it fails the read instead of silently filtering on the raw value.</p>
+   * shown. A target that is not a property of the entity, or whose type differs from the
+   * filtered property's (the value is formatted for the latter), is a customization bug, not a
+   * caller mistake, so it fails the read instead of silently filtering on the raw value.</p>
    *
    * @param dalEntity the DAL entity being read
    * @param prop      the property the caller filtered on
    * @param aliases   the customization's aliases, property name to property name
    * @param applied   collects {@code prop -> target} for every alias used; may be {@code null}
    * @return the target property, or {@code null} when {@code prop} is not aliased
-   * @throws IllegalStateException when the declared target does not exist on the entity
+   * @throws IllegalStateException when the declared target does not exist on the entity or its
+   *                               type differs from {@code prop}'s
    */
   static Property aliasTarget(Entity dalEntity, Property prop,
       java.util.Map<String, String> aliases, java.util.Map<String, String> applied) {
@@ -482,6 +484,12 @@ final class McpQuerySupport {
     if (target == null) {
       throw new IllegalStateException("Filter alias " + prop.getName() + " -> " + targetName
           + " names no property of entity " + dalEntity.getName());
+    }
+    if (prop.isPrimitive() != target.isPrimitive() || (prop.isPrimitive()
+        && !java.util.Objects.equals(prop.getPrimitiveObjectType(),
+            target.getPrimitiveObjectType()))) {
+      throw new IllegalStateException("Filter alias " + prop.getName() + " -> " + targetName
+          + " joins properties of different types on entity " + dalEntity.getName());
     }
     if (applied != null) {
       applied.put(prop.getName(), target.getName());
@@ -514,8 +522,7 @@ final class McpQuerySupport {
       note.put("evaluatedOn", alias.getValue());
       note.put("reason", "The filter on " + alias.getKey() + " was evaluated on "
           + alias.getValue() + ", which holds the value this list shows for " + alias.getKey()
-          + "; the database value of " + alias.getKey() + " is corrected after the query, so it"
-          + " can differ from the value shown.");
+          + ".");
       notes.put(note);
     }
     body.put(KEY_FILTER_ALIASES, notes);
