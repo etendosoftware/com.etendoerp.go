@@ -90,8 +90,11 @@ checkout and subscription rows, and its audit rows are ordinary billing events.
    - `incomplete` is left alone, since the payment is still in progress.
    - A 404 means **absent**, and an absent subscription is closed only behind a circuit breaker
      (§6.4).
-   - The mapping for `paused` and `incomplete_expired` lives in `SubscriptionLifecycleApplier`, so
-     the webhook (`customer.subscription.updated`) and the reconciler agree.
+   - **On hold (2026-10-19, awaiting Martin):** the close for `paused` and `incomplete_expired`
+     would live in `SubscriptionLifecycleApplier`, so that the webhook (`customer.subscription.updated`)
+     and the reconciler agree. Until that is decided the applier keeps answering "unhandled
+     subscription status" for both, and the reconciler, which reads the status through the same
+     applier, leaves them unchanged.
 8. **No-op runs** — the reconciler compares the would-be outcome with the stored state before
    applying anything. Only a change of status, or a close, is written. A period or `LAST_EVENT_AT`
    refresh alone is never written, so a consistent dataset gets zero writes and zero alerts.
@@ -102,15 +105,21 @@ checkout and subscription rows, and its audit rows are ordinary billing events.
    the row and the preferences. The subscription id is the one the creating request recorded, never
    one found by Stripe customer: a customer can own several environments.
 10. **Notifications** — internal alert only (`InternalAlertService`, the same `environment-provisioning`
-    event the onboarding sends). No customer email.
+    event the onboarding sends). No new customer email is added. Note that a repair runs the shared
+    onboarding, which already sends the customer the existing `environment-ready` email
+    (`completeCommittedOnboarding` → `sendEnvironmentReady`), exactly as a browser-driven
+    provisioning does.
 11. **Scheduling** —
     - `startup/BillingReconciliationScheduleStartup` follows the `TenantPoolScheduleStartup` shape:
       fixed process id, fixed request id at client 0, idempotent.
     - The interval is configurable and defaults to hourly. Batches are bounded per run.
-    - Scheduled runs are gated by the `GoFeatureFlags` flag `billing-reconciliation-schedule`, which
-      **defaults OFF**. The request is planted on every instance, but a scheduled run with the flag
-      off returns at once, as the tenant-pool filler does, so flipping the flag needs no restart.
-    - A run started from the menu or an ad-hoc Process Request is never gated.
+    - **Strictly off by default** (decided 2026-10-18). The startup plants the request only while
+      the `GoFeatureFlags` flag `billing-reconciliation-schedule` is on, so turning it on takes
+      effect at the next restart. An operator can also schedule the process by hand from the Process
+      Request window at any time.
+    - As a safety net, a run of the fixed request does nothing while the flag is off, so turning the
+      flag off stops the scheduled work without a restart.
+    - A run started from the menu or from an operator's own Process Request is never gated.
     - Every alert and repair line starts with `[BILLING-RECONCILE]`.
 12. **Stuck `RECEIVED` events** — a Stripe event left `RECEIVED` past a threshold (the crash window
     `BillingEventStore` documents) is not replayed. The run re-reads the provider state of every local
@@ -211,14 +220,15 @@ wrong-mode key gets 404s, never a `paid` or `expired` answer.
 ### 6.5 `payment/reconcile/BillingReconciliationProcess` and the schedule
 
 `DalBaseProcess`, modelled on `UsageAggregationProcess`: the `OBError` result, `fail()` sets an error
-result and throws, and `bundle.getLogger()` lines show in Process Monitor. A scheduled run (the fixed
-request id) returns at once while the flag is off.
+result and throws, and `bundle.getLogger()` lines show in Process Monitor. The startup plants the
+fixed request only while the flag is on; a run of that request also returns at once while the flag
+is off.
 
 ## 7. Configuration
 
 | Property / env | Default | Meaning |
 |---|---|---|
-| `etendo.go.flags.billing-reconciliation-schedule` / `ETGO_FLAG_BILLING_RECONCILIATION_SCHEDULE` (or ConfigCat) | off | Scheduled runs do work only when on |
+| `etendo.go.flags.billing-reconciliation-schedule` / `ETGO_FLAG_BILLING_RECONCILIATION_SCHEDULE` (or ConfigCat) | off | The schedule is planted at startup only when on; a run of it does work only when on |
 | `etendo.go.billing.reconcile.interval.minutes` / `ETGO_BILLING_RECONCILE_INTERVAL_MINUTES` | 60 | Interval of the planted request (read when it is first planted) |
 | `etendo.go.billing.reconcile.batch.size` / `ETGO_BILLING_RECONCILE_BATCH_SIZE` | 50 | Rows per phase per run |
 | `etendo.go.billing.reconcile.abandoned.hours` / `ETGO_BILLING_RECONCILE_ABANDONED_HOURS` | 48 (minimum 48) | Age before a checkout counts as abandoned |
@@ -233,7 +243,8 @@ request id) returns at once while the flag is off.
 - **Read what changed:** the **Billing Event** window (filter `Provider = reconciler`) and the
   **Checkout Request → Billing Event** tab. The **Subscriptions** window shows corrected status and
   end dates. Scheduled runs are in **Process Monitor**.
-- **Switch the schedule on:** set the flag (ConfigCat, or the property, then restart).
+- **Switch the schedule on:** set the flag (ConfigCat or the property), then restart. Or schedule
+  the process by hand in the Process Request window.
 - **Alerts:** grep `[BILLING-RECONCILE]`. Provisioning repairs also send the internal
   `environment-provisioning` alert.
 
