@@ -30,6 +30,11 @@ public class MalformedJsonException extends JSONException {
 
   private static final long serialVersionUID = 1L;
 
+  /**
+   * Creates the exception for a refused or unparseable client text.
+   *
+   * @param message why the text was refused; never echoes the text itself
+   */
   public MalformedJsonException(String message) {
     super(message);
   }

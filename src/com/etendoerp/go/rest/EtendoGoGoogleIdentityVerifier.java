@@ -61,6 +61,7 @@ final class EtendoGoGoogleIdentityVerifier implements EtendoGoSsoAssertionVerifi
 
   private static final Logger log = LogManager.getLogger(EtendoGoGoogleIdentityVerifier.class);
   private static final String FIELD_CLIENT_ID = "client_id";
+  private static final String INVALID_CREDENTIAL = "Invalid Google credential";
   private static final NetHttpTransport GOOGLE_HTTP_TRANSPORT = new NetHttpTransport();
   private static final GsonFactory GOOGLE_JSON_FACTORY = GsonFactory.getDefaultInstance();
 
@@ -98,7 +99,7 @@ final class EtendoGoGoogleIdentityVerifier implements EtendoGoSsoAssertionVerifi
       return credentialValidator.validate(body.credential, configuration);
     } catch (IOException | GeneralSecurityException e) {
       log.warn("Google ID token validation failed", e);
-      throw unauthorized("Invalid Google credential");
+      throw unauthorized(INVALID_CREDENTIAL);
     }
   }
 
@@ -262,7 +263,7 @@ final class EtendoGoGoogleIdentityVerifier implements EtendoGoSsoAssertionVerifi
       // From here an IOException or GeneralSecurityException is ours (fetching or using Google's
       // keys), not the caller's: the verifier logs it with its stack trace.
       if (!verifier.verify(idToken)) {
-        throw unauthorized("Invalid Google credential");
+        throw unauthorized(INVALID_CREDENTIAL);
       }
       Payload payload = idToken.getPayload();
       String subject = StringUtils.trimToNull(payload.getSubject());
@@ -287,7 +288,7 @@ final class EtendoGoGoogleIdentityVerifier implements EtendoGoSsoAssertionVerifi
         return GoogleIdToken.parse(GOOGLE_JSON_FACTORY, credential);
       } catch (IOException | IllegalArgumentException e) {
         log.warn("Rejected a malformed Google credential ({})", e.getClass().getSimpleName());
-        throw unauthorized("Invalid Google credential");
+        throw unauthorized(INVALID_CREDENTIAL);
       }
     }
 

@@ -67,6 +67,8 @@ public final class BoundedJsonParser {
   /**
    * Parses {@code text} as a JSON object, nested at most {@link #DEFAULT_MAX_DEPTH} levels.
    *
+   * @param text the client's JSON text
+   * @return the parsed object
    * @throws MalformedJsonException when {@code text} is null, malformed, too deep, or not an object
    */
   public static JSONObject parseObject(String text) throws MalformedJsonException {
@@ -76,6 +78,9 @@ public final class BoundedJsonParser {
   /**
    * Parses {@code text} as a JSON object, nested at most {@code maxDepth} levels.
    *
+   * @param text the client's JSON text
+   * @param maxDepth deepest array/object nesting accepted
+   * @return the parsed object
    * @throws MalformedJsonException when {@code text} is null, malformed, too deep, or not an object
    */
   public static JSONObject parseObject(String text, int maxDepth) throws MalformedJsonException {
@@ -85,6 +90,8 @@ public final class BoundedJsonParser {
   /**
    * Parses {@code text} as a JSON array, nested at most {@link #DEFAULT_MAX_DEPTH} levels.
    *
+   * @param text the client's JSON text
+   * @return the parsed array
    * @throws MalformedJsonException when {@code text} is null, malformed, too deep, or not an array
    */
   public static JSONArray parseArray(String text) throws MalformedJsonException {
@@ -94,6 +101,9 @@ public final class BoundedJsonParser {
   /**
    * Parses {@code text} as a JSON array, nested at most {@code maxDepth} levels.
    *
+   * @param text the client's JSON text
+   * @param maxDepth deepest array/object nesting accepted
+   * @return the parsed array
    * @throws MalformedJsonException when {@code text} is null, malformed, too deep, or not an array
    */
   public static JSONArray parseArray(String text, int maxDepth) throws MalformedJsonException {
@@ -111,57 +121,118 @@ public final class BoundedJsonParser {
    * a structural character or at the start), while inside a bare token a quote is an ordinary
    * character. Opening a string there would make the scan see different brackets than jettison.
    * </p>
+   *
+   * @param text the text to scan; {@code null} is refused
+   * @param maxDepth deepest array/object nesting accepted; a negative value refuses everything
+   * @return whether {@code text} may be handed to jettison
    */
   public static boolean isWithinLimits(String text, int maxDepth) {
     if (text == null || maxDepth < 0) {
       return false;
     }
-    char[] open = new char[maxDepth];
-    int depth = 0;
-    boolean rootClosed = false;
-    // Last non-whitespace character outside a string; 0 at the start of the text.
-    char previous = 0;
+    BracketScan scan = new BracketScan(maxDepth);
     int i = 0;
-    while (i < text.length()) {
-      char c = text.charAt(i);
+    while (i != BracketScan.REFUSED && i < text.length()) {
       // jettison's own whitespace rule (JSONTokener#nextClean); not Character.isWhitespace, which
       // would skip characters such as U+2028 that jettison reads as the start of a bare token.
-      if (c <= ' ') {
-        i++;
-        continue;
-      }
-      if (rootClosed || c == '/' || c == '#') {
-        return false;
-      }
-      if (c == '"' || c == '\'') {
-        if (!startsToken(previous)) {
-          return false;
-        }
-        i = endOfString(text, i);
-        if (i == text.length()) {
-          return false;
-        }
-      } else if (c == '[' || c == '{') {
-        if (depth == maxDepth) {
-          return false;
-        }
-        open[depth++] = c;
-      } else if (c == ']' || c == '}') {
-        if (depth == 0 || open[--depth] != (c == ']' ? '[' : '{')) {
-          return false;
-        }
-        rootClosed = depth == 0;
-      }
-      // "=>" separates a key from its value only as one unit; a lone '>' is part of a bare token.
-      previous = c == '>' && (i == 0 || text.charAt(i - 1) != '=') ? 'x' : c;
-      i++;
+      i = text.charAt(i) <= ' ' ? i + 1 : scan.consume(text, i);
     }
-    return depth == 0;
+    return i != BracketScan.REFUSED && scan.isBalanced();
   }
 
-  /** Whether jettison starts a new token after {@code previous} (0: the start of the text). */
-  private static boolean startsToken(char previous) {
-    return previous == 0 || TOKEN_STARTERS.indexOf(previous) >= 0;
+  /** State of one {@link #isWithinLimits} scan, fed every character outside whitespace. */
+  private static final class BracketScan {
+
+    static final int REFUSED = -1;
+
+    private final char[] opened;
+    private int depth;
+    private boolean rootClosed;
+    /** Last non-whitespace character outside a string; 0 at the start of the text. */
+    private char previous;
+
+    BracketScan(int maxDepth) {
+      opened = new char[maxDepth];
+    }
+
+    boolean isBalanced() {
+      return depth == 0;
+    }
+
+    /**
+     * Consumes the token starting at the non-whitespace character {@code text[i]}: one character,
+     * or a whole quoted string.
+     *
+     * @return the index right after the token, or {@link #REFUSED}
+     */
+    int consume(String text, int i) {
+      char c = text.charAt(i);
+      if (rootClosed || c == '/' || c == '#') {
+        return REFUSED;
+      }
+      int last = i;
+      boolean accepted = true;
+      if (c == '"' || c == '\'') {
+        last = startsToken(previous) ? endOfString(text, i) : text.length();
+        accepted = last < text.length();
+      } else if (c == '[' || c == '{') {
+        accepted = open(c);
+      } else if (c == ']' || c == '}') {
+        accepted = close(c);
+      }
+      if (!accepted) {
+        return REFUSED;
+      }
+      previous = tokenMark(text, i, c);
+      return last + 1;
+    }
+
+    private boolean open(char c) {
+      if (depth == opened.length) {
+        return false;
+      }
+      opened[depth++] = c;
+      return true;
+    }
+
+    private boolean close(char c) {
+      if (depth == 0 || opened[--depth] != (c == ']' ? '[' : '{')) {
+        return false;
+      }
+      rootClosed = depth == 0;
+      return true;
+    }
+
+    /**
+     * "=>" separates a key from its value only as one unit; a lone '>' is part of a bare token, so
+     * it is remembered as an ordinary character.
+     */
+    private static char tokenMark(String text, int i, char c) {
+      return c == '>' && (i == 0 || text.charAt(i - 1) != '=') ? 'x' : c;
+    }
+
+    /** Whether jettison starts a new token after {@code previous} (0: the start of the text). */
+    private static boolean startsToken(char previous) {
+      return previous == 0 || TOKEN_STARTERS.indexOf(previous) >= 0;
+    }
+
+    /**
+     * @return the index of the quote closing the string opened at {@code open} with the same quote
+     *         character (escapes honoured), or {@code text.length()} when it is never closed
+     */
+    private static int endOfString(String text, int open) {
+      char quote = text.charAt(open);
+      int i = open + 1;
+      while (i < text.length()) {
+        char c = text.charAt(i);
+        if (c == quote) {
+          return i;
+        }
+        // A backslash escapes the next character, so it is skipped too.
+        i += c == '\\' ? 2 : 1;
+      }
+      return text.length();
+    }
   }
 
   /** jettison's {@code JSONObject(String)} / {@code JSONArray(String)} constructor. */
@@ -197,23 +268,5 @@ public final class BoundedJsonParser {
     }
     int at = message.indexOf(" at character ");
     return at >= 0 ? message.substring(0, at) : message;
-  }
-
-  /**
-   * @return the index of the quote closing the string opened at {@code open} with the same quote
-   *         character (escapes honoured), or {@code text.length()} when it is never closed
-   */
-  private static int endOfString(String text, int open) {
-    char quote = text.charAt(open);
-    int i = open + 1;
-    while (i < text.length()) {
-      char c = text.charAt(i);
-      if (c == quote) {
-        return i;
-      }
-      // A backslash escapes the next character, so it is skipped too.
-      i += c == '\\' ? 2 : 1;
-    }
-    return text.length();
   }
 }

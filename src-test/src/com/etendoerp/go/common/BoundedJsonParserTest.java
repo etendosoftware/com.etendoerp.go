@@ -77,7 +77,7 @@ public class BoundedJsonParserTest {
 
     @Test
     void aMalformedBodyIsStillAJsonException() {
-      // Existing catch (JSONException) blocks keep answering their own 400.
+      // So every caller that already answers a JSONException with a 400 keeps doing so.
       assertThrows(JSONException.class, () -> BoundedJsonParser.parseObject("{\"x\":["));
     }
 
