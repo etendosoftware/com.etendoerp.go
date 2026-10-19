@@ -5576,6 +5576,32 @@ With `months=N` the two entries above are unchanged and two period KPIs are appe
 
 ---
 
+#### 5.3.4 Whole-set list aggregates — `NeoListAggregateQuery` (ETP-5778)
+
+A list response carries one page, so a total drawn next to it covers the loaded rows only. `NeoListAggregateQuery` lets an entity customization run ONE grouped HQL query over the same filtered set the list used.
+
+- **Handover.** `NeoCrudHandler.handleDefault`, on a list GET (no record id), calls `NeoListAggregateQuery.remember(context, params)` with the params the list query was built from (sort and `_targetRecordId` removed). It is skipped for `_distinct` (FK dropdown) and `_summary` (grid summary) requests, so those pay nothing and `of(context)` is `null`. The customization's `afterHandle` gets it back with `NeoListAggregateQuery.of(context)` and calls `groupBy(select, groupBy)`. The state lives in a `NeoContext` attribute, so it never leaves the request.
+- **Same filters as the grid.** The query service is built by core's own `createSetQueryService` (criteria, tab where clause, `readPredicates`, org filter), and the `OBQuery` carries the same readable org/client/active flags as `DataEntityQueryService.count()`. The row alias is `e`.
+- **Channels.** REST single and REST batch only. MCP lists never go through `handleDefault`, so `of(context)` is `null` there and their responses do not grow.
+- **Constants only.** `select` and `groupBy` are concatenated into the HQL: pass server-side constants, never request-derived text. Query timeout uses the `grid` profile.
+- The helper names no entity; each customization owns its own select (payments: `PaymentListSummary`).
+- Currency folding is shared with the Financial Accounts sidebar through `NeoCurrencyTotals` (today's rate, a missing rate excludes the currency and is reported, each subtotal rounded `HALF_UP` to the org precision).
+
+**Payment list summary** (`payment-reactivate` handler, `payment-in` and `payment-out`). `response.summary`, a sibling of `data`, identical on every page and present even for an empty list; a failure is logged and the key omitted:
+
+```json
+{ "orgCurrencyIso":"EUR", "rowCount":18,
+  "total":  {"amount":2400.14,"approximate":true,"count":16,"missingRateCurrencies":[]},
+  "pending":{"amount":193.55,"approximate":true,"count":2,"missingRateCurrencies":[]},
+  "draftCount":2,
+  "byMethod":[{"id":"...","label":"Efectivo","amount":1174.06,"approximate":true,"count":10}],
+  "byCurrency":[{"currencyIso":"EUR","total":2093.79,"count":7},{"currencyIso":"USD","total":355.72,"count":9}] }
+```
+
+- `RPVOID` is excluded everywhere. *Deposited* (`total`, `byMethod`, `byCurrency`) = `RPR, RPPC, RDNC, PPM, PWNC, RPAE`, mirroring `paymentStatuses.js` (`PPM` counts as deposited; `ETGOERR` is pending). *Pending* = every other non-void status; `draftCount` = `pending.count`; `rowCount` = `total.count + pending.count`.
+- `approximate` = a non-zero foreign-currency subtotal was converted. `byCurrency` shows original amounts (never approximate), organization currency first, then amount descending. `byMethod` is sorted by converted amount descending.
+- Cost: one grouped scan per page request over the whole filtered set.
+
 ## 6. Parent-Child Tab Filtering
 
 When an entity maps to a child tab (`tabLevel > 0`), the servlet automatically filters records by the parent record. The caller provides the parent record ID via the `parentId` query parameter:
