@@ -47,7 +47,7 @@ jobs:
           echo "GIT_BRANCH=$GIT_BRANCH" >> "$GITHUB_OUTPUT"
 
           case "$GIT_BRANCH" in
-            hotfix/*)  FALLBACK="$MAIN_BRANCH" ;;
+            hotfix/*|mergeblock/*)  FALLBACK="$MAIN_BRANCH" ;;
             *)         FALLBACK="$DEVELOP_BRANCH" ;;
           esac
           echo "FALLBACK=$FALLBACK" >> "$GITHUB_OUTPUT"

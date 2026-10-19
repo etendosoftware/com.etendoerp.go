@@ -454,7 +454,7 @@ public class UserRoleCompositionServiceIntegrationTest extends WeldBaseTest {
   }
 
   /**
-   * Mirrors {@code SFWindowAccessMap#resolveShowAccountingFields}'s own read: {@code
+   * Mirrors {@code NeoAccountingAccessPolicy#readShowAccountingFieldsFlag}'s own read: {@code
    * EM_ETGO_Show_Acct_Fields} is a plain physical column (ETP-4520), not a mapped DAL property, so
    * it must be read via the same native-query shape production code uses — never via a typed
    * getter that does not exist.

@@ -17,10 +17,12 @@
 package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.Arrays;
 import java.util.List;
+import java.util.function.IntSupplier;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -88,7 +90,7 @@ public final class NeoCommercialLinePolicy {
    * <p>ETP-4855: the create path used to run gross-first while the update path ran net-first.
    * With gross-first, any client that omitted both amounts — the OCR {@code /batch} ingest, the
    * MCP write path, the line import modal — hit the NaN guard in
-   * {@link #resolveGrossAmount(double, double, double, String)} and persisted
+   * {@link #resolveGrossAmount(BigDecimal, BigDecimal, BigDecimal, String)} and persisted
    * {@code LINE_GROSS_AMOUNT = 0}, so the line "Total" column rendered as 0 even though
    * {@code LINENETAMT} and the header totals were correct. Keeping the sequence in one place
    * is what stops the two call sites from drifting apart again.
@@ -102,46 +104,77 @@ public final class NeoCommercialLinePolicy {
    * customizations ({@code OrderLineDiscountSupport}) and the sales invoice line customization
    * ({@code InvoiceLineAmountSupport}) call this on every create.
    *
+   * <p>ETP-5703: rounds to {@link NeoCurrencyPrecision#DEFAULT_SCALE} decimals. A caller that knows
+   * the record uses {@link #injectCommercialAmounts(JSONObject, IntSupplier)} with the document
+   * currency's precision instead.
+   *
    * @param body the write body, keyed by DAL property name; mutated in place
    */
   public static void injectCommercialAmounts(JSONObject body) {
-    injectLineNetAmountIfMissing(body);
-    injectGrossAmountIfMissing(body);
-    injectLineGrossAmountIfMissing(body);
+    injectCommercialAmounts(body, () -> NeoCurrencyPrecision.DEFAULT_SCALE);
+  }
+
+  /**
+   * {@link #injectCommercialAmounts(JSONObject)} rounding every derived amount to
+   * {@code amountScale} decimals, HALF_UP (ETP-5703).
+   *
+   * <p>The amounts used to be derived in {@code double} and written unrounded: 120 × 1.50 at 21 %
+   * persisted {@code grossAmount = 217.79999999999998}, 3 × 1.50 persisted {@code 5.445}. They are
+   * now computed in {@link BigDecimal} and rounded to the document currency's standard precision,
+   * which is what core's own amount callouts store. An amount that is already correctly rounded is
+   * unchanged by this. Callers that know the record pass {@link NeoCurrencyPrecision#forWrite};
+   * the precision is only resolved when an amount is actually derived.
+   *
+   * @param body        the write body, keyed by DAL property name; mutated in place
+   * @param amountScale the number of decimals to round to; read lazily, at most once
+   */
+  public static void injectCommercialAmounts(JSONObject body, IntSupplier amountScale) {
+    IntSupplier scale = NeoCurrencyPrecision.memoize(amountScale);
+    injectLineNetAmountIfMissing(body, scale);
+    injectGrossAmountIfMissing(body, scale);
+    injectLineGrossAmountIfMissing(body, scale);
   }
 
   static void injectGrossAmountIfMissing(JSONObject body) {
+    injectGrossAmountIfMissing(body, () -> NeoCurrencyPrecision.DEFAULT_SCALE);
+  }
+
+  static void injectGrossAmountIfMissing(JSONObject body, IntSupplier scale) {
     if (body == null) {
       return;
     }
-    double qty;
-    try {
-      qty = Double.parseDouble(body.optString(FIELD_INVOICED_QTY, "0"));
-    } catch (NumberFormatException e) {
+    BigDecimal qty = parseQuantity(body, FIELD_INVOICED_QTY);
+    if (qty == null) {
       return;
     }
-    if (qty == 0) {
+    if (qty.signum() == 0) {
       forceZeroIfEntityFieldPresent(body, FIELD_INVOICED_QTY, FIELD_GROSS_AMOUNT, qty);
       return;
     }
-    double baseNetAmt = body.optDouble(FIELD_LINE_NET_AMOUNT, 0);
+    BigDecimal baseNetAmt = decimalOrZero(body.opt(FIELD_LINE_NET_AMOUNT));
     String taxId = body.optString(FIELD_TAX, "");
-    if (baseNetAmt > 0 && taxId.isEmpty()) {
+    if (baseNetAmt.signum() > 0 && taxId.isEmpty()) {
       return;
     }
-    double computed = resolveGrossAmount(body.optDouble(FIELD_GROSS_UNIT_PRICE, 0), qty, baseNetAmt, taxId);
-    if (Double.isNaN(computed)) {
+    BigDecimal computed = resolveGrossAmount(decimalOrZero(body.opt(FIELD_GROSS_UNIT_PRICE)),
+        qty, baseNetAmt, taxId);
+    if (computed == null) {
       return;
     }
     try {
-      body.put(FIELD_GROSS_AMOUNT, computed);
-      log.debug("[NEO-LINE-POLICY] Computed grossAmount={} (qty={}, tax={})", computed, qty, taxId);
+      double rounded = round(computed, scale);
+      body.put(FIELD_GROSS_AMOUNT, rounded);
+      log.debug("[NEO-LINE-POLICY] Computed grossAmount={} (qty={}, tax={})", rounded, qty, taxId);
     } catch (Exception e) {
       log.debug("Could not set grossAmount: {}", e.getMessage());
     }
   }
 
   static void injectLineGrossAmountIfMissing(JSONObject body) {
+    injectLineGrossAmountIfMissing(body, () -> NeoCurrencyPrecision.DEFAULT_SCALE);
+  }
+
+  static void injectLineGrossAmountIfMissing(JSONObject body, IntSupplier scale) {
     if (body == null) {
       return;
     }
@@ -153,14 +186,12 @@ public final class NeoCommercialLinePolicy {
           clientValue);
       return;
     }
-    double qty;
-    try {
-      qty = Double.parseDouble(body.optString(FIELD_ORDERED_QTY, "0"));
-    } catch (NumberFormatException e) {
+    BigDecimal qty = parseQuantity(body, FIELD_ORDERED_QTY);
+    if (qty == null) {
       return;
     }
-    double unitPrice = body.optDouble(FIELD_UNIT_PRICE, 0);
-    if (qty == 0 || unitPrice == 0) {
+    BigDecimal unitPrice = decimalOrZero(body.opt(FIELD_UNIT_PRICE));
+    if (qty.signum() == 0 || unitPrice.signum() == 0) {
       // ETP-4727: editing orderedQuantity or unitPrice to exactly 0 on an EXISTING line is
       // deterministic (qty × price with either factor at 0 is always 0). See
       // forceZeroIfEntityFieldPresent's javadoc for why this fallback is needed at all and why
@@ -172,15 +203,15 @@ public final class NeoCommercialLinePolicy {
     // Do NOT apply discountFactor again — that would double the discount.
     // ETP-4567: a negative unitPrice is a legitimate line (frontend now allows negative
     // qty/price) — the branch above only catches the genuinely-zero case.
-    double baseNetAmt = unitPrice * qty;
+    BigDecimal baseNetAmt = unitPrice.multiply(qty);
     String taxId = body.optString(FIELD_TAX, "");
-    double computed = resolveGrossAmount(body.optDouble(FIELD_GROSS_UNIT_PRICE, 0), qty, baseNetAmt, taxId);
-    if (Double.isNaN(computed)) {
+    BigDecimal computed = resolveGrossAmount(decimalOrZero(body.opt(FIELD_GROSS_UNIT_PRICE)),
+        qty, baseNetAmt, taxId);
+    if (computed == null) {
       return;
     }
     try {
-      double rounded = BigDecimal.valueOf(computed)
-          .setScale(2, java.math.RoundingMode.HALF_UP).doubleValue();
+      double rounded = round(computed, scale);
       body.put(FIELD_LINE_GROSS_AMOUNT, rounded);
       log.debug("[NEO-LINE-POLICY] Computed lineGrossAmount={} (qty={}, unitPrice={}, tax={})",
           rounded, qty, unitPrice, taxId);
@@ -190,17 +221,19 @@ public final class NeoCommercialLinePolicy {
   }
 
   static void injectLineNetAmountIfMissing(JSONObject body) {
+    injectLineNetAmountIfMissing(body, () -> NeoCurrencyPrecision.DEFAULT_SCALE);
+  }
+
+  static void injectLineNetAmountIfMissing(JSONObject body, IntSupplier scale) {
     if (body == null) {
       return;
     }
-    double qty;
-    try {
-      qty = Double.parseDouble(body.optString(FIELD_INVOICED_QTY, "0"));
-    } catch (NumberFormatException e) {
+    BigDecimal qty = parseQuantity(body, FIELD_INVOICED_QTY);
+    if (qty == null) {
       return;
     }
-    double unitPrice = body.optDouble(FIELD_UNIT_PRICE, 0);
-    if (qty == 0 || unitPrice == 0) {
+    BigDecimal unitPrice = decimalOrZero(body.opt(FIELD_UNIT_PRICE));
+    if (qty.signum() == 0 || unitPrice.signum() == 0) {
       // ETP-4727: see injectLineGrossAmountIfMissing above for the full rationale — a direct
       // edit of invoicedQuantity or unitPrice to 0 on an existing line is deterministic and must
       // zero lineNetAmount, not leave it untouched in a partial PATCH.
@@ -208,13 +241,36 @@ public final class NeoCommercialLinePolicy {
       return;
     }
     try {
-      double computed = qty * unitPrice;
+      double computed = round(qty.multiply(unitPrice), scale);
       body.put(FIELD_LINE_NET_AMOUNT, computed);
       log.debug("[NEO-LINE-POLICY] Set lineNetAmount={} from qty={} × unitPrice={}",
           computed, qty, unitPrice);
     } catch (Exception e) {
       log.debug("Could not compute lineNetAmount: {}", e.getMessage());
     }
+  }
+
+  /**
+   * The quantity under {@code key} (absent reads as 0), or {@code null} when it is not a number —
+   * the caller then leaves the body untouched, as it always did.
+   */
+  private static BigDecimal parseQuantity(JSONObject body, String key) {
+    try {
+      return new BigDecimal(body.optString(key, "0").trim());
+    } catch (NumberFormatException e) {
+      return null;
+    }
+  }
+
+  /** {@code value} as a decimal; absent, null or not a number read as 0. */
+  private static BigDecimal decimalOrZero(Object value) {
+    BigDecimal decimal = LineAmountSupport.decimal(value);
+    return decimal != null ? decimal : BigDecimal.ZERO;
+  }
+
+  /** {@code amount} rounded HALF_UP to the scale {@code scale} supplies. */
+  private static double round(BigDecimal amount, IntSupplier scale) {
+    return amount.setScale(scale.getAsInt(), RoundingMode.HALF_UP).doubleValue();
   }
 
   /**
@@ -239,7 +295,7 @@ public final class NeoCommercialLinePolicy {
    * carry.
    */
   private static void forceZeroIfEntityFieldPresent(JSONObject body, String qtyFieldKey,
-      String amountField, double qty) {
+      String amountField, BigDecimal qty) {
     if (!body.has(qtyFieldKey)) {
       return;
     }
@@ -390,18 +446,24 @@ public final class NeoCommercialLinePolicy {
     }
   }
 
-  private static double resolveGrossAmount(double grossUnitPrice, double qty, double baseNetAmt,
-      String taxId) {
-    if (grossUnitPrice > 0) {
-      return grossUnitPrice * qty;
+  /**
+   * The unrounded gross of a line: {@code grossUnitPrice × qty} on a tax-included price, else
+   * {@code baseNetAmt × (1 + rate / 100)}; {@code null} when it is indeterminate (no gross price
+   * and a zero net).
+   */
+  private static BigDecimal resolveGrossAmount(BigDecimal grossUnitPrice, BigDecimal qty,
+      BigDecimal baseNetAmt, String taxId) {
+    if (grossUnitPrice.signum() > 0) {
+      return grossUnitPrice.multiply(qty);
     }
     // ETP-4567: baseNetAmt is legitimately negative for a negative-qty/price line
     // (the frontend now allows both). Only exact zero is indeterminate.
-    if (baseNetAmt == 0) {
-      return Double.NaN;
+    if (baseNetAmt.signum() == 0) {
+      return null;
     }
-    double rate = (taxId == null || taxId.isEmpty()) ? 0 : fetchTaxRate(taxId);
-    return baseNetAmt * (1.0 + rate / 100.0);
+    BigDecimal rate = (taxId == null || taxId.isEmpty()) ? BigDecimal.ZERO
+        : BigDecimal.valueOf(fetchTaxRate(taxId));
+    return baseNetAmt.multiply(BigDecimal.ONE.add(rate.movePointLeft(2)));
   }
 
   private static double fetchTaxRate(String taxId) {

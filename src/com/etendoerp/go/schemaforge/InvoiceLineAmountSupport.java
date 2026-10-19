@@ -21,6 +21,7 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.util.Arrays;
 import java.util.List;
+import java.util.function.IntSupplier;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -79,8 +80,8 @@ import org.openbravo.model.common.invoice.InvoiceLine;
  * discount applied.
  *
  * <p><b>The amounts.</b> {@link NeoCommercialLinePolicy#injectCommercialAmounts} over the line's
- * final quantity, price, gross price and tax, rounded to {@value LineAmountSupport#AMOUNT_SCALE}
- * decimals. {@code lineNetAmount} needs no tax; {@code grossAmount} is written only when the line
+ * final quantity, price, gross price and tax, rounded to the invoice currency's standard precision
+ * ({@link NeoCurrencyPrecision}, ETP-5703). {@code lineNetAmount} needs no tax; {@code grossAmount} is written only when the line
  * has one (a REST or batch create reaches its pre-hook before the create cascade resolves it, and
  * {@code executePostCreate} derives the gross afterwards).
  */
@@ -211,6 +212,10 @@ final class InvoiceLineAmountSupport {
    * inputs afterwards on the REST and batch channels and writes the same values, so the pre-hook's
    * write changes nothing there.
    *
+   * <p><b>Typed values.</b> The amounts are written as {@link BigDecimal}, the DAL type of both
+   * columns, rounded to the invoice currency's standard precision ({@link NeoCurrencyPrecision},
+   * ETP-5703), exactly what {@code etendo_batch} persists for the same line.
+   *
    * <p>Total: never throws.
    *
    * @param ctx the pre-hook context; its request body is mutated in place
@@ -225,15 +230,16 @@ final class InvoiceLineAmountSupport {
       return;
     }
     try {
-      JSONObject undiscounted = amountsOf(amountInputs(body));
+      IntSupplier scale = NeoCurrencyPrecision.forWrite(ctx.getAdTab(), body, null);
+      JSONObject undiscounted = amountsOf(amountInputs(body), scale);
       boolean discounted = applyDiscount(body, body, true);
-      JSONObject derived = amountsOf(amountInputs(body));
+      JSONObject derived = amountsOf(amountInputs(body), scale);
       zeroGrossFollowsZeroNet(derived);
       boolean withGross = hasTax(body);
       for (String out : AMOUNT_OUTPUTS) {
         if (!FIELD_GROSS_AMOUNT.equals(out) || withGross) {
           writeIfStale(body, out, derived.opt(out), discounted ? undiscounted.opt(out) : null,
-              discounted);
+              discounted, scale);
         }
       }
     } catch (Exception e) {
@@ -272,20 +278,21 @@ final class InvoiceLineAmountSupport {
       if (state == null) {
         return;
       }
+      IntSupplier scale = NeoCurrencyPrecision.forWrite(ctx.getAdTab(), body, ctx.getRecordId());
       JSONObject sent = new JSONObject(body.toString());
       overlay(state, body);
       if (applyDiscount(body, state, false)) {
         state.put(FIELD_UNIT_PRICE, body.get(FIELD_UNIT_PRICE));
       }
-      JSONObject derived = amountsOf(amountInputs(state));
+      JSONObject derived = amountsOf(amountInputs(state), scale);
       zeroGrossFollowsZeroNet(derived);
       for (String out : AMOUNT_OUTPUTS) {
         BigDecimal value = LineAmountSupport.decimal(derived.opt(out));
         if (value != null && !sent.has(out)) {
-          body.put(out, value.setScale(LineAmountSupport.AMOUNT_SCALE, RoundingMode.HALF_UP));
+          body.put(out, value.setScale(scale.getAsInt(), RoundingMode.HALF_UP));
         }
       }
-    } catch (Exception e) {
+    } catch (Exception | LinkageError e) {
       log.warn("[INVOICE-LINE-AMOUNTS] Could not recalculate the line {} on {} {}: {}",
           ctx.getRecordId(), ctx.getSpecName(), ctx.getEntityName(), e.getMessage());
     }
@@ -359,9 +366,12 @@ final class InvoiceLineAmountSupport {
     }
   }
 
-  /** The amounts the policy derives over {@code inputs}, never the stored ones. */
-  private static JSONObject amountsOf(JSONObject inputs) {
-    NeoCommercialLinePolicy.injectCommercialAmounts(inputs);
+  /**
+   * The amounts the policy derives over {@code inputs}, never the stored ones, rounded to
+   * {@code scale} decimals.
+   */
+  private static JSONObject amountsOf(JSONObject inputs, IntSupplier scale) {
+    NeoCommercialLinePolicy.injectCommercialAmounts(inputs, scale);
     return inputs;
   }
 
@@ -371,10 +381,11 @@ final class InvoiceLineAmountSupport {
    * A derived 0 is written only when {@code zeroIsDeliberate} — the discount itself took the price
    * to 0 (100 %), so the amount is 0 on purpose and an amount of the undiscounted price must not
    * survive. Without a discount a derived 0 means "no price or quantity yet" and is left for the
-   * rest of the pipeline.
+   * rest of the pipeline. The value written is rounded to {@code scale} decimals, the invoice
+   * currency's precision (ETP-5703).
    */
   static void writeIfStale(JSONObject body, String key, Object derived, Object beforeDiscount,
-      boolean zeroIsDeliberate) throws JSONException {
+      boolean zeroIsDeliberate, IntSupplier scale) throws JSONException {
     BigDecimal value = LineAmountSupport.decimal(derived);
     if (value == null || (value.signum() == 0 && !zeroIsDeliberate)) {
       return;
@@ -382,7 +393,7 @@ final class InvoiceLineAmountSupport {
     Object current = body.opt(key);
     if (LineAmountSupport.isStaleAmount(current, value)
         || LineAmountSupport.sameAmountAtScale(current, beforeDiscount)) {
-      body.put(key, value.setScale(LineAmountSupport.AMOUNT_SCALE, RoundingMode.HALF_UP));
+      body.put(key, value.setScale(scale.getAsInt(), RoundingMode.HALF_UP));
     }
   }
 

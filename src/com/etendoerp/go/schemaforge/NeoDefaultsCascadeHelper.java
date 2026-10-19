@@ -34,12 +34,12 @@ public class NeoDefaultsCascadeHelper {
 
   private static final Logger log = LogManager.getLogger(NeoDefaultsCascadeHelper.class);
   private static final int MAX_CALLOUT_CHAIN_DEPTH = 5;
-  private static final String FIELD_VALUE = "value";
+  static final String FIELD_VALUE = "value";
   private static final String FIELD_IDENTIFIER = "_identifier";
   private static final String IDENTIFIER_SUFFIX = "$_identifier";
-  private static final String KEY_UPDATES = "updates";
-  private static final String KEY_COMBOS = "combos";
-  private static final String KEY_SELECTED = "selected";
+  static final String KEY_UPDATES = "updates";
+  static final String KEY_COMBOS = "combos";
+  static final String KEY_SELECTED = "selected";
 
   private NeoDefaultsCascadeHelper() {
   }
@@ -186,6 +186,21 @@ public class NeoDefaultsCascadeHelper {
   public static NeoDefaultsService.CalloutCascadeResult executeCalloutCascade(NeoContext ctx, Tab adTab,
       JSONObject defaults, Set<String> seqFields, Set<String> protectedFields,
       Set<String> suppressedFields) {
+    return executeCalloutCascade(ctx, adTab, defaults, seqFields, protectedFields,
+        suppressedFields, null);
+  }
+
+  /**
+   * The create cascade with a per-batch {@link NeoCalloutDiscardMemory} (ETP-5676): a callout whose
+   * every output was discarded by an earlier operation of the same batch, under the same key, is
+   * not run again. {@code null} runs every callout, as every other caller does.
+   *
+   * @param discardMemory the batch's memory, or {@code null} outside a batch
+   * @see #executeCalloutCascade(NeoContext, Tab, JSONObject, Set, Set, Set)
+   */
+  static NeoDefaultsService.CalloutCascadeResult executeCalloutCascade(NeoContext ctx, Tab adTab,
+      JSONObject defaults, Set<String> seqFields, Set<String> protectedFields,
+      Set<String> suppressedFields, NeoCalloutDiscardMemory discardMemory) {
     NeoDefaultsService.CalloutCascadeResult result = new NeoDefaultsService.CalloutCascadeResult();
     try {
       List<String> fieldsWithCallouts = collectFieldsWithCallouts(defaults, seqFields, adTab);
@@ -198,7 +213,7 @@ public class NeoDefaultsCascadeHelper {
 
       JSONObject formState = new JSONObject(defaults.toString());
       CascadeTargets targets = new CascadeTargets(formState, defaults, seqFields,
-          protectedFields, suppressedFields);
+          protectedFields, suppressedFields, discardMemory);
       runCascadeLoop(ctx, adTab, targets, new LinkedHashSet<>(fieldsWithCallouts), result);
     } catch (Exception e) {
       log.error("[NEO-DEFAULTS] Error in callout cascade: {}", e.getMessage(), e);
@@ -297,7 +312,8 @@ public class NeoDefaultsCascadeHelper {
       log.info("[NEO-DEFAULTS] Re-firing callouts for trigger fields: {}", pendingFields);
       CascadeTargets targets = new CascadeTargets(formState, body,
           java.util.Collections.<String>emptySet(), protectedFields,
-          suppressedFields != null ? suppressedFields : java.util.Collections.<String>emptySet());
+          suppressedFields != null ? suppressedFields : java.util.Collections.<String>emptySet(),
+          null);
       runCascadeLoop(ctx, adTab, targets, pendingFields, result);
     } catch (Exception e) {
       log.warn("[NEO-DEFAULTS] Trigger-field callout re-fire failed (non-fatal): {}",
@@ -321,7 +337,7 @@ public class NeoDefaultsCascadeHelper {
       Set<String> nextPending = new LinkedHashSet<>();
       CalloutFieldContext cCtx = new CalloutFieldContext(targets.formState, targets.defaults,
           targets.seqFields, result, nextPending, targets.protectedFields,
-          targets.suppressedFields);
+          targets.suppressedFields, targets.discardMemory);
       for (String fieldName : pending) {
         Object value = targets.formState.opt(fieldName);
         if (value != null && !JSONObject.NULL.equals(value)) {
@@ -454,7 +470,7 @@ public class NeoDefaultsCascadeHelper {
     // Set<Object> and the overload no longer resolves.
     CalloutFieldContext cCtx = new CalloutFieldContext(formState, defaults,
         java.util.Collections.<String>emptySet(), result, nextPending, skipFields,
-        java.util.Collections.<String>emptySet());
+        java.util.Collections.<String>emptySet(), null);
 
     for (String fieldName : pendingFields) {
       boolean shouldSkip = skipFields != null && skipFields.contains(fieldName);
@@ -544,6 +560,17 @@ public class NeoDefaultsCascadeHelper {
   private static void processCalloutForField(NeoContext ctx, Tab adTab, String fieldName,
       Object value, CalloutFieldContext cCtx) {
     try {
+      // ETP-5676: only inside a batch. The kept set is taken here, before the callout runs,
+      // because it is exactly what the merge below will test each output against.
+      Set<String> keptFields = null;
+      String discardKey = null;
+      if (cCtx.discardMemory != null && adTab != null) {
+        keptFields = keptFields(cCtx.defaults, cCtx.protectedFields, cCtx.suppressedFields);
+        discardKey = NeoCalloutDiscardMemory.keyFor(adTab.getId(), fieldName, value, keptFields);
+        if (cCtx.discardMemory.shouldSkip(discardKey)) {
+          return;
+        }
+      }
       JSONObject calloutRequest = buildCalloutRequest(adTab, fieldName, value, cCtx.formState);
       NeoResponse calloutResponse = NeoCalloutService.executeCallout(ctx, calloutRequest);
       if (calloutResponse == null || calloutResponse.getHttpStatus() != 200) {
@@ -554,6 +581,11 @@ public class NeoDefaultsCascadeHelper {
       JSONObject calloutBody = calloutResponse.getBody();
       if (calloutBody == null) {
         return;
+      }
+      if (discardKey != null) {
+        cCtx.discardMemory.recordOutcome(discardKey,
+            NeoCalloutDiscardMemory.calloutOutputs(calloutBody), keptFields,
+            NeoCalloutDiscardMemory.calloutReported(calloutBody));
       }
 
       mergeCalloutUpdates(calloutBody, cCtx.formState, cCtx.defaults, cCtx.seqFields,
@@ -584,6 +616,23 @@ public class NeoDefaultsCascadeHelper {
           auxValues.length(), fieldName);
     }
     return calloutRequest;
+  }
+
+  /**
+   * The fields that keep their current value over any callout output right now: the suppressed
+   * ones, and the protected ones that already hold a non-blank value — the very test
+   * {@link #shouldKeepExistingValue} applies during the merge (ETP-5676).
+   */
+  private static Set<String> keptFields(JSONObject defaults, Set<String> protectedFields,
+      Set<String> suppressedFields) {
+    Set<String> kept = new HashSet<>(suppressedFields);
+    for (String field : protectedFields) {
+      if (shouldKeepExistingValue(defaults, field, protectedFields,
+          java.util.Collections.<String>emptySet())) {
+        kept.add(field);
+      }
+    }
+    return kept;
   }
 
   private static void mergeCalloutUpdates(JSONObject calloutBody, JSONObject formState,
@@ -718,14 +767,17 @@ public class NeoDefaultsCascadeHelper {
     final Set<String> seqFields;
     final Set<String> protectedFields;
     final Set<String> suppressedFields;
+    final NeoCalloutDiscardMemory discardMemory;
 
     CascadeTargets(JSONObject formState, JSONObject defaults, Set<String> seqFields,
-        Set<String> protectedFields, Set<String> suppressedFields) {
+        Set<String> protectedFields, Set<String> suppressedFields,
+        NeoCalloutDiscardMemory discardMemory) {
       this.formState = formState;
       this.defaults = defaults;
       this.seqFields = seqFields;
       this.protectedFields = protectedFields;
       this.suppressedFields = suppressedFields;
+      this.discardMemory = discardMemory;
     }
   }
 
@@ -737,10 +789,14 @@ public class NeoDefaultsCascadeHelper {
     final Set<String> nextPending;
     final Set<String> protectedFields;
     final Set<String> suppressedFields;
+    /** ETP-5676: the batch's memory on the create path, {@code null} everywhere else. */
+    final NeoCalloutDiscardMemory discardMemory;
 
     CalloutFieldContext(JSONObject formState, JSONObject defaults, Set<String> seqFields,
         NeoDefaultsService.CalloutCascadeResult result, Set<String> nextPending,
-        Set<String> protectedFields, Set<String> suppressedFields) {
+        Set<String> protectedFields, Set<String> suppressedFields,
+        NeoCalloutDiscardMemory discardMemory) {
+      this.discardMemory = discardMemory;
       this.formState = formState;
       this.defaults = defaults;
       this.seqFields = seqFields;
