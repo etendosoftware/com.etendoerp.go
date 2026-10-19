@@ -20,6 +20,7 @@ package com.etendoerp.go.schemaforge;
 import java.util.Arrays;
 
 import org.apache.commons.lang3.StringUtils;
+import org.openbravo.base.model.Entity;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.base.structure.ClientEnabled;
 import org.openbravo.base.structure.OrganizationEnabled;
@@ -49,6 +50,9 @@ import org.openbravo.model.common.enterprise.Organization;
  * guard and a DAL-backed query always agree on what the caller may see. Both are derived from the
  * role at login and are <b>not</b> widened by admin mode, which only suppresses the entity-access
  * check.
+ *
+ * <p>The NEO write paths use the client-only variant, {@link #loadOwnedByClient(String, String)},
+ * for every reference a request sets (ETP-5785, see {@link NeoReferenceOwnership}).
  */
 final class TenantOwnership {
 
@@ -88,6 +92,64 @@ final class TenantOwnership {
       return true;
     }
     return hasReadableClient(entity, context) && hasReadableOrganization(entity, context);
+  }
+
+  /**
+   * Loads a row by entity name and id, but only when it belongs to a client the caller may read:
+   * its own, or System ({@code 0}). Unlike {@link #loadOwned(Class, String)} the organization is
+   * NOT judged (ETP-5785).
+   *
+   * <p>For callers that know the entity only from the DAL model — a foreign key resolved
+   * structurally from a request, a parent tab — rather than as a class. The client-only scope is
+   * deliberate: a reference to a row of another organization of the SAME tenant is an
+   * organization-access question with rules of its own (the natural tree, the referenced-org check
+   * of {@code OBInterceptor}), not a tenant leak.
+   *
+   * @param entityName the DAL entity name
+   * @param id         the id, typically straight from a request body
+   * @return the row, or {@code null} when the id is blank, unknown, or owned by another tenant
+   */
+  static BaseOBObject loadOwnedByClient(String entityName, String id) {
+    if (StringUtils.isBlank(entityName) || StringUtils.isBlank(id)) {
+      return null;
+    }
+    BaseOBObject row = OBDal.getInstance().get(entityName, id);
+    return belongsToReadableClient(row) ? row : null;
+  }
+
+  /**
+   * True when {@code entity} belongs to a client the caller may read — its own or System — with
+   * no opinion on its organization. See {@link #loadOwnedByClient(String, String)} for why.
+   *
+   * <p>A {@link Client} row is judged by its own id: it IS the tenant. Any other row that is not
+   * client-enabled is shared reference data and always passes, exactly as in
+   * {@link #isVisibleToCurrentTenant(BaseOBObject)}.
+   */
+  static boolean belongsToReadableClient(BaseOBObject entity) {
+    if (entity == null) {
+      return false;
+    }
+    OBContext context = OBContext.getOBContext();
+    if (context == null) {
+      // Same fail-open contract as isVisibleToCurrentTenant: no session, no tenant to compare.
+      return true;
+    }
+    if (entity instanceof Client) {
+      return contains(context.getReadableClients(), ((Client) entity).getId());
+    }
+    return hasReadableClient(entity, context);
+  }
+
+  /**
+   * True when rows of {@code entity} belong to a tenant: the entity is client-enabled, or it is the
+   * client entity itself. Anything else is shared by every tenant, so ownership cannot be violated
+   * through it and there is nothing to look up.
+   *
+   * @param entity a DAL model entity; {@code null} is not tenant-scoped
+   */
+  static boolean isTenantScoped(Entity entity) {
+    return entity != null
+        && (entity.isClientEnabled() || Client.ENTITY_NAME.equals(entity.getName()));
   }
 
   private static boolean hasReadableClient(BaseOBObject entity, OBContext context) {

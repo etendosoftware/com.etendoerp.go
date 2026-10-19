@@ -890,6 +890,69 @@ unknown ids, lookup failure, null rows) and the `testResolveSqlDefaultOutcomeTen
 `NeoDefaultsServiceTest`. Background and the list of known unscoped defaults:
 `etendo_schema_forge` `docs/etendo-ad/unscoped-sql-defaults.md`.
 
+#### 4.3.7 A write never references another tenant's row (ETP-5785)
+
+Core resolves a foreign-key value of a write body with a bare `OBDal.get` (`JsonToDataConverter`),
+which applies no client filter, and `OBInterceptor` skips its referenced-organization check on
+insert. The parent of a child create was read the same way (`NeoParentValuesLoader`). With
+credentials of tenant A and a UUID of tenant B, a caller could attach A's order line to B's order or
+point A's records at B's price list, tax, partner or user.
+
+`NeoReferenceOwnership.refuseUnownedReferences(adTab, requestFields, parentId)` closes it on every
+write channel that persists through NEO:
+
+| channel | where it runs |
+|---|---|
+| REST `POST /sws/neo/{spec}/{entity}` | `NeoCrudHandler.executePostCreate`, right after `filterCreateRequest`, before mandatory defaults, the callout cascade and the parent read |
+| REST `PUT`/`PATCH` | `NeoCrudHandler.executeUpdate`, right after `filterWriteRequest` |
+| REST `/sws/neo/batch` and MCP `etendo_batch` | the same `executePostCreate` (`BatchService` → `handleWithHooks` → `handleDefault`) |
+| MCP `etendo_create` | `parentId` right after `requireApplicableParent`; the fields right after FK-by-name resolution (`McpFkResolver`), before defaults and the injectors |
+| MCP `etendo_update` | right after FK-by-name resolution |
+
+There is no single persistence point the three channels share below core: MCP `etendo_create` /
+`etendo_update` persist through their own pipeline. The check is therefore one implementation called
+from those two pipelines, not two copies.
+
+**What is checked.** Only what the request set: the body as the caller sent it (after the field
+filter, before any server-derived value is added) and `parentId`. A body key is a reference when the
+DAL model says so — a non-primitive, non-one-to-many property, reached directly or through a
+`property.id` path, or a nested object with an `id` (core writes into that row) — and its target
+entity is client-enabled or is the client entity. No entity, table or property is named. Skipped
+without a lookup: shared reference data (not client-enabled), blank / `"null"` values, the `"0"`
+sentinel, an unsubstituted batch `$ref:`, and placeholder literals no id can match (an unresolved
+`@Token@` AD default, a `<…>` sequence preview). `parentId` is checked against the parent tab's
+entity; a header ignores `parentId`, so it is not checked there.
+
+**What is accepted.** A row whose client is the caller's or System (`0`), as decided by
+`TenantOwnership.loadOwnedByClient` (readable clients; the organization is not judged — see below).
+
+**The refusal.** A row of another tenant and a row that does not exist get the same answer: the body
+core's `DefaultJsonDataService` returns for an unknown reference
+(`RPCREQUEST_STATUS_VALIDATION_ERROR`, one error keyed `id`:
+`New object <Entity>(null)  (key: <id>_<Entity>) refered to but not present in the import set`). Each
+channel maps it with its existing mapper — REST: **400** through `NeoValidationErrorResponseBuilder`;
+MCP: the **422** `validation_error` envelope with `fieldErrors.id` — so nothing tells the caller that
+the id exists elsewhere. Nothing is written: the check runs before the write and, in a batch, the
+failure rolls back the whole set. The server log keeps one WARN naming the target entity, never the
+id. A missing id is now refused at this point too, before defaults or callouts run, so its answer
+no longer depends on how far the write got.
+
+**Cost.** One `OBDal.get` per distinct reference the request sets, never one per foreign key of the
+entity. The row lands in the session's first-level cache, where core's own resolution of the same id
+finds it a moment later, so a write that passes costs no extra query. A reference by a non-id
+property (rare) resolves through the same query core uses, and every match must be acceptable.
+
+**The parent read.** `NeoParentValuesLoader` treats a parent of another tenant as missing, so its
+values never reach defaults — on the create path and on `GET /defaults?parentId=` alike.
+
+**Out of scope.** Organization-level references within the same tenant (a row of an organization
+outside the role's tree) are not judged here; that is an organization-access question, not a tenant
+leak. The target record of an update or delete is not a reference and is not checked by this rule.
+
+Tests: `NeoReferenceOwnershipTest` (structural detection, dedup, paths, nested objects, parent,
+skipped values, identical answers), the `loadOwnedByClient` cases of `TenantOwnershipTest`, and the
+two-tenant `NeoReferenceOwnershipIntegrationTest` (REST default path, nothing written).
+
 ### 4.4 Selectors (FK Dropdowns)
 
 The selector service resolves foreign key references and provides searchable dropdown values.
@@ -3550,6 +3613,7 @@ not: `etendo_create` does not run it in shared code, so it is in the table below
 | `NeoCommercialLinePolicy.injectCommercialAmounts` | **no** in shared code — only from the customizations of sales order, sales quotation, sales invoice and purchase invoice lines (ETP-5528, ETP-5710, §4.12.20, §4.12.31) | yes | `etendo_batch` runs it in `NeoCrudHandler.executePostCreate`; `etendo_create` never reaches that method — it is a separate pipeline. Since ETP-5528, sales order and sales quotation lines get the amounts on every create from their own customizations (`OrderLineDiscountSupport.deriveAmountsOnCreate`), and so do sales and purchase invoice lines (`SalesInvoiceLineHandler` / `PurchaseInvoiceLineHandler` → `InvoiceLineAmountSupport.deriveAmountsOnCreate`; purchase since ETP-5710). Every other entity is as on `develop`: a generic commercial line persists `lineGrossAmount = 0` on a net price list, and purchase order lines still do not get it (measured 2026-09-30: purchase order line gross 0; the purchase invoice line 0 / 0 of that measurement is fixed by ETP-5710). Declared, not fixed in shared code. (`grossUnitPrice` still persists as 0 on both verbs — a separate, undiagnosed defect, not a divergence) |
 | `buildInvalidDatesError` | yes | **no** | no explicit 422 for an unreadable or ambiguous date (ETP-4793 / IMP-24). Type coercion itself does run on the shared path (`executePostCreate` → `coerceTypes`), so the value is not silently mangled — the agent just gets a less precise failure |
 | the `warehouse` default | *Almacén Secundario* | *Almacén Principal* | observed with an identical body, 2026-09-28. Not yet diagnosed: it may be a genuine divergence in the defaults chain or a session dependency. Recorded here so it is not rediscovered as new |
+| reference ownership (ETP-5785, §4.3.7) | checked before defaults, FK-name resolution (parent) and the injectors | checked in `executePostCreate`, after `preprocessBatchOperation` | a foreign or missing reference is refused on both and nothing is written. In batch, the preprocessor's injectors (`McpLinePriceInjector`, `McpBillToInjector`) run first and may read the referenced parent or partner; what they read never reaches the response, but a refusal the preprocessor raises on that read is answered instead of the unknown-reference body |
 | `user` create — invitation (ETP-4830, declared by ETP-5194) | invitation committed by the post-hook | same, but mid-batch | the invitation's `commitAndClose()` commits every earlier operation of the batch, so a later failure answers `atomic: false` (§4.12.4.1). Same behaviour on REST `/batch`; declared, not changed. The ETP-5194 email correction is an update, which batch does not perform |
 
 This is a **declared** list, not an unknown one: the point is that the next person to touch either

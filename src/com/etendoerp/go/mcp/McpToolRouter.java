@@ -666,6 +666,14 @@ public class McpToolRouter {
     // unmappable link on its own and attach the record to a parent nobody chose.
     McpWriteRequestSupport.requireApplicableParent(sfEntity,
         fields.optString(McpConstants.PARAM_PARENT_ID, null));
+    // ETP-5785: the parent must be a row of the caller's client or of System. Checked before the
+    // selector context, the defaults pass or resolveParentFK read it.
+    JSONObject unownedParent = McpWriteRequestSupport.refuseUnownedReferences(adTab, null,
+        fields.optString(McpConstants.PARAM_PARENT_ID, null),
+        NeoCrudHelper.snapshotBodyFields(fields));
+    if (unownedParent != null) {
+      return wrapAsErrorContent(unownedParent);
+    }
 
     String dalEntityName = adTab.getTable().getName();
     DefaultJsonDataService jsonService = DefaultJsonDataService.getInstance();
@@ -710,6 +718,14 @@ public class McpToolRouter {
             adTab), log);
     if (fkError != null) {
       return wrapAsErrorContent(fkError);
+    }
+
+    // ETP-5785: every reference the agent set is now an id (names were resolved above), and must
+    // be a row of the caller's client or of System — checked before defaults or callouts use it.
+    JSONObject unownedReference = McpWriteRequestSupport.refuseUnownedReferences(adTab,
+        filteredBody, null, NeoCrudHelper.snapshotBodyFields(filteredBody));
+    if (unownedReference != null) {
+      return wrapAsErrorContent(unownedReference);
     }
 
     // Snapshot user-provided fields BEFORE callout cascade can overwrite them.
@@ -929,6 +945,13 @@ public class McpToolRouter {
         McpSelectorContextHelper.buildSelectorContextParams(null, adTab), log);
     if (fkError != null) {
       return wrapAsErrorContent(fkError);
+    }
+
+    // ETP-5785: same reference-ownership check as handleCreate; an update has no parent.
+    JSONObject unownedReference = McpWriteRequestSupport.refuseUnownedReferences(adTab,
+        filteredBody, null, updateUserProvidedFields);
+    if (unownedReference != null) {
+      return wrapAsErrorContent(unownedReference);
     }
 
     // ETP-4793 / IMP-16: the same coercion pass handleCreate runs, and for the same reason. Until

@@ -33,6 +33,8 @@ import org.junit.runner.RunWith;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.mockito.junit.MockitoJUnitRunner;
+import org.openbravo.base.model.Entity;
+import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.system.Client;
@@ -41,7 +43,10 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 
 /**
  * Unit tests for {@link TenantOwnership} — the guard that stops an id supplied by a request from
- * resolving to another tenant's row (ETP-4950).
+ * resolving to another tenant's row (ETP-4950), including the client-only variant the NEO write
+ * paths use for the references a request sets (ETP-5785).
+ *
+ * @covers com.etendoerp.go.schemaforge.TenantOwnership
  *
  * <p>These matter more than most: every other test in the module runs with no {@code OBContext} on
  * the thread, where the guard deliberately fails open, so this is the only place the isolating
@@ -55,6 +60,8 @@ public class TenantOwnershipTest {
   private static final String OTHER_CLIENT = "client-other";
   private static final String OWN_ORG = "org-own";
   private static final String OTHER_ORG = "org-other";
+  private static final String SYSTEM_CLIENT = "0";
+  private static final String ACCOUNT_ENTITY = "FIN_Financial_Account";
 
   /**
    * Releases the inline mock-maker references created during the test. Without this they
@@ -228,5 +235,129 @@ public class TenantOwnershipTest {
 
       assertTrue(TenantOwnership.isVisibleToCurrentTenant(account));
     }
+  }
+
+  // ── loadOwnedByClient / belongsToReadableClient (ETP-5785) ────────────────
+
+  /** Stubs {@code OBDal.get(entityName, id)} to return {@code row}. */
+  private static void stubDalGet(MockedStatic<OBDal> obDal, BaseOBObject row) {
+    OBDal dal = mock(OBDal.class);
+    obDal.when(OBDal::getInstance).thenReturn(dal);
+    when(dal.get(ACCOUNT_ENTITY, ACCOUNT_ID)).thenReturn(row);
+  }
+
+  /** A row of the caller's own client is returned. */
+  @Test
+  public void testLoadOwnedByClientReturnsARowOfTheCurrentClient() {
+    FIN_FinancialAccount account = accountOf(OWN_CLIENT, OWN_ORG);
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBContext> obContext = mockStatic(OBContext.class)) {
+      stubDalGet(obDal, account);
+      stubContext(obContext, new String[] {OWN_CLIENT, SYSTEM_CLIENT}, new String[] {OWN_ORG});
+
+      assertNotNull(TenantOwnership.loadOwnedByClient(ACCOUNT_ENTITY, ACCOUNT_ID));
+    }
+  }
+
+  /** A System row (client {@code 0}) is shared by every tenant and therefore accepted. */
+  @Test
+  public void testLoadOwnedByClientAcceptsASystemRow() {
+    FIN_FinancialAccount system = accountOf(SYSTEM_CLIENT, "0");
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBContext> obContext = mockStatic(OBContext.class)) {
+      stubDalGet(obDal, system);
+      stubContext(obContext, new String[] {OWN_CLIENT, SYSTEM_CLIENT}, new String[] {OWN_ORG});
+
+      assertNotNull(TenantOwnership.loadOwnedByClient(ACCOUNT_ENTITY, ACCOUNT_ID));
+    }
+  }
+
+  /** The point of ETP-5785: a row of another client is reported as missing. */
+  @Test
+  public void testLoadOwnedByClientHidesARowOfAnotherClient() {
+    FIN_FinancialAccount foreign = accountOf(OTHER_CLIENT, OTHER_ORG);
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBContext> obContext = mockStatic(OBContext.class)) {
+      stubDalGet(obDal, foreign);
+      stubContext(obContext, new String[] {OWN_CLIENT, SYSTEM_CLIENT}, new String[] {OWN_ORG});
+
+      assertNull(TenantOwnership.loadOwnedByClient(ACCOUNT_ENTITY, ACCOUNT_ID));
+    }
+  }
+
+  /**
+   * Unlike {@link TenantOwnership#loadOwned}, the organization is not judged: a row of an
+   * unreadable organization of the same client is still the tenant's own.
+   */
+  @Test
+  public void testLoadOwnedByClientIgnoresTheOrganization() {
+    FIN_FinancialAccount sibling = accountOf(OWN_CLIENT, OTHER_ORG);
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBContext> obContext = mockStatic(OBContext.class)) {
+      stubDalGet(obDal, sibling);
+      stubContext(obContext, new String[] {OWN_CLIENT, SYSTEM_CLIENT}, new String[] {OWN_ORG});
+
+      assertNotNull(TenantOwnership.loadOwnedByClient(ACCOUNT_ENTITY, ACCOUNT_ID));
+    }
+  }
+
+  /** An unknown id and a blank id both come back as {@code null}; a blank one never hits the DAL. */
+  @Test
+  public void testLoadOwnedByClientReturnsNullForUnknownOrBlankIds() {
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBContext> obContext = mockStatic(OBContext.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      stubContext(obContext, new String[] {OWN_CLIENT, SYSTEM_CLIENT}, new String[] {OWN_ORG});
+
+      assertNull(TenantOwnership.loadOwnedByClient(ACCOUNT_ENTITY, ACCOUNT_ID));
+      assertNull(TenantOwnership.loadOwnedByClient(ACCOUNT_ENTITY, " "));
+      assertNull(TenantOwnership.loadOwnedByClient(null, ACCOUNT_ID));
+
+      verify(dal, never()).get(ACCOUNT_ENTITY, " ");
+    }
+  }
+
+  /** A client row is the tenant itself: judged by its own id against the readable clients. */
+  @Test
+  public void testBelongsToReadableClientJudgesAClientRowByItsId() {
+    Client own = mock(Client.class);
+    when(own.getId()).thenReturn(OWN_CLIENT);
+    Client other = mock(Client.class);
+    when(other.getId()).thenReturn(OTHER_CLIENT);
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class)) {
+      stubContext(obContext, new String[] {OWN_CLIENT, SYSTEM_CLIENT}, new String[] {OWN_ORG});
+
+      assertTrue(TenantOwnership.belongsToReadableClient(own));
+      assertFalse(TenantOwnership.belongsToReadableClient(other));
+      assertFalse(TenantOwnership.belongsToReadableClient(null));
+    }
+  }
+
+  /** Same fail-open contract as the rest of the class when no session is on the thread. */
+  @Test
+  public void testBelongsToReadableClientFailsOpenWithoutASession() {
+    FIN_FinancialAccount foreign = accountOf(OTHER_CLIENT, OTHER_ORG);
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class)) {
+      obContext.when(OBContext::getOBContext).thenReturn(null);
+
+      assertTrue(TenantOwnership.belongsToReadableClient(foreign));
+    }
+  }
+
+  /** Client-enabled entities and the client entity itself are tenant-scoped; nothing else is. */
+  @Test
+  public void testIsTenantScoped() {
+    Entity clientEnabled = mock(Entity.class);
+    when(clientEnabled.isClientEnabled()).thenReturn(true);
+    Entity clientEntity = mock(Entity.class);
+    when(clientEntity.getName()).thenReturn(Client.ENTITY_NAME);
+    Entity shared = mock(Entity.class);
+    when(shared.getName()).thenReturn("Shared");
+
+    assertTrue(TenantOwnership.isTenantScoped(clientEnabled));
+    assertTrue(TenantOwnership.isTenantScoped(clientEntity));
+    assertFalse(TenantOwnership.isTenantScoped(shared));
+    assertFalse(TenantOwnership.isTenantScoped(null));
   }
 }
