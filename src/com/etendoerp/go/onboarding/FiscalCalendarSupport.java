@@ -160,7 +160,8 @@ public final class FiscalCalendarSupport {
    * Makes sure the calendar has a January-December year {@code fiscalYear} with its twelve
    * periods. An existing year with periods is left alone (whatever its start month); a missing one
    * is created, and an existing one without periods gets them. {@code C_PERIOD_TRG} adds the
-   * control rows; the caller normalizes afterwards.
+   * control rows, one per (period, organization, document base type), so a year created here needs
+   * no normalization (the productive branch normalizes anyway, for the dataset's own rows).
    *
    * @param calendar   the organization's calendar
    * @param fiscalYear the calendar year to ensure, e.g. 2026

@@ -63,7 +63,10 @@ import org.openbravo.model.financialmgmt.calendar.Year;
  * resolution and the provisioning steps) so no real database is touched. The few seams that issue
  * {@code OBDal.getInstance().save(...)} directly (enablePeriodControl, rebrandImportedCalendarName,
  * applyPeriodOpenState) are exercised under a {@link MockedStatic} of {@link OBDal} that swallows
- * the saves.
+ * the saves. Calls that reach {@link FiscalCalendarSupport#ensureYear} (the demo window and the
+ * productive initial state) also mock {@link FiscalCalendarSupport}.
+ *
+ * @covers com.etendoerp.go.onboarding.OnboardingPeriodControlService
  */
 public class OnboardingPeriodControlServiceTest {
 
