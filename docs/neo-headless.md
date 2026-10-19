@@ -8947,3 +8947,109 @@ None between channels: REST, batch and MCP all reach `PurchaseInvoiceLineHandler
 `taxableAmount` of invoices generated from receipts (core function), purchase **order** lines (ETP-5727;
 `InvoiceLineAmountSupport` / `LineAmountSupport` are written to be reusable), the default tax
 (ETP-5726).
+
+#### 4.12.32 Returns: create from the document, link to it and never over-return (ETP-5711)
+
+**Document type is resolved inside the source document's client.** `createPurchaseReturn` and the return-invoice actions run in admin mode, so their lookup (`ReturnShipmentUtils.findReturnDocTypeForOrg(client, ...)`) restricts to the source document's client (org match, then that client's org `'0'`); with none, the call is refused. Unrestricted, another client's RTV type was picked (org `'0'` exists in every client) and the return consumed that client's document sequence.
+
+**The defects.** (1) An agent could not use the return flow: `createPurchaseReturn` (goods receipt) and
+`createReturn` (goods shipment) were declared nowhere, the import/list actions of the purchase return were
+published nowhere, and `return-to-vendor-shipment` could not even be created (`Missing required fields:
+etgoCurrency`, no default). (2) Nothing capped a return: `returnQuantity` was never compared with what the source
+line had left, so a return could take more than was received/shipped, and `createReturn` answered **409** as soon as
+ANY return line pointed at the shipment, which also blocked a second partial return.
+
+**Published to MCP** (contracts declared by the handlers, explicit references, no entity name in shared code):
+
+| Spec / entity | Actions declared (in order) |
+|---|---|
+| `goods-receipt/goodsReceipt` | `documentAction`, `createPurchaseInvoice`, **`createPurchaseReturn`**, `cloneRecord` |
+| `goods-shipment/goodsShipment` | `documentAction`, `createDraftInvoice`, **`createReturn`**, `cloneRecord` |
+| `return-to-vendor-shipment/returnToVendorShipment` | `availableReceipts`, `availableReceiptLines` (`receiptId` + `businessPartner`), `importReceiptLines`, `rectifiableInvoices`, `createReturnInvoice`, `documentAction` (CO) |
+| `return-material-receipt/returnMaterialReceipt` | the five it already declared + `documentAction` (CO) |
+
+`createPurchaseReturn` / `createReturn` share one contract builder (`ReturnFromDocumentSupport.contract`): `lines`
+optional `[{lineId, returnQuantity}]`, `reason` optional. Both spec agent prompts
+(`agent-prompts/*/spec.md`) describe both ways of creating a return.
+
+**`MCP_CONFIG` redirects** (`ETGO_SF_ENTITY`): the classic buttons `RM_Shipment_Pickedit` (Return to Vendor
+Shipment, "Pick/Edit Lines") and `RM_Receipt_PickEdit` (Return Material Receipt) have no process connected; they
+redirect to `importReceiptLines` / `importShipmentLines`. The goods receipt/shipment copies of those columns are
+`isdisplayed = N` and are not touched.
+
+**Create from the document** (`ReturnFromDocumentSupport.plan`): `lines` omitted or empty returns **everything still
+returnable** of every active product line (a line with nothing left is skipped); `lines` given returns exactly those,
+a line listed twice summed. The return is **always left in DRAFT** (never completed here). The 201 carries
+`{id, documentNo, documentStatus, lines:[{id, product, productName, returnedQuantity, originalQuantity,
+sourceLineId}]}` so an agent can report the linkage; `returnedQuantity`/`originalQuantity` are positive (the stored
+negative sign stays internal, see `ReturnLineQuantityPolicy`). `reason` is kept as the return's description. The
+source must be completed. The 409 and its `hasExistingReturn` query are gone.
+
+**The cap** (`ReturnableQuantity`, one rule, called explicitly by each per-entity path):
+*returnable = source line `MovementQty` − Σ|`MovementQty`| of the return lines linked through
+`Canceled_Inoutline_ID` whose header is not voided (`DocStatus <> 'VO'`), drafts included* — the same SQL semantics as
+`availableReceiptLines` / `availableShipmentLines`, so the UI and the server cannot disagree. Checked in:
+create from the document (both directions), `importReceiptLines` / `importShipmentLines` (shared
+`ReturnShipmentUtils.importReturnLines`, which validates the whole request before creating any line), and PATCH/PUT of
+`movementQuantity` on a return line (both line handlers; the line's own current quantity is excluded). A cap that
+cannot be verified (the query fails) answers 500, it is not skipped.
+
+Refusals are **422**, `error = {status, code, message, ...}`:
+
+| `error.code` | When | Extra keys |
+|---|---|---|
+| `returnQuantityExceedsAvailable` | more than what is left of a source line | `product`, `requested`, `available`, `sourceLineId` |
+| `nothingLeftToReturn` | create from the document with no `lines` and nothing left anywhere | |
+| `returnLineNotInDocument` | a `lineId` that is not a line of the source document | |
+| `returnLineRequiresImport` | `POST` of a return line through the CRUD endpoint (either spec, any channel) | |
+| `returnReasonTooLong` | `reason` longer than the description column | |
+| `sourceNotCompleted` | the source document is not `CO` | |
+
+Example: `Cannot return 5 of Agua: only 4 can still be returned from this line (10 on the source document).`
+The SPA maps these English sentences in `backendErrors.js` (`backendError.returnQuantityExceeds`, ...).
+
+**Currency.** `etgoCurrency` of `return-to-vendor-shipment` is `system` with `defaultExpr @C_Currency_ID@` (organisation
+currency, parity with the goods receipt and with `return-material-receipt` since ETP-5704): `etendo_defaults` returns it
+and a header create without it succeeds on REST, batch and MCP. No Java.
+
+**Concurrency (the lock).** Reading the returned total and inserting the lines are two steps, so two concurrent
+creates / imports on the same source line could both pass the cap. Every path therefore calls
+`ReturnableQuantity.lockSourceLines` BEFORE it reads the total: `SELECT M_InOutLine_ID FROM M_InOutLine WHERE
+M_InOutLine_ID = ? FOR UPDATE` for every source line of the request, in ascending id order (two requests with
+overlapping lines never wait on each other in opposite orders, so no deadlock). It runs on `OBDal.getConnection()`,
+the connection of the very transaction that goes on to insert the return lines, and is released when it ends; the
+second request waits at the lock and then reads a total that includes the first one's lines (READ COMMITTED sees
+committed rows per statement). Covered: `refuseIfExceeds` (create from the document with `lines`, import),
+`ReturnFromDocumentSupport.planEverything` (create from the document without `lines`) and the quantity edit
+(`refuseQuantityEdit`, locks the line's source).
+
+*Known limit:* the ascending-id ordering holds within ONE cap check, not globally across several checks in the same
+transaction (e.g. an `etendo_batch` with two return operations over crossed line sets: op 1 locks A then B, op 2 locks
+C then A, while another transaction does the reverse). Two such transactions can deadlock; PostgreSQL detects it and
+aborts one with a deadlock error, answered as HTTP 500. There is no data corruption (the aborted transaction rolls
+back whole) and retrying is safe.
+
+**What counts as returned.** `DocStatus <> 'VO'`: a **reversed** return (`RE`) still counts as returned, exactly as in
+the window's pickers (`availableReceiptLines` / `availableShipmentLines` and their document lists). Only a voided one
+(`VO`) frees its quantity. A reversal that should give the units back is out of scope of this rule; if it is ever
+wanted it has to change the pickers and this cap together.
+
+**`reason`.** It is stored as `M_InOut.Description`. Over the AD length of that column (255 today, read from the
+model at runtime, `ReturnFromDocumentSupport.descriptionMaxLength`) the action answers **422 `returnReasonTooLong`**
+before creating anything, instead of cutting the end of what the user wrote.
+
+**Channels.** REST, `etendo_batch` and MCP reach the same handlers through `NeoExtensionDispatcher`, so there is no
+new divergence. **The server refuses the direct creation of a return line** (a `POST` of the CRUD endpoint of the line
+entity) on both return specs and on every channel: **422 `returnLineRequiresImport`**, message `Return lines cannot be
+created directly. Add them to the return with importReceiptLines (or importShipmentLines on the receipt return), or
+create the whole return from the source document with createPurchaseReturn (createReturn on the shipment).` The window
+only offers "Add from document" (`addLineGuard` is always false in both generated pages), so no supported flow creates a
+line through that POST: the imports and the create-from-document actions write through the DAL, and `cloneRecord`
+copies through `CloneRecordHook` / `DalUtil.copy`, none of them through the line handlers. The refusal lives in the
+CRUD pre-hook of the two return line customizations (`ReturnableQuantity.refuseDirectCreate`, called explicitly, no
+entity name in shared code). `PUT` / `PATCH` of `movementQuantity` of an existing line stay allowed and capped.
+`refuseQuantityEdit` still answers `null` (no cap) for a **legacy** line without a source link (`canceledInoutLine`
+is `discarded` in both windows): loose lines can no longer be created, but ones that already exist have nothing to be
+capped against. Every line linked to a receipt/shipment arrives by import or by create-from-the-document, both capped.
+`etendo_batch` has no ACTION surface and no update, so the actions and the quantity edit are not reachable through it;
+its `create` on a return line is refused like REST's.

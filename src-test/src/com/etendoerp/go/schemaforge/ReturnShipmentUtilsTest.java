@@ -252,6 +252,10 @@ public class ReturnShipmentUtilsTest {
 
   // ── findReturnDocTypeForOrg (ETP-4737) ───────────────────────────────────────
 
+  /** Client passed to the lookup in tests that do not assert on the client restriction. */
+  private static final org.openbravo.model.ad.system.Client CLIENT =
+      mock(org.openbravo.model.ad.system.Client.class);
+
   private static OBCriteria<DocumentType> mockCriteria(OBDal dal, List<DocumentType> result) {
     @SuppressWarnings("unchecked")
     OBCriteria<DocumentType> criteria = mock(OBCriteria.class);
@@ -282,7 +286,7 @@ public class ReturnShipmentUtilsTest {
       dalMock.when(OBDal::getInstance).thenReturn(dal);
       OBCriteria<DocumentType> criteria = mockCriteria(dal, Collections.emptyList());
 
-      ReturnShipmentUtils.findReturnDocTypeForOrg("org-1", "APC", false, false, false);
+      ReturnShipmentUtils.findReturnDocTypeForOrg(CLIENT, "org-1", "APC", false, false, false);
 
       verify(criteria, never()).add(argThat(ReturnShipmentUtilsTest::isRectificativeRestriction));
     } finally {
@@ -303,7 +307,7 @@ public class ReturnShipmentUtilsTest {
       dalMock.when(OBDal::getInstance).thenReturn(dal);
       OBCriteria<DocumentType> criteria = mockCriteria(dal, Collections.emptyList());
 
-      ReturnShipmentUtils.findReturnDocTypeForOrg("org-1", "ARC", true, false, true);
+      ReturnShipmentUtils.findReturnDocTypeForOrg(CLIENT, "org-1", "ARC", true, false, true);
 
       verify(criteria, atLeastOnce()).add(argThat(ReturnShipmentUtilsTest::isRectificativeRestriction));
     } finally {
@@ -323,11 +327,30 @@ public class ReturnShipmentUtilsTest {
       dalMock.when(OBDal::getInstance).thenReturn(dal);
       OBCriteria<DocumentType> criteria = mockCriteria(dal, Collections.emptyList());
 
-      ReturnShipmentUtils.findReturnDocTypeForOrg("org-1", "APC", false, false, true);
+      ReturnShipmentUtils.findReturnDocTypeForOrg(CLIENT, "org-1", "APC", false, false, true);
 
       verify(criteria, never()).add(argThat(ReturnShipmentUtilsTest::isRectificativeRestriction));
     } finally {
       RectificativeSupport.setColumnPresentForTests(null);
+    }
+  }
+
+  /**
+   * The lookup is restricted to the given client (admin-mode callers pass the source document's
+   * client).
+   */
+  @Test
+  public void findReturnDocTypeForOrg_withClient_restrictsToThatClient() {
+    org.openbravo.model.ad.system.Client client = mock(org.openbravo.model.ad.system.Client.class);
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      OBCriteria<DocumentType> criteria = mockCriteria(dal, Collections.emptyList());
+
+      ReturnShipmentUtils.findReturnDocTypeForOrg(client, "org-1", "MMR", false, true, false);
+      verify(criteria, atLeastOnce()).add(argThat(c -> c instanceof SimpleExpression
+          && DocumentType.PROPERTY_CLIENT.equals(((SimpleExpression) c).getPropertyName())
+          && client.equals(((SimpleExpression) c).getValue())));
     }
   }
 
@@ -350,7 +373,7 @@ public class ReturnShipmentUtilsTest {
       mockCriteria(dal, Collections.singletonList(match));
 
       DocumentType result = ReturnShipmentUtils.findReturnDocTypeForOrg(
-          "org-1", "APC", false, false, false);
+          CLIENT, "org-1", "APC", false, false, false);
 
       assertSame(match, result);
     }
@@ -367,7 +390,7 @@ public class ReturnShipmentUtilsTest {
       mockCriteria(dal, java.util.Arrays.asList(other, zero));
 
       DocumentType result = ReturnShipmentUtils.findReturnDocTypeForOrg(
-          "org-1", "APC", false, false, false);
+          CLIENT, "org-1", "APC", false, false, false);
 
       assertSame(zero, result);
     }
@@ -383,7 +406,7 @@ public class ReturnShipmentUtilsTest {
       mockCriteria(dal, Collections.singletonList(first));
 
       DocumentType result = ReturnShipmentUtils.findReturnDocTypeForOrg(
-          "org-1", "APC", false, false, false);
+          CLIENT, "org-1", "APC", false, false, false);
 
       assertSame(first, result);
     }
@@ -398,7 +421,7 @@ public class ReturnShipmentUtilsTest {
       mockCriteria(dal, Collections.emptyList());
 
       DocumentType result = ReturnShipmentUtils.findReturnDocTypeForOrg(
-          "org-1", "APC", false, false, true);
+          CLIENT, "org-1", "APC", false, false, true);
 
       assertNull(result);
     }
@@ -570,6 +593,85 @@ public class ReturnShipmentUtilsTest {
       verify(retLine, never()).setStorageBin(sourceBin);
       verify(retLine).setStorageBin(headerDefaultBin);
     }
+  }
+
+  // ── importReturnLines — the shared "add lines from receipts/shipments" path (ETP-5711) ──
+
+  private static JSONArray importEntries(String... idAndQuantity) throws Exception {
+    JSONArray lines = new JSONArray();
+    for (int i = 0; i < idAndQuantity.length; i += 2) {
+      lines.put(new JSONObject().put("sourceLineId", idAndQuantity[i])
+          .put("returnQuantity", idAndQuantity[i + 1]));
+    }
+    return lines;
+  }
+
+  /**
+   * Runs importReturnLines on return {@code ret-1} (whose last line number is 10) against source
+   * lines {@code src-1} (received 5) and {@code src-2} (received 8), with nothing returned yet.
+   */
+  private static NeoResponse runImport(JSONArray lines, java.util.List<ShipmentInOutLine> created)
+      throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      ReturnedQuantityTestSupport.stubReturnedQuantities(dal, 10L, (src, excl) -> BigDecimal.ZERO);
+      ShipmentInOutLine water = ReturnedQuantityTestSupport.sourceLine("src-1", "Agua", "5");
+      ShipmentInOutLine beer = ReturnedQuantityTestSupport.sourceLine("src-2", "Cerveza", "8");
+      when(dal.get(ShipmentInOutLine.class, "src-1")).thenReturn(water);
+      when(dal.get(ShipmentInOutLine.class, "src-2")).thenReturn(beer);
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(ShipmentInOutLine.class)).thenAnswer(inv -> {
+        ShipmentInOutLine line = mock(ShipmentInOutLine.class);
+        created.add(line);
+        return line;
+      });
+      ShipmentInOut returnDoc = mock(ShipmentInOut.class);
+      return ReturnShipmentUtils.importReturnLines(returnDoc, "ret-1", lines);
+    }
+  }
+
+  @Test
+  public void importReturnLines_linesOfSeveralSourceLines_areNumberedAfterTheExistingOnes()
+      throws Exception {
+    java.util.List<ShipmentInOutLine> created = new java.util.ArrayList<>();
+
+    NeoResponse result = runImport(importEntries("src-1", "2", "src-2", "8"), created);
+
+    assertEquals(200, result.getHttpStatus());
+    assertEquals(2, result.getBody().getJSONObject("response").getJSONObject("data")
+        .getInt("importedCount"));
+    verify(created.get(0)).setLineNo(20L);
+    verify(created.get(1)).setLineNo(30L);
+  }
+
+  @Test
+  public void importReturnLines_overReturn_createsNothingAndAnswers422() throws Exception {
+    java.util.List<ShipmentInOutLine> created = new java.util.ArrayList<>();
+
+    NeoResponse result = runImport(importEntries("src-2", "8", "src-1", "6"), created);
+
+    assertEquals(422, result.getHttpStatus());
+    assertEquals("returnQuantityExceedsAvailable",
+        result.getBody().getJSONObject("error").getString("code"));
+    assertEquals("Agua", result.getBody().getJSONObject("error").getString("product"));
+    assertTrue("a refused import must not create the lines that were fine", created.isEmpty());
+  }
+
+  @Test
+  public void importReturnLines_unusableEntries_areSkipped() throws Exception {
+    java.util.List<ShipmentInOutLine> created = new java.util.ArrayList<>();
+    JSONArray lines = importEntries("src-1", "abc", "src-2", "0", "missing", "1");
+    lines.put(new JSONObject().put("returnQuantity", "1"));
+
+    NeoResponse result = runImport(lines, created);
+
+    assertEquals(200, result.getHttpStatus());
+    assertEquals(0, result.getBody().getJSONObject("response").getJSONObject("data")
+        .getInt("importedCount"));
+    assertTrue(created.isEmpty());
   }
 
   /**
