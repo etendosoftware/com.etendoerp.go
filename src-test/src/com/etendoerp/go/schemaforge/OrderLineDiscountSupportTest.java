@@ -356,6 +356,52 @@ class OrderLineDiscountSupportTest {
     assertAmount(label, null, json, OrderLineDiscountSupport.FIELD_LINE_NET_AMOUNT);
   }
 
+  /**
+   * ETP-5703 (ETP-5528 merge safety): the 3-argument overload rounds to the line's currency
+   * precision on its own. (a) No {@code currency} on the line → 2 decimals, and the currency is
+   * never looked up (no DAL read of {@code Currency}).
+   */
+  @org.junit.jupiter.api.Test
+  void deriveAmountsOnUpdate_noCurrency_roundsToTwoWithoutCurrencyLookup() throws Exception {
+    JSONObject json = new JSONObject("{\"discount\":5,\"unitPrice\":\"17.10\"}");
+    JSONObject formState = new JSONObject("{\"orderedQuantity\":10,\"unitPrice\":18,\"tax\":\""
+        + TAX_ID + "\"}");
+
+    try (MockedStatic<OBDal> dal = LineAmountTestSupport.taxRate(21.0)) {
+      OBDal instance = OBDal.getInstance();
+      OrderLineDiscountSupport.deriveAmountsOnUpdate(json, formState,
+          new JSONObject("{\"discount\":5}"));
+      org.mockito.Mockito.verify(instance, org.mockito.Mockito.never())
+          .get(org.mockito.ArgumentMatchers.eq(org.openbravo.model.common.currency.Currency.class),
+              any());
+    }
+
+    assertEquals(0, new BigDecimal("206.91").compareTo(
+        new BigDecimal(String.valueOf(json.get(OrderLineDiscountSupport.FIELD_LINE_GROSS_AMOUNT)))));
+  }
+
+  /**
+   * (b) A line in a currency with precision 0 rounds to whole units: 10 × 17.10 at 21 % = 206.91
+   * → 207. The lookup is stubbed at {@code NeoCurrencyPrecision.scaleOfCurrencyId}.
+   */
+  @org.junit.jupiter.api.Test
+  void deriveAmountsOnUpdate_lineCurrencyPrecisionZero_roundsToUnits() throws Exception {
+    JSONObject json = new JSONObject("{\"discount\":5,\"unitPrice\":\"17.10\"}");
+    JSONObject formState = new JSONObject("{\"orderedQuantity\":10,\"unitPrice\":18,\"tax\":\""
+        + TAX_ID + "\",\"currency\":\"jpy-id\"}");
+
+    try (MockedStatic<OBDal> dal = LineAmountTestSupport.taxRate(21.0);
+        MockedStatic<NeoCurrencyPrecision> precision = mockStatic(NeoCurrencyPrecision.class,
+            org.mockito.Mockito.CALLS_REAL_METHODS)) {
+      precision.when(() -> NeoCurrencyPrecision.scaleOfCurrencyId("jpy-id")).thenReturn(0);
+      OrderLineDiscountSupport.deriveAmountsOnUpdate(json, formState,
+          new JSONObject("{\"discount\":5}"));
+    }
+
+    assertEquals(0, new BigDecimal("207").compareTo(
+        new BigDecimal(String.valueOf(json.get(OrderLineDiscountSupport.FIELD_LINE_GROSS_AMOUNT)))));
+  }
+
   // ── coerceDerivedValues (private): through applyDiscount on a create ──
 
   /**

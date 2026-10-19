@@ -87,6 +87,9 @@ final class McpFkResolver {
   private static final String KEY_ID = "id";
   private static final String KEY_CANDIDATES = "candidates";
   private static final String KEY_FIELD = "field";
+  /** The item keys a record is shown by: selector label, DAL identifier, search key. */
+  private static final Set<String> DISPLAY_KEYS =
+      Set.of("label", "_identifier", "searchKey", "value");
   private static final int SELECTOR_LIMIT = 10;
   private static final String LABEL_SEPARATOR = " - ";
   /** Caps how many label separators are probed, so one failed resolution stays cheap. */
@@ -262,8 +265,11 @@ final class McpFkResolver {
       return null;
     }
 
-    JSONArray items = selectorResponse.getBody().optJSONArray(KEY_ITEMS);
-    int matchCount = items == null ? 0 : items.length();
+    // ETP-5703: count RECORDS, not rows. A custom-HQL selector can return one row per joined
+    // child (the product selector, one per price-list version), so a single product came back as
+    // two rows and was reported ambiguous against itself.
+    JSONArray items = distinctById(selectorResponse.getBody().optJSONArray(KEY_ITEMS));
+    int matchCount = items.length();
     switch (decideOutcome(matchCount)) {
       case NOT_FOUND:
         String labelMatchId = resolveByExactLabel(column, key, search, contextParams);
@@ -273,6 +279,13 @@ final class McpFkResolver {
         }
         return buildNotFoundError(key, search);
       case AMBIGUOUS:
+        // ETP-5703: "Agua" against "Agua" and "Agua con gas" names one record exactly; only a
+        // value that equals no candidate's label, or several, is truly ambiguous.
+        String exactId = uniqueLabelMatchIgnoreCase(items, search);
+        if (exactId != null) {
+          body.put(key, exactId);
+          return null;
+        }
         return buildAmbiguousError(key, search, items);
       case RESOLVED:
       default:
@@ -317,29 +330,68 @@ final class McpFkResolver {
 
   /** @return the id of the only item having a string property equal to {@code label}, else null. */
   static String uniqueLabelMatch(JSONArray items, String label) {
+    return uniqueMatch(items, label, false);
+  }
+
+  /**
+   * Case-insensitive {@link #uniqueLabelMatch} (ETP-5703), restricted to the display keys
+   * ({@code label}, {@code _identifier}, {@code searchKey}, {@code value}): the id of the only
+   * record shown as {@code label} ignoring case, else {@code null}. Rows of the same record count
+   * once.
+   */
+  static String uniqueLabelMatchIgnoreCase(JSONArray items, String label) {
+    return uniqueMatch(items, label, true);
+  }
+
+  private static String uniqueMatch(JSONArray items, String label, boolean ignoreCase) {
     String found = null;
     for (int i = 0; items != null && i < items.length(); i++) {
       JSONObject item = items.optJSONObject(i);
-      if (item == null || !hasStringValue(item, label)) {
+      if (item == null || !hasStringValue(item, label, ignoreCase)) {
         continue;
       }
-      if (found != null) {
+      String id = item.optString(KEY_ID, null);
+      if (found != null && !found.equals(id)) {
         return null;
       }
-      found = item.optString(KEY_ID, null);
+      found = id;
     }
     return found;
   }
 
-  private static boolean hasStringValue(JSONObject item, String expected) {
+  private static boolean hasStringValue(JSONObject item, String expected, boolean ignoreCase) {
     Iterator<?> names = item.keys();
     while (names.hasNext()) {
       String name = (String) names.next();
-      if (!KEY_ID.equals(name) && expected.equals(item.opt(name))) {
+      // The case-insensitive preference (ETP-5703) only looks at what the agent is shown as the
+      // record's name — label, identifier, search key — never at any other column of the row.
+      if (KEY_ID.equals(name) || (ignoreCase && !DISPLAY_KEYS.contains(name))) {
+        continue;
+      }
+      Object value = item.opt(name);
+      if (value instanceof String && (ignoreCase ? expected.equalsIgnoreCase((String) value)
+          : expected.equals(value))) {
         return true;
       }
     }
     return false;
+  }
+
+  /**
+   * {@code items} with one entry per distinct {@code id}, first occurrence kept, order preserved
+   * (ETP-5703). Items without an id are kept as they are. Never {@code null}.
+   */
+  static JSONArray distinctById(JSONArray items) {
+    JSONArray distinct = new JSONArray();
+    Set<String> seen = new LinkedHashSet<>();
+    for (int i = 0; items != null && i < items.length(); i++) {
+      Object item = items.opt(i);
+      String id = item instanceof JSONObject ? ((JSONObject) item).optString(KEY_ID, null) : null;
+      if (id == null || seen.add(id)) {
+        distinct.put(item);
+      }
+    }
+    return distinct;
   }
 
   /**

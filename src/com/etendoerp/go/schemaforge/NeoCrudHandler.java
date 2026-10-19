@@ -894,7 +894,10 @@ class NeoCrudHandler {
     // call the injectors gross-first, which left LINE_GROSS_AMOUNT at 0 for any client that
     // sent neither amount (OCR /batch, MCP, import modal). The update path at executePut already
     // routes through this method, so calling it here is what keeps the two from drifting apart.
-    NeoCommercialLinePolicy.injectCommercialAmounts(filteredBody);
+    // ETP-5703: rounded to the document currency's standard precision, resolved structurally
+    // (currency-typed property of the line or of its parent) and only when an amount is derived.
+    NeoCommercialLinePolicy.injectCommercialAmounts(filteredBody,
+        NeoCurrencyPrecision.forWrite(adTab, filteredBody, null));
     stripContactsPreCreateBillingDefaults(filteredBody, context, adTab);
     // Coerce String primitives injected by injectMandatoryDefaults to their correct Java types.
     // Utility.getDefault() always returns String; JsonToDataConverter has no String→BigDecimal/
@@ -1072,7 +1075,9 @@ class NeoCrudHandler {
     // The frontend sends invoicedQuantity and unitPrice as editable fields, so both are
     // available here to compute the correct net amount even for products where SL_Invoice_Amt
     // throws on the sales invoice context (e.g. tax-exclusive price lists).
-    NeoCommercialLinePolicy.injectCommercialAmounts(filteredBody);
+    // ETP-5703: rounded to the document currency's standard precision (see executePostCreate).
+    NeoCommercialLinePolicy.injectCommercialAmounts(filteredBody,
+        NeoCurrencyPrecision.forWrite(context.getAdTab(), filteredBody, context.getRecordId()));
     // ETP-4531: re-apply accountingDate now that filtering (which stripped it, correctly, as a
     // read-only field the CLIENT should never write directly) has run. Each header handler's
     // handle() pre-hook (e.g. AbstractInvoiceHeaderHandler#mirrorAccountingDate) mirrors the
