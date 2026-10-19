@@ -23,11 +23,14 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockConstruction;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import java.util.ArrayList;
@@ -634,6 +637,31 @@ public class NeoProcessServiceTest {
       InOrder order = inOrder(built);
       order.verify(built).init(connMock.constructed().get(0));
       order.verify(built).setParams(params);
+    }
+  }
+
+  // ETP-5669: building the bundle only reads the context; it must not switch user, role, client or
+  // org, nor leave admin mode on for the rest of the request.
+  @Test
+  public void classicBundleLeavesTheOBContextUntouched() throws Exception {
+    OBContext ctx = mock(OBContext.class);
+    VariablesSecureApp vars = new VariablesSecureApp("u", "c", "o", "r", "en_US");
+    try (MockedStatic<OBContext> obMock = mockStatic(OBContext.class);
+        MockedStatic<NeoDefaultsService> neoMock = mockStatic(NeoDefaultsService.class);
+        MockedConstruction<DalConnectionProvider> connMock = mockConstruction(DalConnectionProvider.class);
+        MockedConstruction<ProcessBundle> bundleMock = mockConstruction(ProcessBundle.class,
+            (b, c) -> when(b.init(any())).thenReturn(b))) {
+      obMock.when(OBContext::getOBContext).thenReturn(ctx);
+      neoMock.when(() -> NeoDefaultsService.buildVariablesSecureApp(any())).thenReturn(vars);
+
+      NeoProcessService.newClassicBundle("P1", Collections.emptyMap());
+
+      neoMock.verify(() -> NeoDefaultsService.buildVariablesSecureApp(ctx));
+      obMock.verify(OBContext::setAdminMode, never());
+      obMock.verify(() -> OBContext.setAdminMode(anyBoolean()), never());
+      obMock.verify(OBContext::restorePreviousMode, never());
+      obMock.verify(() -> OBContext.setOBContext(any(OBContext.class)), never());
+      verifyNoInteractions(ctx);
     }
   }
 }
