@@ -326,6 +326,36 @@ public class AbstractOrderHeaderHandlerTest {
     verify(svc).recalculate(ORDER_ID, true);
   }
 
+  /**
+   * ETP-5710: an MCP call reaches the handler under the field name whichever spelling was typed, so
+   * a reopen typed as DocAction still cleans up the stale discount line.
+   */
+  @Test
+  public void testSyncDocAction_mcpFieldNameNotCompleting_recalculates() {
+    TotalDiscountService svc = mock(TotalDiscountService.class);
+    NeoContext ctx = NeoContext.builder().mcpOrigin(true)
+        .endpointType(NeoEndpointType.ACTION).fieldName("documentAction").recordId(ORDER_ID)
+        .requestBody(bodyWith("docAction", "RE")).build();
+
+    AbstractOrderHeaderHandler.syncTotalDiscountOnDocAction(ctx, svc, false);
+
+    verify(svc).recalculate(ORDER_ID, false);
+  }
+
+  /** A completion by field name is left to applyTotalDiscountBeforeComplete: one recalculation. */
+  @Test
+  public void testSyncDocAction_mcpFieldNameCompleting_leftToTheCompletionHook() {
+    TotalDiscountService svc = mock(TotalDiscountService.class);
+    NeoContext ctx = NeoContext.builder().mcpOrigin(true)
+        .endpointType(NeoEndpointType.ACTION).fieldName("documentAction").recordId(ORDER_ID)
+        .requestBody(bodyWith("docAction", "CO")).build();
+
+    AbstractOrderHeaderHandler.syncTotalDiscountOnDocAction(ctx, svc, false);
+    AbstractOrderHeaderHandler.applyTotalDiscountBeforeComplete(ctx, svc, false);
+
+    verify(svc, org.mockito.Mockito.times(1)).recalculate(ORDER_ID, false);
+  }
+
   // ── ETP-4531: mirrorAccountingDate (unified date, server-side mirror) ───────
 
   @Test

@@ -19,7 +19,9 @@ package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.Mockito.mock;
@@ -42,6 +44,7 @@ import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.ad.ui.Tab;
 
 import com.smf.jobs.hooks.CloneRecordHook;
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
 
 /**
  * Unit tests for {@link NeoCloneRecordHandler}.
@@ -54,6 +57,8 @@ import com.smf.jobs.hooks.CloneRecordHook;
  *   <li>Happy path: DalUtil copy fallback when no hook registered → 201.</li>
  *   <li>Error handling: OBException → 400, RuntimeException → 500.</li>
  * </ul>
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoCloneRecordHandler
  */
 public class NeoCloneRecordHandlerTest {
 
@@ -255,5 +260,21 @@ public class NeoCloneRecordHandlerTest {
   @Test
   public void afterHandle_alwaysReturnsNull() {
     assertNull(new NeoCloneRecordHandler().afterHandle(NeoContext.builder().httpMethod("GET").build()));
+  }
+
+  @Test
+  public void contract_isGenericPostWithoutParameters() {
+    NeoActionContract c = NeoCloneRecordHandler.CONTRACT;
+
+    assertEquals(ACTION, c.getName());
+    assertEquals("POST", c.getHttpMethod());
+    assertTrue(c.getParams().isEmpty());
+    assertTrue(c.getDescription().contains("NEW DRAFT"));
+    assertTrue(c.getDescription().contains("new document number"));
+    // Shared by every spec that routes to the handler: it must name none of them.
+    for (String spec : new String[] {"purchase-order", "sales-order", "goods-receipt",
+        "purchase-invoice", "sales-invoice", "shipment"}) {
+      assertFalse(spec, c.getDescription().contains(spec));
+    }
   }
 }
