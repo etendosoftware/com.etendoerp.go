@@ -1175,6 +1175,47 @@ below assume it (item 1's 503 is decided per enforcement flag).
 | 11 | **Unverified.** Purchase-source ownership is `EtendoGoJwtDalHelper.clientBelongsToAccountEmail`: any active user of the environment whose email or username is the account email (or an `email+suffix` variant). That matches a member **invited** into another owner's environment, not only its owner. | An invited member might name another owner's demo as `demoClientId`, so a purchase would associate, copy and revoke a demo the buyer does not own — against FR-08 of `schema_forge/docs/plans/etp-5396-demo-to-pro-prd.md`. | `develop` (predates ETP-5046/5047) | None — **ETP-5743** "Restrict the purchase demo source to the account owner". |
 | 12 | A canceled tenant cannot re-subscribe its own environment: every checkout provisions a new one, and since ETP-5047 a canceled productive tenant is not a demo source either (§4.14). The flow was decided on 2026-10-14 (Martin Taal; §2.9, §3.7). The same-name check `ownsProductiveNamed` (pre-checkout and onboarding) asks `resolvePlan`, which reads a canceled tenant as `free`, so its name does not count as taken. | A canceled customer who wants to come back gets a second environment, and may give it the canceled one's company name. | **ETP-5047** (it closes the row on cancel, so a canceled tenant reads `free`; the missing flow itself predates it) | None — **ETP-5742** "Let a canceled tenant re-subscribe its own environment". |
 
+### 🟡 4.15 Paid provisioning is only half extracted from `EtendoGoJwtServlet` (ETP-5048)
+
+**Ticket:** accepted by Martin on 2026-10-18 as a narrower extraction; to be finished by ETP-5396 or a
+later refactor (no ticket of its own). Related ETP-5048.
+
+ETP-5048 needed to provision a paid purchase with no browser attached (the billing reconciliation),
+and the decision was to pull the paid provisioning path out of the servlet into a service that takes
+an `OnboardingProgressSink`. What shipped is narrower:
+
+- **Still in `EtendoGoJwtServlet`:** every provisioning step — tenant selection (pooled or classic),
+  client and organization creation, dataset, metadata (`applyPaidUpgradeSideEffects`), the commit,
+  and the post-commit steps (`completeCommittedOnboarding`, the period fill, sample data, costing).
+  They still take a `PrintWriter`, shared by the free and the paid path.
+- **Why:** about 60 servlet tests drive those methods directly or spy on them on the servlet
+  (`EtendoGoJwtServletOnboardingDatasetTest`, `…CoverageTest`, `…HeartbeatTest`,
+  `…DemoDataTransferTest`, among others). Moving them would rewrite those tests in a change whose
+  goal is reconciliation, with no change in behaviour to show for it.
+- **What moved:** the transport-independent run, `EtendoGoJwtServlet.runOnboarding`, which is the
+  try/catch/finally that used to sit inside `handleOnboarding` (rollback, outcome record, alert).
+  Also the request-free part of the paid preparation, split into small cores the HTTP path now calls
+  too: `restorePaidSelection`, `claimPaid`, `isPaidOnboardingNotOwned`, `findCurrencyId`.
+- **What `PaidProvisioningService` owns:**
+  - resolving the inputs from the checkout row (`LANGUAGE`/`CURRENCY`/`COUNTRY`, then the account's
+    `ONBOARDING_DRAFT`, then `en_US`/`EUR`/`ES`);
+  - restoring the caller's `OBContext`;
+  - classifying the result (`PROVISIONED`, `FAILED`, `NEEDS_REVIEW`, `NOT_CLAIMED`, `NOT_PAID`).
+
+  It calls `EtendoGoJwtServlet.provisionPaidPurchase` on a fresh servlet instance, which runs the
+  same preparation and `runOnboarding` over an `OnboardingStreamWriter` backed by
+  `NdjsonSinkWriter`. That writer replays the NDJSON lines onto the sink.
+- **What it does not own:** the steps themselves, the NDJSON format, the fenced claim (still
+  `CheckoutRequestStore.claimForProvisioning`), and any work record, checkpoint or retry budget
+  (ETP-5396 §3.3).
+
+**To finish it** (ETP-5396 or a later refactor):
+1. Move the step methods into an onboarding service that takes an `OnboardingProgressSink` instead
+   of a `PrintWriter`, migrating the spying tests to that service.
+2. Have the servlet build an `NdjsonOnboardingProgressSink` and call it.
+3. `PaidProvisioningService` then stops instantiating a servlet, and `NdjsonSinkWriter` can be
+   deleted.
+
 ## 5. Handed forward to later tickets
 
 *Moved to §6 on 2026-09-28: §5.7, §5.10, §5.12; §5.15 was decided on arrival and sits there too.*
