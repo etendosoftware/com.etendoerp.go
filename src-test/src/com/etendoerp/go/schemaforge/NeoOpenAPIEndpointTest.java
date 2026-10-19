@@ -133,6 +133,86 @@ class NeoOpenAPIEndpointTest {
         .getDescription().contains("once"));
   }
 
+  /** ETP-5781 — the setting moved the documented path but never the servlet route: dropped. */
+  @Test
+  @DisplayName("Documents the fixed servlet route whatever etgo.public.api.keys.path says")
+  void publicApiKeyPathIgnoresTheDroppedPathSetting() throws Exception {
+    System.setProperty("etgo.public.api.keys.path", "/custom/keys");
+    try {
+      OpenAPI openAPI = publicApiKeyContract();
+
+      assertNotNull(openAPI.getPaths().get("/oauth2/api-keys"));
+      assertNull(openAPI.getPaths().get("/custom/keys"));
+    } finally {
+      System.clearProperty("etgo.public.api.keys.path");
+    }
+  }
+
+  /** ETP-5781 — single-key operations answer the bare key, not the list wrapper. */
+  @Test
+  @DisplayName("Single-key responses are the bare key object; only the list is wrapped")
+  void publicApiKeySingleKeyResponsesAreTheBareKeyObject() throws Exception {
+    OpenAPI openAPI = publicApiKeyContract();
+    PathItem item = openAPI.getPaths().get("/oauth2/api-keys/{id}");
+
+    for (Operation op : Arrays.asList(item.getGet(), item.getPut(),
+        openAPI.getPaths().get("/oauth2/api-keys/{id}/rotate").getPost(),
+        openAPI.getPaths().get("/oauth2/api-keys").getPost())) {
+      String status = op.getResponses().containsKey("201") ? "201" : "200";
+      Map<String, Schema> properties = jsonSchema(op, status).getProperties();
+      assertTrue(properties.containsKey("id"), op.getSummary() + " must document the key itself");
+      assertTrue(properties.containsKey("capabilities"), op.getSummary());
+      assertFalse(properties.containsKey("apiKeys"), op.getSummary() + " is not a list");
+    }
+    assertTrue(jsonSchema(openAPI.getPaths().get("/oauth2/api-keys").getGet(), "200")
+        .getProperties().containsKey("apiKeys"));
+    Map<String, Schema> rotated = jsonSchema(
+        openAPI.getPaths().get("/oauth2/api-keys/{id}/rotate").getPost(), "200").getProperties();
+    assertTrue(rotated.containsKey("clientSecret"));
+    assertTrue(rotated.containsKey("tokensRevoked"));
+  }
+
+  /** ETP-5781 — operations carried no security requirement and statuses were inconsistent. */
+  @Test
+  @DisplayName("Every API key operation declares its security and the statuses it can answer")
+  void publicApiKeyOperationsDeclareSecurityAndConsistentStatuses() throws Exception {
+    OpenAPI openAPI = publicApiKeyContract();
+    List<String> ownedKeyOperations = Arrays.asList("Get public API key",
+        "Update public API key", "Rotate public API key secret", "Revoke public API key tokens");
+
+    int operations = 0;
+    for (Map.Entry<String, PathItem> path : openAPI.getPaths().entrySet()) {
+      for (Operation op : path.getValue().readOperations()) {
+        operations++;
+        assertNotNull(op.getSecurity(), op.getSummary() + " must declare its security");
+        assertTrue(op.getSecurity().stream().anyMatch(r -> r.containsKey("goSession")),
+            op.getSummary());
+        assertTrue(op.getSecurity().stream().anyMatch(r -> r.containsKey("bearerAuth")),
+            op.getSummary());
+        for (String status : Arrays.asList("401", "402", "403")) {
+          assertTrue(op.getResponses().containsKey(status), op.getSummary() + " lacks " + status);
+        }
+        assertEquals(ownedKeyOperations.contains(op.getSummary()),
+            op.getResponses().containsKey("404"), op.getSummary() + " 404");
+      }
+    }
+    assertEquals(7, operations);
+    assertNotNull(openAPI.getComponents().getSecuritySchemes().get("goSession"));
+    assertTrue(openAPI.getPaths().get("/oauth2/api-keys/{id}").getPut().getResponses()
+        .containsKey("409"), "a reactivation can hit the limit or a duplicate name");
+  }
+
+  private OpenAPI publicApiKeyContract() throws Exception {
+    OpenAPI openAPI = new OpenAPI();
+    openAPI.setPaths(new Paths());
+    invokePrivate(endpoint, "addPublicApiKeyPaths", new Class<?>[] { OpenAPI.class }, openAPI);
+    return openAPI;
+  }
+
+  private static Schema<?> jsonSchema(Operation op, String status) {
+    return op.getResponses().get(status).getContent().get("application/json").getSchema();
+  }
+
   // -------------------------------------------------------------------------
   // add() integration — process spec paths
   // -------------------------------------------------------------------------
