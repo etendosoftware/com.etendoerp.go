@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
@@ -47,6 +48,7 @@ import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.client.kernel.KernelUtils;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.ad.ui.Tab;
@@ -314,6 +316,81 @@ public class NeoReferenceOwnershipTest {
     assertNull(NeoReferenceOwnership.refuseUnownedReferences(lineTab,
         body(JsonConstants.ID, FOREIGN_PARTNER_ID), null));
     verify(dal, never()).get(anyString(), anyString());
+  }
+
+  /**
+   * A numeric id is still an id: core reads a nested object's id with getString, so
+   * {"id": 1000000} resolves the row "1000000" and must be checked like its string form.
+   */
+  @Test
+  public void testRefusesANumericIdOfAnotherClient() throws Exception {
+    BaseOBObject foreignRow = rowOf(OTHER_CLIENT);
+    when(dal.get(PARTNER, "1000000")).thenReturn(foreignRow);
+
+    assertNotNull(NeoReferenceOwnership.refuseUnownedReferences(lineTab,
+        body(PROP_PARTNER, new JSONObject().put(JsonConstants.ID, 1000000L)), null));
+    verify(dal).get(PARTNER, "1000000");
+  }
+
+  /** A leading dot ({@code .partner.id}) does not hide the reference from the check. */
+  @Test
+  public void testRefusesAForeignKeySentThroughALeadingDotPath() throws Exception {
+    assertNotNull(NeoReferenceOwnership.refuseUnownedReferences(lineTab,
+        body("." + PROP_PARTNER + ".id", FOREIGN_PARTNER_ID), null));
+  }
+
+  /**
+   * {@code x.id} sets {@code x} in core, so a property that references its target by a non-id
+   * property is looked up by that property, exactly as core resolves it.
+   */
+  @Test
+  public void testLooksUpByTheReferencedPropertyThroughAnIdPath() throws Exception {
+    Property byValue = mock(Property.class);
+    when(byValue.isId()).thenReturn(false);
+    when(byValue.getName()).thenReturn("searchKey");
+    Property coded = reference(partnerEntity);
+    when(coded.getReferencedProperty()).thenReturn(byValue);
+    Entity lineEntity = ModelProvider.getInstance().getEntityByTableId("T-LINE");
+    when(lineEntity.getProperty("codedPartner", false)).thenReturn(coded);
+    @SuppressWarnings("unchecked")
+    OBQuery<BaseOBObject> query = mock(OBQuery.class);
+    when(dal.createQuery(PARTNER, "searchKey = :reference")).thenReturn(query);
+    BaseOBObject foreignRow = rowOf(OTHER_CLIENT);
+    when(query.list()).thenReturn(Collections.singletonList(foreignRow));
+
+    assertNotNull(NeoReferenceOwnership.refuseUnownedReferences(lineTab,
+        body("codedPartner.id", "ACME"), null));
+    verify(query).setNamedParameter("reference", "ACME");
+    verify(dal, never()).get(PARTNER, "ACME");
+  }
+
+  /**
+   * A lookup that throws (e.g. an id the key type cannot hold) fails closed, with the very
+   * refusal a missing row gets — never an exception for the caller's generic handler.
+   */
+  @Test
+  public void testALookupFailureIsRefusedLikeAMissingRow() throws Exception {
+    when(dal.get(PARTNER, "P-BROKEN")).thenThrow(new IllegalArgumentException("type mismatch"));
+
+    String broken = NeoReferenceOwnership.refuseUnownedReferences(lineTab,
+        body(PROP_PARTNER, "P-BROKEN"), null);
+    String missing = NeoReferenceOwnership.refuseUnownedReferences(lineTab,
+        body(PROP_PARTNER, MISSING_PARTNER_ID), null);
+
+    assertNotNull(broken);
+    assertEquals(missing, broken.replace("P-BROKEN", MISSING_PARTNER_ID));
+  }
+
+  /** The public probe used by MCP FK-by-name resolution: own and System yes, foreign or broken no. */
+  @Test
+  public void testIsOwnedByCallerClient() {
+    when(dal.get(PARTNER, "P-BROKEN")).thenThrow(new IllegalArgumentException("type mismatch"));
+
+    assertTrue(NeoReferenceOwnership.isOwnedByCallerClient(PARTNER, OWN_PARTNER_ID));
+    assertTrue(NeoReferenceOwnership.isOwnedByCallerClient(PARTNER, SYSTEM_PARTNER_ID));
+    assertFalse(NeoReferenceOwnership.isOwnedByCallerClient(PARTNER, FOREIGN_PARTNER_ID));
+    assertFalse(NeoReferenceOwnership.isOwnedByCallerClient(PARTNER, MISSING_PARTNER_ID));
+    assertFalse(NeoReferenceOwnership.isOwnedByCallerClient(PARTNER, "P-BROKEN"));
   }
 
   // ── parentId ───────────────────────────────────────────────────────────────

@@ -64,17 +64,18 @@ import org.openbravo.service.json.JsonConstants;
  * named here. A nested JSON object with an {@code id} is checked as the row it addresses, and its
  * own keys are walked the same way, because core writes into that row too.
  *
- * <p><b>Cost.</b> One {@code OBDal.get} per distinct reference the request sets — never per
- * foreign key of the entity, and server-derived values (defaults, callouts) are not looked at.
- * The row lands in the session's first-level cache, which is where core's own resolution of the
- * same id finds it a moment later, so a request that passes costs no extra query. Shared reference
- * data (not client-enabled) is skipped without a lookup.
+ * <p><b>Cost.</b> One lookup per distinct reference the request sets — never per foreign key of
+ * the entity, and server-derived values (defaults, callouts) are not looked at. A reference by id
+ * is an {@code OBDal.get}: the row lands in the session's first-level cache, where core's own
+ * resolution of the same id finds it later, so it adds no query to a write that passes. A
+ * reference by a non-id property (rare) is a query of its own. Shared reference data (not
+ * client-enabled) is skipped without a lookup.
  *
- * <p><b>Where it runs.</b> Every write channel that persists through NEO calls it before any
- * default, callout or parent read can consume the reference: {@link NeoCrudHandler} (REST single
- * and {@code /batch}, which reaches the same create path through {@code BatchService}, MCP
- * {@code etendo_batch} included) and the MCP {@code etendo_create} / {@code etendo_update} verbs,
- * which persist on their own. See {@code docs/neo-headless.md} §4.3.7.
+ * <p><b>Where it runs.</b> Before any customization is dispatched and before any default, callout
+ * or parent read can consume the reference: {@link NeoWritePreflight} for REST single writes and
+ * every {@code /batch} create (MCP {@code etendo_batch} included), and the MCP
+ * {@code etendo_create} / {@code etendo_update} pipelines, which persist on their own. See
+ * {@code docs/neo-headless.md} §4.3.7.
  */
 public final class NeoReferenceOwnership {
 
@@ -122,6 +123,25 @@ public final class NeoReferenceOwnership {
     return refuseFirstUnowned(references);
   }
 
+  /**
+   * True when {@code id} names a row of {@code entityName} owned by the caller's client or by
+   * System. For callers outside this package that probe an id before deciding how to read a value
+   * (MCP FK-by-name resolution): a row of another tenant must look exactly like a missing one.
+   * Fails closed on a lookup error.
+   *
+   * @param entityName the DAL entity name
+   * @param id         the candidate id
+   * @return {@code true} only for an existing row of the caller's client or of System
+   */
+  public static boolean isOwnedByCallerClient(String entityName, String id) {
+    try {
+      return TenantOwnership.loadOwnedByClient(entityName, id) != null;
+    } catch (RuntimeException e) {
+      log.debug("Ownership probe on {} failed: {}", entityName, e.getMessage());
+      return false;
+    }
+  }
+
   // ── collection ──────────────────────────────────────────────────────────
 
   /**
@@ -155,36 +175,36 @@ public final class NeoReferenceOwnership {
   }
 
   /**
-   * Resolves one key structurally. A plain key is a property of {@code entity}; a dotted key
-   * ({@code businessPartner.id}) walks reference properties, which is how core's converter reads it
-   * too. Keys that resolve to nothing are left to the write path, which ignores or rejects them.
+   * Resolves one key structurally, the way core's converter reads it. A plain key is a property of
+   * {@code entity}. A dotted key walks reference properties ({@code a.b.c}); a trailing {@code .id}
+   * means the property before it receives the value ({@code a.id} sets {@code a}), exactly as
+   * {@code JsonToDataConverter#handleMultiPathProperty} does, so the referenced property of that
+   * property decides the lookup. Empty segments ({@code .a.id}) are ignored, which checks at least
+   * what core would resolve. Keys that resolve to nothing are left to the write path.
    */
   private static void collectKey(Entity entity, String key, Object value, Set<Reference> out) {
     String[] path = StringUtils.split(key, PATH_SEPARATOR);
     if (path == null || path.length == 0) {
       return;
     }
+    int last = path.length - 1;
+    boolean endsWithId = JsonConstants.ID.equals(path[last]);
+    if (endsWithId && last == 0) {
+      // A plain `id` is the written record itself, not a reference: a create discards it and an
+      // update replaces it with the path id.
+      return;
+    }
+    int receiver = endsWithId ? last - 1 : last;
     Entity owner = entity;
-    for (int i = 0; i < path.length - 1; i++) {
+    for (int i = 0; i < receiver; i++) {
       Property hop = owner.getProperty(path[i], false);
-      if (hop == null || hop.isPrimitive() || hop.getTargetEntity() == null) {
+      if (hop == null || hop.isPrimitive() || hop.isOneToMany() || hop.getTargetEntity() == null) {
         return;
       }
       owner = hop.getTargetEntity();
     }
-    Property property = owner.getProperty(path[path.length - 1], false);
-    if (property == null) {
-      return;
-    }
-    if (property.isId()) {
-      // A plain `id` is the written record itself, not a reference: a create discards it and an
-      // update replaces it with the path id. Reached through a path it names the referenced row.
-      if (path.length > 1) {
-        addReference(owner, null, value, out);
-      }
-      return;
-    }
-    if (isPersistedReference(property)) {
+    Property property = owner.getProperty(path[receiver], false);
+    if (property != null && !property.isId() && isPersistedReference(property)) {
       collectValue(property, value, out);
     }
   }
@@ -246,10 +266,13 @@ public final class NeoReferenceOwnership {
 
   private static void addReference(Entity target, Property referencedProperty, Object raw,
       Set<Reference> out) {
-    if (!(raw instanceof String) || !TenantOwnership.isTenantScoped(target)) {
+    // A number is an id too: core reads a nested object's id with getString, so {"id": 1000000}
+    // resolves the row "1000000".
+    if (!(raw instanceof String || raw instanceof Number)
+        || !TenantOwnership.isTenantScoped(target)) {
       return;
     }
-    String value = (String) raw;
+    String value = String.valueOf(raw);
     if (isNotAReference(value)) {
       return;
     }
@@ -299,7 +322,22 @@ public final class NeoReferenceOwnership {
     }
   }
 
+  /**
+   * Fails closed: a lookup that throws (an id the target's key type cannot hold, a broken row) is
+   * answered as "not the caller's", with the same refusal as a missing row, instead of escaping to
+   * the caller's generic error handling with a different answer.
+   */
   private static boolean isOwned(Reference reference) {
+    try {
+      return lookUpOwned(reference);
+    } catch (RuntimeException e) {
+      log.debug("Reference ownership lookup on {} failed; refusing: {}",
+          reference.entity.getName(), e.getMessage());
+      return false;
+    }
+  }
+
+  private static boolean lookUpOwned(Reference reference) {
     if (reference.referencedProperty == null) {
       return TenantOwnership.loadOwnedByClient(reference.entity.getName(), reference.value) != null;
     }
