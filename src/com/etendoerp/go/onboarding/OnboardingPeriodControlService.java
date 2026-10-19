@@ -148,8 +148,9 @@ public class OnboardingPeriodControlService extends OnboardingContextSupport {
       Calendar calendar = resolveOrgCalendar(clientId, orgId);
       Instant now = currentDate().toInstant();
       Instant trialEnd = trialStart.plus(Duration.ofDays(Math.max(trialDays, 0)));
-      ensureYears(calendar, (trialStart.isBefore(now) ? trialStart : now).minus(ONE_DAY),
-          trialEnd.isAfter(now.plus(ONE_DAY)) ? trialEnd : now.plus(ONE_DAY));
+      Instant from = (trialStart.isBefore(now) ? trialStart : now).minus(ONE_DAY);
+      Instant to = trialEnd.isAfter(now.plus(ONE_DAY)) ? trialEnd : now.plus(ONE_DAY);
+      ensureYears(calendar, from, to);
       openNeverOpenedPeriodsThrough(resolveCalendarPeriods(calendar), Date.from(trialEnd));
       flushChanges();
     });
@@ -304,8 +305,9 @@ public class OnboardingPeriodControlService extends OnboardingContextSupport {
    * the calendar covers the signup year: every calendar year in [now - 1 day, now + 1 day], because
    * the tenant's timezone is unknown and a 31 December / 1 January signup must get both years.
    * Then deletes every other year that was never opened (ETP-5744), so a tenant created after the
-   * onboarding dataset's year (2026) does not start with it. Normalizes the controls last. Every period stays never-opened: the owner chooses what to open
-   * after reviewing the calendar in "Primeros pasos".
+   * onboarding dataset's year (2026) does not start with it. Normalizes the controls last. Every
+   * period stays never-opened: the owner chooses what to open after reviewing the calendar in
+   * "Primeros pasos".
    *
    * @param clientId         productive client identifier
    * @param orgId            productive organization identifier

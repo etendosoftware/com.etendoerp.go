@@ -16,6 +16,9 @@
  */
 package com.etendoerp.go.onboarding;
 
+import java.sql.Connection;
+import java.sql.SQLException;
+import java.sql.Savepoint;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
@@ -28,6 +31,7 @@ import java.util.Map;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.hibernate.criterion.Restrictions;
+import org.openbravo.base.exception.OBException;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
@@ -148,12 +152,17 @@ public final class FiscalCalendarSupport {
    * were never opened, with its periods and their control rows (ETP-5744). A new productive tenant
    * must start with the signup year only, not with the year the onboarding dataset ships. A year
    * with any opened period is kept. Native SQL on the DAL session, so pending DAL changes are
-   * flushed first.
+   * flushed first, and callers must not hold {@link Year} or {@link Period} entities of the deleted
+   * years.
+   *
+   * <p>Best effort: the deletes run under a savepoint, so a row referencing one of those periods
+   * (every foreign key to {@code C_PERIOD}/{@code C_YEAR} is NO ACTION) only skips the cleanup with
+   * a warning instead of failing the caller's transaction.
    *
    * @param calendarId calendar to clean
    * @param firstYear  first calendar year to keep
    * @param lastYear   last calendar year to keep
-   * @return the number of years deleted
+   * @return the number of years deleted, 0 when the cleanup was skipped
    */
   public static int removeUnusedYearsOutside(String calendarId, int firstYear, int lastYear) {
     List<String> keepYears = new ArrayList<>();
@@ -161,13 +170,39 @@ public final class FiscalCalendarSupport {
       keepYears.add(String.valueOf(year));
     }
     OBDal.getInstance().flush();
-    executeUpdate(DELETE_UNUSED_PERIODS_SQL, calendarId, keepYears);
-    int deleted = executeUpdate(DELETE_UNUSED_YEARS_SQL, calendarId, keepYears);
+    Connection connection = OBDal.getInstance().getConnection(false);
+    Savepoint savepoint = setSavepoint(connection);
+    int deleted;
+    try {
+      executeUpdate(DELETE_UNUSED_PERIODS_SQL, calendarId, keepYears);
+      deleted = executeUpdate(DELETE_UNUSED_YEARS_SQL, calendarId, keepYears);
+    } catch (RuntimeException e) {
+      rollbackTo(connection, savepoint);
+      log.warn("ETP-5744 could not delete unused years outside {}-{} from calendar {}; kept",
+          firstYear, lastYear, calendarId, e);
+      return 0;
+    }
     if (deleted > 0) {
       log.info("ETP-5744 deleted {} unused years outside {}-{} from calendar {}", deleted,
           firstYear, lastYear, calendarId);
     }
     return deleted;
+  }
+
+  private static Savepoint setSavepoint(Connection connection) {
+    try {
+      return connection.setSavepoint();
+    } catch (SQLException e) {
+      throw new OBException("Cannot set a savepoint to clean the calendar years", e);
+    }
+  }
+
+  private static void rollbackTo(Connection connection, Savepoint savepoint) {
+    try {
+      connection.rollback(savepoint);
+    } catch (SQLException e) {
+      throw new OBException("Cannot roll back the calendar year cleanup", e);
+    }
   }
 
   private static int executeUpdate(String sql, String calendarId, List<String> keepYears) {

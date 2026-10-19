@@ -28,8 +28,12 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.sql.Connection;
+import java.sql.Savepoint;
 import java.util.ArrayList;
 import java.util.List;
+
+import javax.persistence.PersistenceException;
 
 import org.hibernate.Session;
 import org.hibernate.query.NativeQuery;
@@ -63,6 +67,8 @@ class FiscalCalendarSupportTest {
   private OBCriteria<Period> periodCriteria;
   private final List<Period> createdPeriods = new ArrayList<>();
   private final Calendar calendar = mock(Calendar.class);
+  private final Connection connection = mock(Connection.class);
+  private final Savepoint savepoint = mock(Savepoint.class);
 
   @BeforeEach
   @SuppressWarnings("unchecked")
@@ -144,24 +150,53 @@ class FiscalCalendarSupportTest {
   }
 
   @Test
-  @SuppressWarnings("unchecked")
-  void removeUnusedYearsFlushesThenDeletesPeriodsBeforeYearsKeepingTheRange() {
-    Session session = mock(Session.class);
-    NativeQuery<Object> query = mock(NativeQuery.class);
-    when(dal.getSession()).thenReturn(session);
-    when(session.createNativeQuery(anyString())).thenReturn(query);
-    when(query.setParameter(anyString(), any())).thenReturn(query);
-    when(query.setParameterList(anyString(), any(java.util.Collection.class))).thenReturn(query);
+  void removeUnusedYearsFlushesThenDeletesPeriodsBeforeYearsKeepingTheRange() throws Exception {
+    NativeQuery<Object> query = stubNativeQueries();
     when(query.executeUpdate()).thenReturn(1);
 
     assertEquals(1, FiscalCalendarSupport.removeUnusedYearsOutside("CAL-1", 2026, 2027));
 
+    Session session = dal.getSession();
     InOrder order = Mockito.inOrder(dal, session);
     order.verify(dal).flush();
     order.verify(session).createNativeQuery(FiscalCalendarSupport.DELETE_UNUSED_PERIODS_SQL);
     order.verify(session).createNativeQuery(FiscalCalendarSupport.DELETE_UNUSED_YEARS_SQL);
     verify(query, times(2)).setParameterList("keepYears", List.of("2026", "2027"));
-    // Only never-opened years go: a year with an opened period is kept.
-    assertTrue(FiscalCalendarSupport.DELETE_UNUSED_YEARS_SQL.contains("periodstatus <> 'N'"));
+    verify(query, times(2)).setParameter("calendarId", "CAL-1");
+    verify(connection, never()).rollback(any(Savepoint.class));
+  }
+
+  @Test
+  void removeUnusedYearsScopesToTheCalendarKeepsTheRangeAndOpenedYears() {
+    for (String sql : List.of(FiscalCalendarSupport.DELETE_UNUSED_PERIODS_SQL,
+        FiscalCalendarSupport.DELETE_UNUSED_YEARS_SQL)) {
+      assertTrue(sql.contains("y.c_calendar_id = :calendarId"));
+      assertTrue(sql.contains("y.year NOT IN (:keepYears)"));
+      assertTrue(sql.contains("c.periodstatus <> 'N'"));
+    }
+  }
+
+  @Test
+  void removeUnusedYearsRollsBackToTheSavepointAndKeepsTheYearsWhenADeleteIsBlocked()
+      throws Exception {
+    NativeQuery<Object> query = stubNativeQueries();
+    when(query.executeUpdate()).thenThrow(new PersistenceException("fk_violation"));
+
+    assertEquals(0, FiscalCalendarSupport.removeUnusedYearsOutside("CAL-1", 2027, 2027));
+
+    verify(connection).rollback(savepoint);
+  }
+
+  @SuppressWarnings("unchecked")
+  private NativeQuery<Object> stubNativeQueries() throws Exception {
+    Session session = mock(Session.class);
+    NativeQuery<Object> query = mock(NativeQuery.class);
+    when(dal.getSession()).thenReturn(session);
+    when(dal.getConnection(false)).thenReturn(connection);
+    when(connection.setSavepoint()).thenReturn(savepoint);
+    when(session.createNativeQuery(anyString())).thenReturn(query);
+    when(query.setParameter(anyString(), any())).thenReturn(query);
+    when(query.setParameterList(anyString(), any(java.util.Collection.class))).thenReturn(query);
+    return query;
   }
 }
