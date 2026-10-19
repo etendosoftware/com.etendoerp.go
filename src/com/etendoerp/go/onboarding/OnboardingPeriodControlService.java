@@ -83,6 +83,8 @@ public class OnboardingPeriodControlService extends OnboardingContextSupport {
    */
   private static final String OPENCLOSE_OPEN = "C";
   private static final String OPENCLOSE_CLOSED = "O";
+  /** Margin for the tenant's unknown time zone around "now" when ensuring calendar years. */
+  private static final Duration ONE_DAY = Duration.ofDays(1);
 
   /**
    * Enables period control on the target organization and wires it to its imported calendar.
@@ -121,9 +123,14 @@ public class OnboardingPeriodControlService extends OnboardingContextSupport {
    * <p>It only opens: a control row is flipped from never-opened ({@code 'N'}) to open, and rows a
    * user closed ({@code 'C'}) or closed permanently ({@code 'P'}) are never touched. Every control row
    * of a period is considered, so a duplicated row (see {@link #normalize}) ends up open too:
-   * posting needs any open row and costing reads any non-open row as closed. Years are not created
-   * (ETP-5744): when the trial end falls beyond the calendar's last period, what exists is opened
-   * and a warning is logged.
+   * posting needs any open row and costing reads any non-open row as closed.
+   *
+   * <p>First it makes sure the calendar has every year the trial touches (ETP-5744): every calendar
+   * year in [min(trial start, now) - 1 day, max(trial end, now + 1 day)], so a trial crossing into
+   * January, or a demo created or claimed after the dataset's last year, can still post. The day of
+   * margin covers a 31 December / 1 January signup, as in {@link #applyProductiveInitialState}. The
+   * core {@code C_PERIOD_TRG} trigger adds one never-opened control row per new period, so no
+   * normalization is needed.
    *
    * @param clientId    demo client identifier
    * @param orgId       demo organization identifier
@@ -139,15 +146,21 @@ public class OnboardingPeriodControlService extends OnboardingContextSupport {
     }
     runInTenantContext(clientId, orgId, adminUserId, adminRoleId, () -> {
       Calendar calendar = resolveOrgCalendar(clientId, orgId);
-      Date trialEnd = Date.from(trialStart.plus(Duration.ofDays(Math.max(trialDays, 0))));
-      List<Period> periods = resolveCalendarPeriods(calendar);
-      if (!coversDate(periods, trialEnd)) {
-        log.warn("ETP-5575 trial end {} beyond calendar for client {}; opening what exists",
-            trialEnd, clientId);
-      }
-      openNeverOpenedPeriodsThrough(periods, trialEnd);
+      Instant now = currentDate().toInstant();
+      Instant trialEnd = trialStart.plus(Duration.ofDays(Math.max(trialDays, 0)));
+      ensureYears(calendar, (trialStart.isBefore(now) ? trialStart : now).minus(ONE_DAY),
+          trialEnd.isAfter(now.plus(ONE_DAY)) ? trialEnd : now.plus(ONE_DAY));
+      openNeverOpenedPeriodsThrough(resolveCalendarPeriods(calendar), Date.from(trialEnd));
       flushChanges();
     });
+  }
+
+  /** Ensures every calendar year touched by [from, to], in the server's time zone. */
+  private static void ensureYears(Calendar calendar, Instant from, Instant to) {
+    int lastYear = to.atZone(ZoneId.systemDefault()).getYear();
+    for (int year = from.atZone(ZoneId.systemDefault()).getYear(); year <= lastYear; year++) {
+      FiscalCalendarSupport.ensureYear(calendar, year);
+    }
   }
 
   /**
@@ -169,22 +182,6 @@ public class OnboardingPeriodControlService extends OnboardingContextSupport {
     } finally {
       restoreExecutionContext(previousContext);
     }
-  }
-
-  /** True when some period of the calendar ends on or after the given date. */
-  private static boolean coversDate(List<Period> periods, Date date) {
-    for (Period period : periods) {
-      Date end = period.getEndingDate();
-      if (end != null && !end.before(truncateToDay(date))) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  private static Date truncateToDay(Date date) {
-    return Date.from(date.toInstant().atZone(ZoneId.systemDefault()).toLocalDate()
-        .atStartOfDay(ZoneId.systemDefault()).toInstant());
   }
 
   /**
@@ -316,11 +313,7 @@ public class OnboardingPeriodControlService extends OnboardingContextSupport {
     runInTenantContext(clientId, orgId, adminUserId, adminRoleId, () -> {
       Calendar calendar = resolveOrgCalendar(clientId, orgId);
       Instant now = currentDate().toInstant();
-      int firstYear = now.minus(Duration.ofDays(1)).atZone(ZoneId.systemDefault()).getYear();
-      int lastYear = now.plus(Duration.ofDays(1)).atZone(ZoneId.systemDefault()).getYear();
-      for (int year = firstYear; year <= lastYear; year++) {
-        FiscalCalendarSupport.ensureYear(calendar, year);
-      }
+      ensureYears(calendar, now.minus(ONE_DAY), now.plus(ONE_DAY));
       // Last, and native: it recomputes every period's open/close flag from the surviving rows.
       flushChanges();
       FiscalCalendarSupport.normalizePeriodControls(calendar.getId());
