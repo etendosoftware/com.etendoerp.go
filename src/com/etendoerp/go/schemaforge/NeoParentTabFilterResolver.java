@@ -107,7 +107,7 @@ public final class NeoParentTabFilterResolver {
    *   <li>Fallback → {@code parentId}</li>
    * </ol>
    */
-  static String resolveTabWhereTokens(Tab adTab, String tabWhere, String parentId) {
+  public static String resolveTabWhereTokens(Tab adTab, String tabWhere, String parentId) {
     Tab parentTab = null;
     BaseOBObject parentRecord = null;
     Entity parentEntity = null;
@@ -211,7 +211,7 @@ public final class NeoParentTabFilterResolver {
   /**
    * Resolves the HQL filter expression that constrains child tab records by parent record ID.
    */
-  static String resolveParentFilter(Tab childTab, String parentId) {
+  public static String resolveParentFilter(Tab childTab, String parentId) {
     try {
       NeoTypeCoercionHelper.ParentFilter parentFilter =
           NeoTypeCoercionHelper.buildParentWhereClause(childTab, parentId);

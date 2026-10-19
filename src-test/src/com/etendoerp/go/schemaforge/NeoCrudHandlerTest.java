@@ -4135,7 +4135,7 @@ class NeoCrudHandlerTest {
     private List<String> invokeAddTabWherePredicate(Tab adTab, String tabWhere,
         String parentId) throws Exception {
       List<String> predicates = new ArrayList<>();
-      invokePrivate(handler, "addTabWherePredicate",
+      invokeStaticPrivate(NeoDistinctFetchSupport.class, "addTabWherePredicate",
           new Class<?>[] { Tab.class, String.class, String.class, List.class },
           adTab, tabWhere, parentId, predicates);
       return predicates;
