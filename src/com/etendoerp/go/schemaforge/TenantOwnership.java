@@ -118,6 +118,22 @@ final class TenantOwnership {
   }
 
   /**
+   * Typed form of {@link #loadOwnedByClient(String, String)}, for a caller that knows the class.
+   *
+   * @param entityClass the DAL entity class
+   * @param id          the id, typically straight from a request
+   * @param <T>         the entity type
+   * @return the row, or {@code null} when the id is blank, unknown, or owned by another tenant
+   */
+  static <T extends BaseOBObject> T loadOwnedByClient(Class<T> entityClass, String id) {
+    if (StringUtils.isBlank(id)) {
+      return null;
+    }
+    T row = OBDal.getInstance().get(entityClass, id);
+    return belongsToReadableClient(row) ? row : null;
+  }
+
+  /**
    * True when {@code entity} belongs to a client the caller may read — its own or System — with
    * no opinion on its organization. See {@link #loadOwnedByClient(String, String)} for why.
    *

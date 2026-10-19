@@ -93,6 +93,8 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  * sandbox cannot boot one — the fix was verified by a live probe instead, recorded in IMP-23 §9.
  * What these assertions do pin is {@link BatchService}'s own lifecycle (never the broken part) and
  * the failure body's atomicity report, which is the caller-visible contract that changed twice.
+ *
+ * @covers com.etendoerp.go.schemaforge.BatchService
  */
 public class BatchServiceRobustnessTest {
 
@@ -362,6 +364,37 @@ public class BatchServiceRobustnessTest {
       assertNotNull("every failure body must carry 'persisted', empty included (IMP-23)",
           result.optJSONArray("persisted"));
       return result;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // ETP-5785 — a create that references another tenant's record is refused BEFORE
+  // the customization runs, and the batch persists nothing.
+  // ---------------------------------------------------------------------------
+  @Test
+  public void aRefusedReferenceNeverReachesTheCustomizationAndRollsBack() throws Exception {
+    BatchService service = BatchService.forBatchOnly();
+    JSONArray ops = new JSONArray();
+    ops.put(op("loc", "locationAddress").put("body",
+        new JSONObject().put(PARENT_ID, "FOREIGN-BP").put("addressLine1", "Main St 1")));
+
+    OBDal obDal = mock(OBDal.class);
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<NeoServletSupport> support = mockStatic(NeoServletSupport.class);
+         MockedStatic<NeoWritePreflight> preflight = mockStatic(NeoWritePreflight.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubEntityResolution(support, obDal);
+      preflight.when(() -> NeoWritePreflight.refusalFor(any(NeoContext.class)))
+          .thenReturn(NeoResponse.error(400, "refered to but not present in the import set"));
+
+      JSONObject result = service.executeBatch(ops);
+
+      assertFalse(result.getBoolean(COMMITTED));
+      assertEquals(400, result.getJSONObject("error").getInt("status"));
+      support.verify(() -> NeoServletSupport.handleWithHooks(any(), any(NeoContext.class), any(),
+          any()), never());
+      verify(obDal, never()).commitAndClose();
+      verify(obDal).rollbackAndClose();
     }
   }
 

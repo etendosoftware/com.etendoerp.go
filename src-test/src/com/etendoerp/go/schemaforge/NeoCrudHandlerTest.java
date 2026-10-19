@@ -373,6 +373,51 @@ class NeoCrudHandlerTest {
     }
 
     /**
+     * ETP-5785: the reference-ownership refusal is answered BEFORE the customization runs. A
+     * customization's handle() may persist on its own (ContactsLocationAddressHandler writes under
+     * the partner named by parentId), so a check inside the default step came too late.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = { "POST", "PUT", "PATCH" })
+    @DisplayName("ETP-5785: a write refused by the preflight never reaches the customization")
+    void preflightRefusalShortCircuitsTheCustomization(String method) throws Exception {
+      SFSpec spec = mock(SFSpec.class);
+      SFEntity entity = createMockEntity(false, false, true, true, true, false);
+      Tab adTab = mock(Tab.class);
+      Table table = mock(Table.class);
+      NeoFieldFilter filter = mock(NeoFieldFilter.class);
+      HttpServletRequest request = mock(HttpServletRequest.class);
+      HttpServletResponse response = mock(HttpServletResponse.class);
+      NeoServlet.NeoPathInfo pathInfo = new NeoServlet.NeoPathInfo(
+          "contacts", "locationAddress", "POST".equals(method) ? null : "REC-1");
+      when(spec.getId()).thenReturn("SPEC-1");
+      when(entity.getADTab()).thenReturn(adTab);
+      when(entity.getJavaQualifier()).thenReturn("contactsLocationAddressHandler");
+      when(adTab.getTable()).thenReturn(table);
+      when(table.getName()).thenReturn("BusinessPartnerLocation");
+      when(servlet.findEntity("SPEC-1", "locationAddress")).thenReturn(entity);
+      Map<String, String> query = new HashMap<>();
+      query.put("parentId", "FOREIGN-BP");
+      when(servlet.extractQueryParams(any())).thenReturn(query);
+      when(request.getInputStream()).thenReturn(toServletInputStream("{\"name\":\"x\"}"));
+      when(filter.findClientReadOnlyFields(any(), any())).thenReturn(List.of());
+      NeoResponse refusal = NeoResponse.error(400, "refered to but not present");
+
+      try (MockedStatic<NeoFieldFilter> fieldFilters = Mockito.mockStatic(NeoFieldFilter.class);
+          MockedStatic<NeoWritePreflight> preflight = Mockito.mockStatic(NeoWritePreflight.class)) {
+        fieldFilters.when(() -> NeoFieldFilter.forEntity(any(), any())).thenReturn(filter);
+        preflight.when(() -> NeoWritePreflight.refusalFor(any())).thenReturn(refusal);
+
+        handler.handleWindowEntityCrud(spec, pathInfo, method, request, response);
+
+        preflight.verify(() -> NeoWritePreflight.refusalFor(any()));
+      }
+
+      verify(servlet, never()).handleWithHooks(any(), any(), any(), any());
+      verify(servlet).writeResponse(response, refusal);
+    }
+
+    /**
      * Builds a REAL (non-mocked) {@link NeoFieldFilter} via reflection on its package-private
      * constructor — same technique {@code NeoFieldFilterTest} uses — so this test exercises the
      * actual {@code validateClientWriteRequest}/{@code rejectableOnCreateFields} interaction

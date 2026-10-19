@@ -296,6 +296,12 @@ class NeoCrudHandler {
 
   private NeoResponse dispatchCrudRequestInternal(SFEntity entity, NeoContext neoContext,
       HttpServletRequest request, HttpServletResponse response) {
+    // ETP-5785: before ANY customization — its handle() may persist on its own — and once per
+    // write. handleDefault does not repeat it. See NeoWritePreflight.
+    NeoResponse refusal = NeoWritePreflight.refusalFor(neoContext);
+    if (refusal != null) {
+      return refusal;
+    }
     String javaQualifier = entity.getJavaQualifier();
     if (StringUtils.isNotBlank(javaQualifier)) {
       return servlet.handleWithHooks(javaQualifier, neoContext, request, response);
@@ -305,6 +311,10 @@ class NeoCrudHandler {
 
   /**
    * Executes the default DAL-based handler for a CRUD request.
+   *
+   * <p>Reference ownership (ETP-5785) is NOT checked here: both callers that reach this for a write
+   * ({@code dispatchCrudRequestInternal} and {@code BatchService.createRecord}) run
+   * {@link NeoWritePreflight} before dispatching to a customization.
    */
   NeoResponse handleDefault(NeoContext context) {
     try {
@@ -853,14 +863,6 @@ class NeoCrudHandler {
     // not overwrite values the user explicitly chose (e.g. paymentTerms manually changed in
     // the form after a businessPartner callout already ran).
     Set<String> userSubmittedFields = NeoCrudHelper.snapshotBodyFields(filteredBody);
-    // ETP-5785: every reference the request set, and its parent, must be a row of the caller's
-    // client or of System. Checked before defaults, callouts or the parent read can consume one.
-    // A refusal is core's own unknown-reference body, so it takes the normal response path.
-    String unownedReference = NeoReferenceOwnership.refuseUnownedReferences(adTab, filteredBody,
-        parentIdValue);
-    if (unownedReference != null) {
-      return unownedReference;
-    }
     long perfTotalStart = System.nanoTime();
     long perfStart = perfTotalStart;
     // runCascade=false: the cascade is run explicitly right after by executePostCalloutCascade,
@@ -1060,12 +1062,6 @@ class NeoCrudHandler {
     // regenerateDocumentNoOnDocTypeChange must not overwrite a number the caller authored itself.
     boolean clientSentDocumentNo = DocumentNoRepreviewHelper.hasClientAuthoredDocumentNo(rawBody);
     JSONObject filteredBody = fieldFilter.filterWriteRequest(rawBody);
-    // ETP-5785: same reference-ownership check as the create path; an update has no parent.
-    String unownedReference = NeoReferenceOwnership.refuseUnownedReferences(context.getAdTab(),
-        filteredBody, null);
-    if (unownedReference != null) {
-      return unownedReference;
-    }
     // Keep C_DocType_ID in sync with the doc-type target the client just submitted. The create
     // path does this through DocTypeResolver.reapplyDocTypeFromTabFilter; without it here,
     // changing the document type of an already-saved draft leaves the effective doctype stale and

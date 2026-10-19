@@ -312,7 +312,7 @@ public class TenantOwnershipTest {
 
       assertNull(TenantOwnership.loadOwnedByClient(ACCOUNT_ENTITY, ACCOUNT_ID));
       assertNull(TenantOwnership.loadOwnedByClient(ACCOUNT_ENTITY, " "));
-      assertNull(TenantOwnership.loadOwnedByClient(null, ACCOUNT_ID));
+      assertNull(TenantOwnership.loadOwnedByClient((String) null, ACCOUNT_ID));
 
       verify(dal, never()).get(ACCOUNT_ENTITY, " ");
     }
