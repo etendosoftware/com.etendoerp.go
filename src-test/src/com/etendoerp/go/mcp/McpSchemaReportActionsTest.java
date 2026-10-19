@@ -238,7 +238,7 @@ class McpSchemaReportActionsTest {
   }
 
   @Test
-  @DisplayName("BUG-4: without declared actions and no entity → still 'Missing required argument'")
+  @DisplayName("BUG-4: without declared actions and no entity → still 'Missing required arguments: entity, view'")
   void noActionsSpecNoEntity() {
     specDeclaresNoActions();
     McpRoutingException ex = assertThrows(McpRoutingException.class,
@@ -259,7 +259,7 @@ class McpSchemaReportActionsTest {
   }
 
   @Test
-  @DisplayName("no entity + no action entity → 'Missing required argument: entity'")
+  @DisplayName("no entity + no action entity → 'Missing required arguments: entity, view'")
   void noEntityZeroActionEntities() {
     specDeclaresNoActions();
     SFEntity other = entity("other", PLAIN_Q);
@@ -304,7 +304,7 @@ class McpSchemaReportActionsTest {
   }
 
   @Test
-  @DisplayName("a window spec without entity still gets 'Missing required argument: entity'")
+  @DisplayName("a window spec without entity still gets 'Missing required arguments: entity, view'")
   void windowSpecMissingEntity() {
     when(spec.getSpecType()).thenReturn("W");
     McpRoutingException ex = assertThrows(McpRoutingException.class,

@@ -61,7 +61,11 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 
-/** Tests for {@link NeoProcessService}. */
+/**
+ * Tests for {@link NeoProcessService}.
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoProcessService
+ */
 public class NeoProcessServiceTest {
 
   // ===================== executeProcess =====================

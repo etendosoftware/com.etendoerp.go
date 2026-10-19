@@ -73,6 +73,8 @@ import com.etendoerp.go.schemaforge.data.SFField;
 
 /**
  * Unit tests for {@link NeoButtonActionHelper}.
+ *
+ * @covers com.etendoerp.go.schemaforge.util.NeoButtonActionHelper
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
