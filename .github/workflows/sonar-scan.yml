@@ -1,15 +1,14 @@
 name: Sonar Build
+# Pushes analyze only the long-lived branches, the baseline Sonar measures a PR's new code
+# against. A feature branch is analyzed through its PR; a push trigger on it too ran the
+# scan twice per push.
 on:
   pull_request:
     types: [opened, synchronize, reopened]
   push:
     branches:
       - main
-      - master
       - develop
-      - 'release/**'
-      - 'feature/**'
-      - 'epic/**'
 jobs:
   build:
     name: Sonar Build
