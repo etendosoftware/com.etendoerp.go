@@ -591,7 +591,23 @@ class NeoCrudHandler {
     if (errorResponse != null) {
       return errorResponse;
     }
+    // Kept even for an ids-only response: it renames DAL properties to the API keys a
+    // customization's afterHandle reads, so skipping it would change what the hook sees.
     fieldFilter.filterGetResponse(responseJson);
+    enrichResponseIdentifiers(context, responseJson);
+    return NeoResponse.ok(responseJson);
+  }
+
+  /**
+   * Adds the display identifiers the frontend reads off a response: list identifiers on GET, and
+   * Locator warehouse labels on GET and on the record a write echoes back.
+   */
+  private static void enrichResponseIdentifiers(NeoContext context, JSONObject responseJson) {
+    // ETP-5676: a batch sent with _onlyReturnIds reads nothing but the new id from this response
+    // (BatchService#extractRecordId), so the identifier enrichment below is work nobody sees.
+    if (context.isIdsOnlyResponse() && "POST".equals(context.getHttpMethod())) {
+      return;
+    }
     if (context.getSfEntity() != null) {
       String httpMethod = context.getHttpMethod();
       if ("GET".equals(httpMethod)) {
@@ -610,7 +626,6 @@ class NeoCrudHandler {
         NeoLocatorIdentifierHelper.enrichLocatorIdentifiers(responseJson, context.getSfEntity());
       }
     }
-    return NeoResponse.ok(responseJson);
   }
 
   /**
@@ -967,8 +982,10 @@ class NeoCrudHandler {
     Set<String> effectiveSuppressed = suppressedFields != null
         ? suppressedFields
         : java.util.Collections.emptySet();
+    // ETP-5676: inside a batch, a callout whose every output the same batch already saw discarded
+    // under the same key is skipped; null outside a batch, where every callout runs as before.
     NeoDefaultsCascadeHelper.executeCalloutCascade(context, adTab, filteredBody, seqFields,
-        effectiveProtected, effectiveSuppressed);
+        effectiveProtected, effectiveSuppressed, NeoBatchScope.currentCalloutDiscardMemory());
     long t1 = System.nanoTime();
     DocTypeResolver.reapplyDocTypeFromTabFilter(filteredBody, adTab, context, effectiveProtected);
     NeoDefaultsCascadeHelper.removeEmptyFkValues(filteredBody, adTab);

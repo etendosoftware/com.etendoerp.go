@@ -547,7 +547,7 @@ class McpToolRouterRouteTest {
         // The denial must short-circuit before any DAL work — BatchService must never
         // be reached once authorizeSpecAccess throws.
         org.mockito.Mockito.verify(mockBatch, org.mockito.Mockito.never())
-            .executeBatch(any(), any());
+            .executeBatch(any(), any(), org.mockito.ArgumentMatchers.anyBoolean());
       }
     }
 
@@ -568,15 +568,54 @@ class McpToolRouterRouteTest {
             .thenReturn(mockBatch);
         JSONObject batchResult = new JSONObject();
         batchResult.put("committed", true);
-        when(mockBatch.executeBatch(any(), any())).thenReturn(batchResult);
+        when(mockBatch.executeBatch(any(), any(), org.mockito.ArgumentMatchers.anyBoolean(),
+            org.mockito.ArgumentMatchers.anyBoolean()))
+            .thenReturn(batchResult);
 
         JSONObject result = router.handleBatch(buildBatchArgs());
 
         assertFalse(result.has("isError"));
-        // ETP-5415: the two-arg overload is the assertion, not an incidental detail — the MCP
-        // body transforms now ride along as a per-operation preprocessor, and a call through the
-        // one-arg overload would silently run the batch with none of them.
-        org.mockito.Mockito.verify(mockBatch).executeBatch(any(), any());
+        // ETP-5415: a non-null preprocessor is the assertion, not an incidental detail — the MCP
+        // body transforms ride along as a per-operation preprocessor, and a call through the
+        // one-arg overload would silently run the batch with none of them. ETP-5676: the
+        // _onlyReturnIds and _skipRedundantCallouts options default to false on MCP.
+        org.mockito.Mockito.verify(mockBatch).executeBatch(any(),
+            org.mockito.ArgumentMatchers.notNull(), org.mockito.ArgumentMatchers.eq(false),
+            org.mockito.ArgumentMatchers.eq(false));
+      }
+    }
+
+    /** ETP-5676: the etendo_batch argument reaches BatchService with the REST option's meaning. */
+    @Test
+    @DisplayName("an etendo_batch forwards _onlyReturnIds and _skipRedundantCallouts")
+    void batchForwardsOnlyReturnIds() throws Exception {
+      SFSpec spec = mockSpec();
+      supportMock.when(() -> McpToolRouterSupport.findActiveSpecByName(SPEC_NAME))
+          .thenReturn(spec);
+      supportMock.when(() -> McpToolRouterSupport.hasSpecAccess(spec, "W", "POST"))
+          .thenReturn(true);
+
+      try (MockedStatic<com.etendoerp.go.schemaforge.BatchService> batchMock =
+          mockStatic(com.etendoerp.go.schemaforge.BatchService.class)) {
+        com.etendoerp.go.schemaforge.BatchService mockBatch =
+            mock(com.etendoerp.go.schemaforge.BatchService.class);
+        batchMock.when(com.etendoerp.go.schemaforge.BatchService::forBatchOnly)
+            .thenReturn(mockBatch);
+        JSONObject batchResult = new JSONObject();
+        batchResult.put("committed", true);
+        when(mockBatch.executeBatch(any(), any(), org.mockito.ArgumentMatchers.anyBoolean(),
+            org.mockito.ArgumentMatchers.anyBoolean()))
+            .thenReturn(batchResult);
+        JSONObject args = buildBatchArgs();
+        args.put(com.etendoerp.go.schemaforge.BatchService.PARAM_ONLY_RETURN_IDS, true);
+        args.put(com.etendoerp.go.schemaforge.BatchService.PARAM_SKIP_REDUNDANT_CALLOUTS, true);
+
+        JSONObject result = router.handleBatch(args);
+
+        assertFalse(result.has("isError"));
+        org.mockito.Mockito.verify(mockBatch).executeBatch(any(),
+            org.mockito.ArgumentMatchers.notNull(), org.mockito.ArgumentMatchers.eq(true),
+            org.mockito.ArgumentMatchers.eq(true));
       }
     }
   }
