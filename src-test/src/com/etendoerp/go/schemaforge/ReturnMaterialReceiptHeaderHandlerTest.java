@@ -254,9 +254,22 @@ public class ReturnMaterialReceiptHeaderHandlerTest {
           .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
           .fieldName(action).recordId(null).build();
       NeoResponse result = handler.handle(ctx);
+      if ("documentAction".equals(action)) {
+        assertNull("completion is the native process", result);
+        continue;
+      }
       assertNotNull(action + " is dispatched by handle()", result);
       assertEquals(action, HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
     }
+  }
+
+  /** The return flow ends with the completion button, published for agents (ETP-5711). */
+  @Test
+  public void testActionContractsPublishCompletionLast() {
+    java.util.List<String> names = java.util.List.copyOf(handler.actionContracts().keySet());
+
+    assertEquals("documentAction", names.get(names.size() - 1));
+    assertTrue(handler.actionContracts().get("documentAction").getDescription().contains("DRAFT"));
   }
 
   /**
@@ -278,6 +291,8 @@ public class ReturnMaterialReceiptHeaderHandlerTest {
         { "rectifiableInvoices", "{\"startRow\":0,\"pageSize\":20,\"search\":\"\"}", null,
             null },
         { "createReturnInvoice", "{\"originInvoices\":[\"X\"]}", null, null },
+        { "documentAction", "{\"docAction\":\"CO\"}", null, null },
+        { "documentAction", "{\"docAction\":\"VO\"}", "field", "docAction" },
     };
     Map<String, NeoActionContract> contracts = handler.actionContracts();
     for (Object[] c : cases) {
@@ -1376,8 +1391,13 @@ public class ReturnMaterialReceiptHeaderHandlerTest {
 
   // ── handleImportShipmentLines — import loop path ──────────────────────────
 
-  @Test
-  public void testHandleImportShipmentLinesImportsOneLine() throws Exception {
+  /**
+   * Runs importShipmentLines against a shipment line of {@code shipped} units, {@code returned} of
+   * them already on other (non-voided) returns, and answers the response; the return lines built
+   * are reported through {@code saved}.
+   */
+  private NeoResponse importShipmentLines(String shipped, String returned, JSONArray lines,
+      java.util.List<ShipmentInOutLine> saved) throws Exception {
     try (MockedStatic<OBContext> ignored = Mockito.mockStatic(OBContext.class);
          MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
          MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
@@ -1388,36 +1408,87 @@ public class ReturnMaterialReceiptHeaderHandlerTest {
 
       ShipmentInOut receipt = mock(ShipmentInOut.class);
       when(dal.get(ShipmentInOut.class, "rec-1")).thenReturn(receipt);
+      ReturnedQuantityTestSupport.stubReturnedQuantities(dal, 10L,
+          (src, excl) -> new BigDecimal(returned));
 
-      Connection conn = mock(Connection.class);
-      when(dal.getConnection()).thenReturn(conn);
-      PreparedStatement ps = mock(PreparedStatement.class);
-      when(conn.prepareStatement(anyString())).thenReturn(ps);
-      ResultSet rs = mock(ResultSet.class);
-      when(ps.executeQuery()).thenReturn(rs);
-      when(rs.next()).thenReturn(true);
-      when(rs.getLong(1)).thenReturn(10L); // fetchMaxLineNo → nextLineNo = 20
-
-      ShipmentInOutLine sourceLine = mock(ShipmentInOutLine.class);
+      ShipmentInOutLine sourceLine =
+          ReturnedQuantityTestSupport.sourceLine("src-1", "Agua", shipped);
       when(dal.get(ShipmentInOutLine.class, "src-1")).thenReturn(sourceLine);
-      when(sourceLine.getProduct()).thenReturn(mock(Product.class));
       when(sourceLine.getStorageBin()).thenReturn(null);
 
-      ShipmentInOutLine newLine = mock(ShipmentInOutLine.class);
-      when(provider.get(ShipmentInOutLine.class)).thenReturn(newLine);
+      when(provider.get(ShipmentInOutLine.class)).thenAnswer(inv -> {
+        ShipmentInOutLine newLine = mock(ShipmentInOutLine.class);
+        saved.add(newLine);
+        return newLine;
+      });
 
-      JSONObject lineReq = new JSONObject().put("sourceLineId", "src-1").put("returnQuantity", 2.0);
-      JSONObject reqBody = new JSONObject().put("lines", new JSONArray().put(lineReq));
       NeoContext ctx = NeoContext.builder()
           .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
-          .fieldName("importShipmentLines").recordId("rec-1").requestBody(reqBody).build();
-      NeoResponse result = handler.handle(ctx);
-
-      assertNotNull(result);
-      assertEquals(200, result.getHttpStatus());
-      assertEquals(1, result.getBody()
-          .getJSONObject("response").getJSONObject("data").getInt("importedCount"));
+          .fieldName("importShipmentLines").recordId("rec-1")
+          .requestBody(new JSONObject().put("lines", lines)).build();
+      return handler.handle(ctx);
     }
+  }
+
+  private static JSONObject shipmentEntry(String quantity) throws Exception {
+    return new JSONObject().put("sourceLineId", "src-1").put("returnQuantity", quantity);
+  }
+
+  @Test
+  public void testHandleImportShipmentLinesImportsOneLine() throws Exception {
+    java.util.List<ShipmentInOutLine> saved = new java.util.ArrayList<>();
+
+    NeoResponse result = importShipmentLines("5", "0",
+        new JSONArray().put(shipmentEntry("2.0")), saved);
+
+    assertNotNull(result);
+    assertEquals(200, result.getHttpStatus());
+    assertEquals(1, result.getBody()
+        .getJSONObject("response").getJSONObject("data").getInt("importedCount"));
+    assertEquals(1, saved.size());
+  }
+
+  /** Over-return on import: a 422 naming product, requested and available; nothing is created. */
+  @Test
+  public void testHandleImportShipmentLinesOverReturnIsRefusedAndNothingCreated() throws Exception {
+    java.util.List<ShipmentInOutLine> saved = new java.util.ArrayList<>();
+
+    NeoResponse result = importShipmentLines("10", "6",
+        new JSONArray().put(shipmentEntry("5")), saved);
+
+    assertEquals(422, result.getHttpStatus());
+    JSONObject error = result.getBody().getJSONObject("error");
+    assertEquals("returnQuantityExceedsAvailable", error.getString("code"));
+    assertTrue(error.getString("message"), error.getString("message").contains("Agua"));
+    assertEquals(5, error.getDouble("requested"), 0.0001);
+    assertEquals(4, error.getDouble("available"), 0.0001);
+    assertTrue("a refused import creates no line", saved.isEmpty());
+  }
+
+  /** A second partial return with what is left of the line works. */
+  @Test
+  public void testHandleImportShipmentLinesSecondPartialWithinRemainingIsAccepted()
+      throws Exception {
+    java.util.List<ShipmentInOutLine> saved = new java.util.ArrayList<>();
+
+    NeoResponse result = importShipmentLines("10", "6",
+        new JSONArray().put(shipmentEntry("4")), saved);
+
+    assertEquals(200, result.getHttpStatus());
+    assertEquals(1, saved.size());
+  }
+
+  /** The same source line twice in one request accumulates: 3 + 3 against 5 is refused. */
+  @Test
+  public void testHandleImportShipmentLinesDuplicateSourceLinesAccumulate() throws Exception {
+    java.util.List<ShipmentInOutLine> saved = new java.util.ArrayList<>();
+
+    NeoResponse result = importShipmentLines("5", "0",
+        new JSONArray().put(shipmentEntry("3")).put(shipmentEntry("3")), saved);
+
+    assertEquals(422, result.getHttpStatus());
+    assertEquals(6, result.getBody().getJSONObject("error").getDouble("requested"), 0.0001);
+    assertTrue(saved.isEmpty());
   }
 
   // ── fillMissingStorageBins — loop body paths ──────────────────────────────

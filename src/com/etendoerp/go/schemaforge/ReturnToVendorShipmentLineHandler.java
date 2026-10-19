@@ -32,16 +32,15 @@ import org.codehaus.jettison.json.JSONObject;
  * <p>Injects {@code orderQuantity} (original received qty from the canceled goods receipt line)
  * and {@code productCode} (M_Product.Value / search key) into every GET response.
  *
- * <p>POST (create) pre-hook (ETP-4863): defaults {@code storageBin} to the header
- * {@code M_InOut}'s own warehouse default locator when the create request did not already
- * supply a REAL one — same rationale and shared implementation as {@link
- * GoodsReceiptLineHandler} (ETP-4671) and {@link GoodsShipmentLineHandler}, see {@link
- * NeoHandlerUtils#injectDefaultLocatorIfMissing(JSONObject, Logger)}. This class implements
- * {@link NeoHandler} directly rather than extending {@link AbstractInOutLineHandler} — its GET
- * enrichment (orderQuantity/productCode) and movementQuantity sign handling are return-specific
- * and unrelated to the invoice-line-linking behavior {@code AbstractInOutLineHandler} provides
- * for receipts/shipments — so the locator default is applied directly here via the shared
- * helper instead of inheriting it.
+ * <p>Direct creation (ETP-5711): a {@code POST} of a line is refused with 422
+ * {@code returnLineRequiresImport} on every channel. Lines enter a return only through
+ * {@code importReceiptLines} / {@code createPurchaseReturn}, which link each one to the receipt line
+ * it returns and cap its quantity; the storageBin default of ETP-4863 therefore lives in those
+ * paths ({@code ReturnShipmentUtils}, {@code NeoReturnReceiptService}), not here. Quantity edits
+ * ({@code PUT}/{@code PATCH}) stay allowed, capped by {@link ReturnableQuantity}; a legacy line
+ * with no source link is not capped, there is nothing to cap it against.
+ *
+ * <p>Write/read quantity sign (ETP-5313): see {@link ReturnLineQuantityPolicy}.
  */
 @Named("returnToVendorShipmentLineHandler")
 public class ReturnToVendorShipmentLineHandler implements NeoHandler {
@@ -52,20 +51,27 @@ public class ReturnToVendorShipmentLineHandler implements NeoHandler {
 
   @Override
   public NeoResponse handle(NeoContext context) {
-    if (context != null && NeoEndpointType.CRUD.equals(context.getEndpointType())
-        && "POST".equalsIgnoreCase(context.getHttpMethod())) {
-      try {
-        NeoHandlerUtils.injectDefaultLocatorIfMissing(context.getRequestBody(), log);
-      } catch (Exception e) {
-        log.warn("[ReturnToVendorShipmentLineHandler] Could not default storageBin: {}",
-            e.getMessage(), e);
-      }
+    if (context == null) {
+      return null;
+    }
+    // ETP-5711: a line is only ever created by importReceiptLines / createPurchaseReturn (they link
+    // it to the receipt line it returns and cap it); a direct POST is refused on every channel.
+    NeoResponse directCreate = ReturnableQuantity.refuseDirectCreate(context,
+        "importReceiptLines", "createPurchaseReturn");
+    if (directCreate != null) {
+      return directCreate;
+    }
+    // ETP-5711: a quantity edit may not take the line above what is still returnable of its source
+    // line; the line's own current quantity does not count against it.
+    NeoResponse overReturn = ReturnableQuantity.refuseQuantityEdit(context, log);
+    if (overReturn != null) {
+      return overReturn;
     }
     // ETP-5313: the stored-negative / exposed-positive rule now lives in ONE place, shared with
     // ReturnMaterialReceiptLineHandler — see ReturnLineQuantityPolicy for why the DB sign is
     // forced on us by core M_INOUT_POST / M_INOUT_TRG_PROV.
     String method = context.getHttpMethod();
-    if (("PUT".equals(method) || "PATCH".equals(method) || "POST".equals(method))
+    if (("PUT".equals(method) || "PATCH".equals(method))
         && context.getRequestBody() != null) {
       applyStoredSignAndStripProduct(context.getRequestBody(), method);
     }
@@ -80,9 +86,7 @@ public class ReturnToVendorShipmentLineHandler implements NeoHandler {
       // NOTE: this is NOT what protects the quantity from SL_InOutLine_Product — the NEO CRUD
       // callout cascade only runs on create (NeoCrudHandler#executePostCreate), never on
       // PUT/PATCH.
-      if (!"POST".equals(method)) {
-        body.remove("product");
-      }
+      body.remove("product");
     }
   }
 
