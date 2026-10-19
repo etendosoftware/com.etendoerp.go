@@ -52,6 +52,9 @@ import org.openbravo.dal.service.OBDal;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 import io.swagger.v3.oas.models.OpenAPI;
 import io.swagger.v3.oas.models.Operation;
@@ -185,10 +188,11 @@ class NeoOpenAPIEndpointTest {
       for (Operation op : path.getValue().readOperations()) {
         operations++;
         assertNotNull(op.getSecurity(), op.getSummary() + " must declare its security");
-        assertTrue(op.getSecurity().stream().anyMatch(r -> r.containsKey("goSession")),
-            op.getSummary());
         assertTrue(op.getSecurity().stream().anyMatch(r -> r.containsKey("bearerAuth")),
             op.getSummary());
+        assertTrue(op.getDescription().contains("__Host-go_session")
+            && op.getDescription().contains("X-Go-CSRF"), op.getSummary()
+            + " must state the session cookie alternative");
         for (String status : Arrays.asList("401", "402", "403")) {
           assertTrue(op.getResponses().containsKey(status), op.getSummary() + " lacks " + status);
         }
@@ -197,9 +201,30 @@ class NeoOpenAPIEndpointTest {
       }
     }
     assertEquals(7, operations);
-    assertNotNull(openAPI.getComponents().getSecuritySchemes().get("goSession"));
     assertTrue(openAPI.getPaths().get("/oauth2/api-keys/{id}").getPut().getResponses()
         .containsKey("409"), "a reactivation can hit the limit or a duplicate name");
+  }
+
+  /**
+   * ETP-5781 — the OpenAPI controller serializes with a plain Jackson {@code ObjectMapper}, which
+   * writes swagger enums by name. A cookie {@code apiKey} scheme came out as
+   * {@code {"type":"APIKEY","in":"COOKIE"}}, invalid OpenAPI; the contract must serialize clean.
+   */
+  @Test
+  @DisplayName("The API key contract serializes to valid OpenAPI with the controller's mapper")
+  void publicApiKeyContractSerializesWithAPlainObjectMapper() throws Exception {
+    ObjectMapper mapper = new ObjectMapper();
+    mapper.setSerializationInclusion(JsonInclude.Include.NON_NULL);
+
+    String json = mapper.writeValueAsString(publicApiKeyContract());
+
+    assertFalse(json.contains("APIKEY"), json);
+    assertFalse(json.contains("COOKIE"), json);
+    assertFalse(json.contains("\"securitySchemes\""), "the endpoint declares no scheme of its own");
+    JsonNode rotate = mapper.readTree(json).path("paths").path("/oauth2/api-keys/{id}/rotate")
+        .path("post").path("security");
+    assertEquals(1, rotate.size());
+    assertTrue(rotate.get(0).has("bearerAuth"));
   }
 
   private OpenAPI publicApiKeyContract() throws Exception {

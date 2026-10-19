@@ -32,7 +32,6 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.session.GoSessionSecurity;
 import com.etendoerp.openapi.model.OpenAPIEndpoint;
 
-import io.swagger.v3.oas.models.Components;
 import io.swagger.v3.oas.models.OpenAPI;
 import io.swagger.v3.oas.models.Operation;
 import io.swagger.v3.oas.models.PathItem;
@@ -51,7 +50,6 @@ import io.swagger.v3.oas.models.parameters.RequestBody;
 import io.swagger.v3.oas.models.responses.ApiResponse;
 import io.swagger.v3.oas.models.responses.ApiResponses;
 import io.swagger.v3.oas.models.security.SecurityRequirement;
-import io.swagger.v3.oas.models.security.SecurityScheme;
 import io.swagger.v3.oas.models.tags.Tag;
 
 /**
@@ -72,12 +70,23 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
   private static final String LEGACY_TAG_NAME = "EtendoGo";
   private static final String BASE_PATH = "/sws/neo/";
   /** The fixed {@code OAuth2Servlet} route of the self-service API key lifecycle. */
-  private static final String PUBLIC_API_KEYS_PATH = "/oauth2/api-keys";
-  /** Security scheme of the Etendo Go session cookie, declared by this endpoint. */
-  private static final String SECURITY_GO_SESSION = "goSession";
+  private static final String PUBLIC_API_KEYS_PATH =
+      "/oauth2/api-keys"; // NOSONAR java:S1075 — fixed OAuth2Servlet route (ETP-5781)
   /** Security scheme of the Etendo bearer JWT, declared by the OpenAPI controller. */
   private static final String SECURITY_BEARER = "bearerAuth";
   private static final String FIELD_TOKENS_REVOKED = "tokensRevoked";
+  private static final String FIELD_NAME = "name";
+  private static final String FIELD_CAPABILITIES = "capabilities";
+  /**
+   * How the API key operations authenticate besides {@code bearerAuth}. The session cookie is
+   * stated in prose, not as a components scheme: the OpenAPI controller serializes with a plain
+   * Jackson mapper that writes swagger enums by name ({@code "APIKEY"}, {@code "COOKIE"}), which
+   * is not valid OpenAPI (ETP-5781).
+   */
+  private static final String API_KEY_AUTH_NOTE = " Authentication: the Etendo Go session cookie `"
+      + GoSessionSecurity.COOKIE_NAME + "` (with the `" + GoSessionSecurity.CSRF_HEADER
+      + "` header on writes) or, while the legacy switch allows it, the bearer JWT. OAuth2 access"
+      + " tokens issued to an API key are not accepted.";
   private static final String MSG_API_KEY_BAD_REQUEST =
       "Malformed or empty JSON body, a field of the wrong type, an invalid name, or an unsupported capability";
   private static final String MSG_API_KEY_CONFLICT =
@@ -758,19 +767,18 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
     final String itemPath = basePath + "/{id}";
     final String rotatePath = itemPath + "/rotate";
     final String revokePath = itemPath + "/revoke-tokens";
-    registerGoSessionScheme(openAPI);
 
     ObjectSchema requestSchema = new ObjectSchema();
     requestSchema.setDescription("Public capability request. Identity is always derived from the authenticated session.");
-    requestSchema.addProperties("name", new StringSchema().maxLength(120));
+    requestSchema.addProperties(FIELD_NAME, new StringSchema().maxLength(120));
     ArraySchema capabilitySchema = new ArraySchema();
     StringSchema capabilityItem = new StringSchema();
     capabilityItem.addEnumItem("public-api:read");
     capabilityItem.addEnumItem("public-api:write");
     capabilityItem.addEnumItem("public-api:process");
     capabilitySchema.items(capabilityItem);
-    requestSchema.addProperties("capabilities", capabilitySchema);
-    requestSchema.setRequired(List.of("name", "capabilities"));
+    requestSchema.addProperties(FIELD_CAPABILITIES, capabilitySchema);
+    requestSchema.setRequired(List.of(FIELD_NAME, FIELD_CAPABILITIES));
 
     Operation list = publicApiKeyOperation("List public API keys",
         "Lists the active and inactive public API keys owned by the authenticated user in the current tenant and organization.");
@@ -799,7 +807,7 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
         "Updates only the owned key name and active state. Reactivating a key is subject to the active-key limit and, like a rename, to the unique active name rule.");
     update.addParametersItem(id);
     ObjectSchema updateSchema = new ObjectSchema();
-    updateSchema.addProperties("name", new StringSchema().maxLength(120));
+    updateSchema.addProperties(FIELD_NAME, new StringSchema().maxLength(120));
     updateSchema.addProperties("isActive", new BooleanSchema());
     update.setRequestBody(new RequestBody().required(true).content(new Content()
         .addMediaType(CONTENT_TYPE_JSON, new MediaType().schema(updateSchema))));
@@ -837,13 +845,12 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
   }
 
   /**
-   * An API key operation. They are management endpoints of the signed-in user: the Etendo Go
-   * session cookie (with its CSRF header on writes) or, while the legacy switch allows it, the
-   * Etendo bearer JWT. OAuth2 access tokens issued to an API key are not accepted.
+   * An API key operation. They are management endpoints of the signed-in user; the requirement
+   * names {@code bearerAuth}, the only scheme the document declares, and the description states
+   * the session cookie alternative (see {@link #API_KEY_AUTH_NOTE}).
    */
   private Operation publicApiKeyOperation(String summary, String description) {
-    Operation op = createOperation(summary, description);
-    op.addSecurityItem(new SecurityRequirement().addList(SECURITY_GO_SESSION));
+    Operation op = createOperation(summary, description + API_KEY_AUTH_NOTE);
     op.addSecurityItem(new SecurityRequirement().addList(SECURITY_BEARER));
     return op;
   }
@@ -863,29 +870,13 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
     return responses;
   }
 
-  /** Declares the Etendo Go session cookie scheme the API key operations refer to. */
-  private void registerGoSessionScheme(OpenAPI openAPI) {
-    if (openAPI.getComponents() == null) {
-      openAPI.setComponents(new Components());
-    }
-    if (openAPI.getComponents().getSecuritySchemes() == null
-        || !openAPI.getComponents().getSecuritySchemes().containsKey(SECURITY_GO_SESSION)) {
-      openAPI.getComponents().addSecuritySchemes(SECURITY_GO_SESSION, new SecurityScheme()
-          .type(SecurityScheme.Type.APIKEY)
-          .in(SecurityScheme.In.COOKIE)
-          .name(GoSessionSecurity.COOKIE_NAME)
-          .description("Etendo Go session cookie. Writes also require the "
-              + GoSessionSecurity.CSRF_HEADER + " header."));
-    }
-  }
-
   /** The bare key object returned by every single-key operation. */
   private Schema<?> publicApiKeySchema(boolean includeSecret, boolean includeTokensRevoked) {
     ObjectSchema key = new ObjectSchema();
     key.addProperties("id", new StringSchema());
-    key.addProperties("name", new StringSchema());
+    key.addProperties(FIELD_NAME, new StringSchema());
     key.addProperties("clientId", new StringSchema());
-    key.addProperties("capabilities", new ArraySchema().items(new StringSchema()));
+    key.addProperties(FIELD_CAPABILITIES, new ArraySchema().items(new StringSchema()));
     key.addProperties("isActive", new BooleanSchema());
     if (includeSecret) {
       StringSchema secret = new StringSchema();
