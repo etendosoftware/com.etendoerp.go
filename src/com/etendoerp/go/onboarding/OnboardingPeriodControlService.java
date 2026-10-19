@@ -157,10 +157,13 @@ public class OnboardingPeriodControlService extends OnboardingContextSupport {
 
   /** Ensures every calendar year touched by [from, to], in the server's time zone. */
   private static void ensureYears(Calendar calendar, Instant from, Instant to) {
-    int lastYear = to.atZone(ZoneId.systemDefault()).getYear();
-    for (int year = from.atZone(ZoneId.systemDefault()).getYear(); year <= lastYear; year++) {
+    for (int year = yearOf(from); year <= yearOf(to); year++) {
       FiscalCalendarSupport.ensureYear(calendar, year);
     }
+  }
+
+  private static int yearOf(Instant instant) {
+    return instant.atZone(ZoneId.systemDefault()).getYear();
   }
 
   /**
@@ -300,7 +303,8 @@ public class OnboardingPeriodControlService extends OnboardingContextSupport {
    * Initial period state of a productive tenant (ETP-5577), after the onboarding commit. Makes sure
    * the calendar covers the signup year: every calendar year in [now - 1 day, now + 1 day], because
    * the tenant's timezone is unknown and a 31 December / 1 January signup must get both years.
-   * Normalizes the controls last. Every period stays never-opened: the owner chooses what to open
+   * Then deletes every other year that was never opened (ETP-5744), so a tenant created after the
+   * onboarding dataset's year (2026) does not start with it. Normalizes the controls last. Every period stays never-opened: the owner chooses what to open
    * after reviewing the calendar in "Primeros pasos".
    *
    * @param clientId         productive client identifier
@@ -314,8 +318,10 @@ public class OnboardingPeriodControlService extends OnboardingContextSupport {
       Calendar calendar = resolveOrgCalendar(clientId, orgId);
       Instant now = currentDate().toInstant();
       ensureYears(calendar, now.minus(ONE_DAY), now.plus(ONE_DAY));
-      // Last, and native: it recomputes every period's open/close flag from the surviving rows.
       flushChanges();
+      FiscalCalendarSupport.removeUnusedYearsOutside(calendar.getId(),
+          yearOf(now.minus(ONE_DAY)), yearOf(now.plus(ONE_DAY)));
+      // Last, and native: it recomputes every period's open/close flag from the surviving rows.
       FiscalCalendarSupport.normalizePeriodControls(calendar.getId());
     });
   }

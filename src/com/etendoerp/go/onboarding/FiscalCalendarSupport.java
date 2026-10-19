@@ -19,7 +19,9 @@ package com.etendoerp.go.onboarding;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.Date;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
@@ -120,7 +122,60 @@ public final class FiscalCalendarSupport {
           + " GROUP BY c.c_period_id) x"
           + " WHERE p.c_period_id = x.c_period_id AND p.openclose IS DISTINCT FROM x.openclose";
 
+  /**
+   * Years of the calendar outside the kept range whose periods were never opened: nothing can have
+   * posted into them (core's own {@code @PeriodAlreadyUsed@} rule in {@code C_PERIOD_TRG2}).
+   */
+  private static final String UNUSED_YEARS_OUTSIDE =
+      "SELECT y.c_year_id FROM c_year y WHERE y.c_calendar_id = :calendarId"
+          + " AND y.year NOT IN (:keepYears)"
+          + " AND NOT EXISTS (SELECT 1 FROM c_period p JOIN c_periodcontrol c"
+          + " ON c.c_period_id = p.c_period_id"
+          + " WHERE p.c_year_id = y.c_year_id AND c.periodstatus <> 'N')";
+
+  /** {@code C_PERIOD_TRG2} deletes each period's control rows and log on delete. */
+  static final String DELETE_UNUSED_PERIODS_SQL =
+      "DELETE FROM c_period WHERE c_year_id IN (" + UNUSED_YEARS_OUTSIDE + ")";
+
+  static final String DELETE_UNUSED_YEARS_SQL =
+      "DELETE FROM c_year WHERE c_year_id IN (" + UNUSED_YEARS_OUTSIDE + ")";
+
   private FiscalCalendarSupport() {
+  }
+
+  /**
+   * Deletes every year of the calendar outside [{@code firstYear}, {@code lastYear}] whose periods
+   * were never opened, with its periods and their control rows (ETP-5744). A new productive tenant
+   * must start with the signup year only, not with the year the onboarding dataset ships. A year
+   * with any opened period is kept. Native SQL on the DAL session, so pending DAL changes are
+   * flushed first.
+   *
+   * @param calendarId calendar to clean
+   * @param firstYear  first calendar year to keep
+   * @param lastYear   last calendar year to keep
+   * @return the number of years deleted
+   */
+  public static int removeUnusedYearsOutside(String calendarId, int firstYear, int lastYear) {
+    List<String> keepYears = new ArrayList<>();
+    for (int year = firstYear; year <= lastYear; year++) {
+      keepYears.add(String.valueOf(year));
+    }
+    OBDal.getInstance().flush();
+    executeUpdate(DELETE_UNUSED_PERIODS_SQL, calendarId, keepYears);
+    int deleted = executeUpdate(DELETE_UNUSED_YEARS_SQL, calendarId, keepYears);
+    if (deleted > 0) {
+      log.info("ETP-5744 deleted {} unused years outside {}-{} from calendar {}", deleted,
+          firstYear, lastYear, calendarId);
+    }
+    return deleted;
+  }
+
+  private static int executeUpdate(String sql, String calendarId, List<String> keepYears) {
+    return OBDal.getInstance().getSession()
+        .createNativeQuery(sql)
+        .setParameter(PARAM_CALENDAR_ID, calendarId)
+        .setParameterList("keepYears", keepYears)
+        .executeUpdate();
   }
 
   /**

@@ -721,6 +721,7 @@ public class OnboardingPeriodControlServiceTest {
           never());
       support.verify(() -> FiscalCalendarSupport.ensureYear(any(Calendar.class), eq(2027)),
           never());
+      support.verify(() -> FiscalCalendarSupport.removeUnusedYearsOutside("CAL-1", 2026, 2026));
       support.verify(() -> FiscalCalendarSupport.normalizePeriodControls("CAL-1"));
     }
     assertEquals("N", octControl.getPeriodStatus());
@@ -737,6 +738,22 @@ public class OnboardingPeriodControlServiceTest {
           "ROLE-1"));
       support.verify(() -> FiscalCalendarSupport.ensureYear(service.importedCalendar, 2026));
       support.verify(() -> FiscalCalendarSupport.ensureYear(service.importedCalendar, 2027));
+      support.verify(() -> FiscalCalendarSupport.removeUnusedYearsOutside(any(), eq(2026),
+          eq(2027)));
+    }
+  }
+
+  @Test
+  public void testProductiveInANewYearKeepsOnlyThatYear() {
+    RealLogicService service = new RealLogicService();
+    service.fixedNow = date("2027-01-05");
+    when(service.importedCalendar.getId()).thenReturn("CAL-1");
+
+    try (MockedStatic<FiscalCalendarSupport> support = mockStatic(FiscalCalendarSupport.class)) {
+      runWithDal(() -> service.applyProductiveInitialState("CLIENT-1", "ORG-1", "USER-1",
+          "ROLE-1"));
+      support.verify(() -> FiscalCalendarSupport.ensureYear(service.importedCalendar, 2027));
+      support.verify(() -> FiscalCalendarSupport.removeUnusedYearsOutside("CAL-1", 2027, 2027));
     }
   }
 

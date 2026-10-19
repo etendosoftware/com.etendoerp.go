@@ -142,4 +142,26 @@ class FiscalCalendarSupportTest {
     order.verify(session).createNativeQuery(FiscalCalendarSupport.RECOMPUTE_OPENCLOSE_SQL);
     verify(query, times(4)).setParameter("calendarId", "CAL-1");
   }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  void removeUnusedYearsFlushesThenDeletesPeriodsBeforeYearsKeepingTheRange() {
+    Session session = mock(Session.class);
+    NativeQuery<Object> query = mock(NativeQuery.class);
+    when(dal.getSession()).thenReturn(session);
+    when(session.createNativeQuery(anyString())).thenReturn(query);
+    when(query.setParameter(anyString(), any())).thenReturn(query);
+    when(query.setParameterList(anyString(), any(java.util.Collection.class))).thenReturn(query);
+    when(query.executeUpdate()).thenReturn(1);
+
+    assertEquals(1, FiscalCalendarSupport.removeUnusedYearsOutside("CAL-1", 2026, 2027));
+
+    InOrder order = Mockito.inOrder(dal, session);
+    order.verify(dal).flush();
+    order.verify(session).createNativeQuery(FiscalCalendarSupport.DELETE_UNUSED_PERIODS_SQL);
+    order.verify(session).createNativeQuery(FiscalCalendarSupport.DELETE_UNUSED_YEARS_SQL);
+    verify(query, times(2)).setParameterList("keepYears", List.of("2026", "2027"));
+    // Only never-opened years go: a year with an opened period is kept.
+    assertTrue(FiscalCalendarSupport.DELETE_UNUSED_YEARS_SQL.contains("periodstatus <> 'N'"));
+  }
 }

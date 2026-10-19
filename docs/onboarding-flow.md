@@ -226,7 +226,7 @@ tenant type by `OnboardingInitialPeriodStateService`, after the onboarding commi
 | Tenant | Initial state |
 |---|---|
 | demo | every period through the end of the trial (`openDemoTrialWindow`, below) |
-| productive | none. The calendar is made to cover the signup year (every calendar year in [now − 1 day, now + 1 day], since the tenant's timezone is unknown), controls are normalized, and every period stays never-opened. The owner reviews the calendar in "Primeros pasos" and opens the periods they want (`applyProductiveInitialState`) |
+| productive | none. The calendar is made to cover the signup year (every calendar year in [now − 1 day, now + 1 day], since the tenant's timezone is unknown); every other year that was never opened is deleted with its periods and control rows (ETP-5744), so a tenant created in 2027 does not keep the dataset's 2026; controls are normalized, and every period stays never-opened. The owner reviews the calendar in "Primeros pasos" and opens the periods they want (`applyProductiveInitialState`) |
 
 - **Markers.** Two client preferences, written by `markPending` inside the onboarding
   transaction: `ETGO_InitialPeriodStatePending` (value: org, admin user and admin role the step
