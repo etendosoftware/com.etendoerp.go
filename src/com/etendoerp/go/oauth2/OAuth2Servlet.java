@@ -691,8 +691,10 @@ public class OAuth2Servlet extends HttpBaseServlet {
     } catch (AuthException e) {
       writeError(response, e.statusCode, ERROR_ACCESS_DENIED, e.getMessage());
     } catch (MalformedJsonException e) {
-      log.warn("Malformed public API key update request body: {}", e.getMessage());
-      writeMalformedBody(response);
+      // Only requireBooleanField throws it here: the body parsed, a field has the wrong type.
+      log.warn("Invalid public API key update request: {}", e.getMessage());
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST,
+          e.getMessage());
     } catch (SQLException | JSONException e) {
       log.error("Error updating public API key", e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
@@ -1188,8 +1190,10 @@ public class OAuth2Servlet extends HttpBaseServlet {
     } catch (AuthException e) {
       writeError(response, e.statusCode, ERROR_ACCESS_DENIED, e.getMessage());
     } catch (MalformedJsonException e) {
-      log.warn("Malformed OAuth2 client update request body: {}", e.getMessage());
-      writeMalformedBody(response);
+      // Only requireBooleanField throws it here: the body parsed, a field has the wrong type.
+      log.warn("Invalid OAuth2 client update request: {}", e.getMessage());
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST,
+          e.getMessage());
     } catch (SQLException | JSONException e) {
       log.error("Error updating OAuth2 client", e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
@@ -2161,9 +2165,9 @@ public class OAuth2Servlet extends HttpBaseServlet {
   // --- JSON/HTTP helpers ---
 
   /**
-   * Read a boolean the client sent. A value of another type is the client's malformed body (a
-   * quiet 400), not the server-side {@code JSONException} that {@code getBoolean} would raise and
-   * the handlers' catch turns into a 500 with a stack trace.
+   * Read a boolean the client sent. A value of another type is the client's error (a quiet 400
+   * whose description names the field), not the server-side {@code JSONException} that
+   * {@code getBoolean} would raise and the handlers' catch turns into a 500 with a stack trace.
    */
   static boolean requireBooleanField(JSONObject body, String field)
       throws MalformedJsonException {

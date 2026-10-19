@@ -103,6 +103,7 @@ class NeoCrudHandler {
    * all the same string.
    */
   private static final String FIELD_UPDATED = "updated";
+  private static final String MSG_BODY_REQUIRED = "Request body is required";
 
   /**
    * Key names of the structured error envelopes this class returns.
@@ -649,6 +650,12 @@ class NeoCrudHandler {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
           "POST (create) must not include a record ID in the URL");
     }
+    // A blank body reaches here as null (NeoRequestBodyParser.parseOptionalJsonObject); `{}` is a
+    // body and still goes through. Without this, create failed later with a NullPointerException.
+    if (context.getRequestBody() == null) {
+      NeoWriteRefusalLog.missingBody(context);
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, MSG_BODY_REQUIRED);
+    }
     return null;
   }
 
@@ -671,7 +678,11 @@ class NeoCrudHandler {
     // variant would) is the deliberate choice: a caller that cannot produce `updated` has not
     // read the record it is overwriting, and that is exactly the caller we must stop.
     JSONObject body = context.getRequestBody();
-    String updated = body == null ? null : body.optString(FIELD_UPDATED, null);
+    if (body == null) {
+      NeoWriteRefusalLog.missingBody(context);
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, MSG_BODY_REQUIRED);
+    }
+    String updated = body.optString(FIELD_UPDATED, null);
     if (StringUtils.isBlank(updated) || "null".equals(updated)) {
       NeoWriteRefusalLog.missingUpdated(context, FIELD_UPDATED);
       return buildMissingUpdatedResponse();

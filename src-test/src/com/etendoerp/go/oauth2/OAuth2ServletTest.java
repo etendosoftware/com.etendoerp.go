@@ -1281,7 +1281,10 @@ public class OAuth2ServletTest {
         servlet.doPut(req, resp.response);
 
         assertEquals(raw, 400, resp.status);
-        assertEquals(raw, "invalid_request", new JSONObject(resp.body()).getString("error"));
+        JSONObject error = new JSONObject(resp.body());
+        assertEquals(raw, "invalid_request", error.getString("error"));
+        // The JSON is well formed; the description names the field, not a malformed body.
+        assertEquals(raw, "isActive must be a boolean", error.getString("error_description"));
       }
       assertEquals(List.of(), logs.messages(Level.ERROR));
       for (LogEvent warn : logs.events(Level.WARN)) {

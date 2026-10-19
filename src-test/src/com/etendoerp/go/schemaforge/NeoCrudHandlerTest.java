@@ -913,14 +913,33 @@ class NeoCrudHandlerTest {
     }
 
     @Test
-    @DisplayName("Returns null when POST has no record ID")
+    @DisplayName("Returns null when POST has no record ID and a body")
     void postWithoutRecordIdReturnsNull() throws Exception {
+      NeoContext context = buildContext("POST", null, mock(Tab.class),
+          mock(SFEntity.class), new JSONObject(), null);
+
+      NeoResponse result = invokeValidatePost(context);
+
+      assertNull(result);
+    }
+
+    /**
+     * A blank body reaches the handler as a null request body. Creating from it used to fail
+     * deep in the callout cascade with a NullPointerException: a 500 and an ERROR stack trace
+     * for what is the caller's mistake.
+     */
+    @Test
+    @DisplayName("Refuses POST with a blank body as a 400")
+    void postWithoutBodyIsRefused() throws Exception {
       NeoContext context = buildContext("POST", null, mock(Tab.class),
           mock(SFEntity.class), null, null);
 
       NeoResponse result = invokeValidatePost(context);
 
-      assertNull(result);
+      assertNotNull(result);
+      assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
+      assertEquals("Request body is required",
+          result.getBody().getJSONObject("error").getString("message"));
     }
   }
 
@@ -989,13 +1008,29 @@ class NeoCrudHandlerTest {
     @DisplayName("Refuses PUT/PATCH that has a record ID but no `updated`")
     void updateWithRecordIdButNoVersionIsRefused() throws Exception {
       NeoContext context = buildContext("PATCH", "REC-123", mock(Tab.class),
-          mock(SFEntity.class), null, null);
+          mock(SFEntity.class), new JSONObject(), null);
 
       NeoResponse result = invokeValidateUpdate(context);
 
       assertNotNull(result);
       assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
       assertEquals("missing_updated", result.getBody().getString("error"));
+    }
+
+    /** No body at all is not a missing token: the caller sent nothing to update with. */
+    @ParameterizedTest
+    @ValueSource(strings = { "PUT", "PATCH" })
+    @DisplayName("Refuses PUT/PATCH with a blank body as a 400")
+    void updateWithoutBodyIsRefused(String method) throws Exception {
+      NeoContext context = buildContext(method, "REC-123", mock(Tab.class),
+          mock(SFEntity.class), null, null);
+
+      NeoResponse result = invokeValidateUpdate(context);
+
+      assertNotNull(result);
+      assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
+      assertEquals("Request body is required",
+          result.getBody().getJSONObject("error").getString("message"));
     }
   }
 

@@ -240,8 +240,8 @@ class OAuth2ServletManagementAuthTest {
   }
 
   /**
-   * A well-formed update whose {@code isActive} is not a boolean is the caller's malformed body: a
-   * quiet 400 {@code invalid_request} (WARN, no stack trace), not the 500 + ERROR a
+   * A well-formed update whose {@code isActive} is not a boolean is a quiet 400
+   * {@code invalid_request} naming the field (WARN, no stack trace), not the 500 + ERROR a
    * {@code JSONException} from {@code getBoolean} fell into; the key is never written.
    */
   @Test
@@ -259,7 +259,8 @@ class OAuth2ServletManagementAuthTest {
         Response updated = new Response();
         servlet.doPut(cookie("PUT", "/api-keys/key-1", CSRF, raw), updated.response);
         assertEquals(400, updated.status, "PUT /api-keys/key-1 " + raw);
-        assertEquals("Malformed request body", updated.description());
+        // The JSON is well formed; the description names the field, not a malformed body.
+        assertEquals("isActive must be a boolean", updated.description(), raw);
       }
       assertEquals(List.of(), logs.messages(Level.ERROR));
       assertFalse(logs.events(Level.WARN).isEmpty(), "the rejection is logged at WARN");

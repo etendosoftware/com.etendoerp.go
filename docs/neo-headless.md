@@ -676,6 +676,7 @@ that nobody else saved the record in between.
 
 | Condition | Status | `error` | Meaning / remedy |
 |---|---|---|---|
+| No request body at all (blank) — also a blank `POST` create (ETP-5475) | `400` | `{"error":{"message":"Request body is required"}}` (standard NEO error) | Nothing to write was sent; logged at WARN without a stack trace. Send the JSON body. |
 | `updated` absent, blank, or the literal string `"null"` | `400` | `missing_updated` | The caller never read the record, or dropped the field before writing. Re-`GET` the same URL (or `etendo_get`) and send its `updated` back verbatim alongside the changed fields. |
 | `updated` present but no longer matches the stored row | `409` | `stale_record` | Someone else saved the record after the caller's read and before this write. Re-read, reapply the intended changes on top of the fresh state, retry. |
 
@@ -5907,7 +5908,9 @@ file is written with raw codes (§4.3 *File export*); the refusal above only rem
 
 **Two neighbouring type errors answer 4xx too (ETP-5475).** On `PUT /oauth2/clients/{id}` and
 `PUT /oauth2/api-keys/{id}`, an `isActive` that is not a boolean is a `400` `invalid_request`
-*Malformed request body* (it was a `500` with a stack trace). A Google sign-in credential that is
+*isActive must be a boolean*, logged at `WARN` without a stack trace (it was a `500` with a stack
+trace). The JSON itself is well formed, so the description names the field rather than a
+malformed body. A Google sign-in credential that is
 not a parseable ID token is a `401` *Invalid Google credential* with one quiet `WARN`, as any other
 rejected credential.
 
