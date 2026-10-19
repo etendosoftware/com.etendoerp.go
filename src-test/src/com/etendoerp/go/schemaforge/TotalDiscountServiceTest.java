@@ -556,6 +556,70 @@ public class TotalDiscountServiceTest {
     assertEquals(new BigDecimal("-30.00"), captorB.getValue());
   }
 
+  // ── ETP-5710: the global discount over lines that now carry real net amounts ──
+
+  /**
+   * The ticket's live scenario once the lines carry their nets: Agua 2 x 5 at 10 % (net 9.00, IVA
+   * 21 %), Cerveza 2 x 11 (22.00, 10 %) and Queso 2 x 100 (200.00, 4 %), global discount 5 %.
+   * One negative line per tax group: -0.45, -1.10 and -10.00, so the subtotal is 231.00 − 11.55 =
+   * 219.45. With the nets at 0 (the bug) every group was skipped and no discount line existed.
+   */
+  @Test
+  public void recalculate_invoiceGlobalDiscountOverThreeTaxGroups_discountsEachGroupNet()
+      throws Exception {
+    Connection conn = mock(Connection.class);
+    when(dal.getConnection()).thenReturn(conn);
+
+    PreparedStatement psPct = mock(PreparedStatement.class);
+    ResultSet rsPct = mock(ResultSet.class);
+    when(rsPct.next()).thenReturn(true);
+    when(rsPct.getBigDecimal(1)).thenReturn(new BigDecimal("5"));
+    when(psPct.executeQuery()).thenReturn(rsPct);
+
+    PreparedStatement psDel = mock(PreparedStatement.class);
+    when(psDel.executeUpdate()).thenReturn(0);
+
+    PreparedStatement psTax = mock(PreparedStatement.class);
+    ResultSet rsTax = mock(ResultSet.class);
+    when(rsTax.next()).thenReturn(true, true, true, false);
+    when(rsTax.getString(1)).thenReturn("tax-21", "tax-10", "tax-4");
+    when(rsTax.getBigDecimal(2)).thenReturn(new BigDecimal("9.00"), new BigDecimal("22.00"),
+        new BigDecimal("200.00"));
+    when(psTax.executeQuery()).thenReturn(rsTax);
+
+    PreparedStatement psLineNo = mock(PreparedStatement.class);
+    ResultSet rsLineNo = mock(ResultSet.class);
+    when(rsLineNo.next()).thenReturn(true);
+    when(rsLineNo.getLong(1)).thenReturn(0L);
+    when(psLineNo.executeQuery()).thenReturn(rsLineNo);
+
+    PreparedStatement psUom = mock(PreparedStatement.class);
+    ResultSet rsUom = mock(ResultSet.class);
+    when(rsUom.next()).thenReturn(false);
+    when(psUom.executeQuery()).thenReturn(rsUom);
+
+    when(conn.prepareStatement(anyString())).thenReturn(psPct).thenReturn(psDel)
+        .thenReturn(psTax).thenReturn(psLineNo).thenReturn(psUom);
+
+    Invoice invoice = mockInvoice("inv-5710");
+    when(dal.get(Invoice.class, "inv-5710")).thenReturn(invoice);
+    when(dal.get(Product.class, TotalDiscountService.DISCOUNT_PRODUCT_ID))
+        .thenReturn(mock(Product.class));
+    for (String tax : new String[] { "tax-21", "tax-10", "tax-4" }) {
+      when(dal.get(TaxRate.class, tax)).thenReturn(mock(TaxRate.class));
+    }
+    InvoiceLine l1 = mock(InvoiceLine.class);
+    InvoiceLine l2 = mock(InvoiceLine.class);
+    InvoiceLine l3 = mock(InvoiceLine.class);
+    when(provider.get(InvoiceLine.class)).thenReturn(l1, l2, l3);
+
+    new TotalDiscountService().recalculate("inv-5710", true);
+
+    verify(l1).setLineNetAmount(new BigDecimal("-0.45"));
+    verify(l2).setLineNetAmount(new BigDecimal("-1.10"));
+    verify(l3).setLineNetAmount(new BigDecimal("-10.00"));
+  }
+
   // ── Tests: discount product not found → no line saved ─────────────────────
 
   /**

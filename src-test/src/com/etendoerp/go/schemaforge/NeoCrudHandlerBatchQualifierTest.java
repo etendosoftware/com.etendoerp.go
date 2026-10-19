@@ -271,7 +271,7 @@ class NeoCrudHandlerBatchQualifierTest {
       // what is already here", and these fields are by their nature absent from the body.
       ArgumentCaptor<Set<String>> suppressedFields = ArgumentCaptor.forClass(Set.class);
       pipeline.cascade.verify(() -> NeoDefaultsCascadeHelper.executeCalloutCascade(eq(context),
-          eq(adTab), any(), any(), any(), suppressedFields.capture()));
+          eq(adTab), any(), any(), any(), suppressedFields.capture(), any()));
       assertTrue(suppressedFields.getValue().contains(HANDLER_PROTECTED_FIELD),
           "the handler's declared protected field must be honoured by the cascade");
     }
@@ -309,7 +309,7 @@ class NeoCrudHandlerBatchQualifierTest {
       // A missing handler is not an error: the create still runs to the DAL write.
       assertInstanceOf(NullPointerException.class, cause);
       pipeline.cascade.verify(() -> NeoDefaultsCascadeHelper.executeCalloutCascade(eq(context),
-          eq(adTab), any(), any(), any(), any()));
+          eq(adTab), any(), any(), any(), any(), any()));
     }
   }
 
@@ -355,7 +355,7 @@ class NeoCrudHandlerBatchQualifierTest {
 
       ArgumentCaptor<JSONObject> captured = ArgumentCaptor.forClass(JSONObject.class);
       pipeline.cascade.verify(() -> NeoDefaultsCascadeHelper.executeCalloutCascade(eq(context),
-          eq(adTab), captured.capture(), any(), any(), any()));
+          eq(adTab), captured.capture(), any(), any(), any(), any()));
       assertEquals("PROD-1", captured.getValue().getString("product"));
     }
   }

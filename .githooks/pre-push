@@ -9,6 +9,13 @@ CORE_DIR="$(cd -- "$MODULE_DIR/../.." && pwd)"
 
 echo "==> Running pre-push checks..."
 
+# The push's ref lines (stdin), read once: the trailer check and the target branch both use them.
+# A manual run from a terminal has none.
+PUSH_REFS=""
+[ -t 0 ] || PUSH_REFS="$(cat)"
+# shellcheck source=lib/target-branch.sh
+. "$SCRIPT_DIR/lib/target-branch.sh"
+
 # ----------------------------------------------------------------------------
 # Hooks-Verified: every commit being pushed must carry a valid trailer, proving
 # the pre-commit hooks were installed and ran for that exact tree.
@@ -18,6 +25,7 @@ if [ "$HOOKS_VERIFY_SKIP" != "1" ]; then
   . "$SCRIPT_DIR/lib/hooks-proof.sh"
   UNVERIFIED=""
   while read -r _local_ref local_sha _remote_ref remote_sha; do
+    [ -n "$local_sha" ] || continue
     [ "$local_sha" = "0000000000000000000000000000000000000000" ] && continue
     if [ "$remote_sha" = "0000000000000000000000000000000000000000" ]; then
       RANGE="$(git rev-list "$local_sha" --not --remotes)"
@@ -32,7 +40,7 @@ if [ "$HOOKS_VERIFY_SKIP" != "1" ]; then
     for sha in $RANGE; do
       hooks_verify_commit "$sha" || UNVERIFIED="$UNVERIFIED $sha"
     done
-  done
+  done <<< "$PUSH_REFS"
 
   if [ -n "$UNVERIFIED" ]; then
     echo "❌ ERROR: commits without a valid '${HOOKS_TRAILER_KEY}' trailer:"
@@ -66,14 +74,19 @@ if [ -n "$(git status --porcelain)" ]; then
   exit 1
 fi
 
-# Resolve base branch dynamically
+# Measure everything against the branch this push will merge into (lib/target-branch.sh): the
+# conflict check, the relevance diff, Sonar's base ref and the changed-lines coverage.
+TARGET_BRANCH="$(target_branch "$(pushed_branch "$PUSH_REFS")")"
+git rev-parse --verify --quiet "origin/$TARGET_BRANCH" >/dev/null \
+  || git fetch --quiet origin "$TARGET_BRANCH" 2>/dev/null || true
 BASE_REF=""
-for branch in "origin/develop" "origin/main"; do
+for branch in "origin/$TARGET_BRANCH" "origin/develop" "origin/main"; do
   if git rev-parse --verify --quiet "$branch" >/dev/null; then
     BASE_REF="$branch"
     break
   fi
 done
+echo "==> Target branch: ${BASE_REF:-none} (PRE_PUSH_TARGET=<branch> overrides it)"
 
 # ----------------------------------------------------------------------------
 # Live progress helpers
@@ -287,58 +300,8 @@ junit_test_counts() {
   echo "$(( tests - failures - skipped )) passed, ${failures} failed, ${skipped} skipped (${tests} total)"
 }
 
-# 0. Fetch the base branch and fail fast if this branch conflicts with it.
-# Runs BEFORE the expensive tests/sonar so a conflicting branch is rejected quickly.
-check_base_conflicts() {
-  echo "==> Checking for conflicts with base branch (fetch + merge-tree)..."
-
-  # Fetch the latest base branch (prefer develop, then main).
-  local base_branch=""
-  for b in "develop" "main"; do
-    if git fetch --quiet origin "$b" 2>/dev/null; then
-      base_branch="$b"
-      break
-    fi
-  done
-
-  if [ -z "$base_branch" ]; then
-    echo "    SKIPPED ⚠️ (could not fetch any base branch from origin — offline?)"
-    return 0
-  fi
-
-  local base_ref="origin/$base_branch"
-
-  # Tree-level merge check — no working-tree changes (git >= 2.38).
-  local out rc
-  out="$(git merge-tree --write-tree --name-only "$base_ref" HEAD 2>/dev/null)"
-  rc=$?
-
-  if [ "$rc" -eq 0 ]; then
-    echo "    SUCCESS ✅ (merges cleanly into $base_ref)"
-    return 0
-  elif [ "$rc" -eq 1 ]; then
-    # Conflicts. Output is: <tree-oid> on line 1, then conflicted file paths.
-    echo "    FAILED ❌ (conflicts with $base_ref)"
-    echo ""
-    echo "========================================================================="
-    echo "❌ ERROR: This branch has merge conflicts with $base_ref."
-    echo "========================================================================="
-    echo "Conflicting file(s):"
-    echo "$out" | tail -n +2 | sed 's/^/  - /'
-    echo ""
-    echo "👉 Update your branch and resolve the conflicts before pushing:"
-    echo "     git merge $base_ref        # or: git rebase $base_branch"
-    echo "   Then re-run the push (or bypass with 'git push --no-verify')."
-    echo "========================================================================="
-    exit 1
-  else
-    # rc > 1: merge-tree errored or unsupported — warn but don't hard-block.
-    echo "    SKIPPED ⚠️ (merge-tree unavailable or errored, rc=$rc)"
-    return 0
-  fi
-}
-
-check_base_conflicts
+# Fail fast when the branch no longer merges cleanly into its target (lib/target-branch.sh).
+check_target_conflicts "$TARGET_BRANCH"
 
 # ----------------------------------------------------------------------------
 # Relevance detection — run only the steps a change actually requires.
@@ -368,6 +331,60 @@ if [ -n "$BASE_REF" ] && CHANGED_FILES="$(git diff --name-only "$BASE_REF"...HEA
 else
   RUN_STEP1=1; RUN_STEP2=1; RUN_STEP3=1
   echo "==> Relevance: no reliable change set (base='${BASE_REF:-none}') → running ALL steps."
+fi
+
+# 0. Conventions (ETP-5695): what CI's Git Police, Test Hygiene and Unit Test Classification
+# would reject, checked before the slow steps. CI keeps all three: hooks can be skipped, and only
+# Git Police sees the PR title. The branch check (lib/git-conventions.sh) blocks only a target
+# branch-merge-policy.yml rejects; an unusual name only warns, since Git Police's own rules are
+# not in this repo. The two test checks run when the push touches tests, build.gradle or them.
+. "$SCRIPT_DIR/lib/git-conventions.sh"
+PUSH_BRANCH="$(pushed_branch "$PUSH_REFS")"
+BRANCH_PROBLEM="$(branch_problem "$PUSH_BRANCH" "$TARGET_BRANCH")"
+CONVENTION_STEP="Branch name and target"
+case "$BRANCH_PROBLEM" in
+  error:*)
+    echo "==> [0/4] $CONVENTION_STEP... FAILED ❌ (${BRANCH_PROBLEM#error: })"
+    record_summary_row "$CONVENTION_STEP" "-" "FAILED" "${BRANCH_PROBLEM#error: }"
+    record_failure "$CONVENTION_STEP"
+    ;;
+  warning:*)
+    echo "==> [0/4] $CONVENTION_STEP... WARNING ⚠️  (${BRANCH_PROBLEM#warning: })"
+    record_summary_row "$CONVENTION_STEP" "-" "OK" "warning: ${BRANCH_PROBLEM#warning: }"
+    ;;
+  *)
+    echo "==> [0/4] $CONVENTION_STEP... SUCCESS ✅ (${PUSH_BRANCH:-?} → ${TARGET_BRANCH})"
+    record_summary_row "$CONVENTION_STEP" "-" "OK" "${PUSH_BRANCH:-?} → ${TARGET_BRANCH}"
+    ;;
+esac
+
+RUN_TEST_RULES=1
+if [ -n "${CHANGED_FILES:-}" ] && ! printf '%s\n' "$CHANGED_FILES" \
+    | grep -qE '^src-test/.*\.java$|^build\.gradle$|^scripts/check-(test-hygiene\.py|unit-test-classification\.sh)$'; then
+  RUN_TEST_RULES=0
+fi
+# $1 label, $2 command: output indented on the console (warnings included), one summary row.
+run_convention_check() {
+  local label="$1" cmd="$2" out status=0
+  echo "==> [0/4] $label..."
+  out="$(cd "$MODULE_DIR" && eval "$cmd" 2>&1)" || status=$?
+  [ -n "$out" ] && printf '%s\n' "$out" | sed 's/^/    /'
+  if [ "$status" -eq 0 ]; then
+    record_summary_row "$label" "-" "OK" ""
+  else
+    echo "==> [0/4] $label... FAILED ❌"
+    record_summary_row "$label" "-" "FAILED" ""
+    record_failure "$label"
+  fi
+}
+if [ "$RUN_TEST_RULES" = "1" ]; then
+  run_convention_check "Unit/integration test split" "bash scripts/check-unit-test-classification.sh"
+  if [ -n "$BASE_REF" ]; then
+    run_convention_check "Test hygiene (@covers, naming)" "python3 scripts/check-test-hygiene.py --base \"$BASE_REF\" --head HEAD"
+  fi
+else
+  skip_step "0" "Unit/integration test split"
+  skip_step "0" "Test hygiene (@covers, naming)"
 fi
 
 # 1. Validate sourcedata XML record order + constraints (mirrors CI's
@@ -403,47 +420,75 @@ else
   skip_step "1b" "Checking Sonar issues (branch-mode, real parse)"
 fi
 
-# 2. Run the Etendo Go test suite (com.etendoerp.go.*) — mirrors CI's "Etendo Go
-# Tests" stage. Step 2 is deliberately NOT keyed: it runs `./gradlew test` in
-# $CORE_DIR, so its real input set is the whole etendo_core build, not just this
-# module's sources. A key built from the module alone would miss a core change and
-# produce a false pass. Gradle already maintains its own up-to-date checks.
+# 2. Run the database-free half of the Etendo Go suite (goTestUnit, ETP-5695): no
+# Postgres, no Tomcat. The DB-backed *IntegrationTest classes run in CI's full
+# suite, not here. goTestUnitCoverageReport turns this run's goTestUnit.exec into
+# the XML that step 3 reads. The previous run's exec, XML and results are deleted
+# first: when this step fails, Gradle stops before the report, and step 3 must find
+# no XML rather than measure coverage from an older run.
+# Step 2 is deliberately NOT keyed: it runs Gradle in $CORE_DIR, so its real input
+# set is the whole etendo_core build, not just this module's sources. A key built
+# from the module alone would miss a core change and produce a false pass.
+GO_UNIT_XML="$CORE_DIR/build/reports/jacoco/goTestUnit/goTestUnit.xml"
+GO_UNIT_RESULTS="$CORE_DIR/build/test-results/goTestUnit"
 if [ "$RUN_STEP2" = "1" ]; then
-  run_step "2" "Running Etendo Go Tests (com.etendoerp.go.*)" "$CORE_DIR" "tmp/pre-push/junit-tests.log" "./gradlew test --tests \"com.etendoerp.go.*\""
+  rm -rf "$GO_UNIT_RESULTS" "$GO_UNIT_XML" "$CORE_DIR/build/jacoco/goTestUnit.exec"
+  run_step "2" "Running Etendo Go unit tests (goTestUnit, no database)" "$CORE_DIR" "tmp/pre-push/junit-tests.log" "./gradlew goTestUnit goTestUnitCoverageReport"
 
   # run_step already recorded this row (duration + OK/FAILED) — patch in the
   # real pass/fail/skip counts aggregated from Gradle's per-class JUnit XML.
-  JUNIT_COUNTS="$(junit_test_counts "$CORE_DIR/build/test-results/test" "com.etendoerp.go.")"
+  JUNIT_COUNTS="$(junit_test_counts "$GO_UNIT_RESULTS" "com.etendoerp.go.")"
   if [ -n "$JUNIT_COUNTS" ] && [ "${#SUMMARY_ROWS[@]}" -gt 0 ]; then
     SUMMARY_LAST_IDX=$(( ${#SUMMARY_ROWS[@]} - 1 ))
     IFS='|' read -r SUMMARY_ROW_NAME SUMMARY_ROW_DUR SUMMARY_ROW_STATUS _ <<< "${SUMMARY_ROWS[$SUMMARY_LAST_IDX]}"
     SUMMARY_ROWS[$SUMMARY_LAST_IDX]="${SUMMARY_ROW_NAME}|${SUMMARY_ROW_DUR}|${SUMMARY_ROW_STATUS}|${JUNIT_COUNTS}"
   fi
 else
-  skip_step "2" "Running Etendo Go Tests (com.etendoerp.go.*)"
+  skip_step "2" "Running Etendo Go unit tests (goTestUnit, no database)"
 fi
 
-# 3. Coverage report + SonarQube analysis + Compare Coverage Results.
-# Mirrors CI's two chained stages: "Generate Coverage Report" runs
-# `./gradlew jacocoRootReport` in $CORE_DIR to aggregate the .exec data step 2
-# produced into jacocoRootReport.xml (the task reads $buildDir/jacoco/*.exec and
-# does NOT depend on `test`, so it never re-runs the suite); then the scanner is
-# handed that XML via --jacoco-xml. WITHOUT this, Sonar imports NO coverage and
-# the --compare-coverage gate would compare against 0. --fail-on-gate exits
-# non-zero when the Quality Gate is in ERROR; --compare-coverage additionally
-# blocks when coverage drops vs the base beyond tolerance (or below the minimum).
+# 3. SonarQube analysis, with goTestUnit's coverage imported when step 2 produced
+# it. --fail-on-gate exits non-zero when the Quality Gate is in ERROR. The overall
+# coverage comparison against the base (--compare-coverage) is gone from the
+# pre-push: without the DB-backed tests the overall figure always drops, so it
+# stays where the full suite runs (CI). Step 3b measures the changed lines instead.
 if [ "$RUN_STEP3" = "1" ]; then
-  JACOCO_XML="$CORE_DIR/build/reports/jacoco/jacocoRootReport/jacocoRootReport.xml"
   if [ -n "$BASE_REF" ]; then
-    SONAR_ARGS="--base-ref \"$BASE_REF\" --fail-on-gate --compare-coverage"
+    SONAR_ARGS="--base-ref \"$BASE_REF\" --fail-on-gate"
   else
     SONAR_ARGS="--all-issues --fail-on-gate"
   fi
-  # jacocoRootReport in $CORE_DIR, then the scanner in $MODULE_DIR with the XML.
-  SONAR_CMD="( cd \"$CORE_DIR\" && ./gradlew jacocoRootReport ) && ./run-sonar.sh $SONAR_ARGS --jacoco-xml \"$JACOCO_XML\""
-  run_step "3" "Generating JaCoCo coverage + SonarQube analysis" "$MODULE_DIR" "tmp/pre-push/sonar-analysis.log" "$SONAR_CMD"
+  if [ -f "$GO_UNIT_XML" ]; then
+    SONAR_ARGS="$SONAR_ARGS --jacoco-xml \"$GO_UNIT_XML\""
+  fi
+  run_step "3" "SonarQube analysis (Quality Gate)" "$MODULE_DIR" "tmp/pre-push/sonar-analysis.log" "./run-sonar.sh $SONAR_ARGS"
+
+  # 3b. Coverage of the changed lines (scripts/check-diff-coverage.py), printed to
+  # the console: in annotate mode it never fails, so inside run_step its output
+  # would only reach the log. DIFF_COVERAGE_MODE=block makes it blocking.
+  COVERAGE_STEP="Changed-lines coverage (goTestUnit, ${DIFF_COVERAGE_THRESHOLD:-80}% threshold)"
+  if [ ! -f "$GO_UNIT_XML" ]; then
+    echo "==> [3b/4] $COVERAGE_STEP... SKIPPED ⏭️  (no goTestUnit coverage: step 2 failed or did not run)"
+    record_summary_row "$COVERAGE_STEP" "-" "SKIPPED" "no coverage report"
+  elif [ -z "$BASE_REF" ]; then
+    echo "==> [3b/4] $COVERAGE_STEP... SKIPPED ⏭️  (no base branch to diff against)"
+    record_summary_row "$COVERAGE_STEP" "-" "SKIPPED" "no base branch"
+  else
+    echo "==> [3b/4] $COVERAGE_STEP..."
+    COVERAGE_STATUS=0
+    COVERAGE_OUT="$(python3 "$MODULE_DIR/scripts/check-diff-coverage.py" --base "$BASE_REF" \
+      --jacoco-xml "$GO_UNIT_XML" --threshold "${DIFF_COVERAGE_THRESHOLD:-80}" 2>&1)" || COVERAGE_STATUS=$?
+    echo "$COVERAGE_OUT" | sed 's/^/    /'
+    COVERAGE_SUMMARY="$(echo "$COVERAGE_OUT" | grep '^diff-coverage:' | tail -1 | sed 's/^diff-coverage: //')"
+    if [ "$COVERAGE_STATUS" -eq 0 ]; then
+      record_summary_row "$COVERAGE_STEP" "-" "OK" "$COVERAGE_SUMMARY"
+    else
+      record_summary_row "$COVERAGE_STEP" "-" "FAILED" "$COVERAGE_SUMMARY"
+      record_failure "$COVERAGE_STEP"
+    fi
+  fi
 else
-  skip_step "3" "Generating JaCoCo coverage + SonarQube analysis"
+  skip_step "3" "SonarQube analysis (Quality Gate)"
 fi
 
 # One line per check that had a turn this run (skipped ones included) — real

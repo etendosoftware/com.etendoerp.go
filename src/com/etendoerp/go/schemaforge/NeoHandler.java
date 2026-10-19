@@ -184,6 +184,22 @@ public interface NeoHandler {
   }
 
   /**
+   * Declares the create-body directives this customization reads and removes in its pre-hook,
+   * each with a one-line description for an agent (ETP-5676).
+   *
+   * <p>A directive is a request option, not a field: an underscore-prefixed body key that tunes
+   * what the customization does around the write (e.g. the product's {@code _skipPricesSeed}).
+   * The customization strips it in {@link #handle} so it never reaches the field filter or the
+   * DAL. Declaring it here is what lets the MCP write verbs accept it without reporting it in
+   * {@code unknownFields}, and {@code etendo_schema(view:"create")} publish it.</p>
+   *
+   * @return directive name to description; empty by default
+   */
+  default Map<String, String> createDirectives() {
+    return Collections.emptyMap();
+  }
+
+  /**
    * Declares the response keys this handler adds to every GET record in {@link #afterHandle} —
    * keys that are not {@code ETGO_SF_FIELD} columns, so {@code NeoFieldFilter} does not know them
    * (ETP-5576, MCP observation 11).

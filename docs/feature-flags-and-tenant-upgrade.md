@@ -71,6 +71,7 @@ Declare every flag's key as a constant on `GoFeatureFlags` and add its row here.
 | `environment-access-enforcement-off` | `etendo.go.flags.environment-access-enforcement-off` | `ETGO_FLAG_ENVIRONMENT_ACCESS_ENFORCEMENT_OFF` | absent ⇒ **`false`** = enforcing (an OFF switch — see its section below) |
 | `onboarding-tenant-pool` | `etendo.go.flags.onboarding-tenant-pool` | `ETGO_FLAG_ONBOARDING_TENANT_POOL` | absent ⇒ **`false`** |
 | `mcp-modern-era-disabled` | `etendo.go.flags.mcp-modern-era-disabled` | `ETGO_FLAG_MCP_MODERN_ERA_DISABLED` | absent ⇒ **`false`** (dual-era on) |
+| `batch-callout-skip-disabled` | `etendo.go.flags.batch-callout-skip-disabled` | `ETGO_FLAG_BATCH_CALLOUT_SKIP_DISABLED` | absent ⇒ **`false`** (opt-in skip honoured) |
 | *(pattern for a new flag)* | `etendo.go.flags.<key>` | `ETGO_FLAG_<KEY>` | absent ⇒ **`false`** |
 
 `bp-portal-link` (ETP-5267) decides whether a `sales-invoice-send` email carries a link to the
@@ -383,6 +384,23 @@ cache the era per origin and one origin serves every tenant. Its only caller is
 `McpRequestEra.modernEnabled()`. Retire it, keeping the modern path, once the modern era is stable in
 production. Full reference: [`neo-headless.md`](neo-headless.md) §4.12.30.
 
+### `batch-callout-skip-disabled` (ETP-5676) — backend-only kill switch, inverted
+
+Turns off the per-batch redundant-callout skip: `true` makes every `/sws/neo/batch` and
+`etendo_batch` request run every create-cascade callout, even one sent with
+`_skipRedundantCallouts: true`. Unset or `false` honours that opt-in; a batch without it never
+skips anything either way. Inverted for the same reason as `mcp-modern-era-disabled`: a missing
+flag or an unreachable control plane must not change behaviour. Environment level (empty context),
+evaluated once per batch; its only caller is `NeoBatchScope.calloutSkipKillSwitchOn()`. Retire it,
+keeping the skip, once the skip has run on real tenant imports without a wrong default. Full
+reference: [`neo-headless.md`](neo-headless.md) §4.3.6.
+
+To flip it: set it to `true` in ConfigCat (live within one 60 s poll). The local value
+(`etendo.go.flags.batch-callout-skip-disabled=true` in `Openbravo.properties`, or
+`ETGO_FLAG_BATCH_CALLOUT_SKIP_DISABLED=true`, plus a Tomcat restart) is read **only where no
+ConfigCat SDK key is configured**: `GoFeatureFlags#createProvider()` installs one provider, ConfigCat
+when `etendo.go.configcat.sdkKey` resolves, `PropertiesFeatureProvider` otherwise, never both.
+
 ## 2. The onboarding paywall
 
 ### Local pooled failure fixture
@@ -455,6 +473,43 @@ The demo trial lasts **14 days** (product definition, ETP-5548), counted from th
 length on every read rather than stored, so changing it — including the 15 → 14 change — moves the
 deadline of existing demos too, not only new ones. The renewal grace window is separate:
 `etendo.go.billing.grace.days` (`ETGO_BILLING_GRACE_DAYS`), 15 days.
+
+### Trial notices (ETP-5453)
+
+The owner of a demo is emailed before the trial ends and once it has ended, by the background
+process **Demo Trial Notices** (`ETGO_DemoTrialNotices`, `DemoTrialNoticeProcess`).
+It is **scheduled by hand**, once per instance: in Classic, as System Administrator, open
+**Process Request**, create a record for *Demo Trial Notices* with timing *Scheduled*, frequency
+*Daily* and a morning start time, and press *Schedule Process*. Nothing schedules it at startup on
+purpose: production is updated by delta and never restarted, so a startup hook would never run
+there. An instance where nobody scheduled it sends no notices at all.
+
+- **Who is checked:** every active client carrying `ETGO_DemoTrialStartedAt` or
+  `ETGO_LegacyTransitionStartedAt`. `DemoTrialNoticePlanner` decides from
+  `EnvironmentAccessPolicy`, so the email and the access gate cannot disagree about when a trial
+  ends.
+- **What is sent:** a reminder when the days left (rounded up, as the picker shows them) fit a
+  threshold — `etendo.go.demo.trial.reminder.days` (`ETGO_DEMO_TRIAL_REMINDER_DAYS`), default `3,1`
+  — and the expiry notice once the decision becomes `DEMO_TRIAL_EXPIRED`. The smallest fitting
+  threshold wins, so a missed run is caught up the next day. The expiry notice goes out only during
+  the first 3 days after the end: older demos are never mailed out of the blue, including on the
+  first run after a deploy.
+- **Who is never notified:** productive environments, inactive clients, tenants with no lifecycle
+  metadata, and any demo associated with a productive environment. A demo is never converted:
+  paying creates a new productive environment and the old demo is cut at once, so its owner must not
+  be told that the trial "ended".
+- **Recipient and language:** the platform account (`ETGO_ACCOUNT`) behind the client's owner
+  (`AD_User.EM_ETGO_Is_Owner`), in the client's language (`AD_Client.AD_Language`). Onboarding does
+  not set that column today, so the notices currently go out in Spanish, the email fallback.
+- **Idempotency:** contract `demo-trial-notice`, keyed on client, trial start and milestone
+  (`reminder-3`, `reminder-1`, `expired`) in `ETGO_Email_Safety`. A re-run, a restart or a retry
+  sends nothing new; a trial restarted with a new start is notified again.
+- **Best effort:** each environment commits on its own. A failed send is logged, counted in the
+  run's result (a warning, not an error) and retried on the next run.
+- **Not callable from the browser:** the contract accepts only a System-context caller and
+  re-derives the owed notice itself; the command carries nothing but `clientId`.
+
+Local verification, case by case: `etendo_schema_forge/docs/etp-5396-local-lifecycle-tool.md`.
 
 For legacy free tenants, enforcement is opt-in through `etendo.go.demo.transition.activation.at`
 (`ETGO_DEMO_TRANSITION_ACTIVATION_AT`), an ISO-8601 UTC instant selected during rollout. The first
@@ -561,6 +616,23 @@ the check holds while `ETGO_SubscriptionModel` is OFF too.
   "PRODUCTIVE"`, `subscriptionStatus: "EXPIRED"`. The upgrade page keys its picker on
   `environmentType`, not only on `plan`.
 
+**Only the demo's owner may give it away (ETP-5743).** An invited member has an environment user
+in the owner's demo, so matching the account email alone is not proof of ownership: the purchase
+copies the demo's profile and data and then locks it. Every purchase-source check therefore
+requires the account's user in that demo to carry `AD_User.EM_ETGO_Is_Owner = 'Y'`
+(`EtendoGoJwtDalHelper.clientOwnedByAccountEmail`):
+
+- `GET /sws/go/environments` reports `ownedByAccount: false` for a demo the account was only
+  invited into, and the upgrade page leaves it out of the source picker.
+- A purchase whose session is in such a demo is a clean productive purchase, exactly like one from
+  a spent demo: the body's `demoClientId` / `dataTransfer` are ignored.
+- Naming such a demo as `demoClientId` answers 400 `INVALID_DEMO_SELECTION`.
+- Onboarding resolves a paid purchase's recorded source against the account's **owned** free demos
+  only, so a selection recorded before this rule is refused with `DEMO_SELECTION_REQUIRED` (409)
+  instead of copying another owner's demo.
+- A tenant created before the owner flag existed (ETP-4830) has no owner at all. For those the
+  account email match is still accepted, until a backfill assigns an owner.
+
 Paid onboarding uses `PROVISIONING_ATTEMPTS` as a durable fencing token. The claim is normally
 taken from `PAID`; if the row has remained `PROVISIONING` longer than
 `etendo.go.billing.provisioning.lease.minutes` (`ETGO_BILLING_PROVISIONING_LEASE_MINUTES`), it is
@@ -585,8 +657,10 @@ current cost and their prices, and active contacts are copied under target clien
 global units and tax categories remain global references. Only prices on the demo's **default**
 sales and purchase price lists are migrated (the newest version of each), onto the target's
 default lists; prices on any other list are left behind. A contact address reuses only an
-address row already used by another contact, never the organization's fiscal address. Missing
-required target references fail the job with a visible reason.
+address row already used by another contact, never the organization's fiscal address. A contact
+keeps its source currency, else gets the target organization's (ETP-5768): the copy runs as
+System and bypasses the NEO hook that defaults it, and Core refuses to complete any document for
+a contact without one. Missing required target references fail the job with a visible reason.
 
 Each product and each contact is committed on its own, so the First Steps counters move while
 the job runs. A failure therefore rolls back only the item in progress and leaves the earlier

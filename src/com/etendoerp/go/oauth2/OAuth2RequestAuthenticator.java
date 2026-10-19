@@ -104,8 +104,16 @@ final class OAuth2RequestAuthenticator {
     }
     GoLegacyBearer.recordUse();
     DecodedJWT jwt = authenticateJwt(authorizeRequest.jwtToken);
-    return new AuthorizePrincipal(jwt.getClaim("user").asString(),
-        jwt.getClaim("role").asString());
+    String userId = jwt.getClaim("user").asString();
+    String roleId = jwt.getClaim("role").asString();
+    // ETP-5270 — same reason as the cookie branch above, and a JWT cannot be rebound: refuse a
+    // role revoked since the token was issued instead of handing it to the client.
+    try {
+      sessionRoleReconciler.requireHeldRole(userId, roleId, jwt.getClaim("client").asString());
+    } catch (SessionRoleRevokedException e) {
+      throw new OAuth2Servlet.AuthException(HttpServletResponse.SC_FORBIDDEN, e.getMessage());
+    }
+    return new AuthorizePrincipal(userId, roleId);
   }
 
   /** The authenticated user/role pair resolved for an authorize request. */

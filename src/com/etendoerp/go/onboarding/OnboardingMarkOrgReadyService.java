@@ -126,10 +126,11 @@ public class OnboardingMarkOrgReadyService {
    *       {@code @20545@}, which would take the whole onboarding down.</li>
    *   <li><b>Reconciling derived state</b> ({@code AD_ORG_TREE}, then the legal entity / business
    *       unit pointers) runs <b>always</b>, because it is idempotent and because {@code isReady}
-   *       is not the state it repairs. {@code InitialOrgSetup.createOrganization()} already runs
-   *       AD_Org_Ready before this method is called, so the organization arrives here with
-   *       {@code isReady = 'Y'} — the early return that used to key on that flag skipped every
-   *       repair below, which is how ETP-5352's tenants kept an empty legal entity pointer.</li>
+   *       is not the state it repairs. Some core versions (the retired {@code epic/ETP-3504}
+   *       branch) run AD_Org_Ready inside {@code InitialOrgSetup.createOrganization()}, so the
+   *       organization can arrive here with {@code isReady = 'Y'}; core {@code main} does not.
+   *       The early return that used to key on that flag skipped every repair below, which is how
+   *       ETP-5352's tenants kept an empty legal entity pointer.</li>
    * </ul>
    *
    * @param clientId    target client identifier

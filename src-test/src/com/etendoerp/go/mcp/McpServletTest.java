@@ -25,6 +25,7 @@ import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockConstruction;
 import static org.mockito.Mockito.mockStatic;
@@ -73,6 +74,8 @@ import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.session.GoSessionRecord;
 import com.etendoerp.go.session.GoSessionSecurity;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
+import com.etendoerp.go.session.GoSessionRoleReconciler;
+import com.etendoerp.go.session.SessionRoleRevokedException;
 import com.etendoerp.go.usageevents.LogCapture;
 
 /**
@@ -90,6 +93,7 @@ public class McpServletTest {
   private StringWriter responseBody;
   private PrintWriter writer;
   private EnvironmentAccessGuard environmentAccessGuard;
+  private GoSessionRoleReconciler roleReconciler;
 
   private static final String ENFORCEMENT_OFF_PROPERTY =
       "etendo.go.flags.environment-access-enforcement-off";
@@ -104,6 +108,9 @@ public class McpServletTest {
     Field guardField = McpServlet.class.getDeclaredField("environmentAccessGuard");
     guardField.setAccessible(true);
     guardField.set(servlet, environmentAccessGuard);
+    // ETP-5270 — the role lookups hit AD_User_Roles; a mock is "role still held, no rebind".
+    roleReconciler = mock(GoSessionRoleReconciler.class);
+    servlet.sessionRoleReconciler = roleReconciler;
     newExchange();
 
     System.setProperty(PublicUrlResolver.MCP_PUBLIC_URL_PROPERTY, "https://example.com/mcp");
@@ -236,6 +243,97 @@ public class McpServletTest {
 
     verify(response).setStatus(HttpServletResponse.SC_UNAUTHORIZED);
     assertTrue(getResponseBody().contains("no environment selected"));
+  }
+
+  // ── authenticate: role revalidation (ETP-5270) ──────────────────────────
+
+  /**
+   * The copilot reaches MCP with the cookie session, and every other surface already rebinds a
+   * role an admin revoked since the session entered (ETP-5395). The identity must carry the role
+   * the user holds now, so RBAC filters the tool catalog with it.
+   */
+  @Test
+  public void sessionIdentityCarriesTheReboundRole() throws Exception {
+    GoSessionRecord session = sessionRecord("user1", "revoked-role", "client1", "org1");
+    when(roleReconciler.reconcile(session)).thenAnswer(invocation -> {
+      session.setRoleId("rebound-role");
+      return true;
+    });
+
+    McpServlet.AuthIdentity identity = invokeSessionIdentity(session);
+
+    assertNotNull(identity);
+    assertEquals("rebound-role", identity.roleId);
+  }
+
+  @Test
+  public void sessionIdentityRejectsASessionWhoseUserHoldsNoRoleLeft() throws Exception {
+    GoSessionRecord session = sessionRecord("user1", "revoked-role", "client1", "org1");
+    when(roleReconciler.reconcile(session))
+        .thenThrow(new SessionRoleRevokedException("no role left"));
+
+    assertNull(invokeSessionIdentity(session));
+
+    verify(response).setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+    assertTrue(getResponseBody().contains("no role left"));
+  }
+
+  /** A legacy JWT cannot be rebound: a role revoked since it was issued refuses the request. */
+  @Test
+  public void authenticateRefusesALegacyJwtWhoseRoleWasRevoked() throws Exception {
+    when(request.getHeader("Authorization")).thenReturn("Bearer legacy-jwt");
+    doThrow(new SessionRoleRevokedException(GoSessionRoleReconciler.MSG_TOKEN_ROLE_REVOKED))
+        .when(roleReconciler).requireHeldRole("user1", "role1", "client1");
+
+    try (MockedStatic<OAuth2Filter> oauth2Mock = mockStatic(OAuth2Filter.class);
+         MockedStatic<com.smf.securewebservices.utils.SecureWebServicesUtils> jwtMock =
+             mockStatic(com.smf.securewebservices.utils.SecureWebServicesUtils.class)) {
+      oauth2Mock.when(() -> OAuth2Filter.validateToken("legacy-jwt")).thenReturn(null);
+      com.auth0.jwt.interfaces.DecodedJWT jwt = legacyJwt();
+      jwtMock.when(() -> com.smf.securewebservices.utils.SecureWebServicesUtils
+          .decodeToken("legacy-jwt")).thenReturn(jwt);
+
+      assertNull(invokeAuthenticate());
+    }
+
+    verify(response).setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+    assertTrue(getResponseBody().contains(GoSessionRoleReconciler.MSG_TOKEN_ROLE_REVOKED));
+  }
+
+  @Test
+  public void authenticateAcceptsALegacyJwtWhoseRoleIsStillHeld() throws Exception {
+    when(request.getHeader("Authorization")).thenReturn("Bearer legacy-jwt");
+
+    McpServlet.AuthIdentity identity;
+    try (MockedStatic<OAuth2Filter> oauth2Mock = mockStatic(OAuth2Filter.class);
+         MockedStatic<com.smf.securewebservices.utils.SecureWebServicesUtils> jwtMock =
+             mockStatic(com.smf.securewebservices.utils.SecureWebServicesUtils.class)) {
+      oauth2Mock.when(() -> OAuth2Filter.validateToken("legacy-jwt")).thenReturn(null);
+      com.auth0.jwt.interfaces.DecodedJWT jwt = legacyJwt();
+      jwtMock.when(() -> com.smf.securewebservices.utils.SecureWebServicesUtils
+          .decodeToken("legacy-jwt")).thenReturn(jwt);
+
+      identity = invokeAuthenticate();
+    }
+
+    assertNotNull(identity);
+    assertEquals("role1", identity.roleId);
+    verify(roleReconciler).requireHeldRole("user1", "role1", "client1");
+  }
+
+  private static com.auth0.jwt.interfaces.DecodedJWT legacyJwt() {
+    com.auth0.jwt.interfaces.DecodedJWT jwt = mock(com.auth0.jwt.interfaces.DecodedJWT.class);
+    Map<String, String> claims = new HashMap<>();
+    claims.put("user", "user1");
+    claims.put("role", "role1");
+    claims.put("client", "client1");
+    claims.put("organization", "org1");
+    for (Map.Entry<String, String> entry : claims.entrySet()) {
+      com.auth0.jwt.interfaces.Claim claim = mock(com.auth0.jwt.interfaces.Claim.class);
+      when(claim.asString()).thenReturn(entry.getValue());
+      when(jwt.getClaim(entry.getKey())).thenReturn(claim);
+    }
+    return jwt;
   }
 
   // ── doOptions ───────────────────────────────────────────────────────────

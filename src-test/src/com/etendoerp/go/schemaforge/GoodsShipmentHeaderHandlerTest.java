@@ -36,6 +36,7 @@ import java.util.Collections;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
@@ -61,6 +62,8 @@ import org.openbravo.model.pricing.pricelist.PriceList;
  *   <li>{@code afterHandle()} with DB — outer try-catch returns null on DB failure for
  *       both single-record (recordId non-null) and batch (recordId null) paths.</li>
  * </ul>
+ *
+ * @covers com.etendoerp.go.schemaforge.GoodsShipmentHeaderHandler
  */
 public class GoodsShipmentHeaderHandlerTest {
 
@@ -1029,5 +1032,135 @@ public class GoodsShipmentHeaderHandlerTest {
       assertEquals("PL-CLIENT-DEFAULT", shipmentRec.getString("resolvedPriceListId"));
       assertEquals("Client Default Price List", shipmentRec.getString("resolvedPriceList$_identifier"));
     }
+  }
+
+  // ── declared action contracts (ETP-5709) ──────────────────────────────────
+
+  @Test
+  public void actionContracts_declaresDocumentActionCreateDraftInvoiceAndCloneRecord() throws Exception {
+    java.util.Map<String, com.etendoerp.go.schemaforge.util.NeoActionContract> contracts =
+        new GoodsShipmentHeaderHandler().actionContracts();
+
+    assertEquals(java.util.List.of("documentAction", "createDraftInvoice", "createReturn", "cloneRecord"),
+        java.util.List.copyOf(contracts.keySet()));
+    assertEquals("POST", contracts.get("cloneRecord").getHttpMethod());
+    assertNull(com.etendoerp.go.schemaforge.util.NeoActionContract.validate(contracts, "cloneRecord", new JSONObject()));
+  }
+
+  // ── documentAction contract (ETP-5709) ─────────────────────────────────────
+
+  @Test
+  public void actionContracts_declareDocumentActionWithOnlyComplete() throws Exception {
+    java.util.Map<String, NeoActionContract> contracts =
+        new GoodsShipmentHeaderHandler().actionContracts();
+
+    NeoActionContract c = contracts.get("documentAction");
+    assertNotNull("documentAction must be declared so the MCP lists it as invokable", c);
+    assertEquals("POST", c.getHttpMethod());
+    assertEquals(1, c.getParams().size());
+    assertEquals("docAction", c.getParams().get(0).getName());
+    org.junit.Assert.assertTrue(c.getParams().get(0).isRequired());
+    assertEquals("[\"CO\"]", c.toJson().getJSONObject("parameters").getJSONObject("properties")
+        .getJSONObject("docAction").getJSONArray("enum").toString());
+    org.junit.Assert.assertTrue(c.getDescription().contains("DRAFT")
+        && c.getDescription().contains("CO"));
+  }
+
+  @Test
+  public void actionContracts_documentActionAcceptsCoAndRejectsEverythingElse() throws Exception {
+    java.util.Map<String, NeoActionContract> contracts =
+        new GoodsShipmentHeaderHandler().actionContracts();
+
+    // The SPA (useDocumentAction) posts exactly this body.
+    assertNull(NeoActionContract.validate(contracts, "documentAction",
+        new JSONObject().put("docAction", "CO")));
+    for (String other : new String[] {"VO", "RE", "CL", "PR", "XX"}) {
+      assertEquals(other, NeoActionContract.SC_UNPROCESSABLE, NeoActionContract.validate(contracts,
+          "documentAction", new JSONObject().put("docAction", other)).getHttpStatus());
+    }
+    assertEquals(NeoActionContract.SC_UNPROCESSABLE, NeoActionContract.validate(contracts,
+        "documentAction", new JSONObject()).getHttpStatus());
+    assertEquals(NeoActionContract.SC_UNPROCESSABLE, NeoActionContract.validate(contracts,
+        "documentAction", new JSONObject().put("docAction", "CO").put("action", "CO"))
+        .getHttpStatus());
+  }
+
+  // ── createDraftInvoice contract (ETP-5709) ─────────────────────────────────
+
+  /** What the shipment path really reads: shipmentIds, priceListId, lines[{shipmentLineId|orderLineId, quantity}]. */
+  @Test
+  public void actionContracts_createDraftInvoiceDeclaresTheKeysTheShipmentPathReads() throws Exception {
+    NeoActionContract c = new GoodsShipmentHeaderHandler().actionContracts().get("createDraftInvoice");
+
+    assertNotNull("the classic button is redirected here, so it must be declared", c);
+    assertEquals("POST", c.getHttpMethod());
+    java.util.List<String> names = new java.util.ArrayList<>();
+    for (NeoActionContract.Param p : c.getParams()) {
+      names.add(p.getName());
+      assertFalse(p.getName() + " must be optional: the SPA posts only priceListId", p.isRequired());
+    }
+    assertEquals(java.util.List.of("shipmentIds", "priceListId", "lines"), names);
+    String d = c.getDescription();
+    org.junit.Assert.assertTrue(d, d.contains("COMPLETES") && d.contains("completed")
+        && d.contains("cannot have its quantities edited"));
+  }
+
+  @Test
+  public void actionContracts_createDraftInvoiceAcceptsTheSpaBodiesAndRejectsUnknownKeys()
+      throws Exception {
+    java.util.Map<String, NeoActionContract> contracts =
+        new GoodsShipmentHeaderHandler().actionContracts();
+
+    // GoodsShipmentActions.jsx and BulkInvoiceFromShipment.jsx post exactly these.
+    assertNull(NeoActionContract.validate(contracts, "createDraftInvoice",
+        new JSONObject().put("priceListId", "pl-1")));
+    assertNull(NeoActionContract.validate(contracts, "createDraftInvoice",
+        new JSONObject().put("shipmentIds", new JSONArray().put("a").put("b")).put("priceListId", "pl-1")));
+    assertNull(NeoActionContract.validate(contracts, "createDraftInvoice", new JSONObject()));
+    assertNull(NeoActionContract.validate(contracts, "createDraftInvoice", new JSONObject().put("lines",
+        new JSONArray().put(new JSONObject().put("shipmentLineId", "sl-1").put("quantity", "2")))));
+    assertEquals(NeoActionContract.SC_UNPROCESSABLE, NeoActionContract.validate(contracts,
+        "createDraftInvoice", new JSONObject().put("receiptIds", new JSONArray().put("a")))
+        .getHttpStatus());
+  }
+
+  // ── createReturn contract (ETP-5711) ─────────────────────────────────────────
+
+  /**
+   * The create-from-document return is published to agents with its lines optional: omitting them
+   * returns everything still returnable, and the result is always a draft.
+   */
+  @Test
+  public void actionContracts_createReturnIsPublishedWithOptionalLines() throws Exception {
+    java.util.Map<String, NeoActionContract> contracts = new GoodsShipmentHeaderHandler().actionContracts();
+
+    NeoActionContract c = contracts.get("createReturn");
+    assertNotNull("createReturn must be declared so agents can create the return", c);
+    assertEquals("POST", c.getHttpMethod());
+    assertEquals(java.util.List.of("lines", "reason"), c.getParams().stream()
+        .map(NeoActionContract.Param::getName).collect(java.util.stream.Collectors.toList()));
+    assertFalse("every body key is optional",
+        c.getParams().stream().anyMatch(NeoActionContract.Param::isRequired));
+    String description = c.getDescription();
+    org.junit.Assert.assertTrue(description,
+        description.contains("omit lines to return everything still returnable"));
+    org.junit.Assert.assertTrue(description, description.contains("left in draft"));
+    org.junit.Assert.assertTrue("it states what refuses an over-return",
+        description.contains("returnQuantityExceedsAvailable"));
+  }
+
+  @Test
+  public void actionContracts_createReturnAcceptsTheSpaBodyAndTheEmptyBody() throws Exception {
+    java.util.Map<String, NeoActionContract> contracts = new GoodsShipmentHeaderHandler().actionContracts();
+
+    assertNull(NeoActionContract.validate(contracts, "createReturn", new JSONObject()));
+    assertNull(NeoActionContract.validate(contracts, "createReturn", new JSONObject()
+        .put("lines", new JSONArray().put(
+            new JSONObject().put("lineId", "L1").put("returnQuantity", 2)))
+        .put("reason", "damaged")));
+    assertEquals(NeoActionContract.SC_UNPROCESSABLE, NeoActionContract.validate(contracts,
+        "createReturn", new JSONObject().put("lines", "x")).getHttpStatus());
+    assertEquals(NeoActionContract.SC_UNPROCESSABLE, NeoActionContract.validate(contracts,
+        "createReturn", new JSONObject().put("orderId", "O1")).getHttpStatus());
   }
 }

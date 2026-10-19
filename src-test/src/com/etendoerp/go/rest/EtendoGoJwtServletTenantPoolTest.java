@@ -62,6 +62,7 @@ import org.openbravo.model.common.enterprise.Organization;
 import com.etendoerp.go.onboarding.OnboardingCostingScheduleService;
 import com.etendoerp.go.onboarding.OnboardingDatasetImportService;
 import com.etendoerp.go.onboarding.OnboardingOrgInfoService;
+import com.etendoerp.go.onboarding.OnboardingInitialPeriodStateService;
 import com.etendoerp.go.onboarding.OnboardingPeriodControlService;
 import com.etendoerp.go.onboarding.OnboardingProgressSink;
 import com.etendoerp.go.onboarding.OnboardingWarehouseAddressService;
@@ -97,6 +98,9 @@ public class EtendoGoJwtServletTenantPoolTest {
     when(lifecycle.configuration()).thenReturn(new EnvironmentAccessPolicy.Configuration(15, 7));
     OnboardingPeriodControlService periods = mock(OnboardingPeriodControlService.class);
     servlet.onboardingPeriodControlService = periods;
+    OnboardingInitialPeriodStateService initialState =
+        mock(OnboardingInitialPeriodStateService.class);
+    servlet.onboardingInitialPeriodStateService = initialState;
     servlet.onboardingDatasetImportService = dataset;
     servlet.onboardingOrgInfoService = orgInfo;
     servlet.onboardingWarehouseAddressService = warehouse;
@@ -112,9 +116,8 @@ public class EtendoGoJwtServletTenantPoolTest {
     doAnswer(inv -> {
       commitBeforeWindow[0] = mockingDetails(dalInstance).getInvocations().stream()
           .anyMatch(i -> "commitAndClose".equals(i.getMethod().getName()));
-      return null;
-    }).when(periods).openDemoTrialWindow(anyString(), anyString(), anyString(), anyString(),
-        any(Instant.class), anyInt());
+      return true;
+    }).when(initialState).applyIfPending("POOLED-CLIENT");
     try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
          MockedStatic<OBDal> dal = mockStatic(OBDal.class);
          MockedStatic<EtendoGoJwtSupport> support = mockStatic(EtendoGoJwtSupport.class);
@@ -152,12 +155,13 @@ public class EtendoGoJwtServletTenantPoolTest {
         "ADMIN-ROLE");
     verify(lifecycle).markDemoReady(eq("POOLED-CLIENT"), any(Instant.class));
     verify(costing).activateSchedule("POOLED-CLIENT");
-    // ETP-5575: a pooled demo gets its trial window re-evaluated after the onboarding commit, so a
-    // tenant built in an earlier month still opens through its trial end.
-    assertTrue(commitBeforeWindow[0], "the window runs after the onboarding commit");
-    InOrder order = inOrder(periods, costing);
-    order.verify(periods).openDemoTrialWindow(eq("POOLED-CLIENT"), eq("ORG-1"), eq("ADMIN-USER"),
-        eq("ADMIN-ROLE"), any(Instant.class), eq(15));
+    // ETP-5575 / ETP-5577: a pooled tenant gets its initial period state after the onboarding
+    // commit (the chain built it type-neutral, all periods never-opened), marked pending inside it.
+    assertTrue(commitBeforeWindow[0], "the period state runs after the onboarding commit");
+    InOrder order = inOrder(initialState, costing);
+    order.verify(initialState).markPending("POOLED-CLIENT", "ORG-1", "ADMIN-USER", "ADMIN-ROLE",
+        false);
+    order.verify(initialState).applyIfPending("POOLED-CLIENT");
     order.verify(costing).activateSchedule("POOLED-CLIENT");
     // ETP-5047: a demo has no subscription, so it never asks the provider for a billing period.
     verify(subscriptions, never()).fillPeriodFromProviderAfterCommit(anyString());

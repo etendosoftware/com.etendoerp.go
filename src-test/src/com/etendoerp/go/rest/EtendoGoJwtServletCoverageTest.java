@@ -555,6 +555,21 @@ public class EtendoGoJwtServletCoverageTest {
    */
   @Test
   public void purchaseFromAnAlreadyAssociatedDemoCreatesACleanProductive() throws Exception {
+    assertCleanProductivePurchaseFromSessionDemo(true, true);
+  }
+
+  /**
+   * ETP-5743: a demo the account was only invited into is not the buyer's to copy. Buying from
+   * inside it creates a clean productive environment, even when the request names it as source.
+   */
+  @Test
+  public void purchaseFromADemoTheAccountIsOnlyInvitedIntoCreatesACleanProductive()
+      throws Exception {
+    assertCleanProductivePurchaseFromSessionDemo(false, false);
+  }
+
+  private void assertCleanProductivePurchaseFromSessionDemo(boolean sessionDemoAssociated,
+      boolean sessionDemoOwned) throws Exception {
     Account account = mock(Account.class);
     when(account.getId()).thenReturn("account-1");
     when(account.getEmail()).thenReturn("owner@example.test");
@@ -579,7 +594,7 @@ public class EtendoGoJwtServletCoverageTest {
     when(tenantPlan.resolvePlan("SPENT-DEMO")).thenReturn(TenantPlanService.PLAN_FREE);
     TenantEnvironmentLifecycleService lifecycle = mock(TenantEnvironmentLifecycleService.class);
     purchaseServlet.tenantEnvironmentLifecycleService = lifecycle;
-    when(lifecycle.isAssociatedWithProductive("SPENT-DEMO")).thenReturn(true);
+    when(lifecycle.isAssociatedWithProductive("SPENT-DEMO")).thenReturn(sessionDemoAssociated);
 
     JSONObject checkoutResult = new JSONObject().put("requestId", "purchase-prod-1");
     when(checkout.createSession(eq("account-1"), eq("owner@example.test"), eq("New Production"),
@@ -606,6 +621,8 @@ public class EtendoGoJwtServletCoverageTest {
           .thenReturn(true);
       dal.when(() -> EtendoGoJwtDalHelper.clientBelongsToAccountEmail("SPENT-DEMO", "owner@example.test"))
           .thenReturn(true);
+      dal.when(() -> EtendoGoJwtDalHelper.clientOwnedByAccountEmail("SPENT-DEMO", "owner@example.test"))
+          .thenReturn(sessionDemoOwned);
       urls.when(PublicUrlResolver::resolveConfiguredAppBaseUrl).thenReturn("https://app.example.test");
 
       purchaseServlet.doPost(request, response.response);
@@ -771,6 +788,8 @@ public class EtendoGoJwtServletCoverageTest {
           .thenReturn(true);
       dal.when(() -> EtendoGoJwtDalHelper.clientBelongsToAccountEmail("FREE-1", "owner@example.test"))
           .thenReturn(true);
+      dal.when(() -> EtendoGoJwtDalHelper.clientOwnedByAccountEmail("FREE-1", "owner@example.test"))
+          .thenReturn(true);
 
       purchaseServlet.doPost(request, response.response);
 
@@ -787,18 +806,27 @@ public class EtendoGoJwtServletCoverageTest {
 
   @Test
   public void billingPurchaseRejectsDemoOwnedByAnotherAccount() throws Exception {
-    assertInvalidDemoSelectionRejected(false, TenantPlanService.PLAN_FREE, false, false);
+    assertInvalidDemoSelectionRejected(false, false, TenantPlanService.PLAN_FREE, false, false);
+  }
+
+  /**
+   * ETP-5743: an invited member has a user in the owner's demo, but choosing it as the source
+   * would copy and lock someone else's environment.
+   */
+  @Test
+  public void billingPurchaseRejectsDemoTheAccountIsOnlyInvitedInto() throws Exception {
+    assertInvalidDemoSelectionRejected(true, false, TenantPlanService.PLAN_FREE, false, false);
   }
 
   @Test
   public void billingPurchaseRejectsOwnedDemoThatIsNoLongerFree() throws Exception {
-    assertInvalidDemoSelectionRejected(true, TenantPlanService.PLAN_PRODUCTIVE, false, false);
+    assertInvalidDemoSelectionRejected(true, true, TenantPlanService.PLAN_PRODUCTIVE, false, false);
   }
 
   /** ETP-5548: a demo that already originated a productive environment is not a source again. */
   @Test
   public void billingPurchaseRejectsDemoThatAlreadyOriginatedAProductive() throws Exception {
-    assertInvalidDemoSelectionRejected(true, TenantPlanService.PLAN_FREE, true, false);
+    assertInvalidDemoSelectionRejected(true, true, TenantPlanService.PLAN_FREE, true, false);
   }
 
   /**
@@ -807,11 +835,12 @@ public class EtendoGoJwtServletCoverageTest {
    */
   @Test
   public void billingPurchaseRejectsACanceledProductiveAsDemoSource() throws Exception {
-    assertInvalidDemoSelectionRejected(true, TenantPlanService.PLAN_FREE, false, true);
+    assertInvalidDemoSelectionRejected(true, true, TenantPlanService.PLAN_FREE, false, true);
   }
 
-  private void assertInvalidDemoSelectionRejected(boolean selectedDemoOwned, String selectedDemoPlan,
-      boolean selectedDemoAssociated, boolean selectedDemoProductive) throws Exception {
+  private void assertInvalidDemoSelectionRejected(boolean selectedDemoMember,
+      boolean selectedDemoOwned, String selectedDemoPlan, boolean selectedDemoAssociated,
+      boolean selectedDemoProductive) throws Exception {
     Account account = mock(Account.class);
     when(account.getId()).thenReturn("account-1");
     when(account.getEmail()).thenReturn("owner@example.test");
@@ -863,7 +892,11 @@ public class EtendoGoJwtServletCoverageTest {
           .thenReturn(true);
       dal.when(() -> EtendoGoJwtDalHelper.clientBelongsToAccountEmail("FREE-1",
           "owner@example.test")).thenReturn(true);
+      dal.when(() -> EtendoGoJwtDalHelper.clientOwnedByAccountEmail("FREE-1",
+          "owner@example.test")).thenReturn(true);
       dal.when(() -> EtendoGoJwtDalHelper.clientBelongsToAccountEmail("DEMO-1",
+          "owner@example.test")).thenReturn(selectedDemoMember);
+      dal.when(() -> EtendoGoJwtDalHelper.clientOwnedByAccountEmail("DEMO-1",
           "owner@example.test")).thenReturn(selectedDemoOwned);
       urls.when(PublicUrlResolver::resolveConfiguredAppBaseUrl).thenReturn("https://app.example.test");
 
@@ -1434,6 +1467,45 @@ public class EtendoGoJwtServletCoverageTest {
     JSONObject body = new JSONObject(resp.body());
     assertEquals("jwt-token", body.getString("token"));
     assertNotNull(body.getJSONArray("roleList"));
+  }
+
+  /** ETP-5096 — the token is minted for the user's default role, not for the oldest one. */
+  @Test
+  public void envLoginMintsTheJwtForTheDefaultRoleNotTheOldest() throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = mockRequest("/login");
+    when(req.getHeader("Authorization")).thenReturn("Bearer valid-token");
+    when(req.getParameter("userId")).thenReturn("user-1");
+
+    User user = mock(User.class);
+    Role defaultRole = mock(Role.class);
+    EtendoGoJwtSupport.RoleListData roleListData =
+        new EtendoGoJwtSupport.RoleListData("oldest-role", "default-role", new JSONArray());
+
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.get(User.class, "user-1")).thenReturn(user);
+    when(obDal.get(Role.class, "default-role")).thenReturn(defaultRole);
+
+    try (var ctxMock = mockStatic(OBContext.class);
+         var supportMock = mockStatic(EtendoGoJwtSupport.class);
+         var dalMock = mockStatic(EtendoGoJwtDalHelper.class);
+         var obDalMock = mockStatic(OBDal.class);
+         var swsMock = mockStatic(SecureWebServicesUtils.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubAuthenticatedAccount(dalMock);
+      supportMock.when(() -> EtendoGoJwtSupport.isEnvironmentUserOwnedByAccount(
+          "user@test.com", "user-1")).thenReturn(true);
+      supportMock.when(() -> EtendoGoJwtSupport.loadRoleListData("user-1"))
+          .thenReturn(roleListData);
+      swsMock.when(() -> SecureWebServicesUtils.generateToken(user, defaultRole))
+          .thenReturn("jwt-default-role");
+
+      servlet.doGet(req, resp.response);
+    }
+
+    assertEquals(200, resp.status);
+    assertEquals("jwt-default-role", new JSONObject(resp.body()).getString("token"));
+    verify(obDal, never()).get(Role.class, "oldest-role");
   }
 
   @Test
@@ -2979,6 +3051,8 @@ public class EtendoGoJwtServletCoverageTest {
         mock(com.etendoerp.go.onboarding.OnboardingWarehouseAddressService.class);
     servlet.onboardingCostingScheduleService =
         mock(com.etendoerp.go.onboarding.OnboardingCostingScheduleService.class);
+    servlet.onboardingInitialPeriodStateService =
+        mock(com.etendoerp.go.onboarding.OnboardingInitialPeriodStateService.class);
     doAnswer(invocation -> steps.add("activateSchedule"))
         .when(servlet.onboardingCostingScheduleService).activateSchedule("client-1");
     runStagedPaidOnboarding(stage, (support, dal, transactions) -> {
@@ -3716,6 +3790,8 @@ public class EtendoGoJwtServletCoverageTest {
     servlet.onboardingOrgInfoService = mock(com.etendoerp.go.onboarding.OnboardingOrgInfoService.class);
     servlet.onboardingWarehouseAddressService = mock(com.etendoerp.go.onboarding.OnboardingWarehouseAddressService.class);
     servlet.onboardingCostingScheduleService = mock(com.etendoerp.go.onboarding.OnboardingCostingScheduleService.class);
+    servlet.onboardingInitialPeriodStateService =
+        mock(com.etendoerp.go.onboarding.OnboardingInitialPeriodStateService.class);
     if (failAfterCommit) doThrow(new RuntimeException("post-commit scheduler failure"))
         .when(servlet.onboardingCostingScheduleService).activateSchedule("client-1");
     Currency currency = mock(Currency.class); when(currency.getId()).thenReturn("currency-1");

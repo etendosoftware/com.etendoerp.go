@@ -44,6 +44,8 @@ import org.openbravo.model.ad.ui.Tab;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
+import com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy;
 
 /**
  * Robustness / e2e-style coverage for the generic {@code /sws/neo/batch} endpoint
@@ -119,7 +121,9 @@ public class BatchServiceRobustnessTest {
 
     OBDal obDal = mock(OBDal.class);
     try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
-         MockedStatic<NeoServletSupport> support = mockStatic(NeoServletSupport.class)) {
+         MockedStatic<NeoServletSupport> support = mockStatic(NeoServletSupport.class);
+         MockedStatic<NeoAccessHelper> access = allowSpecAccess();
+         MockedStatic<NeoAccountingAccessPolicy> acct = allowAccountingEntities()) {
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
       stubEntityResolution(support, obDal);
       support.when(() -> NeoServletSupport.handleWithHooks(any(), any(NeoContext.class), any(), any()))
@@ -227,7 +231,9 @@ public class BatchServiceRobustnessTest {
 
     OBDal obDal = mock(OBDal.class);
     try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
-         MockedStatic<NeoServletSupport> support = mockStatic(NeoServletSupport.class)) {
+         MockedStatic<NeoServletSupport> support = mockStatic(NeoServletSupport.class);
+         MockedStatic<NeoAccessHelper> access = allowSpecAccess();
+         MockedStatic<NeoAccountingAccessPolicy> acct = allowAccountingEntities()) {
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
       stubEntityResolution(support, obDal);
       support.when(() -> NeoServletSupport.handleWithHooks(any(), any(NeoContext.class), any(), any()))
@@ -283,7 +289,9 @@ public class BatchServiceRobustnessTest {
     when(obDal.getSession()).thenReturn(before, afterCommit, afterCommit);
 
     try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
-         MockedStatic<NeoServletSupport> support = mockStatic(NeoServletSupport.class)) {
+         MockedStatic<NeoServletSupport> support = mockStatic(NeoServletSupport.class);
+         MockedStatic<NeoAccessHelper> access = allowSpecAccess();
+         MockedStatic<NeoAccountingAccessPolicy> acct = allowAccountingEntities()) {
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
       stubEntityResolution(support, obDal);
       support.when(() -> NeoServletSupport.handleWithHooks(any(), any(NeoContext.class), any(), any()))
@@ -348,7 +356,9 @@ public class BatchServiceRobustnessTest {
 
     OBDal obDal = mock(OBDal.class);
     try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
-         MockedStatic<NeoServletSupport> support = mockStatic(NeoServletSupport.class)) {
+         MockedStatic<NeoServletSupport> support = mockStatic(NeoServletSupport.class);
+         MockedStatic<NeoAccessHelper> access = allowSpecAccess();
+         MockedStatic<NeoAccountingAccessPolicy> acct = allowAccountingEntities()) {
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
       stubEntityResolution(support, obDal);
       support.when(() -> NeoServletSupport.handleWithHooks(any(), any(NeoContext.class), any(), any()))
@@ -371,6 +381,20 @@ public class BatchServiceRobustnessTest {
    * AD tab and a Java qualifier (so dispatch routes through
    * {@code handleWithHooks}, the mockable seam).
    */
+  /** ETP-5772: the batch's spec-access gate is not under test here; let it pass. */
+  private static MockedStatic<NeoAccessHelper> allowSpecAccess() {
+    MockedStatic<NeoAccessHelper> access = mockStatic(NeoAccessHelper.class);
+    access.when(() -> NeoAccessHelper.hasWindowAccessForSpec(any(), any())).thenReturn(true);
+    return access;
+  }
+
+  /** ETP-5648: the batch's accounting gate is not under test here; let it pass. */
+  private static MockedStatic<NeoAccountingAccessPolicy> allowAccountingEntities() {
+    MockedStatic<NeoAccountingAccessPolicy> acct = mockStatic(NeoAccountingAccessPolicy.class);
+    acct.when(() -> NeoAccountingAccessPolicy.isEntityNameAllowed(any(), any())).thenReturn(true);
+    return acct;
+  }
+
   private void stubEntityResolution(MockedStatic<NeoServletSupport> support, OBDal obDal) {
     SFSpec spec = mock(SFSpec.class);
     when(spec.getId()).thenReturn(SPEC_ID);

@@ -22,6 +22,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -43,6 +44,7 @@ import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.model.pricing.pricelist.PriceList;
 
 import com.etendoerp.go.schemaforge.handlers.DocumentPostingService;
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
 
 /**
  * NeoHandler for the Goods Receipt header entity.
@@ -77,6 +79,25 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
 
   @Inject
   private DocumentPostingService postingService;
+
+  /**
+   * The actions this header serves through its delegates, declared for agents (ETP-5709):
+   * {@code documentAction} (CO only, {@link InOutCompletionContract}), {@code createPurchaseInvoice},
+   * {@code createPurchaseReturn} ({@link CreatePurchaseReturnHandler#CONTRACT}, ETP-5711) and
+   * {@code cloneRecord}. Published by the MCP next to the AD
+   * buttons; REST and the SPA do not read it.
+   */
+  @Override
+  public Map<String, NeoActionContract> actionContracts() {
+    Map<String, NeoActionContract> contracts = new LinkedHashMap<>();
+    contracts.put(InOutCompletionContract.CONTRACT.getName(), InOutCompletionContract.CONTRACT);
+    contracts.put(CreatePurchaseInvoiceHandler.RECEIPT_CONTRACT.getName(),
+        CreatePurchaseInvoiceHandler.RECEIPT_CONTRACT);
+    contracts.put(CreatePurchaseReturnHandler.CONTRACT.getName(),
+        CreatePurchaseReturnHandler.CONTRACT);
+    contracts.put(NeoCloneRecordHandler.CONTRACT.getName(), NeoCloneRecordHandler.CONTRACT);
+    return contracts;
+  }
 
   /** Package-private seam so unit tests can inject a mocked {@link DocumentPostingService}. */
   void setPostingService(DocumentPostingService postingService) {
