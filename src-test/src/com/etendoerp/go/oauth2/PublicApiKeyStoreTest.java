@@ -109,6 +109,15 @@ class PublicApiKeyStoreTest {
   }
 
   @Test
+  void deleteTokensSqlOnlyTouchesTheTokensOfTheDeletedKey() {
+    String sql = PublicApiKeyStore.SQL_DELETE_TOKENS.toLowerCase();
+
+    assertTrue(sql.startsWith("delete from etgo_oauth2_token"));
+    assertTrue(sql.endsWith("where etgo_oauth2_client_id = ?"),
+        "an unfiltered delete would remove every key's tokens");
+  }
+
+  @Test
   void deleteRemovesTheTokensBySqlBeforeTheKey() throws Exception {
     OAuth2Client key = mock(OAuth2Client.class);
     when(key.getId()).thenReturn(KEY_ID);

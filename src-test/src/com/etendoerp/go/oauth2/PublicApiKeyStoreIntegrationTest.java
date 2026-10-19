@@ -55,6 +55,8 @@ import com.etendoerp.go.schemaforge.data.com.etendoerp.go.schemaforge.data.OAuth
  * {@code OAuth2Servlet.SQL_INSERT_TOKEN} and a real tenant organization. Everything runs in the
  * test's transaction and {@link #rollBack()} discards it: {@code OBBaseTest} would otherwise commit
  * a successful test.
+ *
+ * @covers com.etendoerp.go.oauth2.PublicApiKeyStore
  */
 public class PublicApiKeyStoreIntegrationTest extends OBBaseTest {
 

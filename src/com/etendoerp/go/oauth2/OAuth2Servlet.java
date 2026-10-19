@@ -184,9 +184,6 @@ public class OAuth2Servlet extends HttpBaseServlet {
   private static final String MESSAGE_API_KEY_NOT_FOUND = "API key not found";
   private static final String FIELD_CLIENT_SECRET = "clientSecret";
   private static final String FIELD_DELETED = "deleted";
-  private static final String FIELD_USER_ID = "userId";
-  private static final String FIELD_ROLE_ID = "roleId";
-  private static final String FIELD_ORG_ID = "orgId";
   private static final String FIELD_CAPABILITIES = "capabilities";
   private static final String FIELD_TOKENS_REVOKED = "tokensRevoked";
   private static final String FIELD_NAME = "name";
@@ -676,6 +673,8 @@ public class OAuth2Servlet extends HttpBaseServlet {
       writeError(response, e.statusCode, ERROR_ACCESS_DENIED, e.getMessage());
     } catch (SQLException | JSONException e) {
       log.error("Error deleting public API key", e);
+      // A write may already be flushed (rotate's new secret): do not let the request commit it.
+      OBDal.getInstance().rollbackAndClose();
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
           MESSAGE_INTERNAL_SERVER_ERROR);
     } finally {
@@ -705,6 +704,8 @@ public class OAuth2Servlet extends HttpBaseServlet {
       writeError(response, e.statusCode, ERROR_ACCESS_DENIED, e.getMessage());
     } catch (SQLException | JSONException e) {
       log.error("Error rotating public API key", e);
+      // A write may already be flushed (rotate's new secret): do not let the request commit it.
+      OBDal.getInstance().rollbackAndClose();
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
           MESSAGE_INTERNAL_SERVER_ERROR);
     } finally {
@@ -732,6 +733,8 @@ public class OAuth2Servlet extends HttpBaseServlet {
       writeError(response, e.statusCode, ERROR_ACCESS_DENIED, e.getMessage());
     } catch (SQLException | JSONException e) {
       log.error("Error revoking public API key tokens", e);
+      // A write may already be flushed (rotate's new secret): do not let the request commit it.
+      OBDal.getInstance().rollbackAndClose();
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
           MESSAGE_INTERNAL_SERVER_ERROR);
     } finally {
@@ -857,7 +860,8 @@ public class OAuth2Servlet extends HttpBaseServlet {
         continue;
       }
       otherActive++;
-      duplicate |= other.getName() != null && other.getName().trim().equalsIgnoreCase(name.trim());
+      // name is already normalized (trimmed) by PublicApiKeyPolicy.normalizeName.
+      duplicate |= other.getName() != null && other.getName().trim().equalsIgnoreCase(name);
     }
     if (checkLimit && otherActive >= PublicApiKeyPolicy.MAX_ACTIVE_KEYS_PER_OWNER) {
       return "The maximum number of active public API keys is "
@@ -1179,7 +1183,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
       result.put(FIELD_ID, id);
       result.put(FIELD_CLIENT_ID, existing.getString(FIELD_CLIENT_ID));
       result.put(FIELD_CLIENT_SECRET, plainSecret);
-      result.put("tokensRevoked", revokeTokens);
+      result.put(FIELD_TOKENS_REVOKED, revokeTokens);
 
       writeJsonResponse(response, HttpServletResponse.SC_OK, result);
       log.info("OAuth2 client secret regenerated: {}", id);
@@ -1227,7 +1231,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
       JSONObject result = new JSONObject();
       result.put("revoked", true);
       result.put(FIELD_CLIENT_ID, clientIdentifier.trim());
-      result.put("tokensRevoked", rowsUpdated);
+      result.put(FIELD_TOKENS_REVOKED, rowsUpdated);
 
       writeJsonResponse(response, HttpServletResponse.SC_OK, result);
       log.info("OAuth2 tokens revoked for client: {} ({} tokens)", clientIdentifier, rowsUpdated);

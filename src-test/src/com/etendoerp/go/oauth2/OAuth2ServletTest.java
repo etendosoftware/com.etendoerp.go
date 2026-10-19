@@ -26,6 +26,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
@@ -41,6 +42,7 @@ import java.security.MessageDigest;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -2536,6 +2538,31 @@ public class OAuth2ServletTest {
     assertCapabilities(new JSONObject(resp.body()), "public-api:read", "public-api:write");
   }
 
+  /** A failed store call must not let the request commit what was already flushed. */
+  @Test
+  public void rotateThatFailsToRevokeTokensRollsBackTheNewSecret() throws Exception {
+    ownedKey("key-1", "Production", READ_WRITE_SCOPES, true);
+    when(apiKeyStore.revokeTokens("key-1", KEY_USER_ID)).thenThrow(new SQLException("boom"));
+
+    assertServerErrorRollsBack(() -> callApiKeys("POST", "/api-keys/key-1/rotate", null));
+  }
+
+  @Test
+  public void revokeTokensThatFailsRollsBack() throws Exception {
+    ownedKey("key-1", "Production", READ_WRITE_SCOPES, true);
+    when(apiKeyStore.revokeTokens("key-1", KEY_USER_ID)).thenThrow(new SQLException("boom"));
+
+    assertServerErrorRollsBack(() -> callApiKeys("POST", "/api-keys/key-1/revoke-tokens", null));
+  }
+
+  @Test
+  public void deleteThatFailsRollsBack() throws Exception {
+    OAuth2Client key = ownedKey("key-1", "Production", READ_WRITE_SCOPES, true);
+    doThrow(new SQLException("boom")).when(apiKeyStore).delete(key);
+
+    assertServerErrorRollsBack(() -> callApiKeys("DELETE", "/api-keys/key-1", null));
+  }
+
   @Test
   public void rotateOfAKeyThatIsNotOwnedIsNotFound() throws Exception {
     ResponseCapture resp = callApiKeys("POST", "/api-keys/someone-else/rotate", null);
@@ -2825,6 +2852,23 @@ public class OAuth2ServletTest {
     doAnswer(inv -> state.put("name", inv.getArgument(0))).when(key).setName(anyString());
     doAnswer(inv -> state.put("active", inv.getArgument(0))).when(key).setActive(any());
     return key;
+  }
+
+  private interface ApiKeyCall {
+    ResponseCapture run() throws Exception;
+  }
+
+  private static void assertServerErrorRollsBack(ApiKeyCall call) throws Exception {
+    OBDal dal = mock(OBDal.class);
+    try (MockedStatic<OBDal> dalStatic = mockStatic(OBDal.class)) {
+      dalStatic.when(OBDal::getInstance).thenReturn(dal);
+
+      ResponseCapture resp = call.run();
+
+      assertEquals(500, resp.status);
+      assertEquals("server_error", new JSONObject(resp.body()).getString("error"));
+      verify(dal).rollbackAndClose();
+    }
   }
 
   private void assertBadRequest(ResponseCapture resp) throws Exception {
