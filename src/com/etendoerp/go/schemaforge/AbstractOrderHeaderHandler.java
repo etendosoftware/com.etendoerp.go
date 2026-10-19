@@ -27,6 +27,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -932,7 +933,8 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
           result.put(rs.getString(1),
-              new OrderQuantities(zeroIfNull(rs.getBigDecimal(2)), zeroIfNull(rs.getBigDecimal(3))));
+              new OrderQuantities(Objects.requireNonNullElse(rs.getBigDecimal(2), BigDecimal.ZERO),
+                  Objects.requireNonNullElse(rs.getBigDecimal(3), BigDecimal.ZERO)));
         }
       }
     }
@@ -1031,7 +1033,8 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
         while (rs.next()) {
           String orderId = rs.getString(1);
           if (DOC_STATUS_COMPLETED.equals(rs.getString(2))) {
-            completedTotals.put(orderId, zeroIfNull(rs.getBigDecimal(3)));
+            completedTotals.put(orderId,
+                Objects.requireNonNullElse(rs.getBigDecimal(3), BigDecimal.ZERO));
           } else {
             withDraft.add(orderId);
           }
@@ -1050,10 +1053,6 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
 
   private static String placeholders(List<String> ids) {
     return ids.stream().map(id -> "?").collect(Collectors.joining(","));
-  }
-
-  private static BigDecimal zeroIfNull(BigDecimal value) {
-    return value != null ? value : BigDecimal.ZERO;
   }
 
   /**
