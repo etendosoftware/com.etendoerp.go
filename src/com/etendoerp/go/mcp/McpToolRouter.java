@@ -404,10 +404,10 @@ public class McpToolRouter {
     NeoContext readCtx = McpHookExecutor.buildReadHookContext(specName, entityName, null, adTab,
         sfEntity, McpHookExecutor.buildReadProviderParams(filters, parentId, offset, limit, orderBy));
 
-    // Apply filters as where clause. ETP-5705: a customization that rewrites a value in
-    // afterHandle declares, via filterAliases, the property that holds the value it displays;
-    // a filter on the rewritten field is evaluated there, or it would match the raw value the
-    // caller is never shown. Every alias used is reported in the response (filterAliases).
+    // Apply filters as where clause. ETP-5705: when a customization rewrites a value after the
+    // read, it can declare a filter alias naming the property that holds the displayed value.
+    // A filter on that field is evaluated against the alias, or it would match the raw value
+    // the caller is never shown. Every alias used is reported back in the response.
     Map<String, String> appliedAliases = new LinkedHashMap<>();
     if (filters != null && filters.length() > 0) {
       String whereClause = McpQuerySupport.buildWhereFromFilters(filters, adTab, sfEntity,
