@@ -334,6 +334,18 @@ class NeoCrudHandlerTest {
   @DisplayName("handleWindowEntityCrud")
   class HandleWindowEntityCrud {
 
+    /**
+     * ETP-5785: a PUT/PATCH/DELETE first asks {@link NeoActionRecordGuard#writeRefusalFor} whether
+     * the target record may be written, and that guard fails closed (404) without a session. The
+     * routing tests below are about what happens once the write is allowed, so only that target
+     * check is stubbed to allow; the rest of {@link NeoWritePreflight} still runs for real.
+     */
+    private MockedStatic<NeoActionRecordGuard> allowWriteTarget() {
+      MockedStatic<NeoActionRecordGuard> guard = Mockito.mockStatic(NeoActionRecordGuard.class);
+      guard.when(() -> NeoActionRecordGuard.writeRefusalFor(any(), any())).thenReturn(null);
+      return guard;
+    }
+
     @ParameterizedTest
     @ValueSource(strings = { "POST", "PUT", "PATCH" })
     @DisplayName("ETP-5556: a read-only field no longer blocks the REST write from reaching a "
@@ -362,7 +374,8 @@ class NeoCrudHandlerTest {
       when(servlet.handleWithHooks(eq("orderHook"), any(), eq(request), eq(response)))
           .thenReturn(hookResponse);
 
-      try (MockedStatic<NeoFieldFilter> fieldFilters = Mockito.mockStatic(NeoFieldFilter.class)) {
+      try (MockedStatic<NeoFieldFilter> fieldFilters = Mockito.mockStatic(NeoFieldFilter.class);
+          MockedStatic<NeoActionRecordGuard> guard = allowWriteTarget()) {
         fieldFilters.when(() -> NeoFieldFilter.forEntity(entity, "Order")).thenReturn(filter);
 
         handler.handleWindowEntityCrud(spec, pathInfo, method, request, response);
@@ -454,7 +467,8 @@ class NeoCrudHandlerTest {
       when(servlet.extractQueryParams(any())).thenReturn(new HashMap<>());
       NeoFieldFilter filter = buildCreateExemptedFilter();
 
-      try (MockedStatic<NeoFieldFilter> fieldFilters = Mockito.mockStatic(NeoFieldFilter.class)) {
+      try (MockedStatic<NeoFieldFilter> fieldFilters = Mockito.mockStatic(NeoFieldFilter.class);
+          MockedStatic<NeoActionRecordGuard> guard = allowWriteTarget()) {
         fieldFilters.when(() -> NeoFieldFilter.forEntity(entity, "A_Asset")).thenReturn(filter);
 
         // POST: currency in the body is exempted (create-only) -> reaches dispatch.
@@ -475,6 +489,7 @@ class NeoCrudHandlerTest {
 
         verify(servlet).handleWithHooks(eq("assetsHandler"), any(), eq(putRequest), eq(response));
         verify(servlet, never()).writeResponse(eq(response), any());
+        guard.verify(() -> NeoActionRecordGuard.writeRefusalFor(entity, "REC-1"));
       }
     }
 
@@ -507,11 +522,14 @@ class NeoCrudHandlerTest {
           .thenReturn(hookResponse);
       NeoFieldFilter filter = buildLineFilter();
 
-      try (MockedStatic<NeoFieldFilter> fieldFilters = Mockito.mockStatic(NeoFieldFilter.class)) {
+      try (MockedStatic<NeoFieldFilter> fieldFilters = Mockito.mockStatic(NeoFieldFilter.class);
+          MockedStatic<NeoActionRecordGuard> guard = allowWriteTarget()) {
         fieldFilters.when(() -> NeoFieldFilter.forEntity(entity, "OrderLine")).thenReturn(filter);
 
         handler.handleWindowEntityCrud(spec,
             new NeoServlet.NeoPathInfo("testSpec", "lines", "LINE-1"), method, request, response);
+
+        guard.verify(() -> NeoActionRecordGuard.writeRefusalFor(entity, "LINE-1"));
       }
 
       verify(servlet).handleWithHooks(eq("linesHook"), any(), eq(request), eq(response));
@@ -625,7 +643,11 @@ class NeoCrudHandlerTest {
       when(request.getInputStream()).thenReturn(
           toServletInputStream("{\"qty\":5}"));
 
-      handler.handleWindowEntityCrud(spec, pathInfo, "PUT", request, response);
+      try (MockedStatic<NeoActionRecordGuard> guard = allowWriteTarget()) {
+        handler.handleWindowEntityCrud(spec, pathInfo, "PUT", request, response);
+
+        guard.verify(() -> NeoActionRecordGuard.writeRefusalFor(entity, "REC-1"));
+      }
 
       verify(servlet).writeResponse(eq(response), eq(hookResponse));
     }
@@ -654,7 +676,11 @@ class NeoCrudHandlerTest {
       when(request.getInputStream()).thenReturn(
           toServletInputStream("{\"status\":\"CO\"}"));
 
-      handler.handleWindowEntityCrud(spec, pathInfo, "PATCH", request, response);
+      try (MockedStatic<NeoActionRecordGuard> guard = allowWriteTarget()) {
+        handler.handleWindowEntityCrud(spec, pathInfo, "PATCH", request, response);
+
+        guard.verify(() -> NeoActionRecordGuard.writeRefusalFor(entity, "REC-1"));
+      }
 
       verify(servlet).writeResponse(eq(response), eq(hookResponse));
     }
