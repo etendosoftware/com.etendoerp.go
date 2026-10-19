@@ -73,12 +73,12 @@ public class ReturnToVendorShipmentLineHandler implements NeoHandler {
     String method = context.getHttpMethod();
     if (("PUT".equals(method) || "PATCH".equals(method))
         && context.getRequestBody() != null) {
-      applyStoredSignAndStripProduct(context.getRequestBody(), method);
+      applyStoredSignAndStripProduct(context.getRequestBody());
     }
     return null;
   }
 
-  private void applyStoredSignAndStripProduct(JSONObject body, String method) {
+  private void applyStoredSignAndStripProduct(JSONObject body) {
     if (body.has(FIELD_MOVEMENT_QUANTITY)) {
       ReturnLineQuantityPolicy.applyStoredSignToWriteBody(body, log);
       // Keeps the product of an existing RTV line immutable: a return line mirrors its source

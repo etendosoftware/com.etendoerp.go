@@ -38,7 +38,6 @@ import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.enterprise.DocumentType;
-import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
 
@@ -94,8 +93,9 @@ public class ReturnToVendorShipmentHeaderHandler extends AbstractReturnDocumentH
       + "rest is defaulted — etendo_schema view:\"create\" is the authority on what it needs); "
       + "availableReceipts -> availableReceiptLines -> importReceiptLines on the new header (it "
       + "may take lines from several receipts of the same vendor); confirm it with the DocAction "
-      + "button (docAction CO); then rectifiableInvoices -> createReturnInvoice to refund it with "
-      + "a rectificative invoice. To return from ONE receipt without this flow, call "
+      + "button (docAction CO) — this does NOT create the factura rectificativa; then, as a "
+      + "SEPARATE step, rectifiableInvoices -> createReturnInvoice to refund it with the factura "
+      + "rectificativa. To return from ONE receipt without this flow, call "
       + "createPurchaseReturn on that goods receipt: it creates the draft return with its lines "
       + "linked in one step.";
 
@@ -158,15 +158,24 @@ public class ReturnToVendorShipmentHeaderHandler extends AbstractReturnDocumentH
         .withIdDescription("The id of the completed return shipment."));
     contracts.put(ACTION_CREATE_RETURN_INVOICE, NeoActionContract.write(
         ACTION_CREATE_RETURN_INVOICE,
-        "Creates the rectificative purchase invoice of a completed return shipment, links it to "
-            + "the invoices it rectifies and confirms it. Refused when the shipment is not "
-            + "completed; check hasReturnInvoice in rectifiableInvoices first, as the UI does. "
-            + "Step 6." + FLOW,
+        "Creates the factura rectificativa (corrective purchase invoice, API rectificative) of a "
+            + "completed return shipment, links it to the invoices it rectifies and confirms it: "
+            + "the invoice is left COMPLETED. Confirming the return does NOT do this; it is this "
+            + "separate call. Refused with 400 when the shipment is not completed. A second call "
+            + "is NOT refused and creates a second factura rectificativa, so check "
+            + "hasReturnInvoice (in rectifiableInvoices) or returnInvoices (on the return header) "
+            + "first; the answer lists, in previousReturnInvoices, the ones the return already "
+            + "had before this call. Refused with 422 returnInvoiceWithoutAmount, creating "
+            + "nothing, when a product has no price to refund. Returns {id, documentNo, "
+            + "documentStatus, documentType, isSalesTransaction, grandTotalAmount, totalLines, "
+            + "linkedReturnId, returnDocumentNo, rectifiedInvoices:[{id, documentNo}], "
+            + "previousReturnInvoices:[{id, documentNo, documentStatus}]}; the amounts are "
+            + "negative, it refunds. Step 6." + FLOW,
         NeoActionContract.Param.array("originInvoices", NeoActionContract.TYPE_STRING, false,
             "Ids of the invoices it rectifies, from rectifiableInvoices. Default: the invoice "
                 + "auto-detected from the returned receipt lines; refused when none is found."))
         .withIdDescription("The id of the completed return shipment."));
-    contracts.put(InOutCompletionContract.CONTRACT.getName(), InOutCompletionContract.CONTRACT);
+    contracts.put(ReturnCompletionContract.CONTRACT.getName(), ReturnCompletionContract.CONTRACT);
     return Collections.unmodifiableMap(contracts);
   }
 
@@ -424,18 +433,11 @@ public class ReturnToVendorShipmentHeaderHandler extends AbstractReturnDocumentH
               "No rectificative invoice document type found for this organization");
         }
 
-        // ETP-5381: resolve WHICH invoices are being rectified before creating anything. Without
-        // the C_Invoice_Reverse link the rectificative invoice cannot be confirmed, so failing
-        // here leaves no stuck draft behind.
-        List<String> rectifiedIds = ReturnShipmentUtils.resolveRectifiedInvoiceIds(
-            context.getRequestBody(), returnId);
-
-        Invoice sourceInvoice = ReturnShipmentUtils.findSourceInvoice(lines);
-        Invoice invoice = ReturnShipmentUtils.buildReturnInvoiceHeader(returnDoc, docType, sourceInvoice, false);
-        OBDal.getInstance().save(invoice);
-        OBDal.getInstance().flush();
-        return ReturnShipmentUtils.finalizeReturnInvoice(invoice, lines, createDraftInvoiceHandler,
-            rectifiedIds, context.getObContext());
+        // ETP-5381 / ETP-5712: which invoices are rectified, the rectificativas the return already
+        // had, the zero-amount refusal, then create, link and confirm — in that order, see the
+        // shared body.
+        return ReturnInvoiceSupport.createReturnInvoice(returnDoc, returnId, lines, docType, false,
+            context, createDraftInvoiceHandler);
 
       } finally {
         OBContext.restorePreviousMode();

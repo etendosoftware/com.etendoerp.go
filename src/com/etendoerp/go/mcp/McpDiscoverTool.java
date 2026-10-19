@@ -32,6 +32,7 @@ import org.openbravo.dal.service.OBDal;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy;
 
 /**
  * The {@code etendo_discover} tool handler and its spec selection (IMP-53), split out of
@@ -74,8 +75,15 @@ final class McpDiscoverTool {
       // ETP-4254: load the included entities ONCE per W spec — the entity summary, the
       // caller-derived primaryEntity (IMP-9/ETP-4601) and the spec-level readOnly marker are
       // all derived from this same list, so none of them costs an extra query.
+      // ETP-5648: only the entities this role may see; a spec left with none (all accounting)
+      // is not advertised at all.
       List<SFEntity> includedEntities = "W".equals(specType)
           ? McpToolRouterSupport.listIncludedEntities(spec.getId()) : null;
+      List<SFEntity> visibleEntities = NeoAccountingAccessPolicy.visibleEntities(includedEntities);
+      if (includedEntities != null && !includedEntities.isEmpty() && visibleEntities.isEmpty()) {
+        continue;
+      }
+      includedEntities = visibleEntities;
       JSONArray entities = "W".equals(specType)
           ? McpToolRouterSupport.buildEntitySummaryArray(includedEntities) : null;
       // IMP-9: derived here (not inside buildDiscoverSpec) so that method stays DAL-free —

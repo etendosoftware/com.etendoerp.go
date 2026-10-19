@@ -155,6 +155,9 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
       return invoiceGuard;
     }
     NeoHandlerUtils.mirrorAccountingDateOnCreate(context, "invoiceDate", "accountingDate");
+    // ETP-5703: server-side defaults for a write that leaves them out (an agent; the SPA sends both).
+    injectPartnerAddressIfMissing(context);
+    currencyRateDefaults.capture(context);
     captureOriginInvoice(context);
     NeoResponse siiAuthError = captureAndValidateSiiAuthorization(context);
     if (siiAuthError != null) {
@@ -223,6 +226,8 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
    */
   @Override
   public NeoResponse afterHandle(NeoContext context) {
+    // ETP-5703: before the rate-document sync, which is a no-op while the rate is null.
+    currencyRateDefaults.apply(context);
     autoCreateOrUpdateConversionRateDocument(context);
     // POST/PUT/PATCH: persist origin invoice relationship after the record is saved.
     // Mirrors PurchaseInvoiceHeaderHandler#afterHandle (ETP-4737) — the manual

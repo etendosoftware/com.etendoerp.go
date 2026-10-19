@@ -62,6 +62,7 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
  * and protected-field semantics.</p>
  *
  * @covers com.etendoerp.go.schemaforge.NeoDefaultsCascadeHelper
+ * @covers com.etendoerp.go.schemaforge.NeoCalloutDiscardMemory
  */
 public class NeoDefaultsCascadeHelperTest {
 
@@ -1158,6 +1159,345 @@ public class NeoDefaultsCascadeHelperTest {
       assertNotNull(result);
       assertTrue("Messages should be merged", result.hasResults());
     }
+  }
+
+  // ===================================================================
+  // ETP-5676 — per-batch callout-discard memory
+  // ===================================================================
+
+  /** One create of a batch: organization triggers a callout that proposes {@code output}. */
+  private static void runBatchCreate(NeoCalloutDiscardMemory memory, String output,
+      boolean outputSentByCaller) throws Exception {
+    JSONObject defaults = new JSONObject();
+    defaults.put("organization", "ORG1");
+    Set<String> protectedFields = new HashSet<>();
+    protectedFields.add("organization");
+    if (outputSentByCaller) {
+      defaults.put(output, "SENT");
+      protectedFields.add(output);
+    }
+    NeoDefaultsCascadeHelper.executeCalloutCascade(mock(NeoContext.class),
+        mockTabWithTable("100"), defaults, new HashSet<>(), protectedFields,
+        Collections.<String>emptySet(), memory);
+  }
+
+  private static void stubOrganizationCallout(MockedStatic<NeoCalloutService> calloutMock,
+      MockedStatic<ModelProvider> providerMock, String output) throws Exception {
+    calloutMock.when(() -> NeoCalloutService.resolveCallout(any(), eq("organization")))
+        .thenReturn(new NeoCalloutService.CalloutInfo("com.example.Callout", "inpadOrgId",
+            "Organization"));
+    calloutMock.when(() -> NeoCalloutService.executeCallout(any(), any()))
+        .thenReturn(NeoResponse.ok(calloutBodyWith(output, "DERIVED", null)));
+    ModelProvider mockProvider = mock(ModelProvider.class);
+    providerMock.when(ModelProvider::getInstance).thenReturn(mockProvider);
+    when(mockProvider.getEntityByTableId(anyString())).thenReturn(null);
+  }
+
+  /**
+   * The premise of the skip: a callout whose only output the caller already sent changed nothing
+   * the first time, so the next operation of the same batch with the same key does not run it.
+   */
+  @Test
+  public void testBatchSkipsCalloutWhoseOutputsWereAllDiscarded() throws Exception {
+    try (MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
+         MockedStatic<ModelProvider> providerMock = mockStatic(ModelProvider.class)) {
+      stubOrganizationCallout(calloutMock, providerMock, "currency");
+      NeoCalloutDiscardMemory memory = new NeoCalloutDiscardMemory();
+
+      runBatchCreate(memory, "currency", true);
+      runBatchCreate(memory, "currency", true);
+      runBatchCreate(memory, "currency", true);
+
+      calloutMock.verify(() -> NeoCalloutService.executeCallout(any(), any()),
+          org.mockito.Mockito.times(1));
+    }
+  }
+
+  /** A callout that wrote something the first time is never skipped. */
+  @Test
+  public void testBatchKeepsRunningCalloutWithAKeptOutput() throws Exception {
+    try (MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
+         MockedStatic<ModelProvider> providerMock = mockStatic(ModelProvider.class)) {
+      stubOrganizationCallout(calloutMock, providerMock, "currency");
+      NeoCalloutDiscardMemory memory = new NeoCalloutDiscardMemory();
+
+      runBatchCreate(memory, "currency", false);
+      runBatchCreate(memory, "currency", false);
+
+      calloutMock.verify(() -> NeoCalloutService.executeCallout(any(), any()),
+          org.mockito.Mockito.times(2));
+    }
+  }
+
+  /** One create of a batch on tab {@code tabId}; answers the body after the cascade. */
+  private static JSONObject runBatchCreate(NeoCalloutDiscardMemory memory, String tabId,
+      JSONObject defaults, Set<String> protectedFields, Set<String> suppressedFields) {
+    Tab adTab = mockTabWithTable("100");
+    when(adTab.getId()).thenReturn(tabId);
+    NeoDefaultsCascadeHelper.executeCalloutCascade(mock(NeoContext.class), adTab, defaults,
+        new HashSet<>(), protectedFields, suppressedFields, memory);
+    return defaults;
+  }
+
+  /** A body the caller sent: every key is protected, as the create path snapshots it. */
+  private static JSONObject sentBody(String... keyValues) throws Exception {
+    JSONObject body = new JSONObject();
+    for (int i = 0; i < keyValues.length; i += 2) {
+      body.put(keyValues[i], keyValues[i + 1]);
+    }
+    return body;
+  }
+
+  private static Set<String> keysOf(JSONObject body) {
+    Set<String> keys = new HashSet<>();
+    java.util.Iterator<String> it = body.keys();
+    while (it.hasNext()) {
+      keys.add(it.next());
+    }
+    return keys;
+  }
+
+  private static void verifyCalloutRuns(MockedStatic<NeoCalloutService> calloutMock, int times) {
+    calloutMock.verify(() -> NeoCalloutService.executeCallout(any(), any()),
+        org.mockito.Mockito.times(times));
+  }
+
+  /** A callout answer whose only value is discarded but that carries a message. */
+  private static NeoResponse calloutWithMessage() throws Exception {
+    JSONObject body = calloutBodyWith("currency", "DERIVED", null);
+    body.put("messages", new JSONArray().put(new JSONObject().put("text", "warn")));
+    return NeoResponse.ok(body);
+  }
+
+  private static NeoResponse calloutWithError() throws Exception {
+    JSONObject body = calloutBodyWith("currency", "DERIVED", null);
+    body.put("error", "boom");
+    return NeoResponse.ok(body);
+  }
+
+  /**
+   * A callout that reports something is never skipped, even when every value it returned was
+   * discarded: the message or error is the output, and skipping would hide it from the rest of
+   * the batch. A non-200 answer records nothing, so it is never learned as skippable either.
+   */
+  @Test
+  public void testBatchNeverSkipsACalloutThatReportsOrFails() throws Exception {
+    NeoResponse[] answers = { calloutWithMessage(), calloutWithError(),
+        NeoResponse.error(500, "callout crashed") };
+    for (NeoResponse answer : answers) {
+      try (MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
+           MockedStatic<ModelProvider> providerMock = mockStatic(ModelProvider.class)) {
+        stubOrganizationCallout(calloutMock, providerMock, "currency");
+        calloutMock.when(() -> NeoCalloutService.executeCallout(any(), any())).thenReturn(answer);
+        NeoCalloutDiscardMemory memory = new NeoCalloutDiscardMemory();
+
+        for (int i = 0; i < 3; i++) {
+          JSONObject body = sentBody("organization", "ORG1", "currency", "SENT");
+          runBatchCreate(memory, "TAB", body, keysOf(body), Collections.<String>emptySet());
+        }
+
+        verifyCalloutRuns(calloutMock, 3);
+      }
+    }
+  }
+
+  /**
+   * The first outcome of a key decides it. A key first seen applying an output stays "run" even
+   * when a later invocation under the same key only returns kept fields.
+   */
+  @Test
+  public void testBatchKeyFirstSeenApplyingAnOutputIsNeverLearnedAsSkippable() throws Exception {
+    try (MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
+         MockedStatic<ModelProvider> providerMock = mockStatic(ModelProvider.class)) {
+      stubOrganizationCallout(calloutMock, providerMock, "currency");
+      calloutMock.when(() -> NeoCalloutService.executeCallout(any(), any())).thenReturn(
+          NeoResponse.ok(calloutBodyWith("currency", "DERIVED", null)),
+          NeoResponse.ok(calloutBodyWith("organization", "ORG1", null)));
+      NeoCalloutDiscardMemory memory = new NeoCalloutDiscardMemory();
+      Set<String> protectedFields = Set.of("organization");
+
+      JSONObject first = runBatchCreate(memory, "TAB", sentBody("organization", "ORG1"),
+          protectedFields, Collections.<String>emptySet());
+      assertEquals("the first row really took the callout's value", "DERIVED",
+          first.getString("currency"));
+      for (int i = 0; i < 3; i++) {
+        runBatchCreate(memory, "TAB", sentBody("organization", "ORG1"), protectedFields,
+            Collections.<String>emptySet());
+      }
+
+      verifyCalloutRuns(calloutMock, 4);
+    }
+  }
+
+  /**
+   * A row that leaves a protected output blank has a different key — the field is no longer kept
+   * — so the callout runs for it and its value lands, even after the batch learned to skip the
+   * callout for rows that did send it.
+   */
+  @Test
+  public void testBatchRunsTheCalloutForARowWithABlankProtectedField() throws Exception {
+    try (MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
+         MockedStatic<ModelProvider> providerMock = mockStatic(ModelProvider.class)) {
+      stubOrganizationCallout(calloutMock, providerMock, "currency");
+      NeoCalloutDiscardMemory memory = new NeoCalloutDiscardMemory();
+
+      JSONObject sent = sentBody("organization", "ORG1", "currency", "SENT");
+      runBatchCreate(memory, "TAB", sent, keysOf(sent), Collections.<String>emptySet());
+      JSONObject sentAgain = sentBody("organization", "ORG1", "currency", "SENT");
+      runBatchCreate(memory, "TAB", sentAgain, keysOf(sentAgain), Collections.<String>emptySet());
+      verifyCalloutRuns(calloutMock, 1);
+
+      JSONObject blank = sentBody("organization", "ORG1", "currency", "");
+      runBatchCreate(memory, "TAB", blank, keysOf(blank), Collections.<String>emptySet());
+
+      verifyCalloutRuns(calloutMock, 2);
+      assertEquals("SENT", sentAgain.getString("currency"));
+      assertEquals("the blank row gets the derived value", "DERIVED", blank.getString("currency"));
+    }
+  }
+
+  /**
+   * The trigger's value is part of the key: rows of another organisation (a multi-org import)
+   * run the callout again instead of reusing the first organisation's verdict. So does the same
+   * trigger on another tab.
+   */
+  @Test
+  public void testBatchKeysByTriggerValueAndTab() throws Exception {
+    try (MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
+         MockedStatic<ModelProvider> providerMock = mockStatic(ModelProvider.class)) {
+      stubOrganizationCallout(calloutMock, providerMock, "currency");
+      NeoCalloutDiscardMemory memory = new NeoCalloutDiscardMemory();
+
+      for (String[] row : new String[][] { { "TAB", "ORG1" }, { "TAB", "ORG1" },
+          { "TAB", "ORG2" }, { "TAB", "ORG2" }, { "OTHER_TAB", "ORG1" } }) {
+        JSONObject body = sentBody("organization", row[1], "currency", "SENT");
+        runBatchCreate(memory, row[0], body, keysOf(body), Collections.<String>emptySet());
+      }
+
+      verifyCalloutRuns(calloutMock, 3);
+    }
+  }
+
+  /**
+   * ETP-5350 still holds with the memory on: the suppressed {@code username} (ContactHandler) is
+   * never populated, on the row that runs the callout or on the rows that then skip it.
+   */
+  @Test
+  public void testBatchSkipKeepsASuppressedFieldUnpopulated() throws Exception {
+    try (MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
+         MockedStatic<ModelProvider> providerMock = mockStatic(ModelProvider.class)) {
+      stubUsernameDerivingCallout(calloutMock, providerMock);
+      NeoCalloutDiscardMemory memory = new NeoCalloutDiscardMemory();
+      Set<String> suppressed = Set.of("username");
+
+      for (int i = 0; i < 3; i++) {
+        JSONObject body = runBatchCreate(memory, "CONTACT_TAB", sentBody("firstName", "Juan"),
+            new HashSet<>(), suppressed);
+        assertFalse("row " + i + " must not get a username", body.has("username"));
+      }
+
+      verifyCalloutRuns(calloutMock, 1);
+    }
+  }
+
+  /**
+   * <b>The accepted assumption</b>, pinned so a change to it is deliberate: a callout's set of
+   * output fields is assumed not to depend on body fields outside the key. A conditional callout
+   * that, for the same key, would also derive {@code priceList} because another field
+   * ({@code isSOTrx}) changed, is skipped after the first row and that row gets no
+   * {@code priceList}. Documented on {@link NeoCalloutDiscardMemory}; confined to a batch.
+   */
+  @Test
+  public void testBatchAssumesTheOutputSetDoesNotDependOnFieldsOutsideTheKey() throws Exception {
+    try (MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
+         MockedStatic<ModelProvider> providerMock = mockStatic(ModelProvider.class)) {
+      stubOrganizationCallout(calloutMock, providerMock, "currency");
+      JSONObject conditional = calloutBodyWith("currency", "DERIVED", null);
+      conditional.getJSONObject("updates").put("priceList", new JSONObject().put("value", "PL"));
+      calloutMock.when(() -> NeoCalloutService.executeCallout(any(), any())).thenReturn(
+          NeoResponse.ok(calloutBodyWith("currency", "DERIVED", null)),
+          NeoResponse.ok(conditional));
+      NeoCalloutDiscardMemory memory = new NeoCalloutDiscardMemory();
+      Set<String> protectedFields = Set.of("organization", "currency");
+
+      runBatchCreate(memory, "TAB",
+          sentBody("organization", "ORG1", "currency", "SENT", "isSOTrx", "Y"),
+          protectedFields, Collections.<String>emptySet());
+      JSONObject second = runBatchCreate(memory, "TAB",
+          sentBody("organization", "ORG1", "currency", "SENT", "isSOTrx", "N"),
+          protectedFields, Collections.<String>emptySet());
+
+      verifyCalloutRuns(calloutMock, 1);
+      assertFalse(second.has("priceList"));
+    }
+  }
+
+  /** Without a memory (every caller outside a batch) every callout runs, as it always has. */
+  @Test
+  public void testCascadeWithoutMemoryRunsEveryCallout() throws Exception {
+    try (MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
+         MockedStatic<ModelProvider> providerMock = mockStatic(ModelProvider.class)) {
+      stubOrganizationCallout(calloutMock, providerMock, "currency");
+
+      for (int i = 0; i < 3; i++) {
+        JSONObject body = sentBody("organization", "ORG1", "currency", "SENT");
+        NeoDefaultsCascadeHelper.executeCalloutCascade(mock(NeoContext.class),
+            mockTabWithTable("100"), body, new HashSet<>(), keysOf(body),
+            Collections.<String>emptySet());
+      }
+
+      verifyCalloutRuns(calloutMock, 3);
+    }
+  }
+
+  /** A combo selection is an output too: a selection on an unkept field means "run". */
+  @Test
+  public void testBatchTreatsAComboSelectionAsAnOutput() throws Exception {
+    try (MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
+         MockedStatic<ModelProvider> providerMock = mockStatic(ModelProvider.class)) {
+      stubOrganizationCallout(calloutMock, providerMock, "currency");
+      JSONObject body = calloutBodyWith("currency", "DERIVED", null);
+      body.put("combos", new JSONObject().put("warehouse",
+          new JSONObject().put("selected", "WH1")));
+      calloutMock.when(() -> NeoCalloutService.executeCallout(any(), any()))
+          .thenReturn(NeoResponse.ok(body));
+      NeoCalloutDiscardMemory memory = new NeoCalloutDiscardMemory();
+
+      for (int i = 0; i < 2; i++) {
+        JSONObject sent = sentBody("organization", "ORG1", "currency", "SENT");
+        JSONObject after = runBatchCreate(memory, "TAB", sent, keysOf(sent),
+            Collections.<String>emptySet());
+        assertEquals("WH1", after.getString("warehouse"));
+      }
+
+      verifyCalloutRuns(calloutMock, 2);
+    }
+  }
+
+  @Test
+  public void testDiscardMemoryKeyIgnoresTheOrderOfTheKeptFields() {
+    Set<String> ab = new java.util.LinkedHashSet<>(Arrays.asList("a", "b"));
+    Set<String> ba = new java.util.LinkedHashSet<>(Arrays.asList("b", "a"));
+    assertEquals(NeoCalloutDiscardMemory.keyFor("T", "f", "v", ab),
+        NeoCalloutDiscardMemory.keyFor("T", "f", "v", ba));
+    assertFalse(NeoCalloutDiscardMemory.keyFor("T", "f", "v", ab)
+        .equals(NeoCalloutDiscardMemory.keyFor("T", "f", "v", Set.of("a"))));
+  }
+
+  @Test
+  public void testDiscardMemoryOnlySkipsAKeyLearnedAsFullyDiscarded() {
+    NeoCalloutDiscardMemory memory = new NeoCalloutDiscardMemory();
+    assertFalse("an unseen key runs", memory.shouldSkip("k"));
+
+    memory.recordOutcome("k", Set.of("a"), Set.of("a", "b"), false);
+    memory.recordOutcome("k", Set.of("c"), Set.of("a"), false);
+    assertTrue("the first outcome decides", memory.shouldSkip("k"));
+
+    memory.recordOutcome("reported", Set.of("a"), Set.of("a"), true);
+    assertFalse(memory.shouldSkip("reported"));
+
+    memory.recordOutcome("kept", Set.of("a", "c"), Set.of("a"), false);
+    assertFalse(memory.shouldSkip("kept"));
   }
 
   // ===================================================================

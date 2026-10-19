@@ -17,6 +17,7 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -142,6 +143,21 @@ class NeoExchangeRateService {
       return null;
     }
     return inverseRate != 0 ? 1.0 / inverseRate : 0;
+  }
+
+  /**
+   * {@link #rate(String, String, java.time.LocalDate, String)} as a {@link BigDecimal}, the DAL type
+   * of the {@code EM_ETGO_Currency_Rate} columns it is written to (ETP-5703: the invoice header
+   * defaults its rate from it when a write leaves the rate out, as the SPA's currency picker does
+   * from {@code currencyOptions}, which applies the same direct-then-inverse lookup).
+   *
+   * @return the rate, or {@code null} when there is none
+   * @throws java.sql.SQLException if the lookup fails
+   */
+  static BigDecimal rateAsDecimal(String fromCurrencyId, String toCurrencyId,
+      java.time.LocalDate date, String orgId) throws java.sql.SQLException {
+    Double rate = rate(fromCurrencyId, toCurrencyId, date, orgId);
+    return rate != null ? BigDecimal.valueOf(rate) : null;
   }
 
   /**

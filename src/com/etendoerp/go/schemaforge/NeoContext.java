@@ -61,6 +61,13 @@ public class NeoContext {
    */
   private final boolean mcpOrigin;
   /**
+   * ETP-5676 — {@code true} when the caller will read nothing but the record id from this write's
+   * response (a batch sent with {@code _onlyReturnIds}). Lets the write path and the entity's
+   * customization skip work that only decorates the echoed record — field filtering, identifier
+   * enrichment, display flags. The response still carries the full record core returned.
+   */
+  private final boolean idsOnlyResponse;
+  /**
    * ETP-5194 — per-request state a customization hands from its {@code handle()} pre-hook to its
    * own {@code afterHandle()} post-hook. Every channel (REST single, REST batch, MCP) passes the
    * same {@code NeoContext} instance to both phases, while a handler instance may be shared
@@ -83,6 +90,17 @@ public class NeoContext {
     this.endpointType = builder.endpointType;
     this.fieldName = builder.fieldName;
     this.mcpOrigin = builder.mcpOrigin;
+    this.idsOnlyResponse = builder.idsOnlyResponse;
+  }
+
+  /**
+   * Whether the caller reads only the record id from this write's response. See
+   * {@link #idsOnlyResponse}.
+   *
+   * @return {@code true} when response decoration may be skipped
+   */
+  public boolean isIdsOnlyResponse() {
+    return idsOnlyResponse;
   }
 
   /**
@@ -249,6 +267,18 @@ public class NeoContext {
     private NeoEndpointType endpointType;
     private String fieldName;
     private boolean mcpOrigin;
+    private boolean idsOnlyResponse;
+
+    /**
+     * Marks the response as read for its record id only (ETP-5676). Defaults to {@code false}.
+     *
+     * @param idsOnlyResponse {@code true} when the caller reads nothing but the id
+     * @return this builder
+     */
+    public Builder idsOnlyResponse(boolean idsOnlyResponse) {
+      this.idsOnlyResponse = idsOnlyResponse;
+      return this;
+    }
 
     /**
      * Marks this context as MCP-originated and returns this builder. Defaults to {@code false},

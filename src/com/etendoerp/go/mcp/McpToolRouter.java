@@ -1388,9 +1388,13 @@ public class McpToolRouter {
       Set<String> serverResolved = new HashSet<>(
           McpSchemaResponseHints.serverDefaultedNames(specName, entityName, adTab, sfEntity));
       serverResolved.addAll(McpServerResolvedFields.forCreate(sfEntity));
-      return wrapAsTextContent(McpSchemaCreateView
+      JSONObject createView = McpSchemaCreateView
           .buildResponse(specName, entityName, fieldsArray, serverResolved, isChildEntity,
-              entityAgentPrompt));
+              entityAgentPrompt);
+      // ETP-5676: the request options the entity's customization accepts on create, e.g. the
+      // product's _skipPricesSeed. Absent for every entity that declares none.
+      McpServerResolvedFields.addCreateDirectives(createView, sfEntity);
+      return wrapAsTextContent(createView);
     }
     // IMP-44: everything below is the full dump, and reaching it now requires having asked for
     // it. Omitting `view` used to land here — 39.5 kB on sales-order/header against 5.4 kB for
@@ -1551,8 +1555,12 @@ public class McpToolRouter {
       // the first point where a $ref is resolved and a parentRef's parent exists; running them
       // over the whole array beforehand made every parent-dependent injection abstain in silence.
       // See BatchService#executeBatch(JSONArray, OperationPreprocessor).
+      // ETP-5676: both optional, default false — the response is ids-only either way; the options
+      // only let each write skip decorating its echo and skip callouts proven redundant.
       JSONObject result = BatchService.forBatchOnly()
-          .executeBatch(operations, this::preprocessBatchOperation);
+          .executeBatch(operations, this::preprocessBatchOperation,
+              args.optBoolean(BatchService.PARAM_ONLY_RETURN_IDS, false),
+              args.optBoolean(BatchService.PARAM_SKIP_REDUNDANT_CALLOUTS, false));
       if (!result.optBoolean("committed", false)) {
         // IMP-15: rewrite the failure in place into the IMP-5 envelope, so an agent gets a stable
         // error code instead of the raw DAL sub-response BatchService forwards to REST callers.
