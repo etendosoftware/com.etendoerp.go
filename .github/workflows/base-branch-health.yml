@@ -1,7 +1,7 @@
 name: Base Branch Health Check
 
-# Blocks merging a PR when the TARGET branch (main, develop) is already
-# failing at its latest commit. The team must fix the base branch (direct
+# Blocks merging a PR into main when main is already failing at its latest
+# commit. The team must fix the base branch (direct
 # commit) first; once its checks are green, re-run this check on the PR
 # ("Re-run jobs") to unblock the merge.
 #
@@ -10,7 +10,12 @@ name: Base Branch Health Check
 #   - Commit statuses → Jenkins (posted via build-update-github.sh)
 #
 # To actually block merges, add "Base branch is green" to the required status
-# checks in the branch protection rules of main/develop branches.
+# checks of main.
+#
+# Not on develop (ETP-5695): tasks merge into develop one by one, so its latest
+# commit nearly always has its own checks still running (the full unit suite,
+# Jenkins), and a daily cut whose branch points at develop's tip paints it with
+# the cut's pipeline. Each PR into develop is checked by its own mini pipeline.
 
 on:
   pull_request:
@@ -19,7 +24,6 @@ on:
     types: [opened, reopened, synchronize, labeled]
     branches:
       - main
-      - develop
 
 permissions:
   contents: read
