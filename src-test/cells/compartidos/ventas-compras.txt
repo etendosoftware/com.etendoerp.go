@@ -1,0 +1,55 @@
+# Grupo compartido: ventas-compras (lo incluyen las células ventas y compras)
+# Lógica común a Ventas y Compras: cabeceras/líneas de factura y pedido genéricas, follow-up, albaranes (InOut), descuentos.
+# Una clase de test por línea (nombre completo). Las *IntegrationTest / *DbTest son de integración;
+# el resto, con mocks. Se ejecuta con -Pcell=ventas o -Pcell=compras.
+
+# --- con mocks (40)
+com.etendoerp.go.schemaforge.AbstractInvoiceHeaderHandlerTest
+com.etendoerp.go.schemaforge.AbstractLegacyInvoiceActionHandlerTest
+com.etendoerp.go.schemaforge.AbstractOrderHeaderHandlerTest
+com.etendoerp.go.schemaforge.CloneInvoiceLinePriceHookTest
+com.etendoerp.go.schemaforge.CloneOrderLinePriceHookTest
+com.etendoerp.go.schemaforge.CompletedInvoiceWriteFenceTest
+com.etendoerp.go.schemaforge.CreateDraftInvoiceHandlerLegacyMethodsTest
+com.etendoerp.go.schemaforge.CreateDraftInvoiceHandlerTest
+com.etendoerp.go.schemaforge.DiscountLineFilterTest
+com.etendoerp.go.schemaforge.FollowUpActionHandlerTest
+com.etendoerp.go.schemaforge.FollowUpDocumentServiceTest
+com.etendoerp.go.schemaforge.FollowUpInputsTest
+com.etendoerp.go.schemaforge.FollowUpSupportTest
+com.etendoerp.go.schemaforge.InOutFollowUpCreatorTest
+com.etendoerp.go.schemaforge.InOutLineFromOrderFactoryTest
+com.etendoerp.go.schemaforge.InOutTargetBuilderTest
+com.etendoerp.go.schemaforge.InOutWarehouseResolverTest
+com.etendoerp.go.schemaforge.InvoiceCalloutHelperTest
+com.etendoerp.go.schemaforge.InvoiceCompletionLineGuardTest
+com.etendoerp.go.schemaforge.InvoiceCompletionRateHookTest
+com.etendoerp.go.schemaforge.InvoiceCompletionServiceTest
+com.etendoerp.go.schemaforge.InvoiceExchangeRateHandlerTest
+com.etendoerp.go.schemaforge.InvoiceFromOrderSupportTest
+com.etendoerp.go.schemaforge.InvoiceInOutMappingTest
+com.etendoerp.go.schemaforge.InvoiceLineAmountSupportTest
+com.etendoerp.go.schemaforge.InvoiceLineHandlerTest
+com.etendoerp.go.schemaforge.InvoiceLineLinkerTest
+com.etendoerp.go.schemaforge.InvoicePendingResolverTest
+com.etendoerp.go.schemaforge.InvoiceReactivationGuardTest
+com.etendoerp.go.schemaforge.LineAmountSupportTest
+com.etendoerp.go.schemaforge.MultiDocumentInvoiceSupportTest
+com.etendoerp.go.schemaforge.NeoCloneRecordHandlerTest
+com.etendoerp.go.schemaforge.NeoInvoiceSupportTest
+com.etendoerp.go.schemaforge.OrderDocActionSupportTest
+com.etendoerp.go.schemaforge.OrderLineDiscountSupportTest
+com.etendoerp.go.schemaforge.OrderLineHandlerTest
+com.etendoerp.go.schemaforge.OrderPendingDocsAnnotationTest
+com.etendoerp.go.schemaforge.ReturnLineQuantityPolicyTest
+com.etendoerp.go.schemaforge.TotalDiscountServiceTest
+com.etendoerp.go.schemaforge.util.DocumentStatusGuardTest
+
+# --- integración (BD) (6)
+com.etendoerp.go.schemaforge.AbstractInvoiceHeaderHandlerOriginInvoiceIntegrationTest
+com.etendoerp.go.schemaforge.CreateDraftInvoiceHandlerNegativeQuantityIntegrationTest
+com.etendoerp.go.schemaforge.CreateDraftInvoiceHandlerPriceListRequiredIntegrationTest
+com.etendoerp.go.schemaforge.InOutInvoiceLinksPartialReceiptIntegrationTest
+com.etendoerp.go.schemaforge.NeoCloneRecordHandlerInvoiceLinksIntegrationTest
+com.etendoerp.go.schemaforge.ReturnLineQuantitySignIntegrationTest
+

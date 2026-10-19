@@ -29,9 +29,13 @@ import static org.mockito.Mockito.when;
 
 import java.io.IOException;
 import java.net.URI;
+import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Properties;
 
@@ -42,8 +46,13 @@ import org.junit.Before;
 import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.openbravo.base.session.OBPropertiesProvider;
+import org.openbravo.dal.core.OBContext;
+import org.openbravo.model.ad.system.Client;
 
 import com.etendoerp.go.common.PublicUrlResolver;
+import com.etendoerp.go.payment.DemoTrialNotice;
+import com.etendoerp.go.payment.DemoTrialNoticeRecord;
+import com.etendoerp.go.payment.DemoTrialNoticeSource;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.email.contracts.CoreEmailContractProvider;
 import com.etendoerp.go.schemaforge.email.contracts.GoodsShipmentSendEmailContract;
@@ -62,6 +71,7 @@ import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
  * @covers com.etendoerp.go.schemaforge.email.TransactionalEmailService
  * @covers com.etendoerp.go.schemaforge.email.DefaultDocumentSendEmailContract
  * @covers com.etendoerp.go.schemaforge.email.contracts.CompanyInvitationEmailContract
+ * @covers com.etendoerp.go.schemaforge.email.contracts.DemoTrialNoticeEmailContract
  */
 public class InitialEmailContractsTest {
 
@@ -109,6 +119,7 @@ public class InitialEmailContractsTest {
     assertTrue(registry.find("sales-invoice-send").isPresent());
     assertTrue(registry.find("sales-order-send").isPresent());
     assertTrue(registry.find("sales-quotation-send").isPresent());
+    assertTrue(registry.find("demo-trial-notice").isPresent());
     assertFalse(registry.find("custom").isPresent());
     assertFalse(registry.find("support-custom-email").isPresent());
   }
@@ -315,6 +326,139 @@ public class InitialEmailContractsTest {
         adapter.getLastRequest().getData().getString("subject"));
     assertTrue(adapter.getLastRequest().getData().getString("body")
         .contains("Haz clic en el siguiente botón para acceder a tu panel"));
+  }
+
+  // ── ETP-5453: demo trial notices ────────────────────────────────────────────
+
+  @Test
+  public void demoTrialReminderGoesToTheOwnerWithTheEndDateDaysLeftAndUpgradeLink()
+      throws Exception {
+    System.setProperty(PublicUrlResolver.APP_BASE_URL_PROPERTY, "https://app.example.test");
+    FakeProviderAdapter adapter = new FakeProviderAdapter();
+    InMemoryEmailSafetyStore safetyStore = new InMemoryEmailSafetyStore();
+    TransactionalEmailService service = service(adapter, safetyStore);
+
+    asSystem(() -> assertSent(service.send("demo-trial-notice",
+        demoTrialCommand("demo-3-days"))));
+
+    EmailProviderRequest request = adapter.getLastRequest();
+    String body = request.getData().getString("body");
+    assertEquals("custom", request.getTemplate());
+    assertEquals("account@example.com", request.getRecipient());
+    assertEquals("https://app.example.test/upgrade", request.getData().getString("link"));
+    assertEquals("Tu período de prueba de Acme Demo termina en 3 días",
+        request.getData().getString("subject"));
+    assertTrue(body.contains("<strong>Acme Demo</strong> termina el 29/10/2026"));
+    assertTrue(body.contains("te quedan 3 días"));
+    assertTrue(body.contains("tus datos se conservan"));
+    assertTrue(body.contains("https://app.example.test/upgrade"));
+    assertEquals("demo-trial-notice:demo-3-days:demo-3-days:"
+            + FixtureDemoTrialNoticeSource.TRIAL_STARTED_AT + ":reminder-3:v1",
+        safetyStore.getAuditRecords().get(0).getIdempotencyKey());
+  }
+
+  @Test
+  public void demoTrialReminderUsesTheEnvironmentLanguageAndTheSingularForOneDay()
+      throws Exception {
+    System.setProperty(PublicUrlResolver.APP_BASE_URL_PROPERTY, "https://app.example.test");
+    FakeProviderAdapter adapter = new FakeProviderAdapter();
+    TransactionalEmailService service = service(adapter);
+
+    asSystem(() -> assertSent(service.send("demo-trial-notice",
+        demoTrialCommand("demo-1-day"))));
+
+    EmailProviderRequest request = adapter.getLastRequest();
+    assertEquals("en_US", request.getData().getString("language"));
+    assertEquals("Your trial period of Acme Demo ends in 1 day",
+        request.getData().getString("subject"));
+    assertTrue(request.getData().getString("body").contains("ends on 10/29/2026"));
+    assertTrue(request.getData().getString("body").contains("you have 1 day left"));
+  }
+
+  @Test
+  public void demoTrialExpiredNoticeFallsBackToSpanishWhenTheEnvironmentHasNoLanguage()
+      throws Exception {
+    System.setProperty(PublicUrlResolver.APP_BASE_URL_PROPERTY, "https://app.example.test");
+    FakeProviderAdapter adapter = new FakeProviderAdapter();
+    TransactionalEmailService service = service(adapter);
+
+    asSystem(() -> assertSent(service.send("demo-trial-notice",
+        demoTrialCommand("demo-expired"))));
+
+    EmailProviderRequest request = adapter.getLastRequest();
+    assertFalse(request.getData().has("language"));
+    assertEquals("Tu período de prueba de Acme Demo terminó",
+        request.getData().getString("subject"));
+    assertTrue(request.getData().getString("body").contains("terminó el 29/10/2026"));
+    assertTrue(request.getData().getString("body").contains("Actualizar mi plan"));
+  }
+
+  @Test
+  public void demoTrialNoticeEscapesTheEnvironmentNameInTheBody() throws Exception {
+    System.setProperty(PublicUrlResolver.APP_BASE_URL_PROPERTY, "https://app.example.test");
+    FakeProviderAdapter adapter = new FakeProviderAdapter();
+    TransactionalEmailService service = service(adapter);
+
+    asSystem(() -> assertSent(service.send("demo-trial-notice",
+        demoTrialCommand("demo-markup-name"))));
+
+    String body = adapter.getLastRequest().getData().getString("body");
+    assertTrue(body.contains("<strong>&lt;b&gt;Acme&lt;/b&gt;</strong>"));
+    assertFalse(body.contains("<b>Acme</b>"));
+  }
+
+  @Test
+  public void demoTrialNoticeIsSentOncePerTrialAndMilestoneAndAgainForARestartedTrial()
+      throws Exception {
+    System.setProperty(PublicUrlResolver.APP_BASE_URL_PROPERTY, "https://app.example.test");
+    FakeProviderAdapter adapter = new FakeProviderAdapter();
+    FixtureDemoTrialNoticeSource source = new FixtureDemoTrialNoticeSource();
+    TransactionalEmailService service = new TransactionalEmailService(
+        DefaultEmailContractRegistry.create(fixtureProviders(source)), adapter,
+        new InMemoryEmailSafetyStore());
+
+    asSystem(() -> {
+      assertSent(service.send("demo-trial-notice", demoTrialCommand("demo-3-days")));
+      // A re-run of the job, or a restart, finds the same notice owed: nothing goes out.
+      NeoResponse rerun = service.send("demo-trial-notice", demoTrialCommand("demo-3-days"));
+      assertEquals(TransactionalEmailService.STATUS_DUPLICATE,
+          responseData(rerun).getString("status"));
+      assertEquals(1, adapter.getSendCount());
+
+      // The trial was extended with a new start: the same milestone is owed again.
+      Instant restartedAt = Instant.parse("2026-10-20T12:00:00Z");
+      source.owe("demo-3-days", "Acme Demo", "es_ES", DemoTrialNotice.reminder(3, 3,
+          restartedAt, restartedAt.plusSeconds(14 * 24 * 3600L)));
+      assertSent(service.send("demo-trial-notice", demoTrialCommand("demo-3-days")));
+      assertEquals(2, adapter.getSendCount());
+    });
+  }
+
+  @Test
+  public void demoTrialNoticeRejectsAnEnvironmentThatOwesNothing() throws Exception {
+    System.setProperty(PublicUrlResolver.APP_BASE_URL_PROPERTY, "https://app.example.test");
+    FakeProviderAdapter adapter = new FakeProviderAdapter();
+    TransactionalEmailService service = service(adapter);
+
+    asSystem(() -> {
+      NeoResponse response = service.send("demo-trial-notice",
+          demoTrialCommand("productive-client"));
+      assertEquals(409, response.getHttpStatus());
+    });
+    assertEquals(0, adapter.getSendCount());
+  }
+
+  @Test
+  public void demoTrialNoticeIsRefusedToANonSystemCaller() throws Exception {
+    // The /sws/neo/email-contracts endpoint runs as the calling tenant user, never as System.
+    System.setProperty(PublicUrlResolver.APP_BASE_URL_PROPERTY, "https://app.example.test");
+    FakeProviderAdapter adapter = new FakeProviderAdapter();
+    TransactionalEmailService service = service(adapter);
+
+    NeoResponse response = service.send("demo-trial-notice", demoTrialCommand("demo-3-days"));
+
+    assertEquals(403, response.getHttpStatus());
+    assertEquals(0, adapter.getSendCount());
   }
 
   @Test
@@ -967,9 +1111,37 @@ public class InitialEmailContractsTest {
   }
 
   private static List<EmailContractProvider> fixtureProviders() {
+    return fixtureProviders(new FixtureDemoTrialNoticeSource());
+  }
+
+  private static List<EmailContractProvider> fixtureProviders(
+      DemoTrialNoticeSource demoTrialNoticeSource) {
     FixtureDataResolver dataResolver = new FixtureDataResolver();
-    return Arrays.asList(new CoreEmailContractProvider(dataResolver),
+    return Arrays.asList(new CoreEmailContractProvider(dataResolver, demoTrialNoticeSource),
         new FixtureSalesDocumentEmailContractProvider());
+  }
+
+  /**
+   * Runs as the System client, which is what the scheduled job runs as and the only caller the
+   * demo trial notice contract accepts.
+   */
+  private static void asSystem(ThrowingRunnable runnable) throws Exception {
+    Client system = mock(Client.class);
+    when(system.getId()).thenReturn("0");
+    OBContext context = mock(OBContext.class);
+    when(context.getCurrentClient()).thenReturn(system);
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class)) {
+      obContext.when(OBContext::getOBContext).thenReturn(context);
+      runnable.run();
+    }
+  }
+
+  private static JSONObject demoTrialCommand(String clientId) throws JSONException {
+    JSONObject command = new JSONObject();
+    command.put(EmailContractCommandSupport.FIELD_VERSION, EmailContractCommandSupport.VERSION);
+    command.put(EmailContractCommandSupport.FIELD_CLIENT_ID, clientId);
+    command.put(EmailContractCommandSupport.FIELD_TENANT_ID, clientId);
+    return command;
   }
 
   private static JSONObject baseCommand() throws JSONException {
@@ -1085,6 +1257,44 @@ public class InitialEmailContractsTest {
       return Optional.empty();
     }
 
+  }
+
+  /**
+   * Demo trial notices owed by fixture environments. The trial of every fixture ends on
+   * {@link #TRIAL_ENDS_AT}, a midday instant so the formatted date is the same in any server
+   * timezone.
+   */
+  private static final class FixtureDemoTrialNoticeSource implements DemoTrialNoticeSource {
+    static final Instant TRIAL_STARTED_AT = Instant.parse("2026-10-15T12:00:00Z");
+    static final Instant TRIAL_ENDS_AT = Instant.parse("2026-10-29T12:00:00Z");
+
+    private final Map<String, DemoTrialNoticeRecord> owed = new HashMap<>();
+
+    FixtureDemoTrialNoticeSource() {
+      owe("demo-3-days", "Acme Demo", "es_ES",
+          DemoTrialNotice.reminder(3, 3, TRIAL_STARTED_AT, TRIAL_ENDS_AT));
+      owe("demo-1-day", "Acme Demo", "en_US",
+          DemoTrialNotice.reminder(1, 1, TRIAL_STARTED_AT, TRIAL_ENDS_AT));
+      owe("demo-expired", "Acme Demo", null,
+          DemoTrialNotice.expired(TRIAL_STARTED_AT, TRIAL_ENDS_AT));
+      owe("demo-markup-name", "<b>Acme</b>", "es_ES",
+          DemoTrialNotice.reminder(3, 3, TRIAL_STARTED_AT, TRIAL_ENDS_AT));
+    }
+
+    void owe(String clientId, String environmentName, String language, DemoTrialNotice notice) {
+      owed.put(clientId, new DemoTrialNoticeRecord(clientId, environmentName, language, "Lucas",
+          "account@example.com", notice));
+    }
+
+    @Override
+    public List<String> findCandidateClientIds() {
+      return new ArrayList<>(owed.keySet());
+    }
+
+    @Override
+    public Optional<DemoTrialNoticeRecord> findOwedNotice(String clientId, Instant now) {
+      return Optional.ofNullable(owed.get(clientId));
+    }
   }
 
   private static final class FixtureSalesDocumentEmailContractProvider

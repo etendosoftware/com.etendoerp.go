@@ -195,6 +195,13 @@ public class ToolRegistryTest {
     assertNotNull(itemProps.get("entity"));
     assertNotNull(itemProps.get("parentRef"));
     assertNotNull(itemProps.get("body"));
+
+    // ETP-5676: the same option the REST body takes, optional (not in 'required').
+    Map<String, Object> onlyReturnIds =
+        (Map<String, Object>) props.get(com.etendoerp.go.schemaforge.BatchService.PARAM_ONLY_RETURN_IDS);
+    assertNotNull("etendo_batch must publish _onlyReturnIds", onlyReturnIds);
+    assertEquals("boolean", onlyReturnIds.get("type"));
+    assertTrue(String.valueOf(onlyReturnIds.get("description")).contains("default false"));
   }
 
   // ── IMP-41: targets enum on the vector-search tool ─────────────────────

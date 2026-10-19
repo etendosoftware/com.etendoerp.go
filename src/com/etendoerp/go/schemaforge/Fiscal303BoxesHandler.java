@@ -144,6 +144,16 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
         response.getWriter().write(result.toString());
       } else if (GENERATE.equals(entityName)) {
         guardNotAlreadySubmitted(orgId, year, period);
+        // ETP-5725 (reopened QA fix) — "Generar fichero 303" produces the literal AEAT
+        // submission artifact, not a preview, so it must be gated by the same
+        // corrective/ordinaria consistency rule as "Guardar"/"Registrar/Presentar"
+        // (FiscalDeclCorrectiveConsistencySupport#checkCorrectiveConsistency). The frontend's own identChecks
+        // state is what this request describes (generate303File never flushes a save first),
+        // forwarded as the dedicated, unambiguous `Rectificativa=Y` param — unlike
+        // `IsComplementary`, which this same request also sets for the UNRELATED legacy
+        // "complementaria" checkbox and so cannot be trusted to mean "rectificativa" here.
+        boolean effectivelyCorrective = "Y".equalsIgnoreCase(request.getParameter("Rectificativa"));
+        guardCorrectiveConsistency(orgId, year, period, "303", effectivelyCorrective);
         String tipo = request.getParameter("tipo");
         submissionSupport.handleGenerate(orgId, year, period, tipo, request, response);
       } else if (SUBMIT.equals(entityName)) {
