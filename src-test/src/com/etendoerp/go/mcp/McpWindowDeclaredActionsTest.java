@@ -443,6 +443,35 @@ class McpWindowDeclaredActionsTest {
       assertTrue(env.toString().contains(key), env.toString());
     }
 
+    /**
+     * ETP-5712: an agent that lists a return header's actions must learn from {@code documentAction}
+     * that confirming does NOT create the factura rectificativa and that createReturnInvoice does;
+     * the goods receipt / goods shipment completion text (the shared contract) must not change.
+     */
+    @Test
+    @DisplayName("the return headers' documentAction points at createReturnInvoice; the goods"
+        + " receipt/shipment one does not")
+    void returnDocumentActionPointsAtCreateReturnInvoice() throws Exception {
+      for (Map<String, NeoActionContract> declared : List.of(
+          new ReturnToVendorShipmentHeaderHandler().actionContracts(),
+          new ReturnMaterialReceiptHeaderHandler().actionContracts())) {
+        String text = declared.get("documentAction").getDescription();
+        assertTrue(text.contains("does NOT create the factura rectificativa"), text);
+        assertTrue(text.contains("createReturnInvoice"), text);
+        assertTrue(text.contains("rectifiableInvoices"), text);
+        assertNull(NeoActionContract.validate(declared, "documentAction",
+            new JSONObject().put("docAction", "CO")));
+        assertEquals(422, NeoActionContract.validate(declared, "documentAction",
+            new JSONObject().put("docAction", "VO")).getHttpStatus());
+      }
+      for (Map<String, NeoActionContract> declared : List.of(
+          new GoodsReceiptHeaderHandler().actionContracts(),
+          new GoodsShipmentHeaderHandler().actionContracts())) {
+        assertFalse(declared.get("documentAction").getDescription().contains("createReturnInvoice"));
+        assertFalse(declared.get("documentAction").getDescription().contains("rectificativa"));
+      }
+    }
+
     @Test
     @DisplayName("an AD button is not judged here: no contract, no refusal")
     void adButtonPasses() throws Exception {

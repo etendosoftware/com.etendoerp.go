@@ -156,7 +156,7 @@ public class ReturnLineQuantitySignIntegrationTest extends WeldBaseTest {
   /**
    * The invoice option must be irrelevant to the stock math. Builds a minimal, real, persisted
    * {@link Invoice}/{@link InvoiceLine} linked to the source shipment line via {@code
-   * goodsShipmentLine} (the same FK {@link ReturnShipmentUtils#findSourceInvoice} reads) BEFORE
+   * goodsShipmentLine} (the same FK {@link ReturnInvoiceSupport#findSourceInvoice} reads) BEFORE
    * the return exists, then asserts the return posts identically to scenario 1.
    *
    * <p>Deliberately does NOT go through the full {@code createReturnInvoice} action (needs
@@ -486,7 +486,7 @@ public class ReturnLineQuantitySignIntegrationTest extends WeldBaseTest {
 
   /**
    * Minimal, real, persisted {@link InvoiceLine} linked to {@code sourceLine} via {@code
-   * goodsShipmentLine} — the same FK {@link ReturnShipmentUtils#findSourceInvoice} reads.
+   * goodsShipmentLine} — the same FK {@link ReturnInvoiceSupport#findSourceInvoice} reads.
    * Deliberately does NOT go through {@code CreateDraftInvoiceHandler#createShipmentInvoiceLine}
    * (a CDI-injected dependency this plain-{@code new} test double avoids); it only satisfies the
    * DB's own NOT NULL columns (see {@code c_invoiceline}'s schema) plus the FK this scenario
