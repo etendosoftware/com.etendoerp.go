@@ -501,6 +501,36 @@ public class SalesQuotationHeaderHandlerTest {
     verify(process).convertQuotationIntoSalesOrder(false, "q-001");
   }
 
+  /** ETP-5710: an MCP etendo_action call reaches the handler under the button's field name. */
+  @Test
+  public void testHandle_convertQuotationByFieldName_preservesQuotationPrices() throws Exception {
+    ConvertQuotationIntoOrder process = mock(ConvertQuotationIntoOrder.class);
+    Order order = mock(Order.class);
+    when(order.getId()).thenReturn("order-001");
+    when(order.getDocumentNo()).thenReturn("SO-001");
+    when(process.convertQuotationIntoSalesOrder(eq(false), eq("q-001"))).thenReturn(order);
+
+    SalesQuotationHeaderHandler handler = fullyWiredHandler(
+        mock(TotalDiscountService.class),
+        mock(NeoCloneRecordHandler.class),
+        mock(CurrencyOptionsHandler.class),
+        mock(CreateDraftInvoiceHandler.class),
+        mock(RejectQuotationHandler.class),
+        mock(CreateRejectReasonHandler.class));
+    setField(handler, "convertQuotationProcess", process);
+
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+        .fieldName("convertquotation").recordId("q-001").build();
+
+    NeoResponse result = handler.handle(ctx);
+
+    // Non-null proves handle() short-circuited the default button handler.
+    assertNotNull(result);
+    // recalculatePrices=false is the critical invariant — quotation prices must be kept.
+    verify(process).convertQuotationIntoSalesOrder(false, "q-001");
+  }
+
   // ── ETP-5528: the converted order is reactivated to Draft ─────────────────
 
   /**
@@ -1164,5 +1194,80 @@ public class SalesQuotationHeaderHandlerTest {
     NeoContext ctx = NeoContext.builder()
         .httpMethod("GET").endpointType(NeoEndpointType.CRUD).recordId(QUOTATION_ID).build();
     assertNull(new SalesQuotationHeaderHandler().handle(ctx));
+  }
+
+  /**
+   * ETP-5703: the point-4 QA case came from quotations (ETP-5535). A batch create with only
+   * {@code businessPartner}, for a partner with a single location, gets partnerAddress and
+   * invoiceAddress from it — the same pre-hook default as the sales order.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void handleCreateWithSingleLocationFillsPartnerAndInvoiceAddress() throws Exception {
+    try (org.mockito.MockedStatic<org.openbravo.dal.service.OBDal> obDal =
+        org.mockito.Mockito.mockStatic(org.openbravo.dal.service.OBDal.class)) {
+      org.openbravo.dal.service.OBDal dal =
+          org.mockito.Mockito.mock(org.openbravo.dal.service.OBDal.class);
+      obDal.when(org.openbravo.dal.service.OBDal::getInstance).thenReturn(dal);
+      org.openbravo.model.common.businesspartner.Location only =
+          org.mockito.Mockito.mock(org.openbravo.model.common.businesspartner.Location.class);
+      org.mockito.Mockito.when(only.getId()).thenReturn("loc-1");
+      org.openbravo.dal.service.OBCriteria<org.openbravo.model.common.businesspartner.Location>
+          criteria = org.mockito.Mockito.mock(org.openbravo.dal.service.OBCriteria.class);
+      org.mockito.Mockito.when(
+          dal.createCriteria(org.openbravo.model.common.businesspartner.Location.class))
+          .thenReturn(criteria);
+      org.mockito.Mockito.when(criteria.add(org.mockito.ArgumentMatchers.any()))
+          .thenReturn(criteria);
+      java.util.List<org.openbravo.model.common.businesspartner.Location> locations =
+          java.util.Collections.singletonList(only);
+      org.mockito.Mockito.when(criteria.list()).thenReturn(locations);
+      JSONObject body = new JSONObject().put("businessPartner", "bp-1");
+      NeoContext ctx = NeoContext.builder().httpMethod("POST")
+          .endpointType(NeoEndpointType.CRUD).requestBody(body).build();
+
+      org.junit.Assert.assertNull(new SalesQuotationHeaderHandler().handle(ctx));
+
+      org.junit.Assert.assertEquals("loc-1", body.getString("partnerAddress"));
+      org.junit.Assert.assertEquals("loc-1", body.getString("invoiceAddress"));
+    }
+  }
+
+  // ── declared action contracts (ETP-5709) ──────────────────────────────────
+
+  /** createDraftInvoice is published next to the reject actions, which stay declared. */
+  @Test
+  public void actionContracts_declaresInvoiceAndKeepsRejectActions() {
+    Map<String, com.etendoerp.go.schemaforge.util.NeoActionContract> contracts =
+        new SalesQuotationHeaderHandler().actionContracts();
+
+    assertEquals(List.of("createDraftInvoice", "rejectQuotation", "createRejectReason"),
+        List.copyOf(contracts.keySet()));
+    com.etendoerp.go.schemaforge.util.NeoActionContract invoice = contracts.get("createDraftInvoice");
+    assertSame(CreateDraftInvoiceHandler.QUOTATION_CONTRACT, invoice);
+    assertTrue("a quotation is invoiced in full: no parameters", invoice.getParams().isEmpty());
+    String description = invoice.getDescription();
+    assertTrue("must warn the invoice is completed despite the name",
+        description.contains("COMPLETES") && description.contains("despite the name"));
+    assertTrue("must name the status the quotation ends in", description.contains("ETGO_CI"));
+    assertTrue("must name the required status", description.contains("UE"));
+  }
+
+  /** The body the SPA posts ({}) and a valid partial body pass; an unknown key is a 422. */
+  @Test
+  public void actionContracts_acceptTheSpaBodyAndRejectUnknownKeys() throws Exception {
+    Map<String, com.etendoerp.go.schemaforge.util.NeoActionContract> contracts =
+        new SalesQuotationHeaderHandler().actionContracts();
+
+    assertNull(com.etendoerp.go.schemaforge.util.NeoActionContract.validate(contracts,
+        "createDraftInvoice", new JSONObject()));
+    assertEquals(com.etendoerp.go.schemaforge.util.NeoActionContract.SC_UNPROCESSABLE,
+        com.etendoerp.go.schemaforge.util.NeoActionContract.validate(contracts,
+            "createDraftInvoice", new JSONObject().put("lines",
+                new JSONArray().put(new JSONObject().put("orderLineId", "L1").put("quantity", "2"))))
+            .getHttpStatus());
+    assertEquals(com.etendoerp.go.schemaforge.util.NeoActionContract.SC_UNPROCESSABLE,
+        com.etendoerp.go.schemaforge.util.NeoActionContract.validate(contracts,
+            "createDraftInvoice", new JSONObject().put("priceListId", "P1")).getHttpStatus());
   }
 }

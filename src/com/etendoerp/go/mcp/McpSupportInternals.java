@@ -111,7 +111,7 @@ final class McpSupportInternals {
    */
   static List<String> includedEntityNames(String specId) {
     List<String> names = new ArrayList<>();
-    for (SFEntity entity : McpToolRouterSupport.listIncludedEntities(specId)) {
+    for (SFEntity entity : McpToolRouterSupport.listVisibleEntities(specId)) {
       names.add(entity.getName());
     }
     return names;

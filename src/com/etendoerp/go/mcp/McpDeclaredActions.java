@@ -181,6 +181,41 @@ final class McpDeclaredActions {
   }
 
   /**
+   * The name a customization sees an AD button under (ETP-5710): the field name
+   * {@code etendo_schema} publishes (the DAL property name), whichever spelling the agent typed.
+   *
+   * <p>{@code etendo_schema} advertises a button under its DB column name ({@code action}) and the
+   * REST action route reaches the customization under the name in its URL — for the document-action
+   * button the SPA posts the field name. A customization discriminates on that name, so a call
+   * typed by column name used to skip it: the header handler never saw a completion, and the
+   * total-discount lines and the line-amount guard were bypassed. Resolving the button the way
+   * {@link NeoButtonActionHelper#findButtonColumn} does and answering its property name makes both
+   * spellings reach the customization alike. Structure only: it names no entity.</p>
+   *
+   * <p>Only the name the customization is dispatched under changes. {@code MCP_CONFIG} and the
+   * declared-contract precedence are judged on the typed name before this runs
+   * ({@link #precheck}), and the button is still fired under the typed name.</p>
+   *
+   * @param entity the SchemaForge entity
+   * @param action the action as typed
+   * @return the button's property name, or {@code action} itself when it names no button the
+   *         entity fires
+   */
+  static String customizationNameOf(SFEntity entity, String action) {
+    if (entity == null || action == null) {
+      return action;
+    }
+    try {
+      Column fired = NeoButtonActionHelper.findButtonColumn(entity.getId(), action);
+      String property = fired == null ? null : propertyNameOf(fired);
+      return property == null ? action : property;
+    } catch (RuntimeException e) {
+      log.debug("Button lookup failed for {} on {}: {}", action, entity.getName(), e.getMessage());
+      return action;
+    }
+  }
+
+  /**
    * Refuses the call when {@code name} — one spelling of the requested action — is excluded by
    * the customization, hidden or redirected by {@code MCP_CONFIG.actions}, or given a value the
    * configuration does not allow.

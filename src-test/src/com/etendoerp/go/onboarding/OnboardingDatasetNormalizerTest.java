@@ -48,6 +48,8 @@ import org.openbravo.model.ad.system.Language;
 
 /**
  * Test class for {@link OnboardingDatasetNormalizer}.
+ *
+ * @covers com.etendoerp.go.onboarding.OnboardingDatasetNormalizer
  */
 public class OnboardingDatasetNormalizerTest {
 
@@ -88,7 +90,7 @@ public class OnboardingDatasetNormalizerTest {
   /** Verifies that normalized onboarding XML emits document types together with their dependencies. */
   @Test
   public void testNormalizerIncludesDocumentTypesWithDependencies() {
-    String xml = pathBackedNormalizer().buildDatasetXml();
+    String xml = pathBackedDatasetXml();
 
     assertTrue(xml.contains("<cDoctype"));
     assertTrue(xml.contains("<adSequence"));
@@ -105,7 +107,7 @@ public class OnboardingDatasetNormalizerTest {
   /** Verifies that normalized onboarding XML emits payment term rows from GOClient. */
   @Test
   public void testNormalizerIncludesPaymentTerms() {
-    String xml = pathBackedNormalizer().buildDatasetXml();
+    String xml = pathBackedDatasetXml();
 
     assertTrue(xml.contains("<cPaymentterm"));
     assertTrue(xml.contains("30 Días"));
@@ -120,7 +122,7 @@ public class OnboardingDatasetNormalizerTest {
   /** Verifies that normalized onboarding XML seeds the default transaction types from GOClient. */
   @Test
   public void testNormalizerIncludesDefaultTransactionTypes() {
-    String xml = pathBackedNormalizer().buildDatasetXml();
+    String xml = pathBackedDatasetXml();
 
     assertTrue(xml.contains("<etgoTransactionType"));
     assertTrue(xml.contains("Comisión"));
@@ -139,7 +141,7 @@ public class OnboardingDatasetNormalizerTest {
   /** Verifies that normalized onboarding XML does not import business partner entity rows. */
   @Test
   public void testNormalizerExcludesBusinessPartnersFromDatasetXml() {
-    String xml = pathBackedNormalizer().buildDatasetXml();
+    String xml = pathBackedDatasetXml();
 
     assertFalse(xml.contains("<cBpartner>"));
     assertFalse(xml.contains("<cBpartnerLocation>"));
@@ -158,7 +160,7 @@ public class OnboardingDatasetNormalizerTest {
    */
   @Test
   public void testNormalizerLocatorsDefaultToAvailableInventoryStatus() {
-    String xml = pathBackedNormalizer().buildDatasetXml();
+    String xml = pathBackedDatasetXml();
 
     assertTrue(xml.contains("<mLocator"));
     assertTrue(xml.contains("<mInventorystatusId>2</mInventorystatusId>"));
@@ -179,7 +181,7 @@ public class OnboardingDatasetNormalizerTest {
 
   @Test
   public void testNormalizerUsesOpenbravoRootElement() {
-    String xml = pathBackedNormalizer().buildDatasetXml();
+    String xml = pathBackedDatasetXml();
 
     assertTrue(xml.contains("<Openbravo"));
     assertFalse(xml.contains("<data>"));
@@ -188,7 +190,7 @@ public class OnboardingDatasetNormalizerTest {
   /** Verifies that bootstrap records are removed from the generated onboarding dataset. */
   @Test
   public void testNormalizerRemovesBootstrapTablesFromDatasetXml() {
-    String xml = pathBackedNormalizer().buildDatasetXml();
+    String xml = pathBackedDatasetXml();
 
     assertFalse(xml.contains("<AD_CLIENT>"));
     assertFalse(xml.contains("<AD_ORG>"));
@@ -208,7 +210,7 @@ public class OnboardingDatasetNormalizerTest {
   /** Verifies that the remaining onboarding dataset still keeps shared setup content after removing BP rows. */
   @Test
   public void testNormalizerKeepsSharedSetupContent() {
-    String xml = pathBackedNormalizer().buildDatasetXml();
+    String xml = pathBackedDatasetXml();
 
     // ETP-5079 keeps the four sample products and the three template financial accounts in the
     // SOURCE dataset (GOClient demos with them at install time) and drops them from the NORMALIZED
@@ -243,7 +245,7 @@ public class OnboardingDatasetNormalizerTest {
    */
   @Test
   public void testNormalizerShipsCorrectedInitialDataset() {
-    String xml = pathBackedNormalizer().buildDatasetXml();
+    String xml = pathBackedDatasetXml();
 
     // Sample products and their price rows are gone...
     assertFalse(xml.contains("Agua"));
@@ -341,7 +343,7 @@ public class OnboardingDatasetNormalizerTest {
    */
   @Test
   public void testNormalizerDropsDemoMasterDataTogetherWithItsChildRows() {
-    String xml = pathBackedNormalizer().buildDatasetXml();
+    String xml = pathBackedDatasetXml();
 
     // Parents.
     assertEquals("only the internal ETGO_DTO product may survive", 1,
@@ -386,7 +388,7 @@ public class OnboardingDatasetNormalizerTest {
    */
   @Test
   public void testNormalizerDropsTheDocumentNoCountersTheClientSetupAlreadyCreates() {
-    String xml = pathBackedNormalizer().buildDatasetXml();
+    String xml = pathBackedDatasetXml();
 
     assertEquals("the 43 named document series, AP Invoice, and the two GO-only counters", 46,
         countEntities(xml, "adSequence"));
@@ -404,7 +406,7 @@ public class OnboardingDatasetNormalizerTest {
    */
   @Test
   public void testNormalizerKeepsTheDocumentNoCountersOnlyThisDatasetProvides() {
-    String xml = pathBackedNormalizer().buildDatasetXml();
+    String xml = pathBackedDatasetXml();
 
     assertTrue(xml.contains("DocumentNo_C_ExtBP_Config_Filter_Opt"));
     assertTrue(xml.contains("DocumentNo_C_ExtBP_Config_Prop_Opt"));
@@ -417,7 +419,7 @@ public class OnboardingDatasetNormalizerTest {
    */
   @Test
   public void testNormalizerKeepsEveryNamedDocumentSeries() {
-    String xml = pathBackedNormalizer().buildDatasetXml();
+    String xml = pathBackedDatasetXml();
 
     for (String series : new String[] { "Purchase Order", "Standard Order", "AR Invoice",
         "Factura Rectificativa (Ventas)", "AP Invoice", "Factura Rectificativa (Compras)" }) {
@@ -444,7 +446,7 @@ public class OnboardingDatasetNormalizerTest {
   /** Verifies that user-scoped sales representative columns are stripped from product rows. */
   @Test
   public void testNormalizerStripsUserScopedProductSalesRepField() {
-    String xml = pathBackedNormalizer().buildDatasetXml();
+    String xml = pathBackedDatasetXml();
 
     assertFalse(xml.contains("<SALESREP_ID>"));
   }
@@ -458,7 +460,7 @@ public class OnboardingDatasetNormalizerTest {
    */
   @Test
   public void testNormalizerRetainsLanguageColumnOnTranslationRows() {
-    String xml = pathBackedNormalizer().buildDatasetXml();
+    String xml = pathBackedDatasetXml();
 
     assertTrue(xml.contains("<adLanguage>es_ES</adLanguage>"));
   }
@@ -467,7 +469,7 @@ public class OnboardingDatasetNormalizerTest {
   /** Verifies that sourcedata table and column tags do not leak into the final XML. */
   @Test
   public void testNormalizerDoesNotEmitSourcedataTableOrColumnTags() {
-    String xml = pathBackedNormalizer().buildDatasetXml();
+    String xml = pathBackedDatasetXml();
 
     assertFalse(xml.contains("<AD_ORG_WAREHOUSE>"));
     assertFalse(xml.contains("<C_BP_GROUP>"));
@@ -495,7 +497,7 @@ public class OnboardingDatasetNormalizerTest {
    */
   @Test
   public void testNormalizerExcludesOrgSpecificAccountElementTree() {
-    String xml = pathBackedNormalizer().buildDatasetXml();
+    String xml = pathBackedDatasetXml();
 
     String wiredElementId = "BB9B64C5B6534A40A36F7C0F45C2CC0B";
     String orphanElementId = "91D04C02EF8F4975B9E4F5E07543B6EA";
@@ -519,7 +521,7 @@ public class OnboardingDatasetNormalizerTest {
    */
   @Test
   public void testNormalizerExcludesOperandsOfOrgSpecificAccountElementTree() {
-    String xml = pathBackedNormalizer().buildDatasetXml();
+    String xml = pathBackedDatasetXml();
 
     String wiredTreeOperandId = "841C6B189D5D49C79FB542D847B32EFA";
     String orphanTreeOperandId = "D6D980B2CC284EA08884E5C398FEAFDC";
@@ -620,7 +622,7 @@ public class OnboardingDatasetNormalizerTest {
    */
   @Test
   public void testNormalizerIncludesAllEightAccountingDimensions() {
-    String xml = pathBackedNormalizer().buildDatasetXml();
+    String xml = pathBackedDatasetXml();
 
     // Pre-existing 5 (regression guard).
     assertTrue("Organization (OO) element missing", xml.contains("23C4FD2DE4514B1EB8966CC4FA0BEE90"));
@@ -651,7 +653,7 @@ public class OnboardingDatasetNormalizerTest {
    */
   @Test
   public void testNormalizerAccountingSchemaAllowNegativeDefaultsToNo() {
-    String xml = pathBackedNormalizer().buildDatasetXml();
+    String xml = pathBackedDatasetXml();
 
     assertTrue("allownegative must be N (ETP-4947 reverts ETP-4245/A3's Y default)",
         xml.contains("<allownegative>N</allownegative>"));
@@ -668,7 +670,7 @@ public class OnboardingDatasetNormalizerTest {
    */
   @Test
   public void testNormalizerAccountingSchemaAccrualDefaultsToDevengo() {
-    String xml = pathBackedNormalizer().buildDatasetXml();
+    String xml = pathBackedDatasetXml();
 
     assertTrue("isaccrual must be Y (Devengo) — Etendo Go doesn't support Caja for taxes",
         xml.contains("<isaccrual>Y</isaccrual>"));
@@ -685,7 +687,7 @@ public class OnboardingDatasetNormalizerTest {
    */
   @Test
   public void testNormalizerIncludesAcctSchemaDefaultDoubtfulDebtAndDeferredAccounts() {
-    String xml = pathBackedNormalizer().buildDatasetXml();
+    String xml = pathBackedDatasetXml();
 
     // New 6 (ETP-4245 R11 gap closure) — C_ValidCombination ids resolved against GOClient's chart.
     assertTrue("DoubtfulDebt_Acct (43600000) missing", xml.contains("B745085187C74232849D0468C5780413"));
@@ -712,7 +714,7 @@ public class OnboardingDatasetNormalizerTest {
    */
   @Test
   public void testNormalizerIncludesAcctSchemaDefaultInvoicePriceVarianceAccount() {
-    String xml = pathBackedNormalizer().buildDatasetXml();
+    String xml = pathBackedDatasetXml();
 
     // Assert the ACTUAL new element (P_InvoicePriceVariance_Acct on C_ACCTSCHEMA_DEFAULT), not a
     // bare substring: 29616DEC549948E7A65ABC28BCC18742 is also the C_ValidCombination row's own PK
@@ -748,7 +750,7 @@ public class OnboardingDatasetNormalizerTest {
    */
   @Test
   public void testNormalizerInvoicePriceVarianceCombinationRowSurvivesNormalization() {
-    String xml = pathBackedNormalizer().buildDatasetXml();
+    String xml = pathBackedDatasetXml();
 
     assertTrue("C_ACCTSCHEMA_DEFAULT must still reference the combination (sibling test guard)",
         xml.contains("<pInvoicepricevarianceAcct>29616DEC549948E7A65ABC28BCC18742"
@@ -770,7 +772,7 @@ public class OnboardingDatasetNormalizerTest {
    */
   @Test
   public void testNormalizerWriteOffAccountIsAccount65000000() {
-    String xml = pathBackedNormalizer().buildDatasetXml();
+    String xml = pathBackedDatasetXml();
 
     assertTrue("WriteOff_Acct (65000000) missing — expected GOClient's own 65000000 combination id",
         xml.contains("CB7E1B51B897403083CDCA20835F6AE9"));
@@ -786,7 +788,7 @@ public class OnboardingDatasetNormalizerTest {
    */
   @Test
   public void testNormalizerIncludesValidatedStandardCostingRule() {
-    String xml = pathBackedNormalizer().buildDatasetXml();
+    String xml = pathBackedDatasetXml();
 
     assertTrue("M_Costing_Rule row (id 6278C7936B7743898D12928D0E935CC6) missing — table must be "
         + "in INCLUDED_TABLES", xml.contains("6278C7936B7743898D12928D0E935CC6"));
@@ -1255,6 +1257,28 @@ public class OnboardingDatasetNormalizerTest {
     when(targetEntity.getName()).thenReturn(targetEntityName);
     when(property.getTargetEntity()).thenReturn(targetEntity);
     return property;
+  }
+
+  /**
+   * The normalized XML of the bundled GOClient dataset, built once for the whole class.
+   *
+   * <p>{@link #pathBackedNormalizer()} reads the module's 121 sampledata files (29 MB) on every
+   * call, and {@code buildDatasetXml()} is a pure function of that dataset and of
+   * {@link #mockEntityForTable(String)} — the same inputs for all of the tests below that assert
+   * on the real dataset, so they were all rebuilding the same string. Doing it per test cost 2 min
+   * 24 s of a 4 min 13 s unit-suite run; doing it once costs about 5 s. Tests that need a
+   * DIFFERENT dataset (a temp directory with a malformed row, an unmapped table, the classpath
+   * variant) build their own normalizer and are untouched by this.</p>
+   */
+  private static final AtomicReference<String> PATH_BACKED_XML = new AtomicReference<>();
+
+  private String pathBackedDatasetXml() {
+    String cached = PATH_BACKED_XML.get();
+    if (cached == null) {
+      cached = pathBackedNormalizer().buildDatasetXml();
+      PATH_BACKED_XML.set(cached);
+    }
+    return cached;
   }
 
   private OnboardingDatasetNormalizer pathBackedNormalizer() {

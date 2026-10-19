@@ -441,15 +441,63 @@ class EtendoGoJwtDalHelperTest {
     // ETP-5640 reads the tenant plan in OBContext admin mode; with no live session the real
     // static methods NPE, so they are no-ops here — the plan lookup is stubbed through obDal.
     private MockedStatic<OBContext> obContextMock;
+    // ETP-5743 reads the owner flag through native SQL. Unstubbed, every client reads as a legacy
+    // tenant with no owner flagged, which keeps the account match as the ownership evidence.
+    private MockedStatic<OwnerSupport> ownerSupportMock;
 
     @BeforeEach
     void mockAdminMode() {
       obContextMock = mockStatic(OBContext.class);
+      ownerSupportMock = mockStatic(OwnerSupport.class);
     }
 
     @AfterEach
     void restoreAdminMode() {
       obContextMock.close();
+      ownerSupportMock.close();
+    }
+
+    private User environmentUser(String userId, String clientId) {
+      Client client = mock(Client.class);
+      when(client.getId()).thenReturn(clientId);
+      User user = mock(User.class);
+      when(user.getId()).thenReturn(userId);
+      when(user.getClient()).thenReturn(client);
+      return user;
+    }
+
+    private void givenEnvironmentUsers(User... users) {
+      when(obDal.createQuery(eq(User.class), anyString())).thenReturn(usersQuery);
+      when(usersQuery.list()).thenReturn(List.of(users));
+      when(obDal.createQuery(eq(Preference.class), anyString())).thenReturn(preferenceQuery);
+      when(preferenceQuery.uniqueResult()).thenReturn(null);
+    }
+
+    @Test
+    @DisplayName("leaves out a free client the account was only invited into (ETP-5743)")
+    void excludesFreeClientWhereAccountIsInvited() {
+      givenEnvironmentUsers(environmentUser("own-user", "own-demo"),
+          environmentUser("invited-user", "foreign-demo"));
+      ownerSupportMock.when(() -> OwnerSupport.isOwner("own-user")).thenReturn(true);
+      ownerSupportMock.when(() -> OwnerSupport.clientHasOwner("own-demo")).thenReturn(true);
+      ownerSupportMock.when(() -> OwnerSupport.clientHasOwner("foreign-demo")).thenReturn(true);
+
+      Set<String> result = EtendoGoJwtDalHelper.findFreeTenantIdsByAccountEmail("owner@example.test");
+
+      assertEquals(Set.of("own-demo"), result);
+    }
+
+    @Test
+    @DisplayName("keeps a client when any of the account's users in it is the owner")
+    void keepsClientWhenAnyAccountUserIsOwner() {
+      givenEnvironmentUsers(environmentUser("suffixed-user", "own-demo"),
+          environmentUser("owner-user", "own-demo"));
+      ownerSupportMock.when(() -> OwnerSupport.isOwner("owner-user")).thenReturn(true);
+      ownerSupportMock.when(() -> OwnerSupport.clientHasOwner("own-demo")).thenReturn(true);
+
+      Set<String> result = EtendoGoJwtDalHelper.findFreeTenantIdsByAccountEmail("owner@example.test");
+
+      assertEquals(Set.of("own-demo"), result);
     }
 
     @Test
@@ -514,15 +562,20 @@ class EtendoGoJwtDalHelperTest {
     // ETP-5640 reads the tenant plan in OBContext admin mode; with no live session the real
     // static methods NPE, so they are no-ops here — the plan lookup is stubbed through obDal.
     private MockedStatic<OBContext> obContextMock;
+    // ETP-5743 reads the owner flag through native SQL; unstubbed, both clients read as legacy
+    // tenants with no owner flagged, so the account match alone decides as before.
+    private MockedStatic<OwnerSupport> ownerSupportMock;
 
     @BeforeEach
     void mockAdminMode() {
       obContextMock = mockStatic(OBContext.class);
+      ownerSupportMock = mockStatic(OwnerSupport.class);
     }
 
     @AfterEach
     void restoreAdminMode() {
       obContextMock.close();
+      ownerSupportMock.close();
     }
 
     @Test
@@ -666,8 +719,8 @@ class EtendoGoJwtDalHelperTest {
 
       JSONObject result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, organization, environmentUser);
 
-      // Seven original fields plus plan, relationship and demo-association metadata.
-      assertEquals(10, result.length());
+      // Seven original fields plus plan, relationship, ownership and demo-association metadata.
+      assertEquals(11, result.length());
     }
 
     @Test
@@ -697,6 +750,45 @@ class EtendoGoJwtDalHelperTest {
 
       // ETP-5548: always present, so the purchase picker never has to guess from a missing key.
       assertFalse(result.getBoolean("associatedWithProductive"));
+    }
+
+    private JSONObject buildForOwnership(boolean userIsOwner, boolean clientHasOwner)
+        throws Exception {
+      when(client.getId()).thenReturn("C-5");
+      when(client.getName()).thenReturn("Client Five");
+      when(environmentUser.getId()).thenReturn("U-5");
+      when(environmentUser.getUsername()).thenReturn("user@five.com");
+      when(environmentUser.getName()).thenReturn("User Five");
+      ownerSupportMock.when(() -> OwnerSupport.isOwner("U-5")).thenReturn(userIsOwner);
+      ownerSupportMock.when(() -> OwnerSupport.clientHasOwner("C-5")).thenReturn(clientHasOwner);
+      return EtendoGoJwtDalHelper.buildEnvironmentJson(client, null, environmentUser);
+    }
+
+    @Test
+    @DisplayName("reports the owner's environment as owned by the account")
+    void reportsOwnerAsOwned() throws Exception {
+      JSONObject result = buildForOwnership(true, true);
+
+      assertEquals("OWNER", result.getString("relationship"));
+      assertTrue(result.getBoolean("ownedByAccount"));
+    }
+
+    @Test
+    @DisplayName("reports an invited member's environment as not owned, so it is no purchase source (ETP-5743)")
+    void reportsInvitedMemberAsNotOwned() throws Exception {
+      JSONObject result = buildForOwnership(false, true);
+
+      assertEquals("INVITED", result.getString("relationship"));
+      assertFalse(result.getBoolean("ownedByAccount"));
+    }
+
+    @Test
+    @DisplayName("reports a legacy tenant with no owner flagged as owned, matching the checkout check")
+    void reportsUnownedLegacyTenantAsOwned() throws Exception {
+      JSONObject result = buildForOwnership(false, false);
+
+      assertEquals("INVITED", result.getString("relationship"));
+      assertTrue(result.getBoolean("ownedByAccount"));
     }
   }
 
@@ -846,6 +938,71 @@ class EtendoGoJwtDalHelperTest {
 
       verify(query).setNamedParameter("accountEmail", "a_b%@x.com");
       verify(query).setNamedParameter("accountPrefix", "a\\_b\\%@x.com+%");
+    }
+  }
+
+  @Nested
+  @DisplayName("clientOwnedByAccountEmail (ETP-5743 purchase-source ownership)")
+  class ClientOwnedByAccountEmail {
+
+    @Mock private OBQuery<User> query;
+    private MockedStatic<OwnerSupport> ownerSupportMock;
+
+    @BeforeEach
+    void mockOwnerLookup() {
+      ownerSupportMock = mockStatic(OwnerSupport.class);
+      when(obDal.createQuery(eq(User.class), anyString())).thenReturn(query);
+    }
+
+    @AfterEach
+    void restoreOwnerLookup() {
+      ownerSupportMock.close();
+    }
+
+    // Built before stubbing the query: creating the mock inside thenReturn(...) would nest a
+    // when() in an unfinished stubbing.
+    private void givenAccountUser(String userId) {
+      User user = mock(User.class);
+      when(user.getId()).thenReturn(userId);
+      when(query.list()).thenReturn(List.of(user));
+    }
+
+    @Test
+    @DisplayName("is true when the account's user in the client is its flagged owner")
+    void trueForFlaggedOwner() {
+      givenAccountUser("U-OWNER");
+      ownerSupportMock.when(() -> OwnerSupport.isOwner("U-OWNER")).thenReturn(true);
+
+      assertTrue(EtendoGoJwtDalHelper.clientOwnedByAccountEmail("CLIENT-1", "user@example.com"));
+      verify(query).setNamedParameter("clientId", "CLIENT-1");
+      verify(query).setNamedParameter("accountPrefix", "user@example.com+%");
+    }
+
+    @Test
+    @DisplayName("is false for an invited member of a client that has another owner")
+    void falseForInvitedMember() {
+      givenAccountUser("U-INVITED");
+      ownerSupportMock.when(() -> OwnerSupport.clientHasOwner("CLIENT-1")).thenReturn(true);
+
+      assertFalse(EtendoGoJwtDalHelper.clientOwnedByAccountEmail("CLIENT-1", "user@example.com"));
+    }
+
+    @Test
+    @DisplayName("keeps the account match for a legacy client with no owner flagged")
+    void trueForUnownedLegacyClient() {
+      givenAccountUser("U-LEGACY");
+      ownerSupportMock.when(() -> OwnerSupport.clientHasOwner("CLIENT-1")).thenReturn(false);
+
+      assertTrue(EtendoGoJwtDalHelper.clientOwnedByAccountEmail("CLIENT-1", "user@example.com"));
+    }
+
+    @Test
+    @DisplayName("is false when the account has no user in the client, even if it has no owner")
+    void falseWithoutAccountUser() {
+      when(query.list()).thenReturn(Collections.emptyList());
+
+      assertFalse(EtendoGoJwtDalHelper.clientOwnedByAccountEmail("CLIENT-1", "user@example.com"));
+      ownerSupportMock.verify(() -> OwnerSupport.clientHasOwner(anyString()), never());
     }
   }
 

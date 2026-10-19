@@ -23,12 +23,15 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 
 import javax.inject.Inject;
 import javax.inject.Named;
+
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -91,6 +94,28 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
   /** Package-private seam so unit tests can inject a mocked {@link DocumentPostingService}. */
   void setPostingService(DocumentPostingService postingService) {
     this.postingService = postingService;
+  }
+
+  /**
+   * The actions this header serves AND declares for agents (ETP-5709): {@code documentAction}
+   * (CO only, {@link InOutCompletionContract}), {@code createDraftInvoice} (shipment to sales
+   * invoice, {@link CreateDraftInvoiceHandler#SHIPMENT_CONTRACT}), {@code createReturn} (ETP-5711,
+   * {@link CreateReturnReceiptHandler#CONTRACT}) and {@code cloneRecord}.
+   * {@code createDraftInvoice} is declared because the classic {@code Invoicefromshipment} button
+   * bypasses the guards of that path (status check, nothing-pending 400, scoping to the
+   * shipment's own lines, honoured partial {@code lines}); MCP_CONFIG redirects the button to it.
+   * Published by the MCP next to the AD buttons; REST and the SPA do not read it.
+   */
+  @Override
+  public Map<String, NeoActionContract> actionContracts() {
+    Map<String, NeoActionContract> contracts = new LinkedHashMap<>();
+    contracts.put(InOutCompletionContract.CONTRACT.getName(), InOutCompletionContract.CONTRACT);
+    contracts.put(CreateDraftInvoiceHandler.SHIPMENT_CONTRACT.getName(),
+        CreateDraftInvoiceHandler.SHIPMENT_CONTRACT);
+    contracts.put(CreateReturnReceiptHandler.CONTRACT.getName(),
+        CreateReturnReceiptHandler.CONTRACT);
+    contracts.put(NeoCloneRecordHandler.CONTRACT.getName(), NeoCloneRecordHandler.CONTRACT);
+    return contracts;
   }
 
   @Override

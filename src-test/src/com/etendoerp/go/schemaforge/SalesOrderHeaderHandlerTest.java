@@ -64,6 +64,7 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.ad.ui.Tab;
+import org.openbravo.model.common.businesspartner.Location;
 import org.openbravo.model.ad.ui.Window;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
 
@@ -78,13 +79,16 @@ import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
  * </ul>
  *
  * <p>{@code handle()} is also covered, including the Reactivate refusal on orders with linked
- * documents.
+ * documents, and the create pre-hook's partnerAddress/invoiceAddress default (ETP-5703).
  *
  * @covers com.etendoerp.go.schemaforge.SalesOrderHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.CreateShipmentHandler
+ * @covers com.etendoerp.go.schemaforge.CreateDraftInvoiceHandler
  * @covers com.etendoerp.go.schemaforge.OrderReactivationGuard
  * @covers com.etendoerp.go.schemaforge.AbstractOrderHeaderHandler
  * @covers com.etendoerp.go.schemaforge.DocActionRequestSupport
  * @covers com.etendoerp.go.schemaforge.DocActionResolution
+ * @covers com.etendoerp.go.schemaforge.PartnerLocationDefaults
  */
 public class SalesOrderHeaderHandlerTest {
 
@@ -901,5 +905,201 @@ public class SalesOrderHeaderHandlerTest {
     NeoContext ctx = NeoContext.builder()
         .httpMethod("GET").endpointType(NeoEndpointType.CRUD).build();
     assertNull(new SalesOrderHeaderHandler().handle(ctx));
+  }
+
+  // ── ETP-5703: partnerAddress / invoiceAddress default on create ─────────────
+
+  /** A Location criteria whose list() answers {@code locations}, for every flag queried. */
+  @SuppressWarnings("unchecked")
+  private static void stubLocations(OBDal dal, List<Location> locations) {
+    OBCriteria<Location> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(Location.class)).thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.list()).thenReturn(locations);
+  }
+
+  private static NeoContext createCtx(JSONObject body) {
+    return NeoContext.builder().httpMethod("POST").endpointType(NeoEndpointType.CRUD)
+        .requestBody(body).build();
+  }
+
+  /**
+   * ETP-5703 repro: an etendo_batch sales-order header with only {@code businessPartner} (partner with
+   * a single location) answered 422 for {@code partnerAddress}. The create pre-hook fills it, and the
+   * bill-to address with it.
+   */
+  @Test
+  public void testHandleCreateWithSingleLocationFillsPartnerAndInvoiceAddress() throws Exception {
+    try (MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      Location only = mock(Location.class);
+      when(only.getId()).thenReturn("loc-1");
+      stubLocations(dal, Collections.singletonList(only));
+      JSONObject body = new JSONObject().put("businessPartner", "bp-1");
+
+      assertNull(new SalesOrderHeaderHandler().handle(createCtx(body)));
+
+      assertEquals("loc-1", body.getString("partnerAddress"));
+      assertEquals("loc-1", body.getString("invoiceAddress"));
+    }
+  }
+
+  /** Two eligible locations: the choice is the caller's, nothing is filled. */
+  @Test
+  public void testHandleCreateWithTwoLocationsAbstains() throws Exception {
+    try (MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      Location first = mock(Location.class);
+      Location second = mock(Location.class);
+      when(first.getId()).thenReturn("loc-1");
+      when(second.getId()).thenReturn("loc-2");
+      stubLocations(dal, java.util.Arrays.asList(first, second));
+      JSONObject body = new JSONObject().put("businessPartner", "bp-1");
+
+      assertNull(new SalesOrderHeaderHandler().handle(createCtx(body)));
+
+      assertFalse(body.has("partnerAddress"));
+      assertFalse(body.has("invoiceAddress"));
+    }
+  }
+
+  /** An address the caller sent is kept, and nothing is read. */
+  @Test
+  public void testHandleCreateWithSentAddressLeavesBodyAlone() throws Exception {
+    JSONObject body = new JSONObject().put("businessPartner", "bp-1")
+        .put("partnerAddress", "loc-caller");
+    try (MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
+      assertNull(new SalesOrderHeaderHandler().handle(createCtx(body)));
+
+      assertEquals("loc-caller", body.getString("partnerAddress"));
+      assertFalse(body.has("invoiceAddress"));
+      obDal.verifyNoInteractions();
+    }
+  }
+
+  /**
+   * Stubs Location reads: the criteria's list() answers {@code answers} in call order (ship-to
+   * query first), and {@code shipTo} is the location OBDal returns by id.
+   */
+  @SuppressWarnings("unchecked")
+  private static void stubLocationQueries(OBDal dal, Location shipTo, List<Location> shipToAnswer,
+      List<Location> secondAnswer) {
+    String shipToId = shipTo.getId();
+    OBCriteria<Location> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(Location.class)).thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.list()).thenReturn(shipToAnswer, secondAnswer);
+    when(dal.get(Location.class, shipToId)).thenReturn(shipTo);
+  }
+
+  /**
+   * ETP-5703 review W2: the ship-to was filled but the partner has two bill-to locations, so no
+   * single bill-to exists. BillTo must fall back to the ship-to, never stay null — a null BillTo makes
+   * the order impossible to invoice (C_INVOICE_CREATE copies it into a NOT NULL column).
+   */
+  @Test
+  public void testHandleCreateBillToFallsBackToShipToWhenNoSingleBillTo() throws Exception {
+    try (MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      Location shipTo = mock(Location.class);
+      Location billA = mock(Location.class);
+      Location billB = mock(Location.class);
+      when(shipTo.getId()).thenReturn("ship-1");
+      when(shipTo.get(Location.PROPERTY_INVOICETOADDRESS)).thenReturn(Boolean.FALSE);
+      stubLocationQueries(dal, shipTo, Collections.singletonList(shipTo),
+          java.util.Arrays.asList(billA, billB));
+      JSONObject body = new JSONObject().put("businessPartner", "bp-1");
+
+      assertNull(new SalesOrderHeaderHandler().handle(createCtx(body)));
+
+      assertEquals("ship-1", body.getString("partnerAddress"));
+      assertEquals("ship-1", body.getString("invoiceAddress"));
+    }
+  }
+
+  /**
+   * ETP-5703 review W1: on etendo_batch McpBillToInjector runs first and, with no ship-to yet,
+   * sets the partner's OLDEST bill-to. When the ship-to the pre-hook then fills is itself a bill-to
+   * address, the bill-to follows it — the injector's value is recognised as server-derived.
+   */
+  @Test
+  public void testHandleCreateReplacesInjectorBillToWithFilledShipToBillTo() throws Exception {
+    try (MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      Location shipTo = mock(Location.class);
+      Location oldest = mock(Location.class);
+      when(shipTo.getId()).thenReturn("ship-1");
+      when(shipTo.get(Location.PROPERTY_INVOICETOADDRESS)).thenReturn(Boolean.TRUE);
+      when(oldest.getId()).thenReturn("bill-old");
+      stubLocationQueries(dal, shipTo, Collections.singletonList(shipTo),
+          Collections.singletonList(oldest));
+      JSONObject body = new JSONObject().put("businessPartner", "bp-1")
+          .put("invoiceAddress", "bill-old");
+
+      assertNull(new SalesOrderHeaderHandler().handle(createCtx(body)));
+
+      assertEquals("ship-1", body.getString("partnerAddress"));
+      assertEquals("ship-1", body.getString("invoiceAddress"));
+    }
+  }
+
+  /** A bill-to that is not the injector's choice is the caller's, and is kept. */
+  @Test
+  public void testHandleCreateKeepsCallerBillTo() throws Exception {
+    try (MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      Location shipTo = mock(Location.class);
+      Location oldest = mock(Location.class);
+      when(shipTo.getId()).thenReturn("ship-1");
+      when(shipTo.get(Location.PROPERTY_INVOICETOADDRESS)).thenReturn(Boolean.TRUE);
+      when(oldest.getId()).thenReturn("bill-old");
+      stubLocationQueries(dal, shipTo, Collections.singletonList(shipTo),
+          Collections.singletonList(oldest));
+      JSONObject body = new JSONObject().put("businessPartner", "bp-1")
+          .put("invoiceAddress", "bill-chosen");
+
+      assertNull(new SalesOrderHeaderHandler().handle(createCtx(body)));
+
+      assertEquals("bill-chosen", body.getString("invoiceAddress"));
+    }
+  }
+
+  // ── declared action contracts (ETP-5709) ──────────────────────────────────
+
+  @Test
+  public void actionContracts_declaresShipmentInvoiceAndClone() {
+    Map<String, com.etendoerp.go.schemaforge.util.NeoActionContract> contracts = new SalesOrderHeaderHandler().actionContracts();
+
+    assertEquals(List.of("createShipment", "createDraftInvoice", "cloneRecord"),
+        List.copyOf(contracts.keySet()));
+    for (com.etendoerp.go.schemaforge.util.NeoActionContract c : contracts.values()) {
+      assertEquals("POST", c.getHttpMethod());
+    }
+    assertTrue(contracts.get("createShipment").getParams().isEmpty());
+    assertTrue(contracts.get("cloneRecord").getParams().isEmpty());
+    assertTrue(contracts.get("createShipment").getDescription().contains("DRAFT"));
+    String invoice = contracts.get("createDraftInvoice").getDescription();
+    assertTrue("must warn that the invoice is completed despite the name",
+        invoice.contains("COMPLETES") && invoice.contains("despite the name"));
+    assertEquals(List.of("lines"), contracts.get("createDraftInvoice").getParams().stream()
+        .map(com.etendoerp.go.schemaforge.util.NeoActionContract.Param::getName).collect(java.util.stream.Collectors.toList()));
+  }
+
+  @Test
+  public void actionContracts_acceptEveryBodyTheSpaSends() throws Exception {
+    Map<String, com.etendoerp.go.schemaforge.util.NeoActionContract> contracts = new SalesOrderHeaderHandler().actionContracts();
+
+    for (String action : contracts.keySet()) {
+      assertNull(action, com.etendoerp.go.schemaforge.util.NeoActionContract.validate(contracts, action, new JSONObject()));
+    }
+    assertNull(com.etendoerp.go.schemaforge.util.NeoActionContract.validate(contracts, "createDraftInvoice", new JSONObject().put("lines",
+        new JSONArray().put(new JSONObject().put("orderLineId", "L1").put("quantity", "2")))));
+    assertEquals(com.etendoerp.go.schemaforge.util.NeoActionContract.SC_UNPROCESSABLE, com.etendoerp.go.schemaforge.util.NeoActionContract.validate(contracts,
+        "createShipment", new JSONObject().put("warehouseId", "W1")).getHttpStatus());
   }
 }

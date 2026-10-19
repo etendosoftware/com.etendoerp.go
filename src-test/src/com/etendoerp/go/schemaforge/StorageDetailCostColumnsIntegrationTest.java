@@ -87,6 +87,8 @@ public class StorageDetailCostColumnsIntegrationTest extends OBBaseTest {
   /** A product with stock rows and a cost: etgo_product_cost() is not NULL for it. */
   private String costProduct;
   private String currencyId;
+  /** The product created by {@link #createNoCostProductFixture()}; deleted in {@link #cleanUp()}. */
+  private String noCostProductId;
 
   @Before
   public void openConnection() throws Exception {
@@ -96,17 +98,56 @@ public class StorageDetailCostColumnsIntegrationTest extends OBBaseTest {
         props.getProperty("bbdd.user"), props.getProperty("bbdd.password"));
     connection.setAutoCommit(true);
 
-    noCostProduct = string("SELECT sd.m_product_id FROM m_storage_detail sd"
-        + " WHERE sd.qtyonhand > 0"
-        + " AND NOT EXISTS (SELECT 1 FROM m_costing c WHERE c.m_product_id = sd.m_product_id)"
-        + " GROUP BY sd.m_product_id ORDER BY count(*), sd.m_product_id LIMIT 1");
+    noCostProduct = createNoCostProductFixture();
     costProduct = string("SELECT sd.m_product_id FROM m_storage_detail sd"
-        + " WHERE etgo_product_cost(sd.m_product_id) IS NOT NULL"
+        + " WHERE sd.qtyonhand > 0 AND etgo_product_cost(sd.m_product_id) IS NOT NULL"
         + " GROUP BY sd.m_product_id ORDER BY count(*), sd.m_product_id LIMIT 1");
     currencyId = string("SELECT c_currency_id FROM m_costing LIMIT 1");
-    assertNotNull("The database must hold a product with stock and no cost", noCostProduct);
     assertNotNull("The database must hold a product with stock and a cost", costProduct);
     assertNotNull("The database must hold a costing row to borrow a currency from", currencyId);
+  }
+
+  /**
+   * ETP-5555 (Emilio's review): a clean {@code ./gradlew install} with only the sample F&amp;B
+   * and QA Testing reference data has no product that is both stocked and uncosted — every
+   * stocked product already carries a cost, and the two uncosted products have zero stock. The
+   * old {@code noCostProduct} lookup only ever found a match locally, where leftover E2E test
+   * data (e.g. the E2E-BETA product) happened to satisfy both conditions at once.
+   *
+   * <p>This fixture is self-sufficient instead: it creates its own product (borrowing
+   * client/org/UOM/category/tax category from an existing active product, so it fits whatever
+   * reference data is installed) and a single positive-quantity storage row for it, then never
+   * gives it a cost. Both rows are deleted in {@link #cleanUp()}, same as {@link #costingIds}
+   * and {@link #storageIds}.</p>
+   */
+  private String createNoCostProductFixture() throws SQLException {
+    String productId = UUID.randomUUID().toString().replace("-", "").toUpperCase();
+    int productInserted = update("INSERT INTO m_product (m_product_id, ad_client_id, ad_org_id,"
+        + " isactive, created, createdby, updated, updatedby, value, name, c_uom_id,"
+        + " m_product_category_id, c_taxcategory_id, producttype, isstocked, ispurchased,"
+        + " issold)"
+        + " SELECT ?, src.ad_client_id, src.ad_org_id, 'Y', now(), '0', now(), '0', ?,"
+        + " 'ETP-5555 storage cost test fixture', src.c_uom_id, src.m_product_category_id,"
+        + " src.c_taxcategory_id, src.producttype, 'Y', 'N', 'N'"
+        + " FROM m_product src"
+        + " WHERE src.isactive = 'Y' AND src.issummary = 'N' LIMIT 1",
+        productId, "ETP-5555-" + productId.substring(0, 12));
+    assertEquals("no reference product to borrow client/org/UOM/category/tax from",
+        1, productInserted);
+    noCostProductId = productId;
+
+    String storageId = UUID.randomUUID().toString().replace("-", "").toUpperCase();
+    int storageInserted = update("INSERT INTO m_storage_detail (m_storage_detail_id,"
+        + " ad_client_id, ad_org_id, isactive, created, createdby, updated, updatedby,"
+        + " m_product_id, m_locator_id, m_attributesetinstance_id, c_uom_id, qtyonhand,"
+        + " reservedqty, allocatedqty)"
+        + " SELECT ?, p.ad_client_id, p.ad_org_id, 'Y', now(), '0', now(), '0', p.m_product_id,"
+        + " l.m_locator_id, '0', p.c_uom_id, 5, 0, 0"
+        + " FROM m_product p JOIN m_locator l ON l.ad_client_id = p.ad_client_id"
+        + " WHERE p.m_product_id = ? LIMIT 1", storageId, productId);
+    assertEquals("no locator available for the fixture product's client", 1, storageInserted);
+    storageIds.add(storageId);
+    return productId;
   }
 
   @After
@@ -120,6 +161,9 @@ public class StorageDetailCostColumnsIntegrationTest extends OBBaseTest {
       }
       for (String id : storageIds) {
         update("DELETE FROM m_storage_detail WHERE m_storage_detail_id = ?", id);
+      }
+      if (noCostProductId != null) {
+        update("DELETE FROM m_product WHERE m_product_id = ?", noCostProductId);
       }
     } finally {
       connection.close();

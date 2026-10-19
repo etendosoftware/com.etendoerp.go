@@ -32,6 +32,7 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.ad_process.ConvertQuotationIntoOrder;
+import org.openbravo.model.common.businesspartner.Location;
 import org.openbravo.model.common.order.Order;
 
 import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
@@ -82,6 +83,10 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
   private static final String FIELD_DOCUMENT_STATUS = "documentStatus";
   private static final String DOC_STATUS_COMPLETED = "CO";
   private static final String DOC_ACTION_REJECT = "RJ";
+  /** The button's column name, what the SPA posts. */
+  private static final String ACTION_CONVERT_COLUMN = "Convertquotation";
+  /** The button's field name, what an MCP {@code etendo_action} call reaches the handler under (ETP-5710). */
+  private static final String ACTION_CONVERT_FIELD = "convertquotation";
 
   /** The named actions published to agents, in presentation order (ETP-5535). */
   private static final Map<String, NeoActionContract> ACTION_CONTRACTS = buildActionContracts();
@@ -114,6 +119,15 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
     if (paymentMethodSelector != null) {
       return paymentMethodSelector;
     }
+    // ETP-5703: a create that names a business partner but no address (an agent; the SPA always
+    // sends one) gets the partner's only ship-to location — the AD rule of
+    // C_Order.C_BPartner_Location_ID is "C_BPartner Location - Ship To" — and, only then, a bill-to
+    // for BillTo_ID ("C_BPartner Location - Bill To") that is never left empty (see
+    // PartnerLocationDefaults#alignBillTo). REST single and batch; etendo_create keeps its 422
+    // (declared divergence, neo-headless.md §4.12.9).
+    PartnerLocationDefaults.fillShipToAndBillTo(context, Order.PROPERTY_PARTNERADDRESS,
+        Location.PROPERTY_SHIPTOADDRESS, Order.PROPERTY_INVOICEADDRESS,
+        Location.PROPERTY_INVOICETOADDRESS);
     // ETP-5535: ahead of the total-discount sync, which recalculates on every DocAction — a
     // rejection does not touch the lines, exactly as the UI's rejectQuotation does not.
     if (isRejectDocAction(context)) {
@@ -123,7 +137,7 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
     AbstractOrderHeaderHandler.syncTotalDiscountOnDocAction(context, totalDiscountService, false);
 
     if (NeoEndpointType.ACTION.equals(context.getEndpointType())
-        && "Convertquotation".equals(context.getFieldName())) {
+        && isConvertQuotationAction(context.getFieldName())) {
       return handleConvertQuotation(context.getRecordId());
     }
 
@@ -148,6 +162,8 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
 
   private static Map<String, NeoActionContract> buildActionContracts() {
     Map<String, NeoActionContract> contracts = new LinkedHashMap<>();
+    contracts.put(CreateDraftInvoiceHandler.QUOTATION_CONTRACT.getName(),
+        CreateDraftInvoiceHandler.QUOTATION_CONTRACT);
     contracts.put(RejectQuotationHandler.CONTRACT.getName(), RejectQuotationHandler.CONTRACT);
     contracts.put(CreateRejectReasonHandler.CONTRACT.getName(), CreateRejectReasonHandler.CONTRACT);
     return Collections.unmodifiableMap(contracts);
@@ -177,6 +193,10 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
    */
   static boolean isRejectDocAction(NeoContext context) {
     return DocActionRequestSupport.requests(context, DOC_ACTION_REJECT);
+  }
+
+  private static boolean isConvertQuotationAction(String action) {
+    return ACTION_CONVERT_COLUMN.equals(action) || ACTION_CONVERT_FIELD.equals(action);
   }
 
   /**
@@ -254,7 +274,7 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
   @Override
   public NeoResponse afterHandle(NeoContext context) {
     if (NeoEndpointType.ACTION.equals(context.getEndpointType())
-        && "Convertquotation".equals(context.getFieldName())) {
+        && isConvertQuotationAction(context.getFieldName())) {
       transferCurrencyRateToNewOrder(context.getRecordId());
     }
     return super.afterHandle(context);

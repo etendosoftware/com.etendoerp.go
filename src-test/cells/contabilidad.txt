@@ -1,0 +1,43 @@
+# Célula: contabilidad
+# Contabilidad (Santi + Ramiro): plan de cuentas, asientos, informes contables, ejercicios/periodos, activos y amortizaciones.
+# Una clase de test por línea (nombre completo). Las *IntegrationTest / *DbTest son de integración;
+# el resto, con mocks. Ejecutar: ./gradlew goCellTest -Pcell=contabilidad [-Pkind=mock|integration|all]
+
+# --- con mocks (36)
+com.etendoerp.go.schemaforge.AccountReportTreeTest
+com.etendoerp.go.schemaforge.AccountingDimensionsSupportTest
+com.etendoerp.go.schemaforge.AmortizationConfirmGuardTest
+com.etendoerp.go.schemaforge.AmortizationHeaderHandlerTest
+com.etendoerp.go.schemaforge.AmortizationLineHandlerTest
+com.etendoerp.go.schemaforge.AmortizationPlanServiceTest
+com.etendoerp.go.schemaforge.AssetGroupNameUniqueHandlerTest
+com.etendoerp.go.schemaforge.AssetSearchKeyUniqueHandlerTest
+com.etendoerp.go.schemaforge.AssetsHandlerTest
+com.etendoerp.go.schemaforge.BalanceSheetReportHandlerTest
+com.etendoerp.go.schemaforge.FactAcctHandlerTest
+com.etendoerp.go.schemaforge.FiscalYearPeriodsHandlerTest
+com.etendoerp.go.schemaforge.GeneralLedgerConfigurationHandlerTest
+com.etendoerp.go.schemaforge.GeneralLedgerGroupingTest
+com.etendoerp.go.schemaforge.GeneralLedgerReportHandlerTest
+com.etendoerp.go.schemaforge.GlJournalHeaderHandlerTest
+com.etendoerp.go.schemaforge.JournalEntriesGroupingTest
+com.etendoerp.go.schemaforge.JournalEntriesReportHandlerTest
+com.etendoerp.go.schemaforge.PeriodControlDocOpenCloseHandlerTest
+com.etendoerp.go.schemaforge.PeriodOpenCloseHandlerTest
+com.etendoerp.go.schemaforge.ProfitLossReportHandlerTest
+com.etendoerp.go.schemaforge.handlers.TaxAccountingHandlerTest
+com.etendoerp.go.schemaforge.TrialBalanceFoldingTest
+com.etendoerp.go.schemaforge.TrialBalanceReportHandlerTest
+com.etendoerp.go.schemaforge.YearCloseHandlerTest
+com.etendoerp.go.schemaforge.handlers.ChartOfAccountsCriteriaTest
+com.etendoerp.go.schemaforge.handlers.ChartOfAccountsHandlerTest
+com.etendoerp.go.schemaforge.handlers.ChartOfAccountsTreeMathTest
+com.etendoerp.go.schemaforge.handlers.DocumentPostingServiceTest
+com.etendoerp.go.schemaforge.handlers.GlItemProvisioningSupportTest
+com.etendoerp.go.schemaforge.handlers.NotPostedDocumentsHandlerTest
+com.etendoerp.go.schemaforge.handlers.YearAccountingHandlerTest
+com.etendoerp.go.schemaforge.selector.policy.PostingAccountCombinationSelectorPolicyTest
+com.etendoerp.go.schemaforge.util.AccountingDocumentTypeSupportTest
+com.etendoerp.go.schemaforge.util.PostingAccountCombinationsTest
+com.etendoerp.go.schemaforge.webhooks.SFAcctProcessMonitorTest
+
