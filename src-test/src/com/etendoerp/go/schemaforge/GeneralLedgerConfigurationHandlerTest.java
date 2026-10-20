@@ -46,6 +46,7 @@ import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.core.SessionHandler;
+import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.system.Client;
@@ -564,6 +565,7 @@ class GeneralLedgerConfigurationHandlerTest {
     wireLoadCriteria(Collections.emptyList());
 
     AccountingCombination combo = mock(AccountingCombination.class);
+    when(combo.isActive()).thenReturn(true); // ETP-5693 posting check
     when(combo.getId()).thenReturn("combo-1");
     when(obDal.get(AccountingCombination.class, "combo-1")).thenReturn(combo);
 
@@ -574,6 +576,83 @@ class GeneralLedgerConfigurationHandlerTest {
 
     assertEquals(200, response.getHttpStatus());
     verify(defaults).set(AcctSchemaDefault.PROPERTY_BANKASSET, combo);
+  }
+
+  private AccountingCombination summaryCombo(String id) {
+    ElementValue account = mock(ElementValue.class);
+    when(account.isSummaryLevel()).thenReturn(true);
+    when(account.isActive()).thenReturn(true);
+    AccountingCombination combo = mock(AccountingCombination.class);
+    when(combo.isActive()).thenReturn(true);
+    when(combo.getId()).thenReturn(id);
+    when(combo.getAccount()).thenReturn(account);
+    when(obDal.get(AccountingCombination.class, id)).thenReturn(combo);
+    return combo;
+  }
+
+  @Test
+  @DisplayName("ETP-5693: a summary account is refused with its messageKey and the save rolled back")
+  void postRejectsSummaryAccount() throws Exception {
+    wireOrgWithLedger();
+    wireLoadCriteria(Collections.emptyList());
+    summaryCombo("combo-sum");
+    JSONObject body = new JSONObject()
+        .put("defaults", new JSONObject().put("bankAsset", "combo-sum"));
+
+    try (MockedStatic<OBMessageUtils> messages = mockStatic(OBMessageUtils.class)) {
+      messages.when(() -> OBMessageUtils.messageBD(any())).thenAnswer(i -> i.getArgument(0));
+      messages.when(() -> OBMessageUtils.parseTranslation(any(String.class), any()))
+          .thenAnswer(i -> i.getArgument(0));
+      NeoResponse response = handler.handle(postCtx(ORG_ID, body));
+
+      assertEquals(400, response.getHttpStatus());
+      assertEquals("ETGO_AccountIsSummary", response.getBody().getJSONObject("error")
+          .getJSONArray("messageKeys").getString(0));
+      verify(sessionHandler).rollback();
+      verify(defaults, never()).set(any(), any());
+    }
+  }
+
+  @Test
+  @DisplayName("ETP-5693: a combination of another ledger is refused with its messageKey")
+  void postRejectsOtherLedgerAccount() throws Exception {
+    wireOrgWithLedger();
+    wireLoadCriteria(Collections.emptyList());
+    AcctSchema otherLedger = mock(AcctSchema.class);
+    when(otherLedger.getId()).thenReturn("other-ledger");
+    AccountingCombination combo = mock(AccountingCombination.class);
+    when(combo.isActive()).thenReturn(true);
+    when(combo.getId()).thenReturn("combo-other");
+    when(combo.getAccountingSchema()).thenReturn(otherLedger);
+    when(obDal.get(AccountingCombination.class, "combo-other")).thenReturn(combo);
+    JSONObject body = new JSONObject()
+        .put("defaults", new JSONObject().put("bankAsset", "combo-other"));
+
+    try (MockedStatic<OBMessageUtils> messages = mockStatic(OBMessageUtils.class)) {
+      messages.when(() -> OBMessageUtils.messageBD(any())).thenAnswer(i -> i.getArgument(0));
+      messages.when(() -> OBMessageUtils.parseTranslation(any(String.class), any()))
+          .thenAnswer(i -> i.getArgument(0));
+      NeoResponse response = handler.handle(postCtx(ORG_ID, body));
+
+      assertEquals(400, response.getHttpStatus());
+      assertEquals("ETGO_AccountWrongLedger", response.getBody().getJSONObject("error")
+          .getJSONArray("messageKeys").getString(0));
+    }
+  }
+
+  @Test
+  @DisplayName("ETP-5693: an unchanged pre-existing summary account still saves (R2)")
+  void postKeepsUnchangedSummaryAccount() throws Exception {
+    wireOrgWithLedger();
+    wireLoadCriteria(Collections.emptyList());
+    AccountingCombination stored = summaryCombo("combo-sum");
+    when(defaults.get(AcctSchemaDefault.PROPERTY_BANKASSET)).thenReturn(stored);
+    JSONObject body = new JSONObject()
+        .put("defaults", new JSONObject().put("bankAsset", "combo-sum"));
+
+    NeoResponse response = handler.handle(postCtx(ORG_ID, body));
+
+    assertEquals(200, response.getHttpStatus());
   }
 
   @Test
@@ -692,6 +771,7 @@ class GeneralLedgerConfigurationHandlerTest {
     wireOrgWithLedger();
 
     AccountingCombination combo = mock(AccountingCombination.class);
+    when(combo.isActive()).thenReturn(true); // ETP-5693 posting check
     when(combo.getId()).thenReturn("combo-x");
     when(combo.getAccount()).thenReturn(null);
     when(combo.getCombination()).thenReturn("1000");
@@ -722,6 +802,7 @@ class GeneralLedgerConfigurationHandlerTest {
     when(account.getName()).thenReturn("Bancos");
 
     AccountingCombination combo = mock(AccountingCombination.class);
+    when(combo.isActive()).thenReturn(true); // ETP-5693 posting check
     when(combo.getId()).thenReturn("combo-y");
     when(combo.getAccount()).thenReturn(account);
     when(combo.getCombination()).thenReturn("572");
@@ -1021,6 +1102,7 @@ class GeneralLedgerConfigurationHandlerTest {
     when(generalAccounts.isCreateClosing()).thenReturn(true);
 
     AccountingCombination retainedEarning = mock(AccountingCombination.class);
+    when(retainedEarning.isActive()).thenReturn(true); // ETP-5693 posting check
     when(retainedEarning.getId()).thenReturn("combo-retained");
     when(generalAccounts.getRetainedEarning()).thenReturn(retainedEarning);
 
@@ -1045,6 +1127,7 @@ class GeneralLedgerConfigurationHandlerTest {
     wireLoadCriteria(Collections.emptyList());
 
     AccountingCombination combo = mock(AccountingCombination.class);
+    when(combo.isActive()).thenReturn(true); // ETP-5693 posting check
     when(combo.getId()).thenReturn("combo-income");
     when(obDal.get(AccountingCombination.class, "combo-income")).thenReturn(combo);
 
@@ -1138,6 +1221,7 @@ class GeneralLedgerConfigurationHandlerTest {
     Organization star = mock(Organization.class);
     when(star.getId()).thenReturn("0");
     AccountingCombination combo = mock(AccountingCombination.class);
+    when(combo.isActive()).thenReturn(true); // ETP-5693 posting check
     when(combo.getId()).thenReturn(id);
     Client owner = client(clientId);
     when(combo.getClient()).thenReturn(owner);

@@ -303,11 +303,10 @@ class NeoCrudHandler {
 
   private NeoResponse dispatchCrudRequestInternal(SFEntity entity, NeoContext neoContext,
       HttpServletRequest request, HttpServletResponse response) {
-    String javaQualifier = entity.getJavaQualifier();
-    if (StringUtils.isNotBlank(javaQualifier)) {
-      return servlet.handleWithHooks(javaQualifier, neoContext, request, response);
-    }
-    return handleDefault(neoContext);
+    // ETP-5693: always through the hook pipeline, so an @NeoExtension on an entity without a
+    // Java_Qualifier runs on REST too (ETP-5415 removed this early return from batch/MCP only).
+    // handleWithDefaultStep falls back to handleDefault when nothing resolves.
+    return servlet.handleWithHooks(entity.getJavaQualifier(), neoContext, request, response);
   }
 
   /**

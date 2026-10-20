@@ -18,6 +18,7 @@ package com.etendoerp.go.schemaforge.handlers;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doReturn;
@@ -26,6 +27,19 @@ import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
 
 import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import org.openbravo.base.model.Entity;
+import org.openbravo.base.model.ModelProvider;
+import org.openbravo.base.model.Property;
+import org.openbravo.erpCommon.utility.OBLedgerUtils;
+import org.openbravo.model.ad.datamodel.Table;
+import org.openbravo.model.ad.ui.Tab;
+import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.model.common.plm.Product;
+import com.etendoerp.go.schemaforge.NeoActionRecordGuard;
+import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.schemaforge.util.PostingAccountGuard;
 
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.AfterEach;
@@ -248,4 +262,104 @@ class ProductAccountingHandlerTest {
 
     assertNull(HANDLER.handle(ctx));
   }
+
+  // ── ETP-5693: deterministic auto-fill + posting guard ──────────────────────
+
+  private static final String PRODUCT_ID = "product-1";
+
+  /** A tab on M_Product_Acct whose link-to-parent properties are the product and the ledger. */
+  private Tab productAcctTab() {
+    Entity productEntity = mock(Entity.class);
+    doReturn(Product.class).when(productEntity).getMappingClass();
+    Property productProperty = mock(Property.class);
+    when(productProperty.isParent()).thenReturn(true);
+    when(productProperty.getName()).thenReturn("product");
+    when(productProperty.getTargetEntity()).thenReturn(productEntity);
+    Entity rowEntity = mock(Entity.class);
+    when(rowEntity.getProperties()).thenReturn(List.of(productProperty));
+    ModelProvider modelProvider = mock(ModelProvider.class);
+    when(modelProvider.getEntity("ProductAccounts")).thenReturn(rowEntity);
+    modelProviderMock.when(ModelProvider::getInstance).thenReturn(modelProvider);
+    Table table = mock(Table.class);
+    when(table.getName()).thenReturn("ProductAccounts");
+    Tab tab = mock(Tab.class);
+    when(tab.getTable()).thenReturn(table);
+    return tab;
+  }
+
+  private NeoContext postWithParent(JSONObject body, Tab tab) {
+    return NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("POST")
+        .requestBody(body)
+        .adTab(tab)
+        .queryParams(Map.of("parentId", PRODUCT_ID))
+        .build();
+  }
+
+  private MockedStatic<ModelProvider> modelProviderMock;
+  private MockedStatic<OBLedgerUtils> ledgerUtilsMock;
+  private MockedStatic<NeoActionRecordGuard> recordGuardMock;
+  private MockedStatic<PostingAccountGuard> postingGuardMock;
+
+  @BeforeEach
+  void setUpEtp5693() {
+    modelProviderMock = mockStatic(ModelProvider.class);
+    ledgerUtilsMock = mockStatic(OBLedgerUtils.class);
+    recordGuardMock = mockStatic(NeoActionRecordGuard.class);
+    postingGuardMock = mockStatic(PostingAccountGuard.class);
+  }
+
+  @AfterEach
+  void tearDownEtp5693() {
+    postingGuardMock.close();
+    recordGuardMock.close();
+    ledgerUtilsMock.close();
+    modelProviderMock.close();
+  }
+
+  @Test
+  @DisplayName("ETP-5693: POST without accountingSchema takes the ledger of the parent product's organization")
+  void autoFillUsesParentOrganizationLedger() throws Exception {
+    Organization productOrg = mock(Organization.class);
+    when(productOrg.getId()).thenReturn("org-product");
+    Product product = mock(Product.class);
+    when(product.getOrganization()).thenReturn(productOrg);
+    recordGuardMock.when(() -> NeoActionRecordGuard.loadOwned(Product.class, PRODUCT_ID)).thenReturn(product);
+    ledgerUtilsMock.when(() -> OBLedgerUtils.getOrgLedger("org-product")).thenReturn("ledger-parent");
+    JSONObject body = new JSONObject();
+
+    assertNull(HANDLER.handle(postWithParent(body, productAcctTab())));
+    assertEquals("ledger-parent", body.getString("accountingSchema"));
+  }
+
+  @Test
+  @DisplayName("ETP-5693: with no parent ledger, POST falls back to the caller's organization ledger")
+  void autoFillFallsBackToContextOrganization() throws Exception {
+    Organization contextOrg = mock(Organization.class);
+    when(contextOrg.getId()).thenReturn("org-ctx");
+    when(obContext.getCurrentOrganization()).thenReturn(contextOrg);
+    ledgerUtilsMock.when(() -> OBLedgerUtils.getOrgLedger("org-ctx")).thenReturn("ledger-ctx");
+    JSONObject body = new JSONObject();
+
+    assertNull(HANDLER.handle(postWithParent(body, productAcctTab())));
+    assertEquals("ledger-ctx", body.getString("accountingSchema"));
+  }
+
+  @Test
+  @DisplayName("ETP-5693: the posting guard runs on PATCH and its refusal is returned")
+  void patchRunsPostingGuard() {
+    NeoResponse refusal = NeoResponse.error(400, "refused");
+    postingGuardMock.when(() -> PostingAccountGuard.ledgerOfRow("accountingSchema")).thenCallRealMethod();
+    postingGuardMock.when(() -> PostingAccountGuard.checkWrite(any(), any())).thenReturn(refusal);
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("PATCH")
+        .recordId("row-1")
+        .requestBody(new JSONObject())
+        .build();
+
+    assertSame(refusal, HANDLER.handle(ctx));
+  }
 }
+
