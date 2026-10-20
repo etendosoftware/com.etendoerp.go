@@ -83,6 +83,7 @@ abstract class CheckoutRequestStoreQuerySupport {
     private final boolean transferProducts;
     private final boolean transferContacts;
     private final String stripePriceId;
+    private final String reactivatedClientId;
 
     /**
      * Creates immutable choices to persist with a checkout request.
@@ -95,11 +96,30 @@ abstract class CheckoutRequestStoreQuerySupport {
      */
     public RequestOptions(String demoClientId, boolean demoSelectionRecorded,
         boolean transferProducts, boolean transferContacts, String stripePriceId) {
+      this(demoClientId, demoSelectionRecorded, transferProducts, transferContacts, stripePriceId,
+          null);
+    }
+
+    /**
+     * Creates immutable choices to persist with a checkout request.
+     *
+     * @param demoClientId selected demo client id, or {@code null}
+     * @param demoSelectionRecorded whether the selection was explicitly recorded
+     * @param transferProducts whether products should be transferred
+     * @param transferContacts whether contacts should be transferred
+     * @param stripePriceId selected Stripe Price id, or {@code null}
+     * @param reactivatedClientId the canceled tenant this purchase re-subscribes (ETP-5742), or
+     *     {@code null} for a purchase that provisions a new environment
+     */
+    public RequestOptions(String demoClientId, boolean demoSelectionRecorded,
+        boolean transferProducts, boolean transferContacts, String stripePriceId,
+        String reactivatedClientId) {
       this.demoClientId = demoClientId;
       this.demoSelectionRecorded = demoSelectionRecorded;
       this.transferProducts = transferProducts;
       this.transferContacts = transferContacts;
       this.stripePriceId = stripePriceId;
+      this.reactivatedClientId = reactivatedClientId;
     }
 
     @Override
@@ -111,13 +131,14 @@ abstract class CheckoutRequestStoreQuerySupport {
           && transferProducts == that.transferProducts
           && transferContacts == that.transferContacts
           && Objects.equals(demoClientId, that.demoClientId)
-          && Objects.equals(stripePriceId, that.stripePriceId);
+          && Objects.equals(stripePriceId, that.stripePriceId)
+          && Objects.equals(reactivatedClientId, that.reactivatedClientId);
     }
 
     @Override
     public int hashCode() {
       return Objects.hash(demoClientId, demoSelectionRecorded, transferProducts,
-          transferContacts, stripePriceId);
+          transferContacts, stripePriceId, reactivatedClientId);
     }
 
     String getDemoClientId() { return demoClientId; }
@@ -125,6 +146,26 @@ abstract class CheckoutRequestStoreQuerySupport {
     boolean isTransferProducts() { return transferProducts; }
     boolean isTransferContacts() { return transferContacts; }
     String getStripePriceId() { return stripePriceId; }
+    String getReactivatedClientId() { return reactivatedClientId; }
+  }
+
+  /**
+   * ETP-5742 — whether a request re-subscribes an existing canceled tenant instead of provisioning
+   * a new one.
+   *
+   * <p>No column of its own: a new purchase names its {@code CREATED_CLIENT_ID} only when it
+   * reaches {@code PROVISIONED} (both writes are one statement, see
+   * {@link CheckoutRequestStore#recordProvisioned}), while a re-subscription names its tenant from
+   * the moment it is requested. So a named tenant on a request that is not yet provisioned can only
+   * be a re-subscription. Once provisioned the two are alike on purpose: both are "the purchase
+   * that backs this tenant", which is what the lifecycle webhooks and the billing page read.
+   *
+   * @param request durable checkout row, possibly {@code null}
+   * @return true for an unfinished re-subscription
+   */
+  static boolean isPendingReactivation(CheckoutRequest request) {
+    return request != null && request.getCreatedClient() != null
+        && !CheckoutRequestStore.STATUS_PROVISIONED.equals(request.getCheckoutRequestStatus());
   }
 
   /**
@@ -467,6 +508,12 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
       request.setTransferProducts(requestOptions.isTransferProducts());
       request.setTransferContacts(requestOptions.isTransferContacts());
       request.setStripePrice(StringUtils.trimToNull(requestOptions.getStripePriceId()));
+      // ETP-5742 — a re-subscription names its tenant up front: it is what the payment webhook
+      // applies the purchase to, and what routes the new subscription's lifecycle events.
+      String reactivatedClientId = StringUtils.trimToNull(requestOptions.getReactivatedClientId());
+      if (reactivatedClientId != null) {
+        request.setCreatedClient(OBDal.getInstance().get(Client.class, reactivatedClientId));
+      }
       request.setCheckoutRequestStatus(STATUS_CREATING);
       request.setCreatingAt(new Date());
       request.setProvisioningAttempts(0L);
@@ -804,6 +851,51 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
   }
 
   /**
+   * ETP-5742 — the account's unfinished re-subscription of one tenant, so a second click or a
+   * second tab reopens the same checkout instead of charging twice.
+   *
+   * @param accountId immutable platform account id
+   * @param accountEmail authenticated platform account email
+   * @param clientId the canceled tenant being re-subscribed
+   * @return the newest re-subscription of that tenant not yet applied, or {@code null}
+   */
+  public CheckoutRequest findActiveReactivation(String accountId, String accountEmail,
+      String clientId) {
+    if (StringUtils.isBlank(accountId) || StringUtils.isBlank(accountEmail)
+        || StringUtils.isBlank(clientId)) return null;
+    return runAsSystem(() -> {
+      OBQuery<CheckoutRequest> query = OBDal.getInstance().createQuery(CheckoutRequest.class,
+          "as cr where cr.etendoGoAccount.id = :accountId"
+              + " and lower(cr.accountEmail) = lower(:accountEmail)"
+              + " and cr.createdClient.id = :clientId"
+              + " and cr.checkoutRequestStatus in ('CREATING', 'CREATED', 'PAID')"
+              + " order by cr.creationDate desc");
+      query.setNamedParameter(PARAM_ACCOUNT_ID, StringUtils.trimToEmpty(accountId));
+      query.setNamedParameter(PARAM_ACCOUNT_EMAIL, StringUtils.trimToEmpty(accountEmail));
+      query.setNamedParameter("clientId", StringUtils.trimToEmpty(clientId));
+      query.setFilterOnReadableClients(false);
+      query.setFilterOnReadableOrganization(false);
+      query.setMaxResult(1);
+      return query.uniqueResult();
+    });
+  }
+
+  /**
+   * ETP-5742 — the re-subscription a confirmed payment has to be applied to, read by the payment
+   * webhook right after {@link #recordPaid}.
+   *
+   * @param requestId correlation id read from {@code metadata[request_id]}
+   * @return the request when it is a re-subscription paid but not yet applied, else {@code null}
+   */
+  public CheckoutRequest findPaidReactivation(String requestId) {
+    return runAsSystem(() -> {
+      CheckoutRequest request = findByRequestId(requestId);
+      return isPendingReactivation(request)
+          && STATUS_PAID.equals(request.getCheckoutRequestStatus()) ? request : null;
+    });
+  }
+
+  /**
    * Returns whether a confirmed payment backs this request, account and environment name.
    *
    * <p>Accepts every status at or past {@code PAID}, so a resumed onboarding still passes the
@@ -875,6 +967,10 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
    * renewed only by that stale-lease branch; {@code PROVISIONING_ATTEMPTS} carries the fencing
    * token.
    *
+   * <p>ETP-5742 — a re-subscription ({@link #isPendingReactivation}) is never claimed: it is
+   * applied to its existing tenant by the payment webhook, and onboarding must not provision a
+   * second environment for the same payment.
+   *
    * @param requestId checkout request correlation id
    * @param accountEmail authenticated platform account email
    * @return {@code true} when this caller won the claim
@@ -894,7 +990,8 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
               + "       cr.updated = :now"
               + " where cr.request = :requestId"
               + "   and lower(cr.accountEmail) = lower(:" + PARAM_ACCOUNT_EMAIL + ")"
-              + "   and cr.checkoutRequestStatus = :paid")
+              + "   and cr.checkoutRequestStatus = :paid"
+              + "   and cr.createdClient is null")
           .setParameter(HQL_PROVISIONING, STATUS_PROVISIONING)
           .setParameter("paid", STATUS_PAID)
           .setParameter("now", now)
