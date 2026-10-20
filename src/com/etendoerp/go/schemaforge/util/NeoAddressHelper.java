@@ -50,6 +50,21 @@ public final class NeoAddressHelper {
    * for the wrapper's virtual columns — reads the real metadata instead of guessing a getter name
    * that could silently fail to compile, or worse, silently compile against the wrong property.
    *
+   * <p><b>Verified against the real model</b> (ETP-5806 follow-up, module now installed locally):
+   * {@code org.openbravo.sepa.iso20022}'s generated {@code Location.java} does expose typed
+   * {@code getOBSEPAStreetName()} / {@code getOBSEPABuildingNumber()} / {@code getOBSEPABuildingName()}
+   * accessors, and they are stable (predictable casing, matches the column names 1:1). They are
+   * NOT used here on purpose: this module declares {@code org.openbravo.sepa.iso20022} as an
+   * {@code AD_MODULE_DEPENDENCY} (required at runtime), but that does not guarantee the dependency's
+   * sources/model are present at COMPILE time for every build of this module — {@code src-gen} is
+   * regenerated from whatever is installed in the target instance's DB, not from a fixed classpath.
+   * A hardcoded {@code Location.getOBSEPAStreetName()} call would break compilation of this entire
+   * module on any environment where {@code org.openbravo.sepa.iso20022} has not been installed yet.
+   * The column-name accessor stays the correct choice; end-to-end read/write was confirmed against
+   * the real local DB via {@code POST}/{@code PUT}/{@code GET} on
+   * {@code /sws/neo/contacts/locationAddress} (streetName, buildingNumber, buildingName round-trip
+   * correctly, including clearing a field with an empty string).
+   *
    * @return the string value, or {@code null} when the object, the column or the value is absent
    */
   public static String getColumnValue(BaseOBObject obj, String tableName, String columnName) {
