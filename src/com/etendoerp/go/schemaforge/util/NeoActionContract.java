@@ -344,10 +344,20 @@ public final class NeoActionContract {
     Collections.sort(unknown);
     JSONArray accepted = new JSONArray();
     params.forEach(p -> accepted.put(p.name));
-    JSONObject err = errorBody("Action '" + name + "' does not accept parameter(s) "
-        + String.join(", ", unknown) + ".");
+    String message = "Action '" + name + "' does not accept parameter(s) "
+        + String.join(", ", unknown) + ".";
+    boolean describesId = StringUtils.isNotBlank(idDescription);
+    if (describesId) {
+      // Neutral lead-in: declared descriptions are sometimes a noun phrase, sometimes a sentence.
+      message += " Record id ('id' argument, not a parameter): "
+          + StringUtils.stripEnd(idDescription.trim(), ". \t\r\n") + ".";
+    }
+    JSONObject err = errorBody(message);
     err.put("unknownParameters", new JSONArray(unknown));
     err.put("acceptedParameters", accepted);
+    if (describesId) {
+      err.put("idDescription", idDescription);
+    }
     return wrap(err);
   }
 

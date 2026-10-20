@@ -447,9 +447,19 @@ public class McpToolRouter {
     // order-by instead of the random id order.
     NeoTabDefaultSort.applyIfAbsent(params, adTab, dalEntityName);
 
-    // Apply filters as where clause
+    // One read context for the customization's filter aliases and read predicates below.
+    NeoContext readCtx = McpHookExecutor.buildReadHookContext(specName, entityName, null, adTab,
+        sfEntity, McpHookExecutor.buildReadProviderParams(filters, parentId, offset, limit, orderBy));
+
+    // Apply filters as where clause. ETP-5705: when a customization rewrites a value after the
+    // read, it can declare a filter alias naming the property that holds the displayed value.
+    // A filter on that field is evaluated against the alias, or it would match the raw value
+    // the caller is never shown. Every alias used is reported back in the response.
+    Map<String, String> appliedAliases = new LinkedHashMap<>();
     if (filters != null && filters.length() > 0) {
-      String whereClause = McpQuerySupport.buildWhereFromFilters(filters, adTab, sfEntity, log);
+      String whereClause = McpQuerySupport.buildWhereFromFilters(filters, adTab, sfEntity,
+          NeoReadPredicates.resolveFilterAliases(readCtx, NeoExtensionChannel.MCP),
+          appliedAliases, log);
       if (StringUtils.isNotBlank(whereClause)) {
         params.put(JsonConstants.WHERE_AND_FILTER_CLAUSE, whereClause);
         params.put(JsonConstants.USE_ALIAS, "true");
@@ -474,10 +484,7 @@ public class McpToolRouter {
     // ETP-5009: the customization's read predicates, ANDed in exactly as the REST list GET and
     // its ?_distinct= fetch do (NeoReadPredicates), so a row a customization excludes from the
     // query is excluded here too — rather than only from the page its afterHandle was handed.
-    String readPredicate = NeoReadPredicates.resolve(McpHookExecutor.buildReadHookContext(
-        specName, entityName, null, adTab, sfEntity,
-        McpHookExecutor.buildReadProviderParams(filters, parentId, offset, limit, orderBy)),
-        NeoExtensionChannel.MCP);
+    String readPredicate = NeoReadPredicates.resolve(readCtx, NeoExtensionChannel.MCP);
     if (StringUtils.isNotBlank(readPredicate)) {
       params.put(JsonConstants.WHERE_AND_FILTER_CLAUSE, NeoReadPredicates.and(
           params.get(JsonConstants.WHERE_AND_FILTER_CLAUSE), readPredicate));
@@ -521,6 +528,7 @@ public class McpToolRouter {
     // other filters mean — the moment it is choosing among them. After projection on purpose:
     // `fields` selects row columns, and this block is not one.
     McpNamedFilters.attachApplied(flat, sfEntity.getNamedFilters(), filters);
+    McpQuerySupport.attachFilterAliases(flat, appliedAliases);
     return wrapAsTextContent(flat);
   }
 

@@ -20,11 +20,14 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -42,6 +45,7 @@ import javax.servlet.http.HttpServletResponse;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.MockedStatic;
 
 import com.etendoerp.go.payment.CheckoutRequestStore;
 import com.etendoerp.go.payment.DemoDataTransferService;
@@ -51,6 +55,8 @@ import com.etendoerp.go.payment.DemoDataTransferService;
  * (ETP-5443) is retired. These specs pin the servlet wiring: both endpoints are routed, the
  * checkout selection is recorded under its request, the purchase projection returns it for
  * resume, and a paid onboarding starts the transfer from the demo persisted on the purchase.
+ *
+ * @covers com.etendoerp.go.rest.EtendoGoJwtServlet
  */
 class EtendoGoJwtServletDemoDataTransferTest {
 
@@ -164,6 +170,26 @@ class EtendoGoJwtServletDemoDataTransferTest {
     servlet.startDemoDataTransferBestEffort(REQUEST_ID, DEMO_CLIENT_ID, CLIENT_ID,
         ACCOUNT_ID, ACCOUNT_EMAIL);
     verify(transferService).start(REQUEST_ID, DEMO_CLIENT_ID, CLIENT_ID);
+  }
+
+  /**
+   * ETP-5047 — a start that fails after writing part of its preferences, and before its own
+   * commit, must not leave them pending: the next commit on the thread (the draft clear, the
+   * billing period fill) would persist them. Everything earlier on the thread has committed, so
+   * the rollback discards only the transfer's own work.
+   */
+  @Test
+  void aFailedStartRollsBackWhatItLeftPending() {
+    IllegalStateException failure = new IllegalStateException("half-written selection");
+    doThrow(failure).when(transferService).start(REQUEST_ID, DEMO_CLIENT_ID, CLIENT_ID);
+
+    try (MockedStatic<EtendoGoDalHelper> transactions = mockStatic(EtendoGoDalHelper.class)) {
+      servlet.startDemoDataTransferBestEffort(REQUEST_ID, DEMO_CLIENT_ID, CLIENT_ID,
+          ACCOUNT_ID, ACCOUNT_EMAIL);
+
+      transactions.verify(() -> EtendoGoDalHelper.rollbackDalChanges(
+          eq("demo data transfer start"), eq(failure), any()));
+    }
   }
 
   @Test

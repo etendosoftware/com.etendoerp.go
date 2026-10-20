@@ -78,6 +78,7 @@ import com.etendoerp.go.schemaforge.util.NeoReportCallability;
  *
  * @covers com.etendoerp.go.mcp.McpDeclaredActions
  * @covers com.etendoerp.go.mcp.McpActionsView
+ * @covers com.etendoerp.go.mcp.McpRoutingException
  */
 @SuppressWarnings("java:S2187")
 @DisplayName("MCP declared actions (ETP-5468)")
@@ -579,6 +580,31 @@ class McpDeclaredActionsTest {
       List<McpToolDefinition> tools = tools();
       assertFalse(specEnumOf(tools, "etendo_action").contains(BANK_REC));
       assertTrue(specEnumOf(tools, "etendo_list").contains("sales-order"));
+    }
+  }
+
+  // ── declared-action 422 envelope ──────────────────────────────────────────
+
+  @Nested
+  @DisplayName("McpRoutingException.actionParametersInvalid (undeclared key)")
+  class UnknownParameterEnvelope {
+
+    @Test
+    @DisplayName("the envelope carries the id suffix, Nothing was run and idDescription")
+    void envelopeExplainsId() throws Exception {
+      Map<String, NeoActionContract> declared = Map.of("ping", NeoActionContract
+          .read("ping", "Pings.").withIdDescription("the thing."));
+      JSONObject error = NeoActionContract.validate(declared, "ping",
+          new JSONObject().put("zeta", "x")).getBody().getJSONObject("error");
+
+      JSONObject envelope = McpRoutingException
+          .actionParametersInvalid("spec", "entity", "ping", error).toEnvelope();
+
+      assertEquals("Action 'ping' does not accept parameter(s) zeta."
+          + " Record id ('id' argument, not a parameter): the thing. Nothing was run.",
+          envelope.getString("detail"));
+      assertEquals("the thing.", envelope.getString("idDescription"));
+      assertEquals("[\"zeta\"]", envelope.getJSONArray("unknownParameters").toString());
     }
   }
 }

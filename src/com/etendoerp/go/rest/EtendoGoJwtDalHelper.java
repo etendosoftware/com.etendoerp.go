@@ -41,7 +41,10 @@ import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.common.GoAccountResolver;
+import com.etendoerp.go.payment.EnvironmentAccessGuard;
 import com.etendoerp.go.payment.EnvironmentAccessPolicy;
+import com.etendoerp.go.payment.EnvironmentPlanCache;
+import com.etendoerp.go.payment.SubscriptionService;
 import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.payment.TenantPlanService;
 import com.etendoerp.go.schemaforge.data.Account;
@@ -77,6 +80,7 @@ final class EtendoGoJwtDalHelper {
   private static final String FIELD_ADMIN_USER = "adminUser";
   private static final String FIELD_ADMIN_USER_NAME = "adminUserName";
   private static final String FIELD_PLAN = "plan";
+  private static final String FIELD_PLAN_KEY = "planKey";
   private static final String FIELD_ENVIRONMENT_TYPE = "environmentType";
   private static final String FIELD_TRIAL_STARTED_AT = "trialStartedAt";
   private static final String FIELD_TRIAL_EXPIRES_AT = "trialExpiresAt";
@@ -103,9 +107,16 @@ final class EtendoGoJwtDalHelper {
   // ETP-5115: the constants naming the account's inline SSO columns are gone with the last reader
   // of those columns. The columns themselves stay as the migration fallback and are read only by
   // AccountIdentityDalHelper, through Account's own generated property names.
+  private static final SubscriptionService SUBSCRIPTION_SERVICE = new SubscriptionService();
   private static final TenantPlanService TENANT_PLAN_SERVICE = new TenantPlanService();
   private static final TenantEnvironmentLifecycleService ENVIRONMENT_LIFECYCLE_SERVICE =
       new TenantEnvironmentLifecycleService();
+  /**
+   * ETP-5047 — reports {@code accessState} as the decision the guard enforces, so the kill switch
+   * that lets a tenant in also stops the picker from showing it as suspended.
+   */
+  private static final EnvironmentAccessGuard ENVIRONMENT_ACCESS_GUARD =
+      new EnvironmentAccessGuard(ENVIRONMENT_LIFECYCLE_SERVICE);
   // ETP-4829: STATUS distinguishes an account that already owns a usable local password
   // ("active", the default for self-registration/SSO) from one an admin created on a user's
   // behalf, awaiting the ETP-4830 invite-email flow to set a password ("pending"). No login is
@@ -641,6 +652,11 @@ final class EtendoGoJwtDalHelper {
    * sources a purchase copies from, and only an owner may give one away — see
    * {@link #clientOwnedByAccountEmail}.
    *
+   * <p>Every caller is looking for a purchase source, so "free" here means a free demo: a client
+   * whose plan reads free but which is positively a productive environment (a canceled one, see
+   * {@link TenantEnvironmentLifecycleService#isProductiveEnvironment}) is left out (ETP-5047). A
+   * tenant with no lifecycle type at all is kept.
+   *
    * @param accountEmail authenticated platform account email
    * @param excludedClientId client id to omit from the candidates, or {@code null}
    * @return immutable distinct free-client IDs, possibly empty
@@ -657,7 +673,11 @@ final class EtendoGoJwtDalHelper {
     for (Map.Entry<String, List<User>> entry : accountUsersByClient.entrySet()) {
       String clientId = entry.getKey();
       if (clientId.equals(excludedClientId)) continue;
+      // ETP-5047 — a canceled productive environment reads plan free too, but it is no demo:
+      // every caller looks for a purchase source, so it is left out. So is a demo the account
+      // was only invited into (ETP-5743).
       if (TenantPlanService.PLAN_FREE.equals(TENANT_PLAN_SERVICE.resolvePlan(clientId))
+          && !ENVIRONMENT_LIFECYCLE_SERVICE.isProductiveEnvironment(clientId)
           && accountOwnsClient(clientId, entry.getValue())) {
         freeClientIds.add(clientId);
       }
@@ -665,8 +685,57 @@ final class EtendoGoJwtDalHelper {
     return Collections.unmodifiableSet(freeClientIds);
   }
 
-  static JSONObject buildEnvironmentJson(Client client, Organization organization, User environmentUser)
-      throws JSONException {
+  /**
+   * Serialises one environment for a caller that has no plan cache — a single-environment path,
+   * which can afford the one query the cache exists to avoid.
+   *
+   * @param client the tenant
+   * @param organization the organization inside it, may be null
+   * @param environmentUser the tenant's admin user linked to the account
+   * @return the environment object, carrying the same plan fields as the list endpoint
+   * @throws JSONException when the object cannot be built
+   */
+  static JSONObject buildEnvironmentJson(Client client, Organization organization,
+      User environmentUser) throws JSONException {
+    // ETP-5046-TRANSITIONAL-FALLBACK — the id is passed so this single-environment path resolves
+    // the plan exactly as the list endpoint does, including the retired-preference fallback for a
+    // tenant the R37 backfill has not reached. Delete the extra argument in Phase F.
+    return buildEnvironmentJson(client, organization, environmentUser,
+        EnvironmentPlanCache.of(List.of(client.getId()),
+            SUBSCRIPTION_SERVICE.findLatestForClients(List.of(client.getId()))));
+  }
+
+  /**
+   * Serialises one environment, reading its commercial state from a cache the caller built once
+   * for the whole page.
+   *
+   * <p><b>{@code plan} is byte-for-byte what it has always been.</b> Two live consumers read it
+   * directly — {@code environmentPresentation.js} and {@code UpgradePage.jsx} — and both compare
+   * it against the literal {@code "productive"}. The two fields added beside it are additive:
+   * a client that ignores them is unaffected.
+   *
+   * <p>{@code planKey} and {@code subscriptionStatus} are JSON null for a tenant with no
+   * subscription, deliberately <b>not</b> the string {@code "free"}: a plan key names a row in the
+   * Subscription Plan Catalog, and a free tenant has no such row. Reporting {@code "free"} there
+   * would invent a plan catalog entry that does not exist and that nothing could ever look up.
+   *
+   * <p><b>TRANSITIONAL (ETP-5046-TRANSITIONAL-FALLBACK).</b> One tenant shape carries
+   * {@code plan = "productive"} with both {@code planKey} and {@code subscriptionStatus} JSON
+   * null: a tenant still answered for by the retired {@code ETGO_TenantPlan} preference because
+   * the R37 backfill has not reached it. The nulls are the honest answer — there is no plan catalog
+   * row
+   * and no subscription — and they keep the gap visible to anyone reading the payload. This shape
+   * disappears with the fallback in Phase F.
+   *
+   * @param client the tenant
+   * @param organization the organization inside it, may be null
+   * @param environmentUser the tenant's admin user linked to the account
+   * @param planCache the per-request plan cache, never null
+   * @return the environment object
+   * @throws JSONException when the object cannot be built
+   */
+  static JSONObject buildEnvironmentJson(Client client, Organization organization,
+      User environmentUser, EnvironmentPlanCache planCache) throws JSONException {
     JSONObject env = new JSONObject();
     env.put(FIELD_CLIENT_ID, client.getId());
     env.put(FIELD_CLIENT_NAME, client.getName());
@@ -675,10 +744,15 @@ final class EtendoGoJwtDalHelper {
     env.put(FIELD_ADMIN_USER_ID, environmentUser.getId());
     env.put(FIELD_ADMIN_USER, environmentUser.getUsername());
     env.put(FIELD_ADMIN_USER_NAME, environmentUser.getName());
+    EnvironmentPlanCache.PlanView planView = planCache.viewFor(client.getId());
     // Additive since ETP-4686 so the environment picker can badge the plan. Older clients that
-    // ignore the field keep working, and a tenant with no plan marker reads back as free.
-    String plan = TENANT_PLAN_SERVICE.resolvePlan(client.getId());
-    env.put(FIELD_PLAN, plan);
+    // ignore the field keep working, and a tenant with no subscription reads back as free.
+    env.put(FIELD_PLAN, planView.legacyPlan());
+    // ETP-5046: the Subscription Plan Catalog key of the plan behind the subscription. JSON null
+    // (never "free") for a tenant with no subscription — a plan key names a plan catalog row,
+    // and a free tenant has none, so reporting "free" would invent an entry nothing could look up.
+    env.put(FIELD_PLAN_KEY,
+        planView.planKey() == null ? JSONObject.NULL : planView.planKey());
     boolean flaggedOwner = OwnerSupport.isOwner(environmentUser.getId());
     env.put(FIELD_RELATIONSHIP, flaggedOwner ? "OWNER" : "INVITED");
     // ETP-5743: only an owned demo may be a purchase source. Unlike `relationship`, a legacy tenant
@@ -686,8 +760,11 @@ final class EtendoGoJwtDalHelper {
     env.put(FIELD_OWNED_BY_ACCOUNT, ownerOrUnownedLegacyClient(flaggedOwner, client.getId()));
     TenantEnvironmentLifecycleService.EnvironmentSnapshot lifecycle =
         ENVIRONMENT_LIFECYCLE_SERVICE.resolve(client.getId());
-    EnvironmentAccessPolicy.Decision access = ENVIRONMENT_LIFECYCLE_SERVICE
-        .evaluateAccess(client.getId(), true, Instant.now());
+    // The ENFORCED decision, not the raw policy one: with the kill switch on for this tenant a
+    // refusal reads ALLOWED, matching what NEO and MCP actually do. The subscription status and
+    // trial fields below stay the facts they are.
+    EnvironmentAccessPolicy.Decision access =
+        ENVIRONMENT_ACCESS_GUARD.enforcedDecision(client.getId());
     if (access != null) {
       env.put(FIELD_ACCESS_STATE, access.name());
     }
@@ -697,6 +774,9 @@ final class EtendoGoJwtDalHelper {
         ENVIRONMENT_LIFECYCLE_SERVICE.isAssociatedWithProductive(client.getId()));
     if (lifecycle != null) {
       env.put(FIELD_ENVIRONMENT_TYPE, lifecycle.getType().name());
+      // ETP-5046: ONE subscription status for the whole product. The snapshot derives it
+      // from the open ETGO_SUBSCRIPTION row, so the access policy and the Subscription Plan Catalog
+      // can never disagree about whether a tenant is paying.
       env.put(FIELD_SUBSCRIPTION_STATUS, lifecycle.getSubscriptionStatus().name());
       if (lifecycle.getRenewalDueAt() != null) {
         env.put(FIELD_RENEWAL_DUE_AT, lifecycle.getRenewalDueAt().toString());

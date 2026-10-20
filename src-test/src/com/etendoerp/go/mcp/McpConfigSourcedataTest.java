@@ -422,6 +422,8 @@ class McpConfigSourcedataTest {
     assertNotNull(reason);
     assertTrue(reason.contains("createMovement") && reason.contains("transferFunds"),
         "the hidden Core buttons point at the movement and transfer actions: " + reason);
+    assertTrue(reason.contains("disconnectBank") && reason.contains("deleteBankConnection"),
+        "the bank connection is disconnected with the declared actions: " + reason);
     // ETP-5558: Classic's Funds Transfer stays listed, withdrawn, pointing at the agent's action.
     assertEquals("transferFunds", payload.getJSONObject(McpActionsSection.NAME)
         .getJSONObject(McpActionsSection.KEY_REDIRECT).getString("aprmFundsTrans"));

@@ -254,6 +254,84 @@ class NeoActionContractTest {
     }
 
     @Test
+    @DisplayName("an unknown parameter with an idDescription → message and body say what id is")
+    void unknownParameterExplainsId() throws Exception {
+      Map<String, NeoActionContract> map = new LinkedHashMap<>(catalog());
+      map.put("apply", map.get("apply").withIdDescription("the id of the line"));
+      JSONObject error = errorOf(NeoActionContract.validate(map, "apply",
+          validApplyBody().put("zeta", "x")));
+      assertEquals("Action 'apply' does not accept parameter(s) zeta."
+          + " Record id ('id' argument, not a parameter): the id of the line.",
+          error.getString("message"));
+      assertEquals("the id of the line", error.getString("idDescription"));
+    }
+
+    @Test
+    @DisplayName("without an idDescription the unknown-parameter 422 is unchanged")
+    void unknownParameterWithoutIdDescription() throws Exception {
+      JSONObject error = errorOf(NeoActionContract.validate(catalog(), "apply",
+          validApplyBody().put("zeta", "x")));
+      assertEquals("Action 'apply' does not accept parameter(s) zeta.",
+          error.getString("message"));
+      assertFalse(error.has("idDescription"));
+    }
+
+    @Test
+    @DisplayName("several unknown parameters: the id suffix is appended once, after the sorted list")
+    void unknownParametersSuffixOnce() throws Exception {
+      Map<String, NeoActionContract> map = new LinkedHashMap<>(catalog());
+      map.put("apply", map.get("apply").withIdDescription("the id of the line"));
+      JSONObject error = errorOf(NeoActionContract.validate(map, "apply",
+          validApplyBody().put("zeta", "x").put("amount", "1")));
+      String message = error.getString("message");
+      assertEquals("Action 'apply' does not accept parameter(s) amount, zeta."
+          + " Record id ('id' argument, not a parameter): the id of the line.", message);
+      assertEquals(message.indexOf("Record id"), message.lastIndexOf("Record id"));
+    }
+
+    @Test
+    @DisplayName("a blank or whitespace-only idDescription adds no suffix and no body key")
+    void blankIdDescriptionIsIgnored() throws Exception {
+      for (String blank : new String[] {"", "   ", "\t\n"}) {
+        Map<String, NeoActionContract> map = new LinkedHashMap<>(catalog());
+        map.put("apply", map.get("apply").withIdDescription(blank));
+        JSONObject error = errorOf(NeoActionContract.validate(map, "apply",
+            validApplyBody().put("zeta", "x")));
+        assertEquals("Action 'apply' does not accept parameter(s) zeta.",
+            error.getString("message"));
+        assertFalse(error.has("idDescription"));
+      }
+    }
+
+    @Test
+    @DisplayName("an idDescription ending in '.' gets exactly one period; the body key stays raw")
+    void idDescriptionTrailingPeriodNormalised() throws Exception {
+      String raw = "Not used \u2014 the list is not tied to a return receipt. Pass \"_\".  ";
+      Map<String, NeoActionContract> map = new LinkedHashMap<>(catalog());
+      map.put("apply", map.get("apply").withIdDescription(raw));
+      JSONObject error = errorOf(NeoActionContract.validate(map, "apply",
+          validApplyBody().put("zeta", "x")));
+      assertEquals("Action 'apply' does not accept parameter(s) zeta."
+          + " Record id ('id' argument, not a parameter): Not used \u2014 the list is not tied"
+          + " to a return receipt. Pass \"_\".", error.getString("message"));
+      assertFalse(error.getString("message").endsWith(".."));
+      assertEquals(raw, error.getString("idDescription"));
+    }
+
+    @Test
+    @DisplayName("a contract with no parameters: suffix present, acceptedParameters empty")
+    void noParametersContract() throws Exception {
+      Map<String, NeoActionContract> map = new LinkedHashMap<>();
+      map.put("ping", NeoActionContract.read("ping", "Pings.").withIdDescription("the thing"));
+      JSONObject error = errorOf(NeoActionContract.validate(map, "ping",
+          new JSONObject().put("zeta", "x")));
+      assertEquals("Action 'ping' does not accept parameter(s) zeta."
+          + " Record id ('id' argument, not a parameter): the thing.", error.getString("message"));
+      assertEquals(0, error.getJSONArray("acceptedParameters").length());
+      assertEquals("the thing", error.getString("idDescription"));
+    }
+
+    @Test
     @DisplayName("unknown parameters are reported before missing ones")
     void unknownBeforeMissing() throws Exception {
       JSONObject error = errorOf(NeoActionContract.validate(catalog(), "apply",

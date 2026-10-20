@@ -16,16 +16,22 @@
  */
 package com.etendoerp.go.onboarding;
 
+import java.sql.Connection;
+import java.sql.SQLException;
+import java.sql.Savepoint;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.Date;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.hibernate.criterion.Restrictions;
+import org.openbravo.base.exception.OBException;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
@@ -120,7 +126,91 @@ public final class FiscalCalendarSupport {
           + " GROUP BY c.c_period_id) x"
           + " WHERE p.c_period_id = x.c_period_id AND p.openclose IS DISTINCT FROM x.openclose";
 
+  /**
+   * Years of the calendar outside the kept range whose periods were never opened: nothing can have
+   * posted into them (core's own {@code @PeriodAlreadyUsed@} rule in {@code C_PERIOD_TRG2}).
+   */
+  private static final String UNUSED_YEARS_OUTSIDE =
+      "SELECT y.c_year_id FROM c_year y WHERE y.c_calendar_id = :calendarId"
+          + " AND y.year NOT IN (:keepYears)"
+          + " AND NOT EXISTS (SELECT 1 FROM c_period p JOIN c_periodcontrol c"
+          + " ON c.c_period_id = p.c_period_id"
+          + " WHERE p.c_year_id = y.c_year_id AND c.periodstatus <> 'N')";
+
+  /** {@code C_PERIOD_TRG2} deletes each period's control rows and log on delete. */
+  static final String DELETE_UNUSED_PERIODS_SQL =
+      "DELETE FROM c_period WHERE c_year_id IN (" + UNUSED_YEARS_OUTSIDE + ")";
+
+  static final String DELETE_UNUSED_YEARS_SQL =
+      "DELETE FROM c_year WHERE c_year_id IN (" + UNUSED_YEARS_OUTSIDE + ")";
+
   private FiscalCalendarSupport() {
+  }
+
+  /**
+   * Deletes every year of the calendar outside [{@code firstYear}, {@code lastYear}] whose periods
+   * were never opened, with its periods and their control rows (ETP-5744). A new productive tenant
+   * must start with the signup year only, not with the year the onboarding dataset ships. A year
+   * with any opened period is kept. Native SQL on the DAL session, so pending DAL changes are
+   * flushed first, and callers must not hold {@link Year} or {@link Period} entities of the deleted
+   * years.
+   *
+   * <p>Best effort: the deletes run under a savepoint, so a row referencing one of those periods
+   * (every foreign key to {@code C_PERIOD}/{@code C_YEAR} is NO ACTION) only skips the cleanup with
+   * a warning instead of failing the caller's transaction.
+   *
+   * @param calendarId calendar to clean
+   * @param firstYear  first calendar year to keep
+   * @param lastYear   last calendar year to keep
+   * @return the number of years deleted, 0 when the cleanup was skipped
+   */
+  public static int removeUnusedYearsOutside(String calendarId, int firstYear, int lastYear) {
+    List<String> keepYears = new ArrayList<>();
+    for (int year = firstYear; year <= lastYear; year++) {
+      keepYears.add(String.valueOf(year));
+    }
+    OBDal.getInstance().flush();
+    Connection connection = OBDal.getInstance().getConnection(false);
+    Savepoint savepoint = setSavepoint(connection);
+    int deleted;
+    try {
+      executeUpdate(DELETE_UNUSED_PERIODS_SQL, calendarId, keepYears);
+      deleted = executeUpdate(DELETE_UNUSED_YEARS_SQL, calendarId, keepYears);
+    } catch (RuntimeException e) {
+      rollbackTo(connection, savepoint);
+      log.warn("ETP-5744 could not delete unused years outside {}-{} from calendar {}; kept",
+          firstYear, lastYear, calendarId, e);
+      return 0;
+    }
+    if (deleted > 0) {
+      log.info("ETP-5744 deleted {} unused years outside {}-{} from calendar {}", deleted,
+          firstYear, lastYear, calendarId);
+    }
+    return deleted;
+  }
+
+  private static Savepoint setSavepoint(Connection connection) {
+    try {
+      return connection.setSavepoint();
+    } catch (SQLException e) {
+      throw new OBException("Cannot set a savepoint to clean the calendar years", e);
+    }
+  }
+
+  private static void rollbackTo(Connection connection, Savepoint savepoint) {
+    try {
+      connection.rollback(savepoint);
+    } catch (SQLException e) {
+      throw new OBException("Cannot roll back the calendar year cleanup", e);
+    }
+  }
+
+  private static int executeUpdate(String sql, String calendarId, List<String> keepYears) {
+    return OBDal.getInstance().getSession()
+        .createNativeQuery(sql)
+        .setParameter(PARAM_CALENDAR_ID, calendarId)
+        .setParameterList("keepYears", keepYears)
+        .executeUpdate();
   }
 
   /**
@@ -160,7 +250,8 @@ public final class FiscalCalendarSupport {
    * Makes sure the calendar has a January-December year {@code fiscalYear} with its twelve
    * periods. An existing year with periods is left alone (whatever its start month); a missing one
    * is created, and an existing one without periods gets them. {@code C_PERIOD_TRG} adds the
-   * control rows; the caller normalizes afterwards.
+   * control rows, one per (period, organization, document base type), so a year created here needs
+   * no normalization (the productive branch normalizes anyway, for the dataset's own rows).
    *
    * @param calendar   the organization's calendar
    * @param fiscalYear the calendar year to ensure, e.g. 2026
