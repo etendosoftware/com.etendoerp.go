@@ -124,13 +124,14 @@ class JwtAuthUtilsTest {
 
     @Test
     void asksForTheNeoDataPolicyAndLetsAnAuthenticatedRequestThrough() throws Exception {
-      when(pipeline.authenticate(request, SurfacePolicy.NEO_DATA)).thenReturn(
+      when(pipeline.authenticate(request, SurfacePolicy.NEO_DATA, "favorites GET")).thenReturn(
           EnvironmentAuthOutcome.authenticated(AuthScheme.COOKIE, mock(OBContext.class),
               "user-1", "role-1", "client-1", "org-1"));
 
       assertTrue(JwtAuthUtils.authenticateOrFail(pipeline, request, response, log, "favorites GET"));
 
-      verify(pipeline).authenticate(request, SurfacePolicy.NEO_DATA);
+      // ETP-5047 — the endpoint label reaches the access guard's log line.
+      verify(pipeline).authenticate(request, SurfacePolicy.NEO_DATA, "favorites GET");
       verify(response, never()).setStatus(anyInt());
     }
 
@@ -141,7 +142,7 @@ class JwtAuthUtilsTest {
     void writesEveryRefusalWithThePipelinesStatusAndMessage(EnvironmentAuthOutcome.Status status)
         throws Exception {
       String message = "refused as " + status.name();
-      when(pipeline.authenticate(any(), eq(SurfacePolicy.NEO_DATA)))
+      when(pipeline.authenticate(any(), eq(SurfacePolicy.NEO_DATA), eq("favorites GET")))
           .thenReturn(EnvironmentAuthOutcome.refused(status, message, AuthScheme.COOKIE));
       StringWriter body = new StringWriter();
       when(response.getWriter()).thenReturn(new PrintWriter(body));

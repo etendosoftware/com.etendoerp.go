@@ -39,7 +39,13 @@ import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.ad.ui.Window;
 import org.openbravo.model.common.enterprise.Organization;
 
-/** Tests for {@link NeoFiscalModelsCatalogService}. */
+import com.etendoerp.go.common.BoundedJsonParserTest;
+
+/**
+ * Tests for {@link NeoFiscalModelsCatalogService}.
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoFiscalModelsCatalogService
+ */
 public class NeoFiscalModelsCatalogServiceTest {
 
   @Test
@@ -134,5 +140,28 @@ public class NeoFiscalModelsCatalogServiceTest {
   @Test(expected = IllegalArgumentException.class)
   public void saveActiveModelsInvalidJsonThrowsIllegalArgumentException() {
     NeoFiscalModelsCatalogService.saveActiveModels("not-json");
+  }
+
+  /**
+   * A body that breaks the JSON parser is the client's error: the IllegalArgumentException the
+   * endpoint turns into a 400, never an {@code Error}, and nothing is stored.
+   */
+  @Test
+  public void saveActiveModelsParserBreakingBodyThrowsIllegalArgumentException() {
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<Preferences> prefMock = mockStatic(Preferences.class)) {
+      BoundedJsonParserTest.stackBreakingBodies().filter(body -> body.length() < 100)
+          .forEach(body -> {
+            try {
+              NeoFiscalModelsCatalogService.saveActiveModels(body);
+              throw new AssertionError("expected IllegalArgumentException for " + body);
+            } catch (IllegalArgumentException expected) {
+              assertEquals("Invalid JSON body", expected.getMessage());
+            }
+          });
+
+      ctxMock.verifyNoInteractions();
+      prefMock.verifyNoInteractions();
+    }
   }
 }

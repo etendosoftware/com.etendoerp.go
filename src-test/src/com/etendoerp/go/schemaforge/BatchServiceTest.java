@@ -28,10 +28,12 @@ import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.ArgumentMatchers.startsWith;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -40,7 +42,6 @@ import static org.mockito.Mockito.when;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
-
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
@@ -54,6 +55,7 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.ui.Tab;
 
+import com.etendoerp.go.common.BoundedJsonParserTest;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
@@ -555,7 +557,6 @@ public class BatchServiceTest {
       assertEquals(403, result.getJSONObject("error").getInt("status"));
     }
   }
-
   @Test
   public void handleRequiresServletBoundConstructor() throws Exception {
     BatchService service = BatchService.forBatchOnly();
@@ -565,6 +566,32 @@ public class BatchServiceTest {
       assertTrue("Expected IllegalStateException", false);
     } catch (IllegalStateException e) {
       assertTrue(e.getMessage().contains("servlet-bound"));
+    }
+  }
+
+  /** A batch body that breaks the JSON parser is a 400, and no operation is dispatched. */
+  @Test
+  public void handleMalformedBodyReturnsBadRequest() throws Exception {
+    NeoServlet servlet = mock(NeoServlet.class);
+    BatchService service = new BatchService(servlet);
+    HttpServletRequest request = mock(HttpServletRequest.class);
+
+    try (MockedStatic<NeoRequestBodyParser> bodies = mockStatic(NeoRequestBodyParser.class);
+         MockedStatic<OBDal> dal = mockStatic(OBDal.class)) {
+      for (String body : (Iterable<String>) BoundedJsonParserTest.stackBreakingBodies()
+          .filter(b -> b.length() < 100)::iterator) {
+        HttpServletResponse response = mock(HttpServletResponse.class);
+        bodies.when(() -> NeoRequestBodyParser.readRequestBody(request)).thenReturn(body);
+
+        service.handle(request, response);
+
+        verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_BAD_REQUEST),
+            startsWith("Invalid JSON body"));
+      }
+      verify(servlet, never()).sendError(any(), eq(HttpServletResponse.SC_BAD_REQUEST),
+          eq("Missing or empty 'operations' array"));
+      verify(servlet, never()).writeResponse(any(), any());
+      dal.verifyNoInteractions();
     }
   }
 }

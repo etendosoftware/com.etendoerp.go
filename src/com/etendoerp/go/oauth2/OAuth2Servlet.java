@@ -62,7 +62,9 @@ import com.etendoerp.go.auth.DalWarehouseResolver;
 import com.etendoerp.go.auth.EnvironmentAuthOutcome;
 import com.etendoerp.go.auth.EnvironmentRequestAuthenticator;
 import com.etendoerp.go.auth.SurfacePolicy;
+import com.etendoerp.go.common.BoundedJsonParser;
 import com.etendoerp.go.common.CorsUtils;
+import com.etendoerp.go.common.MalformedJsonException;
 import com.etendoerp.go.common.ProtocolErrorAdapters;
 import com.etendoerp.go.common.PublicUrlResolver;
 import com.etendoerp.go.schemaforge.data.com.etendoerp.go.schemaforge.data.OAuth2Client;
@@ -95,6 +97,8 @@ import com.etendoerp.go.session.JdbcGoSessionStore;
 public class OAuth2Servlet extends HttpBaseServlet {
 
   private static final Logger log = LogManager.getLogger(OAuth2Servlet.class);
+  /** The label of the API-key endpoints in the commercial-access guard's log line (ETP-5047). */
+  private static final String API_KEYS_ENTRY_POINT = "oauth2-api-keys";
   private final GoSessionService goSessionService;
   private final EnvironmentRequestAuthenticator environmentAuthenticator;
   // Package-visible so tests can swap the database-backed role lookups for a fake. Only the
@@ -157,6 +161,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
     private static final String MESSAGE_INTERNAL_SERVER_ERROR = "Internal server error";
     private static final String MESSAGE_UNKNOWN_ENDPOINT = "Unknown endpoint: ";
     private static final String MESSAGE_CLIENT_NOT_FOUND = "Client not found: ";
+    private static final String MESSAGE_MALFORMED_JSON = "Malformed request body";
     private static final String PATH_AUTHORIZE = "/authorize";
   private static final String ERROR_INVALID_CLIENT = "invalid_client";
   private static final String ERROR_INVALID_SCOPE = "invalid_scope";
@@ -430,7 +435,10 @@ public class OAuth2Servlet extends HttpBaseServlet {
       String contentType = request.getContentType();
       JSONObject body = null;
       if (contentType != null && contentType.contains(APPLICATION_JSON)) {
-        body = parseJsonBody(request);
+        body = parseJsonBodyOrWriteError(request, response);
+        if (body == null) {
+          return;
+        }
         grantType = body.optString("grant_type", null);
         clientId = body.optString(FIELD_CLIENT_ID_REQUEST, null);
         clientSecret = body.optString("client_secret", null);
@@ -583,7 +591,10 @@ public class OAuth2Servlet extends HttpBaseServlet {
       throws IOException {
     try {
       PublicApiKeyContext context = requirePublicApiKeyContext(request);
-      JSONObject body = parseJsonBody(request);
+      JSONObject body = parseJsonBodyOrWriteError(request, response);
+      if (body == null) {
+        return;
+      }
       String name = PublicApiKeyPolicy.normalizeName(body.optString("name", null));
       Set<String> capabilities = parsePublicCapabilities(body);
       validatePublicCapabilities(context, capabilities);
@@ -652,12 +663,15 @@ public class OAuth2Servlet extends HttpBaseServlet {
         writeError(response, HttpServletResponse.SC_NOT_FOUND, ERROR_NOT_FOUND, MESSAGE_API_KEY_NOT_FOUND);
         return;
       }
-      JSONObject body = parseJsonBody(request);
+      JSONObject body = parseJsonBodyOrWriteError(request, response);
+      if (body == null) {
+        return;
+      }
       String name = body.has("name")
           ? PublicApiKeyPolicy.normalizeName(body.optString("name", null))
           : existing.getString("name");
       boolean active = body.has(FIELD_IS_ACTIVE)
-          ? body.getBoolean(FIELD_IS_ACTIVE) : existing.getBoolean(FIELD_IS_ACTIVE);
+          ? requireBooleanField(body, FIELD_IS_ACTIVE) : existing.getBoolean(FIELD_IS_ACTIVE);
       if (active && !name.equals(existing.getString("name"))
           && publicApiKeyNameExists(context, name)) {
         writeError(response, HttpServletResponse.SC_CONFLICT, ERROR_INVALID_REQUEST,
@@ -678,6 +692,11 @@ public class OAuth2Servlet extends HttpBaseServlet {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST, e.getMessage());
     } catch (AuthException e) {
       writeError(response, e.statusCode, ERROR_ACCESS_DENIED, e.getMessage());
+    } catch (MalformedJsonException e) {
+      // Only requireBooleanField throws it here: the body parsed, a field has the wrong type.
+      log.warn("Invalid public API key update request: {}", e.getMessage());
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST,
+          e.getMessage());
     } catch (SQLException | JSONException e) {
       log.error("Error updating public API key", e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
@@ -943,8 +962,8 @@ public class OAuth2Servlet extends HttpBaseServlet {
     // the Authorization header only, so the SPA's cookie session got 401 here (and the frontend
     // logs out on a 401), the legacy kill switch did not apply, and a commercially blocked
     // tenant's keys stayed manageable. The pipeline installs the request's OBContext itself.
-    EnvironmentAuthOutcome outcome =
-        environmentAuthenticator.authenticate(request, SurfacePolicy.NEO_DATA);
+    EnvironmentAuthOutcome outcome = environmentAuthenticator.authenticate(request,
+        SurfacePolicy.NEO_DATA, API_KEYS_ENTRY_POINT);
     if (!outcome.isAuthenticated()) {
       throw new AuthException(outcome.getHttpStatus(), outcome.getMessage());
     }
@@ -1030,7 +1049,10 @@ public class OAuth2Servlet extends HttpBaseServlet {
       EnvironmentAuthOutcome admin = requireAdmin(request);
       String adminUserId = admin.getUserId();
 
-      JSONObject body = parseJsonBody(request);
+      JSONObject body = parseJsonBodyOrWriteError(request, response);
+      if (body == null) {
+        return;
+      }
       String name = body.optString("name", null);
       String adUserId = body.optString(FIELD_AD_USER_ID, null);
       String adRoleId = body.optString(FIELD_AD_ROLE_ID, null);
@@ -1113,7 +1135,10 @@ public class OAuth2Servlet extends HttpBaseServlet {
     try {
       String adminUserId = requireAdmin(request).getUserId();
 
-      JSONObject body = parseJsonBody(request);
+      JSONObject body = parseJsonBodyOrWriteError(request, response);
+      if (body == null) {
+        return;
+      }
 
       // Verify client exists
       JSONObject existing = findClientById(id);
@@ -1130,7 +1155,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
       String redirectUrisJson = body.optString(
           FIELD_REDIRECT_URIS_JSON, existing.optString(FIELD_REDIRECT_URIS_JSON, "[]"));
       boolean isActive = body.has(FIELD_IS_ACTIVE)
-          ? body.getBoolean(FIELD_IS_ACTIVE)
+          ? requireBooleanField(body, FIELD_IS_ACTIVE)
           : existing.getBoolean(FIELD_IS_ACTIVE);
 
       Connection conn = OBDal.getInstance().getConnection();
@@ -1166,6 +1191,11 @@ public class OAuth2Servlet extends HttpBaseServlet {
 
     } catch (AuthException e) {
       writeError(response, e.statusCode, ERROR_ACCESS_DENIED, e.getMessage());
+    } catch (MalformedJsonException e) {
+      // Only requireBooleanField throws it here: the body parsed, a field has the wrong type.
+      log.warn("Invalid OAuth2 client update request: {}", e.getMessage());
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST,
+          e.getMessage());
     } catch (SQLException | JSONException e) {
       log.error("Error updating OAuth2 client", e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
@@ -1234,7 +1264,10 @@ public class OAuth2Servlet extends HttpBaseServlet {
       boolean revokeTokens = true;
       String contentType = request.getContentType();
       if (contentType != null && contentType.contains(APPLICATION_JSON)) {
-        JSONObject body = parseJsonBody(request);
+        JSONObject body = parseJsonBodyOrWriteError(request, response);
+        if (body == null) {
+          return;
+        }
         revokeTokens = body.optBoolean("revokeExistingTokens", true);
       }
 
@@ -1338,7 +1371,10 @@ public class OAuth2Servlet extends HttpBaseServlet {
     try {
       requireAdmin(request);
 
-      JSONObject body = parseJsonBody(request);
+      JSONObject body = parseJsonBodyOrWriteError(request, response);
+      if (body == null) {
+        return;
+      }
       String clientIdentifier = body.optString(FIELD_CLIENT_ID, null);
 
       if (clientIdentifier == null || clientIdentifier.trim().isEmpty()) {
@@ -1381,7 +1417,10 @@ public class OAuth2Servlet extends HttpBaseServlet {
     try {
       requireAdmin(request);
 
-      JSONObject body = parseJsonBody(request);
+      JSONObject body = parseJsonBodyOrWriteError(request, response);
+      if (body == null) {
+        return;
+      }
       String token = body.optString(FIELD_TOKEN, null);
 
       if (token == null || token.trim().isEmpty()) {
@@ -1544,10 +1583,14 @@ public class OAuth2Servlet extends HttpBaseServlet {
       log.error("Error validating OAuth2 authorize request", e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
           MESSAGE_INTERNAL_SERVER_ERROR);
+    } catch (MalformedJsonException e) {
+      // The body is parsed before the caller is authenticated: a 400 without a stack trace.
+      log.warn("Malformed authorize request body: {}", e.getMessage());
+      writeMalformedBody(response);
     } catch (JSONException e) {
-      log.error("Error processing authorize request", e);
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST,
-          "Malformed request body");
+      log.error("Failed to build authorize response", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
+          MESSAGE_INTERNAL_SERVER_ERROR);
     }
   }
 
@@ -1816,7 +1859,10 @@ public class OAuth2Servlet extends HttpBaseServlet {
   private void handleRegister(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
     try {
-      JSONObject body = parseJsonBody(request);
+      JSONObject body = parseJsonBodyOrWriteError(request, response);
+      if (body == null) {
+        return;
+      }
       String clientName = body.optString("client_name", "MCP Client");
       String scopes = OAuth2ClientPolicy.normalizeClientScopes(
           body.optString(FIELD_SCOPE, null), ApiScopes.ALL, VALID_SCOPES);
@@ -1860,9 +1906,9 @@ public class OAuth2Servlet extends HttpBaseServlet {
     } catch (IllegalArgumentException | OBException e) {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST, e.getMessage());
     } catch (JSONException e) {
-      log.error("Error processing DCR request", e);
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST,
-          "Malformed request body");
+      log.error("Failed to build DCR response", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
+          MESSAGE_INTERNAL_SERVER_ERROR);
     } catch (SQLException e) {
       log.error("Database error during DCR", e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
@@ -2121,9 +2167,24 @@ public class OAuth2Servlet extends HttpBaseServlet {
   // --- JSON/HTTP helpers ---
 
   /**
+   * Read a boolean the client sent. A value of another type is the client's error (a quiet 400
+   * whose description names the field), not the server-side {@code JSONException} that
+   * {@code getBoolean} would raise and the handlers' catch turns into a 500 with a stack trace.
+   */
+  static boolean requireBooleanField(JSONObject body, String field)
+      throws MalformedJsonException {
+    try {
+      return body.getBoolean(field);
+    } catch (JSONException e) {
+      throw new MalformedJsonException(field + " must be a boolean");
+    }
+  }
+
+  /**
    * Parse the request body as JSON.
    */
-  private JSONObject parseJsonBody(HttpServletRequest request) throws IOException, JSONException {
+  private JSONObject parseJsonBody(HttpServletRequest request)
+      throws IOException, MalformedJsonException {
     StringBuilder sb = new StringBuilder();
     try (BufferedReader reader = request.getReader()) {
       String line;
@@ -2131,7 +2192,28 @@ public class OAuth2Servlet extends HttpBaseServlet {
         sb.append(line);
       }
     }
-    return new JSONObject(sb.toString());
+    return BoundedJsonParser.parseObject(sb.toString());
+  }
+
+  /**
+   * Parse the request body as JSON, writing a 400 {@code invalid_request} if the client sent a
+   * malformed one.
+   *
+   * @param request the HTTP request whose body is parsed
+   * @param response the HTTP response used to write an error if parsing fails
+   * @return the parsed {@link JSONObject}, or {@code null} if an error was written
+   * @throws IOException if reading the request body fails
+   */
+  private JSONObject parseJsonBodyOrWriteError(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    try {
+      return parseJsonBody(request);
+    } catch (MalformedJsonException e) {
+      // The client's error, a 400 without a stack trace; the message never echoes the body.
+      log.warn("Malformed {} request body: {}", request.getPathInfo(), e.getMessage());
+      writeMalformedBody(response);
+      return null;
+    }
   }
 
   /**
@@ -2149,6 +2231,16 @@ public class OAuth2Servlet extends HttpBaseServlet {
   /**
    * Write an RFC 6749 error response.
    */
+  /**
+   * A request body the client sent is not JSON (or breaks the parser): its error, a 400
+   * {@code invalid_request}, never the 500 that a {@code JSONException} from our own response
+   * building means.
+   */
+  private void writeMalformedBody(HttpServletResponse response) throws IOException {
+    writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST,
+        MESSAGE_MALFORMED_JSON);
+  }
+
   private void writeError(HttpServletResponse response, int status, String error,
       String description) throws IOException {
     ProtocolErrorAdapters.writeOAuthError(response, status, error, description);

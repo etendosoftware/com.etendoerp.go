@@ -27,6 +27,7 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.model.ad.ui.Process;
 
+import com.etendoerp.go.common.MalformedJsonException;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 
 /**
@@ -65,6 +66,9 @@ class NeoProcessReportEndpoint {
 
       NeoResponse result = NeoProcessService.executeProcess(adProcess, requestBody);
       servlet.writeResponse(response, result);
+    } catch (MalformedJsonException e) {
+      servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
+          "Invalid JSON body: " + e.getMessage());
     } catch (Exception e) {
       log.error("Error executing process spec '{}': {}", spec.getName(), e.getMessage(), e);
       servlet.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
