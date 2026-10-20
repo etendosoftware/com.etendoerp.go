@@ -97,6 +97,15 @@ final class Fiscal390IncidentRules {
   static final String MISSING_303 = Fiscal390PreloadAggregator.W_MISSING;
   /** The result differs from the 303s beyond the tolerance ({@code reconcile}). */
   static final String DIFF_303 = "DIFF_303";
+  /**
+   * AEAT {@code PAR016} ("Los resultados de las autoliquidaciones periódicas (Apartado 9) no
+   * coinciden con los resultados de la declaración anual (Casillas 86 ó 94)"): block 9 of the
+   * STORED inputs ([95] − [96] − [97] − [98] − [662]) does not add up to the annual result.
+   * Classic generates the file anyway; the AEAT rejects it, so it is blocking.
+   */
+  static final String BLOCK9_MISMATCH = "BLOCK9_MISMATCH";
+  /** The year has 303s but block 9 was never filled from them (the preload was not saved). */
+  static final String BLOCK9_NOT_PRELOADED = "BLOCK9_NOT_PRELOADED";
   /** An inactive tax rate of the 390 configuration with posted operations in the exercise. */
   static final String INACTIVE_TAX_WITH_OPERATIONS = "INACTIVE_TAX_WITH_OPERATIONS";
   /** An identity text longer than the length classic cuts it to in the file. */
@@ -127,6 +136,8 @@ final class Fiscal390IncidentRules {
   static final String ACTION_INVOICES = "invoices";
   /** The fiscal calendar window (the periods of the exercise). */
   static final String ACTION_FISCAL_CALENDAR = "fiscalCalendar";
+  /** The year's 303s under block 9 ("Ver detalle por trimestre"; Calcular preloads them). */
+  static final String ACTION_SETTLEMENTS = "settlements";
   /** Organization window sections ({@code /organization#<section>}). */
   static final String SECTION_IDENTITY = "identity";
   static final String SECTION_IAE = "iae";
@@ -263,6 +274,10 @@ final class Fiscal390IncidentRules {
           .param("year", String.valueOf(f.year))
           .param("missingPeriods", StringUtils.join(f.incompleteFiscalYear, ","))
           .action(ACTION_FISCAL_CALENDAR, null, null));
+    }
+    Incident block9 = block9(f);
+    if (block9 != null) {
+      out.add(block9);
     }
     if (f.computeError != null) {
       out.add(block(COMPUTE_FAILED, "The boxes could not be computed: " + f.computeError)
@@ -465,8 +480,76 @@ final class Fiscal390IncidentRules {
     out.add(inc);
   }
 
+  /** [662] — cuotas pendientes de compensación al final del ejercicio (block 9). */
+  private static final String KEY_END_COMPENSATION = Fiscal390PreloadAggregator.END_COMPENSATION;
+
+  /** {@code true} when no block-9 input has an amount. */
+  static boolean block9Empty(Facts f) {
+    for (int month = 1; month <= 12; month++) {
+      String mm = String.format("%02d", month);
+      if (hasAmount(f, Fiscal390DerivedBoxes.INGRESAR_PREFIX + mm)
+          || hasAmount(f, Fiscal390DerivedBoxes.DEVOLVER_PREFIX + mm)) {
+        return false;
+      }
+    }
+    return !hasAmount(f, KEY_LAST_PERIOD) && !hasAmount(f, KEY_LAST_PERIOD_REFUND)
+        && !hasAmount(f, KEY_END_COMPENSATION);
+  }
+
+  /** {@code [95] − [96] − [97] − [98] − [662]} of the stored inputs. */
+  static BigDecimal block9Result(Facts f) {
+    BigDecimal sum = BigDecimal.ZERO;
+    for (int month = 1; month <= 12; month++) {
+      String mm = String.format("%02d", month);
+      sum = sum.add(amount(f, Fiscal390DerivedBoxes.INGRESAR_PREFIX + mm))
+          .subtract(amount(f, Fiscal390DerivedBoxes.DEVOLVER_PREFIX + mm));
+    }
+    return sum.subtract(amount(f, KEY_LAST_PERIOD)).subtract(amount(f, KEY_LAST_PERIOD_REFUND))
+        .subtract(amount(f, KEY_END_COMPENSATION));
+  }
+
+  /**
+   * AEAT {@code PAR016}, evaluated from the STORED inputs (what the file is built from): block 9
+   * must add up to [86] (territory mode: [94]) within the cuadre tolerance
+   * ({@link Fiscal390PreloadAggregator#RECONCILIATION_TOLERANCE}; the AEAT does not publish its
+   * own). Empty block 9 with 303s in the year is {@link #BLOCK9_NOT_PRELOADED} (Calcular
+   * preloads them); otherwise a difference is {@link #BLOCK9_MISMATCH}. {@code null} when the
+   * boxes were not computed (another incident reports why) or it adds up.
+   */
+  static Incident block9(Facts f) {
+    if (f.annualResult == null) {
+      return null;
+    }
+    int box = f.territoryMode ? 94 : 86;
+    BigDecimal annual = Fiscal390PreloadAggregator.r2(f.annualResult);
+    if (block9Empty(f) && f.expected303Result != null && annual.signum() != 0) {
+      return block(BLOCK9_NOT_PRELOADED, "Block 9 is empty although the exercise has Modelo 303"
+          + " declarations: calculate to preload them (AEAT PAR016)")
+          .param("result", annual.toPlainString())
+          .param(PARAM_BOX, box)
+          .action(ACTION_SETTLEMENTS, null, null);
+    }
+    BigDecimal block9 = Fiscal390PreloadAggregator.r2(block9Result(f));
+    BigDecimal diff = Fiscal390PreloadAggregator.r2(annual.subtract(block9));
+    if (diff.abs().compareTo(Fiscal390PreloadAggregator.RECONCILIATION_TOLERANCE) <= 0) {
+      return null;
+    }
+    return block(BLOCK9_MISMATCH, "Block 9 (" + block9.toPlainString() + ") does not add up to ["
+        + box + "] (" + annual.toPlainString() + ") (AEAT PAR016)")
+        .param("difference", diff.toPlainString())
+        .param("block9", block9.toPlainString())
+        .param("result", annual.toPlainString())
+        .param("tolerance", Fiscal390PreloadAggregator.RECONCILIATION_TOLERANCE.toPlainString())
+        .param(PARAM_BOX, box)
+        .action(ACTION_SETTLEMENTS, null, null);
+  }
+
   private static void reconciliation(Facts f, List<Incident> out) {
     if (f.annualResult == null || f.expected303Result == null) {
+      return;
+    }
+    // The blocking block-9 incident already reports a difference the file would carry.
+    if (block9(f) != null) {
       return;
     }
     Map<String, Object> cuadre =

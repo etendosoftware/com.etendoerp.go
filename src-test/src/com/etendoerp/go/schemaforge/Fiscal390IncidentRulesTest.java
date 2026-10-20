@@ -320,6 +320,7 @@ public class Fiscal390IncidentRulesTest {
   public void testDifferenceWith303BeyondToleranceWarns() {
     f.annualResult = new BigDecimal("102.00");
     f.expected303Result = new BigDecimal("100.00");
+    inputs.put("INGRESAR_12", "102.00"); // block 9 adds up to the result: only the 303 warning
     Fiscal390IncidentRules.Incident inc = only(Fiscal390IncidentRules.DIFF_303);
     assertEquals("2.00", inc.params.get("difference"));
     assertEquals(86, inc.action.get("box"));
@@ -331,10 +332,57 @@ public class Fiscal390IncidentRulesTest {
   public void testDifferenceWithinToleranceIsFine() {
     f.annualResult = new BigDecimal("101.00");
     f.expected303Result = new BigDecimal("100.00");
-    assertTrue(codes().isEmpty());
+    inputs.put("INGRESAR_12", "100.50");
+    assertTrue(codes().toString(), codes().isEmpty());
     f.expected303Result = null;
     f.annualResult = new BigDecimal("5000");
-    assertTrue(codes().isEmpty());
+    inputs.put("INGRESAR_12", "5000");
+    assertTrue(codes().toString(), codes().isEmpty());
+  }
+
+  /**
+   * ETP-5716 — AEAT PAR016 repro: 303s submitted after the 390 draft was saved, so its stored
+   * block 9 is empty while [86] comes from the invoices. Blocking, pointing to the 303s.
+   */
+  @Test
+  public void testEmptyBlock9WithThe303sBlocks() {
+    f.annualResult = new BigDecimal("1260.00");
+    f.expected303Result = new BigDecimal("1260.00");
+    Fiscal390IncidentRules.Incident inc = only(Fiscal390IncidentRules.BLOCK9_NOT_PRELOADED);
+    assertTrue(inc.isBlocking());
+    assertEquals(Fiscal390IncidentRules.ACTION_SETTLEMENTS, inc.action.get("type"));
+    assertEquals(86, inc.params.get("box"));
+    // Not reported twice as the 303 difference.
+    assertTrue(codes().toString(), !codes().contains(Fiscal390IncidentRules.DIFF_303));
+    // A zero result with an empty block 9 adds up.
+    f.annualResult = BigDecimal.ZERO;
+    f.expected303Result = BigDecimal.ZERO;
+    assertTrue(codes().toString(), codes().isEmpty());
+  }
+
+  /**
+   * PAR016: block 9 = [95] − [96] − [97] − [98] − [662] must match [86] / [94] within 1,00 €
+   * ([96] and [98] subtract the same way; their combination is covered by other rules).
+   */
+  @Test
+  public void testBlock9MismatchBlocksBeyondTolerance() {
+    f.annualResult = new BigDecimal("500.00");
+    inputs.put("INGRESAR_03", "600.00");
+    inputs.put("TOTAL_LASTPERIOD", "30.00");
+    inputs.put("LIQANUAL_ENDCOMPENSATION", "68.00"); // 600 − 30 − 68 = 502
+    Fiscal390IncidentRules.Incident inc = only(Fiscal390IncidentRules.BLOCK9_MISMATCH);
+    assertTrue(inc.isBlocking());
+    assertEquals("-2.00", inc.params.get("difference"));
+    assertEquals("502.00", inc.params.get("block9"));
+    f.territoryMode = true;
+    assertEquals(94, only(Fiscal390IncidentRules.BLOCK9_MISMATCH).params.get("box"));
+    inputs.put("LIQANUAL_ENDCOMPENSATION", "67.00"); // 503 → 3 off still
+    assertTrue(codes().contains(Fiscal390IncidentRules.BLOCK9_MISMATCH));
+    inputs.put("LIQANUAL_ENDCOMPENSATION", "69.50"); // 500.50 → within tolerance
+    assertTrue(codes().toString(), codes().isEmpty());
+    // Boxes not computed: nothing to compare (COMPUTE_FAILED / INCOMPLETE_FISCAL_YEAR report it).
+    f.annualResult = null;
+    assertTrue(codes().toString(), !codes().contains(Fiscal390IncidentRules.BLOCK9_MISMATCH));
   }
 
   @Test
