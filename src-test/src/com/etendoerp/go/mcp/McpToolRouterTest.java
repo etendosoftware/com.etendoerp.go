@@ -1536,6 +1536,11 @@ public class McpToolRouterTest {
           envelope.getString("detail"));
       assertEquals("20502", envelope.getJSONArray("messageKeys").getString(0));
       assertFalse("a refusal is not a bug to report", envelope.has("feedback"));
+      String hint = envelope.getString("hint").toLowerCase(java.util.Locale.ROOT);
+      assertFalse("a post-hook can fail after the main write committed",
+          hint.contains("nothing was written"));
+      assertTrue("the caller must reconcile the current state before retrying",
+          hint.matches("(?s).*(check|verify|inspect|confirm).*"));
     }
   }
 

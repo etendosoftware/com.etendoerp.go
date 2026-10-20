@@ -254,8 +254,6 @@ public class McpToolRouter {
           toolName, e.getMessage(), McpUsageTelemetry.sessionForLog());
       return wrapAsErrorContent(McpRouterErrorBodies.forbidden(toolName, e.getMessage()));
     } catch (Exception e) {
-      log.error("Error routing MCP tool '{}' session={}", toolName,
-          McpUsageTelemetry.sessionForLog(), e);
       return wrapAsErrorContent(buildUnexpectedErrorBody(toolName, e));
     }
   }

@@ -37,6 +37,7 @@ import com.etendoerp.go.schemaforge.NeoExtensionRequest;
 import com.etendoerp.go.schemaforge.NeoExtensionResult;
 import com.etendoerp.go.schemaforge.NeoExtensionSurface;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
+import com.etendoerp.go.schemaforge.NeoErrorResponses;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.data.SFEntity;
@@ -558,8 +559,17 @@ final class McpHookExecutor {
    */
   static JSONObject runPostHook(NeoExtensionRequest request, JSONObject responseJson)
       throws JSONException {
-    NeoExtensionResult result = NeoExtensionDispatcher.dispatch(
-        request.withPreviousResult(NeoResponse.ok(responseJson)));
+    NeoExtensionResult result;
+    try {
+      result = NeoExtensionDispatcher.dispatch(
+          request.withPreviousResult(NeoResponse.ok(responseJson)));
+    } catch (RuntimeException e) {
+      // ETP-5782: the write before this post-hook is committed, so its failure must not read as a
+      // refusal to correct and re-send — the agent would repeat the write. Same answer as REST.
+      return neoResponseToMcpResult(NeoErrorResponses.afterCommitFailure(e,
+          request.context() != null ? request.context().getHttpMethod() : null,
+          "MCP afterHandle", null));
+    }
     if (result.outcome() == NeoExtensionOutcome.NO_CUSTOMIZATION) {
       return null;
     }

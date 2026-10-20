@@ -67,7 +67,7 @@ final class McpToolResponses {
       return McpResponseSanitizer.serialize(envelope);
     } catch (JSONException jsonEx) {
       log.error("Could not build routing error envelope for '{}'", toolName, jsonEx);
-      return "Error executing " + toolName + ": " + e.getMessage();
+      return "Error executing " + toolName + ": " + NeoErrorSanitizer.sanitize(e);
     }
   }
 
@@ -87,13 +87,19 @@ final class McpToolResponses {
     try {
       // ETP-5782: a failure the agent can act on — a trigger or an AD-message-keyed refusal, an
       // unknown reference, a row still in use, a deadlock — is classified by what the exception
-      // is, not answered as a server fault. The session is rolled back first, so nothing the call
-      // wrote before throwing is committed and the message is translated on a usable session.
+      // is, not answered as a server fault. The session is rolled back first, discarding only
+      // uncommitted work; earlier steps may already be committed. Translation then reads
+      // AD_Message on a usable session. A post-hook failure never gets here (afterCommitFailure).
       Classification c = NeoErrorClassifier.classify(e, null);
       NeoErrorResponses.rollbackUnlessBatchOwned();
+      if (c.isServerSide()) {
+        log.error("MCP tool '{}' failed: {} {} session={}", toolName, c.status(), c.code(),
+            McpUsageTelemetry.sessionForLog(), e);
+      } else {
+        log.warn("MCP tool '{}' refused: {} {} ({}) session={}", toolName, c.status(), c.code(),
+            e.getClass().getSimpleName(), McpUsageTelemetry.sessionForLog());
+      }
       if (!c.isServerSide() || c.status() == HTTP_SERVICE_UNAVAILABLE) {
-        log.warn("MCP tool '{}' refused: {} {} ({})", toolName, c.status(), c.code(),
-            e.getClass().getSimpleName());
         JSONObject envelope = classifiedEnvelope(c.status(), c.code(),
             NeoErrorClassifier.displayMessage(c), c.messageKeys());
         envelope.put(McpConstants.KEY_TOOL, toolName);
@@ -111,7 +117,7 @@ final class McpToolResponses {
       return McpResponseSanitizer.serialize(envelope);
     } catch (JSONException jsonEx) {
       log.error("Could not build error envelope for '{}'", toolName, jsonEx);
-      return "Error executing " + toolName + ": " + e.getMessage();
+      return "Error executing " + toolName + ": " + NeoErrorSanitizer.sanitize(e);
     }
   }
 
@@ -165,7 +171,7 @@ final class McpToolResponses {
     switch (code) {
       case NeoErrorClassifier.CODE_BUSINESS_RULE:
         return "A business rule rejected the request. Read 'detail' (the rule's own message), "
-            + "change what it names and retry — nothing was written.";
+            + "check the current record state, then correct what it names and retry.";
       case NeoErrorClassifier.CODE_UNKNOWN_REFERENCE:
         return "A referenced id does not exist or is not accessible. Look the record up with "
             + "etendo_list and send an id from the result.";

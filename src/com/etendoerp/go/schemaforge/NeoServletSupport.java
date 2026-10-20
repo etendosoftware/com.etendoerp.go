@@ -29,6 +29,7 @@ import com.etendoerp.go.schemaforge.util.NeoHandlerResolutionCache;
 class NeoServletSupport {
 
   private static final Logger log = LogManager.getLogger(NeoServletSupport.class);
+  private static final String HOOK_HANDLER_ERROR_PREFIX = "Hook handler error: ";
   private static final EnvironmentRequestAuthenticator AUTHENTICATOR =
       new EnvironmentRequestAuthenticator();
 
@@ -154,7 +155,7 @@ class NeoServletSupport {
         if (preResult.getHttpStatus() >= 400) {
           return preResult;
         }
-        return runPostHook(request, handler, preResult);
+        return runPostHookAfterCommit(request, handler, preResult, javaQualifier);
       }
 
       NeoResponse defaultResult = defaultStep.apply(context);
@@ -167,14 +168,30 @@ class NeoServletSupport {
         return defaultResult;
       }
 
-      return runPostHook(request, handler, defaultResult);
+      return runPostHookAfterCommit(request, handler, defaultResult, javaQualifier);
     } catch (Exception e) {
       // ETP-5782: a customization's refusal is classified like any other failure — a trigger or an
       // AD-message-keyed refusal is a 422 the caller can act on, a fault stays a 500 — and the
-      // session is rolled back so nothing the customization saved before throwing is committed.
+      // session is rolled back, discarding what was not committed yet. A failure in afterHandle,
+      // after the main write committed, never gets here: see runPostHookAfterCommit.
       // A 5xx message is sanitized: it used to forward e.getMessage() verbatim, SQL included.
       return NeoErrorResponses.fromException(e, context.getHttpMethod(),
-          "Hook handler " + javaQualifier, "Hook handler error: ");
+          "Hook handler " + javaQualifier, HOOK_HANDLER_ERROR_PREFIX);
+    }
+  }
+
+  /**
+   * {@link #runPostHook}, with a failure answered by {@link NeoErrorResponses#afterCommitFailure}
+   * (ETP-5782): by the time {@code afterHandle} runs the main write succeeded and, outside a batch,
+   * is committed, so a failure here must not read as a refusal to correct and re-send.
+   */
+  private static NeoResponse runPostHookAfterCommit(NeoExtensionRequest request,
+      NeoHandler handler, NeoResponse previousResult, String javaQualifier) {
+    try {
+      return runPostHook(request, handler, previousResult);
+    } catch (RuntimeException e) {
+      return NeoErrorResponses.afterCommitFailure(e, request.context().getHttpMethod(),
+          "Hook handler " + javaQualifier + " afterHandle", HOOK_HANDLER_ERROR_PREFIX);
     }
   }
 
