@@ -25,7 +25,9 @@ import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -34,12 +36,17 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.util.Map;
+
+import javax.servlet.http.HttpServletResponse;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
+import org.mockito.ArgumentMatcher;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.enterprise.Locator;
@@ -51,13 +58,17 @@ import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
  *
  * <p>Covers:
  * <ul>
- *   <li>{@code handle()} — always returns null (pass-through pre-hook).</li>
+ *   <li>{@code handle()} — pass-through pre-hook, storageBin default, and (ETP-5729 CP-12) which
+ *       source line and quantity a write asks {@link ReturnableQuantityGuard} about, per branch
+ *       of {@code refuseOverReturn}, plus the 500 and 409 outcomes.</li>
  *   <li>{@code afterHandle()} — guard conditions (non-GET, no previous result, empty data),
  *       and the SQL enrichment paths: both fields, null productCode, null qty, empty lineIds,
  *       and SQL exception resilience.</li>
  * </ul>
  *
  * <p>Tests that require a live Etendo DB are covered by integration tests.
+ *
+ * @covers com.etendoerp.go.schemaforge.ReturnMaterialReceiptLineHandler
  */
 public class ReturnMaterialReceiptLineHandlerTest {
 
@@ -194,6 +205,239 @@ public class ReturnMaterialReceiptLineHandlerTest {
       assertNull(HANDLER.handle(ctx));
       assertEquals("loc-explicit", body.getString("storageBin"));
       Mockito.verify(dal, Mockito.never()).createCriteria(Locator.class);
+    }
+  }
+
+  // ── handle() — returnable quantity of the source shipment line ───────────
+  //
+  // ReturnableQuantityGuard is stubbed here: these cases pin WHICH source line and quantity the
+  // handler asks about (or that it asks nothing). The guard's own SQL is in
+  // ReturnableQuantityGuardTest.
+
+  private static NeoContext writeCtx(String method, String recordId, JSONObject body) {
+    return NeoContext.builder()
+        .specName("return-material-receipt").entityName("lines")
+        .httpMethod(method).endpointType(NeoEndpointType.CRUD)
+        .recordId(recordId).requestBody(body)
+        .build();
+  }
+
+  /** Matches a requested-quantity map holding exactly one source line with that magnitude. */
+  private static ArgumentMatcher<Map<String, BigDecimal>> onlySource(String id, String qty) {
+    return m -> m != null && m.size() == 1 && m.get(id) != null
+        && m.get(id).compareTo(new BigDecimal(qty)) == 0;
+  }
+
+  /** A write that carries neither a quantity nor a link changes nothing returnable: no check. */
+  @Test
+  public void testHandleSkipsTheReturnableCheckWhenTheWriteTouchesNeitherQtyNorLink()
+      throws Exception {
+    try (MockedStatic<ReturnableQuantityGuard> guard =
+             Mockito.mockStatic(ReturnableQuantityGuard.class);
+         MockedStatic<OBContext> obContext = Mockito.mockStatic(OBContext.class)) {
+      assertNull(HANDLER.handle(
+          writeCtx("PATCH", "rl-1", new JSONObject().put("description", "x"))));
+      guard.verifyNoInteractions();
+      obContext.verifyNoInteractions();
+    }
+  }
+
+  /**
+   * {@code canceledInoutLine} sent as JSON null, {@code ""}, {@code "null"} or an object without an
+   * id unlinks the line: there is no source line left to check, even with a quantity in the body.
+   */
+  @Test
+  public void testHandleTreatsAnEmptyCanceledInoutLineAsAnUnlink() throws Exception {
+    Object[] unlinks = { JSONObject.NULL, "", "null", new JSONObject() };
+    for (Object unlink : unlinks) {
+      try (MockedStatic<ReturnableQuantityGuard> guard =
+               Mockito.mockStatic(ReturnableQuantityGuard.class);
+           MockedStatic<OBContext> obContext = Mockito.mockStatic(OBContext.class)) {
+        JSONObject body = new JSONObject().put("canceledInoutLine", unlink)
+            .put("movementQuantity", 5);
+        assertNull("unlink " + unlink, HANDLER.handle(writeCtx("PATCH", "rl-1", body)));
+        guard.verifyNoInteractions();
+      }
+    }
+  }
+
+  /**
+   * Re-pointing an existing line without sending a quantity is checked with the quantity it
+   * already carries, against the NEW source line only — the stored one is never a fallback.
+   */
+  @Test
+  public void testHandleChecksARePointedLineWithTheQuantityItAlreadyCarries() throws Exception {
+    ReturnableQuantityGuard.StoredReturnLine stored =
+        new ReturnableQuantityGuard.StoredReturnLine("src-old", new BigDecimal("4"));
+    try (MockedStatic<ReturnableQuantityGuard> guard =
+             Mockito.mockStatic(ReturnableQuantityGuard.class);
+         MockedStatic<OBContext> obContext = Mockito.mockStatic(OBContext.class)) {
+      guard.when(() -> ReturnableQuantityGuard.findStoredReturnLine("rl-1")).thenReturn(stored);
+
+      assertNull(HANDLER.handle(writeCtx("PATCH", "rl-1",
+          new JSONObject().put("canceledInoutLine", "src-new"))));
+
+      guard.verify(() -> ReturnableQuantityGuard.refuseIfExceeded(
+          argThat(onlySource("src-new", "4")), eq("rl-1")));
+    }
+  }
+
+  /**
+   * A new line carrying both a link (here as an {@code {"id": ...}} reference) and a quantity is
+   * checked with what it sends, compared as a magnitude, without reading any stored line.
+   */
+  @Test
+  public void testHandleChecksANewLineAgainstTheSourceLineItLinks() throws Exception {
+    try (MockedStatic<ReturnableQuantityGuard> guard =
+             Mockito.mockStatic(ReturnableQuantityGuard.class);
+         MockedStatic<OBContext> obContext = Mockito.mockStatic(OBContext.class)) {
+      JSONObject body = new JSONObject()
+          .put("canceledInoutLine", new JSONObject().put("id", " src-2 "))
+          .put("movementQuantity", -3);
+
+      assertNull(HANDLER.handle(writeCtx("POST", null, body)));
+
+      guard.verify(() -> ReturnableQuantityGuard.findStoredReturnLine(any()), Mockito.never());
+      guard.verify(() -> ReturnableQuantityGuard.refuseIfExceeded(
+          argThat(onlySource("src-2", "3")), isNull()));
+    }
+  }
+
+  /** Editing only the quantity of an existing line checks it against the stored source line. */
+  @Test
+  public void testHandleChecksAQuantityOnlyEditAgainstTheStoredSourceLine() throws Exception {
+    ReturnableQuantityGuard.StoredReturnLine stored =
+        new ReturnableQuantityGuard.StoredReturnLine("src-1", new BigDecimal("2"));
+    try (MockedStatic<ReturnableQuantityGuard> guard =
+             Mockito.mockStatic(ReturnableQuantityGuard.class);
+         MockedStatic<OBContext> obContext = Mockito.mockStatic(OBContext.class)) {
+      guard.when(() -> ReturnableQuantityGuard.findStoredReturnLine("rl-1")).thenReturn(stored);
+
+      assertNull(HANDLER.handle(writeCtx("PATCH", "rl-1",
+          new JSONObject().put("movementQuantity", 7))));
+
+      guard.verify(() -> ReturnableQuantityGuard.refuseIfExceeded(
+          argThat(onlySource("src-1", "7")), eq("rl-1")));
+    }
+  }
+
+  /**
+   * A quantity edit on a stored line that is not linked to a shipment line — or on a line that
+   * does not exist — has nothing to check.
+   */
+  @Test
+  public void testHandleSkipsTheCheckWhenTheStoredLineHasNoSource() throws Exception {
+    ReturnableQuantityGuard.StoredReturnLine[] storedLines = {
+        new ReturnableQuantityGuard.StoredReturnLine(null, new BigDecimal("2")), null };
+    for (ReturnableQuantityGuard.StoredReturnLine stored : storedLines) {
+      try (MockedStatic<ReturnableQuantityGuard> guard =
+               Mockito.mockStatic(ReturnableQuantityGuard.class);
+           MockedStatic<OBContext> obContext = Mockito.mockStatic(OBContext.class)) {
+        guard.when(() -> ReturnableQuantityGuard.findStoredReturnLine("rl-1")).thenReturn(stored);
+
+        assertNull(HANDLER.handle(writeCtx("PATCH", "rl-1",
+            new JSONObject().put("movementQuantity", 7))));
+
+        guard.verify(() -> ReturnableQuantityGuard.refuseIfExceeded(any(), any()),
+            Mockito.never());
+      }
+    }
+  }
+
+  /**
+   * A quantity of 0 returns nothing, and an unparsable or null one is NEO's to reject: neither
+   * is checked, even on a linked line.
+   */
+  @Test
+  public void testHandleSkipsTheCheckForAZeroOrUnparsableQuantity() throws Exception {
+    Object[] quantities = { 0, "abc", JSONObject.NULL };
+    for (Object qty : quantities) {
+      try (MockedStatic<ReturnableQuantityGuard> guard =
+               Mockito.mockStatic(ReturnableQuantityGuard.class);
+           MockedStatic<OBContext> obContext = Mockito.mockStatic(OBContext.class)) {
+        JSONObject body = new JSONObject().put("canceledInoutLine", "src-1")
+            .put("movementQuantity", qty);
+        assertNull("qty " + qty, HANDLER.handle(writeCtx("PUT", "rl-1", body)));
+        guard.verifyNoInteractions();
+      }
+    }
+  }
+
+  /**
+   * A new line (no record id) that lacks either the link or the quantity has no stored line to
+   * fill the gap: no admin mode, no query.
+   */
+  @Test
+  public void testHandleDoesNotQueryForANewLineMissingItsLinkOrQuantity() throws Exception {
+    JSONObject[] bodies = { new JSONObject().put("movementQuantity", 2),
+        new JSONObject().put("canceledInoutLine", "src-1") };
+    for (JSONObject body : bodies) {
+      try (MockedStatic<ReturnableQuantityGuard> guard =
+               Mockito.mockStatic(ReturnableQuantityGuard.class);
+           MockedStatic<OBContext> obContext = Mockito.mockStatic(OBContext.class)) {
+        assertNull(HANDLER.handle(writeCtx("POST", null, body)));
+        guard.verifyNoInteractions();
+        obContext.verifyNoInteractions();
+      }
+    }
+  }
+
+  /**
+   * Fails closed: when the returnable quantity cannot be read the write is refused with a 500
+   * (never let through), the body is left untouched and admin mode is restored.
+   */
+  @Test
+  public void testHandleAnswers500WhenTheReturnableQuantityCannotBeRead() throws Exception {
+    try (MockedStatic<ReturnableQuantityGuard> guard =
+             Mockito.mockStatic(ReturnableQuantityGuard.class);
+         MockedStatic<OBContext> obContext = Mockito.mockStatic(OBContext.class)) {
+      guard.when(() -> ReturnableQuantityGuard.findStoredReturnLine("rl-1"))
+          .thenThrow(new SQLException("connection lost"));
+      JSONObject body = new JSONObject().put("movementQuantity", 7);
+
+      NeoResponse result = HANDLER.handle(writeCtx("PATCH", "rl-1", body));
+
+      assertNotNull(result);
+      assertEquals(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, result.getHttpStatus());
+      assertEquals(7, body.getInt("movementQuantity"));
+      obContext.verify(OBContext::restorePreviousMode);
+    }
+  }
+
+  /**
+   * End to end through the real guard: a line pushing its shipment line past what was shipped is
+   * refused with the structured 409, its own id is the one excluded from the sum, and the body
+   * is not sign-flipped (nothing is written).
+   */
+  @Test
+  public void testHandleRefusesAnOverReturnWithTheStructured409() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBContext> obContext = Mockito.mockStatic(OBContext.class)) {
+      OBDal dal = mock(OBDal.class);
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(true, false);
+      when(rs.getString(1)).thenReturn("src-1");
+      when(rs.getString(2)).thenReturn("Widget");
+      when(rs.getBigDecimal(3)).thenReturn(new BigDecimal("5"));
+      when(rs.getBigDecimal(4)).thenReturn(BigDecimal.ZERO);
+      JSONObject body = new JSONObject().put("canceledInoutLine", "src-1")
+          .put("movementQuantity", 6);
+
+      NeoResponse result = HANDLER.handle(writeCtx("PUT", "rl-1", body));
+
+      assertNotNull(result);
+      assertEquals(HttpServletResponse.SC_CONFLICT, result.getHttpStatus());
+      JSONObject error = result.getBody().getJSONObject("error");
+      assertEquals("ETGO_ReturnQtyExceedsShipped", error.getJSONArray("messageKeys").getString(0));
+      assertEquals("Widget", error.getJSONObject("messageParams").getString("product"));
+      Mockito.verify(ps).setString(1, "rl-1");
+      assertEquals(6, body.getInt("movementQuantity"));
     }
   }
 

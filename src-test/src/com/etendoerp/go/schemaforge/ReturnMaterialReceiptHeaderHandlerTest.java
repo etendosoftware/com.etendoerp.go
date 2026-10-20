@@ -28,7 +28,9 @@ import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -44,6 +46,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 
 import javax.servlet.http.HttpServletResponse;
 
@@ -80,7 +83,9 @@ import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
  *   <li>{@code handle()} — non-ACTION exit, clone delegation, unknown action, wrong method,
  *       documentAction with null/real receiptId (fillMissingStorageBins paths), and
  *       missing required params for each action.</li>
- *   <li>{@code handleImportShipmentLines()} — missing recordId, receipt not found, no lines.</li>
+ *   <li>{@code handleImportShipmentLines()} — missing recordId, receipt not found, no lines,
+ *       and (ETP-5729 CP-12) the returnable-quantity refusal writing nothing plus
+ *       {@code requestedQtyBySourceLine} summing and skipping lines.</li>
  *   <li>{@code handleAvailableShipments()} — missing businessPartner, SQL empty, SQL with rows.</li>
  *   <li>{@code handleAvailableShipmentLines()} — missing shipmentId, SQL empty, SQL with rows.</li>
  *   <li>{@code handleCreateReturnInvoice()} — missing recordId, receipt not found,
@@ -89,6 +94,8 @@ import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
  *       SQL with rows (addShipmentToMap + addInvoiceToMap), issuerOrg enrichment on a
  *       detail GET (ETP-5124), and outer-catch path.</li>
  * </ul>
+ *
+ * @covers com.etendoerp.go.schemaforge.ReturnMaterialReceiptHeaderHandler
  */
 public class ReturnMaterialReceiptHeaderHandlerTest {
 
@@ -1307,11 +1314,18 @@ public class ReturnMaterialReceiptHeaderHandlerTest {
 
   // ── handleImportShipmentLines — import loop path ──────────────────────────
 
+  /**
+   * A line within what is still returnable is imported. The returnable-quantity check
+   * (ETP-5729 CP-12) is stubbed to pass — its SQL is {@code ReturnableQuantityGuardTest}'s; the
+   * shared statement mock below only serves {@code fetchMaxLineNo}.
+   */
   @Test
   public void testHandleImportShipmentLinesImportsOneLine() throws Exception {
     try (MockedStatic<OBContext> ignored = Mockito.mockStatic(OBContext.class);
          MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
-         MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+         MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class);
+         MockedStatic<ReturnableQuantityGuard> guard =
+             Mockito.mockStatic(ReturnableQuantityGuard.class)) {
       OBDal dal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(dal);
       OBProvider provider = mock(OBProvider.class);
@@ -1348,7 +1362,63 @@ public class ReturnMaterialReceiptHeaderHandlerTest {
       assertEquals(200, result.getHttpStatus());
       assertEquals(1, result.getBody()
           .getJSONObject("response").getJSONObject("data").getInt("importedCount"));
+      guard.verify(() -> ReturnableQuantityGuard.refuseIfExceeded(
+          argThat(m -> m.size() == 1 && m.get("src-1").compareTo(new BigDecimal("2")) == 0),
+          isNull()));
     }
+  }
+
+  /**
+   * An import the guard refuses answers its 409 as is, and writes nothing: no source line is
+   * loaded, no line saved, nothing flushed.
+   */
+  @Test
+  public void testHandleImportShipmentLinesRefusedByTheGuardWritesNoLine() throws Exception {
+    NeoResponse refusal = NeoResponse.error(HttpServletResponse.SC_CONFLICT, "over-return");
+    try (MockedStatic<OBContext> ignored = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<ReturnableQuantityGuard> guard =
+             Mockito.mockStatic(ReturnableQuantityGuard.class)) {
+      OBDal dal = mock(OBDal.class);
+      ShipmentInOut receipt = mock(ShipmentInOut.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(ShipmentInOut.class, "rec-1")).thenReturn(receipt);
+      guard.when(() -> ReturnableQuantityGuard.refuseIfExceeded(any(), any())).thenReturn(refusal);
+
+      JSONObject reqBody = new JSONObject().put("lines", new JSONArray()
+          .put(new JSONObject().put("sourceLineId", "src-1").put("returnQuantity", 9)));
+      NeoContext ctx = NeoContext.builder()
+          .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+          .fieldName("importShipmentLines").recordId("rec-1").requestBody(reqBody).build();
+
+      assertSame(refusal, handler.handle(ctx));
+      Mockito.verify(dal, Mockito.never()).get(eq(ShipmentInOutLine.class), anyString());
+      Mockito.verify(dal, Mockito.never()).save(any());
+      Mockito.verify(dal, Mockito.never()).flush();
+      Mockito.verify(dal, Mockito.never()).getConnection();
+    }
+  }
+
+  /**
+   * What the guard is asked about is exactly what the import loop would write: a source line
+   * listed twice counts twice, and a line without a source id or with a quantity that is not
+   * positive (zero, negative, missing) is skipped.
+   */
+  @Test
+  public void testRequestedQtyBySourceLineSumsDuplicatesAndSkipsUnusableLines() throws Exception {
+    JSONArray lines = new JSONArray()
+        .put(new JSONObject().put("sourceLineId", "src-1").put("returnQuantity", 2))
+        .put(new JSONObject().put("sourceLineId", "src-1").put("returnQuantity", 1.5))
+        .put(new JSONObject().put("sourceLineId", "src-2").put("returnQuantity", 0))
+        .put(new JSONObject().put("sourceLineId", "src-3").put("returnQuantity", -1))
+        .put(new JSONObject().put("sourceLineId", "src-4"))
+        .put(new JSONObject().put("returnQuantity", 4));
+
+    Map<String, BigDecimal> requested =
+        ReturnMaterialReceiptHeaderHandler.requestedQtyBySourceLine(lines);
+
+    assertEquals(Collections.singleton("src-1"), requested.keySet());
+    assertEquals(0, new BigDecimal("3.5").compareTo(requested.get("src-1")));
   }
 
   // ── fillMissingStorageBins — loop body paths ──────────────────────────────
