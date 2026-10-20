@@ -311,8 +311,11 @@ final class InOutLineFromOrderFactory {
    * candidate is {@code null} (see its javadoc), so passing {@code locator=null} straight through
    * for a non-stockable line would still end up anchoring a bin onto it. The bin must stay
    * {@code null} for those lines, matching classic {@code M_INOUT_CREATE}.
+   *
+   * @return the persisted line, already flushed, so a caller that reports what it created (the
+   *         order-line import of ETP-5713) can name its id
    */
-  static void createAndLinkLine(ShipmentInOut parentInOut, OrderLine orderLine,
+  static ShipmentInOutLine createAndLinkLine(ShipmentInOut parentInOut, OrderLine orderLine,
       Locator locator, long lineNo, BigDecimal pendingQty) {
     ShipmentInOutLine line = OBProvider.getInstance().get(ShipmentInOutLine.class);
     line.setClient(orderLine.getClient());
@@ -333,6 +336,7 @@ final class InOutLineFromOrderFactory {
     // helper, which uses it as the `inoutLineId` parameter of the UPDATE.
     OBDal.getInstance().flush();
     InvoiceLineLinker.linkPendingInvoiceLinesToInout(line, orderLine.getId());
+    return line;
   }
 
   /**
@@ -344,7 +348,7 @@ final class InOutLineFromOrderFactory {
     private final OrderLine orderLine;
     private final BigDecimal pendingQty;
 
-    private PendingOrderLine(OrderLine orderLine, BigDecimal pendingQty) {
+    PendingOrderLine(OrderLine orderLine, BigDecimal pendingQty) {
       this.orderLine = orderLine;
       this.pendingQty = pendingQty;
     }

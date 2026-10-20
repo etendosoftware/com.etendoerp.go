@@ -165,6 +165,7 @@ def isolatedDalTests = [
         '**/SubscriptionResubscriptionIntegrationTest.class',
         '**/SubscriptionModelSwitchIntegrationTest.class',
         '**/NeoCloneRecordHandlerInvoiceLinksIntegrationTest.class',
+        '**/ImportOrderLinesIntoInvoiceHandlerIntegrationTest.class',
         // ETP-5778: passes alone but trips OBBaseTest's admin-mode check after other classes ran
         // in the same worker (a leaked setAdminMode() from an earlier test), so it gets its own JVM.
         '**/NeoListAggregateQueryIntegrationTest.class',
@@ -183,6 +184,7 @@ def isolatedDalTestClasses = [
         'com.etendoerp.go.payment.SubscriptionResubscriptionIntegrationTest',
         'com.etendoerp.go.payment.SubscriptionModelSwitchIntegrationTest',
         'com.etendoerp.go.schemaforge.NeoCloneRecordHandlerInvoiceLinksIntegrationTest',
+        'com.etendoerp.go.schemaforge.ImportOrderLinesIntoInvoiceHandlerIntegrationTest',
         'com.etendoerp.go.schemaforge.handlers.NeoListAggregateQueryIntegrationTest',
 ]
 

@@ -947,8 +947,8 @@ public class GoodsReceiptHeaderHandlerTest {
     java.util.Map<String, NeoActionContract> contracts =
         new GoodsReceiptHeaderHandler().actionContracts();
 
-    assertEquals(java.util.List.of("documentAction", "createPurchaseInvoice", "createPurchaseReturn",
-            "cloneRecord"),
+    assertEquals(java.util.List.of("documentAction", "availableOrders", "availableOrderLines",
+            "importOrderLines", "createPurchaseInvoice", "createPurchaseReturn", "cloneRecord"),
         java.util.List.copyOf(contracts.keySet()));
     NeoActionContract invoice = contracts.get("createPurchaseInvoice");
     assertEquals("POST", invoice.getHttpMethod());
@@ -1066,5 +1066,64 @@ public class GoodsReceiptHeaderHandlerTest {
         "createPurchaseReturn", new JSONObject().put("lines", "x")).getHttpStatus());
     assertEquals(NeoActionContract.SC_UNPROCESSABLE, NeoActionContract.validate(contracts,
         "createPurchaseReturn", new JSONObject().put("orderId", "O1")).getHttpStatus());
+  }
+
+
+  // ── order import (ETP-5713) ───────────────────────────────────────────────
+
+  private static GoodsReceiptHeaderHandler receiptWithImportDelegate(
+      ImportOrderLinesIntoInOutHandler delegate) throws Exception {
+    GoodsReceiptHeaderHandler handler = new GoodsReceiptHeaderHandler();
+    java.lang.reflect.Field field =
+        GoodsReceiptHeaderHandler.class.getDeclaredField("importOrderLinesHandler");
+    field.setAccessible(true);
+    field.set(handler, delegate);
+    return handler;
+  }
+
+  @Test
+  public void actionContracts_publishTheOrderImportInFlowOrder() throws Exception {
+    java.util.Map<String, NeoActionContract> contracts =
+        new GoodsReceiptHeaderHandler().actionContracts();
+
+    assertTrue(contracts.keySet().containsAll(
+        java.util.List.of("availableOrders", "availableOrderLines", "importOrderLines")));
+    java.util.List<String> names = java.util.List.copyOf(contracts.keySet());
+    assertTrue("the import follows the document action, before the one-step actions",
+        names.indexOf("documentAction") < names.indexOf("availableOrders")
+            && names.indexOf("importOrderLines") < names.indexOf("createPurchaseInvoice"));
+    assertTrue("a receipt takes purchase orders, and names its one-step alternative",
+        contracts.get("importOrderLines").getDescription().contains("createGoodsReceipt"));
+    assertNull(NeoActionContract.validate(contracts, "importOrderLines",
+        new JSONObject().put("orderId", "o1")));
+    assertNull(NeoActionContract.validate(contracts, "importOrderLines",
+        new JSONObject().put("orderId", "o1").put("lines", new JSONArray().put(
+            new JSONObject().put("sourceLineId", "l1").put("quantity", 2)))));
+    assertEquals(NeoActionContract.SC_UNPROCESSABLE, NeoActionContract.validate(contracts,
+        "importOrderLines", new JSONObject().put("orderId", "o1").put("foo", 1)).getHttpStatus());
+  }
+
+  @Test
+  public void handle_dispatchesTheOrderImportToItsDelegate() throws Exception {
+    ImportOrderLinesIntoInOutHandler delegate = mock(ImportOrderLinesIntoInOutHandler.class);
+    GoodsReceiptHeaderHandler handler = receiptWithImportDelegate(delegate);
+    NeoContext ctx = NeoContext.builder().httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+        .fieldName("importOrderLines").recordId("r1").build();
+    NeoResponse expected = NeoResponse.ok(new JSONObject().put("imported", true));
+    when(delegate.handle(ctx)).thenReturn(expected);
+
+    assertSame(expected, handler.handle(ctx));
+  }
+
+  @Test
+  public void handle_anActionTheDelegateDoesNotServe_fallsThrough() throws Exception {
+    ImportOrderLinesIntoInOutHandler delegate = mock(ImportOrderLinesIntoInOutHandler.class);
+    GoodsReceiptHeaderHandler handler = receiptWithImportDelegate(delegate);
+    NeoContext ctx = NeoContext.builder().httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+        .fieldName("unknownAction").recordId("r1").build();
+    when(delegate.handle(ctx)).thenReturn(null);
+
+    assertNull(handler.handle(ctx));
+    verify(delegate).handle(ctx);
   }
 }

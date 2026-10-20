@@ -221,6 +221,88 @@ public class InvoiceFromOrderSupportTest {
     }
   }
 
+  /**
+   * ETP-5713: the line import adds lines to an invoice that already holds others. The copy is then
+   * restricted to the new lines: a line outside the set keeps its discount untouched (here, none),
+   * even when its source order line carries one, and {@code null} still means every line.
+   */
+  @Test
+  public void testCopyLineDiscountsFromOrderScopedToTheGivenLinesLeavesTheOthersAlone() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      OrderLine discounted = mock(OrderLine.class);
+      when(discounted.getDiscount()).thenReturn(new BigDecimal("10"));
+
+      InvoiceLine imported = mock(InvoiceLine.class);
+      when(imported.getId()).thenReturn("new-line");
+      when(imported.getSalesOrderLine()).thenReturn(discounted);
+      when(imported.getEtgoDiscount()).thenReturn(null);
+
+      InvoiceLine alreadyThere = mock(InvoiceLine.class);
+      when(alreadyThere.getId()).thenReturn("old-line");
+      when(alreadyThere.getSalesOrderLine()).thenReturn(discounted);
+      when(alreadyThere.getEtgoDiscount()).thenReturn(null);
+
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getInvoiceLineList()).thenReturn(Arrays.asList(alreadyThere, imported));
+
+      new InvoiceFromOrderSupport().copyLineDiscountsFromOrder(invoice,
+          Collections.singleton("new-line"));
+
+      verify(imported).setEtgoDiscount(new BigDecimal("10"));
+      verify(alreadyThere, never()).setEtgoDiscount(any(BigDecimal.class));
+      verify(dal).flush();
+
+      new InvoiceFromOrderSupport().copyLineDiscountsFromOrder(invoice, null);
+      verify(alreadyThere).setEtgoDiscount(new BigDecimal("10"));
+    }
+  }
+
+  /**
+   * ETP-5713: the gross repair of the line import is scoped to the lines it added. A deliberate
+   * zero line or a negative line already in the draft keeps the gross it has; only a new line with
+   * no gross gets one, and {@code null} still means every line.
+   */
+  @Test
+  public void testEnsureLineGrossAmountsScopedLeavesExistingZeroAndNegativeLinesAlone() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      Currency currency = mock(Currency.class);
+      when(currency.getStandardPrecision()).thenReturn(2L);
+
+      InvoiceLine zero = invoiceLineWithGross("zero", BigDecimal.ZERO);
+      InvoiceLine negative = invoiceLineWithGross("negative", new BigDecimal("-5"));
+      InvoiceLine added = invoiceLineWithGross("added", BigDecimal.ZERO);
+      when(added.getInvoicedQuantity()).thenReturn(new BigDecimal("2"));
+      when(added.getGrossUnitPrice()).thenReturn(new BigDecimal("3"));
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getCurrency()).thenReturn(currency);
+      when(invoice.getInvoiceLineList()).thenReturn(Arrays.asList(zero, negative, added));
+
+      new InvoiceFromOrderSupport().ensureLineGrossAmounts(invoice,
+          Collections.singleton("added"));
+
+      verify(added).setGrossAmount(new BigDecimal("6.00"));
+      verify(zero, never()).setGrossAmount(any(BigDecimal.class));
+      verify(negative, never()).setGrossAmount(any(BigDecimal.class));
+
+      new InvoiceFromOrderSupport().ensureLineGrossAmounts(invoice, null);
+      verify(zero).setGrossAmount(any(BigDecimal.class));
+    }
+  }
+
+  private static InvoiceLine invoiceLineWithGross(String id, BigDecimal gross) {
+    InvoiceLine line = mock(InvoiceLine.class);
+    when(line.getId()).thenReturn(id);
+    when(line.getGrossAmount()).thenReturn(gross);
+    when(line.getInvoicedQuantity()).thenReturn(BigDecimal.ONE);
+    when(line.getLineNetAmount()).thenReturn(BigDecimal.ONE);
+    return line;
+  }
+
   // ── rebuildInvoiceTaxAggregates ──────────────────────────────────────────
   // Removed: c_invoicetax is now kept consistent by the Etendo DB triggers
   // (c_invoiceline_trg2 → c_invoicelinetax_trg); applyOrderDiscountToInvoice
