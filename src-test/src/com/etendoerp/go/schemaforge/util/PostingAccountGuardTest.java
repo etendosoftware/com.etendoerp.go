@@ -321,6 +321,20 @@ class PostingAccountGuardTest {
   }
 
   @Test
+  @DisplayName("An FK sent as {\"id\": ...} (which core also accepts) is checked like a plain id")
+  void objectShapedIdChecked() throws Exception {
+    combo("c-sum", ledger, true, true, true);
+    JSONObject body = new JSONObject().put(COMBO_PROP, new JSONObject().put("id", "c-sum"));
+    assertRefused(patch(body), PostingAccountGuard.MSG_SUMMARY);
+  }
+
+  @Test
+  @DisplayName("Update: repeating the stored ledger as {\"id\": ...} is not a ledger change")
+  void objectShapedSameLedgerPasses() throws Exception {
+    assertNull(patch(new JSONObject().put(LEDGER_PROP, new JSONObject().put("id", "ledger-1"))));
+  }
+
+  @Test
   @DisplayName("Keys that are not properties (parentId, updated, $_identifier) are ignored without error")
   void unknownKeysIgnored() throws Exception {
     posting("c-ok");

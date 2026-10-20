@@ -24,10 +24,13 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.util.Collections;
 import java.util.List;
+import org.hibernate.criterion.Order;
+import org.mockito.ArgumentCaptor;
 import java.util.Map;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
@@ -269,8 +272,13 @@ class ProductAccountingHandlerTest {
 
   /** A tab on M_Product_Acct whose link-to-parent properties are the product and the ledger. */
   private Tab productAcctTab() {
+    return acctTabWithParent(Product.class);
+  }
+
+  /** An accounting tab whose only link-to-parent property points at {@code parentClass}. */
+  private Tab acctTabWithParent(Class<?> parentClass) {
     Entity productEntity = mock(Entity.class);
-    doReturn(Product.class).when(productEntity).getMappingClass();
+    doReturn(parentClass).when(productEntity).getMappingClass();
     Property productProperty = mock(Property.class);
     when(productProperty.isParent()).thenReturn(true);
     when(productProperty.getName()).thenReturn("product");
@@ -303,7 +311,7 @@ class ProductAccountingHandlerTest {
   private MockedStatic<PostingAccountGuard> postingGuardMock;
 
   @BeforeEach
-  void setUpEtp5693() {
+  void stubLedgerLookups() {
     modelProviderMock = mockStatic(ModelProvider.class);
     ledgerUtilsMock = mockStatic(OBLedgerUtils.class);
     recordGuardMock = mockStatic(NeoActionRecordGuard.class);
@@ -311,7 +319,7 @@ class ProductAccountingHandlerTest {
   }
 
   @AfterEach
-  void tearDownEtp5693() {
+  void closeLedgerLookups() {
     postingGuardMock.close();
     recordGuardMock.close();
     ledgerUtilsMock.close();
@@ -344,6 +352,37 @@ class ProductAccountingHandlerTest {
 
     assertNull(HANDLER.handle(postWithParent(body, productAcctTab())));
     assertEquals("ledger-ctx", body.getString("accountingSchema"));
+  }
+
+  @Test
+  @DisplayName("ETP-5693: a tab that hangs off the ledger itself takes that ledger verbatim")
+  void autoFillUsesParentLedgerVerbatim() throws Exception {
+    AcctSchema parentLedger = mock(AcctSchema.class);
+    doReturn("ledger-of-parent").when(parentLedger).getId();
+    recordGuardMock.when(() -> NeoActionRecordGuard.loadOwned(AcctSchema.class, PRODUCT_ID)).thenReturn(parentLedger);
+    JSONObject body = new JSONObject();
+
+    assertNull(HANDLER.handle(postWithParent(body, acctTabWithParent(AcctSchema.class))));
+    assertEquals("ledger-of-parent", body.getString("accountingSchema"));
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  @DisplayName("ETP-5693: with no org ledger, the client fallback is ordered by name")
+  void clientFallbackIsOrderedByName() throws Exception {
+    AcctSchema schema = mock(AcctSchema.class);
+    doReturn(SCHEMA_ID).when(schema).getId();
+    OBCriteria<AcctSchema> criteria = mock(OBCriteria.class);
+    when(obDal.createCriteria(AcctSchema.class)).thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.list()).thenReturn(Collections.singletonList(schema));
+    JSONObject body = new JSONObject();
+
+    assertNull(HANDLER.handle(postWithParent(body, productAcctTab())));
+    assertEquals(SCHEMA_ID, body.getString("accountingSchema"));
+    ArgumentCaptor<Order> order = ArgumentCaptor.forClass(Order.class);
+    verify(criteria).addOrder(order.capture());
+    assertEquals(Order.asc(AcctSchema.PROPERTY_NAME).toString(), order.getValue().toString());
   }
 
   @Test

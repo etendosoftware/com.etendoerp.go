@@ -168,8 +168,9 @@ public final class PostingAccountGuard {
     } catch (MessageKeyedException e) {
       return NeoResponse.error(400, e);
     } catch (Exception e) {
-      log.warn("Posting-account check skipped for {}/{}: {}", context.getSpecName(),
-          context.getEntityName(), e.getMessage(), e);
+      // Greppable marker: a skip here means a write went unchecked.
+      log.warn("posting-guard-skipped: posting-account check skipped for {}/{}: {}",
+          context.getSpecName(), context.getEntityName(), e.getMessage(), e);
       return null;
     } finally {
       OBContext.restorePreviousMode();
@@ -229,11 +230,16 @@ public final class PostingAccountGuard {
       String key = (String) keys.next();
       String name = filter == null ? key : filter.resolveWritablePropName(key);
       if (entity.getProperty(name, false) != null) {
-        body.put(name, raw.isNull(key) ? null : raw.get(key));
+        body.put(name, raw.isNull(key) ? null : idOf(raw.get(key)));
         apiKeys.put(name, key);
       }
     }
     return body;
+  }
+
+  /** Core also accepts an FK as {@code {"id": ...}}; checking only strings would let that shape through. */
+  private static Object idOf(Object value) {
+    return value instanceof JSONObject ? ((JSONObject) value).optString("id", null) : value;
   }
 
   @SuppressWarnings("unchecked")
