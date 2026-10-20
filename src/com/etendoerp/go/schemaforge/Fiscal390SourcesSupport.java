@@ -102,6 +102,9 @@ final class Fiscal390SourcesSupport {
 
   private final Fiscal390BoxesHandler owner;
 
+  private static final String PAGE_SIZE = "pageSize";
+  private static final String TOTAL = "total";
+
   Fiscal390SourcesSupport(Fiscal390BoxesHandler owner) {
     this.owner = owner;
   }
@@ -116,11 +119,29 @@ final class Fiscal390SourcesSupport {
 
   /** The {@link Fiscal390BoxesCalculator.Engine} reads, with lines instead of figures. */
   interface LineEngine {
+    /**
+     * The output parameters of a tax-report group.
+     *
+     * @param groupKey the group's search key
+     * @return its output parameters
+     */
     List<TaxReportParameter> outputParameters(String groupKey);
 
+    /**
+     * The taxes a parameter reads.
+     *
+     * @param parameter the tax-report parameter
+     * @return its taxes
+     */
     List<TaxRate> taxes(TaxReportParameter parameter);
 
-    /** The lines the figure of {@code parameter} for {@code taxes} is the sum of. */
+    /**
+     * The lines the figure of {@code parameter} for {@code taxes} is the sum of.
+     *
+     * @param parameter the tax-report parameter
+     * @param taxes     the taxes it reads
+     * @return the invoice-tax lines behind the figure
+     */
     List<SourceLine> lines(TaxReportParameter parameter, List<TaxRate> taxes);
   }
 
@@ -154,7 +175,7 @@ final class Fiscal390SourcesSupport {
     static Query from(HttpServletRequest request) {
       String box = request.getParameter(KEY_BOX);
       String page = request.getParameter("page");
-      String size = request.getParameter("pageSize");
+      String size = request.getParameter(PAGE_SIZE);
       int pageSize = StringUtils.isBlank(size) ? DEFAULT_PAGE_SIZE : Integer.parseInt(size.trim());
       if (pageSize < 0 || pageSize > MAX_PAGE_SIZE) {
         throw new IllegalArgumentException("pageSize must be between 0 and " + MAX_PAGE_SIZE);
@@ -397,7 +418,7 @@ final class Fiscal390SourcesSupport {
     JSONObject totals = new JSONObject();
     totals.put("base", amount(base));
     totals.put("vat", amount(vat));
-    totals.put("total", amount(base.add(vat)));
+    totals.put(TOTAL, amount(base.add(vat)));
     if (q.box() != null) {
       totals.put(KEY_BOX, amount(boxTotal));
     }
@@ -406,7 +427,7 @@ final class Fiscal390SourcesSupport {
     root.put("rows", rows);
     root.put("count", filtered.size());
     root.put("page", q.page());
-    root.put("pageSize", q.pageSize());
+    root.put(PAGE_SIZE, q.pageSize());
     root.put(KEY_TOTALS, totals);
     root.put(Fiscal390BoxesHandler.BOXES, boxesJson(c.boxes));
     root.put("taxes", taxesJson(c.rows));
@@ -419,12 +440,12 @@ final class Fiscal390SourcesSupport {
     JSONObject totals = new JSONObject();
     totals.put("base", amount(BigDecimal.ZERO));
     totals.put("vat", amount(BigDecimal.ZERO));
-    totals.put("total", amount(BigDecimal.ZERO));
+    totals.put(TOTAL, amount(BigDecimal.ZERO));
     JSONObject root = new JSONObject();
     root.put("rows", new JSONArray());
     root.put("count", 0);
     root.put("page", q.page());
-    root.put("pageSize", q.pageSize());
+    root.put(PAGE_SIZE, q.pageSize());
     root.put(KEY_TOTALS, totals);
     root.put(Fiscal390BoxesHandler.BOXES, new JSONObject());
     root.put("taxes", new JSONArray());
@@ -452,7 +473,7 @@ final class Fiscal390SourcesSupport {
         : JSONObject.NULL);
     o.put("base", amount(r.base));
     o.put("vat", amount(r.cuota));
-    o.put("total", amount(r.base.add(r.cuota)));
+    o.put(TOTAL, amount(r.base.add(r.cuota)));
     StringBuilder boxes = new StringBuilder();
     JSONObject boxAmounts = new JSONObject();
     for (Map.Entry<Integer, BigDecimal> e : r.boxAmounts.entrySet()) {

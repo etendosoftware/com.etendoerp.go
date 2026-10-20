@@ -96,7 +96,12 @@ public class IncompleteFiscalYearException extends OBException {
     return body;
   }
 
-  /** The {@link IncompleteFiscalYearException} in {@code t}'s cause chain, or {@code null}. */
+  /**
+   * The {@link IncompleteFiscalYearException} in {@code t}'s cause chain (10 levels at most).
+   *
+   * @param t the throwable to inspect, may be {@code null}
+   * @return the exception found, or {@code null}
+   */
   public static IncompleteFiscalYearException find(Throwable t) {
     Throwable cur = t;
     for (int depth = 0; cur != null && depth < 10; depth++) {

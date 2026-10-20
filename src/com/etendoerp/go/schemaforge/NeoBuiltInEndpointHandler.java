@@ -75,6 +75,17 @@ class NeoBuiltInEndpointHandler {
     this.transactionalEmailService = transactionalEmailService;
   }
 
+  /** The fiscal-model handler of {@code /fiscal303}, {@code /fiscal349} or {@code /fiscal390}. */
+  private AbstractFiscalHandler fiscalHandlerFor(String specName) {
+    if ("fiscal303".equals(specName)) {
+      return fiscal303Handler;
+    }
+    if ("fiscal349".equals(specName)) {
+      return fiscal349Handler;
+    }
+    return "fiscal390".equals(specName) ? fiscal390Handler : null;
+  }
+
   boolean handle(NeoServlet.NeoPathInfo pathInfo, String method,
       HttpServletRequest request, HttpServletResponse response) throws IOException {
     if (pathInfo.specName == null) {
@@ -107,16 +118,9 @@ class NeoBuiltInEndpointHandler {
       handleAttachmentsEndpoint(method, request, response);
       return true;
     }
-    if ("fiscal303".equals(pathInfo.specName)) {
-      fiscal303Handler.handle(pathInfo.entityName, method, request, response);
-      return true;
-    }
-    if ("fiscal349".equals(pathInfo.specName)) {
-      fiscal349Handler.handle(pathInfo.entityName, method, request, response);
-      return true;
-    }
-    if ("fiscal390".equals(pathInfo.specName)) {
-      fiscal390Handler.handle(pathInfo.entityName, method, request, response);
+    AbstractFiscalHandler fiscalHandler = fiscalHandlerFor(pathInfo.specName);
+    if (fiscalHandler != null) {
+      fiscalHandler.handle(pathInfo.entityName, method, request, response);
       return true;
     }
     if ("fiscal-models-catalog".equals(pathInfo.specName)) {

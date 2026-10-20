@@ -66,6 +66,8 @@ import org.openbravo.model.common.enterprise.Organization;
  * {@code Fiscal303SubmitHandlerTest}.</p>
  *
  * @covers com.etendoerp.go.schemaforge.FiscalDeclCrudHandler
+ * @covers com.etendoerp.go.schemaforge.FiscalDeclSingleOrdinarySupport
+ * @covers com.etendoerp.go.schemaforge.FiscalDeclIncidentMessages
  */
 public class FiscalDeclCrudHandlerTest {
 
@@ -423,21 +425,21 @@ public class FiscalDeclCrudHandlerTest {
     java.util.Map<String, Object> action = new java.util.LinkedHashMap<>();
     action.put("type", "box");
     action.put("box", 87);
-    String stored = FiscalDeclCrudHandler.structuredMessage("Sum is 90 %", params, action);
+    String stored = FiscalDeclIncidentMessages.structuredMessage("Sum is 90 %", params, action);
 
     org.codehaus.jettison.json.JSONObject out = new org.codehaus.jettison.json.JSONObject();
-    FiscalDeclCrudHandler.putMessageFields(out, stored);
+    FiscalDeclIncidentMessages.putMessageFields(out, stored);
     assertEquals("Sum is 90 %", out.getString("message"));
     assertEquals(87, out.getJSONObject("params").getInt("box"));
     assertEquals("box", out.getJSONObject("action").getString("type"));
 
     org.codehaus.jettison.json.JSONObject plain = new org.codehaus.jettison.json.JSONObject();
-    FiscalDeclCrudHandler.putMessageFields(plain, "{not json} El NIF no es valido");
+    FiscalDeclIncidentMessages.putMessageFields(plain, "{not json} El NIF no es valido");
     assertEquals("{not json} El NIF no es valido", plain.getString("message"));
     assertFalse(plain.has("params"));
 
     org.codehaus.jettison.json.JSONObject noText = new org.codehaus.jettison.json.JSONObject();
-    FiscalDeclCrudHandler.putMessageFields(noText, "{\"a\":1}");
+    FiscalDeclIncidentMessages.putMessageFields(noText, "{\"a\":1}");
     assertEquals("{\"a\":1}", noText.getString("message"));
   }
 
@@ -3432,7 +3434,7 @@ public class FiscalDeclCrudHandlerTest {
     // The rule linkSubmittedSnapshotProviders wires from the handlers: only the 390's
     // allowsSingleOrdinary() is true (see AbstractFiscalHandlerTest).
     String model390 = new Fiscal390BoxesHandler(servlet).getDeclModel();
-    handler.setSingleOrdinaryModel(model390::equals);
+    handler.singleOrdinarySupport.setSingleOrdinaryModel(model390::equals);
     HttpServletRequest req = mock(HttpServletRequest.class);
     HttpServletResponse resp = mock(HttpServletResponse.class);
     when(resp.getWriter()).thenReturn(new PrintWriter(new StringWriter()));
@@ -3489,7 +3491,7 @@ public class FiscalDeclCrudHandlerTest {
     assertTrue("a structured 409 must be written", r != null);
     assertEquals(HttpServletResponse.SC_CONFLICT, r.getHttpStatus());
     JSONObject error = r.getBody().getJSONObject("error");
-    assertEquals(FiscalDeclCrudHandler.ERR_DUPLICATE_ORDINARY, error.getString("code"));
+    assertEquals(FiscalDeclSingleOrdinarySupport.ERR_DUPLICATE_ORDINARY, error.getString("code"));
     assertEquals("DECL390", error.getString("existingId"));
     assertTrue(!error.getString("message").isEmpty());
     assertTrue("no row may be created", !created[0]);

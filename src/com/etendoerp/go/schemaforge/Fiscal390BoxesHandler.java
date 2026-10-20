@@ -197,6 +197,12 @@ class Fiscal390BoxesHandler extends AbstractFiscalHandler {
   /** A body that may throw {@link FiscalHandlerException}, run under {@link #withRequestMemo}. */
   @FunctionalInterface
   interface MemoBody<T> {
+    /**
+     * Runs the body.
+     *
+     * @return the body's result
+     * @throws FiscalHandlerException whatever the body raises
+     */
     T run() throws FiscalHandlerException;
   }
 
@@ -219,37 +225,54 @@ class Fiscal390BoxesHandler extends AbstractFiscalHandler {
         return;
       }
       try {
-        if (BOXES.equals(entityName)) {
-          // Not guarded: a pure read. A submitted declaration is served from its snapshot.
-          JSONObject snapshot = findSubmittedSnapshot(year, period);
-          JSONObject out = snapshot != null ? snapshot
-              : computePayload(orgId, year, effectiveInputs(orgId, year, period, request));
-          response.setContentType(JSON_CT);
-          response.getWriter().write(out.toString());
-        } else if (GENERATE.equals(entityName)) {
-          guardNotAlreadySubmitted(orgId, year, period, MODEL);
-          Map<String, String> inputs = effectiveInputs(orgId, year, period, request);
-          if (incidentsSupport().rejectGenerate(orgId, year, period, inputs, response)) {
-            return;
-          }
-          generateSupport().handleGenerate(orgId, year, inputs, response);
-        } else if (Fiscal390SourcesSupport.SOURCES.equals(entityName)) {
-          sourcesSupport.handle(orgId, year, period, request, response);
-        } else if (Fiscal390PreloadSupport.PRELOAD.equals(entityName)) {
-          preloadSupport.handle(orgId, year, period, request, response);
-        } else if (Fiscal390SubmissionSupport.SUBMIT.equals(entityName)) {
-          submissionSupport.handleSubmit(orgId, year, period, request, response);
-        } else if (Fiscal390IncidentsSupport.VALIDATE.equals(entityName)) {
-          incidentsSupport().handleValidate(orgId, year, request, response);
-        } else {
-          long sinceMs = Long.parseLong(request.getParameter(SINCE_KEY));
-          handleModified(orgId, year, period, new Date(sinceMs), response);
-        }
+        routeEntity(entityName, orgId, year, period, request, response);
       } catch (IllegalArgumentException e) {
         // A non-numeric user input (Fiscal390DerivedBoxes.parseInputs) — the caller can fix it.
         servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
       }
     });
+  }
+
+  /** Serves one entity of the (annual) exercise; see the class comment for the list. */
+  private void routeEntity(String entityName, String orgId, int year, String period,
+      HttpServletRequest request, HttpServletResponse response) throws Exception {
+    if (BOXES.equals(entityName)) {
+      writeBoxes(orgId, year, period, request, response);
+    } else if (GENERATE.equals(entityName)) {
+      generateFile(orgId, year, period, request, response);
+    } else if (Fiscal390SourcesSupport.SOURCES.equals(entityName)) {
+      sourcesSupport.handle(orgId, year, period, request, response);
+    } else if (Fiscal390PreloadSupport.PRELOAD.equals(entityName)) {
+      preloadSupport.handle(orgId, year, period, request, response);
+    } else if (Fiscal390SubmissionSupport.SUBMIT.equals(entityName)) {
+      submissionSupport.handleSubmit(orgId, year, period, request, response);
+    } else if (Fiscal390IncidentsSupport.VALIDATE.equals(entityName)) {
+      incidentsSupport().handleValidate(orgId, year, request, response);
+    } else {
+      long sinceMs = Long.parseLong(request.getParameter(SINCE_KEY));
+      handleModified(orgId, year, period, new Date(sinceMs), response);
+    }
+  }
+
+  /** {@code boxes}: not guarded, a pure read. A submitted declaration is served from its snapshot. */
+  private void writeBoxes(String orgId, int year, String period, HttpServletRequest request,
+      HttpServletResponse response) throws Exception {
+    JSONObject snapshot = findSubmittedSnapshot(year, period);
+    JSONObject out = snapshot != null ? snapshot
+        : computePayload(orgId, year, effectiveInputs(orgId, year, period, request));
+    response.setContentType(JSON_CT);
+    response.getWriter().write(out.toString());
+  }
+
+  /** {@code generate}: refused once submitted, or while a blocking incident is open. */
+  private void generateFile(String orgId, int year, String period, HttpServletRequest request,
+      HttpServletResponse response) throws Exception {
+    guardNotAlreadySubmitted(orgId, year, period, MODEL);
+    Map<String, String> inputs = effectiveInputs(orgId, year, period, request);
+    if (incidentsSupport().rejectGenerate(orgId, year, period, inputs, response)) {
+      return;
+    }
+    generateSupport().handleGenerate(orgId, year, inputs, response);
   }
 
   /**

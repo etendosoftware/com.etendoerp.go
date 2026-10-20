@@ -716,9 +716,9 @@ public class AbstractFiscalHandlerTest {
     assertTrue(!h303.allowsSingleOrdinary());
     AbstractFiscalHandler.linkSubmittedSnapshotProviders(h303, h390);
     for (AbstractFiscalHandler h : List.of(h303, h390)) {
-      assertTrue(h.declHandler().isSingleOrdinaryModel(h390.getDeclModel()));
-      assertTrue(!h.declHandler().isSingleOrdinaryModel(h303.getDeclModel()));
-      assertTrue(!h.declHandler().isSingleOrdinaryModel("unknown"));
+      assertTrue(h.declHandler().singleOrdinarySupport.isSingleOrdinaryModel(h390.getDeclModel()));
+      assertTrue(!h.declHandler().singleOrdinarySupport.isSingleOrdinaryModel(h303.getDeclModel()));
+      assertTrue(!h.declHandler().singleOrdinarySupport.isSingleOrdinaryModel("unknown"));
     }
   }
 

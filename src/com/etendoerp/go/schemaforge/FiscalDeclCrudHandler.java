@@ -235,8 +235,8 @@ class FiscalDeclCrudHandler {
   static final String SUSTITUTIVA_KEY    = "sustitutiva";
   private static final String SUBMISSION_METHOD_KEY = "submissionMethod";
   private static final String SUBMITTED_SNAPSHOT_KEY = "submittedSnapshot";
-  private static final String CODE_KEY          = "code";
-  private static final String MESSAGE_KEY       = "message";
+  static final String CODE_KEY          = "code";
+  static final String MESSAGE_KEY       = "message";
   private static final String SEVERITY_KEY      = "severity";
   private static final String MISSING_ID_PARAM  = "Missing param: id";
   private static final String DECL_NOT_FOUND_PREFIX = "Declaration not found: ";
@@ -272,6 +272,8 @@ class FiscalDeclCrudHandler {
   final FiscalDeclReactivationSupport reactivationSupport;
   /** See {@link #correctiveConsistencySupport}'s own javadoc for the extraction rationale. */
   final FiscalDeclManualDataValidationSupport manualDataValidationSupport;
+  /** The per-model single-ordinary rule (ETP-5716); same extraction rationale. */
+  final FiscalDeclSingleOrdinarySupport singleOrdinarySupport;
 
   FiscalDeclCrudHandler(NeoServlet servlet) {
     this.servlet = servlet;
@@ -279,6 +281,7 @@ class FiscalDeclCrudHandler {
     this.correctiveConsistencySupport = new FiscalDeclCorrectiveConsistencySupport(this);
     this.reactivationSupport = new FiscalDeclReactivationSupport(this, correctiveConsistencySupport);
     this.manualDataValidationSupport = new FiscalDeclManualDataValidationSupport(this);
+    this.singleOrdinarySupport = new FiscalDeclSingleOrdinarySupport(this);
   }
 
   void handleDeclarations(String method, HttpServletRequest request,
@@ -335,8 +338,8 @@ class FiscalDeclCrudHandler {
     // exists — a non-draft (ready/submitted/...) existing declaration is the intended
     // corrective/rectificativa case (ETP-5187) and must keep working exactly as before, via
     // resolveNextDeclSeq below, untouched by this check.
-    if (rejectDuplicateOrdinary(clientId, orgId, model, year, period, requestedDeclType,
-        response)) {
+    if (singleOrdinarySupport.rejectDuplicateOrdinary(clientId, orgId, model, year, period,
+        requestedDeclType, response)) {
       return;
     }
     if (hasDraftDeclaration(clientId, orgId, model, year, period)) {
@@ -398,75 +401,6 @@ class FiscalDeclCrudHandler {
 
     response.setStatus(HttpServletResponse.SC_CREATED);
     response.getWriter().write(created.toString());
-  }
-
-  /**
-   * Whether a model allows a single ORDINARY declaration per natural key (ETP-5716). Not decided
-   * here: each model's handler says so ({@link AbstractFiscalHandler#allowsSingleOrdinary}, e.g.
-   * the Modelo 390, filed once per exercise — a later filing is a sustitutiva/complementaria,
-   * {@code type: "com"}, which stays allowed), wired by
-   * {@link AbstractFiscalHandler#linkSubmittedSnapshotProviders}. Default: none (the 303/349
-   * rectificativa flow re-files an ordinary for the same period, ETP-5187).
-   */
-  private java.util.function.Predicate<String> singleOrdinaryModel = model -> false;
-
-  /** True when {@code model} allows a single ordinary declaration (see {@link #singleOrdinaryModel}). */
-  boolean isSingleOrdinaryModel(String model) {
-    return singleOrdinaryModel.test(model);
-  }
-
-  /** Installs the per-model "single ordinary" rule (see {@link #singleOrdinaryModel}). */
-  void setSingleOrdinaryModel(java.util.function.Predicate<String> rule) {
-    this.singleOrdinaryModel = rule != null ? rule : model -> false;
-  }
-
-  /** Error code of the 409 {@link #rejectDuplicateOrdinary} answers. */
-  static final String ERR_DUPLICATE_ORDINARY = "DUPLICATE_ORDINARY";
-
-  /**
-   * For a single-ordinary model ({@link #singleOrdinaryModel}), rejects creating a second ordinary declaration
-   * for the natural key with a {@code 409} whose body carries what the UI needs to open the
-   * existing one: {@code {"error":{"status":409,"code":"DUPLICATE_ORDINARY","message":...,
-   * "existingId":...}}} ({@code existingId} = the latest ordinary, by {@code DECL_SEQ}).
-   *
-   * @return {@code true} when the response was written and the creation must stop
-   */
-  private boolean rejectDuplicateOrdinary(String clientId, String orgId, String model, long year,
-      String period, String requestedDeclType, HttpServletResponse response) throws Exception {
-    if (!singleOrdinaryModel.test(model) || !"O".equals(requestedDeclType)) {
-      return false;
-    }
-    BaseOBObject existing = findLatestOrdinary(clientId, orgId, model, year, period);
-    if (existing == null) {
-      return false;
-    }
-    JSONObject error = new JSONObject();
-    error.put(STATUS_KEY, HttpServletResponse.SC_CONFLICT);
-    error.put(CODE_KEY, ERR_DUPLICATE_ORDINARY);
-    error.put(MESSAGE_KEY, "An ordinary Modelo " + model + " declaration already exists for "
-        + year + " — open it, or create a substitute (complementaria) declaration instead.");
-    error.put("existingId", existing.getId());
-    JSONObject body = new JSONObject();
-    body.put("error", error);
-    servlet.writeResponse(response, NeoResponse.error(HttpServletResponse.SC_CONFLICT, body));
-    return true;
-  }
-
-  /** Highest-{@code DECL_SEQ} ordinary ({@code DECL_TYPE = 'O'}) declaration, or {@code null}. */
-  private BaseOBObject findLatestOrdinary(String clientId, String orgId, String model, long year,
-      String period) {
-    BaseOBObject latest = null;
-    long maxSeq = -1L;
-    for (BaseOBObject existing : naturalKeyQuery(clientId, orgId, model, year, period).list()) {
-      String type = asString(existing.get(PROPERTY_DECLARATION_TYPE)).trim();
-      Object rawSeq = existing.get(PROPERTY_DECL_SEQ);
-      long seq = rawSeq instanceof Number ? ((Number) rawSeq).longValue() : 0L;
-      if (!"C".equals(type) && seq > maxSeq) {
-        maxSeq = seq;
-        latest = existing;
-      }
-    }
-    return latest;
   }
 
   /**
@@ -884,8 +818,8 @@ class FiscalDeclCrudHandler {
   /**
    * The persisted incidents of {@code declId} in the read shape of {@link #handleIncidents}:
    * {@code [{code, message, severity[, params][, action]}]}. A structured message
-   * ({@link #structuredMessage}) is unfolded: {@code message} is its text and its
-   * {@code params}/{@code action} are returned alongside; a plain message (an AEAT answer) is
+   * ({@link FiscalDeclIncidentMessages#structuredMessage}) is unfolded: {@code message} is its
+   * text and its {@code params}/{@code action} are returned alongside; a plain message (an AEAT answer) is
    * returned as-is.
    */
   JSONArray incidentsJson(String declId) throws JSONException {
@@ -893,73 +827,11 @@ class FiscalDeclCrudHandler {
     for (BaseOBObject inc : queryIncidents(declId)) {
       JSONObject o = new JSONObject();
       o.put(CODE_KEY,     asString(inc.get(PROPERTY_INCIDENT_CODE)));
-      putMessageFields(o, asString(inc.get(PROPERTY_INCIDENT_MESSAGE)));
-      o.put(SEVERITY_KEY, resolveSeverity(inc));
+      FiscalDeclIncidentMessages.putMessageFields(o, asString(inc.get(PROPERTY_INCIDENT_MESSAGE)));
+      o.put(SEVERITY_KEY, FiscalDeclIncidentMessages.resolveSeverity(inc));
       arr.put(o);
     }
     return arr;
-  }
-
-  /** Key of the human-readable text inside a {@link #structuredMessage}. */
-  static final String STRUCTURED_TEXT_KEY = "text";
-  static final String PARAMS_KEY = "params";
-  static final String ACTION_KEY = "action";
-
-  /**
-   * The {@code MESSAGE} of an incident a model computes itself (ETP-5716, Modelo 390 rules):
-   * {@code {"text": <fallback text>, "params": {...}, "action": {...}}} as JSON, so the reader can
-   * translate the incident by its code with its parameters and offer the action — without a new
-   * column. {@code params}/{@code action} are omitted when {@code null}.
-   */
-  static String structuredMessage(String text, java.util.Map<String, ?> params,
-      java.util.Map<String, ?> action) throws JSONException {
-    JSONObject o = new JSONObject();
-    o.put(STRUCTURED_TEXT_KEY, StringUtils.defaultString(text));
-    if (params != null && !params.isEmpty()) {
-      o.put(PARAMS_KEY, new JSONObject(params));
-    }
-    if (action != null && !action.isEmpty()) {
-      o.put(ACTION_KEY, new JSONObject(action));
-    }
-    return o.toString();
-  }
-
-  /**
-   * Puts {@code message} (and, for a {@link #structuredMessage}, {@code params} / {@code action})
-   * into {@code out}. Anything that is not a JSON object with a string {@code text} is a plain
-   * message.
-   */
-  static void putMessageFields(JSONObject out, String stored) throws JSONException {
-    String trimmed = StringUtils.trimToEmpty(stored);
-    if (trimmed.startsWith("{")) {
-      try {
-        JSONObject parsed = new JSONObject(trimmed);
-        Object text = parsed.opt(STRUCTURED_TEXT_KEY);
-        if (text instanceof String) {
-          out.put(MESSAGE_KEY, text);
-          if (parsed.optJSONObject(PARAMS_KEY) != null) {
-            out.put(PARAMS_KEY, parsed.getJSONObject(PARAMS_KEY));
-          }
-          if (parsed.optJSONObject(ACTION_KEY) != null) {
-            out.put(ACTION_KEY, parsed.getJSONObject(ACTION_KEY));
-          }
-          return;
-        }
-      } catch (JSONException e) {
-        // not structured: a plain message that happens to start with a brace
-      }
-    }
-    out.put(MESSAGE_KEY, stored);
-  }
-
-  /**
-   * Reads the persisted {@code severity} value, defaulting to {@link #SEVERITY_BLOCK} for any row
-   * that predates this column (blank/null) — preserves the pre-ETP-4456 behavior for old rows
-   * rather than surfacing an empty string to the frontend.
-   */
-  private static String resolveSeverity(BaseOBObject inc) {
-    String severity = asString(inc.get(PROPERTY_INCIDENT_SEVERITY));
-    return StringUtils.isNotBlank(severity) ? severity : SEVERITY_BLOCK;
   }
 
   /** All {@code ETGO_Fiscal_Decl_Incident} rows for {@code declId}, oldest first. */
@@ -1049,7 +921,10 @@ class FiscalDeclCrudHandler {
     insertIncidents(decl, warnings, SEVERITY_WARN, AEAT_INCIDENT_CODE_PREFIX);
   }
 
-  /** One incident a model computes itself: code, severity and its {@link #structuredMessage}. */
+  /**
+   * One incident a model computes itself: code, severity and its
+   * {@link FiscalDeclIncidentMessages#structuredMessage}.
+   */
   record RuleIncidentRow(String code, String severity, String message) {
   }
 

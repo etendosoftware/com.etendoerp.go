@@ -365,7 +365,7 @@ class Fiscal390IncidentsSupport {
     List<FiscalDeclCrudHandler.RuleIncidentRow> rows = new ArrayList<>();
     for (Fiscal390IncidentRules.Incident inc : incidents) {
       rows.add(new FiscalDeclCrudHandler.RuleIncidentRow(inc.code, inc.severity,
-          FiscalDeclCrudHandler.structuredMessage(inc.text, inc.params, inc.action)));
+          FiscalDeclIncidentMessages.structuredMessage(inc.text, inc.params, inc.action)));
     }
     return rows;
   }
@@ -377,8 +377,8 @@ class Fiscal390IncidentsSupport {
       JSONObject o = new JSONObject();
       o.put("code", inc.code);
       o.put("severity", inc.severity);
-      FiscalDeclCrudHandler.putMessageFields(o,
-          FiscalDeclCrudHandler.structuredMessage(inc.text, inc.params, inc.action));
+      FiscalDeclIncidentMessages.putMessageFields(o,
+          FiscalDeclIncidentMessages.structuredMessage(inc.text, inc.params, inc.action));
       arr.put(o);
     }
     return arr;

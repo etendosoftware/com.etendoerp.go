@@ -300,7 +300,7 @@ abstract class AbstractFiscalHandler {
     };
     for (AbstractFiscalHandler h : handlers) {
       h.declHandler().snapshots.setProvider(provider);
-      h.declHandler().setSingleOrdinaryModel(singleOrdinary);
+      h.declHandler().singleOrdinarySupport.setSingleOrdinaryModel(singleOrdinary);
     }
   }
 
@@ -355,18 +355,27 @@ abstract class AbstractFiscalHandler {
       String orgId = resolveEffectiveOrg();
       dispatch(entityName, orgId, year, period, request, response);
     } catch (Exception e) {
-      if (sendIncompleteFiscalYear(response, e, entityName)) {
-        return;
-      }
-      if (e instanceof FiscalHandlerException) {
-        log.error("Error in /" + getModelKey() + "/" + entityName, e);
-        servlet.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, userMessage(e));
-        return;
-      }
-      log.error("Unexpected error in /" + getModelKey() + "/" + entityName, e);
-      servlet.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          GENERIC_ERROR_MESSAGE);
+      sendDispatchFailure(response, e, entityName);
     }
+  }
+
+  /**
+   * Answers a failed {@code dispatch()}: the structured 422 of an incomplete fiscal year, the
+   * user message of a {@link FiscalHandlerException}, or the generic 500 text otherwise.
+   */
+  private void sendDispatchFailure(HttpServletResponse response, Exception e, String entityName)
+      throws IOException {
+    if (sendIncompleteFiscalYear(response, e, entityName)) {
+      return;
+    }
+    if (e instanceof FiscalHandlerException) {
+      log.error("Error in /" + getModelKey() + "/" + entityName, e);
+      servlet.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, userMessage(e));
+      return;
+    }
+    log.error("Unexpected error in /" + getModelKey() + "/" + entityName, e);
+    servlet.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+        GENERIC_ERROR_MESSAGE);
   }
 
   /**
@@ -728,17 +737,12 @@ abstract class AbstractFiscalHandler {
     int bestYear = Integer.MIN_VALUE;
     boolean bestIsOrgRow = false;
     for (TaxReport candidate : candidates) {
-      if (!Boolean.TRUE.equals(candidate.isActive()) || candidate.getSearchKey() == null) {
-        continue;
-      }
-      Matcher m = yearPattern.matcher(candidate.getSearchKey());
-      if (!m.matches()) {
+      Matcher m = Boolean.TRUE.equals(candidate.isActive()) && candidate.getSearchKey() != null
+          ? yearPattern.matcher(candidate.getSearchKey()) : null;
+      if (m == null || !m.matches() || Integer.parseInt(m.group(1)) > year) {
         continue;
       }
       int layoutYear = Integer.parseInt(m.group(1));
-      if (layoutYear > year) {
-        continue;
-      }
       boolean isOrgRow = candidate.getOrganization() != null
           && orgId.equals(candidate.getOrganization().getId());
       if (layoutYear > bestYear || (layoutYear == bestYear && isOrgRow && !bestIsOrgRow)) {

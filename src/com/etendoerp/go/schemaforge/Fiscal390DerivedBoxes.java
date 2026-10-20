@@ -207,10 +207,8 @@ final class Fiscal390DerivedBoxes {
     // AEAT390_MonthlyReturn_Check; review N3): otherwise [96] ignores them.
     boolean monthlyReturn = isMonthlyReturn(raw);
     for (Map.Entry<String, String> e : raw.entrySet()) {
-      if (!INPUT_KEYS.contains(e.getKey()) || StringUtils.isBlank(e.getValue())) {
-        continue;
-      }
-      if (!monthlyReturn && e.getKey().startsWith(DEVOLVER_PREFIX)) {
+      if (!INPUT_KEYS.contains(e.getKey()) || StringUtils.isBlank(e.getValue())
+          || (!monthlyReturn && e.getKey().startsWith(DEVOLVER_PREFIX))) {
         continue;
       }
       try {

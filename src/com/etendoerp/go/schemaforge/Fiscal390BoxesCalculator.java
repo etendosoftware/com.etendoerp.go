@@ -78,13 +78,29 @@ final class Fiscal390BoxesCalculator {
 
   /** Database access the computation needs. */
   interface Engine {
-    /** Output ({@code type = 'O'}) parameters of a group, by sequence; empty when no group. */
+    /**
+     * Output ({@code type = 'O'}) parameters of a group, by sequence.
+     *
+     * @param groupKey the group's search key
+     * @return its output parameters; empty when no group
+     */
     List<TaxReportParameter> outputParameters(String groupKey);
 
-    /** The taxes mapped to a parameter, ordered by rate. */
+    /**
+     * The taxes mapped to a parameter.
+     *
+     * @param parameter the tax-report parameter
+     * @return its taxes, ordered by rate
+     */
     List<TaxRate> taxes(TaxReportParameter parameter);
 
-    /** {@code {base, cuota}} of posted invoices of the year for those taxes (never null). */
+    /**
+     * The posted invoices' amounts of the year for those taxes.
+     *
+     * @param parameter the tax-report parameter
+     * @param taxes     the taxes to add up
+     * @return {@code {base, cuota}} (never null)
+     */
     BigDecimal[] amounts(TaxReportParameter parameter, List<TaxRate> taxes);
 
     /**
@@ -95,6 +111,11 @@ final class Fiscal390BoxesCalculator {
      * rate, negative volume base, no box) is never reported. No-op by default; the Facturas tab
      * ({@link Fiscal390SourcesSupport}) uses it to attribute each invoice line to the boxes it
      * feeds, so that the lines of a box add up to that box.
+     *
+     * @param parameter the tax-report parameter of the figure
+     * @param taxes     the taxes of the figure
+     * @param baseBox   the box its base went to, or {@code null}
+     * @param cuotaBox  the box its cuota went to, or {@code null}
      */
     default void placed(TaxReportParameter parameter, List<TaxRate> taxes, Integer baseBox,
         Integer cuotaBox) {
@@ -138,28 +159,33 @@ final class Fiscal390BoxesCalculator {
       Map<Integer, BigDecimal> raw, Result r) {
     boolean deductible = VAT_PURCHASE.equals(groupKey);
     for (TaxReportParameter p : engine.outputParameters(groupKey)) {
-      String element = p.getAeat390XmlElement();
-      if (StringUtils.isBlank(element)) {
-        continue;
-      }
-      List<TaxRate> taxes = engine.taxes(p);
-      if (taxes.isEmpty()) {
-        continue;
-      }
-      if (Boolean.TRUE.equals(p.isAeat390Issplit())) {
-        exploreSplitParameter(engine, p, element, taxes, deductible, raw, r);
-      } else {
-        BigDecimal[] amounts = engine.amounts(p, taxes);
-        if (isZero(amounts)) {
-          continue;
-        }
-        place(engine, raw, r, p, taxes, element, Fiscal390BoxLayout.TIPO_X, amounts, null);
-        if (deductible) {
-          r.figures.deductibleCuotas = r.figures.deductibleCuotas.add(amounts[1]);
-        }
-        trackSalesTotals(r.figures, element, amounts[1]);
-      }
+      exploreRegGeneralParameter(engine, p, deductible, raw, r);
     }
+  }
+
+  private static void exploreRegGeneralParameter(Engine engine, TaxReportParameter p,
+      boolean deductible, Map<Integer, BigDecimal> raw, Result r) {
+    String element = p.getAeat390XmlElement();
+    if (StringUtils.isBlank(element)) {
+      return;
+    }
+    List<TaxRate> taxes = engine.taxes(p);
+    if (taxes.isEmpty()) {
+      return;
+    }
+    if (Boolean.TRUE.equals(p.isAeat390Issplit())) {
+      exploreSplitParameter(engine, p, element, taxes, deductible, raw, r);
+      return;
+    }
+    BigDecimal[] amounts = engine.amounts(p, taxes);
+    if (isZero(amounts)) {
+      return;
+    }
+    place(engine, raw, r, p, taxes, element, Fiscal390BoxLayout.TIPO_X, amounts, null);
+    if (deductible) {
+      r.figures.deductibleCuotas = r.figures.deductibleCuotas.add(amounts[1]);
+    }
+    trackSalesTotals(r.figures, element, amounts[1]);
   }
 
   private static void exploreSplitParameter(Engine engine, TaxReportParameter p, String element,
@@ -168,21 +194,15 @@ final class Fiscal390BoxesCalculator {
     BigDecimal totalCuota = BigDecimal.ZERO;
     List<TaxRate> placedTaxes = new ArrayList<>();
     for (Map.Entry<BigDecimal, List<TaxRate>> byRate : splitByRate(taxes).entrySet()) {
-      BigDecimal[] amounts = engine.amounts(p, byRate.getValue());
-      if (isZero(amounts)) {
-        continue;
-      }
-      String tipo = RATE_TO_TIPO.get(byRate.getKey());
-      if (tipo == null) {
-        r.warnings.add(warning(WARNING_UNSUPPORTED_RATE, p, byRate.getKey()));
-        continue;
-      }
-      place(engine, raw, r, p, byRate.getValue(), element, tipo, amounts, byRate.getKey());
-      placedTaxes.addAll(byRate.getValue());
-      totalBase = totalBase.add(amounts[0]);
-      totalCuota = totalCuota.add(amounts[1]);
-      if (ELEMENT_RECARGO.equals(element)) {
-        r.figures.recargoCuotas = r.figures.recargoCuotas.add(amounts[1]);
+      BigDecimal[] amounts = placeSplitRate(engine, p, element, byRate.getKey(), byRate.getValue(),
+          raw, r);
+      if (amounts.length > 0) {
+        placedTaxes.addAll(byRate.getValue());
+        totalBase = totalBase.add(amounts[0]);
+        totalCuota = totalCuota.add(amounts[1]);
+        if (ELEMENT_RECARGO.equals(element)) {
+          r.figures.recargoCuotas = r.figures.recargoCuotas.add(amounts[1]);
+        }
       }
     }
     boolean withTotal = Boolean.TRUE.equals(p.isAeat390Istotal())
@@ -195,6 +215,28 @@ final class Fiscal390BoxesCalculator {
     if (deductible && withTotal) {
       r.figures.deductibleCuotas = r.figures.deductibleCuotas.add(totalCuota);
     }
+  }
+
+  /**
+   * Places one rate of a split element: its {@code {base, cuota}}, or an empty array when nothing
+   * was placed (a zero figure, or a rate classic has no setter for — warned).
+   */
+  private static final BigDecimal[] NOTHING_PLACED = new BigDecimal[0];
+
+  @SuppressWarnings("java:S107") // the walk's whole state, as in place()
+  private static BigDecimal[] placeSplitRate(Engine engine, TaxReportParameter p, String element,
+      BigDecimal rate, List<TaxRate> rateTaxes, Map<Integer, BigDecimal> raw, Result r) {
+    BigDecimal[] amounts = engine.amounts(p, rateTaxes);
+    if (isZero(amounts)) {
+      return NOTHING_PLACED;
+    }
+    String tipo = RATE_TO_TIPO.get(rate);
+    if (tipo == null) {
+      r.warnings.add(warning(WARNING_UNSUPPORTED_RATE, p, rate));
+      return NOTHING_PLACED;
+    }
+    place(engine, raw, r, p, rateTaxes, element, tipo, amounts, rate);
+    return amounts;
   }
 
   private static void trackSalesTotals(Fiscal390DerivedBoxes.InvoiceFigures f, String element,
@@ -210,32 +252,37 @@ final class Fiscal390BoxesCalculator {
       Map<Integer, BigDecimal> raw, Result r) {
     boolean volume = VOLUME_OPERATIONS.equals(groupKey);
     for (TaxReportParameter p : engine.outputParameters(groupKey)) {
-      String element = p.getAeat390XmlElement();
-      List<TaxRate> taxes = engine.taxes(p);
-      if (StringUtils.isBlank(element) || taxes.isEmpty()) {
-        continue;
-      }
-      BigDecimal[] amounts = engine.amounts(p, taxes);
-      // Classic keeps the figure only when the base is >= 0.
-      if (amounts[0].signum() < 0) {
-        continue;
-      }
-      if (Boolean.TRUE.equals(p.isAeat390IsBIAndCuota())) {
-        place(engine, raw, r, p, taxes, element, Fiscal390BoxLayout.TIPO_X, amounts, null);
-        continue;
-      }
-      Integer box = Fiscal390BoxLayout.box(element);
-      if (box == null) {
-        r.warnings.add(warning(WARNING_NO_BOX, p, null));
-        continue;
-      }
-      raw.merge(box, amounts[0], BigDecimal::add);
-      engine.placed(p, taxes, box, null);
-      if (volume) {
-        BigDecimal signed = Fiscal390DerivedBoxes.VOLUME_SUBTRACTED_BOXES.contains(box)
-            ? amounts[0].negate() : amounts[0];
-        r.figures.invoiceVolume = r.figures.invoiceVolume.add(signed);
-      }
+      exploreTaxableParameter(engine, p, volume, raw, r);
+    }
+  }
+
+  private static void exploreTaxableParameter(Engine engine, TaxReportParameter p, boolean volume,
+      Map<Integer, BigDecimal> raw, Result r) {
+    String element = p.getAeat390XmlElement();
+    List<TaxRate> taxes = engine.taxes(p);
+    if (StringUtils.isBlank(element) || taxes.isEmpty()) {
+      return;
+    }
+    BigDecimal[] amounts = engine.amounts(p, taxes);
+    // Classic keeps the figure only when the base is >= 0.
+    if (amounts[0].signum() < 0) {
+      return;
+    }
+    if (Boolean.TRUE.equals(p.isAeat390IsBIAndCuota())) {
+      place(engine, raw, r, p, taxes, element, Fiscal390BoxLayout.TIPO_X, amounts, null);
+      return;
+    }
+    Integer box = Fiscal390BoxLayout.box(element);
+    if (box == null) {
+      r.warnings.add(warning(WARNING_NO_BOX, p, null));
+      return;
+    }
+    raw.merge(box, amounts[0], BigDecimal::add);
+    engine.placed(p, taxes, box, null);
+    if (volume) {
+      BigDecimal signed = Fiscal390DerivedBoxes.VOLUME_SUBTRACTED_BOXES.contains(box)
+          ? amounts[0].negate() : amounts[0];
+      r.figures.invoiceVolume = r.figures.invoiceVolume.add(signed);
     }
   }
 

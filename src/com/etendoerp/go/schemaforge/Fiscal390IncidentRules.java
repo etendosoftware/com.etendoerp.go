@@ -161,6 +161,10 @@ final class Fiscal390IncidentRules {
   private static final String PARAM_FIELD = "field";
   private static final String PARAM_LIMIT = "limit";
   private static final String PARAM_SECTION = "section";
+  private static final String PARAM_PARAMETER = "parameter";
+  private static final String PARAM_RESULT = "result";
+  /** A cuadre parameter, and also the {@code status} of a cuadre that does not add up. */
+  private static final String PARAM_DIFFERENCE = "difference";
 
   private Fiscal390IncidentRules() {
   }
@@ -246,7 +250,7 @@ final class Fiscal390IncidentRules {
       return this;
     }
 
-    Incident action(String type, String key, Object value) {
+    Incident withAction(String type, String key, Object value) {
       action = new LinkedHashMap<>();
       action.put("type", type);
       if (key != null) {
@@ -273,7 +277,7 @@ final class Fiscal390IncidentRules {
           + " has no period for month(s) " + f.incompleteFiscalYear + " in the fiscal calendar.")
           .param("year", String.valueOf(f.year))
           .param("missingPeriods", StringUtils.join(f.incompleteFiscalYear, ","))
-          .action(ACTION_FISCAL_CALENDAR, null, null));
+          .withAction(ACTION_FISCAL_CALENDAR, null, null));
     }
     Incident block9 = block9(f);
     if (block9 != null) {
@@ -286,8 +290,8 @@ final class Fiscal390IncidentRules {
     for (Map<String, String> w : f.calculatorWarnings) {
       if (UNSUPPORTED_RATE.equals(w.get("code"))) {
         out.add(block(UNSUPPORTED_RATE, "Tax rate " + w.get("rate") + " % of "
-            + w.get("parameter") + " is not supported by the Modelo 390")
-            .param("parameter", StringUtils.defaultString(w.get("parameter")))
+            + w.get(PARAM_PARAMETER) + " is not supported by the Modelo 390")
+            .param(PARAM_PARAMETER, StringUtils.defaultString(w.get(PARAM_PARAMETER)))
             .param("rate", StringUtils.defaultString(w.get("rate"))));
       }
     }
@@ -304,24 +308,24 @@ final class Fiscal390IncidentRules {
     if (f.missing303Periods != null && !f.missing303Periods.isEmpty()) {
       String periods = String.join(", ", f.missing303Periods);
       out.add(warn(MISSING_303, "Modelo 303 declarations of the exercise are missing: " + periods)
-          .param("periods", periods).action(ACTION_BOX, PARAM_BOX, 95));
+          .param("periods", periods).withAction(ACTION_BOX, PARAM_BOX, 95));
     }
     reconciliation(f, out);
     for (InactiveTax tax : f.inactiveTaxes) {
       out.add(warn(INACTIVE_TAX_WITH_OPERATIONS, "The inactive tax " + tax.name() + " has "
           + tax.invoices() + " posted invoices in the exercise; they are left out of the 390")
-          .param("tax", tax.name()).param("invoices", tax.invoices()));
+          .param("tax", tax.name()).param(ACTION_INVOICES, tax.invoices()));
     }
     truncations(f, out);
     if (hasAmount(f, KEY_LAST_PERIOD_REFUND)
         && (hasAmount(f, KEY_LAST_PERIOD) || anyMonthlyRefund(f))) {
       out.add(warn(BOX98_WITH_96_97, "[98] must be empty when [96] or [97] has an amount")
-          .action(ACTION_BOX, PARAM_BOX, 98));
+          .withAction(ACTION_BOX, PARAM_BOX, 98));
     }
     for (Map<String, String> w : f.calculatorWarnings) {
       if (NO_BOX.equals(w.get("code"))) {
-        out.add(warn(NO_BOX, "A figure of " + w.get("parameter") + " has no box in the form")
-            .param("parameter", StringUtils.defaultString(w.get("parameter")))
+        out.add(warn(NO_BOX, "A figure of " + w.get(PARAM_PARAMETER) + " has no box in the form")
+            .param(PARAM_PARAMETER, StringUtils.defaultString(w.get(PARAM_PARAMETER)))
             .param("rate", StringUtils.defaultString(w.get("rate"))));
       }
     }
@@ -333,7 +337,7 @@ final class Fiscal390IncidentRules {
   private static void organizationIdentity(Facts f, List<Incident> out) {
     if (StringUtils.isBlank(f.orgNif)) {
       out.add(block(NO_ORG_NIF, "The organization has no NIF")
-          .action(ACTION_ORGANIZATION, PARAM_SECTION, SECTION_IDENTITY));
+          .withAction(ACTION_ORGANIZATION, PARAM_SECTION, SECTION_IDENTITY));
     }
     if (!f.person) {
       legalRepresentative(f, out);
@@ -342,12 +346,12 @@ final class Fiscal390IncidentRules {
     if (StringUtils.isBlank(f.firstName) || StringUtils.isBlank(f.surname1)) {
       out.add(block(PERSON_NAME_MISSING,
           "A natural person needs the first name and the first surname")
-          .action(ACTION_ORGANIZATION, PARAM_SECTION, SECTION_390));
+          .withAction(ACTION_ORGANIZATION, PARAM_SECTION, SECTION_390));
     }
     if (StringUtils.isBlank(f.personRepNif) != StringUtils.isBlank(f.personRepName)) {
       out.add(block(PERSON_REPRESENTATIVE_INCOMPLETE,
           "The representative needs both the NIF and the name")
-          .action(ACTION_ORGANIZATION, PARAM_SECTION, SECTION_390));
+          .withAction(ACTION_ORGANIZATION, PARAM_SECTION, SECTION_390));
     }
   }
 
@@ -361,14 +365,14 @@ final class Fiscal390IncidentRules {
     if (!anyWithNif) {
       out.add(block(NO_LEGAL_REPRESENTATIVE,
           "A legal entity must declare the NIF of at least one legal representative")
-          .action(ACTION_ORGANIZATION, PARAM_SECTION, SECTION_390));
+          .withAction(ACTION_ORGANIZATION, PARAM_SECTION, SECTION_390));
     }
   }
 
   private static void activities(Facts f, List<Incident> out) {
     if (f.mainActivities.isEmpty()) {
       out.add(block(NO_MAIN_IAE, "The organization has no main IAE activity")
-          .action(ACTION_ORGANIZATION, PARAM_SECTION, SECTION_IAE));
+          .withAction(ACTION_ORGANIZATION, PARAM_SECTION, SECTION_IAE));
     }
     List<Activity> all = new ArrayList<>(f.mainActivities.isEmpty()
         ? Collections.emptyList() : f.mainActivities.subList(0, 1));
@@ -377,7 +381,7 @@ final class Fiscal390IncidentRules {
       if (!a.hasCode()) {
         out.add(block(IAE_WITHOUT_CODE, "The IAE activity " + a.label() + " has no activity code")
             .param("activity", StringUtils.defaultString(a.label()))
-            .action(ACTION_ORGANIZATION, PARAM_SECTION, SECTION_IAE));
+            .withAction(ACTION_ORGANIZATION, PARAM_SECTION, SECTION_IAE));
       }
     }
     if (f.otherActivities.size() > MAX_OTHER_ACTIVITIES) {
@@ -385,7 +389,7 @@ final class Fiscal390IncidentRules {
           + " IAE activities besides the main one; the organization has "
           + f.otherActivities.size())
           .param("count", f.otherActivities.size()).param("max", MAX_OTHER_ACTIVITIES)
-          .action(ACTION_ORGANIZATION, PARAM_SECTION, SECTION_IAE));
+          .withAction(ACTION_ORGANIZATION, PARAM_SECTION, SECTION_IAE));
     }
   }
 
@@ -418,14 +422,14 @@ final class Fiscal390IncidentRules {
         out.add(block(TERRITORY_PERCENT_MAX, "Box [" + TERRITORY_BOXES[i]
             + "] cannot exceed 99 %")
             .param(PARAM_BOX, TERRITORY_BOXES[i]).param("max", 99)
-            .action(ACTION_BOX, PARAM_BOX, TERRITORY_BOXES[i]));
+            .withAction(ACTION_BOX, PARAM_BOX, TERRITORY_BOXES[i]));
       }
     }
     if (sum.signum() > 0 && sum.compareTo(HUNDRED) != 0) {
       out.add(block(TERRITORY_PERCENT_SUM, "The territory percentages add up to "
           + sum.stripTrailingZeros().toPlainString() + " %, not 100 %")
           .param("sum", sum.stripTrailingZeros().toPlainString())
-          .action(ACTION_BOX, PARAM_BOX, 87));
+          .withAction(ACTION_BOX, PARAM_BOX, 87));
     }
   }
 
@@ -434,30 +438,30 @@ final class Fiscal390IncidentRules {
     BigDecimal territoryCompensation = amount(f, KEY_TERRITORY_COMPENSATION);
     if (compensation.signum() < 0) {
       out.add(block(COMPENSATION_NEGATIVE, "Box [85] cannot be negative")
-          .param(PARAM_BOX, 85).action(ACTION_BOX, PARAM_BOX, 85));
+          .param(PARAM_BOX, 85).withAction(ACTION_BOX, PARAM_BOX, 85));
     }
     if (territoryCompensation.signum() < 0) {
       out.add(block(COMPENSATION_NEGATIVE, "Box [93] cannot be negative")
-          .param(PARAM_BOX, 93).action(ACTION_BOX, PARAM_BOX, 93));
+          .param(PARAM_BOX, 93).withAction(ACTION_BOX, PARAM_BOX, 93));
     }
     if (compensation.signum() > 0 && territoryMode(f)) {
       out.add(block(COMPENSATION_WITH_TERRITORY,
           "Box [85] cannot be used when filing to several administrations: use [93]")
-          .action(ACTION_BOX, PARAM_BOX, 85));
+          .withAction(ACTION_BOX, PARAM_BOX, 85));
     } else if (compensation.signum() > 0 && territoryCompensation.signum() > 0) {
       out.add(block(COMPENSATION_BOTH, "Boxes [85] and [93] cannot both have an amount")
-          .action(ACTION_BOX, PARAM_BOX, 93));
+          .withAction(ACTION_BOX, PARAM_BOX, 93));
     }
     if (!YES.equals(f.inputs.get(KEY_MONTHLY_RETURN)) && anyMonthlyRefund(f)) {
       out.add(block(REFUND_WITHOUT_MONTHLY_REGISTER,
           "Monthly refunds need the monthly refund register mark")
-          .action(ACTION_BOX, PARAM_BOX, 96));
+          .withAction(ACTION_BOX, PARAM_BOX, 96));
     }
     if (hasAmount(f, Fiscal390DerivedBoxes.DEVOLVER_PREFIX + "12")
         && hasAmount(f, KEY_LAST_PERIOD)) {
       out.add(block(LAST_PERIOD_REFUND_CONFLICT,
           "The December refund and box [97] cannot both have an amount")
-          .action(ACTION_BOX, PARAM_BOX, 97));
+          .withAction(ACTION_BOX, PARAM_BOX, 97));
     }
   }
 
@@ -529,9 +533,9 @@ final class Fiscal390IncidentRules {
     if (block9Empty(f) && f.expected303Result != null && annual.signum() != 0) {
       return block(BLOCK9_NOT_PRELOADED, "Block 9 is empty although the exercise has Modelo 303"
           + " declarations: calculate to preload them (AEAT PAR016)")
-          .param("result", annual.toPlainString())
+          .param(PARAM_RESULT, annual.toPlainString())
           .param(PARAM_BOX, box)
-          .action(ACTION_SETTLEMENTS, null, null);
+          .withAction(ACTION_SETTLEMENTS, null, null);
     }
     BigDecimal block9 = Fiscal390PreloadAggregator.r2(block9Result(f));
     BigDecimal diff = Fiscal390PreloadAggregator.r2(annual.subtract(block9));
@@ -540,11 +544,11 @@ final class Fiscal390IncidentRules {
     }
     return block(BLOCK9_MISMATCH, "Block 9 (" + block9.toPlainString() + ") does not add up to ["
         + box + "] (" + annual.toPlainString() + ") (AEAT PAR016)")
-        .param("difference", diff.toPlainString())
+        .param(PARAM_DIFFERENCE, diff.toPlainString())
         .param("block9", block9.toPlainString())
-        .param("result", annual.toPlainString())
+        .param(PARAM_RESULT, annual.toPlainString())
         .param(PARAM_BOX, box)
-        .action(ACTION_SETTLEMENTS, null, null);
+        .withAction(ACTION_SETTLEMENTS, null, null);
   }
 
   private static void reconciliation(Facts f, List<Incident> out) {
@@ -557,18 +561,18 @@ final class Fiscal390IncidentRules {
     }
     Map<String, Object> cuadre =
         Fiscal390PreloadAggregator.reconcile(f.annualResult, f.expected303Result);
-    if (!"difference".equals(cuadre.get("status"))) {
+    if (!PARAM_DIFFERENCE.equals(cuadre.get("status"))) {
       return;
     }
-    BigDecimal diff = (BigDecimal) cuadre.get("difference");
+    BigDecimal diff = (BigDecimal) cuadre.get(PARAM_DIFFERENCE);
     int box = f.territoryMode ? 94 : 86;
     out.add(warn(DIFF_303, "The result differs from the Modelo 303 declarations by "
         + diff.toPlainString())
-        .param("difference", diff.toPlainString())
+        .param(PARAM_DIFFERENCE, diff.toPlainString())
         .param("expected", Fiscal390PreloadAggregator.r2(f.expected303Result).toPlainString())
-        .param("result", Fiscal390PreloadAggregator.r2(f.annualResult).toPlainString())
+        .param(PARAM_RESULT, Fiscal390PreloadAggregator.r2(f.annualResult).toPlainString())
         .param(PARAM_BOX, box)
-        .action(ACTION_BOX, PARAM_BOX, box));
+        .withAction(ACTION_BOX, PARAM_BOX, box));
   }
 
   private static void truncations(Facts f, List<Incident> out) {
@@ -598,7 +602,7 @@ final class Fiscal390IncidentRules {
     Incident inc = warn(NAME_TRUNCATED, "The " + field + " will be cut to " + limit
         + " characters in the file")
         .param(PARAM_FIELD, field).param(PARAM_LIMIT, limit)
-        .action(ACTION_ORGANIZATION, PARAM_SECTION,
+        .withAction(ACTION_ORGANIZATION, PARAM_SECTION,
             "socialName".equals(field) ? SECTION_IDENTITY : SECTION_390);
     if (label != null) {
       inc.param("label", label);

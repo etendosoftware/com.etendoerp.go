@@ -62,10 +62,25 @@ class Fiscal390PreloadSupport {
   static final String TIPO_KEY = "tipo_declaracion";
   static final String SOURCE_SNAPSHOT = "snapshot";
   static final String SOURCE_LIVE = "live";
-  static final String SOURCE_ERROR = "error";
+  static final String SOURCE_ERROR = Fiscal390PreloadAggregator.SOURCE_ERROR;
 
   /** Computes a 303 period's raw boxes from the current invoices (the 303 handler). */
   interface Live303Boxes {
+    /**
+     * Computes the raw boxes of one 303 period.
+     *
+     * <p>Declares {@code throws Exception} on purpose: it wraps {@code
+     * Fiscal303BoxesHandler#computeBoxes}, whose checked exceptions (an incomplete fiscal year
+     * among them) reach {@link AbstractFiscalHandler#userMessage} unwrapped, so the period's error
+     * text stays the 303's own. A dedicated wrapper would change that message.</p>
+     *
+     * @param orgId  the declaring organization
+     * @param year   the exercise
+     * @param period the 303 period code ({@code T1}-{@code T4}, {@code 01}-{@code 12})
+     * @return AEAT box number → amount
+     * @throws Exception whatever the 303 compute raises; the caller marks the period as failed
+     */
+    @SuppressWarnings("java:S112")
     Map<Integer, BigDecimal> compute(String orgId, int year, String period) throws Exception;
   }
 
@@ -248,7 +263,7 @@ class Fiscal390PreloadSupport {
         o.put("tipo", d.tipo);
       }
       if (SOURCE_ERROR.equals(d.source)) {
-        o.put("error", d.error);
+        o.put(SOURCE_ERROR, d.error);
       } else {
         o.put("result", amount(d.boxes.get(71)));
         o.put("periodResult", amount(d.boxes.get(69)));
@@ -272,7 +287,7 @@ class Fiscal390PreloadSupport {
     JSONObject out = new JSONObject();
     out.put("year", year);
     out.put("periodicity", r.periodicity);
-    out.put("monthlyReturn", monthlyReturn);
+    out.put(MONTHLY_RETURN_PARAM, monthlyReturn);
     out.put("declarations", decls);
     out.put("missingPeriods", new JSONArray(r.missingPeriods));
     out.put("lastPeriod", r.lastPeriod != null ? r.lastPeriod : JSONObject.NULL);

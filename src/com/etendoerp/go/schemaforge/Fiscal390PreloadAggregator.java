@@ -99,6 +99,9 @@ final class Fiscal390PreloadAggregator {
   static final String W_REFUND_WITHOUT_REGISTER = "REFUND_WITHOUT_MONTHLY_REGISTER";
   static final String W_COMPUTE_FAILED = "COMPUTE_FAILED";
 
+  /** {@link Decl303#source} of a period whose compute failed (its figures are unusable). */
+  static final String SOURCE_ERROR = "error";
+
   /** 303 declaration types that ask for a refund (Devolución, cuenta corriente, extranjero). */
   static final Set<String> REFUND_TYPES =
       Collections.unmodifiableSet(new LinkedHashSet<>(Arrays.asList("D", "V", "X")));
@@ -188,8 +191,11 @@ final class Fiscal390PreloadAggregator {
           best = d;
         }
       }
-      best.superseded = group.size() - 1;
-      winners.add(best);
+      // A group is created with its first declaration, so it is never empty.
+      if (best != null) {
+        best.superseded = group.size() - 1;
+        winners.add(best);
+      }
     }
     winners.sort(PERIOD_ORDER);
     return winners;
@@ -333,21 +339,8 @@ final class Fiscal390PreloadAggregator {
     ordered.sort(PERIOD_ORDER);
     r.declarations.addAll(ordered);
 
-    Set<Integer> covered = new TreeSet<>();
-    boolean anyMonthly = false;
-    for (Decl303 d : ordered) {
-      covered.addAll(coveredMonths(d.period));
-      anyMonthly |= !d.period.startsWith("T");
-    }
-    r.periodicity = anyMonthly ? PERIODICITY_MONTHLY : PERIODICITY_QUARTERLY;
-    fillMissing(r, covered, anyMonthly);
-
-    Decl303 last = null;
-    for (Decl303 d : ordered) {
-      if (endMonth(d.period) == LAST_MONTH && !"error".equals(d.source)) {
-        last = d;
-      }
-    }
+    fillPeriodicityAndMissing(r, ordered);
+    Decl303 last = lastUsablePeriod(ordered);
     r.lastPeriod = last != null ? last.period : null;
     if (last == null) {
       r.warnings.add(warning(W_LAST_PERIOD_MISSING, null));
@@ -356,7 +349,7 @@ final class Fiscal390PreloadAggregator {
 
     List<Decl303> usable = new ArrayList<>();
     for (Decl303 d : ordered) {
-      if (!"error".equals(d.source)) {
+      if (!isComputeFailure(d)) {
         usable.add(d);
       }
     }
@@ -365,16 +358,10 @@ final class Fiscal390PreloadAggregator {
     }
     r.territory = last != null && isTerritory(last);
 
-    BigDecimal[] ingresar = zeros(MONTHS + 1);
-    BigDecimal[] devolver = zeros(MONTHS + 1);
-    BigDecimal box97 = BigDecimal.ZERO;
-    BigDecimal box98 = BigDecimal.ZERO;
-    BigDecimal yearPool = BigDecimal.ZERO;
-    BigDecimal priorApplied = BigDecimal.ZERO;
+    PeriodTotals t = new PeriodTotals();
     BigDecimal priorLeft = priorCarry(usable.get(0));
     r.carryOverKnown = priorLeft != null;
     BigDecimal totalApplied = BigDecimal.ZERO;
-
     for (Decl303 d : usable) {
       // [78] of this period: the prior-year carry first, then this year's earlier credits.
       BigDecimal applied = get(d.boxes, 78);
@@ -383,64 +370,120 @@ final class Fiscal390PreloadAggregator {
       if (priorLeft != null) {
         priorLeft = priorLeft.subtract(fromPrior);
       }
-      priorApplied = priorApplied.add(fromPrior);
-      yearPool = yearPool.subtract(applied.subtract(fromPrior)).max(BigDecimal.ZERO);
-
-      int month = endMonth(d.period);
-      boolean isLast = d == last;
-      BigDecimal amount = periodResult(d).abs();
-      String kind = kindOf(d);
-      if (KIND_PAY.equals(kind)) {
-        ingresar[month] = ingresar[month].add(amount);
-      } else if (KIND_REFUND.equals(kind) && monthlyReturn) {
-        devolver[month] = devolver[month].add(amount);
-      } else if (KIND_REFUND.equals(kind) && isLast) {
-        box98 = box98.add(amount);
-      } else if (!KIND_ZERO.equals(kind)) {
-        if (KIND_REFUND.equals(kind)) {
-          r.warnings.add(warning(W_REFUND_WITHOUT_REGISTER, d.period));
-        }
-        if (isLast) {
-          box97 = box97.add(amount);
-        } else {
-          yearPool = yearPool.add(amount);
-        }
-      }
+      t.priorApplied = t.priorApplied.add(fromPrior);
+      t.yearPool = t.yearPool.subtract(applied.subtract(fromPrior)).max(BigDecimal.ZERO);
+      addPeriodResult(r, t, d, d == last, monthlyReturn);
     }
     if (!r.carryOverKnown && totalApplied.signum() > 0) {
       r.warnings.add(warning(W_PRIOR_CARRY_UNKNOWN, null));
     }
+    putResults(r, t, last, monthlyReturn);
+    return r;
+  }
 
+  /** Running figures of {@link #aggregate}: per-month [ingresar]/[devolver] and the year boxes. */
+  private static final class PeriodTotals {
+    final BigDecimal[] ingresar = zeros(MONTHS + 1);
+    final BigDecimal[] devolver = zeros(MONTHS + 1);
+    BigDecimal box97 = BigDecimal.ZERO;
+    BigDecimal box98 = BigDecimal.ZERO;
+    BigDecimal yearPool = BigDecimal.ZERO;
+    BigDecimal priorApplied = BigDecimal.ZERO;
+
+    private static BigDecimal[] zeros(int n) {
+      BigDecimal[] out = new BigDecimal[n];
+      Arrays.fill(out, BigDecimal.ZERO);
+      return out;
+    }
+  }
+
+  private static boolean isComputeFailure(Decl303 d) {
+    return SOURCE_ERROR.equals(d.source);
+  }
+
+  /** Sets {@link Result#periodicity} and the missing periods from the months the 303s cover. */
+  private static void fillPeriodicityAndMissing(Result r, List<Decl303> ordered) {
+    Set<Integer> covered = new TreeSet<>();
+    boolean anyMonthly = false;
+    for (Decl303 d : ordered) {
+      covered.addAll(coveredMonths(d.period));
+      anyMonthly |= !d.period.startsWith("T");
+    }
+    r.periodicity = anyMonthly ? PERIODICITY_MONTHLY : PERIODICITY_QUARTERLY;
+    fillMissing(r, covered, anyMonthly);
+  }
+
+  /** The last usable declaration closing in December, or {@code null}. */
+  private static Decl303 lastUsablePeriod(List<Decl303> ordered) {
+    Decl303 last = null;
+    for (Decl303 d : ordered) {
+      if (endMonth(d.period) == LAST_MONTH && !isComputeFailure(d)) {
+        last = d;
+      }
+    }
+    return last;
+  }
+
+  /**
+   * Books a period's [69] by its kind: an amount to pay goes to its month's [ingresar]; a refund
+   * to its month's [devolver] (monthly register) or [98] (last period); any other non-zero result
+   * — a compensation, or a refund outside the register — to [97] (last period) or the year pool.
+   */
+  private static void addPeriodResult(Result r, PeriodTotals t, Decl303 d, boolean isLast,
+      boolean monthlyReturn) {
+    int month = endMonth(d.period);
+    BigDecimal amount = periodResult(d).abs();
+    String kind = kindOf(d);
+    if (KIND_PAY.equals(kind)) {
+      t.ingresar[month] = t.ingresar[month].add(amount);
+    } else if (KIND_REFUND.equals(kind) && monthlyReturn) {
+      t.devolver[month] = t.devolver[month].add(amount);
+    } else if (KIND_REFUND.equals(kind) && isLast) {
+      t.box98 = t.box98.add(amount);
+    } else if (!KIND_ZERO.equals(kind)) {
+      if (KIND_REFUND.equals(kind)) {
+        r.warnings.add(warning(W_REFUND_WITHOUT_REGISTER, d.period));
+      }
+      if (isLast) {
+        t.box97 = t.box97.add(amount);
+      } else {
+        t.yearPool = t.yearPool.add(amount);
+      }
+    }
+  }
+
+  /** Writes the aggregated figures into {@link Result#inputs}, {@code totals} and the cuadre. */
+  private static void putResults(Result r, PeriodTotals t, Decl303 last, boolean monthlyReturn) {
     BigDecimal box95 = BigDecimal.ZERO;
     BigDecimal box96 = BigDecimal.ZERO;
     for (int m = 1; m <= MONTHS; m++) {
-      box95 = box95.add(ingresar[m]);
-      box96 = box96.add(devolver[m]);
-      r.inputs.put(INGRESAR_PREFIX + monthCode(m), r2(ingresar[m]));
+      box95 = box95.add(t.ingresar[m]);
+      box96 = box96.add(t.devolver[m]);
+      r.inputs.put(INGRESAR_PREFIX + monthCode(m), r2(t.ingresar[m]));
       if (monthlyReturn) {
-        r.inputs.put(DEVOLVER_PREFIX + monthCode(m), r2(devolver[m]));
+        r.inputs.put(DEVOLVER_PREFIX + monthCode(m), r2(t.devolver[m]));
       }
     }
     String compensationKey = r.territory ? Fiscal390DerivedBoxes.COMMON_TERRITORY_COMPENSATION
         : Fiscal390DerivedBoxes.LIQANUAL_COMPENSATION;
-    r.inputs.put(compensationKey, r2(priorApplied));
-    r.inputs.put(END_COMPENSATION, r2(yearPool));
+    r.inputs.put(compensationKey, r2(t.priorApplied));
+    r.inputs.put(END_COMPENSATION, r2(t.yearPool));
     if (last != null) {
-      r.inputs.put(TOTAL_LASTPERIOD, r2(box97));
-      r.inputs.put(TOTAL_LASTPERIOD_DEVOLVER, r2(box98));
+      r.inputs.put(TOTAL_LASTPERIOD, r2(t.box97));
+      r.inputs.put(TOTAL_LASTPERIOD_DEVOLVER, r2(t.box98));
       if (r.territory) {
         putTerritory(r, last);
       }
     }
 
-    r.totals.put(r.territory ? 93 : 85, r2(priorApplied));
+    r.totals.put(r.territory ? 93 : 85, r2(t.priorApplied));
     r.totals.put(95, r2(box95));
     r.totals.put(96, r2(box96));
-    r.totals.put(97, r2(box97));
-    r.totals.put(98, r2(box98));
-    r.totals.put(662, r2(yearPool));
-    r.expectedResult = r2(box95.subtract(box96).subtract(box97).subtract(box98).subtract(yearPool));
-    return r;
+    r.totals.put(97, r2(t.box97));
+    r.totals.put(98, r2(t.box98));
+    r.totals.put(662, r2(t.yearPool));
+    r.expectedResult = r2(box95.subtract(box96).subtract(t.box97).subtract(t.box98)
+        .subtract(t.yearPool));
   }
 
   /** The first 303's [110] (prior-year credits pending at the start of the year), or {@code null}. */
@@ -471,7 +514,7 @@ final class Fiscal390PreloadAggregator {
   private static void reportDraftsAndFailures(Result r, List<Decl303> ordered) {
     List<String> drafts = new ArrayList<>();
     for (Decl303 d : ordered) {
-      if ("error".equals(d.source)) {
+      if (isComputeFailure(d)) {
         r.warnings.add(warning(W_COMPUTE_FAILED, d.period));
       } else if (!d.submitted) {
         drafts.add(d.period);
@@ -498,12 +541,6 @@ final class Fiscal390PreloadAggregator {
     for (int i = 0; i < FORAL_303_BOXES.length; i++) {
       r.inputs.put(FORAL_390_KEYS[i], r2(get(last.boxes, FORAL_303_BOXES[i])));
     }
-  }
-
-  private static BigDecimal[] zeros(int n) {
-    BigDecimal[] out = new BigDecimal[n];
-    Arrays.fill(out, BigDecimal.ZERO);
-    return out;
   }
 
   private static Map<String, String> warning(String code, String periods) {
@@ -533,12 +570,9 @@ final class Fiscal390PreloadAggregator {
       return out;
     }
     for (Map.Entry<String, BigDecimal> e : fresh.entrySet()) {
-      if (e.getValue() == null) {
-        continue;
-      }
       String key = e.getKey();
-      if (!isUnmodified(out.get(key), previous != null ? previous.get(key) : null,
-          previous != null && previous.containsKey(key))) {
+      if (e.getValue() == null || !isUnmodified(out.get(key),
+          previous != null ? previous.get(key) : null, previous != null && previous.containsKey(key))) {
         continue;
       }
       BigDecimal value = r2(e.getValue());

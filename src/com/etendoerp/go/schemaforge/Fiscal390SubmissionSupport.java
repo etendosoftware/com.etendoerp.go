@@ -144,24 +144,7 @@ class Fiscal390SubmissionSupport {
     try {
       fileContent = owner.generateSupport().generateContent(orgId, year, inputs).content;
     } catch (Exception e) {
-      IncompleteFiscalYearException incomplete = IncompleteFiscalYearException.find(e);
-      if (incomplete != null) {
-        AbstractFiscalHandler.log.warn("390 submission (decl=" + declId + "): "
-            + incomplete.getMessage());
-        JSONObject failure = FiscalAeatSubmissionSupport.failureJson(testMode,
-            IncompleteFiscalYearException.CODE, incomplete.userText());
-        failure.put("year", incomplete.getYear());
-        failure.put("missingPeriods", incomplete.missingPeriodsJson());
-        FiscalAeatSubmissionSupport.writeJson(response, IncompleteFiscalYearException.HTTP_STATUS,
-            failure);
-        return;
-      }
-      AbstractFiscalHandler.log.error(
-          "Could not generate the 390 electronic file for submission (decl=" + declId + ")", e);
-      FiscalAeatSubmissionSupport.writeJson(response,
-          HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          FiscalAeatSubmissionSupport.failureJson(testMode, ERR_SUBMISSION_FAILED,
-              translatedMessage(e)));
+      answerFileGenerationFailure(e, declId, testMode, response);
       return;
     }
 
@@ -212,17 +195,52 @@ class Fiscal390SubmissionSupport {
 
     persistAeatIncidentsBestEffort(decl, result);
     if (result.isSuccessful()) {
-      if (testMode) {
-        attachIfPresent(decl, org, "TEST-" + justificanteFileName(year, period), result);
-      } else {
-        persistSuccessfulSubmission(decl, org, year, period, result, snapshot);
-      }
+      recordAcceptedSubmission(decl, org, year, period, result, snapshot, testMode);
     }
     commitBestEffort(declId);
 
     FiscalAeatSubmissionSupport.writeJson(response, HttpServletResponse.SC_OK,
         FiscalAeatSubmissionSupport.resultJson(result,
             declarationDataJson(decl, year, period, snapshot)));
+  }
+
+  /**
+   * Answers a failed file generation: the structured {@code INCOMPLETE_FISCAL_YEAR} when the
+   * fiscal calendar misses periods, a 500 {@code SUBMISSION_FAILED} otherwise.
+   */
+  private void answerFileGenerationFailure(Exception e, String declId, boolean testMode,
+      HttpServletResponse response) throws Exception {
+    IncompleteFiscalYearException incomplete = IncompleteFiscalYearException.find(e);
+    if (incomplete != null) {
+      AbstractFiscalHandler.log.warn("390 submission (decl=" + declId + "): "
+          + incomplete.getMessage());
+      JSONObject failure = FiscalAeatSubmissionSupport.failureJson(testMode,
+          IncompleteFiscalYearException.CODE, incomplete.userText());
+      failure.put("year", incomplete.getYear());
+      failure.put("missingPeriods", incomplete.missingPeriodsJson());
+      FiscalAeatSubmissionSupport.writeJson(response, IncompleteFiscalYearException.HTTP_STATUS,
+          failure);
+      return;
+    }
+    AbstractFiscalHandler.log.error(
+        "Could not generate the 390 electronic file for submission (decl=" + declId + ")", e);
+    FiscalAeatSubmissionSupport.writeJson(response,
+        HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+        FiscalAeatSubmissionSupport.failureJson(testMode, ERR_SUBMISSION_FAILED,
+            translatedMessage(e)));
+  }
+
+  /**
+   * An accepted filing: a test-mode one only attaches its justificante ({@code TEST-} prefix); a
+   * production one persists the submission (status, snapshot, justificante).
+   */
+  private void recordAcceptedSubmission(FiscalDecl decl, Organization org, int year,
+      String period, AEAT303SubmissionResult result, JSONObject snapshot, boolean testMode) {
+    if (testMode) {
+      attachIfPresent(decl, org, "TEST-" + justificanteFileName(year, period), result);
+    } else {
+      persistSuccessfulSubmission(decl, org, year, period, result, snapshot);
+    }
   }
 
   /** Overridable in tests: the classic AEAT service. */
