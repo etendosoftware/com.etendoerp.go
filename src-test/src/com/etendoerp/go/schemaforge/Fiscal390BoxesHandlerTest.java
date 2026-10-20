@@ -208,6 +208,26 @@ public class Fiscal390BoxesHandlerTest {
     verify(handler).computePayload("org1", 2026, expected);
   }
 
+  /**
+   * Review W2: within one request the year's 303s are aggregated once, however many steps
+   * (inputs, incidents, guards) ask for them; outside a request nothing is cached.
+   */
+  @Test
+  public void testThe303AggregationRunsOncePerRequest() throws Exception {
+    Fiscal390PreloadSupport preload = mock(Fiscal390PreloadSupport.class);
+    when(preload.aggregateYear("org1", 2026, false)).thenReturn(new Fiscal390PreloadAggregator.Result());
+    doReturn(preload).when(handler).preloadSupport();
+    handler.withRequestMemo(() -> {
+      handler.aggregatePreload("org1", 2026, false);
+      handler.aggregatePreload("org1", 2026, false);
+      return null;
+    });
+    org.mockito.Mockito.verify(preload, org.mockito.Mockito.times(1)).aggregateYear("org1", 2026, false);
+    handler.aggregatePreload("org1", 2026, false);
+    handler.aggregatePreload("org1", 2026, false);
+    org.mockito.Mockito.verify(preload, org.mockito.Mockito.times(3)).aggregateYear("org1", 2026, false);
+  }
+
   /** A live preview uses the stored inputs overridden by the request's inputs. */
   @Test
   public void testBoxesComputesWithMergedInputs() throws Exception {

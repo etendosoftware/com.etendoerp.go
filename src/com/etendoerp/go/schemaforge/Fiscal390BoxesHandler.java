@@ -19,10 +19,12 @@ package com.etendoerp.go.schemaforge;
 import java.math.BigDecimal;
 import java.util.Collections;
 import java.util.Date;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 import java.util.regex.Pattern;
 
 import javax.servlet.http.HttpServletRequest;
@@ -175,8 +177,40 @@ class Fiscal390BoxesHandler extends AbstractFiscalHandler {
     return incidentsSupport;
   }
 
+  /**
+   * Per-request memo of the expensive reads (review W2): the year's 303 aggregation and the boxes
+   * payloads, so one request (e.g. {@code generate} / {@code submit} / {@code validate}: inputs,
+   * guard incidents, file, snapshot) aggregates the 303s and computes each payload once. Set for
+   * the duration of {@link #dispatch} on its thread; absent elsewhere (no caching).
+   */
+  private final ThreadLocal<Map<String, Object>> requestMemo = new ThreadLocal<>();
+
   @Override
   protected void dispatch(String entityName, String orgId, int year, String period,
+      HttpServletRequest request, HttpServletResponse response) throws FiscalHandlerException {
+    withRequestMemo(() -> {
+      dispatchEntity(entityName, orgId, year, period, request, response);
+      return null;
+    });
+  }
+
+  /** A body that may throw {@link FiscalHandlerException}, run under {@link #withRequestMemo}. */
+  @FunctionalInterface
+  interface MemoBody<T> {
+    T run() throws FiscalHandlerException;
+  }
+
+  /** Runs {@code body} with a fresh {@link #requestMemo}, removed afterwards (tests use it too). */
+  <T> T withRequestMemo(MemoBody<T> body) throws FiscalHandlerException {
+    requestMemo.set(new HashMap<>());
+    try {
+      return body.run();
+    } finally {
+      requestMemo.remove();
+    }
+  }
+
+  private void dispatchEntity(String entityName, String orgId, int year, String period,
       HttpServletRequest request, HttpServletResponse response) throws FiscalHandlerException {
     runDispatch(response, () -> {
       if (!ANNUAL_PERIOD.equals(period)) {
@@ -239,6 +273,22 @@ class Fiscal390BoxesHandler extends AbstractFiscalHandler {
    * Computes the {@code boxes} payload from the CURRENT invoice data and {@code rawInputs}.
    */
   JSONObject computePayload(String orgId, int year, Map<String, String> rawInputs)
+      throws Exception {
+    Map<String, Object> memo = requestMemo.get();
+    if (memo == null) {
+      return computePayloadNow(orgId, year, rawInputs);
+    }
+    String key = "boxes|" + orgId + "|" + year + "|" + new TreeMap<>(rawInputs != null ? rawInputs
+        : Map.of());
+    JSONObject cached = (JSONObject) memo.get(key);
+    if (cached == null) {
+      cached = computePayloadNow(orgId, year, rawInputs);
+      memo.put(key, cached);
+    }
+    return new JSONObject(cached.toString()); // callers may change their copy
+  }
+
+  private JSONObject computePayloadNow(String orgId, int year, Map<String, String> rawInputs)
       throws Exception {
     Organization org = OBDal.getInstance().get(Organization.class, orgId);
     if (org == null) {
@@ -344,7 +394,7 @@ class Fiscal390BoxesHandler extends AbstractFiscalHandler {
   Map<String, String> withServerPreload(String orgId, int year, Map<String, String> inputs,
       String manualData) {
     try {
-      Fiscal390PreloadAggregator.Result r = preloadSupport().aggregateYear(orgId, year,
+      Fiscal390PreloadAggregator.Result r = aggregatePreload(orgId, year,
           "Y".equals(inputs != null ? inputs.get("ISMONTHLYRETURN") : null));
       if (r == null || r.declarations.isEmpty()) {
         return inputs;
@@ -390,6 +440,25 @@ class Fiscal390BoxesHandler extends AbstractFiscalHandler {
     Map<String, String> merged = storedInputs(year, period);
     merged.putAll(Fiscal390GenerateSupport.requestInputs(request));
     return merged;
+  }
+
+  /**
+   * The year's 303 aggregation ({@link Fiscal390PreloadSupport#aggregateYear}), computed once per
+   * request (see {@link #requestMemo}) for the inputs, the incidents and the guards alike.
+   */
+  Fiscal390PreloadAggregator.Result aggregatePreload(String orgId, int year,
+      boolean monthlyReturn) {
+    Map<String, Object> memo = requestMemo.get();
+    String key = "preload|" + orgId + "|" + year + "|" + monthlyReturn;
+    if (memo != null && memo.containsKey(key)) {
+      return (Fiscal390PreloadAggregator.Result) memo.get(key);
+    }
+    Fiscal390PreloadAggregator.Result r = preloadSupport().aggregateYear(orgId, year,
+        monthlyReturn);
+    if (memo != null) {
+      memo.put(key, r);
+    }
+    return r;
   }
 
   /** {@link #mergedInputs} with the server-side 303 preload ({@link #withServerPreload}). */

@@ -114,7 +114,11 @@ equal to `manualData.aeatPreloaded[key]`, or never preloaded and empty / zero �
 cannot be read (logged), leaves the inputs as they are; the blocking `BLOCK9_*` incidents are the
 safety net. Precedent: a draft saved while the year had no 303 kept an empty block 9 and its
 `aeatPreloaded: {}`, the 303s were submitted afterwards, and the filed 390 was rejected with
-`PAR016`. Cost: every such request aggregates the year's 303s (a draft 303 is computed live).
+`PAR016`. Cost: every such request aggregates the year's 303s (a draft 303 is computed live) —
+once per request: `Fiscal390BoxesHandler.aggregatePreload` / `computePayload` are memoised for
+the duration of the dispatch (`withRequestMemo`), so the inputs, the incidents, the guards and
+the snapshot of one `generate` / `submit` / `validate` share one aggregation and one payload per
+input set.
 
 ## `GET /fiscal390/boxes` response
 
@@ -537,8 +541,9 @@ today: the lines behind the affected incidents are, by definition, not in that t
 `generate` and `submit` (production) evaluate the **blocking** rules fresh — never from the stored
 rows, which can be older than the last change to the organization — for the inputs the file is
 built from: `generate` the stored inputs of the latest declaration overridden by the request,
-`submit` the stored inputs (`Fiscal390IncidentsSupport.blockingIncidents`; the warnings' sources
-— 303s, invoice queries — are not loaded). While one holds, `generate` answers `409` with
+`submit` the stored inputs (`Fiscal390IncidentsSupport.blockingIncidents`; the year's 303s are
+loaded too, so an empty block 9 is `BLOCK9_NOT_PRELOADED` there as in `validate`; the invoice
+queries of the warnings are not). While one holds, `generate` answers `409` with
 `error.code = BLOCKING_INCIDENTS` and `error.incidents`, and `submit` the failure JSON with
 `errorCode = BLOCKING_INCIDENTS` and `incidents`. Nothing is written by a guard. Test mode
 (`testMode: true`, ServValiDos) is not guarded, as before. Tests: `Fiscal390IncidentRulesTest`

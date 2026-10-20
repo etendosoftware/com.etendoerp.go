@@ -184,8 +184,10 @@ class Fiscal390IncidentsSupport {
       loadOrganization(f, org);
     }
     loadBoxes(f, orgId, year);
+    // The 303s for the guards too (review N1): BLOCK9_NOT_PRELOADED needs them, and the
+    // aggregation is shared with the server-side preload of the same request.
+    loadPreload(f, orgId, year);
     if (full) {
-      loadPreload(f, orgId, year);
       loadInvoices(f, orgId, year);
     }
     return f;
@@ -268,7 +270,7 @@ class Fiscal390IncidentsSupport {
   /** The year's 303s: missing periods and the expected result of the cuadre. */
   void loadPreload(Fiscal390IncidentRules.Facts f, String orgId, int year) {
     try {
-      Fiscal390PreloadAggregator.Result r = owner.preloadSupport().aggregateYear(orgId, year,
+      Fiscal390PreloadAggregator.Result r = owner.aggregatePreload(orgId, year,
           "Y".equals(f.inputs.get("ISMONTHLYRETURN")));
       f.missing303Periods = new ArrayList<>(r.missingPeriods);
       f.expected303Result = r.expectedResult;
