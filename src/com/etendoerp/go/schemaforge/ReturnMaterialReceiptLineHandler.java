@@ -16,15 +16,20 @@
  */
 package com.etendoerp.go.schemaforge;
 
+import java.math.BigDecimal;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
 import javax.inject.Named;
+import javax.servlet.http.HttpServletResponse;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.dal.core.OBContext;
 
 /**
  * Post-hook for the Return Material Receipt line entity.
@@ -51,6 +56,7 @@ import org.codehaus.jettison.json.JSONObject;
 public class ReturnMaterialReceiptLineHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(ReturnMaterialReceiptLineHandler.class);
+  private static final String FIELD_CANCELED_INOUT_LINE = "canceledInoutLine";
 
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -68,9 +74,69 @@ public class ReturnMaterialReceiptLineHandler implements NeoHandler {
     }
     String method = context.getHttpMethod();
     if ("POST".equals(method) || "PUT".equals(method) || "PATCH".equals(method)) {
+      NeoResponse overReturn = refuseOverReturn(context);
+      if (overReturn != null) {
+        return overReturn;
+      }
       ReturnLineQuantityPolicy.applyStoredSignToWriteBody(context.getRequestBody(), log);
     }
     return null;
+  }
+
+  /**
+   * ETP-5729 CP-12: editing a draft return line (or creating one linked to a shipment line) must
+   * not push the shipment line past what it shipped. The line's own current quantity is excluded
+   * from the sum, so it is replaced, not added. A line not linked to a shipment line
+   * ({@code canceledInoutLine} absent in the body and on the record) has nothing to check.
+   *
+   * <p>Runs BEFORE the sign flip and compares magnitudes, so the user-facing positive value and an
+   * already-negative one are judged the same. Fails closed: a DB error answers 500 rather than
+   * letting an unchecked quantity through.
+   */
+  private NeoResponse refuseOverReturn(NeoContext context) {
+    JSONObject body = context.getRequestBody();
+    if (!NeoEndpointType.CRUD.equals(context.getEndpointType()) || body == null
+        || !body.has(ReturnLineQuantityPolicy.FIELD_MOVEMENT_QUANTITY)) {
+      return null;
+    }
+    BigDecimal qty = parseMagnitude(body.opt(ReturnLineQuantityPolicy.FIELD_MOVEMENT_QUANTITY));
+    if (qty == null || qty.signum() == 0) {
+      return null;
+    }
+    String recordId = context.getRecordId();
+    String bodySourceLineId = body.isNull(FIELD_CANCELED_INOUT_LINE) ? null
+        : body.optString(FIELD_CANCELED_INOUT_LINE, null);
+    if (StringUtils.isBlank(bodySourceLineId) && StringUtils.isBlank(recordId)) {
+      return null;
+    }
+    OBContext.setAdminMode(true);
+    try {
+      String sourceLineId = StringUtils.isNotBlank(bodySourceLineId) ? bodySourceLineId
+          : ReturnableQuantityGuard.findSourceLineId(recordId);
+      if (StringUtils.isBlank(sourceLineId)) {
+        return null;
+      }
+      return ReturnableQuantityGuard.refuseIfExceeded(
+          Collections.singletonMap(sourceLineId, qty), recordId);
+    } catch (Exception e) {
+      log.error("Could not check the returnable quantity of return line {}: {}", recordId,
+          e.getMessage(), e);
+      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          "Could not check the returnable quantity of this line");
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  private static BigDecimal parseMagnitude(Object raw) {
+    if (raw == null || raw == JSONObject.NULL) {
+      return null;
+    }
+    try {
+      return new BigDecimal(raw.toString().trim()).abs();
+    } catch (NumberFormatException e) {
+      return null;
+    }
   }
 
   /**

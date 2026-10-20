@@ -20,6 +20,7 @@ import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -31,6 +32,7 @@ import javax.servlet.http.HttpServletResponse;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
@@ -166,6 +168,12 @@ public class ReturnMaterialReceiptHeaderHandler extends AbstractReturnDocumentHe
           return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "No lines specified");
         }
 
+        NeoResponse overReturn = ReturnableQuantityGuard.refuseIfExceeded(
+            requestedQtyBySourceLine(requestedLines), null);
+        if (overReturn != null) {
+          return overReturn;
+        }
+
         long nextLineNo = ReturnShipmentUtils.fetchMaxLineNo(receiptId) + 10;
         int imported = 0;
 
@@ -196,6 +204,26 @@ public class ReturnMaterialReceiptHeaderHandler extends AbstractReturnDocumentHe
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "An internal error occurred while importing lines");
     }
+  }
+
+  /**
+   * ETP-5729 CP-12: the quantities {@code importShipmentLines} is about to write, summed per
+   * source shipment line (a line listed twice counts twice), so {@link ReturnableQuantityGuard}
+   * can refuse an import that would return more than shipped. Same parsing and skip rules as the
+   * import loop, so the check sees exactly what would be written.
+   */
+  static Map<String, BigDecimal> requestedQtyBySourceLine(JSONArray requestedLines)
+      throws JSONException {
+    Map<String, BigDecimal> requested = new HashMap<>();
+    for (int i = 0; i < requestedLines.length(); i++) {
+      JSONObject req = requestedLines.getJSONObject(i);
+      String sourceLineId = req.optString("sourceLineId", null);
+      BigDecimal qty = BigDecimal.valueOf(req.optDouble("returnQuantity", 0));
+      if (sourceLineId != null && qty.compareTo(BigDecimal.ZERO) > 0) {
+        requested.merge(sourceLineId, qty, BigDecimal::add);
+      }
+    }
+    return requested;
   }
 
   @SuppressWarnings("java:S2077")
