@@ -379,7 +379,7 @@ public class GlJournalHeaderHandler implements NeoHandler {
     String isoDate = new SimpleDateFormat(NeoDateFormat.ISO_DATE).format(date);
     JSONObject params = new JSONObject();
     params.put("period", period.getName());
-    params.put("accountingDate", isoDate);
+    params.put(FIELD_ACCOUNTING_DATE, isoDate);
     JSONObject body = new JSONObject();
     body.put("success", false);
     body.put("message", "Period '" + period.getName() + "' does not contain the accounting date "

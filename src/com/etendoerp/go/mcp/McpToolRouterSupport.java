@@ -749,8 +749,8 @@ final class McpToolRouterSupport {
       throw McpRoutingException.missingArgument("Missing arguments", null)
           .withMissing(java.util.Arrays.asList(required));
     }
-    // ETP-5669: every missing key at once (the agent used to fix them one round trip each);
-    // `field` stays the first one for callers that read only that.
+    // ETP-5669: every missing key at once (the agent used to fix them one round trip each).
+    // The field attribute stays the first one for callers that read only that.
     List<String> missing = new java.util.ArrayList<>();
     for (String key : required) {
       if (!args.has(key) || args.isNull(key)) {

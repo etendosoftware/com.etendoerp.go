@@ -218,7 +218,10 @@ public class NeoContext {
   }
 
   /**
-   * @param propName a body key the mandatory-defaults pass filled with a fallback placeholder
+   * Records a body key the mandatory-defaults pass filled with a fallback placeholder, so the
+   * create does not protect it from the callout cascade (ETP-5669).
+   *
+   * @param propName the body key
    */
   public void addFallbackDefault(String propName) {
     fallbackDefaults.add(propName);

@@ -875,14 +875,14 @@ class NeoButtonActionHelperTest {
       org.openbravo.model.ad.domain.Reference button = mock(org.openbravo.model.ad.domain.Reference.class);
       when(button.getId()).thenReturn("28");
       when(column.getReference()).thenReturn(button);
-      Table table = mock(Table.class);
-      when(table.getDBTableName()).thenReturn("C_Order");
-      when(column.getTable()).thenReturn(table);
-      Entity dal = mock(Entity.class);
+      Table orderTable = mock(Table.class);
+      when(orderTable.getDBTableName()).thenReturn("C_Order");
+      when(column.getTable()).thenReturn(orderTable);
+      Entity orderEntity = mock(Entity.class);
       org.openbravo.base.model.Property prop = mock(org.openbravo.base.model.Property.class);
       when(prop.getName()).thenReturn(property);
-      when(dal.getPropertyByColumnName(dbName)).thenReturn(prop);
-      when(ModelProvider.getInstance().getEntityByTableName("C_Order")).thenReturn(dal);
+      when(orderEntity.getPropertyByColumnName(dbName)).thenReturn(prop);
+      when(ModelProvider.getInstance().getEntityByTableName("C_Order")).thenReturn(orderEntity);
       return column;
     }
 
