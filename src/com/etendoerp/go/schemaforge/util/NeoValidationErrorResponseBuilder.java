@@ -25,6 +25,8 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.openbravo.service.json.JsonConstants;
 
+import com.etendoerp.go.schemaforge.NeoErrorClassifier;
+import com.etendoerp.go.schemaforge.NeoErrorResponses;
 import com.etendoerp.go.schemaforge.NeoResponse;
 
 /**
@@ -69,6 +71,11 @@ public final class NeoValidationErrorResponseBuilder {
     if (errors == null || errors.length() == 0) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Validation failed");
     }
+    if (isUnknownReference(errors)) {
+      return NeoErrorResponses.toResponse(HttpServletResponse.SC_BAD_REQUEST,
+          NeoErrorClassifier.CODE_UNKNOWN_REFERENCE, NeoErrorClassifier.MSG_UNKNOWN_REFERENCE,
+          null);
+    }
     String rawMsg = "Validation failed";
     Iterator<String> keys = errors.keys();
     if (keys.hasNext()) {
@@ -80,5 +87,22 @@ public final class NeoValidationErrorResponseBuilder {
     return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
         NeoErrorSanitizer.stripRowDump(NeoErrorSanitizer.redactObjectReferences(
             NeoListReferenceError.enrich(translated))));
+  }
+
+  /**
+   * ETP-5782: whether the conversion errors report a reference that resolves to no row.
+   *
+   * <p>Structural, not textual: core keys each conversion error by the property that failed, and
+   * for a referenced id that resolves to nothing ({@code JsonToDataConverter#hasErrors}) that
+   * property is the target's id property — {@code id} on every entity. No other conversion failure
+   * is keyed by the id property, and ETP-5785's ownership refusal emits the same key on purpose, so
+   * a missing id and another tenant's id end in the same answer. Core's message for it names the
+   * entity class and echoes the id, so it is replaced, never forwarded.
+   *
+   * @param errors core's {@code response.errors} map
+   * @return whether it reports an unknown reference
+   */
+  public static boolean isUnknownReference(JSONObject errors) {
+    return errors != null && errors.has(JsonConstants.ID);
   }
 }

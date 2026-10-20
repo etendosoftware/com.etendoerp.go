@@ -352,7 +352,6 @@ class NeoCrudHandler {
       // otherwise have silently dropped. Reject instead, so the caller sees why nothing changed.
       return NeoReadOnlyFieldResponse.build(e);
     } catch (Exception e) {
-      log.error("Error in default handler for {} {}", context.getHttpMethod(), context.getEntityName(), e);
       // ETP-4793 / IMP-17: same reclassification as the RPC-failure branch in
       // checkJsonServiceResponse, for the case where the violation is thrown rather than swallowed.
       // The column is read off the raw chain because sanitize() maps any DB exception to a generic
@@ -361,19 +360,19 @@ class NeoCrudHandler {
         String column = NeoErrorSanitizer.notNullViolationColumn(e);
         String fieldName = resolvePropertyNameForColumn(column, context.getAdTab());
         if (fieldName != null) {
+          log.warn("Default handler for {} {} refused: missing required field {}",
+              context.getHttpMethod(), context.getEntityName(), fieldName);
+          NeoErrorResponses.rollbackUnlessBatchOwned();
           return buildMissingRequiredFieldsResponse(
               new MissingRequiredFieldsException(List.of(fieldName)));
         }
       }
-      // A unique-constraint violation is a data conflict, not a server failure — the
-      // client sent a value that already exists, which is a 409, never a 500. Reusing
-      // this same classification is also what keeps the message worded consistently
-      // with NeoErrorSanitizer.DUPLICATE_KEY_ERROR (see its javadoc for why the import
-      // UI depends on that exact wording).
-      int status = NeoErrorSanitizer.isDuplicateKeyViolation(e)
-          ? HttpServletResponse.SC_CONFLICT
-          : HttpServletResponse.SC_INTERNAL_SERVER_ERROR;
-      return NeoResponse.error(status, NeoErrorSanitizer.sanitize(e));
+      // ETP-5782: every other thrown failure is classified by what it is (SQLState, exception
+      // type), answered with its error code, logged once and rolled back. A unique-constraint
+      // violation stays the 409 worded as NeoErrorSanitizer.DUPLICATE_KEY_ERROR (the import UI
+      // depends on that exact wording); anything unrecognised stays a sanitized 500.
+      return NeoErrorResponses.fromException(e, context.getHttpMethod(),
+          "Default handler for " + context.getHttpMethod() + " " + context.getEntityName(), null);
     }
   }
 
@@ -839,6 +838,18 @@ class NeoCrudHandler {
         refusal.getBody().getJSONObject(KEY_ERROR)
             .put(NeoProcessService.MESSAGE_KEYS, new JSONArray(periodKeys));
         return refusal;
+      }
+      // ETP-5782: a failure NEO's write service captured carries the classification of its
+      // throwable — a trigger refusal (422), a row still in use (409), a deadlock (409), a lost
+      // connection (503)… Unique violations are left to the branch below, which keeps Etendo's own
+      // wording. A failure that was not captured, or that is a fault (5xx), keeps today's answer:
+      // it is never guessed from its text.
+      if (!NeoErrorSanitizer.isDuplicateKeyMessage(translated)) {
+        NeoResponse classified = NeoErrorResponses.fromClassifiedWriteFailure(innerResponse,
+            "Write");
+        if (classified != null) {
+          return classified;
+        }
       }
       // DefaultJsonDataService catches a unique-constraint violation internally and
       // returns it as a normal RPC failure response (this branch), never as a thrown
