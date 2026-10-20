@@ -86,9 +86,16 @@ public final class AddressVirtualSelectorPolicy {
    * <p>{@code regionName} sits next to {@code region} on purpose: they are the same answer for two
    * kinds of country, and the handler keeps them mutually exclusive. See
    * {@code ContactsLocationAddressHandler#assignRegion}.
+   *
+   * <p>ETP-5806 added the 3 structured SEPA address columns ({@code EM_OBSEPA_StrtNm/BldgNb/BldgNm},
+   * from {@code org.openbravo.sepa.iso20022}). Same bug class as the rest of this list (ETP-5368):
+   * without them here, {@code etendo_schema}/{@code etendo_selectors} would never advertise
+   * {@code streetName}/{@code buildingNumber}/{@code buildingName} even though both handlers accept
+   * and persist them.
    */
   private static final Set<String> VIRTUAL_COLUMNS = new LinkedHashSet<>(List.of(
-      "Address1", "Address2", "City", "Postal", COLUMN_COUNTRY, COLUMN_REGION, "RegionName"));
+      "Address1", "Address2", "City", "Postal", COLUMN_COUNTRY, COLUMN_REGION, "RegionName",
+      "EM_OBSEPA_StrtNm", "EM_OBSEPA_BldgNb", "EM_OBSEPA_BldgNm"));
 
   /**
    * The wrapper's OWN column that the handler resolves instead of the caller (ETP-5368).

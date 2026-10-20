@@ -3494,6 +3494,19 @@ entity's schema and undiscoverable. Omitting the id fails the generic mandatory-
 422; sending it without address fields fails with a constraint violation. Only "a throwaway id plus
 the address fields" works, and nothing in the machine-readable contract says so — hence the prompt.
 
+**ETP-5806 — structured address fields.** `streetName`, `buildingNumber` and `buildingName` (backed
+by `EM_OBSEPA_StrtNm`/`BldgNb`/`BldgNm` on `C_Location`, from `org.openbravo.sepa.iso20022`) joined
+the raw-field create/update shape above, for both `contacts/locationAddress` and
+`warehouse/location`. `addressLine1`/`addressLine2` are no longer accepted as free-form input in
+practice: the handler computes them itself from the 3 structured fields (`StructuredAddressComposer`,
+porting Classic's `LocationSEPA.fillAddressLines` exactly) whenever `streetName` is non-blank, and
+ignores whatever the caller sent for the two lines in that case. `streetName`, `buildingNumber`,
+`cityName` and `country` are mandatory on every create/update that is not the "reuse an existing
+C_Location" mode — stricter than Classic, where the 3 SEPA fields are optional. A create/update
+missing any of them gets a 400 naming the missing keys. **Pending:** this field-level `AGENT_PROMPT`
+on `ETGO_SF_FIELD` for `C_Location_ID` has not yet been updated in the database to mention the 3 new
+fields and the mandatoriness rule — needs an `sf-alter-db`/webhook pass, left for the user to apply.
+
 Note which level serves that example, because the two are easy to conflate: `contacts/locationAddress`
 is fixed by a **field**-level prompt on `ETGO_SF_FIELD.AGENT_PROMPT` for `C_Location_ID`, which
 predates ETP-5184 and reaches the response through `McpSchemaFieldBuilder`'s per-field

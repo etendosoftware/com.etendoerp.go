@@ -17,6 +17,8 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.util.List;
+
 import javax.inject.Named;
 
 import org.apache.logging.log4j.LogManager;
@@ -30,6 +32,10 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.geography.Country;
 import org.openbravo.model.common.geography.Location;
 import org.openbravo.model.common.geography.Region;
+
+import com.etendoerp.go.schemaforge.util.NeoAddressHelper;
+import com.etendoerp.go.schemaforge.util.StructuredAddressComposer;
+import com.etendoerp.go.schemaforge.util.StructuredAddressComposer.ComposedAddress;
 
 /**
  * NeoHandler for the tab-less {@code location} entity in the {@code warehouse} spec.
@@ -51,17 +57,28 @@ import org.openbravo.model.common.geography.Region;
  * POST, PUT and GET-by-id. Any other method returns 405.
  *
  * <p>Registered via {@code JAVA_QUALIFIER = 'warehouseLocationHandler'} on the ETGO_SF_ENTITY
- * record for {@code location} in the {@code warehouse} spec. Uses {@code @Named} only (never a
- * normal CDI scope), so handler discovery via {@code @Named} on the concrete class works.
+ * record for {@code location} in the {@code warehouse} spec, and (ETP-5806) also via
+ * {@link NeoExtension}, resolved first. Both bindings name this class, so
+ * {@code NeoExtensionIndex.warnOnQualifierDisagreement} never fires for it. Uses {@code @Named}
+ * (never a normal CDI scope), so handler discovery via {@code @Named} on the concrete class works.
  */
 @Named("warehouseLocationHandler")
+@NeoExtension(spec = "warehouse", entity = "location")
 public class WarehouseLocationHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(WarehouseLocationHandler.class);
+  private static final String LOCATION_TABLE = "C_Location";
   private static final String FIELD_COUNTRY = "country";
   private static final String FIELD_REGION = "region";
   private static final String FIELD_RESPONSE = "response";
   private static final String FIELD_DATA = "data";
+  /** ETP-5806 — structured SEPA address fields, backed by {@code org.openbravo.sepa.iso20022}. */
+  private static final String FIELD_STREET_NAME = "streetName";
+  private static final String FIELD_BUILDING_NUMBER = "buildingNumber";
+  private static final String FIELD_BUILDING_NAME = "buildingName";
+  private static final String COLUMN_STREET_NAME = "EM_OBSEPA_StrtNm";
+  private static final String COLUMN_BUILDING_NUMBER = "EM_OBSEPA_BldgNb";
+  private static final String COLUMN_BUILDING_NAME = "EM_OBSEPA_BldgNm";
 
   @Override
   public NeoResponse handle(NeoContext ctx) {
@@ -100,6 +117,11 @@ public class WarehouseLocationHandler implements NeoHandler {
     JSONObject body = ctx.getRequestBody();
     OBContext obCtx = ctx.getObContext();
 
+    NeoResponse rejected = rejectIncompleteAddressPayload(body, nullIfEmpty(body.optString(FIELD_COUNTRY, null)));
+    if (rejected != null) {
+      return rejected;
+    }
+
     OBContext.setAdminMode(true);
     try {
       Location geoLoc = OBProvider.getInstance().get(Location.class);
@@ -130,6 +152,16 @@ public class WarehouseLocationHandler implements NeoHandler {
       if (geoLoc == null) {
         return NeoResponse.error(404, "Location not found: " + locId);
       }
+      // ETP-5806 — country falls back to the existing record's own country when the body omits
+      // it, matching applyGeoLocFields' set-if-provided semantics for that one field.
+      String bodyCountryId = nullIfEmpty(body.optString(FIELD_COUNTRY, null));
+      String effectiveCountryId = bodyCountryId != null
+          ? bodyCountryId
+          : (geoLoc.getCountry() != null ? geoLoc.getCountry().getId() : null);
+      NeoResponse rejected = rejectIncompleteAddressPayload(body, effectiveCountryId);
+      if (rejected != null) {
+        return rejected;
+      }
       applyGeoLocFields(body, geoLoc);
       OBDal.getInstance().flush();
 
@@ -154,11 +186,47 @@ public class WarehouseLocationHandler implements NeoHandler {
     }
   }
 
+  // ------------------------------------------------------------------ validation
+
+  /**
+   * ETP-5806 — Street, Number, City and Country are mandatory for the Warehouse location, the
+   * same product decision as {@code ContactsLocationAddressHandler} (Etendo Go is stricter than
+   * Classic, where the 3 SEPA fields are optional). This entity is tab-less and has no "reuse an
+   * existing C_Location" mode, so the check applies unconditionally on both create and update.
+   */
+  private static NeoResponse rejectIncompleteAddressPayload(JSONObject body, String countryId) {
+    List<String> missing = StructuredAddressComposer.missingMandatoryFields(
+        nullIfEmpty(body.optString(FIELD_STREET_NAME, null)),
+        nullIfEmpty(body.optString(FIELD_BUILDING_NUMBER, null)),
+        nullIfEmpty(body.optString("cityName", null)),
+        countryId);
+    if (missing.isEmpty()) {
+      return null;
+    }
+    return NeoResponse.error(400, "Missing required field(s): " + String.join(", ", missing));
+  }
+
   // ------------------------------------------------------------------ field mapping
 
   private static void applyGeoLocFields(JSONObject body, Location geoLoc) {
-    geoLoc.setAddressLine1(nullIfEmpty(body.optString("addressLine1", null)));
-    geoLoc.setAddressLine2(nullIfEmpty(body.optString("addressLine2", null)));
+    String streetName = nullIfEmpty(body.optString(FIELD_STREET_NAME, null));
+    String buildingNumber = nullIfEmpty(body.optString(FIELD_BUILDING_NUMBER, null));
+    String buildingName = nullIfEmpty(body.optString(FIELD_BUILDING_NAME, null));
+    NeoAddressHelper.setColumnValue(geoLoc, LOCATION_TABLE, COLUMN_STREET_NAME, streetName);
+    NeoAddressHelper.setColumnValue(geoLoc, LOCATION_TABLE, COLUMN_BUILDING_NUMBER, buildingNumber);
+    NeoAddressHelper.setColumnValue(geoLoc, LOCATION_TABLE, COLUMN_BUILDING_NAME, buildingName);
+
+    // ETP-5806 — same compute-only-when-street-present rule as ContactsLocationAddressHandler;
+    // see the comment there for the Classic-parity rationale.
+    if (streetName != null) {
+      ComposedAddress composed =
+          StructuredAddressComposer.composeAddressLines(streetName, buildingNumber, buildingName);
+      geoLoc.setAddressLine1(composed.getAddress1());
+      geoLoc.setAddressLine2(composed.getAddress2());
+    } else {
+      geoLoc.setAddressLine1(nullIfEmpty(body.optString("addressLine1", null)));
+      geoLoc.setAddressLine2(nullIfEmpty(body.optString("addressLine2", null)));
+    }
     geoLoc.setCityName(nullIfEmpty(body.optString("cityName", null)));
     geoLoc.setPostalCode(nullIfEmpty(body.optString("postalCode", null)));
 
@@ -184,6 +252,13 @@ public class WarehouseLocationHandler implements NeoHandler {
     json.put("addressLine2", orNull(geoLoc.getAddressLine2()));
     json.put("cityName", orNull(geoLoc.getCityName()));
     json.put("postalCode", orNull(geoLoc.getPostalCode()));
+    // ETP-5806 — structured SEPA address fields, so the modal can pre-populate them.
+    json.put(FIELD_STREET_NAME,
+        orNull(NeoAddressHelper.getColumnValue(geoLoc, LOCATION_TABLE, COLUMN_STREET_NAME)));
+    json.put(FIELD_BUILDING_NUMBER,
+        orNull(NeoAddressHelper.getColumnValue(geoLoc, LOCATION_TABLE, COLUMN_BUILDING_NUMBER)));
+    json.put(FIELD_BUILDING_NAME,
+        orNull(NeoAddressHelper.getColumnValue(geoLoc, LOCATION_TABLE, COLUMN_BUILDING_NAME)));
     if (geoLoc.getCountry() != null) {
       json.put(FIELD_COUNTRY, geoLoc.getCountry().getId());
       // ETP-5022: getIdentifier(), NOT getName(). getName() is the plain Hibernate getter —
