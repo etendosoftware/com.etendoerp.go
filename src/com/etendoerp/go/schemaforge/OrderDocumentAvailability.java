@@ -69,15 +69,15 @@ final class OrderDocumentAvailability {
    * linked shipment/receipt or invoice (the {@link AbstractOrderHeaderHandler#hasLinkedDocuments}
    * rule, the very query behind the UI's flag).
    *
-   * @param record the record the agent asked about
+   * @param subject the record the agent asked about
    * @return {@code action:value → reason}; empty for anything that is not a completed order, when
    *         nothing is linked, or when the lookup fails (advisory: it never guesses)
    */
-  static Map<String, String> unavailable(BaseOBObject record) {
-    if (!(record instanceof Order)) {
+  static Map<String, String> unavailable(BaseOBObject subject) {
+    if (!(subject instanceof Order)) {
       return Collections.emptyMap();
     }
-    Order order = (Order) record;
+    Order order = (Order) subject;
     if (!DocumentAvailability.STATUS_COMPLETED.equals(order.getDocumentStatus())) {
       return Collections.emptyMap();
     }

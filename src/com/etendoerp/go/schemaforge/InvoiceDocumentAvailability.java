@@ -50,15 +50,15 @@ final class InvoiceDocumentAvailability {
   /**
    * The {@code documentAction} values that do not apply to this invoice.
    *
-   * @param record the record the agent asked about
+   * @param subject the record the agent asked about
    * @return {@code action:value → reason}; empty for anything that is not a completed invoice or
    *         when nothing rules Reactivate out
    */
-  static Map<String, String> unavailable(BaseOBObject record) {
-    if (!(record instanceof Invoice)) {
+  static Map<String, String> unavailable(BaseOBObject subject) {
+    if (!(subject instanceof Invoice)) {
       return Collections.emptyMap();
     }
-    Invoice invoice = (Invoice) record;
+    Invoice invoice = (Invoice) subject;
     if (!DocumentAvailability.STATUS_COMPLETED.equals(invoice.getDocumentStatus())) {
       return Collections.emptyMap();
     }

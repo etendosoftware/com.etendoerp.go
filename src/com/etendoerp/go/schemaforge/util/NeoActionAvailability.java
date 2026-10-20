@@ -23,7 +23,7 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.function.Function;
+import java.util.function.UnaryOperator;
 
 import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONArray;
@@ -332,7 +332,7 @@ public final class NeoActionAvailability {
    *               such property or no value for it
    * @return the verdict; {@code available == null} when a declared property could not be read
    */
-  public Verdict evaluate(Function<String, String> reader) {
+  public Verdict evaluate(UnaryOperator<String> reader) {
     for (Map.Entry<String, List<String>> e : when.entrySet()) {
       String actual = reader.apply(e.getKey());
       if (actual == null) {

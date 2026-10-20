@@ -318,10 +318,10 @@ public interface NeoHandler {
    * enforcement. An implementation must not throw for a record it cannot judge: it omits the
    * action instead.</p>
    *
-   * @param record the record the agent asked about
+   * @param subject the record the agent asked about
    * @return {@code action name → reason}; empty by default
    */
-  default Map<String, String> unavailableActions(BaseOBObject record) {
+  default Map<String, String> unavailableActions(BaseOBObject subject) {
     return Collections.emptyMap();
   }
 

@@ -160,11 +160,8 @@ final class McpActionsSection {
     }
     // A section that only describes when an action applies withholds nothing, so it has nothing
     // to justify (ETP-5714).
-    if (!describes || withholds) {
-      if (StringUtils.isBlank(body.optString(KEY_REASON, null))) {
-        problems.add(
-            KEY_REASON + " is required, so every hidden or redirected action is auditable");
-      }
+    if ((!describes || withholds) && StringUtils.isBlank(body.optString(KEY_REASON, null))) {
+      problems.add(KEY_REASON + " is required, so every hidden or redirected action is auditable");
     }
     return problems;
   }
@@ -419,6 +416,11 @@ final class McpActionsSection {
       return null;
     }
 
+    /** Lower case with everything but letters and digits removed: the spelling-insensitive key. */
+    private static String normalized(String name) {
+      return name == null ? "" : name.replaceAll("[^A-Za-z0-9]", "").toLowerCase(Locale.ROOT);
+    }
+
     /** @return whether the MCP must not offer or run {@code action} */
     boolean isHidden(String action) {
       return action != null && hidden.contains(action);
@@ -438,11 +440,6 @@ final class McpActionsSection {
     boolean isUnusable() {
       return unusable;
     }
-  }
-
-  /** Lower case with everything but letters and digits removed: the spelling-insensitive key. */
-  private static String normalized(String name) {
-    return name == null ? "" : name.replaceAll("[^A-Za-z0-9]", "").toLowerCase(Locale.ROOT);
   }
 
   /**

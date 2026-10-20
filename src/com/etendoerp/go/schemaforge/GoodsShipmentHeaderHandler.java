@@ -133,9 +133,9 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
    * {@code issuerOrg} and the resolved price list. Declared so an MCP {@code fields:[…]}
    * projection does not report them in {@code unknownFields} while the same response carries them.
    */
-  static final Set<String> RESPONSE_ENRICHED_FIELDS = Set.of("invoiceStatus", "linkedOrders",
-      "linkedInvoices", "returnReceipts", "canCreateReturn", "issuerOrg", "resolvedPriceListId",
-      "resolvedPriceList$_identifier");
+  static final Set<String> RESPONSE_ENRICHED_FIELDS = Set.of(FIELD_INVOICE_STATUS,
+      FIELD_LINKED_ORDERS, "linkedInvoices", "returnReceipts", "canCreateReturn", "issuerOrg",
+      FIELD_RESOLVED_PRICE_LIST_ID, FIELD_RESOLVED_PRICE_LIST_IDENTIFIER);
 
   /**
    * {@inheritDoc} The keys {@link #afterHandle} adds to a GET record (see

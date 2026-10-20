@@ -20,7 +20,7 @@ package com.etendoerp.go.mcp;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
-import java.util.function.Function;
+import java.util.function.UnaryOperator;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -48,7 +48,7 @@ final class McpActionAvailabilityContext {
   private static final Logger log = LogManager.getLogger(McpActionAvailabilityContext.class);
 
   private final String recordId;
-  private final Function<String, String> reader;
+  private final UnaryOperator<String> reader;
   private final Map<String, String> derivedUnavailable;
 
   /**
@@ -58,7 +58,7 @@ final class McpActionAvailabilityContext {
    * @param reader             reads a property by name as a string, {@code null} when it cannot
    * @param derivedUnavailable {@code action → reason} the customization derived; may be {@code null}
    */
-  McpActionAvailabilityContext(String recordId, Function<String, String> reader,
+  McpActionAvailabilityContext(String recordId, UnaryOperator<String> reader,
       Map<String, String> derivedUnavailable) {
     this.recordId = recordId;
     this.reader = reader;
@@ -76,12 +76,12 @@ final class McpActionAvailabilityContext {
    */
   static McpActionAvailabilityContext forRecord(SFEntity sfEntity, Entity dalEntity,
       String recordId) {
-    BaseOBObject record = OBDal.getInstance().get(dalEntity.getName(), recordId);
-    if (record == null || !isVisibleToRole(record)) {
+    BaseOBObject subject = OBDal.getInstance().get(dalEntity.getName(), recordId);
+    if (subject == null || !isVisibleToRole(subject)) {
       return null;
     }
-    return new McpActionAvailabilityContext(recordId, propertyReader(dalEntity, record),
-        McpDeclaredActions.unavailableFor(sfEntity, record));
+    return new McpActionAvailabilityContext(recordId, propertyReader(dalEntity, subject),
+        McpDeclaredActions.unavailableFor(sfEntity, subject));
   }
 
   /**
@@ -92,14 +92,14 @@ final class McpActionAvailabilityContext {
    * — an existence oracle. A record that fails this is answered exactly like a missing one.
    * Structural: it reads the generic client/organisation of the record, never an entity.
    */
-  static boolean isVisibleToRole(BaseOBObject record) {
+  static boolean isVisibleToRole(BaseOBObject subject) {
     OBContext context = OBContext.getOBContext();
-    if (record instanceof ClientEnabled && !contains(context.getReadableClients(),
-        ((ClientEnabled) record).getClient())) {
+    if (subject instanceof ClientEnabled && !contains(context.getReadableClients(),
+        ((ClientEnabled) subject).getClient())) {
       return false;
     }
-    return !(record instanceof OrganizationEnabled) || contains(context.getReadableOrganizations(),
-        ((OrganizationEnabled) record).getOrganization());
+    return !(subject instanceof OrganizationEnabled) || contains(context.getReadableOrganizations(),
+        ((OrganizationEnabled) subject).getOrganization());
   }
 
   private static boolean contains(String[] readable, BaseOBObject owner) {
@@ -119,13 +119,13 @@ final class McpActionAvailabilityContext {
    * Reads a record property as a string: a foreign key as the referenced id, anything else through
    * {@code String.valueOf}. Structural: the property is whatever name a declaration asks for.
    */
-  private static Function<String, String> propertyReader(Entity dalEntity, BaseOBObject record) {
+  private static UnaryOperator<String> propertyReader(Entity dalEntity, BaseOBObject subject) {
     return property -> {
       if (StringUtils.isBlank(property) || !dalEntity.hasProperty(property)) {
         return null;
       }
       try {
-        Object value = record.get(property);
+        Object value = subject.get(property);
         if (value instanceof BaseOBObject) {
           return ((BaseOBObject) value).getId().toString();
         }
@@ -144,7 +144,7 @@ final class McpActionAvailabilityContext {
   }
 
   /** @return reads a record property by name; {@code null} when it cannot be read */
-  Function<String, String> getReader() {
+  UnaryOperator<String> getReader() {
     return reader;
   }
 

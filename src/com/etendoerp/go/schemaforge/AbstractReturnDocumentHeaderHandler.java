@@ -59,8 +59,8 @@ public abstract class AbstractReturnDocumentHeaderHandler implements NeoHandler 
    * rectificativa (ETP-5714).
    */
   @Override
-  public Map<String, String> unavailableActions(BaseOBObject record) {
-    return ReturnDocumentAvailability.unavailable(record);
+  public Map<String, String> unavailableActions(BaseOBObject subject) {
+    return ReturnDocumentAvailability.unavailable(subject);
   }
 
   /**

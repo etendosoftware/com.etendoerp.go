@@ -71,15 +71,15 @@ final class ReturnDocumentAvailability {
    * The actions that do not apply to this return: {@code createReturnInvoice} when it already has
    * a non-voided factura rectificativa (the {@code hasReturnInvoice} rule).
    *
-   * @param record the record the agent asked about
+   * @param subject the record the agent asked about
    * @return {@code action → reason}; empty for anything that is not a completed return, when it
    *         has no rectificativa yet, or when the lookup fails
    */
-  static Map<String, String> unavailable(BaseOBObject record) {
-    if (!(record instanceof ShipmentInOut)) {
+  static Map<String, String> unavailable(BaseOBObject subject) {
+    if (!(subject instanceof ShipmentInOut)) {
       return Collections.emptyMap();
     }
-    ShipmentInOut inout = (ShipmentInOut) record;
+    ShipmentInOut inout = (ShipmentInOut) subject;
     if (!DocumentAvailability.STATUS_COMPLETED.equals(inout.getDocumentStatus())) {
       return Collections.emptyMap();
     }

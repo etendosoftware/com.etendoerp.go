@@ -214,11 +214,11 @@ public abstract class AbstractInvoiceHeaderHandler {
    * implement {@link NeoHandler}, so this public method is their
    * {@link NeoHandler#unavailableActions}.
    *
-   * @param record the record the agent asked about
+   * @param subject the record the agent asked about
    * @return {@code action:value → reason}; empty when nothing is ruled out
    */
-  public Map<String, String> unavailableActions(BaseOBObject record) {
-    return InvoiceDocumentAvailability.unavailable(record);
+  public Map<String, String> unavailableActions(BaseOBObject subject) {
+    return InvoiceDocumentAvailability.unavailable(subject);
   }
 
   /**

@@ -102,16 +102,16 @@ final class McpDeclaredActions {
    * is logged and answered as "nothing derived".</p>
    *
    * @param entity the SchemaForge entity
-   * @param record the record the agent asked about
+   * @param subject the record the agent asked about
    * @return {@code action → reason}; empty when none or when the customization cannot be resolved
    */
-  static Map<String, String> unavailableFor(SFEntity entity, BaseOBObject record) {
+  static Map<String, String> unavailableFor(SFEntity entity, BaseOBObject subject) {
     NeoHandler handler = customizationOf(entity);
     if (handler == null) {
       return Collections.emptyMap();
     }
     try {
-      Map<String, String> derived = handler.unavailableActions(record);
+      Map<String, String> derived = handler.unavailableActions(subject);
       return derived != null ? derived : Collections.emptyMap();
     } catch (RuntimeException e) {
       log.warn("Could not derive the unavailable actions of {}: {}", handler.getClass().getName(),

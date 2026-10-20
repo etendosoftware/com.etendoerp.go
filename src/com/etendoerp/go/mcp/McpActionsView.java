@@ -178,12 +178,12 @@ final class McpActionsView {
    * catalogue is complete — and nothing here refuses a call: availability is advisory, the
    * handlers' own guards stay the enforcement.</p>
    *
-   * @param record the record the agent asked about, or {@code null} for the static catalogue
+   * @param subject the record the agent asked about, or {@code null} for the static catalogue
    */
   @SuppressWarnings("java:S107") // the catalogue's inputs; a holder would only rename them
   static JSONObject buildResponse(String specName, String entityName, JSONArray fields,
       Map<String, NeoActionContract> declared, McpActionsSection.View config,
-      Set<String> excluded, McpActionAvailabilityContext record) throws JSONException {
+      Set<String> excluded, McpActionAvailabilityContext subject) throws JSONException {
     Map<String, NeoActionContract> offered = declared != null ? declared : Map.of();
     boolean hasDeclared = !offered.isEmpty();
     JSONObject response = new JSONObject();
@@ -192,11 +192,11 @@ final class McpActionsView {
     JSONArray actions = withoutDescribedButtons(apply(applyConfig(fields, config, excluded)),
         offered);
     for (int i = 0; i < actions.length(); i++) {
-      decorateButton(actions.getJSONObject(i), config, record);
+      decorateButton(actions.getJSONObject(i), config, subject);
     }
     for (NeoActionContract contract : offered.values()) {
       JSONObject entry = contract.toJson();
-      judge(entry, contract.getAvailability(), List.of(contract.getName()), record);
+      judge(entry, contract.getAvailability(), List.of(contract.getName()), subject);
       actions.put(entry);
     }
     withdrawAllIfUnusable(actions, config);
@@ -209,8 +209,8 @@ final class McpActionsView {
           + "entry's 'action', id = the record its idDescription names, and parameters matching "
           + "its schema. Prefer them over an AD button with a similar meaning.");
     }
-    if (record != null) {
-      response.put("recordId", record.getRecordId());
+    if (subject != null) {
+      response.put("recordId", subject.getRecordId());
     }
     if (declaresAvailability(actions)) {
       response.put(KEY_AVAILABILITY_HINT, AVAILABILITY_HINT);
@@ -232,7 +232,7 @@ final class McpActionsView {
 
   /** An AD button: its availability comes from {@code MCP_CONFIG.actions}, under any of its names. */
   private static void decorateButton(JSONObject button, McpActionsSection.View config,
-      McpActionAvailabilityContext record) throws JSONException {
+      McpActionAvailabilityContext subject) throws JSONException {
     List<String> names = namesOf(button);
     NeoActionAvailability declared = null;
     for (String name : names) {
@@ -244,7 +244,7 @@ final class McpActionsView {
     if (declared != null) {
       declared.writeTo(button);
     }
-    judge(button, declared, names, record);
+    judge(button, declared, names, subject);
   }
 
   /**
@@ -253,12 +253,12 @@ final class McpActionsView {
    * declaration; an action with neither says nothing.
    */
   private static void judge(JSONObject action, NeoActionAvailability declared, List<String> names,
-      McpActionAvailabilityContext record) throws JSONException {
-    if (record == null) {
+      McpActionAvailabilityContext subject) throws JSONException {
+    if (subject == null) {
       return;
     }
     for (String name : names) {
-      String derived = record.derivedReasonOf(name);
+      String derived = subject.derivedReasonOf(name);
       if (derived != null) {
         action.put(NeoActionAvailability.KEY_AVAILABLE_NOW, false);
         action.put(NeoActionAvailability.KEY_UNAVAILABLE_REASON, derived);
@@ -266,14 +266,14 @@ final class McpActionsView {
       }
     }
     if (declared != null) {
-      judgeDeclared(action, declared, record);
+      judgeDeclared(action, declared, subject);
     }
-    ruleOutValues(action, names, record);
+    ruleOutValues(action, names, subject);
   }
 
   private static void judgeDeclared(JSONObject action, NeoActionAvailability declared,
-      McpActionAvailabilityContext record) throws JSONException {
-    NeoActionAvailability.Verdict verdict = declared.evaluate(record.getReader());
+      McpActionAvailabilityContext subject) throws JSONException {
+    NeoActionAvailability.Verdict verdict = declared.evaluate(subject.getReader());
     if (verdict.available() == null) {
       return;
     }
@@ -292,10 +292,10 @@ final class McpActionsView {
    * {@code availableValuesNow} and is reported, with its reason, under {@code unavailableValues}.
    */
   private static void ruleOutValues(JSONObject action, List<String> names,
-      McpActionAvailabilityContext record) throws JSONException {
+      McpActionAvailabilityContext subject) throws JSONException {
     Map<String, String> ruledOut = new LinkedHashMap<>();
     for (String name : names) {
-      ruledOut.putAll(record.derivedValueReasonsOf(name));
+      ruledOut.putAll(subject.derivedValueReasonsOf(name));
     }
     if (ruledOut.isEmpty()) {
       return;

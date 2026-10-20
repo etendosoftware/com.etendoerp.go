@@ -286,10 +286,10 @@ class McpDeclaredActionsTest {
       List<String> view = McpSourceScanner.callArguments(body, "McpActionsView.buildResponse",
           actionsView);
       assertEquals(7, view.size(), "buildResponse(spec, entity, fields, declared, config, "
-          + "excluded, record)");
+          + "excluded, asked)");
       assertTrue(body.indexOf("availabilityContextOf", actionsView) > actionsView,
           "the record is only resolved inside the actions view");
-      assertEquals("record", view.get(6));
+      assertEquals("asked", view.get(6));
     }
   }
 
@@ -312,7 +312,7 @@ class McpDeclaredActionsTest {
     @Test
     @DisplayName("the customization's own answer is returned, and a null or throwing one is empty")
     void customizationAnswerIsRelayed() {
-      org.openbravo.base.structure.BaseOBObject record =
+      org.openbravo.base.structure.BaseOBObject subject =
           mock(org.openbravo.base.structure.BaseOBObject.class);
       SFEntity entity = recEntity();
       try (org.mockito.MockedStatic<com.etendoerp.go.schemaforge.util.NeoHandlerLookup> lookup =
@@ -321,14 +321,14 @@ class McpDeclaredActionsTest {
             mock(com.etendoerp.go.schemaforge.NeoHandler.class);
         lookup.when(() -> com.etendoerp.go.schemaforge.util.NeoHandlerLookup
             .byQualifierQuietly(QUALIFIER)).thenReturn(handler);
-        when(handler.unavailableActions(record)).thenReturn(Map.of("a", "because"));
+        when(handler.unavailableActions(subject)).thenReturn(Map.of("a", "because"));
 
-        assertEquals(Map.of("a", "because"), McpDeclaredActions.unavailableFor(entity, record));
+        assertEquals(Map.of("a", "because"), McpDeclaredActions.unavailableFor(entity, subject));
 
-        when(handler.unavailableActions(record)).thenReturn(null);
-        assertTrue(McpDeclaredActions.unavailableFor(entity, record).isEmpty());
-        when(handler.unavailableActions(record)).thenThrow(new IllegalStateException("boom"));
-        assertTrue(McpDeclaredActions.unavailableFor(entity, record).isEmpty());
+        when(handler.unavailableActions(subject)).thenReturn(null);
+        assertTrue(McpDeclaredActions.unavailableFor(entity, subject).isEmpty());
+        when(handler.unavailableActions(subject)).thenThrow(new IllegalStateException("boom"));
+        assertTrue(McpDeclaredActions.unavailableFor(entity, subject).isEmpty());
       }
     }
   }

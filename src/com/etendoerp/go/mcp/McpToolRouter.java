@@ -1330,12 +1330,12 @@ public class McpToolRouter {
     if (recordId == null) {
       return null;
     }
-    McpActionAvailabilityContext record =
+    McpActionAvailabilityContext asked =
         McpActionAvailabilityContext.forRecord(sfEntity, dalEntity, recordId);
-    if (record == null) {
+    if (asked == null) {
       throw McpRoutingException.recordNotFound(spec.getName(), sfEntity.getName(), recordId);
     }
-    return record;
+    return asked;
   }
 
   // AD_Reference ID for OBUISEL selectors (extends the base FK refs from NeoSelectorService)
@@ -1440,9 +1440,9 @@ public class McpToolRouter {
     // IMP-6: view:"actions" collapses the dump down to the callable buttons/processes.
     if (McpActionsView.isActionsView(view)) {
       // ETP-5714: with an id, each action is also judged against that record (advisory only).
-      McpActionAvailabilityContext record = availabilityContextOf(args, spec, sfEntity, dalEntity);
+      McpActionAvailabilityContext asked = availabilityContextOf(args, spec, sfEntity, dalEntity);
       return wrapAsTextContent(McpActionsView.buildResponse(specName, entityName, fieldsArray,
-          declaredActions, actionsConfig, excludedActions, record));
+          declaredActions, actionsConfig, excludedActions, asked));
     }
     // IMP-12: view:"create" keeps only what the agent may actually send, split into
     // required/optional. 157 fields / 62 kB on sales-invoice/header collapses to the handful that

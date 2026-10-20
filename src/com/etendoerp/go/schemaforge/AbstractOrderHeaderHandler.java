@@ -763,8 +763,8 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
    * {@inheritDoc} Reactivate is ruled out for an order that has linked documents (ETP-5714).
    */
   @Override
-  public Map<String, String> unavailableActions(BaseOBObject record) {
-    return OrderDocumentAvailability.unavailable(record);
+  public Map<String, String> unavailableActions(BaseOBObject subject) {
+    return OrderDocumentAvailability.unavailable(subject);
   }
 
   /**

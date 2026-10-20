@@ -45,7 +45,7 @@ class NeoActionAvailabilityTest {
   private static final String STATUS = "documentStatus";
   private static final String POSTED = "posted";
 
-  private static java.util.function.Function<String, String> record(String... pairs) {
+  private static java.util.function.UnaryOperator<String> subject(String... pairs) {
     Map<String, String> values = new java.util.HashMap<>();
     for (int i = 0; i < pairs.length; i += 2) {
       values.put(pairs[i], pairs[i + 1]);
@@ -62,8 +62,8 @@ class NeoActionAvailabilityTest {
     void matchesAndRefuses() {
       NeoActionAvailability draftOnly = NeoActionAvailability.whenIn(STATUS, "DR");
 
-      NeoActionAvailability.Verdict draft = draftOnly.evaluate(record(STATUS, "DR"));
-      NeoActionAvailability.Verdict completed = draftOnly.evaluate(record(STATUS, "CO"));
+      NeoActionAvailability.Verdict draft = draftOnly.evaluate(subject(STATUS, "DR"));
+      NeoActionAvailability.Verdict completed = draftOnly.evaluate(subject(STATUS, "CO"));
 
       assertEquals(Boolean.TRUE, draft.available());
       assertNull(draft.reason());
@@ -80,11 +80,11 @@ class NeoActionAvailabilityTest {
           .andWhen(POSTED, "Y");
 
       assertEquals(Boolean.TRUE,
-          unpostable.evaluate(record(STATUS, "CO", POSTED, "Y")).available());
+          unpostable.evaluate(subject(STATUS, "CO", POSTED, "Y")).available());
       assertEquals(Boolean.FALSE,
-          unpostable.evaluate(record(STATUS, "CO", POSTED, "N")).available());
+          unpostable.evaluate(subject(STATUS, "CO", POSTED, "N")).available());
       assertEquals(Boolean.FALSE,
-          unpostable.evaluate(record(STATUS, "DR", POSTED, "Y")).available());
+          unpostable.evaluate(subject(STATUS, "DR", POSTED, "Y")).available());
     }
 
     @Test
@@ -92,9 +92,9 @@ class NeoActionAvailabilityTest {
     void negation() {
       NeoActionAvailability postable = NeoActionAvailability.whenIn(POSTED, "!Y");
 
-      assertEquals(Boolean.TRUE, postable.evaluate(record(POSTED, "N")).available());
-      assertEquals(Boolean.TRUE, postable.evaluate(record(POSTED, "NC")).available());
-      NeoActionAvailability.Verdict posted = postable.evaluate(record(POSTED, "Y"));
+      assertEquals(Boolean.TRUE, postable.evaluate(subject(POSTED, "N")).available());
+      assertEquals(Boolean.TRUE, postable.evaluate(subject(POSTED, "NC")).available());
+      NeoActionAvailability.Verdict posted = postable.evaluate(subject(POSTED, "Y"));
       assertEquals(Boolean.FALSE, posted.available());
       assertTrue(posted.reason().contains("posted is not Y"), posted.reason());
     }
@@ -103,7 +103,7 @@ class NeoActionAvailabilityTest {
     @DisplayName("a property the record cannot supply is UNKNOWN, never unavailable (advisory)")
     void unknownPropertyIsNotAVerdict() {
       NeoActionAvailability.Verdict verdict =
-          NeoActionAvailability.whenIn("noSuchProperty", "X").evaluate(record(STATUS, "DR"));
+          NeoActionAvailability.whenIn("noSuchProperty", "X").evaluate(subject(STATUS, "DR"));
 
       assertNull(verdict.available());
       assertNull(verdict.reason());
@@ -115,7 +115,7 @@ class NeoActionAvailabilityTest {
       NeoActionAvailability declared = NeoActionAvailability.whenIn(STATUS, "DR")
           .withNote("Correct it with a return.");
 
-      assertTrue(declared.evaluate(record(STATUS, "CO")).reason().endsWith("Correct it with a return."));
+      assertTrue(declared.evaluate(subject(STATUS, "CO")).reason().endsWith("Correct it with a return."));
     }
   }
 
@@ -129,8 +129,8 @@ class NeoActionAvailabilityTest {
     @Test
     @DisplayName("lists the values that apply to the record's status")
     void valuesNow() {
-      NeoActionAvailability.Verdict draft = docAction.evaluate(record(STATUS, "DR"));
-      NeoActionAvailability.Verdict completed = docAction.evaluate(record(STATUS, "CO"));
+      NeoActionAvailability.Verdict draft = docAction.evaluate(subject(STATUS, "DR"));
+      NeoActionAvailability.Verdict completed = docAction.evaluate(subject(STATUS, "CO"));
 
       assertEquals(Boolean.TRUE, draft.available());
       assertEquals(List.of("CO", "VO"), draft.valuesNow());
@@ -142,8 +142,8 @@ class NeoActionAvailabilityTest {
     void nothingApplies() {
       NeoActionAvailability.Verdict emptyList = NeoActionAvailability
           .valuesByStatus(STATUS, Map.of("CO", List.<String>of()))
-          .withNote("Use a return.").evaluate(record(STATUS, "CO"));
-      NeoActionAvailability.Verdict unlisted = docAction.evaluate(record(STATUS, "VO"));
+          .withNote("Use a return.").evaluate(subject(STATUS, "CO"));
+      NeoActionAvailability.Verdict unlisted = docAction.evaluate(subject(STATUS, "VO"));
 
       assertEquals(Boolean.FALSE, emptyList.available());
       assertTrue(emptyList.reason().endsWith("Use a return."), emptyList.reason());
@@ -154,7 +154,7 @@ class NeoActionAvailabilityTest {
     @Test
     @DisplayName("an unreadable status is UNKNOWN")
     void unknownStatus() {
-      assertNull(docAction.evaluate(record()).available());
+      assertNull(docAction.evaluate(subject()).available());
     }
   }
 
@@ -186,7 +186,7 @@ class NeoActionAvailabilityTest {
           new JSONObject("{\"property\":\"documentStatus\",\"values\":{\"CO\":[\"RE\"]}}"));
 
       NeoActionAvailability.Verdict verdict =
-          parsed.evaluate(record(POSTED, "N", STATUS, "CO"));
+          parsed.evaluate(subject(POSTED, "N", STATUS, "CO"));
 
       assertEquals(Boolean.TRUE, verdict.available());
       assertEquals(List.of("RE"), verdict.valuesNow());

@@ -237,15 +237,15 @@ class McpActionsViewTest {
   private static final String POSTED = "posted";
   private static final String DOCUMENT_ACTION = "documentAction";
 
-  private static McpActionAvailabilityContext record(Map<String, String> state,
+  private static McpActionAvailabilityContext subject(Map<String, String> state,
       Map<String, String> derived) {
     return new McpActionAvailabilityContext("REC1", state::get, derived);
   }
 
   private static JSONObject catalogue(Map<String, NeoActionContract> declared,
-      McpActionAvailabilityContext record) throws JSONException {
+      McpActionAvailabilityContext subject) throws JSONException {
     return McpActionsView.buildResponse("spec", "entity", new JSONArray(), declared, null,
-        Collections.emptySet(), record);
+        Collections.emptySet(), subject);
   }
 
   private static JSONObject entry(JSONObject response, String action) throws JSONException {
@@ -260,7 +260,7 @@ class McpActionsViewTest {
 
   private static void assertNow(Map<String, NeoActionContract> declared, Map<String, String> state,
       String action, boolean expected) throws JSONException {
-    JSONObject entry = entry(catalogue(declared, record(state, Map.of())), action);
+    JSONObject entry = entry(catalogue(declared, subject(state, Map.of())), action);
     assertNotNull(entry, action + " must stay LISTED whatever the state");
     assertEquals(expected, entry.getBoolean("availableNow"), action + " in " + state);
     assertEquals(!expected, entry.has("unavailableReason"), action + " in " + state);
@@ -290,7 +290,7 @@ class McpActionsViewTest {
       Map<String, NeoActionContract> declared =
           Map.of("plain", NeoActionContract.write("plain", "x"));
 
-      JSONObject response = catalogue(declared, record(Map.of(DOCUMENT_STATUS, "CO"), Map.of()));
+      JSONObject response = catalogue(declared, subject(Map.of(DOCUMENT_STATUS, "CO"), Map.of()));
 
       assertFalse(entry(response, "plain").has("availableNow"));
       assertFalse(response.has(McpActionsView.KEY_AVAILABILITY_HINT));
@@ -369,9 +369,9 @@ class McpActionsViewTest {
           new ReturnToVendorShipmentHeaderHandler().actionContracts(),
           new ReturnMaterialReceiptHeaderHandler().actionContracts())) {
         JSONObject completed = entry(
-            catalogue(declared, record(Map.of(DOCUMENT_STATUS, "CO"), Map.of())), DOCUMENT_ACTION);
+            catalogue(declared, subject(Map.of(DOCUMENT_STATUS, "CO"), Map.of())), DOCUMENT_ACTION);
         JSONObject draft = entry(
-            catalogue(declared, record(Map.of(DOCUMENT_STATUS, "DR"), Map.of())), DOCUMENT_ACTION);
+            catalogue(declared, subject(Map.of(DOCUMENT_STATUS, "DR"), Map.of())), DOCUMENT_ACTION);
 
         assertFalse(completed.getBoolean("availableNow"));
         assertTrue(completed.getString("unavailableReason")
@@ -396,7 +396,7 @@ class McpActionsViewTest {
         assertNow(declared, Map.of(DOCUMENT_STATUS, "DR"), importAction, true);
         assertNow(declared, Map.of(DOCUMENT_STATUS, "CO"), importAction, false);
 
-        JSONObject withRectificativa = entry(catalogue(declared, record(
+        JSONObject withRectificativa = entry(catalogue(declared, subject(
             Map.of(DOCUMENT_STATUS, "CO"),
             Map.of("createReturnInvoice", "This return already has a factura rectificativa (R-1)."))),
             "createReturnInvoice");
@@ -445,7 +445,7 @@ class McpActionsViewTest {
     @DisplayName("a property the record cannot give leaves the action without a verdict")
     void unreadablePropertyGivesNoVerdict() throws JSONException {
       JSONObject response = catalogue(new GoodsReceiptHeaderHandler().actionContracts(),
-          record(Map.of(), Map.of()));
+          subject(Map.of(), Map.of()));
 
       assertFalse(entry(response, DOCUMENT_ACTION).has("availableNow"));
     }
@@ -462,7 +462,7 @@ class McpActionsViewTest {
               + "\"CO\":[\"CL\",\"RE\"]}}}}}");
 
       JSONObject response = McpActionsView.buildResponse("sales-order", "header", fields,
-          Map.of(), config, Collections.emptySet(), record(Map.of(DOCUMENT_STATUS, "CO"),
+          Map.of(), config, Collections.emptySet(), subject(Map.of(DOCUMENT_STATUS, "CO"),
               Map.of(NeoActionAvailability.valueKey(DOCUMENT_ACTION, "RE"), "Linked documents.")));
 
       JSONObject action = entry(response, DOCUMENT_ACTION);
@@ -481,9 +481,9 @@ class McpActionsViewTest {
 
       JSONObject withoutRecord = invoiceButtonCatalogue(config, null);
       JSONObject completed = invoiceButtonCatalogue(config,
-          record(Map.of(DOCUMENT_STATUS, "CO"), Map.of()));
+          subject(Map.of(DOCUMENT_STATUS, "CO"), Map.of()));
       JSONObject voided = invoiceButtonCatalogue(config,
-          record(Map.of(DOCUMENT_STATUS, "VO"), Map.of()));
+          subject(Map.of(DOCUMENT_STATUS, "VO"), Map.of()));
 
       assertTrue(entry(withoutRecord, DOCUMENT_ACTION).has("valuesByStatus"));
       assertFalse(entry(withoutRecord, DOCUMENT_ACTION).has("availableNow"));
@@ -497,25 +497,25 @@ class McpActionsViewTest {
     @DisplayName("a voided goods document is not judged and gets no completed-document note")
     void voidedGoodsDocumentIsNotJudged() throws JSONException {
       JSONObject voided = entry(catalogue(new GoodsReceiptHeaderHandler().actionContracts(),
-          record(Map.of(DOCUMENT_STATUS, "VO"), Map.of())), DOCUMENT_ACTION);
+          subject(Map.of(DOCUMENT_STATUS, "VO"), Map.of())), DOCUMENT_ACTION);
 
       assertFalse(voided.has("availableNow"), voided.toString());
       assertFalse(voided.has("unavailableReason"), voided.toString());
     }
 
     private JSONObject invoiceButtonCatalogue(McpActionsSection.View config,
-        McpActionAvailabilityContext record) throws JSONException {
+        McpActionAvailabilityContext subject) throws JSONException {
       JSONObject button = buttonField(DOCUMENT_ACTION, "Process Invoice");
       button.put("column", "DocAction");
       return McpActionsView.buildResponse("purchase-invoice", "header", new JSONArray().put(button),
-          Map.of(), config, Collections.emptySet(), record);
+          Map.of(), config, Collections.emptySet(), subject);
     }
 
     @Test
     @DisplayName("an unavailable action stays listed and still counts as invokable (advisory)")
     void unavailableStaysListedAndInvokable() throws JSONException {
       JSONObject response = catalogue(new GoodsReceiptHeaderHandler().actionContracts(),
-          record(Map.of(DOCUMENT_STATUS, "CO"), Map.of()));
+          subject(Map.of(DOCUMENT_STATUS, "CO"), Map.of()));
 
       JSONObject complete = entry(response, DOCUMENT_ACTION);
       assertFalse(complete.getBoolean("availableNow"));
@@ -531,7 +531,7 @@ class McpActionsViewTest {
   class Visibility {
 
     private org.openbravo.base.structure.BaseOBObject owned(String clientId, String orgId) {
-      org.openbravo.base.structure.BaseOBObject record = org.mockito.Mockito.mock(
+      org.openbravo.base.structure.BaseOBObject subject = org.mockito.Mockito.mock(
           org.openbravo.base.structure.BaseOBObject.class,
           org.mockito.Mockito.withSettings().extraInterfaces(
               org.openbravo.base.structure.ClientEnabled.class,
@@ -542,15 +542,15 @@ class McpActionsViewTest {
       org.openbravo.model.common.enterprise.Organization organisation = org.mockito.Mockito.mock(
           org.openbravo.model.common.enterprise.Organization.class);
       org.mockito.Mockito.when(organisation.getId()).thenReturn(orgId);
-      org.mockito.Mockito.when(((org.openbravo.base.structure.ClientEnabled) record).getClient())
+      org.mockito.Mockito.when(((org.openbravo.base.structure.ClientEnabled) subject).getClient())
           .thenReturn(client);
       org.mockito.Mockito.when(
-          ((org.openbravo.base.structure.OrganizationEnabled) record).getOrganization())
+          ((org.openbravo.base.structure.OrganizationEnabled) subject).getOrganization())
           .thenReturn(organisation);
-      return record;
+      return subject;
     }
 
-    private boolean visible(org.openbravo.base.structure.BaseOBObject record, String[] clients,
+    private boolean visible(org.openbravo.base.structure.BaseOBObject subject, String[] clients,
         String[] orgs) {
       try (org.mockito.MockedStatic<org.openbravo.dal.core.OBContext> ctx =
           org.mockito.Mockito.mockStatic(org.openbravo.dal.core.OBContext.class)) {
@@ -559,7 +559,7 @@ class McpActionsViewTest {
         ctx.when(org.openbravo.dal.core.OBContext::getOBContext).thenReturn(context);
         org.mockito.Mockito.when(context.getReadableClients()).thenReturn(clients);
         org.mockito.Mockito.when(context.getReadableOrganizations()).thenReturn(orgs);
-        return McpActionAvailabilityContext.isVisibleToRole(record);
+        return McpActionAvailabilityContext.isVisibleToRole(subject);
       }
     }
 

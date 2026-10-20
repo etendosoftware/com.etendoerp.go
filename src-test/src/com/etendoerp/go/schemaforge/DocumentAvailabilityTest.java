@@ -66,7 +66,7 @@ class DocumentAvailabilityTest {
 
   private static final String DOCUMENT_ACTION = "documentAction";
 
-  private static java.util.function.Function<String, String> record(String status, String posted) {
+  private static java.util.function.UnaryOperator<String> subject(String status, String posted) {
     return property -> {
       if ("documentStatus".equals(property)) {
         return status;
@@ -83,28 +83,28 @@ class DocumentAvailabilityTest {
     @DisplayName("post applies to a completed document that is not booked; unpost to one that is")
     void postAndUnpost() {
       assertEquals(Boolean.TRUE, DocumentAvailability.WHEN_POSTABLE
-          .evaluate(record("CO", "N")).available());
+          .evaluate(subject("CO", "N")).available());
       assertEquals(Boolean.TRUE, DocumentAvailability.WHEN_POSTABLE
-          .evaluate(record("CO", "NC")).available());
+          .evaluate(subject("CO", "NC")).available());
       assertEquals(Boolean.FALSE, DocumentAvailability.WHEN_POSTABLE
-          .evaluate(record("CO", "Y")).available());
+          .evaluate(subject("CO", "Y")).available());
       assertEquals(Boolean.FALSE, DocumentAvailability.WHEN_POSTABLE
-          .evaluate(record("DR", "N")).available());
+          .evaluate(subject("DR", "N")).available());
       assertEquals(Boolean.TRUE, DocumentAvailability.WHEN_UNPOSTABLE
-          .evaluate(record("CO", "Y")).available());
+          .evaluate(subject("CO", "Y")).available());
       assertEquals(Boolean.FALSE, DocumentAvailability.WHEN_UNPOSTABLE
-          .evaluate(record("CO", "N")).available());
+          .evaluate(subject("CO", "N")).available());
     }
 
     @Test
     @DisplayName("goods documentAction offers CO on a draft and nothing, with the return note, once completed")
     void goodsDocumentAction() {
       NeoActionAvailability.Verdict draft =
-          DocumentAvailability.GOODS_DOCUMENT_ACTION.evaluate(record("DR", null));
+          DocumentAvailability.GOODS_DOCUMENT_ACTION.evaluate(subject("DR", null));
       NeoActionAvailability.Verdict completed =
-          DocumentAvailability.GOODS_DOCUMENT_ACTION.evaluate(record("CO", null));
+          DocumentAvailability.GOODS_DOCUMENT_ACTION.evaluate(subject("CO", null));
       NeoActionAvailability.Verdict voided =
-          DocumentAvailability.GOODS_DOCUMENT_ACTION.evaluate(record("VO", null));
+          DocumentAvailability.GOODS_DOCUMENT_ACTION.evaluate(subject("VO", null));
 
       assertEquals(List.of("CO"), draft.valuesNow());
       assertEquals(Boolean.FALSE, completed.available());
