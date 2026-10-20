@@ -238,8 +238,13 @@ public class FinancialAccountAccountingHandler implements NeoHandler {
     }
     String id = body.isNull(field) ? null : StringUtils.trimToNull(body.optString(field, null));
     // ETP-5693: an unchanged value is not re-checked, so a pre-existing row stays saveable
-    boolean unchanged = current != null && current.getId().equals(id);
-    setter.accept(id == null ? null : unchanged ? current : resolveCombination(id, ledger, field));
+    if (id == null) {
+      setter.accept(null);
+    } else if (current != null && current.getId().equals(id)) {
+      setter.accept(current);
+    } else {
+      setter.accept(resolveCombination(id, ledger, field));
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -326,11 +331,8 @@ public class FinancialAccountAccountingHandler implements NeoHandler {
     if (combo == null) {
       throw new OBException("Accounting combination not found: " + id);
     }
-    if (combo.getAccountingSchema() != null && ledger != null
-        && !combo.getAccountingSchema().getId().equals(ledger.getId())) {
-      throw new OBException("Accounting combination does not belong to the account's ledger: " + id);
-    }
-    PostingAccountGuard.requirePosting(combo, null, field);
+    // ETP-5693: the ledger check is the shared keyed one, so the SPA can translate it
+    PostingAccountGuard.requirePosting(combo, ledger, field);
     return combo;
   }
 

@@ -80,6 +80,8 @@ import org.openbravo.model.financialmgmt.calendar.Calendar;
  *   <li>tenant isolation: foreign combination / currency / org ids answer "not found", and every
  *   error rolls the session back (ETP-5722)</li>
  * </ul>
+ *
+ * @covers com.etendoerp.go.schemaforge.GeneralLedgerConfigurationHandler
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)

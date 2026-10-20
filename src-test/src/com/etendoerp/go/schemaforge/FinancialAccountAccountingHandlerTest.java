@@ -575,8 +575,8 @@ class FinancialAccountAccountingHandlerTest {
   }
 
   @Test
-  @DisplayName("Save throws when the submitted AccountingCombination belongs to a different ledger")
-  void saveCrossLedgerCombinationThrows400() throws Exception {
+  @DisplayName("ETP-5693: a combination of another ledger is refused with ETGO_AccountWrongLedger")
+  void saveCrossLedgerCombinationRefusedWithKey() throws Exception {
     wireAccountWithLedger();
     // findOrCreateRow runs before any combination is resolved — the cross-ledger validation
     // failure happens while updating an already-existing row.
@@ -596,11 +596,21 @@ class FinancialAccountAccountingHandlerTest {
         .put(PARAM_ACCOUNT_ID, ACCOUNT_ID)
         .put(F_DEPOSIT, "deposit-bad");
 
-    NeoResponse response = handler.handle(saveCtx("POST", body));
+    NeoResponse response = saveWithKeyedMessages(body);
 
     assertEquals(400, response.getHttpStatus());
-    assertTrue(response.getBody().getJSONObject("error").getString("message")
-        .contains("does not belong to the account's ledger"));
+    assertEquals("ETGO_AccountWrongLedger", response.getBody().getJSONObject("error")
+        .getJSONArray("messageKeys").getString(0));
+  }
+
+  /** Saves with OBMessageUtils answering each message key verbatim, so a keyed refusal is readable. */
+  private NeoResponse saveWithKeyedMessages(JSONObject body) {
+    try (MockedStatic<OBMessageUtils> messages = mockStatic(OBMessageUtils.class)) {
+      messages.when(() -> OBMessageUtils.messageBD(any())).thenAnswer(i -> i.getArgument(0));
+      messages.when(() -> OBMessageUtils.parseTranslation(any(String.class), any()))
+          .thenAnswer(i -> i.getArgument(0));
+      return handler.handle(saveCtx("POST", body));
+    }
   }
 
   @Test
@@ -662,11 +672,11 @@ class FinancialAccountAccountingHandlerTest {
         .put(F_DEPOSIT, "deposit-ok")
         .put(F_WITHDRAWAL, "withdrawal-bad");
 
-    NeoResponse response = handler.handle(saveCtx("POST", body));
+    NeoResponse response = saveWithKeyedMessages(body);
 
     assertEquals(400, response.getHttpStatus());
-    assertTrue(response.getBody().getJSONObject("error").getString("message")
-        .contains("does not belong to the account's ledger"));
+    assertEquals("ETGO_AccountWrongLedger", response.getBody().getJSONObject("error")
+        .getJSONArray("messageKeys").getString(0));
     // The whole request is rejected (400, nothing persisted) — but the earlier field in call
     // order already mutated the in-memory row before the later field's failure aborted the
     // method. This is NOT full object-level atomicity: only "never explicitly persisted".

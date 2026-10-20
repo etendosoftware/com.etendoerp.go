@@ -80,6 +80,8 @@ public final class PostingAccountGuard {
   public interface LedgerResolver {
 
     /**
+     * Names the ledger of the row being written.
+     *
      * @param context the write being checked
      * @param stored  the stored record on update, {@code null} on create
      * @param body    the submitted values keyed by DAL property name
@@ -195,17 +197,9 @@ public final class PostingAccountGuard {
     AcctSchema ledger = null;
     boolean ledgerResolved = false;
     for (Map.Entry<String, Object> entry : body.entrySet()) {
-      Property property = entity.getProperty(entry.getKey(), false);
-      if (!isCombination(property) || !(entry.getValue() instanceof String)) {
-        continue;
-      }
-      String id = (String) entry.getValue();
-      if (stored != null && !changes(id, stored.get(entry.getKey()))) {
-        continue; // R2
-      }
-      AccountingCombination combo = NeoActionRecordGuard.loadOwned(AccountingCombination.class, id);
+      AccountingCombination combo = changedCombination(entity, stored, entry);
       if (combo == null) {
-        continue; // R3
+        continue;
       }
       if (!ledgerResolved) {
         ledger = ledgerOf.resolve(context, stored, body);
@@ -213,6 +207,23 @@ public final class PostingAccountGuard {
       }
       requirePosting(combo, ledger, apiKeys.get(entry.getKey()));
     }
+  }
+
+  /**
+   * The combination one submitted value writes, or {@code null} when the value is not a
+   * combination, equals the stored one (R2) or does not load for the caller (R3).
+   */
+  private static AccountingCombination changedCombination(Entity entity, BaseOBObject stored,
+      Map.Entry<String, Object> entry) {
+    Property property = entity.getProperty(entry.getKey(), false);
+    if (!isCombination(property) || !(entry.getValue() instanceof String)) {
+      return null;
+    }
+    String id = (String) entry.getValue();
+    if (stored != null && !changes(id, stored.get(entry.getKey()))) {
+      return null;
+    }
+    return NeoActionRecordGuard.loadOwned(AccountingCombination.class, id);
   }
 
   /** The submitted values keyed by DAL property, unwrapped and renamed as NeoFieldFilter does. */

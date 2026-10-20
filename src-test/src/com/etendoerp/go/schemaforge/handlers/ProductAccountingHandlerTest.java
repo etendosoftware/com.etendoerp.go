@@ -72,6 +72,9 @@ import com.etendoerp.go.schemaforge.NeoEndpointType;
  * the DB returns no accounting schemas, and the exception fallback.
  *
  * <p>100 % line and branch coverage of the handler class is the target.
+ *
+ * @covers com.etendoerp.go.schemaforge.handlers.ProductAccountingHandler
+ * @covers com.etendoerp.go.schemaforge.handlers.AbstractAccountingSchemaAutoFillHandler
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
