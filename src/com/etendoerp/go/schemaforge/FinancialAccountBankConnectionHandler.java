@@ -47,6 +47,7 @@ import com.etendoerp.psd2.bank.integration.utils.BankIntegrationConstants;
 import com.etendoerp.psd2.bank.integration.utils.BankIntegrationUtils;
 import com.etendoerp.psd2.bank.integration.utils.SaltEdgeAccountLinkHelper;
 import com.etendoerp.psd2.bank.integration.utils.SaltEdgeConnectionBuilder;
+import com.etendoerp.psd2.bank.integration.utils.SaltEdgeConnectionHelper;
 import com.etendoerp.psd2.bank.integration.utils.SaltEdgeAccountLinkHelper.LinkAccountData;
 import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
@@ -685,6 +686,10 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
         ? SaltEdgeAccountLinkHelper.resolveConsentExpiresAt(details, apiKey)
         : null;
     SaltEdgeAccountLinkHelper.syncAllConnectionsForSaltEdgeId(connectionId, "AC", consentExpiresAt);
+    // Same as Classic: a successful reconnect does not by itself clear the staleness left by the
+    // failure that prompted it, so refresh the fetch health now instead of waiting for the next
+    // sync (ETP-5089). Null-safe and never throws, so it cannot fail the reconnect.
+    SaltEdgeConnectionHelper.syncConnectionHealthFromDetails(connectionId, details);
     JSONObject data = new JSONObject();
     data.put("connected", true);
     data.put("consentExpiresAt", FinancialAccountBankConnectionSupport.formatInstant(consentExpiresAt));
