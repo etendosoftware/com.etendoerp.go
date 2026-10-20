@@ -82,6 +82,7 @@ public class HostedCheckoutService {
     private final boolean transferProducts;
     private final boolean transferContacts;
     private final Consumer<String> beforeProvider;
+    private final String reactivatedClientId;
 
     /**
      * Creates the options of one checkout.
@@ -94,15 +95,37 @@ public class HostedCheckoutService {
      */
     public SessionOptions(String demoClientId, boolean transferProducts, boolean transferContacts,
         Consumer<String> beforeProvider) {
+      this(demoClientId, transferProducts, transferContacts, beforeProvider, null);
+    }
+
+    private SessionOptions(String demoClientId, boolean transferProducts,
+        boolean transferContacts, Consumer<String> beforeProvider, String reactivatedClientId) {
       this.demoClientId = demoClientId;
       this.transferProducts = transferProducts;
       this.transferContacts = transferContacts;
       this.beforeProvider = beforeProvider == null ? requestId -> { } : beforeProvider;
+      this.reactivatedClientId = reactivatedClientId;
     }
 
     /** @return options for a checkout with no demo source and no callback */
     public static SessionOptions none() {
       return new SessionOptions(null, false, false, null);
+    }
+
+    /**
+     * ETP-5742 — options for a checkout that re-subscribes an existing canceled tenant: no demo
+     * source, no transfer, and the tenant the payment webhook applies the purchase to.
+     *
+     * @param reactivatedClientId {@code AD_CLIENT_ID} of the canceled tenant
+     * @return the re-subscription options
+     */
+    public static SessionOptions reactivating(String reactivatedClientId) {
+      return new SessionOptions(null, false, false, null, reactivatedClientId);
+    }
+
+    /** @return the tenant this checkout re-subscribes, or {@code null} for a new environment */
+    public String getReactivatedClientId() {
+      return reactivatedClientId;
     }
 
     /** @return selected demo client id, or {@code null} when none is selected */
@@ -197,11 +220,13 @@ public class HostedCheckoutService {
     // because the checkoutUrl only reaches the browser once this method returns.
     checkoutRequestStore.recordRequested(requestId, accountId, accountEmail, clientName,
         new CheckoutRequestStore.RequestOptions(sessionOptions.demoClientId, true,
-            sessionOptions.transferProducts, sessionOptions.transferContacts, price.getId()),
+            sessionOptions.transferProducts, sessionOptions.transferContacts, price.getId(),
+            sessionOptions.reactivatedClientId),
         plan);
     sessionOptions.beforeProvider.accept(requestId);
     return createProviderSession(requestId, accountEmail, clientName, origin, price,
-        plan.getSearchKey(), initialIdempotencyKey(requestId), null);
+        plan.getSearchKey(), initialIdempotencyKey(requestId), null,
+        sessionOptions.reactivatedClientId != null);
   }
 
   /**
@@ -322,15 +347,16 @@ public class HostedCheckoutService {
       throw new OriginalPriceUnavailableException();
     }
     StripePriceService.Price price = stripePriceService.retrievePrice(priceId);
+    CheckoutRequest request = checkoutRequestStore.find(requestId, accountEmail);
     return createProviderSession(requestId, accountEmail, clientName, origin, price,
-        findPlanKey(requestId, accountEmail),
+        planKeyOf(request),
         sessionId == null ? initialIdempotencyKey(requestId)
-            : replacementIdempotencyKey(requestId, sessionId), sessionId);
+            : replacementIdempotencyKey(requestId, sessionId), sessionId,
+        CheckoutRequestStore.isPendingReactivation(request));
   }
 
   /** The plan key recorded on the request, echoed as metadata; blank for a pre-plan request. */
-  private String findPlanKey(String requestId, String accountEmail) {
-    CheckoutRequest request = checkoutRequestStore.find(requestId, accountEmail);
+  private static String planKeyOf(CheckoutRequest request) {
     Plan plan = request == null ? null : request.getPlan();
     return plan == null ? null : plan.getSearchKey();
   }
@@ -351,12 +377,13 @@ public class HostedCheckoutService {
     return result;
   }
 
+  @SuppressWarnings("java:S107")
   private JSONObject createProviderSession(String requestId, String accountEmail, String clientName,
       String origin, StripePriceService.Price price, String planKey, String idempotencyKey,
-      String expectedSessionId) throws IOException, JSONException {
+      String expectedSessionId, boolean reactivation) throws IOException, JSONException {
     String mode = modeOf(price);
     String form = buildSessionForm(requestId, accountEmail, clientName, origin, price.getId(),
-        planKey, mode);
+        planKey, mode, reactivation);
     StripeResponse response = stripeApiClient.postForm("/v1/checkout/sessions", form,
         idempotencyKey);
     if (!response.isSuccess()) {
@@ -439,8 +466,31 @@ public class HostedCheckoutService {
   static String buildSessionForm(String requestId, String accountEmail, String clientName,
       String origin, String priceId, String planKey, String mode)
       throws UnsupportedEncodingException {
-    String success = origin + "/upgrade?checkout=success&requestId=" + requestId;
-    String cancel = origin + "/upgrade?checkout=cancelled&requestId=" + requestId;
+    return buildSessionForm(requestId, accountEmail, clientName, origin, priceId, planKey, mode,
+        false);
+  }
+
+  /**
+   * Builds the form-encoded Checkout Session body, returning a re-subscription to its tenant.
+   *
+   * <p>ETP-5742 — a re-subscription comes back to the blocked tenant itself, not to the upgrade
+   * page: there is no new environment to set up, the payment webhook applies the purchase to the
+   * tenant, and the blocked screen waits for it ({@code reactivation=success}). A cancel returns
+   * to the same screen, which still offers the re-subscription.
+   *
+   * @param reactivation whether the checkout re-subscribes an existing tenant
+   * @see #buildSessionForm(String, String, String, String, String, String, String)
+   */
+  @SuppressWarnings("java:S107")
+  static String buildSessionForm(String requestId, String accountEmail, String clientName,
+      String origin, String priceId, String planKey, String mode, boolean reactivation)
+      throws UnsupportedEncodingException {
+    String success = reactivation
+        ? origin + "/dashboard?reactivation=success&requestId=" + requestId
+        : origin + "/upgrade?checkout=success&requestId=" + requestId;
+    String cancel = reactivation
+        ? origin + "/dashboard?reactivation=cancelled&requestId=" + requestId
+        : origin + "/upgrade?checkout=cancelled&requestId=" + requestId;
     StringBuilder form = new StringBuilder();
     add(form, "mode", mode);
     add(form, "line_items[0][price]", priceId);
