@@ -102,6 +102,13 @@ public final class NeoListReferenceError {
   /**
    * ETP-4996 on a captured fault: a List-reference failure is a 5xx whose sanitized message still
    * names the column, so the accepted values are appended exactly as on the uncaptured path.
+   *
+   * @param classified
+   *     the classified error response
+   * @return the same response, with the accepted List-reference values appended to
+   *     {@code error.message} when it is a 5xx
+   * @throws JSONException
+   *     when the error body cannot be updated
    */
   public static NeoResponse enrichServerError(NeoResponse classified) throws JSONException {
     JSONObject error = classified.getBody() != null
