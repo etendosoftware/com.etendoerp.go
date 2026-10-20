@@ -549,7 +549,10 @@ loaded too, so an empty block 9 is `BLOCK9_NOT_PRELOADED` there as in `validate`
 queries of the warnings are not). While one holds, `generate` answers `409` with
 `error.code = BLOCKING_INCIDENTS` and `error.incidents`, and `submit` the failure JSON with
 `errorCode = BLOCKING_INCIDENTS` and `incidents`. Nothing is written by a guard. Test mode
-(`testMode: true`, ServValiDos) is not guarded, as before. Tests: `Fiscal390IncidentRulesTest`
+(`testMode: true`, ServValiDos) is not guarded, as before. **Manual registration is deliberately
+ungated: the declaration was filed outside Etendo** — the status change to `submitted` /
+`submitted_ack` (`PUT /declarations`, manual method) evaluates no rule, and the page does not
+gate those two paths either (as for the 303). Tests: `Fiscal390IncidentRulesTest`
 (every rule, positive and negative), `Fiscal390IncidentsSupportTest`,
 `FiscalDeclCrudHandlerTest` (replace keeps `AEAT-…`, structured message),
 `Fiscal390BoxesHandlerTest` (generate guard), `Fiscal390SubmissionSupportTest`.
