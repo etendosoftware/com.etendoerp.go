@@ -130,7 +130,7 @@ public class DocumentPostingService {
    * cost yet. Reusing a real, already-translated core {@code AD_MESSAGE} beats a hardcoded EN/ES
    * pair maintained only in Java.</p>
    */
-  private static final String MSG_NOT_CALCULATED_COST = "NotCalculatedCost";
+  static final String MSG_NOT_CALCULATED_COST = "NotCalculatedCost";
 
   /**
    * How long a caller should wait before posting again when cost is still being calculated
@@ -145,10 +145,6 @@ public class DocumentPostingService {
   static final String ERROR_COST_NOT_CALCULATED = "costNotCalculated";
   /** HTTP 409: nothing is wrong with the request, retry once cost has been calculated. */
   static final int STATUS_RETRY_LATER = 409;
-  private static final String COST_RETRY_HINT = "Cost is calculated by a background process that "
-      + "runs about every 30 seconds. Nothing was posted and the document keeps the posting "
-      + "status Etendo set (posted NC) until a later post succeeds: wait about 30 seconds and "
-      + "repeat the same post action.";
 
   /**
    * The {@code C_BP_Group_Acct} columns relevant to this app's document types (ETP-5175) — a
@@ -546,8 +542,8 @@ public class DocumentPostingService {
       body.put("success", result.ok());
       body.put("message", result.message());
       putMessageIdentity(body, result);
-      if (isRetryable(result)) {
-        return retryLater(body, result);
+      if (CostingStall.isRetryable(result)) {
+        return CostingStall.retryLater(body, result);
       }
       if (CostingStall.isStalled(result)) {
         return CostingStall.answer(body, result);
@@ -561,30 +557,6 @@ public class DocumentPostingService {
       log.error("Posting action error for record {}", context.getRecordId(), e);
       return NeoResponse.error(500, "Posting action error");
     }
-  }
-
-  /** @return whether the failure is the retryable "cost not calculated yet" one (ETP-5714) */
-  private static boolean isRetryable(PostResult result) {
-    return !result.ok() && result.messageKeys().contains(MSG_NOT_CALCULATED_COST)
-        && result.messageParams().containsKey(MESSAGE_PARAMS_RETRY_AFTER_SECONDS);
-  }
-
-  /**
-   * The 409 answer for a post that failed only because cost is not calculated yet (ETP-5714):
-   * the flat body the SPA already reads ({@code message}, {@code messageKeys}) plus the canonical
-   * MCP error shape — {@code error} is the code, so the MCP envelope keeps it instead of
-   * replacing it with a generic one — {@code retryable} and {@code retryAfterSeconds}; REST
-   * additionally gets the standard {@code Retry-After} header.
-   */
-  private static NeoResponse retryLater(JSONObject body, PostResult result) throws JSONException {
-    body.put("error", ERROR_COST_NOT_CALCULATED);
-    body.put("status", STATUS_RETRY_LATER);
-    body.put("detail", result.message());
-    body.put("retryable", true);
-    body.put(MESSAGE_PARAMS_RETRY_AFTER_SECONDS, COST_RETRY_AFTER_SECONDS);
-    body.put("hint", COST_RETRY_HINT);
-    return NeoResponse.error(STATUS_RETRY_LATER, body)
-        .withHeader("Retry-After", String.valueOf(COST_RETRY_AFTER_SECONDS));
   }
 
   /** Seam for the transaction connection provider; overridable in tests. */
@@ -726,6 +698,33 @@ public class DocumentPostingService {
     return OBMessageUtils.messageBD(messageKey);
   }
 
+  /**
+   * The AD message the failure's text is re-resolved from in the GO locale, or {@code null} to keep
+   * core's text. {@code InvalidAccount} (ETP-5175), {@code OtherPostingProcessActive} for a document
+   * another process holds (ETP-5529), {@code PeriodNotAvailable} (ETP-5577) and
+   * {@code NotCalculatedCost} (ETP-5714: core resolves {@code NC} to the per-product
+   * "NotCalculatedCostWithTransaction" text in the classic session's language, while the answer
+   * carries the generic, GO-locale one). ETP-5436: {@code D} on a Goods Movement means the same "cost
+   * not yet calculated" condition, so it reuses {@code NotCalculatedCost} instead of a second
+   * hardcoded message.
+   */
+  private static String relocalizedKeyOf(AcctServer acct) {
+    String status = acct.getStatus();
+    if (AcctServer.STATUS_InvalidAccount.equals(status)) {
+      return MSG_INVALID_ACCOUNT_BASE;
+    }
+    if (AcctServer.STATUS_DocumentLocked.equals(status)) {
+      return MSG_OTHER_POSTING_PROCESS_ACTIVE;
+    }
+    if (AcctServer.STATUS_PeriodClosed.equals(status)) {
+      return MSG_PERIOD_NOT_AVAILABLE;
+    }
+    boolean goodsMovementDisabled = AcctServer.STATUS_DocumentDisabled.equals(status)
+        && TABLE_M_MOVEMENT.equals(acct.tableName);
+    return AcctServer.STATUS_NotCalculatedCost.equals(status) || goodsMovementDisabled
+        ? MSG_NOT_CALCULATED_COST : null;
+  }
+
   private static String errorMessageOf(AcctServer acct) {
     OBError result = acct.getMessageResult();
     String message = (result != null && result.getMessage() != null && !result.getMessage().isEmpty())
@@ -741,42 +740,11 @@ public class DocumentPostingService {
     // GO locale for the statuses we know — OBMessageUtils.messageBD already follows OBContext's
     // language like the rest of this file's own enrichment messages. Any other status keeps
     // core's text as-is.
-    if (AcctServer.STATUS_InvalidAccount.equals(acct.getStatus())) {
-      String localizedBase = localizedMessage(MSG_INVALID_ACCOUNT_BASE);
-      if (StringUtils.isNotBlank(localizedBase)) {
-        message = localizedBase;
-      }
-    }
-    // ETP-5529: a document another posting process holds (or whose Processing lock AcctServer
-    // could not take) — "This record is being posted by another process".
-    if (AcctServer.STATUS_DocumentLocked.equals(acct.getStatus())) {
-      String localizedLocked = localizedMessage(MSG_OTHER_POSTING_PROCESS_ACTIVE);
-      if (StringUtils.isNotBlank(localizedLocked)) {
-        message = localizedLocked;
-      }
-    }
-    if (AcctServer.STATUS_PeriodClosed.equals(acct.getStatus())) {
-      String localizedPeriod = localizedMessage(MSG_PERIOD_NOT_AVAILABLE);
-      if (StringUtils.isNotBlank(localizedPeriod)) {
-        message = localizedPeriod;
-      }
-    }
-    // ETP-5714: core resolves 'NC' to the per-product "NotCalculatedCostWithTransaction" text in
-    // the classic session's language; the retryable answer carries the generic, GO-locale one.
-    if (AcctServer.STATUS_NotCalculatedCost.equals(acct.getStatus())) {
-      String localizedNotCalculated = localizedMessage(MSG_NOT_CALCULATED_COST);
-      if (StringUtils.isNotBlank(localizedNotCalculated)) {
-        message = localizedNotCalculated;
-      }
-    }
-    // ETP-5436: 'D' on a Goods Movement means the same "cost not yet calculated" condition
-    // MSG_NOT_CALCULATED_COST already describes (see its javadoc) — reuse it rather than a
-    // second hardcoded message.
-    if (AcctServer.STATUS_DocumentDisabled.equals(acct.getStatus())
-        && TABLE_M_MOVEMENT.equals(acct.tableName)) {
-      String localizedNotCalculated = localizedMessage(MSG_NOT_CALCULATED_COST);
-      if (StringUtils.isNotBlank(localizedNotCalculated)) {
-        message = localizedNotCalculated;
+    String key = relocalizedKeyOf(acct);
+    if (key != null) {
+      String localized = localizedMessage(key);
+      if (StringUtils.isNotBlank(localized)) {
+        message = localized;
       }
     }
     return message;

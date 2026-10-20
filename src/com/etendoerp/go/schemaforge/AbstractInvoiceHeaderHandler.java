@@ -38,7 +38,6 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.provider.OBProvider;
-import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBCurrencyUtils;
@@ -206,19 +205,6 @@ public abstract class AbstractInvoiceHeaderHandler {
     Set<String> keys = new HashSet<>(followUp.responseFields());
     keys.add(getInvoiceSubtypeKey());
     return keys;
-  }
-
-  /**
-   * The actions that do not apply to ONE invoice for a reason a column cannot express (ETP-5714):
-   * Reactivate when {@link InvoiceReactivationGuard} would refuse it. The concrete handlers
-   * implement {@link NeoHandler}, so this public method is their
-   * {@link NeoHandler#unavailableActions}.
-   *
-   * @param subject the record the agent asked about
-   * @return {@code action:value → reason}; empty when nothing is ruled out
-   */
-  public Map<String, String> unavailableActions(BaseOBObject subject) {
-    return InvoiceDocumentAvailability.unavailable(subject);
   }
 
   /**

@@ -147,4 +147,33 @@ final class CostingStall {
     body.put("hint", HINT);
     return NeoResponse.error(SC_UNPROCESSABLE, body);
   }
+
+  private static final String COST_RETRY_HINT = "Cost is calculated by a background process that "
+      + "runs about every 30 seconds. Nothing was posted and the document keeps the posting "
+      + "status Etendo set (posted NC) until a later post succeeds: wait about 30 seconds and "
+      + "repeat the same post action.";
+
+  /** @return whether the failure is the retryable "cost not calculated yet" one (ETP-5714) */
+  static boolean isRetryable(DocumentPostingService.PostResult result) {
+    return !result.ok() && result.messageKeys().contains(DocumentPostingService.MSG_NOT_CALCULATED_COST)
+        && result.messageParams().containsKey(DocumentPostingService.MESSAGE_PARAMS_RETRY_AFTER_SECONDS);
+  }
+
+  /**
+   * The 409 answer for a post that failed only because cost is not calculated yet (ETP-5714):
+   * the flat body the SPA already reads ({@code message}, {@code messageKeys}) plus the canonical
+   * MCP error shape — {@code error} is the code, so the MCP envelope keeps it instead of
+   * replacing it with a generic one — {@code retryable} and {@code retryAfterSeconds}; REST
+   * additionally gets the standard {@code Retry-After} header.
+   */
+  static NeoResponse retryLater(JSONObject body, DocumentPostingService.PostResult result) throws JSONException {
+    body.put("error", DocumentPostingService.ERROR_COST_NOT_CALCULATED);
+    body.put("status", DocumentPostingService.STATUS_RETRY_LATER);
+    body.put("detail", result.message());
+    body.put("retryable", true);
+    body.put(DocumentPostingService.MESSAGE_PARAMS_RETRY_AFTER_SECONDS, DocumentPostingService.COST_RETRY_AFTER_SECONDS);
+    body.put("hint", COST_RETRY_HINT);
+    return NeoResponse.error(DocumentPostingService.STATUS_RETRY_LATER, body)
+        .withHeader("Retry-After", String.valueOf(DocumentPostingService.COST_RETRY_AFTER_SECONDS));
+  }
 }
