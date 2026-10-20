@@ -69,6 +69,7 @@ import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.enterprise.Warehouse;
 
 import com.auth0.jwt.interfaces.DecodedJWT;
+import com.etendoerp.go.common.BoundedJsonParser;
 import com.etendoerp.go.common.EtendoGoCorsServlet;
 import com.etendoerp.go.common.JwtAuthUtils;
 import com.etendoerp.go.common.ProtocolErrorAdapters;
@@ -5913,7 +5914,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    */
   private JSONObject readJsonBody(HttpServletRequest request)
       throws IOException, JSONException {
-    return new JSONObject(readRawBody(request));
+    return BoundedJsonParser.parseObject(readRawBody(request));
   }
 
   private String readRawBody(HttpServletRequest request) throws IOException {

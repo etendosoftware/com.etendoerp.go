@@ -703,6 +703,7 @@ that nobody else saved the record in between.
 
 | Condition | Status | `error` | Meaning / remedy |
 |---|---|---|---|
+| No request body at all (blank) — also a blank `POST` create (ETP-5475) | `400` | `{"error":{"message":"Request body is required"}}` (standard NEO error) | Nothing to write was sent; logged at WARN without a stack trace. Send the JSON body. |
 | `updated` absent, blank, or the literal string `"null"` | `400` | `missing_updated` | The caller never read the record, or dropped the field before writing. Re-`GET` the same URL (or `etendo_get`) and send its `updated` back verbatim alongside the changed fields. |
 | `updated` present but no longer matches the stored row | `409` | `stale_record` | Someone else saved the record after the caller's read and before this write. Re-read, reapply the intended changes on top of the fresh state, retry. |
 
@@ -4824,7 +4825,8 @@ counted server-side, not reported to the caller).
 | Rate limit | Two fixed one-minute windows, in memory and per instance (bounded maps); an event must pass **both**, the excess is dropped and counted. **Per session:** 600 events per client + user + `sessionKey`. **Per user:** 1200 events per client + user, whatever the `sessionKey` — the body names the session key, so the per-session limit alone can be evaded by rotating it; the per-user one is keyed only on the token. The per-session limit is checked first, so an event it refuses does not consume the user's budget. |
 | Opt-out | `usage.events.enabled=false` in `Openbravo.properties` — the endpoint still answers `202`, nothing is stored. |
 
-**Errors:** `400` only when the body is not a JSON object with an `events` array; `413` when the
+**Errors:** `400` only when the body is not a JSON object with an `events` array (a body nested
+deeper than 32 levels counts as malformed — see §7 *Client-supplied JSON*); `413` when the
 body exceeds 256 KB; `405` for any method other than `POST`; `401` without a valid token. Any
 unexpected failure after parsing answers `202` with the unprocessed events counted as dropped —
 never `500`, so an older or newer UI degrades to "not recorded" instead of failing.
@@ -5995,6 +5997,77 @@ every action of every entity, before the customization and before the AD button:
 - **REST changes, by accepted exception:** only an action on another tenant's (or an unreadable
   organization's) record, or one whose ownership lookup fails, now answers 404 instead of running. Every action on the caller's own
   records is unchanged, and the SPA only ever sends ids it read through NEO.
+
+### Client-supplied JSON (ETP-5475)
+
+Every JSON text a client sends — a request body, or a JSON-valued request parameter such as
+`criteria`, `items` or `valueMaps` — is parsed through `com.etendoerp.go.common.BoundedJsonParser`,
+never straight into jettison's `new JSONObject(String)` / `new JSONArray(String)`. This holds on
+every channel: NEO REST (single and batch), MCP, `/sws/go/*` (`EtendoGoJwtServlet`), `/oauth2/*`,
+support, survey and agent-chat servlets.
+
+**Why.** jettison 1.3 does not fail cleanly on all malformed input. `{"x":[` recurses until
+`StackOverflowError`, `{"x":[1,` loops appending nulls until `OutOfMemoryError`, and a valid 40 KB
+body nested 20,000 levels deep recurses into `StackOverflowError`. Those are `Error`s, so no
+`catch (Exception)` saw them: the client got a container 500 while the request thread burned CPU,
+or the JVM ran short of heap. Several affected endpoints answer **without a token** (`/oauth2/token`,
+`/oauth2/register`, `/sws/go/login`, `/register`, password reset, session create, invitation accept,
+Google sign-in), so this was a denial-of-service vector.
+
+**What is refused**, by a linear scan before jettison runs: unbalanced or mismatched brackets, an
+unterminated string, nesting deeper than **64** levels (the usage endpoint keeps its own **32**),
+a comment (`/`, `#`) outside a string — jettison skips comments, so they could hide brackets
+from the scan —, a quote inside a bare token (jettison opens a string only where a key or value
+starts, after `{ [ , : ; = >` or at the start; elsewhere a quote is an ordinary character, and a
+scan that opened a string there would see different brackets than jettison), and anything but
+whitespace after the root closes. None of these is valid JSON. Anything jettison still throws on a
+text that passes is reported as `MalformedJsonException` (a `JSONException`), so a
+`catch (JSONException)` that already answered `400` keeps doing so. Its message never echoes the
+body: jettison's `at character N of <text>` suffix is cut.
+
+**What the client gets** is the endpoint's ordinary bad-request answer, never a `500`:
+
+| Channel | Answer |
+|---|---|
+| NEO REST (`/sws/neo/*`, incl. batch, callouts, actions, process and report specs, images, fiscal) | `400` `Invalid JSON body…`; a malformed `criteria` parameter on a CRUD request: `400` `Invalid criteria: malformed JSON` before anything parses it |
+| MCP (`/sws/mcp`) | `400`, JSON-RPC `-32700` *Parse error*, `id: null` (§4.12, dual-era note) |
+| `/sws/go/*` | `400`, as before for any malformed body |
+| `/oauth2/*` | `400` `invalid_request` *Malformed request body* — the token and client-management endpoints answered `500` for any malformed body before |
+
+**Multi-criteria joined by `__;__` are rejected.** Core's datasource accepts several JSON
+criteria in one `criteria` parameter, joined by `JsonConstants.IN_PARAMETER_SEPARATOR` (`__;__`).
+Because the scan refuses anything after the root closes, such a value is a `400`
+`Invalid criteria: malformed JSON`. This is deliberate and not supported: the SPA, core's NEO
+path and this module never send it. An external REST client must send a single criteria object
+(combine conditions inside it, e.g. with an `AdvancedCriteria` `and`).
+
+**Logging.** A refused text is logged once at `WARN`, with no stack trace and without the body —
+it is the client's mistake, not a server fault. `ERROR` with a stack trace stays for failures after
+a successful parse.
+
+**Not every parameter fails the request.** A malformed `valueMaps` on an export is ignored and the
+file is written with raw codes (§4.3 *File export*); the refusal above only removes the crash.
+
+**Two neighbouring type errors answer 4xx too (ETP-5475).** On `PUT /oauth2/clients/{id}` and
+`PUT /oauth2/api-keys/{id}`, an `isActive` that is not a boolean is a `400` `invalid_request`
+*isActive must be a boolean*, logged at `WARN` without a stack trace (it was a `500` with a stack
+trace). The JSON itself is well formed, so the description names the field rather than a
+malformed body. A Google sign-in credential that is
+not a parseable ID token is a `401` *Invalid Google credential* with one quiet `WARN`, as any other
+rejected credential.
+
+Valid JSON within the depth limit parses exactly as before. **Out of scope by design**, still on raw
+jettison: JSON the server itself stored or produced — the stored copy of onboarding drafts, First
+Steps, saved filter presets, the fiscal models catalog and `FiscalDecl` `manualData`, MCP config —,
+the document download token (its signature is verified before its payload is parsed), and responses
+from external providers. The *writes* of filter presets, the fiscal models catalog and `FiscalDecl`
+bodies come from the client and are bounded. The checkout webhook payload (signature-verified) and
+the batch path's re-serialized content still go through `NeoRequestBodyParser` as defense in depth.
+
+**For new code:** parse a client's JSON with `BoundedJsonParser.parseObject` / `parseArray`. A
+`catch (JSONException)` that means "server error" must catch `MalformedJsonException` first.
+`NeoRequestBodyParser`'s `parseJsonObjectSafely` / `parseJsonArraySafely` (and the body helpers
+built on them) are thin delegates to the same parser, never a second scanner.
 
 ---
 
@@ -9206,6 +9279,10 @@ always legacy. Anything else is legacy and behaves exactly as §4.12.24 describe
 | a mirror header, `_meta` version or `clientCapabilities` **missing** | served, one `WARN MCP modern request served without: …`; `400` (`-32020` / `-32602`) only with `mcp.modern.strict=true` |
 | `ping` or any unknown method | `404`, `-32601` |
 | `resources/read` of a missing or inaccessible resource | `-32602` `Resource not found: <uri>` (legacy keeps `-32603`); both eras log one `WARN`, no stack trace. An unknown entity inside a known spec is the same answer |
+
+**A body that is not JSON** — malformed, truncated, nested deeper than 64 levels (§7 *Client-supplied
+JSON*) — answers `400` with JSON-RPC `-32700` *Parse error* and `id: null` in **both** eras: the era,
+like the id, can only be read from a body that parses. It used to be a `500` (ETP-5475).
 
 **The one legacy-visible change.** Everything else in the legacy era is ETP-5639 as it was, but a
 legacy `resources/read` of a missing or inaccessible resource changes on purpose: the code stays

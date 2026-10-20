@@ -4,6 +4,8 @@ package com.etendoerp.go.payment;
 import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONObject;
 
+import com.etendoerp.go.schemaforge.NeoRequestBodyParser;
+
 /**
  * Validates and deduplicates checkout events before a durable provisioning handler is invoked.
  *
@@ -130,7 +132,7 @@ public class CheckoutWebhookProcessor {
     JSONObject event;
     String id;
     try {
-      event = new JSONObject(payload);
+      event = NeoRequestBodyParser.parseJsonObjectSafely(payload);
       id = event.optString("id", "").trim();
       if (id.isEmpty() || !event.has("type")) {
         return Acceptance.refused(Result.INVALID_PAYLOAD);

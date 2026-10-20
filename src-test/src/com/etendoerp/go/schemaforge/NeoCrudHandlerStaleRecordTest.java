@@ -49,6 +49,8 @@ import com.etendoerp.go.schemaforge.util.NeoRecordVersion;
  * mocked statically rather than being driven through a mocked DAL: what is under test here is the
  * WIRING (does a stale verdict become a 409 with the right discriminator), while the verdict itself
  * is covered by {@code NeoRecordVersionTest}.
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoCrudHandler
  */
 class NeoCrudHandlerStaleRecordTest {
 
@@ -137,12 +139,19 @@ class NeoCrudHandlerStaleRecordTest {
     assertFalse(body.getString("hint").trim().isEmpty());
   }
 
+  /**
+   * No body at all is refused before the token check (ETP-5475): there is nothing to write, so it
+   * is a plain 400 "Request body is required", not a {@code missing_updated} logged at ERROR.
+   * What this test guards is that it is still refused, never written without a check.
+   */
   @Test
-  @DisplayName("an update with no request body at all is refused as 400 missing_updated")
+  @DisplayName("an update with no request body at all is refused as 400 before the token check")
   void updateWithoutBodyIsRefused() throws Exception {
     NeoResponse response = invokeValidateUpdateRequest(updateContext(RECORD_ID, null));
     assertNotNull(response);
-    assertEquals("missing_updated", response.getBody().getString("error"));
+    assertEquals(HttpServletResponse.SC_BAD_REQUEST, response.getHttpStatus());
+    assertEquals("Request body is required",
+        response.getBody().getJSONObject("error").getString("message"));
   }
 
   /**
