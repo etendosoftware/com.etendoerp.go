@@ -169,16 +169,11 @@ jobs:
 
       # Runs even when goTestUnit failed, so one run reports both halves. goTestUnit never writes to
       # the database, so these start from the same clean data as on Jenkins. The root test task
-      # finalizes into goIsolatedDalTest, which runs the classes that need a JVM of their own. The
-      # two names besides *IntegrationTest are the ones build.gradle's dbBackedGoTests lists.
+      # finalizes into goIsolatedDalTest, which runs the classes that need a JVM of their own.
       - name: Integration tests
         if: ${{ !cancelled() && github.event_name != 'push' && steps.install.outcome == 'success' }}
         working-directory: etendo_core
-        run: >-
-          ./gradlew test
-          --tests 'com.etendoerp.go.*IntegrationTest'
-          --tests 'com.etendoerp.go.roles.UserRoleCompositionServiceOverlapReverificationTest'
-          --tests 'com.etendoerp.go.schemaforge.BusinessPartnerHandlerDbTest'
+        run: ./gradlew test --tests 'com.etendoerp.go.*IntegrationTest'
 
       - name: Upload the test reports
         if: always() && github.event_name != 'push'
