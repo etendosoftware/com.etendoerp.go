@@ -328,12 +328,19 @@ public class Fiscal390IncidentRulesTest {
     assertEquals(94, only(Fiscal390IncidentRules.DIFF_303).action.get("box"));
   }
 
+  /** No tolerance (the AEAT publishes none): equal at cent precision is fine, a cent off is not. */
   @Test
-  public void testDifferenceWithinToleranceIsFine() {
-    f.annualResult = new BigDecimal("101.00");
+  public void testCuadreIsExactAtCentPrecision() {
+    f.annualResult = new BigDecimal("100.004");
     f.expected303Result = new BigDecimal("100.00");
-    inputs.put("INGRESAR_12", "100.50");
+    inputs.put("INGRESAR_12", "100.00");
     assertTrue(codes().toString(), codes().isEmpty());
+    f.annualResult = new BigDecimal("100.01");
+    assertTrue(codes().contains(Fiscal390IncidentRules.BLOCK9_MISMATCH));
+    assertTrue(codes().toString(), !codes().contains(Fiscal390IncidentRules.DIFF_303));
+    inputs.put("INGRESAR_12", "100.01"); // block 9 matches: only the 303 difference remains
+    assertEquals("0.01", only(Fiscal390IncidentRules.DIFF_303).params.get("difference"));
+    assertNull(only(Fiscal390IncidentRules.DIFF_303).params.get("tolerance"));
     f.expected303Result = null;
     f.annualResult = new BigDecimal("5000");
     inputs.put("INGRESAR_12", "5000");
@@ -361,11 +368,11 @@ public class Fiscal390IncidentRulesTest {
   }
 
   /**
-   * PAR016: block 9 = [95] − [96] − [97] − [98] − [662] must match [86] / [94] within 1,00 €
+   * PAR016: block 9 = [95] − [96] − [97] − [98] − [662] must match [86] / [94] exactly (cents)
    * ([96] and [98] subtract the same way; their combination is covered by other rules).
    */
   @Test
-  public void testBlock9MismatchBlocksBeyondTolerance() {
+  public void testBlock9MismatchBlocksAnyDifference() {
     f.annualResult = new BigDecimal("500.00");
     inputs.put("INGRESAR_03", "600.00");
     inputs.put("TOTAL_LASTPERIOD", "30.00");
@@ -378,7 +385,9 @@ public class Fiscal390IncidentRulesTest {
     assertEquals(94, only(Fiscal390IncidentRules.BLOCK9_MISMATCH).params.get("box"));
     inputs.put("LIQANUAL_ENDCOMPENSATION", "67.00"); // 503 → 3 off still
     assertTrue(codes().contains(Fiscal390IncidentRules.BLOCK9_MISMATCH));
-    inputs.put("LIQANUAL_ENDCOMPENSATION", "69.50"); // 500.50 → within tolerance
+    inputs.put("LIQANUAL_ENDCOMPENSATION", "69.99"); // 500.01 → a cent off still blocks
+    assertTrue(codes().contains(Fiscal390IncidentRules.BLOCK9_MISMATCH));
+    inputs.put("LIQANUAL_ENDCOMPENSATION", "70.00"); // 500.00 → adds up
     assertTrue(codes().toString(), codes().isEmpty());
     // Boxes not computed: nothing to compare (COMPUTE_FAILED / INCOMPLETE_FISCAL_YEAR report it).
     f.annualResult = null;

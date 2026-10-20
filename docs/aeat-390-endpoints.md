@@ -412,8 +412,8 @@ Keys whose source is unknown are omitted, not zero: with the last 303 missing th
 ```
 expectedResult = [95] − [96] − [97] − [98] − [662]        (all from the 303s)
 cuadre:  annualResult − expectedResult,  annualResult = [86]  (territory mode: [94])
-OK when |difference| ≤ 1,00 €  (Fiscal390PreloadAggregator.RECONCILIATION_TOLERANCE,
-                                frontend RECONCILIATION_TOLERANCE_390; Jira: rule pending)
+OK when both sides, rounded to cents, are equal — no tolerance: the AEAT publishes none
+(ETP-5716 decision), so a single cent off is a difference
 ```
 
 Why these boxes: over the year Σ303[69] = Σ([66] + [77] + [68] + [108]) − Σ[78], and
@@ -450,7 +450,7 @@ preloaded (stored empty) or was left out of date is rejected, so that case is th
               "LIQANUAL_ENDCOMPENSATION": "0.00", "TOTAL_LASTPERIOD": "0.00", "TOTAL_LASTPERIOD_DEVOLVER": "0.00" },
   "totals": { "85": "0.00", "95": "…", "96": "…", "97": "…", "98": "…", "662": "…" },
   "territory": false, "carryOverKnown": true,
-  "expectedResult": "…", "tolerance": "1.00",
+  "expectedResult": "…",
   "warnings": [ { "code": "MISSING_303 | LAST_PERIOD_MISSING | DRAFT_303 | PRIOR_CARRY_UNKNOWN | REFUND_WITHOUT_MONTHLY_REGISTER | COMPUTE_FAILED", "periods": "T4" } ]
 }
 ```
@@ -496,8 +496,8 @@ file, or the AEAT rejects it; otherwise it is a **warning**.
 | `UNPOSTED_INVOICES` `{count, sales, purchase, documents}` | warn | issued invoices (`CO`/`CL`/`VO`, processed) of the exercise with `posted <> 'Y'`: classic and the boxes only read posted ones. `documents` = the first 5 numbers | invoices `{sales, purchase}` |
 | `MISSING_303` `{periods}` | warn | preload `missingPeriods` | box [95] |
 | `BLOCK9_NOT_PRELOADED` `{result, box}` | block | AEAT `PAR016`: block 9 of the STORED inputs is empty while the exercise has 303s (their `expectedResult` is known) and [86]/[94] is not zero — the preload was never saved (e.g. the draft was saved before the 303s existed). Calcular preloads and saves them | `settlements` (the year's 303s) |
-| `BLOCK9_MISMATCH` `{difference, block9, result, tolerance, box}` | block | AEAT `PAR016` ("Los resultados de las autoliquidaciones periódicas (Apartado 9 de la declaración) no coinciden con los resultados de la declaración anual (Casillas 86 ó 94)"): block 9 of the STORED inputs, `[95] − [96] − [97] − [98] − [662]`, differs from [86] (territory mode [94]) by more than 1,00 €. Classic generates the file anyway; the AEAT rejects it. Tolerance: the AEAT does not publish one for PAR016, so the cuadre's `RECONCILIATION_TOLERANCE` is used. Evaluated by the guards too (they need no 303s) | `settlements` |
-| `DIFF_303` `{difference, expected, result, tolerance, box}` | warn | `Fiscal390PreloadAggregator.reconcile` of the stored-inputs result ([86], or [94]) with `expectedResult`, beyond 1,00 €. Not raised while a block-9 incident holds (same difference, already blocking) | box [86] / [94] |
+| `BLOCK9_MISMATCH` `{difference, block9, result, box}` | block | AEAT `PAR016` ("Los resultados de las autoliquidaciones periódicas (Apartado 9 de la declaración) no coinciden con los resultados de la declaración anual (Casillas 86 ó 94)"): block 9 of the STORED inputs, `[95] − [96] − [97] − [98] − [662]`, differs from [86] (territory mode [94]) at cent precision. Classic generates the file anyway; the AEAT rejects it. No tolerance: the AEAT publishes none for PAR016. Evaluated by the guards too (they need no 303s) | `settlements` |
+| `DIFF_303` `{difference, expected, result, box}` | warn | `Fiscal390PreloadAggregator.reconcile` of the stored-inputs result ([86], or [94]) with `expectedResult`, any difference at cent precision (no tolerance). Not raised while a block-9 incident holds (same difference, already blocking) | box [86] / [94] |
 | `INACTIVE_TAX_WITH_OPERATIONS` `{tax, invoices}` | warn | an inactive `C_Tax` linked to this report by `OBTL_Tax_Parameter` with posted invoices in the exercise: classic `get390TaxesOrderByRate` reads active taxes only, so they are silently left out | — |
 | `NAME_TRUNCATED` `{field, limit, label?}` | warn | `AEAT390String` cuts: razón social 37, first name / each surname 15, natural-person representative 37 (only with a NIF), legal representative 36 (first 3 by line, `label` = NIF). Measured on what the file keeps (upper case, accents folded, `[^A-Z0-9. ]` dropped) | organization `identity` / `modelo390` |
 | `BOX98_WITH_96_97` | warn | AEAT instructions: [98] empty when [96] or [97] has an amount | box [98] |

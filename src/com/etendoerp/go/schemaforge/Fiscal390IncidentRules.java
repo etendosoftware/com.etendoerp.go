@@ -95,7 +95,7 @@ final class Fiscal390IncidentRules {
   static final String UNPOSTED_INVOICES = "UNPOSTED_INVOICES";
   /** Periods of the exercise with no Modelo 303 ({@code Fiscal390PreloadAggregator.W_MISSING}). */
   static final String MISSING_303 = Fiscal390PreloadAggregator.W_MISSING;
-  /** The result differs from the 303s beyond the tolerance ({@code reconcile}). */
+  /** The result differs from the 303s at cent precision ({@code reconcile}). */
   static final String DIFF_303 = "DIFF_303";
   /**
    * AEAT {@code PAR016} ("Los resultados de las autoliquidaciones periódicas (Apartado 9) no
@@ -510,9 +510,8 @@ final class Fiscal390IncidentRules {
 
   /**
    * AEAT {@code PAR016}, evaluated from the STORED inputs (what the file is built from): block 9
-   * must add up to [86] (territory mode: [94]) within the cuadre tolerance
-   * ({@link Fiscal390PreloadAggregator#RECONCILIATION_TOLERANCE}; the AEAT does not publish its
-   * own). Empty block 9 with 303s in the year is {@link #BLOCK9_NOT_PRELOADED} (Calcular
+   * must add up to [86] (territory mode: [94]) exactly at cent precision (the AEAT publishes no
+   * tolerance, so none is applied). Empty block 9 with 303s in the year is {@link #BLOCK9_NOT_PRELOADED} (Calcular
    * preloads them); otherwise a difference is {@link #BLOCK9_MISMATCH}. {@code null} when the
    * boxes were not computed (another incident reports why) or it adds up.
    */
@@ -531,7 +530,7 @@ final class Fiscal390IncidentRules {
     }
     BigDecimal block9 = Fiscal390PreloadAggregator.r2(block9Result(f));
     BigDecimal diff = Fiscal390PreloadAggregator.r2(annual.subtract(block9));
-    if (diff.abs().compareTo(Fiscal390PreloadAggregator.RECONCILIATION_TOLERANCE) <= 0) {
+    if (diff.signum() == 0) {
       return null;
     }
     return block(BLOCK9_MISMATCH, "Block 9 (" + block9.toPlainString() + ") does not add up to ["
@@ -539,7 +538,6 @@ final class Fiscal390IncidentRules {
         .param("difference", diff.toPlainString())
         .param("block9", block9.toPlainString())
         .param("result", annual.toPlainString())
-        .param("tolerance", Fiscal390PreloadAggregator.RECONCILIATION_TOLERANCE.toPlainString())
         .param(PARAM_BOX, box)
         .action(ACTION_SETTLEMENTS, null, null);
   }
@@ -564,7 +562,6 @@ final class Fiscal390IncidentRules {
         .param("difference", diff.toPlainString())
         .param("expected", Fiscal390PreloadAggregator.r2(f.expected303Result).toPlainString())
         .param("result", Fiscal390PreloadAggregator.r2(f.annualResult).toPlainString())
-        .param("tolerance", Fiscal390PreloadAggregator.RECONCILIATION_TOLERANCE.toPlainString())
         .param(PARAM_BOX, box)
         .action(ACTION_BOX, PARAM_BOX, box));
   }

@@ -294,11 +294,13 @@ public class Fiscal390PreloadAggregatorTest {
   // ── cuadre ──────────────────────────────────────────────────────────
 
   @Test
-  public void testReconcileTolerance() {
-    assertEquals("ok", Fiscal390PreloadAggregator.reconcile(bd("101.00"), bd("100.00")).get("status"));
-    Map<String, Object> diff = Fiscal390PreloadAggregator.reconcile(bd("98.99"), bd("100.00"));
+  public void testReconcileIsExactAtCentPrecision() {
+    // No tolerance (the AEAT publishes none): both sides rounded to cents, then equal.
+    assertEquals("ok", Fiscal390PreloadAggregator.reconcile(bd("100.004"), bd("100.00")).get("status"));
+    Map<String, Object> diff = Fiscal390PreloadAggregator.reconcile(bd("99.99"), bd("100.00"));
     assertEquals("difference", diff.get("status"));
-    assertEquals(bd("-1.01"), diff.get("difference"));
+    assertEquals(bd("-0.01"), diff.get("difference"));
+    assertFalse(diff.containsKey("tolerance"));
     assertEquals("no303", Fiscal390PreloadAggregator.reconcile(bd("1"), null).get("status"));
   }
 
@@ -375,7 +377,7 @@ public class Fiscal390PreloadAggregatorTest {
     assertEquals("20.00", json.getJSONObject("inputs").getString("TOTAL_LASTPERIOD"));
     assertEquals("100.00", json.getJSONObject("totals").getString("95"));
     assertEquals("80.00", json.getString("expectedResult"));
-    assertEquals("1.00", json.getString("tolerance"));
+    assertFalse(json.has("tolerance"));
     assertEquals("T4", json.getString("lastPeriod"));
   }
 

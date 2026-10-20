@@ -227,7 +227,7 @@ class Fiscal390PreloadSupport {
    *   "inputs": { "INGRESAR_03": "120.00", ..., "TOTAL_LASTPERIOD": "0.00", ... },
    *   "totals": { "85": "…", "95": "…", "96": "…", "97": "…", "98": "…", "662": "…" },
    *   "territory": false, "carryOverKnown": true,
-   *   "expectedResult": "…"|null, "tolerance": "1.00",
+   *   "expectedResult": "…"|null,
    *   "warnings": [ { "code": "MISSING_303", "periods": "T4" } ] }
    * </pre>
    */
@@ -282,7 +282,6 @@ class Fiscal390PreloadSupport {
     out.put("carryOverKnown", r.carryOverKnown);
     out.put("expectedResult", r.expectedResult != null ? r.expectedResult.toPlainString()
         : JSONObject.NULL);
-    out.put("tolerance", Fiscal390PreloadAggregator.RECONCILIATION_TOLERANCE.toPlainString());
     out.put("warnings", warnings);
     return out;
   }

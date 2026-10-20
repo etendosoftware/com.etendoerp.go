@@ -83,12 +83,6 @@ import java.util.TreeSet;
  */
 final class Fiscal390PreloadAggregator {
 
-  /**
-   * Largest |annual result − expected result| still reported as "cuadra". Business rule pending
-   * confirmation (Jira ETP-5716: "más de 1,00 €"); the frontend mirrors it as
-   * {@code RECONCILIATION_TOLERANCE_390}.
-   */
-  static final BigDecimal RECONCILIATION_TOLERANCE = new BigDecimal("1.00");
 
   static final String PERIODICITY_MONTHLY = "monthly";
   static final String PERIODICITY_QUARTERLY = "quarterly";
@@ -580,7 +574,8 @@ final class Fiscal390PreloadAggregator {
   /**
    * The cuadre of {@code annualResult} ([86], or [94] in territory mode) with
    * {@code expectedResult} ({@link Result#expectedResult}): {@code status} {@code ok} /
-   * {@code difference} (|difference| &gt; {@link #RECONCILIATION_TOLERANCE}) / {@code no303}
+   * {@code difference} (any difference at cent precision — the AEAT publishes no tolerance, so
+   * none is applied) / {@code no303}
    * (nothing to compare with), and {@code difference = annualResult − expectedResult}. For the
    * incidents phase ("Diferencia con los 303").
    */
@@ -590,10 +585,9 @@ final class Fiscal390PreloadAggregator {
       out.put("status", "no303");
       return out;
     }
-    BigDecimal diff = r2(annualResult.subtract(expectedResult));
-    out.put("status", diff.abs().compareTo(RECONCILIATION_TOLERANCE) > 0 ? "difference" : "ok");
+    BigDecimal diff = r2(annualResult).subtract(r2(expectedResult)); // both sides to cents
+    out.put("status", diff.signum() != 0 ? "difference" : "ok");
     out.put("difference", diff);
-    out.put("tolerance", RECONCILIATION_TOLERANCE);
     return out;
   }
 }
