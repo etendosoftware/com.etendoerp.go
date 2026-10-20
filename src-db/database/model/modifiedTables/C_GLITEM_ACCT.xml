@@ -1,0 +1,8 @@
+<?xml version="1.0"?>
+  <database name="MODIFIED TABLE C_GLITEM_ACCT">
+    <table name="C_GLITEM_ACCT" primaryKey="C_GLITEM_ACCT_KEY">
+      <index name="EM_ETGO_GLITEMACCT_DEBIT_IDX" unique="false">
+        <index-column name="GLITEM_DEBIT_ACCT"/>
+      </index>
+    </table>
+  </database>

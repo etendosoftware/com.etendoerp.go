@@ -52,6 +52,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
@@ -88,6 +90,8 @@ import com.etendoerp.go.auth.SurfacePolicy;
  * assertions therefore check the values stamped on the entity and the
  * save/flush calls, rather than SQL text and bind parameters. The GET path
  * still uses native queries and is asserted as such.
+ *
+ * @covers com.etendoerp.go.schemaforge.SurveyConfigServlet
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -589,6 +593,20 @@ class SurveyConfigServletTest {
       assertTrue(getResponseBody().contains("Invalid JSON body"));
       verify(obDal, never()).save(any());
       verify(obDal, never()).flush();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = { "{\"x\":[", "[[", "{\"a\":[}", "{\"a\":1}#" })
+    @DisplayName("returns 400 on a body that breaks the JSON parser")
+    void parserBreakingBodyReturns400(String body) throws Exception {
+      authenticatedWithContext("CLIENT-1", "ORG-1", "USER-1");
+      HttpServletRequest req = requestWithBody("/response", body);
+
+      servlet.doPost(req, response);
+
+      verify(response).setStatus(HttpServletResponse.SC_BAD_REQUEST);
+      assertTrue(getResponseBody().contains("Invalid JSON body"));
+      verify(obDal, never()).save(any());
     }
   }
 

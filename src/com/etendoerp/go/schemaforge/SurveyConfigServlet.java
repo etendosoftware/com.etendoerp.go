@@ -42,6 +42,7 @@ import org.openbravo.model.ad.access.User;
 
 import com.etendoerp.go.auth.EnvironmentAuthOutcome;
 import com.etendoerp.go.auth.SurfacePolicy;
+import com.etendoerp.go.common.BoundedJsonParser;
 import com.etendoerp.go.common.CorsUtils;
 import com.etendoerp.go.schemaforge.data.ETGOSurveyResponse;
 
@@ -304,7 +305,7 @@ public class SurveyConfigServlet extends HttpBaseServlet {
       while ((line = reader.readLine()) != null) sb.append(line);
     }
     try {
-      return new JSONObject(sb.toString());
+      return BoundedJsonParser.parseObject(sb.toString());
     } catch (JSONException e) {
       sendError(response, HttpServletResponse.SC_BAD_REQUEST, "Invalid JSON body");
       return null;

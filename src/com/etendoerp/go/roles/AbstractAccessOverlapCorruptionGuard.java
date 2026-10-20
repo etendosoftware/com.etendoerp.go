@@ -701,7 +701,7 @@ public abstract class AbstractAccessOverlapCorruptionGuard<A extends BaseOBObjec
    * matter how correct, is a duplicate-INSERT collision waiting to happen the instant core's own
    * propagation reaches it. Live-reproduced (for the {@code WindowAccess}/{@code Window} case):
    * {@code
-   * UserRoleCompositionServiceOverlapReverificationTest#testRealMatrixOverlapSalesAndPurchasingOnProductCategoryStaysReadOnly}
+   * UserRoleCompositionServiceOverlapReverificationIntegrationTest#testRealMatrixOverlapSalesAndPurchasingOnProductCategoryStaysReadOnly}
    * — a bystander role ({@code F238CDA0}, "Personal – CompositionUser") already had a correctly-
    * sourced, correctly-leveled row for the template's newly-granted window; the OLD "skip when
    * already correct" branch left it in place; core's own blind {@code copyRoleAccess} then tried

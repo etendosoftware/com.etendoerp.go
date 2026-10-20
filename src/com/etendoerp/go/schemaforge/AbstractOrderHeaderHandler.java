@@ -27,6 +27,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -447,6 +448,32 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
    */
   protected boolean isSalesTransaction() {
     return true;
+  }
+
+  /**
+   * Redirects a list filter on each status percentage {@link #applyCorrectedStatusPercentages}
+   * rewrites to its stored computed twin (ETP-5705).
+   *
+   * <p>The three virtual columns are rewritten after the query, so a filter on them matched the
+   * raw core value: sales orders shown at {@code deliveryStatus = 100} matched
+   * {@code deliveryStatus < 100}. The stored twins ({@code EM_ETGO_Invoice_Status},
+   * {@code EM_ETGO_Delivery_Status}, {@code EM_ETGO_Deliv_Status_Purchase}) are computed by
+   * {@code ETGO_GET_ORDER_INVOICE_STATUS} / {@code ETGO_GET_ORDER_DELIVERY_STATUS} /
+   * {@code ETGO_GET_PO_DELIVERY_STATUS}, which apply exactly the exclusion and the cancelled /
+   * zero-quantity guards that {@link #batchComputeStatusPercentages} applies, so they hold the
+   * value this handler displays. They are {@code NULL} on an order that never had a line (the
+   * refresh is triggered by {@code C_OrderLine}); the shared filter falls back to the virtual
+   * value there, which is {@code 0} — again what is displayed.</p>
+   *
+   * @param context the read context (unused: the mapping is the same for every read)
+   * @return the three displayed properties, each mapped to its stored twin
+   */
+  @Override
+  public Map<String, String> filterAliases(NeoContext context) {
+    return Map.of(
+        FIELD_INVOICE_STATUS, Order.PROPERTY_ETGOINVOICESTATUS,
+        FIELD_DELIVERY_STATUS, Order.PROPERTY_ETGODELIVERYSTATUS,
+        FIELD_DELIVERY_STATUS_PURCHASE, Order.PROPERTY_ETGODELIVSTATUSPURCHASE);
   }
 
   @Override
@@ -906,7 +933,8 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
           result.put(rs.getString(1),
-              new OrderQuantities(zeroIfNull(rs.getBigDecimal(2)), zeroIfNull(rs.getBigDecimal(3))));
+              new OrderQuantities(Objects.requireNonNullElse(rs.getBigDecimal(2), BigDecimal.ZERO),
+                  Objects.requireNonNullElse(rs.getBigDecimal(3), BigDecimal.ZERO)));
         }
       }
     }
@@ -1005,7 +1033,8 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
         while (rs.next()) {
           String orderId = rs.getString(1);
           if (DOC_STATUS_COMPLETED.equals(rs.getString(2))) {
-            completedTotals.put(orderId, zeroIfNull(rs.getBigDecimal(3)));
+            completedTotals.put(orderId,
+                Objects.requireNonNullElse(rs.getBigDecimal(3), BigDecimal.ZERO));
           } else {
             withDraft.add(orderId);
           }
@@ -1024,10 +1053,6 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
 
   private static String placeholders(List<String> ids) {
     return ids.stream().map(id -> "?").collect(Collectors.joining(","));
-  }
-
-  private static BigDecimal zeroIfNull(BigDecimal value) {
-    return value != null ? value : BigDecimal.ZERO;
   }
 
   /**

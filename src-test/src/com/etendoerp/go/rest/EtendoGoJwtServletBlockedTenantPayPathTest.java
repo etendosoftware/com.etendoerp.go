@@ -23,7 +23,9 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.CALLS_REAL_METHODS;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
@@ -41,6 +43,7 @@ import java.io.StringWriter;
 import java.lang.reflect.Field;
 import java.time.Instant;
 import java.util.Collections;
+import java.util.Optional;
 import java.util.stream.Stream;
 
 import javax.servlet.http.Cookie;
@@ -70,6 +73,7 @@ import com.etendoerp.go.onboarding.OnboardingCompanyDataService;
 import com.etendoerp.go.payment.CheckoutRequestStore;
 import com.etendoerp.go.payment.DemoDataTransferService;
 import com.etendoerp.go.payment.EnvironmentAccessGuard;
+import com.etendoerp.go.payment.EnvironmentAccessPolicy;
 import com.etendoerp.go.payment.EnvironmentAccessPolicy.Decision;
 import com.etendoerp.go.payment.HostedCheckoutService;
 import com.etendoerp.go.payment.PlanCatalogService;
@@ -266,9 +270,107 @@ class EtendoGoJwtServletBlockedTenantPayPathTest {
         bodyFor(endpoint, Decision.DEMO_TRIAL_EXPIRED));
 
     assertEquals(201, resp.status, resp.body());
+    // The expired demo is really the source: its data is what the new environment carries over.
     verify(checkoutService).createSession(eq(ACCOUNT_ID), eq(ACCOUNT_EMAIL), eq(CLIENT_NAME),
-        eq(ORIGIN), any(), any(HostedCheckoutService.SessionOptions.class));
+        eq(ORIGIN), any(), argThat(options -> CLIENT_ID.equals(options.getDemoClientId())));
     verifyNoInteractions(guard);
+  }
+
+  // ===================== re-subscribing the blocked tenant (ETP-5742) =====================
+
+  @Test
+  void theOwnerOfACanceledTenantReSubscribesThatTenant() throws Exception {
+    decide(Decision.SUBSCRIPTION_REQUIRED);
+    givenTheTenantIs(EnvironmentAccessPolicy.SubscriptionStatus.EXPIRED);
+
+    ResponseCapture resp = send("POST", REACTIVATION_PATH, "{}");
+
+    assertEquals(201, resp.status, resp.body());
+    // The session's own tenant, under its own name; no plan was named, so the legacy fallback.
+    verify(checkoutService).createSession(eq(ACCOUNT_ID), eq(ACCOUNT_EMAIL), eq(CLIENT_NAME),
+        eq(ORIGIN), isNull(),
+        argThat(options -> CLIENT_ID.equals(options.getReactivatedClientId())
+            && options.getDemoClientId() == null));
+    verifyNoInteractions(guard);
+  }
+
+  @Test
+  void aReSubscriptionKeepsThePlanOfTheCanceledSubscription() throws Exception {
+    decide(Decision.SUBSCRIPTION_REQUIRED);
+    givenTheTenantIs(EnvironmentAccessPolicy.SubscriptionStatus.EXPIRED);
+    Plan plan = mock(Plan.class);
+    when(plan.getSearchKey()).thenReturn("pro-monthly");
+    Subscription closed = mock(Subscription.class);
+    when(closed.getPlan()).thenReturn(plan);
+    when(subscriptionService.findLatest(CLIENT_ID)).thenReturn(Optional.of(closed));
+
+    ResponseCapture resp = send("POST", REACTIVATION_PATH, "{}");
+
+    assertEquals(201, resp.status, resp.body());
+    verify(checkoutService).createSession(eq(ACCOUNT_ID), eq(ACCOUNT_EMAIL), eq(CLIENT_NAME),
+        eq(ORIGIN), eq("pro-monthly"), any(HostedCheckoutService.SessionOptions.class));
+  }
+
+  @Test
+  void anInvitedMemberCannotReSubscribeTheOwnersTenant() throws Exception {
+    decide(Decision.SUBSCRIPTION_REQUIRED);
+    givenTheTenantIs(EnvironmentAccessPolicy.SubscriptionStatus.EXPIRED);
+    dalHelper.when(() -> EtendoGoJwtDalHelper.clientOwnedByAccountEmail(CLIENT_ID,
+        ACCOUNT_EMAIL)).thenReturn(false);
+
+    ResponseCapture resp = send("POST", REACTIVATION_PATH, "{}");
+
+    assertEquals(403, resp.status, resp.body());
+    assertEquals("REACTIVATION_OWNER_REQUIRED",
+        resp.json().getJSONObject("error").getString("code"));
+    verifyNoInteractions(checkoutService);
+  }
+
+  /** An unpaid invoice is fixed in the Customer Portal; a second subscription would double-bill. */
+  @ParameterizedTest(name = "{0}")
+  @EnumSource(value = EnvironmentAccessPolicy.SubscriptionStatus.class,
+      names = { "PAST_DUE", "CURRENT", "NONE" })
+  void onlyACanceledSubscriptionCanBeReSubscribed(
+      EnvironmentAccessPolicy.SubscriptionStatus status) throws Exception {
+    decide(Decision.SUBSCRIPTION_REQUIRED);
+    givenTheTenantIs(status);
+
+    ResponseCapture resp = send("POST", REACTIVATION_PATH, "{}");
+
+    assertEquals(409, resp.status, resp.body());
+    assertEquals("REACTIVATION_NOT_AVAILABLE",
+        resp.json().getJSONObject("error").getString("code"));
+    verifyNoInteractions(checkoutService);
+  }
+
+  @Test
+  void aReSubscriptionAlreadyPaidIsReportedInsteadOfChargedAgain() throws Exception {
+    decide(Decision.SUBSCRIPTION_REQUIRED);
+    givenTheTenantIs(EnvironmentAccessPolicy.SubscriptionStatus.EXPIRED);
+    CheckoutRequest paid = mock(CheckoutRequest.class);
+    when(paid.getCheckoutRequestStatus()).thenReturn("PAID");
+    when(paid.getRequest()).thenReturn(REQUEST_ID);
+    when(requestStore.findActiveReactivation(ACCOUNT_ID, ACCOUNT_EMAIL, CLIENT_ID))
+        .thenReturn(paid);
+
+    ResponseCapture resp = send("POST", REACTIVATION_PATH, "{}");
+
+    assertEquals(200, resp.status, resp.body());
+    assertEquals("paid", resp.json().getString("status"));
+    assertEquals(REQUEST_ID, resp.json().getString("requestId"));
+    verifyNoInteractions(checkoutService);
+  }
+
+  private static final String REACTIVATION_PATH = "/billing/reactivation";
+
+  /** The session's tenant is productive with the given subscription status, and owned. */
+  private void givenTheTenantIs(EnvironmentAccessPolicy.SubscriptionStatus status) {
+    TenantEnvironmentLifecycleService.EnvironmentSnapshot snapshot =
+        mock(TenantEnvironmentLifecycleService.EnvironmentSnapshot.class);
+    when(snapshot.getType()).thenReturn(EnvironmentAccessPolicy.EnvironmentType.PRODUCTIVE);
+    when(snapshot.getSubscriptionStatus()).thenReturn(status);
+    when(lifecycle.resolve(CLIENT_ID)).thenReturn(snapshot);
+    when(subscriptionService.findLatest(CLIENT_ID)).thenReturn(Optional.empty());
   }
 
   // ===================== entering the blocked environment =====================
@@ -340,6 +442,10 @@ class EtendoGoJwtServletBlockedTenantPayPathTest {
     dalHelper.when(() -> EtendoGoJwtDalHelper.hasOwnedEnvironmentForAccountEmail(ACCOUNT_EMAIL))
         .thenReturn(true);
     dalHelper.when(() -> EtendoGoJwtDalHelper.clientBelongsToAccountEmail(CLIENT_ID,
+        ACCOUNT_EMAIL)).thenReturn(true);
+    // The account OWNS the tenant (ETP-5743): only an owned demo is a purchase source, and only
+    // the owner re-subscribes a canceled tenant (ETP-5742).
+    dalHelper.when(() -> EtendoGoJwtDalHelper.clientOwnedByAccountEmail(CLIENT_ID,
         ACCOUNT_EMAIL)).thenReturn(true);
     User environmentUser = mock(User.class);
     when(environmentUser.getClient()).thenReturn(tenant);

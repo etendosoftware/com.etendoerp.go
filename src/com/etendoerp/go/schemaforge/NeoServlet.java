@@ -24,6 +24,7 @@ import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.ui.Tab;
 
+import com.etendoerp.go.common.MalformedJsonException;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoErrorSanitizer;
@@ -184,6 +185,9 @@ public class NeoServlet extends HttpBaseServlet {
         return;
       }
       requestRouter.handleSpecRequest(pathInfo, method, request, response);
+    } catch (MalformedJsonException e) {
+      // A body or JSON parameter the client sent could not be parsed: its error, not ours.
+      sendError(response, HttpServletResponse.SC_BAD_REQUEST, "Invalid JSON body: " + e.getMessage());
     } catch (Exception e) {
       log.error("Error processing NEO request: {}", e.getMessage(), e);
       sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, NeoErrorSanitizer.sanitize(e));

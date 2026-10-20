@@ -947,7 +947,8 @@ public class GoodsReceiptHeaderHandlerTest {
     java.util.Map<String, NeoActionContract> contracts =
         new GoodsReceiptHeaderHandler().actionContracts();
 
-    assertEquals(java.util.List.of("documentAction", "createPurchaseInvoice", "cloneRecord"),
+    assertEquals(java.util.List.of("documentAction", "availableOrders", "availableOrderLines",
+            "importOrderLines", "createPurchaseInvoice", "createPurchaseReturn", "cloneRecord"),
         java.util.List.copyOf(contracts.keySet()));
     NeoActionContract invoice = contracts.get("createPurchaseInvoice");
     assertEquals("POST", invoice.getHttpMethod());
@@ -1025,5 +1026,104 @@ public class GoodsReceiptHeaderHandlerTest {
     assertEquals(NeoActionContract.SC_UNPROCESSABLE, NeoActionContract.validate(contracts,
         "documentAction", new JSONObject().put("docAction", "CO").put("action", "CO"))
         .getHttpStatus());
+  }
+
+  // ── createPurchaseReturn contract (ETP-5711) ─────────────────────────────────────────
+
+  /**
+   * The create-from-document return is published to agents with its lines optional: omitting them
+   * returns everything still returnable, and the result is always a draft.
+   */
+  @Test
+  public void actionContracts_createPurchaseReturnIsPublishedWithOptionalLines() throws Exception {
+    java.util.Map<String, NeoActionContract> contracts = new GoodsReceiptHeaderHandler().actionContracts();
+
+    NeoActionContract c = contracts.get("createPurchaseReturn");
+    assertNotNull("createPurchaseReturn must be declared so agents can create the return", c);
+    assertEquals("POST", c.getHttpMethod());
+    assertEquals(java.util.List.of("lines", "reason"), c.getParams().stream()
+        .map(NeoActionContract.Param::getName).collect(java.util.stream.Collectors.toList()));
+    assertFalse("every body key is optional",
+        c.getParams().stream().anyMatch(NeoActionContract.Param::isRequired));
+    String description = c.getDescription();
+    org.junit.Assert.assertTrue(description,
+        description.contains("omit lines to return everything still returnable"));
+    org.junit.Assert.assertTrue(description, description.contains("left in draft"));
+    org.junit.Assert.assertTrue("it states what refuses an over-return",
+        description.contains("returnQuantityExceedsAvailable"));
+  }
+
+  @Test
+  public void actionContracts_createPurchaseReturnAcceptsTheSpaBodyAndTheEmptyBody() throws Exception {
+    java.util.Map<String, NeoActionContract> contracts = new GoodsReceiptHeaderHandler().actionContracts();
+
+    assertNull(NeoActionContract.validate(contracts, "createPurchaseReturn", new JSONObject()));
+    assertNull(NeoActionContract.validate(contracts, "createPurchaseReturn", new JSONObject()
+        .put("lines", new JSONArray().put(
+            new JSONObject().put("lineId", "L1").put("returnQuantity", 2)))
+        .put("reason", "damaged")));
+    assertEquals(NeoActionContract.SC_UNPROCESSABLE, NeoActionContract.validate(contracts,
+        "createPurchaseReturn", new JSONObject().put("lines", "x")).getHttpStatus());
+    assertEquals(NeoActionContract.SC_UNPROCESSABLE, NeoActionContract.validate(contracts,
+        "createPurchaseReturn", new JSONObject().put("orderId", "O1")).getHttpStatus());
+  }
+
+
+  // ── order import (ETP-5713) ───────────────────────────────────────────────
+
+  private static GoodsReceiptHeaderHandler receiptWithImportDelegate(
+      ImportOrderLinesIntoInOutHandler delegate) throws Exception {
+    GoodsReceiptHeaderHandler handler = new GoodsReceiptHeaderHandler();
+    java.lang.reflect.Field field =
+        GoodsReceiptHeaderHandler.class.getDeclaredField("importOrderLinesHandler");
+    field.setAccessible(true);
+    field.set(handler, delegate);
+    return handler;
+  }
+
+  @Test
+  public void actionContracts_publishTheOrderImportInFlowOrder() throws Exception {
+    java.util.Map<String, NeoActionContract> contracts =
+        new GoodsReceiptHeaderHandler().actionContracts();
+
+    assertTrue(contracts.keySet().containsAll(
+        java.util.List.of("availableOrders", "availableOrderLines", "importOrderLines")));
+    java.util.List<String> names = java.util.List.copyOf(contracts.keySet());
+    assertTrue("the import follows the document action, before the one-step actions",
+        names.indexOf("documentAction") < names.indexOf("availableOrders")
+            && names.indexOf("importOrderLines") < names.indexOf("createPurchaseInvoice"));
+    assertTrue("a receipt takes purchase orders, and names its one-step alternative",
+        contracts.get("importOrderLines").getDescription().contains("createGoodsReceipt"));
+    assertNull(NeoActionContract.validate(contracts, "importOrderLines",
+        new JSONObject().put("orderId", "o1")));
+    assertNull(NeoActionContract.validate(contracts, "importOrderLines",
+        new JSONObject().put("orderId", "o1").put("lines", new JSONArray().put(
+            new JSONObject().put("sourceLineId", "l1").put("quantity", 2)))));
+    assertEquals(NeoActionContract.SC_UNPROCESSABLE, NeoActionContract.validate(contracts,
+        "importOrderLines", new JSONObject().put("orderId", "o1").put("foo", 1)).getHttpStatus());
+  }
+
+  @Test
+  public void handle_dispatchesTheOrderImportToItsDelegate() throws Exception {
+    ImportOrderLinesIntoInOutHandler delegate = mock(ImportOrderLinesIntoInOutHandler.class);
+    GoodsReceiptHeaderHandler handler = receiptWithImportDelegate(delegate);
+    NeoContext ctx = NeoContext.builder().httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+        .fieldName("importOrderLines").recordId("r1").build();
+    NeoResponse expected = NeoResponse.ok(new JSONObject().put("imported", true));
+    when(delegate.handle(ctx)).thenReturn(expected);
+
+    assertSame(expected, handler.handle(ctx));
+  }
+
+  @Test
+  public void handle_anActionTheDelegateDoesNotServe_fallsThrough() throws Exception {
+    ImportOrderLinesIntoInOutHandler delegate = mock(ImportOrderLinesIntoInOutHandler.class);
+    GoodsReceiptHeaderHandler handler = receiptWithImportDelegate(delegate);
+    NeoContext ctx = NeoContext.builder().httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+        .fieldName("unknownAction").recordId("r1").build();
+    when(delegate.handle(ctx)).thenReturn(null);
+
+    assertNull(handler.handle(ctx));
+    verify(delegate).handle(ctx);
   }
 }

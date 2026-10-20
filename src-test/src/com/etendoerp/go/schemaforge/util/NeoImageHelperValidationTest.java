@@ -22,16 +22,29 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.PrintWriter;
+import java.io.StringWriter;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 
 import javax.imageio.ImageIO;
+import javax.servlet.ReadListener;
+import javax.servlet.ServletInputStream;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
 
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.mockito.MockedStatic;
+import org.openbravo.dal.service.OBDal;
 
 import com.etendoerp.go.schemaforge.util.NeoImageHelper.ImageValidationException;
 
@@ -252,5 +265,53 @@ class NeoImageHelperValidationTest {
     assertNotNull(NeoImageHelper.INVALID_UPLOAD_LINK_MESSAGE);
     assertTrue(NeoImageHelper.INVALID_UPLOAD_LINK_MESSAGE.contains("etendo_request_image_upload"),
         "the 403 must tell the caller how to get a working link");
+  }
+
+  @Nested
+  @DisplayName("handleImageRequest POST")
+  class PostImageBody {
+
+    private ServletInputStream bodyOf(String text) {
+      ByteArrayInputStream in = new ByteArrayInputStream(text.getBytes(StandardCharsets.UTF_8));
+      return new ServletInputStream() {
+        @Override
+        public int read() {
+          return in.read();
+        }
+
+        @Override
+        public boolean isFinished() {
+          return in.available() == 0;
+        }
+
+        @Override
+        public boolean isReady() {
+          return true;
+        }
+
+        @Override
+        public void setReadListener(ReadListener listener) {
+          // not used
+        }
+      };
+    }
+
+    @Test
+    @DisplayName("a malformed JSON body is a 400, with no rollback of a failed upload")
+    void malformedBodyIsBadRequest() throws Exception {
+      HttpServletRequest request = mock(HttpServletRequest.class);
+      when(request.getInputStream()).thenReturn(bodyOf("{\"x\":["));
+      HttpServletResponse response = mock(HttpServletResponse.class);
+      StringWriter out = new StringWriter();
+      when(response.getWriter()).thenReturn(new PrintWriter(out, true));
+
+      try (MockedStatic<OBDal> dal = mockStatic(OBDal.class)) {
+        NeoImageHelper.handleImageRequest(null, "POST", request, response);
+
+        verify(response).setStatus(HttpServletResponse.SC_BAD_REQUEST);
+        assertTrue(out.toString().contains("Invalid JSON body"), out.toString());
+        dal.verifyNoInteractions();
+      }
+    }
   }
 }

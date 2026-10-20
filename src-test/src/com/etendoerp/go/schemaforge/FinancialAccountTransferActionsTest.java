@@ -56,6 +56,8 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * {@code financial-account/account}, mirroring the Movements tab's Transferir
  * ({@code FundsTransferModal}). The movements endpoint and the rate lookup are stubbed: the tests
  * read the exact body the endpoint would receive.
+ *
+ * @covers com.etendoerp.go.schemaforge.FinancialAccountTransferActions
  */
 // Test methods live in the @Nested inner classes below; S2187 only inspects the outer class.
 @SuppressWarnings("java:S2187")
@@ -188,6 +190,22 @@ class FinancialAccountTransferActionsTest {
       assertTrue(transfer.getParams().stream().noneMatch(p -> p.getName().contains("ate")
           && !"conversionRate".equals(p.getName())), "the modal books today: no date parameter");
       assertTrue(transfer.getDescription().contains("transfer back"));
+    }
+
+    @Test
+    @DisplayName("transferFunds with sourceAccountId in the body: 422 unknownParameters and"
+        + " the meaning of id (the source account)")
+    void sourceAccountIdIsNotAParameter() throws Exception {
+      NeoResponse r = NeoActionContract.validate(FinancialAccountTransferActions.actionContracts(),
+          "transferFunds", ten().put("sourceAccountId", SOURCE));
+      assertEquals(422, r.getHttpStatus());
+      JSONObject error = r.getBody().getJSONObject("error");
+      assertEquals("Action 'transferFunds' does not accept parameter(s) sourceAccountId."
+          + " Record id ('id' argument, not a parameter): the id of the financial account the"
+          + " money leaves (the source).", error.getString("message"));
+      assertEquals("[\"sourceAccountId\"]", error.getJSONArray("unknownParameters").toString());
+      assertEquals("the id of the financial account the money leaves (the source)",
+          error.getString("idDescription"));
     }
 
     @Test

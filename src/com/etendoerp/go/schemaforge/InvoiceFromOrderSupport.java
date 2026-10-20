@@ -117,14 +117,28 @@ public class InvoiceFromOrderSupport {
    * @param invoice the invoice whose lines should be patched
    */
   public void ensureLineGrossAmounts(Invoice invoice) {
+    ensureLineGrossAmounts(invoice, null);
+  }
+
+  /**
+   * Same repair, restricted to the invoice lines in {@code onlyLineIds} (ETP-5713). The line import
+   * adds lines to a draft that already holds others; a whole-invoice pass would recompute the gross
+   * of any existing line with a non-positive one (a deliberate zero line, a negative line).
+   * {@code null} means every line, exactly as {@link #ensureLineGrossAmounts(Invoice)}.
+   *
+   * @param invoice     the invoice whose lines should be patched
+   * @param onlyLineIds the ids of the lines to consider, or {@code null} for all
+   */
+  public void ensureLineGrossAmounts(Invoice invoice, java.util.Set<String> onlyLineIds) {
     int precision = invoice.getCurrency().getStandardPrecision().intValue();
     for (InvoiceLine il : invoice.getInvoiceLineList()) {
       BigDecimal current = il.getGrossAmount();
-      if (current != null && current.compareTo(BigDecimal.ZERO) > 0) {
-        continue;
+      boolean inScope = onlyLineIds == null || onlyLineIds.contains(il.getId());
+      boolean hasGross = current != null && current.compareTo(BigDecimal.ZERO) > 0;
+      if (inScope && !hasGross) {
+        il.setGrossAmount(calculateLineGross(il, precision));
+        OBDal.getInstance().save(il);
       }
-      il.setGrossAmount(calculateLineGross(il, precision));
-      OBDal.getInstance().save(il);
     }
     OBDal.getInstance().flush();
   }
@@ -172,8 +186,28 @@ public class InvoiceFromOrderSupport {
    * @param invoice the newly created invoice whose lines should receive the discount
    */
   public void copyLineDiscountsFromOrder(Invoice invoice) {
+    copyLineDiscountsFromOrder(invoice, null);
+  }
+
+  /**
+   * Same copy, restricted to the invoice lines in {@code onlyLineIds} (ETP-5713): the line import
+   * adds lines to an invoice that already holds others — some edited by hand, some deliberately
+   * without a discount — which a whole-invoice pass would re-discount. {@code null} means every
+   * line, exactly as {@link #copyLineDiscountsFromOrder(Invoice)}.
+   *
+   * <p>The native line creation copies unit price, list price and net amount from the order line
+   * exactly; only {@code EM_Etgo_Discount} is added here, as a percentage to display. It never
+   * recomputes a price, so an imported line is not discounted twice.
+   *
+   * @param invoice     the invoice whose lines should receive the discount
+   * @param onlyLineIds the ids of the lines to consider, or {@code null} for all
+   */
+  public void copyLineDiscountsFromOrder(Invoice invoice, java.util.Set<String> onlyLineIds) {
     boolean dirty = false;
     for (InvoiceLine il : invoice.getInvoiceLineList()) {
+      if (onlyLineIds != null && !onlyLineIds.contains(il.getId())) {
+        continue;
+      }
       BigDecimal srcDiscount = resolveCopyableSourceDiscount(il);
       if (srcDiscount != null) {
         il.setEtgoDiscount(srcDiscount);

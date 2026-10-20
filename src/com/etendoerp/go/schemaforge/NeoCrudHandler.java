@@ -52,6 +52,7 @@ import org.openbravo.service.db.DalConnectionProvider;
 import org.openbravo.service.json.DefaultJsonDataService;
 import org.openbravo.service.json.JsonConstants;
 
+import com.etendoerp.go.common.BoundedJsonParser;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryService;
@@ -102,6 +103,7 @@ class NeoCrudHandler {
    * all the same string.
    */
   private static final String FIELD_UPDATED = "updated";
+  private static final String MSG_BODY_REQUIRED = "Request body is required";
 
   /**
    * Key names of the structured error envelopes this class returns.
@@ -176,6 +178,11 @@ class NeoCrudHandler {
     }
     Tab adTab = entity.getADTab();
     Map<String, String> queryParams = servlet.extractQueryParams(request);
+    if (!isCriteriaWithinLimits(queryParams)) {
+      servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
+          "Invalid criteria: malformed JSON");
+      return;
+    }
 
     NeoContext neoContext = NeoContext.builder()
         .specName(pathInfo.specName)
@@ -238,7 +245,7 @@ class NeoCrudHandler {
           .entityName(neoContext.getEntityName())
           .httpMethod(neoContext.getHttpMethod())
           .recordId(neoContext.getRecordId())
-          .requestBody(new JSONObject(bodyStr))
+          .requestBody(BoundedJsonParser.parseObject(bodyStr))
           .queryParams(neoContext.getQueryParams())
           .adTab(neoContext.getAdTab())
           .sfEntity(neoContext.getSfEntity())
@@ -327,6 +334,13 @@ class NeoCrudHandler {
           ? NeoFieldFilter.forEntity(context.getSfEntity(), dalEntityName, context.getQueryParams())
           : NeoFieldFilter.forEntity(context.getSfEntity(), dalEntityName);
       Map<String, String> params = buildDalParams(context, adTab, dalEntityName);
+      if ("GET".equals(context.getHttpMethod()) && context.getRecordId() == null
+          && !params.containsKey(JsonConstants.DISTINCT_PARAMETER)
+          && !params.containsKey(JsonConstants.SUMMARY_PARAMETER)) {
+        // ETP-5778: let a customization's afterHandle aggregate the whole filtered set, not just
+        // the page. FK dropdowns (_distinct) and grid summaries (_summary) never need it.
+        NeoListAggregateQuery.remember(context, params);
+      }
 
       return executeJsonServiceAndBuildResponse(
           context, adTab, dalEntityName, fieldFilter, jsonService, params);
@@ -591,7 +605,23 @@ class NeoCrudHandler {
     if (errorResponse != null) {
       return errorResponse;
     }
+    // Kept even for an ids-only response: it renames DAL properties to the API keys a
+    // customization's afterHandle reads, so skipping it would change what the hook sees.
     fieldFilter.filterGetResponse(responseJson);
+    enrichResponseIdentifiers(context, responseJson);
+    return NeoResponse.ok(responseJson);
+  }
+
+  /**
+   * Adds the display identifiers the frontend reads off a response: list identifiers on GET, and
+   * Locator warehouse labels on GET and on the record a write echoes back.
+   */
+  private static void enrichResponseIdentifiers(NeoContext context, JSONObject responseJson) {
+    // ETP-5676: a batch sent with _onlyReturnIds reads nothing but the new id from this response
+    // (BatchService#extractRecordId), so the identifier enrichment below is work nobody sees.
+    if (context.isIdsOnlyResponse() && "POST".equals(context.getHttpMethod())) {
+      return;
+    }
     if (context.getSfEntity() != null) {
       String httpMethod = context.getHttpMethod();
       if ("GET".equals(httpMethod)) {
@@ -610,7 +640,6 @@ class NeoCrudHandler {
         NeoLocatorIdentifierHelper.enrichLocatorIdentifiers(responseJson, context.getSfEntity());
       }
     }
-    return NeoResponse.ok(responseJson);
   }
 
   /**
@@ -620,6 +649,12 @@ class NeoCrudHandler {
     if (context.getRecordId() != null) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
           "POST (create) must not include a record ID in the URL");
+    }
+    // A blank body reaches here as null (NeoRequestBodyParser.parseOptionalJsonObject); `{}` is a
+    // body and still goes through. Without this, create failed later with a NullPointerException.
+    if (context.getRequestBody() == null) {
+      NeoWriteRefusalLog.missingBody(context);
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, MSG_BODY_REQUIRED);
     }
     return null;
   }
@@ -643,7 +678,11 @@ class NeoCrudHandler {
     // variant would) is the deliberate choice: a caller that cannot produce `updated` has not
     // read the record it is overwriting, and that is exactly the caller we must stop.
     JSONObject body = context.getRequestBody();
-    String updated = body == null ? null : body.optString(FIELD_UPDATED, null);
+    if (body == null) {
+      NeoWriteRefusalLog.missingBody(context);
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, MSG_BODY_REQUIRED);
+    }
+    String updated = body.optString(FIELD_UPDATED, null);
     if (StringUtils.isBlank(updated) || "null".equals(updated)) {
       NeoWriteRefusalLog.missingUpdated(context, FIELD_UPDATED);
       return buildMissingUpdatedResponse();
@@ -860,6 +899,10 @@ class NeoCrudHandler {
     NeoMandatoryDefaultsService.injectMandatoryDefaults(filteredBody, adTab, context, parentIdValue, false);
     long perfInjectDefaults = System.nanoTime();
     Set<String> protectedCalloutFields = NeoCrudHelper.snapshotMandatoryBodyFields(filteredBody, adTab);
+    // ETP-5669: a fallback pick (first combo row, safe type default) only satisfies NOT NULL, so a
+    // callout may refine it — e.g. GL_Journal.C_Period_ID from the accounting date, which /batch
+    // used to keep at the first period. Genuine defaults and the caller's values stay protected.
+    protectedCalloutFields.removeAll(context.getFallbackDefaults());
     protectedCalloutFields.addAll(userSubmittedFields);
     // ETP-5350: kept OUT of protectedCalloutFields. That set is a snapshot of keys the caller
     // actually sent, and "protected" there means "do not overwrite what is already here" - a
@@ -894,7 +937,10 @@ class NeoCrudHandler {
     // call the injectors gross-first, which left LINE_GROSS_AMOUNT at 0 for any client that
     // sent neither amount (OCR /batch, MCP, import modal). The update path at executePut already
     // routes through this method, so calling it here is what keeps the two from drifting apart.
-    NeoCommercialLinePolicy.injectCommercialAmounts(filteredBody);
+    // ETP-5703: rounded to the document currency's standard precision, resolved structurally
+    // (currency-typed property of the line or of its parent) and only when an amount is derived.
+    NeoCommercialLinePolicy.injectCommercialAmounts(filteredBody,
+        NeoCurrencyPrecision.forWrite(adTab, filteredBody, null));
     stripContactsPreCreateBillingDefaults(filteredBody, context, adTab);
     // Coerce String primitives injected by injectMandatoryDefaults to their correct Java types.
     // Utility.getDefault() always returns String; JsonToDataConverter has no String→BigDecimal/
@@ -964,8 +1010,10 @@ class NeoCrudHandler {
     Set<String> effectiveSuppressed = suppressedFields != null
         ? suppressedFields
         : java.util.Collections.emptySet();
+    // ETP-5676: inside a batch, a callout whose every output the same batch already saw discarded
+    // under the same key is skipped; null outside a batch, where every callout runs as before.
     NeoDefaultsCascadeHelper.executeCalloutCascade(context, adTab, filteredBody, seqFields,
-        effectiveProtected, effectiveSuppressed);
+        effectiveProtected, effectiveSuppressed, NeoBatchScope.currentCalloutDiscardMemory());
     long t1 = System.nanoTime();
     DocTypeResolver.reapplyDocTypeFromTabFilter(filteredBody, adTab, context, effectiveProtected);
     NeoDefaultsCascadeHelper.removeEmptyFkValues(filteredBody, adTab);
@@ -1072,7 +1120,9 @@ class NeoCrudHandler {
     // The frontend sends invoicedQuantity and unitPrice as editable fields, so both are
     // available here to compute the correct net amount even for products where SL_Invoice_Amt
     // throws on the sales invoice context (e.g. tax-exclusive price lists).
-    NeoCommercialLinePolicy.injectCommercialAmounts(filteredBody);
+    // ETP-5703: rounded to the document currency's standard precision (see executePostCreate).
+    NeoCommercialLinePolicy.injectCommercialAmounts(filteredBody,
+        NeoCurrencyPrecision.forWrite(context.getAdTab(), filteredBody, context.getRecordId()));
     // ETP-4531: re-apply accountingDate now that filtering (which stripped it, correctly, as a
     // read-only field the CLIENT should never write directly) has run. Each header handler's
     // handle() pre-hook (e.g. AbstractInvoiceHeaderHandler#mirrorAccountingDate) mirrors the
@@ -1194,7 +1244,8 @@ class NeoCrudHandler {
     // @token@ substitution + parent filter for child tabs). Prefixed with
     // "as e" so OBQuery picks up the alias for its own client/org filters.
     String searchPredicate = NeoDistinctFetchSupport.buildDistinctSearchPredicate(prop, resolvedProperty, search);
-    List<String> predicates = buildDistinctPredicates(adTab, resolvedProperty, parentId, searchPredicate);
+    List<String> predicates = NeoDistinctFetchSupport.buildDistinctPredicates(adTab,
+        resolvedProperty, parentId, searchPredicate);
 
     // For to-one associations (FK properties), project through the identifier
     // column (".id") instead of the bare association path, and reuse the exact
@@ -1226,7 +1277,7 @@ class NeoCrudHandler {
       boolean hasMore = results.size() > pageSize;
       List<Object> page = hasMore ? new ArrayList<>(results.subList(0, pageSize)) : results;
 
-      JSONArray data = buildDistinctData(prop, isRelation, page);
+      JSONArray data = NeoDistinctFetchSupport.buildDistinctData(prop, isRelation, page);
 
       JSONObject payload = new JSONObject();
       payload.put("data", data);
@@ -1245,65 +1296,14 @@ class NeoCrudHandler {
   }
 
   /**
-   * Builds the HQL predicate list for {@link #handleDistinctFetch(Tab, Map, NeoContext)}: the
-   * not-null guard on the projected property, the tab's own HQL where clause
-   * (token-resolved), the parent-record filter for child tabs, and the
-   * caller-resolved search predicate. Extracted purely to keep
-   * {@code handleDistinctFetch}'s cognitive complexity within the Sonar limit
-   * (S3776) — same logic, same order, unconditionally invoked once.
+   * The {@code criteria} query parameter is JSON written by the client and parsed by core's
+   * datasource with jettison, which an unbalanced or deeply nested text crashes with an
+   * {@code Error} (see {@link BoundedJsonParser}). It is refused here, before anything parses it.
    */
-  private List<String> buildDistinctPredicates(Tab adTab, String resolvedProperty, String parentId,
-      String searchPredicate) {
-    List<String> predicates = new ArrayList<>();
-    predicates.add("e." + resolvedProperty + " IS NOT NULL");
-
-    String tabWhere = adTab.getHqlwhereclause();
-    addTabWherePredicate(adTab, tabWhere, parentId, predicates);
-    if (parentId != null && adTab.getTabLevel() != null && adTab.getTabLevel() > 0) {
-      String parentFilter = NeoParentTabFilterResolver.resolveParentFilter(adTab, parentId);
-      if (StringUtils.isNotBlank(parentFilter)) {
-        predicates.add("(" + parentFilter + ")");
-      }
-    }
-    if (searchPredicate != null) {
-      predicates.add(searchPredicate);
-    }
-    return predicates;
-  }
-
-  /**
-   * Builds the {@code data} array for {@link #handleDistinctFetch(Tab, Map, NeoContext)}: for a
-   * to-one association property, resolves display identifiers in batch; for a
-   * primitive property, emits the raw distinct values as-is. Extracted purely to
-   * keep {@code handleDistinctFetch}'s cognitive complexity within the Sonar
-   * limit (S3776) — same logic, same order, unconditionally invoked once.
-   */
-  private JSONArray buildDistinctData(Property prop, boolean isRelation, List<Object> page) {
-    JSONArray data = new JSONArray();
-    if (isRelation) {
-      Map<String, String> identifierById = NeoDistinctFetchSupport.loadIdentifiers(prop.getTargetEntity(), page);
-      for (Object value : page) {
-        data.put(NeoDistinctFetchSupport.toRelationDistinctEntry(value, identifierById));
-      }
-    } else {
-      for (Object value : page) {
-        data.put(NeoDistinctFetchSupport.toDistinctEntry(value));
-      }
-    }
-    return data;
-  }
-
-  private void addTabWherePredicate(Tab adTab, String tabWhere, String parentId, List<String> predicates) {
-    if (StringUtils.isNotBlank(tabWhere)) {
-      if (parentId != null && tabWhere.contains("@")) {
-        tabWhere = NeoParentTabFilterResolver.resolveTabWhereTokens(adTab, tabWhere, parentId);
-      }
-      if (!tabWhere.contains("@")) {
-        // Skip when unresolved @session_tokens@ remain — OBQuery can't bind
-        // them and the list fetch relies on DefaultJsonDataService to resolve.
-        predicates.add("(" + tabWhere + ")");
-      }
-    }
+  static boolean isCriteriaWithinLimits(Map<String, String> queryParams) {
+    String criteria = queryParams != null ? queryParams.get(CRITERIA_PARAM) : null;
+    return StringUtils.isBlank(criteria)
+        || BoundedJsonParser.isWithinLimits(criteria, BoundedJsonParser.DEFAULT_MAX_DEPTH);
   }
 
   /**
@@ -1329,7 +1329,7 @@ class NeoCrudHandler {
       return;
     }
     try {
-      JSONArray arr = new JSONArray(criteria);
+      JSONArray arr = BoundedJsonParser.parseArray(criteria);
       if (normalizeBooleanCriteriaArray(arr, entityDef)) {
         params.put(CRITERIA_PARAM, arr.toString());
       }

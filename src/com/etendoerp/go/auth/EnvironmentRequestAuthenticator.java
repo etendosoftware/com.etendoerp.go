@@ -80,13 +80,16 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  * so every {@link SurfacePolicy} gets it for free rather than each cookie-consuming call site
  * wiring it in on its own.
  *
+ * <p>ETP-5270 — a legacy JWT gets the same check. Its role is a signed claim and cannot be rebound,
+ * so a token whose role was revoked is refused ({@code 401}) rather than authorized with it.
+ *
  * <p>ETP-5047 — the bind step's commercial-access check is {@link EnvironmentAccessGuard}, the one
  * check every tenant entry point shares (NEO, the {@code NEO_DATA} servlets, MCP, the environment
  * login): it owns the decision, the {@code environment-access-enforcement-off} kill switch and the
  * structured 402 body, which a refusal carries as {@link EnvironmentAuthOutcome#getAccessDenial()}.
- *
- * <p>ETP-5270 — a legacy JWT gets the same check. Its role is a signed claim and cannot be rebound,
- * so a token whose role was revoked is refused ({@code 401}) rather than authorized with it.
+ * A credential whose tenant cannot be resolved is a {@code 503}
+ * ({@link EnvironmentAuthOutcome.Status#SERVICE_UNAVAILABLE}), answered by the bind step itself
+ * rather than through the ETP-5489 {@code 500}.
  */
 public class EnvironmentRequestAuthenticator {
 
@@ -98,10 +101,10 @@ public class EnvironmentRequestAuthenticator {
   static final String MSG_MISSING_CLAIMS = "Invalid token: missing required claims";
   static final String MSG_INVALID_TOKEN = "Invalid or expired token";
   static final String MSG_INSUFFICIENT_SCOPE = "Insufficient scope or invalid token context";
+  static final String MSG_CONTEXT_UNAVAILABLE = "Environment context could not be established";
   /** ETP-5047 — the role lookup that resolves a wildcard client failed; retry. */
   static final String MSG_TENANT_UNRESOLVED =
       "The environment of this credential could not be verified; retry later";
-  static final String MSG_CONTEXT_UNAVAILABLE = "Environment context could not be established";
 
   private static final String HEADER_AUTHORIZATION = "Authorization";
   private static final String HEADER_ACCEPT_LANGUAGE = "Accept-Language";

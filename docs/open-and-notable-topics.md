@@ -325,11 +325,12 @@ open no row, and the lifecycle webhooks keep the `ETGO_SubscriptionStatus`/`DueA
   `false` when `hasAnySubscription` throws (logged at ERROR), so the payment goes only to the
   `ETGO_TenantPlan` marker. For a tenant whose only row is closed the marker is hidden behind that
   row: since ETP-5047 the tenant reads as canceled, so it would stay blocked (402) while it pays.
-  *Reachable in principle only:* letting a canceled tenant re-subscribe its own environment was
-  decided on 2026-10-14 (Martin Taal), but that flow is **ETP-5742** and does not exist yet. Today
-  every checkout provisions a new, rowless environment (`feature-flags-and-tenant-upgrade.md` §3),
-  and since ETP-5047 a canceled productive tenant is no longer a demo source either (§4.14), so no
-  current purchase reaches a tenant with a closed row. The acceptance does not depend on that.
+  *Not reached by a purchase:* every checkout provisions a new, rowless environment
+  (`feature-flags-and-tenant-upgrade.md` §3), and since ETP-5047 a canceled productive tenant is no
+  longer a demo source either (§4.14). The **ETP-5742** re-subscription does reach a tenant with a
+  closed row, and avoids this path: it asks `hasAnySubscription` itself, unguarded, before
+  recording the payment, so a failing lookup fails the payment webhook for a redelivery. The
+  acceptance does not depend on that.
   *Why accepted:* it fails closed in practice. The lookup runs in the onboarding transaction, and on
   PostgreSQL a failed SQL statement aborts it, so the writes that follow fail too and the upgrade
   fails and stays retryable instead of being recorded in the marker; only a failure other than a
@@ -608,12 +609,11 @@ calling user, whose role can read neither `AD_Preference` nor `ETGO_SUBSCRIPTION
   row (the preference fallback). `isProductiveEnvironment` reads the same way to keep a productive
   tenant, canceled included, out of the purchase-source checks (§4.14).
 - **Re-subscribing opens a fresh row.** A later purchase for the same tenant finds no open row and
-  `openSubscription` inserts one (`SubscriptionResubscriptionIntegrationTest`). No purchase reaches
-  that path yet: letting a canceled tenant re-subscribe its own environment was decided on
-  2026-10-14 (Martin Taal), but the flow is **ETP-5742** and does not exist yet. Today every
-  checkout provisions a new environment, and since ETP-5047 a canceled productive tenant is no
-  longer a demo source either (§4.14); `feature-flags-and-tenant-upgrade.md` §3. The acceptance of
-  §2.9's failed row lookup does not depend on it.
+  `openSubscription` inserts one (`SubscriptionResubscriptionIntegrationTest`). The **ETP-5742**
+  re-subscription is what reaches it: the payment webhook applies a paid re-subscription to its
+  tenant through `applyPaidUpgradeSideEffects` (`feature-flags-and-tenant-upgrade.md` §3,
+  *Re-subscribing a canceled environment*). A purchase still provisions a new environment. The
+  acceptance of §2.9's failed row lookup does not depend on it.
   If the open row is `canceled` but was never closed — its delete event was lost, or R37
   backfilled it (R37 leaves canceled rows open on purpose: it has no provider end instant to close
   them at; its idempotency guard is "no row at all", so a re-run never inserts a second one either
@@ -1173,7 +1173,7 @@ below assume it (item 1's 503 is decided per enforcement flag).
 | 9 | A brief access-map failure during a background refresh replaces the whole app. | Unsaved form input is lost. Core behaviour. | `develop` | None — needs an `app-shell-core` change: keep the previous access map on a background refresh. |
 | 10 | Two readers of the 402 decision: core `apiFetch` reads only the message text; schema_forge's `readEnvironmentAccessDecision` (`d18c484d9`) reads `error.decision` first. | Same answer while the backend keeps both in sync; they drift if it stops. | **ETP-5047** | core: the reader moves into `app-shell-core` (`d57298c06`); the schema_forge side waits for a core release. |
 | 11 | **Unverified.** Purchase-source ownership is `EtendoGoJwtDalHelper.clientBelongsToAccountEmail`: any active user of the environment whose email or username is the account email (or an `email+suffix` variant). That matches a member **invited** into another owner's environment, not only its owner. | An invited member might name another owner's demo as `demoClientId`, so a purchase would associate, copy and revoke a demo the buyer does not own — against FR-08 of `schema_forge/docs/plans/etp-5396-demo-to-pro-prd.md`. | `develop` (predates ETP-5046/5047) | None — **ETP-5743** "Restrict the purchase demo source to the account owner". |
-| 12 | A canceled tenant cannot re-subscribe its own environment: every checkout provisions a new one, and since ETP-5047 a canceled productive tenant is not a demo source either (§4.14). The flow was decided on 2026-10-14 (Martin Taal; §2.9, §3.7). The same-name check `ownsProductiveNamed` (pre-checkout and onboarding) asks `resolvePlan`, which reads a canceled tenant as `free`, so its name does not count as taken. | A canceled customer who wants to come back gets a second environment, and may give it the canceled one's company name. | **ETP-5047** (it closes the row on cancel, so a canceled tenant reads `free`; the missing flow itself predates it) | None — **ETP-5742** "Let a canceled tenant re-subscribe its own environment". |
+| 12 | A canceled tenant cannot re-subscribe its own environment: every checkout provisions a new one, and since ETP-5047 a canceled productive tenant is not a demo source either (§4.14). The flow was decided on 2026-10-14 (Martin Taal; §2.9, §3.7). The same-name check `ownsProductiveNamed` (pre-checkout and onboarding) asks `resolvePlan`, which reads a canceled tenant as `free`, so its name does not count as taken. | A canceled customer who wants to come back gets a second environment, and may give it the canceled one's company name. | **ETP-5047** (it closes the row on cancel, so a canceled tenant reads `free`; the missing flow itself predates it) | **Fixed by ETP-5742**: the owner re-subscribes the canceled environment from its blocked screen (`POST /sws/go/billing/reactivation`, applied by the payment webhook), and `ownsProductiveNamed` also counts a productive lifecycle type, so the name stays taken (`feature-flags-and-tenant-upgrade.md` §3). |
 
 ### 🟡 4.15 Paid provisioning is only half extracted from `EtendoGoJwtServlet` (ETP-5048)
 

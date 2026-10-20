@@ -103,6 +103,12 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
   @Inject
   private CurrencyOptionsHandler currencyOptionsHandler;
 
+  @Inject
+  private ImportOrderLinesIntoInvoiceHandler importOrderLinesHandler;
+
+  @Inject
+  private ImportInOutLinesIntoInvoiceHandler importReceiptLinesHandler;
+
   /** Package-private seam so unit tests can inject a mocked {@link DocumentPostingService}. */
   void setPostingService(DocumentPostingService postingService) {
     this.postingService = postingService;
@@ -126,6 +132,9 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
     contracts.putAll(InvoicePostingGate.CONTRACTS);
     // ETP-5709: cloneRecord was served (see handle) but undeclared.
     contracts.put(NeoCloneRecordHandler.CONTRACT.getName(), NeoCloneRecordHandler.CONTRACT);
+    // ETP-5713: import the pending lines of a completed order / goods receipt into this draft.
+    contracts.putAll(ImportOrderLinesIntoInvoiceHandler.contracts(false));
+    contracts.putAll(ImportInOutLinesIntoInvoiceHandler.contracts(false));
     return contracts;
   }
 
@@ -158,6 +167,9 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
       return invoiceGuard;
     }
     NeoHandlerUtils.mirrorAccountingDateOnCreate(context, "invoiceDate", "accountingDate");
+    // ETP-5703: server-side defaults for a write that leaves them out (an agent; the SPA sends both).
+    injectPartnerAddressIfMissing(context);
+    currencyRateDefaults.capture(context);
     captureOriginInvoice(context);
     NeoResponse siiAuthError = captureAndValidateSiiAuthorization(context);
     if (siiAuthError != null) {
@@ -203,6 +215,8 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
         registerPaymentOutHandler,
         siiSendHandler,
         tbaiXmlgeneratorHandler,
+        importOrderLinesHandler,
+        importReceiptLinesHandler,
         followUp.actionHandler());
   }
 
@@ -240,6 +254,8 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
    */
   @Override
   public NeoResponse afterHandle(NeoContext context) {
+    // ETP-5703: before the rate-document sync, which is a no-op while the rate is null.
+    currencyRateDefaults.apply(context);
     autoCreateOrUpdateConversionRateDocument(context);
     try {
       // POST/PUT/PATCH: persist origin invoice relationship after the record is saved.

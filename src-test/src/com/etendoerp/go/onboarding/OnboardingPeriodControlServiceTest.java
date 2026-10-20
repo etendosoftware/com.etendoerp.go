@@ -33,11 +33,13 @@ import static org.mockito.Mockito.when;
 
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Date;
 import java.util.List;
+import java.util.function.Consumer;
 
 import org.junit.After;
 import org.junit.Test;
@@ -61,7 +63,10 @@ import org.openbravo.model.financialmgmt.calendar.Year;
  * resolution and the provisioning steps) so no real database is touched. The few seams that issue
  * {@code OBDal.getInstance().save(...)} directly (enablePeriodControl, rebrandImportedCalendarName,
  * applyPeriodOpenState) are exercised under a {@link MockedStatic} of {@link OBDal} that swallows
- * the saves.
+ * the saves. Calls that reach {@link FiscalCalendarSupport#ensureYear} (the demo window and the
+ * productive initial state) also mock {@link FiscalCalendarSupport}.
+ *
+ * @covers com.etendoerp.go.onboarding.OnboardingPeriodControlService
  */
 public class OnboardingPeriodControlServiceTest {
 
@@ -461,8 +466,11 @@ public class OnboardingPeriodControlServiceTest {
     service.controlsByPeriod.put(oct, Arrays.asList(octControl));
     service.controlsByPeriod.put(nov, Arrays.asList(novControl));
 
-    runWithDal(() -> service.openDemoTrialWindow("CLIENT-1", "ORG-1", "USER-1", "ROLE-1",
-        Instant.parse("2026-09-30T10:00:00Z"), 15));
+    Instant trialStart = Instant.parse("2026-09-30T10:00:00Z");
+    service.fixedNow = Date.from(trialStart);
+
+    runDemo(() -> service.openDemoTrialWindow("CLIENT-1", "ORG-1", "USER-1", "ROLE-1",
+        trialStart, 15), support -> { });
 
     assertEquals("O", octControl.getPeriodStatus());
     verify(octControl).setOpenClose("C");
@@ -513,19 +521,149 @@ public class OnboardingPeriodControlServiceTest {
     verify(aug, never()).setOpenClose("C");
   }
 
-  @Test
-  public void testDemoWindowBeyondTheCalendarOpensWhatExists() {
-    Period dec = period("2026-12-01", "2026-12-31", "O");
-    PeriodControl decControl = control("N");
-    RealLogicService service = new RealLogicService();
-    service.periods = Arrays.asList(dec);
-    service.controlsByPeriod.put(dec, Arrays.asList(decControl));
+  // ETP-5744: the demo window ensures every calendar year its trial and "now" touch.
 
-    runWithDal(() -> service.openDemoTrialWindow("CLIENT-1", "ORG-1", "USER-1", "ROLE-1",
-        Instant.parse("2026-12-20T10:00:00Z"), 15));
+  @Test
+  public void testDemoWindowInsideOneYearEnsuresOnlyThatYearAndDoesNotNormalize() {
+    RealLogicService service = new RealLogicService();
+    Instant trialStart = Instant.parse("2026-10-19T10:00:00Z");
+    service.fixedNow = Date.from(trialStart);
+
+    runDemo(() -> service.openDemoTrialWindow("CLIENT-1", "ORG-1", "USER-1", "ROLE-1",
+        trialStart, 14), support -> {
+          support.verify(() -> FiscalCalendarSupport.ensureYear(service.importedCalendar, 2026));
+          verifyYearNotEnsured(support, 2025);
+          verifyYearNotEnsured(support, 2027);
+          support.verify(() -> FiscalCalendarSupport.normalizePeriodControls(anyString()),
+              never());
+        });
+  }
+
+  @Test
+  public void testDemoWindowCrossingNewYearEnsuresNextYearAndOpensOnlyJanuary() {
+    Period dec = period("2026-12-01", "2026-12-31", "O");
+    Period jan = period("2027-01-01", "2027-01-31", "O");
+    Period feb = period("2027-02-01", "2027-02-28", "O");
+    PeriodControl decControl = control("N");
+    PeriodControl janControl = control("N");
+    PeriodControl febControl = control("N");
+    RealLogicService service = new RealLogicService();
+    service.periods = Arrays.asList(dec, jan, feb);
+    service.controlsByPeriod.put(dec, Arrays.asList(decControl));
+    service.controlsByPeriod.put(jan, Arrays.asList(janControl));
+    service.controlsByPeriod.put(feb, Arrays.asList(febControl));
+    Instant trialStart = Instant.parse("2026-12-20T10:00:00Z");
+    service.fixedNow = Date.from(trialStart);
+
+    runDemo(() -> service.openDemoTrialWindow("CLIENT-1", "ORG-1", "USER-1", "ROLE-1",
+        trialStart, 14), support -> {
+          support.verify(() -> FiscalCalendarSupport.ensureYear(service.importedCalendar, 2026));
+          support.verify(() -> FiscalCalendarSupport.ensureYear(service.importedCalendar, 2027));
+        });
 
     assertEquals("O", decControl.getPeriodStatus());
-    verify(dec).setOpenClose("C");
+    assertEquals("O", janControl.getPeriodStatus());
+    verify(jan).setOpenClose("C");
+    assertEquals("N", febControl.getPeriodStatus());
+  }
+
+  @Test
+  public void testDemoWindowSignedUpInANewYearCreatesOnlyThatYear() {
+    Period jan = period("2027-01-01", "2027-01-31", "O");
+    PeriodControl janControl = control("N");
+    RealLogicService service = new RealLogicService();
+    service.periods = Arrays.asList(jan);
+    service.controlsByPeriod.put(jan, Arrays.asList(janControl));
+    Instant trialStart = Instant.parse("2027-01-05T10:00:00Z");
+    service.fixedNow = Date.from(trialStart);
+
+    runDemo(() -> service.openDemoTrialWindow("CLIENT-1", "ORG-1", "USER-1", "ROLE-1",
+        trialStart, 14), support -> {
+          support.verify(() -> FiscalCalendarSupport.ensureYear(service.importedCalendar, 2027));
+          verifyYearNotEnsured(support, 2026);
+        });
+
+    assertEquals("O", janControl.getPeriodStatus());
+  }
+
+  @Test
+  public void testDemoWindowWithNoTrialDaysEnsuresOnlyTheSignupYear() {
+    for (int trialDays : new int[] { 0, -5 }) {
+      Period dec = period("2026-12-01", "2026-12-31", "O");
+      Period jan = period("2027-01-01", "2027-01-31", "O");
+      PeriodControl decControl = control("N");
+      PeriodControl janControl = control("N");
+      RealLogicService service = new RealLogicService();
+      service.periods = Arrays.asList(dec, jan);
+      service.controlsByPeriod.put(dec, Arrays.asList(decControl));
+      service.controlsByPeriod.put(jan, Arrays.asList(janControl));
+      Instant trialStart = Instant.parse("2026-12-20T10:00:00Z");
+      service.fixedNow = Date.from(trialStart);
+
+      runDemo(() -> service.openDemoTrialWindow("CLIENT-1", "ORG-1", "USER-1", "ROLE-1",
+          trialStart, trialDays), support -> {
+            support.verify(() -> FiscalCalendarSupport.ensureYear(service.importedCalendar, 2026));
+            verifyYearNotEnsured(support, 2027);
+          });
+
+      assertEquals("O", decControl.getPeriodStatus());
+      assertEquals("N", janControl.getPeriodStatus());
+    }
+  }
+
+  @Test
+  public void testDemoWindowRetriedLaterStillEnsuresTheTrialStartYear() {
+    Period dec = period("2026-12-01", "2026-12-31", "O");
+    PeriodControl userClosed = control("C");
+    RealLogicService service = new RealLogicService();
+    service.periods = Arrays.asList(dec);
+    service.controlsByPeriod.put(dec, Arrays.asList(userClosed));
+    service.fixedNow = date("2027-01-20");
+
+    runDemo(() -> service.openDemoTrialWindow("CLIENT-1", "ORG-1", "USER-1", "ROLE-1",
+        Instant.parse("2026-12-25T10:00:00Z"), 14), support -> {
+          support.verify(() -> FiscalCalendarSupport.ensureYear(service.importedCalendar, 2026));
+          support.verify(() -> FiscalCalendarSupport.ensureYear(service.importedCalendar, 2027));
+        });
+
+    assertEquals("C", userClosed.getPeriodStatus());
+    verify(userClosed, never()).setOpenClose(anyString());
+  }
+
+  @Test
+  public void testDemoWindowAroundNewYearEnsuresBothYears() {
+    for (Instant signup : Arrays.asList(localInstant(2026, 12, 31, 23, 30),
+        localInstant(2027, 1, 1, 0, 30))) {
+      RealLogicService service = new RealLogicService();
+      service.fixedNow = Date.from(signup);
+
+      runDemo(() -> service.openDemoTrialWindow("CLIENT-1", "ORG-1", "USER-1", "ROLE-1",
+          signup, 14), support -> {
+            support.verify(() -> FiscalCalendarSupport.ensureYear(service.importedCalendar, 2026));
+            support.verify(() -> FiscalCalendarSupport.ensureYear(service.importedCalendar, 2027));
+          });
+    }
+  }
+
+  @Test
+  public void testDemoWindowFirstTrialEndingInTheNextYearStartsOnDecember18() {
+    RealLogicService lastIn2026 = new RealLogicService();
+    Instant dec17 = localInstant(2026, 12, 17, 0, 30);
+    lastIn2026.fixedNow = Date.from(dec17);
+    runDemo(() -> lastIn2026.openDemoTrialWindow("CLIENT-1", "ORG-1", "USER-1", "ROLE-1",
+        dec17, 14), support -> verifyYearNotEnsured(support, 2027));
+
+    Period jan = period("2027-01-01", "2027-01-31", "O");
+    PeriodControl janControl = control("N");
+    RealLogicService firstIn2027 = new RealLogicService();
+    firstIn2027.periods = Arrays.asList(jan);
+    firstIn2027.controlsByPeriod.put(jan, Arrays.asList(janControl));
+    Instant dec18 = localInstant(2026, 12, 18, 0, 30);
+    firstIn2027.fixedNow = Date.from(dec18);
+    runDemo(() -> firstIn2027.openDemoTrialWindow("CLIENT-1", "ORG-1", "USER-1", "ROLE-1",
+        dec18, 14), support -> support.verify(
+            () -> FiscalCalendarSupport.ensureYear(firstIn2027.importedCalendar, 2027)));
+    assertEquals("O", janControl.getPeriodStatus());
   }
 
   @Test
@@ -534,8 +672,12 @@ public class OnboardingPeriodControlServiceTest {
     Calendar orgCalendar = mock(Calendar.class);
     when(service.organization.getCalendar()).thenReturn(orgCalendar);
 
-    runWithDal(() -> service.openDemoTrialWindow("CLIENT-1", "ORG-1", "USER-1", "ROLE-1",
-        Instant.parse("2026-10-01T10:00:00Z"), 15));
+    Instant trialStart = Instant.parse("2026-10-01T10:00:00Z");
+    service.fixedNow = Date.from(trialStart);
+
+    runDemo(() -> service.openDemoTrialWindow("CLIENT-1", "ORG-1", "USER-1", "ROLE-1",
+        trialStart, 15), support -> support.verify(
+            () -> FiscalCalendarSupport.ensureYear(orgCalendar, 2026)));
 
     assertSame(orgCalendar, service.lastResolvedCalendar);
   }
@@ -604,6 +746,7 @@ public class OnboardingPeriodControlServiceTest {
           never());
       support.verify(() -> FiscalCalendarSupport.ensureYear(any(Calendar.class), eq(2027)),
           never());
+      support.verify(() -> FiscalCalendarSupport.removeUnusedYearsOutside("CAL-1", 2026, 2026));
       support.verify(() -> FiscalCalendarSupport.normalizePeriodControls("CAL-1"));
     }
     assertEquals("N", octControl.getPeriodStatus());
@@ -620,7 +763,50 @@ public class OnboardingPeriodControlServiceTest {
           "ROLE-1"));
       support.verify(() -> FiscalCalendarSupport.ensureYear(service.importedCalendar, 2026));
       support.verify(() -> FiscalCalendarSupport.ensureYear(service.importedCalendar, 2027));
+      support.verify(() -> FiscalCalendarSupport.removeUnusedYearsOutside(any(), eq(2026),
+          eq(2027)));
     }
+  }
+
+  @Test
+  public void testProductiveInANewYearKeepsOnlyThatYear() {
+    RealLogicService service = new RealLogicService();
+    service.fixedNow = date("2027-01-05");
+    when(service.importedCalendar.getId()).thenReturn("CAL-1");
+
+    try (MockedStatic<FiscalCalendarSupport> support = mockStatic(FiscalCalendarSupport.class)) {
+      runWithDal(() -> service.applyProductiveInitialState("CLIENT-1", "ORG-1", "USER-1",
+          "ROLE-1"));
+      support.verify(() -> FiscalCalendarSupport.ensureYear(service.importedCalendar, 2027));
+      support.verify(() -> FiscalCalendarSupport.removeUnusedYearsOutside("CAL-1", 2027, 2027));
+    }
+  }
+
+  @Test
+  public void testProductiveCleansTheYearsAfterEnsuringThemAndNormalizesLast() {
+    RealLogicService service = new RealLogicService();
+    service.fixedNow = date("2027-01-05");
+    when(service.importedCalendar.getId()).thenReturn("CAL-1");
+    List<String> calls = new java.util.ArrayList<>();
+
+    try (MockedStatic<FiscalCalendarSupport> support = mockStatic(FiscalCalendarSupport.class)) {
+      support.when(() -> FiscalCalendarSupport.ensureYear(any(), eq(2027)))
+          .thenAnswer(invocation -> calls.add("ensure"));
+      support.when(() -> FiscalCalendarSupport.removeUnusedYearsOutside("CAL-1", 2027, 2027))
+          .thenAnswer(invocation -> {
+            calls.add("remove");
+            return 0;
+          });
+      support.when(() -> FiscalCalendarSupport.normalizePeriodControls("CAL-1"))
+          .thenAnswer(invocation -> {
+            calls.add("normalize");
+            return null;
+          });
+      runWithDal(() -> service.applyProductiveInitialState("CLIENT-1", "ORG-1", "USER-1",
+          "ROLE-1"));
+    }
+
+    assertEquals(Arrays.asList("ensure", "remove", "normalize"), calls);
   }
 
   @Test
@@ -639,6 +825,24 @@ public class OnboardingPeriodControlServiceTest {
       obDal.when(OBDal::getInstance).thenReturn(mock(OBDal.class));
       action.run();
     }
+  }
+
+  /** Runs a demo window with {@link FiscalCalendarSupport} mocked, then runs the checks on it. */
+  private static void runDemo(Runnable action,
+      Consumer<MockedStatic<FiscalCalendarSupport>> checks) {
+    try (MockedStatic<FiscalCalendarSupport> support = mockStatic(FiscalCalendarSupport.class)) {
+      runWithDal(action);
+      checks.accept(support);
+    }
+  }
+
+  private static void verifyYearNotEnsured(MockedStatic<FiscalCalendarSupport> support, int year) {
+    support.verify(() -> FiscalCalendarSupport.ensureYear(any(Calendar.class), eq(year)), never());
+  }
+
+  private static Instant localInstant(int year, int month, int day, int hour, int minute) {
+    return LocalDateTime.of(year, month, day, hour, minute).atZone(ZoneId.systemDefault())
+        .toInstant();
   }
 
   private static Date date(String isoDate) {

@@ -1,0 +1,44 @@
+# Célula: ventas
+# Ventas (Irina + Isaias): factura/pedido/presupuesto de venta, albarán de salida, devoluciones de cliente, aging de cobros y contactos (terceros, direcciones).
+# Una clase de test por línea (nombre completo). Las *IntegrationTest / *DbTest son de integración;
+# el resto, con mocks. Ejecutar: ./gradlew goCellTest -Pcell=ventas [-Pkind=mock|integration|all]
+
+# Tests comunes a ventas y compras (src-test/cells/compartidos/ventas-compras.txt)
+@incluye ventas-compras
+
+# --- con mocks (31)
+com.etendoerp.go.schemaforge.AgingReportHandlerTest
+com.etendoerp.go.schemaforge.BusinessPartnerHandlerTest
+com.etendoerp.go.schemaforge.CloneShipmentHookTest
+com.etendoerp.go.schemaforge.ContactNameSyncHandlerTest
+com.etendoerp.go.schemaforge.ContactsBpStatsHandlerTest
+com.etendoerp.go.schemaforge.ContactsBpTrendHandlerTest
+com.etendoerp.go.schemaforge.ContactsLocationAddressCreateModesTest
+com.etendoerp.go.schemaforge.ContactsLocationAddressHandlerTest
+com.etendoerp.go.schemaforge.ContactsLocationAddressParentAndRegionTest
+com.etendoerp.go.schemaforge.CreateRejectReasonHandlerTest
+com.etendoerp.go.schemaforge.CreateShipmentHandlerTest
+com.etendoerp.go.schemaforge.GoodsShipmentHeaderHandlerTest
+com.etendoerp.go.schemaforge.GoodsShipmentLineHandlerTest
+com.etendoerp.go.schemaforge.NeoReturnReceiptServiceTest
+com.etendoerp.go.schemaforge.RejectQuotationHandlerTest
+com.etendoerp.go.schemaforge.ReturnMaterialReceiptHeaderHandlerPostingTest
+com.etendoerp.go.schemaforge.ReturnMaterialReceiptHeaderHandlerTest
+com.etendoerp.go.schemaforge.ReturnMaterialReceiptLineHandlerTest
+com.etendoerp.go.schemaforge.ReturnShipmentUtilsTest
+com.etendoerp.go.schemaforge.SalesInvoiceHeaderHandlerPostingTest
+com.etendoerp.go.schemaforge.SalesInvoiceHeaderHandlerTest
+com.etendoerp.go.schemaforge.SalesLineCustomizationHandlersTest
+com.etendoerp.go.schemaforge.SalesOrderHeaderHandlerTest
+com.etendoerp.go.schemaforge.SalesQuotationHeaderHandlerTest
+com.etendoerp.go.schemaforge.email.contracts.SalesDocumentEmailContractsTest
+com.etendoerp.go.schemaforge.handlers.BusinessPartnerCategoryAccountingHandlerTest
+com.etendoerp.go.schemaforge.handlers.ContactHandlerTest
+com.etendoerp.go.schemaforge.handlers.CustomerAccountingHandlerTest
+com.etendoerp.go.schemaforge.handlers.VendorAccountingHandlerTest
+com.etendoerp.go.schemaforge.selector.policy.AddressVirtualSelectorPolicyTest
+com.etendoerp.go.schemaforge.util.NeoAddressHelperTest
+
+# --- integración (BD) (1)
+com.etendoerp.go.schemaforge.BusinessPartnerHandlerChildDataSqlIntegrationTest
+

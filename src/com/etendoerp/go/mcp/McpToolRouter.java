@@ -26,6 +26,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -399,9 +400,19 @@ public class McpToolRouter {
     // order-by instead of the random id order.
     NeoTabDefaultSort.applyIfAbsent(params, adTab, dalEntityName);
 
-    // Apply filters as where clause
+    // One read context for the customization's filter aliases and read predicates below.
+    NeoContext readCtx = McpHookExecutor.buildReadHookContext(specName, entityName, null, adTab,
+        sfEntity, McpHookExecutor.buildReadProviderParams(filters, parentId, offset, limit, orderBy));
+
+    // Apply filters as where clause. ETP-5705: when a customization rewrites a value after the
+    // read, it can declare a filter alias naming the property that holds the displayed value.
+    // A filter on that field is evaluated against the alias, or it would match the raw value
+    // the caller is never shown. Every alias used is reported back in the response.
+    Map<String, String> appliedAliases = new LinkedHashMap<>();
     if (filters != null && filters.length() > 0) {
-      String whereClause = McpQuerySupport.buildWhereFromFilters(filters, adTab, sfEntity, log);
+      String whereClause = McpQuerySupport.buildWhereFromFilters(filters, adTab, sfEntity,
+          NeoReadPredicates.resolveFilterAliases(readCtx, NeoExtensionChannel.MCP),
+          appliedAliases, log);
       if (StringUtils.isNotBlank(whereClause)) {
         params.put(JsonConstants.WHERE_AND_FILTER_CLAUSE, whereClause);
         params.put(JsonConstants.USE_ALIAS, "true");
@@ -426,10 +437,7 @@ public class McpToolRouter {
     // ETP-5009: the customization's read predicates, ANDed in exactly as the REST list GET and
     // its ?_distinct= fetch do (NeoReadPredicates), so a row a customization excludes from the
     // query is excluded here too — rather than only from the page its afterHandle was handed.
-    String readPredicate = NeoReadPredicates.resolve(McpHookExecutor.buildReadHookContext(
-        specName, entityName, null, adTab, sfEntity,
-        McpHookExecutor.buildReadProviderParams(filters, parentId, offset, limit, orderBy)),
-        NeoExtensionChannel.MCP);
+    String readPredicate = NeoReadPredicates.resolve(readCtx, NeoExtensionChannel.MCP);
     if (StringUtils.isNotBlank(readPredicate)) {
       params.put(JsonConstants.WHERE_AND_FILTER_CLAUSE, NeoReadPredicates.and(
           params.get(JsonConstants.WHERE_AND_FILTER_CLAUSE), readPredicate));
@@ -473,6 +481,7 @@ public class McpToolRouter {
     // other filters mean — the moment it is choosing among them. After projection on purpose:
     // `fields` selects row columns, and this block is not one.
     McpNamedFilters.attachApplied(flat, sfEntity.getNamedFilters(), filters);
+    McpQuerySupport.attachFilterAliases(flat, appliedAliases);
     return wrapAsTextContent(flat);
   }
 
@@ -1278,6 +1287,16 @@ public class McpToolRouter {
    * Reads AD_Column metadata directly (same source as the Etendo classic UI form),
    * so the agent sees exactly the same fields the UI would show.
    */
+  private static String[] schemaRequiredArgs(JSONObject args) {
+    boolean viewMissing = args == null
+        || args.optString(McpActionsView.PARAM_VIEW, "").trim().isEmpty();
+    boolean entityMissing = args == null || !args.has(McpConstants.PARAM_ENTITY)
+        || args.isNull(McpConstants.PARAM_ENTITY);
+    return viewMissing && entityMissing
+        ? new String[] { McpConstants.PARAM_ENTITY, McpActionsView.PARAM_VIEW }
+        : new String[] { McpConstants.PARAM_ENTITY };
+  }
+
   private JSONObject handleSchema(String specName, JSONObject args) throws Exception {
     // ETP-5468: a report spec whose handler declares named actions (bank-reconciliation) is
     // answered with its action catalog BEFORE the generic path, which rejects every SPEC_TYPE=R
@@ -1288,7 +1307,9 @@ public class McpToolRouter {
     if (declaredActionsSchema != null) {
       return declaredActionsSchema;
     }
-    McpToolRouterSupport.validateArgs(args, McpConstants.PARAM_ENTITY);
+    // ETP-5669: an absent view is named together with an absent entity, not one call later. A
+    // present entity keeps the view check below, which lists the views.
+    McpToolRouterSupport.validateArgs(args, schemaRequiredArgs(args));
 
     String entityName = args.getString(McpConstants.PARAM_ENTITY);
 
@@ -1388,9 +1409,13 @@ public class McpToolRouter {
       Set<String> serverResolved = new HashSet<>(
           McpSchemaResponseHints.serverDefaultedNames(specName, entityName, adTab, sfEntity));
       serverResolved.addAll(McpServerResolvedFields.forCreate(sfEntity));
-      return wrapAsTextContent(McpSchemaCreateView
+      JSONObject createView = McpSchemaCreateView
           .buildResponse(specName, entityName, fieldsArray, serverResolved, isChildEntity,
-              entityAgentPrompt));
+              entityAgentPrompt);
+      // ETP-5676: the request options the entity's customization accepts on create, e.g. the
+      // product's _skipPricesSeed. Absent for every entity that declares none.
+      McpServerResolvedFields.addCreateDirectives(createView, sfEntity);
+      return wrapAsTextContent(createView);
     }
     // IMP-44: everything below is the full dump, and reaching it now requires having asked for
     // it. Omitting `view` used to land here — 39.5 kB on sales-order/header against 5.4 kB for
@@ -1551,8 +1576,12 @@ public class McpToolRouter {
       // the first point where a $ref is resolved and a parentRef's parent exists; running them
       // over the whole array beforehand made every parent-dependent injection abstain in silence.
       // See BatchService#executeBatch(JSONArray, OperationPreprocessor).
+      // ETP-5676: both optional, default false — the response is ids-only either way; the options
+      // only let each write skip decorating its echo and skip callouts proven redundant.
       JSONObject result = BatchService.forBatchOnly()
-          .executeBatch(operations, this::preprocessBatchOperation);
+          .executeBatch(operations, this::preprocessBatchOperation,
+              args.optBoolean(BatchService.PARAM_ONLY_RETURN_IDS, false),
+              args.optBoolean(BatchService.PARAM_SKIP_REDUNDANT_CALLOUTS, false));
       if (!result.optBoolean("committed", false)) {
         // IMP-15: rewrite the failure in place into the IMP-5 envelope, so an agent gets a stable
         // error code instead of the raw DAL sub-response BatchService forwards to REST callers.

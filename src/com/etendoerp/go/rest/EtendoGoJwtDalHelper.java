@@ -17,10 +17,13 @@
 package com.etendoerp.go.rest;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Date;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import org.apache.commons.lang3.StringUtils;
@@ -87,6 +90,7 @@ final class EtendoGoJwtDalHelper {
   private static final String FIELD_SUBSCRIPTION_STATUS = "subscriptionStatus";
   private static final String FIELD_RENEWAL_DUE_AT = "renewalDueAt";
   private static final String FIELD_RELATIONSHIP = "relationship";
+  private static final String FIELD_OWNED_BY_ACCOUNT = "ownedByAccount";
   private static final String PROPERTY_PASSWORD_CHANGED = Account.PROPERTY_PASSWORDCHANGED;
   private static final String PROPERTY_RESET_TOKEN_CONSUMED = Account.PROPERTY_RESETTOKENCONSUMED;
   private static final String PROPERTY_RESET_TOKEN_EXPIRES = Account.PROPERTY_RESETTOKENEXPIRES;
@@ -488,6 +492,56 @@ final class EtendoGoJwtDalHelper {
    * isolation for the resume decision.</p>
    */
   static boolean clientBelongsToAccountEmail(String clientId, String accountEmail) {
+    OBQuery<User> query = createClientUsersByAccountEmailQuery(clientId, accountEmail);
+    query.setMaxResult(1);
+    return query.uniqueResult() != null;
+  }
+
+  /**
+   * Returns {@code true} when the account is the OWNER of {@code clientId}, not merely one of its
+   * users (ETP-5743). {@link #clientBelongsToAccountEmail} also matches an invited member, whose
+   * environment user carries their own email; that is right for entering the tenant, but a demo
+   * used as a purchase source is copied into the buyer's new environment and then locked, so only
+   * its owner may choose it.
+   *
+   * <p>A tenant created before the owner flag existed (ETP-4830) has no owner recorded at all. For
+   * those the account match is the only evidence left, so they keep the
+   * {@link #clientBelongsToAccountEmail} behaviour until a backfill assigns an owner.</p>
+   *
+   * @param clientId the client to check
+   * @param accountEmail authenticated platform account email
+   * @return {@code true} when one of the account's users in the client is its flagged owner, or the
+   *     client has no owner flagged and the account has a user in it
+   */
+  static boolean clientOwnedByAccountEmail(String clientId, String accountEmail) {
+    return accountOwnsClient(clientId,
+        createClientUsersByAccountEmailQuery(clientId, accountEmail).list());
+  }
+
+  /**
+   * The ownership rule of {@link #clientOwnedByAccountEmail}, applied to users already resolved as
+   * the account's users in {@code clientId}.
+   */
+  static boolean accountOwnsClient(String clientId, List<User> accountUsersOfClient) {
+    if (accountUsersOfClient.isEmpty()) {
+      return false;
+    }
+    boolean flaggedOwner = false;
+    for (User accountUser : accountUsersOfClient) {
+      if (OwnerSupport.isOwner(accountUser.getId())) {
+        flaggedOwner = true;
+        break;
+      }
+    }
+    return ownerOrUnownedLegacyClient(flaggedOwner, clientId);
+  }
+
+  private static boolean ownerOrUnownedLegacyClient(boolean flaggedOwner, String clientId) {
+    return flaggedOwner || !OwnerSupport.clientHasOwner(clientId);
+  }
+
+  private static OBQuery<User> createClientUsersByAccountEmailQuery(String clientId,
+      String accountEmail) {
     OBQuery<User> query = OBDal.getInstance().createQuery(User.class,
         "as user where user.client.id = :" + PARAM_CLIENT_ID
             + " and (user.email = :" + PARAM_ACCOUNT_EMAIL
@@ -499,8 +553,7 @@ final class EtendoGoJwtDalHelper {
     query.setNamedParameter(PARAM_ACCOUNT_PREFIX, AccountTextUtils.escapeLikeWildcards(accountEmail) + "+%");
     query.setFilterOnReadableClients(false);
     query.setFilterOnReadableOrganization(false);
-    query.setMaxResult(1);
-    return query.uniqueResult() != null;
+    return query;
   }
 
   static List<User> findEnvironmentUsersByAccountEmail(String accountEmail) {
@@ -595,6 +648,9 @@ final class EtendoGoJwtDalHelper {
 
   /**
    * Returns every free client owned by the account except the excluded onboarding destination.
+   * A free client the account was only invited into is left out (ETP-5743): these are the demo
+   * sources a purchase copies from, and only an owner may give one away — see
+   * {@link #clientOwnedByAccountEmail}.
    *
    * <p>Every caller is looking for a purchase source, so "free" here means a free demo: a client
    * whose plan reads free but which is positively a productive environment (a canceled one, see
@@ -607,14 +663,22 @@ final class EtendoGoJwtDalHelper {
    */
   public static Set<String> findFreeTenantIdsByAccountEmail(String accountEmail,
       String excludedClientId) {
-    Set<String> freeClientIds = new HashSet<>();
+    Map<String, List<User>> accountUsersByClient = new LinkedHashMap<>();
     for (User environmentUser : findEnvironmentUsersByAccountEmail(accountEmail)) {
-      String clientId = environmentUser.getClient().getId();
+      accountUsersByClient
+          .computeIfAbsent(environmentUser.getClient().getId(), clientId -> new ArrayList<>())
+          .add(environmentUser);
+    }
+    Set<String> freeClientIds = new HashSet<>();
+    for (Map.Entry<String, List<User>> entry : accountUsersByClient.entrySet()) {
+      String clientId = entry.getKey();
       if (clientId.equals(excludedClientId)) continue;
       // ETP-5047 — a canceled productive environment reads plan free too, but it is no demo:
-      // every caller looks for a purchase source, so it is left out.
+      // every caller looks for a purchase source, so it is left out. So is a demo the account
+      // was only invited into (ETP-5743).
       if (TenantPlanService.PLAN_FREE.equals(TENANT_PLAN_SERVICE.resolvePlan(clientId))
-          && !ENVIRONMENT_LIFECYCLE_SERVICE.isProductiveEnvironment(clientId)) {
+          && !ENVIRONMENT_LIFECYCLE_SERVICE.isProductiveEnvironment(clientId)
+          && accountOwnsClient(clientId, entry.getValue())) {
         freeClientIds.add(clientId);
       }
     }
@@ -689,7 +753,11 @@ final class EtendoGoJwtDalHelper {
     // and a free tenant has none, so reporting "free" would invent an entry nothing could look up.
     env.put(FIELD_PLAN_KEY,
         planView.planKey() == null ? JSONObject.NULL : planView.planKey());
-    env.put(FIELD_RELATIONSHIP, OwnerSupport.isOwner(environmentUser.getId()) ? "OWNER" : "INVITED");
+    boolean flaggedOwner = OwnerSupport.isOwner(environmentUser.getId());
+    env.put(FIELD_RELATIONSHIP, flaggedOwner ? "OWNER" : "INVITED");
+    // ETP-5743: only an owned demo may be a purchase source. Unlike `relationship`, a legacy tenant
+    // with no owner flagged reads as owned, matching the checkout's server-side check.
+    env.put(FIELD_OWNED_BY_ACCOUNT, ownerOrUnownedLegacyClient(flaggedOwner, client.getId()));
     TenantEnvironmentLifecycleService.EnvironmentSnapshot lifecycle =
         ENVIRONMENT_LIFECYCLE_SERVICE.resolve(client.getId());
     // The ENFORCED decision, not the raw policy one: with the kill switch on for this tenant a

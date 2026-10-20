@@ -204,6 +204,22 @@ public final class GoFeatureFlags {
   public static final String FLAG_MCP_MODERN_ERA_DISABLED = "mcp-modern-era-disabled";
 
   /**
+   * ETP-5676 — kill switch for the per-batch redundant-callout skip. <b>Inverted on purpose</b>,
+   * for the same reason as {@link #FLAG_MCP_MODERN_ERA_DISABLED}: unset or {@code false} is the
+   * normal state, in which a batch sent with {@code _skipRedundantCallouts: true} may skip a
+   * create-cascade callout whose outputs an earlier operation of the same batch proved discarded.
+   * {@code true} turns the skip off for every batch, whatever the request asks, so each callout
+   * runs as on a batch without the option. Live within one ConfigCat poll where
+   * {@value #CONFIGCAT_SDK_KEY_PROPERTY} is set; otherwise read from
+   * {@code etendo.go.flags.batch-callout-skip-disabled} and needs a restart.
+   *
+   * <p><b>Environment level and backend-only.</b> Evaluated with an empty context, once per batch,
+   * by {@code NeoBatchScope}, its only caller; nothing in the browser reads it. Retire it (keeping
+   * the skip) once the skip has run in production without a wrong default.
+   */
+  public static final String FLAG_BATCH_CALLOUT_SKIP_DISABLED = "batch-callout-skip-disabled";
+
+  /**
    * ETP-5048 — whether the billing reconciliation is scheduled. Strictly off by default (and off
    * on every failure of this class): while it is off {@code BillingReconciliationScheduleStartup}
    * plants no process request, so turning it on takes effect at the next restart. The process also

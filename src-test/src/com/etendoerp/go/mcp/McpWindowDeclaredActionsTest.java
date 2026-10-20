@@ -58,6 +58,8 @@ import org.openbravo.model.ad.domain.Reference;
 import org.openbravo.model.ad.ui.Tab;
 
 import com.etendoerp.go.schemaforge.CurrencyOptionsHandler;
+import com.etendoerp.go.schemaforge.GoodsReceiptHeaderHandler;
+import com.etendoerp.go.schemaforge.GoodsShipmentHeaderHandler;
 import com.etendoerp.go.schemaforge.NeoActionRecordGuard;
 import com.etendoerp.go.schemaforge.NeoExtensionDispatcher;
 import com.etendoerp.go.schemaforge.NeoExtensionRequest;
@@ -66,6 +68,8 @@ import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.PurchaseInvoiceHeaderHandler;
+import com.etendoerp.go.schemaforge.ReturnMaterialReceiptHeaderHandler;
+import com.etendoerp.go.schemaforge.ReturnToVendorShipmentHeaderHandler;
 import com.etendoerp.go.schemaforge.SalesInvoiceHeaderHandler;
 import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
 import com.etendoerp.go.schemaforge.data.SFEntity;
@@ -114,7 +118,9 @@ class McpWindowDeclaredActionsTest {
     when(handler.actionContracts()).thenReturn(contracts());
     // The AD buttons etendo_action can fire, as NeoButtonActionHelper.findButtonColumn resolves them:
     // by DB column name or by field name. The DAL names each column the way etendo_schema does.
-    buttonMock = mockStatic(NeoButtonActionHelper.class);
+    buttonMock = mockStatic(NeoButtonActionHelper.class,
+        inv -> "propertyNameOf".equals(inv.getMethod().getName()) ? inv.callRealMethod()
+            : org.mockito.Mockito.RETURNS_DEFAULTS.answer(inv));
     ModelProvider provider = mock(ModelProvider.class);
     Entity dal = mock(Entity.class);
     modelMock = mockStatic(ModelProvider.class);
@@ -383,6 +389,91 @@ class McpWindowDeclaredActionsTest {
       assertEquals("GET", c.getHttpMethod());
     }
 
+    /**
+     * ETP-5711: the return flow (both directions) is judged by the contracts the real handlers
+     * declare — the lines of an import and of a create-from-document are optional or typed arrays,
+     * and an undeclared key is a 422 before anything runs.
+     */
+    @ParameterizedTest(name = "{0} {1} {2}")
+    @CsvSource(delimiter = '|', value = {
+        "return-to-vendor | availableReceipts     | {\"businessPartner\":\"BP\"} |",
+        "return-to-vendor | availableReceipts     | {}                    | missing:businessPartner",
+        "return-to-vendor | importReceiptLines    | {\"lines\":[{\"sourceLineId\":\"a\",\"returnQuantity\":1}]} |",
+        "return-to-vendor | importReceiptLines    | {\"foo\":1}             | foo",
+        "return-to-vendor | documentAction        | {\"docAction\":\"CO\"}  |",
+        "return-material  | availableShipments    | {\"businessPartner\":\"BP\"} |",
+        "return-material  | importShipmentLines   | {\"lines\":[{\"sourceLineId\":\"a\",\"returnQuantity\":1}]} |",
+        "return-material  | documentAction        | {\"docAction\":\"CO\"}  |",
+        "goods-receipt    | createPurchaseReturn  | {}                    |",
+        "goods-receipt    | createPurchaseReturn  | {\"lines\":[{\"lineId\":\"a\",\"returnQuantity\":1}],\"reason\":\"x\"} |",
+        "goods-receipt    | createPurchaseReturn  | {\"foo\":1}             | foo",
+        "goods-shipment   | createReturn          | {}                    |",
+        "goods-shipment   | createReturn          | {\"foo\":1}             | foo" })
+    void returnFlowActionsAreJudgedByTheirDeclaredContracts(String window, String action,
+        String body, String refusal) throws Exception {
+      Map<String, NeoActionContract> declared;
+      switch (window) {
+        case "return-to-vendor":
+          declared = new ReturnToVendorShipmentHeaderHandler().actionContracts();
+          break;
+        case "return-material":
+          declared = new ReturnMaterialReceiptHeaderHandler().actionContracts();
+          break;
+        case "goods-receipt":
+          declared = new GoodsReceiptHeaderHandler().actionContracts();
+          break;
+        default:
+          declared = new GoodsShipmentHeaderHandler().actionContracts();
+          break;
+      }
+      when(handler.actionContracts()).thenReturn(declared);
+      SFEntity e = entity("W", null);
+      JSONObject params = new JSONObject(body);
+
+      if (refusal == null) {
+        NeoActionContract contract = McpDeclaredActions.precheck(e, action, params);
+        assertNotNull(contract, action + " is a declared action");
+        assertEquals(action, contract.getName());
+        return;
+      }
+      McpRoutingException refused = assertThrows(McpRoutingException.class,
+          () -> McpDeclaredActions.precheck(e, action, params));
+      JSONObject env = refused.toEnvelope();
+      assertEquals(422, env.getInt(McpConstants.KEY_STATUS));
+      String key = refusal.startsWith("missing:") ? refusal.substring("missing:".length())
+          : refusal;
+      assertTrue(env.toString().contains(key), env.toString());
+    }
+
+    /**
+     * ETP-5712: an agent that lists a return header's actions must learn from {@code documentAction}
+     * that confirming does NOT create the factura rectificativa and that createReturnInvoice does;
+     * the goods receipt / goods shipment completion text (the shared contract) must not change.
+     */
+    @Test
+    @DisplayName("the return headers' documentAction points at createReturnInvoice; the goods"
+        + " receipt/shipment one does not")
+    void returnDocumentActionPointsAtCreateReturnInvoice() throws Exception {
+      for (Map<String, NeoActionContract> declared : List.of(
+          new ReturnToVendorShipmentHeaderHandler().actionContracts(),
+          new ReturnMaterialReceiptHeaderHandler().actionContracts())) {
+        String text = declared.get("documentAction").getDescription();
+        assertTrue(text.contains("does NOT create the factura rectificativa"), text);
+        assertTrue(text.contains("createReturnInvoice"), text);
+        assertTrue(text.contains("rectifiableInvoices"), text);
+        assertNull(NeoActionContract.validate(declared, "documentAction",
+            new JSONObject().put("docAction", "CO")));
+        assertEquals(422, NeoActionContract.validate(declared, "documentAction",
+            new JSONObject().put("docAction", "VO")).getHttpStatus());
+      }
+      for (Map<String, NeoActionContract> declared : List.of(
+          new GoodsReceiptHeaderHandler().actionContracts(),
+          new GoodsShipmentHeaderHandler().actionContracts())) {
+        assertFalse(declared.get("documentAction").getDescription().contains("createReturnInvoice"));
+        assertFalse(declared.get("documentAction").getDescription().contains("rectificativa"));
+      }
+    }
+
     @Test
     @DisplayName("an AD button is not judged here: no contract, no refusal")
     void adButtonPasses() throws Exception {
@@ -425,6 +516,67 @@ class McpWindowDeclaredActionsTest {
       JSONArray unknown = env.getJSONArray("unknownParameters");
       assertEquals(1, unknown.length(), unknown.toString());
       assertEquals(unknownParameter, unknown.getString(0));
+    }
+
+    /**
+     * ETP-5713: the line imports of the four windows are judged by the contracts the real handlers
+     * declare. {@code lines} is optional, the source id is required, and an undeclared key — or
+     * the other side's id key — is a 422 before anything runs.
+     */
+    @ParameterizedTest(name = "{0} {1} {2}")
+    @CsvSource(delimiter = '|', value = {
+        "goods-receipt     | availableOrders        | {}                    |",
+        "goods-receipt     | availableOrderLines    | {\"orderId\":\"o\"}     |",
+        "goods-receipt     | availableOrderLines    | {}                    | missing:orderId",
+        "goods-receipt     | importOrderLines       | {\"orderId\":\"o\"}     |",
+        "goods-receipt     | importOrderLines       | {\"orderId\":\"o\",\"lines\":[{\"sourceLineId\":\"a\",\"quantity\":1}]} |",
+        "goods-receipt     | importOrderLines       | {\"lines\":[]}          | missing:orderId",
+        "goods-receipt     | importOrderLines       | {\"orderId\":\"o\",\"foo\":1} | foo",
+        "goods-shipment    | importOrderLines       | {\"orderId\":\"o\"}     |",
+        "goods-shipment    | importOrderLines       | {\"foo\":1}             | foo",
+        "purchase-invoice  | importOrderLines       | {\"orderId\":\"o\"}     |",
+        "purchase-invoice  | importReceiptLines     | {\"receiptId\":\"r\"}   |",
+        "purchase-invoice  | importReceiptLines     | {\"shipmentId\":\"r\"}  | shipmentId",
+        "purchase-invoice  | availableReceiptLines  | {\"receiptId\":\"r\"}   |",
+        "purchase-invoice  | availableReceipts      | {}                    |",
+        "sales-invoice     | importOrderLines       | {\"orderId\":\"o\"}     |",
+        "sales-invoice     | importShipmentLines    | {\"shipmentId\":\"s\",\"lines\":[{\"sourceLineId\":\"a\",\"quantity\":1}]} |",
+        "sales-invoice     | importShipmentLines    | {\"receiptId\":\"s\"}   | receiptId",
+        "sales-invoice     | availableShipments     | {}                    |" })
+    void lineImportActionsAreJudgedByTheirDeclaredContracts(String window, String action,
+        String body, String refusal) throws Exception {
+      Map<String, NeoActionContract> declared;
+      switch (window.trim()) {
+        case "goods-receipt":
+          declared = new GoodsReceiptHeaderHandler().actionContracts();
+          break;
+        case "goods-shipment":
+          declared = new GoodsShipmentHeaderHandler().actionContracts();
+          break;
+        case "purchase-invoice":
+          declared = new PurchaseInvoiceHeaderHandler().actionContracts();
+          break;
+        default:
+          declared = new SalesInvoiceHeaderHandler().actionContracts();
+          break;
+      }
+      when(handler.actionContracts()).thenReturn(declared);
+      SFEntity e = entity("W", null);
+      JSONObject params = new JSONObject(body);
+
+      if (refusal == null) {
+        NeoActionContract contract = McpDeclaredActions.precheck(e, action.trim(), params);
+        assertNotNull(contract, action + " is a declared action");
+        assertEquals(action.trim(), contract.getName());
+        return;
+      }
+      McpRoutingException refused = assertThrows(McpRoutingException.class,
+          () -> McpDeclaredActions.precheck(e, action.trim(), params));
+      JSONObject env = refused.toEnvelope();
+      assertEquals(422, env.getInt(McpConstants.KEY_STATUS));
+      String key = refusal.startsWith("missing:") ? refusal.substring("missing:".length())
+          : refusal;
+      assertTrue(env.toString().contains(key.trim()), env.toString());
     }
 
     @Test

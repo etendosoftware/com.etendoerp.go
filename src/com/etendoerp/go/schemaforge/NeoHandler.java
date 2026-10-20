@@ -117,6 +117,36 @@ public interface NeoHandler {
   }
 
   /**
+   * Declares list-filter keys that must be evaluated on another property of the same entity
+   * (ETP-5705).
+   *
+   * <p><b>Why this exists.</b> A handler that rewrites a value in {@link #afterHandle} changes
+   * what the caller sees, but not what the query filters on: the filter still runs against the
+   * raw database value. When the two differ, a filter matches rows whose displayed value does not
+   * satisfy it, and misses rows whose displayed value does — with a 200 and nothing to say so. A
+   * customization that keeps a second property holding the displayed value (canonically a stored
+   * computed twin of a virtual column) maps the displayed property to it here, and the filter is
+   * evaluated on that property instead.</p>
+   *
+   * <p><b>Contract.</b> Keys and values are DAL property names of the entity being read; the
+   * caller may still spell the key as its DB column name. Both properties must have the same type.
+   * The filter is rendered as {@code coalesce(<target>, <key>)}, so a row whose target has not
+   * been computed yet falls back to the key's own value rather than dropping out of the result.
+   * The target is not checked against the spec's excluded fields: the condition only ever
+   * compares the value the caller is already shown.</p>
+   *
+   * <p><b>Where it is applied.</b> MCP {@code etendo_list} only, and the response says so when it
+   * happens. The REST list does not consult it — the SPA filters on the stored columns directly —
+   * a divergence declared in {@code docs/neo-headless.md} §4.12.9.</p>
+   *
+   * @param context the read context: spec, entity, {@code GET}, no record id, the query params
+   * @return displayed property name to the property the filter is evaluated on; empty by default
+   */
+  default Map<String, String> filterAliases(NeoContext context) {
+    return Collections.emptyMap();
+  }
+
+  /**
    * Whether the current role may reach the surface this handler serves.
    *
    * <p>Only meaningful for handlers that own their own access rule — today the report handlers,
@@ -181,6 +211,22 @@ public interface NeoHandler {
    */
   default Set<String> serverResolvedCreateFields() {
     return Collections.emptySet();
+  }
+
+  /**
+   * Declares the create-body directives this customization reads and removes in its pre-hook,
+   * each with a one-line description for an agent (ETP-5676).
+   *
+   * <p>A directive is a request option, not a field: an underscore-prefixed body key that tunes
+   * what the customization does around the write (e.g. the product's {@code _skipPricesSeed}).
+   * The customization strips it in {@link #handle} so it never reaches the field filter or the
+   * DAL. Declaring it here is what lets the MCP write verbs accept it without reporting it in
+   * {@code unknownFields}, and {@code etendo_schema(view:"create")} publish it.</p>
+   *
+   * @return directive name to description; empty by default
+   */
+  default Map<String, String> createDirectives() {
+    return Collections.emptyMap();
   }
 
   /**

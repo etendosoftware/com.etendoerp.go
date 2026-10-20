@@ -63,7 +63,7 @@ public class OnboardingSampleDataNormalizerTest {
     assertEquals("the payment methods of the three template accounts", 6,
         countEntities(xml, "finFinaccPaymentmethod"));
     assertEquals("only the secondary warehouse", 1, countEntities(xml, "mWarehouse"));
-    assertFalse("the primary warehouse already reached the tenant", xml.contains("Almacen Principal"));
+    assertFalse("the primary warehouse already reached the tenant", xml.contains("Almacén Principal"));
     assertEquals("only the secondary warehouse's locator", 1, countEntities(xml, "mLocator"));
     assertEquals("only the secondary warehouse's org assignment", 1,
         countEntities(xml, "adOrgWarehouse"));

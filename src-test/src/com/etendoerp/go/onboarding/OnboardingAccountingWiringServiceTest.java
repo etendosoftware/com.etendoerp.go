@@ -317,7 +317,7 @@ public class OnboardingAccountingWiringServiceTest {
    * the onboarding dataset importer (triggers disabled during that import — see
    * {@code OnboardingDatasetDefinition.INCLUDED_TABLES}), so their native {@code _trg} triggers
    * never fire for the bundled template rows. (ETP-5079 later removed the three template financial
-   * accounts from the dataset entirely and reduced the warehouses to a single "Almacen Principal",
+   * accounts from the dataset entirely and reduced the warehouses to a single "Almacén Principal",
    * so the FIN_Financial_Account_Acct backfill is now a no-op on a freshly onboarded tenant and
    * only matters for accounts the tenant creates itself.) Every other included entity in this same
    * method

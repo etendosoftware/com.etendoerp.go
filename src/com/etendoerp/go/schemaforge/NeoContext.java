@@ -17,8 +17,11 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
 
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
@@ -49,6 +52,12 @@ public class NeoContext {
    * built, and it is a diagnostic: nothing downstream branches on it.
    */
   private JSONObject supersededDefaults;
+  /**
+   * ETP-5669: body keys the mandatory-defaults pass filled with a placeholder (first combo row or a
+   * safe type default) only to satisfy NOT NULL. Not a decision, so the create-path callout cascade
+   * may refine them. Mutable and off the builder for the same reason as {@link #supersededDefaults}.
+   */
+  private final Set<String> fallbackDefaults = new HashSet<>();
   private final NeoEndpointType endpointType;
   private final String fieldName;
   /**
@@ -60,6 +69,13 @@ public class NeoContext {
    * capability one.
    */
   private final boolean mcpOrigin;
+  /**
+   * ETP-5676 — {@code true} when the caller will read nothing but the record id from this write's
+   * response (a batch sent with {@code _onlyReturnIds}). Lets the write path and the entity's
+   * customization skip work that only decorates the echoed record — field filtering, identifier
+   * enrichment, display flags. The response still carries the full record core returned.
+   */
+  private final boolean idsOnlyResponse;
   /**
    * ETP-5194 — per-request state a customization hands from its {@code handle()} pre-hook to its
    * own {@code afterHandle()} post-hook. Every channel (REST single, REST batch, MCP) passes the
@@ -83,6 +99,17 @@ public class NeoContext {
     this.endpointType = builder.endpointType;
     this.fieldName = builder.fieldName;
     this.mcpOrigin = builder.mcpOrigin;
+    this.idsOnlyResponse = builder.idsOnlyResponse;
+  }
+
+  /**
+   * Whether the caller reads only the record id from this write's response. See
+   * {@link #idsOnlyResponse}.
+   *
+   * @return {@code true} when response decoration may be skipped
+   */
+  public boolean isIdsOnlyResponse() {
+    return idsOnlyResponse;
   }
 
   /**
@@ -184,6 +211,23 @@ public class NeoContext {
   }
 
   /**
+   * @return the body keys filled by a fallback placeholder during this create (ETP-5669), read-only
+   */
+  public Set<String> getFallbackDefaults() {
+    return Collections.unmodifiableSet(fallbackDefaults);
+  }
+
+  /**
+   * Records a body key the mandatory-defaults pass filled with a fallback placeholder, so the
+   * create does not protect it from the callout cascade (ETP-5669).
+   *
+   * @param propName the body key
+   */
+  public void addFallbackDefault(String propName) {
+    fallbackDefaults.add(propName);
+  }
+
+  /**
    * Returns per-request state an earlier phase of this same request stored with {@link
    * #setAttribute}, typically a customization's {@code handle()} pre-hook handing a marker to its
    * own {@code afterHandle()}. See {@link #attributes}.
@@ -249,6 +293,18 @@ public class NeoContext {
     private NeoEndpointType endpointType;
     private String fieldName;
     private boolean mcpOrigin;
+    private boolean idsOnlyResponse;
+
+    /**
+     * Marks the response as read for its record id only (ETP-5676). Defaults to {@code false}.
+     *
+     * @param idsOnlyResponse {@code true} when the caller reads nothing but the id
+     * @return this builder
+     */
+    public Builder idsOnlyResponse(boolean idsOnlyResponse) {
+      this.idsOnlyResponse = idsOnlyResponse;
+      return this;
+    }
 
     /**
      * Marks this context as MCP-originated and returns this builder. Defaults to {@code false},
