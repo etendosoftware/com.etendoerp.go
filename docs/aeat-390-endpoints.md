@@ -108,9 +108,10 @@ backend** before computing anything — `boxes` (screen and list auto-compute), 
 `submit` (file and snapshot), `validate` / the guards (incidents) and the live snapshot payload —
 so none of them depends on the client having saved the preload, as the 303 / 349 compute from
 live data. `Fiscal390BoxesHandler.withServerPreload` → `Fiscal390PreloadAggregator.applyPreload`,
-the same rule as the frontend's `applyPreload390`: an input the user has not overridden — still
-equal to `manualData.aeatPreloaded[key]`, or never preloaded and empty / zero — takes the current
-303 value (zero clears it); a value the user edited wins. A year without 303s, or a preload that
+the same rule as the frontend's `applyPreload390`: an input the user has not overridden —
+absent / blank, or still equal to `manualData.aeatPreloaded[key]` — takes the current 303 value
+(zero clears it); a value the user set wins, an explicit zero with no preloaded entry included,
+and a preloaded value the user cleared stays cleared. A year without 303s, or a preload that
 cannot be read (logged), leaves the inputs as they are; the blocking `BLOCK9_*` incidents are the
 safety net. Precedent: a draft saved while the year had no 303 kept an empty block 9 and its
 `aeatPreloaded: {}`, the 303s were submitted afterwards, and the filed 390 was rejected with

@@ -388,7 +388,7 @@ public class Fiscal390PreloadAggregatorTest {
   public void testApplyPreloadFillsUntouchedInputs() {
     Map<String, String> inputs = new HashMap<>();
     inputs.put("LIQANUAL_VAT_IMPORT", "7");      // not a preload key: untouched
-    inputs.put("INGRESAR_03", "0");              // zero counts as empty
+    inputs.put("INGRESAR_03", "");               // blank: untouched
     Map<String, BigDecimal> fresh = new HashMap<>();
     fresh.put("INGRESAR_03", new BigDecimal("300"));
     fresh.put("TOTAL_LASTPERIOD", new BigDecimal("12.5"));
@@ -398,6 +398,21 @@ public class Fiscal390PreloadAggregatorTest {
     assertEquals("12.50", out.get("TOTAL_LASTPERIOD"));
     assertFalse(out.containsKey("LIQANUAL_ENDCOMPENSATION"));
     assertEquals("7", out.get("LIQANUAL_VAT_IMPORT"));
+  }
+
+  /** Review N2: an explicit value — a zero too — with no preloaded entry is the user's edit. */
+  @Test
+  public void testApplyPreloadKeepsAnExplicitZeroNeverPreloaded() {
+    Map<String, String> out = Fiscal390PreloadAggregator.applyPreload(
+        Map.of("INGRESAR_03", "0", "INGRESAR_06", "0.00"), Collections.emptyMap(),
+        Map.of("INGRESAR_03", new BigDecimal("300"), "INGRESAR_06", new BigDecimal("600")));
+    assertEquals("0", out.get("INGRESAR_03"));
+    assertEquals("0.00", out.get("INGRESAR_06"));
+    // ...while one still equal to its preloaded zero follows the 303s.
+    Map<String, String> follows = Fiscal390PreloadAggregator.applyPreload(
+        Map.of("INGRESAR_03", "0"), Map.of("INGRESAR_03", "0.00"),
+        Map.of("INGRESAR_03", new BigDecimal("300")));
+    assertEquals("300.00", follows.get("INGRESAR_03"));
   }
 
   /** PAR016 repro: aeatPreloaded {} saved before the 303s existed still takes them. */

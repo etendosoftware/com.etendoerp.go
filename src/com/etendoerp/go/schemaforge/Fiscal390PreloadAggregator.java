@@ -521,9 +521,9 @@ final class Fiscal390PreloadAggregator {
    * The 303 preload applied to the 390 inputs SERVER-SIDE (ETP-5716), with the frontend's rule
    * ({@code applyPreload390} of preload390.js): for every key the 303s determine
    * ({@code fresh}), an input the user has not overridden takes the fresh value (a zero clears
-   * it). "Not overridden" = its value still equals the one preloaded before ({@code previous},
-   * {@code manualData.aeatPreloaded}), or — never preloaded — it is empty / zero. A value the user
-   * edited wins. So the file, the boxes and the incidents always carry the current 303 figures
+   * it). "Not overridden" = it is absent / blank, or its value still equals the one preloaded
+   * before ({@code previous}, {@code manualData.aeatPreloaded}). A value the user set — a zero
+   * included — wins. So the file, the boxes and the incidents always carry the current 303 figures
    * without depending on a client save (AEAT PAR016). Pure; returns a new map.
    */
   static Map<String, String> applyPreload(Map<String, String> inputs, Map<String, String> previous,
@@ -551,11 +551,16 @@ final class Fiscal390PreloadAggregator {
     return out;
   }
 
+  /**
+   * "Untouched" (review N2): absent / blank, or still equal to the value preloaded before. An
+   * input explicitly set — a zero included — with no preloaded entry is the user's edit and wins.
+   * A preloaded non-zero value the user cleared stays cleared (as the frontend's isUnmodified).
+   */
   private static boolean isUnmodified(String current, String previous, boolean wasPreloaded) {
-    if (wasPreloaded) {
-      return cents(current) == cents(previous);
+    if (current == null || current.trim().isEmpty()) {
+      return !wasPreloaded || cents(previous) == 0;
     }
-    return current == null || current.trim().isEmpty() || cents(current) == 0;
+    return wasPreloaded && cents(current) == cents(previous);
   }
 
   /** An input in cents; blank or not a number is zero (as the frontend's {@code cents}). */
