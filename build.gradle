@@ -159,6 +159,11 @@ def isolatedDalTests = [
         '**/CreateGoodsReceiptHandlerNegativeQuantityIntegrationTest.class',
         '**/CreatePurchaseInvoiceHandlerNegativeQuantityIntegrationTest.class',
         '**/AbstractInvoiceHeaderHandlerOriginInvoiceIntegrationTest.class',
+        '**/SubscriptionServiceIntegrationTest.class',
+        '**/GrandfatheredSubscriptionIntegrationTest.class',
+        '**/SubscriptionBackfillIdempotencyIntegrationTest.class',
+        '**/SubscriptionResubscriptionIntegrationTest.class',
+        '**/SubscriptionModelSwitchIntegrationTest.class',
         '**/NeoCloneRecordHandlerInvoiceLinksIntegrationTest.class',
         // ETP-5778: passes alone but trips OBBaseTest's admin-mode check after other classes ran
         // in the same worker (a leaked setAdminMode() from an earlier test), so it gets its own JVM.
@@ -172,6 +177,11 @@ def isolatedDalTestClasses = [
         'com.etendoerp.go.schemaforge.CreateGoodsReceiptHandlerNegativeQuantityIntegrationTest',
         'com.etendoerp.go.schemaforge.CreatePurchaseInvoiceHandlerNegativeQuantityIntegrationTest',
         'com.etendoerp.go.schemaforge.AbstractInvoiceHeaderHandlerOriginInvoiceIntegrationTest',
+        'com.etendoerp.go.payment.SubscriptionServiceIntegrationTest',
+        'com.etendoerp.go.payment.GrandfatheredSubscriptionIntegrationTest',
+        'com.etendoerp.go.payment.SubscriptionBackfillIdempotencyIntegrationTest',
+        'com.etendoerp.go.payment.SubscriptionResubscriptionIntegrationTest',
+        'com.etendoerp.go.payment.SubscriptionModelSwitchIntegrationTest',
         'com.etendoerp.go.schemaforge.NeoCloneRecordHandlerInvoiceLinksIntegrationTest',
         'com.etendoerp.go.schemaforge.handlers.NeoListAggregateQueryIntegrationTest',
 ]

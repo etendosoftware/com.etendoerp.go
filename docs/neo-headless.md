@@ -166,6 +166,33 @@ The token is decoded via `SecureWebServicesUtils.decodeToken()`. Required JWT cl
 
 A missing or invalid token returns `401 Unauthorized`.
 
+**Commercial access — `402 Payment Required` (ETP-5443, body since ETP-5047).** Once the caller is
+authenticated, every NEO request (bearer, cookie session or OAuth2 alike) is refused when the
+tenant's commercial access is cut off — a demo past its trial, or a subscription canceled or past
+due beyond its payment grace. The check is `EnvironmentAccessGuard`, shared with the
+`NEO_DATA` surfaces (favorites, fiscal test mode, report selectors), MCP (§4.12), the `/sws/go`
+tenant-session endpoints and `GET /sws/go/login`, so all of them answer the same body (the OAuth2
+API-key endpoints excepted: they refuse in the OAuth2 servlet's own error envelope). The response
+body is:
+
+```json
+{ "error": { "message": "Environment access is not available: SUBSCRIPTION_REQUIRED",
+             "status": 402,
+             "code": "ENVIRONMENT_ACCESS_DENIED",
+             "decision": "SUBSCRIPTION_REQUIRED" } }
+```
+
+The guard also logs each refusal once at INFO, as a server-side line separate from the body —
+`Commercial access denied at <entryPoint> for tenant <clientId>: <DECISION>`.
+
+`decision` is `DEMO_TRIAL_EXPIRED` or `SUBSCRIPTION_REQUIRED`. Read `error.code` / `error.decision`;
+`message` keeps its pre-ETP-5047 text only so older clients that parse the prefix keep working. The
+backend-only kill switch `environment-access-enforcement-off` turns the refusal into an INFO log
+line. Pseudo-specs are refused too (the SPA's blocked screen is driven by the 402 on
+`windowaccessmap`); the account-level billing, portal and upgrade endpoints are not NEO and never
+refuse. Rules, entry points and the kill switch: `open-and-notable-topics.md` §3.8 and
+`feature-flags-and-tenant-upgrade.md` §1.
+
 #### 4.1.1 OAuth2 scopes — `etendo:*`, with `neo:*` deprecated (ETP-5602)
 
 OAuth2 tokens (MCP clients, API keys, `client_credentials`) carry these scopes:
@@ -1906,6 +1933,10 @@ specs — not a replacement for this one).
 The MCP tool layer (`/sws/mcp`, with `/mcp` as the WebMCP-friendly alias, routed by
 `McpToolRouter`) exposes the same specs described
 above to AI agents as JSON-RPC tools (`etendo_discover`, `etendo_schema`, `etendo_create`, `etendo_update`, …).
+A tenant whose commercial access is cut off (demo trial expired, subscription grace elapsed) gets
+**HTTP 402** with the `EnvironmentAccessGuard` JSON body (`error.code = ENVIRONMENT_ACCESS_DENIED`,
+`error.decision`) on every MCP request — a plain HTTP error, not a JSON-RPC error object
+(ETP-5047, ETP-5642; §4.12.28 and `open-and-notable-topics.md` §3.8).
 Wave 3 of the MCP improvements adds three agent-ergonomics features on top of that surface. Each is
 additive and backwards-compatible: an existing caller that ignores the new parameter/field sees the
 exact same responses as before.
@@ -3836,6 +3867,16 @@ The transfer (§4.12.1.5) follows the same pattern:
 | `OpenClose` (DB column name) | Classic button path, not the handler (fails in `OB.OpenClose.openClose`) | the contract's alias: run as `openClose` by the handler |
 | `N`, `docAction` or any undeclared key | reaches the handler (unread keys ignored; `N` goes to Process 167) | **422** before anything runs |
 | `documents.openClose` | served | **405** — `MCP_CONFIG.actions` hides it (not offered by the calendar) |
+
+##### REST and MCP on the commercial access check of a wildcard token (ETP-5047, aligned)
+
+No longer a divergence. A token on org `0` carries the System client `0`; `/sws/neo/*` (`NEO_API`)
+and MCP both resolve it to the role's tenant through `EffectiveClientResolver`, judge THAT tenant
+(a blocked one gets **402**) and run the request under it; a failed role lookup is **503** on both.
+Recorded here because the two differed during the ETP-5047 review (`open-and-notable-topics.md`
+§3.12). **The org still differs (declared, predates ETP-5047):** MCP resolves a token's org `0` to
+the role's first transactional org (`McpSessionManager.executeInContext`), while NEO keeps org `0`
+in the context it builds.
 
 ##### Closed: an AD button reaches the customization under its field name on MCP (ETP-5710)
 
@@ -5868,6 +5909,8 @@ NEO Headless enforces security at multiple levels:
    declares `actionContracts()` (§4.12.1.1, ETP-5468) gets `servesActions() == true` by default.
 
 9. **Field-level control:** Only fields with `ISINCLUDED = 'Y'` participate in selector listings and button action discovery.
+
+9a. **Commercial access (ETP-5443 / ETP-5047 / ETP-5455).** Right after authentication, before any of the checks above, the bind step of the shared auth pipeline (`EnvironmentRequestAuthenticator`, policy `NEO_API`) asks `EnvironmentAccessGuard` whether the tenant may be entered at all — the EFFECTIVE tenant: an OAuth2 token on org `0` carries the System client `0`, which `EffectiveClientResolver` resolves to the role's client once, for both the guard and the context (a failed lookup answers 503; ETP-5047); a demo past its trial or a subscription past its payment grace answers `402 Payment Required` with `error.code = ENVIRONMENT_ACCESS_DENIED` and `error.decision` (§4.1) — `NeoAuthenticator` writes the guard's body from `EnvironmentAuthOutcome.getAccessDenial()`. The same guard runs for the other commercially gated surfaces (`NEO_DATA`: favorites, fiscal test mode, report selectors, OAuth2 API keys), MCP, the `/sws/go` tenant-session endpoints and `GET /sws/go/login`; a new tenant servlet inherits it only by authenticating through the pipeline under `NEO_API` / `NEO_DATA` (`open-and-notable-topics.md` §3.8).
 
 10. **Tenant-owner protection (ETP-4830).** `AD_User.EM_ETGO_Is_Owner` (`char(1)`, `NOT NULL DEFAULT 'N'`, an `EM_ETGO_`-prefixed extension column on core's `AD_User` table — same convention as `AD_Role.EM_ETGO_Show_Acct_Fields`, added via the `/etendo:alter-db` webhook mechanism, never by hand-editing core's model XML) flags the ONE `AD_User` who completed self-service onboarding/registration for a client — that client's owner. Read/written via native SQL only (`OwnerSupport`, `schemaforge/util/OwnerSupport.java`), never a DAL getter/setter — the column is not mapped as a typed entity property, exactly the same reasoning `NeoAccountingAccessPolicy#readShowAccountingFieldsFlag` documents for its own precedent column.
 
@@ -8997,25 +9040,50 @@ never asked: measured on 2026-10-06, an MCP client kept running `etendo_list` **
 `etendo_update`** on an expired demo, through every scheme, for the owner and an invited user
 alike, while NEO answered 402 to the same token.
 
-**The rule now.** `McpServlet.doPost` evaluates the commercial decision once, right after
-`authenticate()` and before any JSON-RPC dispatch:
+**The rule now (ETP-5642, implemented with ETP-5047's shared guard).** `McpServlet.doPost`
+judges the request once, right after `authenticate()` and before any JSON-RPC dispatch, through the
+same `EnvironmentAccessGuard` NEO, the `NEO_DATA` surfaces and the `/sws/go` tenant-session
+endpoints use (`checkAsSystem(clientId, "mcp")`; MCP has no `OBContext` of its own at that point):
 
-| decision | answer |
+1. **Effective client first.** `EffectiveClientResolver.effectiveClientId(clientId, roleId)`
+   resolves a credential carrying the System wildcard (`"0"`, e.g. an OAuth2 token) to its role's
+   client. The identity is rebuilt with that client (`withClientId`), so the guard judges, and
+   `McpSessionManager.executeInContext` later runs, exactly the same tenant — there is one
+   resolver, shared by both. If the role lookup itself fails, the request is refused with
+   **503** ("The environment of this credential could not be verified; retry later"): falling back
+   to `"0"` would be judged as System and allowed. Judging `"0"` itself would read no lifecycle
+   metadata and let everything through.
+2. **Then the guard.**
+
+| decision (`TenantEnvironmentLifecycleService.evaluateAccess`) | answer |
 |---|---|
 | `ALLOWED` | served as before |
-| `null` — a tenant without lifecycle metadata | served: the controlled legacy transition, same as `EnvironmentRequestAuthenticator.bind()` |
-| `DEMO_TRIAL_EXPIRED` / `SUBSCRIPTION_REQUIRED` | HTTP **402** `{"error":"Environment access is not available: <DECISION>"}` |
+| `null` — a tenant without lifecycle metadata | served: the controlled legacy transition; the guard treats a null decision as "allow", exactly as for NEO |
+| `DEMO_TRIAL_EXPIRED` / `SUBSCRIPTION_REQUIRED` | HTTP **402** with the shared guard body (below) |
+| the same, while the backend-only kill switch `environment-access-enforcement-off` is on | served, with an INFO line: the switch turns a denial into a log line here as on every guarded surface |
+| no decision: the guard check itself throws (e.g. a DB error in `evaluateAccess`) | HTTP **503**, JSON `{"error":"The environment of this credential could not be verified; retry later"}`, a WARN naming the user and the client, nothing dispatched — fail closed, as for a failed role lookup |
 
+```json
+{ "error": { "message": "Environment access is not available: SUBSCRIPTION_REQUIRED",
+             "status": 402,
+             "code": "ENVIRONMENT_ACCESS_DENIED",
+             "decision": "SUBSCRIPTION_REQUIRED" } }
+```
+
+- **Body shape.** ETP-5642 as first written answered `{"error":"Environment access is not
+  available: <DECISION>"}` (a plain string); the merged code answers the structured guard body
+  above, identical to NEO's. `error.message` keeps the same text, so a client that matched the
+  string still finds it — but it now lives at `error.message`, not at `error`. Read `error.code`
+  and `error.decision`. The wording has one source, `EnvironmentAccessGuard.MESSAGE_PREFIX`.
 - **Every method is refused, `initialize` and `tools/list` included.** A tool catalog for an
   environment that cannot be used is of no use to a client.
 - **A transport error, not an in-band tool error.** A tool result with `isError` reads as a
-  per-call failure an agent retries; a 402 ends the exchange. The wording is NEO's
-  (`EnvironmentRequestAuthenticator.MSG_ACCESS_PREFIX`), so the SPA recognizes the same decision.
-- **The decision is evaluated on the effective client.** A credential carrying the System wildcard
-  (`"0"`, e.g. an OAuth2 token) runs under its role's client; the check resolves it with the same
-  `McpSessionManager.resolveEffectiveClientId` the context setup uses, so it sees exactly the
-  tenant the call would touch. Evaluating `"0"` itself would read no lifecycle metadata, answer
-  `null` and let everything through.
+  per-call failure an agent retries; a 402 ends the exchange.
+- **Every credential scheme** — cookie session, OAuth2 token, legacy JWT — reaches the same check,
+  for the owner and an invited user alike.
+- **One log line.** The guard logs the refusal at INFO
+  (`Commercial access denied at mcp for tenant <clientId>: <DECISION>`); the servlet does not log
+  it again.
 - The OAuth discovery hint is unaffected: `WWW-Authenticate` travels only on the 401 for a request
   without credentials, and this check runs after the identity is resolved.
 
