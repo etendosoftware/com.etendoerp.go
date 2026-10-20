@@ -77,6 +77,8 @@ public final class NeoErrorClassifier {
   public static final String CODE_STALE_RECORD = "stale_record";
   public static final String CODE_SERVER_ERROR = "server_error";
 
+  // Mirrored in etendo_schema_forge tools/app-shell/src/lib/backendErrors.js (GENERIC_CODE_MESSAGES)
+  // to translate them; keep both in sync.
   /**
    * The one answer for a reference that resolves to no row the caller may use. Deliberately names
    * nothing: not the id, not the entity, and not whether the row exists for another tenant.
