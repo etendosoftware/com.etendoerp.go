@@ -202,7 +202,8 @@ public class ToolRegistry {
     if (McpToolRouterSupport.isCatalogExcludedSpec(spec)) {
       return;
     }
-    if (!NeoAccessUtils.hasWindowAccessForSpec(spec, "GET")) {
+    if (!NeoAccessUtils.hasWindowAccessForSpec(spec, "GET")
+        || McpToolRouterSupport.isHiddenAccountingSpec(spec)) {
       return;
     }
     accessibleWindowSpecs.add(spec.getName());

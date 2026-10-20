@@ -18,19 +18,32 @@ package com.etendoerp.go.schemaforge;
 
 import javax.inject.Named;
 
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
+
 /**
  * Creates a Return Material Receipt (C-) from a completed Goods Shipment (sales).
  * Invoked as:
  *   POST /sws/neo/goods-shipment/goodsShipment/{shipmentId}/action/createReturn
  *
- * Request body: { "lines": [{ "lineId": "...", "returnQuantity": 3 }] }
- * Response:     { "response": { "data": { "id": "...", "documentNo": "..." } } }
+ * Request body (ETP-5711): { "lines": [{ "lineId": "...", "returnQuantity": 3 }], "reason": "..." },
+ * both optional: no lines returns everything still returnable. The return is always left in DRAFT.
+ * Response:     { "response": { "data": { "id", "documentNo", "documentStatus", "lines": [...] } } }
  *
  * Shared logic lives in {@link NeoReturnReceiptService}.
- * For purchase returns see CreatePurchaseReturnHandler (future).
+ * For purchase returns see {@link CreatePurchaseReturnHandler}.
  */
 @Named("createReturnReceiptHandler")
 public class CreateReturnReceiptHandler implements NeoHandler {
+
+  /**
+   * The contract published to agents for {@code createReturn} (ETP-5711), referenced explicitly
+   * from {@link GoodsShipmentHeaderHandler#actionContracts()}. REST and the SPA do not judge a call
+   * against it; the MCP does.
+   */
+  static final NeoActionContract CONTRACT = ReturnFromDocumentSupport.contract("createReturn",
+      "goods shipment", "return material receipt",
+      "complete it with documentAction (docAction CO) to book the stock movement, or add and "
+          + "edit lines first through the return-material-receipt window.");
 
   @Override
   public NeoResponse handle(NeoContext context) {

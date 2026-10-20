@@ -18,8 +18,10 @@
 package com.etendoerp.go.rest;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -32,12 +34,24 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.io.StringReader;
+import java.io.Serializable;
 import java.io.StringWriter;
+import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
+import org.apache.logging.log4j.Level;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.core.Filter;
+import org.apache.logging.log4j.core.Layout;
+import org.apache.logging.log4j.core.LogEvent;
+import org.apache.logging.log4j.core.appender.AbstractAppender;
+import org.apache.logging.log4j.core.config.Configurator;
+import org.apache.logging.log4j.core.config.Property;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.query.NativeQuery;
 import org.junit.After;
@@ -94,6 +108,15 @@ import com.etendoerp.go.schemaforge.data.Account;
  * disconnecting before the stream opens — which happens strictly <em>after</em> the decision under
  * test and so cannot influence it. {@link #assertNothingWasProvisioned} verifies no client was
  * created regardless.
+ *
+ * <p><b>The draft clear after the commit (ETP-5047).</b> The same request ends by clearing the
+ * account's onboarding draft. The account is a client-0 {@code ETGO_ACCOUNT}, and by then the
+ * thread runs as the new tenant, whose current client is not client 0; the save was
+ * refused with an {@code OBSecurityException} that only the real DAL raises. That spec runs the
+ * clear against real rows here for that reason.
+ *
+ * @covers com.etendoerp.go.rest.EtendoGoJwtServlet
+ * @covers com.etendoerp.go.rest.EtendoGoJwtDalHelper
  */
 public class OnboardingProvisioningClaimIntegrationTest extends OBBaseTest {
 
@@ -329,6 +352,108 @@ public class OnboardingProvisioningClaimIntegrationTest extends OBBaseTest {
   }
 
   // ---------------------------------------------------------------------------------------------
+  // The onboarding draft is cleared as system, whatever context the request runs in
+  // ---------------------------------------------------------------------------------------------
+
+  /**
+   * With the thread in a tenant context, clearing the draft of the client-0 account commits
+   * {@code ONBOARDING_DRAFT = NULL} stamped by system, raises nothing, and hands the tenant its
+   * context back. Run as the tenant, the save is refused with {@code OBSecurityException: Client
+   * (0) ... is not present in ClientList}; the clear is best effort, so that refusal only shows as
+   * the WARN this spec captures and as a draft that never clears.
+   */
+  @Test
+  public void testTheDraftOfAClientZeroAccountIsClearedAsSystemFromATenantContext()
+      throws Exception {
+    String email = newEmail("draft-clear");
+    createAccount(email);
+    String accountId = accountIdFor(email);
+    nativeUpdateCommitted("UPDATE ETGO_ACCOUNT SET ONBOARDING_DRAFT = '{\"step\":2}', "
+        + "UPDATEDBY = '100' WHERE ETGO_ACCOUNT_ID = :id", accountId);
+    Account account;
+    OBContext.setOBContext(ZERO, ZERO, ZERO, ZERO);
+    OBContext.setAdminMode(true);
+    try {
+      account = OBDal.getInstance().get(Account.class, accountId);
+      assertNotNull("Sanity: the draft is there to clear", account.getOnboardingDraft());
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+    setTestUserContext();
+    OBContext tenant = OBContext.getOBContext();
+    // SecurityChecker refuses a write whose client is not the context's current client.
+    assertFalse("Sanity: the tenant's current client is not client 0",
+        ZERO.equals(tenant.getCurrentClient().getId()));
+    WarnCapture warnings = WarnCapture.attachTo(EtendoGoJwtServlet.class);
+
+    try {
+      Method clear = EtendoGoJwtServlet.class.getDeclaredMethod("clearOnboardingDraftBestEffort",
+          Account.class);
+      clear.setAccessible(true);
+      clear.invoke(servlet, account);
+    } finally {
+      warnings.detach();
+    }
+
+    assertTrue("The clear must not fail; it logged: " + warnings.describe(),
+        warnings.events.isEmpty());
+    assertSame("The tenant gets its own context back", tenant, OBContext.getOBContext());
+    assertNull("The draft is cleared in the database",
+        rawAccount(accountId, "ONBOARDING_DRAFT"));
+    assertEquals("The clear is written as system", ZERO, rawAccount(accountId, "UPDATEDBY"));
+  }
+
+  /** Collects the WARN events of one logger, with their throwables, for the draft clear spec. */
+  private static final class WarnCapture extends AbstractAppender {
+    private final List<LogEvent> events = new ArrayList<>();
+    private final String loggerName;
+    private final Level previousLevel;
+
+    private WarnCapture(String loggerName, Level previousLevel) {
+      super("Etp5047DraftClearCapture", (Filter) null, (Layout<? extends Serializable>) null, true,
+          new Property[0]);
+      this.loggerName = loggerName;
+      this.previousLevel = previousLevel;
+    }
+
+    static WarnCapture attachTo(Class<?> type) {
+      String name = type.getName();
+      Level previous = LogManager.getLogger(name).getLevel();
+      // Pinned: this build's default configuration is ERROR-only, so a WARN would never arrive.
+      Configurator.setLevel(name, Level.WARN);
+      WarnCapture capture = new WarnCapture(name, previous);
+      capture.start();
+      ((org.apache.logging.log4j.core.Logger) LogManager.getLogger(name)).addAppender(capture);
+      return capture;
+    }
+
+    void detach() {
+      ((org.apache.logging.log4j.core.Logger) LogManager.getLogger(loggerName))
+          .removeAppender(this);
+      stop();
+      Configurator.setLevel(loggerName, previousLevel);
+    }
+
+    String describe() {
+      List<String> lines = new ArrayList<>();
+      for (LogEvent event : events) {
+        Throwable thrown = event.getThrown();
+        lines.add(event.getMessage().getFormattedMessage()
+            + (thrown == null ? "" : " — " + thrown.getClass().getSimpleName() + ": "
+                + thrown.getMessage()));
+      }
+      return lines.toString();
+    }
+
+    @Override
+    public void append(LogEvent event) {
+      if (event.getLevel().isMoreSpecificThan(Level.WARN)) {
+        events.add(event.toImmutable());
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------------------------
   // Fixtures
   // ---------------------------------------------------------------------------------------------
 
@@ -384,7 +509,8 @@ public class OnboardingProvisioningClaimIntegrationTest extends OBBaseTest {
   private String createPaidRequest(String email, String clientName) {
     String accountId = accountIdFor(email);
     String requestId = MARKER + UUID.randomUUID().toString().replace("-", "");
-    // A current purchase always records its environment source; this one has no demo source.
+    // No plan: this fixture exercises the provisioning claim, which does not read one. A current
+    // purchase always records its environment source; this one has no demo source.
     fixtureStore.recordRequested(requestId, accountId, email, clientName,
         new CheckoutRequestStore.RequestOptions(null, true, false, false, null));
     fixtureStore.recordSessionCreated(requestId, "cs_" + requestId);
@@ -422,6 +548,37 @@ public class OnboardingProvisioningClaimIntegrationTest extends OBBaseTest {
               + "WHERE REQUEST_ID = :requestId");
       query.setParameter("requestId", requestId);
       return query.uniqueResult();
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  @SuppressWarnings("rawtypes")
+  private Object rawAccount(String accountId, String column) {
+    OBContext.setOBContext(ZERO, ZERO, ZERO, ZERO);
+    OBContext.setAdminMode(true);
+    try {
+      NativeQuery query = OBDal.getInstance()
+          .getSession()
+          .createNativeQuery("SELECT " + column + " FROM ETGO_ACCOUNT "
+              + "WHERE ETGO_ACCOUNT_ID = :id");
+      query.setParameter("id", accountId);
+      return query.uniqueResult();
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  @SuppressWarnings("rawtypes")
+  private void nativeUpdateCommitted(String sql, String id) {
+    OBContext.setOBContext(ZERO, ZERO, ZERO, ZERO);
+    OBContext.setAdminMode(true);
+    try {
+      NativeQuery update = OBDal.getInstance().getSession().createNativeQuery(sql);
+      update.setParameter("id", id);
+      update.executeUpdate();
+      OBDal.getInstance().flush();
+      OBDal.getInstance().commitAndClose();
     } finally {
       OBContext.restorePreviousMode();
     }

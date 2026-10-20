@@ -278,6 +278,26 @@ class Fiscal303SubmissionSupport {
       return;
     }
 
+    // ETP-5725 (reopened QA review, Blocker B1) — this is the REAL AEAT telematic filing
+    // (production and test-mode validation alike), distinct from the manual "Registrar/
+    // Presentar" PUT-present flow (FiscalDeclCorrectiveConsistencySupport#rejectCorrectiveConsistencyViolation)
+    // and from the "Generar fichero" preview (Fiscal303BoxesHandler#dispatch's GENERATE branch,
+    // just above). Before this fix neither of those guards ever ran on this endpoint: a direct
+    // call to /fiscal303/submit with a valid declId (or any future frontend path that reaches
+    // AeatSubmitFlow without going through FmModel303Page#handlePresent's own pre-flight check)
+    // could file a corrective declaration with AEAT with no presented ordinaria, or file a
+    // duplicate ordinaria, with the server accepting it — exactly the invalid-AEAT-filing class
+    // of bug this ticket exists to close. Same `Rectificativa=Y` dedicated, unambiguous param
+    // the GENERATE branch reads (AeatSubmitFlow.jsx forwards it too, via the same shared
+    // `applyIdentParams` helper generate303File uses) — never the overloaded `IsComplementary`,
+    // which this same request also carries for the UNRELATED legacy "complementaria" checkbox.
+    // Thrown as `AlreadySubmittedException` (reused, not a new type — see
+    // AbstractFiscalHandler#guardCorrectiveConsistency's own javadoc) and caught by
+    // `Fiscal303BoxesHandler#dispatch`'s shared `runDispatch`, which wraps this SUBMIT branch
+    // exactly like every other one.
+    boolean effectivelyCorrective = "Y".equalsIgnoreCase(request.getParameter("Rectificativa"));
+    owner.guardCorrectiveConsistency(orgId, year, period, "303", effectivelyCorrective);
+
     Organization org = OBDal.getInstance().get(Organization.class, orgId);
     AEAT303SubmissionService service = new AEAT303SubmissionService();
 

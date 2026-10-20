@@ -1608,6 +1608,98 @@ public class Fiscal349BoxesHandlerTest {
     org.junit.Assert.assertEquals(new JSONObject(snapshot).toString(), body.toString());
   }
 
+  // ── guardCorrectiveConsistency (generate only, ETP-5725 reopened QA) ──────────────
+  //
+  // Same rule and rationale as Fiscal303BoxesHandlerTest's own generate-guard tests (see that
+  // file). 349's generate request already always sends an unambiguous `substitutive` param
+  // ("Y"/"N", see generate349File/AEAT3492010Report.generateLine1) — unlike 303's overloaded
+  // `IsComplementary`, no new dedicated param was needed on this model's side.
+
+  /**
+   * The latest declaration is a draft, the request is marked corrective
+   * ({@code substitutive=Y}), and there is no presented ordinaria sibling at all — rejected
+   * before the real generator ever runs.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testDispatchGenerateRejectsCorrectiveWithoutPresentedOrdinaria() throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    when(req.getParameter("substitutive")).thenReturn("Y");
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockClient(ctxMock, "client1");
+      OBQuery<BaseOBObject> query = mockDeclQuery(dalMock);
+      BaseOBObject draft = declWithSeqAndStatus(0L, "draft");
+      when(query.list()).thenReturn(Collections.singletonList(draft));
+
+      handler.dispatch("generate", "org1", 2026, "T1", req, resp);
+    }
+
+    verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_CONFLICT),
+        org.mockito.ArgumentMatchers.contains("corrective declaration"));
+    verify(resp, org.mockito.Mockito.never()).setHeader(eq("Content-Disposition"), anyString());
+  }
+
+  /**
+   * The mirror rule, same endpoint: generating as a genuine ORDINARIA ({@code substitutive=N},
+   * or absent) while another ordinaria is ALREADY presented for the period — rejected too.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testDispatchGenerateRejectsOrdinariaWhenAnotherOrdinariaAlreadyPresented()
+      throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    when(req.getParameter("substitutive")).thenReturn("N");
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockClient(ctxMock, "client1");
+      OBQuery<BaseOBObject> query = mockDeclQuery(dalMock);
+      BaseOBObject draft = declWithSeqAndStatus(1L, "draft");
+      BaseOBObject presentedOrdinaria = declWithSeqAndStatus(0L, "submitted");
+      when(query.list()).thenReturn(Arrays.asList(draft, presentedOrdinaria));
+
+      handler.dispatch("generate", "org1", 2026, "T1", req, resp);
+    }
+
+    verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_CONFLICT),
+        org.mockito.ArgumentMatchers.contains("as ordinaria"));
+    verify(resp, org.mockito.Mockito.never()).setHeader(eq("Content-Disposition"), anyString());
+  }
+
+  /**
+   * A VALID request (ordinaria, no conflicting sibling) must NOT be rejected by this guard — any
+   * failure further down the real generation pipeline (unmocked in this unit test) is expected
+   * and irrelevant to what this test asserts.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testDispatchGenerateDoesNotRejectValidOrdinariaWithNoConflict() throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    when(req.getParameter("substitutive")).thenReturn("N");
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockClient(ctxMock, "client1");
+      OBQuery<BaseOBObject> query = mockDeclQuery(dalMock);
+      BaseOBObject draft = declWithSeqAndStatus(0L, "draft");
+      when(query.list()).thenReturn(Collections.singletonList(draft));
+
+      try {
+        handler.dispatch("generate", "org1", 2026, "T1", req, resp);
+      } catch (FiscalHandlerException expected) {
+        // Expected: the real generator has no further mocks here. Only this guard's own
+        // behavior is under test.
+      }
+    }
+
+    verify(servlet, org.mockito.Mockito.never()).sendError(any(), eq(HttpServletResponse.SC_CONFLICT), anyString());
+  }
+
   @SuppressWarnings("unchecked")
   @Test
   public void testDispatchGenerateReturns409WhenAlreadySubmitted() throws Exception {

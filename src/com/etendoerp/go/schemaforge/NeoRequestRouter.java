@@ -28,6 +28,7 @@ import org.openbravo.model.ad.ui.Process;
 
 import com.etendoerp.go.schemaforge.NeoServlet.NeoPathInfo;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy;
 import com.etendoerp.go.schemaforge.util.NeoReportCallability;
 
 /**
@@ -198,6 +199,13 @@ class NeoRequestRouter {
         return;
       }
       servlet.discoveryHandler.handleSpecDescribe(response, spec);
+      return;
+    }
+    // ETP-5648: accounting entities follow the showAccountingFields capability on every
+    // entity path (CRUD and sub-endpoints), not only in the UI.
+    if (!NeoAccountingAccessPolicy.isEntityNameAllowed(spec, pathInfo.entityName)) {
+      servlet.sendError(response, HttpServletResponse.SC_FORBIDDEN,
+          "Access denied to accounting entity for current role");
       return;
     }
     if (servlet.subEndpointDispatcher.handleWindowSubEndpoint(spec, pathInfo, method, request, response)) {

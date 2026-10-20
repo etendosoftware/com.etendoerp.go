@@ -226,23 +226,23 @@ class RoleInheritanceReconciliationService {
    * {@code 'N'} otherwise (including when Finance is being removed on this very call).
    *
    * <p>This is the "going forward" half of a two-front fix: {@code
-   * SFWindowAccessMap#resolveShowAccountingFields} reads the column as a flat stored value with
-   * no join to {@code AD_Role_Inheritance} at read time, so the column is a DERIVED fact, not an
-   * independent one — whoever last changed a role's template inheritance is responsible for
+   * NeoAccountingAccessPolicy#readShowAccountingFieldsFlag} reads the column as a flat stored value
+   * with no join to {@code AD_Role_Inheritance} at read time, so the column is a DERIVED fact, not
+   * an independent one — whoever last changed a role's template inheritance is responsible for
    * keeping it in sync, and this was the one gap in that chain: nothing previously wrote this
    * column when {@code UserRoleCompositionService#assignTemplateRoles} changed a personal role's
    * templates (only {@code EnsureSystemRoleTemplatesScript}/R16/R23 ever set it, once, at
    * role-clone time, for the old per-client-clone model). Called unconditionally at the end of
    * every {@link #reconcileInheritances(Role, List)} call — including a no-op reconciliation — so
    * this is self-healing on every {@code assignTemplateRoles} call, not only when something
-   * actually changed. The retroactive half (every PRE-EXISTING personal role, not touched by a
-   * live composition call) is the sibling {@code R26-tenant-owner-and-personal-role-retrofit.sql}
-   * data-fix's Step 8b, in {@code etendo_schema_forge} — same predicate, kept in lockstep; a
-   * change to one must be mirrored in the other.</p>
+   * actually changed. The retroactive half (every PRE-EXISTING personal role, not touched by a live
+   * composition call) is the sibling {@code R26-tenant-owner-and-personal-role-retrofit.sql}
+   * data-fix's Step 8b, in {@code etendo_schema_forge} — same predicate, kept in lockstep; a change
+   * to one must be mirrored in the other.</p>
    *
    * <p>Native SQL, not a DAL property — same reasoning {@code OwnerSupport} and {@code
-   * SFWindowAccessMap#resolveShowAccountingFields} document for this exact column: it was added
-   * straight to the physical table (ETP-4520) and is not mapped as a typed entity property.
+   * NeoAccountingAccessPolicy#readShowAccountingFieldsFlag} document for this exact column: it was
+   * added straight to the physical table (ETP-4520) and is not mapped as a typed entity property.
    * Guarded to a no-op UPDATE when the value already matches, so a call that changes nothing here
    * costs one cheap, index-backed statement.</p>
    */

@@ -947,7 +947,8 @@ public class GoodsReceiptHeaderHandlerTest {
     java.util.Map<String, NeoActionContract> contracts =
         new GoodsReceiptHeaderHandler().actionContracts();
 
-    assertEquals(java.util.List.of("documentAction", "createPurchaseInvoice", "cloneRecord"),
+    assertEquals(java.util.List.of("documentAction", "createPurchaseInvoice", "createPurchaseReturn",
+            "cloneRecord"),
         java.util.List.copyOf(contracts.keySet()));
     NeoActionContract invoice = contracts.get("createPurchaseInvoice");
     assertEquals("POST", invoice.getHttpMethod());
@@ -1025,5 +1026,45 @@ public class GoodsReceiptHeaderHandlerTest {
     assertEquals(NeoActionContract.SC_UNPROCESSABLE, NeoActionContract.validate(contracts,
         "documentAction", new JSONObject().put("docAction", "CO").put("action", "CO"))
         .getHttpStatus());
+  }
+
+  // ── createPurchaseReturn contract (ETP-5711) ─────────────────────────────────────────
+
+  /**
+   * The create-from-document return is published to agents with its lines optional: omitting them
+   * returns everything still returnable, and the result is always a draft.
+   */
+  @Test
+  public void actionContracts_createPurchaseReturnIsPublishedWithOptionalLines() throws Exception {
+    java.util.Map<String, NeoActionContract> contracts = new GoodsReceiptHeaderHandler().actionContracts();
+
+    NeoActionContract c = contracts.get("createPurchaseReturn");
+    assertNotNull("createPurchaseReturn must be declared so agents can create the return", c);
+    assertEquals("POST", c.getHttpMethod());
+    assertEquals(java.util.List.of("lines", "reason"), c.getParams().stream()
+        .map(NeoActionContract.Param::getName).collect(java.util.stream.Collectors.toList()));
+    assertFalse("every body key is optional",
+        c.getParams().stream().anyMatch(NeoActionContract.Param::isRequired));
+    String description = c.getDescription();
+    org.junit.Assert.assertTrue(description,
+        description.contains("omit lines to return everything still returnable"));
+    org.junit.Assert.assertTrue(description, description.contains("left in draft"));
+    org.junit.Assert.assertTrue("it states what refuses an over-return",
+        description.contains("returnQuantityExceedsAvailable"));
+  }
+
+  @Test
+  public void actionContracts_createPurchaseReturnAcceptsTheSpaBodyAndTheEmptyBody() throws Exception {
+    java.util.Map<String, NeoActionContract> contracts = new GoodsReceiptHeaderHandler().actionContracts();
+
+    assertNull(NeoActionContract.validate(contracts, "createPurchaseReturn", new JSONObject()));
+    assertNull(NeoActionContract.validate(contracts, "createPurchaseReturn", new JSONObject()
+        .put("lines", new JSONArray().put(
+            new JSONObject().put("lineId", "L1").put("returnQuantity", 2)))
+        .put("reason", "damaged")));
+    assertEquals(NeoActionContract.SC_UNPROCESSABLE, NeoActionContract.validate(contracts,
+        "createPurchaseReturn", new JSONObject().put("lines", "x")).getHttpStatus());
+    assertEquals(NeoActionContract.SC_UNPROCESSABLE, NeoActionContract.validate(contracts,
+        "createPurchaseReturn", new JSONObject().put("orderId", "O1")).getHttpStatus());
   }
 }
