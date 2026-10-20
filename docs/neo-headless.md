@@ -1080,9 +1080,9 @@ it carries an AD message key. The message text is only displayed, never matched.
 | an exception carrying an AD message key: `MessageKeyedException`, or an `OBException` chain whose message is `@Key@` tokens | `422` | `business_rule` | translated |
 | unique violation (`23505`) | `409` | `duplicate_key` | the existing duplicate-key wording (unchanged) |
 | not-null violation (`23502`), Hibernate `PropertyValueException` | `400` | `missing_required_value` | generic |
-| FK violation (`23503`) on a `DELETE` | `409` | `record_in_use` | generic |
-| FK violation on any other verb, Hibernate `TransientObjectException`, an unknown id in the body (core's import-set error keyed `id`) | `400` | `unknown_reference` | generic, **byte-identical for a missing and a foreign id** |
-| check violation (`23514`), data exception (class `22`) | `422` | `invalid_value` | translated when the DB message is an AD key, generic otherwise |
+| FK violation (`23503`) on a `DELETE` | `409` | `record_in_use` | translated constraint or `ForeignKeyViolation` AD message, generic if unavailable |
+| FK violation on any other verb, Hibernate `TransientObjectException`, an unknown id in the body (core's import-set error keyed `id`, recognised by its fixed `New object … refered to but not present in the import set` template — core's body has no category, and `id` alone also carries invalid property paths) | `400` | `unknown_reference` | generic, **byte-identical for a missing and a foreign id** |
+| check violation (`23514`), data exception (class `22`) | `422` | `invalid_value` | translated constraint or AD message, generic if unavailable |
 | `OBSecurityException` / `SecurityException` | `403` | `forbidden` | generic |
 | deadlock (`40P01`), serialization failure (`40001`) | `409` | `retryable_conflict` | generic — retry |
 | statement timeout (`57014`), connection (class `08`), resources (class `53`), shutdown (`57P0x`) | `503` | `service_unavailable` | generic — retry later |
@@ -1098,10 +1098,20 @@ keys:
 
 Rules every funnel follows:
 
-- **Nothing is written.** The session is rolled back before answering (unless `/batch` owns the
-  transaction, which rolls back the whole set itself). The request filter commits whatever the
-  session holds when the servlet answers without throwing, so a refusal answered without this
-  rollback could still persist the half-done write.
+- **The rollback covers only uncommitted work.** The session is rolled back before answering
+  (unless `/batch` owns the transaction, which rolls back the whole set itself). The request filter
+  commits whatever the session holds when the servlet answers without throwing, so a refusal
+  answered without this rollback could still persist the half-done write. What was already
+  committed stays: outside a batch the default write commits before `afterHandle` runs, and a
+  process may commit internally.
+- **A failure after the main write committed is not a refusal.** An exception thrown by
+  `afterHandle` (REST `NeoServletSupport.runPostHookAfterCommit`, MCP `McpHookExecutor.runPostHook`)
+  is answered by `NeoErrorResponses.afterCommitFailure` as before ETP-5782: `500 server_error`,
+  sanitized message, and on a write `error.hint` = *"The record may already be saved. Read it
+  before re-sending the request."* (MCP: `hint` in the envelope). Classifying it as a 4xx would
+  invite the caller to correct and re-send a write that already happened. Inside `/batch` nothing
+  is committed yet, so there it is classified as usual. A customization or process that commits
+  internally *before* throwing is not detectable structurally; its refusal is still classified.
 - **One log line per refusal.** A 4xx logs one `WARN` with the class and keys, no stack trace. A 5xx
   logs `ERROR` with the stack trace.
 - **Translation in the request's language.** `NeoMessageTranslator.translateDbMessage` translates
@@ -1114,14 +1124,22 @@ Known limits, deliberate:
 - **An uncaptured core failure stays 500.** Only a failure whose throwable NEO's write service kept
   is classified; a failure body that reaches NEO as prose alone is answered as before rather than
   guessed from its text. `NeoBatchJsonDataService` now serves single writes too (it commits them as
-  core does) so the REST and MCP writes are captured; its `remove` is core's verbatim plus the
-  capture, which is a drift surface on a core upgrade.
+  core does) so the REST and MCP writes are captured. Both copied `update` and `remove` bodies,
+  including their helpers, must be compared with core on every upgrade. Customizations can
+  dispatch additional writes, including deletes, inside a batch.
 - **A plain `OBException` stays 500.** A core event handler that throws
   `new OBException(OBMessageUtils.messageBD(key))` hands over already-translated prose with no key;
   it is not classified until it throws with its key.
 - **No `field` key yet.** Naming the offending field is deferred until it is combined with
   ETP-5785's reference ownership.
 - **The gateway** still maps NEO's 422/503 to 502 until ETP-5369.
+- **Period/process refusal split.** A captured period refusal or a process reporting failure
+  keeps REST 400; a thrown keyed or P0001 refusal is 422. See the declared divergence in §4.12.9.
+- **SPA follow-up required before delivery.** Localize generic errors by `error.code`:
+  `business_rule`, `unknown_reference`, `record_in_use`, `invalid_value`,
+  `missing_required_value`, `forbidden`, `retryable_conflict`, `service_unavailable` and
+  `stale_record`. Backend AD translations preserve acronyms and multiline text. The separate
+  SPA PR and live stateless MCP translation check remain pending.
 
 ### 4.4 Selectors (FK Dropdowns)
 
@@ -3843,6 +3861,7 @@ not: `etendo_create` does not run it in shared code, so it is in the table below
 | step | in `etendo_create` | in `etendo_batch` | consequence |
 |---|---|---|---|
 | `NeoCommercialLinePolicy.injectCommercialAmounts` | **no** in shared code — only from the customizations of sales order, sales quotation, sales invoice and purchase invoice lines (ETP-5528, ETP-5710, §4.12.20, §4.12.31) | yes | `etendo_batch` runs it in `NeoCrudHandler.executePostCreate`; `etendo_create` never reaches that method — it is a separate pipeline. Since ETP-5528, sales order and sales quotation lines get the amounts on every create from their own customizations (`OrderLineDiscountSupport.deriveAmountsOnCreate`), and so do sales and purchase invoice lines (`SalesInvoiceLineHandler` / `PurchaseInvoiceLineHandler` → `InvoiceLineAmountSupport.deriveAmountsOnCreate`; purchase since ETP-5710). Every other entity is as on `develop`: a generic commercial line persists `lineGrossAmount = 0` on a net price list, and purchase order lines still do not get it (measured 2026-09-30: purchase order line gross 0; the purchase invoice line 0 / 0 of that measurement is fixed by ETP-5710). Declared, not fixed in shared code. (`grossUnitPrice` still persists as 0 on both verbs — a separate, undiagnosed defect, not a divergence) |
+| error classification (ETP-5782) — period and process refusals | captured period refusals and process-reported failures keep REST `400` | thrown keyed or P0001 refusals are `422` | existing funnel divergence preserved; status does not depend on translated prose (§4.3.8). |
 | error classification (ETP-5782) — `unknown_reference`, `missing_required_value` | REST `400` | MCP `422 validation_error`, same `code` | MCP answers every rejected value as 422 already (§4.3.1.1); the class travels in `code`, so a caller branches on it on either channel. Declared in `McpToolResponses.classifiedEnvelope`. |
 | error classification (ETP-5782) — a captured write failure classified `500` | REST `500 server_error`, sanitized | MCP keeps its existing write answer (`422`) | the MCP write path answered every DAL failure 422 before ETP-5782; only the classified 4xx/503 changed it. A 500-class failure keeps the old answer rather than turn a 422 into a 500 for agents. |
 | `buildInvalidDatesError` | yes | **no** | no explicit 422 for an unreadable or ambiguous date (ETP-4793 / IMP-24). Type coercion itself does run on the shared path (`executePostCreate` → `coerceTypes`), so the value is not silently mangled — the agent just gets a less precise failure |
