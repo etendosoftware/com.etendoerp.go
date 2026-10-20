@@ -179,6 +179,35 @@ public class Fiscal390BoxesHandlerTest {
     verify(handler, never()).computePayload(anyString(), anyInt(), anyMap());
   }
 
+  /**
+   * ETP-5716 (AEAT PAR016): the boxes are computed with the year's 303 preload applied
+   * server-side to the inputs the user has not overridden — no client save needed.
+   */
+  @Test
+  public void testBoxesAppliesThe303PreloadServerSide() throws Exception {
+    doReturn(null).when(handler).findSubmittedSnapshot(2026, "0A");
+    Map<String, String> stored = new LinkedHashMap<>();
+    stored.put("ISSUPPLEMENTARY", "N");
+    doReturn(stored).when(handler).storedInputs(2026, "0A");
+    doReturn("{\"aeatInputs\":{\"ISSUPPLEMENTARY\":\"N\"},\"aeatPreloaded\":{}}")
+        .when(handler).storedManualData(2026, "0A");
+    Fiscal390PreloadSupport preload = mock(Fiscal390PreloadSupport.class);
+    Fiscal390PreloadAggregator.Result r = new Fiscal390PreloadAggregator.Result();
+    r.declarations.add(new Fiscal390PreloadAggregator.Decl303("d1", "T1", "submitted", true, 1L));
+    r.inputs.put("INGRESAR_03", new BigDecimal("300"));
+    when(preload.aggregateYear("org1", 2026, false)).thenReturn(r);
+    doReturn(preload).when(handler).preloadSupport();
+    doReturn(new JSONObject("{\"ok\":true}")).when(handler)
+        .computePayload(anyString(), anyInt(), anyMap());
+
+    handler.handle(Fiscal390BoxesHandler.BOXES, "GET", request("0A"), response(new StringWriter()));
+
+    Map<String, String> expected = new LinkedHashMap<>();
+    expected.put("ISSUPPLEMENTARY", "N");
+    expected.put("INGRESAR_03", "300.00");
+    verify(handler).computePayload("org1", 2026, expected);
+  }
+
   /** A live preview uses the stored inputs overridden by the request's inputs. */
   @Test
   public void testBoxesComputesWithMergedInputs() throws Exception {

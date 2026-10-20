@@ -93,6 +93,8 @@ class Fiscal390BoxesHandler extends AbstractFiscalHandler {
   static final String GENERATE = "generate";
   /** Key, inside the declaration's {@code manualData}, of the stored AEAT390 inputs. */
   static final String STORED_INPUTS_KEY = "aeatInputs";
+  /** {@code manualData} key of the values the 303 preload last put in (frontend). */
+  static final String STORED_PRELOADED_KEY = "aeatPreloaded";
   /** SQL LIKE pre-filter of the yearly 390 reports; {@link #REPORT_KEY_PATTERN} is the real test. */
   static final String REPORT_KEY_LIKE = "AEAT390%_Y";
   /** Yearly 390 report search key; group 1 is the layout year. */
@@ -181,12 +183,12 @@ class Fiscal390BoxesHandler extends AbstractFiscalHandler {
           // Not guarded: a pure read. A submitted declaration is served from its snapshot.
           JSONObject snapshot = findSubmittedSnapshot(year, period);
           JSONObject out = snapshot != null ? snapshot
-              : computePayload(orgId, year, mergedInputs(year, period, request));
+              : computePayload(orgId, year, effectiveInputs(orgId, year, period, request));
           response.setContentType(JSON_CT);
           response.getWriter().write(out.toString());
         } else if (GENERATE.equals(entityName)) {
           guardNotAlreadySubmitted(orgId, year, period, MODEL);
-          Map<String, String> inputs = mergedInputs(year, period, request);
+          Map<String, String> inputs = effectiveInputs(orgId, year, period, request);
           if (incidentsSupport().rejectGenerate(orgId, year, period, inputs, response)) {
             return;
           }
@@ -288,14 +290,66 @@ class Fiscal390BoxesHandler extends AbstractFiscalHandler {
    * ({@code manualData.aeatInputs}), as strings; empty when there is none.
    */
   Map<String, String> storedInputs(int year, String period) {
+    return readStoredInputs(storedManualData(year, period));
+  }
+
+  /** {@code manualData} of the latest declaration for the natural key; {@code null} if none. */
+  String storedManualData(int year, String period) {
     String clientId = OBContext.getOBContext().getCurrentClient().getId();
     BaseOBObject latest = declHandler().findLatestDeclaration(clientId, declarationOrgId(), MODEL,
         year, period);
-    if (latest == null) {
-      return new LinkedHashMap<>();
+    return latest == null ? null
+        : FiscalDeclCrudHandler.asString(latest.get(FiscalDeclCrudHandler.PROPERTY_MANUAL_DATA));
+  }
+
+  /** Parses {@code manualData.aeatPreloaded} (what the 303 preload last put in); empty if none. */
+  static Map<String, String> readStoredPreloaded(String manualData) {
+    Map<String, String> out = new LinkedHashMap<>();
+    if (StringUtils.isBlank(manualData)) {
+      return out;
     }
-    return readStoredInputs(
-        FiscalDeclCrudHandler.asString(latest.get(FiscalDeclCrudHandler.PROPERTY_MANUAL_DATA)));
+    try {
+      JSONObject preloaded = new JSONObject(manualData).optJSONObject(STORED_PRELOADED_KEY);
+      if (preloaded == null) {
+        return out;
+      }
+      Iterator<?> keys = preloaded.keys();
+      while (keys.hasNext()) {
+        String key = String.valueOf(keys.next());
+        if (!preloaded.isNull(key)) {
+          out.put(key, preloaded.getString(key));
+        }
+      }
+    } catch (Exception e) {
+      log.warn("Ignoring unparseable Modelo 390 aeatPreloaded: " + e.getMessage());
+    }
+    return out;
+  }
+
+  /**
+   * {@code inputs} with the year's 303 preload applied server-side to every preloadable input the
+   * user has not overridden ({@link Fiscal390PreloadAggregator#applyPreload}, with
+   * {@code manualData.aeatPreloaded} as "what was preloaded before"). Used for the boxes, the
+   * file, the submission and the incidents, so none of them depends on the client having saved
+   * the preload (AEAT PAR016, ETP-5716). The year without 303s, or a preload that cannot be read,
+   * leaves {@code inputs} as they are (logged); the blocking {@code BLOCK9_*} incidents remain the
+   * safety net.
+   */
+  Map<String, String> withServerPreload(String orgId, int year, Map<String, String> inputs,
+      String manualData) {
+    try {
+      Fiscal390PreloadAggregator.Result r = preloadSupport().aggregateYear(orgId, year,
+          "Y".equals(inputs != null ? inputs.get("ISMONTHLYRETURN") : null));
+      if (r == null || r.declarations.isEmpty()) {
+        return inputs;
+      }
+      return Fiscal390PreloadAggregator.applyPreload(inputs, readStoredPreloaded(manualData),
+          r.inputs);
+    } catch (Exception e) {
+      log.warn("Modelo 390: the 303 preload could not be applied server-side ("
+          + e.getMessage() + "); using the inputs as they are");
+      return inputs;
+    }
   }
 
   /** Parses {@code manualData.aeatInputs}; a malformed blob yields no inputs, never an error. */
@@ -330,5 +384,28 @@ class Fiscal390BoxesHandler extends AbstractFiscalHandler {
     Map<String, String> merged = storedInputs(year, period);
     merged.putAll(Fiscal390GenerateSupport.requestInputs(request));
     return merged;
+  }
+
+  /** {@link #mergedInputs} with the server-side 303 preload ({@link #withServerPreload}). */
+  Map<String, String> effectiveInputs(String orgId, int year, String period,
+      HttpServletRequest request) {
+    return withServerPreload(orgId, year, mergedInputs(year, period, request),
+        storedManualDataOrNull(year, period));
+  }
+
+  /** The stored inputs with the server-side 303 preload ({@link #withServerPreload}). */
+  Map<String, String> effectiveStoredInputs(String orgId, int year, String period) {
+    return withServerPreload(orgId, year, storedInputs(year, period),
+        storedManualDataOrNull(year, period));
+  }
+
+  /** {@link #storedManualData}, or {@code null} when it cannot be read (logged). */
+  private String storedManualDataOrNull(int year, String period) {
+    try {
+      return storedManualData(year, period);
+    } catch (Exception e) {
+      log.warn("Modelo 390: the stored manualData could not be read: " + e.getMessage());
+      return null;
+    }
   }
 }

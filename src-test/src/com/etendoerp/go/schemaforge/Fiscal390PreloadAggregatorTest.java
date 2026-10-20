@@ -378,4 +378,50 @@ public class Fiscal390PreloadAggregatorTest {
     assertEquals("1.00", json.getString("tolerance"));
     assertEquals("T4", json.getString("lastPeriod"));
   }
+
+  // ── applyPreload: the 303 preload applied server-side (ETP-5716, AEAT PAR016) ──
+
+  /** An empty / never-preloaded input takes the 303 value; zero clears; others stay. */
+  @Test
+  public void testApplyPreloadFillsUntouchedInputs() {
+    Map<String, String> inputs = new HashMap<>();
+    inputs.put("LIQANUAL_VAT_IMPORT", "7");      // not a preload key: untouched
+    inputs.put("INGRESAR_03", "0");              // zero counts as empty
+    Map<String, BigDecimal> fresh = new HashMap<>();
+    fresh.put("INGRESAR_03", new BigDecimal("300"));
+    fresh.put("TOTAL_LASTPERIOD", new BigDecimal("12.5"));
+    fresh.put("LIQANUAL_ENDCOMPENSATION", BigDecimal.ZERO);
+    Map<String, String> out = Fiscal390PreloadAggregator.applyPreload(inputs, null, fresh);
+    assertEquals("300.00", out.get("INGRESAR_03"));
+    assertEquals("12.50", out.get("TOTAL_LASTPERIOD"));
+    assertFalse(out.containsKey("LIQANUAL_ENDCOMPENSATION"));
+    assertEquals("7", out.get("LIQANUAL_VAT_IMPORT"));
+  }
+
+  /** PAR016 repro: aeatPreloaded {} saved before the 303s existed still takes them. */
+  @Test
+  public void testApplyPreloadWithAnEmptyPreviousPreload() {
+    Map<String, BigDecimal> fresh = Map.of("INGRESAR_03", new BigDecimal("300"));
+    Map<String, String> out = Fiscal390PreloadAggregator.applyPreload(
+        Map.of("ISSUPPLEMENTARY", "N"), Collections.emptyMap(), fresh);
+    assertEquals("300.00", out.get("INGRESAR_03"));
+  }
+
+  /** A value still equal to the previous preload follows the new 303s; a user edit wins. */
+  @Test
+  public void testApplyPreloadKeepsUserOverrides() {
+    Map<String, String> inputs = new HashMap<>();
+    inputs.put("INGRESAR_03", "300.00");   // = previous preload → follows the 303s
+    inputs.put("INGRESAR_06", "999");      // edited by the user → kept
+    inputs.put("INGRESAR_09", "");         // cleared by the user although preloaded → kept empty
+    Map<String, String> previous = Map.of("INGRESAR_03", "300", "INGRESAR_06", "600",
+        "INGRESAR_09", "900");
+    Map<String, BigDecimal> fresh = Map.of("INGRESAR_03", new BigDecimal("310"),
+        "INGRESAR_06", new BigDecimal("610"), "INGRESAR_09", new BigDecimal("910"));
+    Map<String, String> out = Fiscal390PreloadAggregator.applyPreload(inputs, previous, fresh);
+    assertEquals("310.00", out.get("INGRESAR_03"));
+    assertEquals("999", out.get("INGRESAR_06"));
+    assertEquals("", out.get("INGRESAR_09"));
+    assertSame(null, Fiscal390PreloadAggregator.applyPreload(null, null, null).get("x"));
+  }
 }

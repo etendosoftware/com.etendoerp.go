@@ -524,6 +524,60 @@ final class Fiscal390PreloadAggregator {
   // ── Cuadre ──────────────────────────────────────────────────────────────
 
   /**
+   * The 303 preload applied to the 390 inputs SERVER-SIDE (ETP-5716), with the frontend's rule
+   * ({@code applyPreload390} of preload390.js): for every key the 303s determine
+   * ({@code fresh}), an input the user has not overridden takes the fresh value (a zero clears
+   * it). "Not overridden" = its value still equals the one preloaded before ({@code previous},
+   * {@code manualData.aeatPreloaded}), or — never preloaded — it is empty / zero. A value the user
+   * edited wins. So the file, the boxes and the incidents always carry the current 303 figures
+   * without depending on a client save (AEAT PAR016). Pure; returns a new map.
+   */
+  static Map<String, String> applyPreload(Map<String, String> inputs, Map<String, String> previous,
+      Map<String, BigDecimal> fresh) {
+    Map<String, String> out = new LinkedHashMap<>(inputs != null ? inputs : Map.of());
+    if (fresh == null) {
+      return out;
+    }
+    for (Map.Entry<String, BigDecimal> e : fresh.entrySet()) {
+      if (e.getValue() == null) {
+        continue;
+      }
+      String key = e.getKey();
+      if (!isUnmodified(out.get(key), previous != null ? previous.get(key) : null,
+          previous != null && previous.containsKey(key))) {
+        continue;
+      }
+      BigDecimal value = r2(e.getValue());
+      if (value.signum() == 0) {
+        out.remove(key);
+      } else {
+        out.put(key, value.toPlainString());
+      }
+    }
+    return out;
+  }
+
+  private static boolean isUnmodified(String current, String previous, boolean wasPreloaded) {
+    if (wasPreloaded) {
+      return cents(current) == cents(previous);
+    }
+    return current == null || current.trim().isEmpty() || cents(current) == 0;
+  }
+
+  /** An input in cents; blank or not a number is zero (as the frontend's {@code cents}). */
+  private static long cents(String raw) {
+    if (raw == null || raw.trim().isEmpty()) {
+      return 0L;
+    }
+    try {
+      return new BigDecimal(raw.trim().replace(",", ".")).movePointRight(2)
+          .setScale(0, java.math.RoundingMode.HALF_UP).longValueExact();
+    } catch (NumberFormatException | ArithmeticException e) {
+      return 0L;
+    }
+  }
+
+  /**
    * The cuadre of {@code annualResult} ([86], or [94] in territory mode) with
    * {@code expectedResult} ({@link Result#expectedResult}): {@code status} {@code ok} /
    * {@code difference} (|difference| &gt; {@link #RECONCILIATION_TOLERANCE}) / {@code no303}

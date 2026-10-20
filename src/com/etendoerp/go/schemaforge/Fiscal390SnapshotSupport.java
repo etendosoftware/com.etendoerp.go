@@ -44,7 +44,7 @@ class Fiscal390SnapshotSupport implements FiscalSnapshotSupport {
   public JSONObject computeLivePayload(AbstractFiscalHandler handler, String orgId, int year,
       String period) throws Exception {
     Fiscal390BoxesHandler h390 = (Fiscal390BoxesHandler) handler;
-    return h390.computePayload(orgId, year, h390.storedInputs(year, period));
+    return h390.computePayload(orgId, year, h390.effectiveStoredInputs(orgId, year, period));
   }
 
   /**

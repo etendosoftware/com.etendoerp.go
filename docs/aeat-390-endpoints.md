@@ -100,6 +100,22 @@ name. The submission snapshot is computed from the STORED inputs: the frontend m
 `manualData.aeatInputs` before (not in the same PUT as) the status change to submitted, because
 the snapshot is taken before the PUT's `manualData` is applied.
 
+### Server-side 303 preload (ETP-5716, AEAT PAR016)
+
+The block-9 inputs the year's 303s determine (`INGRESAR_xx`, `DEVOLVER_xx`, [97], [98], [662],
+[85]/[93], the territory percentages — `GET /fiscal390/preload` `inputs`) are applied **by the
+backend** before computing anything — `boxes` (screen and list auto-compute), `generate`,
+`submit` (file and snapshot), `validate` / the guards (incidents) and the live snapshot payload —
+so none of them depends on the client having saved the preload, as the 303 / 349 compute from
+live data. `Fiscal390BoxesHandler.withServerPreload` → `Fiscal390PreloadAggregator.applyPreload`,
+the same rule as the frontend's `applyPreload390`: an input the user has not overridden — still
+equal to `manualData.aeatPreloaded[key]`, or never preloaded and empty / zero — takes the current
+303 value (zero clears it); a value the user edited wins. A year without 303s, or a preload that
+cannot be read (logged), leaves the inputs as they are; the blocking `BLOCK9_*` incidents are the
+safety net. Precedent: a draft saved while the year had no 303 kept an empty block 9 and its
+`aeatPreloaded: {}`, the 303s were submitted afterwards, and the filed 390 was rejected with
+`PAR016`. Cost: every such request aggregates the year's 303s (a draft 303 is computed live).
+
 ## `GET /fiscal390/boxes` response
 
 ```json

@@ -137,7 +137,9 @@ class Fiscal390SubmissionSupport {
       return;
     }
 
-    Map<String, String> inputs = Fiscal390BoxesHandler.readStoredInputs(decl.getManualData());
+    // The stored inputs with the year's 303 preload applied server-side (PAR016, ETP-5716).
+    Map<String, String> inputs = owner.withServerPreload(orgId, year,
+        Fiscal390BoxesHandler.readStoredInputs(decl.getManualData()), decl.getManualData());
     String fileContent;
     try {
       fileContent = owner.generateSupport().generateContent(orgId, year, inputs).content;

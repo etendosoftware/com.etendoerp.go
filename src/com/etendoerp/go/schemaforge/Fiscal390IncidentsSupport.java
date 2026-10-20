@@ -170,7 +170,9 @@ class Fiscal390IncidentsSupport {
   Fiscal390IncidentRules.Facts loadFacts(String orgId, int year, String manualData,
       Map<String, String> inputs, boolean full) throws Exception {
     Fiscal390IncidentRules.Facts f = new Fiscal390IncidentRules.Facts();
-    f.inputs = inputs != null ? inputs : Collections.emptyMap();
+    // The rules see what the file carries: the inputs with the 303 preload applied server-side.
+    Map<String, String> effective = owner.withServerPreload(orgId, year, inputs, manualData);
+    f.inputs = effective != null ? effective : Collections.emptyMap();
     JSONObject identification = parse(manualData).optJSONObject(IDENTIFICATION_KEY);
     if (identification != null) {
       Object flag = identification.opt("sustitutiva");
