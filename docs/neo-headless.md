@@ -4056,6 +4056,27 @@ behaviour is unchanged. Channels as noted per field:
   eTGOCurrencyRate."*, EN: *"No exchange rate from EUR to USD for 2026-10-14; send
   eTGOCurrencyRate."* REST: at the root of the body (where the SPA reads `data.messages`). MCP: inside
   core's `response` wrapper, so the flattened record the agent gets has `messages` at its top level.
+  **PSD2 "Import from" beyond the bank's history → a second non-blocking hint (ETP-5805).** A
+  `PUT`/`PATCH` on `financial-account/account` that sends `pSD2ImportFromDate` (the SPA's generic
+  form never does) and a `POST financial-account-bank-connection?action=import-settings` that saves
+  `importFromDate` both succeed as usual; when the saved date is older than
+  `today − maxFetchInterval` the response carries a `warning` in the same `messages` envelope
+  (`psd2ImportFromBeyondFetchInterval`, ES: *"Este banco sólo proporciona los últimos 90 días de
+  movimientos (desde el 21/07/2026)…"*). The PUT/PATCH path takes the calendar day from the request
+  string (the persisted `Date` is local midnight and would be zone-sensitive); import-settings parses
+  in UTC. One shared rule,
+  `FinancialAccountBankConnectionSupport.findImportFromBeyondFetchInterval`: strict calendar-day
+  `<` (the boundary day does not warn), silent when there is no date, no active connection or no
+  declared limit, and never throws. The limit is the same one the bank-connection `status` action
+  exposes as `maxFetchInterval` (readable by the agent through that report spec); it is deliberately
+  not added to the account GET.
+  `import-settings` evaluates the *resulting* from-date (a body with only `importToDate` still
+  warns on a stale stored from-date, as the ETP-5104 range check does); the PUT/PATCH branch is gated
+  on `pSD2ImportFromDate` being sent, and a failed write (non-2xx) gets no hint.
+  **Placement.** Same as the W5 hint: MCP puts `messages` inside core's `response` wrapper (the agent's
+  flattened record has it at top level); REST puts it at the root of the body. `import-settings` builds
+  its body with `okData` (`{"response":{"data":{"saved":true}}}`), so over REST `messages` sits at the
+  root next to `response`, not inside it.
 
 ##### REST `/sws/neo/batch` is unaffected
 
