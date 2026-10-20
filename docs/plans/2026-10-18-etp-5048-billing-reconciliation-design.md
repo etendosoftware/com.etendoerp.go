@@ -81,20 +81,29 @@ checkout and subscription rows, and its audit rows are ordinary billing events.
 6. **No session id** — a `CREATING` row (it never received one) is never auto-closed. It is alerted
    once, deduplicated by its deterministic billing-event id, and counted as "awaiting review" on
    later runs.
-7. **Stripe status mapping** —
-   - `active`/`trialing` → current. `canceled`, `paused` and `incomplete_expired` close the row
-     locally.
-   - `pause_collection` on an active subscription raises an alert only.
+7. **Stripe status mapping** (point 2 decided by Martin on 2026-10-20) —
+   - `active`/`trialing` → current. `canceled` and `incomplete_expired` close the row locally
+     (EXPIRED on the preference route).
+   - `paused` is **alert-only**: it never closes the row and never changes any state, on any path.
+     That covers the reconciler, a `customer.subscription.updated` carrying the status, and the
+     dedicated `customer.subscription.paused` event. Our checkout sets no trial
+     (`HostedCheckoutService.buildSessionForm` sends no `trial_*`), so `paused` means a trial or a
+     pause was configured in Stripe by hand, and a paused subscription can be resumed; closing the
+     row would make that resume impossible, because a closed row is never reopened.
+     `PausedSubscriptionAlert` raises one review alert per subscription, shared by every path: a
+     `reconcile:subscription-paused:<sub>` billing-event row, a WARN (`[BILLING-RECONCILE]` from
+     the job, `[BILLING-ALERT]` from the webhook), and an internal alert
+     (`subscription-paused-review`). A re-run or a redelivery finds the row and stays silent.
+   - `customer.subscription.resumed` stays unhandled (`IGNORED`, "unhandled event type"): a pause
+     changed nothing, so there is nothing to undo.
+   - `pause_collection` on an active subscription raises an alert only, once.
    - `past_due`/`unpaid` stay with the existing webhook grace logic: the reconciler does not touch
      them.
    - `incomplete` is left alone, since the payment is still in progress.
    - A 404 means **absent**, and an absent subscription is closed only behind a circuit breaker
      (§6.4).
-   - **On hold (2026-10-19, awaiting Martin):** the close for `paused` and `incomplete_expired`
-     would live in `SubscriptionLifecycleApplier`, so that the webhook (`customer.subscription.updated`)
-     and the reconciler agree. Until that is decided the applier keeps answering "unhandled
-     subscription status" for both, and the reconciler, which reads the status through the same
-     applier, leaves them unchanged.
+   - The `incomplete_expired` close and the `paused` ignore both live in
+     `SubscriptionLifecycleApplier`, so the webhook and the reconciler cannot disagree.
 8. **No-op runs** — the reconciler compares the would-be outcome with the stored state before
    applying anything. Only a change of status, or a close, is written. A period or `LAST_EVENT_AT`
    refresh alone is never written, so a consistent dataset gets zero writes and zero alerts.
@@ -104,11 +113,11 @@ checkout and subscription rows, and its audit rows are ordinary billing events.
    resolved with `TenantEnvironmentLifecycleService.targetForTenant`, which already decides between
    the row and the preferences. The subscription id is the one the creating request recorded, never
    one found by Stripe customer: a customer can own several environments.
-10. **Notifications** — internal alert only (`InternalAlertService`, the same `environment-provisioning`
-    event the onboarding sends). No new customer email is added. Note that a repair runs the shared
-    onboarding, which already sends the customer the existing `environment-ready` email
+10. **Notifications** (amended by Martin on 2026-10-20) — the internal alert is sent
+    (`InternalAlertService`, the same `environment-provisioning` event the onboarding sends), and so
+    is the existing customer `environment-ready` email. A repair runs the shared onboarding
     (`completeCommittedOnboarding` → `sendEnvironmentReady`), exactly as a browser-driven
-    provisioning does.
+    provisioning does. There is no suppress switch, and no new customer email is added.
 11. **Scheduling** —
     - `startup/BillingReconciliationScheduleStartup` follows the `TenantPoolScheduleStartup` shape:
       fixed process id, fixed request id at client 0, idempotent.
@@ -199,6 +208,7 @@ Billing-event ids are deterministic:
 | subscription back to current | `reconcile:subscription-current:<stripeSubscriptionId>:<runId>` | `APPLIED` |
 | price/amount filled (R37 adoption) | `reconcile:subscription-price:<stripeSubscriptionId>` | `APPLIED` |
 | `pause_collection` alert | `reconcile:pause-collection:<stripeSubscriptionId>` | `IGNORED` |
+| paused subscription review alert (webhook or job) | `reconcile:subscription-paused:<stripeSubscriptionId>` | `IGNORED` |
 
 An existing id is the "already alerted" answer: the row is not written again, and the case counts as
 awaiting review.

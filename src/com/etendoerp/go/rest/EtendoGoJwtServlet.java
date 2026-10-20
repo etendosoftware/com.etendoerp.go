@@ -83,6 +83,7 @@ import com.etendoerp.go.payment.BillingOfferConfiguration;
 import com.etendoerp.go.payment.StripeCurrencyScale;
 import com.etendoerp.go.payment.StripePriceService;
 import com.etendoerp.go.payment.CheckoutRequestStore;
+import com.etendoerp.go.payment.PausedSubscriptionAlert;
 import com.etendoerp.go.payment.ProvisioningFailureReason;
 import com.etendoerp.go.payment.EnvironmentPlanCache;
 import com.etendoerp.go.payment.PlanCatalogService;
@@ -341,6 +342,15 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * lifecycle events anyway.
    */
   private static final List<String> ALERT_ONLY_EVENT_TYPES = List.of("charge.dispute.created");
+  /**
+   * ETP-5048 — Stripe's dedicated event for a subscription that entered status {@code paused}.
+   * Alert-only, like a {@code customer.subscription.updated} carrying that status: see
+   * {@link PausedSubscriptionAlert}. {@code customer.subscription.resumed} stays unhandled, because
+   * a pause never changed anything to undo.
+   */
+  private static final String SUBSCRIPTION_PAUSED_EVENT = "customer.subscription.paused";
+  /** The stable prefix of the webhook's operator alerts (ETP-5048, aligned with the reconciler). */
+  static final String BILLING_ALERT_PREFIX = "[BILLING-ALERT]";
   private static final String FIELD_DRAFT = "draft";
   private static final String FIELD_DRAFT_STEP = "step";
   private static final String FIELD_DRAFT_FORM = "form";
@@ -1543,7 +1553,30 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       applyAlertOnlyEvent(eventId, type, event);
       return;
     }
+    if (SUBSCRIPTION_PAUSED_EVENT.equals(type)) {
+      SystemContext.run("a paused subscription event", () -> {
+        raisePausedSubscriptionAlert(type, event);
+        billingEventStore.markApplied(eventId);
+      });
+      return;
+    }
     billingEventStore.markIgnored(eventId, "unhandled event type");
+  }
+
+  /**
+   * ETP-5048 — raises the review alert of a paused subscription, once per subscription whatever
+   * path noticed it first. Changes no subscription status, grace anchor or access decision.
+   */
+  private void raisePausedSubscriptionAlert(String type, JSONObject event) {
+    JSONObject data = event.optJSONObject("data");
+    JSONObject object = data == null ? null : data.optJSONObject(STRIPE_EVENT_OBJECT);
+    String subscriptionId = SubscriptionLifecycleApplier.subscriptionIdOf(type, object);
+    TenantEnvironmentLifecycleService.LifecycleTarget target =
+        resolveLifecycleTarget(subscriptionId, object);
+    CheckoutRequest purchase = checkoutRequestStore.findByStripeSubscription(subscriptionId);
+    new PausedSubscriptionAlert(billingEventStore, internalAlertService).raiseOnce(
+        BILLING_ALERT_PREFIX, subscriptionId, target == null ? null : target.clientId(),
+        purchase == null ? null : purchase.getRequest(), "webhook");
   }
 
   /**
@@ -1555,7 +1588,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private void applyAlertOnlyEvent(String eventId, String type, JSONObject event) {
     JSONObject data = event.optJSONObject("data");
     JSONObject object = data == null ? null : data.optJSONObject(STRIPE_EVENT_OBJECT);
-    log.warn("Billing alert: Stripe event '{}' ({}) — dispute {} on charge {} (payment intent {}),"
+    log.warn(BILLING_ALERT_PREFIX + " Stripe event '{}' ({}) — dispute {} on charge {} (payment "
+        + "intent {}),"
         + " amount {} {}, reason '{}'. No access change was made; review it in the Stripe"
         + " dashboard.", eventId, type, optProviderText(object, "id"),
         optProviderText(object, "charge"), optProviderText(object, "payment_intent"),
@@ -1642,6 +1676,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private void applySubscriptionLifecycleAsSystem(String eventId, String type, JSONObject event) {
     SubscriptionEventOutcome screened = subscriptionLifecycleApplier.evaluate(type, event);
     if (screened.isIgnored()) {
+      if (SubscriptionLifecycleApplier.REASON_PAUSED.equals(screened.reason())) {
+        raisePausedSubscriptionAlert(type, event);
+      }
       billingEventStore.markIgnored(eventId, screened.reason());
       return;
     }

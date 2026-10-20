@@ -34,6 +34,7 @@ import com.etendoerp.go.payment.CheckoutConfiguration;
 import com.etendoerp.go.payment.CheckoutRequestStore;
 import com.etendoerp.go.payment.EnvironmentAccessPolicy.SubscriptionStatus;
 import com.etendoerp.go.payment.HttpUrlConnectionStripeApiClient;
+import com.etendoerp.go.payment.PausedSubscriptionAlert;
 import com.etendoerp.go.payment.ProvisioningFailureReason;
 import com.etendoerp.go.payment.StripeApiClient;
 import com.etendoerp.go.payment.StripeCurrencyScale;
@@ -133,6 +134,7 @@ public class BillingReconciliationService {
   private final PaidProvisioningService provisioning;
   private final SubscriptionLifecycleApplier applier;
   private final TenantEnvironmentLifecycleService lifecycle;
+  private final PausedSubscriptionAlert pausedAlert;
   private final Clock clock;
 
   /** Production wiring. */
@@ -140,13 +142,14 @@ public class BillingReconciliationService {
     this(ReconciliationSettings.fromConfiguration(), new HttpUrlConnectionStripeApiClient(),
         new CheckoutRequestStore(), new BillingEventStore(), new PaidProvisioningService(),
         new SubscriptionLifecycleApplier(), new TenantEnvironmentLifecycleService(),
-        Clock.systemUTC());
+        new PausedSubscriptionAlert(), Clock.systemUTC());
   }
 
   BillingReconciliationService(ReconciliationSettings settings, StripeApiClient stripe,
       CheckoutRequestStore checkoutStore, BillingEventStore eventStore,
       PaidProvisioningService provisioning, SubscriptionLifecycleApplier applier,
-      TenantEnvironmentLifecycleService lifecycle, Clock clock) {
+      TenantEnvironmentLifecycleService lifecycle, PausedSubscriptionAlert pausedAlert,
+      Clock clock) {
     this.settings = settings;
     this.stripe = stripe;
     this.checkoutStore = checkoutStore;
@@ -154,6 +157,7 @@ public class BillingReconciliationService {
     this.provisioning = provisioning;
     this.applier = applier;
     this.lifecycle = lifecycle;
+    this.pausedAlert = pausedAlert;
     this.clock = clock;
   }
 
@@ -464,9 +468,12 @@ public class BillingReconciliationService {
       case "active":
       case "trialing":
       case "canceled":
-      case "paused":
       case "incomplete_expired":
         break;
+      case "paused":
+        // Alert only, never a state change (decided 2026-10-20): see PausedSubscriptionAlert.
+        alertPaused(candidate, result, audit);
+        return;
       default:
         // past_due / unpaid stay with the webhook's grace logic; incomplete is still being paid.
         return;
@@ -487,6 +494,21 @@ public class BillingReconciliationService {
         fillMissingPrice(candidate, target.subscription(), subscription, result, audit);
       }
     });
+  }
+
+  private void alertPaused(SubscriptionCandidate candidate, ReconciliationResult result,
+      ReconciliationAudit audit) {
+    if (audit.alreadyRecorded(PausedSubscriptionAlert.eventIdOf(candidate.subscriptionId))) {
+      return; // raised before, by this job or by the webhook
+    }
+    if (audit.isDryRun()) {
+      audit.alert("Subscription {} is paused at the provider and needs review",
+          candidate.subscriptionId);
+    } else if (!pausedAlert.raiseOnce(ReconciliationAudit.LOG_PREFIX, candidate.subscriptionId,
+        candidate.clientId, candidate.requestId, "reconciliation")) {
+      return;
+    }
+    result.increment(Counter.PAUSED_ALERTS);
   }
 
   private void alertPauseCollection(SubscriptionCandidate candidate, JSONObject subscription,

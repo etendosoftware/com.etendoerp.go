@@ -40,6 +40,11 @@ public class SubscriptionLifecycleApplier {
 
   private static final String MISSING_PERIOD_END = "missing period end";
   private static final String STALE_EVENT = "stale event";
+  /**
+   * ETP-5048 — the ignore reason of a {@code paused} subscription. Public so the webhook and the
+   * billing reconciliation can tell it from any other ignore and raise their review alert.
+   */
+  public static final String REASON_PAUSED = "subscription paused at the provider";
 
   /**
    * Evaluates an event against an empty stored projection.
@@ -240,9 +245,19 @@ public class SubscriptionLifecycleApplier {
       case "canceled":
         // Terminal at the provider: a canceled Stripe subscription cannot be reactivated, so the
         // row closes here too, not only on customer.subscription.deleted (ETP-5047).
+      case "incomplete_expired":
+        // ETP-5048 (decided by Martin, 2026-10-20): the first payment never succeeded and Stripe
+        // gave up — terminal too, so it closes the row (EXPIRED on the preference route). The
+        // webhook and the billing reconciliation both read the status through this mapping.
         return SubscriptionEventOutcome.apply(
             EnvironmentAccessPolicy.SubscriptionStatus.EXPIRED, null)
             .closing(subscriptionEndedAt(object));
+      case "paused":
+        // ETP-5048 (decided by Martin, 2026-10-20): alert only, never a state change. Our checkout
+        // sets no trial, so a paused subscription means a trial or a pause was configured in
+        // Stripe by hand, and a paused subscription can be resumed — closing the row would make
+        // that resume impossible. Callers recognise the reason and raise the review alert.
+        return SubscriptionEventOutcome.ignore(REASON_PAUSED);
       default:
         return SubscriptionEventOutcome.ignore("unhandled subscription status");
     }

@@ -35,6 +35,7 @@ public final class ReconciliationResult {
     SUBSCRIPTIONS_CURRENT("subscriptions set back to current"),
     PRICES_FILLED("subscription prices filled"),
     PAUSE_COLLECTION_ALERTS("paused-collection alerts"),
+    PAUSED_ALERTS("paused subscriptions needing review"),
     ABSENT_SUBSCRIPTIONS("subscriptions absent at the provider"),
     // ETP-5046-TRANSITIONAL-FALLBACK — tenants with no subscription row, counted on their own so
     // the cutover's progress shows; delete with the preference route in Phase F.
@@ -116,6 +117,7 @@ public final class ReconciliationResult {
         + get(Counter.PROVISIONED) + get(Counter.PROVISIONING_FAILED) + get(Counter.NEEDS_REVIEW)
         + get(Counter.SUBSCRIPTIONS_CLOSED) + get(Counter.SUBSCRIPTIONS_CURRENT)
         + get(Counter.PRICES_FILLED) + get(Counter.PAUSE_COLLECTION_ALERTS)
+        + get(Counter.PAUSED_ALERTS)
         + get(Counter.STALE_EVENTS_SWEPT);
   }
 
