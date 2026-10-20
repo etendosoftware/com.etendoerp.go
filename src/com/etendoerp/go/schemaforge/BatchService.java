@@ -415,6 +415,9 @@ public class BatchService {
             tracker, preprocessor);
         if (failure != null) {
           rollbackQuietly();
+          // ETP-5782: a refusal classified mid-batch could not be translated on the batch's
+          // aborted session; now that it is rolled back, AD message keys resolve.
+          NeoErrorResponses.retranslateBatchFailure(failure);
           return failure;
         }
       }
@@ -428,12 +431,18 @@ public class BatchService {
       ok.put("operations", opResults);
       return ok;
     } catch (Exception e) {
-      log.error("[BATCH] unexpected failure", e);
       if (!commitAttempted) {
         rollbackQuietly();
       }
-      return failureBody(-1, null, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          "Batch failed: " + e.getMessage(), null, tracker.durable());
+      // ETP-5782: classified like any NEO failure (a deferred trigger refusing the commit is a 422,
+      // a customization's keyed refusal too); the session is already rolled back, so the
+      // classification's own rollback is skipped (the batch still owns the transaction) and the
+      // translation reads AD_Message on a usable session. A 5xx message is sanitized: it used to
+      // forward e.getMessage() verbatim.
+      NeoResponse classified = NeoErrorResponses.fromException(e, "POST", "[BATCH] batch",
+          "Batch failed: ");
+      return failureBody(-1, null, classified.getHttpStatus(), errorMessageOf(classified),
+          refusalDetail(classified), tracker.durable());
     } finally {
       // Nested so the transaction claim is released whatever closing the scope does: a claim left
       // on the pooled thread would stop the next, unrelated request from ever committing.
@@ -543,11 +552,30 @@ public class BatchService {
     try {
       return preprocessor.preprocess(op);
     } catch (Exception e) {
-      log.error("[BATCH] preprocessor failed on op '{}' (index {})", op.opId(), op.index(), e);
-      return failureBody(op.index(), op.opId(), HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          "Failed to preprocess operation '" + op.opId() + "': " + e.getMessage(), null,
-          tracker.durable());
+      // ETP-5782: classified, and a 5xx message sanitized (it used to forward e.getMessage()).
+      NeoResponse classified = NeoErrorResponses.fromException(e, "POST",
+          "[BATCH] preprocessor on op '" + op.opId() + "' (index " + op.index() + ")",
+          "Failed to preprocess operation '" + op.opId() + "': ");
+      return failureBody(op.index(), op.opId(), classified.getHttpStatus(),
+          errorMessageOf(classified), refusalDetail(classified), tracker.durable());
     }
+  }
+
+  /**
+   * The body of a classified refusal, as the failure's {@code detail} so its {@code code} and
+   * {@code messageKeys} reach the caller; {@code null} for a 5xx, whose failure carried no detail.
+   */
+  private static JSONObject refusalDetail(NeoResponse classified) {
+    return classified.getHttpStatus() < HttpServletResponse.SC_INTERNAL_SERVER_ERROR
+        ? classified.getBody()
+        : null;
+  }
+
+  /** The {@code error.message} of a NEO error response, or {@code null}. */
+  private static String errorMessageOf(NeoResponse response) {
+    JSONObject body = response.getBody();
+    JSONObject error = body != null ? body.optJSONObject("error") : null;
+    return error != null ? error.optString("message", null) : null;
   }
 
   /**

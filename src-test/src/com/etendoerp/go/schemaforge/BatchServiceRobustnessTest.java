@@ -95,6 +95,8 @@ import com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy;
  * sandbox cannot boot one — the fix was verified by a live probe instead, recorded in IMP-23 §9.
  * What these assertions do pin is {@link BatchService}'s own lifecycle (never the broken part) and
  * the failure body's atomicity report, which is the caller-visible contract that changed twice.
+ *
+ * @covers com.etendoerp.go.schemaforge.BatchService
  */
 public class BatchServiceRobustnessTest {
 
@@ -337,6 +339,91 @@ public class BatchServiceRobustnessTest {
    * asserts the batch reports a structured failure and rolled back, and returns
    * the {@code error} object for scenario-specific assertions.
    */
+  // ---------------------------------------------------------------------------
+  // ETP-5782 — a failure is classified by what it is, wherever it surfaces in the batch.
+  // ---------------------------------------------------------------------------
+
+  /** A customization throwing out of the loop: a 5xx whose message carries no SQL. */
+  @Test
+  public void anExceptionEscapingTheLoopIsSanitized() throws Exception {
+    JSONObject error = runSingleOpThatThrows(new org.hibernate.exception.GenericJDBCException(
+        "could not execute", new java.sql.SQLException(
+            "ERROR: relation \"secret_table\" does not exist", "42P01")));
+
+    assertEquals(500, error.getInt("status"));
+    assertTrue(error.getString("message").startsWith("Batch failed: "));
+    assertFalse(error.getString("message").contains("secret_table"));
+  }
+
+  /** A keyed refusal thrown out of the loop is the caller's to fix: 422 with its code. */
+  @Test
+  public void aKeyedRefusalEscapingTheLoopIsA422() throws Exception {
+    org.openbravo.erpCommon.utility.OBError translated =
+        new org.openbravo.erpCommon.utility.OBError();
+    translated.setMessage("Cannot change business partner or price list if there are lines.");
+    try (MockedStatic<org.openbravo.erpCommon.utility.OBMessageUtils> msg =
+        mockStatic(org.openbravo.erpCommon.utility.OBMessageUtils.class)) {
+      msg.when(() -> org.openbravo.erpCommon.utility.OBMessageUtils.translateError(any(), any(),
+          any(), org.mockito.ArgumentMatchers.anyString())).thenReturn(translated);
+
+      JSONObject error = runSingleOpThatThrows(
+          new org.openbravo.base.exception.OBException("@20502@"));
+
+      assertEquals(422, error.getInt("status"));
+      assertEquals("Cannot change business partner or price list if there are lines.",
+          error.getString("message"));
+      assertEquals("business_rule",
+          error.getJSONObject("detail").getJSONObject("error").getString("code"));
+    }
+  }
+
+  /**
+   * A refusal classified on the batch's aborted session could not be translated; once the batch
+   * has rolled back, the message is translated.
+   */
+  @Test
+  public void aRefusalStillHoldingItsKeyIsTranslatedAfterTheRollback() throws Exception {
+    org.openbravo.erpCommon.utility.OBError translated =
+        new org.openbravo.erpCommon.utility.OBError();
+    translated.setMessage("Cannot change business partner or price list if there are lines.");
+    try (MockedStatic<org.openbravo.erpCommon.utility.OBMessageUtils> msg =
+        mockStatic(org.openbravo.erpCommon.utility.OBMessageUtils.class)) {
+      msg.when(() -> org.openbravo.erpCommon.utility.OBMessageUtils.translateError(any(), any(),
+          any(), org.mockito.ArgumentMatchers.anyString())).thenReturn(translated);
+
+      JSONObject error = runSingleOpAndExpectFailure(NeoErrorResponses.toResponse(422,
+          NeoErrorClassifier.CODE_BUSINESS_RULE, "@20502@", List.of("20502")));
+
+      assertEquals(422, error.getInt("status"));
+      assertEquals("Cannot change business partner or price list if there are lines.",
+          error.getJSONObject("detail").getJSONObject("error").getString("message"));
+    }
+  }
+
+  private JSONObject runSingleOpThatThrows(RuntimeException failure) throws Exception {
+    BatchService service = BatchService.forBatchOnly();
+    JSONArray ops = new JSONArray();
+    ops.put(op("bp", "businessPartner").put("body", new JSONObject().put("name", "x")));
+
+    OBDal obDal = mock(OBDal.class);
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<NeoServletSupport> support = mockStatic(NeoServletSupport.class);
+         MockedStatic<NeoAccessHelper> access = allowSpecAccess();
+         MockedStatic<NeoAccountingAccessPolicy> acct = allowAccountingEntities()) {
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubEntityResolution(support, obDal);
+      support.when(() -> NeoServletSupport.handleWithHooks(any(), any(NeoContext.class), any(), any()))
+          .thenThrow(failure);
+
+      JSONObject result = service.executeBatch(ops);
+
+      assertFalse(result.getBoolean(COMMITTED));
+      verify(obDal, never()).commitAndClose();
+      verify(obDal).rollbackAndClose();
+      return result.getJSONObject("error");
+    }
+  }
+
   private JSONObject runSingleOpAndExpectFailure(NeoResponse subFailure) throws Exception {
     JSONObject result = runSingleOpBatch(subFailure);
     JSONObject error = result.getJSONObject("error");

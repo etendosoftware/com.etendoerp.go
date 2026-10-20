@@ -169,8 +169,12 @@ class NeoServletSupport {
 
       return runPostHook(request, handler, defaultResult);
     } catch (Exception e) {
-      log.error("Error executing hook handler: {}", javaQualifier, e);
-      return NeoResponse.error(500, "Hook handler error: " + e.getMessage());
+      // ETP-5782: a customization's refusal is classified like any other failure — a trigger or an
+      // AD-message-keyed refusal is a 422 the caller can act on, a fault stays a 500 — and the
+      // session is rolled back so nothing the customization saved before throwing is committed.
+      // A 5xx message is sanitized: it used to forward e.getMessage() verbatim, SQL included.
+      return NeoErrorResponses.fromException(e, context.getHttpMethod(),
+          "Hook handler " + javaQualifier, "Hook handler error: ");
     }
   }
 

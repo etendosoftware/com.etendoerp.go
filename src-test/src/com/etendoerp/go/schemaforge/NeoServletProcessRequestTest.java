@@ -132,4 +132,40 @@ class NeoServletProcessRequestTest {
 
     verify(response).setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
   }
+
+  /** A refused DAL access is a decision about the role, not a server failure. */
+  @Test
+  void aRefusedAccessIsA403() throws Exception {
+    routedCallThrows(new org.openbravo.base.exception.OBSecurityException(
+        "Entity C_Order is not writable by this role"));
+    try (MockedStatic<org.openbravo.dal.service.OBDal> obdal =
+        mockStatic(org.openbravo.dal.service.OBDal.class)) {
+      obdal.when(org.openbravo.dal.service.OBDal::getInstance)
+          .thenReturn(mock(org.openbravo.dal.service.OBDal.class));
+
+      servlet.doPost(mock(HttpServletRequest.class), response);
+    }
+
+    verify(response).setStatus(HttpServletResponse.SC_FORBIDDEN);
+    assertTrue(body.toString().contains("\"code\":\"forbidden\""), body.toString());
+    assertFalse(body.toString().contains("C_Order"), body.toString());
+  }
+
+  /** A trigger refusal escaping a handler is the caller's to fix, and nothing it wrote is kept. */
+  @Test
+  void aTriggerRefusalIsA422AndRollsBack() throws Exception {
+    routedCallThrows(new org.hibernate.exception.GenericJDBCException("could not execute",
+        new java.sql.SQLException("ERROR: @20502@", "P0001")));
+    org.openbravo.dal.service.OBDal dal = mock(org.openbravo.dal.service.OBDal.class);
+    try (MockedStatic<org.openbravo.dal.service.OBDal> obdal =
+        mockStatic(org.openbravo.dal.service.OBDal.class)) {
+      obdal.when(org.openbravo.dal.service.OBDal::getInstance).thenReturn(dal);
+
+      servlet.doPost(mock(HttpServletRequest.class), response);
+    }
+
+    verify(response).setStatus(422);
+    verify(dal).rollbackAndClose();
+    assertTrue(body.toString().contains("\"code\":\"business_rule\""), body.toString());
+  }
 }
