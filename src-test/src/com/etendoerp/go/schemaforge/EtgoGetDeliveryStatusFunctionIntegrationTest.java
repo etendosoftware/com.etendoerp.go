@@ -158,8 +158,6 @@ public class EtgoGetDeliveryStatusFunctionIntegrationTest extends OBBaseTest {
         100, deliveryStatus(invoiceLine));
   }
 
-  // ── helpers ────────────────────────────────────────────────────────────────
-
   @Test
   public void salesInvoiceWithARectificativeDocTypeHasNoDeliveryStatus() {
     assumeTrue("requires the SIF General em_etsg_isrectificative column",
@@ -201,6 +199,8 @@ public class EtgoGetDeliveryStatusFunctionIntegrationTest extends OBBaseTest {
         100, deliveryStatus(invoiceLine));
   }
 
+  // ── helpers ────────────────────────────────────────────────────────────────
+
   private static int deliveryStatus(InvoiceLine invoiceLine) {
     Number result = rawDeliveryStatus(invoiceLine);
     assertNotNull("a non-rectificative invoice never answers NULL", result);
@@ -228,10 +228,22 @@ public class EtgoGetDeliveryStatusFunctionIntegrationTest extends OBBaseTest {
   /**
    * Sets {@code em_etsg_isrectificative = 'Y'} on {@code docType} with native SQL (the column
    * belongs to an optional module). Rolled back in {@link #tearDown()}.
+   *
+   * <p>Its document-number sequence is flagged FIRST: when an organization of the client has a
+   * SIF (SII, TicketBAI or Verifactu) configured, the SIF General trigger
+   * {@code etsg_check_rectif_doc_type} rejects a rectificative doc type whose
+   * {@code DocNoSequence_ID} is not itself rectificative ({@code @ETSG_Invalid_Sequence@}).
+   * {@code AD_Sequence} has no triggers and both flag columns belong to the same module, so the
+   * {@code isColumnPresent()} guard covers both. A doc type without a sequence is a no-op here.
    */
   @SuppressWarnings("rawtypes")
   private static void flagRectificative(DocumentType docType) {
     OBDal.getInstance().flush();
+    NativeQuery sequence = OBDal.getInstance().getSession().createNativeQuery(
+        "UPDATE ad_sequence SET em_etsg_isrectificative = 'Y' WHERE ad_sequence_id ="
+            + " (SELECT docnosequence_id FROM c_doctype WHERE c_doctype_id = :docTypeId)");
+    sequence.setParameter("docTypeId", docType.getId());
+    sequence.executeUpdate();
     NativeQuery update = OBDal.getInstance().getSession().createNativeQuery(
         "UPDATE c_doctype SET em_etsg_isrectificative = 'Y' WHERE c_doctype_id = :docTypeId");
     update.setParameter("docTypeId", docType.getId());
