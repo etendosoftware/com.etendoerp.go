@@ -49,7 +49,7 @@ import org.apache.commons.lang3.StringUtils;
  *   [92] = round2([84] * [87] / 100)            (HALF_UP)
  *   [94] = [92] + [659] - [93]
  * [95]  = INGRESAR_01 + ... + INGRESAR_12
- * [96]  = DEVOLVER_01 + ... + DEVOLVER_12
+ * [96]  = DEVOLVER_01 + ... + DEVOLVER_12   (only with ISMONTHLYRETURN = 'Y')
  * [108] = invoice volume ([99]+[653]+[103]+[104]+[105]+[110]+[125]+[126] - [106] - [107])
  *         + [127] + [128] + [101] + [227] + [228]
  * </pre>
@@ -83,6 +83,8 @@ final class Fiscal390DerivedBoxes {
   static final String TRAVEL_AGENCY = "390TRAVEL_AGENCY";
   static final String INGRESAR_PREFIX = "INGRESAR_";
   static final String DEVOLVER_PREFIX = "DEVOLVER_";
+  /** Flag input: inscribed in the monthly-refund register (DEVOLVER_xx only count with it). */
+  static final String MONTHLY_RETURN_FLAG = "ISMONTHLYRETURN";
 
   private static final String[] TERRITORY_KEYS =
       { COMMON_TERRITORY, "ALAVA", "GUIPUZCOA", "VIZCAYA", "NAVARRA" };
@@ -201,8 +203,14 @@ final class Fiscal390DerivedBoxes {
    */
   static Map<String, BigDecimal> parseInputs(Map<String, String> raw) {
     Map<String, BigDecimal> parsed = new LinkedHashMap<>();
+    // DEVOLVER_xx only counts when inscribed in the monthly-refund register (classic
+    // AEAT390_MonthlyReturn_Check; review N3): otherwise [96] ignores them.
+    boolean monthlyReturn = isMonthlyReturn(raw);
     for (Map.Entry<String, String> e : raw.entrySet()) {
       if (!INPUT_KEYS.contains(e.getKey()) || StringUtils.isBlank(e.getValue())) {
+        continue;
+      }
+      if (!monthlyReturn && e.getKey().startsWith(DEVOLVER_PREFIX)) {
         continue;
       }
       try {
@@ -213,6 +221,11 @@ final class Fiscal390DerivedBoxes {
       }
     }
     return parsed;
+  }
+
+  /** {@code ISMONTHLYRETURN = 'Y'}: inscribed in the monthly-refund register. */
+  static boolean isMonthlyReturn(Map<String, String> raw) {
+    return raw != null && "Y".equals(raw.get(MONTHLY_RETURN_FLAG));
   }
 
   private static BigDecimal in(Map<String, BigDecimal> inputs, String key) {

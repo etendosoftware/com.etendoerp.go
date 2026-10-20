@@ -172,7 +172,9 @@ territory mode (any of [87]–[91] > 0):
   [84] = [65] + [661] + [658]    (classic does not take [661] off this slot)
   [92] = round2([84] × [87] / 100), HALF_UP
   [94] = [92] + [659] − [93]
-[95] = Σ INGRESAR_01..12      [96] = Σ DEVOLVER_01..12
+[95] = Σ INGRESAR_01..12      [96] = Σ DEVOLVER_01..12 (only with ISMONTHLYRETURN = 'Y';
+                                otherwise ignored, also by the block-9 rules — classic
+                                AEAT390_MonthlyReturn_Check)
 [108] = [99]+[653]+[103]+[104]+[105]+[110]+[125]+[126] − [106] − [107]
         + [127] + [128] + [101] + [227] + [228]
 ```

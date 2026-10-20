@@ -436,6 +436,18 @@ public class Fiscal390BoxesCalculatorTest {
     assertEquals(Collections.singletonMap("LIQANUAL_VAT_IMPORT", bd("1234.5")), parsed);
   }
 
+  /** Review N3: DEVOLVER_xx only count with ISMONTHLYRETURN = 'Y' (classic MonthlyReturn_Check). */
+  @Test
+  public void testParseInputsDropsMonthlyRefundsWithoutTheRegister() {
+    Map<String, String> raw = new LinkedHashMap<>();
+    raw.put("INGRESAR_03", "100");
+    raw.put("DEVOLVER_06", "20");
+    assertEquals(Collections.singletonMap("INGRESAR_03", bd("100")),
+        Fiscal390DerivedBoxes.parseInputs(raw));
+    raw.put("ISMONTHLYRETURN", "Y");
+    assertEquals(bd("20"), Fiscal390DerivedBoxes.parseInputs(raw).get("DEVOLVER_06"));
+  }
+
   /** A non-numeric amount is a caller error naming the input. */
   @Test
   public void testParseInputsRejectsNonNumeric() {

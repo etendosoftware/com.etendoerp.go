@@ -485,10 +485,11 @@ final class Fiscal390IncidentRules {
 
   /** {@code true} when no block-9 input has an amount. */
   static boolean block9Empty(Facts f) {
+    boolean monthlyReturn = Fiscal390DerivedBoxes.isMonthlyReturn(f.inputs);
     for (int month = 1; month <= 12; month++) {
       String mm = String.format("%02d", month);
       if (hasAmount(f, Fiscal390DerivedBoxes.INGRESAR_PREFIX + mm)
-          || hasAmount(f, Fiscal390DerivedBoxes.DEVOLVER_PREFIX + mm)) {
+          || (monthlyReturn && hasAmount(f, Fiscal390DerivedBoxes.DEVOLVER_PREFIX + mm))) {
         return false;
       }
     }
@@ -498,11 +499,15 @@ final class Fiscal390IncidentRules {
 
   /** {@code [95] − [96] − [97] − [98] − [662]} of the stored inputs. */
   static BigDecimal block9Result(Facts f) {
+    // [96] only with the monthly-refund register (classic AEAT390_MonthlyReturn_Check, as [96]).
+    boolean monthlyReturn = Fiscal390DerivedBoxes.isMonthlyReturn(f.inputs);
     BigDecimal sum = BigDecimal.ZERO;
     for (int month = 1; month <= 12; month++) {
       String mm = String.format("%02d", month);
-      sum = sum.add(amount(f, Fiscal390DerivedBoxes.INGRESAR_PREFIX + mm))
-          .subtract(amount(f, Fiscal390DerivedBoxes.DEVOLVER_PREFIX + mm));
+      sum = sum.add(amount(f, Fiscal390DerivedBoxes.INGRESAR_PREFIX + mm));
+      if (monthlyReturn) {
+        sum = sum.subtract(amount(f, Fiscal390DerivedBoxes.DEVOLVER_PREFIX + mm));
+      }
     }
     return sum.subtract(amount(f, KEY_LAST_PERIOD)).subtract(amount(f, KEY_LAST_PERIOD_REFUND))
         .subtract(amount(f, KEY_END_COMPENSATION));

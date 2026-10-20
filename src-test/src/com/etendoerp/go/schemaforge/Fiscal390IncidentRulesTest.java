@@ -394,6 +394,19 @@ public class Fiscal390IncidentRulesTest {
     assertTrue(codes().toString(), !codes().contains(Fiscal390IncidentRules.BLOCK9_MISMATCH));
   }
 
+  /** Review N3: without the monthly-refund register, DEVOLVER_xx do not take part in block 9. */
+  @Test
+  public void testBlock9IgnoresMonthlyRefundsWithoutTheRegister() {
+    f.annualResult = new BigDecimal("100.00");
+    inputs.put("INGRESAR_03", "100.00");
+    inputs.put("DEVOLVER_06", "20.00");
+    assertTrue(codes().toString(), !codes().contains(Fiscal390IncidentRules.BLOCK9_MISMATCH));
+    assertEquals(new BigDecimal("100.00"), Fiscal390IncidentRules.block9Result(f));
+    inputs.put("ISMONTHLYRETURN", "Y");
+    assertEquals(new BigDecimal("80.00"), Fiscal390IncidentRules.block9Result(f));
+    assertTrue(codes().contains(Fiscal390IncidentRules.BLOCK9_MISMATCH));
+  }
+
   @Test
   public void testInactiveTaxWithOperationsWarns() {
     f.inactiveTaxes = List.of(new Fiscal390IncidentRules.InactiveTax("IVA 21% 2025", 4L));
