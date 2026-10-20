@@ -43,6 +43,8 @@ import com.google.api.client.googleapis.auth.oauth2.GoogleIdTokenVerifier;
 import com.google.api.client.http.javanet.NetHttpTransport;
 import com.google.api.client.json.gson.GsonFactory;
 
+import com.etendoerp.go.common.BoundedJsonParser;
+
 /**
  * Verifies Google Identity Services sign-in responses.
  *
@@ -59,6 +61,7 @@ final class EtendoGoGoogleIdentityVerifier implements EtendoGoSsoAssertionVerifi
 
   private static final Logger log = LogManager.getLogger(EtendoGoGoogleIdentityVerifier.class);
   private static final String FIELD_CLIENT_ID = "client_id";
+  private static final String INVALID_CREDENTIAL = "Invalid Google credential";
   private static final NetHttpTransport GOOGLE_HTTP_TRANSPORT = new NetHttpTransport();
   private static final GsonFactory GOOGLE_JSON_FACTORY = GsonFactory.getDefaultInstance();
 
@@ -96,7 +99,7 @@ final class EtendoGoGoogleIdentityVerifier implements EtendoGoSsoAssertionVerifi
       return credentialValidator.validate(body.credential, configuration);
     } catch (IOException | GeneralSecurityException e) {
       log.warn("Google ID token validation failed", e);
-      throw unauthorized("Invalid Google credential");
+      throw unauthorized(INVALID_CREDENTIAL);
     }
   }
 
@@ -116,7 +119,7 @@ final class EtendoGoGoogleIdentityVerifier implements EtendoGoSsoAssertionVerifi
   private static GoogleSignInBody parseJsonBody(String rawBody)
       throws EtendoGoSsoAssertionException {
     try {
-      JSONObject body = new JSONObject(StringUtils.defaultString(rawBody));
+      JSONObject body = BoundedJsonParser.parseObject(StringUtils.defaultString(rawBody));
       return new GoogleSignInBody(StringUtils.trimToNull(body.optString(FIELD_CREDENTIAL, null)),
           StringUtils.trimToNull(body.optString(FIELD_CSRF_TOKEN, null)),
           StringUtils.trimToNull(body.optString(FIELD_CLIENT_ID, null)));
@@ -249,16 +252,18 @@ final class EtendoGoGoogleIdentityVerifier implements EtendoGoSsoAssertionVerifi
         throws IOException, GeneralSecurityException, EtendoGoSsoAssertionException;
   }
 
-  private static final class GoogleApiCredentialValidator implements GoogleCredentialValidator {
+  static final class GoogleApiCredentialValidator implements GoogleCredentialValidator {
     @Override
     public EtendoGoSsoAssertion validate(String credential,
         GoogleIdentityConfiguration configuration)
         throws IOException, GeneralSecurityException, EtendoGoSsoAssertionException {
+      GoogleIdToken idToken = parseCredential(credential);
       GoogleIdTokenVerifier verifier = new GoogleIdTokenVerifier.Builder(GOOGLE_HTTP_TRANSPORT,
           GOOGLE_JSON_FACTORY).setAudience(configuration.clientIds).build();
-      GoogleIdToken idToken = verifier.verify(credential);
-      if (idToken == null) {
-        throw unauthorized("Invalid Google credential");
+      // From here an IOException or GeneralSecurityException is ours (fetching or using Google's
+      // keys), not the caller's: the verifier logs it with its stack trace.
+      if (!verifier.verify(idToken)) {
+        throw unauthorized(INVALID_CREDENTIAL);
       }
       Payload payload = idToken.getPayload();
       String subject = StringUtils.trimToNull(payload.getSubject());
@@ -270,6 +275,21 @@ final class EtendoGoGoogleIdentityVerifier implements EtendoGoSsoAssertionVerifi
       String name = fallbackName((String) payload.get("name"), email);
       return new EtendoGoSsoAssertion(EtendoGoSsoProviderRegistry.GOOGLE_PROVIDER, subject,
           email, name, isAuthoritativeEmail(emailVerified));
+    }
+
+    /**
+     * A credential that is not a well-formed JWT is the caller's input on an unauthenticated
+     * endpoint: a 401 logged at WARN without a stack trace, rejected before any key is fetched.
+     * Google's parser reports it as an {@link IllegalArgumentException}, which no caller catches.
+     */
+    private static GoogleIdToken parseCredential(String credential)
+        throws EtendoGoSsoAssertionException {
+      try {
+        return GoogleIdToken.parse(GOOGLE_JSON_FACTORY, credential);
+      } catch (IOException | IllegalArgumentException e) {
+        log.warn("Rejected a malformed Google credential ({})", e.getClass().getSimpleName());
+        throw unauthorized(INVALID_CREDENTIAL);
+      }
     }
 
     private static String normalizeEmail(String email) {

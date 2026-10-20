@@ -39,6 +39,17 @@ final class NeoWriteRefusalLog {
   }
 
   /**
+   * A create or update that arrived with no body at all. The caller's fault, a 400: WARN, and
+   * never a stack trace.
+   *
+   * @param context the request being refused
+   */
+  static void missingBody(NeoContext context) {
+    log.warn("Write rejected: no request body on {} /{}/{}/{}", context.getHttpMethod(),
+        context.getSpecName(), context.getEntityName(), context.getRecordId());
+  }
+
+  /**
    * An update that arrived with no concurrency token at all.
    *
    * <p>Logged at ERROR rather than WARN even though a 400 is formally a client fault. The telemetry

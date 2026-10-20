@@ -47,6 +47,7 @@ import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.financialmgmt.accounting.coa.AcctSchemaElement;
 import org.openbravo.service.db.DalConnectionProvider;
 
+import com.etendoerp.go.common.BoundedJsonParser;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
@@ -421,7 +422,7 @@ public final class NeoDisplayLogicHelper {
     try {
       String body = new String(request.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
       if (body != null && !body.trim().isEmpty()) {
-        JSONObject bodyJson = new JSONObject(body);
+        JSONObject bodyJson = BoundedJsonParser.parseObject(body);
         if (bodyJson.has("fieldValues")) {
           return bodyJson.getJSONObject("fieldValues");
         }
