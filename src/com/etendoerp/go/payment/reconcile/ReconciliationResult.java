@@ -78,40 +78,66 @@ public final class ReconciliationResult {
     this.breakerReason = reason;
   }
 
-  /** @return a short id of this run, part of the ids of its non-terminal repairs */
+  /**
+   * Returns a short id of this run, part of the event ids of its non-terminal repairs.
+   *
+   * @return the run id
+   */
   public String getRunId() {
     return runId;
   }
 
-  /** @return whether nothing was written */
+  /**
+   * Tells whether this was a dry run, which writes nothing.
+   *
+   * @return whether nothing was written
+   */
   public boolean isDryRun() {
     return dryRun;
   }
 
   /**
+   * Returns how many of one kind this run counted.
+   *
    * @param counter a kind
-   * @return how many of it this run counted
+   * @return the count
    */
   public int get(Counter counter) {
     return counts.getOrDefault(counter, 0);
   }
 
-  /** @return the item-level errors this run met, in order */
+  /**
+   * Returns the item-level errors this run met, in order.
+   *
+   * @return the errors
+   */
   public List<String> getErrors() {
     return Collections.unmodifiableList(errors);
   }
 
-  /** @return why the absent-subscription breaker tripped, or null when it did not */
+  /**
+   * Returns why the absent-subscription breaker tripped.
+   *
+   * @return the reason, or null when it did not trip
+   */
   public String getBreakerReason() {
     return breakerReason;
   }
 
-  /** @return whether the run must be reported as failed */
+  /**
+   * Tells whether the run must be reported as failed: it met errors or tripped the breaker.
+   *
+   * @return whether the run failed
+   */
   public boolean hasFailures() {
     return breakerReason != null || !errors.isEmpty();
   }
 
-  /** @return the number of writes (repairs plus alert rows) the run made or, dry, would make */
+  /**
+   * Counts the writes (repairs plus alert rows) the run made or, in a dry run, would make.
+   *
+   * @return the number of writes
+   */
   public int repairs() {
     return get(Counter.PAYMENTS_RECOVERED) + get(Counter.CHECKOUTS_EXPIRED)
         + get(Counter.PROVISIONED) + get(Counter.PROVISIONING_FAILED) + get(Counter.NEEDS_REVIEW)
@@ -121,7 +147,11 @@ public final class ReconciliationResult {
         + get(Counter.STALE_EVENTS_SWEPT);
   }
 
-  /** @return the one-paragraph summary an operator reads */
+  /**
+   * Builds the one-paragraph summary an operator reads.
+   *
+   * @return the summary
+   */
   @Override
   public String toString() {
     StringBuilder summary = new StringBuilder();

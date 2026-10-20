@@ -99,34 +99,20 @@ public class StripeListPager {
     String startingAfter = null;
     int objects = 0;
     for (int page = 1; page <= maxPages; page++) {
-      JSONObject body;
-      try {
-        StripeResponse response = client.get(pagePath(path, startingAfter));
-        if (!response.isSuccess()) {
-          return stopped(objects, page, "provider answered " + response.status() + " ("
-              + StringUtils.defaultString(response.errorCode(), "no code") + ")", path);
-        }
-        body = response.json();
-      } catch (StripeTransportException e) {
-        return stopped(objects, page, "provider unreachable: " + e.getMessage(), path);
-      } catch (RuntimeException e) {
-        return stopped(objects, page, "unreadable page: " + e.getClass().getSimpleName(), path);
-      }
-      JSONArray data = body == null ? null : body.optJSONArray("data");
-      if (data == null) {
-        return stopped(objects, page, "page without a data array", path);
+      Page read = readPage(path, startingAfter);
+      if (read.failure != null) {
+        return stopped(objects, page, read.failure, path);
       }
       String lastId = null;
-      for (int i = 0; i < data.length(); i++) {
-        JSONObject object = data.optJSONObject(i);
-        if (object == null) {
-          continue;
+      for (int i = 0; i < read.data.length(); i++) {
+        JSONObject object = read.data.optJSONObject(i);
+        if (object != null) {
+          consumer.accept(object);
+          objects++;
+          lastId = StringUtils.defaultIfBlank(object.optString("id", ""), lastId);
         }
-        consumer.accept(object);
-        objects++;
-        lastId = StringUtils.defaultIfBlank(object.optString("id", ""), lastId);
       }
-      if (!body.optBoolean("has_more", false)) {
+      if (!read.hasMore) {
         return new Sweep(objects, page, true, null);
       }
       if (lastId == null) {
@@ -135,6 +121,43 @@ public class StripeListPager {
       startingAfter = lastId;
     }
     return stopped(objects, maxPages, "page cap of " + maxPages + " reached", path);
+  }
+
+  /** One page as read, or why it could not be. */
+  private static final class Page {
+    private final JSONArray data;
+    private final boolean hasMore;
+    private final String failure;
+
+    private Page(JSONArray data, boolean hasMore, String failure) {
+      this.data = data;
+      this.hasMore = hasMore;
+      this.failure = failure;
+    }
+
+    private static Page failed(String failure) {
+      return new Page(null, false, failure);
+    }
+  }
+
+  private Page readPage(String path, String startingAfter) {
+    try {
+      StripeResponse response = client.get(pagePath(path, startingAfter));
+      if (!response.isSuccess()) {
+        return Page.failed("provider answered " + response.status() + " ("
+            + StringUtils.defaultString(response.errorCode(), "no code") + ")");
+      }
+      JSONObject body = response.json();
+      JSONArray data = body == null ? null : body.optJSONArray("data");
+      if (data == null) {
+        return Page.failed("page without a data array");
+      }
+      return new Page(data, body.optBoolean("has_more", false), null);
+    } catch (StripeTransportException e) {
+      return Page.failed("provider unreachable: " + e.getMessage());
+    } catch (RuntimeException e) {
+      return Page.failed("unreadable page: " + e.getClass().getSimpleName());
+    }
   }
 
   private static Sweep stopped(int objects, int pages, String reason, String path) {

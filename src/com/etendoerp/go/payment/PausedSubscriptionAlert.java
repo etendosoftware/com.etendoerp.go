@@ -99,8 +99,11 @@ public class PausedSubscriptionAlert {
   }
 
   /**
+   * Builds the deterministic event id of a subscription's paused-review alert row, the id every
+   * path checks before alerting.
+   *
    * @param subscriptionId a {@code sub_...}
-   * @return the deterministic id of its paused-review alert row
+   * @return the event id
    */
   public static String eventIdOf(String subscriptionId) {
     return EVENT_ID_PREFIX + StringUtils.trimToEmpty(subscriptionId);

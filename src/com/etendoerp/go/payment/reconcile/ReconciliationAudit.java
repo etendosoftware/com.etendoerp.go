@@ -70,7 +70,7 @@ final class ReconciliationAudit {
    * @param summary provider ids and statuses, never customer data
    * @return whether the row was written (false in a dry run and when it already existed)
    */
-  boolean record(String eventId, String kind, String requestId, String result, String reason,
+  boolean write(String eventId, String kind, String requestId, String result, String reason,
       String summary) {
     if (dryRun) {
       return false;

@@ -448,6 +448,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   CheckoutRequestStore checkoutRequestStore = new CheckoutRequestStore();
   DemoDataTransferService demoDataTransferService = new DemoDataTransferService();
   BillingEventStore billingEventStore = new BillingEventStore();
+  /** ETP-5048 — records the onboarding inputs of a purchase; package-visible for tests. */
+  com.etendoerp.go.payment.CheckoutRequestWrites checkoutRequestWrites =
+      new com.etendoerp.go.payment.CheckoutRequestWrites();
   CheckoutWebhookProcessor checkoutWebhookProcessor =
       new CheckoutWebhookProcessor(billingEventStore, CHECKOUT_WEBHOOK_TOLERANCE_SECONDS);
   SubscriptionLifecycleApplier subscriptionLifecycleApplier = new SubscriptionLifecycleApplier();
@@ -1070,7 +1073,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
               requestId -> {
                 // ETP-5048 — what a server-side provisioning needs if the browser never comes
                 // back; best effort, it never fails the purchase.
-                checkoutRequestStore.recordOnboardingInputs(requestId,
+                checkoutRequestWrites.recordOnboardingInputs(requestId,
                     body.optString(FIELD_LANGUAGE, ""), body.optString(FIELD_CURRENCY, ""),
                     body.optString(FIELD_COUNTRY_CODE, ""));
                 recordDemoDataTransferSelection(body, requestId, selection);

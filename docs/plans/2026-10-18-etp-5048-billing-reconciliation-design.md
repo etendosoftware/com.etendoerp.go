@@ -190,7 +190,13 @@ treats every id it did not see as unknown, never as absent.
 
 ### 6.3 `payment/reconcile/*`
 
-- `BillingReconciliationService` runs the phases.
+- `BillingReconciliationService` runs the phases; phase D (subscriptions) lives in
+  `SubscriptionReconciler`.
+- `ReconciliationSupport` holds the helpers the phases share.
+- `payment/CheckoutRequestWrites` holds the two new checkout-row writes: the onboarding inputs
+  recorded at purchase time, and the conditional `CREATED → EXPIRED` close.
+- `payment/PausedSubscriptionAlert` raises the once-per-subscription review alert for `paused`,
+  shared by the webhook and the job.
 - `ReconciliationSettings` holds the properties of §7.
 - `ReconciliationResult` holds the counts and the summary.
 - `ReconciliationAudit` writes the billing-event rows and the `[BILLING-RECONCILE]` lines.
