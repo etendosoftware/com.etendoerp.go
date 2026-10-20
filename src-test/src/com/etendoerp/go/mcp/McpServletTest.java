@@ -64,6 +64,7 @@ import org.mockito.MockedConstruction;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 
+import com.etendoerp.go.common.BoundedJsonParserTest;
 import com.auth0.jwt.interfaces.Claim;
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.etendoerp.go.common.PublicUrlResolver;
@@ -1739,16 +1740,27 @@ public class McpServletTest {
     }
   }
 
+  /**
+   * A body that is not JSON is the client's error: JSON-RPC parse error {@code -32700} with a null
+   * id (none can be read from it) and HTTP 400, never a 500. That includes a body that breaks
+   * jettison itself (StackOverflowError / OutOfMemoryError, which escape every catch (Exception)).
+   */
   @Test
-  public void doPostMalformedJsonReturnsInternalError() throws Exception {
-    setOAuth2FilterAttributes("user1", "role1", "client1", "org1", "neo:read");
-    setRequestBody("this is not valid json {{{");
+  public void doPostMalformedJsonReturnsParseError() throws Exception {
+    List<String> bodies = new ArrayList<>(BoundedJsonParserTest.stackBreakingBodies().toList());
+    bodies.add("this is not valid json {{{");
+    for (String raw : bodies) {
+      setUp();
+      setOAuth2FilterAttributes("user1", "role1", "client1", "org1", "neo:read");
+      setRequestBody(raw);
 
-    servlet.doPost(request, response);
+      servlet.doPost(request, response);
 
-    verify(response).setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
-    String body = getResponseBody();
-    assertTrue(body.contains("error"));
+      verify(response).setStatus(HttpServletResponse.SC_BAD_REQUEST);
+      JSONObject rpc = new JSONObject(getResponseBody());
+      assertEquals(McpServlet.JSON_RPC_PARSE_ERROR, rpc.getJSONObject("error").getInt("code"));
+      assertTrue(rpc.isNull("id"));
+    }
   }
 
   @Test

@@ -23,8 +23,11 @@ import static org.junit.Assert.fail;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockConstruction;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -44,6 +47,7 @@ import javax.servlet.http.HttpServletResponse;
 
 import org.hibernate.Session;
 import org.hibernate.query.Query;
+import org.mockito.MockedConstruction;
 import org.mockito.MockedStatic;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
@@ -62,6 +66,8 @@ import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
 
+import com.etendoerp.go.common.BoundedJsonParser;
+import com.etendoerp.go.common.MalformedJsonException;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 import com.etendoerp.go.schemaforge.util.RoleAccessMatrix;
 
@@ -909,5 +915,47 @@ public class AbstractFiscalHandlerTest {
 
     org.mockito.Mockito.verify(decl).set(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT,
         "{\"boxes\":{\"46\":\"1.00\"},\"sourceCount\":2}");
+  }
+
+  // ── malformed client JSON → 400 ───────────────────────────────────
+
+  private static MalformedJsonException malformedBody() {
+    try {
+      BoundedJsonParser.parseObject("{\"x\":[");
+    } catch (MalformedJsonException e) {
+      return e;
+    }
+    throw new AssertionError("expected the body to be malformed");
+  }
+
+  /** A body the declarations delegate cannot parse is the client's error: 400, not 500. */
+  @Test
+  public void testDeclarationsMalformedBodyIs400() throws Exception {
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    MalformedJsonException malformed = malformedBody();
+
+    try (MockedConstruction<FiscalDeclCrudHandler> decl = mockConstruction(
+        FiscalDeclCrudHandler.class, (m, ctx) -> doThrow(malformed).when(m)
+            .handleDeclarations(anyString(), any(), any()))) {
+      new StubHandler(servlet, false).handle("declarations", "POST",
+          mock(HttpServletRequest.class), resp);
+    }
+
+    verify(servlet).sendError(resp, HttpServletResponse.SC_BAD_REQUEST, "Invalid JSON body");
+    verify(servlet, never()).sendError(eq(resp), eq(HttpServletResponse.SC_INTERNAL_SERVER_ERROR),
+        anyString());
+  }
+
+  /** {@code runDispatch} answers a malformed body with a 400 instead of wrapping it as a 500. */
+  @Test
+  public void testRunDispatchMalformedBodyIs400() throws Exception {
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    MalformedJsonException malformed = malformedBody();
+
+    new StubHandler(servlet, false).runDispatch(resp, () -> {
+      throw malformed;
+    });
+
+    verify(servlet).sendError(resp, HttpServletResponse.SC_BAD_REQUEST, "Invalid JSON body");
   }
 }

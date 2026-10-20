@@ -39,6 +39,7 @@ import org.openbravo.model.ad.ui.Field;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.service.db.DalConnectionProvider;
 
+import com.etendoerp.go.common.BoundedJsonParser;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 
@@ -195,7 +196,7 @@ class NeoDisplayLogicHandler {
       if (body == null || body.trim().isEmpty()) {
         return new JSONObject();
       }
-      JSONObject bodyJson = new JSONObject(body);
+      JSONObject bodyJson = BoundedJsonParser.parseObject(body);
       return bodyJson.has("fieldValues")
           ? bodyJson.getJSONObject("fieldValues")
           : new JSONObject();

@@ -43,6 +43,7 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.service.json.DefaultJsonDataService;
 
+import com.etendoerp.go.common.BoundedJsonParser;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
@@ -250,7 +251,7 @@ public class BatchService {
         servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST, "Empty request body");
         return;
       }
-      body = new JSONObject(raw);
+      body = BoundedJsonParser.parseObject(raw);
     } catch (JSONException e) {
       servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
           "Invalid JSON body: " + e.getMessage());
