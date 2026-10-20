@@ -44,7 +44,6 @@ import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.geography.Country;
 import org.openbravo.model.common.geography.Region;
 
-import com.etendoerp.go.schemaforge.util.NeoAddressHelper;
 import com.etendoerp.go.schemaforge.util.StructuredAddressComposer;
 import com.etendoerp.go.schemaforge.util.StructuredAddressComposer.ComposedAddress;
 
@@ -74,7 +73,6 @@ import com.etendoerp.go.schemaforge.util.StructuredAddressComposer.ComposedAddre
 public class ContactsLocationAddressHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(ContactsLocationAddressHandler.class);
-  private static final String LOCATION_TABLE = "C_Location";
   private static final String FIELD_SHIP_TO_ADDRESS = "shipToAddress";
   private static final String FIELD_INVOICE_TO_ADDRESS = "invoiceToAddress";
   private static final String FIELD_TAX_LOCATION = "taxLocation";
@@ -84,13 +82,13 @@ public class ContactsLocationAddressHandler implements NeoHandler {
   private static final String FIELD_ADDRESS_LINE2 = "addressLine2";
   private static final String FIELD_CITY_NAME = "cityName";
   private static final String FIELD_POSTAL_CODE = "postalCode";
-  /** ETP-5806 — structured SEPA address fields, backed by {@code org.openbravo.sepa.iso20022}. */
+  /**
+   * ETP-5806 — structured SEPA address fields, backed by {@code org.openbravo.sepa.iso20022}'s
+   * typed {@code Location} getters/setters (see {@link #applyGeoLocFields}).
+   */
   private static final String FIELD_STREET_NAME = "streetName";
   private static final String FIELD_BUILDING_NUMBER = "buildingNumber";
   private static final String FIELD_BUILDING_NAME = "buildingName";
-  private static final String COLUMN_STREET_NAME = "EM_OBSEPA_StrtNm";
-  private static final String COLUMN_BUILDING_NUMBER = "EM_OBSEPA_BldgNb";
-  private static final String COLUMN_BUILDING_NAME = "EM_OBSEPA_BldgNm";
   /** FK to an existing C_Location, for the "reuse" create mode. See {@link #handleCreate}. */
   private static final String FIELD_LOCATION_ADDRESS = "locationAddress";
   /** Free-text region, resolved server-side against the payload's own country. See {@link #resolveRegionByName}. */
@@ -502,9 +500,9 @@ public class ContactsLocationAddressHandler implements NeoHandler {
     String streetName = nullIfEmpty(body.optString(FIELD_STREET_NAME, null));
     String buildingNumber = nullIfEmpty(body.optString(FIELD_BUILDING_NUMBER, null));
     String buildingName = nullIfEmpty(body.optString(FIELD_BUILDING_NAME, null));
-    NeoAddressHelper.setColumnValue(geoLoc, LOCATION_TABLE, COLUMN_STREET_NAME, streetName);
-    NeoAddressHelper.setColumnValue(geoLoc, LOCATION_TABLE, COLUMN_BUILDING_NUMBER, buildingNumber);
-    NeoAddressHelper.setColumnValue(geoLoc, LOCATION_TABLE, COLUMN_BUILDING_NAME, buildingName);
+    geoLoc.setOBSEPAStreetName(streetName);
+    geoLoc.setOBSEPABuildingNumber(buildingNumber);
+    geoLoc.setOBSEPABuildingName(buildingName);
 
     // ETP-5806 — Address1/Address2 are no longer user-editable in the UI; they are computed here
     // from the structured fields, replicating Classic's own rule: the lines are (re)computed only
@@ -780,12 +778,9 @@ public class ContactsLocationAddressHandler implements NeoHandler {
 
     // ETP-5806 — structured SEPA address fields, so the modal can pre-populate Street/Number/
     // Building Name and so an MCP read sees them too (same response shape on every channel).
-    putOrNull(locationJson, FIELD_STREET_NAME,
-        NeoAddressHelper.getColumnValue(geoLoc, LOCATION_TABLE, COLUMN_STREET_NAME));
-    putOrNull(locationJson, FIELD_BUILDING_NUMBER,
-        NeoAddressHelper.getColumnValue(geoLoc, LOCATION_TABLE, COLUMN_BUILDING_NUMBER));
-    putOrNull(locationJson, FIELD_BUILDING_NAME,
-        NeoAddressHelper.getColumnValue(geoLoc, LOCATION_TABLE, COLUMN_BUILDING_NAME));
+    putOrNull(locationJson, FIELD_STREET_NAME, geoLoc.getOBSEPAStreetName());
+    putOrNull(locationJson, FIELD_BUILDING_NUMBER, geoLoc.getOBSEPABuildingNumber());
+    putOrNull(locationJson, FIELD_BUILDING_NAME, geoLoc.getOBSEPABuildingName());
   }
 
   private static void putOrNull(JSONObject json, String key, String value) throws Exception {

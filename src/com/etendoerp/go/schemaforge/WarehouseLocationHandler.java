@@ -33,7 +33,6 @@ import org.openbravo.model.common.geography.Country;
 import org.openbravo.model.common.geography.Location;
 import org.openbravo.model.common.geography.Region;
 
-import com.etendoerp.go.schemaforge.util.NeoAddressHelper;
 import com.etendoerp.go.schemaforge.util.StructuredAddressComposer;
 import com.etendoerp.go.schemaforge.util.StructuredAddressComposer.ComposedAddress;
 
@@ -67,18 +66,17 @@ import com.etendoerp.go.schemaforge.util.StructuredAddressComposer.ComposedAddre
 public class WarehouseLocationHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(WarehouseLocationHandler.class);
-  private static final String LOCATION_TABLE = "C_Location";
   private static final String FIELD_COUNTRY = "country";
   private static final String FIELD_REGION = "region";
   private static final String FIELD_RESPONSE = "response";
   private static final String FIELD_DATA = "data";
-  /** ETP-5806 — structured SEPA address fields, backed by {@code org.openbravo.sepa.iso20022}. */
+  /**
+   * ETP-5806 — structured SEPA address fields, backed by {@code org.openbravo.sepa.iso20022}'s
+   * typed {@code Location} getters/setters (see {@link #applyGeoLocFields}).
+   */
   private static final String FIELD_STREET_NAME = "streetName";
   private static final String FIELD_BUILDING_NUMBER = "buildingNumber";
   private static final String FIELD_BUILDING_NAME = "buildingName";
-  private static final String COLUMN_STREET_NAME = "EM_OBSEPA_StrtNm";
-  private static final String COLUMN_BUILDING_NUMBER = "EM_OBSEPA_BldgNb";
-  private static final String COLUMN_BUILDING_NAME = "EM_OBSEPA_BldgNm";
 
   @Override
   public NeoResponse handle(NeoContext ctx) {
@@ -212,9 +210,9 @@ public class WarehouseLocationHandler implements NeoHandler {
     String streetName = nullIfEmpty(body.optString(FIELD_STREET_NAME, null));
     String buildingNumber = nullIfEmpty(body.optString(FIELD_BUILDING_NUMBER, null));
     String buildingName = nullIfEmpty(body.optString(FIELD_BUILDING_NAME, null));
-    NeoAddressHelper.setColumnValue(geoLoc, LOCATION_TABLE, COLUMN_STREET_NAME, streetName);
-    NeoAddressHelper.setColumnValue(geoLoc, LOCATION_TABLE, COLUMN_BUILDING_NUMBER, buildingNumber);
-    NeoAddressHelper.setColumnValue(geoLoc, LOCATION_TABLE, COLUMN_BUILDING_NAME, buildingName);
+    geoLoc.setOBSEPAStreetName(streetName);
+    geoLoc.setOBSEPABuildingNumber(buildingNumber);
+    geoLoc.setOBSEPABuildingName(buildingName);
 
     // ETP-5806 — same compute-only-when-street-present rule as ContactsLocationAddressHandler;
     // see the comment there for the Classic-parity rationale.
@@ -253,12 +251,9 @@ public class WarehouseLocationHandler implements NeoHandler {
     json.put("cityName", orNull(geoLoc.getCityName()));
     json.put("postalCode", orNull(geoLoc.getPostalCode()));
     // ETP-5806 — structured SEPA address fields, so the modal can pre-populate them.
-    json.put(FIELD_STREET_NAME,
-        orNull(NeoAddressHelper.getColumnValue(geoLoc, LOCATION_TABLE, COLUMN_STREET_NAME)));
-    json.put(FIELD_BUILDING_NUMBER,
-        orNull(NeoAddressHelper.getColumnValue(geoLoc, LOCATION_TABLE, COLUMN_BUILDING_NUMBER)));
-    json.put(FIELD_BUILDING_NAME,
-        orNull(NeoAddressHelper.getColumnValue(geoLoc, LOCATION_TABLE, COLUMN_BUILDING_NAME)));
+    json.put(FIELD_STREET_NAME, orNull(geoLoc.getOBSEPAStreetName()));
+    json.put(FIELD_BUILDING_NUMBER, orNull(geoLoc.getOBSEPABuildingNumber()));
+    json.put(FIELD_BUILDING_NAME, orNull(geoLoc.getOBSEPABuildingName()));
     if (geoLoc.getCountry() != null) {
       json.put(FIELD_COUNTRY, geoLoc.getCountry().getId());
       // ETP-5022: getIdentifier(), NOT getName(). getName() is the plain Hibernate getter —

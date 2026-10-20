@@ -18,86 +18,27 @@
 package com.etendoerp.go.schemaforge.util;
 
 import org.apache.commons.lang3.StringUtils;
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
-import org.openbravo.base.model.Entity;
-import org.openbravo.base.model.ModelProvider;
-import org.openbravo.base.model.Property;
-import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.model.common.geography.Location;
 
 /**
- * Static helpers for address formatting used in printable documents, plus generic
- * column-name-based accessors for the structured-address columns added to {@code C_Location} by
- * {@code org.openbravo.sepa.iso20022} (ETP-5806: {@code EM_OBSEPA_StrtNm}, {@code EM_OBSEPA_BldgNb},
- * {@code EM_OBSEPA_BldgNm}).
+ * Static helpers for address formatting used in printable documents.
+ *
+ * <p>ETP-5806: the structured-address columns added to {@code C_Location} by
+ * {@code org.openbravo.sepa.iso20022} ({@code EM_OBSEPA_StrtNm}, {@code EM_OBSEPA_BldgNb},
+ * {@code EM_OBSEPA_BldgNm}) are read/written in {@code ContactsLocationAddressHandler} and
+ * {@code WarehouseLocationHandler} through the typed DAL getters/setters
+ * ({@code Location.getOBSEPAStreetName()} and friends), not a generic column-name accessor:
+ * {@code com.etendoerp.go} depends on {@code com.etendoerp.localization.spain.extensions}, whose
+ * {@code AD_MODULE_DEPENDENCY} brings in {@code org.openbravo.sepa.iso20022} transitively, so that
+ * module — and its generated {@code Location.java} accessors — is guaranteed present at both
+ * compile and runtime wherever this module is installed. (A generic-accessor approach, by
+ * {@code ModelProvider}/column-name lookup, is the right call elsewhere in this handler pair —
+ * e.g. {@code AddressVirtualSelectorPolicy}'s virtual-column exposure — where the field being
+ * resolved is not pinned to one specific, always-present dependency.)
  */
 public final class NeoAddressHelper {
 
-  private static final Logger log = LogManager.getLogger(NeoAddressHelper.class);
-
   private NeoAddressHelper() {
-  }
-
-  /**
-   * Reads a DAL property by its backing DB column name rather than by a hardcoded getter.
-   *
-   * <p>ETP-5806: the generated DAL property name for an {@code EM_<prefix>_*} custom column is not
-   * fixed by a simple rule (Etendo Go has confirmed divergent casing for other modules' custom
-   * columns), and the columns this reads belong to {@code org.openbravo.sepa.iso20022}, a module
-   * this one depends on but does not generate code against. Resolving by column name through
-   * {@link ModelProvider} — the same technique {@code AddressVirtualSelectorPolicy} already uses
-   * for the wrapper's virtual columns — reads the real metadata instead of guessing a getter name
-   * that could silently fail to compile, or worse, silently compile against the wrong property.
-   *
-   * <p><b>Verified against the real model</b> (ETP-5806 follow-up, module now installed locally):
-   * {@code org.openbravo.sepa.iso20022}'s generated {@code Location.java} does expose typed
-   * {@code getOBSEPAStreetName()} / {@code getOBSEPABuildingNumber()} / {@code getOBSEPABuildingName()}
-   * accessors, and they are stable (predictable casing, matches the column names 1:1). They are
-   * NOT used here on purpose: this module declares {@code org.openbravo.sepa.iso20022} as an
-   * {@code AD_MODULE_DEPENDENCY} (required at runtime), but that does not guarantee the dependency's
-   * sources/model are present at COMPILE time for every build of this module — {@code src-gen} is
-   * regenerated from whatever is installed in the target instance's DB, not from a fixed classpath.
-   * A hardcoded {@code Location.getOBSEPAStreetName()} call would break compilation of this entire
-   * module on any environment where {@code org.openbravo.sepa.iso20022} has not been installed yet.
-   * The column-name accessor stays the correct choice; end-to-end read/write was confirmed against
-   * the real local DB via {@code POST}/{@code PUT}/{@code GET} on
-   * {@code /sws/neo/contacts/locationAddress} (streetName, buildingNumber, buildingName round-trip
-   * correctly, including clearing a field with an empty string).
-   *
-   * @return the string value, or {@code null} when the object, the column or the value is absent
-   */
-  public static String getColumnValue(BaseOBObject obj, String tableName, String columnName) {
-    Property property = resolveProperty(tableName, columnName);
-    if (property == null) {
-      return null;
-    }
-    Object value = obj.get(property.getName());
-    return value == null ? null : value.toString();
-  }
-
-  /**
-   * Writes a DAL property by its backing DB column name. See {@link #getColumnValue} for why this
-   * indirection exists. A column the running instance does not have yet (module not installed —
-   * see the ETP-5806 plan's environment prerequisite) resolves to no property and the write is a
-   * silent no-op, logged at DEBUG: the alternative, a hardcoded getter/setter call, would not
-   * compile at all until the dependency is installed, which is strictly worse for every OTHER
-   * entity in this module.
-   */
-  public static void setColumnValue(BaseOBObject obj, String tableName, String columnName,
-      String value) {
-    Property property = resolveProperty(tableName, columnName);
-    if (property == null) {
-      log.debug("Column {}.{} not found in the model (module not installed?) — skipping write",
-          tableName, columnName);
-      return;
-    }
-    obj.set(property.getName(), value);
-  }
-
-  private static Property resolveProperty(String tableName, String columnName) {
-    Entity entity = ModelProvider.getInstance().getEntityByTableName(tableName);
-    return entity == null ? null : entity.getPropertyByColumnName(columnName, false);
   }
 
   /**
