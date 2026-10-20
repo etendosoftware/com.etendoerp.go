@@ -45,8 +45,10 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.core.SessionHandler;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.financialmgmt.accounting.coa.AccountingCombination;
@@ -74,6 +76,8 @@ import org.openbravo.model.financialmgmt.calendar.Calendar;
  *   <li>org resolution failures (no concrete current org, org not found, org without general ledger)</li>
  *   <li>currency not found, accounting combination not found</li>
  *   <li>a mandatory dimension cannot be deactivated</li>
+ *   <li>tenant isolation: foreign combination / currency / org ids answer "not found", and every
+ *   error rolls the session back (ETP-5722)</li>
  * </ul>
  */
 @ExtendWith(MockitoExtension.class)
@@ -89,6 +93,8 @@ class GeneralLedgerConfigurationHandlerTest {
 
   private MockedStatic<OBDal> obDalMock;
   private MockedStatic<OBContext> obContextMock;
+  private MockedStatic<SessionHandler> sessionHandlerMock;
+  private SessionHandler sessionHandler;
   private OBDal obDal;
 
   // Model graph, rebuilt per test via the wire* helpers.
@@ -105,12 +111,17 @@ class GeneralLedgerConfigurationHandlerTest {
     obDalMock.when(OBDal::getInstance).thenReturn(obDal);
     // setAdminMode / restorePreviousMode become no-ops; getOBContext is stubbed per-test when needed.
     obContextMock = mockStatic(OBContext.class);
+    // Every 400/500 rolls the DAL session back; without this stub getInstance() is null and NPEs.
+    sessionHandler = mock(SessionHandler.class);
+    sessionHandlerMock = mockStatic(SessionHandler.class);
+    sessionHandlerMock.when(SessionHandler::getInstance).thenReturn(sessionHandler);
   }
 
   @AfterEach
   void tearDown() {
     obDalMock.close();
     obContextMock.close();
+    sessionHandlerMock.close();
   }
 
   // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -1100,5 +1111,188 @@ class GeneralLedgerConfigurationHandlerTest {
 
     NeoResponse response = handler.handle(getCtx(ORG_ID));
     assertEquals(400, response.getHttpStatus());
+  }
+
+  // ── Tenant isolation (ETP-5722) ──────────────────────────────────────────────
+
+  private static final String OWN_CLIENT = "tenant-A";
+  private static final String FOREIGN_CLIENT = "tenant-B";
+
+  /** A session of tenant A: readable clients {A, 0}, readable orgs {0, ORG_ID}. */
+  private void wireTenantContext() {
+    OBContext ctx = mock(OBContext.class);
+    obContextMock.when(OBContext::getOBContext).thenReturn(ctx);
+    when(ctx.getReadableClients()).thenReturn(new String[] { OWN_CLIENT, "0" });
+    when(ctx.getReadableOrganizations()).thenReturn(new String[] { "0", ORG_ID });
+    Client own = client(OWN_CLIENT);
+    when(org.getClient()).thenReturn(own);
+  }
+
+  private static Client client(String id) {
+    Client c = mock(Client.class);
+    when(c.getId()).thenReturn(id);
+    return c;
+  }
+
+  private AccountingCombination comboOf(String id, String clientId) {
+    Organization star = mock(Organization.class);
+    when(star.getId()).thenReturn("0");
+    AccountingCombination combo = mock(AccountingCombination.class);
+    when(combo.getId()).thenReturn(id);
+    Client owner = client(clientId);
+    when(combo.getClient()).thenReturn(owner);
+    when(combo.getOrganization()).thenReturn(star);
+    when(obDal.get(AccountingCombination.class, id)).thenReturn(combo);
+    return combo;
+  }
+
+  private static String errorMessage(NeoResponse response) throws Exception {
+    return response.getBody().getJSONObject("error").getString("message");
+  }
+
+  private NeoResponse postSuspense(String comboId) throws Exception {
+    return handler.handle(postCtx(ORG_ID, new JSONObject().put("generalAccounts",
+        new JSONObject().put("suspenseBalancing", comboId))));
+  }
+
+  @Test
+  @DisplayName("A combination of the caller's own tenant is accepted")
+  void ownTenantCombinationAccepted() throws Exception {
+    wireOrgWithLedger();
+    wireLoadCriteria(Collections.emptyList());
+    wireTenantContext();
+    AccountingCombination combo = comboOf("combo-own", OWN_CLIENT);
+
+    NeoResponse response = postSuspense("combo-own");
+
+    assertEquals(200, response.getHttpStatus());
+    verify(generalAccounts).setSuspenseBalancing(combo);
+  }
+
+  @Test
+  @DisplayName("A client-0 combination is accepted")
+  void systemCombinationAccepted() throws Exception {
+    wireOrgWithLedger();
+    wireLoadCriteria(Collections.emptyList());
+    wireTenantContext();
+    AccountingCombination combo = comboOf("combo-system", "0");
+
+    NeoResponse response = postSuspense("combo-system");
+
+    assertEquals(200, response.getHttpStatus());
+    verify(generalAccounts).setSuspenseBalancing(combo);
+  }
+
+  @Test
+  @DisplayName("A combination of another tenant is rejected as not found and nothing is written")
+  void foreignCombinationRejected() throws Exception {
+    wireOrgWithLedger();
+    wireLoadCriteria(Collections.emptyList());
+    wireTenantContext();
+    comboOf("combo-foreign", FOREIGN_CLIENT);
+
+    NeoResponse response = postSuspense("combo-foreign");
+
+    assertEquals(400, response.getHttpStatus());
+    assertEquals("Accounting combination not found: combo-foreign", errorMessage(response));
+    verify(generalAccounts, never()).setSuspenseBalancing(any());
+    verify(obDal, never()).flush();
+    verify(sessionHandler).rollback();
+  }
+
+  @Test
+  @DisplayName("A 400 rolls back changes applied earlier in the same body")
+  void foreignCombinationRollsBackEarlierChanges() throws Exception {
+    wireOrgWithLedger();
+    wireLoadCriteria(Collections.emptyList());
+    wireTenantContext();
+    comboOf("combo-foreign", FOREIGN_CLIENT);
+
+    JSONObject body = new JSONObject()
+        .put("general", new JSONObject().put("name", "Renamed"))
+        .put("generalAccounts", new JSONObject().put("suspenseBalancing", "combo-foreign"));
+    NeoResponse response = handler.handle(postCtx(ORG_ID, body));
+
+    assertEquals(400, response.getHttpStatus());
+    // The name was set on the session object before the throw; only the rollback discards it.
+    verify(schema).setName("Renamed");
+    verify(sessionHandler).rollback();
+  }
+
+  @Test
+  @DisplayName("A foreign combination in defaults is rejected too")
+  void foreignDefaultsCombinationRejected() throws Exception {
+    wireOrgWithLedger();
+    wireLoadCriteria(Collections.emptyList());
+    wireTenantContext();
+    comboOf("combo-foreign", FOREIGN_CLIENT);
+
+    JSONObject body = new JSONObject()
+        .put("defaults", new JSONObject().put("bankAsset", "combo-foreign"));
+    NeoResponse response = handler.handle(postCtx(ORG_ID, body));
+
+    assertEquals(400, response.getHttpStatus());
+    assertEquals("Accounting combination not found: combo-foreign", errorMessage(response));
+    verify(defaults, never()).set(any(), any());
+    verify(sessionHandler).rollback();
+  }
+
+  @Test
+  @DisplayName("A foreign selectedOrgId on GET answers 'Organization not found' without leaking its ledger")
+  void foreignOrgOnGetRejected() throws Exception {
+    wireOrgWithLedger();
+    wireTenantContext();
+    Client other = client(FOREIGN_CLIENT);
+    when(org.getClient()).thenReturn(other);
+
+    NeoResponse response = handler.handle(getCtx(ORG_ID));
+
+    assertEquals(400, response.getHttpStatus());
+    assertEquals("Organization not found: " + ORG_ID, errorMessage(response));
+  }
+
+  @Test
+  @DisplayName("A foreign selectedOrgId in the POST body answers 'Organization not found'")
+  void foreignOrgInPostBodyRejected() throws Exception {
+    wireOrgWithLedger();
+    wireTenantContext();
+    Organization foreign = mock(Organization.class);
+    Client other = client(FOREIGN_CLIENT);
+    when(foreign.getClient()).thenReturn(other);
+    when(obDal.get(Organization.class, "org-foreign")).thenReturn(foreign);
+
+    JSONObject body = new JSONObject().put("selectedOrgId", "org-foreign")
+        .put("general", new JSONObject().put("name", "X"));
+    NeoResponse response = handler.handle(postCtx(ORG_ID, body));
+
+    assertEquals(400, response.getHttpStatus());
+    assertEquals("Organization not found: org-foreign", errorMessage(response));
+  }
+
+  @Test
+  @DisplayName("A currency of another tenant is rejected; a client-0 currency is accepted")
+  void foreignCurrencyRejectedSystemCurrencyAccepted() throws Exception {
+    wireOrgWithLedger();
+    wireLoadCriteria(Collections.emptyList());
+    wireTenantContext();
+    Currency foreign = mock(Currency.class);
+    Client other = client(FOREIGN_CLIENT);
+    when(foreign.getClient()).thenReturn(other);
+    when(obDal.get(Currency.class, "cur-foreign")).thenReturn(foreign);
+    Currency eur = mock(Currency.class);
+    Client system = client("0");
+    when(eur.getClient()).thenReturn(system);
+    when(obDal.get(Currency.class, "cur-eur")).thenReturn(eur);
+
+    NeoResponse rejected = handler.handle(postCtx(ORG_ID,
+        new JSONObject().put("general", new JSONObject().put("currency", "cur-foreign"))));
+    assertEquals(400, rejected.getHttpStatus());
+    assertEquals("Currency not found: cur-foreign", errorMessage(rejected));
+    verify(schema, never()).setCurrency(any());
+
+    NeoResponse accepted = handler.handle(postCtx(ORG_ID,
+        new JSONObject().put("general", new JSONObject().put("currency", "cur-eur"))));
+    assertEquals(200, accepted.getHttpStatus());
+    verify(schema).setCurrency(eur);
   }
 }

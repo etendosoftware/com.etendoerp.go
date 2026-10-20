@@ -43,6 +43,7 @@ import com.etendoerp.psd2.bank.integration.data.Provider;
 import com.etendoerp.psd2.bank.integration.utils.BankIntegrationConstants;
 import com.etendoerp.psd2.bank.integration.utils.BankIntegrationUtils;
 import com.etendoerp.psd2.bank.integration.utils.ProviderCatalogUtils;
+import com.etendoerp.psd2.bank.integration.utils.SaltEdgeAccountLinkHelper;
 
 final class FinancialAccountBankConnectionSupport {
 
@@ -143,6 +144,86 @@ final class FinancialAccountBankConnectionSupport {
       return null;
     }
     return maxFetchInterval.intValue();
+  }
+
+  /** An import-from date older than the bank's history: the limit in days and the earliest usable day. */
+  static final class FetchIntervalExceeded {
+    private final int days;
+    private final LocalDate earliestDate;
+
+    FetchIntervalExceeded(int days, LocalDate earliestDate) {
+      this.days = days;
+      this.earliestDate = earliestDate;
+    }
+
+    int getDays() {
+      return days;
+    }
+
+    LocalDate getEarliestDate() {
+      return earliestDate;
+    }
+  }
+
+  /**
+   * ETP-5805. The single rule behind the "this bank only provides the last N days" advisory,
+   * shared by the PUT/PATCH hook and {@code POST import-settings}. The limit N comes from
+   * {@link #maxFetchIntervalOf} on the account's active connection, the same source the bank
+   * connection {@code status} action exposes.
+   *
+   * Strict calendar-day comparison: {@code importFrom < today - N}. The boundary day itself does
+   * not warn, matching the SPA and the PSD2 module's {@code daysDiff > maxInterval}. Returns null
+   * ("say nothing") for a null date, no active connection or no declared limit. Total: never throws.
+   */
+  static FetchIntervalExceeded findImportFromBeyondFetchInterval(FIN_FinancialAccount finAcc,
+      Date importFrom) {
+    return findImportFromBeyondFetchInterval(finAcc, importFrom, LocalDate.now());
+  }
+
+  static FetchIntervalExceeded findImportFromBeyondFetchInterval(FIN_FinancialAccount finAcc,
+      Date importFrom, LocalDate today) {
+    if (importFrom == null) {
+      return null;
+    }
+    try {
+      // Import dates are stored as UTC midnight (see parseDate), so read the day in UTC.
+      return findImportFromBeyondFetchInterval(finAcc,
+          new Date(importFrom.getTime()).toInstant().atZone(ZoneOffset.UTC).toLocalDate(), today);
+    } catch (Exception e) {
+      log.warn("[ETP-5805] Could not evaluate the import-from fetch interval: {}", e.getMessage());
+      return null;
+    }
+  }
+
+  /**
+   * Calendar-day form of the rule: the single strict {@code importFrom < today - N} comparison both
+   * channels share. Callers that already hold the day (the PUT/PATCH hook reads it from the request
+   * string, because the DAL stores that value at local midnight) use this one so no time zone is
+   * involved.
+   */
+  static FetchIntervalExceeded findImportFromBeyondFetchInterval(FIN_FinancialAccount finAcc,
+      LocalDate importFromDay, LocalDate today) {
+    try {
+      if (finAcc == null || importFromDay == null) {
+        return null;
+      }
+      Integer days = maxFetchIntervalOf(SaltEdgeAccountLinkHelper.getActiveConnectionForFinAcc(finAcc));
+      if (days == null || days <= 0) {
+        return null;
+      }
+      LocalDate earliest = today.minusDays(days);
+      return importFromDay.isBefore(earliest) ? new FetchIntervalExceeded(days, earliest) : null;
+    } catch (Exception e) {
+      log.warn("[ETP-5805] Could not evaluate the import-from fetch interval: {}", e.getMessage());
+      return null;
+    }
+  }
+
+  /** The translated advisory for {@code exceeded}, dates formatted as the language writes them. */
+  static String fetchIntervalExceededText(FetchIntervalExceeded exceeded, String language) {
+    String pattern = NeoHints.isSpanish(language) ? "dd/MM/yyyy" : "yyyy-MM-dd";
+    return NeoHints.text("psd2ImportFromBeyondFetchInterval", language, String.valueOf(exceeded.getDays()),
+        exceeded.getEarliestDate().format(java.time.format.DateTimeFormatter.ofPattern(pattern)));
   }
 
   private static Provider fetchAndRegisterProvider(String providerCode, String providerName,
