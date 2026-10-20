@@ -2195,6 +2195,33 @@ class NeoCrudHandlerTest {
       }
     }
 
+    @Test
+    @DisplayName("A captured List-reference fault still gets its accepted values appended (ETP-4996)")
+    void capturedServerFailureKeepsTheListReferenceValues() throws Exception {
+      String sanitized = "The value is not valid, it should be one of the following values: [value]";
+      JSONObject classification = new JSONObject().put("status", 500)
+          .put("code", "server_error").put("message", sanitized);
+      JSONObject response = new JSONObject().put(JsonConstants.RESPONSE_RESPONSE,
+          new JSONObject().put(JsonConstants.RESPONSE_STATUS, JsonConstants.RPCREQUEST_STATUS_FAILURE)
+              .put(JsonConstants.RESPONSE_ERROR, new JSONObject().put("message", sanitized)
+                  .put("neoClassification", classification)));
+      try (MockedStatic<org.openbravo.erpCommon.utility.OBMessageUtils> messages =
+          mockStatic(org.openbravo.erpCommon.utility.OBMessageUtils.class);
+          MockedStatic<com.etendoerp.go.schemaforge.util.NeoListReferenceError> lists =
+              mockStatic(com.etendoerp.go.schemaforge.util.NeoListReferenceError.class)) {
+        messages.when(() -> org.openbravo.erpCommon.utility.OBMessageUtils.messageBD(anyString()))
+            .thenAnswer(invocation -> invocation.getArgument(0));
+        lists.when(() -> com.etendoerp.go.schemaforge.util.NeoListReferenceError.enrich(sanitized))
+            .thenReturn(sanitized + " Accepted values: DR, CO.");
+
+        NeoResponse result = invokeCheckResponse(response);
+
+        assertEquals(500, result.getHttpStatus());
+        assertEquals(sanitized + " Accepted values: DR, CO.",
+            result.getBody().getJSONObject("error").getString("message"));
+      }
+    }
+
     private JSONObject unknownReferenceBody(String entity, String id) throws Exception {
       JSONObject errors = new JSONObject();
       errors.put(JsonConstants.ID, "New object " + entity + "(null)  (key: " + id + "_" + entity

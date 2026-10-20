@@ -273,8 +273,10 @@ public final class NeoErrorClassifier {
     for (Throwable current : chain) {
       if (current instanceof MessageKeyedException) {
         MessageKeyedException keyed = (MessageKeyedException) current;
-        return new Classification(STATUS_UNPROCESSABLE, CODE_BUSINESS_RULE, keyed.getMessage(),
-            List.of(keyed.getMessageKey()));
+        // The key, not the message: getMessage() is already translated (or echoes the key), so
+        // there is nothing left to translate and it would fall back to the generic text.
+        return new Classification(STATUS_UNPROCESSABLE, CODE_BUSINESS_RULE,
+            "@" + keyed.getMessageKey() + "@", List.of(keyed.getMessageKey()));
       }
     }
     Throwable head = chain.get(0);

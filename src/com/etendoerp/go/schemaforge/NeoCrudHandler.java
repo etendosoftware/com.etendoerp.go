@@ -859,7 +859,7 @@ class NeoCrudHandler {
       if (!NeoErrorSanitizer.isDuplicateKeyMessage(translated)) {
         NeoResponse classified = NeoErrorResponses.fromClassifiedWriteFailure(innerResponse);
         if (classified != null) {
-          return classified;
+          return withListReferenceValues(classified);
         }
       }
       // DefaultJsonDataService catches a unique-constraint violation internally and
@@ -882,6 +882,21 @@ class NeoCrudHandler {
       return NeoResponse.error(httpStatus,
           NeoErrorSanitizer.stripRowDump(NeoErrorSanitizer.redactObjectReferences(
             NeoListReferenceError.enrich(translated))));
+  }
+
+  /**
+   * ETP-4996 on a captured fault: a List-reference failure is a 5xx whose sanitized message still
+   * names the column, so the accepted values are appended exactly as on the uncaptured path.
+   */
+  private static NeoResponse withListReferenceValues(NeoResponse classified) throws JSONException {
+    JSONObject error = classified.getBody() != null
+        ? classified.getBody().optJSONObject(KEY_ERROR)
+        : null;
+    if (classified.getHttpStatus() >= HttpServletResponse.SC_INTERNAL_SERVER_ERROR
+        && error != null) {
+      error.put(KEY_MESSAGE, NeoListReferenceError.enrich(error.optString(KEY_MESSAGE, null)));
+    }
+    return classified;
   }
 
   /**

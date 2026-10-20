@@ -222,6 +222,15 @@ class NeoErrorClassifierTest {
 
       assertEquals(422, c.status());
       assertEquals(List.of("NotEnoughStock"), c.messageKeys());
+      OBError translated = new OBError();
+      translated.setMessage("No hay stock suficiente");
+      try (MockedStatic<OBMessageUtils> msg = mockStatic(OBMessageUtils.class)) {
+        msg.when(() -> OBMessageUtils.translateError(any(), any(), any(),
+            org.mockito.ArgumentMatchers.eq("@NotEnoughStock@"))).thenReturn(translated);
+
+        // Translated from its key in the request language, never the generic fallback.
+        assertEquals("No hay stock suficiente", NeoErrorClassifier.displayMessage(c));
+      }
     }
 
     @Test
