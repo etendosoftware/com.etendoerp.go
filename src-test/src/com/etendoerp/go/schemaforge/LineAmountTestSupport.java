@@ -34,6 +34,8 @@ import java.sql.SQLException;
 import org.codehaus.jettison.json.JSONObject;
 import org.mockito.MockedStatic;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.invoice.InvoiceLine;
+import org.openbravo.model.financialmgmt.tax.TaxRate;
 
 /**
  * Test support for the ETP-5528 line-amount tests: the only DB read on their path is
@@ -51,7 +53,30 @@ final class LineAmountTestSupport {
    * the returned mock and must close it (try-with-resources).
    */
   static MockedStatic<OBDal> taxRate(double rate) throws SQLException {
+    return taxRate(rate, mock(OBDal.class));
+  }
+
+  /** Id the stored line of {@link #taxRate(double, InvoiceLine)} answers to. */
+  static final String STORED_LINE_ID = "LINE-1";
+
+  /**
+   * Like {@link #taxRate(double)}, and {@code OBDal.get(InvoiceLine.class, STORED_LINE_ID)} answers
+   * {@code storedLine} — the persisted line an update overlays its patch on.
+   */
+  static MockedStatic<OBDal> taxRate(double rate, InvoiceLine storedLine) throws SQLException {
     OBDal dal = mock(OBDal.class);
+    if (storedLine != null) {
+      when(dal.get(InvoiceLine.class, STORED_LINE_ID)).thenReturn(storedLine);
+    }
+    return taxRate(rate, dal);
+  }
+
+  /**
+   * {@link #taxRate(double)} over a caller-built {@link OBDal} mock, for a test that also stubs
+   * other reads on it (a stored line, a product). The caller stubs {@code dal} before or after this
+   * call, never inside a {@code thenReturn}.
+   */
+  static MockedStatic<OBDal> taxRate(double rate, OBDal dal) throws SQLException {
     Connection conn = mock(Connection.class);
     PreparedStatement ps = mock(PreparedStatement.class);
     ResultSet rs = mock(ResultSet.class);
@@ -64,6 +89,21 @@ final class LineAmountTestSupport {
     MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
     dalMock.when(OBDal::getInstance).thenReturn(dal);
     return dalMock;
+  }
+
+  /** A persisted invoice line with the inputs the amount derivation reads. */
+  static InvoiceLine storedInvoiceLine(String qty, String unitPrice, String listPrice,
+      String discount, String grossUnitPrice, String taxId) {
+    InvoiceLine line = mock(InvoiceLine.class);
+    when(line.getInvoicedQuantity()).thenReturn(new BigDecimal(qty));
+    when(line.getUnitPrice()).thenReturn(new BigDecimal(unitPrice));
+    when(line.getListPrice()).thenReturn(new BigDecimal(listPrice));
+    when(line.getEtgoDiscount()).thenReturn(new BigDecimal(discount));
+    when(line.getGrossUnitPrice()).thenReturn(new BigDecimal(grossUnitPrice));
+    TaxRate tax = mock(TaxRate.class);
+    when(tax.getId()).thenReturn(taxId);
+    when(line.getTax()).thenReturn(tax);
+    return line;
   }
 
   /**

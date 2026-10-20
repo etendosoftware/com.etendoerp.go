@@ -16,20 +16,15 @@
  */
 package com.etendoerp.go.schemaforge;
 
-import java.math.BigDecimal;
-import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
 import javax.inject.Named;
-import javax.servlet.http.HttpServletResponse;
 
-import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
-import org.openbravo.dal.core.OBContext;
 
 /**
  * Post-hook for the Return Material Receipt line entity.
@@ -37,15 +32,13 @@ import org.openbravo.dal.core.OBContext;
  * <p>Injects {@code orderQuantity} (original delivered qty from canceled source line)
  * and {@code productCode} (M_Product.Value / search key) into every GET response.
  *
- * <p>POST (create) pre-hook (ETP-4863): defaults {@code storageBin} to the header
- * {@code M_InOut}'s own warehouse default locator when the create request did not already
- * supply a REAL one — this is the "Devolución de Venta" (RMA of a sale) counterpart of the same
- * fix already applied to {@link GoodsReceiptLineHandler} (ETP-4671), {@link
- * GoodsShipmentLineHandler}, and {@link ReturnToVendorShipmentLineHandler}. See {@link
- * NeoHandlerUtils#injectDefaultLocatorIfMissing(JSONObject, Logger)} for the full rationale.
- * This class implements {@link NeoHandler} directly rather than extending {@link
- * AbstractInOutLineHandler} — same shape as {@link ReturnToVendorShipmentLineHandler} — so the
- * locator default is applied directly here via the shared helper instead of inheriting it.
+ * <p>Direct creation (ETP-5711): a {@code POST} of a line is refused with 422
+ * {@code returnLineRequiresImport} on every channel. Lines enter a return only through
+ * {@code importShipmentLines} / {@code createReturn}, which link each one to the shipment line it
+ * returns and cap its quantity; the storageBin default of ETP-4863 therefore lives in those paths,
+ * not here. Quantity edits ({@code PUT}/{@code PATCH}) stay allowed, capped by
+ * {@link ReturnableQuantity}; a legacy line with no source link is not capped, there is nothing to
+ * cap it against.
  *
  * <p>Write/read quantity sign (ETP-5313): {@code movementQuantity} is persisted NEGATIVE and
  * echoed back POSITIVE, exactly like {@link ReturnToVendorShipmentLineHandler}. Both delegate to
@@ -56,122 +49,30 @@ import org.openbravo.dal.core.OBContext;
 public class ReturnMaterialReceiptLineHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(ReturnMaterialReceiptLineHandler.class);
-  private static final String FIELD_CANCELED_INOUT_LINE = "canceledInoutLine";
 
   @Override
   public NeoResponse handle(NeoContext context) {
     if (context == null) {
       return null;
     }
-    if (NeoEndpointType.CRUD.equals(context.getEndpointType())
-        && "POST".equalsIgnoreCase(context.getHttpMethod())) {
-      try {
-        NeoHandlerUtils.injectDefaultLocatorIfMissing(context.getRequestBody(), log);
-      } catch (Exception e) {
-        log.warn("[ReturnMaterialReceiptLineHandler] Could not default storageBin: {}",
-            e.getMessage(), e);
-      }
+    // ETP-5711: a line is only ever created by importShipmentLines / createReturn (they link it to
+    // the shipment line it returns and cap it); a direct POST is refused on every channel.
+    NeoResponse directCreate = ReturnableQuantity.refuseDirectCreate(context,
+        "importShipmentLines", "createReturn");
+    if (directCreate != null) {
+      return directCreate;
+    }
+    // ETP-5711: a quantity edit may not take the line above what is still returnable of its source
+    // line; the line's own current quantity does not count against it.
+    NeoResponse overReturn = ReturnableQuantity.refuseQuantityEdit(context, log);
+    if (overReturn != null) {
+      return overReturn;
     }
     String method = context.getHttpMethod();
-    if ("POST".equals(method) || "PUT".equals(method) || "PATCH".equals(method)) {
-      NeoResponse overReturn = refuseOverReturn(context);
-      if (overReturn != null) {
-        return overReturn;
-      }
+    if ("PUT".equals(method) || "PATCH".equals(method)) {
       ReturnLineQuantityPolicy.applyStoredSignToWriteBody(context.getRequestBody(), log);
     }
     return null;
-  }
-
-  /**
-   * ETP-5729 CP-12: creating or editing a return line linked to a shipment line must not push that
-   * shipment line past what it shipped. The line's own current quantity is excluded from the sum,
-   * so it is replaced, not added.
-   *
-   * <p>A write is checked when it touches either side of the equation:
-   * <ul>
-   *   <li><b>{@code canceledInoutLine} in the body</b> decides the source line. A real id re-points
-   *       the line and is the ONLY source checked — the stored one is never used as a silent
-   *       fallback. {@code null} or {@code ""} unlinks the line: nothing to check.</li>
-   *   <li>Absent from the body, the source line is the stored one ({@code recordId}); a new line
-   *       or a stored line without one has nothing to check.</li>
-   *   <li><b>{@code movementQuantity}</b> comes from the body when present, otherwise from the
-   *       stored line — so re-pointing an existing line without sending a quantity is checked with
-   *       the quantity it already carries.</li>
-   * </ul>
-   *
-   * <p>Runs BEFORE the sign flip and compares magnitudes, so the user-facing positive value and an
-   * already-negative one are judged the same. Fails closed: a DB error answers 500 rather than
-   * letting an unchecked quantity through.
-   */
-  private NeoResponse refuseOverReturn(NeoContext context) {
-    JSONObject body = context.getRequestBody();
-    if (!NeoEndpointType.CRUD.equals(context.getEndpointType()) || body == null) {
-      return null;
-    }
-    boolean bodyHasQty = body.has(ReturnLineQuantityPolicy.FIELD_MOVEMENT_QUANTITY);
-    boolean bodyHasLink = body.has(FIELD_CANCELED_INOUT_LINE);
-    if (!bodyHasQty && !bodyHasLink) {
-      return null;
-    }
-    String bodySourceLineId = bodyHasLink ? linkedLineId(body.opt(FIELD_CANCELED_INOUT_LINE)) : null;
-    if (bodyHasLink && bodySourceLineId == null) {
-      return null; // explicit unlink
-    }
-    BigDecimal bodyQty = bodyHasQty
-        ? parseMagnitude(body.opt(ReturnLineQuantityPolicy.FIELD_MOVEMENT_QUANTITY)) : null;
-    if (bodyHasQty && (bodyQty == null || bodyQty.signum() == 0)) {
-      return null; // nothing returned; an unparsable value is NEO's to reject
-    }
-    String recordId = context.getRecordId();
-    if (StringUtils.isBlank(recordId) && (bodySourceLineId == null || bodyQty == null)) {
-      return null; // a new line lacking a link or a quantity has nothing stored to fill it in
-    }
-    OBContext.setAdminMode(true);
-    try {
-      ReturnableQuantityGuard.StoredReturnLine stored =
-          (bodySourceLineId != null && bodyQty != null) ? null
-              : ReturnableQuantityGuard.findStoredReturnLine(recordId);
-      String sourceLineId = bodySourceLineId != null ? bodySourceLineId
-          : stored == null ? null : stored.sourceLineId;
-      BigDecimal qty = bodyQty != null ? bodyQty : stored == null ? null : stored.quantity;
-      if (StringUtils.isBlank(sourceLineId) || qty == null || qty.signum() == 0) {
-        return null;
-      }
-      return ReturnableQuantityGuard.refuseIfExceeded(
-          Collections.singletonMap(sourceLineId, qty), recordId);
-    } catch (Exception e) {
-      log.error("Could not check the returnable quantity of return line {}: {}", recordId,
-          e.getMessage(), e);
-      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          "Could not check the returnable quantity of this line");
-    } finally {
-      OBContext.restorePreviousMode();
-    }
-  }
-
-  /**
-   * The source line id a body sends as {@code canceledInoutLine}: a plain id, or an
-   * {@code {"id": ...}} reference. {@code null} for JSON null, a blank string or an object without
-   * an id — all of which mean "not linked".
-   */
-  private static String linkedLineId(Object raw) {
-    if (raw == null || raw == JSONObject.NULL) {
-      return null;
-    }
-    String id = raw instanceof JSONObject ? ((JSONObject) raw).optString("id", null) : raw.toString();
-    return StringUtils.isBlank(id) || "null".equals(id) ? null : id.trim();
-  }
-
-  private static BigDecimal parseMagnitude(Object raw) {
-    if (raw == null || raw == JSONObject.NULL) {
-      return null;
-    }
-    try {
-      return new BigDecimal(raw.toString().trim()).abs();
-    } catch (NumberFormatException e) {
-      return null;
-    }
   }
 
   /**

@@ -21,6 +21,8 @@ import javax.servlet.http.HttpServletResponse;
 
 import org.openbravo.dal.core.OBContext;
 
+import com.etendoerp.go.payment.EnvironmentAccessGuard;
+
 /**
  * Result of {@link EnvironmentRequestAuthenticator#authenticate} (ETP-5455).
  *
@@ -28,6 +30,11 @@ import org.openbravo.dal.core.OBContext;
  * different ways ({@code NeoServlet#sendError}, {@code ServletResponseUtils#sendError}, their own
  * JSON envelope), and none of that is authentication. What they must NOT differ on — the status
  * and the message for a given failure — is decided here, once.
+ *
+ * <p>ETP-5047 — a commercial-access refusal ({@link Status#PAYMENT_REQUIRED}) also carries the
+ * {@link EnvironmentAccessGuard.Denial} that produced it ({@link #getAccessDenial()}), so a
+ * consumer that owns its response answers with the guard's structured body
+ * ({@code error.code} / {@code error.decision}) instead of the bare message.
  */
 public final class EnvironmentAuthOutcome {
 
@@ -37,7 +44,18 @@ public final class EnvironmentAuthOutcome {
     CSRF_REJECTED(HttpServletResponse.SC_FORBIDDEN),
     UNAUTHENTICATED(HttpServletResponse.SC_UNAUTHORIZED),
     /** javax.servlet predates RFC 7231 and has no constant for 402. */
-    PAYMENT_REQUIRED(402);
+    PAYMENT_REQUIRED(402),
+    /**
+     * ETP-5047 — the credential's tenant could not be resolved (the role lookup failed), so the
+     * request can be neither judged nor bound: refused, and safe to retry.
+     */
+    SERVICE_UNAVAILABLE(HttpServletResponse.SC_SERVICE_UNAVAILABLE),
+    /**
+     * ETP-5489 — the credential is valid but the server could not set up its context. Not a 401:
+     * a client reads 401 as "your session is gone" and logs the user out, which against a session
+     * that is still alive is a logout/re-entry loop.
+     */
+    CONTEXT_UNAVAILABLE(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
 
     private final int httpStatus;
 
@@ -59,13 +77,15 @@ public final class EnvironmentAuthOutcome {
   private final String roleId;
   private final String clientId;
   private final String orgId;
+  private final EnvironmentAccessGuard.Denial accessDenial;
 
   private EnvironmentAuthOutcome(Status status, String message, AuthScheme scheme,
-      OBContext context, String[] identity) {
+      OBContext context, String[] identity, EnvironmentAccessGuard.Denial accessDenial) {
     this.status = status;
     this.message = message;
     this.scheme = scheme;
     this.context = context;
+    this.accessDenial = accessDenial;
     this.userId = identity[0];
     this.roleId = identity[1];
     this.clientId = identity[2];
@@ -87,7 +107,7 @@ public final class EnvironmentAuthOutcome {
   public static EnvironmentAuthOutcome authenticated(AuthScheme scheme, OBContext context,
       String userId, String roleId, String clientId, String orgId) {
     return new EnvironmentAuthOutcome(Status.AUTHENTICATED, null, scheme, context,
-        new String[] { userId, roleId, clientId, orgId });
+        new String[] { userId, roleId, clientId, orgId }, null);
   }
 
   /**
@@ -99,7 +119,22 @@ public final class EnvironmentAuthOutcome {
    * @return the refused outcome
    */
   public static EnvironmentAuthOutcome refused(Status status, String message, AuthScheme scheme) {
-    return new EnvironmentAuthOutcome(status, message, scheme, null, new String[4]);
+    return new EnvironmentAuthOutcome(status, message, scheme, null, new String[4], null);
+  }
+
+  /**
+   * ETP-5047 — a request refused by the commercial access check of
+   * {@link EnvironmentAccessGuard}: {@link Status#PAYMENT_REQUIRED}, the denial's message, and
+   * the denial itself for the structured body.
+   *
+   * @param denial the guard's denial; never null
+   * @param scheme the scheme the credential was resolved as
+   * @return the refused outcome
+   */
+  public static EnvironmentAuthOutcome accessDenied(EnvironmentAccessGuard.Denial denial,
+      AuthScheme scheme) {
+    return new EnvironmentAuthOutcome(Status.PAYMENT_REQUIRED, denial.message(), scheme, null,
+        new String[4], denial);
   }
 
   /** Returns true when the request may proceed; {@link #getContext()} is then set. */
@@ -150,5 +185,14 @@ public final class EnvironmentAuthOutcome {
   /** Returns the organization of the context, or null when refused. */
   public String getOrgId() {
     return orgId;
+  }
+
+  /**
+   * Returns the commercial-access denial behind a {@link Status#PAYMENT_REQUIRED} refusal, or
+   * null for any other outcome (ETP-5047). Its {@link EnvironmentAccessGuard.Denial#errorBody}
+   * and {@link EnvironmentAccessGuard.Denial#writeTo} are the shared 402 wire format.
+   */
+  public EnvironmentAccessGuard.Denial getAccessDenial() {
+    return accessDenial;
   }
 }

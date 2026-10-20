@@ -84,6 +84,26 @@ class McpListReadPredicatesCallSiteTest {
             + " reaches the query (ETP-5009).");
   }
 
+  /**
+   * ETP-5705: the customization's filter aliases reach the where builder on the MCP channel, and
+   * the aliases it applied reach the response. Losing the first silently filters on the raw value
+   * afterHandle overwrites; losing the second answers with a filter on a field the caller never
+   * named and no word of it.
+   */
+  @Test
+  @DisplayName("handleList feeds the filter aliases to the where builder and reports them")
+  void listAppliesAndReportsFilterAliases() {
+    String body = listBody();
+    assertTrue(Pattern.compile("buildWhereFromFilters\\s*\\((?s:[^;]*?)NeoReadPredicates\\s*\\."
+            + "\\s*resolveFilterAliases\\s*\\((?s:[^;]*?)NeoExtensionChannel\\s*\\.\\s*MCP")
+            .matcher(body).find(),
+        "handleList must pass NeoReadPredicates.resolveFilterAliases(..., MCP) into"
+            + " buildWhereFromFilters, or a filter on a rewritten field matches its raw value.");
+    assertTrue(Pattern.compile("McpQuerySupport\\s*\\.\\s*attachFilterAliases\\s*\\(")
+            .matcher(body).find(),
+        "handleList must attach the applied aliases to the response (filterAliases).");
+  }
+
   private static String listBody() {
     return McpSourceScanner.methodBody(McpSourceScanner.read(ROUTER), "handleList");
   }

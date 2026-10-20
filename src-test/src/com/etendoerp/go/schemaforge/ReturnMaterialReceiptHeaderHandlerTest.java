@@ -28,9 +28,7 @@ import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -75,6 +73,8 @@ import org.openbravo.model.common.invoice.ReversedInvoice;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
 
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
+
 /**
  * Unit tests for {@link ReturnMaterialReceiptHeaderHandler}.
  *
@@ -83,9 +83,7 @@ import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
  *   <li>{@code handle()} — non-ACTION exit, clone delegation, unknown action, wrong method,
  *       documentAction with null/real receiptId (fillMissingStorageBins paths), and
  *       missing required params for each action.</li>
- *   <li>{@code handleImportShipmentLines()} — missing recordId, receipt not found, no lines,
- *       and (ETP-5729 CP-12) the returnable-quantity refusal writing nothing plus
- *       {@code requestedQtyBySourceLine} summing and skipping lines.</li>
+ *   <li>{@code handleImportShipmentLines()} — missing recordId, receipt not found, no lines.</li>
  *   <li>{@code handleAvailableShipments()} — missing businessPartner, SQL empty, SQL with rows.</li>
  *   <li>{@code handleAvailableShipmentLines()} — missing shipmentId, SQL empty, SQL with rows.</li>
  *   <li>{@code handleCreateReturnInvoice()} — missing recordId, receipt not found,
@@ -93,6 +91,8 @@ import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
  *   <li>{@code afterHandle()} — guard conditions, no-id enrichment, SQL empty path,
  *       SQL with rows (addShipmentToMap + addInvoiceToMap), issuerOrg enrichment on a
  *       detail GET (ETP-5124), and outer-catch path.</li>
+ *   <li>{@code actionContracts()} — every declared action is served by {@code handle()}, and the
+ *       contract refuses malformed agent calls while accepting the bodies the flow sends.</li>
  * </ul>
  *
  * @covers com.etendoerp.go.schemaforge.ReturnMaterialReceiptHeaderHandler
@@ -236,6 +236,83 @@ public class ReturnMaterialReceiptHeaderHandlerTest {
     NeoResponse result = handler.handle(ctx);
     assertNotNull(result);
     assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
+  }
+
+  // ── actionContracts() — published to agents, served by handle() ───────────
+
+  /**
+   * Every action published to agents is one {@code handle()} dispatches: a declared action the
+   * handler does not serve would pass the MCP's contract check and then fall through to NEO's
+   * default processing. Called with no record id and no body, each one answers its own 400.
+   */
+  @Test
+  public void testEveryDeclaredActionIsServedByHandle() {
+    Map<String, NeoActionContract> contracts = handler.actionContracts();
+    assertFalse("the return actions are published", contracts.isEmpty());
+    for (String action : contracts.keySet()) {
+      NeoContext ctx = NeoContext.builder()
+          .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+          .fieldName(action).recordId(null).build();
+      NeoResponse result = handler.handle(ctx);
+      if ("documentAction".equals(action)) {
+        assertNull("completion is the native process", result);
+        continue;
+      }
+      assertNotNull(action + " is dispatched by handle()", result);
+      assertEquals(action, HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
+    }
+  }
+
+  /** The return flow ends with the completion button, published for agents (ETP-5711). */
+  @Test
+  public void testActionContractsPublishCompletionLast() {
+    java.util.List<String> names = java.util.List.copyOf(handler.actionContracts().keySet());
+
+    assertEquals("documentAction", names.get(names.size() - 1));
+    assertTrue(handler.actionContracts().get("documentAction").getDescription().contains("DRAFT"));
+  }
+
+  /**
+   * The contract judges an agent's call before the handler runs: malformed bodies are refused with
+   * a 422 naming the problem, and the bodies the return flow actually sends are accepted.
+   */
+  @Test
+  public void testActionContractsJudgeAgentCalls_table() throws Exception {
+    // Columns: the action, the body sent, the key expected inside the error (null when the call
+    // is accepted) and the value that key must mention.
+    Object[][] cases = {
+        { "availableShipments", "{}", "missingParameters", "businessPartner" },
+        { "importShipmentLines", "{\"lines\":\"x\"}", "field", "lines" },
+        { "rectifiableInvoices", "{\"foo\":1}", "unknownParameters", "foo" },
+        { "availableShipments", "{\"businessPartner\":\"X\"}", null, null },
+        { "availableShipmentLines", "{\"shipmentId\":\"X\"}", null, null },
+        { "importShipmentLines",
+            "{\"lines\":[{\"sourceLineId\":\"X\",\"returnQuantity\":1}]}", null, null },
+        { "rectifiableInvoices", "{\"startRow\":0,\"pageSize\":20,\"search\":\"\"}", null,
+            null },
+        { "createReturnInvoice", "{\"originInvoices\":[\"X\"]}", null, null },
+        { "documentAction", "{\"docAction\":\"CO\"}", null, null },
+        { "documentAction", "{\"docAction\":\"VO\"}", "field", "docAction" },
+    };
+    Map<String, NeoActionContract> contracts = handler.actionContracts();
+    for (Object[] c : cases) {
+      String action = (String) c[0];
+      String label = action + " " + c[1];
+      String errorKey = (String) c[2];
+
+      NeoResponse result = NeoActionContract.validate(contracts, action,
+          new JSONObject((String) c[1]));
+
+      if (errorKey == null) {
+        assertNull(label, result);
+      } else {
+        assertNotNull(label, result);
+        assertEquals(label, 422, result.getHttpStatus());
+        JSONObject error = result.getBody().getJSONObject("error");
+        assertTrue(label, error.has(errorKey));
+        assertTrue(label, String.valueOf(error.get(errorKey)).contains((String) c[3]));
+      }
+    }
   }
 
   // ── handleImportShipmentLines — receipt not found and no lines ────────────
@@ -674,8 +751,10 @@ public class ReturnMaterialReceiptHeaderHandlerTest {
       InvoiceLine il = mock(InvoiceLine.class);
       when(handler.createDraftInvoiceHandler.createShipmentInvoiceLine(
           any(), any(), any(), anyLong())).thenReturn(il);
-      // il.getUnitPrice()=null → unitPrice=0; invoice.getPriceList()=null → skip resolvePriceFromPriceList
-      // il.getTax()=null → resolveApplicableTax (NPE caught internally → null); unitPrice=0 → no throw
+      // ETP-5712: a line the price chain leaves at 0 is now refused (422) before anything is
+      // saved, so the success path prices it (il.getUnitPrice()=10) and gives it its tax.
+      when(il.getUnitPrice()).thenReturn(new BigDecimal("10.00"));
+      when(il.getTax()).thenReturn(mock(org.openbravo.model.financialmgmt.tax.TaxRate.class));
 
       // ensureDocumentNo, getSupport().ensureLineGrossAmounts
       InvoiceFromOrderSupport support = mock(InvoiceFromOrderSupport.class);
@@ -731,6 +810,41 @@ public class ReturnMaterialReceiptHeaderHandlerTest {
         Mockito.verify(completion.processInvoiceUtil, Mockito.times(1))
             .process(eq("ret-inv-2"), eq("CO"), anyString(), anyString(), anyString(), any(), any());
         assertNotNull(invoice);
+        Mockito.verify(dal, Mockito.never()).rollbackAndClose();
+      }
+    }
+  }
+
+  /**
+   * ETP-5712: the sales-side return shares {@code createReturnInvoice}; a completion that throws at
+   * runtime is answered 500 and the draft is discarded explicitly, never committed.
+   */
+  @Test
+  @SuppressWarnings({"unchecked", "rawtypes"})
+  public void handleCreateReturnInvoice_completionThrowsAtRuntime_answers500AndRollsBack()
+      throws Exception {
+    try (MockedStatic<OBContext> ignored = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      stubReturnInvoiceQueries(dal, "inv-src-1");
+      mockCreateReturnInvoiceFlow(dal, provider, "ret-inv-6");
+
+      try (CompletionMocks completion = new CompletionMocks(dal, completionSuccess())) {
+        Mockito.when(completion.processInvoiceUtil.process(
+            anyString(), eq("CO"), anyString(), anyString(), anyString(), any(), any()))
+            .thenThrow(new IllegalStateException("hook boom"));
+
+        NeoResponse result = handler.handle(NeoContext.builder()
+            .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+            .fieldName("createReturnInvoice").recordId("rec-1").build());
+
+        assertEquals(500, result.getHttpStatus());
+        Mockito.verify(dal, Mockito.times(1)).rollbackAndClose();
+        Mockito.verify(dal, Mockito.never()).commitAndClose();
       }
     }
   }
@@ -772,6 +886,9 @@ public class ReturnMaterialReceiptHeaderHandlerTest {
       assertNotNull(result);
       assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
       assertEquals(ReturnShipmentUtils.ERR_RECTIFIED_INVOICE_REQUIRED, errorMessage(result));
+      // ETP-5712: the agent must read WHY (nothing was invoiced) and WHAT to do, not a UI hint.
+      assertTrue(errorMessage(result), errorMessage(result).contains("no invoice to rectify"));
+      assertTrue(errorMessage(result), errorMessage(result).contains("originInvoices"));
       Mockito.verify(provider, Mockito.never()).get(Invoice.class);
       Mockito.verify(dal, Mockito.never()).save(any());
     }
@@ -930,6 +1047,194 @@ public class ReturnMaterialReceiptHeaderHandlerTest {
     assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
   }
 
+
+  // ── ETP-5712: discoverability, response shape, duplicates, zero-amount guard ──────
+
+  /**
+   * ETP-5712: confirming a return does NOT create the factura rectificativa, and an agent that
+   * reads only {@code documentAction} must learn that and the call that does. The goods
+   * receipt/shipment keep their own text ({@link InOutCompletionContract#CONTRACT}).
+   */
+  @Test
+  public void testDocumentActionDescriptionSaysConfirmingDoesNotCreateTheRectificativa() {
+    String text = handler.actionContracts().get("documentAction").getDescription();
+
+    assertTrue(text, text.contains("DRAFT"));
+    assertTrue(text, text.contains("createReturnInvoice"));
+    assertTrue(text, text.contains("factura rectificativa"));
+    assertTrue(text, text.contains("does NOT create"));
+    assertFalse("the return text must not be the goods receipt/shipment one",
+        text.contains("createGoodsReceipt"));
+    assertFalse("the shared goods receipt/shipment contract stays untouched",
+        InOutCompletionContract.CONTRACT.getDescription().contains("createReturnInvoice"));
+  }
+
+  /** ETP-5712: the createReturnInvoice description warns about duplicates and lists the response. */
+  @Test
+  public void testCreateReturnInvoiceDescriptionWarnsAboutDuplicatesAndListsTheResponse() {
+    String text = handler.actionContracts().get("createReturnInvoice").getDescription();
+
+    assertTrue(text, text.contains("hasReturnInvoice"));
+    assertTrue(text, text.contains("previousReturnInvoices"));
+    assertTrue(text, text.contains("returnInvoiceWithoutAmount"));
+    assertTrue(text, text.contains("grandTotalAmount"));
+    assertTrue(text, text.contains("factura rectificativa"));
+    String flow = handler.actionContracts().get("availableShipments").getDescription();
+    assertTrue("the FLOW text says the confirmation does not create it: " + flow,
+        flow.contains("does NOT create the factura rectificativa"));
+  }
+
+  /**
+   * ETP-5712: the answer says what was created: document type, direction, amounts READ AFTER the
+   * completion (the DB triggers compute the totals there, so the invoice is refreshed first), the
+   * return it is linked to, the invoices it rectifies, and the rectificativas the return already
+   * had before this call.
+   */
+  @SuppressWarnings({"unchecked", "rawtypes"})
+  @Test
+  public void handleCreateReturnInvoice_responseCarriesTypeAmountsAndLinkage() throws Exception {
+    try (MockedStatic<OBContext> ignored = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      stubReturnInvoiceQueries(dal, "inv-src-1");
+      mockCreateReturnInvoiceFlow(dal, provider, "ret-inv-1");
+      ShipmentInOut receipt = dal.get(ShipmentInOut.class, "rec-1");
+      when(receipt.getId()).thenReturn("rec-1");
+      when(receipt.getDocumentNo()).thenReturn("RMR-0001");
+      Invoice origin = mock(Invoice.class);
+      when(origin.getDocumentNo()).thenReturn("FV-0042");
+      when(dal.get(eq(Invoice.class), eq("inv-src-1"))).thenReturn(origin);
+
+      try (CompletionMocks completion = new CompletionMocks(dal, completionSuccess())) {
+        Invoice completed = mockCompletedInvoice(dal, "ret-inv-1", "REC-1000001", "CO");
+        DocumentType type = mock(DocumentType.class);
+        when(type.getName()).thenReturn("Factura rectificativa de venta");
+        when(completed.getDocumentType()).thenReturn(type);
+        when(completed.isSalesTransaction()).thenReturn(true);
+        when(completed.getGrandTotalAmount()).thenReturn(new BigDecimal("-60.50"));
+        when(completed.getSummedLineAmount()).thenReturn(new BigDecimal("-50.00"));
+
+        NeoResponse result = handler.handle(NeoContext.builder()
+            .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+            .fieldName("createReturnInvoice").recordId("rec-1").build());
+
+        assertEquals(200, result.getHttpStatus());
+        JSONObject data = result.getBody().getJSONObject("response").getJSONObject("data");
+        assertEquals("ret-inv-1", data.getString("id"));
+        assertEquals("REC-1000001", data.getString("documentNo"));
+        assertEquals("CO", data.getString("documentStatus"));
+        assertEquals("Factura rectificativa de venta", data.getString("documentType"));
+        assertTrue(data.getBoolean("isSalesTransaction"));
+        assertEquals(-60.50, data.getDouble("grandTotalAmount"), 0.001);
+        assertEquals(-50.00, data.getDouble("totalLines"), 0.001);
+        assertEquals("rec-1", data.getString("linkedReturnId"));
+        assertEquals("RMR-0001", data.getString("returnDocumentNo"));
+        JSONArray rectified = data.getJSONArray("rectifiedInvoices");
+        assertEquals(1, rectified.length());
+        assertEquals("inv-src-1", rectified.getJSONObject(0).getString("id"));
+        assertEquals("FV-0042", rectified.getJSONObject(0).getString("documentNo"));
+        assertEquals(0, data.getJSONArray("previousReturnInvoices").length());
+
+        org.mockito.InOrder order = Mockito.inOrder(completion.processInvoiceUtil, dal);
+        order.verify(completion.processInvoiceUtil)
+            .process(eq("ret-inv-1"), eq("CO"), anyString(), anyString(), anyString(), any(), any());
+        order.verify(dal).refresh(completed);
+      }
+    }
+  }
+
+  /**
+   * ETP-5712: a second rectificative on the same return is ALLOWED (ETP-5381 removed the guard on
+   * purpose) but reported: the answer lists the non-voided ones the return already had BEFORE this
+   * call, so the agent sees it duplicated.
+   */
+  @SuppressWarnings({"unchecked", "rawtypes"})
+  @Test
+  public void handleCreateReturnInvoice_secondCallIsAllowedAndListsPreviousReturnInvoices()
+      throws Exception {
+    try (MockedStatic<OBContext> ignored = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      stubReturnInvoiceQueries(dal, true, java.util.Arrays.asList("inv-src-1"),
+          java.util.Arrays.asList("inv-src-1"),
+          Collections.singletonList(new String[] {"prev-inv-1", "REC-OLD", "CO", "rec-1"}));
+      mockCreateReturnInvoiceFlow(dal, provider, "ret-inv-2");
+
+      try (CompletionMocks completion = new CompletionMocks(dal, completionSuccess())) {
+        mockCompletedInvoice(dal, "ret-inv-2", "REC-NEW", "CO");
+
+        NeoResponse result = handler.handle(NeoContext.builder()
+            .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+            .fieldName("createReturnInvoice").recordId("rec-1").build());
+
+        assertEquals("a duplicate is allowed", 200, result.getHttpStatus());
+        JSONObject data = result.getBody().getJSONObject("response").getJSONObject("data");
+        assertEquals("REC-NEW", data.getString("documentNo"));
+        JSONArray previous = data.getJSONArray("previousReturnInvoices");
+        assertEquals(1, previous.length());
+        assertEquals("prev-inv-1", previous.getJSONObject(0).getString("id"));
+        assertEquals("REC-OLD", previous.getJSONObject(0).getString("documentNo"));
+        assertEquals("CO", previous.getJSONObject(0).getString("documentStatus"));
+        Mockito.verify(completion.processInvoiceUtil, Mockito.times(1))
+            .process(eq("ret-inv-2"), eq("CO"), anyString(), anyString(), anyString(), any(), any());
+      }
+    }
+  }
+
+  /**
+   * ETP-5712: a product whose price cannot be resolved (no order/invoice line price, no source
+   * invoice line, no price-list entry) must not become a confirmed rectificativa of 0: 422, and
+   * NOTHING is persisted or completed.
+   */
+  @SuppressWarnings({"unchecked", "rawtypes"})
+  @Test
+  public void handleCreateReturnInvoice_productWithoutPriceIsRefusedWith422AndPersistsNothing()
+      throws Exception {
+    try (MockedStatic<OBContext> ignored = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      stubReturnInvoiceQueries(dal, "inv-src-1");
+      mockCreateReturnInvoiceFlow(dal, provider, "ret-inv-3");
+      ShipmentInOut receipt = dal.get(ShipmentInOut.class, "rec-1");
+      Product agua = receipt.getMaterialMgmtShipmentInOutLineList().get(0).getProduct();
+      when(agua.getName()).thenReturn("Agua");
+      InvoiceLine unpriced = mock(InvoiceLine.class);
+      when(unpriced.getUnitPrice()).thenReturn(BigDecimal.ZERO);
+      when(handler.createDraftInvoiceHandler.createShipmentInvoiceLine(
+          any(), any(), any(), anyLong())).thenReturn(unpriced);
+
+      try (CompletionMocks completion = new CompletionMocks(dal, completionSuccess())) {
+        NeoResponse result = handler.handle(NeoContext.builder()
+            .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+            .fieldName("createReturnInvoice").recordId("rec-1").build());
+
+        assertEquals(422, result.getHttpStatus());
+        JSONObject error = result.getBody().getJSONObject("error");
+        assertEquals("returnInvoiceWithoutAmount", error.getString("code"));
+        assertEquals(422, error.getInt("status"));
+        assertTrue(error.getString("message"), error.getString("message").contains("Agua"));
+        assertEquals("Agua", error.getJSONArray("products").getString(0));
+        Mockito.verify(dal, Mockito.never()).save(any());
+        Mockito.verify(dal, Mockito.never()).flush();
+        Mockito.verify(provider, Mockito.never()).get(ReversedInvoice.class);
+        Mockito.verify(completion.processInvoiceUtil, Mockito.never())
+            .process(anyString(), anyString(), anyString(), anyString(), anyString(), any(), any());
+      }
+    }
+  }
+
   // ── shared stubs for the createReturnInvoice happy path ───────────────────
 
   /**
@@ -977,6 +1282,9 @@ public class ReturnMaterialReceiptHeaderHandlerTest {
     when(provider.get(eq(Invoice.class))).thenReturn(invoice);
 
     InvoiceLine il = mock(InvoiceLine.class);
+    // ETP-5712: a line the price chain cannot price is refused, so the happy path has a price.
+    when(il.getUnitPrice()).thenReturn(new BigDecimal("10.00"));
+    when(il.getTax()).thenReturn(mock(org.openbravo.model.financialmgmt.tax.TaxRate.class));
     when(handler.createDraftInvoiceHandler.createShipmentInvoiceLine(
         any(), any(), any(), anyLong())).thenReturn(il);
     InvoiceFromOrderSupport support = mock(InvoiceFromOrderSupport.class);
@@ -1315,17 +1623,15 @@ public class ReturnMaterialReceiptHeaderHandlerTest {
   // ── handleImportShipmentLines — import loop path ──────────────────────────
 
   /**
-   * A line within what is still returnable is imported. The returnable-quantity check
-   * (ETP-5729 CP-12) is stubbed to pass — its SQL is {@code ReturnableQuantityGuardTest}'s; the
-   * shared statement mock below only serves {@code fetchMaxLineNo}.
+   * Runs importShipmentLines against a shipment line of {@code shipped} units, {@code returned} of
+   * them already on other (non-voided) returns, and answers the response; the return lines built
+   * are reported through {@code saved}.
    */
-  @Test
-  public void testHandleImportShipmentLinesImportsOneLine() throws Exception {
+  private NeoResponse importShipmentLines(String shipped, String returned, JSONArray lines,
+      java.util.List<ShipmentInOutLine> saved) throws Exception {
     try (MockedStatic<OBContext> ignored = Mockito.mockStatic(OBContext.class);
          MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
-         MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class);
-         MockedStatic<ReturnableQuantityGuard> guard =
-             Mockito.mockStatic(ReturnableQuantityGuard.class)) {
+         MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
       OBDal dal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(dal);
       OBProvider provider = mock(OBProvider.class);
@@ -1333,92 +1639,87 @@ public class ReturnMaterialReceiptHeaderHandlerTest {
 
       ShipmentInOut receipt = mock(ShipmentInOut.class);
       when(dal.get(ShipmentInOut.class, "rec-1")).thenReturn(receipt);
+      ReturnedQuantityTestSupport.stubReturnedQuantities(dal, 10L,
+          (src, excl) -> new BigDecimal(returned));
 
-      Connection conn = mock(Connection.class);
-      when(dal.getConnection()).thenReturn(conn);
-      PreparedStatement ps = mock(PreparedStatement.class);
-      when(conn.prepareStatement(anyString())).thenReturn(ps);
-      ResultSet rs = mock(ResultSet.class);
-      when(ps.executeQuery()).thenReturn(rs);
-      when(rs.next()).thenReturn(true);
-      when(rs.getLong(1)).thenReturn(10L); // fetchMaxLineNo → nextLineNo = 20
-
-      ShipmentInOutLine sourceLine = mock(ShipmentInOutLine.class);
+      ShipmentInOutLine sourceLine =
+          ReturnedQuantityTestSupport.sourceLine("src-1", "Agua", shipped);
       when(dal.get(ShipmentInOutLine.class, "src-1")).thenReturn(sourceLine);
-      when(sourceLine.getProduct()).thenReturn(mock(Product.class));
       when(sourceLine.getStorageBin()).thenReturn(null);
 
-      ShipmentInOutLine newLine = mock(ShipmentInOutLine.class);
-      when(provider.get(ShipmentInOutLine.class)).thenReturn(newLine);
+      when(provider.get(ShipmentInOutLine.class)).thenAnswer(inv -> {
+        ShipmentInOutLine newLine = mock(ShipmentInOutLine.class);
+        saved.add(newLine);
+        return newLine;
+      });
 
-      JSONObject lineReq = new JSONObject().put("sourceLineId", "src-1").put("returnQuantity", 2.0);
-      JSONObject reqBody = new JSONObject().put("lines", new JSONArray().put(lineReq));
       NeoContext ctx = NeoContext.builder()
           .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
-          .fieldName("importShipmentLines").recordId("rec-1").requestBody(reqBody).build();
-      NeoResponse result = handler.handle(ctx);
-
-      assertNotNull(result);
-      assertEquals(200, result.getHttpStatus());
-      assertEquals(1, result.getBody()
-          .getJSONObject("response").getJSONObject("data").getInt("importedCount"));
-      guard.verify(() -> ReturnableQuantityGuard.refuseIfExceeded(
-          argThat(m -> m.size() == 1 && m.get("src-1").compareTo(new BigDecimal("2")) == 0),
-          isNull()));
+          .fieldName("importShipmentLines").recordId("rec-1")
+          .requestBody(new JSONObject().put("lines", lines)).build();
+      return handler.handle(ctx);
     }
   }
 
-  /**
-   * An import the guard refuses answers its 409 as is, and writes nothing: no source line is
-   * loaded, no line saved, nothing flushed.
-   */
-  @Test
-  public void testHandleImportShipmentLinesRefusedByTheGuardWritesNoLine() throws Exception {
-    NeoResponse refusal = NeoResponse.error(HttpServletResponse.SC_CONFLICT, "over-return");
-    try (MockedStatic<OBContext> ignored = Mockito.mockStatic(OBContext.class);
-         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
-         MockedStatic<ReturnableQuantityGuard> guard =
-             Mockito.mockStatic(ReturnableQuantityGuard.class)) {
-      OBDal dal = mock(OBDal.class);
-      ShipmentInOut receipt = mock(ShipmentInOut.class);
-      dalMock.when(OBDal::getInstance).thenReturn(dal);
-      when(dal.get(ShipmentInOut.class, "rec-1")).thenReturn(receipt);
-      guard.when(() -> ReturnableQuantityGuard.refuseIfExceeded(any(), any())).thenReturn(refusal);
-
-      JSONObject reqBody = new JSONObject().put("lines", new JSONArray()
-          .put(new JSONObject().put("sourceLineId", "src-1").put("returnQuantity", 9)));
-      NeoContext ctx = NeoContext.builder()
-          .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
-          .fieldName("importShipmentLines").recordId("rec-1").requestBody(reqBody).build();
-
-      assertSame(refusal, handler.handle(ctx));
-      Mockito.verify(dal, Mockito.never()).get(eq(ShipmentInOutLine.class), anyString());
-      Mockito.verify(dal, Mockito.never()).save(any());
-      Mockito.verify(dal, Mockito.never()).flush();
-      Mockito.verify(dal, Mockito.never()).getConnection();
-    }
+  private static JSONObject shipmentEntry(String quantity) throws Exception {
+    return new JSONObject().put("sourceLineId", "src-1").put("returnQuantity", quantity);
   }
 
-  /**
-   * What the guard is asked about is exactly what the import loop would write: a source line
-   * listed twice counts twice, and a line without a source id or with a quantity that is not
-   * positive (zero, negative, missing) is skipped.
-   */
   @Test
-  public void testRequestedQtyBySourceLineSumsDuplicatesAndSkipsUnusableLines() throws Exception {
-    JSONArray lines = new JSONArray()
-        .put(new JSONObject().put("sourceLineId", "src-1").put("returnQuantity", 2))
-        .put(new JSONObject().put("sourceLineId", "src-1").put("returnQuantity", 1.5))
-        .put(new JSONObject().put("sourceLineId", "src-2").put("returnQuantity", 0))
-        .put(new JSONObject().put("sourceLineId", "src-3").put("returnQuantity", -1))
-        .put(new JSONObject().put("sourceLineId", "src-4"))
-        .put(new JSONObject().put("returnQuantity", 4));
+  public void testHandleImportShipmentLinesImportsOneLine() throws Exception {
+    java.util.List<ShipmentInOutLine> saved = new java.util.ArrayList<>();
 
-    Map<String, BigDecimal> requested =
-        ReturnMaterialReceiptHeaderHandler.requestedQtyBySourceLine(lines);
+    NeoResponse result = importShipmentLines("5", "0",
+        new JSONArray().put(shipmentEntry("2.0")), saved);
 
-    assertEquals(Collections.singleton("src-1"), requested.keySet());
-    assertEquals(0, new BigDecimal("3.5").compareTo(requested.get("src-1")));
+    assertNotNull(result);
+    assertEquals(200, result.getHttpStatus());
+    assertEquals(1, result.getBody()
+        .getJSONObject("response").getJSONObject("data").getInt("importedCount"));
+    assertEquals(1, saved.size());
+  }
+
+  /** Over-return on import: a 422 naming product, requested and available; nothing is created. */
+  @Test
+  public void testHandleImportShipmentLinesOverReturnIsRefusedAndNothingCreated() throws Exception {
+    java.util.List<ShipmentInOutLine> saved = new java.util.ArrayList<>();
+
+    NeoResponse result = importShipmentLines("10", "6",
+        new JSONArray().put(shipmentEntry("5")), saved);
+
+    assertEquals(422, result.getHttpStatus());
+    JSONObject error = result.getBody().getJSONObject("error");
+    assertEquals("returnQuantityExceedsAvailable", error.getString("code"));
+    assertTrue(error.getString("message"), error.getString("message").contains("Agua"));
+    assertEquals(5, error.getDouble("requested"), 0.0001);
+    assertEquals(4, error.getDouble("available"), 0.0001);
+    assertTrue("a refused import creates no line", saved.isEmpty());
+  }
+
+  /** A second partial return with what is left of the line works. */
+  @Test
+  public void testHandleImportShipmentLinesSecondPartialWithinRemainingIsAccepted()
+      throws Exception {
+    java.util.List<ShipmentInOutLine> saved = new java.util.ArrayList<>();
+
+    NeoResponse result = importShipmentLines("10", "6",
+        new JSONArray().put(shipmentEntry("4")), saved);
+
+    assertEquals(200, result.getHttpStatus());
+    assertEquals(1, saved.size());
+  }
+
+  /** The same source line twice in one request accumulates: 3 + 3 against 5 is refused. */
+  @Test
+  public void testHandleImportShipmentLinesDuplicateSourceLinesAccumulate() throws Exception {
+    java.util.List<ShipmentInOutLine> saved = new java.util.ArrayList<>();
+
+    NeoResponse result = importShipmentLines("5", "0",
+        new JSONArray().put(shipmentEntry("3")).put(shipmentEntry("3")), saved);
+
+    assertEquals(422, result.getHttpStatus());
+    assertEquals(6, result.getBody().getJSONObject("error").getDouble("requested"), 0.0001);
+    assertTrue(saved.isEmpty());
   }
 
   // ── fillMissingStorageBins — loop body paths ──────────────────────────────

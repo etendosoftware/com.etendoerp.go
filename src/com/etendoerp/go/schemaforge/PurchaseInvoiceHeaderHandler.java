@@ -103,6 +103,12 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
   @Inject
   private CurrencyOptionsHandler currencyOptionsHandler;
 
+  @Inject
+  private ImportOrderLinesIntoInvoiceHandler importOrderLinesHandler;
+
+  @Inject
+  private ImportInOutLinesIntoInvoiceHandler importReceiptLinesHandler;
+
   /** Package-private seam so unit tests can inject a mocked {@link DocumentPostingService}. */
   void setPostingService(DocumentPostingService postingService) {
     this.postingService = postingService;
@@ -111,8 +117,8 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
   /**
    * The actions this header serves through its delegates, declared for agents (ETP-5558): the
    * invoice payment actions, {@code currencyOptions}, the follow-up document actions
-   * ({@link FollowUpSupport#actionContracts()}, ETP-5576) and {@code post} / {@code unpost}
-   * (ETP-5692). Published by the MCP next to the AD
+   * ({@link FollowUpSupport#actionContracts()}, ETP-5576), {@code post} / {@code unpost}
+   * (ETP-5692) and {@code cloneRecord} (ETP-5709). Published by the MCP next to the AD
    * buttons; REST and the SPA do not read it.
    */
   @Override
@@ -124,6 +130,11 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
     // ETP-5692: post / unpost were served (DocumentPostingService) but undeclared, so an agent
     // had to guess them; the raw `posted` AD button is hidden by MCP_CONFIG in their favour.
     contracts.putAll(InvoicePostingGate.CONTRACTS);
+    // ETP-5709: cloneRecord was served (see handle) but undeclared.
+    contracts.put(NeoCloneRecordHandler.CONTRACT.getName(), NeoCloneRecordHandler.CONTRACT);
+    // ETP-5713: import the pending lines of a completed order / goods receipt into this draft.
+    contracts.putAll(ImportOrderLinesIntoInvoiceHandler.contracts(false));
+    contracts.putAll(ImportInOutLinesIntoInvoiceHandler.contracts(false));
     return contracts;
   }
 
@@ -156,6 +167,9 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
       return invoiceGuard;
     }
     NeoHandlerUtils.mirrorAccountingDateOnCreate(context, "invoiceDate", "accountingDate");
+    // ETP-5703: server-side defaults for a write that leaves them out (an agent; the SPA sends both).
+    injectPartnerAddressIfMissing(context);
+    currencyRateDefaults.capture(context);
     captureOriginInvoice(context);
     NeoResponse siiAuthError = captureAndValidateSiiAuthorization(context);
     if (siiAuthError != null) {
@@ -169,6 +183,12 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
     // commitment; a receipt — especially an unconfirmed one — is not. See
     // AbstractInvoiceHeaderHandler's "removed" note for the full rationale. Over-invoicing relative
     // to the ORDER is still rejected, by the core, in C_INVOICE_POST (@QtyInvoicedHigherOrdered@).
+    // ETP-5710: refuse to complete an invoice with a line that kept a net amount of 0 next to a
+    // quantity and a price — before the discount is recalculated and before the document action runs.
+    NeoResponse unpricedLines = InvoiceCompletionLineGuard.refuseIfLinesHaveNoAmount(context);
+    if (unpricedLines != null) {
+      return unpricedLines;
+    }
     // Must run BEFORE completeInvoiceIfNeeded: the discount line has to reflect the final set of
     // product lines before ProcessInvoiceUtil.process() completes/posts the document (ETP-4388).
     AbstractOrderHeaderHandler.applyTotalDiscountBeforeComplete(context, totalDiscountService, true);
@@ -182,6 +202,12 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
         return lockError;
       }
     }
+    // ETP-5745: refuse reactivation of a fiscally-accepted invoice already rectified by a
+    // completed rectificativa.
+    NeoResponse reactivationGuard = InvoiceReactivationGuard.checkReactivation(context);
+    if (reactivationGuard != null) {
+      return reactivationGuard;
+    }
     return NeoHeaderActionRouter.dispatch(
         context,
         currencyOptionsHandler,
@@ -189,6 +215,8 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
         registerPaymentOutHandler,
         siiSendHandler,
         tbaiXmlgeneratorHandler,
+        importOrderLinesHandler,
+        importReceiptLinesHandler,
         followUp.actionHandler());
   }
 
@@ -226,6 +254,8 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
    */
   @Override
   public NeoResponse afterHandle(NeoContext context) {
+    // ETP-5703: before the rate-document sync, which is a no-op while the rate is null.
+    currencyRateDefaults.apply(context);
     autoCreateOrUpdateConversionRateDocument(context);
     try {
       // POST/PUT/PATCH: persist origin invoice relationship after the record is saved.
@@ -264,6 +294,7 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
         enrichHasRectifications(rec, context.getRecordId());
         InvoiceExemptTaxes.enrich(rec, context.getRecordId());
         SifSubRecordAttachments.enrich(rec, context.getRecordId());
+        InvoiceReactivationGuard.enrichReactivationBlock(rec, context.getRecordId());
       }
       return NeoResponse.ok(body);
     } catch (Exception e) {

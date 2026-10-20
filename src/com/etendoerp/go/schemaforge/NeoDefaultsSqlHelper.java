@@ -105,9 +105,15 @@ final class NeoDefaultsSqlHelper {
         missingParentToken = bindSqlDefaultParams(ps, params, vars, conn, windowId, parentValues,
             parentIdProvided);
 
+        // ETP-5682: an FK default must not resolve to another tenant's row. When the guard
+        // applies, read the candidate rows and keep the first one of this client (or of
+        // client 0); when every row is foreign, report it as zero rows.
+        NeoDefaultTenantGuard guard = NeoDefaultTenantGuard.forColumn(adColumn,
+            vars != null ? vars.getClient() : null);
         try (ResultSet rs = ps.executeQuery()) {
-          if (rs.next()) {
-            return SqlDefaultOutcome.resolved(rs.getString(1));
+          SqlDefaultOutcome fromRows = outcomeFromRows(rs, guard);
+          if (fromRows != null) {
+            return fromRows;
           }
         }
       }
@@ -121,6 +127,28 @@ final class NeoDefaultsSqlHelper {
           adColumn != null ? adColumn.getDBColumnName() : "<auxiliary-input>", e.getMessage());
       return SqlDefaultOutcome.unresolved();
     }
+  }
+
+  /**
+   * The outcome carried by the query's rows, or {@code null} when it returned none. Without a
+   * tenant guard only the first row counts, as before; with one, the rows are scanned until the
+   * first row of this client (or of client 0), and rows that all belong to other tenants count
+   * as zero rows. With a guard, rows whose value is {@code null} also count as zero rows (no
+   * guard: a resolved {@code null}); the default is empty either way, only the
+   * {@code metadata.notes} differ.
+   */
+  private static SqlDefaultOutcome outcomeFromRows(ResultSet rs, NeoDefaultTenantGuard guard)
+      throws SQLException {
+    if (guard == null) {
+      return rs.next() ? SqlDefaultOutcome.resolved(rs.getString(1)) : null;
+    }
+    NeoDefaultTenantGuard.Scan scan = guard.scan(rs);
+    if (!scan.anyRow) {
+      return null;
+    }
+    return scan.value != null
+        ? SqlDefaultOutcome.resolved(scan.value)
+        : SqlDefaultOutcome.zeroRows();
   }
 
   /**

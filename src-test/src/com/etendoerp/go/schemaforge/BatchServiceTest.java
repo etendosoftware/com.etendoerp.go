@@ -19,23 +19,45 @@ package com.etendoerp.go.schemaforge;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
+import static org.junit.Assert.fail;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.junit.After;
 import org.junit.Test;
 import org.mockito.MockedStatic;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.ui.Tab;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
+import com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy;
 
 /**
  * Tests for {@link BatchService}.
@@ -238,9 +260,15 @@ public class BatchServiceTest {
     when(criteria.list()).thenReturn(java.util.List.of(entity));
 
     try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
-         MockedStatic<NeoServletSupport> supportMock = mockStatic(NeoServletSupport.class)) {
+         MockedStatic<NeoServletSupport> supportMock = mockStatic(NeoServletSupport.class);
+         MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class);
+         MockedStatic<NeoAccountingAccessPolicy> acctMock =
+             mockStatic(NeoAccountingAccessPolicy.class)) {
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
       supportMock.when(() -> NeoServletSupport.findSpec("monitor-verifactu")).thenReturn(spec);
+      accessMock.when(() -> NeoAccessHelper.hasWindowAccessForSpec(spec, "POST")).thenReturn(true);
+      acctMock.when(() -> NeoAccountingAccessPolicy.isEntityNameAllowed(spec, "header"))
+          .thenReturn(true);
 
       JSONObject result = service.executeBatch(ops);
 
@@ -253,6 +281,280 @@ public class BatchServiceTest {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // ETP-5676: the per-request NeoBatchScope and the _onlyReturnIds option
+  // ---------------------------------------------------------------------------
+
+  private static final String SCOPE_SPEC = "product";
+
+  /** A failed assertion must not leave a scope on the pooled test thread for the next test. */
+  @After
+  public void clearLeakedScope() {
+    while (NeoBatchScope.current() != null) {
+      NeoBatchScope.close(null);
+    }
+  }
+
+  /** {@code count} create operations on {@link #SCOPE_SPEC}. */
+  private static JSONArray productOps(int count) throws Exception {
+    JSONArray ops = new JSONArray();
+    for (int i = 0; i < count; i++) {
+      ops.put(new JSONObject().put("id", "op" + i).put("spec", SCOPE_SPEC)
+          .put("entity", "product").put("body", new JSONObject().put("name", "P" + i)));
+    }
+    return ops;
+  }
+
+  /** A writable entity behind {@link #SCOPE_SPEC}, found through the mocked criteria. */
+  @SuppressWarnings("unchecked")
+  private static OBCriteria<SFEntity> stubWritableEntity(OBDal obDal,
+      MockedStatic<NeoServletSupport> support, MockedStatic<NeoAccessHelper> access,
+      MockedStatic<NeoAccountingAccessPolicy> acct) {
+    SFSpec spec = mock(SFSpec.class);
+    when(spec.getId()).thenReturn("spec-product");
+    when(spec.getName()).thenReturn(SCOPE_SPEC);
+    support.when(() -> NeoServletSupport.findSpec(SCOPE_SPEC)).thenReturn(spec);
+    // ETP-5648/ETP-5772: createRecord's access gates must let this test's writes through.
+    access.when(() -> NeoAccessHelper.hasWindowAccessForSpec(any(), any())).thenReturn(true);
+    acct.when(() -> NeoAccountingAccessPolicy.isEntityNameAllowed(any(), any())).thenReturn(true);
+    SFEntity entity = mock(SFEntity.class);
+    when(entity.isPost()).thenReturn(true);
+    when(entity.getADTab()).thenReturn(mock(Tab.class));
+    OBCriteria<SFEntity> criteria = mock(OBCriteria.class);
+    when(obDal.createCriteria(SFEntity.class)).thenReturn(criteria);
+    when(criteria.list()).thenReturn(Collections.singletonList(entity));
+    return criteria;
+  }
+
+  /** Every write answers 201 with a fresh id; the contexts it saw are collected. */
+  private static void answerCreated(MockedStatic<NeoServletSupport> support,
+      List<NeoContext> seen) {
+    support.when(() -> NeoServletSupport.handleWithHooks(any(), any(NeoContext.class), any(),
+        any())).thenAnswer(invocation -> {
+          NeoContext ctx = invocation.getArgument(1);
+          seen.add(ctx);
+          assertNotNull("the write runs inside the batch scope", NeoBatchScope.current());
+          JSONObject row = new JSONObject().put("id", "rec-" + seen.size());
+          return new NeoResponse(201, new JSONObject().put("response",
+              new JSONObject().put("data", new JSONArray().put(row))));
+        });
+  }
+
+  /**
+   * The option reaches every operation's write context, and the scope that carries it is gone
+   * once the batch returns. The one- and two-argument overloads keep it off.
+   */
+  @Test
+  public void executeBatchHandsTheOnlyReturnIdsOptionToEveryWrite() throws Exception {
+    for (Boolean option : new Boolean[] { Boolean.TRUE, Boolean.FALSE, null }) {
+      OBDal obDal = mock(OBDal.class);
+      List<NeoContext> seen = new ArrayList<>();
+      try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+           MockedStatic<NeoServletSupport> support = mockStatic(NeoServletSupport.class);
+           MockedStatic<NeoAccessHelper> access = mockStatic(NeoAccessHelper.class);
+           MockedStatic<NeoAccountingAccessPolicy> acct =
+               mockStatic(NeoAccountingAccessPolicy.class)) {
+        dalMock.when(OBDal::getInstance).thenReturn(obDal);
+        stubWritableEntity(obDal, support, access, acct);
+        answerCreated(support, seen);
+
+        BatchService service = BatchService.forBatchOnly();
+        JSONObject result = option == null
+            ? service.executeBatch(productOps(2), null)
+            : service.executeBatch(productOps(2), null, option);
+
+        assertTrue(result.getBoolean("committed"));
+        assertEquals(2, seen.size());
+        boolean expected = Boolean.TRUE.equals(option);
+        for (NeoContext ctx : seen) {
+          assertEquals("option " + option, expected, ctx.isIdsOnlyResponse());
+        }
+        assertEquals("the response shape does not depend on the option", 2,
+            result.getJSONArray("operations").length());
+        assertEquals("rec-1", result.getJSONArray("operations").getJSONObject(0)
+            .getString("recordId"));
+        assertNull("the scope dies with the request", NeoBatchScope.current());
+      }
+    }
+  }
+
+  /**
+   * Spec and entity are looked up once per batch, and a second batch on the same thread looks
+   * them up again: nothing a request memoized survives into the next one.
+   */
+  @Test
+  public void executeBatchMemoizesLookupsPerRequestOnly() throws Exception {
+    OBDal obDal = mock(OBDal.class);
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<NeoServletSupport> support = mockStatic(NeoServletSupport.class);
+         MockedStatic<NeoAccessHelper> access = mockStatic(NeoAccessHelper.class);
+         MockedStatic<NeoAccountingAccessPolicy> acct =
+             mockStatic(NeoAccountingAccessPolicy.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      OBCriteria<SFEntity> criteria = stubWritableEntity(obDal, support, access, acct);
+      answerCreated(support, new ArrayList<>());
+      BatchService service = BatchService.forBatchOnly();
+
+      assertTrue(service.executeBatch(productOps(3), null, true).getBoolean("committed"));
+      support.verify(() -> NeoServletSupport.findSpec(SCOPE_SPEC), times(1));
+      verify(criteria, times(1)).list();
+
+      assertTrue(service.executeBatch(productOps(3), null, true).getBoolean("committed"));
+      support.verify(() -> NeoServletSupport.findSpec(SCOPE_SPEC), times(2));
+      verify(criteria, times(2)).list();
+    }
+  }
+
+  /** A failure inside the loop still closes the scope: the next request starts clean. */
+  @Test
+  public void executeBatchClosesTheScopeWhenAnOperationThrows() throws Exception {
+    OBDal obDal = mock(OBDal.class);
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<NeoServletSupport> support = mockStatic(NeoServletSupport.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      support.when(() -> NeoServletSupport.findSpec(SCOPE_SPEC))
+          .thenThrow(new IllegalStateException("lookup failed"));
+
+      JSONObject result = BatchService.forBatchOnly().executeBatch(productOps(1), null, true);
+
+      assertFalse(result.getBoolean("committed"));
+      assertEquals(500, result.getJSONObject("error").getInt("status"));
+      assertNull(NeoBatchScope.current());
+    }
+  }
+
+  /** Even an Error that escapes executeBatch leaves no scope behind on the pooled thread. */
+  @Test
+  public void executeBatchClosesTheScopeWhenAnErrorEscapes() throws Exception {
+    OBDal obDal = mock(OBDal.class);
+    doThrow(new AssertionError("commit blew up")).when(obDal).commitAndClose();
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+
+      try {
+        BatchService.forBatchOnly().executeBatch(new JSONArray(), null, true);
+        fail("the Error must escape executeBatch");
+      } catch (AssertionError expected) {
+        assertEquals("commit blew up", expected.getMessage());
+      }
+
+      assertNull(NeoBatchScope.current());
+    }
+  }
+
+  /**
+   * Review W1: closing the scope is not allowed to strand the transaction claim. If it throws, the
+   * next request on the pooled thread must still get core's self-committing write path.
+   */
+  @Test
+  public void executeBatchReleasesTheTransactionClaimWhenClosingTheScopeThrows() throws Exception {
+    OBDal obDal = mock(OBDal.class);
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<NeoBatchScope> scopeMock =
+             mockStatic(NeoBatchScope.class, org.mockito.Mockito.CALLS_REAL_METHODS)) {
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      scopeMock.when(() -> NeoBatchScope.close(any())).thenThrow(new IllegalStateException("close"));
+
+      try {
+        BatchService.forBatchOnly().executeBatch(new JSONArray(), null, true);
+        fail("the close failure escapes executeBatch");
+      } catch (IllegalStateException expected) {
+        assertEquals("close", expected.getMessage());
+      }
+
+      // Read off the field: currentJsonService() would build core's service, which needs a
+      // servlet context this unit test does not have.
+      java.lang.reflect.Field claim =
+          BatchService.class.getDeclaredField("CALLER_OWNS_TRANSACTION");
+      claim.setAccessible(true);
+      assertNull("the claim must not survive the request", ((ThreadLocal<?>) claim.get(null)).get());
+    }
+  }
+
+  /** A scope already open on the thread is put back when the batch closes its own. */
+  @Test
+  public void executeBatchRestoresAScopeThatWasAlreadyOpen() throws Exception {
+    OBDal obDal = mock(OBDal.class);
+    NeoBatchScope previous = NeoBatchScope.open(true);
+    NeoBatchScope outer = NeoBatchScope.current();
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+
+      assertTrue(BatchService.forBatchOnly().executeBatch(new JSONArray(), null, false)
+          .getBoolean("committed"));
+
+      assertSame(outer, NeoBatchScope.current());
+    } finally {
+      NeoBatchScope.close(previous);
+    }
+  }
+
+  /** The REST body options are read from the top level of the body and default to false. */
+  @Test
+  public void handleReadsTheBatchOptionsFromTheRestBody() throws Exception {
+    String[] bodies = {
+        "{\"operations\":[{\"id\":\"a\"}]}",
+        "{\"operations\":[{\"id\":\"a\"}],\"_onlyReturnIds\":true}",
+        "{\"operations\":[{\"id\":\"a\"}],\"_onlyReturnIds\":false}",
+        "{\"operations\":[{\"id\":\"a\"}],\"_skipRedundantCallouts\":true}" };
+    boolean[] expectedIds = { false, true, false, false };
+    boolean[] expectedSkip = { false, false, false, true };
+    for (int i = 0; i < bodies.length; i++) {
+      NeoServlet servlet = mock(NeoServlet.class);
+      BatchService service = spy(new BatchService(servlet));
+      JSONObject committed = new JSONObject().put("committed", true);
+      doReturn(committed).when(service).executeBatch(any(), isNull(), anyBoolean(), anyBoolean());
+      try (MockedStatic<NeoRequestBodyParser> parser = mockStatic(NeoRequestBodyParser.class)) {
+        String body = bodies[i];
+        parser.when(() -> NeoRequestBodyParser.readRequestBody(any())).thenReturn(body);
+
+        service.handle(mock(HttpServletRequest.class), mock(HttpServletResponse.class));
+      }
+      verify(service).executeBatch(any(), isNull(), eq(expectedIds[i]), eq(expectedSkip[i]));
+    }
+  }
+
+  /** ETP-5772: REST /batch runs under admin mode, so it must check spec access itself. */
+  @Test
+  public void executeBatchRefusesCreateWithoutSpecAccess() throws Exception {
+    assertBatchCreateRefused(false, true);
+  }
+
+  /** ETP-5648: an accounting entity the role cannot see is refused even inside a batch. */
+  @Test
+  public void executeBatchRefusesCreateOnHiddenAccountingEntity() throws Exception {
+    assertBatchCreateRefused(true, false);
+  }
+
+  private void assertBatchCreateRefused(boolean specAccess, boolean accountingAllowed)
+      throws Exception {
+    BatchService service = BatchService.forBatchOnly();
+    JSONObject op = new JSONObject();
+    op.put("id", "op1");
+    op.put("spec", "product");
+    op.put("entity", "accounting");
+    op.put("body", new JSONObject());
+    JSONArray ops = new JSONArray().put(op);
+    SFSpec spec = mock(SFSpec.class);
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<NeoServletSupport> supportMock = mockStatic(NeoServletSupport.class);
+         MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class);
+         MockedStatic<NeoAccountingAccessPolicy> acctMock =
+             mockStatic(NeoAccountingAccessPolicy.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(mock(OBDal.class));
+      supportMock.when(() -> NeoServletSupport.findSpec("product")).thenReturn(spec);
+      accessMock.when(() -> NeoAccessHelper.hasWindowAccessForSpec(spec, "POST"))
+          .thenReturn(specAccess);
+      acctMock.when(() -> NeoAccountingAccessPolicy.isEntityNameAllowed(spec, "accounting"))
+          .thenReturn(accountingAllowed);
+
+      JSONObject result = service.executeBatch(ops);
+
+      assertFalse(result.getBoolean("committed"));
+      assertEquals(403, result.getJSONObject("error").getInt("status"));
+    }
+  }
   @Test
   public void handleRequiresServletBoundConstructor() throws Exception {
     BatchService service = BatchService.forBatchOnly();

@@ -67,6 +67,8 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
 
   private static final Logger log = LogManager.getLogger(ReportSelectorsServlet.class);
 
+  /** The label of this surface in the commercial-access guard's log line (ETP-5047). */
+  static final String ENTRY_POINT = "report-selectors";
   private static final int DEFAULT_LIMIT = 20;
   private static final int MAX_LIMIT = 100;
   private static final String ORDER_BY_NAME = "ORDER BY name";
@@ -163,11 +165,17 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
     // they get NEO's commercial-access check; and the shared pipeline accepts the cookie session
     // the SPA sends, which the old bearer-only decode answered with 401 (logging the user out).
     EnvironmentAuthOutcome outcome =
-        NeoServletSupport.authenticate(request, SurfacePolicy.NEO_DATA);
+        NeoServletSupport.authenticate(request, SurfacePolicy.NEO_DATA, ENTRY_POINT);
     if (!outcome.isAuthenticated()) {
-      log.warn("Refused ReportSelectors request ({}): {}", outcome.getHttpStatus(),
-          outcome.getMessage());
-      sendError(response, outcome.getHttpStatus(), outcome.getMessage());
+      if (outcome.getAccessDenial() != null) {
+        // ETP-5047 — the commercial refusal answers with the shared guard body, as NEO does. The
+        // guard already logged it, so no WARN here: that line is for refusals it did not decide.
+        outcome.getAccessDenial().writeTo(response);
+      } else {
+        log.warn("Refused ReportSelectors request ({}): {}", outcome.getHttpStatus(),
+            outcome.getMessage());
+        sendError(response, outcome.getHttpStatus(), outcome.getMessage());
+      }
       return;
     }
 
@@ -322,17 +330,20 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
   }
 
   private SelectorQuery buildWarehouseQuery(SelectorRequest req) {
+    // ETP-5573: a warehouse is scoped by its OWN organization (m_warehouse.ad_org_id), the same
+    // way every other Etendo GO warehouse selector (sales order, goods receipt, ...) and
+    // WarehouseLookupHelper do. It used to also require an ad_org_warehouse assignment row, but
+    // Etendo GO never creates one when a warehouse is added, so every warehouse created from the
+    // Warehouse window was silently missing from the Stock Report scope selector. For
+    // selectedOrgId the root organization ('0') is accepted too, because onboarding warehouses
+    // live there; roleOrgIds is the role's readable organizations, applied as-is.
     StringBuilder fromWhere = new StringBuilder(
         "FROM m_warehouse WHERE isactive='Y'" + ACTIVE_CLIENT_NAME_SEARCH);
     if (req.selectedOrgId != null) {
-      fromWhere.append(" AND EXISTS (SELECT 1 FROM ad_org_warehouse ow"
-          + " WHERE ow.m_warehouse_id = m_warehouse.m_warehouse_id"
-          + " AND ow.ad_org_id = :selectedOrgId)");
+      fromWhere.append(" AND m_warehouse.ad_org_id IN (:selectedOrgId, '0')");
     }
     if (!req.roleOrgIds.isEmpty()) {
-      fromWhere.append(" AND EXISTS (SELECT 1 FROM ad_org_warehouse ow"
-          + " WHERE ow.m_warehouse_id = m_warehouse.m_warehouse_id"
-          + " AND ow.ad_org_id IN (:roleOrgIds))");
+      fromWhere.append(" AND m_warehouse.ad_org_id IN (:roleOrgIds)");
     }
     return new SelectorQuery(
         "SELECT m_warehouse_id AS id, name, name AS label",

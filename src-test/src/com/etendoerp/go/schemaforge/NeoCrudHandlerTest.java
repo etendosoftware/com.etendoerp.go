@@ -716,6 +716,100 @@ class NeoCrudHandlerTest {
   }
 
   // -------------------------------------------------------------------------
+  // handleDefault: aggregate handover (ETP-5778)
+  // -------------------------------------------------------------------------
+
+  @Nested
+  @DisplayName("handleDefault remembers the list params for aggregates")
+  class HandleDefaultAggregateHandover {
+
+    private Tab tab() {
+      Tab adTab = mock(Tab.class);
+      Table table = mock(Table.class);
+      Window window = mock(Window.class);
+      when(table.getName()).thenReturn("FIN_Payment");
+      when(adTab.getTable()).thenReturn(table);
+      when(adTab.getId()).thenReturn("tab-1");
+      when(adTab.getWindow()).thenReturn(window);
+      when(window.getId()).thenReturn("win-1");
+      return adTab;
+    }
+
+    /** Runs handleDefault with every collaborator stubbed and returns what remember() saw. */
+    private List<Map<String, String>> run(String method, String recordId) throws Exception {
+      return run(method, recordId, null);
+    }
+
+    private List<Map<String, String>> run(String method, String recordId,
+        Map<String, String> query) throws Exception {
+      org.openbravo.service.json.DefaultJsonDataService json;
+      // DefaultJsonDataService's static initialiser asks Weld for its singleton, which does not
+      // exist outside a running Etendo: keep Weld stubbed while the class is first initialised.
+      try (MockedStatic<org.openbravo.base.weld.WeldUtils> weld =
+          mockStatic(org.openbravo.base.weld.WeldUtils.class)) {
+        json = mock(org.openbravo.service.json.DefaultJsonDataService.class);
+      }
+      when(json.fetch(any())).thenReturn("{\"response\":{\"status\":0,\"data\":[]}}");
+      List<Map<String, String>> remembered = new ArrayList<>();
+      try (MockedStatic<BatchService> batch = mockStatic(BatchService.class);
+          MockedStatic<NeoFieldFilter> filter = mockStatic(NeoFieldFilter.class);
+          MockedStatic<NeoReadPredicates> preds = mockStatic(NeoReadPredicates.class);
+          MockedStatic<NeoParentTabFilterResolver> parent =
+              mockStatic(NeoParentTabFilterResolver.class);
+          MockedStatic<NeoTabDefaultSort> sort = mockStatic(NeoTabDefaultSort.class);
+          MockedStatic<NeoListAggregateQuery> agg = mockStatic(NeoListAggregateQuery.class)) {
+        batch.when(BatchService::currentJsonService).thenReturn(json);
+        filter.when(() -> NeoFieldFilter.forEntity(any(), anyString(), any()))
+            .thenReturn(mock(NeoFieldFilter.class));
+        filter.when(() -> NeoFieldFilter.forEntity(any(), anyString()))
+            .thenReturn(mock(NeoFieldFilter.class));
+        agg.when(() -> NeoListAggregateQuery.remember(any(), any()))
+            .thenAnswer(inv -> remembered.add(inv.getArgument(1)));
+
+        NeoContext context = buildContext(method, recordId, tab(), null, null, query);
+        handler.handleDefault(context);
+      }
+      return remembered;
+    }
+
+    @Test
+    @DisplayName("a list GET hands the DAL params to NeoListAggregateQuery")
+    void listGetRemembersParams() throws Exception {
+      List<Map<String, String>> remembered = run("GET", null);
+      assertEquals(1, remembered.size());
+      assertEquals("tab-1", remembered.get(0).get(JsonConstants.TAB_PARAMETER));
+    }
+
+    @Test
+    @DisplayName("a _distinct list GET (FK dropdown) does not")
+    void distinctListDoesNotRemember() throws Exception {
+      Map<String, String> q = new HashMap<>();
+      q.put(JsonConstants.DISTINCT_PARAMETER, "businessPartner");
+      assertTrue(run("GET", null, q).isEmpty());
+    }
+
+    @Test
+    @DisplayName("a _summary list GET (grid summary row) does not")
+    void summaryListDoesNotRemember() throws Exception {
+      Map<String, String> q = new HashMap<>();
+      q.put(JsonConstants.SUMMARY_PARAMETER, "{\"amount\":\"sum\"}");
+      assertTrue(run("GET", null, q).isEmpty());
+    }
+
+    @Test
+    @DisplayName("a read-by-id GET does not")
+    void readByIdDoesNotRemember() throws Exception {
+      assertTrue(run("GET", "REC-1").isEmpty());
+    }
+
+    @Test
+    @DisplayName("a POST does not")
+    void postDoesNotRemember() throws Exception {
+      assertTrue(run("POST", "REC-1").isEmpty());
+    }
+  }
+
+  // -------------------------------------------------------------------------
   // validatePostRequest tests (via reflection)
   // -------------------------------------------------------------------------
 
@@ -1593,6 +1687,24 @@ class NeoCrudHandlerTest {
 
         assertNotNull(result);
         assertEquals(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, result.getHttpStatus());
+      }
+    }
+
+    @Test
+    @DisplayName("ETP-5577: a period refusal is a 400 carrying its message key, not a 500")
+    void returns400WithKeyForPeriodRefusal() throws Exception {
+      try (MockedStatic<org.openbravo.erpCommon.utility.OBMessageUtils> msgMock =
+          Mockito.mockStatic(org.openbravo.erpCommon.utility.OBMessageUtils.class)) {
+        msgMock.when(() -> org.openbravo.erpCommon.utility.OBMessageUtils.messageBD(
+            org.mockito.ArgumentMatchers.anyString()))
+            .thenReturn("Periodo no válido para esta fecha de contabilidad");
+
+        NeoResponse result = invokeCheckResponse(failureWithMessage("@PeriodNotValid@"));
+
+        assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
+        JSONObject error = result.getBody().getJSONObject("error");
+        assertEquals("Periodo no válido para esta fecha de contabilidad", error.getString("message"));
+        assertEquals("[\"PeriodNotValid\"]", error.getJSONArray("messageKeys").toString());
       }
     }
 
@@ -3833,7 +3945,7 @@ class NeoCrudHandlerTest {
            MockedStatic<DocTypeResolver> docTypeMock =
                Mockito.mockStatic(DocTypeResolver.class)) {
         cascadeMock.when(() -> NeoDefaultsCascadeHelper.executeCalloutCascade(
-            any(), any(), any(), any(), any(), any())).then(invocation -> null);
+            any(), any(), any(), any(), any(), any(), any())).then(invocation -> null);
         cascadeMock.when(() -> NeoDefaultsCascadeHelper.removeEmptyFkValues(
             any(), any())).then(invocation -> null);
         docTypeMock.when(() -> DocTypeResolver.reapplyDocTypeFromTabFilter(
@@ -3846,7 +3958,7 @@ class NeoCrudHandlerTest {
 
         // Verify cascade was called (no exception)
         cascadeMock.verify(() -> NeoDefaultsCascadeHelper.executeCalloutCascade(
-            any(), any(), any(), any(), any(), any()));
+            any(), any(), any(), any(), any(), any(), any()));
       }
     }
 
@@ -3865,7 +3977,7 @@ class NeoCrudHandlerTest {
            MockedStatic<DocTypeResolver> docTypeMock =
                Mockito.mockStatic(DocTypeResolver.class)) {
         cascadeMock.when(() -> NeoDefaultsCascadeHelper.executeCalloutCascade(
-            any(), any(), any(), any(), any(), any())).then(invocation -> null);
+            any(), any(), any(), any(), any(), any(), any())).then(invocation -> null);
         cascadeMock.when(() -> NeoDefaultsCascadeHelper.removeEmptyFkValues(
             any(), any())).then(invocation -> null);
         docTypeMock.when(() -> DocTypeResolver.reapplyDocTypeFromTabFilter(
@@ -3879,7 +3991,45 @@ class NeoCrudHandlerTest {
 
         // Should not throw NPE
         cascadeMock.verify(() -> NeoDefaultsCascadeHelper.executeCalloutCascade(
-            any(), any(), any(), any(), any(), any()));
+            any(), any(), any(), any(), any(), any(), any()));
+      }
+    }
+
+    /**
+     * ETP-5676: inside a batch the cascade gets the batch's callout-discard memory; outside one it
+     * gets {@code null}, so a single REST or MCP create runs every callout as before.
+     */
+    @Test
+    @DisplayName("Hands the cascade the batch's discard memory only inside a batch")
+    void passesTheBatchDiscardMemoryOnlyInsideABatch() throws Exception {
+      Tab adTab = mock(Tab.class);
+      JSONObject body = new JSONObject();
+      NeoContext context = buildContext("POST", null, adTab, mock(SFEntity.class), body, null);
+      Class<?>[] signature = { JSONObject.class, Tab.class, NeoContext.class,
+          java.util.Set.class, java.util.Set.class };
+
+      try (MockedStatic<NeoDefaultsCascadeHelper> cascadeMock =
+               Mockito.mockStatic(NeoDefaultsCascadeHelper.class);
+           MockedStatic<DocTypeResolver> docTypeMock =
+               Mockito.mockStatic(DocTypeResolver.class)) {
+        invokePrivate(handler, "executePostCalloutCascade", signature,
+            body, adTab, context, Collections.emptySet(), Collections.emptySet());
+        cascadeMock.verify(() -> NeoDefaultsCascadeHelper.executeCalloutCascade(
+            eq(context), eq(adTab), any(), any(), any(), any(),
+            org.mockito.ArgumentMatchers.isNull()));
+
+        NeoBatchScope previous = NeoBatchScope.open(false, true);
+        try {
+          NeoCalloutDiscardMemory memory = NeoBatchScope.currentCalloutDiscardMemory();
+          assertNotNull(memory);
+          invokePrivate(handler, "executePostCalloutCascade", signature,
+              body, adTab, context, Collections.emptySet(), Collections.emptySet());
+          cascadeMock.verify(() -> NeoDefaultsCascadeHelper.executeCalloutCascade(
+              eq(context), eq(adTab), any(), any(), any(), any(),
+              org.mockito.ArgumentMatchers.same(memory)));
+        } finally {
+          NeoBatchScope.close(previous);
+        }
       }
     }
 
@@ -3985,7 +4135,7 @@ class NeoCrudHandlerTest {
     private List<String> invokeAddTabWherePredicate(Tab adTab, String tabWhere,
         String parentId) throws Exception {
       List<String> predicates = new ArrayList<>();
-      invokePrivate(handler, "addTabWherePredicate",
+      invokeStaticPrivate(NeoDistinctFetchSupport.class, "addTabWherePredicate",
           new Class<?>[] { Tab.class, String.class, String.class, List.class },
           adTab, tabWhere, parentId, predicates);
       return predicates;

@@ -84,6 +84,7 @@ import org.openbravo.module.aeat349.es.AEAT3492010ReportDao;
 import org.openbravo.module.taxreportlauncher.TaxReport;
 
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
+import com.etendoerp.go.schemaforge.util.RoleAccessMatrix;
 
 /**
  * Unit tests for {@link Fiscal349BoxesHandler}.
@@ -114,7 +115,7 @@ public class Fiscal349BoxesHandlerTest {
     handler = new Fiscal349BoxesHandler(servlet);
     accessMock = mockStatic(NeoAccessHelper.class);
     accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
-        eq(NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID), anyString())).thenReturn(true);
+        eq(RoleAccessMatrix.TAX_MODELS_PROXY_WINDOW_ID), anyString())).thenReturn(true);
   }
 
   @After
@@ -161,7 +162,7 @@ public class Fiscal349BoxesHandlerTest {
     HttpServletResponse resp = mock(HttpServletResponse.class);
 
     accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
-        eq(NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID), eq("GET"))).thenReturn(false);
+        eq(RoleAccessMatrix.TAX_MODELS_PROXY_WINDOW_ID), eq("GET"))).thenReturn(false);
 
     handler.handle("operators", "GET", req, resp);
 
@@ -810,11 +811,19 @@ public class Fiscal349BoxesHandlerTest {
   }
 
   /**
-   * ETP-5597: a single-key invoice keeps exactly its old row — one row, invoice-level base
-   * (summed line amount), even though the per-key map carries a (possibly different) base.
+   * ETP-5725 (was ETP-5597 "keeps invoice-level base"): a single-key invoice's row now uses the
+   * LIVE per-key base — the same {@code resolveInvoiceKeyBases}/{@code
+   * getTaxBaseAmountPerBusinessPartner} HQL sum the Operadores tab and the multi-key branch
+   * already trust — instead of the invoice's cached {@code summedLineAmount}. Before this fix
+   * {@code appendInvoiceRows} discarded the per-key base for the single-key case and passed
+   * {@code null} into {@code buildInvoiceRow}, which then fell back to the stale column; this
+   * test used to assert that OLD (buggy) behavior ("keeps invoice-level base", 120.00) and has
+   * been rewritten to assert the fix instead. See {@link
+   * #testCollectInvoicesSingleKeyRectificativaUsesLiveNegativeBaseNotStaleSummedAmount} for the
+   * bug's actual symptom: a cached column that disagrees in SIGN with the live sum.
    */
   @Test
-  public void testCollectInvoicesSingleKeyInvoiceKeepsInvoiceLevelBase() throws Exception {
+  public void testCollectInvoicesSingleKeyInvoiceUsesLivePerKeyBase() throws Exception {
     Invoice s = invoice("s1", "S1", "120.00");
 
     JSONArray arr = handler.collectInvoices(Collections.<Invoice>emptySet(),
@@ -822,7 +831,29 @@ public class Fiscal349BoxesHandlerTest {
 
     assertEquals(1, arr.length());
     assertEquals("E", arr.getJSONObject(0).getString("key"));
-    assertEquals("120.00", arr.getJSONObject(0).getString("base"));
+    // Live per-key base (77.00) wins over the invoice's cached summedLineAmount (120.00).
+    assertEquals("77.00", arr.getJSONObject(0).getString("base"));
+  }
+
+  /**
+   * ETP-5725 — the actual bug: a rectificativa (FVR) invoice whose CACHED {@code
+   * summedLineAmount} carries the WRONG (positive) sign, while the LIVE per-key base — computed
+   * straight from {@code InvoiceTax}, the same source the Operadores totals and the
+   * Rectificaciones tab's signed-delta path already use — is correctly NEGATIVE. "Facturas
+   * origen" must show the live, correctly-signed value, not the stale column.
+   */
+  @Test
+  public void testCollectInvoicesSingleKeyRectificativaUsesLiveNegativeBaseNotStaleSummedAmount()
+      throws Exception {
+    Invoice fvr = invoice("fvr1", "FVR1000013", "115.00"); // stale cached column: wrong sign
+
+    JSONArray arr = handler.collectInvoices(
+        new LinkedHashSet<>(Collections.singletonList(fvr)), Collections.<Invoice>emptySet(),
+        keyBases("fvr1", "A", "-115.00")); // live InvoiceTax-derived base: correct sign
+
+    assertEquals(1, arr.length());
+    assertEquals("A", arr.getJSONObject(0).getString("key"));
+    assertEquals("-115.00", arr.getJSONObject(0).getString("base"));
   }
 
   /** ETP-5597: a sale mixing goods (E) and services (S) backs both keys, each with its own base. */
@@ -851,10 +882,18 @@ public class Fiscal349BoxesHandlerTest {
   }
 
   /**
-   * ETP-5597 (CP-20): a rectifying invoice (credit note) keeps its NEGATIVE base in "Facturas
-   * origen" — single-key (invoice-level summed line amount) and mixed (per-key, already halved
-   * for a purchase) alike. The operator rows and the AEAT file aggregate these lines signed, so an
-   * abs() here showed a credit note as if it added to the base.
+   * ETP-5597 (CP-20) / ETP-5725: a rectifying invoice (credit note) keeps its NEGATIVE base in
+   * "Facturas origen" — single-key and mixed (per-key, already halved for a purchase) alike. The
+   * operator rows and the AEAT file aggregate these lines signed, so an abs() here showed a
+   * credit note as if it added to the base.
+   *
+   * <p>ETP-5725 — the single-key expectation changed from "-80.00" (the invoice's cached {@code
+   * summedLineAmount}) to "-40.00" (the live per-key base): this is exactly the bug this ticket
+   * fixes — the cached column and the live tax-line sum can disagree, and "Facturas origen" must
+   * show the live one. The sign stays negative either way, which is why this pre-existing test
+   * didn't catch the bug on its own; {@link
+   * #testCollectInvoicesSingleKeyRectificativaUsesLiveNegativeBaseNotStaleSummedAmount} covers
+   * the case where the cached column's SIGN itself is wrong.
    */
   @Test
   public void testCollectInvoicesKeepsTheNegativeBaseOfACreditNote() throws Exception {
@@ -867,7 +906,7 @@ public class Fiscal349BoxesHandlerTest {
         new LinkedHashSet<>(Arrays.asList(single, mixed)), Collections.<Invoice>emptySet(), keys);
 
     assertEquals(3, arr.length());
-    assertEquals("-80.00", arr.getJSONObject(0).getString("base"));
+    assertEquals("-40.00", arr.getJSONObject(0).getString("base"));
     assertEquals("-100.00", arr.getJSONObject(1).getString("base"));
     assertEquals("-50.00", arr.getJSONObject(2).getString("base"));
   }
@@ -1567,6 +1606,98 @@ public class Fiscal349BoxesHandlerTest {
     verify(h, org.mockito.Mockito.never())
         .computeOperators(anyString(), org.mockito.ArgumentMatchers.anyInt(), anyString());
     org.junit.Assert.assertEquals(new JSONObject(snapshot).toString(), body.toString());
+  }
+
+  // ── guardCorrectiveConsistency (generate only, ETP-5725 reopened QA) ──────────────
+  //
+  // Same rule and rationale as Fiscal303BoxesHandlerTest's own generate-guard tests (see that
+  // file). 349's generate request already always sends an unambiguous `substitutive` param
+  // ("Y"/"N", see generate349File/AEAT3492010Report.generateLine1) — unlike 303's overloaded
+  // `IsComplementary`, no new dedicated param was needed on this model's side.
+
+  /**
+   * The latest declaration is a draft, the request is marked corrective
+   * ({@code substitutive=Y}), and there is no presented ordinaria sibling at all — rejected
+   * before the real generator ever runs.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testDispatchGenerateRejectsCorrectiveWithoutPresentedOrdinaria() throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    when(req.getParameter("substitutive")).thenReturn("Y");
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockClient(ctxMock, "client1");
+      OBQuery<BaseOBObject> query = mockDeclQuery(dalMock);
+      BaseOBObject draft = declWithSeqAndStatus(0L, "draft");
+      when(query.list()).thenReturn(Collections.singletonList(draft));
+
+      handler.dispatch("generate", "org1", 2026, "T1", req, resp);
+    }
+
+    verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_CONFLICT),
+        org.mockito.ArgumentMatchers.contains("corrective declaration"));
+    verify(resp, org.mockito.Mockito.never()).setHeader(eq("Content-Disposition"), anyString());
+  }
+
+  /**
+   * The mirror rule, same endpoint: generating as a genuine ORDINARIA ({@code substitutive=N},
+   * or absent) while another ordinaria is ALREADY presented for the period — rejected too.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testDispatchGenerateRejectsOrdinariaWhenAnotherOrdinariaAlreadyPresented()
+      throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    when(req.getParameter("substitutive")).thenReturn("N");
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockClient(ctxMock, "client1");
+      OBQuery<BaseOBObject> query = mockDeclQuery(dalMock);
+      BaseOBObject draft = declWithSeqAndStatus(1L, "draft");
+      BaseOBObject presentedOrdinaria = declWithSeqAndStatus(0L, "submitted");
+      when(query.list()).thenReturn(Arrays.asList(draft, presentedOrdinaria));
+
+      handler.dispatch("generate", "org1", 2026, "T1", req, resp);
+    }
+
+    verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_CONFLICT),
+        org.mockito.ArgumentMatchers.contains("as ordinaria"));
+    verify(resp, org.mockito.Mockito.never()).setHeader(eq("Content-Disposition"), anyString());
+  }
+
+  /**
+   * A VALID request (ordinaria, no conflicting sibling) must NOT be rejected by this guard — any
+   * failure further down the real generation pipeline (unmocked in this unit test) is expected
+   * and irrelevant to what this test asserts.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testDispatchGenerateDoesNotRejectValidOrdinariaWithNoConflict() throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    when(req.getParameter("substitutive")).thenReturn("N");
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockClient(ctxMock, "client1");
+      OBQuery<BaseOBObject> query = mockDeclQuery(dalMock);
+      BaseOBObject draft = declWithSeqAndStatus(0L, "draft");
+      when(query.list()).thenReturn(Collections.singletonList(draft));
+
+      try {
+        handler.dispatch("generate", "org1", 2026, "T1", req, resp);
+      } catch (FiscalHandlerException expected) {
+        // Expected: the real generator has no further mocks here. Only this guard's own
+        // behavior is under test.
+      }
+    }
+
+    verify(servlet, org.mockito.Mockito.never()).sendError(any(), eq(HttpServletResponse.SC_CONFLICT), anyString());
   }
 
   @SuppressWarnings("unchecked")

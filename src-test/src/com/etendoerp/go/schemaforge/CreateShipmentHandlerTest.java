@@ -21,6 +21,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyCollection;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -31,12 +32,14 @@ import static org.mockito.Mockito.when;
 import java.math.BigDecimal;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.List;
 
 import javax.enterprise.inject.Vetoed;
 
 import org.codehaus.jettison.json.JSONException;
 import org.hibernate.Session;
 import org.hibernate.query.NativeQuery;
+import org.hibernate.query.Query;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
@@ -64,6 +67,9 @@ import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
  * shipment line. Without that step, m_inout_post can't create m_matchsi
  * when the shipment is later completed, leaving the delivery status column
  * at 0% on sales invoices.
+ *
+ * @covers com.etendoerp.go.schemaforge.CreateShipmentHandler
+ * @covers com.etendoerp.go.schemaforge.InOutLineFromOrderFactory
  */
 public class CreateShipmentHandlerTest {
 
@@ -104,6 +110,7 @@ public class CreateShipmentHandlerTest {
       when(session.createNativeQuery(anyString())).thenReturn(linkQuery);
       when(linkQuery.setParameter(anyString(), any())).thenReturn(linkQuery);
       when(linkQuery.executeUpdate()).thenReturn(1);
+      stubDraftRows(dal, Collections.<Object[]>emptyList());
 
       OBContext ctx = mock(OBContext.class);
       org.openbravo.model.ad.access.User user = mock(org.openbravo.model.ad.access.User.class);
@@ -112,6 +119,8 @@ public class CreateShipmentHandlerTest {
       obContextMock.when(OBContext::getOBContext).thenReturn(ctx);
 
       Order order = mock(Order.class);
+
+      when(order.getDocumentStatus()).thenReturn("CO");
       OrderLine orderLine = mock(OrderLine.class);
       when(orderLine.getId()).thenReturn("ol-2");
       when(orderLine.isActive()).thenReturn(true);
@@ -135,7 +144,8 @@ public class CreateShipmentHandlerTest {
 
       ShipmentInOut shipment = mock(ShipmentInOut.class);
       java.util.List<InOutLineFromOrderFactory.PendingOrderLine> pendingLines =
-          InOutLineFromOrderFactory.collectPendingLines(order);
+          InOutLineFromOrderFactory.collectPendingLines(order, true,
+              new java.util.LinkedHashSet<String>());
       handler.createShipmentLines(shipment, pendingLines, handler.locatorToReturn);
 
       ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
@@ -192,6 +202,30 @@ public class CreateShipmentHandlerTest {
     when(session.createNativeQuery(anyString())).thenReturn(linkQuery);
     when(linkQuery.setParameter(anyString(), any())).thenReturn(linkQuery);
     when(linkQuery.executeUpdate()).thenReturn(1);
+    stubDraftRows(dal, Collections.<Object[]>emptyList());
+  }
+
+  /**
+   * ETP-5709: stubs the single draft-quantity HQL of the draft-aware pending computation. Each
+   * element of {@code rowsPerCall} is what one successive call returns: rows of
+   * {@code {orderLineId, movementQuantity, documentNo}}.
+   */
+  @SuppressWarnings({ "unchecked", "rawtypes" })
+  private static Query stubDraftRows(OBDal dal, List<Object[]>... rowsPerCall) {
+    Session session = dal.getSession();
+    if (session == null) {
+      session = mock(Session.class);
+      when(dal.getSession()).thenReturn(session);
+    }
+    Query draftQuery = mock(Query.class);
+    when(session.createQuery(anyString(), eq(Object[].class))).thenReturn(draftQuery);
+    when(draftQuery.setParameter(anyString(), any())).thenReturn(draftQuery);
+    when(draftQuery.setParameterList(anyString(), anyCollection())).thenReturn(draftQuery);
+    org.mockito.stubbing.OngoingStubbing<List> stubbing = when(draftQuery.list());
+    for (List<Object[]> rows : rowsPerCall) {
+      stubbing = stubbing.thenReturn(rows);
+    }
+    return draftQuery;
   }
 
   private static OrderLine mockPendingLine(String id, boolean stocked, String productType,
@@ -228,6 +262,7 @@ public class CreateShipmentHandlerTest {
       OrderLine serviceLine = mockPendingLine("ol-service", true, "S",
           new BigDecimal("5"), BigDecimal.ZERO);
       Order order = mock(Order.class);
+      when(order.getDocumentStatus()).thenReturn("CO");
       when(order.getOrderLineList()).thenReturn(Collections.singletonList(serviceLine));
       when(dal.get(Order.class, "order-1")).thenReturn(order);
 
@@ -277,6 +312,8 @@ public class CreateShipmentHandlerTest {
       sessionHandlerMock.when(SessionHandler::getInstance).thenReturn(sessionHandler);
 
       Order order = mock(Order.class);
+
+      when(order.getDocumentStatus()).thenReturn("CO");
       when(order.getOrderLineList()).thenReturn(Collections.emptyList());
       when(dal.get(Order.class, "order-2")).thenReturn(order);
 
@@ -312,6 +349,7 @@ public class CreateShipmentHandlerTest {
       OrderLine serviceLine = mockPendingLine("ol-service", true, "S",
           new BigDecimal("2"), BigDecimal.ZERO);
       Order order = mock(Order.class);
+      when(order.getDocumentStatus()).thenReturn("CO");
       when(order.getOrderLineList()).thenReturn(Collections.singletonList(serviceLine));
       when(dal.get(Order.class, "order-3")).thenReturn(order);
 
@@ -357,9 +395,11 @@ public class CreateShipmentHandlerTest {
       Warehouse warehouse = mock(Warehouse.class);
       when(warehouse.getName()).thenReturn("WH Central");
       Order order = mock(Order.class);
+      when(order.getDocumentStatus()).thenReturn("CO");
       when(order.getOrderLineList()).thenReturn(Collections.singletonList(stockLine));
       when(order.getWarehouse()).thenReturn(warehouse);
       when(dal.get(Order.class, "order-4")).thenReturn(order);
+      stubDraftRows(dal, Collections.<Object[]>emptyList());
 
       TestableHandler handler = new TestableHandler();
       handler.locatorToReturn = null;
@@ -399,6 +439,7 @@ public class CreateShipmentHandlerTest {
       OrderLine serviceLine = mockPendingLine("ol-service", true, "S",
           new BigDecimal("5"), BigDecimal.ZERO);
       Order order = mock(Order.class);
+      when(order.getDocumentStatus()).thenReturn("CO");
       when(order.getOrderLineList()).thenReturn(Arrays.asList(stockLine, serviceLine));
       when(order.getWarehouse()).thenReturn(warehouse);
       when(dal.get(Order.class, "order-5")).thenReturn(order);
@@ -426,6 +467,213 @@ public class CreateShipmentHandlerTest {
       verify(stockShipLine).setStorageBin(resolvedLocator);
       verify(serviceShipLine).setStorageBin(null);
       verify(dal, never()).createCriteria(Locator.class);
+    }
+  }
+
+  /**
+   * ETP-5709: requesting the document twice over the same order must not leave two documents
+   * behind. A DRAFT shipment reserves nothing ({@code c_orderline.qtydelivered} only moves on
+   * completion), so the second call must treat the first draft's quantity as taken: with
+   * everything already in the draft it answers 400 naming that draft and persists no header.
+   */
+  @Test
+  public void testHandleSecondCallOverSameOrderDoesNotCreateSecondDocument() throws JSONException {
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<SessionHandler> sessionHandlerMock = Mockito.mockStatic(SessionHandler.class);
+        MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class)) {
+
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      sessionHandlerMock.when(SessionHandler::getInstance).thenReturn(mock(SessionHandler.class));
+      stubInvoiceLineLinkerTail(dal);
+      // call 1: no drafts yet; call 2: the draft created by call 1 holds the full 5.
+      Query draftQuery = stubDraftRows(dal, Collections.<Object[]>emptyList(),
+          Collections.singletonList(new Object[] { "ol-dup", new BigDecimal("5"), "DOC-1" }));
+
+      OrderLine serviceLine = mockPendingLine("ol-dup", true, "S",
+          new BigDecimal("5"), BigDecimal.ZERO);
+      Order order = mock(Order.class);
+      when(order.getDocumentStatus()).thenReturn("CO");
+      when(order.getOrderLineList()).thenReturn(Collections.singletonList(serviceLine));
+      when(dal.get(Order.class, "order-dup")).thenReturn(order);
+      stubShipmentDocTypeLookup(dal, mock(DocumentType.class));
+
+      OBProvider provider = mock(OBProvider.class);
+      obProviderMock.when(OBProvider::getInstance).thenReturn(provider);
+      ShipmentInOut first = mock(ShipmentInOut.class);
+      when(first.getId()).thenReturn("doc-1");
+      when(first.getDocumentNo()).thenReturn("DOC-1");
+      when(provider.get(ShipmentInOut.class)).thenReturn(first, mock(ShipmentInOut.class));
+      when(provider.get(ShipmentInOutLine.class)).thenReturn(mock(ShipmentInOutLine.class));
+
+      TestableHandler handler = new TestableHandler();
+      handler.locatorToReturn = mock(Locator.class);
+
+      NeoResponse r1 = handler.handle(buildActionContext("order-dup"));
+      NeoResponse r2 = handler.handle(buildActionContext("order-dup"));
+
+      assertNotNull(r1);
+      assertEquals(201, r1.getHttpStatus());
+      assertNotNull(r2);
+      assertEquals(400, r2.getHttpStatus());
+      String message = r2.getBody().getJSONObject("error").getString("message");
+      assertTrue(message, message.contains("DOC-1"));
+      assertTrue(message, message.contains("albarán borrador"));
+      verify(dal, Mockito.times(1)).save(any(ShipmentInOut.class));
+      verify(draftQuery, Mockito.times(2)).setParameter("sot", true);
+    }
+  }
+
+  /**
+   * ETP-5709: a PARTIAL draft (2 of 5 already in a draft) must yield a new document with ONLY
+   * the remainder (3), not the full pending quantity and not an error.
+   */
+  @Test
+  public void testHandlePartialDraftCreatesDocumentWithOnlyTheRemainder() throws JSONException {
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class)) {
+
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      stubInvoiceLineLinkerTail(dal);
+      stubDraftRows(dal, Collections.singletonList(
+          new Object[] { "ol-part", new BigDecimal("2"), "DOC-7" }));
+
+      OrderLine serviceLine = mockPendingLine("ol-part", true, "S",
+          new BigDecimal("5"), BigDecimal.ZERO);
+      Order order = mock(Order.class);
+      when(order.getDocumentStatus()).thenReturn("CO");
+      when(order.getOrderLineList()).thenReturn(Collections.singletonList(serviceLine));
+      when(dal.get(Order.class, "order-part")).thenReturn(order);
+      stubShipmentDocTypeLookup(dal, mock(DocumentType.class));
+
+      OBProvider provider = mock(OBProvider.class);
+      obProviderMock.when(OBProvider::getInstance).thenReturn(provider);
+      ShipmentInOut doc = mock(ShipmentInOut.class);
+      when(doc.getDocumentNo()).thenReturn("DOC-8");
+      when(provider.get(ShipmentInOut.class)).thenReturn(doc);
+      ShipmentInOutLine line = mock(ShipmentInOutLine.class);
+      when(provider.get(ShipmentInOutLine.class)).thenReturn(line);
+
+      TestableHandler handler = new TestableHandler();
+      handler.locatorToReturn = mock(Locator.class);
+
+      NeoResponse r = handler.handle(buildActionContext("order-part"));
+
+      assertNotNull(r);
+      assertEquals(201, r.getHttpStatus());
+      verify(line).setMovementQuantity(new BigDecimal("3"));
+    }
+  }
+
+  /**
+   * ETP-5709: the source order must be completed. A DRAFT order answers 400 naming its number and
+   * status, and nothing is saved.
+   */
+  @Test
+  public void testHandleNonCompletedOrderReturns400WithoutSavingAnything() throws JSONException {
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<SessionHandler> sessionHandlerMock = Mockito.mockStatic(SessionHandler.class)) {
+
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      SessionHandler sessionHandler = mock(SessionHandler.class);
+      sessionHandlerMock.when(SessionHandler::getInstance).thenReturn(sessionHandler);
+
+      Order order = mock(Order.class);
+      when(order.getDocumentStatus()).thenReturn("DR");
+      when(order.getDocumentNo()).thenReturn("PO-77");
+      when(dal.get(Order.class, "order-draft")).thenReturn(order);
+
+      NeoResponse r = new TestableHandler().handle(buildActionContext("order-draft"));
+
+      assertNotNull(r);
+      assertEquals(400, r.getHttpStatus());
+      String message = r.getBody().getJSONObject("error").getString("message");
+      assertTrue(message, message.contains("PO-77") && message.contains("DR"));
+      verify(dal, never()).save(any(ShipmentInOut.class));
+      verify(order, never()).getOrderLineList();
+    }
+  }
+
+  @org.junit.Test
+  public void contract_isPostWithoutParametersAndDescribesDraftAndPrecondition() {
+    com.etendoerp.go.schemaforge.util.NeoActionContract c = CreateShipmentHandler.CONTRACT;
+
+    assertEquals("createShipment", c.getName());
+    assertEquals("POST", c.getHttpMethod());
+    assertTrue(c.getParams().isEmpty());
+    assertTrue(c.getDescription().contains("DRAFT"));
+    assertTrue(c.getDescription().contains("status CO"));
+  }
+
+  @org.junit.Test
+  public void testHandleNonCompletedOrderReturns400NamingNumberAndStatus() throws JSONException {
+    // Covered together with the draft-order case above; this one pins the Spanish message.
+    try (org.mockito.MockedStatic<org.openbravo.dal.core.OBContext> ctxMock =
+            org.mockito.Mockito.mockStatic(org.openbravo.dal.core.OBContext.class);
+        org.mockito.MockedStatic<org.openbravo.dal.service.OBDal> obDalMock =
+            org.mockito.Mockito.mockStatic(org.openbravo.dal.service.OBDal.class);
+        org.mockito.MockedStatic<org.openbravo.dal.core.SessionHandler> shMock =
+            org.mockito.Mockito.mockStatic(org.openbravo.dal.core.SessionHandler.class)) {
+      org.openbravo.dal.service.OBDal dal = org.mockito.Mockito.mock(org.openbravo.dal.service.OBDal.class);
+      obDalMock.when(org.openbravo.dal.service.OBDal::getInstance).thenReturn(dal);
+      shMock.when(org.openbravo.dal.core.SessionHandler::getInstance)
+          .thenReturn(org.mockito.Mockito.mock(org.openbravo.dal.core.SessionHandler.class));
+      org.openbravo.model.common.order.Order order =
+          org.mockito.Mockito.mock(org.openbravo.model.common.order.Order.class);
+      org.mockito.Mockito.when(order.getDocumentStatus()).thenReturn("DR");
+      org.mockito.Mockito.when(order.getDocumentNo()).thenReturn("SO-8");
+      org.mockito.Mockito.when(dal.get(org.openbravo.model.common.order.Order.class, "o-d"))
+          .thenReturn(order);
+
+      NeoResponse r = new CreateShipmentHandler().handle(NeoContext.builder().httpMethod("POST")
+          .endpointType(NeoEndpointType.ACTION).fieldName("createShipment")
+          .specName("sales-order").recordId("o-d").build());
+
+      assertEquals(400, r.getHttpStatus());
+      String message = r.getBody().getJSONObject("error").getString("message");
+      assertTrue(message, message.contains("SO-8") && message.contains("DR")
+          && message.contains("no está completado"));
+    }
+  }
+
+  /**
+   * A CLOSED ({@code CL}) sales order is refused like any non-completed one: 400 naming the order
+   * number and the status {@code CL}, and no shipment is saved.
+   */
+  @org.junit.Test
+  public void testHandleClosedOrderReturns400NamingNumberAndClosedStatus() throws JSONException {
+    try (org.mockito.MockedStatic<org.openbravo.dal.core.OBContext> ctxMock =
+            org.mockito.Mockito.mockStatic(org.openbravo.dal.core.OBContext.class);
+        org.mockito.MockedStatic<org.openbravo.dal.service.OBDal> obDalMock =
+            org.mockito.Mockito.mockStatic(org.openbravo.dal.service.OBDal.class);
+        org.mockito.MockedStatic<org.openbravo.dal.core.SessionHandler> shMock =
+            org.mockito.Mockito.mockStatic(org.openbravo.dal.core.SessionHandler.class)) {
+      org.openbravo.dal.service.OBDal dal = org.mockito.Mockito.mock(org.openbravo.dal.service.OBDal.class);
+      obDalMock.when(org.openbravo.dal.service.OBDal::getInstance).thenReturn(dal);
+      shMock.when(org.openbravo.dal.core.SessionHandler::getInstance)
+          .thenReturn(org.mockito.Mockito.mock(org.openbravo.dal.core.SessionHandler.class));
+      org.openbravo.model.common.order.Order order =
+          org.mockito.Mockito.mock(org.openbravo.model.common.order.Order.class);
+      org.mockito.Mockito.when(order.getDocumentStatus()).thenReturn("CL");
+      org.mockito.Mockito.when(order.getDocumentNo()).thenReturn("SO-CL-1");
+      org.mockito.Mockito.when(dal.get(org.openbravo.model.common.order.Order.class, "o-cl"))
+          .thenReturn(order);
+
+      NeoResponse r = new CreateShipmentHandler().handle(NeoContext.builder().httpMethod("POST")
+          .endpointType(NeoEndpointType.ACTION).fieldName("createShipment")
+          .specName("sales-order").recordId("o-cl").build());
+
+      assertEquals(400, r.getHttpStatus());
+      String message = r.getBody().getJSONObject("error").getString("message");
+      assertTrue(message, message.contains("SO-CL-1") && message.contains("estado CL"));
+      org.mockito.Mockito.verify(dal, org.mockito.Mockito.never())
+          .save(org.mockito.ArgumentMatchers.any(ShipmentInOut.class));
+      org.mockito.Mockito.verify(order, org.mockito.Mockito.never()).getOrderLineList();
     }
   }
 }

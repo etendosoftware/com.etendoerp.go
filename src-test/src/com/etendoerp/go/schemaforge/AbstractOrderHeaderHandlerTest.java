@@ -34,6 +34,8 @@ import org.junit.Test;
  *
  * Tests verify which combinations of endpoint type, HTTP method, field name, and
  * request body cause TotalDiscountService.recalculate() to fire — and which do not.
+ *
+ * @covers com.etendoerp.go.schemaforge.AbstractOrderHeaderHandler
  */
 public class AbstractOrderHeaderHandlerTest {
 
@@ -326,6 +328,36 @@ public class AbstractOrderHeaderHandlerTest {
     verify(svc).recalculate(ORDER_ID, true);
   }
 
+  /**
+   * ETP-5710: an MCP call reaches the handler under the field name whichever spelling was typed, so
+   * a reopen typed as DocAction still cleans up the stale discount line.
+   */
+  @Test
+  public void testSyncDocAction_mcpFieldNameNotCompleting_recalculates() {
+    TotalDiscountService svc = mock(TotalDiscountService.class);
+    NeoContext ctx = NeoContext.builder().mcpOrigin(true)
+        .endpointType(NeoEndpointType.ACTION).fieldName("documentAction").recordId(ORDER_ID)
+        .requestBody(bodyWith("docAction", "RE")).build();
+
+    AbstractOrderHeaderHandler.syncTotalDiscountOnDocAction(ctx, svc, false);
+
+    verify(svc).recalculate(ORDER_ID, false);
+  }
+
+  /** A completion by field name is left to applyTotalDiscountBeforeComplete: one recalculation. */
+  @Test
+  public void testSyncDocAction_mcpFieldNameCompleting_leftToTheCompletionHook() {
+    TotalDiscountService svc = mock(TotalDiscountService.class);
+    NeoContext ctx = NeoContext.builder().mcpOrigin(true)
+        .endpointType(NeoEndpointType.ACTION).fieldName("documentAction").recordId(ORDER_ID)
+        .requestBody(bodyWith("docAction", "CO")).build();
+
+    AbstractOrderHeaderHandler.syncTotalDiscountOnDocAction(ctx, svc, false);
+    AbstractOrderHeaderHandler.applyTotalDiscountBeforeComplete(ctx, svc, false);
+
+    verify(svc, org.mockito.Mockito.times(1)).recalculate(ORDER_ID, false);
+  }
+
   // ── ETP-4531: mirrorAccountingDate (unified date, server-side mirror) ───────
 
   @Test
@@ -463,6 +495,23 @@ public class AbstractOrderHeaderHandlerTest {
   @Test
   public void calculatePercentage_zeroInvoiced_returnsZero() {
     assertEquals(0L, AbstractOrderHeaderHandler.calculatePercentage(0, 5, false));
+  }
+
+  // ── filterAliases (ETP-5705) ────────────────────────────────────────────────
+
+  /**
+   * The aliases live with applyCorrectedStatusPercentages, which every order header handler
+   * inherits; a subclass that overrode filterAliases would keep the rewrite in afterHandle but
+   * filter on the raw virtual value again. So each handler must use the base declaration.
+   */
+  @Test
+  public void filterAliases_isInheritedUnchangedByEveryOrderHeaderHandler() throws Exception {
+    for (Class<? extends AbstractOrderHeaderHandler> handlerClass : java.util.List.of(
+        SalesOrderHeaderHandler.class, PurchaseOrderHeaderHandler.class,
+        SalesQuotationHeaderHandler.class)) {
+      assertEquals(handlerClass.getSimpleName(), AbstractOrderHeaderHandler.class,
+          handlerClass.getMethod("filterAliases", NeoContext.class).getDeclaringClass());
+    }
   }
 
   // ── helpers ───────────────────────────────────────────────────────────────

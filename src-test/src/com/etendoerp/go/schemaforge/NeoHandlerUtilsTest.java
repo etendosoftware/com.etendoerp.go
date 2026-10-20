@@ -1278,4 +1278,44 @@ public class NeoHandlerUtilsTest {
       NeoHandlerUtils.reanchorLinesToHeaderWarehouse("inout-1", LOG);
     }
   }
+
+  // ── fetchDocumentNo: the doctype sequence must be used (ETP-5709) ──────────────
+
+  /**
+   * {@code DocumentNoData.nextDocType} only returns {@code razon}; it never sets {@code exito}. A
+   * doctype that owns a sequence therefore must be accepted on {@code razon} alone, and the table
+   * sequence must not be consulted (it would consume a second number, from another series).
+   */
+  @Test
+  public void fetchDocumentNo_usesTheDoctypeSequenceWhenItReturnsANumber() throws Exception {
+    org.openbravo.erpCommon.utility.CSResponse docTypeNo = new org.openbravo.erpCommon.utility.CSResponse();
+    docTypeNo.razon = "1000035";
+    try (MockedStatic<org.openbravo.erpCommon.utility.DocumentNoData> data =
+        Mockito.mockStatic(org.openbravo.erpCommon.utility.DocumentNoData.class)) {
+      data.when(() -> org.openbravo.erpCommon.utility.DocumentNoData.nextDocType(any(), eq("DT1"),
+          eq("C1"), eq("Y"))).thenReturn(docTypeNo);
+
+      assertEquals("1000035", NeoHandlerUtils.fetchDocumentNo("DT1", "C1", "M_InOut", LOG));
+
+      data.verify(() -> org.openbravo.erpCommon.utility.DocumentNoData.nextDoc(any(), any(),
+          any(), any()), Mockito.never());
+    }
+  }
+
+  /** A doctype with no sequence (razon null) keeps the table sequence, as purchase receipts do. */
+  @Test
+  public void fetchDocumentNo_fallsBackToTheTableSequenceWhenTheDoctypeHasNone() throws Exception {
+    org.openbravo.erpCommon.utility.CSResponse none = new org.openbravo.erpCommon.utility.CSResponse();
+    org.openbravo.erpCommon.utility.CSResponse tableNo = new org.openbravo.erpCommon.utility.CSResponse();
+    tableNo.razon = "10000054";
+    try (MockedStatic<org.openbravo.erpCommon.utility.DocumentNoData> data =
+        Mockito.mockStatic(org.openbravo.erpCommon.utility.DocumentNoData.class)) {
+      data.when(() -> org.openbravo.erpCommon.utility.DocumentNoData.nextDocType(any(), eq("DT2"),
+          eq("C1"), eq("Y"))).thenReturn(none);
+      data.when(() -> org.openbravo.erpCommon.utility.DocumentNoData.nextDoc(any(),
+          eq("DocumentNo_M_InOut"), eq("C1"), eq("Y"))).thenReturn(tableNo);
+
+      assertEquals("10000054", NeoHandlerUtils.fetchDocumentNo("DT2", "C1", "M_InOut", LOG));
+    }
+  }
 }

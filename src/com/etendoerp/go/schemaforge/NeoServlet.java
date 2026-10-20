@@ -286,6 +286,7 @@ public class NeoServlet extends HttpBaseServlet {
 
   void writeResponse(HttpServletResponse response, NeoResponse neoResponse)
       throws IOException {
+    NeoResponse.identifyPeriodRefusal(neoResponse);
     if (neoResponse == null) {
       response.setStatus(HttpServletResponse.SC_NO_CONTENT);
       return;

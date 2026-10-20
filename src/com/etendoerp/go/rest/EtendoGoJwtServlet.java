@@ -20,6 +20,7 @@ package com.etendoerp.go.rest;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.PrintWriter;
+import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -30,15 +31,18 @@ import java.util.Base64;
 import java.util.Comparator;
 import java.util.Date;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.time.Instant;
+import java.time.LocalDate;
 
 import javax.servlet.http.Cookie;
 import javax.servlet.http.HttpServletRequest;
@@ -49,7 +53,6 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
-import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.base.secureApp.VariablesSecureApp;
@@ -77,14 +80,25 @@ import com.etendoerp.go.payment.HostedCheckoutService;
 import com.etendoerp.go.payment.CheckoutConfiguration;
 import com.etendoerp.go.payment.BillingEventStore;
 import com.etendoerp.go.payment.BillingOfferConfiguration;
+import com.etendoerp.go.payment.StripeCurrencyScale;
 import com.etendoerp.go.payment.StripePriceService;
 import com.etendoerp.go.payment.CheckoutRequestStore;
+import com.etendoerp.go.payment.ProvisioningFailureReason;
+import com.etendoerp.go.payment.EnvironmentPlanCache;
+import com.etendoerp.go.payment.PlanCatalogService;
+import com.etendoerp.go.payment.PlanNotAvailableException;
+import com.etendoerp.go.payment.SubscriptionModelSwitch;
+import com.etendoerp.go.payment.SubscriptionService;
 import com.etendoerp.go.payment.EnvironmentAccessPolicy;
 import com.etendoerp.go.payment.SubscriptionEventOutcome;
+import com.etendoerp.go.payment.StripeJson;
 import com.etendoerp.go.payment.SubscriptionLifecycleApplier;
+import com.etendoerp.go.payment.EnvironmentAccessGuard;
+import com.etendoerp.go.payment.SystemContext;
 import com.etendoerp.go.payment.StripeCustomerPortalService;
 import com.etendoerp.go.payment.DemoDataTransferService;
 import com.etendoerp.go.schemaforge.data.CheckoutRequest;
+import com.etendoerp.go.schemaforge.data.Plan;
 import com.etendoerp.go.payment.CheckoutWebhookProcessor;
 import com.etendoerp.go.onboarding.OnboardingAcctdimCentrallyMaintainedService;
 import com.etendoerp.go.onboarding.OnboardingAdminIdentityService;
@@ -95,6 +109,8 @@ import com.etendoerp.go.onboarding.OnboardingForceTestModeService;
 import com.etendoerp.go.onboarding.OnboardingFiscalDataSetupService;
 import com.etendoerp.go.onboarding.OnboardingOrgInfoService;
 import com.etendoerp.go.onboarding.OnboardingMarkOrgReadyService;
+import com.etendoerp.go.onboarding.CalendarReviewService;
+import com.etendoerp.go.onboarding.OnboardingInitialPeriodStateService;
 import com.etendoerp.go.onboarding.OnboardingPeriodControlService;
 import com.etendoerp.go.onboarding.OnboardingCostingScheduleService;
 import com.etendoerp.go.onboarding.OnboardingWarehouseAddressService;
@@ -108,6 +124,7 @@ import com.etendoerp.go.onboarding.OnboardingSequenceGeneratorService;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.data.AccountIdentity;
 import com.etendoerp.go.schemaforge.email.EmailContractCommandSupport;
+import com.etendoerp.go.schemaforge.util.OwnerSupport;
 import com.etendoerp.go.session.GoSessionAuthResult;
 import com.etendoerp.go.session.GoSessionAuthenticator;
 import com.etendoerp.go.session.GoLegacyBearer;
@@ -121,6 +138,7 @@ import com.etendoerp.go.session.SessionRoleRevokedException;
 import com.auth0.jwt.JWT;
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.etendoerp.go.usageevents.SessionLoginUsage;
+import com.etendoerp.go.schemaforge.util.OwnerSupport;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
@@ -139,8 +157,11 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  *   GET  /sws/go/onboarding/draft  — Get the saved onboarding wizard draft (requires session token)
  *   POST /sws/go/onboarding/draft  — Save or clear the onboarding wizard draft (requires session token)
  *   GET  /sws/go/me           — Get current account info (requires session token)
+ *   GET  /sws/go/plans        — List the purchasable plans (requires session token). Plan keys
+ *                               only; the provider price id is never exposed.
  *   GET  /sws/go/environments — List environments for the account (requires session token),
- *                               each carrying its plan ("free" | "productive")
+ *                               each carrying its plan ("free" | "productive"), plan key and
+ *                               subscription status
  *   GET  /sws/go/billing/overview — Account-level purchase projection (requires session token)
  *   GET  /sws/go/billing/offers — Server-owned billing offer projection
  *   POST /sws/go/billing/purchases — Start a new owner-authorized purchase
@@ -206,9 +227,17 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String PATH_SESSION = "/session";
   private static final String ERROR_UNKNOWN_ENDPOINT = "Unknown endpoint: ";
   private static final String FIELD_PAYMENT_TOKEN = "paymentToken";
+  private static final String FIELD_PLAN_KEY = "planKey";
+  private static final String CODE_PLAN_NOT_AVAILABLE = "PLAN_NOT_AVAILABLE";
+  private static final String PLAN_NOT_AVAILABLE_MESSAGE =
+      "The selected plan is no longer available. Reload the page to see the current plans.";
+  private static final String CHECKOUT_NOT_CONFIGURED = "CHECKOUT_NOT_CONFIGURED";
+  private static final String CHECKOUT_NOT_CONFIGURED_MESSAGE = "Checkout is not configured";
   private static final String FIELD_INCLUDE_SAMPLE_DATA = "includeSampleData";
   private static final String FIELD_ACCOUNT_EMAIL = "accountEmail";
   private static final String FIELD_CURRENCY = "currency";
+  /** Key of the resource a Stripe event carries under {@code data}. */
+  private static final String STRIPE_EVENT_OBJECT = "object";
   private static final String HEADER_ORIGIN = "Origin";
   private static final String BILLING_OWNER_REQUIRED = "BILLING_OWNER_REQUIRED";
   private static final String BILLING_OWNER_MESSAGE = "Only the environment owner can manage billing";
@@ -217,8 +246,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       "You already have a productive environment with this name. Choose a different name.";
   private static final String RESERVED_CLIENT_NAME_MESSAGE =
       "This company name is reserved. Choose a different name.";
-  private static final String CHECKOUT_NOT_CONFIGURED = "CHECKOUT_NOT_CONFIGURED";
-  private static final String CHECKOUT_NOT_CONFIGURED_MESSAGE = "Checkout is not configured";
   private static final String FIELD_ERROR = "error";
   private static final String ERROR_PAYMENT_REQUIRED = "payment_required";
   // javax.servlet.http.HttpServletResponse predates RFC 7231 and has no 402 constant.
@@ -296,6 +323,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String CONTRACT_NEW_ACCOUNT = "new-account";
   private static final String SSO_PREFIX = "/sso/";
   private static final String PATH_ONBOARDING_DRAFT = "/onboarding/draft";
+  /** ETP-5734 — opt-in query parameter of {@code GET /environments}. */
+  private static final String PARAM_DETAILS = "details";
   /** Maximum accepted age of a Stripe-Signature timestamp, per the provider's guidance. */
   private static final long CHECKOUT_WEBHOOK_TOLERANCE_SECONDS = 300;
   /** The event types that confirm a hosted-checkout payment; every other type is ignored. */
@@ -304,6 +333,13 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final List<String> SUBSCRIPTION_EVENT_TYPES = List.of(
       "invoice.payment_failed", "invoice.paid", "customer.subscription.updated",
       "customer.subscription.deleted");
+  /**
+   * ETP-5047 — events that raise an operator alert and change nothing. A dispute is a chargeback
+   * the provider is already arbitrating: blocking the tenant on it would punish a customer before
+   * the outcome is known, and a lost dispute reaches the subscription through the ordinary
+   * lifecycle events anyway.
+   */
+  private static final List<String> ALERT_ONLY_EVENT_TYPES = List.of("charge.dispute.created");
   private static final String FIELD_DRAFT = "draft";
   private static final String FIELD_DRAFT_STEP = "step";
   private static final String FIELD_DRAFT_FORM = "form";
@@ -321,6 +357,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String FIELD_FIRST_STEPS_VERSION = "v";
   private static final String FIELD_FIRST_STEPS_SEEN = "seen";
   private static final String FIELD_FIRST_STEPS_COMPLETED = "completed";
+  /** ETP-5047 — the access decision reported when entering a blocked tenant. */
+  private static final String FIELD_ACCESS_DECISION = "accessDecision";
   /**
    * ETP-5364 — the user closed the checklist for good, so the sidebar must stop offering it.
    * Independent of {@code seen} (which only spends the one-time post-signup redirect) and of
@@ -340,6 +378,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String[] FIRST_STEPS_IDS = { "company-data", "fiscal-config", FIELD_PRODUCTS,
       FIELD_CONTACTS, "invoice-sequence", "team" };
   private static final String PATH_ONBOARDING_COMPANY_DATA = "/onboarding/company-data";
+  private static final String PATH_CALENDAR_REVIEW = "/onboarding/calendar-review";
   private static final String FIELD_COMPANY_DATA = "companyData";
 
   OnboardingDatasetImportService onboardingDatasetImportService = new OnboardingDatasetImportService();
@@ -350,6 +389,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       new OnboardingAccountingWiringService();
   OnboardingPeriodControlService onboardingPeriodControlService =
       new OnboardingPeriodControlService();
+  OnboardingInitialPeriodStateService onboardingInitialPeriodStateService =
+      new OnboardingInitialPeriodStateService();
+  CalendarReviewService calendarReviewService = new CalendarReviewService();
   OnboardingSequenceGeneratorService onboardingSequenceGeneratorService =
       new OnboardingSequenceGeneratorService();
   OnboardingMarkOrgReadyService onboardingMarkOrgReadyService =
@@ -379,13 +421,22 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       new TenantEnvironmentLifecycleService();
   DevLifecycleToolService devLifecycleToolService = new DevLifecycleToolService();
   TenantPlanService tenantPlanService = new TenantPlanService();
+  SubscriptionService subscriptionService = new SubscriptionService();
+  SubscriptionModelSwitch subscriptionModelSwitch = new SubscriptionModelSwitch();
   HostedCheckoutService hostedCheckoutService = new HostedCheckoutService();
+  PlanCatalogService planCatalogService = new PlanCatalogService();
   CheckoutRequestStore checkoutRequestStore = new CheckoutRequestStore();
   DemoDataTransferService demoDataTransferService = new DemoDataTransferService();
   BillingEventStore billingEventStore = new BillingEventStore();
   CheckoutWebhookProcessor checkoutWebhookProcessor =
       new CheckoutWebhookProcessor(billingEventStore, CHECKOUT_WEBHOOK_TOLERANCE_SECONDS);
   SubscriptionLifecycleApplier subscriptionLifecycleApplier = new SubscriptionLifecycleApplier();
+  /**
+   * ETP-5047 — one guard for the servlet's life. It reads {@link #tenantEnvironmentLifecycleService}
+   * at every check, so a test that replaces that field keeps working.
+   */
+  private final EnvironmentAccessGuard environmentAccessGuard =
+      new EnvironmentAccessGuard(() -> tenantEnvironmentLifecycleService);
   StripeCustomerPortalService stripeCustomerPortalService = new StripeCustomerPortalService();
   CompanyInvitationService companyInvitationService;
   private final TransactionalAuthEmailSender authEmailSender;
@@ -466,6 +517,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleGetCompanyData(request, response);
     } else if (isPath(path, "/demo-data-transfer")) {
       handleDemoDataTransferStatus(request, response);
+    } else if (isPath(path, PATH_CALENDAR_REVIEW)) {
+      handleCalendarReviewState(request, response);
     } else if (isPath(path, "/environments")) {
       handleEnvironments(request, response);
     } else {
@@ -500,6 +553,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleCompanyInvitationMine(request, response);
     } else if (isPath(path, "/company-invitations/resolve")) {
       handleCompanyInvitationResolve(request, response);
+    } else if (isPath(path, "/plans")) {
+      handlePlans(request, response);
     } else {
       return false;
     }
@@ -673,6 +728,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleBillingPortal(request, response);
     } else if (isPath(path, "/demo-data-transfer/retry")) {
       handleDemoDataTransferRetry(request, response);
+    } else if (isPath(path, PATH_CALENDAR_REVIEW + "/confirm")) {
+      handleCalendarReviewAction(request, response, false);
+    } else if (isPath(path, PATH_CALENDAR_REVIEW + "/regenerate")) {
+      handleCalendarReviewAction(request, response, true);
     } else if (isPath(path, "/checkout/sessions")) {
       handleCheckoutSession(request, response);
     } else if (isPath(path, "/company-invitations")) {
@@ -700,6 +759,132 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
   }
 
+  /**
+   * GET /sws/go/plans — the read-only Subscription Plan Catalog, so the browser can name a plan.
+   *
+   * <p>Header: {@code Authorization: Bearer <session token>}, the same credential the checkout
+   * endpoints take, resolved by the same {@link #runWithAuthenticatedAccount} template. The
+   * plan catalog is not secret, but it is only ever needed by someone about to buy, and inventing a
+   * second, public auth path for it would be a new surface to get wrong.
+   *
+   * <p>Returns {@code 200} with {@code { "plans": [ { planKey, name, description, displayPrice,
+   * currency, billingInterval } ] }}. An empty plan catalog is an empty array and a {@code 200}: "there
+   * is nothing on sale" is an answer, not a failure, and the caller has to render the same
+   * "checkout unavailable" state for it either way.
+   *
+   * <p><b>Legacy price fallback.</b> While {@link PlanCatalogService#isLegacyFallbackActive()}
+   * holds — a legacy price is configured and no plan carries a provider price — the list is exactly
+   * the grandfathered {@code legacy-productive} plan, quoted from the configured Stripe price. That
+   * is the same predicate checkout decides on, so the list never offers something checkout refuses.
+   * If Stripe cannot quote the price, the plan is left out (logged) rather than answering 500.
+   *
+   * @see #handleCheckoutSession the endpoint this exists to feed
+   */
+  private void handlePlans(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    runWithAuthenticatedAccount(request, response, "list plans", account -> {
+      JSONArray plans = new JSONArray();
+      Optional<Plan> legacyFallback = planCatalogService.findLegacyFallbackPlan();
+      if (legacyFallback.isPresent()) {
+        JSONObject item = buildLegacyFallbackPlanJson(legacyFallback.get());
+        if (item != null) {
+          plans.put(item);
+        }
+      } else {
+        for (Plan plan : planCatalogService.listPurchasablePlans()) {
+          JSONObject item = buildPlanJson(plan);
+          if (item != null) {
+            plans.put(item);
+          }
+        }
+      }
+      JSONObject result = new JSONObject();
+      result.put("plans", plans);
+      writeResponse(response, HttpServletResponse.SC_OK, result);
+    });
+  }
+
+  /**
+   * Projects the grandfathered plan onto the browser's view of it, quoting the configured legacy
+   * Stripe price — the one checkout will charge under the fallback.
+   *
+   * <p>The price comes from Stripe ({@link StripePriceService#retrieveConfiguredPrice()}, the same
+   * lookup {@code BillingOfferConfiguration} derives the billing offer from), never from a typed
+   * amount, so the amount shown is the amount charged. A failed lookup leaves the plan out: offering a plan whose price nobody could verify is the one thing this list
+   * must not do, and a 500 would break the page for a problem the buyer cannot act on.
+   *
+   * <p>The description is sent empty: the grandfathered row's {@code DESCRIPTION} documents the
+   * fallback for operators and is not buyer-facing copy.
+   *
+   * @param legacy the active grandfathered plan row
+   * @return the JSON view, or null when the configured price cannot be quoted
+   */
+  private JSONObject buildLegacyFallbackPlanJson(Plan legacy) throws JSONException {
+    StripePriceService.Price price;
+    try {
+      price = stripePriceService.retrieveConfiguredPrice();
+    } catch (IOException | JSONException | RuntimeException e) {
+      log.warn("Legacy price fallback is active but the configured price could not be quoted; "
+          + "leaving plan '{}' out of the plan catalog response", legacy.getSearchKey(), e);
+      return null;
+    }
+    BigDecimal displayPrice = BigDecimal.valueOf(price.getAmountMinor())
+        .movePointLeft(StripeCurrencyScale.exponent(price.getCurrency()));
+    JSONObject item = new JSONObject();
+    item.put(FIELD_PLAN_KEY, legacy.getSearchKey());
+    item.put("name", StringUtils.defaultString(legacy.getName()));
+    // Deliberately empty, never the row's DESCRIPTION: that text is operator documentation
+    // ("Grandfathered plan ... sold only via the legacy price fallback ... etendo.go.checkout...")
+    // and would put internal configuration keys in front of a buyer on the upgrade page.
+    item.put("description", "");
+    item.put("displayPrice", displayPrice.toPlainString());
+    item.put(FIELD_CURRENCY, price.getCurrency());
+    item.put("billingInterval", StringUtils.defaultString(price.getInterval()));
+    return item;
+  }
+
+  /**
+   * Projects a Subscription Plan Catalog row onto the browser's view of it.
+   *
+   * <p><b>{@code PROVIDER_PRICE_ID} is deliberately absent, and must stay absent.</b> The browser
+   * names a plan, never a price: {@link #handleCheckoutSession} has no request field for a price
+   * and no code path that reads one, so a price id would be useless to a client and merely useful
+   * to an attacker mapping the billing account. Shipping only the key keeps that guarantee
+   * structural rather than a convention someone has to remember.
+   *
+   * <p>A row with no display price or no currency is dropped rather than sent with nulls: the
+   * client cannot quote it, so offering it would produce a purchase whose price the buyer was
+   * never shown. That is a plan catalog data defect, hence the warning.
+   *
+   * @param plan an active, sellable plan catalog row
+   * @return the JSON view, or null when the row cannot be quoted and must not be offered
+   */
+  private JSONObject buildPlanJson(Plan plan) throws JSONException {
+    BigDecimal displayPrice = plan.getDisplayPrice();
+    String currency = plan.getCurrencyCode();
+    if (displayPrice == null || StringUtils.isBlank(currency)) {
+      log.warn("Plan '{}' is sellable but carries no display price or currency; "
+          + "leaving it out of the plan catalog response", plan.getSearchKey());
+      return null;
+    }
+    JSONObject item = new JSONObject();
+    item.put(FIELD_PLAN_KEY, plan.getSearchKey());
+    item.put("name", StringUtils.defaultString(plan.getName()));
+    item.put("description", StringUtils.defaultString(plan.getDescription()));
+    // A plain string, not a double: the amount crosses to a client that formats it, and a
+    // binary float would quietly re-round a price on the way.
+    item.put("displayPrice", displayPrice.toPlainString());
+    item.put(FIELD_CURRENCY, currency);
+    item.put("billingInterval", StringUtils.defaultString(plan.getBillingInterval()));
+    return item;
+  }
+
+  /**
+   * POST /sws/go/checkout/sessions — starts a provider-hosted checkout for a plan catalog plan.
+   *
+   * <p>{@code planKey} names the Subscription Plan Catalog row being bought; a missing key asks for
+   * the legacy price fallback. See {@link #createHostedCheckoutSession} for the refusals.
+   */
   private void handleCheckoutSession(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
     runWithAuthenticatedContext(request, response, "checkout-session", authenticated -> {
@@ -718,9 +903,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       CheckoutSelection selection = resolveCheckoutSelection(request, response, authenticated,
           body);
       if (selection == null) return;
-      // Billing redirects are server-owned. Never trust a browser-supplied Origin as a return URL.
-      final String origin = PublicUrlResolver.resolveConfiguredAppBaseUrl();
-      createHostedCheckoutSession(response, account, body, clientName, origin, selection,
+      createHostedCheckoutSession(response, account, body, clientName, selection,
           false);
     });
   }
@@ -760,7 +943,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       // Refused before the provider is contacted: a paid checkout fixes its company name, so
       // accepting it here would charge for an environment that can never be provisioned.
       writeError(response, HttpServletResponse.SC_CONFLICT,
-          CheckoutRequestStore.FAILURE_CODE_CLIENT_NAME_IN_USE, CLIENT_NAME_IN_USE_MESSAGE,
+          ProvisioningFailureReason.CODE_CLIENT_NAME_IN_USE, CLIENT_NAME_IN_USE_MESSAGE,
           CLIENT_NAME_IN_USE_MESSAGE);
       return null;
     }
@@ -774,19 +957,22 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * with a new productive. Onboarding applies the same rule again in
    * {@code rejectDuplicateProductiveName}; this pre-payment copy fails open, because the onboarding
    * one still refuses the collision and records it as non-retryable.
+   *
+   * <p>Runs through {@link SystemContext}, so the caller gets its own OBContext and admin-mode
+   * state back on every path — {@code restorePreviousMode()} alone would leave the system context
+   * installed for the rest of the request (ETP-5045). Failing open happens inside the system
+   * scope, so the context is restored on that path too.
    */
   private boolean isProductiveNameTakenByAccount(String clientName, String accountEmail) {
-    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
-    OBContext.setAdminMode(true);
-    try {
-      return ownsProductiveNamed(clientName, accountEmail);
-    } catch (RuntimeException e) {
-      log.warn("Could not check whether company name is in use before checkout; the onboarding "
-          + "check still applies", e);
-      return false;
-    } finally {
-      OBContext.restorePreviousMode();
-    }
+    return SystemContext.call("the pre-checkout company name check", () -> {
+      try {
+        return ownsProductiveNamed(clientName, accountEmail);
+      } catch (RuntimeException e) {
+        log.warn("Could not check whether company name is in use before checkout; the onboarding "
+            + "check still applies", e);
+        return false;
+      }
+    });
   }
 
   /** Caller provides the admin context. Case and surrounding blanks are ignored. */
@@ -800,19 +986,55 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     return false;
   }
 
+  /**
+   * Opens a provider checkout for a new purchase and answers the caller, translating each failure
+   * mode into the response the checkout contract promises.
+   *
+   * <p><b>The browser names a plan, never a price.</b> There is no request field for a price and
+   * no code path that reads one, so a body carrying {@code "priceId"} is <em>ignored, not
+   * validated</em> — rejecting it would imply the server might otherwise have honoured it. Two
+   * refusals, deliberately different:
+   * <ul>
+   *   <li>{@code 400 PLAN_NOT_AVAILABLE} — the key names no active plan catalog row, or asks for
+   *       the grandfathered plan (or names none) while the legacy price fallback is inactive.
+   *       Unknown and inactive are answered identically, because the endpoint must not confirm
+   *       which keys exist; same non-disclosure discipline as {@link #handleCheckoutStatus}. The
+   *       usual innocent cause is a plan list the browser loaded before it changed, so the user
+   *       message says to reload.</li>
+   *   <li>{@code 503 CHECKOUT_NOT_CONFIGURED} — checkout has no credentials, or the plan exists
+   *       but carries no provider price id. Both are "there is nothing sellable here", which is a
+   *       deployment state rather than a bad request.</li>
+   * </ul>
+   */
   private void createHostedCheckoutSession(HttpServletResponse response, Account account,
-      JSONObject body, String clientName, String origin, CheckoutSelection selection,
+      JSONObject body, String clientName, CheckoutSelection selection,
       boolean accountBillingPurchase) throws IOException {
+    // Optional on the wire: a blank key asks for the legacy price fallback, and is refused with
+    // the same PLAN_NOT_AVAILABLE an unknown key gets once that fallback is inactive.
+    String planKey = StringUtils.trimToNull(body.optString(FIELD_PLAN_KEY, ""));
+    // Billing redirects are server-owned. Never trust a browser-supplied Origin as a return URL.
+    final String origin = PublicUrlResolver.resolveConfiguredAppBaseUrl();
     try {
-      // The source, transfer choice and Stripe Price are persisted on the purchase row, and the
-      // flag-gated transfer selection is recorded before the provider is contacted.
+      // The source, transfer choice, plan and Stripe Price are persisted on the purchase row, and
+      // the flag-gated transfer selection is recorded before the provider is contacted.
       JSONObject result = hostedCheckoutService.createSession(account.getId(), account.getEmail(),
-          clientName, origin, selection.demoClientId, selection.transferProducts,
-          selection.transferContacts,
-          requestId -> recordDemoDataTransferSelection(body, requestId, selection));
+          clientName, origin, planKey, new HostedCheckoutService.SessionOptions(
+              selection.demoClientId, selection.transferProducts, selection.transferContacts,
+              requestId -> recordDemoDataTransferSelection(body, requestId, selection)));
       addDemoDataTransferSelectionBestEffort(result, result.optString(FIELD_REQUEST_ID, ""),
           selection.demoClientId);
       writeResponse(response, HttpServletResponse.SC_CREATED, result);
+    } catch (PlanNotAvailableException e) {
+      // Logged with the key, answered without it: the caller learns that this key is not usable
+      // and nothing about the rest of the plan catalog. The message carries the key already
+      // neutralised for logging (single line, bounded) — see PlanNotAvailableException.
+      log.warn("Rejected a checkout for an unavailable plan: {}", e.getMessage());
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_PLAN_NOT_AVAILABLE,
+          PLAN_NOT_AVAILABLE_MESSAGE, PLAN_NOT_AVAILABLE_MESSAGE);
+    } catch (HostedCheckoutService.CheckoutNotConfiguredException e) {
+      log.warn("Checkout is not available: {}", e.getMessage());
+      writeError(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE, CHECKOUT_NOT_CONFIGURED,
+          CHECKOUT_NOT_CONFIGURED_MESSAGE, CHECKOUT_NOT_CONFIGURED_MESSAGE);
     } catch (IllegalStateException e) {
       if (!CheckoutConfiguration.isConfigured()) {
         writeError(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE, CHECKOUT_NOT_CONFIGURED,
@@ -869,9 +1091,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       CheckoutSelection selection = resolveCheckoutSelection(request, response, authenticated,
           body);
       if (selection == null) return;
-      // Billing redirects are server-owned. Never trust a browser-supplied Origin as a return URL.
-      final String origin = PublicUrlResolver.resolveConfiguredAppBaseUrl();
-      createHostedCheckoutSession(response, account, body, clientName, origin, selection,
+      createHostedCheckoutSession(response, account, body, clientName, selection,
           true);
     });
   }
@@ -1002,9 +1222,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    */
   private static void addProvisioningFailure(JSONObject result, String persistedReason)
       throws JSONException {
-    String failureCode = CheckoutRequestStore.failureCode(persistedReason);
+    String failureCode = ProvisioningFailureReason.codeOf(persistedReason);
     result.put("failureCode", failureCode);
-    result.put("failureReason", CheckoutRequestStore.safeFailureDescription(failureCode));
+    result.put("failureReason", ProvisioningFailureReason.safeDescription(failureCode));
   }
 
   /** Account-level billing overview; it remains available when every ERP environment is blocked. */
@@ -1092,11 +1312,13 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       OBContext.setAdminMode(true);
       try {
         TenantEnvironmentLifecycleService.EnvironmentSnapshot snapshot = null;
+        String clientId = null;
         if (purchase.getCreatedClient() != null) {
-          snapshot = tenantEnvironmentLifecycleService.resolve(purchase.getCreatedClient().getId());
+          clientId = purchase.getCreatedClient().getId();
+          snapshot = tenantEnvironmentLifecycleService.resolve(clientId);
         }
         writeResponse(response, HttpServletResponse.SC_OK,
-            buildBillingSubscriptionJson(live, snapshot));
+            buildBillingSubscriptionJson(live, snapshot, clientId));
       } finally {
         OBContext.restorePreviousMode();
       }
@@ -1140,7 +1362,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
   private JSONObject buildBillingSubscriptionJson(
       StripeCustomerPortalService.SubscriptionDetail live,
-      TenantEnvironmentLifecycleService.EnvironmentSnapshot snapshot) throws JSONException {
+      TenantEnvironmentLifecycleService.EnvironmentSnapshot snapshot, String clientId)
+      throws JSONException {
     Instant graceEndsAt = null;
     int graceDaysRemaining = 0;
     if (snapshot != null
@@ -1161,6 +1384,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     result.put("cancelAtPeriodEnd", live.isCancelAtPeriodEnd());
     result.put("graceEndsAt", graceEndsAt == null ? JSONObject.NULL : graceEndsAt.toString());
     result.put("graceDaysRemaining", graceDaysRemaining);
+    // ETP-5734 — the company the subscription pays for, so "Mis empresas" can put the live
+    // renewal date on that company's row. Additive: existing consumers ignore it.
+    result.put(FIELD_CLIENT_ID, clientId == null ? JSONObject.NULL : clientId);
     return result;
   }
 
@@ -1304,12 +1530,48 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       applySubscriptionLifecycle(eventId, type, event);
       return;
     }
+    if (ALERT_ONLY_EVENT_TYPES.contains(type)) {
+      applyAlertOnlyEvent(eventId, type, event);
+      return;
+    }
     billingEventStore.markIgnored(eventId, "unhandled event type");
+  }
+
+  /**
+   * Records an alert-only event as {@code APPLIED} and raises a WARN carrying the provider ids an
+   * operator needs to find it in the Stripe dashboard. No subscription status, grace anchor or
+   * access decision is touched — see {@link #ALERT_ONLY_EVENT_TYPES}. Only ids, the amount and the
+   * provider's reason code are logged: never card or customer personal data.
+   */
+  private void applyAlertOnlyEvent(String eventId, String type, JSONObject event) {
+    JSONObject data = event.optJSONObject("data");
+    JSONObject object = data == null ? null : data.optJSONObject(STRIPE_EVENT_OBJECT);
+    log.warn("Billing alert: Stripe event '{}' ({}) — dispute {} on charge {} (payment intent {}),"
+        + " amount {} {}, reason '{}'. No access change was made; review it in the Stripe"
+        + " dashboard.", eventId, type, optProviderText(object, "id"),
+        optProviderText(object, "charge"), optProviderText(object, "payment_intent"),
+        optProviderText(object, "amount"), optProviderText(object, FIELD_CURRENCY),
+        optProviderText(object, "reason"));
+    billingEventStore.markApplied(eventId);
+  }
+
+  /**
+   * Reads one provider field for a log line: a nested object contributes its {@code id}, a
+   * missing or JSON-null value reads as {@code "-"} (jettison's {@code optString} would print the
+   * literal word "null").
+   */
+  private static String optProviderText(JSONObject object, String key) {
+    if (object == null || !object.has(key) || object.isNull(key)) {
+      return "-";
+    }
+    JSONObject nested = object.optJSONObject(key);
+    String value = nested == null ? object.optString(key, "") : nested.optString("id", "");
+    return StringUtils.defaultIfBlank(value, "-");
   }
 
   private void applyCheckoutPaid(String eventId, String type, JSONObject event) {
     JSONObject data = event.optJSONObject("data");
-    JSONObject object = data == null ? null : data.optJSONObject("object");
+    JSONObject object = data == null ? null : data.optJSONObject(STRIPE_EVENT_OBJECT);
     JSONObject metadata = object == null ? null : object.optJSONObject("metadata");
     String requestId = metadata == null ? "" : metadata.optString("request_id", "");
     String email = metadata == null ? "" : metadata.optString("account_email", "");
@@ -1319,9 +1581,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
     // The customer and subscription ids are read here and nowhere else: this is the only event
     // that carries them alongside the correlation id, and every later subscription or invoice
-    // event arrives keyed by the subscription rather than by the request.
-    boolean recorded = checkoutRequestStore.recordPaid(requestId, object.optString("customer", ""),
-        object.optString("subscription", ""));
+    // event arrives keyed by the subscription rather than by the request. Both are read as
+    // nullable: a payment-mode checkout sends "subscription": null, which a bare optString would
+    // store as the text "null" (ETP-5047).
+    boolean recorded = checkoutRequestStore.recordPaid(requestId,
+        StripeJson.text(object, "customer"),
+        StripeJson.text(object, "subscription"));
     if (!recorded) {
       billingEventStore.markIgnored(eventId, "unknown checkout request");
       return;
@@ -1335,12 +1600,18 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    *
    * <p>These events carry no {@code request_id}: that metadata travels only on the checkout
    * session. Invoice events are keyed by the subscription field, while subscription events are
-   * keyed by the object id; both fall back to the customer when the subscription lookup misses.
+   * keyed by the object id. The open subscription row carrying that id wins; otherwise the
+   * checkout request (then the customer) names the tenant — see {@link #resolveLifecycleTarget}.
    * An event that resolves to no environment is ignored, never blocking.
    *
    * <p>The event is evaluated twice: once without state, so a malformed or unhandled event is
    * ignored before any lookup, and once against the environment's stored projection, which makes
    * an out-of-order older event stale and keeps an authoritative {@code PAST_DUE} due date.
+   *
+   * <p>The outcome lands on the resolved {@code ETGO_SUBSCRIPTION} row, and on the preference
+   * projection for a tenant with no active row, open or closed (see
+   * {@link TenantEnvironmentLifecycleService#applySubscriptionEvent}); the stored state the event
+   * is evaluated against is read from the same place.
    *
    * <p>The status, due date and event instant are written in the session that
    * {@code markApplied} commits, so they land together. When a write fails the session is rolled
@@ -1348,40 +1619,81 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * projection. The claim row itself was committed by the claim and survives the rollback.
    */
   private void applySubscriptionLifecycle(String eventId, String type, JSONObject event) {
+    // The webhook is matched before the authentication chain, so this thread has NO OBContext.
+    // Every write below (the subscription row, the lifecycle preferences, the event watermark)
+    // needs one, and the stores it calls now give the caller's context back instead of leaking a
+    // system one — so the system context is installed explicitly here, and the caller's (null)
+    // context restored afterwards. SystemContext is the shared implementation the stores use too:
+    // admin mode is left before the context it sits on is taken away, and neither unwinding step
+    // can throw, so a failure leaving admin mode never skips restoring the caller's context.
+    SystemContext.run("a subscription lifecycle event",
+        () -> applySubscriptionLifecycleAsSystem(eventId, type, event));
+  }
+
+  private void applySubscriptionLifecycleAsSystem(String eventId, String type, JSONObject event) {
     SubscriptionEventOutcome screened = subscriptionLifecycleApplier.evaluate(type, event);
     if (screened.isIgnored()) {
       billingEventStore.markIgnored(eventId, screened.reason());
       return;
     }
     JSONObject data = event.optJSONObject("data");
-    JSONObject object = data == null ? null : data.optJSONObject("object");
+    JSONObject object = data == null ? null : data.optJSONObject(STRIPE_EVENT_OBJECT);
     String subscriptionId = SubscriptionLifecycleApplier.subscriptionIdOf(type, object);
-    CheckoutRequest purchase = checkoutRequestStore.findByStripeSubscription(subscriptionId);
-    if (purchase == null) {
-      purchase = checkoutRequestStore.findByStripeCustomer(object.optString("customer", ""));
-    }
-    if (purchase == null || purchase.getCreatedClient() == null) {
+    TenantEnvironmentLifecycleService.LifecycleTarget target =
+        resolveLifecycleTarget(subscriptionId, object);
+    if (target == null) {
       billingEventStore.markIgnored(eventId, "unresolved subscription");
       return;
     }
-    String clientId = purchase.getCreatedClient().getId();
+    if (target.isIgnored()) {
+      billingEventStore.markIgnored(eventId, target.ignoreReason());
+      return;
+    }
     SubscriptionEventOutcome outcome = subscriptionLifecycleApplier.evaluate(type, event,
-        tenantEnvironmentLifecycleService.readSubscriptionState(clientId));
+        target.storedState());
     if (outcome.isIgnored()) {
       billingEventStore.markIgnored(eventId, outcome.reason());
       return;
     }
-    boolean stored = tenantEnvironmentLifecycleService.updateSubscriptionStatus(clientId,
-        outcome.status(), outcome.dueAt());
+    boolean stored = tenantEnvironmentLifecycleService.applySubscriptionEvent(target, outcome,
+        SubscriptionLifecycleApplier.eventCreatedAt(event));
     if (!stored) {
       EtendoGoDalHelper.rollbackDalChanges("subscription lifecycle event", null, log);
       billingEventStore.markFailed(eventId, "Could not store the subscription projection");
       return;
     }
-    tenantEnvironmentLifecycleService.recordSubscriptionEventAt(clientId,
-        SubscriptionLifecycleApplier.eventCreatedAt(event));
     billingEventStore.markApplied(eventId);
     log.info("Subscription lifecycle event '{}' ({}) applied", eventId, type);
+  }
+
+  /**
+   * Resolves where a lifecycle event lands (ETP-5047).
+   *
+   * <p>First the open {@code ETGO_SUBSCRIPTION} row carrying the event's Stripe subscription id —
+   * the id is not unique across rows, only across open ones (§5.2). When no open row carries it,
+   * the tenant is found the pre-ETP-5047 way, through the checkout request that bought the
+   * subscription or, failing that, the Stripe customer; the lifecycle service then decides whether
+   * that tenant's row, its preference projection or nothing takes the event.
+   *
+   * @return the target, or null when no tenant can be resolved at all
+   */
+  private TenantEnvironmentLifecycleService.LifecycleTarget resolveLifecycleTarget(
+      String subscriptionId, JSONObject object) {
+    TenantEnvironmentLifecycleService.LifecycleTarget byRow =
+        tenantEnvironmentLifecycleService.targetForSubscription(subscriptionId);
+    if (byRow != null) {
+      return byRow;
+    }
+    CheckoutRequest purchase = checkoutRequestStore.findByStripeSubscription(subscriptionId);
+    if (purchase == null) {
+      purchase = checkoutRequestStore.findByStripeCustomer(
+          StripeJson.text(object, "customer"));
+    }
+    if (purchase == null || purchase.getCreatedClient() == null) {
+      return null;
+    }
+    return tenantEnvironmentLifecycleService.targetForTenant(purchase.getCreatedClient().getId(),
+        subscriptionId);
   }
 
   /**
@@ -2927,6 +3239,90 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     });
   }
 
+  /**
+   * GET /sws/go/onboarding/calendar-review (ETP-5577) — the accounting calendar review state of
+   * the session's tenant (see {@link CalendarReviewService#state}), plus {@code isOwner}: any user
+   * of the tenant may read it (the posting-error guidance tells non-owners to ask the owner), only
+   * the owner may act on it.
+   */
+  private void handleCalendarReviewState(HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    runWithAuthenticatedContext(request, response, "get calendar review", authenticated -> {
+      TenantSession session = resolveTenantSession(request, response, authenticated);
+      if (session == null) return;
+      JSONObject result = calendarReviewService.state(session.clientId, LocalDate.now());
+      result.put("isOwner", tenantOwnerUserId(request, authenticated, session.clientId) != null);
+      writeSuccessStatus(response, result);
+    });
+  }
+
+  /**
+   * POST /sws/go/onboarding/calendar-review/confirm and …/regenerate (ETP-5577). Owner of THIS
+   * tenant only: owning another environment of the account is not enough, regenerate deletes the
+   * calendar. Regenerate takes {@code {"fiscalYearStart": "JANUARY|APRIL|JULY|OCTOBER"}} and
+   * answers 409 when anything already depends on the calendar.
+   */
+  private void handleCalendarReviewAction(HttpServletRequest request,
+      HttpServletResponse response, boolean regenerate) throws IOException {
+    runWithAuthenticatedContext(request, response, "calendar review", authenticated -> {
+      TenantSession session = resolveTenantSession(request, response, authenticated);
+      if (session == null) return;
+      String userId = tenantOwnerUserId(request, authenticated, session.clientId);
+      if (userId == null) {
+        writeError(response, HttpServletResponse.SC_FORBIDDEN,
+            "Only the owner of this environment can review its calendar");
+        return;
+      }
+      if (regenerate) {
+        String fiscalYearStart = readJsonBody(request).optString("fiscalYearStart", "");
+        CalendarReviewService.Refusal refusal = calendarReviewService.regenerate(
+            session.clientId, fiscalYearStart, userId, LocalDate.now());
+        if (refusal != null) {
+          EtendoGoDalHelper.rollbackDalChanges("calendar regenerate", null, log);
+          writeError(response, refusal.status, refusal.message);
+          return;
+        }
+      } else {
+        calendarReviewService.confirm(session.clientId, userId);
+      }
+      EtendoGoDalHelper.commitDalChanges("calendar review", log);
+      // Same shape as the GET: the caller is the owner, or it would have been refused above.
+      JSONObject result = calendarReviewService.state(session.clientId, LocalDate.now());
+      result.put("isOwner", true);
+      writeSuccessStatus(response, result);
+    });
+  }
+
+  /**
+   * The caller's {@code AD_User} in {@code clientId} when that user is the tenant's owner, else
+   * {@code null}. The user comes from the credential (the cookie session's environment user, or a
+   * legacy bearer's {@code user} claim), never from the request body.
+   */
+  private String tenantOwnerUserId(HttpServletRequest request, AuthenticatedAccount authenticated,
+      String clientId) {
+    String userId = null;
+    if (authenticated.sessionRecord != null) {
+      userId = authenticated.sessionRecord.getUserId();
+    } else {
+      DecodedJWT jwt = bearerTenantClaims(request);
+      userId = jwt == null ? null : jwt.getClaim("user").asString();
+    }
+    return ownerOfTenant(userId, clientId);
+  }
+
+  /**
+   * {@code userId} when that user belongs to {@code clientId} and is its owner, else {@code null}.
+   * Owning another environment of the same account does not count.
+   */
+  static String ownerOfTenant(String userId, String clientId) {
+    if (StringUtils.isBlank(userId)) {
+      return null;
+    }
+    User user = OBDal.getInstance().get(User.class, userId);
+    return user != null && user.getClient() != null && clientId.equals(user.getClient().getId())
+        && OwnerSupport.isOwner(userId) ? userId : null;
+  }
+
   /** Reclaims failed or stranded transfer work; payment and tenant provisioning are never repeated. */
   private void handleDemoDataTransferRetry(HttpServletRequest request,
       HttpServletResponse response) throws IOException {
@@ -2977,7 +3373,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
     // A demo that already originated a productive environment is spent as a source: buying again
     // from it creates a clean productive environment, exactly like buying from a productive one.
-    if (isProductiveClient(sessionClientId) || isAssociatedDemo(sessionClientId)) {
+    // ETP-5047 — so does a productive environment whose plan reads free because its subscription
+    // was canceled: it is not a demo, so it is never asked for, nor taken as, a source.
+    // So is a demo the account was only invited into (ETP-5743): it is not the buyer's to copy.
+    if (isProductiveClient(sessionClientId) || isProductiveEnvironment(sessionClientId)
+        || isAssociatedDemo(sessionClientId)
+        || !isOwnedClient(sessionClientId, authenticated.account.getEmail())) {
       return new CheckoutSelection(null, false, false);
     }
     String demoClientId = optionalDemoClientId(body);
@@ -3044,28 +3445,53 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
   }
 
+  private boolean isOwnedClient(String clientId, String accountEmail) {
+    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
+    OBContext.setAdminMode(true);
+    try {
+      return EtendoGoJwtDalHelper.clientOwnedByAccountEmail(clientId, accountEmail);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Whether the named environment may be the demo source of a purchase: owned by the account, on
+   * the free plan, not already the origin of a productive environment (ETP-5548), and not itself a
+   * productive environment (ETP-5047 — a canceled one reads plan free, see
+   * {@link TenantEnvironmentLifecycleService#isProductiveEnvironment}). A purchase source is copied
+   * into the buyer's new environment and then locked, so the account must own it: being invited
+   * into it is not enough (ETP-5743).
+   */
   private boolean isOwnedFreeDemoClient(String demoClientId, String accountEmail) {
     OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
     OBContext.setAdminMode(true);
     try {
       Client client = OBDal.getInstance().get(Client.class, demoClientId);
       return client != null
-          && EtendoGoJwtDalHelper.clientBelongsToAccountEmail(demoClientId, accountEmail)
+          && EtendoGoJwtDalHelper.clientOwnedByAccountEmail(demoClientId, accountEmail)
           && TenantPlanService.PLAN_FREE.equals(tenantPlanService.resolvePlan(demoClientId))
-          && !tenantEnvironmentLifecycleService.isAssociatedWithProductive(demoClientId);
+          && !tenantEnvironmentLifecycleService.isAssociatedWithProductive(demoClientId)
+          && !tenantEnvironmentLifecycleService.isProductiveEnvironment(demoClientId);
     } finally {
       OBContext.restorePreviousMode();
     }
   }
 
+  /**
+   * ETP-5047 — purchase-source eligibility, not access: the lifecycle type, never the enforced
+   * access decision, so the enforcement kill switch cannot turn a productive environment into a
+   * source. Scoped like {@link #isAssociatedDemo}.
+   */
+  private boolean isProductiveEnvironment(String clientId) {
+    return SystemContext.call("the productive-environment check",
+        () -> tenantEnvironmentLifecycleService.isProductiveEnvironment(clientId));
+  }
+
+  /** Scoped like {@link #isProductiveNameTakenByAccount}: the caller's context is restored. */
   private boolean isAssociatedDemo(String clientId) {
-    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
-    OBContext.setAdminMode(true);
-    try {
-      return tenantEnvironmentLifecycleService.isAssociatedWithProductive(clientId);
-    } finally {
-      OBContext.restorePreviousMode();
-    }
+    return SystemContext.call("the associated-demo check",
+        () -> tenantEnvironmentLifecycleService.isAssociatedWithProductive(clientId));
   }
 
   private void writeInvalidDemoSelection(HttpServletResponse response) throws IOException {
@@ -3200,27 +3626,45 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     // ETP-5455 (decision 2) — a commercially blocked environment's data is fully inaccessible,
     // not only through NEO: every account endpoint that acts on the session's tenant is refused
     // with the same 402 NEO answers. The account itself (billing, upgrade, /me) stays reachable so
-    // the owner can pay. null = a tenant that predates lifecycle metadata, the legacy transition.
-    EnvironmentAccessPolicy.Decision access =
-        tenantEnvironmentLifecycleService.evaluateAccess(clientId, true, Instant.now());
-    if (access != null && access != EnvironmentAccessPolicy.Decision.ALLOWED) {
-      writeError(response, SC_PAYMENT_REQUIRED,
-          "Environment access is not available: " + access.name());
+    // the owner can pay. ETP-5047 — decided by the shared guard (kill switch and structured 402
+    // body included); it allows a tenant that predates lifecycle metadata, the legacy transition.
+    EnvironmentAccessGuard.Denial denial = environmentAccessGuard.check(clientId, "tenant-session");
+    if (denial != null) {
+      denial.writeTo(response);
       return null;
     }
     return new TenantSession(clientId, StringUtils.defaultIfBlank(orgId, "0"));
   }
 
+  /**
+   * Clears the account's saved onboarding draft once the environment is committed.
+   *
+   * <p><b>Written as system</b> (ETP-5047). The draft lives on {@code ETGO_ACCOUNT}, a client-0
+   * row, and this runs after the onboarding commit with the thread in the new tenant's context:
+   * the DAL write check refuses a client-0 row from there at flush ({@code OBSecurityException:
+   * Client (0) ... is not present in ClientList}). That went unnoticed because the dirty account
+   * stayed in the session and the ready email, which commits as system, persisted it by accident
+   * — and on the paid-from-demo path a system context leaked by the demo transfer made the clear
+   * itself succeed until that leak was fixed. {@link SystemContext} hands the tenant's context
+   * back afterwards.
+   *
+   * <p>A failure is rolled back, so a refused account write never stays pending for the next
+   * commit on this thread. {@code updateOnboardingDraft} commits its own work on success. The
+   * rollback can also discard a checkout close left pending by a failed {@code recordProvisioned};
+   * see {@link #startDemoDataTransferBestEffort} for that edge.
+   *
+   * @param account the account that drove the onboarding, may be null
+   */
   private void clearOnboardingDraftBestEffort(Account account) {
     if (account == null) {
       return;
     }
     try {
-      // updateOnboardingDraft flushes and commits internally
-      // (EtendoGoJwtDalHelper.flushAndCommitDalChanges) — no extra commit here.
-      EtendoGoJwtDalHelper.updateOnboardingDraft(account, null);
+      SystemContext.run("clearing the onboarding draft",
+          () -> EtendoGoJwtDalHelper.updateOnboardingDraft(account, null));
     } catch (RuntimeException e) {
       log.warn("Clearing onboarding draft failed without blocking onboarding", e);
+      EtendoGoDalHelper.rollbackDalChanges("onboarding draft clear", e, log);
     }
   }
 
@@ -3240,20 +3684,76 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
   /**
    * ETP-5117: applies the side effects of a paid upgrade once {@code handleOnboarding}'s paywall
-   * has approved the request — marks the tenant productive and, only on success, reverts any
-   * {@code ETSG_ForceTestMode} override. All writes join the onboarding transaction; a failure
-   * aborts it so a paid tenant cannot commit with contradictory metadata.
+   * has approved the request — records that the tenant is productive, marks it in the lifecycle
+   * projection and reverts any {@code ETSG_ForceTestMode} override (see
+   * {@link #revertTestModeForProductiveTenant}). Runs as the last write before the onboarding
+   * commit and joins that transaction.
+   *
+   * <p><b>ETP-5046: the subscription row is the record of the payment.</b> The
+   * {@code ETGO_TenantPlan} preference is no longer written alongside it — a parallel store that is
+   * written on every upgrade but read by nothing (since {@code resolvePlan} reads the subscription
+   * first) is not a safety measure, it is a second answer that drifts. So:
+   * <ul>
+   *   <li><b>Subscription model OFF in this environment</b> ({@link SubscriptionModelSwitch}, the
+   *       System-level {@code ETGO_SubscriptionModel} preference is not {@code Y}) <b>and the
+   *       tenant has no subscription row</b> → no row is attempted and the preference IS written,
+   *       exactly as before ETP-5046. The lifecycle webhooks then keep this rowless tenant's
+   *       billing state in the preference projection. Each environment stays here until its
+   *       operator switches the model on (and then runs the R37 backfill for the tenants already
+   *       on the preference). A tenant that already has a
+   *       row (any row) takes the subscription path below whatever the switch says, because its row
+   *       is what every read answers from.</li>
+   *   <li><b>Subscription write succeeds</b> → the preference is NOT written, and any stale
+   *       {@code ETGO_TenantPlan} row this tenant still carries is retired
+   *       ({@link TenantPlanService#retireProductivePreference}). A newly paid tenant therefore
+   *       lands directly in the post-cutover state, exactly like a tenant the R37 backfill has
+   *       processed.</li>
+   *   <li><b>Subscription write fails</b> → the preference IS written, as the safety net. That is
+   *       the one case where {@code TenantPlanPreferenceFallback} has to answer, and the one case
+   *       where the marker is the only record that the tenant paid. Nothing is retired.</li>
+   * </ul>
+   * Once the switch is on, together with statement 3 of the R37 backfill this makes the rest of
+   * the cutover a per-tenant state transition with an observable end condition
+   * ({@code select count(*) from ad_preference where attribute='ETGO_TenantPlan'} reaching 0).
+   * The switch itself is the one environment-level moment: before it, nothing moves. Grep marker
+   * for the Phase F deletion: {@code ETP-5046-TRANSITIONAL-FALLBACK}.
+   *
+   * <p><b>Fails closed when the tenant would commit with contradictory metadata (ETP-5548).</b>
+   * Paid provisioning is recoverable, so an exception here rolls the attempt back for a retry
+   * instead of committing a paid tenant that reads back as free. It throws when neither the
+   * subscription nor the fallback marker could be recorded, when the lifecycle projection cannot be
+   * written, and when the demo override cannot be reverted. The two writes that stay best-effort
+   * have a recorded alternative: a failed subscription is covered by the fallback marker, and a
+   * failed retirement only leaves the fallback answering until R37 retires the row. Both are logged
+   * as errors naming the environment and the masked account.
+   *
+   * <p>Package-visible rather than private so the specs can drive it directly, matching
+   * {@link #ensureOnboardingDataset} and {@link #importOnboardingDataset}.
    *
    * @param clientId the tenant just created/resolved
    * @param starOrgId the tenant's "*" organization id, required by {@code markProductive}
    * @param clientName the onboarding request's client name, used only for the failure log line
    * @param accountEmail the account driving onboarding, masked in the failure log line
+   * @param paymentToken the checkout request id this environment was paid under
    */
-  private void applyPaidUpgradeSideEffects(String clientId, String starOrgId, String clientName,
-      String accountEmail) {
-    if (!tenantPlanService.markProductive(clientId, starOrgId)) {
+  void applyPaidUpgradeSideEffects(String clientId, String starOrgId, String clientName,
+      String accountEmail, String paymentToken) {
+    PaymentRecord paymentRecord = recordPaymentAsSubscription(clientId, clientName, accountEmail,
+        paymentToken);
+    if (paymentRecord == PaymentRecord.SUBSCRIPTION) {
+      // The subscription IS the record now, so the preference is retired rather than written.
+      // ETP-5046-TRANSITIONAL-FALLBACK — remove this call in Phase F with the fallback itself.
+      retireTenantPlanPreferenceBestEffort(clientId, clientName, accountEmail);
+    } else if (!tenantPlanService.markProductive(clientId, starOrgId)) {
+      // ETP-5046-TRANSITIONAL-FALLBACK — the preference path: the subscription model is off in
+      // this environment, or the row could not be opened. Either way this preference is the sole
+      // record that the tenant paid, and TenantPlanPreferenceFallback is what will read it back.
       throw new OBException("Paid environment '" + clientName + "' (client " + clientId
-          + ") for account " + maskEmail(accountEmail) + " could not be marked as plan '"
+          + ") for account " + maskEmail(accountEmail)
+          + (paymentRecord == PaymentRecord.PREFERENCE_BY_MODEL
+              // No subscription was attempted: the pre-ETP-5046 failure, in develop's words.
+              ? " could not be marked as plan '"
+              : " has neither a subscription nor the fallback plan marker '")
           + TenantPlanService.PLAN_PRODUCTIVE + "'");
     }
     if (!tenantEnvironmentLifecycleService.markProductive(clientId)) {
@@ -3265,14 +3765,222 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
+   * ETP-5046 (ETP-5046-TRANSITIONAL-FALLBACK) — retires this tenant's stale {@code ETGO_TenantPlan}
+   * preference once its subscription row exists. Delete with the rest of the fallback in Phase F.
+   *
+   * <p>Failing to retire the row is harmless: the transitional fallback just keeps answering for
+   * that tenant and the R37 backfill retires it on its next run. So this must never be able to fail
+   * an upgrade that has already been paid for — {@code retireProductivePreference} does not throw,
+   * and this wrapper makes that guarantee local rather than remote.
+   *
+   * @param clientId the tenant whose subscription was just opened
+   * @param clientName the onboarding request's client name, for the failure log line
+   * @param accountEmail the account driving onboarding, masked in the failure log line
+   */
+  private void retireTenantPlanPreferenceBestEffort(String clientId, String clientName,
+      String accountEmail) {
+    try {
+      tenantPlanService.retireProductivePreference(clientId);
+    } catch (RuntimeException e) {
+      log.error("Paid environment '{}' (client {}) for account {} has its subscription, but its "
+          + "legacy {} preference could not be retired; the transitional fallback keeps answering "
+          + "for it until the R37 backfill runs", clientName, clientId, maskEmail(accountEmail),
+          TenantPlanService.PREFERENCE_ATTRIBUTE, e);
+    }
+  }
+
+  /** Which store recorded a paid upgrade, as decided by {@link #recordPaymentAsSubscription}. */
+  enum PaymentRecord {
+    /** An {@code ETGO_SUBSCRIPTION} row records the payment. */
+    SUBSCRIPTION,
+    /** No row was attempted: the subscription model is off and the tenant has no row. */
+    PREFERENCE_BY_MODEL,
+    /** A row was attempted and could not be opened; the preference is the safety net. */
+    PREFERENCE_AFTER_FAILED_SUBSCRIPTION
+  }
+
+  /**
+   * Records the payment as an {@code ETGO_SUBSCRIPTION} row when this environment runs the
+   * subscription model OR the tenant already has a row, and reports which store recorded it.
+   *
+   * <p><b>A tenant with a row is decided by the row — for writes too.</b> Every read
+   * ({@code resolvePlan}, the access policy, the lifecycle webhooks) answers from a tenant's row
+   * whenever it has one, so a payment recorded only in the {@code ETGO_TenantPlan} preference would
+   * be invisible for such a tenant: a canceled or closed row would keep it free and blocked while it
+   * pays. So the switch decides only for a tenant with NO row. "Has a row" means any row, open or
+   * closed, active or not ({@link SubscriptionService#hasAnySubscription}) — the same test R37's
+   * retirement branch uses, and one that stays correct whatever later tickets do to how the current
+   * row is picked.
+   *
+   * <p>With the switch off and no row, nothing is attempted and the caller writes the preference —
+   * the pre-ETP-5046 record, not a failure; it is logged at INFO, not ERROR. If the row lookup
+   * itself fails, the purchase takes that same path and the failure is logged as an error.
+   *
+   * @param clientId the tenant just created/resolved
+   * @param clientName the onboarding request's client name, for the log lines
+   * @param accountEmail the account driving onboarding, masked in the log lines
+   * @param paymentToken the checkout request id this environment was paid under
+   * @return which store recorded the payment; anything but {@link PaymentRecord#SUBSCRIPTION}
+   *     means the caller must write the preference
+   */
+  private PaymentRecord recordPaymentAsSubscription(String clientId, String clientName,
+      String accountEmail, String paymentToken) {
+    if (!subscriptionModelSwitch.isOn() && !tenantHasSubscriptionRow(clientId, clientName,
+        accountEmail)) {
+      log.info("The subscription model is off in this environment ({} is not '{}'); paid "
+          + "environment '{}' (client {}) for account {} is recorded with the {} preference",
+          SubscriptionModelSwitch.PREFERENCE_PROPERTY, SubscriptionModelSwitch.ON, clientName,
+          clientId, maskEmail(accountEmail), TenantPlanService.PREFERENCE_ATTRIBUTE);
+      return PaymentRecord.PREFERENCE_BY_MODEL;
+    }
+    return openSubscriptionBestEffort(clientId, clientName, accountEmail, paymentToken)
+        ? PaymentRecord.SUBSCRIPTION
+        : PaymentRecord.PREFERENCE_AFTER_FAILED_SUBSCRIPTION;
+  }
+
+  /**
+   * Whether the tenant already has any subscription row. Never throws: a failed lookup is logged
+   * and answered {@code false}, which keeps a switched-off environment on its preference path.
+   *
+   * <p><b>Trade-off, accepted (decided 2026-10-14, recorded in register §2.9).</b> Answering
+   * {@code false} on a failed lookup means that a tenant which DID have a row would get its payment
+   * recorded only in the marker — invisible behind that row. Since ETP-5047 a tenant whose only row
+   * is closed reads as canceled, so such a tenant would stay canceled while it pays. The case is
+   * reachable in principle only: letting a canceled tenant re-subscribe its own environment was
+   * decided on 2026-10-14 (Martin Taal), but that flow is ETP-5742 and does not exist yet. Today
+   * every checkout provisions a new environment, and since ETP-5047 a canceled productive tenant is
+   * no longer a demo source either, so no current purchase reaches a tenant with a closed row. The
+   * acceptance does not depend on that: it fails closed in practice. On PostgreSQL a failed SQL
+   * statement aborts the transaction, so the onboarding writes that follow fail too and the upgrade
+   * fails instead of being recorded in the marker. Only a failure other than a failed SQL statement
+   * (a mapping or hydration error after the statement ran, for instance) could reach the marker
+   * path with a usable transaction. Failing the purchase on every lookup error instead would trade
+   * that edge for failing every rowless purchase whenever the lookup misbehaves.
+   */
+  private boolean tenantHasSubscriptionRow(String clientId, String clientName,
+      String accountEmail) {
+    try {
+      return subscriptionService.hasAnySubscription(clientId);
+    } catch (RuntimeException e) {
+      log.error("Paid environment '{}' (client {}) for account {}: could not check for an existing "
+          + "subscription row; recording the payment with the {} preference", clientName, clientId,
+          maskEmail(accountEmail), TenantPlanService.PREFERENCE_ATTRIBUTE, e);
+      return false;
+    }
+  }
+
+  /**
+   * Opens the tenant's subscription row from the checkout request it was bought under.
+   *
+   * <p>Best-effort and loud: a failure here is not a failed upgrade, because the caller then
+   * records the payment through the fallback marker instead, and only fails the attempt when that
+   * cannot be written either. Every failure is logged as an error naming the environment and the
+   * masked account, so it is searchable rather than indistinguishable from a subscription that was
+   * never attempted.
+   *
+   * <p>The checkout request is read through the store's own account-scoped lookup, which opens a
+   * system {@link OBContext} and does not put the caller's back. Onboarding is mid-flight here and
+   * every later step depends on the admin context it prepared, so the context is captured and
+   * restored around the call.
+   *
+   * <p><b>The returned flag decides which store records the plan</b> (ETP-5046): on {@code true}
+   * the subscription is the record and the legacy preference is retired; on {@code false} the
+   * caller falls back to writing the preference, because it is then the only record that the tenant
+   * paid. Every one of the three exits below — no checkout request, no plan on it, or a throwing
+   * write — is a failure to record the subscription and therefore returns {@code false}.
+   *
+   * @param clientId the tenant just created/resolved
+   * @param clientName the onboarding request's client name, for the failure log line
+   * @param accountEmail the account driving onboarding, masked in the failure log line
+   * @param paymentToken the checkout request id this environment was paid under
+   * @return {@code true} when the subscription row was opened, {@code false} on any failure
+   */
+  private boolean openSubscriptionBestEffort(String clientId, String clientName,
+      String accountEmail, String paymentToken) {
+    try {
+      CheckoutRequest checkoutRequest = findCheckoutRequestPreservingContext(paymentToken,
+          accountEmail);
+      if (checkoutRequest == null) {
+        log.error("Paid environment '{}' (client {}) for account {} has no checkout request under "
+            + "token '{}'; no subscription was opened", clientName, clientId,
+            maskEmail(accountEmail), paymentToken);
+        return false;
+      }
+      Plan plan = checkoutRequest.getPlan();
+      if (plan == null) {
+        log.error("Paid environment '{}' (client {}) for account {} was bought under a checkout "
+            + "request carrying no plan; no subscription was opened", clientName, clientId,
+            maskEmail(accountEmail));
+        return false;
+      }
+      // The price the checkout actually charged, which under the legacy price fallback is the
+      // configured legacy price rather than anything on the (priceless) grandfathered plan.
+      subscriptionService.openSubscription(clientId, plan, checkoutRequest.getEtendoGoAccount(),
+          checkoutRequest.getStripeCustomer(), checkoutRequest.getStripeSubscription(),
+          checkoutRequest.getStripePrice());
+      return true;
+    } catch (RuntimeException e) {
+      log.error("Paid environment '{}' (client {}) for account {} could not have its subscription "
+          + "opened; falling back to the legacy plan marker", clientName, clientId,
+          maskEmail(accountEmail), e);
+      return false;
+    }
+  }
+
+  /**
+   * Reads a checkout request without letting the store's system context escape into the
+   * onboarding flow.
+   *
+   * @param paymentToken the checkout request id
+   * @param accountEmail authenticated account email, which the store matches on
+   * @return the matching request, or null
+   */
+  private CheckoutRequest findCheckoutRequestPreservingContext(String paymentToken,
+      String accountEmail) {
+    OBContext previousContext = OBContext.getOBContext();
+    try {
+      return checkoutRequestStore.find(paymentToken, accountEmail);
+    } finally {
+      if (previousContext != null) {
+        OBContext.setOBContext(previousContext);
+      }
+    }
+  }
+
+  /**
    * GET /sws/go/environments
-   * Header: Authorization: Bearer <session_token>
-   * Returns 200 with environments linked to the account, each carrying its plan
-   * ("free" | "productive"), plus the account email as the flag-targeting identity.
-   * Links via AD_User.username matching the account email.
+   * Header: Authorization: Bearer &lt;session_token&gt;
+   * Returns 200 with environments linked to the account, plus the account email as the
+   * flag-targeting identity. Links via AD_User.username matching the account email.
+   *
+   * <p>Each environment carries three plan fields, read from its {@code ETGO_SUBSCRIPTION} row —
+   * the open one, else the latest closed one (ETP-5047):
+   * <ul>
+   *   <li>{@code plan} — the original coarse {@code "free" | "productive"} value, unchanged since
+   *       ETP-4686 and still what live clients branch on. Never null.</li>
+   *   <li>{@code planKey} — the Subscription Plan Catalog key of the subscribed plan, or JSON
+   *       null. A plan <em>key</em> names a plan catalog row and a free tenant has none, so this
+   *       is null rather than {@code "free"}.</li>
+   *   <li>{@code subscriptionStatus} — {@code active}, {@code past_due} or {@code canceled}, or
+   *       JSON null when there is no subscription.</li>
+   * </ul>
+   *
+   * <p>All three come from a single {@link EnvironmentPlanCache} built before the sort. Resolving
+   * the plan per comparison would issue O(n log n) queries for one page render.
+   *
+   * <p><b>TRANSITIONAL (ETP-5046-TRANSITIONAL-FALLBACK).</b> Tenants with no active subscription
+   * row, open or closed (a closed row answers for its tenant, as canceled, since ETP-5047), are
+   * checked once, in one extra query, against the retired {@code ETGO_TenantPlan} preference, so
+   * this list agrees with {@code TenantPlanService#resolvePlan} until the R37 backfill has run.
+   * Such a tenant reports {@code plan = "productive"} with {@code planKey} and
+   * {@code subscriptionStatus} both JSON null. Delete with the fallback in Phase F.
+   *
+   * <p>ETP-5734 — {@code ?details=true} also appends the per-company fields of
+   * {@link EnvironmentDetails}. Opt-in so the list every app load reads stays as cheap as before.
    */
   private void handleEnvironments(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
+    boolean withDetails = Boolean.parseBoolean(request.getParameter(PARAM_DETAILS));
     if (!hasAnyCredential(request)) {
       writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_AUTHORIZATION_HEADER);
       return;
@@ -3287,19 +3995,32 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       org.codehaus.jettison.json.JSONArray envArray = new org.codehaus.jettison.json.JSONArray();
       List<User> environmentUsers = new ArrayList<>(
           EtendoGoJwtDalHelper.findEnvironmentUsersByAccountEmail(account.getEmail()));
+      // One query for every tenant on the page, resolved before the sort rather than inside it.
+      // Built per request and passed down as a parameter — never cached in a field or a
+      // ThreadLocal, because Tomcat pools request threads and the next request on this thread
+      // belongs to a different account. See EnvironmentPlanCache.
+      Set<String> environmentClientIds = new LinkedHashSet<>();
+      for (User environmentUser : environmentUsers) {
+        environmentClientIds.add(environmentUser.getClient().getId());
+      }
+      // ETP-5046-TRANSITIONAL-FALLBACK — the id set is passed too, so the cache can ask the
+      // retired preference about the tenants that have no subscription row yet. Exactly one extra
+      // query, only when at least one tenant is missing, and it keeps this list in agreement with
+      // TenantPlanService#resolvePlan. Delete the extra argument in Phase F.
+      EnvironmentPlanCache planCache = EnvironmentPlanCache.of(environmentClientIds,
+          subscriptionService.findLatestForClients(environmentClientIds));
       // The first environment is entered automatically after account login. Prefer the paid
       // productive tenant so a demo tenant never unexpectedly becomes the active workspace when
       // an account owns both plans. The client repeats this ordering for older backends.
       environmentUsers.sort(Comparator
-          .comparing((User user) -> TenantPlanService.PLAN_PRODUCTIVE
-              .equals(tenantPlanService.resolvePlan(user.getClient().getId())))
+          .comparing((User user) -> planCache.isProductive(user.getClient().getId()))
           .reversed()
           .thenComparing(user -> StringUtils.defaultString(user.getClient().getName()),
               String.CASE_INSENSITIVE_ORDER));
       Map<String, Date> unfinishedPaidClients = findUnfinishedPaidClients(account);
       for (User environmentUser : environmentUsers) {
         if (!isUnfinishedPaidEnvironment(environmentUser.getClient(), unfinishedPaidClients)) {
-          addEnvironmentEntries(envArray, environmentUser);
+          addEnvironmentEntries(envArray, environmentUser, planCache, withDetails);
         }
       }
 
@@ -3326,17 +4047,33 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
   /** One entry per business organization of the user's client, or one without when it has none. */
   private static void addEnvironmentEntries(org.codehaus.jettison.json.JSONArray envArray,
-      User environmentUser) throws JSONException {
+      User environmentUser, EnvironmentPlanCache planCache, boolean withDetails)
+      throws JSONException {
     Client client = environmentUser.getClient();
+    JSONObject details = withDetails
+        ? EnvironmentDetails.resolve(client.getId(), environmentUser,
+            OwnerSupport.isOwner(environmentUser.getId()))
+        : null;
     List<Organization> organizations =
         EtendoGoJwtDalHelper.findNonStarOrganizations(client.getId());
     if (organizations.isEmpty()) {
-      envArray.put(EtendoGoJwtDalHelper.buildEnvironmentJson(client, null, environmentUser));
+      envArray.put(withEnvironmentDetails(
+          EtendoGoJwtDalHelper.buildEnvironmentJson(client, null, environmentUser, planCache),
+          details));
       return;
     }
     for (Organization organization : organizations) {
-      envArray.put(EtendoGoJwtDalHelper.buildEnvironmentJson(client, organization, environmentUser));
+      envArray.put(withEnvironmentDetails(EtendoGoJwtDalHelper.buildEnvironmentJson(client,
+          organization, environmentUser, planCache), details));
     }
+  }
+
+  private static JSONObject withEnvironmentDetails(JSONObject env, JSONObject details)
+      throws JSONException {
+    if (details != null && env != null) {
+      EnvironmentDetails.merge(env, details);
+    }
+    return env;
   }
 
   /**
@@ -3389,6 +4126,40 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
+   * ETP-5047 — the commercial access decision for the tenant an environment user belongs to,
+   * through the one guard NEO and MCP use too (decision, kill switch, error body). Runs in the
+   * caller's system context.
+   *
+   * @param userId the {@code AD_User} being entered, already verified to belong to the account
+   * @param entryPoint a short label for the log line
+   * @return the denial, or null when access is allowed or the user no longer exists
+   */
+  private EnvironmentAccessGuard.Denial environmentAccessDenial(String userId, String entryPoint) {
+    String clientId = clientIdOfUser(userId);
+    return clientId == null ? null : environmentAccessGuard.check(clientId, entryPoint);
+  }
+
+  /**
+   * ETP-5047 — the commercial access decision the guard enforces for the tenant an environment
+   * user belongs to, for a caller that reports it without refusing ({@code POST
+   * /session/environment}). Unlike {@link #environmentAccessDenial} it logs nothing: no request is
+   * refused, so the guard's "Commercial access denied" line would be false.
+   *
+   * @param userId the {@code AD_User} being entered, already verified to belong to the account
+   * @return the enforced decision; null when the tenant predates lifecycle metadata or the user no
+   *     longer exists
+   */
+  private EnvironmentAccessPolicy.Decision enforcedAccessDecision(String userId) {
+    String clientId = clientIdOfUser(userId);
+    return clientId == null ? null : environmentAccessGuard.enforcedDecision(clientId);
+  }
+
+  private static String clientIdOfUser(String userId) {
+    User user = OBDal.getInstance().get(User.class, userId);
+    return user == null || user.getClient() == null ? null : user.getClient().getId();
+  }
+
+  /**
    * GET /sws/go/login?userId={adUserId}
    * Header: Authorization: Bearer <session_token>
    * Returns an Etendo JWT for the given AD_User, if it belongs to the account.
@@ -3423,6 +4194,13 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       if (!EtendoGoJwtSupport.isEnvironmentUserOwnedByAccount(accountEmail, userId)) {
         writeError(response, HttpServletResponse.SC_FORBIDDEN,
             "User does not belong to this account");
+        return;
+      }
+      // ETP-5047 — this endpoint hands out a raw Etendo JWT, which reaches every secure web
+      // service of the tenant, not only NEO: a blocked tenant must not get one.
+      EnvironmentAccessGuard.Denial denial = environmentAccessDenial(userId, "environment-login");
+      if (denial != null) {
+        denial.writeTo(response);
         return;
       }
 
@@ -3651,11 +4429,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     log.info("[ONBOARDING-PERF] phase=onboarding_residual mode={} correlationId={} clientId={} "
         + "elapsedMs={}", mode, correlationId, clientId,
         elapsedMillis(residualStartedAt));
-    if (!paidUpgrade) {
-      openDemoTrialPeriodsBestEffort(clientId, orgId, adminContext);
-    }
+    // Before completeCommittedOnboarding and the sample data, which needs a demo's open periods.
+    applyInitialPeriodStateBestEffort(clientId);
     completeCommittedOnboarding(accountId, accountEmail, onboardingRequest, clientId, paidUpgrade,
         preparation.provisioningClaim, demoSourceClientId);
+    if (paidUpgrade) {
+      // ETP-5047: after the checkout is closed, never before — see the method.
+      fillSubscriptionPeriodBestEffort(clientId);
+    }
     // ETP-5426: after the commit (a failure here can no longer undo the tenant) and before the
     // costing schedule is activated (so the background costing never races the import).
     importSampleDataBestEffort(writer, clientId, orgId, adminContext, onboardingRequest,
@@ -3713,10 +4494,13 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       // plan still read free then; the override removal below reverts and deletes that row.
       alertAttempt.stage = "productive_metadata";
       applyPaidUpgradeSideEffects(clientId, adminContext.starOrgId, request.clientName,
-          preparation.accountEmail);
+          preparation.accountEmail, request.paymentToken);
     } else if (!tenantEnvironmentLifecycleService.markDemoReady(clientId, Instant.now())) {
       throw new IllegalStateException("Could not initialize demo trial lifecycle");
     }
+    // ETP-5577: in the onboarding transaction, so the markers exist exactly when the tenant does.
+    onboardingInitialPeriodStateService.markPending(clientId, orgId, adminContext.adminUserId,
+        adminContext.adminRoleId, preparation.paidUpgrade);
     if (provisioningName != null) {
       // After every step that names something after the client, and in the final transaction,
       // so a failure leaves the client under its provisioning name for the retry to find.
@@ -3726,29 +4510,88 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
-   * ETP-5575 — opens a demo's fiscal periods through the end of its trial, pooled or classic. The
-   * chain only opens through the month the tenant was built, so a signup at the end of a month, or
-   * a pooled tenant built in an earlier month, could not post during the rest of its trial.
+   * ETP-5577 — applies the tenant's initial fiscal-period state (see
+   * {@link OnboardingInitialPeriodStateService}): a demo's periods through the end of its trial
+   * (ETP-5575); for a productive tenant, its signup years, all left never-opened until the owner
+   * reviews the calendar. Runs after the onboarding commit, and again on environment login while the
+   * state is still pending.
    *
-   * <p>Runs after the onboarding commit, in its own transaction, and never fails the onboarding:
-   * the tenant is already committed with the chain's window, so on any failure (the commit
-   * included, which is why it sits inside the try) this step rolls back only itself and the
-   * tenant keeps today's behaviour. The started/done markers make a step that never finished
-   * visible in the logs.
+   * <p>Runs in its own transaction and never fails the caller: the tenant is already committed, so
+   * on any failure (the commit included, which is why it sits inside the try) this step rolls back
+   * only itself and its pending marker survives for the next login. The started/done markers make a
+   * step that never finished visible in the logs.
    */
-  void openDemoTrialPeriodsBestEffort(String clientId, String orgId,
-      OnboardingProvisioningChain.AdminContext adminContext) {
-    log.info("ETP-5575 demo period window started for client {}", clientId);
+  void applyInitialPeriodStateBestEffort(String clientId) {
     try {
-      onboardingPeriodControlService.openDemoTrialWindow(clientId, orgId,
-          adminContext.adminUserId, adminContext.adminRoleId, resolveTrialStart(clientId),
-          tenantEnvironmentLifecycleService.configuration().getTrialDays());
-      EtendoGoDalHelper.commitDalChanges("demo period window", log);
-      log.info("ETP-5575 demo period window done for client {}", clientId);
+      if (onboardingInitialPeriodStateService.applyIfPending(clientId)) {
+        EtendoGoDalHelper.commitDalChanges("initial period state", log);
+        log.info("ETP-5577 initial period state done for client {}", clientId);
+      }
     } catch (Exception e) { // NOSONAR - best effort: the committed tenant must survive any failure
-      log.error("ETP-5575 demo period window failed for client {}", clientId, e);
-      EtendoGoDalHelper.rollbackDalChanges("demo period window", e, log);
+      log.error("ETP-5577 initial period state failed for client {}", clientId, e);
+      EtendoGoDalHelper.rollbackDalChanges("initial period state", e, log);
     }
+  }
+
+  /**
+   * ETP-5047 — gives the subscription row a paid onboarding just opened its Stripe billing period,
+   * read from the provider. The purchase's first {@code invoice.paid} and
+   * {@code customer.subscription.updated} arrived before the row existed and were ignored for
+   * good, so without this the row stays periodless until its first renewal.
+   *
+   * <p><b>Runs after {@code completeCommittedOnboarding}, not right after the commit.</b> Until
+   * {@code recordProvisioned} closes the checkout request it is not {@code PROVISIONED} and names
+   * no created client; a retry after a crash in that window (once the provisioning lease expires)
+   * cannot find the tenant, which by then carries its requested name, and would provision a second
+   * one for the same payment. The provider call takes seconds at worst, so it must not widen that
+   * window. Nothing here needs the checkout open: the fill reads only the subscription row.
+   *
+   * <p>The service requires an empty DAL session: it closes the session before the provider call,
+   * so neither a lock nor a pooled connection is held while Stripe answers, and writes the period
+   * in a fresh transaction that is committed here. Each step of
+   * {@code completeCommittedOnboarding} commits its own work when it succeeds; a failed demo data
+   * transfer start, draft clear (which runs as system, the account being a client-0 row) or ready
+   * email rolls its own work back. Only a failed checkout close ({@code recordProvisioned}) just
+   * logs, by design: if its fenced {@code PROVISIONED} update ran and only the flush or commit
+   * after it failed, the update is still pending in the transaction and the next successful commit
+   * persists it, where a rollback would discard a correct close. When it is still pending here,
+   * the service's session close before the provider call commits it, as the sample data and
+   * costing steps after this one would otherwise. See {@link #startDemoDataTransferBestEffort} for
+   * the edge where a later step's rollback discards it instead. It never fails the
+   * onboarding: the row is already committed, and on any failure (the commit included, which is
+   * why it sits inside the try) only this step rolls back. Provider failures are WARNs from the
+   * reader; see {@link SubscriptionService#fillPeriodFromProviderAfterCommit}.
+   *
+   * @param clientId the tenant just committed
+   */
+  void fillSubscriptionPeriodBestEffort(String clientId) {
+    try {
+      if (subscriptionService.fillPeriodFromProviderAfterCommit(clientId)) {
+        EtendoGoDalHelper.commitDalChanges("subscription billing period", log);
+      }
+    } catch (Exception e) { // NOSONAR - best effort: the committed tenant must survive any failure
+      log.warn("The subscription of client {} could not be given its billing period; it stays "
+          + "without one until its next lifecycle event", clientId, e);
+      EtendoGoDalHelper.rollbackDalChanges("subscription billing period", e, log);
+    }
+  }
+
+  /**
+   * ETP-5577 — retries a tenant's initial period state on environment login while it is still
+   * pending (its post-onboarding step failed). Last on the success path: the login's own work is
+   * committed first, so a failure here rolls back only the retry. Never throws.
+   */
+  void retryInitialPeriodStateOnLogin(String clientId) {
+    try {
+      if (clientId == null || !onboardingInitialPeriodStateService.isPending(clientId)) {
+        return;
+      }
+      EtendoGoDalHelper.commitDalChanges("environment login", log);
+    } catch (Exception e) { // NOSONAR - the login answer is already written
+      log.warn("ETP-5577 could not check the initial period state of client {}", clientId, e);
+      return;
+    }
+    applyInitialPeriodStateBestEffort(clientId);
   }
 
   /**
@@ -3785,18 +4628,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       sendProgress(writer, PROGRESS_SAMPLE_DATA, PROGRESS_WARNING,
           "Sample data could not be loaded");
     }
-  }
-
-  /**
-   * The demo's stored trial start ({@code ETGO_DemoTrialStartedAt}), which {@code markDemoReady}
-   * keeps from the first successful onboarding, so a resumed demo keeps its original window. Falls
-   * back to now when it cannot be read.
-   */
-  private Instant resolveTrialStart(String clientId) {
-    TenantEnvironmentLifecycleService.EnvironmentSnapshot snapshot =
-        tenantEnvironmentLifecycleService.resolve(clientId);
-    Instant startedAt = snapshot != null ? snapshot.getTrialStartedAt() : null;
-    return startedAt != null ? startedAt : Instant.now();
   }
 
   /**
@@ -3952,6 +4783,17 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       onboardingRequest.demoClientId = null;
       return true;
     }
+    if (StringUtils.isNotBlank(persistedDemoClientId)
+        && isProductiveEnvironment(persistedDemoClientId)) {
+      // ETP-5047 — a purchase recorded a productive environment as its source (a canceled one
+      // reads plan free) before the checkout stopped accepting one. It is already paid, so like
+      // the spent demo above it is not refused: it becomes a clean productive environment.
+      log.info("Source {} of the paid setup is not usable as a demo source (a productive "
+          + "environment, or its type could not be read); the paid setup continues without a "
+          + "source", persistedDemoClientId);
+      onboardingRequest.demoClientId = null;
+      return true;
+    }
     Set<String> currentFreeDemoClientIds = findFreeDemoClientIdsForAccount(accountEmail);
     try {
       onboardingRequest.demoClientId = resolvePaidDemoClientId(true, persistedDemoClientId,
@@ -4038,8 +4880,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     String status = checkoutRequestStore.deriveProvisioningStatus(checkoutRequest);
     if (CheckoutRequestStore.DERIVED_STATUS_PROVISIONING_FAILED.equals(status)
         && !checkoutRequestStore.isProvisioningRetryAllowed(checkoutRequest)) {
-      String failureDescription = CheckoutRequestStore.safeFailureDescription(
-          CheckoutRequestStore.failureCode(checkoutRequest.getFailureReason()));
+      String failureDescription = ProvisioningFailureReason.safeDescription(
+          ProvisioningFailureReason.codeOf(checkoutRequest.getFailureReason()));
       writeError(response, HttpServletResponse.SC_CONFLICT, "PROVISIONING_RETRY_NOT_ALLOWED",
           "Setup cannot be retried for this environment",
           failureDescription + ". Setup cannot be retried; contact support to continue.");
@@ -4118,6 +4960,23 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * when the purchase has no demo source. Best-effort in its own right: a failure here is logged
    * as a transfer failure, never as an unclosed checkout, and never reaches the onboarding caller.
    *
+   * <p>A failure is also rolled back (ETP-5047). The service commits each of its writes, but one
+   * that fails between writing a preference and its own commit leaves that preference pending, and
+   * the next commit on this thread — the draft clear, the billing period fill — would persist a
+   * half-written transfer. The tenant has committed by then, and so has a selection this call
+   * recorded before the start failed, so neither is lost.
+   *
+   * <p><b>One edge, accepted rather than handled.</b> The checkout close normally has committed by
+   * then too. Only when {@code recordProvisioned}'s fenced {@code PROVISIONED} update ran and the
+   * flush or commit right after it failed (it only logs, by design) is that update still pending,
+   * and this rollback — like the draft clear's and the ready email's — then discards it. The
+   * tenant stays committed, productive and subscribed, but its checkout request stays
+   * {@code PROVISIONING} with no created client. Nothing re-closes it: a retry once the lease
+   * expires is refused by {@code rejectDuplicateProductiveName}, because the account now owns a
+   * productive environment of that name, and the request records the non-retryable
+   * {@code CLIENT_NAME_IN_USE} failure — no second tenant is built, but the request needs a manual
+   * close. It takes two failures in a row on one thread, so it is not worth a different design.
+   *
    * @param paymentToken the checkout request id the selection was recorded under
    * @param demoClientId exact source selected on the checkout request
    * @param clientId {@code AD_CLIENT_ID} of the productive environment just provisioned
@@ -4136,6 +4995,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     } catch (RuntimeException e) {
       log.error("Environment (client {}) was provisioned but its demo data transfer could not be "
           + "started", clientId, e);
+      EtendoGoDalHelper.rollbackDalChanges("demo data transfer start", e, log);
     }
   }
 
@@ -4162,7 +5022,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       return;
     }
     checkoutRequestStore.recordFailureReason(onboardingRequest.paymentToken,
-        CheckoutRequestStore.encodeFailureReason(failureCode, failureReason));
+        ProvisioningFailureReason.encode(failureCode, failureReason));
   }
 
   /**
@@ -4341,9 +5201,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         writeError(response, HttpServletResponse.SC_NOT_FOUND, "User not found");
         return;
       }
-      Role role = roleListData.getFirstRoleId() != null
-          ? OBDal.getInstance().get(Role.class, roleListData.getFirstRoleId())
-          : null;
+      String entryRoleId = roleListData.getEntryRoleId();
+      Role role = entryRoleId != null ? OBDal.getInstance().get(Role.class, entryRoleId) : null;
       String jwtToken = SecureWebServicesUtils.generateToken(user, role);
 
       JSONObject result = new JSONObject();
@@ -4351,6 +5210,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       result.put(FIELD_ROLE_LIST, roleListData.getRoleArray());
       writeResponse(response, HttpServletResponse.SC_OK, result);
       recordLegacyEnvironmentLogin(jwtToken, startNanos);
+      retryInitialPeriodStateOnLogin(user.getClient() != null ? user.getClient().getId() : null);
     } finally {
       OBContext.restorePreviousMode();
     }
@@ -4610,7 +5470,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     sendProgress(writer, PROGRESS_CLIENT, PROGRESS_ERROR,
         "You already have a productive environment named '" + requestData.clientName + "'.");
     sendFinalResult(writer, false, CLIENT_NAME_IN_USE_MESSAGE,
-        CheckoutRequestStore.FAILURE_CODE_CLIENT_NAME_IN_USE);
+        ProvisioningFailureReason.CODE_CLIENT_NAME_IN_USE);
     return true;
   }
 
@@ -5273,8 +6133,21 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       result.put(FIELD_ENVIRONMENT, buildSessionEnvironment(entered.getRecord()));
       result.put(FIELD_ROLE_LIST, roleListData.getRoleArray());
       result.put(FIELD_CSRF_TOKEN, entered.getCsrfToken());
+      // ETP-5047 — entering a blocked tenant is NOT refused here, deliberately. The blocked-access
+      // screen and the pages it sends the customer to (/account, /upgrade) render inside the
+      // entered environment, so refusing entry would lock a blocked customer out of the one place
+      // that lets them pay. The tenant's data paths refuse on their own instead — NEO, the NEO_DATA
+      // surfaces and MCP answer 402 on every request. accessDecision is informational and
+      // backend-only: nothing in the SPA reads it; its blocked screen is driven by the NEO 402.
+      // It reads the enforced decision instead of asking the guard to check: nothing is refused
+      // here, so the guard's refusal log line must not be written for this call.
+      EnvironmentAccessPolicy.Decision accessDecision = enforcedAccessDecision(userId);
+      if (accessDecision != null && accessDecision != EnvironmentAccessPolicy.Decision.ALLOWED) {
+        result.put(FIELD_ACCESS_DECISION, accessDecision.name());
+      }
       writeResponse(response, HttpServletResponse.SC_OK, result);
       recordCookieEnvironmentLogin(entered.getRecord(), startNanos);
+      retryInitialPeriodStateOnLogin(entered.getRecord().getCtxClientId());
     } catch (RuntimeException e) {
       EtendoGoDalHelper.rollbackDalChanges("session environment", e, log);
       log.error("Database error during environment switch", e);
@@ -5319,14 +6192,17 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
   /**
    * Resolve and validate the requested role (and, if given, organization) for an environment
-   * switch: defaults to the user's first role when none is requested, checks the role is one of
-   * the user's own, and that the requested organization (if any) belongs to that role. Writes the
-   * matching error response and returns {@code null} when the request is invalid.
+   * switch: defaults to the user's entry role when none is requested (see
+   * {@link #defaultEntryRoleId}), checks the role is one of the user's own, and that the requested
+   * organization (if any) belongs to that role. Writes the matching error response and returns
+   * {@code null} when the request is invalid.
    */
   private Role resolveRequestedRole(EtendoGoJwtSupport.RoleListData roleListData,
       String requestedRoleId, String requestedOrgId, HttpServletResponse response)
       throws IOException, JSONException {
-    String roleId = requestedRoleId.isEmpty() ? roleListData.getFirstRoleId() : requestedRoleId;
+    String roleId = requestedRoleId.isEmpty()
+        ? defaultEntryRoleId(roleListData, requestedOrgId)
+        : requestedRoleId;
     JSONObject selectedRole = findRole(roleListData.getRoleArray(), roleId);
     if (roleId == null || selectedRole == null) {
       writeError(response, HttpServletResponse.SC_FORBIDDEN,
@@ -5344,6 +6220,26 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
           "Requested role is not available to this user");
     }
     return role;
+  }
+
+  /**
+   * ETP-5096 — the role an entry with no explicit role uses: the user's default role
+   * ({@link EtendoGoJwtSupport.RoleListData#getEntryRoleId()}), not the oldest one. The client
+   * always sends its first organization, so when the default role cannot open that organization
+   * the oldest role (the one entry used before) is kept: a user who could enter must not start
+   * getting a 403 because their default role is narrower.
+   */
+  private static String defaultEntryRoleId(EtendoGoJwtSupport.RoleListData roleListData,
+      String requestedOrgId) throws JSONException {
+    String entryRoleId = roleListData.getEntryRoleId();
+    if (requestedOrgId.isEmpty() || entryRoleId == null
+        || entryRoleId.equals(roleListData.getFirstRoleId())) {
+      return entryRoleId;
+    }
+    JSONObject entryRole = findRole(roleListData.getRoleArray(), entryRoleId);
+    return entryRole != null && roleContainsOrganization(entryRole, requestedOrgId)
+        ? entryRoleId
+        : roleListData.getFirstRoleId();
   }
 
   /**

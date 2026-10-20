@@ -17,17 +17,15 @@
 package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
+import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 
 import javax.servlet.http.HttpServletResponse;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
@@ -47,13 +45,14 @@ import org.openbravo.service.db.DalConnectionProvider;
  *
  * Used by:
  * - {@link CreateReturnReceiptHandler}: sales return (C-, salesTransaction=true)
- * - CreatePurchaseReturnHandler (future): purchase return (V-, salesTransaction=false)
+ * - {@link CreatePurchaseReturnHandler}: purchase return (V-, salesTransaction=false), which keeps
+ *   its own header construction but shares the plan/answer ({@link ReturnFromDocumentSupport})
+ *   and the quantity rule ({@link ReturnableQuantity})
  */
 final class NeoReturnReceiptService {
 
   private static final Logger log = LogManager.getLogger(NeoReturnReceiptService.class);
   private static final String ACTION_NAME = "createReturn";
-  static final String NO_VALID_LINES_MESSAGE = "No valid lines to return";
 
   private NeoReturnReceiptService() {
   }
@@ -93,22 +92,9 @@ final class NeoReturnReceiptService {
         }
 
         JSONObject body = context.getRequestBody();
-        JSONArray requestedLines = body != null ? body.optJSONArray("lines") : null;
-        if (requestedLines == null || requestedLines.length() == 0) {
-          return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "No lines specified");
-        }
-
-        // ETP-5729 CP-12: no "a return already exists" block — a second return of the same
-        // shipment is allowed for whatever quantity is still returnable, the same model as
-        // invoicing a shipment. Protection is by quantity only, checked BEFORE anything is
-        // persisted so a refused request never leaves an empty return behind.
-        Map<String, BigDecimal> requestedQty = requestedQtyOfSourceLines(source, requestedLines);
-        if (requestedQty.isEmpty()) {
-          return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, NO_VALID_LINES_MESSAGE);
-        }
-        NeoResponse overReturn = ReturnableQuantityGuard.refuseIfExceeded(requestedQty, null);
-        if (overReturn != null) {
-          return overReturn;
+        ReturnFromDocumentSupport.Plan plan = ReturnFromDocumentSupport.plan(source, body);
+        if (plan.refusal != null) {
+          return plan.refusal;
         }
 
         DocumentType docType = findReturnDocType(source, salesTransaction);
@@ -119,27 +105,16 @@ final class NeoReturnReceiptService {
 
         ShipmentInOut returnDoc = NeoCommercialDocumentFactory.createShipmentReceiptHeader(
             source, docType, salesTransaction, movementType);
+        ReturnFromDocumentSupport.applyReason(returnDoc, body);
         OBDal.getInstance().save(returnDoc);
 
-        int added = createReturnLines(returnDoc, source, requestedLines);
-        if (added == 0) {
-          throw new OBException(NO_VALID_LINES_MESSAGE);
-        }
+        List<ReturnFromDocumentSupport.CreatedLine> created =
+            createReturnLines(returnDoc, source, plan.requests);
 
         OBDal.getInstance().flush();
         ensureDocumentNo(returnDoc);
 
-        JSONObject data = new JSONObject();
-        data.put("id", returnDoc.getId());
-        data.put("documentNo", returnDoc.getDocumentNo());
-
-        JSONObject responseData = new JSONObject();
-        responseData.put("data", data);
-
-        JSONObject wrapper = new JSONObject();
-        wrapper.put("response", responseData);
-
-        return NeoResponse.created(wrapper);
+        return NeoResponse.createdWithData(ReturnFromDocumentSupport.describe(returnDoc, created));
 
       } finally {
         OBContext.restorePreviousMode();
@@ -154,53 +129,20 @@ final class NeoReturnReceiptService {
     }
   }
 
-  private static int createReturnLines(ShipmentInOut returnDoc, ShipmentInOut source,
-      JSONArray requestedLines) throws Exception {
-    Map<String, BigDecimal> qtyByLineId = parseReturnQtyMap(requestedLines);
+  private static List<ReturnFromDocumentSupport.CreatedLine> createReturnLines(
+      ShipmentInOut returnDoc, ShipmentInOut source, ReturnableQuantity.Requests requests) {
+    List<ReturnFromDocumentSupport.CreatedLine> created = new ArrayList<>();
     long lineNo = 10;
-    int added = 0;
     for (ShipmentInOutLine sourceLine : source.getMaterialMgmtShipmentInOutLineList()) {
-      BigDecimal returnQty = qtyByLineId.get(sourceLine.getId());
+      BigDecimal returnQty = requests.quantity(sourceLine.getId());
       if (returnQty == null) {
         continue;
       }
-      buildAndSaveReturnLine(returnDoc, sourceLine, returnQty, lineNo);
+      ShipmentInOutLine returnLine = buildAndSaveReturnLine(returnDoc, sourceLine, returnQty, lineNo);
+      created.add(new ReturnFromDocumentSupport.CreatedLine(returnLine, sourceLine, returnQty));
       lineNo += 10;
-      added++;
     }
-    return added;
-  }
-
-  /**
-   * The requested quantities restricted to lines of {@code source} — exactly the lines
-   * {@link #createReturnLines} will write, so an unknown id can neither be checked nor returned.
-   * ETP-5729 CP-12: checked against every non-voided return of the shipment (drafts included)
-   * by {@link ReturnableQuantityGuard} before anything is persisted.
-   */
-  private static Map<String, BigDecimal> requestedQtyOfSourceLines(ShipmentInOut source,
-      JSONArray requestedLines) throws Exception {
-    Map<String, BigDecimal> requested = parseReturnQtyMap(requestedLines);
-    Map<String, BigDecimal> ofSource = new HashMap<>();
-    for (ShipmentInOutLine sourceLine : source.getMaterialMgmtShipmentInOutLineList()) {
-      BigDecimal qty = requested.get(sourceLine.getId());
-      if (qty != null) {
-        ofSource.put(sourceLine.getId(), qty);
-      }
-    }
-    return ofSource;
-  }
-
-  private static Map<String, BigDecimal> parseReturnQtyMap(JSONArray requestedLines) throws Exception {
-    Map<String, BigDecimal> qtyByLineId = new HashMap<>();
-    for (int i = 0; i < requestedLines.length(); i++) {
-      JSONObject req = requestedLines.getJSONObject(i);
-      String lineId = req.getString("lineId");
-      BigDecimal qty = new BigDecimal(req.optString("returnQuantity", "0"));
-      if (qty.compareTo(BigDecimal.ZERO) > 0) {
-        qtyByLineId.put(lineId, qty);
-      }
-    }
-    return qtyByLineId;
+    return created;
   }
 
   /**
@@ -252,12 +194,13 @@ final class NeoReturnReceiptService {
    * Etendo Classic does the same — see {@code RMInOutPickEditLines}, which negates both the
    * movement and the operative quantity.
    */
-  private static void buildAndSaveReturnLine(ShipmentInOut returnDoc, ShipmentInOutLine sourceLine,
-      BigDecimal returnQty, long lineNo) {
+  private static ShipmentInOutLine buildAndSaveReturnLine(ShipmentInOut returnDoc,
+      ShipmentInOutLine sourceLine, BigDecimal returnQty, long lineNo) {
     ShipmentInOutLine retLine = createReturnLineShell(returnDoc, sourceLine, lineNo);
     retLine.setMovementQuantity(ReturnLineQuantityPolicy.toStoredQuantity(returnQty));
     applyOrderUOM(retLine, sourceLine, returnQty);
     OBDal.getInstance().save(retLine);
+    return retLine;
   }
 
   /**

@@ -20,7 +20,6 @@ package com.etendoerp.go.mcp;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.PrintWriter;
-import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -38,21 +37,22 @@ import org.codehaus.jettison.json.JSONObject;
 
 import org.openbravo.dal.core.OBContext;
 
-import com.etendoerp.go.auth.EnvironmentRequestAuthenticator;
+import com.etendoerp.go.auth.EffectiveClientResolver;
 import com.etendoerp.go.common.CorsUtils;
 import com.etendoerp.go.common.ProtocolErrorAdapters;
 import com.etendoerp.go.common.PublicUrlResolver;
 import com.etendoerp.go.oauth2.ApiScopes;
 import com.etendoerp.go.oauth2.OAuth2Filter;
-import com.etendoerp.go.payment.EnvironmentAccessPolicy;
-import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
+import com.etendoerp.go.payment.EnvironmentAccessGuard;
 import com.etendoerp.go.session.GoLegacyBearer;
 import com.etendoerp.go.session.GoNeoAuth;
 import com.etendoerp.go.session.GoSessionAuthResult;
 import com.etendoerp.go.session.GoSessionAuthenticator;
 import com.etendoerp.go.session.GoSessionRecord;
+import com.etendoerp.go.session.GoSessionRoleReconciler;
 import com.etendoerp.go.session.GoSessionService;
 import com.etendoerp.go.session.JdbcGoSessionStore;
+import com.etendoerp.go.session.SessionRoleRevokedException;
 
 /**
  * MCP (Model Context Protocol) servlet implementing Streamable HTTP transport.
@@ -91,6 +91,12 @@ public class McpServlet extends HttpServlet {
   static final String META_CLIENT_INFO = "io.modelcontextprotocol/clientInfo";
   /** The handshake method: the one request that carries no {@code MCP-Protocol-Version}. */
   private static final String INITIALIZE = "initialize";
+  /**
+   * The 503 answer when the tenant of a credential cannot be judged: its role lookup or the
+   * environment access check failed (ETP-5047). Retryable, so it says so.
+   */
+  private static final String ENVIRONMENT_UNVERIFIED =
+      "The environment of this credential could not be verified; retry later";
   /** The only JSON-RPC method that produces a telemetry row (B1). */
   private static final String TOOLS_CALL = "tools/call";
   // Browser sessions use the validated legacy JWT path. RBAC still filters the
@@ -98,27 +104,17 @@ public class McpServlet extends HttpServlet {
   private static final String LEGACY_JWT_FALLBACK_SCOPES = String.join(" ",
       ApiScopes.READ, ApiScopes.WRITE, ApiScopes.PROCESS, ApiScopes.REPORT);
 
+  /**
+   * The commercial access check (ETP-5047). An instance field rather than a static so a test can
+   * substitute it by reflection.
+   */
+  private transient EnvironmentAccessGuard environmentAccessGuard = new EnvironmentAccessGuard();
+
   private static final GoSessionAuthenticator SESSION_AUTHENTICATOR =
       new GoSessionAuthenticator(new GoSessionService(new JdbcGoSessionStore()));
 
-  // javax.servlet.http.HttpServletResponse predates RFC 7231 and has no 402 constant.
-  private static final int SC_PAYMENT_REQUIRED = 402;
-
-  private final transient TenantEnvironmentLifecycleService lifecycleService;
-
-  /** Production wiring: the tenant lifecycle policy every environment surface shares. */
-  public McpServlet() {
-    this(new TenantEnvironmentLifecycleService());
-  }
-
-  /**
-   * Wiring with an explicit lifecycle service, for tests.
-   *
-   * @param lifecycleService answers the commercial access decision for a client
-   */
-  McpServlet(TenantEnvironmentLifecycleService lifecycleService) {
-    this.lifecycleService = lifecycleService;
-  }
+  // ETP-5270 — package-visible so tests can swap the database-backed role lookups for a fake.
+  GoSessionRoleReconciler sessionRoleReconciler = new GoSessionRoleReconciler();
 
   // ── CORS ───────────────────────────────────────────────────────────────
 
@@ -154,11 +150,37 @@ public class McpServlet extends HttpServlet {
     setCorsHeaders(request, response);
 
     // Authenticate via OAuth2 Bearer token
-    AuthIdentity identity = authenticate(request, response);
-    if (identity == null) {
+    AuthIdentity authenticated = authenticate(request, response);
+    if (authenticated == null) {
       return; // Response already sent by authenticate()
     }
-    if (refuseCommerciallyBlocked(request, response, identity)) {
+    // ETP-5047 — the tenant the call acts on, resolved once: the guard below judges it, and
+    // McpSessionManager.executeInContext builds the call's context with the same value. A failed
+    // role lookup refuses the call: falling back to "0" would be allowed unjudged.
+    AuthIdentity identity;
+    try {
+      identity = authenticated.withClientId(EffectiveClientResolver.effectiveClientId(
+          authenticated.clientId, authenticated.roleId));
+    } catch (EffectiveClientResolver.ResolutionException e) {
+      log.warn("Refusing MCP request of user {}: {}", authenticated.userId, e.getMessage(), e);
+      sendJsonError(request, response, HttpServletResponse.SC_SERVICE_UNAVAILABLE,
+          ENVIRONMENT_UNVERIFIED);
+      return;
+    }
+    boolean accessAllowed;
+    try {
+      accessAllowed = isEnvironmentAccessAllowed(response, identity);
+    } catch (RuntimeException e) {
+      // ETP-5047 — the guard could not decide (e.g. its lifecycle lookup hit a DB error). Fail
+      // closed, with the same JSON 503 as a failed role lookup: an escaped exception would reach
+      // the client as Tomcat's HTML 500, and the request must not run unjudged.
+      log.warn("Refusing MCP request of user {} into client {}: the environment access check "
+          + "failed", identity.userId, identity.clientId, e);
+      sendJsonError(request, response, HttpServletResponse.SC_SERVICE_UNAVAILABLE,
+          ENVIRONMENT_UNVERIFIED);
+      return;
+    }
+    if (!accessAllowed) {
       return; // 402 already sent
     }
 
@@ -599,21 +621,30 @@ public class McpServlet extends HttpServlet {
     }
 
     // Fallback: try JWT token
+    com.auth0.jwt.interfaces.DecodedJWT jwt;
     try {
-      com.auth0.jwt.interfaces.DecodedJWT jwt =
-          com.smf.securewebservices.utils.SecureWebServicesUtils.decodeToken(bearerToken);
-      return new AuthIdentity(
-          jwt.getClaim("user").asString(),
-          jwt.getClaim("role").asString(),
-          jwt.getClaim("client").asString(),
-          jwt.getClaim("organization").asString(),
-          LEGACY_JWT_FALLBACK_SCOPES);
+      jwt = com.smf.securewebservices.utils.SecureWebServicesUtils.decodeToken(bearerToken);
     } catch (Exception e) {
       log.warn("Both OAuth2 and JWT authentication failed for MCP request");
       sendJsonError(request, response, HttpServletResponse.SC_UNAUTHORIZED,
           "Invalid or expired token (OAuth2 and JWT both failed)");
       return null;
     }
+    AuthIdentity identity = new AuthIdentity(
+        jwt.getClaim("user").asString(),
+        jwt.getClaim("role").asString(),
+        jwt.getClaim("client").asString(),
+        jwt.getClaim("organization").asString(),
+        LEGACY_JWT_FALLBACK_SCOPES);
+    // ETP-5270 — the role claim is the role at login; refuse it once an admin has revoked it.
+    try {
+      sessionRoleReconciler.requireHeldRole(identity.userId, identity.roleId, identity.clientId);
+    } catch (SessionRoleRevokedException e) {
+      log.warn("Unauthorized MCP request: {}", e.getMessage());
+      sendJsonError(request, response, HttpServletResponse.SC_UNAUTHORIZED, e.getMessage());
+      return null;
+    }
+    return identity;
   }
 
   /**
@@ -677,43 +708,44 @@ public class McpServlet extends HttpServlet {
           "Session has no environment selected");
       return null;
     }
+    // ETP-5270 — the same rebind EnvironmentRequestAuthenticator runs for every other surface
+    // (ETP-5395): a role an admin revoked since the session entered must not reach the tools.
+    // Rebinds `session` in place, so the identity below reads the role the user holds now.
+    try {
+      sessionRoleReconciler.reconcile(session);
+    } catch (SessionRoleRevokedException e) {
+      log.warn("Unauthorized MCP request: {}", e.getMessage());
+      sendJsonError(request, response, HttpServletResponse.SC_UNAUTHORIZED, e.getMessage());
+      return null;
+    }
     return new AuthIdentity(session.getUserId(), session.getRoleId(), session.getCtxClientId(),
         session.getCtxOrgId(), LEGACY_JWT_FALLBACK_SCOPES);
   }
 
   /**
-   * Refuse an environment whose commercial access is cut (ETP-5642).
+   * ETP-5047 — refuses an MCP request into a tenant whose commercial access was cut off (demo
+   * trial expired, subscription grace elapsed), exactly as NEO does: HTTP 402 with the shared
+   * {@link EnvironmentAccessGuard} error body — a plain HTTP error, deliberately not a JSON-RPC
+   * error object, so an MCP client sees the same status NEO answers. Before this, MCP was the one
+   * tenant entry point that never asked, so an agent kept reading and writing a blocked tenant's
+   * data. Every credential scheme (OAuth2, legacy JWT, cookie session) reaches it with the
+   * EFFECTIVE tenant ({@link EffectiveClientResolver#effectiveClientId}): a wildcard token's
+   * {@code "0"} is already resolved to its role's client, since asking about System would allow.
+   * The guard owns the decision and the kill switch; it runs as system because MCP has no
+   * {@code OBContext} of its own at this point.
    *
-   * <p>NEO, Copilot and the account endpoints answer 402 once a demo trial expires or a
-   * subscription's grace elapses, but this servlet resolves its identity on its own and never
-   * asked: an MCP client kept reading and writing the blocked tenant through every scheme. The
-   * check runs once, after {@link #authenticate} and before any method dispatch, so it covers the
-   * cookie session, OAuth2 and legacy JWT alike — and {@code initialize}/{@code tools/list} too:
-   * a tool catalog for an environment that cannot be used is of no use to the client.
-   *
-   * <p>The answer is an HTTP 402 rather than an in-band tool error, with NEO's exact wording, so a
-   * client stops instead of retrying and the SPA recognizes the same decision. The decision is
-   * evaluated on the effective client — a credential carrying the System wildcard runs under its
-   * role's client — so the check sees exactly the tenant the call would touch. A null decision is
-   * a tenant that predates lifecycle metadata: the controlled legacy transition, not a refusal,
-   * exactly as in {@code EnvironmentRequestAuthenticator}.
-   *
-   * @return true when the request was refused and the response already written
+   * @return true when the request may proceed
    */
-  private boolean refuseCommerciallyBlocked(HttpServletRequest request,
-      HttpServletResponse response, AuthIdentity identity) throws IOException {
-    String clientId = McpSessionManager.resolveEffectiveClientId(identity.clientId,
-        identity.roleId);
-    EnvironmentAccessPolicy.Decision decision =
-        lifecycleService.evaluateAccess(clientId, true, Instant.now());
-    if (decision == null || decision == EnvironmentAccessPolicy.Decision.ALLOWED) {
-      return false;
+  private boolean isEnvironmentAccessAllowed(HttpServletResponse response, AuthIdentity identity)
+      throws IOException {
+    EnvironmentAccessGuard.Denial denial =
+        environmentAccessGuard.checkAsSystem(identity.clientId, "mcp");
+    if (denial == null) {
+      return true;
     }
-    log.warn("Refused MCP request: environment {} is commercially blocked ({})", clientId,
-        decision);
-    sendJsonError(request, response, SC_PAYMENT_REQUIRED,
-        EnvironmentRequestAuthenticator.MSG_ACCESS_PREFIX + decision.name());
-    return true;
+    // The guard already logged the refusal (ETP-5047: one line, whichever surface refused).
+    denial.writeTo(response);
+    return false;
   }
 
   // ── JSON-RPC method dispatch ────────────────────────────────────────────
@@ -1027,6 +1059,12 @@ public class McpServlet extends HttpServlet {
       this.clientId = clientId;
       this.orgId = orgId;
       this.scopes = scopes;
+    }
+
+    /** The same identity acting on {@code effectiveClientId}; {@code this} when it is unchanged. */
+    AuthIdentity withClientId(String effectiveClientId) {
+      return StringUtils.equals(clientId, effectiveClientId) ? this
+          : new AuthIdentity(userId, roleId, effectiveClientId, orgId, scopes);
     }
   }
 

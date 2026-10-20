@@ -27,11 +27,8 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import java.math.BigDecimal;
 import java.sql.Connection;
-import java.sql.PreparedStatement;
 import java.sql.SQLException;
-import java.util.List;
 
 import javax.servlet.http.HttpServletResponse;
 
@@ -63,7 +60,7 @@ import org.openbravo.service.db.DalConnectionProvider;
  *
  * @covers com.etendoerp.go.schemaforge.NeoReturnReceiptService
  * @covers com.etendoerp.go.schemaforge.CreateReturnReceiptHandler
- * @covers com.etendoerp.go.schemaforge.ReturnableQuantityGuard
+ * @covers com.etendoerp.go.schemaforge.ReturnFromDocumentSupport
  */
 public class NeoReturnReceiptServiceTest {
 
@@ -198,14 +195,43 @@ public class NeoReturnReceiptServiceTest {
     }
   }
 
-  /**
-   * A null or empty "lines" array in the request body must produce a 400 Bad Request.
-   */
-  @Test
-  public void testCreateReturn_nullRequestedLines_returns400() throws Exception {
-    JSONObject body = new JSONObject();
-    // "lines" key is intentionally absent — optJSONArray returns null
+  // ─────────────────────────────────────────────────────────────────────────────
+  // createReturn — what is left to return (ETP-5711)
+  // ─────────────────────────────────────────────────────────────────────────────
 
+  /** What one run of the service produced, with the mocks a test asserts on. */
+  private static final class Run {
+    NeoResponse response;
+    ShipmentInOut returnDoc;
+    final java.util.List<ShipmentInOutLine> createdLines = new java.util.ArrayList<>();
+    boolean headerBuilt;
+  }
+
+  private static JSONObject entry(String lineId, String quantity) throws Exception {
+    return new JSONObject().put("lineId", lineId).put("returnQuantity", quantity);
+  }
+
+  private static JSONObject linesBody(JSONObject... entries) throws Exception {
+    JSONArray lines = new JSONArray();
+    for (JSONObject e : entries) {
+      lines.put(e);
+    }
+    return new JSONObject().put("lines", lines);
+  }
+
+  private static java.util.function.BiFunction<String, String, java.math.BigDecimal> nothingReturned() {
+    return (src, excl) -> java.math.BigDecimal.ZERO;
+  }
+
+  /**
+   * Runs {@code createReturn} on the completed shipment {@code ship-1} made of {@code sourceLines};
+   * {@code returned} says how much of each source line other non-voided returns already hold.
+   */
+  @SuppressWarnings("unchecked")
+  private static Run runCreateReturn(JSONObject body,
+      java.util.function.BiFunction<String, String, java.math.BigDecimal> returned,
+      ShipmentInOutLine... sourceLines) throws Exception {
+    Run run = new Run();
     NeoContext ctx = NeoContext.builder()
         .endpointType(NeoEndpointType.ACTION)
         .fieldName("createReturn")
@@ -214,231 +240,177 @@ public class NeoReturnReceiptServiceTest {
         .recordId("ship-1")
         .requestBody(body)
         .build();
-
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
-         MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class)) {
-
+         MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
       OBDal dal = mock(OBDal.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
-
-      ShipmentInOut source = mock(ShipmentInOut.class);
-      when(dal.get(eq(ShipmentInOut.class), eq("ship-1"))).thenReturn(source);
-
       obContextMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(inv -> null);
       obContextMock.when(OBContext::restorePreviousMode).thenAnswer(inv -> null);
+      ReturnedQuantityTestSupport.stubReturnedQuantities(dal, returned);
 
-      NeoResponse result = NeoReturnReceiptService.createReturn(ctx, "goods-shipment", true, "C-");
+      ShipmentInOut source = ReturnedQuantityTestSupport.completedSource("ship-1", sourceLines);
+      when(dal.get(eq(ShipmentInOut.class), eq("ship-1"))).thenReturn(source);
 
-      assertEquals("Expected 400 when lines array is absent",
-          HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
+      DocumentType docType = mock(DocumentType.class);
+      OBCriteria<DocumentType> docTypes = mock(OBCriteria.class, Mockito.RETURNS_SELF);
+      when(docTypes.list()).thenReturn(java.util.Collections.singletonList(docType));
+      when(dal.createCriteria(DocumentType.class)).thenReturn(docTypes);
+      OBCriteria<org.openbravo.model.common.plm.ProductUOM> uoms =
+          mock(OBCriteria.class, Mockito.RETURNS_SELF);
+      when(uoms.list()).thenReturn(java.util.Collections.emptyList());
+      when(dal.createCriteria(org.openbravo.model.common.plm.ProductUOM.class)).thenReturn(uoms);
+
+      run.returnDoc = mock(ShipmentInOut.class);
+      when(run.returnDoc.getId()).thenReturn("ret-1");
+      when(run.returnDoc.getDocumentNo()).thenReturn("RET-0001");
+      when(run.returnDoc.getDocumentStatus()).thenReturn("DR");
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(ShipmentInOut.class)).thenAnswer(inv -> {
+        run.headerBuilt = true;
+        return run.returnDoc;
+      });
+      when(provider.get(ShipmentInOutLine.class)).thenAnswer(inv -> {
+        ShipmentInOutLine line = mock(ShipmentInOutLine.class);
+        when(line.getId()).thenReturn("ret-line-" + (run.createdLines.size() + 1));
+        run.createdLines.add(line);
+        return line;
+      });
+
+      run.response = NeoReturnReceiptService.createReturn(ctx, "goods-shipment", true, "C-");
+    }
+    return run;
+  }
+
+  private static ShipmentInOutLine line(String id, String product, String qty) {
+    return ReturnedQuantityTestSupport.sourceLine(id, product, qty);
+  }
+
+  /** A completed shipment with nothing returnable, and no lines asked: a clear 422, no header. */
+  @Test
+  public void testCreateReturn_noLinesAndNothingLeft_returns422() throws Exception {
+    for (JSONObject body : new JSONObject[] {null, new JSONObject(),
+        new JSONObject().put("lines", new JSONArray())}) {
+      Run run = runCreateReturn(body, (src, excl) -> new java.math.BigDecimal("5"),
+          line("L1", "Agua", "5"));
+
+      assertEquals(422, run.response.getHttpStatus());
+      assertEquals("nothingLeftToReturn",
+          run.response.getBody().getJSONObject("error").getString("code"));
+      assertEquals(false, run.headerBuilt);
     }
   }
 
+  /** Lines omitted: every line is returned for what is still returnable, and the return is a draft. */
+  @Test
+  public void testCreateReturn_noLines_returnsEverythingStillReturnableAsDraft() throws Exception {
+    Run run = runCreateReturn(new JSONObject(),
+        (src, excl) -> "L2".equals(src) ? new java.math.BigDecimal("1") : java.math.BigDecimal.ZERO,
+        line("L1", "Agua", "5"), line("L2", "Cerveza", "3"));
+
+    assertEquals(201, run.response.getHttpStatus());
+    JSONObject data = run.response.getBody().getJSONObject("response").getJSONObject("data");
+    assertEquals("ret-1", data.getString("id"));
+    assertEquals("RET-0001", data.getString("documentNo"));
+    assertEquals("DR", data.getString("documentStatus"));
+    JSONArray lines = data.getJSONArray("lines");
+    assertEquals(2, lines.length());
+    assertEquals(5, lines.getJSONObject(0).getDouble("returnedQuantity"), 0.0001);
+    assertEquals(2, lines.getJSONObject(1).getDouble("returnedQuantity"), 0.0001);
+    assertEquals(3, lines.getJSONObject(1).getDouble("originalQuantity"), 0.0001);
+    assertEquals("L2", lines.getJSONObject(1).getString("sourceLineId"));
+    assertEquals("Cerveza", lines.getJSONObject(1).getString("productName"));
+    verify(run.returnDoc, never()).setDocumentStatus("CO");
+  }
+
+  /** Lines given: exactly those, with the linkage in the answer. */
+  @Test
+  public void testCreateReturn_givenLines_returnsExactlyThoseWithLinkage() throws Exception {
+    Run run = runCreateReturn(linesBody(entry("L2", "1")), nothingReturned(),
+        line("L1", "Agua", "5"), line("L2", "Cerveza", "3"));
+
+    assertEquals(201, run.response.getHttpStatus());
+    assertEquals(1, run.createdLines.size());
+    JSONArray lines = run.response.getBody().getJSONObject("response").getJSONObject("data")
+        .getJSONArray("lines");
+    assertEquals(1, lines.length());
+    assertEquals("ret-line-1", lines.getJSONObject(0).getString("id"));
+    assertEquals("L2", lines.getJSONObject(0).getString("sourceLineId"));
+    assertEquals(1, lines.getJSONObject(0).getDouble("returnedQuantity"), 0.0001);
+  }
+
   /**
-   * An empty "lines" array (length 0) must also produce a 400 Bad Request.
+   * A shipment that already has a return no longer answers 409: a second partial return with what
+   * is left works (it used to be refused because ANY return line pointed at the shipment).
    */
   @Test
-  public void testCreateReturn_emptyLinesArray_returns400() throws Exception {
-    JSONObject body = new JSONObject();
-    body.put("lines", new JSONArray());
+  public void testCreateReturn_existingPartialReturn_doesNotBlockASecondOne() throws Exception {
+    Run run = runCreateReturn(linesBody(entry("L1", "4")),
+        (src, excl) -> new java.math.BigDecimal("6"), line("L1", "Agua", "10"));
 
+    assertEquals(201, run.response.getHttpStatus());
+    assertEquals(1, run.createdLines.size());
+  }
+
+  /** ...and one that asks for more than what is left is refused, naming product and quantities. */
+  @Test
+  public void testCreateReturn_secondReturnAboveTheRemainder_returns422() throws Exception {
+    Run run = runCreateReturn(linesBody(entry("L1", "5")),
+        (src, excl) -> new java.math.BigDecimal("6"), line("L1", "Agua", "10"));
+
+    assertEquals(422, run.response.getHttpStatus());
+    JSONObject error = run.response.getBody().getJSONObject("error");
+    assertEquals("returnQuantityExceedsAvailable", error.getString("code"));
+    assertEquals("Agua", error.getString("product"));
+    assertEquals(5, error.getDouble("requested"), 0.0001);
+    assertEquals(4, error.getDouble("available"), 0.0001);
+    assertEquals(false, run.headerBuilt);
+    assertEquals(0, run.createdLines.size());
+  }
+
+  /** The same line listed twice accumulates: 3 + 3 against 5. */
+  @Test
+  public void testCreateReturn_duplicateLinesAccumulate() throws Exception {
+    Run run = runCreateReturn(linesBody(entry("L1", "3"), entry("L1", "3")), nothingReturned(),
+        line("L1", "Agua", "5"));
+
+    assertEquals(422, run.response.getHttpStatus());
+    assertEquals(6, run.response.getBody().getJSONObject("error").getDouble("requested"), 0.0001);
+    assertEquals(false, run.headerBuilt);
+  }
+
+  /** A line that is not on the shipment is refused instead of silently dropped. */
+  @Test
+  public void testCreateReturn_lineNotOnTheShipment_returns422() throws Exception {
+    Run run = runCreateReturn(linesBody(entry("OTHER", "1")), nothingReturned(),
+        line("L1", "Agua", "5"));
+
+    assertEquals(422, run.response.getHttpStatus());
+    assertEquals("returnLineNotInDocument",
+        run.response.getBody().getJSONObject("error").getString("code"));
+  }
+
+  /** A shipment that is not completed has nothing to return yet. */
+  @Test
+  public void testCreateReturn_sourceNotCompleted_returns422() throws Exception {
     NeoContext ctx = NeoContext.builder()
-        .endpointType(NeoEndpointType.ACTION)
-        .fieldName("createReturn")
-        .httpMethod("POST")
-        .specName("goods-shipment")
-        .recordId("ship-1")
-        .requestBody(body)
-        .build();
-
+        .endpointType(NeoEndpointType.ACTION).fieldName("createReturn").httpMethod("POST")
+        .specName("goods-shipment").recordId("ship-1").requestBody(new JSONObject()).build();
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
          MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class)) {
-
       OBDal dal = mock(OBDal.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
-
-      ShipmentInOut source = mock(ShipmentInOut.class);
-      when(dal.get(eq(ShipmentInOut.class), eq("ship-1"))).thenReturn(source);
-
       obContextMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(inv -> null);
       obContextMock.when(OBContext::restorePreviousMode).thenAnswer(inv -> null);
+      ShipmentInOut draft = ReturnedQuantityTestSupport.completedSource("ship-1", line("L1", "Agua", "5"));
+      when(draft.getDocumentStatus()).thenReturn("DR");
+      when(dal.get(eq(ShipmentInOut.class), eq("ship-1"))).thenReturn(draft);
 
       NeoResponse result = NeoReturnReceiptService.createReturn(ctx, "goods-shipment", true, "C-");
 
-      assertEquals("Expected 400 when lines array is empty",
-          HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
-    }
-  }
-
-  // ─────────────────────────────────────────────────────────────────────────────
-  // createReturn — returnable quantity (ETP-5729 CP-12)
-  // ─────────────────────────────────────────────────────────────────────────────
-
-  private static final String DOC_TYPE_SENTINEL = "no doc type — proves the quantity check passed";
-
-  private static NeoContext createReturnContext(String lineId, int qty) throws Exception {
-    JSONObject body = new JSONObject();
-    body.put("lines", new JSONArray().put(
-        new JSONObject().put("lineId", lineId).put("returnQuantity", qty)));
-    return NeoContext.builder()
-        .endpointType(NeoEndpointType.ACTION)
-        .fieldName("createReturn")
-        .httpMethod("POST")
-        .specName("goods-shipment")
-        .recordId("ship-1")
-        .requestBody(body)
-        .build();
-  }
-
-  /**
-   * Stubs the returnable-quantity row of {@code line-1}: shipped 5, {@code alreadyReturned} taken
-   * by other non-voided returns. Every mock is created before it is stubbed (no nested stubbing).
-   */
-  private static Connection stubReturnableRow(OBDal dal, ShipmentInOut source,
-      String alreadyReturned) throws Exception {
-    ShipmentInOutLine sourceLine = mock(ShipmentInOutLine.class);
-    Connection conn = mock(Connection.class);
-    PreparedStatement ps = mock(PreparedStatement.class);
-    java.sql.ResultSet rs = mock(java.sql.ResultSet.class);
-    when(sourceLine.getId()).thenReturn("line-1");
-    when(source.getMaterialMgmtShipmentInOutLineList()).thenReturn(List.of(sourceLine));
-    when(dal.getConnection()).thenReturn(conn);
-    when(conn.prepareStatement(anyString())).thenReturn(ps);
-    when(ps.executeQuery()).thenReturn(rs);
-    when(rs.next()).thenReturn(true, false);
-    when(rs.getString(1)).thenReturn("line-1");
-    when(rs.getString(2)).thenReturn("Product A");
-    when(rs.getBigDecimal(3)).thenReturn(new BigDecimal("5"));
-    when(rs.getBigDecimal(4)).thenReturn(new BigDecimal(alreadyReturned));
-    return conn;
-  }
-
-  private static void stubAdminMode(MockedStatic<OBContext> obContextMock) {
-    obContextMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(inv -> null);
-    obContextMock.when(OBContext::restorePreviousMode).thenAnswer(inv -> null);
-  }
-
-  /**
-   * A second return of the same shipment is allowed while quantity remains: 2 of 5 already taken
-   * by an earlier return (draft or completed — the query does not tell them apart, only voided
-   * returns are left out), 3 requested. There is no "a return already exists" refusal any more:
-   * the flow carries on to the document type lookup, stubbed here to stop with a sentinel.
-   */
-  @Test
-  public void testCreateReturn_secondReturnWithinRemainingQty_isAllowed() throws Exception {
-    NeoContext ctx = createReturnContext("line-1", 3);
-
-    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
-         MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class)) {
-      OBDal dal = mock(OBDal.class);
-      ShipmentInOut source = mock(ShipmentInOut.class);
-      obDalMock.when(OBDal::getInstance).thenReturn(dal);
-      when(dal.get(eq(ShipmentInOut.class), eq("ship-1"))).thenReturn(source);
-      Connection conn = stubReturnableRow(dal, source, "2");
-      when(dal.createCriteria(DocumentType.class)).thenThrow(new OBException(DOC_TYPE_SENTINEL));
-      stubAdminMode(obContextMock);
-
-      NeoResponse result = NeoReturnReceiptService.createReturn(ctx, "goods-shipment", true, "C-");
-
-      assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
-      assertEquals(DOC_TYPE_SENTINEL, result.getBody().getJSONObject("error").getString("message"));
-      verify(conn).prepareStatement(Mockito.argThat(sql -> sql.contains("r.docstatus <> 'VO'")
-          && !sql.contains("'DR'")));
-    }
-  }
-
-  /**
-   * When earlier returns — a draft one included — already cover the whole shipped quantity, a
-   * new return is refused with a structured 409 that names the product and the numbers, and
-   * nothing is persisted (no empty return header is left behind).
-   */
-  @Test
-  public void testCreateReturn_earlierReturnsCoverEverything_returns409AndPersistsNothing()
-      throws Exception {
-    NeoContext ctx = createReturnContext("line-1", 1);
-
-    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
-         MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class)) {
-      OBDal dal = mock(OBDal.class);
-      ShipmentInOut source = mock(ShipmentInOut.class);
-      obDalMock.when(OBDal::getInstance).thenReturn(dal);
-      when(dal.get(eq(ShipmentInOut.class), eq("ship-1"))).thenReturn(source);
-      stubReturnableRow(dal, source, "5");
-      stubAdminMode(obContextMock);
-
-      NeoResponse result = NeoReturnReceiptService.createReturn(ctx, "goods-shipment", true, "C-");
-
-      assertEquals(HttpServletResponse.SC_CONFLICT, result.getHttpStatus());
-      JSONObject error = result.getBody().getJSONObject("error");
-      assertEquals("RETURN_QTY_EXCEEDS_SHIPPED", error.getString("code"));
-      assertEquals("ETGO_ReturnQtyExceedsShipped", error.getJSONArray("messageKeys").getString(0));
-      JSONObject params = error.getJSONObject("messageParams");
-      assertEquals("Product A", params.getString("product"));
-      assertEquals("1", params.getString("requested"));
-      assertEquals("0", params.getString("available"));
-      assertEquals("5", params.getString("shipped"));
-      verify(dal, never()).save(any());
-      verify(dal, never()).createCriteria(DocumentType.class);
-    }
-  }
-
-  /**
-   * The returnable-quantity check fails CLOSED: when it cannot be read the request answers 500
-   * and nothing is created, instead of letting an unchecked return through.
-   */
-  @Test
-  public void testCreateReturn_returnableQtyQueryFails_returns500AndPersistsNothing()
-      throws Exception {
-    NeoContext ctx = createReturnContext("line-1", 1);
-
-    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
-         MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class)) {
-      OBDal dal = mock(OBDal.class);
-      ShipmentInOut source = mock(ShipmentInOut.class);
-      ShipmentInOutLine sourceLine = mock(ShipmentInOutLine.class);
-      Connection conn = mock(Connection.class);
-      obDalMock.when(OBDal::getInstance).thenReturn(dal);
-      when(dal.get(eq(ShipmentInOut.class), eq("ship-1"))).thenReturn(source);
-      when(sourceLine.getId()).thenReturn("line-1");
-      when(source.getMaterialMgmtShipmentInOutLineList()).thenReturn(List.of(sourceLine));
-      when(dal.getConnection()).thenReturn(conn);
-      when(conn.prepareStatement(anyString())).thenThrow(new SQLException("simulated SQL error"));
-      stubAdminMode(obContextMock);
-
-      NeoResponse result = NeoReturnReceiptService.createReturn(ctx, "goods-shipment", true, "C-");
-
-      assertEquals(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, result.getHttpStatus());
-      verify(dal, never()).save(any());
-    }
-  }
-
-  /**
-   * Requested lines that do not belong to the shipment are a 400 before anything is queried or
-   * persisted — never an empty return document.
-   */
-  @Test
-  public void testCreateReturn_noRequestedLineBelongsToShipment_returns400WithoutPersisting()
-      throws Exception {
-    NeoContext ctx = createReturnContext("foreign-line", 1);
-
-    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
-         MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class)) {
-      OBDal dal = mock(OBDal.class);
-      ShipmentInOut source = mock(ShipmentInOut.class);
-      ShipmentInOutLine sourceLine = mock(ShipmentInOutLine.class);
-      obDalMock.when(OBDal::getInstance).thenReturn(dal);
-      when(dal.get(eq(ShipmentInOut.class), eq("ship-1"))).thenReturn(source);
-      when(sourceLine.getId()).thenReturn("line-1");
-      when(source.getMaterialMgmtShipmentInOutLineList()).thenReturn(List.of(sourceLine));
-      stubAdminMode(obContextMock);
-
-      NeoResponse result = NeoReturnReceiptService.createReturn(ctx, "goods-shipment", true, "C-");
-
-      assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
-      assertEquals(NeoReturnReceiptService.NO_VALID_LINES_MESSAGE,
-          result.getBody().getJSONObject("error").getString("message"));
-      verify(dal, never()).getConnection();
-      verify(dal, never()).save(any());
+      assertEquals(422, result.getHttpStatus());
+      assertEquals("sourceNotCompleted", result.getBody().getJSONObject("error").getString("code"));
     }
   }
 
@@ -644,6 +616,54 @@ public class NeoReturnReceiptServiceTest {
 
       verify(receipt).setDocumentNo("RET-00099");
       verify(dal).save(receipt);
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // hasExistingReturn — silent exception path
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  /**
+   * When the already-returned query cannot run, the quantity cap cannot be checked, so the return
+   * is not created (a cap that cannot be verified is not skipped): 500 and no header.
+   */
+  @Test
+  public void testCreateReturn_returnedQuantityQueryFails_returns500AndCreatesNothing()
+      throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("lines", new JSONArray().put(
+        new JSONObject().put("lineId", "L1").put("returnQuantity", 2)));
+
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.ACTION)
+        .fieldName("createReturn")
+        .httpMethod("POST")
+        .specName("goods-shipment")
+        .recordId("ship-1")
+        .requestBody(body)
+        .build();
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class)) {
+
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      ShipmentInOut source = ReturnedQuantityTestSupport.completedSource("ship-1",
+          ReturnedQuantityTestSupport.sourceLine("L1", "Agua", "5"));
+      when(dal.get(eq(ShipmentInOut.class), eq("ship-1"))).thenReturn(source);
+
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(anyString())).thenThrow(new SQLException("simulated SQL error"));
+
+      obContextMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(inv -> null);
+      obContextMock.when(OBContext::restorePreviousMode).thenAnswer(inv -> null);
+
+      NeoResponse result = NeoReturnReceiptService.createReturn(ctx, "goods-shipment", true, "C-");
+
+      assertEquals(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, result.getHttpStatus());
+      verify(dal, never()).save(any());
     }
   }
 

@@ -75,6 +75,7 @@ import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
 
 /**
  * Unit tests for {@link PurchaseInvoiceHeaderHandler}.
@@ -1120,6 +1121,55 @@ public class PurchaseInvoiceHeaderHandlerTest {
   }
 
   /**
+   * ETP-5710: a completion whose invoice still has a line with a quantity and a price but a net
+   * amount of 0 is refused (422) BEFORE the total discount is recalculated and before the document
+   * action runs — it used to complete with a total of 0, no payment plan and paymentComplete = Y.
+   */
+  @Test
+  public void handle_completionWithLinesWithoutAmount_isRefusedBeforeAnythingRuns()
+      throws Exception {
+    JSONObject body = new JSONObject().put("documentAction", "CO");
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PATCH")
+        .endpointType(NeoEndpointType.CRUD)
+        .recordId("inv-zero-lines")
+        .requestBody(body)
+        .build();
+    ProcessInvoiceUtil processInvoiceUtil = mock(ProcessInvoiceUtil.class);
+
+    try (MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<NeoDefaultsService> defaultsMock = Mockito.mockStatic(NeoDefaultsService.class);
+         MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
+      obContextMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      obContextMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(true, false);
+      when(rs.getLong(1)).thenReturn(10L);
+      weldMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(ProcessInvoiceUtil.class))
+          .thenReturn(processInvoiceUtil);
+
+      NeoResponse result = handler.handle(ctx);
+
+      assertNotNull(result);
+      assertEquals(422, result.getHttpStatus());
+      Mockito.verify(totalDiscountService, Mockito.never()).recalculate(anyString(),
+          anyBoolean());
+      Mockito.verify(processInvoiceUtil, Mockito.never()).process(any(), any(), any(), any(),
+          any(), any(), any());
+    }
+  }
+
+  /**
    * Non-completion requests must not trigger discount recalculation at all — only the CO path
    * does (guarded by {@code applyTotalDiscountBeforeComplete}'s own completion check).
    */
@@ -1526,5 +1576,77 @@ public class PurchaseInvoiceHeaderHandlerTest {
   public void responseEnrichedFields_declaresFollowUpAndSubtypeKey() {
     assertEquals(java.util.Set.of("followUp", "apInvoiceSubtype"),
         new PurchaseInvoiceHeaderHandler().responseEnrichedFields());
+  }
+
+  @Test
+  public void actionContracts_declareCloneRecordNextToTheExistingOnes() {
+    java.util.Map<String, NeoActionContract> contracts =
+        new PurchaseInvoiceHeaderHandler().actionContracts();
+
+    NeoActionContract clone = contracts.get("cloneRecord");
+    assertNotNull("cloneRecord is served by handle() and must be declared (ETP-5709)", clone);
+    assertEquals("POST", clone.getHttpMethod());
+    assertTrue(clone.getParams().isEmpty());
+    assertTrue("the existing declarations are kept",
+        contracts.keySet().containsAll(java.util.List.of("currencyOptions", "post", "unpost")));
+    assertNull(NeoActionContract.validate(contracts, "cloneRecord", new JSONObject()));
+  }
+
+
+  // ── line import (ETP-5713) ────────────────────────────────────────────────
+
+  private static PurchaseInvoiceHeaderHandler purchaseWithImportDelegates(
+      ImportOrderLinesIntoInvoiceHandler orders, ImportInOutLinesIntoInvoiceHandler receipts)
+      throws Exception {
+    PurchaseInvoiceHeaderHandler handler = new PurchaseInvoiceHeaderHandler();
+    java.lang.reflect.Field ordersField =
+        PurchaseInvoiceHeaderHandler.class.getDeclaredField("importOrderLinesHandler");
+    ordersField.setAccessible(true);
+    ordersField.set(handler, orders);
+    java.lang.reflect.Field receiptsField =
+        PurchaseInvoiceHeaderHandler.class.getDeclaredField("importReceiptLinesHandler");
+    receiptsField.setAccessible(true);
+    receiptsField.set(handler, receipts);
+    return handler;
+  }
+
+  @Test
+  public void actionContracts_publishTheOrderAndReceiptImports() throws Exception {
+    java.util.Map<String, NeoActionContract> contracts =
+        new PurchaseInvoiceHeaderHandler().actionContracts();
+
+    assertTrue(contracts.keySet().containsAll(java.util.List.of("availableOrders",
+        "availableOrderLines", "importOrderLines", "availableReceipts", "availableReceiptLines",
+        "importReceiptLines")));
+    assertFalse("a purchase invoice does not take shipments",
+        contracts.containsKey("importShipmentLines"));
+    assertTrue("the existing declarations are kept",
+        contracts.keySet().containsAll(java.util.List.of("currencyOptions", "post", "unpost",
+            "cloneRecord", "createGoodsReceipt")));
+    assertNull(NeoActionContract.validate(contracts, "importOrderLines",
+        new JSONObject().put("orderId", "o1")));
+    assertNull(NeoActionContract.validate(contracts, "importReceiptLines",
+        new JSONObject().put("receiptId", "rc1")));
+    assertEquals(NeoActionContract.SC_UNPROCESSABLE, NeoActionContract.validate(contracts,
+        "importReceiptLines", new JSONObject().put("shipmentId", "rc1")).getHttpStatus());
+  }
+
+  @Test
+  public void handle_dispatchesTheImportsToTheirDelegates() throws Exception {
+    ImportOrderLinesIntoInvoiceHandler orders = mock(ImportOrderLinesIntoInvoiceHandler.class);
+    ImportInOutLinesIntoInvoiceHandler receipts = mock(ImportInOutLinesIntoInvoiceHandler.class);
+    PurchaseInvoiceHeaderHandler header = purchaseWithImportDelegates(orders, receipts);
+    NeoContext orderCtx = NeoContext.builder().httpMethod("POST")
+        .endpointType(NeoEndpointType.ACTION).fieldName("importOrderLines").recordId("i1").build();
+    NeoContext receiptCtx = NeoContext.builder().httpMethod("POST")
+        .endpointType(NeoEndpointType.ACTION).fieldName("importReceiptLines").recordId("i1")
+        .build();
+    NeoResponse fromOrders = NeoResponse.ok(new JSONObject().put("from", "orders"));
+    NeoResponse fromReceipts = NeoResponse.ok(new JSONObject().put("from", "receipts"));
+    when(orders.handle(orderCtx)).thenReturn(fromOrders);
+    when(receipts.handle(receiptCtx)).thenReturn(fromReceipts);
+
+    assertSame(fromOrders, header.handle(orderCtx));
+    assertSame(fromReceipts, header.handle(receiptCtx));
   }
 }

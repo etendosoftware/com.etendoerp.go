@@ -91,6 +91,19 @@ public class PooledTenantClaimServiceTest {
     verify(query, times(5)).setParameter("clientId", "CLIENT-1");
   }
 
+  /**
+   * ETP-5638: a 38-40 character company name made the tree "<name> Product Characteristic"
+   * longer than AD_TREE.NAME's 60, because the rewrite truncated tree names to the physical 255.
+   * Every name rewrite must truncate to the 60 the AD declares, or the tree is not storable by DAL.
+   */
+  @Test
+  public void truncatesEveryRewrittenNameToItsAdLength() {
+    for (String sql : PooledTenantClaimService.PLACEHOLDER_DERIVED_NAME_UPDATES) {
+      assertTrue(sql.contains("set name = left(replace(name, :placeholder, :clientName), 60)"),
+          "a name rewrite must truncate to AD length 60: " + sql);
+    }
+  }
+
   @Test
   public void flagOffNeverTouchesThePool() {
     TestClaimService service = new TestClaimService(false);

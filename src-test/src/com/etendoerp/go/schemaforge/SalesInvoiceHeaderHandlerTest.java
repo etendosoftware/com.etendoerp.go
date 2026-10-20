@@ -89,6 +89,8 @@ import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
  * </ul>
  *
  * @covers com.etendoerp.go.schemaforge.SalesInvoiceHeaderHandler
+ *
+ * @covers com.etendoerp.go.schemaforge.SalesInvoiceHeaderHandler
  */
 public class SalesInvoiceHeaderHandlerTest {
 
@@ -1096,6 +1098,57 @@ public class SalesInvoiceHeaderHandlerTest {
   }
 
   /**
+   * ETP-5710 (same risk as the purchase side): a completion whose invoice still has a line with a
+   * quantity and a price but a net amount of 0 is refused (422) before the total discount is
+   * recalculated and before the document action runs.
+   */
+  @Test
+  public void handle_completionWithLinesWithoutAmount_isRefusedBeforeAnythingRuns()
+      throws Exception {
+    JSONObject body = new JSONObject().put("documentAction", "CO");
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PATCH")
+        .endpointType(NeoEndpointType.CRUD)
+        .recordId("ar-inv-zero-lines")
+        .requestBody(body)
+        .build();
+    ProcessInvoiceUtil processInvoiceUtil = mock(ProcessInvoiceUtil.class);
+    TotalDiscountService totalDiscountService = mock(TotalDiscountService.class);
+    SalesInvoiceHeaderHandler handler = handlerWithTotalDiscountMock(totalDiscountService);
+
+    try (MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<NeoDefaultsService> defaultsMock = Mockito.mockStatic(NeoDefaultsService.class);
+         MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
+      obContextMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      obContextMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(true, false);
+      when(rs.getLong(1)).thenReturn(10L);
+      weldMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(ProcessInvoiceUtil.class))
+          .thenReturn(processInvoiceUtil);
+
+      NeoResponse result = handler.handle(ctx);
+
+      assertNotNull(result);
+      assertEquals(422, result.getHttpStatus());
+      Mockito.verify(totalDiscountService, Mockito.never()).recalculate(anyString(),
+          anyBoolean());
+      Mockito.verify(processInvoiceUtil, Mockito.never()).process(any(), any(), any(), any(),
+          any(), any(), any());
+    }
+  }
+
+  /**
    * Non-completion requests must not trigger discount recalculation at all — only the CO path
    * does (guarded by {@code applyTotalDiscountBeforeComplete}'s own completion check).
    */
@@ -1475,5 +1528,74 @@ public class SalesInvoiceHeaderHandlerTest {
   public void responseEnrichedFields_declaresFollowUpAndSubtypeKey() {
     assertEquals(java.util.Set.of("followUp", "arInvoiceSubtype"),
         new SalesInvoiceHeaderHandler().responseEnrichedFields());
+  }
+
+  @Test
+  public void actionContracts_declareCloneRecordNextToTheExistingOnes() throws Exception {
+    Map<String, com.etendoerp.go.schemaforge.util.NeoActionContract> contracts = new SalesInvoiceHeaderHandler().actionContracts();
+
+    assertNotNull("cloneRecord is served by handle() and must be declared (ETP-5709)",
+        contracts.get("cloneRecord"));
+    assertEquals("POST", contracts.get("cloneRecord").getHttpMethod());
+    assertTrue(contracts.get("cloneRecord").getParams().isEmpty());
+    assertTrue("the existing declarations are kept",
+        contracts.keySet().containsAll(List.of("currencyOptions", "post", "unpost")));
+    assertNull(com.etendoerp.go.schemaforge.util.NeoActionContract.validate(contracts, "cloneRecord", new org.codehaus.jettison.json.JSONObject()));
+  }
+
+
+  // ── line import (ETP-5713) ────────────────────────────────────────────────
+
+  private static SalesInvoiceHeaderHandler salesWithImportDelegates(
+      ImportOrderLinesIntoInvoiceHandler orders, ImportInOutLinesIntoInvoiceHandler shipments)
+      throws Exception {
+    SalesInvoiceHeaderHandler handler = new SalesInvoiceHeaderHandler();
+    Field ordersField = SalesInvoiceHeaderHandler.class.getDeclaredField("importOrderLinesHandler");
+    ordersField.setAccessible(true);
+    ordersField.set(handler, orders);
+    Field shipmentsField =
+        SalesInvoiceHeaderHandler.class.getDeclaredField("importShipmentLinesHandler");
+    shipmentsField.setAccessible(true);
+    shipmentsField.set(handler, shipments);
+    return handler;
+  }
+
+  @Test
+  public void actionContracts_publishTheOrderAndShipmentImports() throws Exception {
+    Map<String, com.etendoerp.go.schemaforge.util.NeoActionContract> contracts =
+        new SalesInvoiceHeaderHandler().actionContracts();
+
+    assertTrue(contracts.keySet().containsAll(List.of("availableOrders", "availableOrderLines",
+        "importOrderLines", "availableShipments", "availableShipmentLines",
+        "importShipmentLines")));
+    assertFalse("a sales invoice does not take receipts",
+        contracts.containsKey("importReceiptLines"));
+    assertTrue("the existing declarations are kept",
+        contracts.keySet().containsAll(List.of("currencyOptions", "post", "unpost", "cloneRecord",
+            "createShipment")));
+    assertNull(com.etendoerp.go.schemaforge.util.NeoActionContract.validate(contracts,
+        "importShipmentLines", new JSONObject().put("shipmentId", "s1")));
+    assertEquals(com.etendoerp.go.schemaforge.util.NeoActionContract.SC_UNPROCESSABLE,
+        com.etendoerp.go.schemaforge.util.NeoActionContract.validate(contracts,
+            "importShipmentLines", new JSONObject().put("receiptId", "s1")).getHttpStatus());
+  }
+
+  @Test
+  public void handle_dispatchesTheImportsToTheirDelegates() throws Exception {
+    ImportOrderLinesIntoInvoiceHandler orders = mock(ImportOrderLinesIntoInvoiceHandler.class);
+    ImportInOutLinesIntoInvoiceHandler shipments = mock(ImportInOutLinesIntoInvoiceHandler.class);
+    SalesInvoiceHeaderHandler handler = salesWithImportDelegates(orders, shipments);
+    NeoContext orderCtx = NeoContext.builder().httpMethod("POST")
+        .endpointType(NeoEndpointType.ACTION).fieldName("importOrderLines").recordId("i1").build();
+    NeoContext shipmentCtx = NeoContext.builder().httpMethod("POST")
+        .endpointType(NeoEndpointType.ACTION).fieldName("importShipmentLines").recordId("i1")
+        .build();
+    NeoResponse fromOrders = NeoResponse.ok(new JSONObject().put("from", "orders"));
+    NeoResponse fromShipments = NeoResponse.ok(new JSONObject().put("from", "shipments"));
+    when(orders.handle(orderCtx)).thenReturn(fromOrders);
+    when(shipments.handle(shipmentCtx)).thenReturn(fromShipments);
+
+    assertSame(fromOrders, handler.handle(orderCtx));
+    assertSame(fromShipments, handler.handle(shipmentCtx));
   }
 }
