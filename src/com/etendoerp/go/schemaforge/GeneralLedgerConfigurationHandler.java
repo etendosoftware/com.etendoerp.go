@@ -38,6 +38,7 @@ import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.core.SessionHandler;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.currency.Currency;
@@ -200,9 +201,12 @@ public class GeneralLedgerConfigurationHandler implements NeoHandler {
       }
       return null;
     } catch (OBException e) {
+      // A caught error still commits at request end: drop whatever was applied before the throw.
+      SessionHandler.getInstance().rollback();
       log.warn("general-ledger-configuration business error: {}", e.getMessage());
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
     } catch (Exception e) {
+      SessionHandler.getInstance().rollback();
       log.error("general-ledger-configuration aggregate error", e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Internal Server Error");
     } finally {
@@ -263,7 +267,7 @@ public class GeneralLedgerConfigurationHandler implements NeoHandler {
       orgId = current.getId();
     }
 
-    Organization org = OBDal.getInstance().get(Organization.class, orgId);
+    Organization org = TenantOwnership.loadOwned(Organization.class, orgId);
     if (org == null) {
       throw new OBException("Organization not found: " + orgId);
     }
@@ -470,7 +474,7 @@ public class GeneralLedgerConfigurationHandler implements NeoHandler {
     if (general.has(FIELD_CURRENCY) && !general.isNull(FIELD_CURRENCY)) {
       String currencyId = trimmedOrNull(general.optString(FIELD_CURRENCY, null));
       if (currencyId != null) {
-        Currency currency = OBDal.getInstance().get(Currency.class, currencyId);
+        Currency currency = TenantOwnership.loadOwned(Currency.class, currencyId);
         if (currency == null) {
           throw new OBException("Currency not found: " + currencyId);
         }
@@ -481,21 +485,9 @@ public class GeneralLedgerConfigurationHandler implements NeoHandler {
 
   private void applyDefaultChanges(AggregateState state, JSONObject defaults) {
     for (DefaultFieldMapping mapping : DEFAULT_FIELD_MAPPINGS) {
-      if (!defaults.has(mapping.apiKey)) {
-        continue;
+      if (defaults.has(mapping.apiKey)) {
+        state.defaults.set(mapping.property, resolveAccountingCombination(defaults, mapping.apiKey));
       }
-      Object raw = defaults.opt(mapping.apiKey);
-      AccountingCombination combo = null;
-      if (!(raw == null || raw == JSONObject.NULL)) {
-        String id = StringUtils.trimToNull(String.valueOf(raw));
-        if (id != null) {
-          combo = OBDal.getInstance().get(AccountingCombination.class, id);
-          if (combo == null) {
-            throw new OBException("Accounting combination not found: " + id);
-          }
-        }
-      }
-      state.defaults.set(mapping.property, combo);
     }
   }
 
@@ -530,6 +522,12 @@ public class GeneralLedgerConfigurationHandler implements NeoHandler {
     }
   }
 
+  /**
+   * Resolves a combination id from the request. A bare {@code OBDal.get} applies no tenant predicate
+   * and this handler runs in admin mode, so a foreign id was written into another tenant's ledger
+   * setup (ETP-5722). A row of another tenant is reported as "not found", indistinguishable from a
+   * missing one; client-0 combinations stay visible.
+   */
   private AccountingCombination resolveAccountingCombination(JSONObject payload, String key) {
     Object raw = payload.opt(key);
     if (raw == null || raw == JSONObject.NULL) {
@@ -539,7 +537,7 @@ public class GeneralLedgerConfigurationHandler implements NeoHandler {
     if (id == null) {
       return null;
     }
-    AccountingCombination combo = OBDal.getInstance().get(AccountingCombination.class, id);
+    AccountingCombination combo = TenantOwnership.loadOwned(AccountingCombination.class, id);
     if (combo == null) {
       throw new OBException("Accounting combination not found: " + id);
     }

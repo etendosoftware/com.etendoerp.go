@@ -403,13 +403,24 @@ A blocked environment's data is fully inaccessible. It is not deleted (TL, 2026-
 
 - **Refused with `402`:** `/sws/neo/*`, favorites, fiscal test mode, report selectors, OAuth2 API
   keys, and every `/sws/go` endpoint that acts on the session's tenant (`resolveTenantSession`:
-  onboarding company data, demo-to-productive transfer status and retry).
+  onboarding company data, demo-to-productive transfer status and retry); outside this pipeline,
+  MCP and the legacy `GET /login?userId=` (ETP-5047).
 - **Reachable:** the account (`/me`, `/environments`, `/session*`, billing, checkout, upgrade,
   invitations, auth methods, change-password), support and surveys.
 - The owner can always pay. The transfer is decided on the productive tenant it fills, so buying
   PRO after the demo expired still brings the demo's data along (ETP-5396).
-- Entering a blocked environment (`POST /session/environment`, `GET /login?userId=`) is not
-  refused. The first environment request answers `402`, identically for every scheme.
+- Entering a blocked environment through the cookie session (`POST /session/environment`) is not
+  refused: the blocked screen and the pay path render inside it. The first environment request
+  answers `402`, identically for every scheme. The legacy `GET /login?userId=` IS refused with
+  `402` (ETP-5047; confirmed, Martin, 2026-09-28): it mints a raw Etendo JWT that reaches every
+  secure web service of the tenant, not only the surfaces above.
+- Every `402` above is decided by one class, `EnvironmentAccessGuard` (ETP-5047): the bind step
+  runs it for policies that require commercial access and carries its denial as
+  `EnvironmentAuthOutcome.getAccessDenial()`, so the kill switch
+  `environment-access-enforcement-off` is the same on every surface, and so is the structured
+  body (`error.code` / `error.decision`) — with one exception: the OAuth2 API-key endpoints
+  (`NEO_DATA`, through `OAuth2Servlet`) refuse in the OAuth2 servlet's own error envelope, not in
+  the guard's body (`open-and-notable-topics.md` §3.8).
 
 ### Guards — `AuthenticationEntryPointGuardTest`
 

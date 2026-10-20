@@ -19,6 +19,13 @@ import org.codehaus.jettison.json.JSONObject;
  * read in both shapes: the subscription period at the top level or on its first item (API
  * 2025-03-31 and later), and the invoice's subscription directly or under
  * {@code parent.subscription_details}.
+ *
+ * <p>ETP-5047 — an applied outcome also carries what the row needs beyond the access state: the
+ * provider billing period ({@link SubscriptionEventOutcome#withPeriod}, from the subscription or
+ * its first item on {@code customer.subscription.*}, from the invoice lines on
+ * {@code invoice.paid}) and whether the subscription is terminated
+ * ({@link SubscriptionEventOutcome#closing}, on {@code customer.subscription.deleted} and on an
+ * update to Stripe's terminal {@code canceled}).
  */
 public class SubscriptionLifecycleApplier {
 
@@ -70,18 +77,96 @@ public class SubscriptionLifecycleApplier {
     }
     switch (StringUtils.trimToEmpty(type)) {
       case INVOICE_PAID:
-        return SubscriptionEventOutcome.apply(
-            EnvironmentAccessPolicy.SubscriptionStatus.CURRENT, null);
+        return invoicePaid(object);
       case INVOICE_PAYMENT_FAILED:
         return pastDue(epochSeconds(object, "period_end"));
       case SUBSCRIPTION_DELETED:
         return SubscriptionEventOutcome.apply(
-            EnvironmentAccessPolicy.SubscriptionStatus.EXPIRED, null);
+            EnvironmentAccessPolicy.SubscriptionStatus.EXPIRED, null)
+            .withPeriod(subscriptionPeriodBoundary(object, CURRENT_PERIOD_START),
+                subscriptionPeriodBoundary(object, CURRENT_PERIOD_END))
+            .closing(subscriptionEndedAt(object));
       case SUBSCRIPTION_UPDATED:
-        return fromSubscriptionStatus(object, current);
+        return fromSubscriptionStatus(object, current)
+            .withPeriod(subscriptionPeriodBoundary(object, CURRENT_PERIOD_START),
+                subscriptionPeriodBoundary(object, CURRENT_PERIOD_END));
       default:
         return SubscriptionEventOutcome.ignore("unhandled event type");
     }
+  }
+
+  /**
+   * A paid invoice makes the subscription current and reports the period it paid for.
+   *
+   * <p>ETP-5047 — the period comes from the invoice <em>lines</em>, not from the invoice's own
+   * {@code period_start}/{@code period_end}: on a subscription invoice those look back one period
+   * (the usage period that ended when the invoice was cut), while each line's {@code period} is the
+   * service period of its price. The line reaching furthest is the new period; a proration line
+   * never reaches past it.
+   */
+  private SubscriptionEventOutcome invoicePaid(JSONObject invoice) {
+    SubscriptionEventOutcome current = SubscriptionEventOutcome.apply(
+        EnvironmentAccessPolicy.SubscriptionStatus.CURRENT, null);
+    BillingPeriod period = invoiceServicePeriod(invoice);
+    return period == null ? current : current.withPeriod(period.start(), period.end());
+  }
+
+  /**
+   * The service period an invoice bills: the {@code period} of its line reaching furthest.
+   *
+   * <p>Not the invoice's own {@code period_start}/{@code period_end}: on a subscription invoice
+   * those look back one period (the usage period that ended when the invoice was cut). Shared with
+   * {@link WebhookPayloadSummary}, so the ledger records the same period the row is given.
+   *
+   * @param invoice the invoice object ({@code data.object} of an {@code invoice.*} event)
+   * @return the period, or null when no line carries one
+   */
+  static BillingPeriod invoiceServicePeriod(JSONObject invoice) {
+    JSONObject lines = invoice == null ? null : invoice.optJSONObject("lines");
+    JSONArray data = lines == null ? null : lines.optJSONArray("data");
+    if (data == null) {
+      return null;
+    }
+    Instant start = null;
+    Instant end = null;
+    for (int i = 0; i < data.length(); i++) {
+      JSONObject line = data.optJSONObject(i);
+      JSONObject period = line == null ? null : line.optJSONObject("period");
+      Instant lineEnd = period == null ? null : epochSeconds(period, "end");
+      if (lineEnd != null && (end == null || lineEnd.isAfter(end))) {
+        end = lineEnd;
+        start = epochSeconds(period, "start");
+      }
+    }
+    return end == null ? null : new BillingPeriod(start, end);
+  }
+
+  /** A provider billing period; {@code start} may be null when the provider omitted it. */
+  static final class BillingPeriod {
+    private final Instant start;
+    private final Instant end;
+
+    BillingPeriod(Instant start, Instant end) {
+      this.start = start;
+      this.end = end;
+    }
+
+    Instant start() {
+      return start;
+    }
+
+    Instant end() {
+      return end;
+    }
+  }
+
+  /**
+   * When the provider ended a terminated subscription: {@code ended_at}, else
+   * {@code canceled_at}, else null (the row is then closed at the time it is written).
+   */
+  static Instant subscriptionEndedAt(JSONObject subscription) {
+    Instant endedAt = epochSeconds(subscription, "ended_at");
+    return endedAt != null ? endedAt : epochSeconds(subscription, "canceled_at");
   }
 
   /**
@@ -99,31 +184,15 @@ public class SubscriptionLifecycleApplier {
       return "";
     }
     if (StringUtils.trimToEmpty(type).startsWith(SUBSCRIPTION_EVENT_PREFIX)) {
-      return optText(object, "id");
+      return StripeJson.text(object, "id");
     }
-    String direct = optText(object, "subscription");
+    String direct = StripeJson.text(object, "subscription");
     if (StringUtils.isNotEmpty(direct)) {
       return direct;
     }
     JSONObject parent = object.optJSONObject("parent");
     JSONObject details = parent == null ? null : parent.optJSONObject("subscription_details");
-    return details == null ? "" : optText(details, "subscription");
-  }
-
-  /**
-   * Reads a String field the way Stripe actually sends it, never as the literal word "null".
-   *
-   * <p>An invoice not tied to a subscription reports {@code subscription} as JSON {@code null},
-   * and jettison's {@code JSONObject.optString} stringifies that null marker into the literal
-   * text {@code "null"} instead of falling back to the default. Left unguarded, {@link
-   * #subscriptionIdOf} would return "null" as if it were a real subscription id. Every nullable
-   * Stripe field in this class must be read through here, not through a bare {@code optString}.
-   */
-  private static String optText(JSONObject json, String key) {
-    if (json == null || !json.has(key) || json.isNull(key)) {
-      return "";
-    }
-    return StringUtils.trimToEmpty(json.optString(key, ""));
+    return details == null ? "" : StripeJson.text(details, "subscription");
   }
 
   /**
@@ -169,8 +238,11 @@ public class SubscriptionLifecycleApplier {
       case "unpaid":
         return subscriptionPastDue(object, current);
       case "canceled":
+        // Terminal at the provider: a canceled Stripe subscription cannot be reactivated, so the
+        // row closes here too, not only on customer.subscription.deleted (ETP-5047).
         return SubscriptionEventOutcome.apply(
-            EnvironmentAccessPolicy.SubscriptionStatus.EXPIRED, null);
+            EnvironmentAccessPolicy.SubscriptionStatus.EXPIRED, null)
+            .closing(subscriptionEndedAt(object));
       default:
         return SubscriptionEventOutcome.ignore("unhandled subscription status");
     }

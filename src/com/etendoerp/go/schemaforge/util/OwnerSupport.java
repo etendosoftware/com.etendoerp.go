@@ -32,7 +32,7 @@ import org.openbravo.dal.service.OBDal;
  * AD_User} PUT/PATCH guard, and {@code UserRoleCompositionService}'s role-reassignment guard).
  *
  * <p><b>Read/written via native SQL, never a DAL getter/setter</b> — same reasoning {@code
- * SFWindowAccessMap#resolveShowAccountingFields} documents for {@code
+ * NeoAccountingAccessPolicy#readShowAccountingFieldsFlag} documents for {@code
  * AD_Role.EM_ETGO_Show_Acct_Fields}: this extension column was added straight to the physical
  * table via the {@code /etendo:alter-db} webhook mechanism and is not mapped as a typed entity
  * property, so a native query is the safe, immediately-functional way to read/write it without

@@ -28,6 +28,7 @@ import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.SALT
 import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.postContext;
 import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.stubObContext;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
@@ -527,6 +528,142 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
           FinancialAccountBankConnectionSupport.parseDate("2019-03-01"), stored.getValue());
       verify(dal).save(finAcc);
       verify(dal).flush();
+    }
+  }
+
+  /**
+   * ETP-5805 — import-settings saves AND carries the non-blocking fetch-interval advisory in the
+   * {@code messages} envelope (inside {@code response} for an MCP-origin request).
+   */
+  @Test
+  public void testImportSettingsBeyondFetchIntervalAddsWarning() throws Exception {
+    JSONObject body = new JSONObject()
+        .put(PARAM_ACCOUNT_ID, ACCOUNT_ID)
+        .put("importFromDate", "2019-03-01");
+    FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
+    doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<FinancialAccountBankConnectionSupport> support = mockStatic(
+            FinancialAccountBankConnectionSupport.class, Mockito.CALLS_REAL_METHODS)) {
+      stubObContext(obContext);
+      obDal.when(OBDal::getInstance).thenReturn(mock(OBDal.class));
+      support.when(() -> FinancialAccountBankConnectionSupport.findImportFromBeyondFetchInterval(
+          eq(finAcc), any())).thenReturn(new FinancialAccountBankConnectionSupport.FetchIntervalExceeded(
+              90, java.time.LocalDate.of(2026, 7, 21)));
+      com.etendoerp.go.schemaforge.NeoContext ctx = postContext("import-settings", body);
+      org.mockito.Mockito.when(ctx.isMcpOrigin()).thenReturn(true);
+
+      NeoResponse response = handler.handle(ctx);
+
+      assertEquals(200, response.getHttpStatus());
+      assertTrue(dataOf(response).getBoolean("saved"));
+      org.codehaus.jettison.json.JSONObject message = response.getBody().getJSONObject("response")
+          .getJSONArray("messages").getJSONObject(0);
+      assertEquals("warning", message.getString("type"));
+    }
+  }
+
+  /**
+   * ETP-5805 — import-settings evaluates the RESULTING range (ETP-5104 logic): a body carrying only
+   * importToDate still warns when the stored importFrom is beyond the fetch interval.
+   */
+  @Test
+  public void testImportSettingsOnlyImportToEvaluatesStoredImportFrom() throws Exception {
+    JSONObject body = new JSONObject()
+        .put(PARAM_ACCOUNT_ID, ACCOUNT_ID)
+        .put("importToDate", "2026-10-01");
+    FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
+    Date storedFrom = FinancialAccountBankConnectionSupport.parseDate("2019-03-01");
+    org.mockito.Mockito.when(finAcc.getPSD2ImportFromDate()).thenReturn(storedFrom);
+    doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<FinancialAccountBankConnectionSupport> support = mockStatic(
+            FinancialAccountBankConnectionSupport.class, Mockito.CALLS_REAL_METHODS)) {
+      stubObContext(obContext);
+      obDal.when(OBDal::getInstance).thenReturn(mock(OBDal.class));
+      support.when(() -> FinancialAccountBankConnectionSupport.findImportFromBeyondFetchInterval(
+          eq(finAcc), eq(storedFrom))).thenReturn(
+              new FinancialAccountBankConnectionSupport.FetchIntervalExceeded(
+                  90, java.time.LocalDate.of(2026, 7, 21)));
+
+      com.etendoerp.go.schemaforge.NeoContext ctx = postContext("import-settings", body);
+      org.mockito.Mockito.when(ctx.isMcpOrigin()).thenReturn(true);
+
+      NeoResponse response = handler.handle(ctx);
+
+      assertEquals(200, response.getHttpStatus());
+      assertEquals("warning", response.getBody().getJSONObject("response")
+          .getJSONArray("messages").getJSONObject(0).getString("type"));
+    }
+  }
+
+  /** ETP-5805 - a from-date within the provider's history saves and adds no {@code messages}. */
+  @Test
+  public void testImportSettingsWithinFetchIntervalAddsNoMessages() throws Exception {
+    JSONObject body = new JSONObject()
+        .put(PARAM_ACCOUNT_ID, ACCOUNT_ID)
+        .put("importFromDate", "2026-10-01");
+    FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
+    doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<FinancialAccountBankConnectionSupport> support = mockStatic(
+            FinancialAccountBankConnectionSupport.class, Mockito.CALLS_REAL_METHODS)) {
+      stubObContext(obContext);
+      obDal.when(OBDal::getInstance).thenReturn(mock(OBDal.class));
+      support.when(() -> FinancialAccountBankConnectionSupport.findImportFromBeyondFetchInterval(
+          eq(finAcc), any())).thenReturn(null);
+      com.etendoerp.go.schemaforge.NeoContext ctx = postContext("import-settings", body);
+      org.mockito.Mockito.when(ctx.isMcpOrigin()).thenReturn(true);
+
+      NeoResponse response = handler.handle(ctx);
+
+      assertEquals(200, response.getHttpStatus());
+      assertTrue(dataOf(response).getBoolean("saved"));
+      assertFalse(response.getBody().has("messages"));
+      assertFalse(response.getBody().getJSONObject("response").has("messages"));
+    }
+  }
+
+  /**
+   * ETP-5805 - envelope placement: an MCP-origin request gets the warning inside {@code response},
+   * a REST-origin one at the body root (the same {@code NeoHints.addMessage} contract as the PUT hook).
+   */
+  @Test
+  public void testImportSettingsWarningPlacementFollowsOrigin() throws Exception {
+    for (boolean mcp : new boolean[] {true, false}) {
+      JSONObject body = new JSONObject()
+          .put(PARAM_ACCOUNT_ID, ACCOUNT_ID)
+          .put("importFromDate", "2019-03-01");
+      FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
+      doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
+
+      try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+          MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+          MockedStatic<FinancialAccountBankConnectionSupport> support = mockStatic(
+              FinancialAccountBankConnectionSupport.class, Mockito.CALLS_REAL_METHODS)) {
+        stubObContext(obContext);
+        obDal.when(OBDal::getInstance).thenReturn(mock(OBDal.class));
+        support.when(() -> FinancialAccountBankConnectionSupport.findImportFromBeyondFetchInterval(
+            eq(finAcc), any())).thenReturn(
+                new FinancialAccountBankConnectionSupport.FetchIntervalExceeded(
+                    90, java.time.LocalDate.of(2026, 7, 21)));
+        com.etendoerp.go.schemaforge.NeoContext ctx = postContext("import-settings", body);
+        org.mockito.Mockito.when(ctx.isMcpOrigin()).thenReturn(mcp);
+
+        JSONObject out = handler.handle(ctx).getBody();
+
+        JSONObject holder = mcp ? out.getJSONObject("response") : out;
+        JSONObject other = mcp ? out : out.getJSONObject("response");
+        assertEquals("mcp=" + mcp, "warning",
+            holder.getJSONArray("messages").getJSONObject(0).getString("type"));
+        assertFalse("mcp=" + mcp, other.has("messages"));
+      }
     }
   }
 

@@ -716,6 +716,100 @@ class NeoCrudHandlerTest {
   }
 
   // -------------------------------------------------------------------------
+  // handleDefault: aggregate handover (ETP-5778)
+  // -------------------------------------------------------------------------
+
+  @Nested
+  @DisplayName("handleDefault remembers the list params for aggregates")
+  class HandleDefaultAggregateHandover {
+
+    private Tab tab() {
+      Tab adTab = mock(Tab.class);
+      Table table = mock(Table.class);
+      Window window = mock(Window.class);
+      when(table.getName()).thenReturn("FIN_Payment");
+      when(adTab.getTable()).thenReturn(table);
+      when(adTab.getId()).thenReturn("tab-1");
+      when(adTab.getWindow()).thenReturn(window);
+      when(window.getId()).thenReturn("win-1");
+      return adTab;
+    }
+
+    /** Runs handleDefault with every collaborator stubbed and returns what remember() saw. */
+    private List<Map<String, String>> run(String method, String recordId) throws Exception {
+      return run(method, recordId, null);
+    }
+
+    private List<Map<String, String>> run(String method, String recordId,
+        Map<String, String> query) throws Exception {
+      org.openbravo.service.json.DefaultJsonDataService json;
+      // DefaultJsonDataService's static initialiser asks Weld for its singleton, which does not
+      // exist outside a running Etendo: keep Weld stubbed while the class is first initialised.
+      try (MockedStatic<org.openbravo.base.weld.WeldUtils> weld =
+          mockStatic(org.openbravo.base.weld.WeldUtils.class)) {
+        json = mock(org.openbravo.service.json.DefaultJsonDataService.class);
+      }
+      when(json.fetch(any())).thenReturn("{\"response\":{\"status\":0,\"data\":[]}}");
+      List<Map<String, String>> remembered = new ArrayList<>();
+      try (MockedStatic<BatchService> batch = mockStatic(BatchService.class);
+          MockedStatic<NeoFieldFilter> filter = mockStatic(NeoFieldFilter.class);
+          MockedStatic<NeoReadPredicates> preds = mockStatic(NeoReadPredicates.class);
+          MockedStatic<NeoParentTabFilterResolver> parent =
+              mockStatic(NeoParentTabFilterResolver.class);
+          MockedStatic<NeoTabDefaultSort> sort = mockStatic(NeoTabDefaultSort.class);
+          MockedStatic<NeoListAggregateQuery> agg = mockStatic(NeoListAggregateQuery.class)) {
+        batch.when(BatchService::currentJsonService).thenReturn(json);
+        filter.when(() -> NeoFieldFilter.forEntity(any(), anyString(), any()))
+            .thenReturn(mock(NeoFieldFilter.class));
+        filter.when(() -> NeoFieldFilter.forEntity(any(), anyString()))
+            .thenReturn(mock(NeoFieldFilter.class));
+        agg.when(() -> NeoListAggregateQuery.remember(any(), any()))
+            .thenAnswer(inv -> remembered.add(inv.getArgument(1)));
+
+        NeoContext context = buildContext(method, recordId, tab(), null, null, query);
+        handler.handleDefault(context);
+      }
+      return remembered;
+    }
+
+    @Test
+    @DisplayName("a list GET hands the DAL params to NeoListAggregateQuery")
+    void listGetRemembersParams() throws Exception {
+      List<Map<String, String>> remembered = run("GET", null);
+      assertEquals(1, remembered.size());
+      assertEquals("tab-1", remembered.get(0).get(JsonConstants.TAB_PARAMETER));
+    }
+
+    @Test
+    @DisplayName("a _distinct list GET (FK dropdown) does not")
+    void distinctListDoesNotRemember() throws Exception {
+      Map<String, String> q = new HashMap<>();
+      q.put(JsonConstants.DISTINCT_PARAMETER, "businessPartner");
+      assertTrue(run("GET", null, q).isEmpty());
+    }
+
+    @Test
+    @DisplayName("a _summary list GET (grid summary row) does not")
+    void summaryListDoesNotRemember() throws Exception {
+      Map<String, String> q = new HashMap<>();
+      q.put(JsonConstants.SUMMARY_PARAMETER, "{\"amount\":\"sum\"}");
+      assertTrue(run("GET", null, q).isEmpty());
+    }
+
+    @Test
+    @DisplayName("a read-by-id GET does not")
+    void readByIdDoesNotRemember() throws Exception {
+      assertTrue(run("GET", "REC-1").isEmpty());
+    }
+
+    @Test
+    @DisplayName("a POST does not")
+    void postDoesNotRemember() throws Exception {
+      assertTrue(run("POST", "REC-1").isEmpty());
+    }
+  }
+
+  // -------------------------------------------------------------------------
   // validatePostRequest tests (via reflection)
   // -------------------------------------------------------------------------
 
@@ -4041,7 +4135,7 @@ class NeoCrudHandlerTest {
     private List<String> invokeAddTabWherePredicate(Tab adTab, String tabWhere,
         String parentId) throws Exception {
       List<String> predicates = new ArrayList<>();
-      invokePrivate(handler, "addTabWherePredicate",
+      invokeStaticPrivate(NeoDistinctFetchSupport.class, "addTabWherePredicate",
           new Class<?>[] { Tab.class, String.class, String.class, List.class },
           adTab, tabWhere, parentId, predicates);
       return predicates;
