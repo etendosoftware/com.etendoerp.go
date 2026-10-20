@@ -30,6 +30,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.TreeSet;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -85,6 +86,13 @@ final class Fiscal390SourcesSupport {
   static final String SOURCES = "sources";
   static final String TYPE_SALES = "sales";
   static final String TYPE_PURCHASE = "purchase";
+  /**
+   * Side of the declaration a row's boxes belong to ("Tipo", as the 303's "IVA Devengado" /
+   * "IVA Deducible"): the VAT_SALES group feeds the accrued boxes, VAT_PURCHASE the deductible
+   * ones. An intra-EU acquisition feeds both.
+   */
+  static final String SIDE_ACCRUED = "accrued";
+  static final String SIDE_DEDUCTIBLE = "deductible";
   static final int DEFAULT_PAGE_SIZE = 50;
   /** Largest page a caller may ask for; {@code pageSize=0} asks for every row (CSV export). */
   static final int MAX_PAGE_SIZE = 500;
@@ -122,6 +130,8 @@ final class Fiscal390SourcesSupport {
     final BigDecimal base;
     final BigDecimal cuota;
     final Map<Integer, BigDecimal> boxAmounts = new TreeMap<>();
+    /** {@link #SIDE_ACCRUED} / {@link #SIDE_DEDUCTIBLE} groups that placed it (sorted). */
+    final Set<String> sides = new TreeSet<>();
     String id;
 
     Row(SourceLine line, BigDecimal base, BigDecimal cuota) {
@@ -196,9 +206,11 @@ final class Fiscal390SourcesSupport {
     Collected out = new Collected();
     Map<String, Row> byKey = new LinkedHashMap<>();
     Map<TaxReportParameter, List<SourceLine>> captured = new IdentityHashMap<>();
+    String[] group = { null };
     Fiscal390BoxesCalculator.Engine tracking = new Fiscal390BoxesCalculator.Engine() {
       @Override
       public List<TaxReportParameter> outputParameters(String groupKey) {
+        group[0] = groupKey; // the walk runs one group at a time
         return engine.outputParameters(groupKey);
       }
 
@@ -224,7 +236,7 @@ final class Fiscal390SourcesSupport {
       public void placed(TaxReportParameter parameter, List<TaxRate> taxes, Integer baseBox,
           Integer cuotaBox) {
         attribute(captured.getOrDefault(parameter, Collections.emptyList()), taxes, baseBox,
-            cuotaBox, byKey);
+            cuotaBox, sideOfGroup(group[0]), byKey);
       }
     };
     Fiscal390BoxesCalculator.Result result =
@@ -243,7 +255,7 @@ final class Fiscal390SourcesSupport {
    * line can come once per payment) and each sum is added to its row's {@code boxAmounts}.
    */
   private static void attribute(List<SourceLine> lines, List<TaxRate> taxes, Integer baseBox,
-      Integer cuotaBox, Map<String, Row> byKey) {
+      Integer cuotaBox, String side, Map<String, Row> byKey) {
     Set<String> taxIds = new HashSet<>();
     for (TaxRate t : taxes) {
       taxIds.add(t.getId());
@@ -271,7 +283,32 @@ final class Fiscal390SourcesSupport {
       if (cuotaBox != null) {
         row.boxAmounts.merge(cuotaBox, cuota, BigDecimal::add);
       }
+      if (side != null && (baseBox != null || cuotaBox != null)) {
+        row.sides.add(side);
+      }
     }
+  }
+
+  /** The side a box-walk group feeds; {@code null} for volume / specific operations. */
+  static String sideOfGroup(String groupKey) {
+    if (Fiscal390BoxesCalculator.VAT_SALES.equals(groupKey)) {
+      return SIDE_ACCRUED;
+    }
+    if (Fiscal390BoxesCalculator.VAT_PURCHASE.equals(groupKey)) {
+      return SIDE_DEDUCTIBLE;
+    }
+    return null;
+  }
+
+  /**
+   * The row's sides; a row that only feeds volume / specific-operation boxes takes the side of
+   * its invoice (a sale is accrued, a purchase deductible), as the 303's Tipo.
+   */
+  static Set<String> sidesOf(Row r) {
+    if (!r.sides.isEmpty()) {
+      return r.sides;
+    }
+    return Set.of(r.line.sales() ? SIDE_ACCRUED : SIDE_DEDUCTIBLE);
   }
 
   private static final Comparator<Row> ROW_ORDER = Comparator
@@ -296,7 +333,8 @@ final class Fiscal390SourcesSupport {
     if (q.box() != null && !r.boxAmounts.containsKey(q.box())) {
       return false;
     }
-    if (q.type() != null && !q.type().equals(typeOf(r))) {
+    // "Tipo": accrued / deductible (the row's sides); sales / purchase still accepted.
+    if (q.type() != null && !q.type().equals(typeOf(r)) && !sidesOf(r).contains(q.type())) {
       return false;
     }
     if (q.taxId() != null && !q.taxId().equals(r.line.taxId())) {
@@ -322,7 +360,8 @@ final class Fiscal390SourcesSupport {
    * The JSON of the tab:
    * <pre>
    * { "rows":   [ { "id", "invoiceTaxId", "invoiceId", "ref", "date", "accountingDate",
-   *                 "type": "sales"|"purchase", "party", "docType", "taxId", "tax", "rate",
+   *                 "type": "sales"|"purchase", "sides": ["accrued"|"deductible", ...],
+   *                 "party", "docType", "taxId", "tax", "rate",
    *                 "base", "vat", "total", "boxes": "1,3,99", "boxAmounts": { "1": "100.00", ... } } ],
    *   "count": &lt;rows matching the filters&gt;, "page": 1, "pageSize": 50,
    *   "totals": { "base", "vat", "total", "box": &lt;sum of boxAmounts[box], only with a box filter&gt; },
@@ -404,6 +443,7 @@ final class Fiscal390SourcesSupport {
     o.put("accountingDate",
         l.accountingDate() != null ? sdf.format(l.accountingDate()) : JSONObject.NULL);
     o.put("type", typeOf(r));
+    o.put("sides", new JSONArray(new ArrayList<>(sidesOf(r))));
     o.put("party", StringUtils.defaultString(l.party()));
     o.put("docType", StringUtils.defaultString(l.docType()));
     o.put("taxId", l.taxId());

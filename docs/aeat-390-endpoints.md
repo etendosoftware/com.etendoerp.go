@@ -203,7 +203,8 @@ endpoint) then attributes those lines to the boxes the figure landed in. Consequ
   not listed; derived boxes ([47], [64], [65], [84]…[108]) have no lines.
 
 Query parameters (all optional besides `year`/`period`): `box` (AEAT box number), `type`
-(`sales` | `purchase`, from the invoice's `isSOTrx`), `tax` (`C_Tax_ID`), `q` (case-insensitive
+(`accrued` | `deductible` — the row's `sides`, see below; `sales` | `purchase`, from the
+invoice's `isSOTrx`, still accepted), `tax` (`C_Tax_ID`), `q` (case-insensitive
 substring of document number, business partner or tax name), `page` (1-based, default 1),
 `pageSize` (default 50, max 500, `0` = every row — used by the CSV export).
 
@@ -211,7 +212,7 @@ substring of document number, business partner or tax name), `page` (1-based, de
 {
   "rows": [ {
     "id": "<C_InvoiceTax_ID>[#n]", "invoiceTaxId": "…", "invoiceId": "…", "ref": "F001",
-    "date": "2026-01-15", "accountingDate": "2026-01-15", "type": "sales | purchase",
+    "date": "2026-01-15", "accountingDate": "2026-01-15", "type": "sales | purchase", "sides": ["accrued", "deductible"],
     "party": "Acme", "docType": "AR Invoice", "taxId": "…", "tax": "IVA 21%", "rate": "21",
     "base": "1000.00", "vat": "210.00", "total": "1210.00",
     "boxes": "5,6,33,34,99", "boxAmounts": { "5": "1000.00", "6": "210.00", "33": "1000.00", "34": "210.00", "99": "1000.00" }
@@ -235,6 +236,13 @@ filter). Inputs (`manualData.aeatInputs`) do not affect invoice boxes, so they a
 `sourceCount` of its per-invoice drilldown: once the latest declaration of the year is submitted
 with a snapshot, the endpoint answers `submitted: true` with no rows (a live list could no longer
 add up to the frozen boxes). The frontend shows the "per-invoice detail is not kept" note.
+
+**`sides`** (ETP-5716, the Facturas tab's "Tipo", as the 303's "IVA Devengado" / "IVA
+Deducible"): the side(s) of the declaration the row's boxes belong to — `accrued` when a
+`VAT_SALES` figure placed it, `deductible` when a `VAT_PURCHASE` one did, both for an intra-EU
+acquisition ([26]-type devengado and [57]-type deducible boxes of the same line, one row). A row
+that only feeds volume / specific-operation boxes takes its invoice's side (sale → accrued,
+purchase → deductible). `Fiscal390SourcesSupport.sidesOf`.
 
 ## `GET /fiscal390/generate`
 

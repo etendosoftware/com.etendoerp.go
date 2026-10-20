@@ -323,6 +323,32 @@ public class Fiscal390SourcesSupportTest {
     assertTrue(it9.boxAmounts.containsKey(
         Fiscal390BoxLayout.box("AdqIntracomunitariasBienesCorrientes", "Total", "Cuota")));
     assertFalse(it9.line.sales());
+    // ETP-5716 — Tipo as the 303: the row belongs to both sides of the declaration.
+    assertEquals(new java.util.TreeSet<>(java.util.List.of("accrued", "deductible")),
+        Fiscal390SourcesSupport.sidesOf(it9));
+  }
+
+  /** Tipo of a plain sale / purchase; a filter by side keeps an intra-EU row on both. */
+  @Test
+  public void testSidesAndTheirFilter() throws Exception {
+    Fiscal390SourcesSupport.Collected c = Fiscal390SourcesSupport.collect(typicalYear());
+    assertEquals(java.util.Set.of("accrued"), Fiscal390SourcesSupport.sidesOf(row(c.rows, "IT1")));
+    assertEquals(java.util.Set.of("deductible"),
+        Fiscal390SourcesSupport.sidesOf(row(c.rows, "IT6")));
+
+    JSONObject accrued = Fiscal390SourcesSupport.buildResponse(c,
+        query(null, Fiscal390SourcesSupport.SIDE_ACCRUED, null, null, 1, 0));
+    assertEquals(5, accrued.getInt("count")); // IT1, IT2, IT3, IT4 + IT9 (intra-EU)
+    JSONObject deductible = Fiscal390SourcesSupport.buildResponse(c,
+        query(null, Fiscal390SourcesSupport.SIDE_DEDUCTIBLE, null, null, 1, 0));
+    assertEquals(4, deductible.getInt("count")); // IT6, IT7, IT8 + IT9
+    JSONArray rows = deductible.getJSONArray("rows");
+    boolean sawBoth = false;
+    for (int i = 0; i < rows.length(); i++) {
+      JSONArray sides = rows.getJSONObject(i).getJSONArray("sides");
+      sawBoth |= sides.length() == 2;
+    }
+    assertTrue(sawBoth);
   }
 
   /** Cash-VAT lines (one per payment) of the same invoice tax add up into one row. */
