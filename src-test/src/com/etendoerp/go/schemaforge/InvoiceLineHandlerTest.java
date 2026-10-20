@@ -1646,4 +1646,57 @@ class InvoiceLineHandlerTest {
           response.getBody().getJSONObject("error").getJSONArray("fields").getString(0));
     }
   }
+
+  // ---------------------------------------------------------------------------
+  // ETP-5703 — amounts re-derived on update, after the return-invoice negation
+  // ---------------------------------------------------------------------------
+
+  /**
+   * ETP-5703: on a return invoice, an update of a line's quantity to 3 is negated first (-3) by this
+   * class's pre-hook and the amounts are then derived — by the line customization that extends it
+   * ({@link SalesInvoiceLineHandler}, after {@code super.handle}) — from the negated quantity with
+   * the stored price and tax: -4.50 net, -5.45 gross. Deriving before the negation would persist
+   * positive amounts on a negative line.
+   */
+  @Test
+  void returnInvoiceUpdateDerivesAmountsFromTheNegatedQuantity() throws Exception {
+    Invoice invoice = mock(Invoice.class);
+    DocumentType docType = mock(DocumentType.class);
+    when(invoice.isProcessed()).thenReturn(false);
+    when(invoice.getId()).thenReturn("inv-r");
+    when(invoice.getTransactionDocument()).thenReturn(docType);
+    when(docType.isReturn()).thenReturn(true);
+    org.openbravo.model.financialmgmt.tax.TaxRate tax =
+        mock(org.openbravo.model.financialmgmt.tax.TaxRate.class);
+    when(tax.getId()).thenReturn("TAX21");
+    InvoiceLine line = mock(InvoiceLine.class);
+    when(line.getInvoice()).thenReturn(invoice);
+    when(line.getInvoicedQuantity()).thenReturn(new java.math.BigDecimal("-10"));
+    when(line.getUnitPrice()).thenReturn(new java.math.BigDecimal("1.50"));
+    when(line.getGrossUnitPrice()).thenReturn(java.math.BigDecimal.ZERO);
+    when(line.getTax()).thenReturn(tax);
+    JSONObject body = new JSONObject().put("invoicedQuantity", 3);
+    NeoContext context = NeoContext.builder()
+        .specName("sales-invoice").entityName("lines")
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("PUT")
+        .recordId("line-r")
+        .requestBody(body)
+        .build();
+
+    try (MockedStatic<OBContext> obc = Mockito.mockStatic(OBContext.class);
+        MockedStatic<OBDal> dal = LineAmountTestSupport.taxRate(21.0)) {
+      OBDal obDal = OBDal.getInstance();
+      when(obDal.get(InvoiceLine.class, "line-r")).thenReturn(line);
+      when(obDal.get(Invoice.class, "inv-r")).thenReturn(invoice);
+
+      assertNull(new SalesInvoiceLineHandler().handle(context));
+    }
+
+    assertEquals(-3.0, body.getDouble("invoicedQuantity"), 0.001);
+    assertEquals(0, new java.math.BigDecimal("-4.50").compareTo(
+        new java.math.BigDecimal(String.valueOf(body.get("lineNetAmount")))));
+    assertEquals(0, new java.math.BigDecimal("-5.45").compareTo(
+        new java.math.BigDecimal(String.valueOf(body.get("grossAmount")))));
+  }
 }

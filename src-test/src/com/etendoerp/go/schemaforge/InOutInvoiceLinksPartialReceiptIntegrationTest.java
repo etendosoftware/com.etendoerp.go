@@ -227,7 +227,7 @@ public class InOutInvoiceLinksPartialReceiptIntegrationTest extends OBBaseTest {
     ShipmentInOut template = OBDal.getInstance().get(ShipmentInOut.class, SHIPMENT_TEMPLATE_ID);
     ShipmentInOutLine templateLine = template.getMaterialMgmtShipmentInOutLineList().get(0);
     DocumentType docType = ReturnShipmentUtils.findReturnDocTypeForOrg(
-        template.getOrganization().getId(), "ARI", true, false, false);
+        template.getClient(), template.getOrganization().getId(), "ARI", true, false, false);
     assertNotNull("test fixture requires an active, non-return AR Invoice doc type", docType);
     BusinessPartner bp = template.getBusinessPartner();
 

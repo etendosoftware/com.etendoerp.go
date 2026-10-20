@@ -402,9 +402,9 @@ public class NeoBatchJsonDataService extends DefaultJsonDataService {
     Check.isNotNull(content, "Content must be set");
     final Object jsonRepresentation;
     if (content.trim().startsWith("[")) {
-      jsonRepresentation = new JSONArray(content);
+      jsonRepresentation = NeoRequestBodyParser.parseJsonArraySafely(content);
     } else {
-      final JSONObject jsonObject = new JSONObject(content);
+      final JSONObject jsonObject = NeoRequestBodyParser.parseJsonObjectSafely(content);
       jsonRepresentation = jsonObject.get(JsonConstants.DATA);
     }
     return jsonRepresentation;

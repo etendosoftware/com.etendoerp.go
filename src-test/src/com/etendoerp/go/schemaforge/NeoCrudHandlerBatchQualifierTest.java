@@ -271,7 +271,7 @@ class NeoCrudHandlerBatchQualifierTest {
       // what is already here", and these fields are by their nature absent from the body.
       ArgumentCaptor<Set<String>> suppressedFields = ArgumentCaptor.forClass(Set.class);
       pipeline.cascade.verify(() -> NeoDefaultsCascadeHelper.executeCalloutCascade(eq(context),
-          eq(adTab), any(), any(), any(), suppressedFields.capture()));
+          eq(adTab), any(), any(), any(), suppressedFields.capture(), any()));
       assertTrue(suppressedFields.getValue().contains(HANDLER_PROTECTED_FIELD),
           "the handler's declared protected field must be honoured by the cascade");
     }
@@ -309,7 +309,7 @@ class NeoCrudHandlerBatchQualifierTest {
       // A missing handler is not an error: the create still runs to the DAL write.
       assertInstanceOf(NullPointerException.class, cause);
       pipeline.cascade.verify(() -> NeoDefaultsCascadeHelper.executeCalloutCascade(eq(context),
-          eq(adTab), any(), any(), any(), any()));
+          eq(adTab), any(), any(), any(), any(), any()));
     }
   }
 
@@ -338,6 +338,81 @@ class NeoCrudHandlerBatchQualifierTest {
   }
 
   @Test
+  @DisplayName("ETP-5669: a fallback pick is not protected from the cascade; a real default is")
+  @SuppressWarnings("unchecked")
+  void fallbackPicksAreNotProtectedFromTheCascade() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("accountingDate", "2026-06-20");
+    Tab adTab = mock(Tab.class);
+    NeoContext context = contextWithQualifier(adTab, "   ", body);
+
+    try (Pipeline pipeline = new Pipeline()) {
+      // After the defaults pass the body holds a first-combo-row period and a genuine default.
+      pipeline.crudHelper.when(() -> NeoCrudHelper.snapshotMandatoryBodyFields(any(), any()))
+          .thenReturn(new HashSet<>(Set.of("period", "organization")));
+      pipeline.mandatoryDefaults.when(() -> NeoMandatoryDefaultsService.injectMandatoryDefaults(
+          any(), any(), any(), any(), anyBoolean())).thenAnswer(inv -> {
+            context.addFallbackDefault("period");
+            return null;
+          });
+
+      executePostCreateToTheDalWrite(new NeoCrudHandler(null), context, adTab,
+          passThroughFilter(body));
+
+      ArgumentCaptor<Set<String>> protectedFields = ArgumentCaptor.forClass(Set.class);
+      pipeline.cascade.verify(() -> NeoDefaultsCascadeHelper.executeCalloutCascade(eq(context),
+          eq(adTab), any(), any(), protectedFields.capture(), any(), any()));
+      assertFalse(protectedFields.getValue().contains("period"),
+          "the DateAcct callout must be free to replace the first-row period");
+      assertTrue(protectedFields.getValue().contains("organization"),
+          "a genuine default stays protected (ETP-4258)");
+    }
+  }
+
+  @Test
+  @DisplayName("ETP-5669: the cascade's value replaces a fallback pick; a submitted value survives")
+  void cascadeValueReachesTheRecordForAFallbackFieldOnly() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("accountingDate", "2026-06-20");
+    body.put("description", "mine");
+    Tab adTab = mock(Tab.class);
+    NeoContext context = contextWithQualifier(adTab, "   ", body);
+
+    try (Pipeline pipeline = new Pipeline()) {
+      pipeline.crudHelper.when(() -> NeoCrudHelper.snapshotBodyFields(any()))
+          .thenReturn(new HashSet<>(Set.of("accountingDate", "description")));
+      pipeline.crudHelper.when(() -> NeoCrudHelper.snapshotMandatoryBodyFields(any(), any()))
+          .thenReturn(new HashSet<>(Set.of("accountingDate", "description", "period")));
+      pipeline.mandatoryDefaults.when(() -> NeoMandatoryDefaultsService.injectMandatoryDefaults(
+          any(), any(), any(), any(), anyBoolean())).thenAnswer(inv -> {
+            body.put("period", "FIRST-ROW");
+            context.addFallbackDefault("period");
+            return null;
+          });
+      // The cascade proposes a value for both; like the real merge, it keeps a protected field
+      // that already holds a value.
+      pipeline.cascade.when(() -> NeoDefaultsCascadeHelper.executeCalloutCascade(any(), any(),
+          any(), any(), any(), any(), any())).thenAnswer(inv -> {
+            JSONObject target = inv.getArgument(2);
+            Set<String> kept = inv.getArgument(4);
+            for (String field : new String[] {"period", "description"}) {
+              if (!kept.contains(field) || !target.has(field)) {
+                target.put(field, "CASCADE");
+              }
+            }
+            return null;
+          });
+
+      executePostCreateToTheDalWrite(new NeoCrudHandler(null), context, adTab,
+          passThroughFilter(body));
+
+      assertEquals("CASCADE", body.getString("period"));
+      assertEquals("mine", body.getString("description"));
+      assertEquals("2026-06-20", body.getString("accountingDate"));
+    }
+  }
+
+  @Test
   @DisplayName("The cascade sees the body the field filter returned")
   void theFilteredBodyIsWhatTheCascadeSees() throws Exception {
     JSONObject body = new JSONObject();
@@ -355,7 +430,7 @@ class NeoCrudHandlerBatchQualifierTest {
 
       ArgumentCaptor<JSONObject> captured = ArgumentCaptor.forClass(JSONObject.class);
       pipeline.cascade.verify(() -> NeoDefaultsCascadeHelper.executeCalloutCascade(eq(context),
-          eq(adTab), captured.capture(), any(), any(), any()));
+          eq(adTab), captured.capture(), any(), any(), any(), any()));
       assertEquals("PROD-1", captured.getValue().getString("product"));
     }
   }

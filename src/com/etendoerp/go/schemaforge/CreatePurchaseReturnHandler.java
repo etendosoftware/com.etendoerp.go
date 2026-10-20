@@ -18,11 +18,10 @@
 package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
+import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Date;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 
 import javax.inject.Named;
 import javax.servlet.http.HttpServletResponse;
@@ -31,8 +30,6 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.time.DateUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.codehaus.jettison.json.JSONArray;
-import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
@@ -42,13 +39,20 @@ import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
 
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
+
 /**
  * NeoHandler that creates a draft Purchase Return Receipt (M_InOut with movementType='V-') from a
  * completed Goods Receipt. Invoked via:
  *   POST /sws/neo/goods-receipt/goodsReceipt/{recordId}/action/createPurchaseReturn
  *
- * <p>Request body: {@code { "lines": [{ "lineId": "...", "returnQuantity": N }], "reason": "..." }}
- * <p>Response: {@code { "response": { "data": { "id": "...", "documentNo": "..." } } }}
+ * <p>Request body (ETP-5711): {@code { "lines": [{ "lineId": "...", "returnQuantity": N }],
+ * "reason": "..." }}. {@code lines} is optional: omitted (or empty) returns everything still
+ * returnable of every line; given, exactly those lines. The quantities are checked against what is
+ * still returnable before anything is created ({@link ReturnableQuantity}), and the return is
+ * always left in DRAFT.
+ * <p>Response: {@code { "response": { "data": { "id", "documentNo", "documentStatus", "lines": [
+ * { "id", "product", "productName", "returnedQuantity", "originalQuantity", "sourceLineId" }] } } }}
  */
 @Named("createPurchaseReturnHandler")
 public class CreatePurchaseReturnHandler implements NeoHandler {
@@ -56,6 +60,16 @@ public class CreatePurchaseReturnHandler implements NeoHandler {
   private static final Logger log = LogManager.getLogger(CreatePurchaseReturnHandler.class);
   private static final String ACTION_NAME = "createPurchaseReturn";
   private static final String MOVEMENT_TYPE_PURCHASE_RETURN = "V-";
+
+  /**
+   * The contract published to agents for {@link #ACTION_NAME} (ETP-5711), referenced explicitly
+   * from {@link GoodsReceiptHeaderHandler#actionContracts()}. REST and the SPA do not judge a call
+   * against it; the MCP does.
+   */
+  static final NeoActionContract CONTRACT = ReturnFromDocumentSupport.contract(ACTION_NAME,
+      "goods receipt", "return to vendor shipment",
+      "complete it with documentAction (docAction CO) to book the stock movement, or add and "
+          + "edit lines first through the return-to-vendor-shipment window.");
 
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -80,10 +94,10 @@ public class CreatePurchaseReturnHandler implements NeoHandler {
               "Goods receipt not found: " + recordId);
         }
 
-        Map<String, BigDecimal> lineQtyMap = parseLinePayload(context.getRequestBody());
-        if (lineQtyMap.isEmpty()) {
-          return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-              "No lines specified for the return");
+        ReturnFromDocumentSupport.Plan plan =
+            ReturnFromDocumentSupport.plan(original, context.getRequestBody());
+        if (plan.refusal != null) {
+          return plan.refusal;
         }
 
         User currentUser = OBContext.getOBContext().getUser();
@@ -97,7 +111,8 @@ public class CreatePurchaseReturnHandler implements NeoHandler {
           returnReceipt.setPartnerAddress(original.getPartnerAddress());
         }
         returnReceipt.setWarehouse(original.getWarehouse());
-        DocumentType returnDocType = findRtvShipmentDocType(original.getOrganization().getId());
+        DocumentType returnDocType = ReturnShipmentUtils.findReturnDocTypeForOrg(
+            original.getClient(), original.getOrganization().getId(), "MMR", false, true, false);
         if (returnDocType == null) {
           return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
               "No RTV Shipment document type (MMR, isReturn=Y) found for this organization");
@@ -115,6 +130,7 @@ public class CreatePurchaseReturnHandler implements NeoHandler {
         returnReceipt.setCompletelyInvoiced(false);
         // ETP-4028: EM_Etgo_Currency_ID is mandatory on M_InOut — every new record must carry it.
         returnReceipt.setEtgoCurrency(original.getEtgoCurrency());
+        ReturnFromDocumentSupport.applyReason(returnReceipt, context.getRequestBody());
         returnReceipt.setCreatedBy(currentUser);
         returnReceipt.setUpdatedBy(currentUser);
         returnReceipt.setCreationDate(new Date());
@@ -123,19 +139,15 @@ public class CreatePurchaseReturnHandler implements NeoHandler {
         OBDal.getInstance().save(returnReceipt);
         OBDal.getInstance().flush();
 
-        buildReturnLines(original, returnReceipt, lineQtyMap, currentUser);
+        List<ReturnFromDocumentSupport.CreatedLine> created =
+            buildReturnLines(original, returnReceipt, plan.requests, currentUser);
 
         OBDal.getInstance().flush();
         OBDal.getInstance().refresh(returnReceipt);
 
         ensureDocumentNo(returnReceipt);
 
-        JSONObject data = new JSONObject();
-        data.put("id", returnReceipt.getId());
-        data.put("documentNo",
-            returnReceipt.getDocumentNo() != null ? returnReceipt.getDocumentNo() : "");
-
-        return NeoResponse.createdWithData(data);
+        return NeoResponse.createdWithData(ReturnFromDocumentSupport.describe(returnReceipt, created));
 
       } finally {
         OBContext.restorePreviousMode();
@@ -152,28 +164,23 @@ public class CreatePurchaseReturnHandler implements NeoHandler {
     }
   }
 
-  private void buildReturnLines(ShipmentInOut original, ShipmentInOut returnReceipt,
-      Map<String, BigDecimal> lineQtyMap, User currentUser) {
+  private List<ReturnFromDocumentSupport.CreatedLine> buildReturnLines(ShipmentInOut original,
+      ShipmentInOut returnReceipt, ReturnableQuantity.Requests requests, User currentUser) {
+    List<ReturnFromDocumentSupport.CreatedLine> created = new ArrayList<>();
     long lineNo = 10L;
     for (ShipmentInOutLine originalLine : original.getMaterialMgmtShipmentInOutLineList()) {
-      BigDecimal returnQty = resolveReturnQty(originalLine, lineQtyMap);
+      BigDecimal returnQty = requests.quantity(originalLine.getId());
       if (returnQty != null) {
-        addReturnLine(originalLine, returnReceipt, returnQty, currentUser, lineNo);
+        ShipmentInOutLine returnLine = addReturnLine(originalLine, returnReceipt, returnQty,
+            currentUser, lineNo);
+        created.add(new ReturnFromDocumentSupport.CreatedLine(returnLine, originalLine, returnQty));
         lineNo += 10L;
       }
     }
+    return created;
   }
 
-  private BigDecimal resolveReturnQty(ShipmentInOutLine originalLine,
-      Map<String, BigDecimal> lineQtyMap) {
-    if (!originalLine.isActive() || originalLine.getProduct() == null) {
-      return null;
-    }
-    BigDecimal qty = lineQtyMap.get(originalLine.getId());
-    return (qty == null || qty.compareTo(BigDecimal.ZERO) <= 0) ? null : qty;
-  }
-
-  private void addReturnLine(ShipmentInOutLine originalLine,
+  private ShipmentInOutLine addReturnLine(ShipmentInOutLine originalLine,
       ShipmentInOut returnReceipt, BigDecimal returnQty, User currentUser, long lineNo) {
     ShipmentInOutLine returnLine = NeoReturnReceiptService.createReturnLineShell(
         returnReceipt, originalLine, lineNo);
@@ -185,22 +192,7 @@ public class CreatePurchaseReturnHandler implements NeoHandler {
     returnLine.setUpdated(new Date());
     returnReceipt.getMaterialMgmtShipmentInOutLineList().add(returnLine);
     OBDal.getInstance().save(returnLine);
-  }
-
-  private DocumentType findRtvShipmentDocType(String orgId) {
-    List<DocumentType> candidates = OBDal.getInstance().getSession()
-        .createQuery(
-            "FROM DocumentType WHERE documentCategory = 'MMR' AND return = true" +
-            " AND salesTransaction = false AND active = true ORDER BY isDefault DESC",
-            DocumentType.class)
-        .list();
-    for (DocumentType dt : candidates) {
-      if (orgId.equals(dt.getOrganization().getId())) return dt;
-    }
-    for (DocumentType dt : candidates) {
-      if ("0".equals(dt.getOrganization().getId())) return dt;
-    }
-    return candidates.isEmpty() ? null : candidates.get(0);
+    return returnLine;
   }
 
   private void ensureDocumentNo(ShipmentInOut returnReceipt) {
@@ -220,33 +212,5 @@ public class CreatePurchaseReturnHandler implements NeoHandler {
       log.warn("Could not generate documentNo for purchase return receipt {}",
           returnReceipt.getId());
     }
-  }
-
-  private Map<String, BigDecimal> parseLinePayload(JSONObject body) {
-    Map<String, BigDecimal> result = new HashMap<>();
-    if (body == null) {
-      return result;
-    }
-    JSONArray linesArr = body.optJSONArray("lines");
-    if (linesArr == null) {
-      return result;
-    }
-    for (int i = 0; i < linesArr.length(); i++) {
-      try {
-        JSONObject entry = linesArr.getJSONObject(i);
-        String lineId = entry.optString("lineId", null);
-        Object qtyVal = entry.opt("returnQuantity");
-        if (StringUtils.isBlank(lineId) || qtyVal == null) {
-          continue;
-        }
-        BigDecimal qty = new BigDecimal(qtyVal.toString());
-        if (qty.compareTo(BigDecimal.ZERO) > 0) {
-          result.put(lineId, qty);
-        }
-      } catch (Exception e) {
-        log.warn("Failed to parse return line at index {}: {}", i, e.getMessage());
-      }
-    }
-    return result;
   }
 }

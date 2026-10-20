@@ -69,7 +69,8 @@ class TenantIsolationPolicyTest {
   /**
    * The classes that serve the financial-account surface: bank reconciliation, account movements,
    * bank statements, cash close, the account's own configuration tabs and the payment registration
-   * they delegate to.
+   * they delegate to. Plus the general ledger configuration, which writes accounting combinations
+   * into the ledger setup (ETP-5722).
    */
   private static final List<String> GUARDED_CLASSES = Arrays.asList(
       "AccountingDimensionsSupport.java",
@@ -84,6 +85,7 @@ class TenantIsolationPolicyTest {
       "FinancialAccountHandler.java",
       "FinancialAccountTransactionsHandler.java",
       "FinancialAccountTransactionsSupport.java",
+      "GeneralLedgerConfigurationHandler.java",
       "NearMatchSupport.java",
       "ReconciliationDifferenceSupport.java",
       "ReconciliationFlowSupport.java",

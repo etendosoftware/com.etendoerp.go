@@ -43,6 +43,8 @@ import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.ad.utility.Image;
 import org.openbravo.model.common.enterprise.Organization;
 
+import com.etendoerp.go.common.BoundedJsonParser;
+import com.etendoerp.go.common.MalformedJsonException;
 import com.etendoerp.go.schemaforge.NeoResponse;
 
 /**
@@ -374,6 +376,8 @@ public final class NeoImageHelper {
         sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
             "Image endpoint only supports GET and POST");
       }
+    } catch (MalformedJsonException e) {
+      sendError(response, HttpServletResponse.SC_BAD_REQUEST, "Invalid JSON body");
     } catch (Exception e) {
       log.error("Error handling image request", e);
       OBDal.getInstance().rollbackAndClose();
@@ -415,7 +419,7 @@ public final class NeoImageHelper {
       return;
     }
     String bodyStr = new String(rawBytes, StandardCharsets.UTF_8);
-    JSONObject body = new JSONObject(bodyStr);
+    JSONObject body = BoundedJsonParser.parseObject(bodyStr);
     String name = body.optString("name", "image");
     String mimeType = body.optString("mimeType", "image/png");
     String dataBase64 = body.optString("data", "");

@@ -54,11 +54,15 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 /**
  * Unit tests for {@link NeoCsvExportService} — pure (no DB / OBContext). Builds
  * the standard list envelope, drives {@code tryExport}, and asserts the streamed
  * CSV plus the download headers.
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoCsvExportService
+ * @covers com.etendoerp.go.schemaforge.NeoExportTable
  */
 class NeoCsvExportServiceTest {
 
@@ -718,5 +722,23 @@ class NeoCsvExportServiceTest {
 
     assertTrue(handled);
     assertTrue(cap.csv().contains("\"S\""), cap.csv());
+  }
+
+  // A map that would break the JSON parser (unbalanced, unterminated, commented) degrades the same
+  // way: raw codes, and the export still completes.
+  @ParameterizedTest
+  @ValueSource(strings = { "{\"x\":[", "[[", "{\"productType\":{\"S\":\"Servicio\"}",
+      "{\"productType\":{\"S\":\"Servicio\"}/*c*/}" })
+  void fallsBackToRawCodesWhenValueMapsBreaksTheParser(String valueMaps) throws Exception {
+    CapturingResponse cap = new CapturingResponse();
+    JSONArray rows = new JSONArray().put(new JSONObject().put("productType", "S"));
+
+    boolean handled = NeoCsvExportService.tryExport(flatEnvelope(rows),
+        params("export", "csv", "columns", "productType:tipo", "valueMaps", valueMaps),
+        cap.response);
+
+    assertTrue(handled);
+    assertTrue(cap.csv().contains("\"S\""), cap.csv());
+    assertFalse(cap.csv().contains("Servicio"), cap.csv());
   }
 }

@@ -57,6 +57,7 @@ import org.openbravo.model.ad.ui.Window;
 import com.etendoerp.go.schemaforge.NeoServlet.NeoPathInfo;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy;
 import com.etendoerp.go.schemaforge.util.NeoReportCallability;
 
 /**
@@ -330,9 +331,37 @@ class NeoRequestRouterTest {
 
     supportMock.when(() -> NeoServletSupport.findSpec("myWindow")).thenReturn(spec);
 
-    router.handleSpecRequest(pathInfo, "GET", request, response);
+    try (MockedStatic<NeoAccountingAccessPolicy> policy = mockStatic(NeoAccountingAccessPolicy.class)) {
+      policy.when(() -> NeoAccountingAccessPolicy.isEntityNameAllowed(spec, "myEntity"))
+          .thenReturn(true);
+      router.handleSpecRequest(pathInfo, "GET", request, response);
+    }
 
     verify(servlet.crudHandler).handleWindowEntityCrud(spec, pathInfo, "GET", request, response);
+  }
+
+  /**
+   * ETP-5648: an accounting entity the role cannot see is refused with 403 before any
+   * sub-endpoint or CRUD handler runs, even though the spec itself is reachable.
+   */
+  @Test
+  void testHandleSpecRequestDeniesHiddenAccountingEntity() throws Exception {
+    NeoPathInfo pathInfo = new NeoPathInfo("product", "accounting", null);
+    SFSpec spec = mock(SFSpec.class);
+    when(spec.getSpecType()).thenReturn("W");
+    when(servlet.authenticator.hasWindowAccessForSpec(spec, "PUT")).thenReturn(true);
+    supportMock.when(() -> NeoServletSupport.findSpec("product")).thenReturn(spec);
+
+    try (MockedStatic<NeoAccountingAccessPolicy> policy = mockStatic(NeoAccountingAccessPolicy.class)) {
+      policy.when(() -> NeoAccountingAccessPolicy.isEntityNameAllowed(spec, "accounting"))
+          .thenReturn(false);
+      router.handleSpecRequest(pathInfo, "PUT", request, response);
+    }
+
+    verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_FORBIDDEN), anyString());
+    verify(servlet.subEndpointDispatcher, never()).handleWindowSubEndpoint(
+        any(), any(), any(), any(), any());
+    verify(servlet.crudHandler, never()).handleWindowEntityCrud(any(), any(), any(), any(), any());
   }
 
   // ── handleProcessSpecRequest ─────────────────────────────────────────────

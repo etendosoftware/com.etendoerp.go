@@ -17,20 +17,15 @@
 package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
-import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
+import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 
 import javax.servlet.http.HttpServletResponse;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
@@ -50,7 +45,9 @@ import org.openbravo.service.db.DalConnectionProvider;
  *
  * Used by:
  * - {@link CreateReturnReceiptHandler}: sales return (C-, salesTransaction=true)
- * - CreatePurchaseReturnHandler (future): purchase return (V-, salesTransaction=false)
+ * - {@link CreatePurchaseReturnHandler}: purchase return (V-, salesTransaction=false), which keeps
+ *   its own header construction but shares the plan/answer ({@link ReturnFromDocumentSupport})
+ *   and the quantity rule ({@link ReturnableQuantity})
  */
 final class NeoReturnReceiptService {
 
@@ -95,14 +92,9 @@ final class NeoReturnReceiptService {
         }
 
         JSONObject body = context.getRequestBody();
-        JSONArray requestedLines = body != null ? body.optJSONArray("lines") : null;
-        if (requestedLines == null || requestedLines.length() == 0) {
-          return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "No lines specified");
-        }
-
-        if (hasExistingReturn(shipmentId)) {
-          return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
-              "A return already exists for shipment: " + shipmentId);
+        ReturnFromDocumentSupport.Plan plan = ReturnFromDocumentSupport.plan(source, body);
+        if (plan.refusal != null) {
+          return plan.refusal;
         }
 
         DocumentType docType = findReturnDocType(source, salesTransaction);
@@ -113,27 +105,16 @@ final class NeoReturnReceiptService {
 
         ShipmentInOut returnDoc = NeoCommercialDocumentFactory.createShipmentReceiptHeader(
             source, docType, salesTransaction, movementType);
+        ReturnFromDocumentSupport.applyReason(returnDoc, body);
         OBDal.getInstance().save(returnDoc);
 
-        int added = createReturnLines(returnDoc, source, requestedLines);
-        if (added == 0) {
-          throw new OBException("No valid lines to return");
-        }
+        List<ReturnFromDocumentSupport.CreatedLine> created =
+            createReturnLines(returnDoc, source, plan.requests);
 
         OBDal.getInstance().flush();
         ensureDocumentNo(returnDoc);
 
-        JSONObject data = new JSONObject();
-        data.put("id", returnDoc.getId());
-        data.put("documentNo", returnDoc.getDocumentNo());
-
-        JSONObject responseData = new JSONObject();
-        responseData.put("data", data);
-
-        JSONObject wrapper = new JSONObject();
-        wrapper.put("response", responseData);
-
-        return NeoResponse.created(wrapper);
+        return NeoResponse.createdWithData(ReturnFromDocumentSupport.describe(returnDoc, created));
 
       } finally {
         OBContext.restorePreviousMode();
@@ -148,34 +129,20 @@ final class NeoReturnReceiptService {
     }
   }
 
-  private static int createReturnLines(ShipmentInOut returnDoc, ShipmentInOut source,
-      JSONArray requestedLines) throws Exception {
-    Map<String, BigDecimal> qtyByLineId = parseReturnQtyMap(requestedLines);
+  private static List<ReturnFromDocumentSupport.CreatedLine> createReturnLines(
+      ShipmentInOut returnDoc, ShipmentInOut source, ReturnableQuantity.Requests requests) {
+    List<ReturnFromDocumentSupport.CreatedLine> created = new ArrayList<>();
     long lineNo = 10;
-    int added = 0;
     for (ShipmentInOutLine sourceLine : source.getMaterialMgmtShipmentInOutLineList()) {
-      BigDecimal returnQty = qtyByLineId.get(sourceLine.getId());
+      BigDecimal returnQty = requests.quantity(sourceLine.getId());
       if (returnQty == null) {
         continue;
       }
-      buildAndSaveReturnLine(returnDoc, sourceLine, returnQty, lineNo);
+      ShipmentInOutLine returnLine = buildAndSaveReturnLine(returnDoc, sourceLine, returnQty, lineNo);
+      created.add(new ReturnFromDocumentSupport.CreatedLine(returnLine, sourceLine, returnQty));
       lineNo += 10;
-      added++;
     }
-    return added;
-  }
-
-  private static Map<String, BigDecimal> parseReturnQtyMap(JSONArray requestedLines) throws Exception {
-    Map<String, BigDecimal> qtyByLineId = new HashMap<>();
-    for (int i = 0; i < requestedLines.length(); i++) {
-      JSONObject req = requestedLines.getJSONObject(i);
-      String lineId = req.getString("lineId");
-      BigDecimal qty = new BigDecimal(req.optString("returnQuantity", "0"));
-      if (qty.compareTo(BigDecimal.ZERO) > 0) {
-        qtyByLineId.put(lineId, qty);
-      }
-    }
-    return qtyByLineId;
+    return created;
   }
 
   /**
@@ -227,12 +194,13 @@ final class NeoReturnReceiptService {
    * Etendo Classic does the same — see {@code RMInOutPickEditLines}, which negates both the
    * movement and the operative quantity.
    */
-  private static void buildAndSaveReturnLine(ShipmentInOut returnDoc, ShipmentInOutLine sourceLine,
-      BigDecimal returnQty, long lineNo) {
+  private static ShipmentInOutLine buildAndSaveReturnLine(ShipmentInOut returnDoc,
+      ShipmentInOutLine sourceLine, BigDecimal returnQty, long lineNo) {
     ShipmentInOutLine retLine = createReturnLineShell(returnDoc, sourceLine, lineNo);
     retLine.setMovementQuantity(ReturnLineQuantityPolicy.toStoredQuantity(returnQty));
     applyOrderUOM(retLine, sourceLine, returnQty);
     OBDal.getInstance().save(retLine);
+    return retLine;
   }
 
   /**
@@ -268,26 +236,6 @@ final class NeoReturnReceiptService {
         .setMaxResults(1)
         .list();
     return results.isEmpty() ? null : results.get(0);
-  }
-
-  private static boolean hasExistingReturn(String shipmentId) {
-    String sql = "SELECT COUNT(*) FROM m_inout io"
-        + " JOIN m_inoutline iol ON iol.m_inout_id = io.m_inout_id"
-        + " WHERE iol.canceled_inoutline_id IN"
-        + " (SELECT m_inoutline_id FROM m_inoutline WHERE m_inout_id = ?)"
-        + " AND io.isactive = 'Y'";
-    try {
-      Connection conn = OBDal.getInstance().getConnection();
-      try (PreparedStatement ps = conn.prepareStatement(sql)) {
-        ps.setString(1, shipmentId);
-        try (ResultSet rs = ps.executeQuery()) {
-          return rs.next() && rs.getInt(1) > 0;
-        }
-      }
-    } catch (Exception e) {
-      log.warn("Could not check for existing return of {}: {}", shipmentId, e.getMessage());
-      return false;
-    }
   }
 
   private static DocumentType findReturnDocType(ShipmentInOut source, boolean salesTransaction) {

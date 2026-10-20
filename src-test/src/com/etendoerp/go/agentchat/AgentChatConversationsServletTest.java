@@ -43,6 +43,8 @@ import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.junit.jupiter.params.ParameterizedTest;
 import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.openbravo.base.exception.OBException;
@@ -57,6 +59,8 @@ import com.etendoerp.go.common.JwtAuthUtils;
  * Tests for {@link AgentChatConversationsServlet}: routing, HTTP mapping and transaction handling.
  * The persistence and ownership rules live in {@link ConversationUtils} and
  * {@link ConversationWriteUtils} (tested in the Copilot module); here they are mocked.
+ *
+ * @covers com.etendoerp.go.agentchat.AgentChatConversationsServlet
  */
 class AgentChatConversationsServletTest {
 
@@ -224,6 +228,16 @@ class AgentChatConversationsServletTest {
   @Test
   void aMalformedJsonBodyIsA400() throws Exception {
     servlet.doPost(request(PATH_CONVERSATIONS, "{not json"), response);
+    assertStatus(400);
+    conversations.verifyNoInteractions();
+    writes.verifyNoInteractions();
+  }
+
+  /** A body that breaks the JSON parser is a 400 too, never a 500 from the parser. */
+  @ParameterizedTest
+  @ValueSource(strings = { "{\"x\":[", "[[", "{\"a\":[}", "{\"a\":1}#" })
+  void aParserBreakingBodyIsA400(String body) throws Exception {
+    servlet.doPost(request(PATH_CONVERSATIONS, body), response);
     assertStatus(400);
     conversations.verifyNoInteractions();
     writes.verifyNoInteractions();
