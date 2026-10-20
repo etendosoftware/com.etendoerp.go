@@ -89,6 +89,9 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
   private CreateReturnReceiptHandler createReturnReceiptHandler;
 
   @Inject
+  private ImportOrderLinesIntoInOutHandler importOrderLinesHandler;
+
+  @Inject
   private DocumentPostingService postingService;
 
   /** Package-private seam so unit tests can inject a mocked {@link DocumentPostingService}. */
@@ -100,7 +103,9 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
    * The actions this header serves AND declares for agents (ETP-5709): {@code documentAction}
    * (CO only, {@link InOutCompletionContract}), {@code createDraftInvoice} (shipment to sales
    * invoice, {@link CreateDraftInvoiceHandler#SHIPMENT_CONTRACT}), {@code createReturn} (ETP-5711,
-   * {@link CreateReturnReceiptHandler#CONTRACT}) and {@code cloneRecord}.
+   * {@link CreateReturnReceiptHandler#CONTRACT}), the order import ({@code availableOrders},
+   * {@code availableOrderLines}, {@code importOrderLines},
+   * {@link ImportOrderLinesIntoInOutHandler}, ETP-5713) and {@code cloneRecord}.
    * {@code createDraftInvoice} is declared because the classic {@code Invoicefromshipment} button
    * bypasses the guards of that path (status check, nothing-pending 400, scoping to the
    * shipment's own lines, honoured partial {@code lines}); MCP_CONFIG redirects the button to it.
@@ -110,6 +115,7 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
   public Map<String, NeoActionContract> actionContracts() {
     Map<String, NeoActionContract> contracts = new LinkedHashMap<>();
     contracts.put(InOutCompletionContract.CONTRACT.getName(), InOutCompletionContract.CONTRACT);
+    contracts.putAll(ImportOrderLinesIntoInOutHandler.contracts(true));
     contracts.put(CreateDraftInvoiceHandler.SHIPMENT_CONTRACT.getName(),
         CreateDraftInvoiceHandler.SHIPMENT_CONTRACT);
     contracts.put(CreateReturnReceiptHandler.CONTRACT.getName(),
@@ -136,7 +142,8 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
       return null; // let NEO native process handle completion
     }
     return NeoHeaderActionRouter.dispatch(context,
-        createDraftInvoiceHandler, neoCloneRecordHandler, createReturnReceiptHandler);
+        createDraftInvoiceHandler, neoCloneRecordHandler, createReturnReceiptHandler,
+        importOrderLinesHandler);
   }
 
   /**
