@@ -339,18 +339,30 @@ class FiscalDeclCrudHandler {
   }
 
   /**
-   * Models that allow a single ORDINARY declaration per natural key (ETP-5716): Modelo 390, the
-   * annual summary, is filed once per exercise; any later filing for the same year is a
-   * sustitutiva/complementaria ({@code type: "com"}), which stays allowed. Modelo 303/349 are
-   * not listed — their rectificativa flow re-files an ordinary for the same period (ETP-5187).
+   * Whether a model allows a single ORDINARY declaration per natural key (ETP-5716). Not decided
+   * here: each model's handler says so ({@link AbstractFiscalHandler#allowsSingleOrdinary}, e.g.
+   * the Modelo 390, filed once per exercise — a later filing is a sustitutiva/complementaria,
+   * {@code type: "com"}, which stays allowed), wired by
+   * {@link AbstractFiscalHandler#linkSubmittedSnapshotProviders}. Default: none (the 303/349
+   * rectificativa flow re-files an ordinary for the same period, ETP-5187).
    */
-  static final java.util.Set<String> SINGLE_ORDINARY_MODELS = java.util.Set.of("390");
+  private java.util.function.Predicate<String> singleOrdinaryModel = model -> false;
+
+  /** True when {@code model} allows a single ordinary declaration (see {@link #singleOrdinaryModel}). */
+  boolean isSingleOrdinaryModel(String model) {
+    return singleOrdinaryModel.test(model);
+  }
+
+  /** Installs the per-model "single ordinary" rule (see {@link #singleOrdinaryModel}). */
+  void setSingleOrdinaryModel(java.util.function.Predicate<String> rule) {
+    this.singleOrdinaryModel = rule != null ? rule : model -> false;
+  }
 
   /** Error code of the 409 {@link #rejectDuplicateOrdinary} answers. */
   static final String ERR_DUPLICATE_ORDINARY = "DUPLICATE_ORDINARY";
 
   /**
-   * For a {@link #SINGLE_ORDINARY_MODELS} model, rejects creating a second ordinary declaration
+   * For a single-ordinary model ({@link #singleOrdinaryModel}), rejects creating a second ordinary declaration
    * for the natural key with a {@code 409} whose body carries what the UI needs to open the
    * existing one: {@code {"error":{"status":409,"code":"DUPLICATE_ORDINARY","message":...,
    * "existingId":...}}} ({@code existingId} = the latest ordinary, by {@code DECL_SEQ}).
@@ -359,7 +371,7 @@ class FiscalDeclCrudHandler {
    */
   private boolean rejectDuplicateOrdinary(String clientId, String orgId, String model, long year,
       String period, String requestedDeclType, HttpServletResponse response) throws Exception {
-    if (!SINGLE_ORDINARY_MODELS.contains(model) || !"O".equals(requestedDeclType)) {
+    if (!singleOrdinaryModel.test(model) || !"O".equals(requestedDeclType)) {
       return false;
     }
     BaseOBObject existing = findLatestOrdinary(clientId, orgId, model, year, period);

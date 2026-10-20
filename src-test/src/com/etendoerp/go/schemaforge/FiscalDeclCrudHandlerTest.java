@@ -2904,6 +2904,10 @@ public class FiscalDeclCrudHandlerTest {
   @SuppressWarnings("unchecked")
   private NeoResponse postWithExisting(String body, List<BaseOBObject> existing,
       boolean[] created) throws Exception {
+    // The rule linkSubmittedSnapshotProviders wires from the handlers: only the 390's
+    // allowsSingleOrdinary() is true (see AbstractFiscalHandlerTest).
+    String model390 = new Fiscal390BoxesHandler(servlet).getDeclModel();
+    handler.setSingleOrdinaryModel(model390::equals);
     HttpServletRequest req = mock(HttpServletRequest.class);
     HttpServletResponse resp = mock(HttpServletResponse.class);
     when(resp.getWriter()).thenReturn(new PrintWriter(new StringWriter()));

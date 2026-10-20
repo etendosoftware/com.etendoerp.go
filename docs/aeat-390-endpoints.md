@@ -548,7 +548,10 @@ built from: `generate` the stored inputs of the latest declaration overridden by
 
 ## One ordinary per exercise
 
-`FiscalDeclCrudHandler.SINGLE_ORDINARY_MODELS = {"390"}`: `POST /declarations` of an ordinary
+A per-model hook, not a model literal in the shared CRUD handler: `Fiscal390BoxesHandler`
+overrides `AbstractFiscalHandler.allowsSingleOrdinary()` (default `false`), and
+`linkSubmittedSnapshotProviders` wires that rule, through the same per-model handler map, into
+every `FiscalDeclCrudHandler` (`setSingleOrdinaryModel`). `POST /declarations` of an ordinary
 390 when one already exists for the org/year (any status) answers
 
 ```json

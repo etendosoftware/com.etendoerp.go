@@ -696,6 +696,25 @@ public class AbstractFiscalHandlerTest {
     }
   }
 
+  /**
+   * ETP-5716 (review B3): "single ordinary per exercise" is a per-model hook, not a model literal
+   * in the shared CRUD handler — linkSubmittedSnapshotProviders wires it from each handler's
+   * allowsSingleOrdinary() (only the 390 says yes) into every handler's declarations CRUD.
+   */
+  @Test
+  public void testSingleOrdinaryRuleComesFromTheModelHandlers() {
+    Fiscal390BoxesHandler h390 = new Fiscal390BoxesHandler(servlet);
+    Fiscal303BoxesHandler h303 = new Fiscal303BoxesHandler(servlet);
+    assertTrue(h390.allowsSingleOrdinary());
+    assertTrue(!h303.allowsSingleOrdinary());
+    AbstractFiscalHandler.linkSubmittedSnapshotProviders(h303, h390);
+    for (AbstractFiscalHandler h : List.of(h303, h390)) {
+      assertTrue(h.declHandler().isSingleOrdinaryModel(h390.getDeclModel()));
+      assertTrue(!h.declHandler().isSingleOrdinaryModel(h303.getDeclModel()));
+      assertTrue(!h.declHandler().isSingleOrdinaryModel("unknown"));
+    }
+  }
+
   /** A year with no period at all is rejected too (no silent empty compute): every month. */
   @Test
   public void testRequireFullYearRejectsEmptyCalendar() {

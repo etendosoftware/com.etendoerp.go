@@ -171,6 +171,16 @@ abstract class AbstractFiscalHandler {
   }
 
   /**
+   * Whether this model allows a single ORDINARY declaration per exercise / period (ETP-5716):
+   * a second ordinary one is answered {@code 409 DUPLICATE_ORDINARY} by
+   * {@link FiscalDeclCrudHandler}. Default {@code false} (303/349: the rectificativa flow
+   * re-files an ordinary); the Modelo 390 handler overrides it.
+   */
+  protected boolean allowsSingleOrdinary() {
+    return false;
+  }
+
+  /**
    * Computes, from the CURRENT invoice data, the exact JSON payload this model's read endpoint
    * returns ({@code /fiscal303/boxes}, {@code /fiscal349/operators}) for a declaration that is
    * not served from a snapshot. {@link #computeSubmittedSnapshot} derives the snapshot from it.
@@ -238,8 +248,14 @@ abstract class AbstractFiscalHandler {
           ? owner.computeSubmittedSnapshot(owner.resolveEffectiveOrg(), year, period)
           : null;
     };
+    // Per-model "single ordinary" rule, resolved through the same per-model map (ETP-5716).
+    java.util.function.Predicate<String> singleOrdinary = model -> {
+      AbstractFiscalHandler owner = byModel.get(model);
+      return owner != null && owner.allowsSingleOrdinary();
+    };
     for (AbstractFiscalHandler h : handlers) {
       h.declHandler().snapshots.setProvider(provider);
+      h.declHandler().setSingleOrdinaryModel(singleOrdinary);
     }
   }
 

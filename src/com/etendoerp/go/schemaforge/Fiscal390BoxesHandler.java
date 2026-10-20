@@ -144,6 +144,12 @@ class Fiscal390BoxesHandler extends AbstractFiscalHandler {
         || Fiscal390IncidentsSupport.VALIDATE.equals(entityName);
   }
 
+  /** The annual summary is filed once per exercise: a later filing is a substitute (ETP-5716). */
+  @Override
+  protected boolean allowsSingleOrdinary() {
+    return true;
+  }
+
   @Override
   protected String getModelKey() {
     return "fiscal390";
