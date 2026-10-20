@@ -2836,6 +2836,42 @@ Expected on the GOClient vendor location `4380CC6D925841E99BB516C78E7717CF`: 21 
 21%*, 10 → *Adquisiciones IVA 10%*, 0 → *Adquisiciones interiores exentas (art 22)*, 4 → *Adquisiciones IVA 4%*. `NO_MATCH` is the generic answer when no purchase tax can be
 determined for the requested rate.
 
+##### 4.12.1.8 Bank connection — declared actions on `financial-account/account` (ETP-5804)
+
+"Editar cuenta" and the row's kebab let a person disconnect an account from its bank (PSD2 / Salt
+Edge) in two ways. Both go to `financial-account-bank-connection?action=disconnect` with
+`{financialAccountId, permanentDeletion}` (`FinancialAccountBankConnectionHandler.handleDisconnect`);
+`FinancialAccountBankConnectionActions` declares them with `id` = the account, no parameters, and
+calls the endpoint through `FinancialAccountBankConnectionEndpoint` (the same bridge as
+`financial-account-transactions`, so its customization is resolved as REST resolves it):
+
+| Action | Kind | `permanentDeletion` | Effect |
+|---|---|---|---|
+| `disconnectBank` | write | `false` | Soft and reversible. Sync stops; the connection is marked inactive (`IN`), the account goes to `PSD2ConnectionStatus=DC` and keeps its Salt Edge account id, so it can be reconnected later from the UI. A Salt Edge connection shared by several accounts always takes the unlink path, even for this soft request: the answer is then `permanent:true, reconnectable:false`, so read `reconnectable`. Repeating it while the account is still soft-disconnected (connection `IN`) is idempotent and answers 200; once the account is unlinked (a permanent delete, or the shared-connection case) no connection row is left and a repeat answers 404 *No bank connection to disconnect for this account* |
+| `deleteBankConnection` | write | `true` | Permanent and **irreversible**. The connection is deleted at Salt Edge, the account is unlinked and the `FinaccConnection` row is removed. Reconnecting the same account can import again movements of periods already reconciled (duplicates): the warning of `financeAccountsBankConnectionDeleteWarning` |
+
+The description of `deleteBankConnection` carries an imperative instruction ("ask the user first,
+call it only after they confirm; for a reversible stop use `disconnectBank`"), as `transferFunds`
+(§4.12.1.5) and `PeriodOpenCloseHandler` (§4.12.1.6) do. There is no contract flag for it.
+
+Answer: **200** `{disconnected, permanent, reconnectable}` in the `{"response":{"data":...}}`
+wrapper (re-wrapped from the endpoint's own answer). Refusals before the endpoint: a method other
+than POST **405**; an account that does not exist or is another tenant's **404** `Financial account
+not found`. The endpoint's own refusals pass through unchanged: **404** `No bank connection to
+disconnect for this account` (no connection; this is also the answer for a soft disconnect of an
+account that never had one), **400** when Salt Edge refuses, **500** when a permanent request
+leaves the account still linked (post-condition, ETP-5097). There is no local gate: the handler's
+404 already says it.
+
+Effect on other refusals: a connected account rejects manual bank statements with **409**
+*synchronized with the bank* and cannot be hard-deleted (**409**) — `disconnectBank` lifts the
+statement refusal; `deleteBankConnection` also removes the bank connection as a delete blocker (other delete blockers may still apply). A soft-disconnected account
+that is still linked to Salt Edge remains blocked from deletion.
+
+**Connecting and reconnecting stay hidden** (`pSD2GetConsent`, `psd2ReconnectFa`, ...,
+`MCP_CONFIG.actions.hidden`, §4.12.6): they need the account holder to authenticate at the bank
+(SCA), which an agent cannot do. The `reason` of `MCP_CONFIG` names the two actions.
+
 #### 4.12.2 `etendo_discover` → `primaryEntity` — the root entity of a window spec (IMP-9)
 
 A window spec (`SPEC_TYPE = 'W'`) can include several entities (Header, Lines, …). To create a
@@ -3364,7 +3400,7 @@ The shape and the rules are in §4.12.1.3.
 | `payment-in/finPayment`, `payment-out/header` | `psd2GenerateBankPayment`, `aPRMAddScheduledpayments`, `aprmExecutepayment`, `aPRMReversePayment`, `aPRMReconcilePayment`, `aeatsiiSend`, `etblkpBulkposting`, `posted`, `retryPisPayment`, `pisPaymentStatus` | `aPRMProcessPayment: ["P"]` | agents get exactly the window's three buttons, all with `parameters:{}`: *Confirmar* (`aPRMProcessPayment`), *Reactivar* (`etprReactivatePayment`) and *Eliminar* (`eTPRRemovePayment`). *Eliminar* is offered with the UI's own gate: the trash icon and the row action call it at every status except `RPVOID` and except when `pisLocked`, so `ReactivatePaymentHandler` refuses an agent with **422** in those two cases (same `isLifecycleLockedByTransfer` predicate the GET emits as `pisLocked`). On a processed payment it reactivates and then deletes it, and it gives **no** consumed credit back — exactly as in the UI; the invoice's `deletePayment` still deletes a draft and does give the credit back. `retryPisPayment` / `pisPaymentStatus` (served by `ReactivatePaymentHandler` on the payment record) are PIS, hidden like every PIS action under the fiscal/bank-integration criterion (§4.12.9). Payments are created and allocated through `registerPayment` on the invoice header. `values` keeps the catalogue honest but is **not** a safety boundary: `ReactivatePaymentHandler` always sends `action:"P"` for `aPRMProcessPayment` and ignores what the agent passes |
 | `financial-account/transaction` | `etprReactivateTransaction`, `etprRemoveTransaction`, `posted`, `etblkpBulkposting` | — | the UI's movements are reactivated, deleted and recorded through the account's movement flow; for agents, the account's `reactivateMovement` / `deleteMovement` / `createMovement` (§4.12.1.4). What stays for agents is `post` / `unpost` — `etendo_action(spec:'financial-account', entity:'transaction', id:<transactionId>, action:'post'\|'unpost', parameters:{})`, served by the `document-posting` qualifier (`DocumentPostingService`, as the SPA's kebab). They are handler-served, not declared contracts, so `view:"actions"` does not list them |
 | `open-close-period-control/documents` | `openClose`, `processNow` | — | the calendar has no per-document-type open/close since ETP-4948; the period's own `openClose` (§4.12.1.6) opens or closes every document type at once |
-| `financial-account/account` | `aPRMImportBankFile`, `aPRMMatchTransactions`, `aPRMMatchTransactionsForce`, `aPRMReconcile`, `aprmAddMultiplePayments`, `pSD2GetBankstatement`, `pSD2GetConsent`, `psd2ReconnectFa`, `psd2GetConnections`, `psd2RefreshConnections` | `aprmFundsTrans` → `transferFunds` (§4.12.1.5) | the window offers none of its Core buttons: statements go through `bank-statements`, reconciliation through `bank-reconciliation`, manual movements through the entity's own declared movement actions (§4.12.1.4); PSD2 consent and reconnection need SCA. It has no `verbs` section: create, update and delete stay (the SPA uses them) |
+| `financial-account/account` | `aPRMImportBankFile`, `aPRMMatchTransactions`, `aPRMMatchTransactionsForce`, `aPRMReconcile`, `aprmAddMultiplePayments`, `pSD2GetBankstatement`, `pSD2GetConsent`, `psd2ReconnectFa`, `psd2GetConnections`, `psd2RefreshConnections` | `aprmFundsTrans` → `transferFunds` (§4.12.1.5) | the window offers none of its Core buttons: statements go through `bank-statements`, reconciliation through `bank-reconciliation`, manual movements through the entity's own declared movement actions (§4.12.1.4); the bank connection is disconnected with the declared `disconnectBank` / `deleteBankConnection` actions (§4.12.1.8); PSD2 consent, connection and reconnection need SCA. It has no `verbs` section: create, update and delete stay (the SPA uses them) |
 | `goods-receipt/header` | — | redirect `invoicefromshipment` → `createPurchaseInvoice` (ETP-5709) | the classic *Invoicefromshipment* process, fired on a purchase receipt, creates a **sales** invoice (`isSotrx = true`), does not mark the receipt as invoiced and can report success without creating anything. The target is the header's declared `createPurchaseInvoice` (`GoodsReceiptHeaderHandler`), which creates a purchase invoice from the receipt and completes it in the same call. The return specs (`return-material-receipt`, `return-to-vendor-shipment`) carry the same classic button and are redirected to their own `createReturnInvoice` (ETP-5712, next two rows) |
 | `goods-shipment/goodsShipment` | — | redirect `Invoicefromshipment` → `createDraftInvoice` (ETP-5709) | the classic process bypasses every guard of the handler's own path (completed-status check, nothing-pending 400, scoping to the shipment's own lines, honoured partial `lines`), so agents are sent to `createDraftInvoice`, now declared by `GoodsShipmentHeaderHandler.actionContracts()` (`CreateDraftInvoiceHandler.SHIPMENT_CONTRACT`: optional `shipmentIds[]`, `priceListId`, `lines[{shipmentLineId, quantity}]`). The key is the AD column name `Invoicefromshipment`, the only spelling both `McpActionsView.namesOf` (listing) and `McpDeclaredActions.namesOf` (call) accept. The other sales specs keep the classic button |
 | `return-to-vendor-shipment/returnToVendorShipment` | — | redirect `RM_Shipment_Pickedit` → `importReceiptLines` (ETP-5711), `GenerateTo` and `Invoicefromshipment` → `createReturnInvoice` (ETP-5712); `reasons` for the last two | *Pick/Edit Lines* has no process connected. `GenerateTo` (AD_Process 154, *Generate Invoice from Shipment*, `isdisplayed = N` in the tab) and `Invoicefromshipment` (no process) are the classic ways to invoice a shipment; on a return they would not build the factura rectificativa the app builds (negative lines, link to the invoice it rectifies, confirmed). The target is the header's declared `createReturnInvoice` (§4.12.33). Keys are AD column names |
