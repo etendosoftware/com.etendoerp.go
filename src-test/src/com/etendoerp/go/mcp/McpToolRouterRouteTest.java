@@ -66,6 +66,7 @@ import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.ad.ui.Window;
 
 import com.etendoerp.go.schemaforge.AmortizationPlanService;
+import com.etendoerp.go.schemaforge.NeoActionRecordGuard;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoDefaultsService;
 import com.etendoerp.go.schemaforge.NeoHandler;
@@ -2209,8 +2210,18 @@ class McpToolRouterRouteTest {
      */
     private static final String HANDLER_QUALIFIER = "action-test-handler";
 
+    /**
+     * ETP-5558's record-ownership guard runs before every action. Unstubbed it reaches the real
+     * {@code ModelProvider}, which initializes against the database: these tests passed only while
+     * a local PostgreSQL was up, and failed with a 404 instead of the action result when it was not.
+     * The guard has its own coverage in {@code NeoActionRecordGuardTest}; here it admits the record.
+     */
+    private MockedStatic<NeoActionRecordGuard> recordGuardMock;
+
     @BeforeEach
     void setupActionSupport() {
+      recordGuardMock = mockStatic(NeoActionRecordGuard.class);
+      recordGuardMock.when(() -> NeoActionRecordGuard.refusalFor(any(), any())).thenReturn(null);
       supportMock.when(() -> McpToolRouterSupport.mapNeoResponseToActionResult(any()))
           .thenCallRealMethod();
       supportMock.when(() -> McpToolRouterSupport.resolveStatusFromErrorBody(any()))
@@ -2221,6 +2232,13 @@ class McpToolRouterRouteTest {
       // the body is passed through so the test asserts on what the handler said.
       supportMock.when(() -> McpToolRouterSupport.toMcpHandlerError(any(), anyInt()))
           .thenAnswer(invocation -> invocation.getArgument(0));
+    }
+
+    @AfterEach
+    void closeRecordGuard() {
+      if (recordGuardMock != null) {
+        recordGuardMock.close();
+      }
     }
 
     private JSONObject buildActionArgs() throws Exception {
