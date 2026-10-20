@@ -19,6 +19,8 @@ package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assume.assumeTrue;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
@@ -57,8 +59,18 @@ import org.openbravo.test.base.OBBaseTest;
  * committed: every row is rolled back in {@link #tearDown()}, as in
  * {@link EtgoGetTbaiStatusFunctionIntegrationTest}.
  *
+ * <p>A SALES rectificative invoice answers {@code NULL} (no delivery to track): its target doc
+ * type is flagged {@code em_etsg_isrectificative = 'Y'} or is a legacy {@code ARC}/{@code ARI_RM}
+ * category — the same rule as {@code SalesInvoiceHeaderHandler.classifyDocType}. The flag cases
+ * set the flag on an existing doc type inside the rolled-back transaction and are skipped when
+ * the optional SIF General column is absent. The purchase case keeps the flagged doc type and
+ * only switches {@code issotrx} to {@code 'N'}, isolating the sales-only guard.
+ *
  * <p>Unit under test: {@code src-db/database/model/functions/ETGO_GET_DELIVERY_STATUS.xml}. No
- * Java class owns it, so no {@code @covers} tag can resolve under {@code src/}.
+ * Java class owns it; the {@code @covers} below names the handler whose rectificative rule the
+ * function mirrors, so a change to that rule finds this parity guard.
+ *
+ * @covers com.etendoerp.go.schemaforge.SalesInvoiceHeaderHandler
  */
 public class EtgoGetDeliveryStatusFunctionIntegrationTest extends OBBaseTest {
 
@@ -148,15 +160,82 @@ public class EtgoGetDeliveryStatusFunctionIntegrationTest extends OBBaseTest {
 
   // ── helpers ────────────────────────────────────────────────────────────────
 
-  @SuppressWarnings("rawtypes")
+  @Test
+  public void salesInvoiceWithARectificativeDocTypeHasNoDeliveryStatus() {
+    assumeTrue("requires the SIF General em_etsg_isrectificative column",
+        RectificativeSupport.isColumnPresent());
+    DocumentType rectificative = salesInvoiceDocType();
+    flagRectificative(rectificative);
+    InvoiceLine invoiceLine = newInvoiceWithOneLine(rectificative, true);
+    ShipmentInOutLine returned = newMovementLine(newMovement("CO"), INVOICED);
+    insertMatchSi(invoiceLine, returned, INVOICED);
+
+    assertNull("a sales rectificative has no delivery to track, even with a completed match",
+        rawDeliveryStatus(invoiceLine));
+  }
+
+  @Test
+  public void salesInvoiceWithALegacyCreditMemoDocTypeHasNoDeliveryStatus() {
+    ShipmentInOut template = OBDal.getInstance().get(ShipmentInOut.class, SHIPMENT_TEMPLATE_ID);
+    DocumentType creditMemo = ReturnShipmentUtils.findReturnDocTypeForOrg(
+        template.getClient(), template.getOrganization().getId(), "ARC", true, false, false);
+    assertNotNull("test fixture requires an active AR Credit Memo (ARC) doc type", creditMemo);
+    InvoiceLine invoiceLine = newInvoiceWithOneLine(creditMemo, true);
+    ShipmentInOutLine returned = newMovementLine(newMovement("CO"), INVOICED);
+    insertMatchSi(invoiceLine, returned, INVOICED);
+
+    assertNull("a legacy ARC credit memo is a rectificative", rawDeliveryStatus(invoiceLine));
+  }
+
+  @Test
+  public void purchaseInvoiceWithARectificativeDocTypeKeepsItsDeliveryStatus() {
+    assumeTrue("requires the SIF General em_etsg_isrectificative column",
+        RectificativeSupport.isColumnPresent());
+    DocumentType rectificative = salesInvoiceDocType();
+    flagRectificative(rectificative);
+    InvoiceLine invoiceLine = newInvoiceWithOneLine(rectificative, false);
+    ShipmentInOutLine received = newMovementLine(newMovement("CO"), INVOICED);
+    insertMatchInv(invoiceLine, received, INVOICED);
+
+    assertEquals("the rectificative rule is sales-only: issotrx = 'N' is computed as before",
+        100, deliveryStatus(invoiceLine));
+  }
+
   private static int deliveryStatus(InvoiceLine invoiceLine) {
+    Number result = rawDeliveryStatus(invoiceLine);
+    assertNotNull("a non-rectificative invoice never answers NULL", result);
+    return result.intValue();
+  }
+
+  @SuppressWarnings("rawtypes")
+  private static Number rawDeliveryStatus(InvoiceLine invoiceLine) {
     OBDal.getInstance().flush();
     NativeQuery query = OBDal.getInstance().getSession()
         .createNativeQuery("SELECT etgo_get_delivery_status(:invoiceId)");
     query.setParameter("invoiceId", invoiceLine.getInvoice().getId());
-    Number result = (Number) query.uniqueResult();
-    assertNotNull("the function never returns NULL for an existing invoice", result);
-    return result.intValue();
+    return (Number) query.uniqueResult();
+  }
+
+  /** The active, non-return AR Invoice doc type of the template's organization. */
+  private static DocumentType salesInvoiceDocType() {
+    ShipmentInOut template = OBDal.getInstance().get(ShipmentInOut.class, SHIPMENT_TEMPLATE_ID);
+    DocumentType docType = ReturnShipmentUtils.findReturnDocTypeForOrg(
+        template.getClient(), template.getOrganization().getId(), "ARI", true, false, false);
+    assertNotNull("test fixture requires an active, non-return AR Invoice doc type", docType);
+    return docType;
+  }
+
+  /**
+   * Sets {@code em_etsg_isrectificative = 'Y'} on {@code docType} with native SQL (the column
+   * belongs to an optional module). Rolled back in {@link #tearDown()}.
+   */
+  @SuppressWarnings("rawtypes")
+  private static void flagRectificative(DocumentType docType) {
+    OBDal.getInstance().flush();
+    NativeQuery update = OBDal.getInstance().getSession().createNativeQuery(
+        "UPDATE c_doctype SET em_etsg_isrectificative = 'Y' WHERE c_doctype_id = :docTypeId");
+    update.setParameter("docTypeId", docType.getId());
+    update.executeUpdate();
   }
 
   /** A movement header cloned from the draft shipment template, with {@code docStatus}. */
@@ -195,11 +274,17 @@ public class EtgoGetDeliveryStatusFunctionIntegrationTest extends OBBaseTest {
 
   /** A draft sales invoice with a single line of {@link #INVOICED} units. */
   private static InvoiceLine newInvoiceWithOneLine() {
+    return newInvoiceWithOneLine(salesInvoiceDocType(), true);
+  }
+
+  /**
+   * A draft invoice of {@code docType} (document and target type) with {@code issotrx} set from
+   * {@code salesTransaction} and a single line of {@link #INVOICED} units.
+   */
+  private static InvoiceLine newInvoiceWithOneLine(DocumentType docType,
+      boolean salesTransaction) {
     ShipmentInOut template = OBDal.getInstance().get(ShipmentInOut.class, SHIPMENT_TEMPLATE_ID);
     ShipmentInOutLine templateLine = template.getMaterialMgmtShipmentInOutLineList().get(0);
-    DocumentType docType = ReturnShipmentUtils.findReturnDocTypeForOrg(
-        template.getClient(), template.getOrganization().getId(), "ARI", true, false, false);
-    assertNotNull("test fixture requires an active, non-return AR Invoice doc type", docType);
     BusinessPartner bp = template.getBusinessPartner();
 
     Invoice invoice = OBProvider.getInstance().get(Invoice.class);
@@ -209,7 +294,7 @@ public class EtgoGetDeliveryStatusFunctionIntegrationTest extends OBBaseTest {
     invoice.setTransactionDocument(docType);
     invoice.setDocumentStatus("DR");
     invoice.setDocumentAction("CO");
-    invoice.setSalesTransaction(true);
+    invoice.setSalesTransaction(salesTransaction);
     invoice.setInvoiceDate(new Date());
     invoice.setAccountingDate(new Date());
     invoice.setBusinessPartner(bp);
