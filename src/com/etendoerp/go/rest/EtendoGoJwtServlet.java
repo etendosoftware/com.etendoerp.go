@@ -1262,7 +1262,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     if ("PAID".equals(active.getCheckoutRequestStatus())) {
       JSONObject result = new JSONObject();
       result.put(FIELD_REQUEST_ID, active.getRequest());
-      result.put("status", "paid");
+      result.put(FIELD_STATUS, "paid");
       writeResponse(response, HttpServletResponse.SC_OK, result);
       return;
     }

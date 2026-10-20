@@ -874,7 +874,16 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
     OBDal.getInstance().flush();
     JSONObject data = new JSONObject();
     data.put("saved", true);
-    return FinancialAccountBankConnectionSupport.okData(data);
+    NeoResponse saved = FinancialAccountBankConnectionSupport.okData(data);
+    // ETP-5805: non-blocking advisory, same rule and envelope as the PUT/PATCH hook.
+    FinancialAccountBankConnectionSupport.FetchIntervalExceeded exceeded =
+        FinancialAccountBankConnectionSupport.findImportFromBeyondFetchInterval(finAcc, importFrom);
+    if (exceeded != null) {
+      NeoHints.addMessage(saved.getBody(), context.isMcpOrigin(), NeoHints.TYPE_WARNING,
+          FinancialAccountBankConnectionSupport.fetchIntervalExceededText(exceeded,
+              com.etendoerp.go.schemaforge.util.NeoLanguage.currentCode()));
+    }
+    return saved;
   }
 
   // ---------------------------------------------------------------------------

@@ -163,9 +163,9 @@ abstract class CheckoutRequestStoreQuerySupport {
    * @param request durable checkout row, possibly {@code null}
    * @return true for an unfinished re-subscription
    */
-  public static boolean isPendingReactivation(CheckoutRequest request) {
+  static boolean isPendingReactivation(CheckoutRequest request) {
     return request != null && request.getCreatedClient() != null
-        && !"PROVISIONED".equals(request.getCheckoutRequestStatus());
+        && !CheckoutRequestStore.STATUS_PROVISIONED.equals(request.getCheckoutRequestStatus());
   }
 
   /**

@@ -352,7 +352,7 @@ public class HostedCheckoutService {
         planKeyOf(request),
         sessionId == null ? initialIdempotencyKey(requestId)
             : replacementIdempotencyKey(requestId, sessionId), sessionId,
-        CheckoutRequestStore.isPendingReactivation(request));
+        CheckoutRequestStoreQuerySupport.isPendingReactivation(request));
   }
 
   /** The plan key recorded on the request, echoed as metadata; blank for a pre-plan request. */

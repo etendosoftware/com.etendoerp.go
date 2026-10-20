@@ -226,7 +226,7 @@ tenant type by `OnboardingInitialPeriodStateService`, after the onboarding commi
 | Tenant | Initial state |
 |---|---|
 | demo | every period through the end of the trial (`openDemoTrialWindow`, below) |
-| productive | none. The calendar is made to cover the signup year (every calendar year in [now − 1 day, now + 1 day], since the tenant's timezone is unknown), controls are normalized, and every period stays never-opened. The owner reviews the calendar in "Primeros pasos" and opens the periods they want (`applyProductiveInitialState`) |
+| productive | none. The calendar is made to cover the signup year (every calendar year in [now − 1 day, now + 1 day], since the tenant's timezone is unknown); every other year is deleted with its periods and control rows (ETP-5744) unless one of its periods was ever opened (a non-`N` control row, core's `@PeriodAlreadyUsed@` rule), so a tenant created in 2027 does not keep the dataset's 2026; controls are normalized, and every period stays never-opened. The owner reviews the calendar in "Primeros pasos" and opens the periods they want (`applyProductiveInitialState`) |
 
 - **Markers.** Two client preferences, written by `markPending` inside the onboarding
   transaction: `ETGO_InitialPeriodStatePending` (value: org, admin user and admin role the step
@@ -252,7 +252,7 @@ tenant type by `OnboardingInitialPeriodStateService`, after the onboarding commi
   environment retries it.
 
 **Demo trial window (ETP-5575).** A demo's trial lasts `etendo.go.demo.trial.days` /
-`ETGO_DEMO_TRIAL_DAYS` (default 15), so a signup at the end of a month must be able to post the
+`ETGO_DEMO_TRIAL_DAYS` (default 14, `TenantEnvironmentLifecycleService.DEFAULT_TRIAL_DAYS`), so a signup at the end of a month must be able to post the
 next month. `openDemoTrialWindow` opens every never-opened period whose start is on or before
 `ETGO_DemoTrialStartedAt` + trial days. It runs as the demo branch of the initial period state
 above (so a pooled demo built in an earlier month is evaluated at claim time).
@@ -260,8 +260,17 @@ above (so a pooled demo built in an earlier month is evaluated at claim time).
 - **Open-only.** Only `N` (never opened) control rows are flipped to open; rows a user closed
   (`C`) or closed permanently (`P`) are never touched. `C_Period.OpenClose` is then recomputed
   from the controls.
-- **No year creation.** If the trial end falls beyond the calendar's last period, what exists is
-  opened and a WARN is logged (follow-up: ETP-5586).
+- **Creates the years the trial needs (ETP-5744).** Before opening, it ensures every calendar year
+  in [min(trial start, now) − 1 day, max(trial end, now + 1 day)] through
+  `FiscalCalendarSupport.ensureYear` (server time zone; the day of margin covers a 31 December /
+  1 January signup, as on the productive branch). So a trial crossing into January opens January,
+  and a demo created or claimed after the dataset's last year (2026) still gets an open period.
+  The core `C_PERIOD_TRG` trigger adds one never-opened control row per new period, so no
+  normalization runs. An existing year is left alone.
+- **Demos keep the dataset's 2026.** Unlike productive tenants, demos are not pruned: the sample
+  data (loaded only when not a paid upgrade, `OnboardingSampleDataDefinition.isEligible`) posts on
+  fixed 2026 dates, so deleting 2026 would break it. Follow-up: move the sample-data dates to the
+  signup year, then demos can drop it too.
 - **Existing demos** were widened through October 2026 by the corrective data-fix
   `R44-demo-periods-open-through-oct-2026` (etendo_schema_forge).
 
@@ -434,7 +443,7 @@ nothing for a new tenant.
 lists named "Tarifa de venta/compra principal", both shipping `ISDEFAULT='Y'`
 so each is the default for its direction (ETP-5190 — the Product window's Price
 tab resolves the tariff through that flag); a **single** warehouse
-"Almacen Principal" (value `AG`) with one locator; **no** sample products —
+"Almacén Principal" (value `AG`) with one locator; **no** sample products —
 only the internal `ETGO_DTO` "Discount" product the inline-discount feature
 resolves at runtime, which is not sample data and must never be removed; **no**
 default financial accounts (a consequence a tenant must accept: it cannot

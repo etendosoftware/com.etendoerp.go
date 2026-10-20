@@ -555,7 +555,6 @@ public class BatchServiceTest {
       assertEquals(403, result.getJSONObject("error").getInt("status"));
     }
   }
-
   @Test
   public void handleRequiresServletBoundConstructor() throws Exception {
     BatchService service = BatchService.forBatchOnly();
