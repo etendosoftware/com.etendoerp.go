@@ -103,7 +103,7 @@ public class OrderPendingDocsAnnotationTest {
   /**
    * A {@link ResultSet} mock that walks the given rows. {@code rows[i][col - 1]} is the value of
    * column {@code col} in row {@code i}; a {@code null} cell reads back as SQL NULL, which is the
-   * case {@code zeroIfNull()} in the handler exists for.
+   * case the handler's {@code requireNonNullElse(..., ZERO)} reads exist for.
    */
   private static ResultSet resultSet(Object[]... rows) throws SQLException {
     List<Object[]> data = Arrays.asList(rows);

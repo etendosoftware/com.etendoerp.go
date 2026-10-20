@@ -4128,6 +4128,24 @@ It also rewrites core `Utilities.checkPeriod`'s raw `@ETPR_PeriodClosedForUnRemo
 the translated, keyed refusal. Still divergent: inside an `etendo_batch` / `/sws/neo/batch` body,
 a per-operation error is not keyed — only the envelope goes through these two places.
 
+##### REST and MCP on list filters over a rewritten value (ETP-5705, declared)
+
+`NeoHandler#filterAliases` is applied by MCP `etendo_list` only. A filter on an aliased property
+(for the order headers: `invoiceStatus`, `deliveryStatus`, `deliveryStatusPurchase`) is evaluated on
+`coalesce(<stored twin>, <virtual>)` there, and the response carries a `filterAliases` note
+(§4.12.32). The REST list does **not** consult the aliases: a `criteria=` on the virtual column still
+matches the raw SQLLogic value. That is deliberate, not an oversight — the SPA's generated order
+lists already show and filter the stored columns (`EM_ETGO_*_Status`), so no REST caller filters
+on the virtual one, and rewriting the REST criteria builder for a filter nobody sends would add risk
+without fixing anything observable (sales order: `tools/app-shell/src/windows/custom/sales-order/index.jsx`
+declares `eTGOInvoiceStatus` / `eTGODeliveryStatus` on `EM_ETGO_*`; purchase order: its
+`decisions.json` lists `eTGOInvoiceStatus` / `eTGODelivStatusPurchase`). A REST caller that filters
+on the virtual column gets the raw value; filter on the stored twin instead.
+
+`orderBy` is not aliased on **either** channel: sorting on `deliveryStatus` (and the other two)
+uses the raw virtual value on MCP and REST alike, and can disagree with the order of the values
+shown. Filters are aliased on MCP; sorts are not, anywhere.
+
 #### 4.12.10 An excluded field does not exist, on every verb (ETP-5335, IMP-39)
 
 **A field the spec excludes is absent from `etendo_schema`, refused by `etendo_list` as a filter, and
@@ -5592,6 +5610,20 @@ So there is no channel divergence to declare: list, count and distinct agree on 
 - **Readable client/org filtering is untouched.** The predicate is ANDed onto whatever core and `OBQuery` already apply; it can only narrow a read.
 
 Current implementers: `ProductDefaultsHandler` (products in a system category, ETP-4967) and `ProductCategoryDefaultHandler` (the system categories themselves).
+
+##### 5.3.2.a Filtering on a value `afterHandle` rewrites — `NeoHandler#filterAliases` (ETP-5705)
+
+The sibling of `readPredicates` for the opposite problem: not rows the query must exclude, but a
+value the query compares that is not the value shown. A handler that rewrites a field in
+`afterHandle` and keeps the displayed value in another property of the same entity (canonically a
+stored computed twin of a virtual column) returns `displayed → holder` from
+`filterAliases(NeoContext)`; the default is an empty map. MCP `etendo_list` then evaluates a filter
+on the displayed property as `coalesce(<holder>, <displayed>)` and says so in a `filterAliases`
+note. Resolved like `readPredicates` (same lookup, same stateless rule). MCP only — REST does not
+consult it (declared in §4.12.9). Full behaviour: §4.12.32.
+
+Current implementer: `AbstractOrderHeaderHandler` (`invoiceStatus` / `deliveryStatus` /
+`deliveryStatusPurchase` → their `EM_ETGO_*` stored twins).
 
 #### 5.3.3 Contact summary read providers — `contacts/bp-stats` and `contacts/bp-trend` (ETP-5600)
 
@@ -9285,6 +9317,99 @@ None between channels: REST, batch and MCP all reach `PurchaseInvoiceLineHandler
 `InvoiceLineAmountSupport` / `LineAmountSupport` are written to be reusable), the default tax
 (ETP-5726).
 
+#### 4.12.32 `etendo_list` filters on computed (SQLLogic) columns (ETP-5705)
+
+A filter key may name a computed column (AD `SQLLogic`, `Property.isComputedColumn()`), on equality,
+`between` and the comparison operators alike. Such a property exists in the DAL model but is not a
+mapped Hibernate property, so `McpQuerySupport` writes it as `e._computedColumns.<name>`
+(`Entity.COMPUTED_COLUMNS_PROXY_PROPERTY`), the same path core's `AdvancedQueryBuilder` uses for the
+SPA grid. Before this, the HQL said `e.<name>` and the call failed with a 500 (`could not resolve
+property`), e.g. `deliveryStatus` on `sales-order/header` or `eTGODueDate` on `sales-invoice/header`.
+Every other property still renders as `e.<name>`; the choice is structural, never per entity.
+
+**Performance:** the SQLLogic subquery runs per row inside the `WHERE`. When the entity has a stored
+twin of the same value (a stored computed column, e.g. `eTGODeliveryStatus` next to
+`deliveryStatus`), filter on the stored one: it is a physical column, read rather than recomputed.
+
+##### A filter on a value the customization rewrites — `NeoHandler#filterAliases`
+
+**The problem.** `AbstractOrderHeaderHandler.applyCorrectedStatusPercentages` (ETP-5317) rewrites
+`invoiceStatus`, `deliveryStatus` and `deliveryStatusPurchase` in `afterHandle()`, because the core
+SQLLogic does not exclude the Total Discount line. A filter on the virtual column therefore matched
+the raw SQLLogic value while the row showed the corrected one: sales orders displayed at
+`deliveryStatus: 100` were returned for `{"deliveryStatus":{"lt":100}}`. A 200 with wrong rows,
+and nothing in the response to say so. The schema made it likelier, not rarer: it labels the virtual
+column "Delivery Status" and the stored twin `EM_ETGO_Delivery_Status`, so an agent picks the virtual.
+
+**The mechanism.** A customization may declare `filterAliases(NeoContext)` — displayed property →
+the property of the same entity that holds the displayed value (§5.3.2.a). `etendo_list` resolves it
+on the READ surface through `NeoReadPredicates.resolveFilterAliases` (the same customization lookup
+as the read predicates, on the same read context), and `McpQuerySupport.buildWhereFromFilters`
+compares every filter shape on an aliased property — equality, `gt`/`gte`/`lt`/`lte`, `between` —
+against `coalesce(<target>, <virtual>)`:
+
+```
+{"deliveryStatus":{"lt":100}}
+→ coalesce(e.eTGODeliveryStatus, e._computedColumns.deliveryStatus) < 100
+```
+
+- **Matched on the resolved property**, so `DeliveryStatus` (the column name) is redirected too.
+  The key is still gated as the caller spelled it (unknown / excluded → the usual 422); only the
+  compared expression changes.
+- **`coalesce`, not the target alone.** The stored twins are refreshed by triggers on
+  `C_OrderLine`, so an order that never had a line holds `NULL` (31 of 3058 orders on the
+  development database, every one a lineless draft). A bare `NULL` drops out of every comparison;
+  the fallback is the virtual value, `0` for a lineless order — what `afterHandle` displays too.
+- **A target that is not a property of the entity fails the read** (500), rather than quietly
+  filtering on the raw value. It is a customization bug, not a caller mistake.
+- **The target is not checked against the spec's excluded fields.** It is declared by the server,
+  and the condition only compares the value the caller is already shown.
+- A named `status` filter is never aliased: it is a hand-authored fragment, not a property.
+- **The target must have the filtered property's type** (both primitive with the same Java type,
+  or both references); the value is formatted for the filtered property. A mismatch fails the
+  read (500) like a missing target.
+- **`orderBy` is NOT aliased.** Only filters are redirected: `orderBy: "deliveryStatus"` still
+  sorts on the raw virtual value, so the order can disagree with the values shown on exactly the
+  rows `afterHandle` corrects. Sort on the twin (`orderBy: "eTGODeliveryStatus"`) when it matters.
+
+**Transparency.** Every alias actually applied is reported next to the rows, the same way the
+`namedFilters` block reports a named filter (IMP-50):
+
+```json
+"filterAliases": [{
+  "filter": "deliveryStatus",
+  "evaluatedOn": "eTGODeliveryStatus",
+  "reason": "The filter on deliveryStatus was evaluated on eTGODeliveryStatus, which holds the value this list shows for deliveryStatus."
+}]
+```
+
+**The order headers' mapping** (`AbstractOrderHeaderHandler#filterAliases`, inherited by the sales
+order, purchase order and sales quotation handlers):
+
+| displayed (virtual, SQLLogic) | evaluated on (stored, `Computation_Mode S`, `Refresh_Mode S`) | computed by |
+|---|---|---|
+| `invoiceStatus` | `eTGOInvoiceStatus` (`EM_ETGO_Invoice_Status`) | `ETGO_GET_ORDER_INVOICE_STATUS` |
+| `deliveryStatus` | `eTGODeliveryStatus` (`EM_ETGO_Delivery_Status`) | `ETGO_GET_ORDER_DELIVERY_STATUS` |
+| `deliveryStatusPurchase` | `eTGODelivStatusPurchase` (`EM_ETGO_Deliv_Status_Purchase`) | `ETGO_GET_PO_DELIVERY_STATUS` |
+
+Each function applies the same guards as `batchComputeStatusPercentages` (cancelled or cancelling
+order → 0, no orderable quantity → 0, `C_Order_Discount_ID IS NULL`, `M_Product_ID <> ETGO_DTO`,
+`ROUND(numerator / ordered * 100)` over `ABS` sums). Verified 2026-10-19 on the development
+database: for every order whose twin is computed, the twin equals the value `afterHandle` displays,
+for all three columns. One theoretical gap remains: the handler reads the summed quantities with
+`ResultSet.getLong`, truncating a fractional sum, while the functions divide the exact numerics — an
+order with fractional quantities could show a percentage one point off its twin. No such order
+exists in the measured data; the twin is the more exact of the two.
+
+**Header-only changes do not refresh the twins.** Their `AD_COLUMN_COMP_DEPENDENCY` rows watch only
+`C_OrderLine` (`SOURCE_TABLE_ID = 260`; verified 2026-10-19, one row per twin). A change made on
+the `C_Order` row alone — `iscancelled` or `cancelledorder_id` set without touching any line —
+leaves the twin at its previous value, while `afterHandle` (and the virtual column) already
+answer `0` for a cancelled order. On that path the aliased filter can still disagree with the
+value shown. Not confirmed either way whether every cancel flow also writes the lines; not fixed
+here (it is an AD dependency change, not a filter change).
+
+REST does not apply the aliases — a declared divergence, §4.12.9.
 #### 4.12.32 Returns: create from the document, link to it and never over-return (ETP-5711)
 
 **Document type is resolved inside the source document's client.** `createPurchaseReturn` and the return-invoice actions run in admin mode, so their lookup (`ReturnShipmentUtils.findReturnDocTypeForOrg(client, ...)`) restricts to the source document's client (org match, then that client's org `'0'`); with none, the call is refused. Unrestricted, another client's RTV type was picked (org `'0'` exists in every client) and the return consumed that client's document sequence.
