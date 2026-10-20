@@ -270,6 +270,66 @@ class McpDeclaredActionsTest {
       assertEquals(declared, view.get(3),
           "the map passed to isActionOnlyEntity must be the one view:\"actions\" appends");
     }
+
+    /**
+     * ETP-5714: with an id, the actions view is judged against that record — the record is resolved
+     * only for view:"actions" and handed to the 7-argument buildResponse as its last argument.
+     */
+    @Test
+    @DisplayName("view:\"actions\" resolves the record named by id and passes it to buildResponse")
+    void actionsViewIsJudgedAgainstTheRecord() {
+      String body = McpSourceScanner.methodBody(
+          McpSourceScanner.read("com/etendoerp/go/mcp/McpToolRouter.java"), "handleSchema");
+
+      int actionsView = body.indexOf("isActionsView");
+      List<String> view = McpSourceScanner.callArguments(body, "McpActionsView.buildResponse",
+          actionsView);
+      assertEquals(7, view.size(), "buildResponse(spec, entity, fields, declared, config, "
+          + "excluded, record)");
+      assertTrue(body.indexOf("availabilityContextOf", actionsView) > actionsView,
+          "the record is only resolved inside the actions view");
+      assertEquals("record", view.get(6));
+    }
+  }
+
+  @Nested
+  @DisplayName("unavailableFor (ETP-5714)")
+  class UnavailableFor {
+
+    @Test
+    @DisplayName("an entity with no customization, or one that throws, derives nothing")
+    void quietWhenNothingCanBeDerived() {
+      SFEntity none = mock(SFEntity.class);
+      when(none.getName()).thenReturn("none");
+      when(none.getJavaQualifier()).thenReturn(null);
+
+      assertTrue(McpDeclaredActions.unavailableFor(none, mock(org.openbravo.base.structure.BaseOBObject.class))
+          .isEmpty());
+      assertTrue(McpDeclaredActions.unavailableFor(null, null).isEmpty());
+    }
+
+    @Test
+    @DisplayName("the customization's own answer is returned, and a null or throwing one is empty")
+    void customizationAnswerIsRelayed() {
+      org.openbravo.base.structure.BaseOBObject record =
+          mock(org.openbravo.base.structure.BaseOBObject.class);
+      SFEntity entity = recEntity();
+      try (org.mockito.MockedStatic<com.etendoerp.go.schemaforge.util.NeoHandlerLookup> lookup =
+          Mockito.mockStatic(com.etendoerp.go.schemaforge.util.NeoHandlerLookup.class)) {
+        com.etendoerp.go.schemaforge.NeoHandler handler =
+            mock(com.etendoerp.go.schemaforge.NeoHandler.class);
+        lookup.when(() -> com.etendoerp.go.schemaforge.util.NeoHandlerLookup
+            .byQualifierQuietly(QUALIFIER)).thenReturn(handler);
+        when(handler.unavailableActions(record)).thenReturn(Map.of("a", "because"));
+
+        assertEquals(Map.of("a", "because"), McpDeclaredActions.unavailableFor(entity, record));
+
+        when(handler.unavailableActions(record)).thenReturn(null);
+        assertTrue(McpDeclaredActions.unavailableFor(entity, record).isEmpty());
+        when(handler.unavailableActions(record)).thenThrow(new IllegalStateException("boom"));
+        assertTrue(McpDeclaredActions.unavailableFor(entity, record).isEmpty());
+      }
+    }
   }
 
   // ── etendo_discover ───────────────────────────────────────────────────────

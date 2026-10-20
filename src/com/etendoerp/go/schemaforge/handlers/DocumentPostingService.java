@@ -133,6 +133,24 @@ public class DocumentPostingService {
   private static final String MSG_NOT_CALCULATED_COST = "NotCalculatedCost";
 
   /**
+   * How long a caller should wait before posting again when cost is still being calculated
+   * (ETP-5714). Etendo calculates cost in a background process that runs about every 30 seconds,
+   * so a post made right after completing a goods document usually fails once and succeeds a
+   * moment later; the answer says so instead of leaving the caller to guess.
+   */
+  static final int COST_RETRY_AFTER_SECONDS = 30;
+  /** {@code messageParams} entry (and body key) carrying {@link #COST_RETRY_AFTER_SECONDS}. */
+  static final String MESSAGE_PARAMS_RETRY_AFTER_SECONDS = "retryAfterSeconds";
+  /** The error code of a post refused only because cost is not calculated yet (ETP-5714). */
+  static final String ERROR_COST_NOT_CALCULATED = "costNotCalculated";
+  /** HTTP 409: nothing is wrong with the request, retry once cost has been calculated. */
+  static final int STATUS_RETRY_LATER = 409;
+  private static final String COST_RETRY_HINT = "Cost is calculated by a background process that "
+      + "runs about every 30 seconds. Nothing was posted and the document keeps the posting "
+      + "status Etendo set (posted NC) until a later post succeeds: wait about 30 seconds and "
+      + "repeat the same post action.";
+
+  /**
    * The {@code C_BP_Group_Acct} columns relevant to this app's document types (ETP-5175) — a
    * curated subset, not every nullable column on that table. {@code NotInvoicedReceivables_Acct}
    * (getter {@code getNonInvoicedReceivables()}) was deliberately dropped from this list
@@ -213,7 +231,8 @@ public class DocumentPostingService {
    * by identity; never {@code null}, empty when there are none. {@code messageParams} (ETP-5175)
    * are the values those keys interpolate, so a client can render the whole sentence in its own
    * locale instead of trusting the backend prose; never {@code null}, empty when there are none.
-   * Values are {@code String} or {@code List<String>}.
+   * Values are {@code String}, {@code List<String>} or, for {@code retryAfterSeconds}, an
+   * {@code Integer}.
    */
   public record PostResult(boolean ok, String message, List<String> messageKeys,
       Map<String, Object> messageParams) {
@@ -527,6 +546,12 @@ public class DocumentPostingService {
       body.put("success", result.ok());
       body.put("message", result.message());
       putMessageIdentity(body, result);
+      if (isRetryable(result)) {
+        return retryLater(body, result);
+      }
+      if (CostingStall.isStalled(result)) {
+        return CostingStall.answer(body, result);
+      }
       // NOTE: pass the JSONObject itself, NOT body.toString() — that String would bind to the
       // NeoResponse.error(int, String) overload, which wraps it as a nested error.message
       // string instead of sending this flat body, silently discarding the real message from
@@ -536,6 +561,30 @@ public class DocumentPostingService {
       log.error("Posting action error for record {}", context.getRecordId(), e);
       return NeoResponse.error(500, "Posting action error");
     }
+  }
+
+  /** @return whether the failure is the retryable "cost not calculated yet" one (ETP-5714) */
+  private static boolean isRetryable(PostResult result) {
+    return !result.ok() && result.messageKeys().contains(MSG_NOT_CALCULATED_COST)
+        && result.messageParams().containsKey(MESSAGE_PARAMS_RETRY_AFTER_SECONDS);
+  }
+
+  /**
+   * The 409 answer for a post that failed only because cost is not calculated yet (ETP-5714):
+   * the flat body the SPA already reads ({@code message}, {@code messageKeys}) plus the canonical
+   * MCP error shape — {@code error} is the code, so the MCP envelope keeps it instead of
+   * replacing it with a generic one — {@code retryable} and {@code retryAfterSeconds}; REST
+   * additionally gets the standard {@code Retry-After} header.
+   */
+  private static NeoResponse retryLater(JSONObject body, PostResult result) throws JSONException {
+    body.put("error", ERROR_COST_NOT_CALCULATED);
+    body.put("status", STATUS_RETRY_LATER);
+    body.put("detail", result.message());
+    body.put("retryable", true);
+    body.put(MESSAGE_PARAMS_RETRY_AFTER_SECONDS, COST_RETRY_AFTER_SECONDS);
+    body.put("hint", COST_RETRY_HINT);
+    return NeoResponse.error(STATUS_RETRY_LATER, body)
+        .withHeader("Retry-After", String.valueOf(COST_RETRY_AFTER_SECONDS));
   }
 
   /** Seam for the transaction connection provider; overridable in tests. */
@@ -712,6 +761,14 @@ public class DocumentPostingService {
         message = localizedPeriod;
       }
     }
+    // ETP-5714: core resolves 'NC' to the per-product "NotCalculatedCostWithTransaction" text in
+    // the classic session's language; the retryable answer carries the generic, GO-locale one.
+    if (AcctServer.STATUS_NotCalculatedCost.equals(acct.getStatus())) {
+      String localizedNotCalculated = localizedMessage(MSG_NOT_CALCULATED_COST);
+      if (StringUtils.isNotBlank(localizedNotCalculated)) {
+        message = localizedNotCalculated;
+      }
+    }
     // ETP-5436: 'D' on a Goods Movement means the same "cost not yet calculated" condition
     // MSG_NOT_CALCULATED_COST already describes (see its javadoc) — reuse it rather than a
     // second hardcoded message.
@@ -750,6 +807,16 @@ public class DocumentPostingService {
    */
   private static PostResult failureOf(AcctServer acct) {
     String message = errorMessageOf(acct);
+    if (AcctServer.STATUS_NotCalculatedCost.equals(acct.getStatus())) {
+      if (CostingStall.isQueueStalled(acct)) {
+        return CostingStall.failure(localizedMessage(CostingStall.MSG_COSTING_STALLED));
+      }
+      // ETP-5714: retryable, with its own identity. Goods documents (receipts, shipments, returns)
+      // post as soon as their cost has been calculated, which a background process does shortly
+      // after completion — the caller should wait and repeat, not conclude the document is broken.
+      return new PostResult(false, message, List.of(MSG_NOT_CALCULATED_COST),
+          Map.of(MESSAGE_PARAMS_RETRY_AFTER_SECONDS, COST_RETRY_AFTER_SECONDS));
+    }
     if (AcctServer.STATUS_DocumentLocked.equals(acct.getStatus())) {
       return new PostResult(false, message, List.of(MSG_OTHER_POSTING_PROCESS_ACTIVE));
     }

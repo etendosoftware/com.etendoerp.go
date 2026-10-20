@@ -16,7 +16,11 @@
  */
 package com.etendoerp.go.schemaforge;
 
+import java.util.Map;
+
 import javax.inject.Inject;
+
+import org.openbravo.base.structure.BaseOBObject;
 
 import com.etendoerp.go.schemaforge.handlers.DocumentPostingService;
 
@@ -48,6 +52,15 @@ public abstract class AbstractReturnDocumentHeaderHandler implements NeoHandler 
   public NeoResponse handle(NeoContext context) {
     mirrorAccountingDate(context);
     return NeoHandlerUtils.delegateToPostingServiceOrElse(context, postingService, this::continueHandling);
+  }
+
+  /**
+   * {@inheritDoc} {@code createReturnInvoice} does not apply once the return already has a factura
+   * rectificativa (ETP-5714).
+   */
+  @Override
+  public Map<String, String> unavailableActions(BaseOBObject record) {
+    return ReturnDocumentAvailability.unavailable(record);
   }
 
   /**

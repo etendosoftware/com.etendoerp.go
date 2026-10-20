@@ -2038,6 +2038,12 @@ Behavior details (`McpActionsView`):
   and `…Findtransactionspd`, are `discarded` there, which also makes the REST route answer 404; the
   visible APRM buttons were left untouched) — so **a Classic/OBUIAPP button that must never run
   outside its own popup has to be curated `discarded`**, not trusted to its display logic.
+- **A button a declared contract describes is invokable (ETP-5714).** `describeDeclaredButtons` replaces the
+  AD reference list of such a button by the contract's parameters; it now also drops the AD flags the bare
+  button carried — `invokable:false` / `notInvokableReason`, e.g. `DocAction` of a goods receipt, whose `AD_Field` is
+  `isDisplayed = N` — and sets `invokeVia:"etendo_action"`, because the contract IS what `etendo_action` runs and what
+  `view:"actions"` lists. `view:"full"` and `view:"actions"` no longer disagree. A withdrawal made by `MCP_CONFIG.actions`
+  (redirect, unusable configuration) is left alone: that one is real. Display logic is still not invokability (above).
 - **`invokableCount`** sits next to `actionCount` so the split is visible before reading the array.
   On `sales-invoice/header` the catalog has 22 actions and only a handful are callable.
 - A button carries **no `required` flag** (IMP-21). A button has no payload value, so AD's NOT NULL
@@ -2470,6 +2476,12 @@ payments by hand through the route BUG-1 corrupted data with (FR-1 of the ETP-55
   and discovery says so: `view:"actions"` lists every entry `invokable:false` with
   `notInvokableReason` (`invokableCount: 0`), and `etendo_discover` adds `actionsInvokable:false` +
   `actionsNotInvokableReason`.
+  `availableWhen` and `valuesByStatus` (optional, ETP-5714) describe an AD button instead of withholding it:
+  `availableWhen` is `{action: {property: [values]}}` (every property must match; a value prefixed with `!` means "anything
+  but") and `valuesByStatus` is `{action: {property, values: {status: [values]}}}` for a list-backed button such as
+  `documentAction`. They are rendered by `view:"actions"` and judged against a record when `etendo_schema` is given an `id`
+  (`availableNow`, `unavailableReason`, `availableValuesNow`); they never refuse a call. A section that only declares them
+  needs no `reason`. Full shape, the handler-side counterpart and the per-document declarations: §4.12.35.
 - **Excluded from agents, in code.** `NeoHandler#agentExcludedActions()` (default empty) names
   actions the handler serves to the SPA that an agent must never run. If `agentExcludedActions()`
   throws, the MCP fails closed: every action of the entity is treated as excluded (refused,
@@ -3353,16 +3365,18 @@ The shape and the rules are in §4.12.1.3.
 
 | Entity | `hidden` | `values` / `redirect` | Why |
 |---|---|---|---|
-| `sales-invoice/header`, `purchase-invoice/header` | the five PIS actions, `psd2GenerateBankPayment`, `posted` (ETP-5692) | redirect `aPRMAddpayment` → `registerPayment`; `Createfromorders` → `importOrderLines`, `Createfrominouts` → `importShipmentLines` (sales) / `importReceiptLines` (purchase), `CreateFrom` → `importOrderLines` (ETP-5713, §4.12.34); `reasons.posted` and one reason per Create From button | PIS needs a person to authorize at the bank (SCA); Classic's *Add Payment* is not the Etendo payment flow. `posted` is the AD button behind the *Posted* column — a blind toggle that answered "Process completed successfully" on a draft while doing nothing, and that the window never shows. Agents book and unbook the invoice with the header's **declared** `post` / `unpost` contracts instead (`InvoicePostingGate.CONTRACTS`, §4.12.29). `posted` has its own `reasons` entry naming both, so a refusal on it never carries the PIS sentence, and the section `reason` stays the PIS one. The `posted` *field* (curated `readOnly`) stays readable in `view:"full"` / `fields:[…]` as a plain value (§4.12.1.3) |
+| `sales-invoice/header`, `purchase-invoice/header` | the five PIS actions, `psd2GenerateBankPayment`, `posted` (ETP-5692), `etblkpBulkposting` (ETP-5714) | redirect `aPRMAddpayment` → `registerPayment`; `Createfromorders` → `importOrderLines`, `Createfrominouts` → `importShipmentLines` (sales) / `importReceiptLines` (purchase), `CreateFrom` → `importOrderLines` (ETP-5713, §4.12.34); `reasons.posted` and one reason per Create From button; `valuesByStatus.documentAction`: `DR` → CO, `IP` → CO, VO, `CO` → RC, RE (ETP-5714, §4.12.35) | PIS needs a person to authorize at the bank (SCA); Classic's *Add Payment* is not the Etendo payment flow. `posted` is the AD button behind the *Posted* column — a blind toggle that answered "Process completed successfully" on a draft while doing nothing, and that the window never shows. Agents book and unbook the invoice with the header's **declared** `post` / `unpost` contracts instead (`InvoicePostingGate.CONTRACTS`, §4.12.29). `posted` has its own `reasons` entry naming both, so a refusal on it never carries the PIS sentence, and the section `reason` stays the PIS one. The `posted` *field* (curated `readOnly`) stays readable in `view:"full"` / `fields:[…]` as a plain value (§4.12.1.3) |
 | `payment-in/finPayment`, `payment-out/header` | `psd2GenerateBankPayment`, `aPRMAddScheduledpayments`, `aprmExecutepayment`, `aPRMReversePayment`, `aPRMReconcilePayment`, `aeatsiiSend`, `etblkpBulkposting`, `posted`, `retryPisPayment`, `pisPaymentStatus` | `aPRMProcessPayment: ["P"]` | agents get exactly the window's three buttons, all with `parameters:{}`: *Confirmar* (`aPRMProcessPayment`), *Reactivar* (`etprReactivatePayment`) and *Eliminar* (`eTPRRemovePayment`). *Eliminar* is offered with the UI's own gate: the trash icon and the row action call it at every status except `RPVOID` and except when `pisLocked`, so `ReactivatePaymentHandler` refuses an agent with **422** in those two cases (same `isLifecycleLockedByTransfer` predicate the GET emits as `pisLocked`). On a processed payment it reactivates and then deletes it, and it gives **no** consumed credit back — exactly as in the UI; the invoice's `deletePayment` still deletes a draft and does give the credit back. `retryPisPayment` / `pisPaymentStatus` (served by `ReactivatePaymentHandler` on the payment record) are PIS, hidden like every PIS action under the fiscal/bank-integration criterion (§4.12.9). Payments are created and allocated through `registerPayment` on the invoice header. `values` keeps the catalogue honest but is **not** a safety boundary: `ReactivatePaymentHandler` always sends `action:"P"` for `aPRMProcessPayment` and ignores what the agent passes |
 | `financial-account/transaction` | `etprReactivateTransaction`, `etprRemoveTransaction`, `posted`, `etblkpBulkposting` | — | the UI's movements are reactivated, deleted and recorded through the account's movement flow; for agents, the account's `reactivateMovement` / `deleteMovement` / `createMovement` (§4.12.1.4). What stays for agents is `post` / `unpost` — `etendo_action(spec:'financial-account', entity:'transaction', id:<transactionId>, action:'post'\|'unpost', parameters:{})`, served by the `document-posting` qualifier (`DocumentPostingService`, as the SPA's kebab). They are handler-served, not declared contracts, so `view:"actions"` does not list them |
 | `open-close-period-control/documents` | `openClose`, `processNow` | — | the calendar has no per-document-type open/close since ETP-4948; the period's own `openClose` (§4.12.1.6) opens or closes every document type at once |
 | `financial-account/account` | `aPRMImportBankFile`, `aPRMMatchTransactions`, `aPRMMatchTransactionsForce`, `aPRMReconcile`, `aprmAddMultiplePayments`, `pSD2GetBankstatement`, `pSD2GetConsent`, `psd2ReconnectFa`, `psd2GetConnections`, `psd2RefreshConnections` | `aprmFundsTrans` → `transferFunds` (§4.12.1.5) | the window offers none of its Core buttons: statements go through `bank-statements`, reconciliation through `bank-reconciliation`, manual movements through the entity's own declared movement actions (§4.12.1.4); PSD2 consent and reconnection need SCA. It has no `verbs` section: create, update and delete stay (the SPA uses them) |
-| `goods-receipt/header` | — | redirect `invoicefromshipment` → `createPurchaseInvoice` (ETP-5709); `CreateFrom` → `importOrderLines` with its own reason (ETP-5713, §4.12.34) | the classic *Invoicefromshipment* process, fired on a purchase receipt, creates a **sales** invoice (`isSotrx = true`), does not mark the receipt as invoiced and can report success without creating anything. The target is the header's declared `createPurchaseInvoice` (`GoodsReceiptHeaderHandler`), which creates a purchase invoice from the receipt and completes it in the same call. The return specs (`return-material-receipt`, `return-to-vendor-shipment`) carry the same classic button and are not redirected yet (ETP-5711) |
-| `goods-shipment/goodsShipment` | — | redirect `Invoicefromshipment` → `createDraftInvoice` (ETP-5709); `CreateFrom` → `importOrderLines` with its own reason (ETP-5713, §4.12.34) | the classic process bypasses every guard of the handler's own path (completed-status check, nothing-pending 400, scoping to the shipment's own lines, honoured partial `lines`), so agents are sent to `createDraftInvoice`, now declared by `GoodsShipmentHeaderHandler.actionContracts()` (`CreateDraftInvoiceHandler.SHIPMENT_CONTRACT`: optional `shipmentIds[]`, `priceListId`, `lines[{shipmentLineId, quantity}]`). The key is the AD column name `Invoicefromshipment`, the only spelling both `McpActionsView.namesOf` (listing) and `McpDeclaredActions.namesOf` (call) accept. The other sales specs keep the classic button |
-| `return-to-vendor-shipment/returnToVendorShipment` | — | redirect `RM_Shipment_Pickedit` → `importReceiptLines` (ETP-5711), `GenerateTo` and `Invoicefromshipment` → `createReturnInvoice` (ETP-5712); `reasons` for the last two | *Pick/Edit Lines* has no process connected. `GenerateTo` (AD_Process 154, *Generate Invoice from Shipment*, `isdisplayed = N` in the tab) and `Invoicefromshipment` (no process) are the classic ways to invoice a shipment; on a return they would not build the factura rectificativa the app builds (negative lines, link to the invoice it rectifies, confirmed). The target is the header's declared `createReturnInvoice` (§4.12.33). Keys are AD column names |
-| `return-material-receipt/returnMaterialReceipt` | — | redirect `RM_Receipt_PickEdit` → `importShipmentLines` (ETP-5711), `GenerateTo` and `Invoicefromshipment` → `createReturnInvoice` (ETP-5712); `reasons` for the last two | the sales mirror of the previous row |
+| `goods-receipt/header` | `posted`, `etblkpBulkposting` (ETP-5714) | redirect `invoicefromshipment` → `createPurchaseInvoice` (ETP-5709); `CreateFrom` → `importOrderLines` with its own reason (ETP-5713, §4.12.34) | the classic *Invoicefromshipment* process, fired on a purchase receipt, creates a **sales** invoice (`isSotrx = true`), does not mark the receipt as invoiced and can report success without creating anything. The target is the header's declared `createPurchaseInvoice` (`GoodsReceiptHeaderHandler`), which creates a purchase invoice from the receipt and completes it in the same call. The return specs (`return-material-receipt`, `return-to-vendor-shipment`) carry the same classic button and are not redirected yet (ETP-5711) |
+| `goods-shipment/goodsShipment` | `posted`, `etblkpBulkposting` (ETP-5714) | redirect `Invoicefromshipment` → `createDraftInvoice` (ETP-5709); `CreateFrom` → `importOrderLines` with its own reason (ETP-5713, §4.12.34) | the classic process bypasses every guard of the handler's own path (completed-status check, nothing-pending 400, scoping to the shipment's own lines, honoured partial `lines`), so agents are sent to `createDraftInvoice`, now declared by `GoodsShipmentHeaderHandler.actionContracts()` (`CreateDraftInvoiceHandler.SHIPMENT_CONTRACT`: optional `shipmentIds[]`, `priceListId`, `lines[{shipmentLineId, quantity}]`). The key is the AD column name `Invoicefromshipment`, the only spelling both `McpActionsView.namesOf` (listing) and `McpDeclaredActions.namesOf` (call) accept. The other sales specs keep the classic button |
+| `return-to-vendor-shipment/returnToVendorShipment` | `posted`, `etblkpBulkposting` (ETP-5714) | redirect `RM_Shipment_Pickedit` → `importReceiptLines` (ETP-5711), `GenerateTo` and `Invoicefromshipment` → `createReturnInvoice` (ETP-5712); `reasons` for the last two | *Pick/Edit Lines* has no process connected. `GenerateTo` (AD_Process 154, *Generate Invoice from Shipment*, `isdisplayed = N` in the tab) and `Invoicefromshipment` (no process) are the classic ways to invoice a shipment; on a return they would not build the factura rectificativa the app builds (negative lines, link to the invoice it rectifies, confirmed). The target is the header's declared `createReturnInvoice` (§4.12.33). Keys are AD column names |
+| `return-material-receipt/returnMaterialReceipt` | `posted`, `etblkpBulkposting` (ETP-5714) | redirect `RM_Receipt_PickEdit` → `importShipmentLines` (ETP-5711), `GenerateTo` and `Invoicefromshipment` → `createReturnInvoice` (ETP-5712); `reasons` for the last two | the sales mirror of the previous row |
 | `purchase-order/header` | — | redirect `rMReceiveMaterials` → `createGoodsReceipt`, `rMCreateInvoice` → `createPurchaseInvoice` (ETP-5709) | the classic *Receive Materials* button has no process connected for an agent, and *Create Invoice* is undocumented for it. The targets are the header's declared contracts (`PurchaseOrderHeaderHandler`): `createGoodsReceipt` creates a DRAFT receipt, `createPurchaseInvoice` creates AND completes a purchase invoice. The preconditions (source must be completed, draft-aware pending quantity) are described in the ETP-5709 paragraphs of §4.12.9 and apply to a redirected call exactly as to a direct one |
+| `purchase-order/header` (ETP-5714) | `RM_Pickfromreceipt`, `Cancelandreplace`, `Confirmcancelandreplace`, each with its own `reasons` entry | `valuesByStatus.documentAction`: `DR` → CO, VO, PR; `IP` → CO, VO; `CO` → CL, RE | *Pick from Receipt* is a pick-and-edit window with no process an agent can run; Cancel and Replace is a classic multi-step flow (replacement order plus reversal of the original's documents) with no MCP equivalent, and its second step has no meaning alone. The redirect row above is kept. `valuesByStatus` is advisory availability (§4.12.35), from core's `ActionButtonUtility.docAction` |
+| `sales-order/header` (ETP-5714) | `Cancelandreplace`, `Confirmcancelandreplace`, each with its own `reasons` entry | `valuesByStatus.documentAction`: as the purchase order | the sales order had no `MCP_CONFIG` until now. Cancel and Replace is a real flow in the app, but it is a multi-step flow with no declared contract, so it is withheld from agents with a reason rather than offered half-supported; reactivate (RE, only without linked documents), edit and complete again instead |
 
 **A redirect target is not validated at runtime (ETP-5709).** `McpActionsSection.validateRedirect` only requires each target to be a non-blank string; it never checks that the target is an action the entity serves. A typo or a renamed action still loads, and the agent is then told to call something that answers 404. Every `redirect` target must therefore be an action the entity declares (an `actionContracts()` entry or a handler-served action). Also, `reason` is mandatory in every `actions` section, `redirect`-only ones included: `validate` rejects a section without it, and an unusable section fails the entity closed (§4.12.6). `redirectReason` and `reasons` refine the text per action; they do not replace `reason`.
 
@@ -3680,6 +3694,8 @@ not: `etendo_create` does not run it in shared code, so it is in the table below
 | the `warehouse` default | *Almacén Secundario* | *Almacén Principal* | observed with an identical body, 2026-09-28. Not yet diagnosed: it may be a genuine divergence in the defaults chain or a session dependency. Recorded here so it is not rediscovered as new |
 | `user` create — invitation (ETP-4830, declared by ETP-5194) | invitation committed by the post-hook | same, but mid-batch | the invitation's `commitAndClose()` commits every earlier operation of the batch, so a later failure answers `atomic: false` (§4.12.4.1). Same behaviour on REST `/batch`; declared, not changed. The ETP-5194 email correction is an update, which batch does not perform |
 | line creation of receipts, shipments and invoices (ETP-5713) | the lines CRUD, which is what the SPA's "Add from ..." modals post one line at a time: **not capped** by the server (the modal limits the quantity client-side), invoice-line `salesOrderLine` / `goodsShipmentLine` and header `salesOrder` refused as `read_only_field` on MCP | `etendo_batch` reaches the same CRUD: same refusals, same lack of cap | the declared import actions (`importOrderLines`, `importReceiptLines`, `importShipmentLines`, §4.12.34) are the MCP way to create linked lines: capped by what is pending (drafts included), linked, one transaction. They are served by the same delegates on REST and MCP, so the two channels agree on them; what differs is the CRUD line create, which the actions deliberately do not reuse |
+| availability, `etendo_schema` `id`, entity-name case, message-key hints (ETP-5714) | **not applicable**: the actions view, `availableNow` and the hints are MCP surfaces (`McpActionsView`, `McpToolRouter`); REST has no equivalent view and answers its own bodies | MCP only | declared, not a bug: availability is advisory and never judged by any channel, so a REST call and an MCP call to the same action are refused or served identically by the same handler. The costing retry (409 `costNotCalculated`) is NOT a divergence: it comes from `DocumentPostingService.handleAction`, shared by REST and MCP |
+| the grid price (`listPrice`) of an agent-written order line (ETP-5714) | explicit price → `listPrice` 0 (`OrderLineDiscountSupport`; 17 of 73 order lines in 3 days of local data) | same | declared, not fixed: the invoice-line side now aligns the list price on create, update and every native copy, so an invoice created or imported from such an order shows the price; the order line itself still shows 0,00 until its own helper gets the same rule |
 
 This is a **declared** list, not an unknown one: the point is that the next person to touch either
 path can see what is deliberately unequal. Closing a row means adding the step to
@@ -3874,10 +3890,10 @@ Known gaps, still open after the measurement (details in §4.12.20):
 
 - `etendo_create` with a discount still answers `supersededDefaults: {discount: …}` and its hint,
   although the discount is applied.
-- With an explicit `unitPrice` other than the product's standard price, `listPrice` persists as
-  the defaults cascade left it (usually 0): `McpLinePriceInjector` abstains when the agent sent a
-  price. Pre-existing, unchanged from `develop`. (A product whose price list entry has no list
-  price now gets its standard price as `listPrice`, as in the form — QA reopen CP-8, §4.12.20.)
+- ~~With an explicit `unitPrice` other than the product's standard price, `listPrice` persisted as the defaults cascade
+  left it (usually 0).~~ **Closed (ETP-5714 follow-up):** an invoice line with a price, no discount and no list price now gets
+  `listPrice = unitPrice` (absent or 0 counts as no list price; `InvoiceLineAmountSupport.alignListPriceWithPrice`), so the grid's "Precio" (`listPrice`) is no longer
+  0,00 next to a correct gross; see the §4.12.20 bullet. `McpLinePriceInjector` still abstains (unchanged).
 - Each resolution logs one ERROR line tagged `(warn)` from
   `NeoExtensionIndex.warnOnQualifierDisagreement`, because the `Java_Qualifier` is kept on purpose.
 
@@ -8441,11 +8457,36 @@ The three QA-reopen rules were checked against the same payloads (`useLineGrossA
   on the router's own context (`McpToolRouter.handleCreate`, reported with
   `ctx.getSupersededDefaults()`); the customization only receives the hook context, which does not
   share it, and reaching it would be ETP-5415 plumbing. Declared, not fixed.
-- With an explicit `unitPrice` other than the product's standard price, `listPrice` persists as the
-  defaults cascade left it (usually 0): `McpLinePriceInjector` abstains when the agent sent a price,
-  and the selector-aux values the cascade reads have no price-list context. Unchanged from
-  `develop`. Not filled because `listPrice` is editable on both entities and the form's own value
-  then depends on what the user typed; only the "product just picked" state is filled (step 1).
+- **Closed for invoice lines (ETP-5714 follow-up): the price is the list price.** The grid column "Precio" of
+  `purchase-invoice/lines` and `sales-invoice/lines` is `listPrice` (`unitPrice` is `grid:false, form:false`); the form edits
+  `listPrice` and derives `unitPrice = listPrice × (1 − discount/100)`, so a form line at 50 stores `listPrice 50`. With an explicit
+  `unitPrice` other than the product's standard price `McpLinePriceInjector` abstains and `listPrice` stayed 0: net and gross were
+  right (Agua × 2 at 50, 21 % → 100 / 121,00) and the grid showed 0,00. `InvoiceLineAmountSupport.alignListPriceWithPrice` (shared
+  by both invoice-line customizations, called from `deriveAmountsOnCreate` and `deriveAmountsOnUpdate`) now sets
+  `listPrice = unitPrice` when the line has a price, **no discount**, no gross price and a `listPrice` that is **absent or 0** (an
+  explicit `listPrice: 0` counts as absent). Never overridden: a non-zero `listPrice` the caller sent, one the defaults cascade resolved
+  (e.g. the product's standard price) and
+  any line with a discount (which keeps the discount rule: list = price, price = list × (1 − d/100)). On an **update** it applies
+  when the patch carries a `unitPrice` that **differs from the stored one** (`compareTo`; re-sending the same price changes nothing, so a
+  legacy or copied line with list 100 / price 90 keeps 100 on `{unitPrice:90}`, as the form only touches the list when "Precio" is edited) and no
+  non-zero `listPrice`, **whatever list price the line had stored** — the form has
+  no "edit the unit price": the user edits "Precio" (`listPrice`) and the unit price is derived (`computeUnitPriceForPost`, sent whenever
+  `listPrice` is in the payload), so repricing a line with no discount moves the list price with it (created at 50 / list 50, repriced to
+  60 → 60 / list 60, not 60 / list 50). A patch that does not re-price never invents a list price, and a line with a discount (stored or
+  sent) keeps the discount rule. **Copied lines (ETP-5713 imports, one-step create from an order or a receipt):** the native line copy
+  (`CreateInvoiceLinesFromProcess` / `UpdatePricesAndAmounts`) takes the source line's prices exactly, so a source order line whose
+  `listPrice` is 0 (the order-side symptom below) gave an invoice line with a price and `listPrice 0`. `InvoiceFromOrderSupport.alignLineListPrices`
+  now sets `listPrice = unitPrice` on a copied line with a non-zero price, no list price and no gross price (and, when the line has a discount,
+  `listPrice = unitPrice / (1 − discount/100)` to 6 decimals — the inverse of the form's `unit = list × (1 − d/100)`; a discount of 100 %
+  or outside 0..100 is left alone), for the lines of the import only (`importOrderLines`, `importReceiptLines`, `importShipmentLines`) and for every one-step native copy: `createDraftInvoice` /
+  `createPurchaseInvoice` from an order, a receipt (linked or without a purchase order), several receipts together (the bulk invoice, which keeps
+  no per-line discount) and `createDraftInvoice` from a shipment; a list price the source carries is never replaced. The shipment-based and return paths
+  (`CreateDraftInvoiceHandler.createShipmentInvoiceLine`, `ReturnInvoiceSupport.resolveLinePricing`, §4.12.33) already fall back to the price
+  list's list price and then to the price, so they needed nothing. **Gross price:** a copied line carrying a `grossUnitPrice` is left alone — the form never persists one (its price field is `listPrice`), Classic leaves the net prices at 0 on a taxes-included price list (nothing to align), and no line of the local database has both (0 of 10 880 invoice lines have `gross_unit_price`). **By design, not covered:** order lines (`OrderLineDiscountSupport`) keep showing 0,00 for an explicit price, which is also why imported or copied lines needed the alignment above; they are a different helper. **Lines already stored with `listPrice 0` are NOT repaired** — they change only when their price
+  is edited; recalculating old drafts is the separate follow-up. Measured on the local database (last 3 days, lines with a price and
+  `listPrice 0`): purchase invoice lines 13 of 36, sales invoice lines 6 of 37, **purchase order lines 12 of 36, sales order lines 5 of
+  37** — order lines show the same symptom through `OrderLineDiscountSupport`, a different helper, not changed here. Also seen on those
+  lines: `gross_unit_price` is 0 although the gross amount is right (separate defect, not touched).
 - `applyUnitPrice` is update-only. A create with an explicit `unitPrice` below the list price and
   no discount keeps discount 0, as before.
 - The rule compares `unitPrice` with the line's `listPrice`. A price list whose standard price
@@ -9511,6 +9552,8 @@ completed, and a draft that is voided or deleted gives its quantity back. Import
   discount, so the unit price is the order's, once, and the discount is not lost either:
   `InvoiceFromOrderSupport.copyLineDiscountsFromOrder(invoice, newLineIds)` adds the display percentage
   (`EM_Etgo_Discount`) to the NEW lines only (the lines already on the invoice are not touched), and
+  `alignLineListPrices(invoice, newLineIds)` gives a NEW line with a price, no list price and no discount `listPrice = unitPrice` — the
+  native copy takes the order line's list price exactly, and the grid's "Precio" is the list price (ETP-5714, §4.12.20);
   `ensureLineGrossAmounts(invoice, newLineIds)` fills a missing gross of the NEW lines only (a deliberate zero line or a
   negative line already in the draft keeps its gross; the whole-invoice pass of the one-step actions is not used here).
   There is **no** `linkInvoiceLinesToExistingInouts` back-fill: the movement link is whatever the native process (bound
@@ -9587,3 +9630,218 @@ contracts only judge the MCP call, and `etendo_batch` has no ACTION surface. No 
 that matters (the lines CRUD is uncapped, the actions are) is declared in the §4.12.9 table.
 
 *Not done here (follow-up):* the sales shipment modal should link the header like the receipt one.
+
+#### 4.12.35 Discoverability: which actions apply to a document now, and what its values mean (ETP-5714)
+
+**The defect.** `etendo_schema(view:"actions")` published the catalogue with no sense of time. An agent could not tell
+that completing is for drafts only, that a completed goods document can be neither reactivated nor voided through MCP
+and is corrected with a return, which `documentAction` value applies to the document in front of it, or that creating the
+factura rectificativa a second time is not refused and duplicates it; it learned each rule from a refusal (or did the
+wrong thing). Other gaps found alongside: the full view called `documentAction` of a goods receipt `invokable:false` while
+the actions view listed its contract as invokable; the response keys the headers inject (`invoiceStatus`, `linkedReturns`,
+`hasLinkedDocuments`...) were reported in `unknownFields`; a post right after completing a goods document failed with a
+generic 422; core's "Documento ya procesado" came with no way forward; and the tool description gave `'Header'` as an
+entity example while the catalogue spells `header`.
+
+**Decisions (user, binding).** (1) Unavailable actions are **listed with the reason, never hidden**: the catalogue is
+complete, each action says in which states it applies and, given a record id, whether it applies NOW and why not.
+(2) Availability is **advisory only**: it never refuses a call; enforcement stays in the contracts' enums and the handlers'
+guards, so a wrong declaration can mislead a reader but can never block a legitimate action. (3) RE / RC on a completed
+receipt, shipment or return: nothing new is offered, `documentAction` stays CO-only, and the availability says a completed
+document cannot be reactivated or voided through MCP and must be corrected with a return. (4) A post without calculated
+cost is a clear, retryable `costNotCalculated`.
+
+##### Where it is declared
+
+| Source | Declares | Notes |
+|---|---|---|
+| `NeoActionContract.availableWhen(NeoActionAvailability)` | an action served by a handler | rendered by `toJson()`; every `with*` copy keeps it |
+| `MCP_CONFIG.actions.availableWhen` / `.valuesByStatus` | an AD button (e.g. the order and invoice `documentAction`) | data, no per-entity code; validated by `McpActionsSection`; a section that only describes needs no `reason` (nothing is withheld), one that also hides or redirects still does |
+| `NeoHandler#unavailableActions(BaseOBObject)` | what a column value cannot express: another row's state | default empty; one sentence per action; a key `action:value` rules out ONE value of a list-backed action |
+
+**Shape** (all keys optional; both parts can sit on one action):
+
+```json
+{ "action": "post",
+  "availableWhen": { "documentStatus": ["CO"], "posted": ["!Y"] },
+  "valuesByStatus": { "property": "documentStatus", "values": { "DR": ["CO"], "CO": [] } } }
+```
+
+`availableWhen` maps a record property to its allowed values; every property must match (AND) and a value prefixed with `!`
+means "anything but". `valuesByStatus` is for a list-backed action: which values of its parameter apply per status; a status
+with no entry is not judged (no verdict, never "unavailable"); only an explicit empty list means nothing applies. With **no** `id` the response carries these static declarations plus an
+`availabilityHint` that explains how to read them; an action with neither key applies in every state.
+
+With `etendo_schema(spec, entity, view:"actions", id:<recordId>)` each declared action also carries:
+
+| Key | Meaning |
+|---|---|
+| `availableNow` | `true` / `false` for this record. **Absent** when the record cannot give a declared property (unknown is not "unavailable") |
+| `unavailableReason` | when false: `Applies when documentStatus is DR; this record's documentStatus is CO.` plus the declaration's note (for goods documents: *A completed document cannot be reactivated or voided through MCP; it must be corrected with a return.*) |
+| `availableValuesNow` | for a list-backed action, the values that apply to this record |
+| `unavailableValues` | `{value: reason}` of values the handler ruled out through an `action:value` key |
+
+The response also carries `recordId`. A record that does not exist for the caller answers `404 not_found` (`field: id`).
+The properties are read off the record **by name** through the DAL (`McpActionAvailabilityContext`): a foreign key reads as
+the referenced id, anything else through `String.valueOf`; a name the entity does not have, or an empty value, gives no
+verdict. Shared code names no entity; the handlers' customizations declare their own states
+(`DocumentAvailability`, `OrderDocumentAvailability`, `InvoiceDocumentAvailability`, `ReturnDocumentAvailability`).
+
+**An unavailable action is still callable as far as availability goes.** Nothing consults it on the call path:
+`McpDeclaredActions.precheck` and `NeoActionContract.validate` judge the call exactly as before, so a call to an action
+"not available now" reaches its normal validation and the handler's own guard.
+
+##### What each document declares
+
+| Document | Declared (static `availableWhen` unless noted) |
+|---|---|
+| goods receipt, goods shipment, return to vendor, customer return | `documentAction` (contract): `DR` only, `valuesByStatus` `DR` → CO, `CO` → none, with the "corrected with a return" note; a `docAction` outside `CO` answers 422 with that sentence as `hint`. `importOrderLines` / `importReceiptLines` / `importShipmentLines` and their `available*` lists: `DR` (the `id` is the draft target; ETP-5713). `createPurchaseInvoice`, `createDraftInvoice`, `createPurchaseReturn`, `createReturn`, `rectifiableInvoices`, `createReturnInvoice`: `CO`. `cloneRecord`: any state |
+| return documents | `createReturnInvoice` is also **derived**: a completed return with a non-voided factura rectificativa is `availableNow:false` ("calling it again would NOT be refused and would create a second one"), from `ReturnShipmentUtils.fetchPreviousReturnInvoices`, the query behind `hasReturnInvoice` |
+| purchase and sales invoice | `post`: `CO` and `posted` not `Y`; `unpost`: `CO` and `posted` = `Y`; import actions: `DR`. `documentAction` (AD button, `MCP_CONFIG.valuesByStatus`): `DR` → CO, `IP` → CO, VO, `CO` → RC, RE. Derived: RE is ruled out (`unavailableValues`) when `InvoiceReactivationGuard` would refuse it (fiscally accepted and already rectified) |
+| purchase and sales order | `createGoodsReceipt` / `createShipment`, `createPurchaseInvoice` / `createDraftInvoice`: `CO`. `documentAction` (`MCP_CONFIG.valuesByStatus`): `DR` → CO, VO, PR; `IP` → CO, VO; `CO` → CL, RE. Derived: RE is ruled out while the order has linked shipments, receipts or invoices (`AbstractOrderHeaderHandler.hasLinkedDocuments`, the query behind the UI flag; enforced on the sales order by `OrderReactivationGuard`, only advised on the purchase order) |
+
+The `documentAction` values come from core's `ActionButtonUtility.docAction` (the real transitions), not from the AD list:
+a draft **invoice** is completed (CO) and, unlike a draft order, cannot be voided from the combo; goods documents offer CO
+on a draft and nothing once completed. Only what our contracts accept is declared: receipts, shipments and returns offer CO
+alone even though core would allow RC on a completed one.
+
+##### `documentAction`, `--` and the injected keys
+
+`documentAction` on a record is the document's **next default action** (what its Process button would run); `--` means none,
+the document is in a final state. The header handlers inject keys that no spec field backs and now declare them through
+`responseEnrichedFields()` so a `fields:[…]` projection no longer reports them in `unknownFields`:
+
+| Entity | Keys | Meaning |
+|---|---|---|
+| goods receipt | `invoiceStatus`, `returnStatus`, `linkedInvoices`, `linkedReturns`, `linkedOrders`, `resolvedPriceListId`, `resolvedPriceList$_identifier` | `invoiceStatus` / `returnStatus`: percentage (0 to 100, rounded, capped) of the receipt already invoiced / returned; the linked lists are `[{id, documentNo, documentStatus, ...}]` |
+| goods shipment | `invoiceStatus`, `linkedOrders`, `linkedInvoices`, `returnReceipts`, `canCreateReturn`, `issuerOrg`, `resolvedPriceListId`, `resolvedPriceList$_identifier` | as above, sales side |
+| return to vendor, customer return | `sourceReceipts` / `sourceShipments`, `sourceReceiptDocNo` / `sourceShipmentDocNo`, `returnInvoices`, `hasReturnInvoice`, `linesCount`, `invoiceStatus`, `issuerOrg` | |
+| purchase and sales order | `hasLinkedDocuments`, `needsPrimaryDoc`, `needsInvoiceDoc` | `hasLinkedDocuments`: an active invoice or goods document points at the order |
+
+`invoiceStatus` is injected on lists too; the others only on a single-record read. (The request called the receipt's order
+list `linkedOrder`; the injected key is `linkedOrders`.)
+
+##### Posting without calculated cost: 409 `costNotCalculated`
+
+Etendo calculates cost in a background process that runs about every 30 seconds, so posting a just-completed goods document
+usually fails once (`AcctServer.STATUS_NotCalculatedCost`) and succeeds a moment later. `DocumentPostingService.failureOf`
+now answers it as a retryable refusal, on **REST and MCP alike**:
+
+```json
+HTTP 409, Retry-After: 30
+{ "success": false, "message": "<NotCalculatedCost, GO locale>", "messageKeys": ["NotCalculatedCost"],
+  "messageParams": { "retryAfterSeconds": 30 },
+  "error": "costNotCalculated", "status": 409, "detail": "<message>", "retryable": true,
+  "retryAfterSeconds": 30, "hint": "Cost is calculated by a background process ..." }
+```
+
+`error` is the code (the flat canonical shape, so the MCP envelope keeps it instead of replacing it by the status's generic
+one); the flat `message` / `messageKeys` are what the SPA already reads. The text is AD message `NotCalculatedCost` (it
+exists in core, "Cost has not yet been calculated for all products in the document.") resolved in the GO locale, not
+core's per-product `NotCalculatedCostWithTransaction` baked in the classic session's language. `Posted` stays as core sets
+it (`NC`, not reset). **No `M_InOut` pre-check was added**: `DocInOut` can post at purchase-order or standard cost, so a
+naive "no transaction cost yet" check would block valid posts. The existing Physical Inventory / Internal Consumption
+pre-check (ETP-5360, ETP-5445) is unchanged and still answers 422.
+
+##### "Documento ya procesado" (message key `20501`)
+
+`McpToolRouter.addMessageKeyHint` (the mechanism of `PeriodNotAvailable`, ETP-5577, generalised to a key -> hint map) adds a
+`hint` to any MCP refusal whose `messageKeys` (top level or under `error`) contain `20501`: the document is processed;
+reactivate it first (`documentAction` RE) if its document actions allow it, and `etendo_schema(view:"actions", id)` says what
+applies now and why not. The hint is generic on purpose (the key is shared by every document type); the goods-specific wording (a
+completed receipt, shipment or return is corrected with a return) lives only in the availability reasons. Keyed on the message, never on the entity; a body that already has
+a `hint` keeps it; the key must match exactly.
+
+##### Smaller fixes in the same change
+
+- **Entity names are case-insensitive on MCP.** A miss on `entity` is retried once with the spelling the spec uses when
+  exactly one visible entity matches ignoring case (`McpEntityNames.canonicalName`); the `entity` argument is
+  rewritten before the retry so hooks and customization lookups see the canonical name. The normal path is untouched; an
+  ambiguous or unknown name keeps its `404 not_found` with the exact names. The tool description's example is now `'header'`.
+- **Hidden classic buttons.** `purchase-order/header`: `RM_Pickfromreceipt`, `Cancelandreplace`, `Confirmcancelandreplace`;
+  `sales-order/header`: `Cancelandreplace`, `Confirmcancelandreplace`, each with its reason (table in §4.12.1.3).
+- **Spec prompts** of the six document windows explain `documentAction` / `--`, the injected keys, `availableNow` and the
+  costing retry (`schema_forge/agent-prompts/<window>/spec.md`).
+
+##### Round 2 (live tests)
+
+- **A hidden action typed in another spelling still gets its reason.** `etendo_action` with `cancelAndReplace` for the hidden
+  button `Cancelandreplace` answered a bare `404 Action not found`. `McpActionsSection.View.configuredNameLike` compares the
+  typed name with every `hidden` / `redirect` entry ignoring case and separators (`cancelAndReplace`, `CANCEL_AND_REPLACE`,
+  `rmPickFromReceipt` for `RM_Pickfromreceipt`), and `McpDeclaredActions.precheck` then refuses with that entry's reason (405) or
+  names its redirect, exactly as for the exact name. Structural: it reads the configuration, never an entity.
+- **A locked field of a completed invoice says how to change it.** `completed_invoice_fields_locked` (422) now carries a `hint`
+  (REST body too, under `error.hint`; the SPA maps `messageKeys`, so it ignores the extra key): reactivate the invoice
+  (`documentAction` RE), edit, complete again; RE can be refused by `InvoiceReactivationGuard`, and
+  `etendo_schema(view:"actions", id)` says whether it applies to that invoice.
+- **Costing that is stuck is not "retry in 30 seconds".** `DocumentPostingService.failureOf` asks `CostingStall` to probe the costing queue of the
+  failing document's organisation (an uncalculated stocked transaction older than
+  `CostingStall.STALLED_AFTER_MINUTES` = 10, the oldest-first order the background process works in). If one exists the answer is
+  **422** `error:"costCalculationStalled"`, `messageKeys:["ETGO_CostCalculationStalled"]`, `retryable:false`, no
+  `retryAfterSeconds`, no `Retry-After`, and a hint that sends an administrator to the Costing Background process and the
+  pending transactions. Otherwise the 409 `costNotCalculated` of above is unchanged. The probe fails open to the retryable answer.
+  The text is AD message `ETGO_CostCalculationStalled` (sourcedata `AD_MESSAGE.xml`; the Java fallback has the same English text).
+  *Live root cause (tenant "Ivan Test 27"):* the client's only costing rule uses the **Standard Algorithm** while its products
+  have only average (`AVA`) cost rows and no standard cost, so the background process (`CostingBackground`) aborts the whole
+  run on the oldest uncalculated transaction (log: "No existe coste estandar para el producto y fecha dados. ... Producto: Agua")
+  — the run still ends `SUC` in `ad_process_run` — and the 20 transactions behind it (`costing_status NC`) never get a cost. It is
+  tenant configuration (define standard costs or use an average-cost rule), not something a retry fixes.
+
+##### Round 4: `post` / `unpost` on the goods documents, the AD `Posted` toggle hidden
+
+Receipts, shipments and both returns listed only the AD `Posted` button (field `posted`, values N = Post / Y = Unpost) in the
+actions view, with no availability, and did not list `post` / `unpost`. The SPA never uses that button: it calls the menu
+actions `post` / `unpost`, served by `DocumentPostingService` ahead of everything else in the four header handlers. An agent
+that pressed `Posted` got core's raw cost error with no retry guidance. Now:
+
+- `GoodsPostingContracts` declares `post` (`documentStatus` CO and `posted` not `Y`) and `unpost` (CO and `posted` = `Y`), the
+  same states as the invoices', from the four `actionContracts()`. Declaring them **changes no routing** — the handlers still
+  hand both to the posting service first, and REST and the SPA do not read contracts. The `post` description tells the agent what
+  to do with the 409 `costNotCalculated` (wait `retryAfterSeconds`, repeat) and the 422 `costCalculationStalled` (do not retry).
+  Unlike an invoice, `unpost` has no status gate: on a document that is not posted it answers 200 "0 entries removed".
+- `MCP_CONFIG.actions.hidden: ["posted"]` on the four header entities, with its own `reasons.posted` naming both actions (the
+  existing redirects and reasons are kept). It is hidden, not redirected: a redirect names ONE target, and there are two. The
+  round-2 precheck answers `Posted`, `posted` and any other spelling with that reason (405) instead of running core's process.
+  The `posted` value stays readable (curated `readOnly`).
+- The four spec prompts tell the agent to book and unbook with `post` / `unpost`.
+
+##### Round 5: the Bulk Posting button
+
+`etblkpBulkposting` (`EM_Etblkp_Bulkposting`, the mass-accounting button of the Bulk Posting module) has no process on `M_InOut` or
+`C_Invoice`. **The actions catalogue lists every button column of the entity's table, whatever `ISINCLUDED` says**: where the field is
+included (`goods-shipment`, both returns, curated `readOnly`) it was listed as invokable and answered 405 on use; where it is excluded
+and curated `discarded` (`goods-receipt`, `purchase-invoice`, `sales-invoice`) it was listed as `invokable:false` ("not part of the
+curated surface") and an invocation answered a bare `404 Action not found`, because nothing configured a reason. It is now hidden, with a
+reason that names `post` / `unpost`, on all six headers (`MCP_CONFIG.actions.hidden` + `reasons.etblkpBulkposting`); the round-2 precheck
+answers the reason (405) by field name, column name and any spelling. The orders do not have the column. The round 1 `markInvokable`
+fix only touches buttons a declared contract describes, so it did not re-enable anything. *Not covered here (same column, other
+tables):* `sii-monitor` (C_Invoice lists), `goods-movements`, `physical-inventory`, `internal-consumption`, `simple-g-l-journal`,
+`amortization`, the bank-statement / reconciliation specs and `matched-purchase-invoices` list it too; they have no MCP_CONFIG yet.
+
+##### Review notes (declared divergences and limits)
+
+- **Posting without calculated cost differs by document type.** `DocumentPostingService.failureOf` answers
+  `STATUS_NotCalculatedCost` with the retryable **409** `costNotCalculated` (+ `retryAfterSeconds`) for every document the
+  accounting engine posts, and with **422** `costCalculationStalled` when the queue is stalled. The Physical Inventory and
+  Internal Consumption **pre-check** (ETP-5360, ETP-5445) runs before the engine and still answers a plain **422**
+  `NotCalculatedCost` without `retryAfterSeconds` and without the stalled probe. Deliberately not unified here; a caller must not
+  assume one shape across document types.
+- **Unlisted statuses are not judged.** `valuesByStatus` answers "not applicable" (no `availableNow`) for a status the declaration
+  does not list; a status that offers nothing is listed with an empty array (`VO`, `CL` on orders, `VO` on invoices, `CO` on goods
+  documents). The completed-document note is only given for `CO`.
+- **`availableNow` follows the caller's visibility.** The record behind `etendo_schema(view:"actions", id)` is read in the router's
+  administrator mode, so it is checked against the role's readable clients and organisations
+  (`McpActionAvailabilityContext.isVisibleToRole`); a record the role cannot see answers `404 not_found` exactly like a missing id.
+- **The stalled-costing probe was validated by hand.** `CostingStall`'s SQL is only mocked in the unit tests; no isolated-DAL
+  fixture exists that builds costed `M_Transaction` rows cheaply. It was run by hand against the tenant database (true for the
+  stalled organisation with a 10 minute threshold, false with a very large one).
+- **`id` outside `view:"actions"`** is ignored by `etendo_schema` (the argument description says it only applies there).
+
+**Deployment.** `MCP_CONFIG` (eight entity rows), `AGENT_PROMPT` (six spec rows) and the `ETGO_CostCalculationStalled` AD message are data. The sourcedata XML edited here is
+the source, and an idempotent SQL file with `md5` guards brings an existing database to the same bytes without
+`export.database`. The code is a plain deployment.
+
+*Not done here (follow-ups):* the REST guard for `docAction`, the order `linkedDocuments` list, the summary view size,
+status-field curation (five duplicates, `taxableAmount`), the FK text filter errors, the `etendo_action` response-shape
+unification, the tax selector, `serverResolvedCreateFields` for purchase lines, stale totals after `etendo_update` and the
+mandatory-field i18n. The `sales-order` / `purchase-order` windows still have no spec prompt.

@@ -110,7 +110,8 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
           + "the invoice and, once nothing is pending, answers 400 'No pending lines to invoice "
           + "in this purchase order'. Only COMPLETED invoices count as invoiced: an invoice "
           + "left in draft by other means does not reduce what is pending.")
-      .withIdDescription("the id of the purchase order to invoice");
+      .withIdDescription("the id of the purchase order to invoice")
+      .availableWhen(DocumentAvailability.WHEN_COMPLETED);
 
   /**
    * The goods-receipt variant of {@code createPurchaseInvoice} (ETP-5709): the optional body keys
@@ -151,7 +152,8 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
               + "400 naming the line and its pending quantity (it is never capped silently), and "
               + "so is a list none of whose entries has a receiptLineId and a non-zero quantity. "
               + "Omit to invoice the pending quantity of every line."))
-      .withIdDescription("the id of the goods receipt to invoice");
+      .withIdDescription("the id of the goods receipt to invoice")
+      .availableWhen(DocumentAvailability.WHEN_COMPLETED);
 
   private static final String ERR_ORDER_NOT_COMPLETED =
       "Purchase order %s is not completed (status %s): complete it before creating the invoice";
@@ -471,6 +473,8 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     // this EM_ extension column, so the generated invoice total drifted from the
     // source purchase order. Shared with CreateDraftInvoiceHandler (ETP-4006).
     getSupport().copyLineDiscountsFromOrder(invoice);
+    // ETP-5714: a source line without a list price gives a copied line the form would not store
+    getSupport().alignLineListPrices(invoice, null);
 
     InvoiceLineLinker.linkInvoiceLinesToExistingInouts(invoice.getId());
 
@@ -681,6 +685,8 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     // ETP-4726 pattern (see createFromReceipt/createFromReceiptNoPo): CreateInvoiceLinesFromProcess
     // never populates Line_Gross_Amount / grossUnitPrice; only this call does.
     getSupport().ensureLineGrossAmounts(invoice);
+    // ETP-5714: the native copy keeps a source list price of 0; the form would store the price
+    getSupport().alignLineListPrices(invoice, null);
 
     // Deliberately NOT called on this path, unlike createFromReceipt/createFromOrder:
     // copyLineDiscountsFromOrder / applyOrderDiscountToInvoice / propagateOrderRateToInvoice
@@ -962,6 +968,8 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     // ETP-4780: same discount copy as createFromOrder above — a receipt-originated
     // invoice must not lose the % Descuento carried by the linked purchase order line.
     getSupport().copyLineDiscountsFromOrder(invoice);
+    // ETP-5714: a source line without a list price gives a copied line the form would not store
+    getSupport().alignLineListPrices(invoice, null);
 
     InvoiceLineLinker.linkInvoiceLinesToExistingInouts(invoice.getId());
 
@@ -1145,6 +1153,9 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     ensureDocumentNo(invoice);
     // ETP-4726: same gap as createFromReceipt() above — never wired in this branch either.
     getSupport().ensureLineGrossAmounts(invoice);
+    // ETP-5714: same list-price gap as the other native-copy paths (the invoice is brand new, so
+    // every line is a copied one)
+    getSupport().alignLineListPrices(invoice, null);
 
     return invoice;
   }

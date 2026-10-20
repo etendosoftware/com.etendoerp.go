@@ -36,6 +36,7 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
+import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
@@ -720,6 +721,23 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
       log.error("DB error querying linked documents for order {}", orderId, e);
       return false;
     }
+  }
+
+  /**
+   * {@inheritDoc} The order header adds {@code hasLinkedDocuments}, {@code needsPrimaryDoc} and
+   * {@code needsInvoiceDoc} to every GET record (ETP-5714).
+   */
+  @Override
+  public Set<String> responseEnrichedFields() {
+    return OrderDocumentAvailability.RESPONSE_ENRICHED_FIELDS;
+  }
+
+  /**
+   * {@inheritDoc} Reactivate is ruled out for an order that has linked documents (ETP-5714).
+   */
+  @Override
+  public Map<String, String> unavailableActions(BaseOBObject record) {
+    return OrderDocumentAvailability.unavailable(record);
   }
 
   /**

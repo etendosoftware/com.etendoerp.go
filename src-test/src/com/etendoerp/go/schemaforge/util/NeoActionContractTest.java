@@ -478,4 +478,88 @@ class NeoActionContractTest {
       }
     }
   }
+  /**
+   * ETP-5714: availability and the refusal hint. Availability is advisory — the contract renders it
+   * and nothing in {@code validate} consults it — and a value outside a parameter's enum carries
+   * the sentence that says what to do instead.
+   */
+  @Nested
+  @DisplayName("availability and refusal hint (ETP-5714)")
+  class Availability {
+
+    @Test
+    @DisplayName("toJson renders the declared availability next to the parameters")
+    void rendersAvailability() throws Exception {
+      NeoActionContract contract = NeoActionContract.write("importLines", "x")
+          .availableWhen(NeoActionAvailability.whenIn("documentStatus", "DR"));
+
+      JSONObject json = contract.toJson();
+
+      assertEquals("DR", json.getJSONObject("availableWhen").getJSONArray("documentStatus")
+          .getString(0));
+      assertNotNull(contract.getAvailability());
+      assertFalse(NeoActionContract.write("plain", "x").toJson().has("availableWhen"));
+    }
+
+    @Test
+    @DisplayName("every wither keeps the availability")
+    void withersKeepAvailability() {
+      NeoActionContract contract = NeoActionContract.write("a", "x")
+          .availableWhen(NeoActionAvailability.whenIn("documentStatus", "CO"))
+          .withIdDescription("id").withHttpMethod("GET").withFieldValuesBody();
+
+      assertNotNull(contract.getAvailability());
+    }
+
+    @Test
+    @DisplayName("availability is advisory: a call to an action that does not apply still validates")
+    void availabilityNeverRefusesACall() {
+      NeoActionContract onlyDrafts = NeoActionContract.write("completeThing", "x",
+          NeoActionContract.Param.required("docAction", NeoActionContract.TYPE_STRING, "d"))
+          .availableWhen(NeoActionAvailability.whenIn("documentStatus", "DR"));
+
+      assertNull(NeoActionContract.validate(Map.of("completeThing", onlyDrafts), "completeThing",
+          jsonOf("docAction", "CO")));
+    }
+
+    @Test
+    @DisplayName("a value outside the enum answers 422 with the hint, in the message and as hint")
+    void enumRefusalCarriesTheHint() throws Exception {
+      NeoActionContract contract = NeoActionContract.write("documentAction", "x",
+          NeoActionContract.Param.requiredOptions("docAction", "d", List.of("CO"))
+              .withRefusalHint("A completed document must be corrected with a return."));
+
+      NeoResponse refused = NeoActionContract.validate(Map.of("documentAction", contract),
+          "documentAction", jsonOf("docAction", "RE"));
+
+      assertEquals(422, refused.getHttpStatus());
+      JSONObject error = refused.getBody().getJSONObject("error");
+      assertTrue(error.getString("message").contains("must be one of CO."), error.toString());
+      assertTrue(error.getString("message").endsWith("corrected with a return."));
+      assertEquals("A completed document must be corrected with a return.", error.getString("hint"));
+      assertNull(NeoActionContract.validate(Map.of("documentAction", contract), "documentAction",
+          jsonOf("docAction", "CO")));
+    }
+
+    @Test
+    @DisplayName("an enum without a hint refuses exactly as before")
+    void enumWithoutHintIsUnchanged() throws Exception {
+      NeoActionContract contract = NeoActionContract.write("documentAction", "x",
+          NeoActionContract.Param.requiredOptions("docAction", "d", List.of("CO")));
+
+      JSONObject error = NeoActionContract.validate(Map.of("documentAction", contract),
+          "documentAction", jsonOf("docAction", "RE")).getBody().getJSONObject("error");
+
+      assertEquals("Parameter 'docAction' must be one of CO.", error.getString("message"));
+      assertFalse(error.has("hint"));
+    }
+
+    private JSONObject jsonOf(String key, String value) {
+      try {
+        return new JSONObject().put(key, value);
+      } catch (org.codehaus.jettison.json.JSONException e) {
+        throw new IllegalStateException(e);
+      }
+    }
+  }
 }

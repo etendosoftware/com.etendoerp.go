@@ -86,7 +86,8 @@ public final class InvoicePostingGate {
             + "already posted invoice 422 with ['PostedDocument']; an incomplete accounting setup "
             + "or a closed period also answers 422 with the reason. Nothing changes on a refusal. "
             + "Takes no parameters; read documentStatus and posted with etendo_get first.")
-        .withIdDescription(ID_DESCRIPTION));
+        .withIdDescription(ID_DESCRIPTION)
+        .availableWhen(DocumentAvailability.WHEN_POSTABLE));
     contracts.put(ACTION_UNPOST, NeoActionContract.write(ACTION_UNPOST,
         "Removes the invoice's accounting entries (posted becomes 'N') and leaves it Completed, "
             + "so its accounting date, accounting dimensions (project, costcenter) and exchange "
@@ -96,7 +97,8 @@ public final class InvoicePostingGate {
             + "not posted 422 with ['ETGO_InvoiceUnpostNotPosted'], and a period closed for "
             + "unposting 422 — nothing changes on a refusal. To reopen the invoice for any other "
             + "change use documentAction RE instead. Takes no parameters.")
-        .withIdDescription(ID_DESCRIPTION));
+        .withIdDescription(ID_DESCRIPTION)
+        .availableWhen(DocumentAvailability.WHEN_UNPOSTABLE));
     CONTRACTS = Collections.unmodifiableMap(contracts);
   }
 

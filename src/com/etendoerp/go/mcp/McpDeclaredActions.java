@@ -34,6 +34,7 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
+import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.ad.ui.Tab;
@@ -91,6 +92,32 @@ final class McpDeclaredActions {
       }
     }
     return offered;
+  }
+
+  /**
+   * The actions the entity's customization says do not apply to one record, for a reason a column
+   * value cannot express (ETP-5714, {@link NeoHandler#unavailableActions}).
+   *
+   * <p>Advisory and quiet: a customization that throws must not break the catalogue, so a failure
+   * is logged and answered as "nothing derived".</p>
+   *
+   * @param entity the SchemaForge entity
+   * @param record the record the agent asked about
+   * @return {@code action → reason}; empty when none or when the customization cannot be resolved
+   */
+  static Map<String, String> unavailableFor(SFEntity entity, BaseOBObject record) {
+    NeoHandler handler = customizationOf(entity);
+    if (handler == null) {
+      return Collections.emptyMap();
+    }
+    try {
+      Map<String, String> derived = handler.unavailableActions(record);
+      return derived != null ? derived : Collections.emptyMap();
+    } catch (RuntimeException e) {
+      log.warn("Could not derive the unavailable actions of {}: {}", handler.getClass().getName(),
+          e.getMessage());
+      return Collections.emptyMap();
+    }
   }
 
   /**
@@ -169,6 +196,12 @@ final class McpDeclaredActions {
     Set<String> excluded = excludedBy(customization, entity);
     Column button = declared.containsKey(action) ? null : buttonOf(entity, action);
     Set<String> names = namesOf(action, button);
+    // ETP-5714: another spelling of a name the configuration hides or redirects is that name.
+    // Never for a name the customization declares as an action: that one is judged by its contract.
+    String configured = declared.containsKey(action) ? null : config.configuredNameLike(action);
+    if (configured != null) {
+      names.add(configured);
+    }
     for (String name : names) {
       refuseUnlessRunnable(specName, entityName, action, name, excluded, config, parameters);
     }

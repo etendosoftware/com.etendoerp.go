@@ -23,6 +23,8 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
+import org.openbravo.base.structure.BaseOBObject;
+
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import com.etendoerp.go.schemaforge.util.NeoReportParam;
 
@@ -267,6 +269,29 @@ public interface NeoHandler {
    * @return the declared actions by name, in the order they should be presented
    */
   default Map<String, NeoActionContract> actionContracts() {
+    return Collections.emptyMap();
+  }
+
+  /**
+   * Declares, for one concrete record, the actions that do not apply to it for a reason a column
+   * value cannot express (ETP-5714).
+   *
+   * <p>The static part of availability ({@code NeoActionContract#availableWhen}, the
+   * {@code MCP_CONFIG.actions} {@code availableWhen}) compares record properties with allowed
+   * values. Some rules depend on other rows: a return can be invoiced only while it has no
+   * corrective invoice yet, an order can be reactivated only while nothing is linked to it. The
+   * customization that owns the rule answers here, with one sentence per action.</p>
+   *
+   * <p>Advisory, like the rest of availability: {@code etendo_schema(view:"actions")} reports the
+   * entry as {@code availableNow:false} with the sentence as {@code unavailableReason} when it is
+   * asked about a record. It never refuses a call, so the handler's own guard stays the
+   * enforcement. An implementation must not throw for a record it cannot judge: it omits the
+   * action instead.</p>
+   *
+   * @param record the record the agent asked about
+   * @return {@code action name → reason}; empty by default
+   */
+  default Map<String, String> unavailableActions(BaseOBObject record) {
     return Collections.emptyMap();
   }
 
