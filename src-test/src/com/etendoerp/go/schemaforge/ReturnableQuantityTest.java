@@ -307,7 +307,7 @@ public class ReturnableQuantityTest {
     when(dal.getConnection()).thenReturn(conn);
     when(conn.prepareStatement(anyString())).thenAnswer(inv -> {
       String sql = inv.getArgument(0);
-      String kind = sql.contains("FOR UPDATE") ? "lock"
+      String kind = sql.contains("FOR NO KEY UPDATE") ? "lock"
           : ReturnedQuantityTestSupport.isReturnedQuantityQuery(sql) ? "sum" : "other";
       PreparedStatement ps = mock(PreparedStatement.class);
       ResultSet rs = mock(ResultSet.class);
@@ -362,7 +362,7 @@ public class ReturnableQuantityTest {
       verify(dal.getConnection()).prepareStatement(sql.capture());
       assertTrue(sql.getValue(), sql.getValue().contains("FROM M_InOutLine"));
       assertTrue(sql.getValue(), sql.getValue().contains("WHERE M_InOutLine_ID = ?"));
-      assertTrue(sql.getValue(), sql.getValue().endsWith("FOR UPDATE"));
+      assertTrue(sql.getValue(), sql.getValue().endsWith("FOR NO KEY UPDATE"));
     }
   }
 

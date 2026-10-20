@@ -31,25 +31,30 @@ import static org.mockito.Mockito.mockConstruction;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import java.io.BufferedReader;
 import java.io.PrintWriter;
 import java.io.StringReader;
 import java.io.StringWriter;
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Callable;
 
+import javax.servlet.http.Cookie;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.Session;
 import org.apache.logging.log4j.Level;
 import org.junit.After;
 import org.junit.Before;
@@ -57,13 +62,19 @@ import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.mockito.MockedConstruction;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBDal;
 
 import com.etendoerp.go.common.BoundedJsonParserTest;
+import com.auth0.jwt.interfaces.Claim;
+import com.auth0.jwt.interfaces.DecodedJWT;
 import com.etendoerp.go.common.PublicUrlResolver;
 import com.etendoerp.go.oauth2.OAuth2Filter;
+import com.etendoerp.go.payment.EnvironmentAccessGuard;
 import com.etendoerp.go.payment.EnvironmentAccessPolicy;
 import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.session.GoSessionRecord;
+import com.etendoerp.go.session.GoSessionSecurity;
+import com.smf.securewebservices.utils.SecureWebServicesUtils;
 import com.etendoerp.go.session.GoSessionRoleReconciler;
 import com.etendoerp.go.session.SessionRoleRevokedException;
 import com.etendoerp.go.usageevents.LogCapture;
@@ -78,21 +89,36 @@ import com.etendoerp.go.usageevents.LogCapture;
 public class McpServletTest {
 
   private McpServlet servlet;
-  private TenantEnvironmentLifecycleService lifecycleService;
   private HttpServletRequest request;
   private HttpServletResponse response;
   private StringWriter responseBody;
   private PrintWriter writer;
+  private EnvironmentAccessGuard environmentAccessGuard;
   private GoSessionRoleReconciler roleReconciler;
+
+  private static final String ENFORCEMENT_OFF_PROPERTY =
+      "etendo.go.flags.environment-access-enforcement-off";
 
   @Before
   public void setUp() throws Exception {
-    // Mockito answers null by default: a tenant without lifecycle metadata, which is allowed.
-    lifecycleService = mock(TenantEnvironmentLifecycleService.class);
-    servlet = new McpServlet(lifecycleService);
+    servlet = new McpServlet();
+    // ETP-5047 — doPost asks the commercial access guard, which runs as system against the DAL.
+    // A mock that allows every tenant (null denial) keeps these dispatch tests DB-free; the
+    // refusal itself is pinned by the environment-access tests below.
+    environmentAccessGuard = mock(EnvironmentAccessGuard.class);
+    Field guardField = McpServlet.class.getDeclaredField("environmentAccessGuard");
+    guardField.setAccessible(true);
+    guardField.set(servlet, environmentAccessGuard);
     // ETP-5270 — the role lookups hit AD_User_Roles; a mock is "role still held, no rebind".
     roleReconciler = mock(GoSessionRoleReconciler.class);
     servlet.sessionRoleReconciler = roleReconciler;
+    newExchange();
+
+    System.setProperty(PublicUrlResolver.MCP_PUBLIC_URL_PROPERTY, "https://example.com/mcp");
+  }
+
+  /** A fresh request/response pair, so one test can send several requests. */
+  private void newExchange() throws Exception {
     request = mock(HttpServletRequest.class);
     response = mock(HttpServletResponse.class);
     responseBody = new StringWriter();
@@ -104,8 +130,6 @@ public class McpServletTest {
     when(request.getServerName()).thenReturn("localhost");
     when(request.getServerPort()).thenReturn(8080);
     when(request.getContextPath()).thenReturn("/etendo");
-
-    System.setProperty(PublicUrlResolver.MCP_PUBLIC_URL_PROPERTY, "https://example.com/mcp");
   }
 
   @After
@@ -113,6 +137,7 @@ public class McpServletTest {
     System.clearProperty(KILL_SWITCH_PROPERTY);
     System.clearProperty(PublicUrlResolver.MCP_PUBLIC_URL_PROPERTY);
     System.clearProperty(PublicUrlResolver.OAUTH2_PUBLIC_URL_PROPERTY);
+    System.clearProperty(ENFORCEMENT_OFF_PROPERTY);
   }
 
   private void setRequestBody(String body) throws Exception {
@@ -479,6 +504,435 @@ public class McpServletTest {
     }
   }
 
+  // ── doPost: commercial environment access (ETP-5047) ────────────────────
+
+  /**
+   * A denial built by the real guard, so the body asserted below is the shared wire format and not
+   * a test double of it. The guard's lifecycle service answers the decision; its kill switch is
+   * off.
+   */
+  private static EnvironmentAccessGuard.Denial denialFor(EnvironmentAccessPolicy.Decision decision) {
+    com.etendoerp.go.payment.TenantEnvironmentLifecycleService lifecycle =
+        mock(com.etendoerp.go.payment.TenantEnvironmentLifecycleService.class);
+    when(lifecycle.evaluateAccess(eq("client1"), eq(true),
+        org.mockito.ArgumentMatchers.any(java.time.Instant.class))).thenReturn(decision);
+    try (MockedStatic<com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag> flag =
+        mockStatic(com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag.class)) {
+      flag.when(() -> com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag
+          .isEnforcementSwitchedOff(anyString())).thenReturn(false);
+      return new EnvironmentAccessGuard(lifecycle).check("client1", "test");
+    }
+  }
+
+  @Test
+  public void doPostIntoABlockedTenantAnswers402WithTheSharedBodyAndDispatchesNothing()
+      throws Exception {
+    setOAuth2FilterAttributes("user1", "role1", "client1", "org1", "neo:read");
+    setRequestBody(new JSONObject().put("jsonrpc", "2.0").put("id", 1).put("method", "ping")
+        .toString());
+    EnvironmentAccessGuard.Denial denial =
+        denialFor(EnvironmentAccessPolicy.Decision.SUBSCRIPTION_REQUIRED);
+    when(environmentAccessGuard.checkAsSystem("client1", "mcp")).thenReturn(denial);
+
+    servlet.doPost(request, response);
+
+    verify(response).setStatus(HttpServletResponse.SC_PAYMENT_REQUIRED);
+    verify(response, never()).setStatus(HttpServletResponse.SC_OK);
+    // Written by the shared Denial.writeTo: JSON in UTF-8, like every other entry point.
+    verify(response).setContentType("application/json");
+    verify(response).setCharacterEncoding("UTF-8");
+    verify(request, never()).getReader();
+    JSONObject error = new JSONObject(getResponseBody()).getJSONObject("error");
+    assertEquals("Environment access is not available: SUBSCRIPTION_REQUIRED",
+        error.getString("message"));
+    assertEquals(402, error.getInt("status"));
+    assertEquals("ENVIRONMENT_ACCESS_DENIED", error.getString("code"));
+    assertEquals("SUBSCRIPTION_REQUIRED", error.getString("decision"));
+    assertFalse("a refused request is not a JSON-RPC response",
+        new JSONObject(getResponseBody()).has("jsonrpc"));
+  }
+
+  @Test
+  public void doPostIntoAnExpiredDemoAnswers402WithItsDecision() throws Exception {
+    setOAuth2FilterAttributes("user1", "role1", "client1", "org1", "neo:read");
+    setRequestBody(new JSONObject().put("jsonrpc", "2.0").put("id", 1).put("method", "ping")
+        .toString());
+    // Built before the stubbing starts: denialFor stubs mocks of its own.
+    EnvironmentAccessGuard.Denial denial =
+        denialFor(EnvironmentAccessPolicy.Decision.DEMO_TRIAL_EXPIRED);
+    when(environmentAccessGuard.checkAsSystem("client1", "mcp")).thenReturn(denial);
+
+    servlet.doPost(request, response);
+
+    verify(response).setStatus(HttpServletResponse.SC_PAYMENT_REQUIRED);
+    assertEquals("DEMO_TRIAL_EXPIRED", new JSONObject(getResponseBody())
+        .getJSONObject("error").getString("decision"));
+  }
+
+  @Test
+  public void doPostIntoAnAllowedTenantAsksTheGuardForItsClientAndProceeds() throws Exception {
+    setOAuth2FilterAttributes("user1", "role1", "client1", "org1", "neo:read");
+    setRequestBody(new JSONObject().put("jsonrpc", "2.0").put("id", 7).put("method", "ping")
+        .toString());
+    when(environmentAccessGuard.checkAsSystem("client1", "mcp")).thenReturn(null);
+
+    servlet.doPost(request, response);
+
+    verify(environmentAccessGuard).checkAsSystem("client1", "mcp");
+    verify(response).setStatus(HttpServletResponse.SC_OK);
+    verify(response, never()).setStatus(HttpServletResponse.SC_PAYMENT_REQUIRED);
+    assertEquals(7, new JSONObject(getResponseBody()).getInt("id"));
+  }
+
+  /**
+   * A notification ({@code notifications/initialized}, no {@code id}) is normally answered 202
+   * with no body (ETP-5639). Into a blocked tenant it must still get the structured 402: the
+   * access guard runs before the body is read, so a client that only sends notifications learns it
+   * is refused instead of seeing every message accepted, and nothing is dispatched.
+   */
+  @Test
+  public void aNotificationIntoABlockedTenantIsRefusedWith402NotAccepted() throws Exception {
+    setOAuth2FilterAttributes("user1", "role1", "client1", "org1", "neo:read");
+    setRequestBody(new JSONObject().put("jsonrpc", "2.0")
+        .put("method", "notifications/initialized").toString());
+    EnvironmentAccessGuard.Denial denial =
+        denialFor(EnvironmentAccessPolicy.Decision.SUBSCRIPTION_REQUIRED);
+    when(environmentAccessGuard.checkAsSystem("client1", "mcp")).thenReturn(denial);
+
+    servlet.doPost(request, response);
+
+    verify(response).setStatus(HttpServletResponse.SC_PAYMENT_REQUIRED);
+    verify(response, never()).setStatus(HttpServletResponse.SC_ACCEPTED);
+    // The body is never read, so the notification is never parsed nor dispatched.
+    verify(request, never()).getReader();
+    JSONObject error = new JSONObject(getResponseBody()).getJSONObject("error");
+    assertEquals("Environment access is not available: SUBSCRIPTION_REQUIRED",
+        error.getString("message"));
+    assertEquals(402, error.getInt("status"));
+    assertEquals("ENVIRONMENT_ACCESS_DENIED", error.getString("code"));
+    assertEquals("SUBSCRIPTION_REQUIRED", error.getString("decision"));
+  }
+
+  @Test
+  public void doPostThatFailsAuthenticationNeverAsksTheGuard() throws Exception {
+    when(request.getAttribute(OAuth2Filter.ATTR_USER_ID)).thenReturn(null);
+    when(request.getHeader("Authorization")).thenReturn(null);
+
+    servlet.doPost(request, response);
+
+    verify(response).setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+    verifyNoInteractions(environmentAccessGuard);
+  }
+
+  /**
+   * ETP-5047 review W1 — an MCP token commonly carries the wildcard client {@code "0"}; the tenant
+   * it acts on is its role's client, which {@link McpSessionManager} resolves before building the
+   * context. The guard must judge THAT tenant: asked about {@code "0"} it finds no lifecycle
+   * metadata and allows, so a blocked tenant walked past it with a wildcard token.
+   */
+  @Test
+  public void doPostWithAWildcardTokenAsksTheGuardForTheRolesTenant() throws Exception {
+    setOAuth2FilterAttributes("user1", "role1", "0", "0", "neo:read");
+    setRequestBody(new JSONObject().put("jsonrpc", "2.0").put("id", 1).put("method", "ping")
+        .toString());
+    EnvironmentAccessGuard.Denial denial =
+        denialFor(EnvironmentAccessPolicy.Decision.SUBSCRIPTION_REQUIRED);
+    when(environmentAccessGuard.checkAsSystem("tenantOfRole1", "mcp")).thenReturn(denial);
+    OBDal obDal = mock(OBDal.class);
+    Session session = mock(Session.class);
+    when(obDal.getSession()).thenReturn(session);
+    // The role lookup (SELECT ad_client_id FROM ad_role) answers the role's tenant.
+    when(session.doReturningWork(org.mockito.ArgumentMatchers.any())).thenReturn("tenantOfRole1");
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      servlet.doPost(request, response);
+    }
+
+    verify(environmentAccessGuard).checkAsSystem("tenantOfRole1", "mcp");
+    verify(environmentAccessGuard, never()).checkAsSystem(eq("0"), anyString());
+    verify(response).setStatus(HttpServletResponse.SC_PAYMENT_REQUIRED);
+  }
+
+  /**
+   * A guard that cannot decide (its lifecycle lookup hit a DB error) must fail closed with the
+   * same JSON 503 a failed role lookup answers — never an escaped exception, which Tomcat turns
+   * into an HTML 500, and never a dispatch.
+   */
+  @Test
+  public void doPostWhoseAccessCheckFailsAnswers503AndDispatchesNothing() throws Exception {
+    setOAuth2FilterAttributes("user1", "role1", "client1", "org1", "neo:read");
+    setRequestBody(new JSONObject()
+        .put("jsonrpc", "2.0")
+        .put("id", 9)
+        .put("method", "tools/call")
+        .put("params", new JSONObject().put("name", "etendo_list")
+            .put("arguments", new JSONObject().put("spec", "product")))
+        .toString());
+    when(environmentAccessGuard.checkAsSystem("client1", "mcp"))
+        .thenThrow(new IllegalStateException("lifecycle lookup failed"));
+
+    try (MockedConstruction<McpToolRouter> routerMock =
+        mockConstruction(McpToolRouter.class)) {
+      servlet.doPost(request, response);
+
+      assertTrue(routerMock.constructed().isEmpty());
+    }
+    verify(response).setStatus(HttpServletResponse.SC_SERVICE_UNAVAILABLE);
+    verify(response, never()).setStatus(HttpServletResponse.SC_OK);
+    verify(request, never()).getReader();
+    String body = getResponseBody();
+    assertTrue(body, new JSONObject(body).getString("error").contains("could not be verified"));
+    assertFalse(body.contains("\"jsonrpc\""));
+  }
+
+  /** Runs a wildcard-token {@code ping} whose role lookup answers {@code roleLookup}. */
+  private void doPostWildcardPing(Object roleLookup) throws Exception {
+    setOAuth2FilterAttributes("user1", "role1", "0", "0", "neo:read");
+    setRequestBody(new JSONObject().put("jsonrpc", "2.0").put("id", 3).put("method", "ping")
+        .toString());
+    OBDal obDal = mock(OBDal.class);
+    Session session = mock(Session.class);
+    when(obDal.getSession()).thenReturn(session);
+    if (roleLookup instanceof RuntimeException) {
+      when(session.doReturningWork(org.mockito.ArgumentMatchers.any()))
+          .thenThrow((RuntimeException) roleLookup);
+    } else {
+      when(session.doReturningWork(org.mockito.ArgumentMatchers.any())).thenReturn(roleLookup);
+    }
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      servlet.doPost(request, response);
+    }
+  }
+
+  /**
+   * ETP-5047 review W2 — fail closed: a role lookup that FAILED must not fall back to
+   * {@code "0"}, which the guard allows; a later successful lookup in
+   * {@code McpSessionManager.executeInContext} would then run under the tenant unjudged.
+   */
+  @Test
+  public void doPostWithAWildcardTokenWhoseRoleLookupFailsIsRefusedUnjudged() throws Exception {
+    doPostWildcardPing(new IllegalStateException("db down"));
+
+    verify(response).setStatus(HttpServletResponse.SC_SERVICE_UNAVAILABLE);
+    verifyNoInteractions(environmentAccessGuard);
+    assertFalse(getResponseBody().contains("\"jsonrpc\""));
+  }
+
+  /** A System role legitimately has no tenant: it keeps {@code "0"} and proceeds, as before. */
+  @Test
+  public void doPostWithAWildcardTokenOfASystemRoleKeepsTheSystemClient() throws Exception {
+    doPostWildcardPing(null);
+
+    verify(environmentAccessGuard).checkAsSystem("0", "mcp");
+    verify(response).setStatus(HttpServletResponse.SC_OK);
+  }
+
+  // ── doPost: the 402 under every credential scheme (ETP-5047) ────────────
+
+  /**
+   * Every way {@link McpServlet#doPost} accepts a caller. The guard is asked with the tenant the
+   * credential names, so each scheme carries its own tenant id: a scheme whose tenant never reached
+   * the guard would be decided for the wrong tenant (or for none) and slip through.
+   */
+  private enum CredentialScheme {
+    /** Attributes the OAuth2 filter already set on the request. */
+    OAUTH2_FILTER("filter-tenant"),
+    /** An opaque OAuth2 access token in {@code Authorization: Bearer}. */
+    OAUTH2_TOKEN("oauth2-tenant"),
+    /** A legacy Etendo JWT in {@code Authorization: Bearer}. */
+    LEGACY_JWT("jwt-tenant"),
+    /** The SPA's {@code __Host-go_session} cookie, with its Origin and CSRF proof. */
+    COOKIE_SESSION("cookie-tenant");
+
+    final String clientId;
+
+    CredentialScheme(String clientId) {
+      this.clientId = clientId;
+    }
+  }
+
+  private static final String SAME_ORIGIN = "http://localhost:8080";
+  private static final String SESSION_CSRF = "csrf-token-value-123456";
+
+  /**
+   * Makes the current request carry {@code scheme}'s credential, naming its tenant.
+   *
+   * @return the static mocks the scheme needs, to be closed by the caller
+   */
+  private List<MockedStatic<?>> presentCredential(CredentialScheme scheme) throws Exception {
+    List<MockedStatic<?>> statics = new ArrayList<>();
+    switch (scheme) {
+      case OAUTH2_FILTER:
+        setOAuth2FilterAttributes("user1", "role1", scheme.clientId, "org1", "neo:read");
+        break;
+      case OAUTH2_TOKEN: {
+        when(request.getHeader("Authorization")).thenReturn("Bearer opaque-token");
+        Map<String, String> tokenIdentity = new HashMap<>();
+        tokenIdentity.put(OAuth2Filter.ATTR_USER_ID, "user1");
+        tokenIdentity.put(OAuth2Filter.ATTR_ROLE_ID, "role1");
+        tokenIdentity.put(OAuth2Filter.ATTR_CLIENT_ID, scheme.clientId);
+        tokenIdentity.put(OAuth2Filter.ATTR_ORG_ID, "org1");
+        tokenIdentity.put(OAuth2Filter.ATTR_SCOPES, "neo:read");
+        MockedStatic<OAuth2Filter> oauth2 = mockStatic(OAuth2Filter.class);
+        statics.add(oauth2);
+        oauth2.when(() -> OAuth2Filter.validateToken("opaque-token")).thenReturn(tokenIdentity);
+        break;
+      }
+      case LEGACY_JWT: {
+        when(request.getHeader("Authorization")).thenReturn("Bearer legacy.jwt.token");
+        MockedStatic<OAuth2Filter> oauth2 = mockStatic(OAuth2Filter.class);
+        statics.add(oauth2);
+        oauth2.when(() -> OAuth2Filter.validateToken("legacy.jwt.token")).thenReturn(null);
+        MockedStatic<SecureWebServicesUtils> jwt = mockStatic(SecureWebServicesUtils.class);
+        statics.add(jwt);
+        DecodedJWT decoded = mock(DecodedJWT.class);
+        Claim user = claim("user1");
+        Claim role = claim("role1");
+        Claim client = claim(scheme.clientId);
+        Claim org = claim("org1");
+        when(decoded.getClaim("user")).thenReturn(user);
+        when(decoded.getClaim("role")).thenReturn(role);
+        when(decoded.getClaim("client")).thenReturn(client);
+        when(decoded.getClaim("organization")).thenReturn(org);
+        jwt.when(() -> SecureWebServicesUtils.decodeToken("legacy.jwt.token")).thenReturn(decoded);
+        break;
+      }
+      case COOKIE_SESSION: {
+        when(request.getMethod()).thenReturn("POST");
+        when(request.getCookies()).thenReturn(
+            new Cookie[] { new Cookie(GoSessionSecurity.COOKIE_NAME, "session-token") });
+        when(request.getHeader("Origin")).thenReturn(SAME_ORIGIN);
+        when(request.getHeader(GoSessionSecurity.CSRF_HEADER)).thenReturn(SESSION_CSRF);
+        GoSessionRecord session = sessionRecord("user1", "role1", scheme.clientId, "org1");
+        session.setCsrfToken(SESSION_CSRF);
+        // Far from both expiries, so resolving it writes nothing back.
+        session.setExpiresAt(Instant.now().plus(365, ChronoUnit.DAYS));
+        session.setAbsoluteExpiresAt(Instant.now().plus(365, ChronoUnit.DAYS));
+        // The servlet's session store reads through the DAL session's JDBC work.
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        statics.add(obDal);
+        OBDal dal = mock(OBDal.class);
+        Session hibernateSession = mock(Session.class);
+        when(dal.getSession()).thenReturn(hibernateSession);
+        when(hibernateSession.doReturningWork(org.mockito.ArgumentMatchers.any()))
+            .thenReturn(session);
+        obDal.when(OBDal::getInstance).thenReturn(dal);
+        break;
+      }
+      default:
+        throw new IllegalArgumentException(scheme.name());
+    }
+    return statics;
+  }
+
+  private static Claim claim(String value) {
+    Claim claim = mock(Claim.class);
+    when(claim.asString()).thenReturn(value);
+    return claim;
+  }
+
+  /**
+   * Replaces the mock guard with the real one over a lifecycle service that answers
+   * {@code decision} for every tenant, so the refusal, its body and the kill switch are the
+   * production code's, not a stub's.
+   */
+  private TenantEnvironmentLifecycleService useTheRealGuardDeciding(
+      EnvironmentAccessPolicy.Decision decision) throws Exception {
+    TenantEnvironmentLifecycleService lifecycle = mock(TenantEnvironmentLifecycleService.class);
+    when(lifecycle.evaluateAccess(anyString(), eq(true),
+        org.mockito.ArgumentMatchers.any(Instant.class))).thenReturn(decision);
+    Field guardField = McpServlet.class.getDeclaredField("environmentAccessGuard");
+    guardField.setAccessible(true);
+    guardField.set(servlet, new EnvironmentAccessGuard(lifecycle));
+    return lifecycle;
+  }
+
+  /**
+   * Sends a {@code ping} under {@code scheme} into a tenant the lifecycle service refuses. The
+   * guard runs as system; {@link OBContext} is static-mocked so that switch touches no database.
+   */
+  private TenantEnvironmentLifecycleService pingABlockedTenantUnder(CredentialScheme scheme)
+      throws Exception {
+    newExchange();
+    TenantEnvironmentLifecycleService lifecycle =
+        useTheRealGuardDeciding(EnvironmentAccessPolicy.Decision.SUBSCRIPTION_REQUIRED);
+    setRequestBody(new JSONObject().put("jsonrpc", "2.0").put("id", 5).put("method", "ping")
+        .toString());
+    List<MockedStatic<?>> statics = presentCredential(scheme);
+    try (MockedStatic<OBContext> context = mockStatic(OBContext.class)) {
+      servlet.doPost(request, response);
+    } finally {
+      for (MockedStatic<?> mocked : statics) {
+        mocked.close();
+      }
+    }
+    return lifecycle;
+  }
+
+  private void assertRefusedWith402AndNothingDispatched(CredentialScheme scheme,
+      TenantEnvironmentLifecycleService lifecycle) throws Exception {
+    String body = getResponseBody();
+    verify(lifecycle).evaluateAccess(eq(scheme.clientId), eq(true),
+        org.mockito.ArgumentMatchers.any(Instant.class));
+    verify(response).setStatus(HttpServletResponse.SC_PAYMENT_REQUIRED);
+    verify(response, never()).setStatus(HttpServletResponse.SC_OK);
+    verify(response).setContentType("application/json");
+    verify(response).setCharacterEncoding("UTF-8");
+    verify(request, never()).getReader();
+    JSONObject json = new JSONObject(body);
+    assertFalse(scheme + ": a refusal is not a JSON-RPC response", json.has("jsonrpc"));
+    JSONObject error = json.getJSONObject("error");
+    assertEquals(scheme + ": " + body,
+        "Environment access is not available: SUBSCRIPTION_REQUIRED", error.getString("message"));
+    assertEquals(402, error.getInt("status"));
+    assertEquals("ENVIRONMENT_ACCESS_DENIED", error.getString("code"));
+    assertEquals("SUBSCRIPTION_REQUIRED", error.getString("decision"));
+  }
+
+  @Test
+  public void aBlockedTenantIsRefusedWith402UnderTheOAuth2FilterAttributes() throws Exception {
+    CredentialScheme scheme = CredentialScheme.OAUTH2_FILTER;
+    assertRefusedWith402AndNothingDispatched(scheme, pingABlockedTenantUnder(scheme));
+  }
+
+  @Test
+  public void aBlockedTenantIsRefusedWith402UnderAnOAuth2AccessToken() throws Exception {
+    CredentialScheme scheme = CredentialScheme.OAUTH2_TOKEN;
+    assertRefusedWith402AndNothingDispatched(scheme, pingABlockedTenantUnder(scheme));
+  }
+
+  @Test
+  public void aBlockedTenantIsRefusedWith402UnderALegacyJwt() throws Exception {
+    CredentialScheme scheme = CredentialScheme.LEGACY_JWT;
+    assertRefusedWith402AndNothingDispatched(scheme, pingABlockedTenantUnder(scheme));
+  }
+
+  @Test
+  public void aBlockedTenantIsRefusedWith402UnderTheCookieSession() throws Exception {
+    CredentialScheme scheme = CredentialScheme.COOKIE_SESSION;
+    assertRefusedWith402AndNothingDispatched(scheme, pingABlockedTenantUnder(scheme));
+  }
+
+  /** The kill switch reopens MCP for a blocked tenant whichever credential the caller holds. */
+  @Test
+  public void aBlockedTenantIsDispatchedUnderEverySchemeWhileEnforcementIsSwitchedOff()
+      throws Exception {
+    System.setProperty(ENFORCEMENT_OFF_PROPERTY, "true");
+    for (CredentialScheme scheme : CredentialScheme.values()) {
+      TenantEnvironmentLifecycleService lifecycle = pingABlockedTenantUnder(scheme);
+
+      verify(lifecycle).evaluateAccess(eq(scheme.clientId), eq(true),
+          org.mockito.ArgumentMatchers.any(Instant.class));
+      verify(response).setStatus(HttpServletResponse.SC_OK);
+      verify(response, never()).setStatus(HttpServletResponse.SC_PAYMENT_REQUIRED);
+      JSONObject rpcResponse = new JSONObject(getResponseBody());
+      assertEquals(scheme + ": the ping is answered", 5, rpcResponse.getInt("id"));
+      assertTrue(scheme.name(), rpcResponse.has("result"));
+    }
+  }
+
   // ── doPost: JSON-RPC dispatch ───────────────────────────────────────────
 
   @Test
@@ -723,8 +1177,6 @@ public class McpServletTest {
   @Test
   public void modernToolsListIsServedWithoutInitialize() throws Exception {
     try (MockedStatic<McpSessionManager> sessionMock = mockStatic(McpSessionManager.class)) {
-      sessionMock.when(() -> McpSessionManager.resolveEffectiveClientId(anyString(),
-          anyString())).thenReturn("client1");
       sessionMock.when(() -> McpSessionManager.executeInContext(anyString(), anyString(),
           anyString(), anyString(), org.mockito.ArgumentMatchers.isNull(),
           org.mockito.ArgumentMatchers.<Callable<JSONObject>>any()))
@@ -1051,108 +1503,85 @@ public class McpServletTest {
     assertTrue(served.getJSONObject("result").has("supportedVersions"));
   }
 
-  // ── commercial access gate (ETP-5642) ───────────────────────────────────
+  // ── commercial access gate (ETP-5642, through the ETP-5047 guard) ────────
+  //
+  // ETP-5642's specs, kept for what they add to the guard specs above: the refusal comes before
+  // any dispatch whatever the method (tools/call, and the protocol methods initialize and
+  // tools/list), and the real guard serves an allowed tenant and a tenant without lifecycle
+  // metadata (a null decision: the legacy transition). The wildcard-client spec of ETP-5642 is
+  // covered by doPostWithAWildcardTokenAsksTheGuardForTheRolesTenant. The body is the shared
+  // structured one; ETP-5642 first answered a plain {"error":"<message>"} string.
 
-  private void stubAccessDecision(EnvironmentAccessPolicy.Decision decision) {
-    when(lifecycleService.evaluateAccess(eq("client1"), eq(true), any(Instant.class)))
-        .thenReturn(decision);
+  /** Posts {@code body} as an OAuth2 caller of client1 through the real guard deciding so. */
+  private void postThroughTheRealGuard(EnvironmentAccessPolicy.Decision decision, String body)
+      throws Exception {
+    useTheRealGuardDeciding(decision);
+    setOAuth2FilterAttributes("user1", "role1", "client1", "org1", "neo:read");
+    setRequestBody(body);
+    // The guard runs as system; OBContext is static-mocked so that switch touches no database.
+    try (MockedStatic<OBContext> context = mockStatic(OBContext.class)) {
+      servlet.doPost(request, response);
+    }
   }
 
-  private void setToolsCallBody() throws Exception {
-    setRequestBody(new JSONObject()
+  private static String rpc(int id, String method) throws Exception {
+    return new JSONObject().put("jsonrpc", "2.0").put("id", id).put("method", method).toString();
+  }
+
+  @Test
+  public void doPostRefusesExpiredDemoWith402BeforeAnyDispatch() throws Exception {
+    String toolsCall = new JSONObject()
         .put("jsonrpc", "2.0")
         .put("id", 30)
         .put("method", "tools/call")
         .put("params", new JSONObject().put("name", "etendo_list")
             .put("arguments", new JSONObject().put("spec", "product")))
-        .toString());
-  }
-
-  @Test
-  public void doPostRefusesExpiredDemoWith402BeforeAnyDispatch() throws Exception {
-    setOAuth2FilterAttributes("user1", "role1", "client1", "org1", "neo:read");
-    stubAccessDecision(EnvironmentAccessPolicy.Decision.DEMO_TRIAL_EXPIRED);
-    setToolsCallBody();
+        .toString();
 
     try (MockedConstruction<McpToolRouter> routerMock =
         mockConstruction(McpToolRouter.class)) {
-      servlet.doPost(request, response);
+      postThroughTheRealGuard(EnvironmentAccessPolicy.Decision.DEMO_TRIAL_EXPIRED, toolsCall);
 
-      verify(response).setStatus(402);
+      verify(response).setStatus(HttpServletResponse.SC_PAYMENT_REQUIRED);
       assertTrue(routerMock.constructed().isEmpty());
     }
     JSONObject body = new JSONObject(getResponseBody());
+    JSONObject error = body.getJSONObject("error");
     assertEquals("Environment access is not available: DEMO_TRIAL_EXPIRED",
-        body.getString("error"));
+        error.getString("message"));
+    assertEquals("DEMO_TRIAL_EXPIRED", error.getString("decision"));
     assertFalse(body.has("result"));
   }
 
   @Test
   public void doPostRefusesSuspendedSubscriptionEvenForProtocolMethods() throws Exception {
-    setOAuth2FilterAttributes("user1", "role1", "client1", "org1", "neo:read");
-    stubAccessDecision(EnvironmentAccessPolicy.Decision.SUBSCRIPTION_REQUIRED);
-    setRequestBody(new JSONObject()
-        .put("jsonrpc", "2.0")
-        .put("id", 31)
-        .put("method", "tools/list")
-        .toString());
+    for (String method : new String[] { "initialize", "tools/list" }) {
+      newExchange();
+      postThroughTheRealGuard(EnvironmentAccessPolicy.Decision.SUBSCRIPTION_REQUIRED,
+          rpc(31, method));
 
-    servlet.doPost(request, response);
-
-    verify(response).setStatus(402);
-    verify(response, never()).setStatus(HttpServletResponse.SC_OK);
-    assertEquals("Environment access is not available: SUBSCRIPTION_REQUIRED",
-        new JSONObject(getResponseBody()).getString("error"));
+      verify(response).setStatus(HttpServletResponse.SC_PAYMENT_REQUIRED);
+      verify(response, never()).setStatus(HttpServletResponse.SC_OK);
+      assertEquals(method, "Environment access is not available: SUBSCRIPTION_REQUIRED",
+          new JSONObject(getResponseBody()).getJSONObject("error").getString("message"));
+    }
   }
 
   @Test
   public void doPostServesAnAllowedEnvironment() throws Exception {
-    setOAuth2FilterAttributes("user1", "role1", "client1", "org1", "neo:read");
-    stubAccessDecision(EnvironmentAccessPolicy.Decision.ALLOWED);
-    setRequestBody(new JSONObject()
-        .put("jsonrpc", "2.0")
-        .put("id", 32)
-        .put("method", "ping")
-        .toString());
-
-    servlet.doPost(request, response);
+    postThroughTheRealGuard(EnvironmentAccessPolicy.Decision.ALLOWED, rpc(32, "ping"));
 
     verify(response).setStatus(HttpServletResponse.SC_OK);
-    verify(response, never()).setStatus(402);
+    verify(response, never()).setStatus(HttpServletResponse.SC_PAYMENT_REQUIRED);
     assertEquals(32, new JSONObject(getResponseBody()).getInt("id"));
   }
 
   @Test
   public void doPostServesATenantWithoutLifecycleMetadata() throws Exception {
-    setOAuth2FilterAttributes("user1", "role1", "client1", "org1", "neo:read");
-    stubAccessDecision(null);
-    setRequestBody(new JSONObject()
-        .put("jsonrpc", "2.0")
-        .put("id", 33)
-        .put("method", "ping")
-        .toString());
-
-    servlet.doPost(request, response);
+    postThroughTheRealGuard(null, rpc(33, "ping"));
 
     verify(response).setStatus(HttpServletResponse.SC_OK);
-    verify(response, never()).setStatus(402);
-  }
-
-  @Test
-  public void doPostEvaluatesTheRoleClientForASystemWildcardCredential() throws Exception {
-    setOAuth2FilterAttributes("user1", "role1", "0", "org1", "neo:read");
-    setToolsCallBody();
-
-    try (MockedStatic<McpSessionManager> sessionMock = mockStatic(McpSessionManager.class)) {
-      sessionMock.when(() -> McpSessionManager.resolveEffectiveClientId("0", "role1"))
-          .thenReturn("client1");
-      stubAccessDecision(EnvironmentAccessPolicy.Decision.DEMO_TRIAL_EXPIRED);
-
-      servlet.doPost(request, response);
-    }
-
-    verify(lifecycleService).evaluateAccess(eq("client1"), eq(true), any(Instant.class));
-    verify(response).setStatus(402);
+    verify(response, never()).setStatus(HttpServletResponse.SC_PAYMENT_REQUIRED);
   }
 
   @Test
@@ -1213,6 +1642,10 @@ public class McpServletTest {
     verify(response).setStatus(HttpServletResponse.SC_ACCEPTED);
   }
 
+  /**
+   * Into an allowed tenant the notification keeps ETP-5639's 202 with no body; the guard is still
+   * asked first (see {@link #aNotificationIntoABlockedTenantIsRefusedWith402NotAccepted}).
+   */
   @Test
   public void doPostNotificationsInitializedReturns202() throws Exception {
     setOAuth2FilterAttributes("user1", "role1", "client1", "org1", "neo:read");
@@ -1221,10 +1654,14 @@ public class McpServletTest {
         .put("method", "notifications/initialized")
         .toString();
     setRequestBody(rpcBody);
+    when(environmentAccessGuard.checkAsSystem("client1", "mcp")).thenReturn(null);
 
     servlet.doPost(request, response);
 
+    verify(environmentAccessGuard).checkAsSystem("client1", "mcp");
     verify(response).setStatus(HttpServletResponse.SC_ACCEPTED);
+    verify(response, never()).setStatus(HttpServletResponse.SC_PAYMENT_REQUIRED);
+    assertEquals("", getResponseBody());
   }
 
   @Test
@@ -1592,14 +2029,14 @@ public class McpServletTest {
     org.openbravo.dal.service.OBDal obDal = mock(org.openbravo.dal.service.OBDal.class);
     org.hibernate.Session session = mock(org.hibernate.Session.class);
     when(obDal.getSession()).thenReturn(session);
-    // McpSessionManager resolves the org first, then the client. A wildcard token's client is
-    // also looked up once before both, by doPost's commercial-access gate (ETP-5642).
+    // ETP-5047: the servlet resolves a wildcard client once, before the access guard. The session
+    // manager then looks up the org, and the client a second time only when it is still the
+    // wildcard.
     if ("0".equals(tokenClient)) {
       when(session.doReturningWork(org.mockito.ArgumentMatchers.any()))
           .thenReturn(resolvedClient, resolvedOrg, resolvedClient);
     } else {
-      when(session.doReturningWork(org.mockito.ArgumentMatchers.any()))
-          .thenReturn(resolvedOrg, resolvedClient);
+      when(session.doReturningWork(org.mockito.ArgumentMatchers.any())).thenReturn(resolvedOrg);
     }
 
     try (MockedStatic<org.openbravo.dal.service.OBDal> obDalMock =
