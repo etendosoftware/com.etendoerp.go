@@ -854,6 +854,18 @@ class McpToolRouterSupportTest {
           () -> McpToolRouterSupport.validateArgs(null, "entity"));
       assertEquals(422, noArgs.toEnvelope().getInt("status"));
       assertFalse(noArgs.toEnvelope().has("field"), "no single argument is at fault");
+      assertEquals("[\"entity\"]", noArgs.toEnvelope().getJSONArray("missing").toString());
+    }
+
+    @Test
+    @DisplayName("ETP-5669: every missing argument is named at once; 'field' stays the first")
+    void allMissingArgumentsAreNamedAtOnce() throws Exception {
+      JSONObject envelope = assertThrows(McpRoutingException.class,
+          () -> McpToolRouterSupport.validateArgs(new JSONObject(), "entity", "view"))
+          .toEnvelope();
+      assertEquals("entity", envelope.getString("field"));
+      assertEquals("[\"entity\",\"view\"]", envelope.getJSONArray("missing").toString());
+      assertTrue(envelope.getString("detail").contains("entity, view"));
     }
   }
 

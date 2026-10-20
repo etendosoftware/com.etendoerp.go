@@ -685,6 +685,9 @@ public class ToolRegistry {
       case McpConstants.TOOL_NEO_DEFAULTS: definition = registry.buildDefaultsTool(List.of()); break;
       case McpConstants.TOOL_NEO_SCHEMA: definition = registry.buildSchemaTool(List.of()); break;
       case McpConstants.TOOL_NEO_DISCOVER: definition = registry.buildDiscoverTool(); break;
+      // ETP-5669: a top-level docAction was silently ignored and the call fell through to the
+      // generic executor; the action's own parameters belong under 'parameters'.
+      case McpConstants.TOOL_NEO_ACTION: definition = registry.buildActionTool(List.of()); break;
       default: return Optional.empty();
     }
     Object props = definition.getInputSchema().get(McpConstants.KEY_PROPERTIES);
@@ -1120,7 +1123,8 @@ public class ToolRegistry {
     props.put(McpConstants.PARAM_ENTITY, stringProp(McpConstants.LABEL_ENTITY_NAME));
     props.put("id", stringProp("Record ID to act upon"));
     props.put("action", stringProp(
-        "Column name of the button field to trigger (e.g. 'Processed', 'Processing')"));
+        "The 'action' value of the button from etendo_schema view:\"actions\" (its field name, "
+            + "e.g. 'documentAction'; the DB column name, e.g. 'DocAction', is also accepted)"));
     props.put(McpConstants.PARAM_PARAMETERS, objectProp(
         "Process parameters. For a list-backed button, put the chosen value under the key "
             + "named by the field's 'actionParameter' — e.g. {\"docAction\": \"CO\"}"));

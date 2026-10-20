@@ -5113,6 +5113,7 @@ Bank connection (PSD2): to stop an account's bank synchronization use `disconnec
 <!--E4339B7BBA754B44B491E48440CC9741-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--E4339B7BBA754B44B491E48440CC9741-->  <JAVA_QUALIFIER><![CDATA[glJournalHeaderHandler]]></JAVA_QUALIFIER>
 <!--E4339B7BBA754B44B491E48440CC9741-->  <SEQNO><![CDATA[10]]></SEQNO>
+<!--E4339B7BBA754B44B491E48440CC9741-->  <MCP_CONFIG><![CDATA[{"actions":{"hidden":["posted"],"reason":"The posted button is a blind post/unpost toggle; book the journal with this entity's post action (after documentAction CO) and remove its accounting entries with its unpost action, which state their preconditions. The posted field itself stays readable"}}]]></MCP_CONFIG>
 <!--E4339B7BBA754B44B491E48440CC9741--></ETGO_SF_ENTITY>
 
 <!--E4AF6A58376C462D93456E820B2A069C--><ETGO_SF_ENTITY>

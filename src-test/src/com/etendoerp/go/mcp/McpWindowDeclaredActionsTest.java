@@ -118,7 +118,9 @@ class McpWindowDeclaredActionsTest {
     when(handler.actionContracts()).thenReturn(contracts());
     // The AD buttons etendo_action can fire, as NeoButtonActionHelper.findButtonColumn resolves them:
     // by DB column name or by field name. The DAL names each column the way etendo_schema does.
-    buttonMock = mockStatic(NeoButtonActionHelper.class);
+    buttonMock = mockStatic(NeoButtonActionHelper.class,
+        inv -> "propertyNameOf".equals(inv.getMethod().getName()) ? inv.callRealMethod()
+            : org.mockito.Mockito.RETURNS_DEFAULTS.answer(inv));
     ModelProvider provider = mock(ModelProvider.class);
     Entity dal = mock(Entity.class);
     modelMock = mockStatic(ModelProvider.class);

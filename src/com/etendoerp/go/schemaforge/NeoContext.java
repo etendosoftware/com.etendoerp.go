@@ -17,8 +17,11 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
 
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
@@ -49,6 +52,12 @@ public class NeoContext {
    * built, and it is a diagnostic: nothing downstream branches on it.
    */
   private JSONObject supersededDefaults;
+  /**
+   * ETP-5669: body keys the mandatory-defaults pass filled with a placeholder (first combo row or a
+   * safe type default) only to satisfy NOT NULL. Not a decision, so the create-path callout cascade
+   * may refine them. Mutable and off the builder for the same reason as {@link #supersededDefaults}.
+   */
+  private final Set<String> fallbackDefaults = new HashSet<>();
   private final NeoEndpointType endpointType;
   private final String fieldName;
   /**
@@ -199,6 +208,23 @@ public class NeoContext {
    */
   public void setSupersededDefaults(JSONObject supersededDefaults) {
     this.supersededDefaults = supersededDefaults;
+  }
+
+  /**
+   * @return the body keys filled by a fallback placeholder during this create (ETP-5669), read-only
+   */
+  public Set<String> getFallbackDefaults() {
+    return Collections.unmodifiableSet(fallbackDefaults);
+  }
+
+  /**
+   * Records a body key the mandatory-defaults pass filled with a fallback placeholder, so the
+   * create does not protect it from the callout cascade (ETP-5669).
+   *
+   * @param propName the body key
+   */
+  public void addFallbackDefault(String propName) {
+    fallbackDefaults.add(propName);
   }
 
   /**

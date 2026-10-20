@@ -899,6 +899,10 @@ class NeoCrudHandler {
     NeoMandatoryDefaultsService.injectMandatoryDefaults(filteredBody, adTab, context, parentIdValue, false);
     long perfInjectDefaults = System.nanoTime();
     Set<String> protectedCalloutFields = NeoCrudHelper.snapshotMandatoryBodyFields(filteredBody, adTab);
+    // ETP-5669: a fallback pick (first combo row, safe type default) only satisfies NOT NULL, so a
+    // callout may refine it — e.g. GL_Journal.C_Period_ID from the accounting date, which /batch
+    // used to keep at the first period. Genuine defaults and the caller's values stay protected.
+    protectedCalloutFields.removeAll(context.getFallbackDefaults());
     protectedCalloutFields.addAll(userSubmittedFields);
     // ETP-5350: kept OUT of protectedCalloutFields. That set is a snapshot of keys the caller
     // actually sent, and "protected" there means "do not overwrite what is already here" - a

@@ -326,6 +326,20 @@ original POST (including one forced by upstream logic before the request reached
 rectifying-document key per ETP-4783) is in the step-1 snapshot and stays protected from being
 overwritten by a re-cascaded callout.
 
+**REST / batch create (`NeoCrudHandler#executePostCreate`).** This path runs the defaults pass
+without its cascade and then its own cascade, protecting the caller's fields **plus** every
+mandatory field present after the defaults (ETP-4258, so a genuine field/session/parent default —
+e.g. an asset's `calculateType` — is not replaced by a callout). Since ETP-5669 a mandatory field
+the defaults pass filled with a **placeholder** — the first combo row (`tryInjectFirstFromLookup`)
+or the safe-type fallback — is recorded on the context (`NeoContext#getFallbackDefaults`) and left
+**out** of that protected set: it only satisfies NOT NULL, so a callout may refine it. Reference
+case: `etendo_batch` created G/L journals in the first open period (Apr-26) whatever the
+accounting date, because `SL_Journal_Period`'s answer for `period` was discarded. Side effect,
+intended: e.g. `A_Asset.Amortizationtype` / `Assetschedule` (no AD default) now follow the asset
+group's callout, as the SPA form shows. Because fallback picks (the first combo row or a safe-type default) are no longer
+protected from the callout cascade, a placeholder document type is now re-applied from the tab filter
+by `DocTypeResolver`.
+
 **PUT / PATCH update** -- `PUT|PATCH /{specName}/{entityName}/{recordId}`
 
 Both PUT and PATCH are delegated to DataSourceServlet's PUT handler internally. PATCH is handled via a `service()` override that intercepts the PATCH method at the Servlet API level.
@@ -1297,6 +1311,12 @@ Classic processes return OBError results, translated to:
 ```
 
 Errors from either type return HTTP 400 with `"status": "error"`.
+
+**Bundle context (ETP-5669).** For a `DalBaseProcess`, `NeoProcessService.newClassicBundle` builds the
+`ProcessBundle` with a `ProcessContext` taken from `OBContext` and calls
+`init(new DalConnectionProvider(false))`, then sets the parameters (`init` resets them). The
+`org.openbravo.scheduling.Process` path (`executeSchedulingProcess`) is unchanged: its bundle has no
+`init`, so `getConnection()` is `null` there — a known limitation.
 
 ### 4.6a Attachments Endpoint (ETP-4315)
 
@@ -3779,6 +3799,8 @@ Same handler, same business validations, but the MCP channel refuses more, on pu
 | `createDraftInvoice` on `goods-shipment` (ETP-5709) | served; reads `shipmentIds`, `priceListId`, `lines` and ignores other keys | **declared** by `GoodsShipmentHeaderHandler.actionContracts()` (`CreateDraftInvoiceHandler.SHIPMENT_CONTRACT`): optional `shipmentIds[]`, `priceListId`, `lines[{shipmentLineId, quantity}]` (partial invoicing, honoured exactly; above pending, against the line's sign or nothing pending is a 400 naming the line). Created AND completed in the same call; the shipment(s) must be completed (400 naming number and status, checked in `loadAndValidateShipments`, nothing created); nothing pending answers 400 `No hay líneas pendientes de facturar en este albarán`. The SPA's bodies (`{priceListId}`, `{shipmentIds, priceListId}`) satisfy it. The classic `Invoicefromshipment` button is redirected here (see the `actions` table). Until ETP-5709 it was served but undeclared |
 | `createPurchaseInvoice` on `goods-receipt` (ETP-5709) | served; reads `receiptIds`, `priceListId`, `lines` and ignores other keys | **declared** by `GoodsReceiptHeaderHandler.actionContracts()` (`CreatePurchaseInvoiceHandler.RECEIPT_CONTRACT`): optional `receiptIds[]` (invoice several receipts of one partner together; when sent, exactly those), optional `priceListId`, optional `lines[{receiptLineId, quantity}]` (partial invoicing; a quantity above what is pending for the line, against its sign, or for a line with nothing pending is a 400 naming the line and the pending quantity, never a silent cap). Only the pending quantity is invoiced, so a repeated call answers 400 `Goods receipt <no> has nothing left to invoice` (several receipts: `Goods receipts <no>, <no> have nothing left to invoice`). The SPA's bodies (`{priceListId}`, `{receiptIds, priceListId}`, `{}`) all satisfy it. A partial `lines` quantity is honoured exactly and the invoice is scoped to the receipt's own lines (see *Invoice quantities*); it cannot be corrected afterwards, so give it at creation. Created AND completed in the same call |
 | `post`, `unpost` (ETP-5692) | served; `unpost` refused **422** unless `documentStatus` is `CO` and `posted` is `Y` | same handler, same refusals, and **declared**: both headers publish them as `NeoActionContract`s (no parameters, `id` = the invoice id, preconditions in the description), so `view:"actions"` and `etendo_discover` list them and an unknown parameter is a **422** `unknownParameters`. Until ETP-5692 they were callable but undeclared and `unpost` had no status gate (§4.12.29) |
+| `documentAction` on the G/L journal header (ETP-5587 / ETP-5669) | served | **declared** by `GlJournalHeaderHandler.actionContracts()`: required `docAction`, restricted to `CO` or `RE`; any other value is a **422** naming what was sent (e.g. `docAction 'VO' is not allowed`) |
+| `post`, `unpost` on the G/L journal header (ETP-5587 / ETP-5669) | served | **declared** by the same handler (no parameters); the `gLJournal` row in `ETGO_SF_ENTITY.xml` carries `MCP_CONFIG` `actions.hidden:["posted"]` with its reason, so agents use `post` / `unpost` instead of the blind `posted` toggle |
 | the `posted` AD button (by field or DB column name) | served (Classic toggle) | **405** — `MCP_CONFIG.actions.hidden`, with its own `reasons.posted` pointing at `post` / `unpost`; the field stays readable as a value |
 | `registerPayment` with `pis` or any key its contract does not declare | accepted (unread keys ignored) | **422** `unknownParameters` before anything runs |
 | `currencyOptions` | `GET` only | called as `GET` (the contract says so) |
@@ -3882,7 +3904,13 @@ in the context it builds.
 
 ##### Closed: an AD button reaches the customization under its field name on MCP (ETP-5710)
 
-`etendo_schema` advertises a button under its DB column name (`action: "DocAction"`) and the REST
+Until ETP-5669, `etendo_schema` advertised a button under its DB column name (`action: "DocAction"`);
+it now advertises the field (DAL property) name (`action: "documentAction"`, `column` keeps
+`"DocAction"`), and `etendo_action` accepts both. `NeoButtonActionHelper.findButtonColumn` matches
+the DB column name and the pushed `Java_Qualifier` first and then, for button columns only, the DAL
+property — the qualifier is computed by the extractor and differs from the DAL name on some
+buttons (`C_Order.RM_CreateInvoice`: qualifier `rMCreateInvoice`, property `createInvoice`), so
+without that second pass the advertised name could not be fired. The REST
 action route reaches the customization under the name in its URL — the SPA posts `documentAction`
 for the document-action button. `McpToolRouter.handleAction` used to hand the agent's string to the
 customization as it was typed, so a completion typed `DocAction` was invisible to the header
@@ -4170,6 +4198,13 @@ A refusal for a date with no open period is named `PeriodNotAvailable` (or `Peri
 It also rewrites core `Utilities.checkPeriod`'s raw `@ETPR_PeriodClosedForUnRemovePayment@` into
 the translated, keyed refusal. Still divergent: inside an `etendo_batch` / `/sws/neo/batch` body,
 a per-operation error is not keyed — only the envelope goes through these two places.
+
+Not a period refusal: completing a G/L journal whose **stored** period does not contain its
+accounting date. Core's trigger would answer `PeriodNotValid`, which the SPA words as "open the
+period" — wrong advice when the period is open but is the wrong one. `GlJournalHeaderHandler`
+refuses CO first with its own plain key `ETGO_GLJournalPeriodMismatch` and `messageParams`
+`{period, accountingDate}` (ETP-5669); a body that already names its keys is left alone by
+`identifyPeriodRefusal`.
 
 ##### REST and MCP on list filters over a rewritten value (ETP-5705, declared)
 
@@ -9046,6 +9081,16 @@ the names and cannot read an array. Because `etendo_discover` now declares its a
 unknown-argument guard (IMP-40) covers it too: `etendo_discover({entity:"header"})` is refused
 with `unknown_argument` instead of being ignored. The tool annotations (§4.12.25) do not change:
 the tool is still read-only and idempotent.
+
+**`etendo_action` is covered by the same guard (ETP-5669).** `ToolRegistry.declaredArgumentNames` has a
+`TOOL_NEO_ACTION` case, so a stray top-level key (e.g. `docAction`) is refused `unknown_argument`; the
+hint adds that the action's own parameters (e.g. `docAction`) go inside `parameters`.
+
+**Missing arguments are reported together (ETP-5669).** `McpToolRouterSupport.validateArgs` names every
+missing key in one answer instead of one per round trip: `Missing required arguments: spec, id` for
+several, `Missing required argument: spec` for one. `field` is the first missing key and the error
+envelope carries a new `missing[]` array with all of them. `etendo_schema` with no `entity` and a blank
+`view` asks for `entity` and `view` together.
 
 #### 4.12.27 Named filters can be found from the catalog and from the response (ETP-5639, IMP-50)
 
