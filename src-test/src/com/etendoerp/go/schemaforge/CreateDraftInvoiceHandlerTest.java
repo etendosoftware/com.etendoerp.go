@@ -1129,6 +1129,7 @@ public class CreateDraftInvoiceHandlerTest {
     String sourceOrderStatus = "CO";
     boolean ensuredDocumentNo;
     boolean ensuredGrossAmounts;
+    Invoice alignedListPricesInvoice;
     List<Invoice> draftsToReturn = Collections.emptyList();
     RuntimeException checkFailure;
     List<String> checkedIds;
@@ -1189,6 +1190,11 @@ public class CreateDraftInvoiceHandlerTest {
         public void ensureLineGrossAmounts(Invoice invoice) {
           ensuredGrossAmounts = true;
         }
+
+        @Override
+        public void alignLineListPrices(Invoice invoice, java.util.Set<String> onlyLineIds) {
+          alignedListPricesInvoice = onlyLineIds == null ? invoice : null;
+        }
       };
     }
 
@@ -1213,6 +1219,10 @@ public class CreateDraftInvoiceHandlerTest {
     Map<String, BigDecimal> receivedOverrides;
     Invoice ensuredGrossInvoice;
     Invoice copiedDiscountsInvoice;
+    /** ETP-5714: the copy-side support calls in the order they happened (copy, align, gross). */
+    final List<String> supportCalls = new java.util.ArrayList<>();
+    Invoice alignedInvoice;
+    java.util.Set<String> alignedScope = Collections.singleton("unset");
 
     @Override
     protected JSONArray buildSelectedLinesForOrder(Order order, Map<String, BigDecimal> lineOverrides) {
@@ -1231,11 +1241,20 @@ public class CreateDraftInvoiceHandlerTest {
         @Override
         public void ensureLineGrossAmounts(Invoice invoice) {
           ensuredGrossInvoice = invoice;
+          supportCalls.add("gross");
         }
 
         @Override
         public void copyLineDiscountsFromOrder(Invoice invoice) {
           copiedDiscountsInvoice = invoice;
+          supportCalls.add("copy");
+        }
+
+        @Override
+        public void alignLineListPrices(Invoice invoice, java.util.Set<String> onlyLineIds) {
+          supportCalls.add("align");
+          alignedInvoice = invoice;
+          alignedScope = onlyLineIds;
         }
       };
     }
@@ -1659,6 +1678,8 @@ public class CreateDraftInvoiceHandlerTest {
         assertEquals(Arrays.asList("ship-1", "ship-2"), handler.receivedShipmentIds);
         assertEquals(new BigDecimal("3"), handler.receivedLineOverrides.get("sl-1"));
         assertTrue(handler.ensuredGrossAmounts);
+      assertNotNull("ETP-5714: the shipment path aligns the list prices of its whole invoice",
+          handler.alignedListPricesInvoice);
         verify(dal, Mockito.times(2)).flush();
       }
     }
@@ -2089,6 +2110,13 @@ public class CreateDraftInvoiceHandlerTest {
       assertEquals(overrides, handler.receivedOverrides);
       assertSame(invoice, handler.ensuredGrossInvoice);
       assertSame(invoice, handler.copiedDiscountsInvoice);
+      // ETP-5714: the list price the native copy left at 0 is aligned for the whole invoice, after
+      // the discount copy (it reads the discount) and before the gross amounts
+      assertSame(invoice, handler.alignedInvoice);
+      assertNull(handler.alignedScope);
+      assertTrue(handler.supportCalls.toString(),
+          handler.supportCalls.indexOf("copy") < handler.supportCalls.indexOf("align")
+              && handler.supportCalls.indexOf("align") < handler.supportCalls.indexOf("gross"));
       verify(invoice).setDocumentType(handler.resolvedDocType);
       verify(invoice).setTransactionDocument(handler.resolvedDocType);
       // Factory delegates document numbering to DocumentNoHandlerLegacy

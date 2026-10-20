@@ -948,7 +948,8 @@ public class GoodsReceiptHeaderHandlerTest {
         new GoodsReceiptHeaderHandler().actionContracts();
 
     assertEquals(java.util.List.of("documentAction", "availableOrders", "availableOrderLines",
-            "importOrderLines", "createPurchaseInvoice", "createPurchaseReturn", "cloneRecord"),
+            "importOrderLines", "createPurchaseInvoice", "createPurchaseReturn", "cloneRecord", "post",
+            "unpost"),
         java.util.List.copyOf(contracts.keySet()));
     NeoActionContract invoice = contracts.get("createPurchaseInvoice");
     assertEquals("POST", invoice.getHttpMethod());
@@ -1125,5 +1126,19 @@ public class GoodsReceiptHeaderHandlerTest {
 
     assertNull(handler.handle(ctx));
     verify(delegate).handle(ctx);
+  }
+
+  /**
+   * ETP-5714: the keys GoodsReceiptHeaderHandler's afterHandle adds to a GET record are declared, so an MCP
+   * {@code fields:[…]} projection does not report them in {@code unknownFields} while the same
+   * response carries them.
+   */
+  @org.junit.jupiter.api.Test
+  @org.junit.jupiter.api.DisplayName("goods receipt: enriched response keys are declared")
+  void enrichedKeysAreDeclaredGoodsReceiptHeaderHandler() {
+    java.util.Set<String> declared = new GoodsReceiptHeaderHandler().responseEnrichedFields();
+    for (String key : java.util.List.of("invoiceStatus", "returnStatus", "linkedInvoices", "linkedReturns", "linkedOrders")) {
+      org.junit.jupiter.api.Assertions.assertTrue(declared.contains(key), key + " in " + declared);
+    }
   }
 }

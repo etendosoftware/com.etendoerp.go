@@ -95,18 +95,20 @@ public final class NeoActionContract {
   private final String idDescription;
   private final String httpMethod;
   private final boolean fieldValuesBody;
+  private final NeoActionAvailability availability;
 
   /** The method an action is called with unless it declares another — what the MCP always used. */
   public static final String DEFAULT_HTTP_METHOD = "POST";
 
   private NeoActionContract(String name, String description, boolean mutating,
       List<Param> params) {
-    this(name, description, mutating, params, null, DEFAULT_HTTP_METHOD, false);
+    this(name, description, mutating, params, null, DEFAULT_HTTP_METHOD, false, null);
   }
 
-  @SuppressWarnings("java:S107") // one value object: the seven fields are the contract itself
+  @SuppressWarnings("java:S107") // one value object: the eight fields are the contract itself
   private NeoActionContract(String name, String description, boolean mutating,
-      List<Param> params, String idDescription, String httpMethod, boolean fieldValuesBody) {
+      List<Param> params, String idDescription, String httpMethod, boolean fieldValuesBody,
+      NeoActionAvailability availability) {
     this.name = name;
     this.description = description;
     this.mutating = mutating;
@@ -114,6 +116,30 @@ public final class NeoActionContract {
     this.idDescription = idDescription;
     this.httpMethod = httpMethod;
     this.fieldValuesBody = fieldValuesBody;
+    this.availability = availability;
+  }
+
+  /**
+   * The same contract, declaring in which record states it applies (ETP-5714).
+   *
+   * <p>Advisory: {@code etendo_schema(view:"actions")} renders it and, given a record id, reports
+   * {@code availableNow}; it never refuses a call (see {@link NeoActionAvailability}).</p>
+   *
+   * @param declared the availability declaration
+   * @return a copy carrying it
+   */
+  public NeoActionContract availableWhen(NeoActionAvailability declared) {
+    return new NeoActionContract(name, description, mutating, params, idDescription, httpMethod,
+        fieldValuesBody, declared);
+  }
+
+  /**
+   * The availability this action declares.
+   *
+   * @return the declaration, or {@code null} when the action applies in every state
+   */
+  public NeoActionAvailability getAvailability() {
+    return availability;
   }
 
   /**
@@ -129,7 +155,7 @@ public final class NeoActionContract {
    */
   public NeoActionContract withHttpMethod(String method) {
     return new NeoActionContract(name, description, mutating, params, idDescription, method,
-        fieldValuesBody);
+        fieldValuesBody, availability);
   }
 
   /** @return the HTTP method the action is called with; {@link #DEFAULT_HTTP_METHOD} unless declared */
@@ -147,7 +173,7 @@ public final class NeoActionContract {
    */
   public NeoActionContract withIdDescription(String idDescription) {
     return new NeoActionContract(name, description, mutating, params, idDescription, httpMethod,
-        fieldValuesBody);
+        fieldValuesBody, availability);
   }
 
   /** @return what the {@code id} argument identifies, or {@code null} when not declared */
@@ -169,7 +195,7 @@ public final class NeoActionContract {
    */
   public NeoActionContract withFieldValuesBody() {
     return new NeoActionContract(name, description, mutating, params, idDescription, httpMethod,
-        true);
+        true, availability);
   }
 
   /** @return {@code true} when the parameters travel under {@code fieldValues} in the body */
@@ -253,6 +279,9 @@ public final class NeoActionContract {
       out.put("idDescription", idDescription);
     }
     out.put("parameters", schema);
+    if (availability != null) {
+      availability.writeTo(out);
+    }
     return out;
   }
 
@@ -432,9 +461,17 @@ public final class NeoActionContract {
     private final boolean required;
     private final String description;
     private final List<String> allowedValues;
+    private final String refusalHint;
 
     private Param(String name, String type, String itemType, boolean required, String description,
         List<String> allowedValues) {
+      this(name, type, itemType, required, description, allowedValues, null);
+    }
+
+    @SuppressWarnings("java:S107") // one value object: the seven fields are the parameter itself
+    private Param(String name, String type, String itemType, boolean required, String description,
+        List<String> allowedValues, String refusalHint) {
+      this.refusalHint = refusalHint;
       this.name = name;
       this.type = type;
       this.itemType = itemType;
@@ -511,6 +548,19 @@ public final class NeoActionContract {
       return new Param(name, TYPE_ARRAY, itemType, required, description, null);
     }
 
+    /**
+     * The same parameter, saying what to do instead when a value outside {@code allowedValues} is
+     * sent (ETP-5714). The sentence is appended to the 422 message and returned as {@code hint}:
+     * an enum alone says which values are accepted, not why the value an agent reached for (RE,
+     * RC) is not among them.
+     *
+     * @param hint what to do instead
+     * @return a copy carrying the hint
+     */
+    public Param withRefusalHint(String hint) {
+      return new Param(name, type, itemType, required, description, allowedValues, hint);
+    }
+
     /** @return the body key */
     public String getName() {
       return name;
@@ -553,10 +603,14 @@ public final class NeoActionContract {
         return wrap(err);
       }
       if (!allowedValues.isEmpty() && !allowedValues.contains(String.valueOf(value))) {
-        JSONObject err = errorBody("Parameter '" + name + "' must be one of "
-            + String.join(", ", new TreeSet<>(allowedValues)) + ".");
+        String message = "Parameter '" + name + "' must be one of "
+            + String.join(", ", new TreeSet<>(allowedValues)) + ".";
+        JSONObject err = errorBody(refusalHint == null ? message : message + " " + refusalHint);
         err.put("field", name);
         err.put("allowedValues", new JSONArray(allowedValues));
+        if (refusalHint != null) {
+          err.put("hint", refusalHint);
+        }
         return wrap(err);
       }
       return null;
