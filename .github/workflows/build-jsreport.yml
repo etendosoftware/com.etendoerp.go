@@ -52,11 +52,11 @@ jobs:
 
       - name: Force ECS redeploy
         run: |
-          if [[ "${{ github.ref_name }}" == "develop" ]]; then
-            CLUSTER=etendo-staging
-          else
-            CLUSTER=etendo-experimental
-          fi
+          # ETP-5028: develop feeds the experimental infrastructure, which is now
+          # the pre-production environment (staging has been retired).
+          # NOTE: production is still not covered by this workflow — a jsreport
+          # image change never reaches etendo-production automatically.
+          CLUSTER=etendo-experimental
 
           aws ecs update-service \
             --cluster $CLUSTER \
