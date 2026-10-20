@@ -147,16 +147,30 @@ public class BatchService {
   }
 
   /**
-   * The write path the current thread must use: the deferred-commit one while a batch owns the
-   * transaction, core's self-committing one otherwise. Single decision point — callers such as
-   * {@link NeoCrudHandler} ask for "the current service" and never branch themselves.
+   * Whether a batch owns the current thread's transaction: writes defer their commit to it, and a
+   * failure must not roll back or close the session under it (the batch rolls back the whole set).
    *
-   * @return the {@link DefaultJsonDataService} appropriate for the current thread
+   * @return {@code true} between {@link #beginCallerOwnedTransaction()} and
+   *         {@link #endCallerOwnedTransaction()}
    */
-  static DefaultJsonDataService currentJsonService() {
-    return Boolean.TRUE.equals(CALLER_OWNS_TRANSACTION.get())
-        ? NeoBatchJsonDataService.deferredCommitInstance()
-        : DefaultJsonDataService.getInstance();
+  static boolean callerOwnsTransaction() {
+    return Boolean.TRUE.equals(CALLER_OWNS_TRANSACTION.get());
+  }
+
+  /**
+   * The write path every NEO write uses: {@link NeoBatchJsonDataService}, which defers its commit
+   * while a batch owns the transaction and commits like core otherwise. Single decision point —
+   * callers such as {@link NeoCrudHandler} ask for "the current service" and never branch
+   * themselves.
+   *
+   * <p>Since ETP-5782 a single write goes through it too, not through core's service: it is the
+   * only write path that still holds the exception when a write fails, which is what lets the
+   * failure be classified by what it is rather than by its translated text.
+   *
+   * @return the {@link DefaultJsonDataService} for the current thread
+   */
+  public static DefaultJsonDataService currentJsonService() {
+    return NeoBatchJsonDataService.deferredCommitInstance();
   }
 
   /**
