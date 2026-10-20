@@ -83,6 +83,7 @@ public class NeoProcessService {
   private static final Logger log = LogManager.getLogger(NeoProcessService.class);
 
   /** UIPattern value for OBUIAPP (Standard) processes. */
+  private static final String PROCESS_NAME_PREFIX = "Process ";
   private static final String UI_PATTERN_STANDARD = "S";
 
   public static final String MESSAGE = "message";
@@ -172,7 +173,7 @@ public class NeoProcessService {
       }
 
     } catch (Exception e) {
-      result = processFailure(e, "Process " + process.getName());
+      result = processFailure(e, PROCESS_NAME_PREFIX + process.getName());
     }
     // Normalize at the single exit point: every early-return guard clause above
     // (access denied, missing mandatory param, unmet precondition) and every
@@ -939,7 +940,7 @@ public class NeoProcessService {
       result.put(MESSAGE, errorMsg.replaceFirst("@SUCCESS=", ""));
     } else {
       result.put(MESSAGE,
-          "Process " + process.getName() + " executed successfully");
+          PROCESS_NAME_PREFIX + process.getName() + " executed successfully");
     }
     return NeoResponse.ok(result);
   }
@@ -1133,7 +1134,7 @@ public class NeoProcessService {
     } else {
       result.put(STATUS, SUCCESS);
       result.put(MESSAGE,
-          "Process " + process.getName() + " executed successfully");
+          PROCESS_NAME_PREFIX + process.getName() + " executed successfully");
     }
 
     return NeoResponse.ok(result);

@@ -2168,6 +2168,33 @@ class NeoCrudHandlerTest {
           "a missing id and another one must get byte-identical answers");
     }
 
+    @Test
+    @DisplayName("A captured server fault uses the sanitized message instead of core's SQL prose")
+    void capturedServerFailureUsesItsSanitizedMessage() throws Exception {
+      String internal = "ERROR: relation internal_invoice_store does not exist; SQL SELECT secret";
+      String sanitized = "The operation could not be completed. Please contact your administrator.";
+      JSONObject classification = new JSONObject().put("status", 500)
+          .put("code", "server_error").put("message", sanitized);
+      JSONObject error = new JSONObject().put("message", internal)
+          .put("neoClassification", classification);
+      JSONObject response = new JSONObject().put(JsonConstants.RESPONSE_RESPONSE,
+          new JSONObject().put(JsonConstants.RESPONSE_STATUS, JsonConstants.RPCREQUEST_STATUS_FAILURE)
+              .put(JsonConstants.RESPONSE_ERROR, error));
+      try (MockedStatic<org.openbravo.erpCommon.utility.OBMessageUtils> messages =
+          mockStatic(org.openbravo.erpCommon.utility.OBMessageUtils.class)) {
+        messages.when(() -> org.openbravo.erpCommon.utility.OBMessageUtils.messageBD(anyString()))
+            .thenAnswer(invocation -> invocation.getArgument(0));
+
+        NeoResponse result = invokeCheckResponse(response);
+
+        assertEquals(500, result.getHttpStatus());
+        assertEquals(sanitized, result.getBody().getJSONObject("error").getString("message"));
+        assertEquals("server_error", result.getBody().getJSONObject("error").getString("code"));
+        assertFalse(result.getBody().toString().contains("internal_invoice_store"));
+        assertFalse(result.getBody().toString().contains("SELECT secret"));
+      }
+    }
+
     private JSONObject unknownReferenceBody(String entity, String id) throws Exception {
       JSONObject errors = new JSONObject();
       errors.put(JsonConstants.ID, "New object " + entity + "(null)  (key: " + id + "_" + entity

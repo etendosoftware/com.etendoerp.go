@@ -29,6 +29,7 @@ import org.hibernate.PropertyValueException;
 import org.hibernate.TransientObjectException;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.base.exception.OBSecurityException;
+import org.openbravo.service.json.OBStaleObjectException;
 
 import com.etendoerp.go.schemaforge.util.NeoErrorSanitizer;
 import com.etendoerp.go.schemaforge.util.NeoMessageTranslator;
@@ -73,6 +74,7 @@ public final class NeoErrorClassifier {
   public static final String CODE_FORBIDDEN = "forbidden";
   public static final String CODE_RETRYABLE_CONFLICT = "retryable_conflict";
   public static final String CODE_SERVICE_UNAVAILABLE = "service_unavailable";
+  public static final String CODE_STALE_RECORD = "stale_record";
   public static final String CODE_SERVER_ERROR = "server_error";
 
   /**
@@ -81,6 +83,8 @@ public final class NeoErrorClassifier {
    */
   public static final String MSG_UNKNOWN_REFERENCE =
       "A referenced record does not exist or is not accessible.";
+  static final String MSG_BUSINESS_RULE = "A business rule rejected this operation.";
+  static final String MSG_STALE_RECORD = "The record was modified by another operation.";
   static final String MSG_RECORD_IN_USE =
       "This record cannot be deleted because other records use it.";
   static final String MSG_INVALID_VALUE = "A value sent is not valid.";
@@ -164,6 +168,9 @@ public final class NeoErrorClassifier {
         return of(HttpServletResponse.SC_BAD_REQUEST, CODE_MISSING_REQUIRED_VALUE, null);
       }
     }
+    if (chain.stream().anyMatch(OBStaleObjectException.class::isInstance)) {
+      return of(HttpServletResponse.SC_CONFLICT, CODE_STALE_RECORD, "@OBJSON_StaleDate@");
+    }
     Classification keyed = classifyMessageKeyed(chain);
     return keyed != null ? keyed : serverError(t);
   }
@@ -183,7 +190,7 @@ public final class NeoErrorClassifier {
     String message;
     switch (c.code()) {
       case CODE_BUSINESS_RULE:
-        message = translatedOr(c.rawMessage(), c.rawMessage());
+        message = translatedOrGeneric(c.rawMessage(), MSG_BUSINESS_RULE);
         break;
       case CODE_INVALID_VALUE:
         message = translatedOrGeneric(c.rawMessage(), MSG_INVALID_VALUE);
@@ -198,7 +205,11 @@ public final class NeoErrorClassifier {
         message = MSG_UNKNOWN_REFERENCE;
         break;
       case CODE_RECORD_IN_USE:
-        message = MSG_RECORD_IN_USE;
+        message = translatedOrGeneric(c.rawMessage(),
+            translatedOrGeneric("@ForeignKeyViolation@", MSG_RECORD_IN_USE));
+        break;
+      case CODE_STALE_RECORD:
+        message = translatedOrGeneric(c.rawMessage(), MSG_STALE_RECORD);
         break;
       case CODE_MISSING_REQUIRED_VALUE:
         message = MSG_MISSING_REQUIRED_VALUE;
@@ -225,7 +236,7 @@ public final class NeoErrorClassifier {
       case SQLSTATE_NOT_NULL:
         return of(HttpServletResponse.SC_BAD_REQUEST, CODE_MISSING_REQUIRED_VALUE, null);
       case SQLSTATE_FOREIGN_KEY:
-        return delete ? of(HttpServletResponse.SC_CONFLICT, CODE_RECORD_IN_USE, null)
+        return delete ? of(HttpServletResponse.SC_CONFLICT, CODE_RECORD_IN_USE, sql.getMessage())
             : of(HttpServletResponse.SC_BAD_REQUEST, CODE_UNKNOWN_REFERENCE, null);
       case SQLSTATE_CHECK:
         return of(STATUS_UNPROCESSABLE, CODE_INVALID_VALUE, sql.getMessage());
@@ -321,14 +332,6 @@ public final class NeoErrorClassifier {
     return found;
   }
 
-  private static String translatedOr(String raw, String fallback) {
-    if (raw == null || raw.isBlank()) {
-      return fallback;
-    }
-    String translated = primaryLine(NeoMessageTranslator.translateDbMessage(raw));
-    return translated == null || translated.isBlank() ? fallback : translated;
-  }
-
   /**
    * The translated text when translation actually resolved something (an {@code @Key@} token, or a
    * constraint with its own AD message); the generic text otherwise, because an untranslated
@@ -338,9 +341,11 @@ public final class NeoErrorClassifier {
     if (raw == null || raw.isBlank()) {
       return generic;
     }
-    String translated = primaryLine(NeoMessageTranslator.translateDbMessage(raw));
+    String translated = NeoMessageTranslator.translateDbMessage(raw);
     if (translated == null || translated.isBlank()
-        || translated.equals(primaryLine(raw)) || translated.contains("@")) {
+        || translated.equals(raw) || translated.equals(primaryLine(raw))
+        || translated.contains("@")
+        || NeoMessageTranslator.extractMessageKeys(raw).contains(translated)) {
       return generic;
     }
     return translated;

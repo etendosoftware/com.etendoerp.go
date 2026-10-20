@@ -21,9 +21,12 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -41,6 +44,7 @@ import org.hibernate.exception.GenericJDBCException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.mockito.InOrder;
 import org.mockito.MockedStatic;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.provider.OBProvider;
@@ -84,12 +88,13 @@ class NeoBatchJsonDataServiceTest {
   private OBDal dal;
   private OBProvider provider;
   private BaseOBObject bob;
+  private JsonToDataConverter fromJson;
 
   @BeforeEach
   void setUp() throws Exception {
     // DefaultJsonDataService's static initialiser asks Weld for its singleton.
     try (MockedStatic<WeldUtils> weld = mockStatic(WeldUtils.class)) {
-      service = new TestableService();
+      service = spy(new TestableService());
     }
     dal = mock(OBDal.class);
     when(dal.getSession()).thenReturn(mock(Session.class));
@@ -103,7 +108,7 @@ class NeoBatchJsonDataServiceTest {
     DataToJsonConverter toJson = mock(DataToJsonConverter.class);
     when(toJson.toJsonObjects(any())).thenReturn(List.of(new JSONObject().put("id", "A")));
     when(provider.get(DataToJsonConverter.class)).thenReturn(toJson);
-    JsonToDataConverter fromJson = mock(JsonToDataConverter.class);
+    fromJson = mock(JsonToDataConverter.class);
     when(fromJson.toBaseOBObject(any())).thenReturn(bob);
     when(provider.get(JsonToDataConverter.class)).thenReturn(fromJson);
   }
@@ -151,6 +156,73 @@ class NeoBatchJsonDataServiceTest {
       }
 
       verify(dal, never()).commitAndClose();
+    }
+  }
+
+  @Test
+  @DisplayName("a single conversion refusal rolls back without saving or committing")
+  void singleConversionRefusalRollsBack() throws Exception {
+    assertConversionRefusal(false);
+    verify(dal).rollbackAndClose();
+  }
+
+  @Test
+  @DisplayName("a batch conversion refusal leaves rollback to the transaction owner")
+  void batchConversionRefusalLeavesRollbackToTheCaller() throws Exception {
+    assertConversionRefusal(true);
+    verify(dal, never()).rollbackAndClose();
+  }
+
+  private void assertConversionRefusal(boolean callerOwnsTransaction) throws Exception {
+    when(fromJson.hasErrors()).thenReturn(true);
+    when(fromJson.getErrors()).thenReturn(Collections.emptyList());
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obdal = mockStatic(OBDal.class);
+        MockedStatic<OBProvider> prov = mockStatic(OBProvider.class)) {
+      obdal.when(OBDal::getInstance).thenReturn(dal);
+      prov.when(OBProvider::getInstance).thenReturn(provider);
+      if (callerOwnsTransaction) {
+        BatchService.beginCallerOwnedTransaction();
+      }
+      try {
+        JSONObject result = new JSONObject(service.update(params(), "{\"data\":{\"id\":\"A\"}}"));
+        JSONObject response = result.getJSONObject(JsonConstants.RESPONSE_RESPONSE);
+        assertEquals(JsonConstants.RPCREQUEST_STATUS_VALIDATION_ERROR,
+            response.getInt(JsonConstants.RESPONSE_STATUS));
+        assertEquals(0, response.getJSONObject(JsonConstants.RESPONSE_ERRORS).length());
+        verify(dal, never()).save(any());
+        verify(dal, never()).commitAndClose();
+        verify(service, never()).doPostAction(any(), anyString(), any(), anyString());
+      } finally {
+        if (callerOwnsTransaction) {
+          BatchService.endCallerOwnedTransaction();
+        }
+      }
+    }
+  }
+
+  @Test
+  @DisplayName("the single-write post action finishes before the transaction is committed")
+  void singleWriteRunsPostActionBeforeCommitting() throws Exception {
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obdal = mockStatic(OBDal.class);
+        MockedStatic<OBProvider> prov = mockStatic(OBProvider.class);
+        MockedStatic<JsonUtils> json = mockStatic(JsonUtils.class)) {
+      obdal.when(OBDal::getInstance).thenReturn(dal);
+      prov.when(OBProvider::getInstance).thenReturn(provider);
+      json.when(() -> JsonUtils.getAdditionalProperties(any())).thenReturn(Collections.emptyList());
+      Map<String, String> parameters = params();
+      String content = "{\"data\":{\"id\":\"A\"}}";
+
+      JSONObject result = new JSONObject(service.update(parameters, content));
+
+      assertEquals(JsonConstants.RPCREQUEST_STATUS_SUCCESS,
+          result.getJSONObject(JsonConstants.RESPONSE_RESPONSE).getInt(JsonConstants.RESPONSE_STATUS));
+      InOrder order = inOrder(service, dal);
+      order.verify(service).doPostAction(eq(parameters), anyString(),
+          eq(NeoBatchJsonDataService.DataSourceAction.UPDATE), eq(content));
+      order.verify(dal).commitAndClose();
+      verify(dal, never()).rollbackAndClose();
     }
   }
 

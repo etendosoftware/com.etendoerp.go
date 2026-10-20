@@ -804,9 +804,21 @@ class NeoCrudHandler {
     }
     int status = innerResponse.optInt(JsonConstants.RESPONSE_STATUS, 0);
     if (status == JsonConstants.RPCREQUEST_STATUS_FAILURE) {
+      return checkJsonWriteFailure(innerResponse, adTab);
+    }
+    if (status == JsonConstants.RPCREQUEST_STATUS_VALIDATION_ERROR) {
+      // ETP-5323: delegated to NeoValidationErrorResponseBuilder (kept out of this class to stay
+      // under SonarQube's method-count limit, java:S1448) — see its javadoc for the full
+      // RPCREQUEST_STATUS_VALIDATION_ERROR body shape and rationale.
+      return NeoValidationErrorResponseBuilder.build(innerResponse);
+    }
+    return null;
+  }
+
+  private NeoResponse checkJsonWriteFailure(JSONObject innerResponse, Tab adTab) throws Exception {
       String errMsg = innerResponse.has(JsonConstants.RESPONSE_ERROR)
           ? innerResponse.getJSONObject(JsonConstants.RESPONSE_ERROR)
-              .optString("message", "Write operation failed")
+              .optString(KEY_MESSAGE, "Write operation failed")
           : "Write operation failed";
       String translated = OBMessageUtils.messageBD(errMsg);
       // ETP-5073 / DOC-04: a concurrent-modification conflict, classified before the generic
@@ -842,11 +854,10 @@ class NeoCrudHandler {
       // ETP-5782: a failure NEO's write service captured carries the classification of its
       // throwable — a trigger refusal (422), a row still in use (409), a deadlock (409), a lost
       // connection (503)… Unique violations are left to the branch below, which keeps Etendo's own
-      // wording. A failure that was not captured, or that is a fault (5xx), keeps today's answer:
-      // it is never guessed from its text.
+      // wording. Captured 5xx failures use the sanitized classification message. An uncaptured
+      // failure keeps the legacy answer; its class is never guessed from its text.
       if (!NeoErrorSanitizer.isDuplicateKeyMessage(translated)) {
-        NeoResponse classified = NeoErrorResponses.fromClassifiedWriteFailure(innerResponse,
-            "Write");
+        NeoResponse classified = NeoErrorResponses.fromClassifiedWriteFailure(innerResponse);
         if (classified != null) {
           return classified;
         }
@@ -871,14 +882,6 @@ class NeoCrudHandler {
       return NeoResponse.error(httpStatus,
           NeoErrorSanitizer.stripRowDump(NeoErrorSanitizer.redactObjectReferences(
             NeoListReferenceError.enrich(translated))));
-    }
-    if (status == JsonConstants.RPCREQUEST_STATUS_VALIDATION_ERROR) {
-      // ETP-5323: delegated to NeoValidationErrorResponseBuilder (kept out of this class to stay
-      // under SonarQube's method-count limit, java:S1448) — see its javadoc for the full
-      // RPCREQUEST_STATUS_VALIDATION_ERROR body shape and rationale.
-      return NeoValidationErrorResponseBuilder.build(innerResponse);
-    }
-    return null;
   }
 
   /**

@@ -92,17 +92,20 @@ public final class NeoValidationErrorResponseBuilder {
   /**
    * ETP-5782: whether the conversion errors report a reference that resolves to no row.
    *
-   * <p>Structural, not textual: core keys each conversion error by the property that failed, and
-   * for a referenced id that resolves to nothing ({@code JsonToDataConverter#hasErrors}) that
-   * property is the target's id property — {@code id} on every entity. No other conversion failure
-   * is keyed by the id property, and ETP-5785's ownership refusal emits the same key on purpose, so
-   * a missing id and another tenant's id end in the same answer. Core's message for it names the
-   * entity class and echoes the id, so it is replaced, never forwarded.
+   * <p>Core does not carry a conversion-error category in this legacy body. Its id property
+   * also carries invalid property paths, so id alone is insufficient. Match only the fixed
+   * unresolved-import template emitted by JsonToDataConverter and the ownership preflight.
+   * This compatibility adapter does not classify SQL exceptions by message text.
    *
    * @param errors core's {@code response.errors} map
    * @return whether it reports an unknown reference
    */
   public static boolean isUnknownReference(JSONObject errors) {
-    return errors != null && errors.has(JsonConstants.ID);
+    if (errors == null) {
+      return false;
+    }
+    String message = errors.optString(JsonConstants.ID, "");
+    return message.startsWith("New object ") && message.contains(" (key: ")
+        && message.endsWith(") refered to but not present in the import set");
   }
 }

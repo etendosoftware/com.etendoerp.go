@@ -58,6 +58,7 @@ import com.etendoerp.go.schemaforge.util.NeoErrorSanitizer;
  * Unit tests for the error classification shared by every NEO channel: what status and code a
  * failure gets, from the exception alone, and how that becomes a response.
  *
+ * @covers com.etendoerp.go.schemaforge.util.NeoValidationErrorResponseBuilder
  * @covers com.etendoerp.go.schemaforge.NeoErrorClassifier
  * @covers com.etendoerp.go.schemaforge.NeoErrorResponses
  */
@@ -70,6 +71,45 @@ class NeoErrorClassifierTest {
   private static RuntimeException dbFailure(String sqlState, String message) {
     return new GenericJDBCException("could not execute statement",
         new SQLException(message, sqlState));
+  }
+
+  @Test
+  void untranslatedTriggerDoesNotExposeDatabaseInternals() {
+    Classification c = NeoErrorClassifier.classify(
+        dbFailure("P0001", "ERROR: relation private_table does not exist"), "PUT");
+    assertEquals(422, c.status());
+    assertEquals("A business rule rejected this operation.", NeoErrorClassifier.displayMessage(c));
+  }
+
+  @Test
+  void translatedConstraintKeepsItsLanguageAcronymAndLines() {
+    Classification c = NeoErrorClassifier.classify(
+        dbFailure("23503", "ERROR: violates foreign key constraint"), "DELETE");
+    OBError translated = new OBError();
+    translated.setMessage("NIF: Registro utilizado.\nRevise los documentos relacionados.");
+    try (MockedStatic<OBMessageUtils> msg = mockStatic(OBMessageUtils.class)) {
+      msg.when(() -> OBMessageUtils.translateError(any(), any(), any(), anyString()))
+          .thenReturn(translated);
+      assertEquals(translated.getMessage(), NeoErrorClassifier.displayMessage(c));
+    }
+  }
+
+  @Test
+  void staleExceptionIsAConflictBeforeItsMessageKeyIsClassified() {
+    Classification c = NeoErrorClassifier.classify(
+        new org.openbravo.service.json.OBStaleObjectException("@OBJSON_StaleDate@"), "PUT");
+    assertEquals(409, c.status());
+    assertEquals("stale_record", c.code());
+  }
+
+  @Test
+  void invalidPropertyPathIsNotAnUnknownReference() throws Exception {
+    JSONObject errors = new JSONObject().put("id", "Property not found invalid error when parsing path");
+    assertFalse(com.etendoerp.go.schemaforge.util.NeoValidationErrorResponseBuilder
+        .isUnknownReference(errors));
+    errors.put("id", "New object object (key: missing) refered to but not present in the import set");
+    assertTrue(com.etendoerp.go.schemaforge.util.NeoValidationErrorResponseBuilder
+        .isUnknownReference(errors));
   }
 
   @Nested
@@ -291,6 +331,23 @@ class NeoErrorClassifierTest {
     }
 
     @Test
+    @DisplayName("a row still in use shows core's translated foreign-key text, not a fixed English one")
+    void recordInUseKeepsCoresTranslation() {
+      Classification c = NeoErrorClassifier.classify(
+          dbFailure("23503", "ERROR: update or delete on table \"c_order\" violates foreign key "
+              + "constraint \"c_orderline_c_order\" on table \"c_orderline\""), "DELETE");
+      OBError translated = new OBError();
+      translated.setMessage("No se puede borrar: hay líneas de pedido que lo usan.");
+      try (MockedStatic<OBMessageUtils> msg = mockStatic(OBMessageUtils.class)) {
+        msg.when(() -> OBMessageUtils.translateError(any(), any(), any(), anyString()))
+            .thenReturn(translated);
+
+        assertEquals("No se puede borrar: hay líneas de pedido que lo usan.",
+            NeoErrorClassifier.displayMessage(c));
+      }
+    }
+
+    @Test
     @DisplayName("generic classes name nothing, and a duplicate keeps the wording the import UI matches")
     void genericTexts() {
       assertEquals(NeoErrorClassifier.MSG_UNKNOWN_REFERENCE, NeoErrorClassifier.displayMessage(
@@ -408,7 +465,7 @@ class NeoErrorClassifierTest {
         assertEquals(409, classification.getInt("status"));
         assertEquals("record_in_use", classification.getString("code"));
 
-        NeoResponse response = NeoErrorResponses.fromClassifiedWriteFailure(inner, "test");
+        NeoResponse response = NeoErrorResponses.fromClassifiedWriteFailure(inner);
         assertEquals(409, response.getHttpStatus());
         assertEquals(NeoErrorClassifier.MSG_RECORD_IN_USE,
             response.getBody().getJSONObject("error").getString("message"));
@@ -416,15 +473,50 @@ class NeoErrorClassifierTest {
     }
 
     @Test
-    @DisplayName("a captured fault is left to the caller's existing answer; an uncaptured body too")
+    @DisplayName("a captured fault uses its sanitized classification; an uncaptured body is unchanged")
     void serverFaultsAndUncapturedAreNotAnswered() throws Exception {
       JSONObject fault = new JSONObject("{\"status\":-1,\"error\":{\"message\":\"m\","
           + "\"neoClassification\":{\"status\":500,\"code\":\"server_error\"}}}");
       JSONObject uncaptured = new JSONObject("{\"status\":-1,\"error\":{\"message\":\"m\"}}");
 
-      assertNull(NeoErrorResponses.fromClassifiedWriteFailure(fault, "test"));
-      assertNull(NeoErrorResponses.fromClassifiedWriteFailure(uncaptured, "test"));
+      assertEquals(500, NeoErrorResponses.fromClassifiedWriteFailure(fault).getHttpStatus());
+      assertNull(NeoErrorResponses.fromClassifiedWriteFailure(uncaptured));
       assertNull(NeoErrorResponses.classificationOf(uncaptured));
+    }
+
+    @Test
+    void batchKeepsAnAlreadyTranslatedMessageAndItsParameters() throws Exception {
+      String message = "NIF: Rechazado ABC.\nRevise el documento.";
+      JSONObject innerError = new JSONObject().put("code", "business_rule")
+          .put("message", message).put("messageKeys", new org.codehaus.jettison.json.JSONArray()
+              .put("20502"));
+      JSONObject failure = new JSONObject().put("error", new JSONObject().put("message", message)
+          .put("detail", new JSONObject().put("error", innerError)));
+      try (MockedStatic<OBMessageUtils> msg = mockStatic(OBMessageUtils.class)) {
+        NeoErrorResponses.retranslateBatchFailure(failure);
+        msg.verifyNoInteractions();
+      }
+      assertEquals(message, failure.getJSONObject("error").getString("message"));
+      assertEquals(message, innerError.getString("message"));
+    }
+
+    @Test
+    void batchRetranslatesRetainedKeysAfterGenericFallback() throws Exception {
+      JSONObject failure = new JSONObject("{\"error\":{\"status\":422,"
+          + "\"message\":\"A business rule rejected this operation.\",\"detail\":{\"error\":{"
+          + "\"message\":\"A business rule rejected this operation.\","
+          + "\"code\":\"business_rule\",\"messageKeys\":[\"20502\"]}}}}");
+      OBError translated = new OBError();
+      translated.setMessage("NIF: No se permite.\nRevise el documento.");
+      try (MockedStatic<OBMessageUtils> msg = mockStatic(OBMessageUtils.class)) {
+        msg.when(() -> OBMessageUtils.translateError(any(), any(), any(), anyString()))
+            .thenReturn(translated);
+        NeoErrorResponses.retranslateBatchFailure(failure);
+      }
+      JSONObject error = failure.getJSONObject("error");
+      assertEquals(translated.getMessage(), error.getString("message"));
+      assertEquals(translated.getMessage(),
+          error.getJSONObject("detail").getJSONObject("error").getString("message"));
     }
 
     @Test

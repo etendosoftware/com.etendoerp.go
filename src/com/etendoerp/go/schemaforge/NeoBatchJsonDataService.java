@@ -21,8 +21,6 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
@@ -63,6 +61,9 @@ import org.openbravo.service.json.JsonUtils;
  * subclassed instead — which core explicitly sanctions: "This class can however also be extended
  * and instantiated directly."</p>
  *
+ * <p>The complete update and remove implementations are copies of core. Review both methods,
+ * including their extracted helpers, against core on every upgrade.</p>
+ *
  * <h2>What is different from core</h2>
  * <p>{@link #update(Map, String)} is core's method with exactly two lines made conditional on a
  * batch owning the transaction:</p>
@@ -88,8 +89,8 @@ import org.openbravo.service.json.JsonUtils;
  * foreign-key violation, a deadlock…) to core's failure body before it is lost.
  * {@link #remove(Map)} is overridden for the same reason and is otherwise core's.</p>
  *
- * <h2>The two things this class must keep in step with core</h2>
- * <p>Both are {@code private} upstream and so had to be duplicated. If core changes either, this
+ * <h2>Private helpers copied in addition to the update and remove bodies</h2>
+ * <p>These are {@code private} upstream and so had to be duplicated. If core changes either, this
  * class drifts <b>silently</b> — there is no compiler error to catch it:</p>
  * <ul>
  *   <li>{@link #ADD_FLAG}, core's {@code "_doingAdd"} marker;</li>
@@ -119,7 +120,6 @@ import org.openbravo.service.json.JsonUtils;
  */
 public class NeoBatchJsonDataService extends DefaultJsonDataService {
 
-  private static final Logger log = LogManager.getLogger();
 
   /** Duplicated from core's private constant — see the class javadoc on silent drift. */
   private static final String ADD_FLAG = "_doingAdd";
@@ -199,7 +199,6 @@ public class NeoBatchJsonDataService extends DefaultJsonDataService {
       return result;
     } catch (Throwable t) { // NOSONAR — core catches Throwable here and the shape must match
       Throwable localThrowable = DbUtility.getUnderlyingSQLException(t);
-      logUpdateFailure(parameters, localThrowable);
       // ETP-5782: core's body, plus the classification of the throwable it is about to lose.
       return NeoErrorResponses.writeFailure(t, localThrowable,
           parameters.containsKey(ADD_FLAG) ? "POST" : "PUT");
@@ -248,33 +247,13 @@ public class NeoBatchJsonDataService extends DefaultJsonDataService {
   }
 
   /**
-   * Logs an {@code update}/{@code add} failure exactly like core, minus the rollback core performs
-   * before logging (the caller owns the transaction here). Extracted from {@link #update(Map,
-   * String)} purely to reduce its cognitive complexity (Sonar).
-   *
-   * @param parameters      the datasource parameters, used to tell add from update for the message
-   * @param localThrowable  the underlying throwable, already unwrapped via
-   *                        {@link DbUtility#getUnderlyingSQLException(Throwable)}
-   */
-  private void logUpdateFailure(Map<String, String> parameters, Throwable localThrowable) {
-    if (!(localThrowable instanceof OBException
-        && !((OBException) localThrowable).isLogExceptionNeeded())) {
-      if (parameters.containsKey(ADD_FLAG)) {
-        log.error("Error adding new object", localThrowable);
-      } else {
-        log.error("Error updating object", localThrowable);
-      }
-    }
-  }
-
-  /**
    * Core's {@code remove}, verbatim, except that a failure keeps its throwable: the failure body is
    * built by {@link NeoErrorResponses#writeFailure}, which attaches the classification (ETP-5782) —
    * a foreign-key violation here means the record is still in use, a 409, not a 500.
    *
    * <p>Like core, it commits twice (the response is built and committed before the delete runs in a
-   * transaction of its own), so it is never called while a batch owns the transaction: a batch only
-   * creates.
+   * transaction of its own). Customizations can dispatch a delete inside a batch; this inherited
+   * commit behavior must be checked when upgrading core.
    *
    * {@inheritDoc}
    */
@@ -322,11 +301,6 @@ public class NeoBatchJsonDataService extends DefaultJsonDataService {
 
       return result;
     } catch (Throwable t) { // NOSONAR — core catches Throwable here and the shape must match
-      Throwable localThrowable = DbUtility.getUnderlyingSQLException(t);
-      if (!(localThrowable instanceof OBException
-          && !((OBException) localThrowable).isLogExceptionNeeded())) {
-        log.error("Error removing object of " + entityName + " entity", localThrowable);
-      }
       // Core passes the original throwable to convertExceptionToJson here, not the unwrapped one.
       return NeoErrorResponses.writeFailure(t, t, "DELETE");
     }

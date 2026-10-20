@@ -121,6 +121,7 @@ import com.etendoerp.go.schemaforge.util.NeoMethodPolicy;
  */
 public class BatchService {
 
+  private static final String KEY_ERROR = "error";
   private static final Logger log = LogManager.getLogger(BatchService.class);
 
   /**
@@ -292,7 +293,7 @@ public class BatchService {
 
     int status = HttpServletResponse.SC_OK;
     if (!result.optBoolean(FIELD_COMMITTED, false)) {
-      JSONObject error = result.optJSONObject("error");
+      JSONObject error = result.optJSONObject(KEY_ERROR);
       if (error != null) {
         status = error.optInt("status", HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
       } else {
@@ -574,7 +575,7 @@ public class BatchService {
   /** The {@code error.message} of a NEO error response, or {@code null}. */
   private static String errorMessageOf(NeoResponse response) {
     JSONObject body = response.getBody();
-    JSONObject error = body != null ? body.optJSONObject("error") : null;
+    JSONObject error = body != null ? body.optJSONObject(KEY_ERROR) : null;
     return error != null ? error.optString("message", null) : null;
   }
 
@@ -733,7 +734,7 @@ public class BatchService {
     if (detail != null) {
       error.put("detail", detail);
     }
-    body.put("error", error);
+    body.put(KEY_ERROR, error);
     return body;
   }
 

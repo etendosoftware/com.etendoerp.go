@@ -20,6 +20,8 @@ package com.etendoerp.go.schemaforge;
 import java.util.ArrayList;
 import java.util.List;
 
+import javax.servlet.http.HttpServletResponse;
+
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
@@ -30,6 +32,7 @@ import org.openbravo.service.json.JsonConstants;
 import org.openbravo.service.json.JsonUtils;
 
 import com.etendoerp.go.schemaforge.NeoErrorClassifier.Classification;
+import com.etendoerp.go.schemaforge.util.NeoErrorSanitizer;
 import com.etendoerp.go.schemaforge.util.NeoMessageTranslator;
 
 /**
@@ -60,6 +63,12 @@ public final class NeoErrorResponses {
   /** Key, inside core's {@code response.error}, of the classification NEO attached to it. */
   public static final String CLASSIFICATION_KEY = "neoClassification";
 
+  /** Hint of a failure raised after the main write committed: re-sending would repeat it. */
+  public static final String AFTER_COMMIT_HINT = "The record may already be saved. Read it before "
+      + "re-sending the request.";
+
+  private static final String KEY_ERROR = "error";
+  private static final String KEY_HINT = "hint";
   static final String KEY_CODE = "code";
   static final String KEY_STATUS = "status";
   static final String KEY_MESSAGE = "message";
@@ -72,8 +81,8 @@ public final class NeoErrorResponses {
    * The response for a thrown exception.
    *
    * <p>Rolls the session back first — unless a batch owns the transaction, which rolls back
-   * itself — so a refused request writes nothing (the request filter commits whatever the session
-   * holds when the servlet answers instead of throwing), and so the translation that follows reads
+   * itself — to discard uncommitted work. Earlier commits, including the main write before
+   * an afterHandle failure, cannot be undone. The translation that follows reads
    * {@code AD_Message} on a usable session.
    *
    * @param t            the exception
@@ -93,6 +102,46 @@ public final class NeoErrorResponses {
       message = serverPrefix + message;
     }
     return toResponse(c.status(), c.code(), message, c.messageKeys());
+  }
+
+  /**
+   * The response for an exception raised AFTER the main operation completed — by
+   * {@code afterHandle}, once the default write (or the customization's own handling) succeeded.
+   *
+   * <p>Outside a batch that write is already committed, so the failure is NOT answered as a 4xx
+   * the caller should correct and re-send: re-sending would repeat a write that happened. It stays
+   * the 500 it always was, its message sanitized, with {@link #AFTER_COMMIT_HINT} on a write.
+   * Inside a batch nothing is committed yet (the batch rolls the whole set back), so the failure
+   * is classified as usual.
+   *
+   * @param t            the exception
+   * @param httpMethod   the verb of the request; may be {@code null}
+   * @param where        what failed, for the log line only
+   * @param serverPrefix prefix of the message (e.g. {@code "Hook handler error: "}); may be
+   *                     {@code null}
+   * @return the error response
+   */
+  public static NeoResponse afterCommitFailure(Throwable t, String httpMethod, String where,
+      String serverPrefix) {
+    if (BatchService.callerOwnsTransaction()) {
+      return fromException(t, httpMethod, where, serverPrefix);
+    }
+    log.error("{} failed after the main operation completed", where, t);
+    rollbackUnlessBatchOwned();
+    String message = (serverPrefix != null ? serverPrefix : "") + NeoErrorSanitizer.sanitize(t);
+    NeoResponse response = toResponse(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+        NeoErrorClassifier.CODE_SERVER_ERROR, message, null);
+    JSONObject error = response.getBody() != null
+        ? response.getBody().optJSONObject(KEY_ERROR)
+        : null;
+    if (error != null && !"GET".equalsIgnoreCase(httpMethod)) {
+      try {
+        error.put(KEY_HINT, AFTER_COMMIT_HINT);
+      } catch (JSONException e) {
+        log.debug("Could not add the after-commit hint: {}", e.getMessage());
+      }
+    }
+    return response;
   }
 
   /**
@@ -123,7 +172,7 @@ public final class NeoErrorResponses {
   public static NeoResponse toResponse(int status, String code, String message,
       List<String> messageKeys) {
     NeoResponse response = NeoResponse.error(status, message);
-    JSONObject error = response.getBody() != null ? response.getBody().optJSONObject("error") : null;
+    JSONObject error = response.getBody() != null ? response.getBody().optJSONObject(KEY_ERROR) : null;
     if (error != null) {
       try {
         error.put(KEY_CODE, code);
@@ -159,6 +208,7 @@ public final class NeoErrorResponses {
         c = fromUnderlying;
       }
     }
+    logClassified(c, t, "Write");
     try {
       JSONObject json = new JSONObject(coreBody);
       JSONObject response = json.optJSONObject(JsonConstants.RESPONSE_RESPONSE);
@@ -199,33 +249,24 @@ public final class NeoErrorResponses {
   }
 
   /**
-   * The response for a captured, classified write failure — or {@code null} when it is not one a
-   * caller can act on (not captured, or a 5xx), which its callers keep answering as before.
+   * The response for a captured, classified write failure — or {@code null} when it is not a
+   * captured failure. Uncaptured failures retain their existing handling; captured 5xx messages
+   * use the sanitized classification rather than core prose.
    *
    * @param innerResponse core's {@code response} object
-   * @param where         what failed, for the log line only
    * @return the response, or {@code null}
    */
-  static NeoResponse fromClassifiedWriteFailure(JSONObject innerResponse, String where) {
+  static NeoResponse fromClassifiedWriteFailure(JSONObject innerResponse) {
     JSONObject classification = classificationOf(innerResponse);
     if (classification == null) {
       return null;
     }
     int status = classification.optInt(KEY_STATUS, 500);
-    if (status >= 500 && status != 503) {
-      return null;
-    }
     String code = classification.optString(KEY_CODE, NeoErrorClassifier.CODE_SERVER_ERROR);
     List<String> keys = new ArrayList<>();
     JSONArray rawKeys = classification.optJSONArray(KEY_MESSAGE_KEYS);
     for (int i = 0; rawKeys != null && i < rawKeys.length(); i++) {
       keys.add(rawKeys.optString(i));
-    }
-    if (status >= 500) {
-      log.error("{} failed: {} {}", where, status, code);
-    } else {
-      log.warn("{} refused: {} {}{}", where, status, code,
-          keys.isEmpty() ? "" : " " + keys);
     }
     return toResponse(status, code, classification.optString(KEY_MESSAGE, null), keys);
   }
@@ -235,35 +276,67 @@ public final class NeoErrorResponses {
    *
    * <p>A refusal classified while a batch still owned the transaction was displayed on a session
    * the failure had already aborted, where {@code AD_Message} cannot be read, so its message may
-   * still be the raw {@code @Key@}. Only a message that still holds such a token is touched.
+   * have been replaced with a safe generic message. The retained {@code messageKeys} allow a
+   * second translation without retaining or returning raw database text.
    *
    * @param failure the batch failure body ({@code error}, and the operation's response under
    *                {@code error.detail})
    */
   static void retranslateBatchFailure(JSONObject failure) {
-    JSONObject error = failure != null ? failure.optJSONObject("error") : null;
+    JSONObject error = failure != null ? failure.optJSONObject(KEY_ERROR) : null;
     if (error == null) {
       return;
     }
     retranslate(error);
     JSONObject detail = error.optJSONObject("detail");
-    JSONObject detailError = detail != null ? detail.optJSONObject("error") : null;
+    JSONObject detailError = detail != null ? detail.optJSONObject(KEY_ERROR) : null;
     if (detailError != null) {
+      String previous = detailError.optString(KEY_MESSAGE, null);
       retranslate(detailError);
+      if (java.util.Objects.equals(previous, error.optString(KEY_MESSAGE, null))) {
+        try {
+          error.put(KEY_MESSAGE, detailError.optString(KEY_MESSAGE, previous));
+        } catch (JSONException e) {
+          log.debug("Could not synchronize the batch failure message: {}", e.getMessage());
+        }
+      }
     }
   }
 
   private static void retranslate(JSONObject error) {
     String message = error.optString(KEY_MESSAGE, null);
-    if (message == null || NeoMessageTranslator.extractMessageKeys(message).isEmpty()) {
+    List<String> keys = new ArrayList<>(NeoMessageTranslator.extractMessageKeys(message));
+    // Metadata only recovers a failed translation; never discard a valid message's parameters.
+    if (keys.isEmpty() && !isTranslationFallback(message)) {
       return;
     }
+    JSONArray retainedKeys = error.optJSONArray(KEY_MESSAGE_KEYS);
+    for (int i = 0; retainedKeys != null && i < retainedKeys.length(); i++) {
+      String key = retainedKeys.optString(i);
+      if (!key.isBlank() && !keys.contains(key)) {
+        keys.add(key);
+      }
+    }
+    if (keys.isEmpty()) {
+      return;
+    }
+    String source = message != null && !NeoMessageTranslator.extractMessageKeys(message).isEmpty()
+        ? message : "@" + String.join("@ @", keys) + "@";
+    Classification classification = new Classification(error.optInt(KEY_STATUS, 422),
+        error.optString(KEY_CODE, NeoErrorClassifier.CODE_BUSINESS_RULE), source, keys);
     try {
-      error.put(KEY_MESSAGE, NeoErrorClassifier.primaryLine(
-          NeoMessageTranslator.translateDbMessage(message)));
+      error.put(KEY_MESSAGE, NeoErrorClassifier.displayMessage(classification));
     } catch (JSONException e) {
       log.debug("Could not re-translate a batch failure: {}", e.getMessage());
     }
+  }
+
+  private static boolean isTranslationFallback(String message) {
+    return NeoErrorClassifier.MSG_BUSINESS_RULE.equals(message)
+        || NeoErrorClassifier.MSG_RECORD_IN_USE.equals(message)
+        || NeoErrorClassifier.MSG_INVALID_VALUE.equals(message)
+        || NeoErrorClassifier.MSG_FORBIDDEN.equals(message)
+        || NeoErrorClassifier.MSG_STALE_RECORD.equals(message);
   }
 
   private static void logClassified(Classification c, Throwable t, String where) {
