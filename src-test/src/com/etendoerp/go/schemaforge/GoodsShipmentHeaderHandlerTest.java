@@ -37,6 +37,7 @@ import java.util.Collections;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
@@ -62,6 +63,8 @@ import org.openbravo.model.pricing.pricelist.PriceList;
  *   <li>{@code afterHandle()} with DB — outer try-catch returns null on DB failure for
  *       both single-record (recordId non-null) and batch (recordId null) paths.</li>
  * </ul>
+ *
+ * @covers com.etendoerp.go.schemaforge.GoodsShipmentHeaderHandler
  */
 public class GoodsShipmentHeaderHandlerTest {
 
