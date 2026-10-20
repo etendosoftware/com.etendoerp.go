@@ -294,7 +294,7 @@ public class FinancialAccountHandler implements NeoHandler {
   // ---------------------------------------------------------------------------
 
   private static boolean isUpdateMethod(String method) {
-    return "PUT".equals(method) || "PATCH".equals(method);
+    return METHOD_PUT.equals(method) || METHOD_PATCH.equals(method);
   }
 
   /**
