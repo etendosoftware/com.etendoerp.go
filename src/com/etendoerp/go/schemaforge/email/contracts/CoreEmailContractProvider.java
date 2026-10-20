@@ -17,6 +17,8 @@
 
 package com.etendoerp.go.schemaforge.email.contracts;
 
+import com.etendoerp.go.payment.DalDemoTrialNoticeSource;
+import com.etendoerp.go.payment.DemoTrialNoticeSource;
 import com.etendoerp.go.schemaforge.email.EmailContract;
 import com.etendoerp.go.schemaforge.email.EmailContractDataResolver;
 import com.etendoerp.go.schemaforge.email.EmailContractProvider;
@@ -39,6 +41,7 @@ public final class CoreEmailContractProvider implements EmailContractProvider {
   private static final String NOTE_WARNING = "note.warning";
 
   private final EmailContractDataResolver contractResolver;
+  private final DemoTrialNoticeSource demoTrialNoticeSource;
   private static final int RESET_PASSWORD_RECIPIENT_THROTTLE_LIMIT = 3;
   // ETP-5115: same ceiling as reset-password. Asking again is the same normal thing to do — the
   // first mail lands in spam, the user waits — and the two are the same flow seen from either side
@@ -66,7 +69,19 @@ public final class CoreEmailContractProvider implements EmailContractProvider {
    * @param contractResolver resolver used by account and login alert contracts
    */
   public CoreEmailContractProvider(EmailContractDataResolver contractResolver) {
+    this(contractResolver, new DalDemoTrialNoticeSource());
+  }
+
+  /**
+   * Creates the provider with explicit resolvers.
+   *
+   * @param contractResolver resolver used by account and login alert contracts
+   * @param demoTrialNoticeSource source of the demo trial notices (ETP-5453)
+   */
+  public CoreEmailContractProvider(EmailContractDataResolver contractResolver,
+      DemoTrialNoticeSource demoTrialNoticeSource) {
     this.contractResolver = contractResolver;
+    this.demoTrialNoticeSource = demoTrialNoticeSource;
   }
 
   @Override
@@ -103,6 +118,8 @@ public final class CoreEmailContractProvider implements EmailContractProvider {
         new LoginAlertEmailContract(contractResolver),
         new OrganizationJoinedEmailContract(contractResolver),
         new CompanyInvitationEmailContract(),
-        new com.etendoerp.go.schemaforge.email.InternalAlertEmailContract());
+        new com.etendoerp.go.schemaforge.email.InternalAlertEmailContract(),
+        // ETP-5453: sent by the daily demo trial job, never from the browser.
+        new DemoTrialNoticeEmailContract(demoTrialNoticeSource));
   }
 }

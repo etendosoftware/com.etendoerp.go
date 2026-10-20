@@ -27,8 +27,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.stream.Stream;
 
-
 import org.codehaus.jettison.json.JSONObject;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -227,6 +227,27 @@ class InvoiceLineAmountSupportTest {
     if (gross != null) {
       assertAmount(label, gross, json, InvoiceLineAmountSupport.FIELD_GROSS_AMOUNT);
     }
+  }
+
+  /**
+   * ETP-5703: the recalculated amounts are written rounded to the invoice currency's precision, as
+   * {@link java.math.BigDecimal}s — 3 x 1.50 at 21 % is 4.50 / 5.45, never the unrounded 5.445 the
+   * policy used to write. {@code assertAmount} rounds before comparing, so this asserts exactly.
+   */
+  @Test
+  void updateWritesAmountsRoundedToTheCurrencyPrecision() throws Exception {
+    JSONObject json = new JSONObject("{\"invoicedQuantity\":3}");
+    NeoContext ctx = NeoContext.builder().specName("purchase-invoice").entityName("lines")
+        .httpMethod("PUT").endpointType(NeoEndpointType.CRUD)
+        .recordId(LineAmountTestSupport.STORED_LINE_ID).requestBody(json).build();
+
+    try (MockedStatic<OBDal> dal = LineAmountTestSupport.taxRate(21.0,
+        LineAmountTestSupport.storedInvoiceLine("10", "1.5", "0", "0", "0", "TAX21"))) {
+      InvoiceLineAmountSupport.deriveAmountsOnUpdate(ctx);
+    }
+
+    assertEquals("4.50", json.get(InvoiceLineAmountSupport.FIELD_LINE_NET_AMOUNT).toString());
+    assertEquals("5.45", json.get(InvoiceLineAmountSupport.FIELD_GROSS_AMOUNT).toString());
   }
 
   @ParameterizedTest(name = "{0}")
