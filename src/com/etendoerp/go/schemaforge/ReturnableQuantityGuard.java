@@ -22,7 +22,9 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
 
 import javax.servlet.http.HttpServletResponse;
 
@@ -49,6 +51,11 @@ import org.openbravo.dal.service.OBDal;
  * ({@link ReturnMaterialReceiptLineHandler}). Every channel (REST single, batch, MCP) reaches those
  * customizations, so it reaches this check too.
  *
+ * <p>Concurrency: the requested source lines are row-locked ({@code FOR UPDATE}) before the
+ * returnable quantity is read, so two concurrent returns of the same shipment line are checked one
+ * after the other, never both against the same "already returned" figure. The lock lives until the
+ * business transaction ends, i.e. after the caller has written its return lines.
+ *
  * <p>Fails CLOSED: a DB error propagates, so the caller answers 500 instead of letting an
  * unchecked return through.
  */
@@ -60,10 +67,15 @@ final class ReturnableQuantityGuard {
   /**
    * One row per requested source line: product name, shipped magnitude, and the magnitude already
    * taken by other non-voided returns. The {@code <> ?} excludes the return line being edited, so
-   * re-saving a line with its own quantity is never counted twice.
+   * re-saving a line with its own quantity is never counted twice. Same filters as
+   * {@code GoodsShipmentHeaderHandler.CAN_RETURN_SQL}: an INACTIVE source line has nothing
+   * returnable. It is expressed as "shipped = 0" rather than as {@code sil.isactive = 'Y'} in the
+   * WHERE so the row — and the product name the refusal shows — is still there; an unknown id,
+   * which yields no row at all, is refused the same way, see {@link #findExcess}.
    */
   private static final String RETURNABLE_SQL_PREFIX =
-      "SELECT sil.m_inoutline_id, p.name, ABS(sil.movementqty),"
+      "SELECT sil.m_inoutline_id, p.name,"
+      + " CASE WHEN sil.isactive = 'Y' THEN ABS(sil.movementqty) ELSE 0 END,"
       + " COALESCE((SELECT SUM(ABS(rl.movementqty)) FROM m_inoutline rl"
       + "   JOIN m_inout r ON r.m_inout_id = rl.m_inout_id"
       + "   WHERE rl.canceled_inoutline_id = sil.m_inoutline_id"
@@ -73,8 +85,24 @@ final class ReturnableQuantityGuard {
       + " LEFT JOIN m_product p ON p.m_product_id = sil.m_product_id"
       + " WHERE sil.m_inoutline_id IN (";
 
-  private static final String SOURCE_LINE_SQL =
-      "SELECT canceled_inoutline_id FROM m_inoutline WHERE m_inoutline_id = ?";
+  /**
+   * Row-locks the requested source lines for the rest of the business transaction, so two
+   * concurrent returns of the same shipment line are serialised: the second one waits here until
+   * the first commits (or rolls back). Ordered by id so two requests locking overlapping sets
+   * always take the locks in the same order and cannot deadlock each other.
+   *
+   * <p>It is a SEPARATE statement on purpose, not a {@code FOR UPDATE} on the returnable query:
+   * under READ COMMITTED each statement takes its own snapshot, and a locking query that waited
+   * re-checks only the locked row, not the {@code SUM} sub-select over the return lines. Only a
+   * statement that STARTS after the lock was granted sees the return lines the other transaction
+   * just committed.
+   */
+  private static final String LOCK_SOURCE_LINES_SQL_PREFIX =
+      "SELECT m_inoutline_id FROM m_inoutline WHERE m_inoutline_id IN (";
+  private static final String LOCK_SOURCE_LINES_SQL_SUFFIX = ") ORDER BY m_inoutline_id FOR UPDATE";
+
+  private static final String STORED_LINE_SQL =
+      "SELECT canceled_inoutline_id, ABS(movementqty) FROM m_inoutline WHERE m_inoutline_id = ?";
 
   private ReturnableQuantityGuard() {
   }
@@ -125,21 +153,52 @@ final class ReturnableQuantityGuard {
       return null;
     }
     String[] ids = requestedBySourceLine.keySet().toArray(new String[0]);
-    String sql = RETURNABLE_SQL_PREFIX
-        + String.join(",", Collections.nCopies(ids.length, "?")) + ")";
+    String placeholders = String.join(",", Collections.nCopies(ids.length, "?"));
     Connection conn = OBDal.getInstance().getConnection();
-    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+    lockSourceLines(conn, placeholders, ids);
+    Set<String> seen = new HashSet<>();
+    try (PreparedStatement ps = conn.prepareStatement(RETURNABLE_SQL_PREFIX + placeholders + ")")) {
       ps.setString(1, StringUtils.defaultString(editedReturnLineId));
       for (int i = 0; i < ids.length; i++) {
         ps.setString(i + 2, ids[i]);
       }
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
+          seen.add(rs.getString(1));
           Excess candidate = toExcessIfOver(rs, requestedBySourceLine);
           if (candidate != null) {
             return candidate;
           }
         }
+      }
+    }
+    return nothingReturnableOnUnseenLine(requestedBySourceLine, seen);
+  }
+
+  // Placeholders only; every value is bound.
+  @SuppressWarnings("java:S2077")
+  private static void lockSourceLines(Connection conn, String placeholders, String[] ids)
+      throws SQLException {
+    String sql = LOCK_SOURCE_LINES_SQL_PREFIX + placeholders + LOCK_SOURCE_LINES_SQL_SUFFIX;
+    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+      for (int i = 0; i < ids.length; i++) {
+        ps.setString(i + 1, ids[i]);
+      }
+      // execute(), not executeQuery(): the rows are not needed, only the locks the statement takes.
+      ps.execute();
+    }
+  }
+
+  /**
+   * A requested source line the returnable query did not return — not a shipment line at all —
+   * has nothing returnable. Without this, an unknown id would pass the check silently instead of
+   * being refused.
+   */
+  private static Excess nothingReturnableOnUnseenLine(Map<String, BigDecimal> requested,
+      Set<String> seen) {
+    for (Map.Entry<String, BigDecimal> e : requested.entrySet()) {
+      if (!seen.contains(e.getKey())) {
+        return new Excess(e.getKey(), "", BigDecimal.ZERO, BigDecimal.ZERO, e.getValue());
       }
     }
     return null;
@@ -158,26 +217,38 @@ final class ReturnableQuantityGuard {
         alreadyReturned, qty);
   }
 
+  /** What a persisted return line carries: its source shipment line and its quantity magnitude. */
+  static final class StoredReturnLine {
+    final String sourceLineId;
+    final BigDecimal quantity;
+
+    StoredReturnLine(String sourceLineId, BigDecimal quantity) {
+      this.sourceLineId = sourceLineId;
+      this.quantity = quantity;
+    }
+  }
+
   /**
-   * The source shipment line a persisted return line points at, or {@code null} when the line
-   * does not exist or is not linked to a shipment line.
+   * The source shipment line and the quantity magnitude of a persisted return line, or
+   * {@code null} when the id is blank or no such line exists. {@code sourceLineId} is {@code null}
+   * when the line is not linked to a shipment line.
    */
-  static String findSourceLineId(String returnLineId) throws SQLException {
+  static StoredReturnLine findStoredReturnLine(String returnLineId) throws SQLException {
     if (StringUtils.isBlank(returnLineId)) {
       return null;
     }
     Connection conn = OBDal.getInstance().getConnection();
-    try (PreparedStatement ps = conn.prepareStatement(SOURCE_LINE_SQL)) {
+    try (PreparedStatement ps = conn.prepareStatement(STORED_LINE_SQL)) {
       ps.setString(1, returnLineId);
       try (ResultSet rs = ps.executeQuery()) {
-        return rs.next() ? rs.getString(1) : null;
+        return rs.next() ? new StoredReturnLine(rs.getString(1), rs.getBigDecimal(2)) : null;
       }
     }
   }
 
   /**
-   * The 409 for an over-return. Same structured shape as
-   * {@code NeoReturnReceiptService#returnAlreadyExists}: the SPA renders its own locale from
+   * The 409 for an over-return, in the structured NEO error shape ({@code code},
+   * {@code messageKeys}, {@code messageParams}): the SPA renders its own locale from
    * {@code messageKeys} + {@code messageParams}; the English {@code message} is what REST and MCP
    * callers read, and it carries the numbers an agent needs to correct the request.
    */

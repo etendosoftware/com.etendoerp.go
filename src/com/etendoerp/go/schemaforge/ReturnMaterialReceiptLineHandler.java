@@ -84,10 +84,21 @@ public class ReturnMaterialReceiptLineHandler implements NeoHandler {
   }
 
   /**
-   * ETP-5729 CP-12: editing a draft return line (or creating one linked to a shipment line) must
-   * not push the shipment line past what it shipped. The line's own current quantity is excluded
-   * from the sum, so it is replaced, not added. A line not linked to a shipment line
-   * ({@code canceledInoutLine} absent in the body and on the record) has nothing to check.
+   * ETP-5729 CP-12: creating or editing a return line linked to a shipment line must not push that
+   * shipment line past what it shipped. The line's own current quantity is excluded from the sum,
+   * so it is replaced, not added.
+   *
+   * <p>A write is checked when it touches either side of the equation:
+   * <ul>
+   *   <li><b>{@code canceledInoutLine} in the body</b> decides the source line. A real id re-points
+   *       the line and is the ONLY source checked — the stored one is never used as a silent
+   *       fallback. {@code null} or {@code ""} unlinks the line: nothing to check.</li>
+   *   <li>Absent from the body, the source line is the stored one ({@code recordId}); a new line
+   *       or a stored line without one has nothing to check.</li>
+   *   <li><b>{@code movementQuantity}</b> comes from the body when present, otherwise from the
+   *       stored line — so re-pointing an existing line without sending a quantity is checked with
+   *       the quantity it already carries.</li>
+   * </ul>
    *
    * <p>Runs BEFORE the sign flip and compares magnitudes, so the user-facing positive value and an
    * already-negative one are judged the same. Fails closed: a DB error answers 500 rather than
@@ -95,25 +106,36 @@ public class ReturnMaterialReceiptLineHandler implements NeoHandler {
    */
   private NeoResponse refuseOverReturn(NeoContext context) {
     JSONObject body = context.getRequestBody();
-    if (!NeoEndpointType.CRUD.equals(context.getEndpointType()) || body == null
-        || !body.has(ReturnLineQuantityPolicy.FIELD_MOVEMENT_QUANTITY)) {
+    if (!NeoEndpointType.CRUD.equals(context.getEndpointType()) || body == null) {
       return null;
     }
-    BigDecimal qty = parseMagnitude(body.opt(ReturnLineQuantityPolicy.FIELD_MOVEMENT_QUANTITY));
-    if (qty == null || qty.signum() == 0) {
+    boolean bodyHasQty = body.has(ReturnLineQuantityPolicy.FIELD_MOVEMENT_QUANTITY);
+    boolean bodyHasLink = body.has(FIELD_CANCELED_INOUT_LINE);
+    if (!bodyHasQty && !bodyHasLink) {
       return null;
+    }
+    String bodySourceLineId = bodyHasLink ? linkedLineId(body.opt(FIELD_CANCELED_INOUT_LINE)) : null;
+    if (bodyHasLink && bodySourceLineId == null) {
+      return null; // explicit unlink
+    }
+    BigDecimal bodyQty = bodyHasQty
+        ? parseMagnitude(body.opt(ReturnLineQuantityPolicy.FIELD_MOVEMENT_QUANTITY)) : null;
+    if (bodyHasQty && (bodyQty == null || bodyQty.signum() == 0)) {
+      return null; // nothing returned; an unparsable value is NEO's to reject
     }
     String recordId = context.getRecordId();
-    String bodySourceLineId = body.isNull(FIELD_CANCELED_INOUT_LINE) ? null
-        : body.optString(FIELD_CANCELED_INOUT_LINE, null);
-    if (StringUtils.isBlank(bodySourceLineId) && StringUtils.isBlank(recordId)) {
-      return null;
+    if (StringUtils.isBlank(recordId) && (bodySourceLineId == null || bodyQty == null)) {
+      return null; // a new line lacking a link or a quantity has nothing stored to fill it in
     }
     OBContext.setAdminMode(true);
     try {
-      String sourceLineId = StringUtils.isNotBlank(bodySourceLineId) ? bodySourceLineId
-          : ReturnableQuantityGuard.findSourceLineId(recordId);
-      if (StringUtils.isBlank(sourceLineId)) {
+      ReturnableQuantityGuard.StoredReturnLine stored =
+          (bodySourceLineId != null && bodyQty != null) ? null
+              : ReturnableQuantityGuard.findStoredReturnLine(recordId);
+      String sourceLineId = bodySourceLineId != null ? bodySourceLineId
+          : stored == null ? null : stored.sourceLineId;
+      BigDecimal qty = bodyQty != null ? bodyQty : stored == null ? null : stored.quantity;
+      if (StringUtils.isBlank(sourceLineId) || qty == null || qty.signum() == 0) {
         return null;
       }
       return ReturnableQuantityGuard.refuseIfExceeded(
@@ -126,6 +148,19 @@ public class ReturnMaterialReceiptLineHandler implements NeoHandler {
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /**
+   * The source line id a body sends as {@code canceledInoutLine}: a plain id, or an
+   * {@code {"id": ...}} reference. {@code null} for JSON null, a blank string or an object without
+   * an id — all of which mean "not linked".
+   */
+  private static String linkedLineId(Object raw) {
+    if (raw == null || raw == JSONObject.NULL) {
+      return null;
+    }
+    String id = raw instanceof JSONObject ? ((JSONObject) raw).optString("id", null) : raw.toString();
+    return StringUtils.isBlank(id) || "null".equals(id) ? null : id.trim();
   }
 
   private static BigDecimal parseMagnitude(Object raw) {
