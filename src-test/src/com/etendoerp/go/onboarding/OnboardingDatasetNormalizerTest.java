@@ -154,7 +154,7 @@ public class OnboardingDatasetNormalizerTest {
    * ("Undefined-OverIssue", {@code OVERISSUE='Y'}), is the root cause documented in
    * {@code docs/etendo-ad/onboarding-gaps.md} §I1 — assert it is gone, not merely that '2' appears,
    * so a partial revert still fails this test. (ETP-5079 reduced the ONBOARDING output to a single
-   * locator, {@code AG-0-0-0} of "Almacen Principal" — the source dataset still ships the secondary
+   * locator, {@code AG-0-0-0} of "Almacén Principal" — the source dataset still ships the secondary
    * warehouse's {@code AS-0-0-0} for GOClient, filtered out at import time. The assertion is
    * deliberately count-agnostic.)
    */
@@ -233,7 +233,7 @@ public class OnboardingDatasetNormalizerTest {
    * NOT be born with the sample products, the second warehouse or the template financial accounts,
    * while the pieces the runtime actually depends on must survive: the internal {@code ETGO_DTO}
    * "Discount" product (resolved at runtime for inline discounts) and the single warehouse
-   * "Almacen Principal".
+   * "Almacén Principal".
    *
    * <p>Asserted on the NORMALIZED output, which is the level that matters and the reason this test
    * survived the fix. All of these rows are still present in the SOURCE dataset — GOClient is
@@ -307,7 +307,7 @@ public class OnboardingDatasetNormalizerTest {
         OnboardingDatasetDefinition.getIncludedTables().contains("M_PRODUCT_CATEGORY_TRL"));
 
     // Exactly one warehouse, renamed; the secondary one and its locator are gone.
-    assertTrue(xml.contains("Almacen Principal"));
+    assertTrue(xml.contains("Almacén Principal"));
     assertFalse(xml.contains("Almacen GO"));
     assertFalse(xml.contains("Almacén Secundario"));
     assertFalse(xml.contains("AS-0-0-0"));
@@ -483,7 +483,7 @@ public class OnboardingDatasetNormalizerTest {
     String xml = classpathBackedNormalizer().buildDatasetXml();
 
     assertTrue(xml.contains("<Openbravo"));
-    assertTrue(xml.contains("Almacen Principal"));
+    assertTrue(xml.contains("Almacén Principal"));
     assertFalse(xml.contains("<AD_CLIENT>"));
   }
 
