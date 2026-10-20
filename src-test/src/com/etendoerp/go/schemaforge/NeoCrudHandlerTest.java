@@ -2214,6 +2214,9 @@ class NeoCrudHandlerTest {
         lists.when(() -> com.etendoerp.go.schemaforge.util.NeoListReferenceError.enrich(sanitized))
             .thenReturn(sanitized + " Accepted values: DR, CO.");
 
+        lists.when(() -> com.etendoerp.go.schemaforge.util.NeoListReferenceError
+            .enrichServerError(org.mockito.ArgumentMatchers.any(NeoResponse.class))).thenCallRealMethod();
+
         NeoResponse result = invokeCheckResponse(response);
 
         assertEquals(500, result.getHttpStatus());

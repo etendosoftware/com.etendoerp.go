@@ -8,13 +8,19 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
+import javax.servlet.http.HttpServletResponse;
+
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONException;
+import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
 import org.openbravo.base.model.domaintype.DomainType;
 import org.openbravo.base.model.domaintype.EnumerateDomainType;
+
+import com.etendoerp.go.schemaforge.NeoResponse;
 
 /**
  * Rewrites Openbravo's List-reference validation failure so it names the values the column
@@ -88,6 +94,24 @@ public final class NeoListReferenceError {
   static final int MAX_LISTED_VALUES = 40;
 
   private NeoListReferenceError() {
+  }
+
+  private static final String KEY_ERROR = "error";
+  private static final String KEY_MESSAGE = "message";
+
+  /**
+   * ETP-4996 on a captured fault: a List-reference failure is a 5xx whose sanitized message still
+   * names the column, so the accepted values are appended exactly as on the uncaptured path.
+   */
+  public static NeoResponse enrichServerError(NeoResponse classified) throws JSONException {
+    JSONObject error = classified.getBody() != null
+        ? classified.getBody().optJSONObject(KEY_ERROR)
+        : null;
+    if (classified.getHttpStatus() >= HttpServletResponse.SC_INTERNAL_SERVER_ERROR
+        && error != null) {
+      error.put(KEY_MESSAGE, enrich(error.optString(KEY_MESSAGE, null)));
+    }
+    return classified;
   }
 
   /**
