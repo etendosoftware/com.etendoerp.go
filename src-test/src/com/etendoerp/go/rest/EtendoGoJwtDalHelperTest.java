@@ -33,6 +33,7 @@ import static org.mockito.Mockito.when;
 import java.util.Collections;
 import java.util.Date;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import org.codehaus.jettison.json.JSONObject;
@@ -60,14 +61,19 @@ import org.openbravo.model.common.enterprise.Organization;
 
 import com.auth0.jwt.interfaces.Claim;
 import com.auth0.jwt.interfaces.DecodedJWT;
+import com.etendoerp.go.payment.EnvironmentPlanCache;
+import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.payment.TenantPlanService;
 import com.etendoerp.go.schemaforge.data.Account;
+import com.etendoerp.go.schemaforge.data.Subscription;
 import com.etendoerp.go.schemaforge.data.Invitation;
 import com.etendoerp.go.schemaforge.util.OwnerSupport;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
  * Unit tests for {@link EtendoGoJwtDalHelper}.
+ *
+ * @covers com.etendoerp.go.rest.EtendoGoJwtDalHelper
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -429,12 +435,136 @@ class EtendoGoJwtDalHelperTest {
     }
   }
 
+  /**
+   * ETP-5047 — stubs the account's environments for the purchase-source lookups: each client id
+   * becomes one environment user, {@code closedRowClientId} has a closed (canceled) subscription
+   * row, and {@code markerClientId} has no row but the {@code ETGO_EnvironmentType = PRODUCTIVE}
+   * marker. Every other read finds nothing, so every plan reads free.
+   */
+  private void givenEnvironments(OBQuery<User> usersQuery, OBQuery<Preference> preferenceQuery,
+      OBQuery<Subscription> subscriptionQuery, String closedRowClientId, String markerClientId,
+      String... clientIds) {
+    List<User> users = new java.util.ArrayList<>();
+    for (String clientId : clientIds) {
+      Client client = mock(Client.class);
+      when(client.getId()).thenReturn(clientId);
+      User user = mock(User.class);
+      when(user.getClient()).thenReturn(client);
+      users.add(user);
+    }
+    when(obDal.createQuery(eq(User.class), anyString())).thenReturn(usersQuery);
+    when(usersQuery.list()).thenReturn(users);
+
+    Subscription closedRow = mock(Subscription.class);
+    when(closedRow.getSubscriptionStatus()).thenReturn("canceled");
+    when(closedRow.getEndDate()).thenReturn(new Date());
+    java.util.concurrent.atomic.AtomicReference<Object> rowClient =
+        new java.util.concurrent.atomic.AtomicReference<>();
+    org.mockito.Mockito.doAnswer(invocation -> {
+      if ("environmentClientId".equals(invocation.getArgument(0))) {
+        rowClient.set(invocation.getArgument(1));
+      }
+      return subscriptionQuery;
+    }).when(subscriptionQuery).setNamedParameter(anyString(), any());
+    when(obDal.createQuery(eq(Subscription.class), anyString())).thenReturn(subscriptionQuery);
+    when(subscriptionQuery.uniqueResult()).thenAnswer(invocation ->
+        closedRowClientId != null && closedRowClientId.equals(rowClient.get()) ? closedRow : null);
+
+    Preference productiveMarker = mock(Preference.class);
+    when(productiveMarker.getSearchKey())
+        .thenReturn(TenantEnvironmentLifecycleService.TYPE_PRODUCTIVE);
+    java.util.concurrent.atomic.AtomicReference<Object> attribute =
+        new java.util.concurrent.atomic.AtomicReference<>();
+    java.util.concurrent.atomic.AtomicReference<Object> preferenceClient =
+        new java.util.concurrent.atomic.AtomicReference<>();
+    org.mockito.Mockito.doAnswer(invocation -> {
+      if ("attribute".equals(invocation.getArgument(0))) {
+        attribute.set(invocation.getArgument(1));
+      } else if ("clientId".equals(invocation.getArgument(0))) {
+        preferenceClient.set(invocation.getArgument(1));
+      }
+      return preferenceQuery;
+    }).when(preferenceQuery).setNamedParameter(anyString(), any());
+    when(obDal.createQuery(eq(Preference.class), anyString())).thenReturn(preferenceQuery);
+    when(preferenceQuery.uniqueResult()).thenAnswer(invocation ->
+        TenantEnvironmentLifecycleService.ENVIRONMENT_TYPE_ATTRIBUTE.equals(attribute.get())
+            && markerClientId != null && markerClientId.equals(preferenceClient.get())
+            ? productiveMarker : null);
+  }
+
   @Nested
   @DisplayName("findFreeTenantIdsByAccountEmail")
   class FindFreeTenantIdsByAccountEmail {
 
     @Mock private OBQuery<User> usersQuery;
     @Mock private OBQuery<Preference> preferenceQuery;
+    @Mock private OBQuery<Subscription> subscriptionQuery;
+
+    // ETP-5640 reads the tenant plan in OBContext admin mode; with no live session the real
+    // static methods NPE, so they are no-ops here — the plan lookup is stubbed through obDal.
+    private MockedStatic<OBContext> obContextMock;
+    // ETP-5743 reads the owner flag through native SQL. Unstubbed, every client reads as a legacy
+    // tenant with no owner flagged, which keeps the account match as the ownership evidence.
+    private MockedStatic<OwnerSupport> ownerSupportMock;
+
+    @BeforeEach
+    void mockAdminMode() {
+      obContextMock = mockStatic(OBContext.class);
+      // ETP-5047: the plan and the environment type both read the subscription rows; by default
+      // no tenant has one. A spec that needs a row answers it per tenant.
+      when(obDal.createQuery(eq(Subscription.class), anyString())).thenReturn(subscriptionQuery);
+      when(subscriptionQuery.uniqueResult()).thenReturn(null);
+      ownerSupportMock = mockStatic(OwnerSupport.class);
+    }
+
+    @AfterEach
+    void restoreAdminMode() {
+      obContextMock.close();
+      ownerSupportMock.close();
+    }
+
+    private User environmentUser(String userId, String clientId) {
+      Client client = mock(Client.class);
+      when(client.getId()).thenReturn(clientId);
+      User user = mock(User.class);
+      when(user.getId()).thenReturn(userId);
+      when(user.getClient()).thenReturn(client);
+      return user;
+    }
+
+    private void givenEnvironmentUsers(User... users) {
+      when(obDal.createQuery(eq(User.class), anyString())).thenReturn(usersQuery);
+      when(usersQuery.list()).thenReturn(List.of(users));
+      when(obDal.createQuery(eq(Preference.class), anyString())).thenReturn(preferenceQuery);
+      when(preferenceQuery.uniqueResult()).thenReturn(null);
+    }
+
+    @Test
+    @DisplayName("leaves out a free client the account was only invited into (ETP-5743)")
+    void excludesFreeClientWhereAccountIsInvited() {
+      givenEnvironmentUsers(environmentUser("own-user", "own-demo"),
+          environmentUser("invited-user", "foreign-demo"));
+      ownerSupportMock.when(() -> OwnerSupport.isOwner("own-user")).thenReturn(true);
+      ownerSupportMock.when(() -> OwnerSupport.clientHasOwner("own-demo")).thenReturn(true);
+      ownerSupportMock.when(() -> OwnerSupport.clientHasOwner("foreign-demo")).thenReturn(true);
+
+      Set<String> result = EtendoGoJwtDalHelper.findFreeTenantIdsByAccountEmail("owner@example.test");
+
+      assertEquals(Set.of("own-demo"), result);
+    }
+
+    @Test
+    @DisplayName("keeps a client when any of the account's users in it is the owner")
+    void keepsClientWhenAnyAccountUserIsOwner() {
+      givenEnvironmentUsers(environmentUser("suffixed-user", "own-demo"),
+          environmentUser("owner-user", "own-demo"));
+      ownerSupportMock.when(() -> OwnerSupport.isOwner("owner-user")).thenReturn(true);
+      ownerSupportMock.when(() -> OwnerSupport.clientHasOwner("own-demo")).thenReturn(true);
+
+      Set<String> result = EtendoGoJwtDalHelper.findFreeTenantIdsByAccountEmail("owner@example.test");
+
+      assertEquals(Set.of("own-demo"), result);
+    }
 
     @Test
     @DisplayName("returns an empty set when the account has no environments")
@@ -486,6 +616,60 @@ class EtendoGoJwtDalHelperTest {
 
       assertEquals(Set.of("free-client-1", "free-client-2"), result);
     }
+
+    /**
+     * ETP-5047: a canceled productive environment reads plan "free" (its closed row answers
+     * canceled) but it is not a demo, so it is never a purchase source candidate. A demo without
+     * any lifecycle type next to it still is.
+     */
+    @Test
+    @DisplayName("leaves out a canceled productive environment whose plan reads free")
+    void excludesACanceledProductiveEnvironment() {
+      Client demoClient = mock(Client.class);
+      Client canceledClient = mock(Client.class);
+      when(demoClient.getId()).thenReturn("demo-client");
+      when(canceledClient.getId()).thenReturn("canceled-productive");
+      User demoUser = mock(User.class);
+      User canceledUser = mock(User.class);
+      when(demoUser.getClient()).thenReturn(demoClient);
+      when(canceledUser.getClient()).thenReturn(canceledClient);
+      when(obDal.createQuery(eq(User.class), anyString())).thenReturn(usersQuery);
+      when(usersQuery.list()).thenReturn(List.of(demoUser, canceledUser));
+      when(obDal.createQuery(eq(Preference.class), anyString())).thenReturn(preferenceQuery);
+      when(preferenceQuery.uniqueResult()).thenReturn(null);
+      Subscription closedRow = mock(Subscription.class);
+      when(closedRow.getSubscriptionStatus()).thenReturn("canceled");
+      when(closedRow.getEndDate()).thenReturn(new java.util.Date());
+      java.util.concurrent.atomic.AtomicReference<Object> queriedClient =
+          new java.util.concurrent.atomic.AtomicReference<>();
+      org.mockito.Mockito.doAnswer(invocation -> {
+        if ("environmentClientId".equals(invocation.getArgument(0))) {
+          queriedClient.set(invocation.getArgument(1));
+        }
+        return subscriptionQuery;
+      }).when(subscriptionQuery).setNamedParameter(anyString(), any());
+      when(subscriptionQuery.uniqueResult()).thenAnswer(invocation ->
+          "canceled-productive".equals(queriedClient.get()) ? closedRow : null);
+
+      Set<String> result = EtendoGoJwtDalHelper.findFreeTenantIdsByAccountEmail("owner@example.test");
+
+      assertEquals(Set.of("demo-client"), result);
+    }
+
+    /**
+     * ETP-5047: with the subscription model OFF a productive environment has no row at all, only
+     * the {@code ETGO_EnvironmentType} marker; its plan reads free, yet it is no source either.
+     */
+    @Test
+    @DisplayName("leaves out a rowless productive environment that only carries the marker")
+    void excludesARowlessMarkerOnlyProductiveEnvironment() {
+      givenEnvironments(usersQuery, preferenceQuery, subscriptionQuery, null, "marker-productive",
+          "demo-client", "marker-productive");
+
+      Set<String> result = EtendoGoJwtDalHelper.findFreeTenantIdsByAccountEmail("owner@example.test");
+
+      assertEquals(Set.of("demo-client"), result);
+    }
   }
 
   @Nested
@@ -494,6 +678,26 @@ class EtendoGoJwtDalHelperTest {
 
     @Mock private OBQuery<User> usersQuery;
     @Mock private OBQuery<Preference> preferenceQuery;
+    @Mock private OBQuery<Subscription> subscriptionQuery;
+
+    // ETP-5640 reads the tenant plan in OBContext admin mode; with no live session the real
+    // static methods NPE, so they are no-ops here — the plan lookup is stubbed through obDal.
+    private MockedStatic<OBContext> obContextMock;
+    // ETP-5743 reads the owner flag through native SQL; unstubbed, both clients read as legacy
+    // tenants with no owner flagged, so the account match alone decides as before.
+    private MockedStatic<OwnerSupport> ownerSupportMock;
+
+    @BeforeEach
+    void mockAdminMode() {
+      obContextMock = mockStatic(OBContext.class);
+      ownerSupportMock = mockStatic(OwnerSupport.class);
+    }
+
+    @AfterEach
+    void restoreAdminMode() {
+      obContextMock.close();
+      ownerSupportMock.close();
+    }
 
     @Test
     @DisplayName("excludes the new destination when resolving the only free source tenant")
@@ -510,12 +714,53 @@ class EtendoGoJwtDalHelperTest {
       when(usersQuery.list()).thenReturn(List.of(demoUser, targetUser));
       when(obDal.createQuery(eq(Preference.class), anyString())).thenReturn(preferenceQuery);
       when(preferenceQuery.uniqueResult()).thenReturn(null);
+      // ETP-5046: the plan is resolved from the open subscription row first; none exists here.
+      when(obDal.createQuery(eq(Subscription.class), anyString())).thenReturn(subscriptionQuery);
+      when(subscriptionQuery.uniqueResult()).thenReturn(null);
 
       String result = EtendoGoJwtDalHelper.findOnlyFreeTenantIdByAccountEmail(
           "user@test.com", "target-client");
 
+      // Both tenants resolve as free here, so a single answer proves the destination was left out
+      // of the candidates: counted in, the lookup would be ambiguous and answer null.
       assertEquals("demo-client", result);
-      verify(preferenceQuery).setNamedParameter("clientId", "demo-client");
+    }
+
+    /**
+     * ETP-5047: an account with a canceled productive environment and one demo resolves to that
+     * demo. Before the fix both read plan free, so the lookup was ambiguous and answered null —
+     * and the transfer status and paid-retry fallbacks that read it found no source.
+     */
+    @Test
+    @DisplayName("resolves the demo next to a canceled productive environment")
+    void resolvesTheDemoNextToACanceledProductiveEnvironment() {
+      givenEnvironments(usersQuery, preferenceQuery, subscriptionQuery, "canceled-productive", null,
+          "canceled-productive", "demo-client");
+
+      assertEquals("demo-client",
+          EtendoGoJwtDalHelper.findOnlyFreeTenantIdByAccountEmail("owner@example.test"));
+      assertEquals("demo-client", EtendoGoJwtDalHelper.findOnlyFreeTenantIdByAccountEmail(
+          "owner@example.test", "target-client"));
+    }
+
+    @Test
+    @DisplayName("resolves the demo next to a rowless productive environment with only the marker")
+    void resolvesTheDemoNextToARowlessMarkerOnlyProductiveEnvironment() {
+      givenEnvironments(usersQuery, preferenceQuery, subscriptionQuery, null, "marker-productive",
+          "marker-productive", "demo-client");
+
+      assertEquals("demo-client",
+          EtendoGoJwtDalHelper.findOnlyFreeTenantIdByAccountEmail("owner@example.test"));
+    }
+
+    @Test
+    @DisplayName("still answers null when two real demos make the source ambiguous")
+    void staysAmbiguousWithTwoDemosBesideACanceledProductiveEnvironment() {
+      // Control: the productive environment is left out, but two demos remain ambiguous.
+      givenEnvironments(usersQuery, preferenceQuery, subscriptionQuery, "canceled-productive", null,
+          "canceled-productive", "demo-client", "other-demo");
+
+      assertNull(EtendoGoJwtDalHelper.findOnlyFreeTenantIdByAccountEmail("owner@example.test"));
     }
   }
 
@@ -548,19 +793,34 @@ class EtendoGoJwtDalHelperTest {
 
     private MockedStatic<OwnerSupport> ownerSupportMock;
     // ETP-5488 wrapped TenantEnvironmentLifecycleService.readPreference in
-    // OBContext.setAdminMode()/restorePreviousMode(); this class has no live session, so the real
-    // static methods NPE. mockStatic() turns both into no-ops — buildEnvironmentJson's admin-mode
-    // plumbing isn't what these tests exercise.
+    // OBContext.setAdminMode()/restorePreviousMode(), and the ETP-5046 plan and subscription reads
+    // enter admin mode too; this class has no live session, so the real static methods NPE.
+    // mockStatic() turns them into no-ops — buildEnvironmentJson's admin-mode plumbing isn't what
+    // these tests exercise.
     private MockedStatic<OBContext> obContextMock;
     // With the context mocked, the lifecycle reaches its legacy-trial branch, which reads the
     // Etendo configuration. Loading it here, in a JVM without a configured environment, left the
     // config provider without a location for the integration tests that run after this class in
     // the same JVM (OBBaseTest.initializeDisabledTestCases -> Paths.get(null)).
     private MockedStatic<com.etendoerp.go.common.ConfigPropertyReader> configMock;
+    private MockedStatic<org.openbravo.base.session.OBPropertiesProvider> propertiesMock;
 
     @BeforeEach
     void isolateOwnerLookup() {
       ownerSupportMock = mockStatic(OwnerSupport.class);
+      // buildEnvironmentJson reaches TenantEnvironmentLifecycleService.resolve/evaluateAccess,
+      // which read runtime configuration (GoRuntimeProperties -> OBPropertiesProvider). The FIRST
+      // real OBPropertiesProvider read in a JVM also initialises OBConfigFileProvider, and under
+      // this class's static OBProvider mock that init NPEs silently and leaves
+      // OBConfigFileProvider.fileLocation null for good — every OBBaseTest forked into the same
+      // JVM afterwards fails in initializeDisabledTestCases. So the provider is stubbed here and
+      // the real one is never touched by this class.
+      org.openbravo.base.session.OBPropertiesProvider propertiesProvider =
+          mock(org.openbravo.base.session.OBPropertiesProvider.class);
+      when(propertiesProvider.getOpenbravoProperties()).thenReturn(new java.util.Properties());
+      propertiesMock = mockStatic(org.openbravo.base.session.OBPropertiesProvider.class);
+      propertiesMock.when(org.openbravo.base.session.OBPropertiesProvider::getInstance)
+          .thenReturn(propertiesProvider);
       obContextMock = mockStatic(OBContext.class);
       configMock = mockStatic(com.etendoerp.go.common.ConfigPropertyReader.class);
       when(obDal.createQuery(eq(Preference.class), anyString())).thenReturn(preferenceQuery);
@@ -572,6 +832,7 @@ class EtendoGoJwtDalHelperTest {
       ownerSupportMock.close();
       obContextMock.close();
       configMock.close();
+      propertiesMock.close();
     }
 
     @Mock private Client client;
@@ -590,7 +851,8 @@ class EtendoGoJwtDalHelperTest {
       when(environmentUser.getUsername()).thenReturn("admin@test.com");
       when(environmentUser.getName()).thenReturn("Admin User");
 
-      JSONObject result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, organization, environmentUser);
+      JSONObject result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, organization, environmentUser,
+          EnvironmentPlanCache.empty());
 
       assertNotNull(result);
       assertEquals("C-1", result.getString("clientId"));
@@ -611,7 +873,8 @@ class EtendoGoJwtDalHelperTest {
       when(environmentUser.getUsername()).thenReturn("admin@test.com");
       when(environmentUser.getName()).thenReturn("Admin User");
 
-      JSONObject result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, null, environmentUser);
+      JSONObject result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, null, environmentUser,
+          EnvironmentPlanCache.empty());
 
       assertNotNull(result);
       assertEquals("C-1", result.getString("clientId"));
@@ -624,8 +887,8 @@ class EtendoGoJwtDalHelperTest {
     }
 
     @Test
-    @DisplayName("all eight fields are populated")
-    void allEightFieldsPopulated() throws Exception {
+    @DisplayName("all twelve fields are populated")
+    void allTwelveFieldsPopulated() throws Exception {
       when(client.getId()).thenReturn("C-2");
       when(client.getName()).thenReturn("Client Two");
       when(organization.getId()).thenReturn("O-2");
@@ -634,10 +897,13 @@ class EtendoGoJwtDalHelperTest {
       when(environmentUser.getUsername()).thenReturn("user@two.com");
       when(environmentUser.getName()).thenReturn("User Two");
 
-      JSONObject result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, organization, environmentUser);
+      JSONObject result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, organization, environmentUser,
+          EnvironmentPlanCache.empty());
 
-      // Seven original fields plus plan, relationship and demo-association metadata.
-      assertEquals(10, result.length());
+      // Seven original fields, the plan badge (ETP-4686), the plan key (ETP-5046), the
+      // relationship marker, the ownership flag (ETP-5743) and the demo-association flag
+      // (ETP-5548). Lifecycle fields are conditional and absent here.
+      assertEquals(12, result.length());
     }
 
     @Test
@@ -649,8 +915,308 @@ class EtendoGoJwtDalHelperTest {
       when(environmentUser.getUsername()).thenReturn("user@three.com");
       when(environmentUser.getName()).thenReturn("User Three");
 
+      JSONObject result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, null, environmentUser,
+          EnvironmentPlanCache.empty());
+
+      assertEquals(TenantPlanService.PLAN_FREE, result.getString("plan"));
+      // A plan KEY names a row in the catalog, and a tenant with no subscription has none. Null,
+      // deliberately not the string "free", which would invent a catalog entry nothing can look
+      // up. The coarse `plan` field above is what stays "free" for backward compatibility.
+      assertTrue(result.isNull("planKey"));
+      assertTrue(result.isNull("subscriptionStatus"));
+    }
+
+    @Test
+    @DisplayName("ETP-5046-TRANSITIONAL-FALLBACK: a tenant the backfill has not reached is "
+        + "productive with null plan facts")
+    void reportsTheTransitionalFallbackTenantAsProductiveWithNullPlanFacts() throws Exception {
+      // TRANSITIONAL — delete with TenantPlanPreferenceFallback in Phase F.
+      // The tenant has no ETGO_SUBSCRIPTION row and still carries the retired ETGO_TenantPlan
+      // preference. It must read back as "productive" — environmentPresentation.js and
+      // UpgradePage.jsx both compare `plan` against that literal — while planKey and
+      // subscriptionStatus stay JSON null, because there genuinely is no catalog row and no
+      // subscription. Reporting an invented key such as "legacy-productive" would claim a row that
+      // does not exist and would hide the gap from anyone reading the payload.
+      when(client.getId()).thenReturn("C-4");
+      when(client.getName()).thenReturn("Client Four");
+      when(environmentUser.getId()).thenReturn("U-4");
+      when(environmentUser.getUsername()).thenReturn("user@four.com");
+      when(environmentUser.getName()).thenReturn("User Four");
+
+      Client preferenceTenant = mock(Client.class);
+      when(preferenceTenant.getId()).thenReturn("C-4");
+      Preference preference = mock(Preference.class);
+      when(preference.getVisibleAtClient()).thenReturn(preferenceTenant);
+      when(preference.getSearchKey()).thenReturn(TenantPlanService.PLAN_PRODUCTIVE);
+      @SuppressWarnings("unchecked")
+      OBQuery<Preference> tenantPlanQuery = mock(OBQuery.class);
+      when(obDal.createQuery(eq(Preference.class), anyString())).thenReturn(tenantPlanQuery);
+      when(tenantPlanQuery.list()).thenReturn(List.of(preference));
+
+      JSONObject result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, null, environmentUser,
+          EnvironmentPlanCache.of(List.of("C-4"), Map.of()));
+
+      assertEquals(TenantPlanService.PLAN_PRODUCTIVE, result.getString("plan"));
+      assertTrue(result.isNull("planKey"));
+      assertTrue(result.isNull("subscriptionStatus"));
+    }
+
+    /**
+     * ETP-5047 review regression pin (W2') — a tenant whose only subscription row was CLOSED by a
+     * cancellation, and which never got the {@code ETGO_EnvironmentType} marker (every tenant
+     * provisioned before the marker existed). Before the "row decides" fix the canceled row made
+     * the plan free, the missing marker sent the tenant down the demo path, and the environment
+     * list reported it as a demo (with trial fields) that was ALLOWED in. The single-environment
+     * path runs the real SubscriptionService, TenantPlanService and lifecycle service here.
+     */
+    @Test
+    @DisplayName("ETP-5047: a canceled tenant without the productive marker reads as a blocked "
+        + "productive environment on the free plan")
+    void aClosedCanceledRowWithoutTheMarkerIsABlockedProductiveEnvironment() throws Exception {
+      String clientId = "W2-" + java.util.UUID.randomUUID();
+      when(client.getId()).thenReturn(clientId);
+      when(client.getName()).thenReturn("Canceled Tenant");
+      when(environmentUser.getId()).thenReturn("U-W2");
+      when(environmentUser.getUsername()).thenReturn("owner@canceled.test");
+      when(environmentUser.getName()).thenReturn("Owner");
+
+      com.etendoerp.go.schemaforge.data.Plan plan =
+          mock(com.etendoerp.go.schemaforge.data.Plan.class);
+      when(plan.getSearchKey()).thenReturn("productive-monthly");
+      Subscription closed = mock(Subscription.class);
+      when(closed.getEnvironmentClient()).thenReturn(client);
+      when(closed.getPlan()).thenReturn(plan);
+      when(closed.getSubscriptionStatus()).thenReturn("canceled");
+      when(closed.getEndDate()).thenReturn(new Date(System.currentTimeMillis() - 86_400_000L));
+      @SuppressWarnings("unchecked")
+      OBQuery<Subscription> openRows = mock(OBQuery.class);
+      when(openRows.list()).thenReturn(Collections.emptyList());
+      when(openRows.uniqueResult()).thenReturn(null);
+      @SuppressWarnings("unchecked")
+      OBQuery<Subscription> closedRows = mock(OBQuery.class);
+      when(closedRows.list()).thenReturn(List.of(closed));
+      when(closedRows.uniqueResult()).thenReturn(closed);
+      when(obDal.createQuery(eq(Subscription.class), anyString())).thenAnswer(invocation ->
+          ((String) invocation.getArgument(1)).contains("is not null") ? closedRows : openRows);
+
       JSONObject result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, null, environmentUser);
 
+      assertEquals("PRODUCTIVE", result.getString("environmentType"));
+      assertEquals("SUBSCRIPTION_REQUIRED", result.getString("accessState"));
+      assertEquals(TenantPlanService.PLAN_FREE, result.getString("plan"));
+      assertEquals("EXPIRED", result.getString("subscriptionStatus"));
+      assertFalse(result.has("trialStartedAt"), result.toString());
+      assertFalse(result.has("trialExpiresAt"), result.toString());
+      assertFalse(result.has("trialDaysRemaining"), result.toString());
+    }
+
+    // ===================== QA-low: accessState is the ENFORCED decision =====================
+
+    /** Routes the lifecycle preference reads by attribute; every other preference is absent. */
+    private void givenPreferences(Map<String, String> byAttribute) {
+      @SuppressWarnings("unchecked")
+      OBQuery<Preference> routed = mock(OBQuery.class);
+      java.util.concurrent.atomic.AtomicReference<String> attribute =
+          new java.util.concurrent.atomic.AtomicReference<>();
+      org.mockito.Mockito.doAnswer(invocation -> {
+        if ("attribute".equals(invocation.getArgument(0))) {
+          attribute.set(invocation.getArgument(1));
+        }
+        return routed;
+      }).when(routed).setNamedParameter(anyString(), any());
+      Map<String, Preference> stored = new java.util.HashMap<>();
+      for (Map.Entry<String, String> entry : byAttribute.entrySet()) {
+        Preference preference = mock(Preference.class);
+        when(preference.getSearchKey()).thenReturn(entry.getValue());
+        stored.put(entry.getKey(), preference);
+      }
+      when(routed.uniqueResult()).thenAnswer(invocation -> stored.get(attribute.get()));
+      when(routed.list()).thenReturn(Collections.emptyList());
+      when(obDal.createQuery(eq(Preference.class), anyString())).thenReturn(routed);
+    }
+
+    /** Serves {@code open} (may be null) for open-row lookups and nothing for closed ones. */
+    private void givenOpenRow(Subscription open) {
+      @SuppressWarnings("unchecked")
+      OBQuery<Subscription> openRows = mock(OBQuery.class);
+      when(openRows.list()).thenReturn(open == null ? Collections.emptyList() : List.of(open));
+      when(openRows.uniqueResult()).thenReturn(open);
+      @SuppressWarnings("unchecked")
+      OBQuery<Subscription> closedRows = mock(OBQuery.class);
+      when(closedRows.list()).thenReturn(Collections.emptyList());
+      when(closedRows.uniqueResult()).thenReturn(null);
+      when(obDal.createQuery(eq(Subscription.class), anyString())).thenAnswer(invocation ->
+          ((String) invocation.getArgument(1)).contains("is not null") ? closedRows : openRows);
+    }
+
+    private String givenTenant() {
+      String clientId = "QA-" + java.util.UUID.randomUUID();
+      when(client.getId()).thenReturn(clientId);
+      when(client.getName()).thenReturn("Blocked Tenant");
+      when(environmentUser.getId()).thenReturn("U-QA");
+      when(environmentUser.getUsername()).thenReturn("owner@blocked.test");
+      when(environmentUser.getName()).thenReturn("Owner");
+      return clientId;
+    }
+
+    /** A productive tenant whose grace ran out 45 days ago (default grace: 15 days). */
+    private java.time.Instant givenPastDueTenantOutOfGrace() {
+      // Millisecond precision: the anchor travels through a java.util.Date column.
+      java.time.Instant anchor = java.time.Instant.now().minus(java.time.Duration.ofDays(45))
+          .truncatedTo(java.time.temporal.ChronoUnit.MILLIS);
+      Subscription pastDue = mock(Subscription.class);
+      when(pastDue.getEnvironmentClient()).thenReturn(client);
+      when(pastDue.getSubscriptionStatus()).thenReturn("past_due");
+      when(pastDue.getGraceAnchor()).thenReturn(Date.from(anchor));
+      givenOpenRow(pastDue);
+      givenPreferences(Map.of("ETGO_EnvironmentType", "PRODUCTIVE"));
+      return anchor;
+    }
+
+    /** A demo whose default-length trial started 40 days ago, with no subscription row. */
+    private java.time.Instant givenExpiredDemo() {
+      java.time.Instant started = java.time.Instant.now().minus(java.time.Duration.ofDays(40));
+      givenOpenRow(null);
+      givenPreferences(Map.of("ETGO_EnvironmentType", "DEMO",
+          "ETGO_DemoTrialStartedAt", started.toString()));
+      return started;
+    }
+
+    /** Builds the environment with the kill switch answering {@code switchedOff} for the tenant. */
+    private JSONObject buildWithSwitch(String clientId, boolean switchedOff) throws Exception {
+      try (MockedStatic<com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag> flag =
+          mockStatic(com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag.class)) {
+        flag.when(() -> com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag
+            .isEnforcementSwitchedOff(anyString())).thenReturn(false);
+        flag.when(() -> com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag
+            .isEnforcementSwitchedOff(clientId)).thenReturn(switchedOff);
+        JSONObject result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, null,
+            environmentUser);
+        flag.verify(() -> com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag
+            .isEnforcementSwitchedOff(clientId));
+        return result;
+      }
+    }
+
+    /** Every key but accessState must be the same fact whatever the switch says. */
+    private void assertOnlyAccessStateDiffers(JSONObject enforced, JSONObject switchedOff)
+        throws Exception {
+      java.util.Set<String> enforcedKeys = new java.util.TreeSet<>();
+      enforced.keys().forEachRemaining(key -> enforcedKeys.add((String) key));
+      java.util.Set<String> switchedKeys = new java.util.TreeSet<>();
+      switchedOff.keys().forEachRemaining(key -> switchedKeys.add((String) key));
+      assertEquals(enforcedKeys, switchedKeys);
+      for (String key : enforcedKeys) {
+        if (!"accessState".equals(key)) {
+          assertEquals(String.valueOf(enforced.get(key)), String.valueOf(switchedOff.get(key)),
+              key);
+        }
+      }
+    }
+
+    @Test
+    @DisplayName("QA-low: a past-due tenant out of grace reports SUBSCRIPTION_REQUIRED while "
+        + "enforcing, ALLOWED when switched off, with the same subscription facts")
+    void aPastDueTenantOutOfGraceReportsTheEnforcedDecision() throws Exception {
+      String clientId = givenTenant();
+      java.time.Instant anchor = givenPastDueTenantOutOfGrace();
+
+      JSONObject enforced = buildWithSwitch(clientId, false);
+      JSONObject switchedOff = buildWithSwitch(clientId, true);
+
+      assertEquals("SUBSCRIPTION_REQUIRED", enforced.getString("accessState"));
+      assertEquals("ALLOWED", switchedOff.getString("accessState"));
+      for (JSONObject result : List.of(enforced, switchedOff)) {
+        assertEquals("PRODUCTIVE", result.getString("environmentType"));
+        assertEquals("PAST_DUE", result.getString("subscriptionStatus"));
+        assertEquals(anchor.toString(), result.getString("renewalDueAt"));
+      }
+      assertOnlyAccessStateDiffers(enforced, switchedOff);
+    }
+
+    @Test
+    @DisplayName("QA-low: a canceled tenant reports ALLOWED only while switched off, still EXPIRED")
+    void aCanceledTenantReportsAllowedOnlyWhileSwitchedOff() throws Exception {
+      String clientId = givenTenant();
+      Subscription closed = mock(Subscription.class);
+      when(closed.getEnvironmentClient()).thenReturn(client);
+      when(closed.getSubscriptionStatus()).thenReturn("canceled");
+      when(closed.getEndDate()).thenReturn(new Date(System.currentTimeMillis() - 86_400_000L));
+      @SuppressWarnings("unchecked")
+      OBQuery<Subscription> openRows = mock(OBQuery.class);
+      when(openRows.list()).thenReturn(Collections.emptyList());
+      @SuppressWarnings("unchecked")
+      OBQuery<Subscription> closedRows = mock(OBQuery.class);
+      when(closedRows.list()).thenReturn(List.of(closed));
+      when(closedRows.uniqueResult()).thenReturn(closed);
+      when(obDal.createQuery(eq(Subscription.class), anyString())).thenAnswer(invocation ->
+          ((String) invocation.getArgument(1)).contains("is not null") ? closedRows : openRows);
+
+      JSONObject enforced = buildWithSwitch(clientId, false);
+      JSONObject switchedOff = buildWithSwitch(clientId, true);
+
+      assertEquals("SUBSCRIPTION_REQUIRED", enforced.getString("accessState"));
+      assertEquals("ALLOWED", switchedOff.getString("accessState"));
+      assertEquals("EXPIRED", switchedOff.getString("subscriptionStatus"));
+      assertOnlyAccessStateDiffers(enforced, switchedOff);
+    }
+
+    @Test
+    @DisplayName("QA-low: an expired demo reports DEMO_TRIAL_EXPIRED while enforcing, ALLOWED "
+        + "when switched off, with the trial fields unchanged")
+    void anExpiredDemoReportsTheEnforcedDecisionAndKeepsItsTrialFacts() throws Exception {
+      String clientId = givenTenant();
+      java.time.Instant started = givenExpiredDemo();
+
+      JSONObject enforced = buildWithSwitch(clientId, false);
+      JSONObject switchedOff = buildWithSwitch(clientId, true);
+
+      assertEquals("DEMO_TRIAL_EXPIRED", enforced.getString("accessState"));
+      assertEquals("ALLOWED", switchedOff.getString("accessState"));
+      for (JSONObject result : List.of(enforced, switchedOff)) {
+        assertEquals("DEMO", result.getString("environmentType"));
+        assertEquals(started.toString(), result.getString("trialStartedAt"));
+        assertEquals(started.plus(java.time.Duration.ofDays(
+            TenantEnvironmentLifecycleService.DEFAULT_TRIAL_DAYS)).toString(),
+            result.getString("trialExpiresAt"));
+        assertTrue(result.has("trialDaysRemaining"));
+      }
+      assertOnlyAccessStateDiffers(enforced, switchedOff);
+    }
+
+    @Test
+    @DisplayName("QA-low: the switch of ANOTHER tenant does not change this tenant's refusal")
+    void theSwitchIsPerTenant() throws Exception {
+      String clientId = givenTenant();
+      givenPastDueTenantOutOfGrace();
+      JSONObject result;
+      try (MockedStatic<com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag> flag =
+          mockStatic(com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag.class)) {
+        flag.when(() -> com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag
+            .isEnforcementSwitchedOff("SOME-OTHER-TENANT")).thenReturn(true);
+        result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, null, environmentUser);
+      }
+
+      assertEquals("SUBSCRIPTION_REQUIRED", result.getString("accessState"));
+    }
+
+    @Test
+    @DisplayName("QA-low: a legacy tenant with no decision carries no accessState at all")
+    void aLegacyTenantWithNoDecisionHasNoAccessState() throws Exception {
+      String clientId = givenTenant();
+      givenOpenRow(null);
+      givenPreferences(Map.of());
+
+      JSONObject result;
+      try (MockedStatic<com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag> flag =
+          mockStatic(com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag.class)) {
+        result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, null, environmentUser);
+        // No refusal to switch off: the flag is never read.
+        flag.verifyNoInteractions();
+      }
+
+      assertFalse(result.has("accessState"), result.toString());
+      assertFalse(result.has("environmentType"), result.toString());
       assertEquals(TenantPlanService.PLAN_FREE, result.getString("plan"));
     }
 
@@ -663,10 +1229,51 @@ class EtendoGoJwtDalHelperTest {
       when(environmentUser.getUsername()).thenReturn("user@four.com");
       when(environmentUser.getName()).thenReturn("User Four");
 
-      JSONObject result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, null, environmentUser);
+      JSONObject result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, null, environmentUser,
+          EnvironmentPlanCache.empty());
 
       // ETP-5548: always present, so the purchase picker never has to guess from a missing key.
       assertFalse(result.getBoolean("associatedWithProductive"));
+    }
+
+    private JSONObject buildForOwnership(boolean userIsOwner, boolean clientHasOwner)
+        throws Exception {
+      when(client.getId()).thenReturn("C-5");
+      when(client.getName()).thenReturn("Client Five");
+      when(environmentUser.getId()).thenReturn("U-5");
+      when(environmentUser.getUsername()).thenReturn("user@five.com");
+      when(environmentUser.getName()).thenReturn("User Five");
+      ownerSupportMock.when(() -> OwnerSupport.isOwner("U-5")).thenReturn(userIsOwner);
+      ownerSupportMock.when(() -> OwnerSupport.clientHasOwner("C-5")).thenReturn(clientHasOwner);
+      return EtendoGoJwtDalHelper.buildEnvironmentJson(client, null, environmentUser,
+          EnvironmentPlanCache.empty());
+    }
+
+    @Test
+    @DisplayName("reports the owner's environment as owned by the account")
+    void reportsOwnerAsOwned() throws Exception {
+      JSONObject result = buildForOwnership(true, true);
+
+      assertEquals("OWNER", result.getString("relationship"));
+      assertTrue(result.getBoolean("ownedByAccount"));
+    }
+
+    @Test
+    @DisplayName("reports an invited member's environment as not owned, so it is no purchase source (ETP-5743)")
+    void reportsInvitedMemberAsNotOwned() throws Exception {
+      JSONObject result = buildForOwnership(false, true);
+
+      assertEquals("INVITED", result.getString("relationship"));
+      assertFalse(result.getBoolean("ownedByAccount"));
+    }
+
+    @Test
+    @DisplayName("reports a legacy tenant with no owner flagged as owned, matching the checkout check")
+    void reportsUnownedLegacyTenantAsOwned() throws Exception {
+      JSONObject result = buildForOwnership(false, false);
+
+      assertEquals("INVITED", result.getString("relationship"));
+      assertTrue(result.getBoolean("ownedByAccount"));
     }
   }
 
@@ -816,6 +1423,71 @@ class EtendoGoJwtDalHelperTest {
 
       verify(query).setNamedParameter("accountEmail", "a_b%@x.com");
       verify(query).setNamedParameter("accountPrefix", "a\\_b\\%@x.com+%");
+    }
+  }
+
+  @Nested
+  @DisplayName("clientOwnedByAccountEmail (ETP-5743 purchase-source ownership)")
+  class ClientOwnedByAccountEmail {
+
+    @Mock private OBQuery<User> query;
+    private MockedStatic<OwnerSupport> ownerSupportMock;
+
+    @BeforeEach
+    void mockOwnerLookup() {
+      ownerSupportMock = mockStatic(OwnerSupport.class);
+      when(obDal.createQuery(eq(User.class), anyString())).thenReturn(query);
+    }
+
+    @AfterEach
+    void restoreOwnerLookup() {
+      ownerSupportMock.close();
+    }
+
+    // Built before stubbing the query: creating the mock inside thenReturn(...) would nest a
+    // when() in an unfinished stubbing.
+    private void givenAccountUser(String userId) {
+      User user = mock(User.class);
+      when(user.getId()).thenReturn(userId);
+      when(query.list()).thenReturn(List.of(user));
+    }
+
+    @Test
+    @DisplayName("is true when the account's user in the client is its flagged owner")
+    void trueForFlaggedOwner() {
+      givenAccountUser("U-OWNER");
+      ownerSupportMock.when(() -> OwnerSupport.isOwner("U-OWNER")).thenReturn(true);
+
+      assertTrue(EtendoGoJwtDalHelper.clientOwnedByAccountEmail("CLIENT-1", "user@example.com"));
+      verify(query).setNamedParameter("clientId", "CLIENT-1");
+      verify(query).setNamedParameter("accountPrefix", "user@example.com+%");
+    }
+
+    @Test
+    @DisplayName("is false for an invited member of a client that has another owner")
+    void falseForInvitedMember() {
+      givenAccountUser("U-INVITED");
+      ownerSupportMock.when(() -> OwnerSupport.clientHasOwner("CLIENT-1")).thenReturn(true);
+
+      assertFalse(EtendoGoJwtDalHelper.clientOwnedByAccountEmail("CLIENT-1", "user@example.com"));
+    }
+
+    @Test
+    @DisplayName("keeps the account match for a legacy client with no owner flagged")
+    void trueForUnownedLegacyClient() {
+      givenAccountUser("U-LEGACY");
+      ownerSupportMock.when(() -> OwnerSupport.clientHasOwner("CLIENT-1")).thenReturn(false);
+
+      assertTrue(EtendoGoJwtDalHelper.clientOwnedByAccountEmail("CLIENT-1", "user@example.com"));
+    }
+
+    @Test
+    @DisplayName("is false when the account has no user in the client, even if it has no owner")
+    void falseWithoutAccountUser() {
+      when(query.list()).thenReturn(Collections.emptyList());
+
+      assertFalse(EtendoGoJwtDalHelper.clientOwnedByAccountEmail("CLIENT-1", "user@example.com"));
+      ownerSupportMock.verify(() -> OwnerSupport.clientHasOwner(anyString()), never());
     }
   }
 

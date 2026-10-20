@@ -42,6 +42,13 @@ import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import com.etendoerp.go.schemaforge.GoodsReceiptHeaderHandler;
+import com.etendoerp.go.schemaforge.GoodsShipmentHeaderHandler;
+import com.etendoerp.go.schemaforge.PurchaseInvoiceHeaderHandler;
+import com.etendoerp.go.schemaforge.PurchaseOrderHeaderHandler;
+import com.etendoerp.go.schemaforge.ReturnMaterialReceiptHeaderHandler;
+import com.etendoerp.go.schemaforge.ReturnToVendorShipmentHeaderHandler;
+import com.etendoerp.go.schemaforge.SalesInvoiceHeaderHandler;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 
@@ -63,6 +70,14 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  * @covers com.etendoerp.go.mcp.McpActionsSection
  * @covers com.etendoerp.go.mcp.McpVerbsSection
  * @covers com.etendoerp.go.mcp.McpParentSection
+ * @covers com.etendoerp.go.mcp.McpEntityConfig
+ * @covers com.etendoerp.go.schemaforge.PurchaseOrderHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.GoodsReceiptHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.ReturnToVendorShipmentHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.ReturnMaterialReceiptHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.GoodsShipmentHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.PurchaseInvoiceHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.SalesInvoiceHeaderHandler
  */
 @DisplayName("MCP_CONFIG sourcedata")
 class McpConfigSourcedataTest {
@@ -172,9 +187,11 @@ class McpConfigSourcedataTest {
         + String.join("\n  ", failures));
   }
 
+  private static final String SALES_INVOICE_HEADER = "7240CAF07810439B85DE61E70BE8DC0B";
+  private static final String PURCHASE_INVOICE_HEADER = "0D654005B02741A29A0491FD5AFEA6E8";
   /** sales-invoice/header and purchase-invoice/header. */
   private static final List<String> INVOICE_HEADERS =
-      List.of("7240CAF07810439B85DE61E70BE8DC0B", "0D654005B02741A29A0491FD5AFEA6E8");
+      List.of(SALES_INVOICE_HEADER, PURCHASE_INVOICE_HEADER);
   /** payment-in/finPayment and payment-out/header. */
   private static final List<String> PAYMENT_HEADERS =
       List.of("26AAEE85345F4D549907007E8821360A", "65BF1DFD362B4F1CB6FEC60DB7030CF5");
@@ -213,6 +230,29 @@ class McpConfigSourcedataTest {
       String redirectReason = actions.optString(McpActionsSection.KEY_REDIRECT_REASON, "");
       assertTrue(redirectReason.contains("Add Payment"), id + ": the redirect has its own reason");
       assertFalse(redirectReason.contains("SCA"), id + ": not the PIS reason");
+    }
+  }
+
+  /**
+   * ETP-5692: the AD {@code posted} button is a blind toggle — "Process completed successfully" on
+   * a draft while doing nothing. Agents get the declared {@code post} / {@code unpost} actions
+   * instead, so the button is hidden, with its own {@code reasons} entry naming both — the PIS
+   * {@code reason} of the section stays for the PIS actions.
+   */
+  @Test
+  @DisplayName("the invoice headers hide the posted toggle in favour of post / unpost")
+  void invoiceHeadersHideThePostedToggle() throws IOException, JSONException {
+    for (String id : INVOICE_HEADERS) {
+      JSONObject actions = payloadOf(id).getJSONObject(McpActionsSection.NAME);
+      assertTrue(setOf(actions.getJSONArray(McpActionsSection.KEY_HIDDEN)).contains("posted"),
+          id + " must hide the posted button");
+      String posted = actions.getJSONObject(McpActionsSection.KEY_REASONS).getString("posted");
+      assertTrue(posted.contains("post action") && posted.contains("unpost action"),
+          id + ": posted's own reason must point at post and unpost: " + posted);
+      assertFalse(posted.contains("SCA"), id + ": not the PIS reason");
+      String reason = actions.getString(McpActionsSection.KEY_REASON);
+      assertTrue(reason.contains("SCA"), id + ": the PIS reason is kept");
+      assertFalse(reason.contains("posted"), id + ": the PIS reason says nothing about posted");
     }
   }
 
@@ -382,6 +422,8 @@ class McpConfigSourcedataTest {
     assertNotNull(reason);
     assertTrue(reason.contains("createMovement") && reason.contains("transferFunds"),
         "the hidden Core buttons point at the movement and transfer actions: " + reason);
+    assertTrue(reason.contains("disconnectBank") && reason.contains("deleteBankConnection"),
+        "the bank connection is disconnected with the declared actions: " + reason);
     // ETP-5558: Classic's Funds Transfer stays listed, withdrawn, pointing at the agent's action.
     assertEquals("transferFunds", payload.getJSONObject(McpActionsSection.NAME)
         .getJSONObject(McpActionsSection.KEY_REDIRECT).getString("aprmFundsTrans"));
@@ -400,6 +442,314 @@ class McpConfigSourcedataTest {
     assertTrue(actions.getString(McpActionsSection.KEY_REASON)
         .contains("entity:'periodControl'"), actions.toString());
     assertResolvesCleanly(PERIOD_DOCUMENTS);
+  }
+
+  private static final String GOODS_RECEIPT_HEADER = "6102D47FD12A4162858D948885F80544";
+  private static final String PURCHASE_ORDER_HEADER = "F1775FF66155444992AC0B1E38CFA3BB";
+
+  private static JSONObject redirectOf(String entityId) throws IOException, JSONException {
+    return payloadOf(entityId).getJSONObject(McpActionsSection.NAME)
+        .getJSONObject(McpActionsSection.KEY_REDIRECT);
+  }
+
+  /**
+   * The redirect target is not validated at runtime, so a typo would silently hand agents a useless
+   * hint. Assert each target against the contracts the entity's handler really declares.
+   */
+  private static void assertTargetsAreDeclared(String entityId, Set<String> declared)
+      throws IOException, JSONException {
+    JSONObject redirect = redirectOf(entityId);
+    java.util.Iterator<?> keys = redirect.keys();
+    while (keys.hasNext()) {
+      String button = (String) keys.next();
+      assertTrue(declared.contains(redirect.getString(button)), entityId + ": " + button
+          + " redirects to '" + redirect.getString(button) + "', which the handler does not declare "
+          + declared);
+    }
+  }
+
+  @Test
+  @DisplayName("goods-receipt redirects the classic invoice-from-receipt button to"
+      + " createPurchaseInvoice and Create Lines From to importOrderLines, which its handler"
+      + " declares")
+  void goodsReceiptRedirectsInvoiceFromShipment() throws IOException, JSONException {
+    JSONObject redirect = redirectOf(GOODS_RECEIPT_HEADER);
+    assertEquals(2, redirect.length());
+    assertEquals("createPurchaseInvoice", redirect.getString("invoicefromshipment"));
+    assertEquals("importOrderLines", redirect.getString("CreateFrom"));
+    JSONObject actions = payloadOf(GOODS_RECEIPT_HEADER).getJSONObject(McpActionsSection.NAME);
+    assertFalse(actions.optString(McpActionsSection.KEY_REDIRECT_REASON, "").isBlank());
+    assertTrue(actions.getJSONObject(McpActionsSection.KEY_REASONS).getString("CreateFrom")
+        .contains("importOrderLines"), "Create Lines From has its own reason, naming the action");
+    assertTargetsAreDeclared(GOODS_RECEIPT_HEADER,
+        new GoodsReceiptHeaderHandler().actionContracts().keySet());
+    assertResolvesCleanly(GOODS_RECEIPT_HEADER);
+  }
+
+  private static final String RETURN_TO_VENDOR_HEADER = "40D5EE72A0F24464BABD21886059F3D8";
+  private static final String RETURN_MATERIAL_HEADER = "963A22BC87B144E18470530BA256FA78";
+
+  /**
+   * ETP-5712: both return headers carry the classic M_InOut buttons that would invoice from the
+   * return — {@code GenerateTo} (AD_Process 154, "Generate Invoice from Shipment", hidden in the
+   * tab) and {@code Invoicefromshipment} (no process). Neither is an agent path: each is redirected
+   * to the header's own {@code createReturnInvoice}, with its own reason, keyed by AD column name
+   * (the one spelling the listing and the call-time refusal both accept).
+   */
+  private static void assertClassicInvoiceButtonsRedirectToCreateReturnInvoice(JSONObject actions,
+      JSONObject redirect) throws JSONException {
+    assertEquals("createReturnInvoice", redirect.getString("GenerateTo"));
+    assertEquals("createReturnInvoice", redirect.getString("Invoicefromshipment"));
+    JSONObject reasons = actions.getJSONObject(McpActionsSection.KEY_REASONS);
+    for (String button : List.of("GenerateTo", "Invoicefromshipment")) {
+      String reason = reasons.optString(button, "");
+      assertFalse(reason.isBlank(), "a reason for " + button);
+      assertTrue(reason.contains("createReturnInvoice"), button + ": " + reason);
+      assertTrue(reason.contains("factura rectificativa"), button + ": " + reason);
+    }
+  }
+
+  @Test
+  @DisplayName("return-to-vendor-shipment redirects the classic Pick/Edit Lines button, which has no"
+      + " process, to importReceiptLines, which its handler declares")
+  void returnToVendorRedirectsPickEditToImportReceiptLines() throws IOException, JSONException {
+    JSONObject redirect = redirectOf(RETURN_TO_VENDOR_HEADER);
+    assertEquals(3, redirect.length());
+    assertEquals("importReceiptLines", redirect.getString("RM_Shipment_Pickedit"));
+    JSONObject actions = payloadOf(RETURN_TO_VENDOR_HEADER).getJSONObject(McpActionsSection.NAME);
+    assertFalse(actions.optString(McpActionsSection.KEY_REDIRECT_REASON, "").isBlank());
+    assertClassicInvoiceButtonsRedirectToCreateReturnInvoice(actions, redirect);
+    assertTargetsAreDeclared(RETURN_TO_VENDOR_HEADER,
+        new ReturnToVendorShipmentHeaderHandler().actionContracts().keySet());
+    assertResolvesCleanly(RETURN_TO_VENDOR_HEADER);
+  }
+
+  @Test
+  @DisplayName("return-material-receipt redirects the classic Pick/Edit Lines button, which has no"
+      + " process, to importShipmentLines, which its handler declares")
+  void returnMaterialReceiptRedirectsPickEditToImportShipmentLines()
+      throws IOException, JSONException {
+    JSONObject redirect = redirectOf(RETURN_MATERIAL_HEADER);
+    assertEquals(3, redirect.length());
+    assertEquals("importShipmentLines", redirect.getString("RM_Receipt_PickEdit"));
+    JSONObject actions = payloadOf(RETURN_MATERIAL_HEADER).getJSONObject(McpActionsSection.NAME);
+    assertFalse(actions.optString(McpActionsSection.KEY_REDIRECT_REASON, "").isBlank());
+    assertClassicInvoiceButtonsRedirectToCreateReturnInvoice(actions, redirect);
+    assertTargetsAreDeclared(RETURN_MATERIAL_HEADER,
+        new ReturnMaterialReceiptHeaderHandler().actionContracts().keySet());
+    assertResolvesCleanly(RETURN_MATERIAL_HEADER);
+  }
+
+  @Test
+  @DisplayName("purchase-order redirects its classic receive/invoice buttons, each with a reason,"
+      + " to actions its handler declares")
+  void purchaseOrderRedirectsClassicButtons() throws IOException, JSONException {
+    JSONObject redirect = redirectOf(PURCHASE_ORDER_HEADER);
+    assertEquals(2, redirect.length());
+    assertEquals("createGoodsReceipt", redirect.getString("RM_ReceiveMaterials"));
+    assertEquals("createPurchaseInvoice", redirect.getString("RM_CreateInvoice"));
+    JSONObject actions = payloadOf(PURCHASE_ORDER_HEADER).getJSONObject(McpActionsSection.NAME);
+    JSONObject reasons = actions.getJSONObject(McpActionsSection.KEY_REASONS);
+    for (String key : List.of("RM_ReceiveMaterials", "RM_CreateInvoice")) {
+      assertFalse(reasons.optString(key, "").isBlank(), "a reason for " + key);
+    }
+    assertFalse(actions.optString(McpActionsSection.KEY_REDIRECT_REASON, "").isBlank());
+    Set<String> declared = new PurchaseOrderHeaderHandler().actionContracts().keySet();
+    assertTrue(declared.containsAll(Set.of("createGoodsReceipt", "createPurchaseInvoice")), declared
+        .toString());
+    assertTargetsAreDeclared(PURCHASE_ORDER_HEADER, declared);
+    assertResolvesCleanly(PURCHASE_ORDER_HEADER);
+  }
+
+  /**
+   * The button columns of the classic purchase-order header, by the DB column name — the one
+   * spelling both the listing matcher (name or column) and the call-time refusal (action, column or
+   * DAL property) accept. The module carries no source of truth for them: ETGO_SF_FIELD has no row
+   * for these buttons and AD_COLUMN of the core is not shipped here, so the literals are asserted.
+   * {@code rMCreateInvoice} (the DAL property spelling) matched neither in the listing and silently
+   * left the redirect unapplied; this set would have failed it.
+   */
+  private static final Set<String> PURCHASE_ORDER_BUTTON_COLUMNS =
+      new TreeSet<>(List.of("RM_ReceiveMaterials", "RM_CreateInvoice"));
+
+  /** JAVA_QUALIFIER of every ETGO_SF_FIELD row that belongs to the entity (its schema names). */
+  private static Set<String> fieldQualifiersOf(String entityId) throws IOException {
+    String xml = new String(Files.readAllBytes(sourcedataDir().resolve("ETGO_SF_FIELD.xml")),
+        StandardCharsets.UTF_8);
+    Matcher owner = Pattern.compile(
+        "<!--([0-9A-Fa-f]{32})-->\\s*<ETGO_SF_ENTITY_ID><!\\[CDATA\\[" + entityId + "]]>").matcher(xml);
+    Set<String> rows = new TreeSet<>();
+    while (owner.find()) {
+      rows.add(owner.group(1));
+    }
+    Set<String> qualifiers = new TreeSet<>();
+    Matcher qualifier = Pattern.compile(
+        "<!--([0-9A-Fa-f]{32})-->\\s*<JAVA_QUALIFIER><!\\[CDATA\\[(.*?)]]>").matcher(xml);
+    while (qualifier.find()) {
+      if (rows.contains(qualifier.group(1))) {
+        qualifiers.add(qualifier.group(2));
+      }
+    }
+    return qualifiers;
+  }
+
+  private static Set<String> keysOf(JSONObject object) {
+    Set<String> keys = new TreeSet<>();
+    java.util.Iterator<?> it = object.keys();
+    while (it.hasNext()) {
+      keys.add((String) it.next());
+    }
+    return keys;
+  }
+
+  @Test
+  @DisplayName("the purchase-order redirect and reasons are keyed by the buttons' DB column names")
+  void purchaseOrderKeysAreTheButtonColumns() throws IOException, JSONException {
+    JSONObject actions = payloadOf(PURCHASE_ORDER_HEADER).getJSONObject(McpActionsSection.NAME);
+    assertEquals(PURCHASE_ORDER_BUTTON_COLUMNS,
+        keysOf(actions.getJSONObject(McpActionsSection.KEY_REDIRECT)));
+    assertEquals(PURCHASE_ORDER_BUTTON_COLUMNS,
+        keysOf(actions.getJSONObject(McpActionsSection.KEY_REASONS)));
+    assertFalse(actions.has(McpActionsSection.KEY_HIDDEN));
+  }
+
+  @Test
+  @DisplayName("the goods-receipt redirect keys are the schema name of a real field of that entity,"
+      + " or the AD column of its Create Lines From button")
+  void goodsReceiptKeyIsARealButtonField() throws IOException, JSONException {
+    Set<String> qualifiers = fieldQualifiersOf(GOODS_RECEIPT_HEADER);
+    for (String key : keysOf(redirectOf(GOODS_RECEIPT_HEADER))) {
+      assertTrue(qualifiers.contains(key) || INOUT_BUTTON_COLUMNS.contains(key),
+          key + " is not a button field of the goods receipt " + qualifiers);
+    }
+  }
+
+  /**
+   * The DB column of the M_InOut Create Lines From button (field {@code createLinesFrom},
+   * curated discarded). The redirect is keyed by the column, the one spelling the listing and the
+   * call both accept; the module ships no AD_COLUMN to read it from, so the literal is asserted.
+   */
+  private static final Set<String> INOUT_BUTTON_COLUMNS = Set.of("CreateFrom");
+
+  @Test
+  @DisplayName("the redirect texts of every redirecting row do not end with a period (the framework"
+      + " appends its own)")
+  void redirectTextsHaveNoTrailingPeriod() throws IOException, JSONException {
+    for (String id : List.of(GOODS_RECEIPT_HEADER, PURCHASE_ORDER_HEADER, GOODS_SHIPMENT_HEADER,
+        PURCHASE_INVOICE_HEADER, SALES_INVOICE_HEADER)) {
+      JSONObject actions = payloadOf(id).getJSONObject(McpActionsSection.NAME);
+      List<String> texts = new ArrayList<>();
+      texts.add(actions.getString(McpActionsSection.KEY_REDIRECT_REASON));
+      JSONObject reasons = actions.optJSONObject(McpActionsSection.KEY_REASONS);
+      if (reasons != null) {
+        for (String key : keysOf(reasons)) {
+          texts.add(reasons.getString(key));
+        }
+      }
+      for (String text : texts) {
+        assertFalse(text.trim().endsWith("."), id + ": '" + text + "'");
+      }
+    }
+  }
+
+  /** ETGO_SF_ENTITY of goods-shipment/goodsShipment. */
+  private static final String GOODS_SHIPMENT_HEADER = "6882D245E7964685A14DCF0ACD66FB13";
+
+  /**
+   * The classic button bypasses every guard of {@code createDraftInvoice} (status check, nothing
+   * pending, shipment scoping, partial lines), so the shipment redirects it too. The key is the AD
+   * column name, the only spelling both the listing and the call matcher accept.
+   * Reads the exported sourcedata: it needs {@code export.database} to have run for this row.
+   */
+  @Test
+  @DisplayName("goods-shipment redirects the classic Invoicefromshipment button to createDraftInvoice"
+      + " and Create Lines From to importOrderLines, which its handler declares")
+  void goodsShipmentRedirectsInvoiceFromShipment() throws IOException, JSONException {
+    JSONObject redirect = redirectOf(GOODS_SHIPMENT_HEADER);
+    assertEquals(2, redirect.length());
+    assertEquals("createDraftInvoice", redirect.getString("Invoicefromshipment"));
+    assertEquals("importOrderLines", redirect.getString("CreateFrom"));
+    JSONObject actions = payloadOf(GOODS_SHIPMENT_HEADER).getJSONObject(McpActionsSection.NAME);
+    assertTrue(actions.getJSONObject(McpActionsSection.KEY_REASONS).getString("CreateFrom")
+        .contains("importOrderLines"), "Create Lines From has its own reason, naming the action");
+    assertFalse(actions.optString(McpActionsSection.KEY_REDIRECT_REASON, "").isBlank());
+    assertFalse(actions.optString(McpActionsSection.KEY_REASON, "").isBlank());
+    assertTargetsAreDeclared(GOODS_SHIPMENT_HEADER,
+        new GoodsShipmentHeaderHandler().actionContracts().keySet());
+    assertResolvesCleanly(GOODS_SHIPMENT_HEADER);
+  }
+
+  @Test
+  @DisplayName("invoicefromshipment is redirected only on the two goods documents (to their own"
+      + " invoice action) and on the two return headers (to createReturnInvoice, ETP-5712)")
+  void invoiceFromShipmentRedirectIsOnlyOnTheGoodsAndReturnDocuments()
+      throws IOException, JSONException {
+    for (String[] row : authoredPayloads()) {
+      JSONObject body = new JSONObject(row[1]);
+      JSONObject actions = body.optJSONObject(McpActionsSection.NAME);
+      JSONObject redirect = actions == null ? null
+          : actions.optJSONObject(McpActionsSection.KEY_REDIRECT);
+      if (redirect == null) {
+        continue;
+      }
+      for (String key : keysOf(redirect)) {
+        if (key.equalsIgnoreCase("invoicefromshipment")) {
+          boolean goods = row[0].equals("ETGO_SF_ENTITY.xml#" + GOODS_RECEIPT_HEADER)
+              || row[0].equals("ETGO_SF_ENTITY.xml#" + GOODS_SHIPMENT_HEADER);
+          boolean returns = row[0].equals("ETGO_SF_ENTITY.xml#" + RETURN_TO_VENDOR_HEADER)
+              || row[0].equals("ETGO_SF_ENTITY.xml#" + RETURN_MATERIAL_HEADER);
+          assertTrue(goods || returns,
+              "invoicefromshipment must not be redirected outside the goods and return documents: "
+                  + row[0]);
+          if (returns) {
+            assertEquals("createReturnInvoice", redirect.getString(key), row[0]);
+          }
+        }
+      }
+    }
+  }
+
+  // ── ETP-5713: the classic "create lines from" buttons point at the import actions ──
+
+  /**
+   * The classic Create From buttons have no process an agent can run (the OBUIAPP pick-and-edit
+   * ones are not invocable, the plain CreateFrom has none). Each is redirected, with its own
+   * reason, to the import action that does the same through the MCP, and the target is one the
+   * entity's handler really declares (a redirect target is not validated at runtime).
+   */
+  @Test
+  @DisplayName("purchase-invoice redirects its three Create From buttons to the import actions it"
+      + " declares, keeping the Add Payment redirect")
+  void purchaseInvoiceRedirectsTheCreateFromButtons() throws IOException, JSONException {
+    assertInvoiceCreateFromRedirects(PURCHASE_INVOICE_HEADER, "importReceiptLines",
+        new PurchaseInvoiceHeaderHandler().actionContracts().keySet());
+  }
+
+  @Test
+  @DisplayName("sales-invoice redirects its three Create From buttons to the import actions it"
+      + " declares, keeping the Add Payment redirect")
+  void salesInvoiceRedirectsTheCreateFromButtons() throws IOException, JSONException {
+    assertInvoiceCreateFromRedirects(SALES_INVOICE_HEADER, "importShipmentLines",
+        new SalesInvoiceHeaderHandler().actionContracts().keySet());
+  }
+
+  private static void assertInvoiceCreateFromRedirects(String id, String inoutAction,
+      Set<String> declared) throws IOException, JSONException {
+    JSONObject redirect = redirectOf(id);
+    assertEquals(4, redirect.length(), redirect.toString());
+    assertEquals("registerPayment", redirect.getString("aPRMAddpayment"));
+    assertEquals("importOrderLines", redirect.getString("Createfromorders"));
+    assertEquals(inoutAction, redirect.getString("Createfrominouts"));
+    assertEquals("importOrderLines", redirect.getString("CreateFrom"));
+    JSONObject reasons = payloadOf(id).getJSONObject(McpActionsSection.NAME)
+        .getJSONObject(McpActionsSection.KEY_REASONS);
+    for (String button : List.of("Createfromorders", "Createfrominouts", "CreateFrom")) {
+      assertTrue(reasons.optString(button, "").contains(redirect.getString(button)),
+          id + ": " + button + " needs its own reason naming " + redirect.getString(button));
+    }
+    assertTrue(reasons.has("posted"), "the posted reason is kept");
+    assertTargetsAreDeclared(id, declared);
+    assertResolvesCleanly(id);
   }
 
   @Test

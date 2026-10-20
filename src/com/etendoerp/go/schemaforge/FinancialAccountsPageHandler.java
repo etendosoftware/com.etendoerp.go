@@ -18,13 +18,11 @@
 package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
-import java.math.RoundingMode;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -42,7 +40,6 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.security.OrganizationStructureProvider;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.financial.FinancialUtils;
-import org.openbravo.model.common.currency.ConversionRate;
 
 import com.etendoerp.go.schemaforge.util.NeoDateFormat;
 
@@ -129,8 +126,6 @@ public class FinancialAccountsPageHandler implements NeoHandler {
 
   private static final String METHOD_GET = "GET";
   private static final String SQL_TYPE_VARCHAR = "varchar";
-  /** Scale used for converted totals when the org currency has no standard precision set. */
-  private static final int DEFAULT_CURRENCY_PRECISION = 2;
 
   private static final String ACCOUNTS_SQL =
       "SELECT fa.fin_financial_account_id, fa.name, fa.type, fa.currentbalance, "
@@ -572,48 +567,23 @@ public class FinancialAccountsPageHandler implements NeoHandler {
   /**
    * Writes {@code totalBalance}, {@code totalBalanceCurrencyIso}, {@code totalBalanceApproximate}
    * and {@code missingRateCurrencies} into {@code summary} from the per-currency subtotals.
+   * Conversion rules (zero skip, missing rate, HALF_UP, raw sum without an org currency) live in
+   * {@link NeoCurrencyTotals}.
    */
   private void putTotalBalance(JSONObject summary, Collection<CurrencyTotal> subtotals,
       OrgCurrency orgCurrency) throws JSONException {
-    if (orgCurrency == null) {
-      putRawTotal(summary, subtotals);
-      return;
+    List<NeoCurrencyTotals.Subtotal> parts = new ArrayList<>();
+    for (CurrencyTotal subtotal : subtotals) {
+      parts.add(new NeoCurrencyTotals.Subtotal(subtotal.currency.id, subtotal.currency.iso,
+          subtotal.total));
     }
-    BigDecimal total = BigDecimal.ZERO;
-    boolean approximate = false;
+    NeoCurrencyTotals.Converted converted = new NeoCurrencyTotals(this::lookupRate)
+        .convert(parts, orgCurrency);
     JSONArray missingRate = new JSONArray();
-    for (CurrencyTotal subtotal : subtotals) {
-      // A zero subtotal adds nothing at any rate (ETP-5580 QA BUG-1): skip it before the lookup,
-      // so a 0.00 foreign account neither flags the total "≈" nor shows up as a missing rate.
-      if (orgCurrency.matches(subtotal.currency) || subtotal.total.signum() == 0) {
-        total = total.add(subtotal.total);
-        continue;
-      }
-      BigDecimal converted = convertSubtotal(subtotal, orgCurrency);
-      if (converted == null) {
-        missingRate.put(subtotal.currency.iso);
-      } else {
-        total = total.add(converted);
-        approximate = true;
-      }
-    }
-    putTotalFields(summary, total.setScale(orgCurrency.precision, RoundingMode.HALF_UP),
-        orgCurrency.iso, approximate, missingRate);
-  }
-
-  /**
-   * Fallback for when no functional currency exists anywhere in the org/legal-entity/client
-   * chain: nothing to convert into, so keep the legacy raw sum, never flagged approximate, and
-   * label it with the first currency (JSON {@code null} when there are no active accounts).
-   */
-  private static void putRawTotal(JSONObject summary, Collection<CurrencyTotal> subtotals)
-      throws JSONException {
-    BigDecimal total = BigDecimal.ZERO;
-    for (CurrencyTotal subtotal : subtotals) {
-      total = total.add(subtotal.total);
-    }
-    Object iso = subtotals.isEmpty() ? JSONObject.NULL : subtotals.iterator().next().currency.iso;
-    putTotalFields(summary, total, iso, false, new JSONArray());
+    converted.missingRateCurrencies.forEach(missingRate::put);
+    putTotalFields(summary, converted.total,
+        converted.iso == null ? JSONObject.NULL : converted.iso, converted.approximate,
+        missingRate);
   }
 
   private static void putTotalFields(JSONObject summary, BigDecimal total, Object iso,
@@ -625,20 +595,6 @@ public class FinancialAccountsPageHandler implements NeoHandler {
   }
 
   /**
-   * Converts one foreign-currency subtotal into {@code orgCurrency} at today's rate, rounded to
-   * the org currency's standard precision ({@code HALF_UP}).
-   *
-   * @return the converted amount, or {@code null} when no usable rate is configured
-   */
-  private BigDecimal convertSubtotal(CurrencyTotal subtotal, OrgCurrency orgCurrency) {
-    BigDecimal rate = lookupRate(subtotal.currency.id, orgCurrency.id);
-    if (rate == null) {
-      return null;
-    }
-    return subtotal.total.multiply(rate).setScale(orgCurrency.precision, RoundingMode.HALF_UP);
-  }
-
-  /**
    * Resolves the current organization's functional currency (ETP-5580) through
    * {@link NeoConversionHelper#resolveOrgCurrencyId()} — org, then legal entity, then client.
    * Package-private seam so tests can stub it without an OB security context.
@@ -646,18 +602,8 @@ public class FinancialAccountsPageHandler implements NeoHandler {
    * @return the org currency, or {@code null} when none is configured in the hierarchy
    */
   OrgCurrency resolveOrgCurrency() {
-    String currencyId = NeoConversionHelper.resolveOrgCurrencyId();
-    if (currencyId == null) {
-      return null;
-    }
-    org.openbravo.model.common.currency.Currency currency = OBDal.getInstance()
-        .get(org.openbravo.model.common.currency.Currency.class, currencyId);
-    if (currency == null) {
-      return null;
-    }
-    Long precision = currency.getStandardPrecision();
-    return new OrgCurrency(currencyId, StringUtils.trimToEmpty(currency.getISOCode()),
-        precision != null ? precision.intValue() : DEFAULT_CURRENCY_PRECISION);
+    NeoCurrencyTotals.TargetCurrency target = NeoCurrencyTotals.resolveOrgCurrency();
+    return target == null ? null : new OrgCurrency(target.id, target.iso, target.precision);
   }
 
   /**
@@ -674,17 +620,7 @@ public class FinancialAccountsPageHandler implements NeoHandler {
    * @return the multiply rate, or {@code null} when no usable rate is configured
    */
   BigDecimal lookupRate(String fromCurrencyId, String toCurrencyId) {
-    OBDal dal = OBDal.getInstance();
-    OBContext context = OBContext.getOBContext();
-    ConversionRate rate = FinancialUtils.getConversionRate(new Date(),
-        dal.getProxy(org.openbravo.model.common.currency.Currency.class, fromCurrencyId),
-        dal.getProxy(org.openbravo.model.common.currency.Currency.class, toCurrencyId),
-        context.getCurrentOrganization(), context.getCurrentClient());
-    if (rate == null) {
-      return null;
-    }
-    BigDecimal multiplyRate = rate.getMultipleRateBy();
-    return multiplyRate != null && multiplyRate.signum() != 0 ? multiplyRate : null;
+    return NeoCurrencyTotals.todayMultiplyRate(fromCurrencyId, toCurrencyId);
   }
 
   // ---------------------------------------------------------------------------
@@ -812,21 +748,15 @@ public class FinancialAccountsPageHandler implements NeoHandler {
    * The organization's functional currency (ETP-5580): the target of the summary total.
    * {@code precision} is the currency's standard precision, used to round converted subtotals.
    */
-  static class OrgCurrency {
-    final String id;
-    final String iso;
-    final int precision;
+  static class OrgCurrency extends NeoCurrencyTotals.TargetCurrency {
 
     OrgCurrency(String id, String iso, int precision) {
-      this.id = id;
-      this.iso = iso;
-      this.precision = precision;
+      super(id, iso, precision);
     }
 
     /** Whether {@code currency} is this org currency (by id, or by ISO code as a fallback). */
     boolean matches(Currency currency) {
-      return StringUtils.equals(id, currency.id)
-          || (StringUtils.isNotEmpty(iso) && StringUtils.equals(iso, currency.iso));
+      return matches(currency.id, currency.iso);
     }
   }
 

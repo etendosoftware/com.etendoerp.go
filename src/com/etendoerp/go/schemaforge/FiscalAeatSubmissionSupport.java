@@ -36,6 +36,7 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.module.aeat303.es.presentation.AEAT303SubmissionResult;
 
+import com.etendoerp.go.common.BoundedJsonParser;
 import com.etendoerp.go.schemaforge.data.FiscalDecl;
 
 /**
@@ -65,7 +66,7 @@ final class FiscalAeatSubmissionSupport {
       while ((line = reader.readLine()) != null) sb.append(line);
     }
     String raw = sb.toString();
-    return raw.isEmpty() ? new JSONObject() : new JSONObject(raw);
+    return raw.isEmpty() ? new JSONObject() : BoundedJsonParser.parseObject(raw);
   }
 
   static void writeJson(HttpServletResponse response, int status, JSONObject body)

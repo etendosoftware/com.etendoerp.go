@@ -46,6 +46,7 @@ import org.openbravo.model.common.enterprise.Organization;
 import com.etendoerp.go.auth.EnvironmentAuthOutcome;
 import com.etendoerp.go.auth.EnvironmentRequestAuthenticator;
 import com.etendoerp.go.auth.SurfacePolicy;
+import com.etendoerp.go.common.BoundedJsonParser;
 import com.etendoerp.go.common.ConfigPropertyReader;
 import com.etendoerp.go.common.EtendoGoCorsServlet;
 import com.etendoerp.go.common.ProtocolErrorAdapters;
@@ -79,8 +80,9 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
   private static final Logger log = LogManager.getLogger(SupportConversationsServlet.class);
 
   private static final String CONTENT_TYPE_JSON = "application/json";
-  private static final EnvironmentRequestAuthenticator AUTHENTICATOR =
-      new EnvironmentRequestAuthenticator();
+  /** Package-visible so tests can swap the database-backed role lookups for a fake (ETP-5270:
+   * a legacy JWT's role is now checked against {@code AD_User_Roles} on every request). */
+  static EnvironmentRequestAuthenticator authenticator = new EnvironmentRequestAuthenticator();
   private static final String CHARSET_UTF8      = "UTF-8";
   private static final String FIELD_MESSAGE     = "message";
   private static final String FIELD_MESSAGES    = "messages";
@@ -711,7 +713,7 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
    */
   private AuthContext authenticate(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
-    EnvironmentAuthOutcome outcome = AUTHENTICATOR.identify(request, SurfacePolicy.NEO_AUXILIARY);
+    EnvironmentAuthOutcome outcome = authenticator.identify(request, SurfacePolicy.NEO_AUXILIARY);
     if (!outcome.isAuthenticated()) {
       log.warn("Support chat: refused ({}): {}", outcome.getHttpStatus(), outcome.getMessage());
       writeError(response, outcome.getHttpStatus(), outcome.getMessage());
@@ -990,7 +992,7 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
       }
       String s = sb.toString().trim();
       if (s.isEmpty()) return new JSONObject();
-      return new JSONObject(s);
+      return BoundedJsonParser.parseObject(s);
     } catch (Exception e) {
       return null;
     }
@@ -1004,7 +1006,7 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
       while ((line = reader.readLine()) != null) sb.append(line);
     }
     try {
-      return new JSONObject(sb.toString());
+      return BoundedJsonParser.parseObject(sb.toString());
     } catch (JSONException e) {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST, "Invalid JSON body");
       return null;

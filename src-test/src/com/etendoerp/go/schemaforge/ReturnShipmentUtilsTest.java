@@ -51,12 +51,14 @@ import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
+import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.enterprise.Locator;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.enterprise.Warehouse;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.invoice.InvoiceLine;
+import org.openbravo.model.common.invoice.InvoiceTax;
 import org.openbravo.model.common.invoice.ReversedInvoice;
 import org.openbravo.model.common.plm.Product;
 import org.openbravo.model.financialmgmt.tax.TaxRate;
@@ -90,6 +92,9 @@ import static org.mockito.Mockito.when;
  *   <li>{@code findReturnDocTypeForOrg} — requireRectificative gating on column presence, org
  *       match, org-'0' fallback, and first-candidate fallback.</li>
  * </ul>
+ *
+ * @covers com.etendoerp.go.schemaforge.ReturnShipmentUtils
+ * @covers com.etendoerp.go.schemaforge.ReturnInvoiceSupport
  */
 public class ReturnShipmentUtilsTest {
 
@@ -110,7 +115,7 @@ public class ReturnShipmentUtilsTest {
       OBDal dal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(dal);
 
-      BigDecimal result = ReturnShipmentUtils.resolvePriceFromSourceInvoiceLine(
+      BigDecimal result = ReturnInvoiceSupport.resolvePriceFromSourceInvoiceLine(
           null, "unitPrice", FALLBACK);
 
       assertEquals(FALLBACK, result);
@@ -140,7 +145,7 @@ public class ReturnShipmentUtilsTest {
       when(query.setMaxResults(anyInt())).thenReturn(query);
       when(query.list()).thenReturn(Collections.singletonList(expectedPrice));
 
-      BigDecimal result = ReturnShipmentUtils.resolvePriceFromSourceInvoiceLine(
+      BigDecimal result = ReturnInvoiceSupport.resolvePriceFromSourceInvoiceLine(
           "line-001", "unitPrice", FALLBACK);
 
       assertEquals(expectedPrice, result);
@@ -167,7 +172,7 @@ public class ReturnShipmentUtilsTest {
       // The list has one element but it is null
       when(query.list()).thenReturn(Collections.singletonList(null));
 
-      BigDecimal result = ReturnShipmentUtils.resolvePriceFromSourceInvoiceLine(
+      BigDecimal result = ReturnInvoiceSupport.resolvePriceFromSourceInvoiceLine(
           "line-002", "unitPrice", FALLBACK);
 
       assertEquals(FALLBACK, result);
@@ -192,7 +197,7 @@ public class ReturnShipmentUtilsTest {
       when(query.setMaxResults(anyInt())).thenReturn(query);
       when(query.list()).thenReturn(Collections.<BigDecimal>emptyList());
 
-      BigDecimal result = ReturnShipmentUtils.resolvePriceFromSourceInvoiceLine(
+      BigDecimal result = ReturnInvoiceSupport.resolvePriceFromSourceInvoiceLine(
           "line-003", "unitPrice", FALLBACK);
 
       assertEquals(FALLBACK, result);
@@ -213,7 +218,7 @@ public class ReturnShipmentUtilsTest {
           .thenThrow(new RuntimeException("HibernateException: session closed"));
 
       // Must not throw — exception is swallowed and fallback is returned
-      BigDecimal result = ReturnShipmentUtils.resolvePriceFromSourceInvoiceLine(
+      BigDecimal result = ReturnInvoiceSupport.resolvePriceFromSourceInvoiceLine(
           "line-004", "unitPrice", FALLBACK);
 
       assertEquals(FALLBACK, result);
@@ -239,7 +244,7 @@ public class ReturnShipmentUtilsTest {
       when(query.setMaxResults(anyInt())).thenReturn(query);
       when(query.list()).thenReturn(Collections.singletonList(BigDecimal.ZERO));
 
-      BigDecimal result = ReturnShipmentUtils.resolvePriceFromSourceInvoiceLine(
+      BigDecimal result = ReturnInvoiceSupport.resolvePriceFromSourceInvoiceLine(
           "line-005", "unitPrice", FALLBACK);
 
       assertEquals(FALLBACK, result);
@@ -247,6 +252,10 @@ public class ReturnShipmentUtilsTest {
   }
 
   // ── findReturnDocTypeForOrg (ETP-4737) ───────────────────────────────────────
+
+  /** Client passed to the lookup in tests that do not assert on the client restriction. */
+  private static final org.openbravo.model.ad.system.Client CLIENT =
+      mock(org.openbravo.model.ad.system.Client.class);
 
   private static OBCriteria<DocumentType> mockCriteria(OBDal dal, List<DocumentType> result) {
     @SuppressWarnings("unchecked")
@@ -278,7 +287,7 @@ public class ReturnShipmentUtilsTest {
       dalMock.when(OBDal::getInstance).thenReturn(dal);
       OBCriteria<DocumentType> criteria = mockCriteria(dal, Collections.emptyList());
 
-      ReturnShipmentUtils.findReturnDocTypeForOrg("org-1", "APC", false, false, false);
+      ReturnShipmentUtils.findReturnDocTypeForOrg(CLIENT, "org-1", "APC", false, false, false);
 
       verify(criteria, never()).add(argThat(ReturnShipmentUtilsTest::isRectificativeRestriction));
     } finally {
@@ -299,7 +308,7 @@ public class ReturnShipmentUtilsTest {
       dalMock.when(OBDal::getInstance).thenReturn(dal);
       OBCriteria<DocumentType> criteria = mockCriteria(dal, Collections.emptyList());
 
-      ReturnShipmentUtils.findReturnDocTypeForOrg("org-1", "ARC", true, false, true);
+      ReturnShipmentUtils.findReturnDocTypeForOrg(CLIENT, "org-1", "ARC", true, false, true);
 
       verify(criteria, atLeastOnce()).add(argThat(ReturnShipmentUtilsTest::isRectificativeRestriction));
     } finally {
@@ -319,11 +328,30 @@ public class ReturnShipmentUtilsTest {
       dalMock.when(OBDal::getInstance).thenReturn(dal);
       OBCriteria<DocumentType> criteria = mockCriteria(dal, Collections.emptyList());
 
-      ReturnShipmentUtils.findReturnDocTypeForOrg("org-1", "APC", false, false, true);
+      ReturnShipmentUtils.findReturnDocTypeForOrg(CLIENT, "org-1", "APC", false, false, true);
 
       verify(criteria, never()).add(argThat(ReturnShipmentUtilsTest::isRectificativeRestriction));
     } finally {
       RectificativeSupport.setColumnPresentForTests(null);
+    }
+  }
+
+  /**
+   * The lookup is restricted to the given client (admin-mode callers pass the source document's
+   * client).
+   */
+  @Test
+  public void findReturnDocTypeForOrg_withClient_restrictsToThatClient() {
+    org.openbravo.model.ad.system.Client client = mock(org.openbravo.model.ad.system.Client.class);
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      OBCriteria<DocumentType> criteria = mockCriteria(dal, Collections.emptyList());
+
+      ReturnShipmentUtils.findReturnDocTypeForOrg(client, "org-1", "MMR", false, true, false);
+      verify(criteria, atLeastOnce()).add(argThat(c -> c instanceof SimpleExpression
+          && DocumentType.PROPERTY_CLIENT.equals(((SimpleExpression) c).getPropertyName())
+          && client.equals(((SimpleExpression) c).getValue())));
     }
   }
 
@@ -346,7 +374,7 @@ public class ReturnShipmentUtilsTest {
       mockCriteria(dal, Collections.singletonList(match));
 
       DocumentType result = ReturnShipmentUtils.findReturnDocTypeForOrg(
-          "org-1", "APC", false, false, false);
+          CLIENT, "org-1", "APC", false, false, false);
 
       assertSame(match, result);
     }
@@ -363,7 +391,7 @@ public class ReturnShipmentUtilsTest {
       mockCriteria(dal, java.util.Arrays.asList(other, zero));
 
       DocumentType result = ReturnShipmentUtils.findReturnDocTypeForOrg(
-          "org-1", "APC", false, false, false);
+          CLIENT, "org-1", "APC", false, false, false);
 
       assertSame(zero, result);
     }
@@ -379,7 +407,7 @@ public class ReturnShipmentUtilsTest {
       mockCriteria(dal, Collections.singletonList(first));
 
       DocumentType result = ReturnShipmentUtils.findReturnDocTypeForOrg(
-          "org-1", "APC", false, false, false);
+          CLIENT, "org-1", "APC", false, false, false);
 
       assertSame(first, result);
     }
@@ -394,7 +422,7 @@ public class ReturnShipmentUtilsTest {
       mockCriteria(dal, Collections.emptyList());
 
       DocumentType result = ReturnShipmentUtils.findReturnDocTypeForOrg(
-          "org-1", "APC", false, false, true);
+          CLIENT, "org-1", "APC", false, false, true);
 
       assertNull(result);
     }
@@ -448,12 +476,17 @@ public class ReturnShipmentUtilsTest {
           eq(invoice), eq(retLine), qtyCaptor.capture(), anyLong()))
           .thenReturn(il);
 
-      ReturnShipmentUtils.addReturnInvoiceLines(
+      ReturnInvoiceSupport.addReturnInvoiceLines(
           invoice, Collections.singletonList(retLine), createDraftInvoiceHandler);
 
       assertEquals(0, expectedQty.compareTo(qtyCaptor.getValue()));
-      verify(il).setGoodsShipmentLine(retLine);
-      verify(dal).save(il);
+      // ETP-5729: the order line only supplies price and tax. The link must be cleared before
+      // the line is persisted, or C_INVOICE_POST adds this negative quantity to the order
+      // line's QtyInvoiced and the order reads as pending to invoice again.
+      InOrder inOrder = Mockito.inOrder(il, dal);
+      inOrder.verify(il).setGoodsShipmentLine(retLine);
+      inOrder.verify(il).setSalesOrderLine(null);
+      inOrder.verify(dal).save(il);
     }
   }
 
@@ -491,7 +524,7 @@ public class ReturnShipmentUtilsTest {
       Invoice invoice = mock(Invoice.class);
       CreateDraftInvoiceHandler createDraftInvoiceHandler = mock(CreateDraftInvoiceHandler.class);
 
-      ReturnShipmentUtils.addReturnInvoiceLines(
+      ReturnInvoiceSupport.addReturnInvoiceLines(
           invoice, Collections.singletonList(retLine), createDraftInvoiceHandler);
 
       verify(createDraftInvoiceHandler, never())
@@ -561,6 +594,85 @@ public class ReturnShipmentUtilsTest {
       verify(retLine, never()).setStorageBin(sourceBin);
       verify(retLine).setStorageBin(headerDefaultBin);
     }
+  }
+
+  // ── importReturnLines — the shared "add lines from receipts/shipments" path (ETP-5711) ──
+
+  private static JSONArray importEntries(String... idAndQuantity) throws Exception {
+    JSONArray lines = new JSONArray();
+    for (int i = 0; i < idAndQuantity.length; i += 2) {
+      lines.put(new JSONObject().put("sourceLineId", idAndQuantity[i])
+          .put("returnQuantity", idAndQuantity[i + 1]));
+    }
+    return lines;
+  }
+
+  /**
+   * Runs importReturnLines on return {@code ret-1} (whose last line number is 10) against source
+   * lines {@code src-1} (received 5) and {@code src-2} (received 8), with nothing returned yet.
+   */
+  private static NeoResponse runImport(JSONArray lines, java.util.List<ShipmentInOutLine> created)
+      throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      ReturnedQuantityTestSupport.stubReturnedQuantities(dal, 10L, (src, excl) -> BigDecimal.ZERO);
+      ShipmentInOutLine water = ReturnedQuantityTestSupport.sourceLine("src-1", "Agua", "5");
+      ShipmentInOutLine beer = ReturnedQuantityTestSupport.sourceLine("src-2", "Cerveza", "8");
+      when(dal.get(ShipmentInOutLine.class, "src-1")).thenReturn(water);
+      when(dal.get(ShipmentInOutLine.class, "src-2")).thenReturn(beer);
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(ShipmentInOutLine.class)).thenAnswer(inv -> {
+        ShipmentInOutLine line = mock(ShipmentInOutLine.class);
+        created.add(line);
+        return line;
+      });
+      ShipmentInOut returnDoc = mock(ShipmentInOut.class);
+      return ReturnShipmentUtils.importReturnLines(returnDoc, "ret-1", lines);
+    }
+  }
+
+  @Test
+  public void importReturnLines_linesOfSeveralSourceLines_areNumberedAfterTheExistingOnes()
+      throws Exception {
+    java.util.List<ShipmentInOutLine> created = new java.util.ArrayList<>();
+
+    NeoResponse result = runImport(importEntries("src-1", "2", "src-2", "8"), created);
+
+    assertEquals(200, result.getHttpStatus());
+    assertEquals(2, result.getBody().getJSONObject("response").getJSONObject("data")
+        .getInt("importedCount"));
+    verify(created.get(0)).setLineNo(20L);
+    verify(created.get(1)).setLineNo(30L);
+  }
+
+  @Test
+  public void importReturnLines_overReturn_createsNothingAndAnswers422() throws Exception {
+    java.util.List<ShipmentInOutLine> created = new java.util.ArrayList<>();
+
+    NeoResponse result = runImport(importEntries("src-2", "8", "src-1", "6"), created);
+
+    assertEquals(422, result.getHttpStatus());
+    assertEquals("returnQuantityExceedsAvailable",
+        result.getBody().getJSONObject("error").getString("code"));
+    assertEquals("Agua", result.getBody().getJSONObject("error").getString("product"));
+    assertTrue("a refused import must not create the lines that were fine", created.isEmpty());
+  }
+
+  @Test
+  public void importReturnLines_unusableEntries_areSkipped() throws Exception {
+    java.util.List<ShipmentInOutLine> created = new java.util.ArrayList<>();
+    JSONArray lines = importEntries("src-1", "abc", "src-2", "0", "missing", "1");
+    lines.put(new JSONObject().put("returnQuantity", "1"));
+
+    NeoResponse result = runImport(lines, created);
+
+    assertEquals(200, result.getHttpStatus());
+    assertEquals(0, result.getBody().getJSONObject("response").getJSONObject("data")
+        .getInt("importedCount"));
+    assertTrue(created.isEmpty());
   }
 
   /**
@@ -1117,7 +1229,7 @@ public class ReturnShipmentUtilsTest {
       try (CompletionMocks completion = new CompletionMocks(dal, completionSuccess())) {
         mockCompletedInvoice(dal, "ret-inv-1", "REC-1000001", "CO");
 
-        NeoResponse response = ReturnShipmentUtils.finalizeReturnInvoice(invoice,
+        NeoResponse response = ReturnInvoiceSupport.finalizeReturnInvoice(invoice,
             Collections.<ShipmentInOutLine>emptyList(), createDraftInvoiceHandler,
             Collections.singletonList("inv-origin-1"), null);
 
@@ -1134,6 +1246,78 @@ public class ReturnShipmentUtilsTest {
     }
   }
 
+  /**
+   * ETP-5729: the rectificative invoice's tax rows are made by the core trigger chain when the
+   * lines are flushed ({@code C_INVOICELINE_TRG2} → {@code C_INVOICELINETAX_TRG}, one
+   * {@code C_InvoiceTax} per rate). Inserting another {@code InvoiceTax} from Java on top of it
+   * made the completion sum both rows: tax and amount to pay doubled (base -300 → tax -126
+   * instead of -63). Two lines at two rates, so the old per-rate insertion would fire twice.
+   *
+   * <p>The handler is a spy so that anything it still did on the real class would run; only the
+   * two collaborators that need a live environment are stubbed.
+   */
+  @Test
+  public void finalizeReturnInvoice_leavesTaxRowsToTheDbTriggers_neverInsertsAnInvoiceTax()
+      throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getSession()).thenReturn(mock(Session.class));
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      InvoiceTax handMadeTaxRow = mock(InvoiceTax.class);
+      when(provider.get(InvoiceTax.class)).thenReturn(handMadeTaxRow);
+      ReversedInvoice link = mock(ReversedInvoice.class);
+      when(provider.get(ReversedInvoice.class)).thenReturn(link);
+
+      Currency currency = mock(Currency.class);
+      when(currency.getStandardPrecision()).thenReturn(2L);
+      InvoiceLine lineAt21 = taxedReturnInvoiceLine("tax-21", "21", "-300.00");
+      InvoiceLine lineAt10 = taxedReturnInvoiceLine("tax-10", "10", "-50.00");
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getId()).thenReturn("ret-inv-1");
+      when(invoice.getCurrency()).thenReturn(currency);
+      when(invoice.getInvoiceLineList()).thenReturn(Arrays.asList(lineAt21, lineAt10));
+      when(dal.get(eq(Invoice.class), eq("inv-origin-1"))).thenReturn(mock(Invoice.class));
+      stubNoExistingReversedInvoiceLink(dal);
+
+      InvoiceFromOrderSupport support = mock(InvoiceFromOrderSupport.class);
+      CreateDraftInvoiceHandler createDraftInvoiceHandler = Mockito.spy(new CreateDraftInvoiceHandler());
+      Mockito.doNothing().when(createDraftInvoiceHandler).ensureDocumentNo(any());
+      Mockito.doReturn(support).when(createDraftInvoiceHandler).getSupport();
+
+      try (CompletionMocks completion = new CompletionMocks(dal, completionSuccess())) {
+        mockCompletedInvoice(dal, "ret-inv-1", "REC-1000001", "CO");
+
+        ReturnInvoiceSupport.finalizeReturnInvoice(invoice,
+            Collections.<ShipmentInOutLine>emptyList(), createDraftInvoiceHandler,
+            Collections.singletonList("inv-origin-1"), null);
+
+        verify(provider, never()).get(InvoiceTax.class);
+        verify(dal, never()).save(handMadeTaxRow);
+        verify(invoice, never()).setGrandTotalAmount(any());
+        verify(invoice, never()).setSummedLineAmount(any());
+        verify(completion.processInvoiceUtil).process(
+            eq("ret-inv-1"), eq("CO"), anyString(), anyString(), anyString(), any(), any());
+      }
+    }
+  }
+
+  /** A persisted rectificative line carrying a non-summary tax rate and a negative net amount. */
+  private static InvoiceLine taxedReturnInvoiceLine(String taxId, String rate, String lineNet) {
+    TaxRate tax = mock(TaxRate.class);
+    when(tax.getId()).thenReturn(taxId);
+    when(tax.getRate()).thenReturn(new BigDecimal(rate));
+    when(tax.isSummaryLevel()).thenReturn(false);
+    InvoiceLine line = mock(InvoiceLine.class);
+    when(line.getInvoicedQuantity()).thenReturn(BigDecimal.ONE.negate());
+    when(line.getUnitPrice()).thenReturn(new BigDecimal(lineNet).negate());
+    when(line.getLineNetAmount()).thenReturn(new BigDecimal(lineNet));
+    when(line.getTax()).thenReturn(tax);
+    return line;
+  }
+
   // ── linkRectifiedInvoices ─────────────────────────────────────────────────
 
   /**
@@ -1147,7 +1331,7 @@ public class ReturnShipmentUtilsTest {
       dalMock.when(OBDal::getInstance).thenReturn(dal);
 
       try {
-        ReturnShipmentUtils.linkRectifiedInvoices(mock(Invoice.class), Collections.emptyList());
+        ReturnInvoiceSupport.linkRectifiedInvoices(mock(Invoice.class), Collections.emptyList());
         fail("An empty selection must be rejected");
       } catch (OBException e) {
         assertEquals(ReturnShipmentUtils.ERR_RECTIFIED_INVOICE_REQUIRED, e.getMessage());
@@ -1164,7 +1348,7 @@ public class ReturnShipmentUtilsTest {
       dalMock.when(OBDal::getInstance).thenReturn(dal);
 
       try {
-        ReturnShipmentUtils.linkRectifiedInvoices(mock(Invoice.class), null);
+        ReturnInvoiceSupport.linkRectifiedInvoices(mock(Invoice.class), null);
         fail("A null selection must be rejected");
       } catch (OBException e) {
         assertEquals(ReturnShipmentUtils.ERR_RECTIFIED_INVOICE_REQUIRED, e.getMessage());
@@ -1195,7 +1379,7 @@ public class ReturnShipmentUtilsTest {
       when(criteria.list())
           .thenReturn(Collections.singletonList(mock(ReversedInvoice.class)));
 
-      ReturnShipmentUtils.linkRectifiedInvoices(mock(Invoice.class),
+      ReturnInvoiceSupport.linkRectifiedInvoices(mock(Invoice.class),
           Collections.singletonList("inv-origin-1"));
 
       verify(provider, never()).get(ReversedInvoice.class);
@@ -1212,7 +1396,7 @@ public class ReturnShipmentUtilsTest {
       when(dal.get(eq(Invoice.class), eq("does-not-exist"))).thenReturn(null);
 
       try {
-        ReturnShipmentUtils.linkRectifiedInvoices(mock(Invoice.class),
+        ReturnInvoiceSupport.linkRectifiedInvoices(mock(Invoice.class),
             Collections.singletonList("does-not-exist"));
         fail("An unresolvable invoice id must be rejected");
       } catch (OBException e) {
@@ -1282,7 +1466,7 @@ public class ReturnShipmentUtilsTest {
           new JSONArray().put("inv-a").put("inv-b"));
 
       assertEquals(Arrays.asList("inv-a", "inv-b"),
-          ReturnShipmentUtils.resolveRectifiedInvoiceIds(body, "ret-1"));
+          ReturnInvoiceSupport.resolveRectifiedInvoiceIds(body, "ret-1"));
       verify(dal, never()).getConnection();
     }
   }
@@ -1299,7 +1483,7 @@ public class ReturnShipmentUtilsTest {
           new JSONArray().put("inv-a").put("inv-a").put("  ").put("inv-b"));
 
       assertEquals(Arrays.asList("inv-a", "inv-b"),
-          ReturnShipmentUtils.resolveRectifiedInvoiceIds(body, "ret-1"));
+          ReturnInvoiceSupport.resolveRectifiedInvoiceIds(body, "ret-1"));
     }
   }
 
@@ -1316,7 +1500,7 @@ public class ReturnShipmentUtilsTest {
       stubReturnInvoiceQueries(dal, "inv-new", "inv-old");
 
       assertEquals(Collections.singletonList("inv-new"),
-          ReturnShipmentUtils.resolveRectifiedInvoiceIds(null, "ret-1"));
+          ReturnInvoiceSupport.resolveRectifiedInvoiceIds(null, "ret-1"));
     }
   }
 
@@ -1332,7 +1516,7 @@ public class ReturnShipmentUtilsTest {
           .put(ReturnShipmentUtils.PARAM_ORIGIN_INVOICES, new JSONArray());
 
       assertEquals(Collections.singletonList("inv-new"),
-          ReturnShipmentUtils.resolveRectifiedInvoiceIds(body, "ret-1"));
+          ReturnInvoiceSupport.resolveRectifiedInvoiceIds(body, "ret-1"));
     }
   }
 
@@ -1349,7 +1533,7 @@ public class ReturnShipmentUtilsTest {
       stubReturnInvoiceQueries(dal);
 
       try {
-        ReturnShipmentUtils.resolveRectifiedInvoiceIds(null, "ret-1");
+        ReturnInvoiceSupport.resolveRectifiedInvoiceIds(null, "ret-1");
         fail("A return document with no rectifiable invoice must be rejected");
       } catch (OBException e) {
         assertEquals(ReturnShipmentUtils.ERR_RECTIFIED_INVOICE_REQUIRED, e.getMessage());
@@ -1375,7 +1559,7 @@ public class ReturnShipmentUtilsTest {
           Arrays.asList("inv-stranger-a", "inv-stranger-b"));
 
       try {
-        ReturnShipmentUtils.resolveRectifiedInvoiceIds(new JSONObject(), "ret-1");
+        ReturnInvoiceSupport.resolveRectifiedInvoiceIds(new JSONObject(), "ret-1");
         fail("Without a chain the server must refuse, never pick an arbitrary invoice");
       } catch (OBException e) {
         assertEquals(ReturnShipmentUtils.ERR_RECTIFIED_INVOICE_REQUIRED, e.getMessage());
@@ -1405,9 +1589,9 @@ public class ReturnShipmentUtilsTest {
 
       assertEquals("Order is the caller's, repeats are collapsed to the first occurrence",
           Arrays.asList("inv-c", "inv-a", "inv-b"),
-          ReturnShipmentUtils.resolveRectifiedInvoiceIds(body, "ret-1"));
+          ReturnInvoiceSupport.resolveRectifiedInvoiceIds(body, "ret-1"));
       assertFalse("An explicit selection must never be widened with the auto-detected one",
-          ReturnShipmentUtils.resolveRectifiedInvoiceIds(body, "ret-1").contains("inv-auto"));
+          ReturnInvoiceSupport.resolveRectifiedInvoiceIds(body, "ret-1").contains("inv-auto"));
       verify(dal, never()).getConnection();
     }
   }
@@ -2177,6 +2361,276 @@ public class ReturnShipmentUtilsTest {
       ids.add(arr.getString(i));
     }
     return ids;
+  }
+
+  // ── ETP-5712: zero-amount guard and previous rectificativas ───────────────
+
+  private static ShipmentInOutLine returnLine(String productName, String qty,
+      ShipmentInOutLine origLine) {
+    ShipmentInOutLine line = mock(ShipmentInOutLine.class);
+    Product product = mock(Product.class);
+    when(product.getId()).thenReturn("prod-" + productName);
+    when(product.getName()).thenReturn(productName);
+    when(line.getProduct()).thenReturn(product);
+    when(line.getMovementQuantity()).thenReturn(new BigDecimal(qty));
+    when(line.getCanceledInoutLine()).thenReturn(origLine);
+    return line;
+  }
+
+  /** Makes the handler's line probe price whatever the product's name maps to (default 0). */
+  private static CreateDraftInvoiceHandler probePricing(java.util.Map<String, String> priceByProduct) {
+    CreateDraftInvoiceHandler handler = mock(CreateDraftInvoiceHandler.class);
+    when(handler.createShipmentInvoiceLine(any(), any(), any(), anyLong())).thenAnswer(inv -> {
+      ShipmentInOutLine pricingLine = inv.getArgument(1);
+      InvoiceLine il = mock(InvoiceLine.class);
+      String price = priceByProduct.get(pricingLine.getProduct().getName());
+      when(il.getUnitPrice()).thenReturn(price == null ? BigDecimal.ZERO : new BigDecimal(price));
+      return il;
+    });
+    return handler;
+  }
+
+  /**
+   * ETP-5712: ANY product line that ends at price 0 refuses the whole document (422), and the
+   * refusal names exactly the offending products — not the priced ones, not a zero-quantity line.
+   */
+  @Test
+  public void refuseIfUnpriced_namesOnlyTheProductsWithoutPrice() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      Session session = mock(Session.class);
+      when(dal.getSession()).thenReturn(session); // every fallback query answers nothing
+      Invoice header = mock(Invoice.class);
+      CreateDraftInvoiceHandler handler = probePricing(java.util.Map.of("Agua", "2.50"));
+
+      NeoResponse refused = ReturnInvoiceSupport.refuseIfUnpriced(Arrays.asList(
+          returnLine("Agua", "-3", null), returnLine("Sal", "-1", null),
+          returnLine("Pan", "-2", null), returnLine("Aceite", "0", null)), header, handler);
+
+      assertEquals(422, refused.getHttpStatus());
+      JSONObject error = refused.getBody().getJSONObject("error");
+      assertEquals("returnInvoiceWithoutAmount", error.getString("code"));
+      assertEquals(Arrays.asList("Sal", "Pan"), Arrays.asList(
+          error.getJSONArray("products").getString(0), error.getJSONArray("products").getString(1)));
+      assertEquals(2, error.getJSONArray("products").length());
+      assertEquals(ReturnShipmentUtils.MSG_WITHOUT_AMOUNT_PREFIX + "Sal, Pan"
+          + ReturnShipmentUtils.MSG_WITHOUT_AMOUNT_SUFFIX, error.getString("message"));
+    }
+  }
+
+  /** A document whose every line is priced is not refused. */
+  @Test
+  public void refuseIfUnpriced_allPriced_returnsNull() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      CreateDraftInvoiceHandler handler = probePricing(java.util.Map.of("Agua", "2.50"));
+
+      assertNull(ReturnInvoiceSupport.refuseIfUnpriced(
+          Collections.singletonList(returnLine("Agua", "-3", null)), mock(Invoice.class), handler));
+    }
+  }
+
+  /**
+   * The guard judges what the build will really end with: a line the probe leaves at 0 is still
+   * fine when the price list prices the product (the last fallback of buildAndSaveInvoiceLine).
+   */
+  @Test
+  @SuppressWarnings({"unchecked", "rawtypes"})
+  public void refuseIfUnpriced_priceListFallbackCountsAsPriced() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      Session session = mock(Session.class);
+      when(dal.getSession()).thenReturn(session);
+      Query query = mock(Query.class);
+      when(session.createQuery(anyString(), eq(BigDecimal.class))).thenReturn(query);
+      when(query.setParameter(anyString(), any())).thenReturn(query);
+      when(query.setMaxResults(anyInt())).thenReturn(query);
+      when(query.list()).thenReturn(Collections.singletonList(new BigDecimal("5.00")));
+      Invoice header = mock(Invoice.class);
+      org.openbravo.model.pricing.pricelist.PriceList priceList =
+          mock(org.openbravo.model.pricing.pricelist.PriceList.class);
+      when(priceList.getId()).thenReturn("pl-1");
+      when(header.getPriceList()).thenReturn(priceList);
+
+      assertNull(ReturnInvoiceSupport.refuseIfUnpriced(
+          Collections.singletonList(returnLine("Sal", "-1", null)), header,
+          probePricing(Collections.<String, String>emptyMap())));
+    }
+  }
+
+  /**
+   * ETP-5712: the zero-amount probe and the real line build share ONE pricing resolver. A product
+   * only the price list can price is accepted by the probe AND ends on the built line at that same
+   * price; the same inputs cannot make the probe accept and the build price at 0 (or the reverse).
+   */
+  @Test
+  @SuppressWarnings({"unchecked", "rawtypes"})
+  public void probeAndBuild_shareTheResolver_priceListOnlyProductIsAcceptedAndBuiltAtThatPrice() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      Session session = mock(Session.class);
+      when(dal.getSession()).thenReturn(session);
+      Query query = mock(Query.class);
+      when(session.createQuery(anyString(), eq(BigDecimal.class))).thenReturn(query);
+      when(query.setParameter(anyString(), any())).thenReturn(query);
+      when(query.setMaxResults(anyInt())).thenReturn(query);
+      when(query.list()).thenReturn(Collections.singletonList(new BigDecimal("5.00")));
+      Invoice header = mock(Invoice.class);
+      when(header.getCurrency()).thenReturn(null);
+      org.openbravo.model.pricing.pricelist.PriceList priceList =
+          mock(org.openbravo.model.pricing.pricelist.PriceList.class);
+      when(priceList.getId()).thenReturn("pl-1");
+      when(header.getPriceList()).thenReturn(priceList);
+
+      ShipmentInOutLine retLine = returnLine("Sal", "-2", null);
+      CreateDraftInvoiceHandler handler = mock(CreateDraftInvoiceHandler.class);
+      InvoiceLine il = mock(InvoiceLine.class);
+      when(il.getUnitPrice()).thenReturn(BigDecimal.ZERO);
+      when(il.getTax()).thenReturn(mock(TaxRate.class));
+      when(handler.createShipmentInvoiceLine(any(), any(), any(), anyLong())).thenReturn(il);
+
+      // probe: accepted, and it never saves nor mutates the line
+      assertNull(ReturnInvoiceSupport.refuseIfUnpriced(
+          Collections.singletonList(retLine), header, handler));
+      verify(dal, Mockito.never()).save(any());
+      verify(il, Mockito.never()).setUnitPrice(any());
+
+      // build: same inputs, same price, now written onto the line and persisted
+      ReturnInvoiceSupport.addReturnInvoiceLines(header, Collections.singletonList(retLine), handler);
+      verify(il).setUnitPrice(new BigDecimal("5.00"));
+      verify(il).setLineNetAmount(new BigDecimal("-10.00"));
+      verify(dal).save(il);
+    }
+  }
+
+  /** A product priced nowhere is refused by the probe, through the same shared resolver. */
+  @Test
+  @SuppressWarnings({"unchecked", "rawtypes"})
+  public void probe_productPricedNowhere_isRefused() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      Session session = mock(Session.class);
+      when(dal.getSession()).thenReturn(session);
+      Query query = mock(Query.class);
+      when(session.createQuery(anyString(), eq(BigDecimal.class))).thenReturn(query);
+      when(query.setParameter(anyString(), any())).thenReturn(query);
+      when(query.setMaxResults(anyInt())).thenReturn(query);
+      when(query.list()).thenReturn(Collections.<BigDecimal>emptyList());
+      Invoice header = mock(Invoice.class);
+      org.openbravo.model.pricing.pricelist.PriceList priceList =
+          mock(org.openbravo.model.pricing.pricelist.PriceList.class);
+      when(priceList.getId()).thenReturn("pl-1");
+      when(header.getPriceList()).thenReturn(priceList);
+
+      NeoResponse refused = ReturnInvoiceSupport.refuseIfUnpriced(
+          Collections.singletonList(returnLine("Sal", "-2", null)), header,
+          probePricing(Collections.<String, String>emptyMap()));
+
+      assertEquals(422, refused.getHttpStatus());
+    }
+  }
+
+  /** The previous rectificativas are reported as {id, documentNo, documentStatus}, nothing more. */
+  @Test
+  public void fetchPreviousReturnInvoices_reportsIdNumberAndStatusOfEachOne() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      stubReturnInvoiceQueries(dal, false, Collections.<String>emptyList(),
+          Collections.<String>emptyList(), Arrays.asList(
+              new String[] {"i1", "REC-1", "CO", "ret-1"},
+              new String[] {"i2", "REC-2", "DR", "ret-1"}));
+
+      JSONArray previous = ReturnShipmentUtils.fetchPreviousReturnInvoices("ret-1");
+
+      assertEquals(2, previous.length());
+      assertEquals("i1", previous.getJSONObject(0).getString("id"));
+      assertEquals("REC-1", previous.getJSONObject(0).getString("documentNo"));
+      assertEquals("CO", previous.getJSONObject(0).getString("documentStatus"));
+      assertEquals(3, previous.getJSONObject(1).length());
+      assertEquals("DR", previous.getJSONObject(1).getString("documentStatus"));
+    }
+  }
+
+  /** A failing lookup must not read as "no previous one": it would hide the duplicate. */
+  @Test
+  public void fetchPreviousReturnInvoices_failurePropagates() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getConnection()).thenThrow(new IllegalStateException("db down"));
+
+      try {
+        ReturnShipmentUtils.fetchPreviousReturnInvoices("ret-1");
+        fail("a failed lookup must not answer an empty list");
+      } catch (OBException expected) {
+        assertTrue(expected.getMessage(), expected.getMessage().contains("existing invoices"));
+      }
+    }
+  }
+
+  /**
+   * The answer of a rectificativa created without a return document (the five-argument form kept
+   * for old callers) still has every key; the linkage ones are simply absent.
+   */
+  @Test
+  public void finalizeReturnInvoice_withoutReturnDoc_omitsLinkageButKeepsShape() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getSession()).thenReturn(mock(Session.class));
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getId()).thenReturn("ret-inv-1");
+      when(dal.get(eq(Invoice.class), eq("inv-origin-1"))).thenReturn(mock(Invoice.class));
+      stubNoExistingReversedInvoiceLink(dal);
+      when(provider.get(ReversedInvoice.class)).thenReturn(mock(ReversedInvoice.class));
+      CreateDraftInvoiceHandler handler = mock(CreateDraftInvoiceHandler.class);
+      when(handler.getSupport()).thenReturn(mock(InvoiceFromOrderSupport.class));
+
+      try (CompletionMocks completion = new CompletionMocks(dal, completionSuccess())) {
+        mockCompletedInvoice(dal, "ret-inv-1", "REC-1", "CO");
+
+        NeoResponse response = ReturnInvoiceSupport.finalizeReturnInvoice(invoice,
+            Collections.<ShipmentInOutLine>emptyList(), handler,
+            Collections.singletonList("inv-origin-1"), null);
+
+        JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
+        assertFalse(data.has("linkedReturnId"));
+        assertEquals(0, data.getJSONArray("previousReturnInvoices").length());
+        assertEquals("inv-origin-1", data.getJSONArray("rectifiedInvoices").getJSONObject(0)
+            .getString("id"));
+        assertFalse("an unset amount is null, not zero", data.getBoolean("isSalesTransaction"));
+        assertTrue(data.isNull("grandTotalAmount"));
+      }
+    }
+  }
+
+  /** The no-origin message tells an agent why and what to do (ETP-5712). */
+  @Test
+  public void resolveRectifiedInvoiceIds_noneFound_saysThereIsNothingToRectify() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      try {
+        stubReturnInvoiceQueries(dal);
+        ReturnInvoiceSupport.resolveRectifiedInvoiceIds(null, "ret-1");
+        fail("no origin invoice must be refused");
+      } catch (OBException expected) {
+        assertTrue(expected.getMessage(), expected.getMessage().contains("no invoice to rectify"));
+        assertTrue(expected.getMessage(), expected.getMessage().contains("originInvoices"));
+        assertTrue(expected.getMessage(), expected.getMessage().contains("rectifiableInvoices"));
+      } catch (Exception e) {
+        fail(e.toString());
+      }
+    }
   }
 
   /** {@code linkRectifiedInvoices}' "is this pair already linked?" probe answers "no". */

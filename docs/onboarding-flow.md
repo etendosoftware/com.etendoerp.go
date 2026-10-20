@@ -62,15 +62,17 @@ removed, or reordered — and bump `OnboardingProvisioningChain.CHAIN_REVISION` 
 ```
  1. dataset             — import sampledata XML into the new client/org
  2. accounting          — wire the accounting schema (OnboardingAccountingWiringService#wire)
- 3. periodControl       — open the initial fiscal calendar / period control
+ 3. periodControl       — enable period control on the org; every period never-opened (ETP-5577)
  4. sequences           — generate document-number sequences (AD_SEQUENCE)
  5. orgReady            — mark the org as ready (AD_ORG.isready = Y)
- 6. fiscal              — seed SII descriptions (AEATSII_DESCRIPTION)
- 7. orgInfo             — wire org fiscal/address info from the signup form
- 8. costingSchedule     — schedule the 5-minute Costing Background process (non-fatal, ETP-5190)
- 9. bpGroupAcctPatch    — patch C_BP_Group_Acct columns the core trigger never populates (ETP-4720)
-10. acctdimVisibility   — force flat accounting-dimension visibility (gap K1, ETP-4854)
-11. baseline            — stamp the tenant's data-fix baseline (registerBaseline; always LAST)
+ 6. periodNormalize     — one control row per period/org/doc type, flags recomputed (ETP-5577;
+                          reports progress under periodControl)
+ 7. fiscal              — seed SII descriptions (AEATSII_DESCRIPTION)
+ 8. orgInfo             — wire org fiscal/address info from the signup form
+ 9. costingSchedule     — schedule the 5-minute Costing Background process (non-fatal, ETP-5190)
+10. bpGroupAcctPatch    — patch C_BP_Group_Acct columns the core trigger never populates (ETP-4720)
+11. acctdimVisibility   — force flat accounting-dimension visibility (gap K1, ETP-4854)
+12. baseline            — stamp the tenant's data-fix baseline (registerBaseline; always LAST)
 ```
 
 The `orgReady` and `fiscal` steps were added to fix the "environment not ready
@@ -211,35 +213,69 @@ for the full design rationale, and
 for the original ticket analysis.
 
 ### `OnboardingPeriodControlService`
-Step 3. Opens the initial fiscal calendar / period control for the new
-client/org so documents can be posted from day one. The chain opens every period
-through the month the tenant is **built** and leaves later periods never-opened.
+Step 3 (`wire`) enables period control on the new organization and wires it to the imported
+calendar, writing **every** control row as never-opened (`N`). The chain does not decide which
+periods start open, because it also builds pooled tenants before anyone knows whether a demo or a
+productive signup will claim them (ETP-5577). Step 6 (`normalize`, right after `orgReady`, the
+last step that can add control rows) leaves exactly one control row per (period, ready
+organization, document base type) and recomputes `C_Period.OpenClose`; it is idempotent.
 
-**Demo trial window (ETP-5575).** A demo needs more: its trial lasts
-`etendo.go.demo.trial.days` / `ETGO_DEMO_TRIAL_DAYS` (default 15), so a signup at
-the end of a month could not post the next month, and a pooled tenant kept the
-window of its build month. `openDemoTrialWindow` widens it to the whole trial:
-every never-opened period whose start is on or before `ETGO_DemoTrialStartedAt` +
-trial days is opened.
+**Initial period state, after the commit (ETP-5577).** Which periods start open is decided per
+tenant type by `OnboardingInitialPeriodStateService`, after the onboarding commit:
 
-- **Where.** `EtendoGoJwtServlet.openDemoTrialPeriodsBestEffort`, right after the
-  onboarding commit and before `completeCommittedOnboarding`, for every non-paid
-  onboarding — pooled and classic alike. Paid (productive) onboardings are not
-  affected.
-- **Best effort.** It runs in its own transaction with the commit inside the try:
-  any failure rolls back only this step, the tenant keeps the chain's window, and
-  the onboarding still succeeds. Log markers: `ETP-5575 demo period window
-  started|done|failed for client <id>` — a `started` without `done`/`failed`
-  means the step never finished.
-- **Open-only.** Only `N` (never opened) control rows are flipped to open; rows a
-  user closed (`C`) or closed permanently (`P`) are never touched. Every control
-  row of the period is considered, including the duplicated copy `AD_ORG_READY`
-  inserts, because posting needs any open row but costing reads any non-open row
-  as closed. `C_Period.OpenClose` is then recomputed from the controls.
-- **No year creation.** If the trial end falls beyond the calendar's last period,
-  what exists is opened and a WARN is logged (follow-up: ETP-5586).
+| Tenant | Initial state |
+|---|---|
+| demo | every period through the end of the trial (`openDemoTrialWindow`, below) |
+| productive | none. The calendar is made to cover the signup year (every calendar year in [now − 1 day, now + 1 day], since the tenant's timezone is unknown); every other year is deleted with its periods and control rows (ETP-5744) unless one of its periods was ever opened (a non-`N` control row, core's `@PeriodAlreadyUsed@` rule), so a tenant created in 2027 does not keep the dataset's 2026; controls are normalized, and every period stays never-opened. The owner reviews the calendar in "Primeros pasos" and opens the periods they want (`applyProductiveInitialState`) |
+
+- **Markers.** Two client preferences, written by `markPending` inside the onboarding
+  transaction: `ETGO_InitialPeriodStatePending` (value: org, admin user and admin role the step
+  runs as; deleted on success) and, for a productive signup only, `ETGO_CalendarReviewRequired`
+  (`Y`). Tenants created before ETP-5577 have neither, so nothing here ever touches them and they
+  never see the calendar review.
+- **Where.** `EtendoGoJwtServlet.applyInitialPeriodStateBestEffort`, right after the onboarding
+  commit and before `completeCommittedOnboarding`, for pooled and classic onboardings alike.
+- **Best effort, retried on login.** Own transaction, commit inside the try: a failure rolls back
+  only this step, the onboarding still succeeds, and the pending marker survives;
+  `retryInitialPeriodStateOnLogin` re-runs it on the next environment login while the marker
+  exists. Log markers: `ETP-5577 initial period state started|done|failed for client <id>`.
+- **Runbook — tenants whose initial state never applied:**
+
+  ```sql
+  SELECT c.ad_client_id, c.name, p.value AS pending_args, p.updated
+  FROM ad_preference p JOIN ad_client c ON c.ad_client_id = p.ad_client_id
+  WHERE p.attribute = 'ETGO_InitialPeriodStatePending';
+  ```
+
+  A row older than a few minutes means the post-commit step failed and nobody has logged in since
+  (search the logs for `ETP-5577 initial period state failed`). The next login of any user of the
+  environment retries it.
+
+**Demo trial window (ETP-5575).** A demo's trial lasts `etendo.go.demo.trial.days` /
+`ETGO_DEMO_TRIAL_DAYS` (default 14, `TenantEnvironmentLifecycleService.DEFAULT_TRIAL_DAYS`), so a signup at the end of a month must be able to post the
+next month. `openDemoTrialWindow` opens every never-opened period whose start is on or before
+`ETGO_DemoTrialStartedAt` + trial days. It runs as the demo branch of the initial period state
+above (so a pooled demo built in an earlier month is evaluated at claim time).
+
+- **Open-only.** Only `N` (never opened) control rows are flipped to open; rows a user closed
+  (`C`) or closed permanently (`P`) are never touched. `C_Period.OpenClose` is then recomputed
+  from the controls.
+- **Creates the years the trial needs (ETP-5744).** Before opening, it ensures every calendar year
+  in [min(trial start, now) − 1 day, max(trial end, now + 1 day)] through
+  `FiscalCalendarSupport.ensureYear` (server time zone; the day of margin covers a 31 December /
+  1 January signup, as on the productive branch). So a trial crossing into January opens January,
+  and a demo created or claimed after the dataset's last year (2026) still gets an open period.
+  The core `C_PERIOD_TRG` trigger adds one never-opened control row per new period, so no
+  normalization runs. An existing year is left alone.
+- **Demos keep the dataset's 2026.** Unlike productive tenants, demos are not pruned: the sample
+  data (loaded only when not a paid upgrade, `OnboardingSampleDataDefinition.isEligible`) posts on
+  fixed 2026 dates, so deleting 2026 would break it. Follow-up: move the sample-data dates to the
+  signup year, then demos can drop it too.
 - **Existing demos** were widened through October 2026 by the corrective data-fix
   `R44-demo-periods-open-through-oct-2026` (etendo_schema_forge).
+
+**Calendar review (ETP-5577).** See "Accounting calendar review (First Steps step)" below for the
+endpoints a productive owner uses to confirm or regenerate the calendar.
 
 ### `OnboardingSequenceGeneratorService`
 Generates `AD_SEQUENCE` records for all document types that require a number
@@ -407,7 +443,7 @@ nothing for a new tenant.
 lists named "Tarifa de venta/compra principal", both shipping `ISDEFAULT='Y'`
 so each is the default for its direction (ETP-5190 — the Product window's Price
 tab resolves the tariff through that flag); a **single** warehouse
-"Almacen Principal" (value `AG`) with one locator; **no** sample products —
+"Almacén Principal" (value `AG`) with one locator; **no** sample products —
 only the internal `ETGO_DTO` "Discount" product the inline-discount feature
 resolves at runtime, which is not sample data and must never be removed; **no**
 default financial accounts (a consequence a tenant must accept: it cannot
@@ -600,7 +636,10 @@ skipped, not waited for), and a failure anywhere later rolls the claim back and 
   description), the client's 17 `AD_Tree` names/descriptions, the ledger (`C_AcctSchema`), the
   chart of accounts (`C_Element` name/description) and the fiscal calendar — with `POOL-<id>`
   replaced by the company name (`PooledTenantClaimService.renamePlaceholderDerivedNames`, ETP-5548;
-  native SQL scoped by `AD_Client_ID`, inside the claim transaction);
+  native SQL scoped by `AD_Client_ID`, inside the claim transaction). Every rewritten name is
+  truncated to its AD length (60): a company name over 37 characters would make the tree
+  "… Product Characteristic" overflow `AD_TREE.NAME`, so that one tree name loses its tail
+  (ETP-5638). The other derived names fit the 40-character company name whole;
 - admin `AD_User`: username (`buildClientUsername`), name (full name, else username),
   description, email, password hash, **active**;
 - the signup address onto the pooled fiscal location's street line.
@@ -609,9 +648,9 @@ After it, the servlet runs its existing calls: owner marking (`resolveAdminConte
 upgrade side effects (mark productive, revert forced test mode), `orgInfo` (tax id) and
 `warehouseAddress` (re-copies the fiscal address) — the only chain steps that consume signup
 data — then data transfer, `markDemoReady` (the trial clock starts at the claim, not at pool time),
-commit, the demo trial window (ETP-5575: re-evaluates the periods of a pooled demo built in an
-earlier month, see `OnboardingPeriodControlService`), the `environment-ready` email and costing
-activation. The stream skips the `organization`
+commit, the initial period state (ETP-5577: a demo's trial window, re-evaluated for a pooled demo
+built in an earlier month, or a productive tenant's never-opened signup year; see
+`OnboardingPeriodControlService`), the `environment-ready` email and costing activation. The stream skips the `organization`
 and `dataset`…`baseline` steps.
 
 ### Performance observability (ETP-5500)
@@ -710,7 +749,10 @@ Endpoints (session-token auth, same Bearer model as `/me`):
 
 The draft is cleared automatically (best-effort, non-blocking) by
 `POST /sws/go/onboarding` right after the environment commit succeeds, so a
-completed onboarding never resurrects a stale wizard.
+completed onboarding never resurrects a stale wizard. The clear is written as
+system (`SystemContext`, ETP-5047) because `ETGO_ACCOUNT` is a client-0 row the
+new tenant's context may not write, and a failed clear is rolled back without
+blocking the onboarding.
 
 The frontend (`OnboardingPage.jsx`) fetches the draft when an authenticated
 account has zero environments, restores step + form, shows a one-time
@@ -750,6 +792,10 @@ the tenant is on the free plan:
 |---|---|---|
 | free / trial | create-account, company-data, products, contacts, team | `x/5` |
 | productive | the five above plus fiscal-config and invoice-sequence | `x/7` |
+
+Two server-owned productive rows come on top when their server says so: the demo data transfer
+and, since ETP-5577, "Revisar calendario contable" (see "Accounting calendar review" below).
+Neither is a checklist id.
 
 The reason is functional, not cosmetic: a document series a tenant abandons after the trial
 numbers nothing, and the fiscal setup is what the productive environment gets created with.
@@ -886,6 +932,69 @@ self-healed existing tenants converge on the same access set.
   `AD_ROLE` row, so it can never trigger `AD_ROLE_TRG`'s destructive rebuild.
 - **Idempotent.** Re-running on the next restart grants nothing new.
 - **No SQL migration.** Existing databases self-heal on the next Tomcat restart.
+
+## Accounting calendar review (First Steps step)
+
+A productive tenant starts with every accounting period never-opened (ETP-5577, see
+`OnboardingPeriodControlService`), so its first completion, payment or posting is refused with
+`PeriodNotAvailable` until a period is opened. The "Revisar calendario contable" First Steps row
+lets the owner settle the calendar first: keep it, or replace it with one fiscal year that starts
+in another quarter (a company whose fiscal year is not January–December). It is not a checklist
+id: the server derives its state. It ships unflagged by decision (2026-10-14): the initial period state, this
+step and the refusal recovery land in one release, so a flag would guard nothing.
+
+- **`required`** — the tenant carries `ETGO_CalendarReviewRequired` (productive signups since
+  ETP-5577). Only then is the row shown.
+- **`reviewed`** — the owner confirmed or regenerated (`ETGO_CalendarReviewed` client preference),
+  **or** any period was ever opened (a non-`N` control, or an open in `C_PeriodControl_Log` from
+  the Calendar window or the MCP), **or** anything was posted. So opening a period from Calendar
+  completes the row too.
+
+Endpoints (`CalendarReviewService`, session auth, scoped to the session's tenant):
+
+- `GET  /sws/go/onboarding/calendar-review` — any user of the tenant. Returns `required`,
+  `reviewed`, `pending` (= required and not reviewed), `reviewedAt`, `anyPeriodOpened`,
+  `anyPostedFact`, `canRegenerate`, the current year (`year`, `startDate`, `endDate`,
+  `periodCount`), `fiscalYearStart` (`JANUARY|APRIL|JULY|OCTOBER` or `null`) and `isOwner`.
+- `POST /sws/go/onboarding/calendar-review/confirm` — marks the calendar reviewed.
+- `POST /sws/go/onboarding/calendar-review/regenerate` — body
+  `{ "fiscalYearStart": "JANUARY|APRIL|JULY|OCTOBER" }`. Deletes the calendar's years and periods
+  and creates one fiscal year containing today that starts on that month, then marks it reviewed.
+  The calendar's `C_PeriodControl_Log` rows go first (core `C_PERIOD_TRG2` only removes those
+  keyed by `periodno`; a classic year-level close log would otherwise block the delete).
+  `400` for another value; `409` when there is no calendar, a period was ever opened, anything was
+  posted, any other table references a period or year of the calendar (FK scan over the
+  catalog), or a user other than the owner created or changed a year or period of it (e.g. a
+  Finance user who created next year's periods: regenerating would silently delete them). The
+  onboarding rows belong to the system users `0`/`100` and the owner may regenerate over their
+  own changes, so neither counts (`CALENDAR_EDITORS_SQL`, `firstNonOwnerEditor`). `canRegenerate`
+  in the state applies the same rule.
+
+Both `POST`s answer `403` unless the caller is the owner (`EM_ETGO_Is_Owner`) of **this** tenant:
+regenerate deletes the calendar, so owning another environment of the account is not enough. Both
+answer the new state.
+
+**When a refusal still happens.** `PeriodNotAvailable` is published in `messageKeys` by document
+completions (core procedures, via `NeoProcessService`; classic processes that hand their error over already translated — `ProcessInvoiceUtil`, `FIN_AddPaymentFromJournal`, the latter in English whatever the user's language — are recognised from the message text in any language by `NeoMessageTranslator.recognizeMessageKeys`, in `translateClassicResult`), by a refused save (`NeoCrudHandler` answers 400 with `PeriodNotValid`, which `GL_JOURNAL_CHK_RESTRICT_TRG` raises for the same condition, instead of a 500), by posting (`DocumentPostingService`,
+`STATUS_PeriodClosed`) and by payment registration (`MessageKeyedException` →
+`NeoResponse.error(int, OBException)` → `error.messageKeys`). Any other handler that turns a core
+refusal into `error(400, e.getMessage())` loses the key; `NeoServlet.writeResponse` restores it
+with `NeoResponse.identifyPeriodRefusal`, which recognises the text of `PeriodNotAvailable` /
+`PeriodNotValid` in any language on an error body that names no keys (4xx business refusals only: 401/403/404 and 5xx are skipped; the AD_Message texts are cached per key). Core `Utilities.checkPeriod`
+refuses with a raw, untranslated `@ETPR_PeriodClosedForUnRemovePayment@` worded for removing
+payments: the cash close confirm and the reconciliation reactivate / remove-operation guards
+answer `NeoResponse.periodNotAvailable(409, <the refused action>)` instead (the keyed refusal, its text prefixed with what could not be done, for a caller that reads it), and `identifyPeriodRefusal` rewrites that
+token as the keyed `PeriodNotAvailable` refusal on any other path (e.g. reactivating a reconciled
+movement). The cash close's second check — a marked movement whose own accounting date is in a
+closed period — keeps its sentence naming the movement and adds `error.messageKeys`
+(`PeriodNotAvailable`) plus `error.periodDate` (the movement's date), so the SPA opens the fiscal
+year that holds the movement, not the close's. The SPA turns it into a toast that
+points the owner to this row while the review is pending (an owner whose account dismissed First
+Steps, which is per account, goes to Calendar) and everyone else, and everyone afterwards, to
+Calendar: opening a period completes the review, and the Calendar window's own access decides who
+may open one, so an admin or Finance user invited by the owner can open the first period — to the fiscal year whose period contains the document's date, so a July–June
+calendar sends a January date to the year that started the previous July; the MCP adds a `hint` telling the agent to ask the user before opening the
+period with the `openClose` action of `open-close-period-control`.
 
 ## Invoice numbering (First Steps step)
 

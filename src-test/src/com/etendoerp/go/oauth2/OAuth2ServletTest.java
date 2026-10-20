@@ -28,6 +28,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -41,12 +42,16 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Timestamp;
+import java.util.ArrayList;
 import java.util.Base64;
+import java.util.List;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import javax.servlet.http.Cookie;
 
+import org.apache.logging.log4j.Level;
+import org.apache.logging.log4j.core.LogEvent;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
@@ -54,12 +59,20 @@ import org.mockito.MockedStatic;
 
 import com.auth0.jwt.interfaces.Claim;
 import com.auth0.jwt.interfaces.DecodedJWT;
+import com.etendoerp.go.auth.DalWarehouseResolver;
+import com.etendoerp.go.auth.EnvironmentRequestAuthenticator;
+import com.etendoerp.go.common.BoundedJsonParserTest;
+import com.etendoerp.go.common.MalformedJsonException;
 import com.etendoerp.go.common.PublicUrlResolver;
+import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
+import com.etendoerp.go.session.GoSessionAuthenticator;
 import com.etendoerp.go.session.GoSessionRecord;
 import com.etendoerp.go.session.GoSessionSecurity;
 import com.etendoerp.go.session.GoSessionRoleReconciler;
 import com.etendoerp.go.session.GoSessionService;
+import com.etendoerp.go.session.JdbcGoSessionStore;
 import com.etendoerp.go.session.SessionRoleRevokedException;
+import com.etendoerp.go.usageevents.LogCapture;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 import org.openbravo.dal.service.OBDal;
@@ -80,7 +93,21 @@ public class OAuth2ServletTest {
   private static final String TEST_CLIENT_ID = "etgo-test123456";
   private static final String TEST_CLIENT_DB_ID = "uuid-client-1";
 
-  private final OAuth2Servlet servlet = new OAuth2Servlet();
+  private final OAuth2Servlet servlet = servletWithFakeRoleLookups();
+
+  /**
+   * ETP-5270 — a legacy JWT (the admin token, on the management endpoints and on authorize) now
+   * has its role checked against {@code AD_User_Roles}. The DAL is mocked per test, so both role
+   * lookups are a fake that finds the role held; everything else is the production wiring.
+   */
+  private static OAuth2Servlet servletWithFakeRoleLookups() {
+    GoSessionService sessionService = new GoSessionService(new JdbcGoSessionStore());
+    OAuth2Servlet created = new OAuth2Servlet(sessionService, new EnvironmentRequestAuthenticator(
+        new GoSessionAuthenticator(sessionService), new TenantEnvironmentLifecycleService(),
+        new DalWarehouseResolver(), mock(GoSessionRoleReconciler.class)));
+    created.sessionRoleReconciler = mock(GoSessionRoleReconciler.class);
+    return created;
+  }
 
   // ===================== doGet routing =====================
 
@@ -1218,6 +1245,71 @@ public class OAuth2ServletTest {
     assertEquals(TEST_CLIENT_ID, body.getString("clientId"));
   }
 
+  /**
+   * A non-boolean {@code isActive} is the caller's 400, not the 500 + ERROR stack trace a
+   * {@code JSONException} from {@code getBoolean} used to fall into; nothing is written.
+   */
+  @Test
+  public void updateClientWithNonBooleanIsActiveReturnsBadRequestQuietly() throws Exception {
+    DecodedJWT jwt = mockJwt(ADMIN_USER_ID, ADMIN_ROLE_ID);
+    ResultSet findRs = mock(ResultSet.class);
+    when(findRs.next()).thenReturn(true);
+    when(findRs.getString("etgo_oauth2_client_id")).thenReturn(TEST_CLIENT_DB_ID);
+    when(findRs.getString("client_identifier")).thenReturn(TEST_CLIENT_ID);
+    when(findRs.getString("isactive")).thenReturn("Y");
+    PreparedStatement ps = mock(PreparedStatement.class);
+    when(ps.executeQuery()).thenReturn(findRs);
+    Connection conn = mock(Connection.class);
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.getConnection()).thenReturn(conn);
+
+    try (MockedStatic<SecureWebServicesUtils> swsMock = mockStatic(SecureWebServicesUtils.class);
+         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         LogCapture logs = LogCapture.of(OAuth2Servlet.class)) {
+      swsMock.when(() -> SecureWebServicesUtils.decodeToken(ADMIN_TOKEN)).thenReturn(jwt);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+
+      for (String raw : new String[] { "{\"isActive\":\"maybe\"}", "{\"isActive\":1}",
+          "{\"isActive\":[]}", "{\"isActive\":{}}" }) {
+        ResponseCapture resp = mockResponse();
+        HttpServletRequest req = mockRequest("PUT", "/clients/" + TEST_CLIENT_DB_ID);
+        when(req.getHeader("Authorization")).thenReturn("Bearer " + ADMIN_TOKEN);
+        when(req.getContentType()).thenReturn("application/json");
+        when(req.getReader()).thenReturn(new BufferedReader(new StringReader(raw)));
+
+        servlet.doPut(req, resp.response);
+
+        assertEquals(raw, 400, resp.status);
+        JSONObject error = new JSONObject(resp.body());
+        assertEquals(raw, "invalid_request", error.getString("error"));
+        // The JSON is well formed; the description names the field, not a malformed body.
+        assertEquals(raw, "isActive must be a boolean", error.getString("error_description"));
+      }
+      assertEquals(List.of(), logs.messages(Level.ERROR));
+      for (LogEvent warn : logs.events(Level.WARN)) {
+        assertNull(warn.getMessage().getFormattedMessage(), warn.getThrown());
+      }
+    }
+    verify(ps, never()).executeUpdate();
+  }
+
+  /** The shared reader behind PUT /clients and PUT /api-keys: a client type error is malformed. */
+  @Test
+  public void requireBooleanFieldRejectsNonBooleansAsMalformed() throws Exception {
+    assertTrue(OAuth2Servlet.requireBooleanField(new JSONObject("{\"f\":true}"), "f"));
+    assertFalse(OAuth2Servlet.requireBooleanField(new JSONObject("{\"f\":\"false\"}"), "f"));
+    for (String raw : new String[] { "{\"f\":\"maybe\"}", "{\"f\":1}", "{\"f\":null}",
+        "{\"f\":[]}" }) {
+      try {
+        OAuth2Servlet.requireBooleanField(new JSONObject(raw), "f");
+        throw new AssertionError("Expected MalformedJsonException for " + raw);
+      } catch (MalformedJsonException expected) {
+        assertEquals("f must be a boolean", expected.getMessage());
+      }
+    }
+  }
+
   // ===================== doDelete /clients/{id} =====================
 
   @Test
@@ -1686,6 +1778,137 @@ public class OAuth2ServletTest {
 
     JSONObject body = new JSONObject(resp.body());
     assertFalse(body.getBoolean("active"));
+  }
+
+  // ===================== malformed JSON bodies (unauthenticated endpoints) =====================
+
+  /**
+   * POST /token answers without a token, so a body that breaks jettison (StackOverflowError /
+   * OutOfMemoryError, which escape every catch (Exception)) must be a plain 400, and so must any
+   * other body that is not JSON: it was a 500 before.
+   */
+  @Test
+  public void tokenMalformedJsonBodyReturnsBadRequest() throws Exception {
+    assertMalformedBodiesAnswerBadRequestQuietly(null);
+  }
+
+  /** POST /register (DCR) also answers without a token. */
+  @Test
+  public void registerMalformedJsonBodyReturnsBadRequest() throws Exception {
+    assertMalformedBodiesAnswerBadRequestQuietly("/register");
+  }
+
+  /**
+   * A syntactically valid body with a missing or wrongly typed field is still the client's error:
+   * a 400 without an ERROR, never the 500 that a response-building failure means.
+   */
+  @Test
+  public void registerValidJsonWithMissingOrWrongTypedFieldsReturnsBadRequestQuietly()
+      throws Exception {
+    List<String> bodies = List.of("{}", "{\"redirect_uris\":\"x\"}",
+        "{\"redirect_uris\":[1]}", "{\"redirect_uris\":[null]}", "{\"redirect_uris\":[[]]}",
+        "{\"redirect_uris\":{}}", "{\"client_name\":{},\"scope\":[],\"redirect_uris\":[]}");
+    try (LogCapture logs = LogCapture.of(OAuth2Servlet.class)) {
+      for (String raw : bodies) {
+        ResponseCapture resp = mockResponse();
+        HttpServletRequest req = mockRequest("POST", "/register");
+        when(req.getContentType()).thenReturn("application/json");
+        when(req.getReader()).thenReturn(new BufferedReader(new StringReader(raw)));
+
+        servlet.doPost(req, resp.response);
+
+        // invalid_request or invalid_client_metadata: either way the client's 400
+        assertEquals(raw, 400, resp.status);
+      }
+      assertEquals(List.of(), logs.messages(Level.ERROR));
+    }
+  }
+
+  /** POST /authorize parses its body before the caller is authenticated. */
+  @Test
+  public void authorizePostMalformedJsonBodyReturnsBadRequest() throws Exception {
+    assertMalformedBodiesAnswerBadRequestQuietly("/authorize");
+  }
+
+  /**
+   * A client's malformed body is a 400 and its own fault: anyone can send one to these
+   * endpoints, so it must never log an ERROR with a stack trace (a free log flood) — at most a
+   * WARN without the throwable.
+   */
+  private void assertMalformedBodiesAnswerBadRequestQuietly(String pathInfo) throws Exception {
+    try (LogCapture logs = LogCapture.of(OAuth2Servlet.class)) {
+      for (String raw : malformedBodies()) {
+        ResponseCapture resp = mockResponse();
+        HttpServletRequest req = mockRequest("POST", pathInfo);
+        when(req.getContentType()).thenReturn("application/json");
+        when(req.getReader()).thenReturn(new BufferedReader(new StringReader(raw)));
+
+        servlet.doPost(req, resp.response);
+
+        assertEquals(abbreviate(raw), 400, resp.status);
+        assertEquals("invalid_request", new JSONObject(resp.body()).getString("error"));
+      }
+      assertEquals("no ERROR for a client's malformed body", List.of(),
+          logs.messages(Level.ERROR));
+      for (LogEvent warn : logs.events(Level.WARN)) {
+        assertNull("WARN without a stack trace: " + warn.getMessage().getFormattedMessage(),
+            warn.getThrown());
+      }
+    }
+  }
+
+  /**
+   * The admin management endpoints (client create/update/regenerate-secret, revoke, introspect)
+   * read a JSON body after authenticating: a malformed one is the caller's {@code invalid_request}
+   * 400, not the 500 their {@code JSONException} catch means for a response-building failure.
+   */
+  @Test
+  public void adminManagementMalformedJsonBodyReturnsBadRequest() throws Exception {
+    String[][] endpoints = {
+        { "POST", "/clients" },
+        { "PUT", "/clients/" + TEST_CLIENT_DB_ID },
+        { "PUT", "/clients/" + TEST_CLIENT_DB_ID + "/regenerate-secret" },
+        { "POST", "/revoke" },
+        { "POST", "/introspect" } };
+    DecodedJWT jwt = mockJwt(ADMIN_USER_ID, ADMIN_ROLE_ID);
+    OBDal obDal = mock(OBDal.class);
+
+    try (MockedStatic<SecureWebServicesUtils> swsMock = mockStatic(SecureWebServicesUtils.class);
+         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      swsMock.when(() -> SecureWebServicesUtils.decodeToken(ADMIN_TOKEN)).thenReturn(jwt);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+
+      for (String[] endpoint : endpoints) {
+        for (String raw : new String[] { "{\"x\":[", "[[", "not json" }) {
+          ResponseCapture resp = mockResponse();
+          HttpServletRequest req = mockRequest(endpoint[0], endpoint[1]);
+          when(req.getHeader("Authorization")).thenReturn("Bearer " + ADMIN_TOKEN);
+          when(req.getContentType()).thenReturn("application/json");
+          when(req.getReader()).thenReturn(new BufferedReader(new StringReader(raw)));
+
+          if ("PUT".equals(endpoint[0])) {
+            servlet.doPut(req, resp.response);
+          } else {
+            servlet.doPost(req, resp.response);
+          }
+
+          String label = endpoint[0] + " " + endpoint[1] + " " + raw;
+          assertEquals(label, 400, resp.status);
+          assertEquals(label, "invalid_request", new JSONObject(resp.body()).getString("error"));
+        }
+      }
+      verify(obDal, never()).getConnection();
+    }
+  }
+
+  private static List<String> malformedBodies() {
+    List<String> bodies = new ArrayList<>(BoundedJsonParserTest.stackBreakingBodies().toList());
+    bodies.add("not json");
+    return bodies;
+  }
+
+  private static String abbreviate(String raw) {
+    return raw.length() > 40 ? raw.substring(0, 40) + "..." : raw;
   }
 
   // ===================== POST /register (DCR) =====================

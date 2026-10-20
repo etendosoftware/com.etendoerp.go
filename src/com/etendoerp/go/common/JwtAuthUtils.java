@@ -27,6 +27,7 @@ import org.apache.logging.log4j.Logger;
 import com.etendoerp.go.auth.EnvironmentAuthOutcome;
 import com.etendoerp.go.auth.EnvironmentRequestAuthenticator;
 import com.etendoerp.go.auth.SurfacePolicy;
+import com.etendoerp.go.payment.EnvironmentAccessGuard;
 
 /**
  * Authentication entry point for the Etendo GO servlets that serve environment data outside
@@ -38,6 +39,13 @@ import com.etendoerp.go.auth.SurfacePolicy;
  * {@link SurfacePolicy#NEO_DATA}. The bearer-only {@code authenticate(HttpServletRequest)}
  * primitive that also lived here — reachable by nobody, and a way around the legacy kill switch
  * for whoever called it next — is gone.
+ *
+ * <p>ETP-5047 — the pipeline's commercial-access check is the shared {@link EnvironmentAccessGuard}
+ * (NEO and MCP use the same one): a tenant whose demo trial expired or whose subscription grace
+ * elapsed gets the guard's HTTP 402 body ({@code error.code} / {@code error.decision}), unless the
+ * {@code environment-access-enforcement-off} kill switch is on. The account-level billing, portal
+ * and plan endpoints authenticate the account elsewhere
+ * ({@code EtendoGoJwtServlet.runWithPlatformAccount}) and never reach this check.
  */
 public class JwtAuthUtils {
 
@@ -82,9 +90,16 @@ public class JwtAuthUtils {
   static boolean authenticateOrFail(EnvironmentRequestAuthenticator authenticator,
       HttpServletRequest request, HttpServletResponse response, Logger log, String context)
       throws IOException {
-    EnvironmentAuthOutcome outcome = authenticator.authenticate(request, SurfacePolicy.NEO_DATA);
+    EnvironmentAuthOutcome outcome =
+        authenticator.authenticate(request, SurfacePolicy.NEO_DATA, context);
     if (outcome.isAuthenticated()) {
       return true;
+    }
+    EnvironmentAccessGuard.Denial denial = outcome.getAccessDenial();
+    if (denial != null) {
+      // The guard already logged the refusal (ETP-5047: one line, whichever surface refused).
+      denial.writeTo(response);
+      return false;
     }
     log.warn("Refused {} ({}): {}", context, outcome.getHttpStatus(), outcome.getMessage());
     ServletResponseUtils.sendError(response, outcome.getHttpStatus(), outcome.getMessage());

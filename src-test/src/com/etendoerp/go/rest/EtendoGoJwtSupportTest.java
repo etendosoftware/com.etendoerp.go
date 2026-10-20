@@ -183,6 +183,7 @@ class EtendoGoJwtSupportTest {
       assertNotNull(data.getRoleArray());
       assertEquals(0, data.getRoleArray().length());
       assertNull(data.getFirstRoleId());
+      assertNull(data.getEntryRoleId());
       verify(query).setParameter("userId", "user-id");
     }
 
@@ -201,6 +202,8 @@ class EtendoGoJwtSupportTest {
         EtendoGoJwtSupport.RoleListData data = EtendoGoJwtSupport.loadRoleListData("user-id");
 
         assertEquals("role-1", data.getFirstRoleId());
+        // ETP-5096 — the default role is not one the user holds: entry keeps the oldest role.
+        assertEquals("role-1", data.getEntryRoleId());
         assertEquals(2, data.getRoleArray().length());
         JSONObject firstRole = data.getRoleArray().getJSONObject(0);
         assertEquals("role-1", firstRole.getString("id"));
@@ -249,6 +252,40 @@ class EtendoGoJwtSupportTest {
         assertEquals(2, names.length());
         assertEquals("Finance", names.getString(0));
         assertEquals("Sales", names.getString(1));
+      }
+    }
+
+    @Test
+    @DisplayName("ETP-5096: the entry role is the user's default role when they hold it, not "
+        + "the oldest one")
+    void entryRoleIsTheHeldDefaultRole() throws JSONException {
+      mockRoleListQuery(Arrays.asList(
+          new Object[]{ "role-oldest", "Oldest", "org-1", "Main Org", "N" },
+          new Object[]{ "role-default", "Default", "org-1", "Main Org", "N" }));
+      mockUserDefaultRole("role-default");
+
+      try (MockedConstruction<UserRoleCompositionService> composition = mockConstruction(
+          UserRoleCompositionService.class, (mock, ctx) ->
+              when(mock.getAppliedTemplateRoleIds("user-id")).thenReturn(Collections.emptyList()))) {
+        EtendoGoJwtSupport.RoleListData data = EtendoGoJwtSupport.loadRoleListData("user-id");
+
+        assertEquals("role-oldest", data.getFirstRoleId());
+        assertEquals("role-default", data.getEntryRoleId());
+      }
+    }
+
+    @Test
+    @DisplayName("ETP-5096: a user with no default role enters with the oldest one")
+    void entryRoleFallsBackToTheOldestWithNoDefault() throws JSONException {
+      mockRoleListQuery(Arrays.asList(
+          new Object[]{ "role-oldest", "Oldest", null, null, "N" },
+          new Object[]{ "role-newer", "Newer", null, null, "N" }));
+      mockUserDefaultRole(null);
+
+      try (MockedConstruction<UserRoleCompositionService> composition = mockConstruction(
+          UserRoleCompositionService.class, (mock, ctx) ->
+              when(mock.getAppliedTemplateRoleIds("user-id")).thenReturn(Collections.emptyList()))) {
+        assertEquals("role-oldest", EtendoGoJwtSupport.loadRoleListData("user-id").getEntryRoleId());
       }
     }
 
@@ -572,6 +609,47 @@ class EtendoGoJwtSupportTest {
       EtendoGoJwtSupport.applyClientAdminDisplayName("missing-user", "Jane Doe");
 
       verify(obDal, times(0)).save(org.mockito.ArgumentMatchers.any());
+    }
+  }
+
+  @Nested
+  @DisplayName("resolveOwnerDisplayName")
+  class ResolveOwnerDisplayName {
+
+    @Test
+    @DisplayName("prefers the full name typed in the onboarding form")
+    void prefersRequestFullName() {
+      assertEquals("Jane Doe", EtendoGoJwtSupport.resolveOwnerDisplayName(" Jane Doe ",
+          "Account Name", "jane@example.com"));
+    }
+
+    @Test
+    @DisplayName("ETP-5689: falls back to the account name when the form sends none")
+    void fallsBackToAccountName() {
+      assertEquals("Account Name", EtendoGoJwtSupport.resolveOwnerDisplayName("  ",
+          "Account Name", "jane@example.com"));
+    }
+
+    @Test
+    @DisplayName("ETP-5689: falls back to the bare email, never a suffixed username")
+    void fallsBackToEmail() {
+      assertEquals("jane@example.com",
+          EtendoGoJwtSupport.resolveOwnerDisplayName(null, null, "jane@example.com"));
+    }
+
+    @Test
+    @DisplayName("truncates to the AD_User.Name width")
+    void truncatesToFullNameLimit() {
+      String longName = "x".repeat(OnboardingFieldLimits.FULL_NAME + 10);
+
+      assertEquals(OnboardingFieldLimits.FULL_NAME,
+          EtendoGoJwtSupport.resolveOwnerDisplayName(null, longName, "jane@example.com").length());
+    }
+
+    @Test
+    @DisplayName("returns null when every candidate is blank")
+    void nullWhenAllBlank() {
+      assertNull(EtendoGoJwtSupport.resolveOwnerDisplayName("", " ", null));
     }
   }
 

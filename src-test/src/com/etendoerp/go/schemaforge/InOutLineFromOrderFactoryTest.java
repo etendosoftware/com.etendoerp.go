@@ -26,9 +26,14 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
+import java.util.Collections;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Set;
 
 import org.hibernate.Session;
 import org.hibernate.query.NativeQuery;
+import org.hibernate.query.Query;
 import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
@@ -47,6 +52,8 @@ import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
 /**
  * Unit tests for {@link InOutLineFromOrderFactory#pendingQuantityFor(OrderLine)} and
  * {@link InOutLineFromOrderFactory#createAndLinkLine}.
+ *
+ * @covers com.etendoerp.go.schemaforge.InOutLineFromOrderFactory
  *
  * <p><b>ETP-4844:</b> when a Sales/Purchase Order carries a global discount, the
  * synthetic discount line materialized by {@link TotalDiscountService} (product id
@@ -243,12 +250,137 @@ public class InOutLineFromOrderFactoryTest {
     return order;
   }
 
+  /**
+   * Runs the draft-aware resolution with the draft-quantity HQL returning {@code draftRows}
+   * ({@code {orderLineId, movementQuantity, documentNo}}); {@code OBDal} is mocked for the call.
+   */
+  @SuppressWarnings({ "unchecked", "rawtypes" })
+  private static <T> T withDraftRows(List<Object[]> draftRows,
+      java.util.function.Supplier<T> call) {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getSession()).thenReturn(session);
+      Query q = mock(Query.class);
+      when(session.createQuery(anyString(), org.mockito.ArgumentMatchers.eq(Object[].class)))
+          .thenReturn(q);
+      when(q.setParameter(anyString(), any())).thenReturn(q);
+      when(q.setParameterList(anyString(), org.mockito.ArgumentMatchers.anyCollection()))
+          .thenReturn(q);
+      when(q.list()).thenReturn((List) draftRows);
+      return call.get();
+    }
+  }
+
+  private static InOutLineFromOrderFactory.PendingLinesResult resolveWithoutDrafts(Order order,
+      String emptyMessage, java.util.function.Function<Order, Locator> locatorResolver) {
+    return withDraftRows(Collections.<Object[]>emptyList(), () ->
+        InOutLineFromOrderFactory.resolvePendingLinesAndLocator(order, false, emptyMessage,
+            "covered by %s", locatorResolver));
+  }
+
+  private static OrderLine mockIdLine(String id, String ordered, String delivered) {
+    OrderLine line = mockOrderLine(true, "I", new BigDecimal(ordered), new BigDecimal(delivered));
+    when(line.getId()).thenReturn(id);
+    return line;
+  }
+
+  private static Object[] draftRow(String lineId, String qty, String docNo) {
+    return new Object[] { lineId, new BigDecimal(qty), docNo };
+  }
+
+  private static List<InOutLineFromOrderFactory.PendingOrderLine> collectWith(Order order,
+      Set<String> covering, Object[]... rows) {
+    return withDraftRows(java.util.Arrays.asList(rows), () ->
+        InOutLineFromOrderFactory.collectPendingLines(order, false, covering));
+  }
+
+  /** ETP-5709 review B1: a draft holding MORE than pending covers the line; no inverted line. */
+  @Test
+  public void collectPendingLines_draftLargerThanPending_isCoveredNotInverted() {
+    Order order = mockOrder(mockIdLine("a", "5", "0"));
+    Set<String> covering = new LinkedHashSet<>();
+
+    List<InOutLineFromOrderFactory.PendingOrderLine> lines =
+        collectWith(order, covering, draftRow("a", "7", "DOC-7"));
+
+    assertEquals(0, lines.size());
+    assertEquals(Collections.singleton("DOC-7"), covering);
+  }
+
+  @Test
+  public void collectPendingLines_negativeLineWithLargerNegativeDraft_isCovered() {
+    Order order = mockOrder(mockIdLine("n", "-3", "0"));
+    Set<String> covering = new LinkedHashSet<>();
+
+    List<InOutLineFromOrderFactory.PendingOrderLine> lines =
+        collectWith(order, covering, draftRow("n", "-5", "DOC-N"));
+
+    assertEquals(0, lines.size());
+    assertEquals(Collections.singleton("DOC-N"), covering);
+  }
+
+  @Test
+  public void collectPendingLines_mixedOverCoveredAndPending_createsOnlyThePendingLine() {
+    Order order = mockOrder(mockIdLine("a", "5", "0"), mockIdLine("b", "4", "0"));
+    Set<String> covering = new LinkedHashSet<>();
+
+    List<InOutLineFromOrderFactory.PendingOrderLine> lines =
+        collectWith(order, covering, draftRow("a", "7", "DOC-7"));
+
+    assertEquals(1, lines.size());
+    assertEquals("b", lines.get(0).getOrderLine().getId());
+    assertEquals(new BigDecimal("4"), lines.get(0).getPendingQty());
+    assertEquals(Collections.singleton("DOC-7"), covering);
+  }
+
+  @Test
+  public void resolvePendingLines_overCoveredByDraft_failsNamingTheDraft() {
+    Order order = mockOrder(mockIdLine("a", "5", "0"));
+    try {
+      withDraftRows(Collections.singletonList(draftRow("a", "7", "DOC-7")), () ->
+          InOutLineFromOrderFactory.resolvePendingLinesAndLocator(order, false, "empty",
+              "covered by %s", o -> mock(Locator.class)));
+      org.junit.Assert.fail("expected OBException");
+    } catch (org.openbravo.base.exception.OBException e) {
+      assertEquals("covered by DOC-7", e.getMessage());
+    }
+  }
+
+  /** W4: several drafts over one order line are summed. */
+  @Test
+  public void collectPendingLines_multipleDraftsOnOneLine_areSummed() {
+    Order order = mockOrder(mockIdLine("a", "10", "0"));
+    Set<String> covering = new LinkedHashSet<>();
+
+    List<InOutLineFromOrderFactory.PendingOrderLine> lines = collectWith(order, covering,
+        draftRow("a", "3", "DOC-1"), draftRow("a", "4", "DOC-2"));
+
+    assertEquals(1, lines.size());
+    assertEquals(new BigDecimal("3"), lines.get(0).getPendingQty());
+    assertEquals("a partially covered line still pending does not report drafts",
+        0, covering.size());
+  }
+
+  /** W4: delivered (completed documents) already reduces pending; the draft subtracts on top. */
+  @Test
+  public void collectPendingLines_completedAndDraftMix_subtractsBoth() {
+    Order order = mockOrder(mockIdLine("a", "10", "4"));
+    Set<String> covering = new LinkedHashSet<>();
+
+    List<InOutLineFromOrderFactory.PendingOrderLine> lines =
+        collectWith(order, covering, draftRow("a", "3", "DOC-1"));
+
+    assertEquals(1, lines.size());
+    assertEquals(new BigDecimal("3"), lines.get(0).getPendingQty());
+  }
+
   @Test
   public void resolvePendingLinesAndLocator_noPendingLines_throwsGivenMessage() {
     Order order = mockOrder();
     try {
-      InOutLineFromOrderFactory.resolvePendingLinesAndLocator(
-          order, "custom empty-lines message", o -> mock(Locator.class));
+      resolveWithoutDrafts(order, "custom empty-lines message", o -> mock(Locator.class));
       org.junit.Assert.fail("expected OBException");
     } catch (org.openbravo.base.exception.OBException e) {
       assertEquals("custom empty-lines message", e.getMessage());
@@ -262,8 +394,7 @@ public class InOutLineFromOrderFactoryTest {
     Locator resolved = mock(Locator.class);
 
     InOutLineFromOrderFactory.PendingLinesResult result =
-        InOutLineFromOrderFactory.resolvePendingLinesAndLocator(
-            order, "unused", o -> resolved);
+        resolveWithoutDrafts(order, "unused", o -> resolved);
 
     assertEquals(1, result.getPendingLines().size());
     org.junit.Assert.assertSame(resolved, result.getLocator());
@@ -278,7 +409,7 @@ public class InOutLineFromOrderFactoryTest {
     when(order.getWarehouse()).thenReturn(warehouse);
 
     try {
-      InOutLineFromOrderFactory.resolvePendingLinesAndLocator(order, "unused", o -> null);
+      resolveWithoutDrafts(order, "unused", o -> null);
       org.junit.Assert.fail("expected OBException");
     } catch (org.openbravo.base.exception.OBException e) {
       org.junit.Assert.assertTrue(e.getMessage().contains("WH Central"));
@@ -296,7 +427,7 @@ public class InOutLineFromOrderFactoryTest {
     java.util.concurrent.atomic.AtomicBoolean resolverCalled = new java.util.concurrent.atomic.AtomicBoolean(false);
 
     InOutLineFromOrderFactory.PendingLinesResult result =
-        InOutLineFromOrderFactory.resolvePendingLinesAndLocator(order, "unused", o -> {
+        resolveWithoutDrafts(order, "unused", o -> {
           resolverCalled.set(true);
           return mock(Locator.class);
         });
@@ -373,6 +504,42 @@ public class InOutLineFromOrderFactoryTest {
       verify(line, never()).setStorageBin(orderLocator);
       verify(line).setStorageBin(headerDefaultBin);
       verify(dal).save(line);
+    }
+  }
+
+  /**
+   * ETP-5713: the line import reports what it created, so {@code createAndLinkLine} hands back the
+   * very line it saved — flushed first, so its id is already assigned — with the order line it was
+   * copied from linked and the quantity it was asked for.
+   */
+  @Test
+  public void createAndLinkLine_returnsTheSavedLine_flushedAndLinkedToItsOrderLine() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      stubInvoiceLineLinker(dal);
+
+      Warehouse headerWarehouse = LocatorTestSupport.mockWarehouse(WH_PRINCIPAL);
+      Locator bin = LocatorTestSupport.mockLocator("loc-principal-A", headerWarehouse);
+      ShipmentInOut parentInOut = mock(ShipmentInOut.class);
+      when(parentInOut.getWarehouse()).thenReturn(headerWarehouse);
+      ShipmentInOutLine line = mock(ShipmentInOutLine.class);
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(ShipmentInOutLine.class)).thenReturn(line);
+      OrderLine orderLine = mockOrderLine();
+
+      ShipmentInOutLine returned = InOutLineFromOrderFactory.createAndLinkLine(parentInOut,
+          orderLine, bin, 30L, new BigDecimal("4"));
+
+      org.junit.Assert.assertSame(line, returned);
+      verify(line).setSalesOrderLine(orderLine);
+      verify(line).setMovementQuantity(new BigDecimal("4"));
+      verify(line).setLineNo(30L);
+      org.mockito.InOrder order = Mockito.inOrder(dal);
+      order.verify(dal).save(line);
+      order.verify(dal).flush();
     }
   }
 
@@ -511,6 +678,55 @@ public class InOutLineFromOrderFactoryTest {
       verify(line, never()).setStorageBin(orderLocator);
       verify(line, never()).setStorageBin(headerDefaultBin);
       verify(dal, never()).createCriteria(Locator.class);
+    }
+  }
+
+  /**
+   * ETP-5709: a NEGATIVE-quantity line (return-style) fully held by a draft is skipped, the
+   * covering draft number is reported, and the draft HQL runs exactly once for all lines.
+   * With nothing pending to begin with, the HQL is not run at all.
+   */
+  @Test
+  @SuppressWarnings({ "unchecked", "rawtypes" })
+  public void testCollectPendingLinesIsDraftAwareAndQueriesOnce() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getSession()).thenReturn(session);
+      Query q = mock(Query.class);
+      when(session.createQuery(anyString(), org.mockito.ArgumentMatchers.eq(Object[].class)))
+          .thenReturn(q);
+      when(q.setParameter(anyString(), any())).thenReturn(q);
+      when(q.setParameterList(anyString(), org.mockito.ArgumentMatchers.anyCollection()))
+          .thenReturn(q);
+      List<Object[]> rows = Collections.singletonList(
+          new Object[] { "neg", new BigDecimal("-3"), "DOC-9" });
+      when(q.list()).thenReturn((List) rows);
+
+      OrderLine neg = mockOrderLine(true, "I", new BigDecimal("-3"), BigDecimal.ZERO);
+      when(neg.getId()).thenReturn("neg");
+      OrderLine pos = mockOrderLine(true, "I", new BigDecimal("4"), BigDecimal.ZERO);
+      when(pos.getId()).thenReturn("pos");
+      Order order = mock(Order.class);
+      when(order.getOrderLineList()).thenReturn(java.util.Arrays.asList(neg, pos));
+
+      Set<String> covering = new LinkedHashSet<>();
+      List<InOutLineFromOrderFactory.PendingOrderLine> pending =
+          InOutLineFromOrderFactory.collectPendingLines(order, false, covering);
+
+      assertEquals(1, pending.size());
+      assertEquals(new BigDecimal("4"), pending.get(0).getPendingQty());
+      assertEquals(Collections.singleton("DOC-9"), covering);
+      verify(session, Mockito.times(1)).createQuery(anyString(),
+          org.mockito.ArgumentMatchers.eq(Object[].class));
+
+      // nothing pending to begin with -> no query
+      Order empty = mock(Order.class);
+      when(empty.getOrderLineList()).thenReturn(Collections.emptyList());
+      InOutLineFromOrderFactory.collectPendingLines(empty, true, new LinkedHashSet<>());
+      verify(session, Mockito.times(1)).createQuery(anyString(),
+          org.mockito.ArgumentMatchers.eq(Object[].class));
     }
   }
 }

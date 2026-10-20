@@ -66,6 +66,7 @@ import org.openbravo.module.taxreportlauncher.TaxReport;
 import org.openbravo.module.taxreportlauncher.erpCommon.ad_reports.OBTL_TaxReport_I;
 
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
+import com.etendoerp.go.schemaforge.util.RoleAccessMatrix;
 
 /**
  * Unit tests for the Modelo 390 endpoints (ETP-5716): routing of {@link Fiscal390BoxesHandler},
@@ -91,7 +92,7 @@ public class Fiscal390BoxesHandlerTest {
     doReturn("org1").when(handler).resolveEffectiveOrg();
     accessMock = mockStatic(NeoAccessHelper.class);
     accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
-        eq(NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID), anyString())).thenReturn(true);
+        eq(RoleAccessMatrix.TAX_MODELS_PROXY_WINDOW_ID), anyString())).thenReturn(true);
   }
 
   @After

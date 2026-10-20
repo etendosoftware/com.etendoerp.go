@@ -26,6 +26,7 @@ import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import org.junit.After;
 import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.openbravo.base.exception.OBException;
@@ -37,7 +38,22 @@ import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.module.sii.data.AEATSIIDescription;
 
+/**
+ * Unit tests for {@link OnboardingFiscalDataSetupService}.
+ *
+ * @covers com.etendoerp.go.onboarding.OnboardingFiscalDataSetupService
+ */
 public class OnboardingFiscalDataSetupServiceTest {
+
+  /**
+   * Leaves the thread without an {@link OBContext}. Some tests put a mock context on the thread with
+   * the real {@code OBContext.setOBContext}; left there, every later class in the same test JVM saw
+   * it as the current session, and {@code TenantOwnership} then rejected their entities as foreign.
+   */
+  @After
+  public void clearContext() {
+    OBContext.setOBContext((OBContext) null);
+  }
 
   // ---------------------------------------------------------------------------------------------
   // setup() — client/org resolution failures (real branches)

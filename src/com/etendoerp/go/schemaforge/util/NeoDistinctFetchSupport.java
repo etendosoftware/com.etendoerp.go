@@ -25,11 +25,15 @@ import java.util.Map;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.Property;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.ui.Tab;
+
+import com.etendoerp.go.schemaforge.NeoParentTabFilterResolver;
 
 /**
  * Support helpers for the {@code _distinct} fetch endpoint served by
@@ -262,6 +266,83 @@ public final class NeoDistinctFetchSupport {
       log.error("Failed to serialize distinct entry: {}", e.getMessage(), e);
     }
     return entry;
+  }
+
+  /**
+   * Builds the HQL predicate list for {@code NeoCrudHandler#handleDistinctFetch}: the
+   * not-null guard on the projected property, the tab's own HQL where clause
+   * (token-resolved), the parent-record filter for child tabs, and the
+   * caller-resolved search predicate.
+   *
+   * @param adTab
+   *     the AD tab driving the distinct fetch
+   * @param resolvedProperty
+   *     the property name being projected, used for the not-null guard
+   * @param parentId
+   *     the parent record id for a child tab, or {@code null}
+   * @param searchPredicate
+   *     the caller-resolved {@code _distinctSearch} predicate, or {@code null}
+   * @return the HQL predicates to AND together in the query's where clause
+   */
+  public static List<String> buildDistinctPredicates(Tab adTab, String resolvedProperty,
+      String parentId, String searchPredicate) {
+    List<String> predicates = new ArrayList<>();
+    predicates.add("e." + resolvedProperty + " IS NOT NULL");
+
+    String tabWhere = adTab.getHqlwhereclause();
+    addTabWherePredicate(adTab, tabWhere, parentId, predicates);
+    if (parentId != null && adTab.getTabLevel() != null && adTab.getTabLevel() > 0) {
+      String parentFilter = NeoParentTabFilterResolver.resolveParentFilter(adTab, parentId);
+      if (StringUtils.isNotBlank(parentFilter)) {
+        predicates.add("(" + parentFilter + ")");
+      }
+    }
+    if (searchPredicate != null) {
+      predicates.add(searchPredicate);
+    }
+    return predicates;
+  }
+
+  /**
+   * Builds the {@code data} array for {@code NeoCrudHandler#handleDistinctFetch}: for a
+   * to-one association property, resolves display identifiers in batch; for a
+   * primitive property, emits the raw distinct values as-is.
+   *
+   * @param prop
+   *     the resolved property being serialized (scalar or relation)
+   * @param isRelation
+   *     whether {@code prop} is a to-one association
+   * @param page
+   *     the page of distinct values fetched for the current request
+   * @return the {@code data} array for the distinct-fetch response envelope
+   */
+  public static JSONArray buildDistinctData(Property prop, boolean isRelation, List<Object> page) {
+    JSONArray data = new JSONArray();
+    if (isRelation) {
+      Map<String, String> identifierById = loadIdentifiers(prop.getTargetEntity(), page);
+      for (Object value : page) {
+        data.put(toRelationDistinctEntry(value, identifierById));
+      }
+    } else {
+      for (Object value : page) {
+        data.put(toDistinctEntry(value));
+      }
+    }
+    return data;
+  }
+
+  private static void addTabWherePredicate(Tab adTab, String tabWhere, String parentId,
+      List<String> predicates) {
+    if (StringUtils.isNotBlank(tabWhere)) {
+      if (parentId != null && tabWhere.contains("@")) {
+        tabWhere = NeoParentTabFilterResolver.resolveTabWhereTokens(adTab, tabWhere, parentId);
+      }
+      if (!tabWhere.contains("@")) {
+        // Skip when unresolved @session_tokens@ remain — OBQuery can't bind
+        // them and the list fetch relies on DefaultJsonDataService to resolve.
+        predicates.add("(" + tabWhere + ")");
+      }
+    }
   }
 
   /**

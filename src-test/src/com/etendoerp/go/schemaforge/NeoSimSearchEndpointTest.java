@@ -32,11 +32,16 @@ import org.junit.Test;
 import org.mockito.MockedStatic;
 
 import com.etendoerp.copilot.toolpack.webhooks.SimSearch;
+import com.etendoerp.go.common.BoundedJsonParserTest;
 import com.etendoerp.go.schemaforge.util.NeoLanguage;
 import com.etendoerp.go.schemaforge.util.NeoTrl;
 import com.smf.securewebservices.utils.WSResult;
 
-/** Tests for {@link NeoSimSearchEndpoint}. */
+/**
+ * Tests for {@link NeoSimSearchEndpoint}.
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoSimSearchEndpoint
+ */
 public class NeoSimSearchEndpointTest {
 
   private static HttpServletRequest requestWith(String entityName, String items, String qty, String minPct) {
@@ -86,6 +91,20 @@ public class NeoSimSearchEndpointTest {
     NeoResponse resp = endpoint.handle(req);
 
     assertEquals(HttpServletResponse.SC_BAD_REQUEST, resp.getHttpStatus());
+  }
+
+  /** An {@code items} array that breaks the JSON parser is a 400, and nothing is searched. */
+  @Test
+  public void parserBreakingItemsReturnsBadRequest() {
+    NeoSimSearchEndpoint endpoint = new NeoSimSearchEndpoint();
+
+    try (MockedStatic<SimSearch> simSearchMock = mockStatic(SimSearch.class)) {
+      BoundedJsonParserTest.stackBreakingBodies().filter(items -> items.length() < 100)
+          .forEach(items -> assertEquals(items, HttpServletResponse.SC_BAD_REQUEST,
+              endpoint.handle(requestWith("Country", items, null, null)).getHttpStatus()));
+
+      simSearchMock.verifyNoInteractions();
+    }
   }
 
   @Test

@@ -31,6 +31,7 @@ import java.io.BufferedReader;
 import java.io.PrintWriter;
 import java.io.StringReader;
 import java.io.StringWriter;
+import java.lang.reflect.Field;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -48,24 +49,30 @@ import org.openbravo.dal.service.OBDal;
 
 import com.etendoerp.go.common.PublicUrlResolver;
 import com.etendoerp.go.oauth2.OAuth2Filter;
-import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
+import com.etendoerp.go.payment.EnvironmentAccessGuard;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
  * QA edge cases for ETP-5594 (effective tenant on ETGO_MCP_USAGE rows).
  *
+ * @covers com.etendoerp.go.mcp.McpServlet
  * @covers com.etendoerp.go.mcp.McpUsageRow
  * @covers com.etendoerp.go.mcp.McpUsageTelemetry
+ * @covers com.etendoerp.go.mcp.McpCallObservation
  */
 public class McpUsageTenantQaTest {
 
   private McpServlet servlet;
 
   @Before
-  public void setUp() {
-    // A mocked lifecycle answers null (no lifecycle metadata): the commercial gate lets the call
-    // through without touching the DAL these tests stub call by call.
-    servlet = new McpServlet(mock(TenantEnvironmentLifecycleService.class));
+  public void setUp() throws Exception {
+    servlet = new McpServlet();
+    // ETP-5047 — doPost asks the commercial access guard first, which runs as system against the
+    // DAL. A mock that allows every tenant (null denial) keeps these telemetry specs DB-free, as
+    // McpServletTest does; the refusal itself is pinned there.
+    Field guardField = McpServlet.class.getDeclaredField("environmentAccessGuard");
+    guardField.setAccessible(true);
+    guardField.set(servlet, mock(EnvironmentAccessGuard.class));
     System.setProperty(PublicUrlResolver.MCP_PUBLIC_URL_PROPERTY, "https://example.com/mcp");
     McpUsageTelemetry.clearCurrentTenant();
   }
@@ -123,11 +130,17 @@ public class McpUsageTenantQaTest {
   }
 
   /**
-   * Stubs the lookups of a wildcard ({@code "0"}) token in call order: the commercial-access gate
-   * resolves the role's client first (ETP-5642), then executeInContext resolves org and client.
+   * The lookups of a WILDCARD token, in order (ETP-5047): McpServlet resolves the client once,
+   * before the access guard; McpSessionManager then resolves the org, and the client again only
+   * if it is still {@code "0"}.
    */
   private static WorkStub resolves(String org, String client) {
     return s -> when(s.doReturningWork(any())).thenReturn(client, org, client);
+  }
+
+  /** A concrete-client token: only the org is looked up. */
+  private static WorkStub resolvesOrgOnly(String org) {
+    return s -> when(s.doReturningWork(any())).thenReturn(org);
   }
 
   private static JSONObject neoListArgs() throws Exception {
@@ -152,21 +165,22 @@ public class McpUsageTenantQaTest {
 
   @Test
   public void nullTokenOrgIsRecordedAsTheResolvedOrg() throws Exception {
-    // A concrete token client needs no role lookup: the only query is the org resolution.
     McpUsageRow row = doPostToolsCall("etendo_list", neoListArgs(), "client1", null,
-        s -> when(s.doReturningWork(any())).thenReturn("realOrg"), new JSONObject());
+        resolvesOrgOnly("realOrg"), new JSONObject());
     assertEquals("client1", row.clientId());
     assertEquals("realOrg", row.orgId());
   }
 
   @Test
-  public void resolutionFailureIsSwallowedAndTheRowKeepsZero() throws Exception {
-    // resolveDefaultOrg/resolveClientFromRole catch and log: the call proceeds on "0".
-    McpUsageRow row = doPostToolsCall("etendo_list", neoListArgs(), "0", "0",
+  public void orgResolutionFailureIsSwallowedAndTheRowKeepsOrgZero() throws Exception {
+    // resolveDefaultOrg catches and logs: the call proceeds on org "0". (A failed CLIENT lookup
+    // is no longer swallowed — since ETP-5047 it refuses the request before the access guard,
+    // see McpServletTest#doPostWithAWildcardTokenWhoseRoleLookupFailsIsRefusedUnjudged.)
+    McpUsageRow row = doPostToolsCall("etendo_list", neoListArgs(), "client1", "0",
         s -> when(s.doReturningWork(any())).thenThrow(new RuntimeException("db down")),
         new JSONObject());
     assertEquals(McpUsageRow.OUTCOME_OK, row.outcome());
-    assertEquals("0", row.clientId());
+    assertEquals("client1", row.clientId());
     assertEquals("0", row.orgId());
   }
 
@@ -177,11 +191,12 @@ public class McpUsageTenantQaTest {
     assertEquals("clientA", first.clientId());
     assertNull(McpUsageTelemetry.currentTenant());
 
-    // Same thread, next request never reaches setCurrentTenant (resolution blows up).
-    McpUsageRow second = doPostToolsCall("etendo_list", neoListArgs(), "0", "0",
+    // Same thread, next request for another tenant whose org resolution blows up: it must record
+    // its own tenant, never the one the previous request bound.
+    McpUsageRow second = doPostToolsCall("etendo_list", neoListArgs(), "clientB", "0",
         s -> when(s.doReturningWork(any())).thenThrow(new RuntimeException("db down")),
         new JSONObject());
-    assertEquals("0", second.clientId());
+    assertEquals("clientB", second.clientId());
     assertEquals("0", second.orgId());
   }
 
@@ -220,8 +235,7 @@ public class McpUsageTenantQaTest {
     OBDal obDal = mock(OBDal.class);
     Session session = mock(Session.class);
     when(obDal.getSession()).thenReturn(session);
-    // Gate role lookup (ETP-5642), then executeInContext's org and client resolution.
-    when(session.doReturningWork(any())).thenReturn("clientA", "orgA", "clientA");
+    when(session.doReturningWork(any())).thenReturn("clientA", "orgA");
     try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
          MockedStatic<OBContext> contextMock = mockStatic(OBContext.class);
          MockedStatic<SecureWebServicesUtils> swsMock = mockStatic(SecureWebServicesUtils.class)) {
@@ -232,5 +246,142 @@ public class McpUsageTenantQaTest {
       servlet.doPost(request, response);
     }
     assertNull(McpUsageTelemetry.currentTenant());
+  }
+
+  // ── Derived modern sessions (ETP-5640) ──────────────────────────────────
+
+  private static final long T0 = 1_000_000L;
+
+  @Test
+  public void derivedSessionIsStableWithinTheIdleGapAndRenewedAfterIt() {
+    long gap = McpUsageTelemetry.MODERN_SESSION_IDLE_MS;
+    McpUsageTelemetry.ModernSession first =
+        McpUsageTelemetry.modernSession("u-gap", "c1", "r1", T0);
+    McpUsageTelemetry.ModernSession again =
+        McpUsageTelemetry.modernSession("u-gap", "c1", "r1", T0 + gap);
+    McpUsageTelemetry.ModernSession later =
+        McpUsageTelemetry.modernSession("u-gap", "c1", "r1", T0 + 2 * gap + 1);
+
+    org.junit.Assert.assertTrue(first.started());
+    org.junit.Assert.assertFalse(again.started());
+    assertEquals(first.key(), again.key());
+    org.junit.Assert.assertTrue("renewed after the gap", later.started());
+    org.junit.Assert.assertNotEquals(first.key(), later.key());
+    org.junit.Assert.assertTrue(first.key().startsWith(McpUsageTelemetry.MODERN_SESSION_PREFIX));
+  }
+
+  @Test
+  public void derivedSessionsAreDistinctPerAuthenticatedCaller() {
+    String base = McpUsageTelemetry.modernSession("u-per", "c1", "r1", T0).key();
+    org.junit.Assert.assertNotEquals(base,
+        McpUsageTelemetry.modernSession("u-per2", "c1", "r1", T0).key());
+    org.junit.Assert.assertNotEquals(base,
+        McpUsageTelemetry.modernSession("u-per", "c2", "r1", T0).key());
+    org.junit.Assert.assertNotEquals(base,
+        McpUsageTelemetry.modernSession("u-per", "c1", "r2", T0).key());
+  }
+
+  /**
+   * W3: the self-reported client name is not part of the key, so rotating it neither opens new
+   * sessions nor flushes other callers' sessions out of the bounded map.
+   */
+  @Test
+  public void rotatingTheClientNameKeepsOneSession() throws Exception {
+    String first = boundSessionFor("u-rot", "name-1");
+    String second = boundSessionFor("u-rot", "name-2");
+
+    assertEquals(first, second);
+  }
+
+  private static String boundSessionFor(String user, String clientName) throws Exception {
+    JSONObject params = new JSONObject().put("_meta", new JSONObject()
+        .put(McpRequestEra.META_PROTOCOL_VERSION, McpProtocolVersion.MODERN_LATEST)
+        .put(McpServlet.META_CLIENT_INFO, new JSONObject().put("name", clientName)));
+    try {
+      McpUsageTelemetry.bindModernCaller(user, "c1", "r1", params,
+          McpRequestEra.classify("tools/list", params, new McpRequestEra.Headers(
+              McpProtocolVersion.MODERN_LATEST, "tools/list", null), false));
+      assertEquals(clientName, McpUsageTelemetry.currentClient().getName());
+      return McpUsageTelemetry.currentSessionKey();
+    } finally {
+      McpUsageTelemetry.clearCurrentSessionKey();
+      McpUsageTelemetry.clearCurrentClient();
+    }
+  }
+
+  /**
+   * Kill switch on: a request declaring a modern version is legacy. It keeps its _meta client name
+   * but derives no m- session, so a rollback leaves no unused modern sessions behind.
+   */
+  @Test
+  public void aLegacyRequestDeclaringAModernVersionNamesItsClientWithoutASession()
+      throws Exception {
+    JSONObject params = new JSONObject().put("_meta", new JSONObject()
+        .put(McpRequestEra.META_PROTOCOL_VERSION, McpProtocolVersion.MODERN_LATEST)
+        .put(McpServlet.META_CLIENT_INFO, new JSONObject().put("name", "claude-code")));
+    try {
+      McpUsageTelemetry.bindModernCaller("u-legacy", "c1", "r1", params,
+          McpRequestEra.Classification.legacy());
+
+      assertEquals("claude-code", McpUsageTelemetry.currentClient().getName());
+      org.junit.Assert.assertNull(McpUsageTelemetry.currentSessionKey());
+      // The feedback rate limit still has the caller to key on, session or not.
+      org.junit.Assert.assertNotNull(McpUsageTelemetry.rateLimitKey());
+    } finally {
+      McpUsageTelemetry.clearCurrentSessionKey();
+      McpUsageTelemetry.clearCurrentClient();
+    }
+  }
+
+  /** W3: the map evicts the least recently ACTIVE session, never a busy one. */
+  @Test
+  public void anActiveSessionSurvivesEvictionPressure() {
+    long now = T0;
+    String active = McpUsageTelemetry.modernSession("u-active", "c1", "r1", now).key();
+    for (int i = 0; i < 3_000; i++) {
+      McpUsageTelemetry.modernSession("u-filler-" + i, "c1", "r1", now);
+      if (i % 500 == 0) {
+        // The active caller keeps calling while other callers come and go.
+        McpUsageTelemetry.modernSession("u-active", "c1", "r1", now);
+      }
+    }
+
+    McpUsageTelemetry.ModernSession again =
+        McpUsageTelemetry.modernSession("u-active", "c1", "r1", now);
+    org.junit.Assert.assertFalse("still tracked", again.started());
+    assertEquals(active, again.key());
+  }
+
+  @Test
+  public void clientInfoFromMetaReadsNameAndVersionOnly() throws Exception {
+    JSONObject params = new JSONObject().put("_meta", new JSONObject().put(
+        McpServlet.META_CLIENT_INFO, new JSONObject().put("name", "  claude-code ")
+            .put("version", "2.1.0").put("secret", "x")));
+
+    McpUsageTelemetry.ClientInfo client = McpUsageTelemetry.clientInfoFromMeta(params);
+
+    assertEquals("claude-code", client.getName());
+    assertEquals("2.1.0", client.getVersion());
+    org.junit.Assert.assertSame(McpUsageTelemetry.ClientInfo.UNKNOWN,
+        McpUsageTelemetry.clientInfoFromMeta(null));
+    org.junit.Assert.assertSame(McpUsageTelemetry.ClientInfo.UNKNOWN,
+        McpUsageTelemetry.clientInfoFromMeta(new JSONObject().put("_meta", new JSONObject())));
+  }
+
+  @Test
+  public void clientInfoFromMetaBoundsASelfReportedName() throws Exception {
+    String longName = org.apache.commons.lang3.StringUtils.repeat('x', 500);
+    JSONObject params = new JSONObject().put("_meta", new JSONObject().put(
+        McpServlet.META_CLIENT_INFO, new JSONObject().put("name", longName)));
+
+    // Bounded at the stored width (100), not at the shorter bound of an echoed log value.
+    assertEquals(100, McpUsageTelemetry.clientInfoFromMeta(params).getName().length());
+  }
+
+  @Test
+  public void observationCarriesTheResolvedSessionKey() {
+    assertEquals("m-abc", new McpCallObservation("m-abc", "{}", "{}", System.nanoTime())
+        .sessionKey());
+    assertNull(new McpCallObservation(null, "{}", "{}", System.nanoTime()).sessionKey());
   }
 }

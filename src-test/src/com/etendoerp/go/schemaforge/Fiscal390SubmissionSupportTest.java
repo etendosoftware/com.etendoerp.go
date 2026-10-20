@@ -19,6 +19,7 @@ package com.etendoerp.go.schemaforge;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyMap;
@@ -61,8 +62,10 @@ import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.module.aeat303.es.presentation.AEAT303SubmissionResult;
 import org.openbravo.module.aeat303.es.presentation.AEAT303SubmissionService;
 
+import com.etendoerp.go.common.MalformedJsonException;
 import com.etendoerp.go.schemaforge.data.FiscalDecl;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
+import com.etendoerp.go.schemaforge.util.RoleAccessMatrix;
 
 /**
  * Unit tests for the Modelo 390 telematic filing ({@code POST /fiscal390/submit}, ETP-5716): the
@@ -154,7 +157,7 @@ public class Fiscal390SubmissionSupportTest {
     snapshotMock = mockStatic(FiscalSubmittedSnapshotSupport.class);
     accessMock = mockStatic(NeoAccessHelper.class);
     accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
-        eq(NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID), anyString())).thenReturn(true);
+        eq(RoleAccessMatrix.TAX_MODELS_PROXY_WINDOW_ID), anyString())).thenReturn(true);
   }
 
   @After
@@ -476,5 +479,32 @@ public class Fiscal390SubmissionSupportTest {
     JSONObject replaced = Fiscal390SubmissionSupport.withSubmission("{bad", success(false), "u", at);
     assertEquals("REG1", replaced.getJSONObject(Fiscal390SubmissionSupport.SUBMISSION_KEY)
         .getString("registryNumber"));
+  }
+
+  // ── request body (shared by /fiscal303/submit and /fiscal390/submit) ─────────
+
+  @Test
+  public void testReadJsonBodyGoesThroughTheBoundedParser() throws Exception {
+    assertEquals(0, FiscalAeatSubmissionSupport.readJsonBody(requestWithBody("")).length());
+    assertTrue(FiscalAeatSubmissionSupport.readJsonBody(requestWithBody("{\"testMode\":true}"))
+        .getBoolean(FiscalAeatSubmissionSupport.PARAM_TEST_MODE));
+
+    assertRejected("{bad");
+    assertRejected("{\"a\":".repeat(200) + "1" + "}".repeat(200));
+  }
+
+  private static void assertRejected(String body) throws Exception {
+    try {
+      FiscalAeatSubmissionSupport.readJsonBody(requestWithBody(body));
+      fail("Expected MalformedJsonException for body: " + body);
+    } catch (MalformedJsonException expected) {
+      // bounded parser refused it — the 400 "Invalid JSON body" path in runDispatch
+    }
+  }
+
+  private static HttpServletRequest requestWithBody(String body) throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(body)));
+    return req;
   }
 }

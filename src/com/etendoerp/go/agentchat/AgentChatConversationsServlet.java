@@ -36,6 +36,7 @@ import org.openbravo.dal.service.OBDal;
 
 import com.etendoerp.copilot.util.ConversationUtils;
 import com.etendoerp.copilot.util.ConversationWriteUtils;
+import com.etendoerp.go.common.BoundedJsonParser;
 import com.etendoerp.go.common.CorsUtils;
 import com.etendoerp.go.common.JwtAuthUtils;
 import com.etendoerp.go.common.ServletResponseUtils;
@@ -212,6 +213,6 @@ public class AgentChatConversationsServlet extends HttpBaseServlet {
 
   private static JSONObject readBody(HttpServletRequest request) throws IOException, JSONException {
     String raw = new String(request.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
-    return StringUtils.isBlank(raw) ? new JSONObject() : new JSONObject(raw);
+    return StringUtils.isBlank(raw) ? new JSONObject() : BoundedJsonParser.parseObject(raw);
   }
 }

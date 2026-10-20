@@ -136,6 +136,13 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
         response.getWriter().write(result.toString());
       } else if (GENERATE.equals(entityName)) {
         guardNotAlreadySubmitted(orgId, year, period);
+        // ETP-5725 (reopened QA fix) — same rule and rationale as Fiscal303BoxesHandler's own
+        // generate guard (see its comment): "Generar fichero 349" is the literal AEAT
+        // submission artifact. 349's generate request already always sends an unambiguous
+        // `substitutive` param ("Y"/"N", see generate349File/AEAT3492010Report.generateLine1),
+        // unlike 303's overloaded `IsComplementary` — no new param needed here.
+        boolean effectivelyCorrective = "Y".equalsIgnoreCase(request.getParameter("substitutive"));
+        guardCorrectiveConsistency(orgId, year, period, "349", effectivelyCorrective);
         handleGenerate(orgId, year, period, request, response);
       } else if (VALIDATE_VIES.equals(entityName)) {
         JSONObject result = viesSupport.handleValidateVies(this, orgId, year, period);
@@ -185,6 +192,17 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
     List<TaxRate> taxesPurchase = dao349.get349Taxes(taxReport.getId(), "Purchase");
     List<TaxRate> taxesSales    = dao349.get349Taxes(taxReport.getId(), "Sales");
 
+    // ETP-5725 — dependency worth knowing when debugging a misclassified invoice (by design, not
+    // a defect): this split (corrPurch/corrSales → "Rectificaciones" vs. purch/sales → "Facturas
+    // origen") is decided entirely by getCorrectiveInvoices, which queries C_Invoice_Reverse for
+    // em_aeat349_iscorrective = 'Y' — a flag the USER sets manually in the invoice's "Facturas
+    // revertidas" panel to flag that invoice as a 349 correction (defaults to 'N' otherwise).
+    // Deliberately manual, not structurally derived — not every reversed/linked invoice is a 349
+    // correction, so this is a judgment call left to the user. Practical consequence: an invoice
+    // only reaches "Rectificaciones" if that flag was checked; otherwise it is, correctly, treated
+    // as regular and goes through "Facturas origen" below — the exact path the base-sign fix
+    // further down covers. See docs/generated-custom-windows/fiscal-models.md, "Single-key
+    // 'Facturas origen' rows now use the live per-key base" (ETP-5725) for the full writeup.
     Set<Invoice> allPurch  = dao349.get349Invoices(org, taxesPurchase, periods, acctSchema, true,  null);
     Set<Invoice> corrPurch = dao349.getCorrectiveInvoices(allPurch);
     Set<Invoice> purch     = dao349.removeCorrectiveInvoices(allPurch, corrPurch);
@@ -251,8 +269,12 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
     // same resolution {@link Fiscal349GenerateSupport#applyContactParams} already falls back to
     // server-side — never duplicated, just exposed — so this can never drift from what a blank
     // field actually does.
-    String contactFallback = Fiscal349GenerateSupport.resolveCurrentUserContactName();
-    String phoneFallback   = generateSupport.resolveOrgPhone(orgId);
+    // ETP-5597 — passed through the same fitAeat* normalisation generation applies, so a fallback
+    // that normalises to nothing (a phone with no digits) is reported as no fallback at all.
+    String contactFallback = Fiscal349GenerateSupport.fitAeatContact(
+        Fiscal349GenerateSupport.resolveCurrentUserContactName());
+    String phoneFallback   = Fiscal349GenerateSupport.fitAeatPhone(
+        generateSupport.resolveOrgPhone(orgId));
     root.put("contactFallback", contactFallback != null ? contactFallback : "");
     root.put("phoneFallback",   phoneFallback   != null ? phoneFallback   : "");
     return root;
@@ -586,12 +608,13 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
    * it must back both origins too. It therefore produces one row per key, each carrying only the
    * base of that key's tax lines (the per-key base from the same HQL the DAO uses: halved for a
    * purchase line with a non-zero tax amount, in the invoice currency).
-   * A single-key invoice keeps exactly the row it always had (one row, the invoice's
-   * {@code summedLineAmount}).
+   * A single-key invoice produces exactly one row too, but (ETP-5725) its base is now that same
+   * live per-key HQL sum — not the invoice's cached {@code summedLineAmount}, which could disagree
+   * in sign with it for a rectificativa invoice.
    *
    * <p>The rows are origin evidence, not a reconciliation: their bases are NOT guaranteed to add
-   * up to the operator's base (a single-key row shows {@code summedLineAmount}, which is neither
-   * halved nor converted, and no row is currency-converted).
+   * up to the operator's base (the operator's base is a per-business-partner aggregate across
+   * every invoice of that partner, not per-invoice; no row here is currency-converted).
    *
    * <p>Every row of a mixed invoice keeps {@code id} = invoice id; {@code (id, key)} is the
    * unique pair, and the frontend keys rows on it.
@@ -622,10 +645,14 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
       arr.put(buildInvoiceRow(inv, type, sdf, null, null));
       return;
     }
-    // Only a mixed invoice needs the per-key base; a single-key one keeps its invoice-level base.
-    boolean mixed = bases.size() > 1;
+    // ETP-5725: every entry here, including a lone one, goes through the per-key live
+    // base below instead of the invoice's cached header total. The two sources are the
+    // same tax-derived figure the Operadores totals and the multi-key branch already
+    // rely on, so a single-key invoice no longer risks a sign mismatch against them (the
+    // problem seen with FVR rectificativa invoices). The cached header total is only
+    // ever reached above, for an invoice with no resolvable key at all.
     for (Map.Entry<String, BigDecimal> e : bases.entrySet()) {
-      arr.put(buildInvoiceRow(inv, type, sdf, e.getKey(), mixed ? e.getValue() : null));
+      arr.put(buildInvoiceRow(inv, type, sdf, e.getKey(), e.getValue()));
     }
   }
 
@@ -635,15 +662,21 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
    * @param key
    *          AEAT349 key of the row ({@code ""} when unresolved)
    * @param keyBase
-   *          base of the row's key alone (mixed invoice), or {@code null} to use the invoice's
-   *          summed line amount (single-key invoice)
+   *          live per-key base (from {@code resolveInvoiceKeyBases}/
+   *          {@code getTaxBaseAmountPerBusinessPartner}'s HQL), or {@code null} only when no
+   *          live base could be resolved for this invoice at all — then falls back to the
+   *          invoice's cached {@code summedLineAmount} (ETP-5725: this fallback is no longer
+   *          used for the ordinary single-key case, only the "no resolvable key" one)
    */
   JSONObject buildInvoiceRow(Invoice inv, String type, SimpleDateFormat sdf, String key,
       BigDecimal keyBase) throws Exception {
     BusinessPartner bp   = inv.getBusinessPartner();
     BigDecimal      raw  = keyBase != null ? keyBase : inv.getSummedLineAmount();
+    // ETP-5597 (CP-20): the sign is kept. A credit note's lines are negative and the operator
+    // rows (getTaxBaseAmountPerBusinessPartner) and the AEAT file add them up signed, so the
+    // old abs() showed a rectifying invoice as if it added to the base it actually reduces.
     BigDecimal      base = raw != null
-        ? raw.abs().setScale(2, RoundingMode.HALF_UP)
+        ? raw.setScale(2, RoundingMode.HALF_UP)
         : BigDecimal.ZERO;
     JSONObject row = new JSONObject();
     // ETP-5597: the invoice id gives the frontend a collision-free row key (documentNo is not

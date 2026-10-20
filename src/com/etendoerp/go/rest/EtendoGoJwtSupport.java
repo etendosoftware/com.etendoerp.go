@@ -154,8 +154,11 @@ public final class EtendoGoJwtSupport {
    * in {@code AD_Role_Inheritance.Seqno} order. Empty when the user has no personal role yet or
    * no templates applied ({@link UserRoleCompositionService#getAppliedTemplateRoleIds(String)}
    * documents both as returning an empty list, never {@code null}).
+   *
+   * <p>Package-private since ETP-5734: the "Mis empresas" environment details label an invited
+   * account's role in another tenant with exactly these names.
    */
-  private static List<String> resolveEffectiveRoleNames(String userId) {
+  static List<String> resolveEffectiveRoleNames(String userId) {
     List<String> templateRoleIds = new UserRoleCompositionService()
         .getAppliedTemplateRoleIds(userId);
     if (templateRoleIds.isEmpty()) {
@@ -222,7 +225,10 @@ public final class EtendoGoJwtSupport {
     for (JSONObject roleObj : rolesById.values()) {
       roleArray.put(roleObj);
     }
-    return new RoleListData(firstRoleId, roleArray);
+    // ETP-5096 — only a default role the user actually holds can be entered with.
+    String heldDefaultRoleId = defaultRoleId != null && rolesById.containsKey(defaultRoleId)
+        ? defaultRoleId : null;
+    return new RoleListData(firstRoleId, heldDefaultRoleId, roleArray);
   }
 
   private static String stringValue(Object value) {
@@ -357,6 +363,25 @@ public final class EtendoGoJwtSupport {
   }
 
   /**
+   * ETP-5689 — the display name the owner {@code AD_User} of a new environment gets: the full name
+   * typed in the onboarding form, else the account's own {@code ETGO_ACCOUNT.NAME}, else the bare
+   * account email. Never the username, which carries a {@code +company} suffix (see {@link
+   * #buildClientUsername}) whenever the email is already a username elsewhere in the instance —
+   * exactly the additional-environment case, where the form sends no full name. Capped at {@link
+   * OnboardingFieldLimits#FULL_NAME}, the width of {@code AD_User.Name}.
+   *
+   * @param requestFullName full name sent by the onboarding form, possibly blank
+   * @param accountName {@code ETGO_ACCOUNT.NAME} of the onboarding account, possibly blank
+   * @param accountEmail email of the onboarding account
+   * @return the first non-blank of the three, trimmed and truncated; {@code null} if all are blank
+   */
+  static String resolveOwnerDisplayName(String requestFullName, String accountName,
+      String accountEmail) {
+    String name = StringUtils.firstNonBlank(requestFullName, accountName, accountEmail);
+    return name == null ? null : StringUtils.left(name.trim(), OnboardingFieldLimits.FULL_NAME);
+  }
+
+  /**
    * Sets the display name of the client admin user (looked up by username) to the
    * given full name. No-op when the name is blank or the user is not found. The
    * change is saved on the current DAL transaction (committed by the caller).
@@ -422,28 +447,53 @@ public final class EtendoGoJwtSupport {
 
   /**
    * The resolved set of roles (and their available organizations) a user is currently
-   * assignable to, plus a convenience pointer to the first one — the same shape both the
-   * login flow ({@code EtendoGoJwtServlet}) and the silent-refresh webhook
+   * assignable to, plus pointers to the oldest one and to the one to enter with — the same shape
+   * both the login flow ({@code EtendoGoJwtServlet}) and the silent-refresh webhook
    * ({@code SFRefreshToken}) need for their own {@code roleList} responses.
    */
   public static final class RoleListData {
     private final String firstRoleId;
+    private final String defaultRoleId;
     private final JSONArray roleArray;
 
     /**
-     * Builds an immutable {@link RoleListData} snapshot.
+     * Builds an immutable {@link RoleListData} snapshot with no default role among the held ones.
      *
      * @param firstRoleId the first resolved role's {@code AD_Role_ID}, or {@code null}
      * @param roleArray the full resolved role list
      */
     public RoleListData(String firstRoleId, JSONArray roleArray) {
+      this(firstRoleId, null, roleArray);
+    }
+
+    /**
+     * Builds an immutable {@link RoleListData} snapshot.
+     *
+     * @param firstRoleId the first resolved role's {@code AD_Role_ID}, or {@code null}
+     * @param defaultRoleId the user's {@code Default_AD_Role_ID} when it is one of the resolved
+     *     roles, otherwise {@code null}
+     * @param roleArray the full resolved role list
+     */
+    public RoleListData(String firstRoleId, String defaultRoleId, JSONArray roleArray) {
       this.firstRoleId = firstRoleId;
+      this.defaultRoleId = defaultRoleId;
       this.roleArray = roleArray;
     }
 
     /** @return the first resolved role's {@code AD_Role_ID}, or {@code null} if none resolved */
     public String getFirstRoleId() {
       return firstRoleId;
+    }
+
+    /**
+     * ETP-5096 — the role an entry with no explicit role uses: the user's default role when they
+     * hold it (the same preference {@code GoSessionRoleReconciler} applies when it rebinds),
+     * otherwise the oldest one.
+     *
+     * @return the {@code AD_Role_ID} to enter with, or {@code null} if none resolved
+     */
+    public String getEntryRoleId() {
+      return defaultRoleId != null ? defaultRoleId : firstRoleId;
     }
 
     /** @return the full resolved role list, each entry carrying its available organizations */

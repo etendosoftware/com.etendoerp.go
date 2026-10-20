@@ -122,4 +122,51 @@ public class CloneShipmentHookTest {
       verify(clonedLine).setCanceledInoutLine(null);
     }
   }
+
+  /**
+   * The copied line must not look invoiced: the source's QtyInvoiced / IsInvoiced counters
+   * describe invoices that the clone does not have (no invoice line, no match row).
+   */
+  @Test
+  public void testPostCopyResetsInvoicingStateOnClonedLines() {
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class)) {
+      OBContext obCtx = mock(OBContext.class);
+      ctxMock.when(OBContext::getOBContext).thenReturn(obCtx);
+      when(obCtx.getUser()).thenReturn(mock(User.class));
+
+      ShipmentInOut clone = mock(ShipmentInOut.class);
+      ShipmentInOutLine clonedLine = mock(ShipmentInOutLine.class);
+      List<ShipmentInOutLine> cloneLines = new ArrayList<>();
+      cloneLines.add(clonedLine);
+      when(clone.getMaterialMgmtShipmentInOutLineList()).thenReturn(cloneLines);
+
+      new CloneShipmentHook().postCopy(mock(ShipmentInOut.class), clone);
+
+      verify(clonedLine).setInvoiceQuantity(java.math.BigDecimal.ZERO);
+      verify(clonedLine).setReinvoice(false);
+    }
+  }
+
+  /**
+   * The movement date becomes today but the accounting date used to be copied from the source, so
+   * the copy would post earlier than its own movement date. Both must be today.
+   */
+  @Test
+  public void testPostCopyAlignsAccountingDateWithNewMovementDate() {
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class)) {
+      OBContext obCtx = mock(OBContext.class);
+      ctxMock.when(OBContext::getOBContext).thenReturn(obCtx);
+      when(obCtx.getUser()).thenReturn(mock(User.class));
+      ShipmentInOut clone = mock(ShipmentInOut.class);
+      when(clone.getMaterialMgmtShipmentInOutLineList()).thenReturn(new ArrayList<ShipmentInOutLine>());
+
+      new CloneShipmentHook().postCopy(mock(ShipmentInOut.class), clone);
+
+      org.mockito.ArgumentCaptor<java.util.Date> movement = org.mockito.ArgumentCaptor.forClass(java.util.Date.class);
+      org.mockito.ArgumentCaptor<java.util.Date> accounting = org.mockito.ArgumentCaptor.forClass(java.util.Date.class);
+      verify(clone).setMovementDate(movement.capture());
+      verify(clone).setAccountingDate(accounting.capture());
+      assertEquals(movement.getValue(), accounting.getValue());
+    }
+  }
 }

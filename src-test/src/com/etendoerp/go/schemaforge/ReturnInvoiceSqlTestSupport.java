@@ -9,6 +9,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -41,6 +42,11 @@ final class ReturnInvoiceSqlTestSupport {
   private static final String AUTO_DETECTED_MARKER = "rl.Canceled_Inoutline_ID IS NOT NULL";
   /** Only {@code fetchSelectableInvoices} correlates the invoice flow with the return document. */
   private static final String SELECTABLE_MARKER = "i.IsSOTrx = ret.IsSOTrx";
+  /**
+   * Only {@code fetchReturnInvoices} (the non-voided rectificatives the return already has, which
+   * ETP-5712 reports as {@code previousReturnInvoices}) selects the return line's owner first.
+   */
+  private static final String PREVIOUS_MARKER = "SELECT DISTINCT l.M_InOut_ID, i.C_Invoice_ID";
 
   private ReturnInvoiceSqlTestSupport() {
   }
@@ -61,6 +67,21 @@ final class ReturnInvoiceSqlTestSupport {
    */
   static Connection stubReturnInvoiceQueries(OBDal dal, boolean hasReturnInvoice,
       List<String> autoDetectedInvoiceIds, List<String> selectableInvoiceIds) throws Exception {
+    return stubReturnInvoiceQueries(dal, hasReturnInvoice, autoDetectedInvoiceIds,
+        selectableInvoiceIds, Collections.<String[]>emptyList());
+  }
+
+  /**
+   * Same as the four-argument form, plus the rectificatives the return document already has
+   * (ETP-5712): each entry is {@code {invoiceId, documentNo, docStatus, returnId}} of a
+   * non-voided invoice whose line points at one of the lines of the return {@code returnId}.
+   */
+  static Connection stubReturnInvoiceQueries(OBDal dal, boolean hasReturnInvoice,
+      List<String> autoDetectedInvoiceIds, List<String> selectableInvoiceIds,
+      List<String[]> previousReturnInvoices) throws Exception {
+    ResultSet previousRs = previousInvoicesResultSet(previousReturnInvoices);
+    PreparedStatement previousPs = mock(PreparedStatement.class);
+    when(previousPs.executeQuery()).thenReturn(previousRs);
     // Both result sets are built BEFORE any when(...) opens: invoiceResultSet stubs a mock of its
     // own, and creating it inside a thenReturn() argument leaves Mockito's stubbing unfinished.
     ResultSet autoDetectedRs = invoiceResultSet(autoDetectedInvoiceIds);
@@ -86,6 +107,9 @@ final class ReturnInvoiceSqlTestSupport {
     when(dal.getConnection()).thenReturn(conn);
     when(conn.prepareStatement(anyString())).thenAnswer(invocation -> {
       String sql = invocation.getArgument(0);
+      if (sql.contains(PREVIOUS_MARKER)) {
+        return previousPs;
+      }
       if (sql.contains(AUTO_DETECTED_MARKER)) {
         return autoDetectedPs;
       }
@@ -111,6 +135,26 @@ final class ReturnInvoiceSqlTestSupport {
   static Connection stubReturnInvoiceQueries(OBDal dal, String... rectifiableInvoiceIds)
       throws Exception {
     return stubReturnInvoiceQueries(dal, false, Arrays.asList(rectifiableInvoiceIds));
+  }
+
+  /** A result set shaped like {@code fetchReturnInvoices}: owner, invoice id, number, status, total, ISO. */
+  static ResultSet previousInvoicesResultSet(List<String[]> invoices) throws Exception {
+    ResultSet rs = mock(ResultSet.class);
+    AtomicInteger cursor = new AtomicInteger(-1);
+    when(rs.next()).thenAnswer(i -> {
+      if (cursor.incrementAndGet() < invoices.size()) {
+        return true;
+      }
+      cursor.set(-1);
+      return false;
+    });
+    when(rs.getString(1)).thenAnswer(i -> invoices.get(cursor.get())[3]);
+    when(rs.getString(2)).thenAnswer(i -> invoices.get(cursor.get())[0]);
+    when(rs.getString(3)).thenAnswer(i -> invoices.get(cursor.get())[1]);
+    when(rs.getString(4)).thenAnswer(i -> invoices.get(cursor.get())[2]);
+    when(rs.getBigDecimal(5)).thenReturn(new BigDecimal("-10.00"));
+    when(rs.getString(6)).thenReturn("EUR");
+    return rs;
   }
 
   /**

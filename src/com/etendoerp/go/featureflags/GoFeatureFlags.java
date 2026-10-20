@@ -142,6 +142,84 @@ public final class GoFeatureFlags {
   public static final String FLAG_ONBOARDING_TENANT_POOL = "onboarding-tenant-pool";
 
   /**
+   * ETP-5047 — the kill switch of commercial environment-access enforcement: the HTTP 402 that
+   * NEO (every scheme), the {@code NEO_DATA} surfaces (favorites, fiscal test mode, report
+   * selectors, OAuth2 API keys), MCP, the {@code /sws/go} tenant-session endpoints and the legacy
+   * {@code GET /sws/go/login?userId=} answer once a demo trial has expired or a subscription's
+   * payment grace has elapsed. The survey configuration ({@code NEO_AUXILIARY}) is not gated, and
+   * {@code POST /sws/go/session/environment} reports the decision without refusing; the complete
+   * list lives on {@code EnvironmentAccessGuard}.
+   *
+   * <p><b>Phrased as an OFF switch on purpose, because every failure of this class resolves to
+   * {@code false}.</b> Enforcement is live from deploy and stays live when the flag is not
+   * configured, when ConfigCat is unreachable, when the SDK key is wrong or when evaluation
+   * throws: all of those read "not switched off". Only a value that resolves to {@code true}
+   * disables the refusal: on ConfigCat the boolean setting served as {@code true}; locally
+   * ({@link PropertiesFeatureProvider}) {@code true}, {@code Y}, {@code yes} or {@code 1}, case
+   * insensitive and trimmed. {@code false}/{@code N}/{@code no}/{@code 0} keep enforcing, and any
+   * other value is a {@code PARSE_ERROR} that keeps enforcing too. A positively phrased
+   * "enforcement enabled" flag would do the opposite — a missing key would silently open every
+   * blocked tenant — so do not "fix" the polarity.
+   *
+   * <p><b>What {@code true} does.</b> The access decision is still computed and logged at INFO
+   * (entry point, tenant, decision) instead of being refused, so an operator can see who would
+   * have been blocked. It is meant for an incident — a wrong status after a Stripe outage, a bad
+   * deploy — not as a way to grant a tenant free access.
+   *
+   * <p><b>Targeting.</b> Evaluated with an account-less context carrying the tenant as
+   * {@link FeatureFlagContext#ATTRIBUTE_CLIENT_ID}, so a ConfigCat rule can switch enforcement off
+   * for one tenant ({@code clientId}) or for everyone. Locally it is a plain boolean,
+   * {@code etendo.go.flags.environment-access-enforcement-off} /
+   * {@code ETGO_FLAG_ENVIRONMENT_ACCESS_ENFORCEMENT_OFF}.
+   *
+   * <p><b>Backend-only.</b> The browser follows the 402 it is given and needs no key of its own —
+   * same reasoning as {@link #FLAG_BP_PORTAL_LINK}; never add it to {@code flag-keys.js}. Its only
+   * caller is {@code EnvironmentAccessEnforcementFlag}.
+   */
+  public static final String FLAG_ENVIRONMENT_ACCESS_ENFORCEMENT_OFF =
+      "environment-access-enforcement-off";
+
+  /**
+   * ETP-5640 — kill switch for the stateless MCP era (spec 2026-07-28). <b>Inverted on
+   * purpose:</b> {@code true} turns the modern era <em>off</em> and {@code /sws/mcp} answers
+   * exactly as before it existed — {@code server/discover} gets {@code -32601}, per-request
+   * {@code _meta} is ignored and every request is served under the {@code initialize}-based era.
+   * Unset or {@code false} is the normal state: the server is dual-era.
+   *
+   * <p>The inversion follows from this class's failure behaviour: every flag resolves to
+   * {@code false} when it is missing, when ConfigCat is unreachable or when evaluation fails. A
+   * flag that <em>enabled</em> the modern era would switch it off on any control-plane hiccup;
+   * this one leaves the default in place and only a deliberate {@code true} rolls back — live
+   * within one ConfigCat poll where {@value #CONFIGCAT_SDK_KEY_PROPERTY} is set; without an SDK
+   * key the value comes from {@code etendo.go.flags.mcp-modern-era-disabled} and needs a restart.
+   *
+   * <p><b>Environment level only — never target it per account.</b> MCP clients cache the era per
+   * origin, and one origin serves every tenant, so a per-account answer would hand one cached
+   * decision to callers the flag treats differently. It is evaluated with an empty context.
+   *
+   * <p><b>Backend-only.</b> Nothing in the browser reads it; never add it to the web client's
+   * {@code flag-keys.js}. Its only caller is {@code McpRequestEra}. Retire it (keeping the modern
+   * path) once the modern era is stable in production.
+   */
+  public static final String FLAG_MCP_MODERN_ERA_DISABLED = "mcp-modern-era-disabled";
+
+  /**
+   * ETP-5676 — kill switch for the per-batch redundant-callout skip. <b>Inverted on purpose</b>,
+   * for the same reason as {@link #FLAG_MCP_MODERN_ERA_DISABLED}: unset or {@code false} is the
+   * normal state, in which a batch sent with {@code _skipRedundantCallouts: true} may skip a
+   * create-cascade callout whose outputs an earlier operation of the same batch proved discarded.
+   * {@code true} turns the skip off for every batch, whatever the request asks, so each callout
+   * runs as on a batch without the option. Live within one ConfigCat poll where
+   * {@value #CONFIGCAT_SDK_KEY_PROPERTY} is set; otherwise read from
+   * {@code etendo.go.flags.batch-callout-skip-disabled} and needs a restart.
+   *
+   * <p><b>Environment level and backend-only.</b> Evaluated with an empty context, once per batch,
+   * by {@code NeoBatchScope}, its only caller; nothing in the browser reads it. Retire it (keeping
+   * the skip) once the skip has run in production without a wrong default.
+   */
+  public static final String FLAG_BATCH_CALLOUT_SKIP_DISABLED = "batch-callout-skip-disabled";
+
+  /**
    * ConfigCat SDK key. Set ⇒ flags come from ConfigCat and can be flipped without a restart; unset
    * ⇒ {@link PropertiesFeatureProvider} resolves them from local configuration.
    */

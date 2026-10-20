@@ -40,6 +40,8 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 
+import com.etendoerp.go.common.BoundedJsonParser;
+import com.etendoerp.go.common.MalformedJsonException;
 import com.etendoerp.go.usageevents.UsageEvent;
 import com.etendoerp.go.usageevents.UsageEventRecorder;
 import com.etendoerp.go.usageevents.UsageEventTypes;
@@ -148,63 +150,22 @@ class NeoUsageEventEndpoint {
   }
 
   /**
-   * Jettison recurses once per nesting level and, on some truncated inputs (a body that stops inside an array),
-   * forever: both end in a {@link StackOverflowError} on the request thread, which the servlet's
-   * {@code catch (Exception)} does not see. So the depth is bounded before jettison runs, and any
-   * error it still throws is a malformed body, not a 500.
+   * Parsed through {@link BoundedJsonParser}, with this endpoint's tighter depth: jettison 1.3
+   * answers some malformed bodies with an {@code Error} rather than a {@code JSONException}, and
+   * the parser keeps that away from the request thread.
    *
    * @return the events array, or null when the body is malformed
    */
   static JSONArray parseEvents(String body) {
-    if (StringUtils.isBlank(body) || exceedsDepth(body, MAX_JSON_DEPTH)) {
+    if (StringUtils.isBlank(body)) {
       return null;
     }
     try {
-      Object events = new JSONObject(body).opt(KEY_EVENTS);
+      Object events = BoundedJsonParser.parseObject(body, MAX_JSON_DEPTH).opt(KEY_EVENTS);
       return events instanceof JSONArray ? (JSONArray) events : null;
-    } catch (JSONException | RuntimeException | StackOverflowError e) { // NOSONAR — see javadoc.
+    } catch (MalformedJsonException e) {
       return null;
     }
-  }
-
-  /**
-   * Linear scan for array/object nesting deeper than {@code maxDepth}, ignoring brackets
-   * inside JSON strings (escapes honoured). Cheap and total; it does not validate the JSON.
-   */
-  static boolean exceedsDepth(String body, int maxDepth) {
-    int depth = 0;
-    int i = 0;
-    while (i < body.length()) {
-      char c = body.charAt(i);
-      if (c == '"') {
-        i = endOfString(body, i);
-      } else if (c == '[' || c == '{') {
-        if (++depth > maxDepth) {
-          return true;
-        }
-      } else if (c == ']' || c == '}') {
-        depth--;
-      }
-      i++;
-    }
-    return false;
-  }
-
-  /**
-   * @return the index of the quote closing the JSON string opened at {@code open} (escapes
-   *         honoured), or {@code body.length()} when the string is never closed
-   */
-  private static int endOfString(String body, int open) {
-    int i = open + 1;
-    while (i < body.length()) {
-      char c = body.charAt(i);
-      if (c == '"') {
-        return i;
-      }
-      // A backslash escapes the next character, so it is skipped too.
-      i += c == '\\' ? 2 : 1;
-    }
-    return body.length();
   }
 
   private NeoResponse submitBatch(JSONArray events) {

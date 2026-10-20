@@ -30,6 +30,7 @@ import static org.mockito.Mockito.when;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.function.Consumer;
 import java.util.regex.Matcher;
@@ -59,6 +60,8 @@ import com.etendoerp.go.schemaforge.NeoExtensionRequest;
 import com.etendoerp.go.schemaforge.NeoExtensionSurface;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.schemaforge.ProductDefaultsHandler;
+import com.etendoerp.go.schemaforge.SalesOrderLineHandler;
 import com.etendoerp.go.schemaforge.SalesQuotationLineHandler;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
@@ -81,9 +84,12 @@ import com.etendoerp.go.schemaforge.selector.policy.NeoSelectorPolicy;
  * {@link McpSourceScanner} exists for.</p>
  *
  * <p>The same helper also answers the read side ({@link McpServerResolvedFields#enrichedOnRead},
- * ETP-5576): the keys a customization injects on every GET record.</p>
+ * ETP-5576): the keys a customization injects on every GET record; and the create directives a
+ * customization declares ({@link McpServerResolvedFields#createDirectives}, ETP-5676).</p>
  *
  * @covers com.etendoerp.go.mcp.McpServerResolvedFields
+ * @covers com.etendoerp.go.schemaforge.SalesQuotationLineHandler
+ * @covers com.etendoerp.go.schemaforge.SalesOrderLineHandler
  */
 @DisplayName("ETP-5368 / ETP-5535 — server-resolved fields in view:\"create\" and etendo_create")
 class McpSchemaServerResolvedFieldsTest {
@@ -166,15 +172,25 @@ class McpSchemaServerResolvedFieldsTest {
   // ── ETP-5535: McpServerResolvedFields.forCreate ─────────────────────────
 
   /**
-   * The policy's names and the customization's declaration are one set. The real
-   * {@link SalesQuotationLineHandler} is the customization, so its {@code tax} declaration is
-   * exercised through the reader that consumes it.
+   * Rows: the real order-line customizations, both bound to {@code C_OrderLine}. Each declares
+   * {@code tax} (set by {@code SL_Order_Product}) and {@code lineNetAmount} (set by
+   * {@code SL_Order_Amt} in the create cascade, and recomputed by the {@code C_OrderLine} trigger).
    */
-  @Test
+  static Stream<Arguments> orderLineCustomizations() {
+    return Stream.of(
+        Arguments.of("sales-quotation/quotationLine", new SalesQuotationLineHandler()),
+        Arguments.of("sales-order/lines", new SalesOrderLineHandler()));
+  }
+
+  /**
+   * The policy's names and the customization's declaration are one set. The real customization is
+   * used, so its declaration is exercised through the reader that consumes it.
+   */
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("orderLineCustomizations")
   @DisplayName("forCreate is the union of the policy's names and the customization's declaration")
-  void forCreateUnionsPolicyAndCustomization() {
+  void forCreateUnionsPolicyAndCustomization(String entity, NeoHandler customization) {
     SFEntity sfEntity = quotationLineEntity();
-    NeoHandler customization = new SalesQuotationLineHandler();
 
     try (MockedStatic<NeoSelectorPolicy> policy = mockStatic(NeoSelectorPolicy.class);
         MockedStatic<NeoExtensionDispatcher> dispatcher =
@@ -183,7 +199,8 @@ class McpSchemaServerResolvedFieldsTest {
           .thenReturn(Set.of("locationAddress"));
       dispatcher.when(() -> NeoExtensionDispatcher.resolveOnly(any())).thenReturn(customization);
 
-      assertEquals(Set.of("locationAddress", "tax"), McpServerResolvedFields.forCreate(sfEntity));
+      assertEquals(Set.of("locationAddress", "tax", "lineNetAmount"),
+          McpServerResolvedFields.forCreate(sfEntity), entity);
     }
   }
 
@@ -358,6 +375,110 @@ class McpSchemaServerResolvedFieldsTest {
       names.add(missing.getJSONObject(i).getString("name"));
     }
     assertEquals(expectedMissing, names, scenario);
+  }
+
+  // ── ETP-5676: create directives ─────────────────────────────────────────────
+
+  private static SFEntity productEntity() {
+    SFSpec spec = mock(SFSpec.class);
+    when(spec.getName()).thenReturn("product");
+    SFEntity sfEntity = mock(SFEntity.class);
+    when(sfEntity.getName()).thenReturn("product");
+    when(sfEntity.getETGOSFSpec()).thenReturn(spec);
+    return sfEntity;
+  }
+
+  /**
+   * The product customization's declaration is read through the CREATE surface, and
+   * {@code view:"create"} publishes it as {@code directives} with its description.
+   */
+  @Test
+  @DisplayName("view:\"create\" publishes the directives the CREATE customization declares")
+  void createViewPublishesTheDeclaredDirectives() throws Exception {
+    SFEntity sfEntity = productEntity();
+    try (MockedStatic<NeoExtensionDispatcher> dispatcher =
+        mockStatic(NeoExtensionDispatcher.class)) {
+      dispatcher.when(() -> NeoExtensionDispatcher.resolveOnly(any()))
+          .thenReturn(new ProductDefaultsHandler());
+
+      Map<String, String> directives = McpServerResolvedFields.createDirectives(sfEntity);
+      JSONObject createView = new JSONObject().put("requiredCount", 0);
+      McpServerResolvedFields.addCreateDirectives(createView, sfEntity);
+
+      assertEquals(Set.of("_skipPricesSeed"), directives.keySet());
+      JSONObject published = createView.getJSONObject("directives");
+      assertEquals(1, published.length());
+      assertTrue(published.getString("_skipPricesSeed")
+          .startsWith("Optional. An array of price list version ids"));
+      // Two reads: the direct call above and the one inside addCreateDirectives — both CREATE.
+      dispatcher.verify(() -> NeoExtensionDispatcher.resolveOnly(
+          argThat((NeoExtensionRequest request) -> request.surface() == NeoExtensionSurface.CREATE)),
+          org.mockito.Mockito.times(2));
+    }
+  }
+
+  /** Rows: case, how {@code NeoExtensionDispatcher.resolveOnly} is stubbed. */
+  static Stream<Arguments> entitiesWithoutDirectives() {
+    Consumer<MockedStatic<NeoExtensionDispatcher>> declaresNone = dispatcher -> dispatcher
+        .when(() -> NeoExtensionDispatcher.resolveOnly(any()))
+        .thenReturn(new SalesQuotationLineHandler());
+    Stream<Arguments> unusable = unusableCustomizations().map(Arguments::get)
+        .map(row -> Arguments.of(row[0], row[1]));
+    return Stream.concat(Stream.of(Arguments.of("the customization declares none", declaresNone)),
+        unusable);
+  }
+
+  /**
+   * Every other entity's {@code view:"create"} is unchanged: no {@code directives} key at all, and
+   * a customization that cannot be read contributes none rather than failing the schema call.
+   */
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("entitiesWithoutDirectives")
+  void createViewOmitsDirectivesForAnEntityThatDeclaresNone(String scenario,
+      Consumer<MockedStatic<NeoExtensionDispatcher>> stubDispatcher) throws Exception {
+    SFEntity sfEntity = quotationLineEntity();
+    try (MockedStatic<NeoExtensionDispatcher> dispatcher =
+        mockStatic(NeoExtensionDispatcher.class)) {
+      stubDispatcher.accept(dispatcher);
+
+      JSONObject createView = new JSONObject().put("requiredCount", 0);
+      McpServerResolvedFields.addCreateDirectives(createView, sfEntity);
+
+      assertFalse(createView.has("directives"), scenario);
+      assertEquals(1, createView.length(), scenario);
+    }
+  }
+
+  @Test
+  @DisplayName("createDirectives of a null entity is empty, and a null view is left alone")
+  void createDirectivesOfNullEntityIsEmpty() throws Exception {
+    assertTrue(McpServerResolvedFields.createDirectives(null).isEmpty());
+    assertDoesNotThrow(() -> McpServerResolvedFields.addCreateDirectives(null, null));
+  }
+
+  @Test
+  @DisplayName("a NeoHandler declares no directives unless it says so")
+  void neoHandlerDeclaresNoDirectivesByDefault() {
+    assertTrue(DECLARES_NULL.createDirectives().isEmpty());
+  }
+
+  /**
+   * The view's {@code directives} key is added by one call inside {@code handleSchema}; that
+   * method needs a live DAL, so the call site is pinned structurally, as the union above is.
+   */
+  @Test
+  @DisplayName("handleSchema adds the create directives to the create view it returns")
+  void handleSchemaAddsTheCreateDirectives() {
+    String body = McpSourceScanner.methodBody(McpSourceScanner.read(ROUTER), "handleSchema");
+
+    Matcher add = Pattern.compile(
+        "McpServerResolvedFields\\s*\\.\\s*addCreateDirectives"
+            + "\\s*\\(\\s*(\\w+)\\s*,\\s*sfEntity\\s*\\)")
+        .matcher(body);
+    assertTrue(add.find(), "handleSchema must add the entity's create directives to the view");
+    String view = add.group(1);
+    assertTrue(body.indexOf("wrapAsTextContent(" + view + ")", add.end()) > 0,
+        "the view the directives were added to (" + view + ") must be the one returned");
   }
 
   private static SFEntity quotationLineEntity() {

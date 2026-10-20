@@ -28,6 +28,7 @@ import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Order;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
+import org.openbravo.base.exception.OBSecurityException;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.Property;
 import org.openbravo.dal.service.OBCriteria;
@@ -43,6 +44,7 @@ import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoBooleanFormat;
+import com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import com.etendoerp.go.schemaforge.util.NeoReportCallability;
 
@@ -81,6 +83,13 @@ final class McpToolRouterSupport {
       throw McpRoutingException.entityNotFound(entityName,
           McpSupportInternals.resolveSpecNameForError(specId),
           McpSupportInternals.includedEntityNames(specId));
+    }
+    // ETP-5648: the single resolver behind every MCP entity tool, resource and widget, so one
+    // check here covers them all. OBSecurityException maps to the same `forbidden` body that
+    // resources/read already returns for a spec denial.
+    if (!NeoAccountingAccessPolicy.isEntityAllowed(results.get(0))) {
+      throw new OBSecurityException("Access denied to accounting entity '" + entityName
+          + "' for current role");
     }
     return results.get(0);
   }
@@ -123,6 +132,30 @@ final class McpToolRouterSupport {
           NeoReportCallability.buildNotConfiguredMessage(spec.getName()));
     }
     return findIncludedEntity(spec.getId(), entityName);
+  }
+
+  /**
+   * The included entities the current role may see (ETP-5648): accounting entities are dropped
+   * unless the role has the {@code showAccountingFields} capability. For the advertising sites
+   * only (discover, catalog, resources, the "available" names); internal lookups keep using
+   * {@link #listIncludedEntities(String)}. The role flag is read only for a spec that actually
+   * has an accounting entity.
+   *
+   * @param specId the spec whose entities to list
+   * @return the visible entities in {@code seqNo} order
+   */
+  static List<SFEntity> listVisibleEntities(String specId) {
+    return NeoAccountingAccessPolicy.visibleEntities(listIncludedEntities(specId));
+  }
+
+  /**
+   * Whether a spec must be hidden from the catalog because every one of its included entities
+   * is an accounting entity the current role cannot see (e.g. {@code end-year-close}).
+   */
+  static boolean isHiddenAccountingSpec(SFSpec spec) {
+    // Fail-open like the other catalog predicates: the real refusal is in findIncludedEntity.
+    List<SFEntity> included = McpSupportInternals.safeListIncludedEntities(spec);
+    return !included.isEmpty() && NeoAccountingAccessPolicy.visibleEntities(included).isEmpty();
   }
 
   static List<SFEntity> listIncludedEntities(String specId) {
@@ -713,12 +746,21 @@ final class McpToolRouterSupport {
     // IllegalArgumentException the router can only classify as a 500. The exception carries its own
     // 422 envelope and names the argument in `field`.
     if (args == null) {
-      throw McpRoutingException.missingArgument("Missing arguments", null);
+      throw McpRoutingException.missingArgument("Missing arguments", null)
+          .withMissing(java.util.Arrays.asList(required));
     }
+    // ETP-5669: every missing key at once (the agent used to fix them one round trip each).
+    // The field attribute stays the first one for callers that read only that.
+    List<String> missing = new java.util.ArrayList<>();
     for (String key : required) {
       if (!args.has(key) || args.isNull(key)) {
-        throw McpRoutingException.missingArgument("Missing required argument: " + key, key);
+        missing.add(key);
       }
+    }
+    if (!missing.isEmpty()) {
+      throw McpRoutingException.missingArgument(
+          "Missing required argument" + (missing.size() > 1 ? "s: " : ": ")
+              + String.join(", ", missing), missing.get(0)).withMissing(missing);
     }
   }
 

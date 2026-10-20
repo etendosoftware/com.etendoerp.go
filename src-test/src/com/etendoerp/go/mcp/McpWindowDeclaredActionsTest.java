@@ -58,13 +58,18 @@ import org.openbravo.model.ad.domain.Reference;
 import org.openbravo.model.ad.ui.Tab;
 
 import com.etendoerp.go.schemaforge.CurrencyOptionsHandler;
+import com.etendoerp.go.schemaforge.GoodsReceiptHeaderHandler;
+import com.etendoerp.go.schemaforge.GoodsShipmentHeaderHandler;
 import com.etendoerp.go.schemaforge.NeoActionRecordGuard;
 import com.etendoerp.go.schemaforge.NeoExtensionDispatcher;
+import com.etendoerp.go.schemaforge.NeoExtensionRequest;
 import com.etendoerp.go.schemaforge.NeoExtensionResult;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.PurchaseInvoiceHeaderHandler;
+import com.etendoerp.go.schemaforge.ReturnMaterialReceiptHeaderHandler;
+import com.etendoerp.go.schemaforge.ReturnToVendorShipmentHeaderHandler;
 import com.etendoerp.go.schemaforge.SalesInvoiceHeaderHandler;
 import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
 import com.etendoerp.go.schemaforge.data.SFEntity;
@@ -85,6 +90,7 @@ import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
  *
  * @covers com.etendoerp.go.mcp.McpDeclaredActions
  * @covers com.etendoerp.go.mcp.McpActionsSection
+ * @covers com.etendoerp.go.mcp.McpActionsView
  */
 // Test methods live in the @Nested inner classes below; S2187 only inspects the outer class.
 @SuppressWarnings("java:S2187")
@@ -112,7 +118,9 @@ class McpWindowDeclaredActionsTest {
     when(handler.actionContracts()).thenReturn(contracts());
     // The AD buttons etendo_action can fire, as NeoButtonActionHelper.findButtonColumn resolves them:
     // by DB column name or by field name. The DAL names each column the way etendo_schema does.
-    buttonMock = mockStatic(NeoButtonActionHelper.class);
+    buttonMock = mockStatic(NeoButtonActionHelper.class,
+        inv -> "propertyNameOf".equals(inv.getMethod().getName()) ? inv.callRealMethod()
+            : org.mockito.Mockito.RETURNS_DEFAULTS.answer(inv));
     ModelProvider provider = mock(ModelProvider.class);
     Entity dal = mock(Entity.class);
     modelMock = mockStatic(ModelProvider.class);
@@ -381,6 +389,91 @@ class McpWindowDeclaredActionsTest {
       assertEquals("GET", c.getHttpMethod());
     }
 
+    /**
+     * ETP-5711: the return flow (both directions) is judged by the contracts the real handlers
+     * declare — the lines of an import and of a create-from-document are optional or typed arrays,
+     * and an undeclared key is a 422 before anything runs.
+     */
+    @ParameterizedTest(name = "{0} {1} {2}")
+    @CsvSource(delimiter = '|', value = {
+        "return-to-vendor | availableReceipts     | {\"businessPartner\":\"BP\"} |",
+        "return-to-vendor | availableReceipts     | {}                    | missing:businessPartner",
+        "return-to-vendor | importReceiptLines    | {\"lines\":[{\"sourceLineId\":\"a\",\"returnQuantity\":1}]} |",
+        "return-to-vendor | importReceiptLines    | {\"foo\":1}             | foo",
+        "return-to-vendor | documentAction        | {\"docAction\":\"CO\"}  |",
+        "return-material  | availableShipments    | {\"businessPartner\":\"BP\"} |",
+        "return-material  | importShipmentLines   | {\"lines\":[{\"sourceLineId\":\"a\",\"returnQuantity\":1}]} |",
+        "return-material  | documentAction        | {\"docAction\":\"CO\"}  |",
+        "goods-receipt    | createPurchaseReturn  | {}                    |",
+        "goods-receipt    | createPurchaseReturn  | {\"lines\":[{\"lineId\":\"a\",\"returnQuantity\":1}],\"reason\":\"x\"} |",
+        "goods-receipt    | createPurchaseReturn  | {\"foo\":1}             | foo",
+        "goods-shipment   | createReturn          | {}                    |",
+        "goods-shipment   | createReturn          | {\"foo\":1}             | foo" })
+    void returnFlowActionsAreJudgedByTheirDeclaredContracts(String window, String action,
+        String body, String refusal) throws Exception {
+      Map<String, NeoActionContract> declared;
+      switch (window) {
+        case "return-to-vendor":
+          declared = new ReturnToVendorShipmentHeaderHandler().actionContracts();
+          break;
+        case "return-material":
+          declared = new ReturnMaterialReceiptHeaderHandler().actionContracts();
+          break;
+        case "goods-receipt":
+          declared = new GoodsReceiptHeaderHandler().actionContracts();
+          break;
+        default:
+          declared = new GoodsShipmentHeaderHandler().actionContracts();
+          break;
+      }
+      when(handler.actionContracts()).thenReturn(declared);
+      SFEntity e = entity("W", null);
+      JSONObject params = new JSONObject(body);
+
+      if (refusal == null) {
+        NeoActionContract contract = McpDeclaredActions.precheck(e, action, params);
+        assertNotNull(contract, action + " is a declared action");
+        assertEquals(action, contract.getName());
+        return;
+      }
+      McpRoutingException refused = assertThrows(McpRoutingException.class,
+          () -> McpDeclaredActions.precheck(e, action, params));
+      JSONObject env = refused.toEnvelope();
+      assertEquals(422, env.getInt(McpConstants.KEY_STATUS));
+      String key = refusal.startsWith("missing:") ? refusal.substring("missing:".length())
+          : refusal;
+      assertTrue(env.toString().contains(key), env.toString());
+    }
+
+    /**
+     * ETP-5712: an agent that lists a return header's actions must learn from {@code documentAction}
+     * that confirming does NOT create the factura rectificativa and that createReturnInvoice does;
+     * the goods receipt / goods shipment completion text (the shared contract) must not change.
+     */
+    @Test
+    @DisplayName("the return headers' documentAction points at createReturnInvoice; the goods"
+        + " receipt/shipment one does not")
+    void returnDocumentActionPointsAtCreateReturnInvoice() throws Exception {
+      for (Map<String, NeoActionContract> declared : List.of(
+          new ReturnToVendorShipmentHeaderHandler().actionContracts(),
+          new ReturnMaterialReceiptHeaderHandler().actionContracts())) {
+        String text = declared.get("documentAction").getDescription();
+        assertTrue(text.contains("does NOT create the factura rectificativa"), text);
+        assertTrue(text.contains("createReturnInvoice"), text);
+        assertTrue(text.contains("rectifiableInvoices"), text);
+        assertNull(NeoActionContract.validate(declared, "documentAction",
+            new JSONObject().put("docAction", "CO")));
+        assertEquals(422, NeoActionContract.validate(declared, "documentAction",
+            new JSONObject().put("docAction", "VO")).getHttpStatus());
+      }
+      for (Map<String, NeoActionContract> declared : List.of(
+          new GoodsReceiptHeaderHandler().actionContracts(),
+          new GoodsShipmentHeaderHandler().actionContracts())) {
+        assertFalse(declared.get("documentAction").getDescription().contains("createReturnInvoice"));
+        assertFalse(declared.get("documentAction").getDescription().contains("rectificativa"));
+      }
+    }
+
     @Test
     @DisplayName("an AD button is not judged here: no contract, no refusal")
     void adButtonPasses() throws Exception {
@@ -423,6 +516,67 @@ class McpWindowDeclaredActionsTest {
       JSONArray unknown = env.getJSONArray("unknownParameters");
       assertEquals(1, unknown.length(), unknown.toString());
       assertEquals(unknownParameter, unknown.getString(0));
+    }
+
+    /**
+     * ETP-5713: the line imports of the four windows are judged by the contracts the real handlers
+     * declare. {@code lines} is optional, the source id is required, and an undeclared key — or
+     * the other side's id key — is a 422 before anything runs.
+     */
+    @ParameterizedTest(name = "{0} {1} {2}")
+    @CsvSource(delimiter = '|', value = {
+        "goods-receipt     | availableOrders        | {}                    |",
+        "goods-receipt     | availableOrderLines    | {\"orderId\":\"o\"}     |",
+        "goods-receipt     | availableOrderLines    | {}                    | missing:orderId",
+        "goods-receipt     | importOrderLines       | {\"orderId\":\"o\"}     |",
+        "goods-receipt     | importOrderLines       | {\"orderId\":\"o\",\"lines\":[{\"sourceLineId\":\"a\",\"quantity\":1}]} |",
+        "goods-receipt     | importOrderLines       | {\"lines\":[]}          | missing:orderId",
+        "goods-receipt     | importOrderLines       | {\"orderId\":\"o\",\"foo\":1} | foo",
+        "goods-shipment    | importOrderLines       | {\"orderId\":\"o\"}     |",
+        "goods-shipment    | importOrderLines       | {\"foo\":1}             | foo",
+        "purchase-invoice  | importOrderLines       | {\"orderId\":\"o\"}     |",
+        "purchase-invoice  | importReceiptLines     | {\"receiptId\":\"r\"}   |",
+        "purchase-invoice  | importReceiptLines     | {\"shipmentId\":\"r\"}  | shipmentId",
+        "purchase-invoice  | availableReceiptLines  | {\"receiptId\":\"r\"}   |",
+        "purchase-invoice  | availableReceipts      | {}                    |",
+        "sales-invoice     | importOrderLines       | {\"orderId\":\"o\"}     |",
+        "sales-invoice     | importShipmentLines    | {\"shipmentId\":\"s\",\"lines\":[{\"sourceLineId\":\"a\",\"quantity\":1}]} |",
+        "sales-invoice     | importShipmentLines    | {\"receiptId\":\"s\"}   | receiptId",
+        "sales-invoice     | availableShipments     | {}                    |" })
+    void lineImportActionsAreJudgedByTheirDeclaredContracts(String window, String action,
+        String body, String refusal) throws Exception {
+      Map<String, NeoActionContract> declared;
+      switch (window.trim()) {
+        case "goods-receipt":
+          declared = new GoodsReceiptHeaderHandler().actionContracts();
+          break;
+        case "goods-shipment":
+          declared = new GoodsShipmentHeaderHandler().actionContracts();
+          break;
+        case "purchase-invoice":
+          declared = new PurchaseInvoiceHeaderHandler().actionContracts();
+          break;
+        default:
+          declared = new SalesInvoiceHeaderHandler().actionContracts();
+          break;
+      }
+      when(handler.actionContracts()).thenReturn(declared);
+      SFEntity e = entity("W", null);
+      JSONObject params = new JSONObject(body);
+
+      if (refusal == null) {
+        NeoActionContract contract = McpDeclaredActions.precheck(e, action.trim(), params);
+        assertNotNull(contract, action + " is a declared action");
+        assertEquals(action.trim(), contract.getName());
+        return;
+      }
+      McpRoutingException refused = assertThrows(McpRoutingException.class,
+          () -> McpDeclaredActions.precheck(e, action.trim(), params));
+      JSONObject env = refused.toEnvelope();
+      assertEquals(422, env.getInt(McpConstants.KEY_STATUS));
+      String key = refusal.startsWith("missing:") ? refusal.substring("missing:".length())
+          : refusal;
+      assertTrue(env.toString().contains(key.trim()), env.toString());
     }
 
     @Test
@@ -523,6 +677,40 @@ class McpWindowDeclaredActionsTest {
           .getInt(McpConstants.KEY_STATUS));
     }
 
+    /**
+     * The PIS actions are excluded in code by the invoice header customization (and hidden by the
+     * shipped MCP_CONFIG row too). The code check runs first, so they answer the generic reason —
+     * the HEAD behaviour, kept on purpose (ETP-5692 does not change it). Pinned with the PRODUCTION
+     * exclusion set and the SHIPPED row, through handleAction; {@code refused} also checks nothing ran.
+     */
+    @Test
+    @DisplayName("a PIS action excluded in code is refused 405 with the generic reason, nothing run")
+    void pisActionsAreRefusedInCodeThroughTheRealPath() throws Exception {
+      when(handler.agentExcludedActions())
+          .thenReturn(new SalesInvoiceHeaderHandler().agentExcludedActions());
+      String shipped = McpConfigSourcedataTest.payloadOf("7240CAF07810439B85DE61E70BE8DC0B")
+          .toString();
+      for (String pis : List.of("pisTemplates", "pisSupplierAccounts", "cancelPisPayment")) {
+        JSONObject env = refused(shipped, pis).toEnvelope();
+        assertEquals(405, env.getInt(McpConstants.KEY_STATUS), pis);
+        assertTrue(env.getString(McpConstants.KEY_DETAIL)
+            .contains("its customization keeps it for people only"), pis);
+      }
+    }
+
+    /** ETP-5692: on the same shipped row, posted gives its own reason and never the SCA one. */
+    @Test
+    @DisplayName("posted gives its own reason through the real path, not the SCA one")
+    void postedGivesItsOwnReasonThroughTheRealPath() throws Exception {
+      when(handler.agentExcludedActions())
+          .thenReturn(new SalesInvoiceHeaderHandler().agentExcludedActions());
+      String shipped = McpConfigSourcedataTest.payloadOf("7240CAF07810439B85DE61E70BE8DC0B")
+          .toString();
+      String detail = refused(shipped, "posted").toEnvelope().getString(McpConstants.KEY_DETAIL);
+      assertTrue(detail.contains("post action") && detail.contains("unpost action"), detail);
+      assertFalse(detail.contains("SCA"), detail);
+    }
+
     @Test
     @DisplayName("an action the customization excludes from agents is refused in code — even with"
         + " no MCP_CONFIG.actions row")
@@ -616,6 +804,132 @@ class McpWindowDeclaredActionsTest {
         assertTrue(result.toString().contains("ran"), result.toString());
         dispatch.verify(() -> NeoExtensionDispatcher.dispatch(any()));
       }
+    }
+
+    // ── ETP-5710: the customization sees the button under the name the SPA posts ──
+
+    /**
+     * Runs {@code etendo_action} up to the customization and returns the context it receives. The
+     * dispatcher answers with a response, so nothing past it (the process) runs.
+     */
+    private NeoContext contextSeenBy(String action, String mcpConfig) throws Exception {
+      return contextSeenBy(action, mcpConfig, new JSONObject().put("docAction", "CO"));
+    }
+
+    private NeoContext contextSeenBy(String action, String mcpConfig, JSONObject parameters)
+        throws Exception {
+      current = entity("W", mcpConfig);
+      java.util.concurrent.atomic.AtomicReference<NeoContext> seen =
+          new java.util.concurrent.atomic.AtomicReference<>();
+      try (MockedStatic<NeoExtensionDispatcher> dispatch =
+               mockStatic(NeoExtensionDispatcher.class);
+          MockedStatic<NeoActionRecordGuard> guard = mockStatic(NeoActionRecordGuard.class)) {
+        guard.when(() -> NeoActionRecordGuard.refusalFor(any(), anyString())).thenReturn(null);
+        dispatch.when(() -> NeoExtensionDispatcher.dispatch(any())).thenAnswer(inv -> {
+          seen.set(inv.<NeoExtensionRequest>getArgument(0).context());
+          return new NeoExtensionResult(null, NeoResponse.ok(new JSONObject()), null);
+        });
+        JSONObject args = new JSONObject().put("entity", ENTITY).put("id", "INV-1")
+            .put("action", action).put("parameters", parameters);
+        new McpToolRouter().handleAction(SPEC, args);
+      }
+      assertNotNull(seen.get(), "the customization was reached for " + action);
+      return seen.get();
+    }
+
+    @ParameterizedTest(name = "typed as {0}")
+    @CsvSource({ "DocAction", "documentAction" })
+    @DisplayName("an AD button reaches the customization under its field name, whichever way it"
+        + " was typed")
+    void buttonReachesTheCustomizationUnderItsFieldName(String typed) throws Exception {
+      NeoContext seen = contextSeenBy(typed, null);
+
+      assertEquals("documentAction", seen.getFieldName());
+      assertEquals("INV-1", seen.getRecordId());
+      assertEquals("CO", seen.getRequestBody().getString("docAction"),
+          "the body is the agent's, untouched");
+      assertTrue(seen.isMcpOrigin());
+    }
+
+    @Test
+    @DisplayName("the button is still fired under the name the agent typed")
+    void buttonIsFiredUnderTheTypedName() throws Exception {
+      current = entity("W", null);
+      try (MockedStatic<NeoExtensionDispatcher> dispatch =
+               mockStatic(NeoExtensionDispatcher.class);
+          MockedStatic<NeoActionRecordGuard> guard = mockStatic(NeoActionRecordGuard.class)) {
+        guard.when(() -> NeoActionRecordGuard.refusalFor(any(), anyString())).thenReturn(null);
+        dispatch.when(() -> NeoExtensionDispatcher.dispatch(any())).thenReturn(
+            new NeoExtensionResult(null, null, null));
+        buttonMock.when(() -> NeoButtonActionHelper.executeButtonActionCore(any(), anyString(),
+            anyString(), any())).thenReturn(NeoResponse.ok(new JSONObject()));
+        supportMock.when(() -> McpToolRouterSupport.mapNeoResponseToActionResult(any()))
+            .thenReturn(new JSONObject());
+        JSONObject args = new JSONObject().put("entity", ENTITY).put("id", "INV-1")
+            .put("action", "DocAction");
+        try {
+          new McpToolRouter().handleAction(SPEC, args);
+        } catch (RuntimeException ignored) {
+          // the post-processing is not what this test is about
+        }
+        buttonMock.verify(() -> NeoButtonActionHelper.executeButtonActionCore(any(),
+            eq("INV-1"), eq("DocAction"), any()));
+      }
+    }
+
+    @Test
+    @DisplayName("a name that is no button of the entity reaches the customization as typed")
+    void unknownNameIsLeftAlone() throws Exception {
+      assertEquals("cloneRecord", contextSeenBy("cloneRecord", null).getFieldName());
+    }
+
+    @ParameterizedTest(name = "redirected button typed as {0}")
+    @CsvSource({ "EM_APRM_Addpayment", "aPRMAddpayment" })
+    @DisplayName("a redirected button is refused under either spelling, before any customization")
+    void redirectedButtonIsStillRefusedUnderEverySpelling(String typed) throws Exception {
+      current = entity("W", HIDE_PIS);
+      try (MockedStatic<NeoExtensionDispatcher> dispatch =
+               mockStatic(NeoExtensionDispatcher.class)) {
+        JSONObject args = new JSONObject().put("entity", ENTITY).put("id", "INV-1")
+            .put("action", typed);
+        McpRoutingException e = assertThrows(McpRoutingException.class,
+            () -> new McpToolRouter().handleAction(SPEC, args));
+        assertTrue(e.toEnvelope().getString(McpConstants.KEY_HINT).contains("registerPayment"));
+        dispatch.verify(() -> NeoExtensionDispatcher.dispatch(any()), never());
+      }
+    }
+
+    @ParameterizedTest(name = "hidden button typed as {0}")
+    @CsvSource({ "EM_Psd2_Generate_Bank_Payment", "psd2GenerateBankPayment" })
+    @DisplayName("a hidden button is refused under either spelling, before any customization")
+    void hiddenButtonIsStillRefusedUnderEverySpelling(String typed) throws Exception {
+      current = entity("W", HIDE_PIS);
+      try (MockedStatic<NeoExtensionDispatcher> dispatch =
+               mockStatic(NeoExtensionDispatcher.class)) {
+        JSONObject args = new JSONObject().put("entity", ENTITY).put("id", "INV-1")
+            .put("action", typed);
+        assertThrows(McpRoutingException.class,
+            () -> new McpToolRouter().handleAction(SPEC, args));
+        dispatch.verify(() -> NeoExtensionDispatcher.dispatch(any()), never());
+      }
+    }
+
+    @Test
+    @DisplayName("a declared contract keeps precedence: a contract describing the button is run"
+        + " under its declared name")
+    void declaredContractKeepsPrecedence() throws Exception {
+      Map<String, NeoActionContract> withButtonContract = new LinkedHashMap<>(contracts());
+      withButtonContract.put("documentAction",
+          NeoActionContract.write("documentAction", "Completes the document",
+              NeoActionContract.Param.optional("docAction", NeoActionContract.TYPE_STRING,
+                  "the value")));
+      when(handler.actionContracts()).thenReturn(withButtonContract);
+
+      assertEquals("documentAction", contextSeenBy("DocAction", null).getFieldName());
+      assertEquals("registerPayment", contextSeenBy("registerPayment", null,
+          new JSONObject().put("scheduleId", "S").put("actual_payment", 10)).getFieldName());
+      assertEquals("GET", contextSeenBy("currencyOptions", null, new JSONObject())
+          .getHttpMethod());
     }
   }
 
@@ -1167,6 +1481,140 @@ class McpWindowDeclaredActionsTest {
         out.add(arr.getString(i));
       }
       return out;
+    }
+  }
+
+  // ── ETP-5692: a per-action reason, and a withheld button that is also a displayed value ──
+
+  @Nested
+  @DisplayName("ETP-5692 — reasons per action, and the posted value kept readable")
+  class PerActionReasonsAndDisplayedValues {
+
+    private static final String HIDE_PIS_AND_POSTED = "{\"actions\":{\"hidden\":[\"pisTemplates\","
+        + "\"psd2GenerateBankPayment\",\"posted\"],\"redirect\":{\"aPRMAddpayment\":"
+        + "\"registerPayment\"},\"reason\":\"PIS needs a person to authorize at the bank\","
+        + "\"redirectReason\":\"the classic Add Payment button is not the Etendo payment flow\","
+        + "\"reasons\":{\"posted\":\"a blind toggle; use the post and unpost actions\"}}}";
+
+    /** The schema's buttons plus {@code posted}: a button column curated readOnly. */
+    private JSONArray buttonsWithPosted() throws Exception {
+      JSONArray fields = buttons();
+      fields.put(new JSONObject("{\"name\":\"posted\",\"column\":\"Posted\",\"type\":\"button\","
+          + "\"visibility\":\"readOnly\",\"label\":\"Posted\",\"action\":\"Posted\","
+          + "\"triggerValue\":\"Y\",\"processId\":\"P1\",\"invokeVia\":\"etendo_action\","
+          + "\"actionValues\":[{\"value\":\"Y\",\"label\":\"Unpost\"}],"
+          + "\"actionParameter\":\"docAction\"}"));
+      return fields;
+    }
+
+    private JSONObject named(JSONArray fields, String name) throws Exception {
+      for (int i = 0; i < fields.length(); i++) {
+        if (name.equals(fields.getJSONObject(i).optString("name"))) {
+          return fields.getJSONObject(i);
+        }
+      }
+      return null;
+    }
+
+    @Test
+    @DisplayName("a hidden action with its own reason is refused with that reason, not the section's")
+    void hiddenActionGivesItsOwnReason() throws Exception {
+      McpRoutingException e = assertThrows(McpRoutingException.class,
+          () -> McpDeclaredActions.precheck(entity("W", HIDE_PIS_AND_POSTED), "posted",
+              new JSONObject()));
+      String detail = e.toEnvelope().getString(McpConstants.KEY_DETAIL);
+      assertTrue(detail.contains("use the post and unpost actions"), detail);
+      assertFalse(detail.contains("authorize at the bank"), "not the PIS reason: " + detail);
+    }
+
+    @Test
+    @DisplayName("the other hidden actions keep the section-wide reason")
+    void otherHiddenActionsKeepTheSectionReason() throws Exception {
+      McpRoutingException e = assertThrows(McpRoutingException.class,
+          () -> McpDeclaredActions.precheck(entity("W", HIDE_PIS_AND_POSTED), "pisTemplates",
+              new JSONObject()));
+      assertTrue(e.toEnvelope().getString(McpConstants.KEY_DETAIL).contains("authorize at the bank"));
+    }
+
+    @Test
+    @DisplayName("a redirected button with its own reason shows it in the catalogue")
+    void redirectedButtonGivesItsOwnReason() throws Exception {
+      SFEntity e = entity("W", "{\"actions\":{\"redirect\":{\"aPRMAddpayment\":"
+          + "\"registerPayment\"},\"reason\":\"section reason\","
+          + "\"reasons\":{\"aPRMAddpayment\":\"its own reason\"}}}");
+      JSONArray shaped = McpActionsView.applyConfig(buttons(), McpActionsSection.forEntity(e),
+          Set.of());
+      String reason = named(shaped, "aPRMAddpayment").getString("notInvokableReason");
+      assertTrue(reason.contains("its own reason"), reason);
+      assertFalse(reason.contains("section reason"), reason);
+    }
+
+    @Test
+    @DisplayName("a hidden button curated readOnly stays in the full view as a plain read-only value")
+    void hiddenDisplayedButtonStaysAsValue() throws Exception {
+      SFEntity e = entity("W", HIDE_PIS_AND_POSTED);
+      JSONArray shaped = McpActionsView.applyConfig(buttonsWithPosted(),
+          McpActionsSection.forEntity(e), Set.of());
+
+      JSONObject posted = named(shaped, "posted");
+      assertNotNull(posted, "the posted value must stay described: " + shaped);
+      assertEquals("string", posted.getString("type"));
+      assertTrue(posted.getBoolean("readOnly"));
+      assertEquals("Posted", posted.getString("label"));
+      for (String key : List.of("action", "triggerValue", "processId", "invokeVia", "actionValues",
+          "actionParameter", "invokable", "notInvokableReason")) {
+        assertFalse(posted.has(key), "no action decoration left: " + key + " in " + posted);
+      }
+      assertNull(named(shaped, "psd2GenerateBankPayment"),
+          "a hidden button that is not a displayed value is still left out");
+    }
+
+    @Test
+    @DisplayName("a hidden button curated editable or system is still dropped from the full view")
+    void hiddenNonDisplayedButtonsAreStillDropped() throws Exception {
+      SFEntity e = entity("W", HIDE_PIS_AND_POSTED);
+      for (String visibility : List.of("editable", "system")) {
+        JSONArray fields = buttons();
+        fields.put(new JSONObject("{\"name\":\"posted\",\"column\":\"Posted\","
+            + "\"type\":\"button\",\"visibility\":\"" + visibility + "\","
+            + "\"invokeVia\":\"etendo_action\"}"));
+        JSONArray shaped = McpActionsView.applyConfig(fields, McpActionsSection.forEntity(e),
+            Set.of());
+        assertNull(named(shaped, "posted"), visibility + ": " + shaped);
+      }
+    }
+
+    @Test
+    @DisplayName("view:\"actions\" still leaves the hidden posted button out")
+    void actionsViewStillOmitsPosted() throws Exception {
+      SFEntity e = entity("W", HIDE_PIS_AND_POSTED);
+      JSONArray actions = McpActionsView.buildResponse(SPEC, ENTITY,
+          McpActionsView.applyConfig(buttonsWithPosted(), McpActionsSection.forEntity(e), Set.of()),
+          McpDeclaredActions.of(e), McpActionsSection.forEntity(e)).getJSONArray("actions");
+      assertFalse(namesOf(actions).contains("posted"), actions.toString());
+    }
+
+    @Test
+    @DisplayName("an excluded button curated readOnly is kept as a value too")
+    void excludedDisplayedButtonStaysAsValue() throws Exception {
+      JSONArray shaped = McpActionsView.applyConfig(buttonsWithPosted(), null, Set.of("posted"));
+      assertEquals("string", named(shaped, "posted").getString("type"));
+    }
+
+    @Test
+    @DisplayName("reasons must name a hidden or redirected action, with a non-blank reason")
+    void reasonsAreValidated() throws Exception {
+      JSONObject unknown = new JSONObject("{\"hidden\":[\"a\"],\"reason\":\"r\","
+          + "\"reasons\":{\"b\":\"x\"}}");
+      assertTrue(McpActionsSection.validate(unknown).toString().contains("reasons.b"));
+      JSONObject blank = new JSONObject("{\"hidden\":[\"a\"],\"reason\":\"r\","
+          + "\"reasons\":{\"a\":\" \"}}");
+      assertTrue(McpActionsSection.validate(blank).toString().contains("reasons.a"));
+      JSONObject empty = new JSONObject("{\"hidden\":[\"a\"],\"reason\":\"r\",\"reasons\":{}}");
+      assertFalse(McpActionsSection.validate(empty).isEmpty());
+      JSONObject valid = new JSONObject("{\"hidden\":[\"a\"],\"redirect\":{\"c\":\"d\"},"
+          + "\"reason\":\"r\",\"reasons\":{\"a\":\"x\",\"c\":\"y\"}}");
+      assertTrue(McpActionsSection.validate(valid).isEmpty(), McpActionsSection.validate(valid).toString());
     }
   }
 }

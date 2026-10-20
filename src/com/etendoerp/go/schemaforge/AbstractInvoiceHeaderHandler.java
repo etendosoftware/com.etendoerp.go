@@ -41,6 +41,7 @@ import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBCurrencyUtils;
+import org.openbravo.model.common.businesspartner.Location;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.invoice.Invoice;
@@ -82,6 +83,8 @@ public abstract class AbstractInvoiceHeaderHandler {
   protected static final String FIELD_ORIGIN_INVOICES      = "originInvoices";
   protected static final String FIELD_TRANSACTION_DOCUMENT = "transactionDocument";
   private static final String FIELD_CURRENCY = "currency";
+  /** {@code C_BPartner_Location_ID}: the invoicing address. */
+  static final String FIELD_PARTNER_ADDRESS = "partnerAddress";
   // Package-private: also used by InvoiceCalloutHelper (S1448 extraction)
   static final String FIELD_VALUE = "value";
   private static final String FIELD_PROCESSED = "processed";
@@ -113,6 +116,13 @@ public abstract class AbstractInvoiceHeaderHandler {
   // injected into the request body in handle() and survive to the DAL layer.
   private String pendingSiiAuthorizationno;
   private boolean siiAuthorizationCaptured;
+
+  // ETP-5703: the exchange-rate default of a write that leaves the rate out. Its per-request state
+  // (why the rate is left to the server, set by capture() in handle() and consumed by apply() in
+  // afterHandle()) lives on this object, owned by THIS handler instance — the same
+  // instance-per-request pattern as above. See InvoiceCurrencyRateDefaults.
+  final InvoiceCurrencyRateDefaults currencyRateDefaults =
+      new InvoiceCurrencyRateDefaults();
 
   // ---------------------------------------------------------------------------
   // Abstract contract
@@ -239,6 +249,18 @@ public abstract class AbstractInvoiceHeaderHandler {
   // ---------------------------------------------------------------------------
   // Validation
   // ---------------------------------------------------------------------------
+
+  /**
+   * The header fields this window can still change once the invoice is completed (ETP-5692) — the
+   * one extension point of the invoice write guards ({@link InvoicePostingGate#checkHeaderRequest}).
+   * The sales default; {@link PurchaseInvoiceHeaderHandler} adds {@code orderReference}. Both sets
+   * are declared once, in {@link CompletedInvoiceWriteFence}.
+   *
+   * @return the allowlist the completed-invoice write fence applies to this header
+   */
+  protected Set<String> completedEditableHeaderFields() {
+    return CompletedInvoiceWriteFence.headerEditableWhenCompleted();
+  }
 
   /**
    * Rejects PUT requests that attempt to change the document type after the invoice has been saved
@@ -1023,6 +1045,43 @@ public abstract class AbstractInvoiceHeaderHandler {
       InvoiceCalloutHelper.appendMessage(body, "WARNING", "noExchangeRateAvailable");
       log.debug("[ETP-4029] No conversion rate warning added (currency={})", docCurrencyId);
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Server-side defaults for a write that leaves a field out (ETP-5703)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Fills {@code partnerAddress} (the invoicing address, {@code C_Invoice.C_BPartner_Location_ID},
+   * mandatory) on a create that names a business partner but no address, when the partner has
+   * exactly one active bill-to location (ETP-5703).
+   *
+   * <p><b>Why.</b> The SPA always sends the address it picked from the partner's locations, but an
+   * agent creating an invoice with only {@code businessPartner} was refused with a 422 naming
+   * {@code partnerAddress}, even for a partner with a single address: the business-partner callout
+   * cannot select one through NEO (the {@code _LOC} selector aux value it reads does not exist —
+   * see {@code McpBillToInjector}). Sales and purchase invoices alike.
+   *
+   * <p><b>Only when unambiguous.</b> With several bill-to locations the choice is the caller's —
+   * a plausible wrong invoicing address is worse than a precise 422 — so this abstains, as it does
+   * when the body already carries an address, when the partner is absent or still a batch
+   * {@code $ref:}, or when the partner has none. Runs in the caller's own DAL scope: a location this
+   * role cannot read never becomes the address of a document it writes.
+   *
+   * <p><b>Channels.</b> Called from each subclass's {@code handle()} pre-hook, which runs before
+   * the create on REST single and REST batch / {@code etendo_batch} ({@code handleWithHooks}).
+   * <b>Declared divergence:</b> on MCP {@code etendo_create} the mandatory pre-check runs before
+   * this pre-hook by design (ETP-5535), so a missing {@code partnerAddress} still answers the
+   * precise {@code missingFields} 422 there — see {@code neo-headless.md} §4.12.9.
+   *
+   * <p>Total: never throws.
+   *
+   * @param context the current request context; its request body is mutated in place
+   */
+  protected static void injectPartnerAddressIfMissing(NeoContext context) {
+    // The invoicing address column's AD rule ("C_BPartner Location - Bill To") requires IsBillTo.
+    PartnerLocationDefaults.fillIfMissing(context, FIELD_PARTNER_ADDRESS,
+        Location.PROPERTY_INVOICETOADDRESS);
   }
 
   // ---------------------------------------------------------------------------
