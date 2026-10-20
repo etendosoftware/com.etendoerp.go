@@ -35,14 +35,31 @@ Declarations use `model: "390"`, `period: "0A"`.
 | `409` | `generate` when the latest declaration of the year is submitted (shared ETP-5438 guard) |
 | `409 BLOCKING_INCIDENTS` | `generate` while a blocking rule holds — body `{ error: { status, code, message, incidents: [...] } }` (see "Incidents") |
 | `409 DUPLICATE_ORDINARY` | `POST /declarations` of a 2nd ordinary 390 for the same org/year — see below |
-| `500` | no 390 tax report up to the year, incomplete fiscal calendar, classic validation errors (translated AD message, e.g. missing main IAE activity) |
+| `422 INCOMPLETE_FISCAL_YEAR` | the exercise has no period for some month 1–12 in the fiscal calendar (`boxes`, `sources`, `generate`; see "Annual period") — body `{ error: { status: 422, code, message, year, missingPeriods: [1..12] } }` |
+| `500` | no 390 tax report up to the year, classic validation errors (translated AD message, e.g. missing main IAE activity) |
 
 ## Annual period
 
 `0A` maps to periods 1–12 of the fiscal year (`AbstractFiscalHandler.resolvePeriods`, constant
-`ANNUAL_PERIOD`). If any month has no period the request fails with a message naming the missing
-months — an annual declaration over an incomplete calendar would under-report silently. `Tn` and
-month codes are unchanged.
+`ANNUAL_PERIOD`). If any month has no period the request fails — an annual declaration over an
+incomplete calendar would under-report silently. `Tn` and month codes are unchanged.
+
+The failure is structured (ETP-5716): `requireFullYear` throws `IncompleteFiscalYearException`
+(year + missing months; its message, with the org id, goes to the log only), and
+`AbstractFiscalHandler.handle` finds it anywhere in the cause chain and answers
+
+```json
+{ "error": { "status": 422, "code": "INCOMPLETE_FISCAL_YEAR",
+             "message": "The fiscal year 2025 has no period for month(s) [1, …, 12] in the fiscal calendar. …",
+             "year": 2025, "missingPeriods": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] } }
+```
+
+so the client explains it in its own language and points to the fiscal calendar. The same case
+is the blocking incident `INCOMPLETE_FISCAL_YEAR` (see "Incidents") — which is what `generate` /
+`submit` report first, through their `BLOCKING_INCIDENTS` guard — and, should `submit` reach the
+file generation anyway, its failure JSON carries `errorCode = INCOMPLETE_FISCAL_YEAR`, `year`
+and `missingPeriods` (status `422`). `preload` does not read the 390 calendar. The 303 / 349
+paths keep their own plain "No periods found …" `500` for a quarter or month without periods.
 
 ## Tax report resolution (year fallback)
 
@@ -240,6 +257,7 @@ Flow of a production filing:
    | `409` | `BLOCKING_INCIDENTS` | a blocking RULE holds for the STORED inputs — evaluated fresh, never from the stored rows (see "Incidents"); the answer carries `incidents` |
    | `400` | `MISSING_PRESENTER` | `presenterNif` / `presenterName` blank |
    | `409` | `NO_CERTIFICATE` | the organization has no stored certificate |
+   | `422` | `INCOMPLETE_FISCAL_YEAR` | the file could not be generated because the calendar lacks periods; also `year`, `missingPeriods` |
    | `500` | `SUBMISSION_FAILED` | the file could not be generated |
    | `500` | `SNAPSHOT_FAILED` | the figures could not be frozen — nothing was sent to the AEAT |
    | `502` | `SUBMISSION_FAILED` | transport / non-JSON answer from the AEAT |
@@ -420,7 +438,7 @@ NIF / org info / legal representatives, `AEAT390Utility.getEpigraphOrgInfo` acti
 inputs the file is built from, the boxes payload (`warnings`, `annualResult`), the year's 303s
 (`Fiscal390PreloadSupport.aggregateYear`) and two invoice queries. A source that fails to load
 leaves its facts unknown and its rules silent (logged); a boxes failure is itself the blocking
-incident `COMPUTE_FAILED`.
+incident `COMPUTE_FAILED` — or `INCOMPLETE_FISCAL_YEAR` when the cause is the calendar.
 
 A rule is **blocking** when classic rejects (or crashes on) the same data while generating the
 file, or the AEAT rejects it; otherwise it is a **warning**.
@@ -431,7 +449,8 @@ file, or the AEAT rejects it; otherwise it is a **warning**.
 | `IAE_WITHOUT_CODE` `{activity}` | block | `AEAT390_Activity_Code_Mandatory` (main + every other activity) | organization `iae` |
 | `TOO_MANY_IAE` `{count, max: 5}` | block | the TXT writer keeps the main + 5 others in a 6-slot array: a 6th crashes (Jira listed it as a warning; it is blocking because classic fails) | organization `iae` |
 | `UNSUPPORTED_RATE` `{parameter, rate}` | block | calculator warning; classic aborts on that rate | — |
-| `COMPUTE_FAILED` `{message}` | block | the boxes cannot be computed (non-numeric input, incomplete calendar, no tax report) | — |
+| `INCOMPLETE_FISCAL_YEAR` `{year, missingPeriods: "1,2,…"}` | block | the exercise has no period for those months in the fiscal calendar (classic cannot compute it either) | `fiscalCalendar` |
+| `COMPUTE_FAILED` `{message}` | block | the boxes cannot be computed (non-numeric input, no tax report) | — |
 | `SUBSTITUTE_ID_INVALID` `{length: 13}` | block | `AEAT390_NoSuplementaryNumber`; AEAT needs 13 digits. Substitute = `ISSUPPLEMENTARY`/`ISRECTIFICATION` = Y or `identification.sustitutiva`; identifier = `SUPPLEMENTARYNO`, else `identification.formerStatement` | — |
 | `TERRITORY_PERCENT_MAX` `{box, max: 99}` | block | `AEAT390_99_Percentage_Individual` | box [87]–[91] |
 | `TERRITORY_PERCENT_SUM` `{sum}` | block | `AEAT390_100_Percentage_Sum` (only when some % > 0) | box [87] |

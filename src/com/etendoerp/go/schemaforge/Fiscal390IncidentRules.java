@@ -57,6 +57,11 @@ final class Fiscal390IncidentRules {
   static final String UNSUPPORTED_RATE = Fiscal390BoxesCalculator.WARNING_UNSUPPORTED_RATE;
   /** The boxes could not be computed at all (classic would fail the same way). */
   static final String COMPUTE_FAILED = "COMPUTE_FAILED";
+  /**
+   * The exercise has no period for some month 1-12 in the fiscal calendar
+   * ({@link IncompleteFiscalYearException}): nothing can be computed until they are created.
+   */
+  static final String INCOMPLETE_FISCAL_YEAR = IncompleteFiscalYearException.CODE;
   /** Classic {@code AEAT390_NoSuplementaryNumber}; the AEAT needs the 13-digit identifier. */
   static final String SUBSTITUTE_ID_INVALID = "SUBSTITUTE_ID_INVALID";
   /** Classic {@code AEAT390_99_Percentage_Individual}. */
@@ -120,6 +125,8 @@ final class Fiscal390IncidentRules {
   static final String ACTION_SOURCES = "sources";
   static final String ACTION_ORGANIZATION = "organization";
   static final String ACTION_INVOICES = "invoices";
+  /** The fiscal calendar window (the periods of the exercise). */
+  static final String ACTION_FISCAL_CALENDAR = "fiscalCalendar";
   /** Organization window sections ({@code /organization#<section>}). */
   static final String SECTION_IDENTITY = "identity";
   static final String SECTION_IAE = "iae";
@@ -186,6 +193,10 @@ final class Fiscal390IncidentRules {
     List<Map<String, String>> calculatorWarnings = Collections.emptyList();
     /** Set when the boxes could not be computed. */
     String computeError;
+    /** Months (1-12) without a calendar period; set instead of {@link #computeError}. */
+    List<Long> incompleteFiscalYear;
+    /** The exercise, for {@link #incompleteFiscalYear}. */
+    int year;
     /** [86] (or [94] in territory mode) of the boxes payload. */
     BigDecimal annualResult;
     /** {@code true} when {@link #annualResult} is [94]. */
@@ -246,6 +257,13 @@ final class Fiscal390IncidentRules {
     List<Incident> out = new ArrayList<>();
     organizationIdentity(f, out);
     activities(f, out);
+    if (f.incompleteFiscalYear != null) {
+      out.add(block(INCOMPLETE_FISCAL_YEAR, "The fiscal year " + f.year
+          + " has no period for month(s) " + f.incompleteFiscalYear + " in the fiscal calendar.")
+          .param("year", String.valueOf(f.year))
+          .param("missingPeriods", StringUtils.join(f.incompleteFiscalYear, ","))
+          .action(ACTION_FISCAL_CALENDAR, null, null));
+    }
     if (f.computeError != null) {
       out.add(block(COMPUTE_FAILED, "The boxes could not be computed: " + f.computeError)
           .param("message", f.computeError));

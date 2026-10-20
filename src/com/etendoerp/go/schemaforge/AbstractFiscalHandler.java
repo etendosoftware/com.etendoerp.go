@@ -293,14 +293,43 @@ abstract class AbstractFiscalHandler {
     try {
       String orgId = resolveEffectiveOrg();
       dispatch(entityName, orgId, year, period, request, response);
-    } catch (FiscalHandlerException e) {
-      log.error("Error in /" + getModelKey() + "/" + entityName, e);
-      servlet.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, userMessage(e));
     } catch (Exception e) {
+      if (sendIncompleteFiscalYear(response, e, entityName)) {
+        return;
+      }
+      if (e instanceof FiscalHandlerException) {
+        log.error("Error in /" + getModelKey() + "/" + entityName, e);
+        servlet.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, userMessage(e));
+        return;
+      }
       log.error("Unexpected error in /" + getModelKey() + "/" + entityName, e);
       servlet.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           GENERIC_ERROR_MESSAGE);
     }
+  }
+
+  /**
+   * Answers an {@link IncompleteFiscalYearException} anywhere in {@code e}'s cause chain with the
+   * structured {@code 422 INCOMPLETE_FISCAL_YEAR} (year + missing months, no organization id in
+   * the text), so the client can explain it and point to the fiscal calendar. The full English
+   * message stays in the log.
+   *
+   * @return {@code true} when the answer was written
+   */
+  boolean sendIncompleteFiscalYear(HttpServletResponse response, Throwable e, String entityName)
+      throws IOException {
+    IncompleteFiscalYearException incomplete = IncompleteFiscalYearException.find(e);
+    if (incomplete == null) {
+      return false;
+    }
+    log.warn("/" + getModelKey() + "/" + entityName + ": " + incomplete.getMessage());
+    try {
+      servlet.writeResponse(response,
+          NeoResponse.error(IncompleteFiscalYearException.HTTP_STATUS, incomplete.toErrorBody()));
+    } catch (org.codehaus.jettison.json.JSONException jsonEx) {
+      servlet.sendError(response, IncompleteFiscalYearException.HTTP_STATUS, incomplete.userText());
+    }
+    return true;
   }
 
   /**
@@ -707,7 +736,8 @@ abstract class AbstractFiscalHandler {
    * year that does not have exactly one period per month 1-12 is rejected, naming the missing
    * months.
    *
-   * @throws OBException when any month 1-12 has no period
+   * @throws IncompleteFiscalYearException when any month 1-12 has no period — answered by
+   *     {@link #handle} as the structured {@code 422 INCOMPLETE_FISCAL_YEAR}
    */
   static void requireFullYear(List<Period> periods, String orgId, int year) {
     Set<Long> present = new TreeSet<>();
@@ -723,9 +753,7 @@ abstract class AbstractFiscalHandler {
       }
     }
     if (!missing.isEmpty()) {
-      throw new OBException("The fiscal year " + year + " of org=" + orgId
-          + " is incomplete for an annual declaration: missing period(s) " + missing
-          + ". Create its 12 monthly periods before computing it.");
+      throw new IncompleteFiscalYearException(orgId, year, missing);
     }
   }
 }

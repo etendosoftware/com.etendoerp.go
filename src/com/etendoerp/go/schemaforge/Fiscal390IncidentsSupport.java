@@ -250,6 +250,13 @@ class Fiscal390IncidentsSupport {
         f.annualResult = new BigDecimal(summary.getString("annualResult"));
       }
     } catch (Exception e) {
+      IncompleteFiscalYearException incomplete = IncompleteFiscalYearException.find(e);
+      if (incomplete != null) {
+        AbstractFiscalHandler.log.warn("Modelo 390 incidents: " + incomplete.getMessage());
+        f.year = incomplete.getYear();
+        f.incompleteFiscalYear = incomplete.getMissingPeriods();
+        return;
+      }
       AbstractFiscalHandler.log.warn("Modelo 390 incidents: the boxes could not be computed", e);
       f.computeError = StringUtils.defaultIfBlank(
           NeoMessageTranslator.safeParseTranslation(e.getMessage()), e.getClass().getSimpleName());

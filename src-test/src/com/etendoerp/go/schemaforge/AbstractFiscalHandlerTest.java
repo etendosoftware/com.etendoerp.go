@@ -686,18 +686,64 @@ public class AbstractFiscalHandlerTest {
 
       try {
         handler.resolvePeriods("org1", 2025, AbstractFiscalHandler.ANNUAL_PERIOD);
-        fail("Expected OBException for an incomplete fiscal year");
-      } catch (OBException e) {
+        fail("Expected IncompleteFiscalYearException for an incomplete fiscal year");
+      } catch (IncompleteFiscalYearException e) {
         assertTrue(e.getMessage(), e.getMessage().contains("[7, 12]"));
         assertTrue(e.getMessage(), e.getMessage().contains("2025"));
+        assertEquals(2025, e.getYear());
+        assertEquals(List.of(7L, 12L), e.getMissingPeriods());
       }
     }
   }
 
-  /** A year with no period at all is rejected too (no silent empty compute). */
-  @Test(expected = OBException.class)
+  /** A year with no period at all is rejected too (no silent empty compute): every month. */
+  @Test
   public void testRequireFullYearRejectsEmptyCalendar() {
-    AbstractFiscalHandler.requireFullYear(Collections.emptyList(), "org1", 2025);
+    try {
+      AbstractFiscalHandler.requireFullYear(Collections.emptyList(), "org1", 2025);
+      fail("Expected IncompleteFiscalYearException for an empty calendar");
+    } catch (IncompleteFiscalYearException e) {
+      assertEquals(12, e.getMissingPeriods().size());
+      // The text sent to the client never carries the organization id (the log message does).
+      assertTrue(e.getMessage(), e.getMessage().contains("org1"));
+      assertTrue(e.userText(), !e.userText().contains("org1"));
+    }
+  }
+
+  /**
+   * ETP-5716 — wherever it is raised under dispatch (wrapped by runDispatch), an incomplete
+   * fiscal year is answered as the structured 422 INCOMPLETE_FISCAL_YEAR, not the generic 500.
+   */
+  @Test
+  public void testIncompleteFiscalYearYields422WithCode() throws Exception {
+    HttpServletRequest  req  = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    when(req.getParameter("year")).thenReturn("2025");
+    when(req.getParameter(PERIOD_KEY)).thenReturn("0A");
+    StubHandler handler = new StubHandler(servlet, true,
+        new IncompleteFiscalYearException("ORG1", 2025, List.of(11L, 12L)));
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class)) {
+      OBContext    ctx = mock(OBContext.class);
+      Organization org = mock(Organization.class);
+      when(org.getId()).thenReturn("ORG1");
+      when(ctx.getCurrentOrganization()).thenReturn(org);
+      ctxMock.when(OBContext::getOBContext).thenReturn(ctx);
+      handler.handle("known", "GET", req, resp);
+    }
+
+    org.mockito.ArgumentCaptor<NeoResponse> captor =
+        org.mockito.ArgumentCaptor.forClass(NeoResponse.class);
+    verify(servlet).writeResponse(eq(resp), captor.capture());
+    verify(servlet, org.mockito.Mockito.never()).sendError(eq(resp),
+        eq(HttpServletResponse.SC_INTERNAL_SERVER_ERROR), anyString());
+    assertEquals(IncompleteFiscalYearException.HTTP_STATUS, captor.getValue().getHttpStatus());
+    org.codehaus.jettison.json.JSONObject error = captor.getValue().getBody().getJSONObject("error");
+    assertEquals("INCOMPLETE_FISCAL_YEAR", error.getString("code"));
+    assertEquals(2025, error.getInt("year"));
+    assertEquals(2, error.getJSONArray("missingPeriods").length());
+    assertEquals(11, error.getJSONArray("missingPeriods").getInt(0));
+    assertTrue(error.getString("message"), !error.getString("message").contains("ORG1"));
   }
 
   /** Quarter/month codes never run the full-year check: a partial result is returned as-is. */

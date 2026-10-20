@@ -154,6 +154,22 @@ public class Fiscal390IncidentRulesTest {
     assertTrue(only(Fiscal390IncidentRules.COMPUTE_FAILED).isBlocking());
   }
 
+  /**
+   * ETP-5716 — a fiscal year without its calendar periods is its own blocking incident (year +
+   * missing months, pointing to the fiscal calendar), never the raw COMPUTE_FAILED text.
+   */
+  @Test
+  public void testIncompleteFiscalYearBlocksWithItsOwnCode() {
+    f.year = 2025;
+    f.incompleteFiscalYear = List.of(1L, 2L, 12L);
+    Fiscal390IncidentRules.Incident inc = only(Fiscal390IncidentRules.INCOMPLETE_FISCAL_YEAR);
+    assertTrue(inc.isBlocking());
+    assertEquals("2025", inc.params.get("year"));
+    assertEquals("1,2,12", inc.params.get("missingPeriods"));
+    assertEquals(Fiscal390IncidentRules.ACTION_FISCAL_CALENDAR, inc.action.get("type"));
+    assertTrue(codes().toString(), !codes().contains(Fiscal390IncidentRules.COMPUTE_FAILED));
+  }
+
   @Test
   public void testSubstituteNeedsThirteenDigits() {
     f.substituteFlag = true;

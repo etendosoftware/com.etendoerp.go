@@ -142,6 +142,18 @@ class Fiscal390SubmissionSupport {
     try {
       fileContent = owner.generateSupport().generateContent(orgId, year, inputs).content;
     } catch (Exception e) {
+      IncompleteFiscalYearException incomplete = IncompleteFiscalYearException.find(e);
+      if (incomplete != null) {
+        AbstractFiscalHandler.log.warn("390 submission (decl=" + declId + "): "
+            + incomplete.getMessage());
+        JSONObject failure = FiscalAeatSubmissionSupport.failureJson(testMode,
+            IncompleteFiscalYearException.CODE, incomplete.userText());
+        failure.put("year", incomplete.getYear());
+        failure.put("missingPeriods", incomplete.missingPeriodsJson());
+        FiscalAeatSubmissionSupport.writeJson(response, IncompleteFiscalYearException.HTTP_STATUS,
+            failure);
+        return;
+      }
       AbstractFiscalHandler.log.error(
           "Could not generate the 390 electronic file for submission (decl=" + declId + ")", e);
       FiscalAeatSubmissionSupport.writeJson(response,
