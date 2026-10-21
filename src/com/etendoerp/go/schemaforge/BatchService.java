@@ -914,6 +914,11 @@ public class BatchService {
     // customization, and returning to handleDefault here would have made the annotation work on
     // every path except batch. handleWithHooks falls back to handleDefault itself when nothing
     // resolves, so the generic behaviour for a genuinely uncustomised entity is unchanged.
+    // ETP-5785: same pre-dispatch check as a single REST write, before the customization runs.
+    NeoResponse refusal = NeoWritePreflight.refusalFor(ctx);
+    if (refusal != null) {
+      return refusal;
+    }
     return NeoServletSupport.handleWithHooks(sfEntity.getJavaQualifier(), ctx, crudHandler,
         NeoExtensionChannel.REST_BATCH);
   }

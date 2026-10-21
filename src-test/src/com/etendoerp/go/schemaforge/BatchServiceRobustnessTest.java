@@ -462,6 +462,37 @@ public class BatchServiceRobustnessTest {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // ETP-5785 — a create that references another tenant's record is refused BEFORE
+  // the customization runs, and the batch persists nothing.
+  // ---------------------------------------------------------------------------
+  @Test
+  public void aRefusedReferenceNeverReachesTheCustomizationAndRollsBack() throws Exception {
+    BatchService service = BatchService.forBatchOnly();
+    JSONArray ops = new JSONArray();
+    ops.put(op("loc", "locationAddress").put("body",
+        new JSONObject().put(PARENT_ID, "FOREIGN-BP").put("addressLine1", "Main St 1")));
+
+    OBDal obDal = mock(OBDal.class);
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<NeoServletSupport> support = mockStatic(NeoServletSupport.class);
+         MockedStatic<NeoWritePreflight> preflight = mockStatic(NeoWritePreflight.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      stubEntityResolution(support, obDal);
+      preflight.when(() -> NeoWritePreflight.refusalFor(any(NeoContext.class)))
+          .thenReturn(NeoResponse.error(400, "refered to but not present in the import set"));
+
+      JSONObject result = service.executeBatch(ops);
+
+      assertFalse(result.getBoolean(COMMITTED));
+      assertEquals(400, result.getJSONObject("error").getInt("status"));
+      support.verify(() -> NeoServletSupport.handleWithHooks(any(), any(NeoContext.class), any(),
+          any()), never());
+      verify(obDal, never()).commitAndClose();
+      verify(obDal).rollbackAndClose();
+    }
+  }
+
   /**
    * Stubs the entity-resolution seams so {@code createRecord} reaches the CRUD
    * dispatch: the spec is found, the entity is an active/included row with an

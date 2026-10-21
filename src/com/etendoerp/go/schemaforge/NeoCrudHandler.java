@@ -303,6 +303,12 @@ class NeoCrudHandler {
 
   private NeoResponse dispatchCrudRequestInternal(SFEntity entity, NeoContext neoContext,
       HttpServletRequest request, HttpServletResponse response) {
+    // ETP-5785: before ANY customization — its handle() may persist on its own — and once per
+    // write. handleDefault does not repeat it. See NeoWritePreflight.
+    NeoResponse refusal = NeoWritePreflight.refusalFor(neoContext);
+    if (refusal != null) {
+      return refusal;
+    }
     // ETP-5693: always through the hook pipeline, so an @NeoExtension on an entity without a
     // Java_Qualifier runs on REST too (ETP-5415 removed this early return from batch/MCP only).
     // handleWithDefaultStep falls back to handleDefault when nothing resolves.
@@ -311,6 +317,10 @@ class NeoCrudHandler {
 
   /**
    * Executes the default DAL-based handler for a CRUD request.
+   *
+   * <p>Reference ownership (ETP-5785) is NOT checked here: both callers that reach this for a write
+   * ({@code dispatchCrudRequestInternal} and {@code BatchService.createRecord}) run
+   * {@link NeoWritePreflight} before dispatching to a customization.
    */
   NeoResponse handleDefault(NeoContext context) {
     try {

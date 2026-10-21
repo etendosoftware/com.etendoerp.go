@@ -335,6 +335,18 @@ class NeoCrudHandlerTest {
   @DisplayName("handleWindowEntityCrud")
   class HandleWindowEntityCrud {
 
+    /**
+     * ETP-5785: a PUT/PATCH/DELETE first asks {@link NeoActionRecordGuard#writeRefusalFor} whether
+     * the target record may be written, and that guard fails closed (404) without a session. The
+     * routing tests below are about what happens once the write is allowed, so only that target
+     * check is stubbed to allow; the rest of {@link NeoWritePreflight} still runs for real.
+     */
+    private MockedStatic<NeoActionRecordGuard> allowWriteTarget() {
+      MockedStatic<NeoActionRecordGuard> guard = Mockito.mockStatic(NeoActionRecordGuard.class);
+      guard.when(() -> NeoActionRecordGuard.writeRefusalFor(any(), any())).thenReturn(null);
+      return guard;
+    }
+
     @ParameterizedTest
     @ValueSource(strings = { "POST", "PUT", "PATCH" })
     @DisplayName("ETP-5556: a read-only field no longer blocks the REST write from reaching a "
@@ -363,7 +375,8 @@ class NeoCrudHandlerTest {
       when(servlet.handleWithHooks(eq("orderHook"), any(), eq(request), eq(response)))
           .thenReturn(hookResponse);
 
-      try (MockedStatic<NeoFieldFilter> fieldFilters = Mockito.mockStatic(NeoFieldFilter.class)) {
+      try (MockedStatic<NeoFieldFilter> fieldFilters = Mockito.mockStatic(NeoFieldFilter.class);
+          MockedStatic<NeoActionRecordGuard> guard = allowWriteTarget()) {
         fieldFilters.when(() -> NeoFieldFilter.forEntity(entity, "Order")).thenReturn(filter);
 
         handler.handleWindowEntityCrud(spec, pathInfo, method, request, response);
@@ -371,6 +384,51 @@ class NeoCrudHandlerTest {
 
       verify(servlet).handleWithHooks(eq("orderHook"), any(), eq(request), eq(response));
       verify(servlet).writeResponse(response, hookResponse);
+    }
+
+    /**
+     * ETP-5785: the reference-ownership refusal is answered BEFORE the customization runs. A
+     * customization's handle() may persist on its own (ContactsLocationAddressHandler writes under
+     * the partner named by parentId), so a check inside the default step came too late.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = { "POST", "PUT", "PATCH" })
+    @DisplayName("ETP-5785: a write refused by the preflight never reaches the customization")
+    void preflightRefusalShortCircuitsTheCustomization(String method) throws Exception {
+      SFSpec spec = mock(SFSpec.class);
+      SFEntity entity = createMockEntity(false, false, true, true, true, false);
+      Tab adTab = mock(Tab.class);
+      Table table = mock(Table.class);
+      NeoFieldFilter filter = mock(NeoFieldFilter.class);
+      HttpServletRequest request = mock(HttpServletRequest.class);
+      HttpServletResponse response = mock(HttpServletResponse.class);
+      NeoServlet.NeoPathInfo pathInfo = new NeoServlet.NeoPathInfo(
+          "contacts", "locationAddress", "POST".equals(method) ? null : "REC-1");
+      when(spec.getId()).thenReturn("SPEC-1");
+      when(entity.getADTab()).thenReturn(adTab);
+      when(entity.getJavaQualifier()).thenReturn("contactsLocationAddressHandler");
+      when(adTab.getTable()).thenReturn(table);
+      when(table.getName()).thenReturn("BusinessPartnerLocation");
+      when(servlet.findEntity("SPEC-1", "locationAddress")).thenReturn(entity);
+      Map<String, String> query = new HashMap<>();
+      query.put("parentId", "FOREIGN-BP");
+      when(servlet.extractQueryParams(any())).thenReturn(query);
+      when(request.getInputStream()).thenReturn(toServletInputStream("{\"name\":\"x\"}"));
+      when(filter.findClientReadOnlyFields(any(), any())).thenReturn(List.of());
+      NeoResponse refusal = NeoResponse.error(400, "refered to but not present");
+
+      try (MockedStatic<NeoFieldFilter> fieldFilters = Mockito.mockStatic(NeoFieldFilter.class);
+          MockedStatic<NeoWritePreflight> preflight = Mockito.mockStatic(NeoWritePreflight.class)) {
+        fieldFilters.when(() -> NeoFieldFilter.forEntity(any(), any())).thenReturn(filter);
+        preflight.when(() -> NeoWritePreflight.refusalFor(any())).thenReturn(refusal);
+
+        handler.handleWindowEntityCrud(spec, pathInfo, method, request, response);
+
+        preflight.verify(() -> NeoWritePreflight.refusalFor(any()));
+      }
+
+      verify(servlet, never()).handleWithHooks(any(), any(), any(), any());
+      verify(servlet).writeResponse(response, refusal);
     }
 
     /**
@@ -410,7 +468,8 @@ class NeoCrudHandlerTest {
       when(servlet.extractQueryParams(any())).thenReturn(new HashMap<>());
       NeoFieldFilter filter = buildCreateExemptedFilter();
 
-      try (MockedStatic<NeoFieldFilter> fieldFilters = Mockito.mockStatic(NeoFieldFilter.class)) {
+      try (MockedStatic<NeoFieldFilter> fieldFilters = Mockito.mockStatic(NeoFieldFilter.class);
+          MockedStatic<NeoActionRecordGuard> guard = allowWriteTarget()) {
         fieldFilters.when(() -> NeoFieldFilter.forEntity(entity, "A_Asset")).thenReturn(filter);
 
         // POST: currency in the body is exempted (create-only) -> reaches dispatch.
@@ -431,6 +490,7 @@ class NeoCrudHandlerTest {
 
         verify(servlet).handleWithHooks(eq("assetsHandler"), any(), eq(putRequest), eq(response));
         verify(servlet, never()).writeResponse(eq(response), any());
+        guard.verify(() -> NeoActionRecordGuard.writeRefusalFor(entity, "REC-1"));
       }
     }
 
@@ -463,11 +523,14 @@ class NeoCrudHandlerTest {
           .thenReturn(hookResponse);
       NeoFieldFilter filter = buildLineFilter();
 
-      try (MockedStatic<NeoFieldFilter> fieldFilters = Mockito.mockStatic(NeoFieldFilter.class)) {
+      try (MockedStatic<NeoFieldFilter> fieldFilters = Mockito.mockStatic(NeoFieldFilter.class);
+          MockedStatic<NeoActionRecordGuard> guard = allowWriteTarget()) {
         fieldFilters.when(() -> NeoFieldFilter.forEntity(entity, "OrderLine")).thenReturn(filter);
 
         handler.handleWindowEntityCrud(spec,
             new NeoServlet.NeoPathInfo("testSpec", "lines", "LINE-1"), method, request, response);
+
+        guard.verify(() -> NeoActionRecordGuard.writeRefusalFor(entity, "LINE-1"));
       }
 
       verify(servlet).handleWithHooks(eq("linesHook"), any(), eq(request), eq(response));
@@ -581,7 +644,11 @@ class NeoCrudHandlerTest {
       when(request.getInputStream()).thenReturn(
           toServletInputStream("{\"qty\":5}"));
 
-      handler.handleWindowEntityCrud(spec, pathInfo, "PUT", request, response);
+      try (MockedStatic<NeoActionRecordGuard> guard = allowWriteTarget()) {
+        handler.handleWindowEntityCrud(spec, pathInfo, "PUT", request, response);
+
+        guard.verify(() -> NeoActionRecordGuard.writeRefusalFor(entity, "REC-1"));
+      }
 
       verify(servlet).writeResponse(eq(response), eq(hookResponse));
     }
@@ -610,7 +677,11 @@ class NeoCrudHandlerTest {
       when(request.getInputStream()).thenReturn(
           toServletInputStream("{\"status\":\"CO\"}"));
 
-      handler.handleWindowEntityCrud(spec, pathInfo, "PATCH", request, response);
+      try (MockedStatic<NeoActionRecordGuard> guard = allowWriteTarget()) {
+        handler.handleWindowEntityCrud(spec, pathInfo, "PATCH", request, response);
+
+        guard.verify(() -> NeoActionRecordGuard.writeRefusalFor(entity, "REC-1"));
+      }
 
       verify(servlet).writeResponse(eq(response), eq(hookResponse));
     }

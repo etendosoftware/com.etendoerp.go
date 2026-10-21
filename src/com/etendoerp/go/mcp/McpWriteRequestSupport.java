@@ -45,6 +45,7 @@ import org.openbravo.service.json.JsonConstants;
 
 import com.etendoerp.go.schemaforge.NeoErrorClassifier;
 import com.etendoerp.go.schemaforge.NeoErrorResponses;
+import com.etendoerp.go.schemaforge.NeoReferenceOwnership;
 import com.etendoerp.go.schemaforge.NeoServerOwnedFields;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
@@ -802,6 +803,30 @@ final class McpWriteRequestSupport {
           scope.getAgentProblem());
     }
     return scope;
+  }
+
+  /**
+   * Refuse a write whose request references a row of another tenant (ETP-5785).
+   *
+   * <p>The check itself is {@link NeoReferenceOwnership}, shared with the REST CRUD path. Its
+   * refusal is the body core returns for a reference that names no row, so it is turned into the
+   * agent's answer by {@link #checkJsonServiceError(JSONObject, String, Set)} — the same envelope a
+   * genuinely missing id produces, which is what keeps the two indistinguishable.</p>
+   *
+   * @param adTab                the tab being written
+   * @param fields               the body keyed by DAL property name, holding only what the caller
+   *                             sent; {@code null} to check the parent alone
+   * @param parentId             the parent id of a child create, or {@code null}
+   * @param callerProvidedFields the caller's own field names, for the envelope's hint
+   * @return the 422 validation envelope, or {@code null} when every reference is acceptable
+   * @throws JSONException if the envelope cannot be built
+   */
+  static JSONObject refuseUnownedReferences(Tab adTab, JSONObject fields, String parentId,
+      Set<String> callerProvidedFields) throws JSONException {
+    String refusal = NeoReferenceOwnership.refuseUnownedReferences(adTab, fields, parentId);
+    return refusal == null ? null
+        : checkJsonServiceError(new JSONObject(refusal), McpConstants.SEE_ALSO_WRITING,
+            callerProvidedFields);
   }
 
   /**
