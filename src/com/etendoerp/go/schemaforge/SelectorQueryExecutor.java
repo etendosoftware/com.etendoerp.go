@@ -44,8 +44,8 @@ import com.etendoerp.go.schemaforge.util.NeoTrl;
 final class SelectorQueryExecutor {
 
   private static final Logger log = LogManager.getLogger(SelectorQueryExecutor.class);
-  private static final String PARAM_SEARCH = "search";
-  private static final String ORDER_BY = " ORDER BY ";
+  static final String PARAM_SEARCH = "search";
+  static final String ORDER_BY = " ORDER BY ";
   private static final String PARAM_SEARCH_LANG = "searchLang";
   private static final String FIELD_LABEL = "label";
   private static final String PARAM_LANGUAGE = "language";
@@ -183,20 +183,17 @@ final class SelectorQueryExecutor {
 
     // For view-backed selectors whose Value Field is not the entity PK (e.g. Product Complete →
     // M_Product_Stock_V, one row per product×warehouse×locator), the same value appears in many
-    // rows. Restrict both the count and the data query to one representative row per distinct
-    // valueProperty so the response holds one item per value (no duplicates) and paging math is
-    // correct. Guard mirrors resolveRichItemId exactly: only when valueProperty is a non-PK path.
-    // Stock-breakdown selectors are the deliberate exception (see shouldDistinctByValue): they
-    // MUST keep every per-locator row. When the guard is false the where clause is byte-identical
-    // to before (zero regression).
-    boolean distinctByValue = shouldDistinctByValue(meta);
-    String effectiveWhere = distinctByValue
-        ? buildRepresentativeRowWhere(whereClause.getHql(), meta, alias)
-        : whereClause.getHql();
+    // rows. Those are paged BY VALUE (see {@link ValuePagedRichQuery}) so the response holds one
+    // item per value and the paging math is correct. Guard mirrors resolveRichItemId exactly: only
+    // when valueProperty is a non-PK path. Stock-breakdown selectors are the deliberate exception
+    // (see shouldDistinctByValue): they MUST keep every per-locator row. When the guard is false the
+    // where clause is byte-identical to before (zero regression).
+    if (shouldDistinctByValue(meta)) {
+      return ValuePagedRichQuery.execute(meta, alias, whereClause, search, limit, offset,
+          extraFilterParams);
+    }
+    String effectiveWhere = whereClause.getHql();
 
-    // count(*) over representative rows == count(distinct valueProperty), because the subquery
-    // yields exactly one row per distinct value. Both count and data use the same OBQuery path,
-    // so Hibernate's automatic readable-client/org filters apply identically to each.
     OBQuery<BaseOBObject> countQuery = OBDal.getInstance()
         .createQuery(meta.entityName, effectiveWhere);
     NeoSelectorExecutionHelper.bindNamedParameters(countQuery, whereClause.getParams());
@@ -216,17 +213,22 @@ final class SelectorQueryExecutor {
     dataQuery.setMaxResult(limit);
     dataQuery.setFirstResult(offset);
 
-    JSONArray columns = SelectorResponseSupport.buildGridColumnMetadata(meta.gridFields);
-    JSONArray items = new JSONArray();
-    List<String> entityIds = new ArrayList<>();
-    for (BaseOBObject bob : dataQuery.list()) {
-      JSONObject item = new JSONObject();
-      String itemId = resolveRichItemId(bob, meta);
-      item.put("id", itemId);
-      item.put(FIELD_LABEL, bob.getIdentifier());
-      entityIds.add(itemId);
-      entityIds.add(bob.getId().toString());
+    JSONArray items = buildRichItems(dataQuery.list(), meta);
+    return SelectorResponseSupport.buildSelectorResponse(items,
+        SelectorResponseSupport.buildGridColumnMetadata(meta.gridFields), totalCount, limit, offset);
+  }
 
+  /**
+   * The {id, label, grid fields, aux} item of every row, translated. Shared by the row-paged and
+   * the value-paged rich flows.
+   */
+  static JSONArray buildRichItems(List<BaseOBObject> rows, SelectorMeta meta)
+      throws Exception {
+    JSONArray items = new JSONArray();
+    for (BaseOBObject bob : rows) {
+      JSONObject item = new JSONObject();
+      item.put("id", resolveRichItemId(bob, meta));
+      item.put(FIELD_LABEL, bob.getIdentifier());
       for (RichFieldMeta fieldMeta : meta.gridFields) {
         Object value = resolvePropertyValue(bob, fieldMeta.property);
         item.put(fieldMeta.propertyKey, value != null ? value : JSONObject.NULL);
@@ -234,15 +236,14 @@ final class SelectorQueryExecutor {
       SelectorAuxResolver.appendAuxFields(item, bob, meta.auxFields);
       items.put(item);
     }
-
     enrichTranslations(items, meta.entityName, resolveEnrichLanguage(null));
-
-    return SelectorResponseSupport.buildSelectorResponse(items, columns, totalCount, limit, offset);
+    return items;
   }
 
   /**
    * Decides whether the rich-selector query must be collapsed to one representative row per
-   * distinct {@code valueProperty} (the ETP-4429 de-duplication of view-backed selectors).
+   * distinct {@code valueProperty} (the ETP-4429 de-duplication of view-backed selectors, paged by
+   * value since ETP-5707).
    *
    * <p>De-duplication is enabled only when the Value Field is a non-PK path (mirrors
    * {@link #resolveRichItemId}), AND the selector is NOT a stock-breakdown selector. Stock-breakdown
@@ -281,64 +282,6 @@ final class SelectorQueryExecutor {
     }
     return meta.auxFields.stream().anyMatch(af -> af != null
         && (AUX_SUFFIX_QTY.equalsIgnoreCase(af.suffix) || AUX_SUFFIX_LOC.equalsIgnoreCase(af.suffix)));
-  }
-
-  /**
-   * Rewrites a rich-selector OBQuery where-string so it returns a single representative row per
-   * distinct {@code valueProperty}. Used only when the selector's Value Field is not the entity PK.
-   *
-   * <p>The representative row is deterministic: the one with the minimum {@code id} within each
-   * value group. The very same filter (the original where conditions) is re-applied inside the
-   * subquery — with the entity alias rewritten to a private sub-alias — so filtering stays
-   * consistent and the chosen representative always satisfies the outer predicate. Because there is
-   * exactly one representative per value, {@code count(*)} over the result equals
-   * {@code count(distinct valueProperty)}, which keeps limit/offset paging math correct.</p>
-   *
-   * <p>Input format is what {@link SelectorQueryBuilder#buildRichQueryWhereClause} produces:
-   * {@code "as e"} or {@code "as e where <conditions>"}. Named parameters that appear in the
-   * original conditions are duplicated into the subquery text, but Hibernate binds each named
-   * parameter to every occurrence, so the existing single binding still applies.</p>
-   */
-  private static String buildRepresentativeRowWhere(String baseWhere, SelectorMeta meta,
-      String alias) {
-    final String whereKeyword = " where ";
-    int whereIdx = StringUtils.indexOfIgnoreCase(baseWhere, whereKeyword);
-    String conditions = (whereIdx >= 0)
-        ? baseWhere.substring(whereIdx + whereKeyword.length())
-        : null;
-
-    String subAlias = alias + "_dv";
-    StringBuilder subQuery = new StringBuilder();
-    subQuery.append("select min(").append(subAlias).append(".id) from ")
-        .append(meta.entityName).append(" ").append(subAlias);
-    if (conditions != null) {
-      subQuery.append(whereKeyword).append(rewriteAlias(conditions, alias, subAlias));
-    }
-    subQuery.append(" group by ").append(subAlias).append(".").append(meta.valueProperty);
-
-    StringBuilder result = new StringBuilder("as ").append(alias).append(whereKeyword);
-    if (conditions != null) {
-      result.append("(").append(conditions).append(")").append(SelectorQueryBuilder.SQL_AND);
-    }
-    result.append(alias).append(".id in (").append(subQuery).append(")");
-    return result.toString();
-  }
-
-  /**
-   * Rewrites {@code <alias>.} property references in an HQL fragment to use {@code <newAlias>.}.
-   * The negative look-behind avoids touching identifiers that merely end in the alias letters
-   * (e.g. {@code table.name}) and leaves named parameters ({@code :search}) untouched.
-   *
-   * <p>KNOWN LIMITATION: this is a purely lexical rewrite — it does not skip string literals. A
-   * WHERE condition embedding {@code <alias>.} inside a single-quoted literal (e.g.
-   * {@code 'see e.g. below'}) would be corrupted. This is safe for every value-field selector in
-   * use today (their resolved HQL where clauses are simple: {@code e.active='Y'} plus org filters,
-   * no literals containing the alias). A future value-field selector with such a literal would
-   * need this rewrite hardened to skip quoted literals before it could be used safely.</p>
-   */
-  private static String rewriteAlias(String hql, String alias, String newAlias) {
-    Pattern aliasRef = Pattern.compile("(?<![\\w.])" + Pattern.quote(alias) + "\\.");
-    return aliasRef.matcher(hql).replaceAll(Matcher.quoteReplacement(newAlias + "."));
   }
 
   @SuppressWarnings("unchecked")
@@ -632,7 +575,7 @@ final class SelectorQueryExecutor {
     return HQL_KEYWORDS.contains(candidate.toLowerCase()) ? null : candidate;
   }
 
-  private static String idValueAsString(Object value) {
+  static String idValueAsString(Object value) {
     return value instanceof BaseOBObject ? ((BaseOBObject) value).getId().toString()
         : String.valueOf(value);
   }
@@ -707,7 +650,7 @@ final class SelectorQueryExecutor {
     return asIdx >= 0 ? expr.substring(0, asIdx).trim() : expr;
   }
 
-  private static String resolveRichItemId(BaseOBObject bob, SelectorMeta meta) {
+  static String resolveRichItemId(BaseOBObject bob, SelectorMeta meta) {
     if (meta.valueProperty != null && !"id".equals(meta.valueProperty)) {
       Object val = resolvePropertyValue(bob, meta.valueProperty);
       if (val != null) {
