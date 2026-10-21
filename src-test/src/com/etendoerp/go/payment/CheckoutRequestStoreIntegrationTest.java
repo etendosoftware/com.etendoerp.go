@@ -29,6 +29,7 @@ import java.util.Date;
 import java.util.List;
 import java.util.UUID;
 
+import org.apache.logging.log4j.Level;
 import org.junit.After;
 import org.junit.Test;
 import org.openbravo.base.provider.OBProvider;
@@ -1009,8 +1010,22 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
     String email = newEmail("inputs-malformed");
     String requestId = createCreatedRequest(createAccount(email), email);
 
-    writes.recordOnboardingInputs(requestId, "Spanish", "EURO", "ESP");
-    writes.recordOnboardingInputs(requestId, "ES_es", "€", "1");
+    TestLogCapture log = TestLogCapture.attachTo(CheckoutRequestWrites.class, Level.WARN);
+    try {
+      writes.recordOnboardingInputs(requestId, "Spanish", "EURO", "ESP");
+      writes.recordOnboardingInputs(requestId, "ES_es", "€", "1");
+
+      // Never silent, and never the raw value: the field and the length only.
+      List<String> warnings = log.messagesAt(Level.WARN);
+      assertEquals(warnings.toString(), 6, warnings.size());
+      assertTrue(warnings.get(0), warnings.get(0).startsWith(
+          "[BILLING-RECONCILE] Checkout request " + requestId
+              + ": the language sent with the purchase is malformed (7 characters)"));
+      assertTrue(warnings.toString(), warnings.stream().noneMatch(line -> line.contains("Spanish")
+          || line.contains("EURO") || line.contains("€")));
+    } finally {
+      log.detach();
+    }
 
     CheckoutRequest request = findCommittedRequest(requestId);
     assertNull(request.getLanguage());
@@ -1020,10 +1035,19 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
 
   @Test
   public void testOnboardingInputsForAnUnknownRequestAreANoOp() {
-    // Best effort on the purchase path: it must neither throw nor create a row.
+    // Best effort on the purchase path: it must neither throw nor create a row, but the row was
+    // created moments earlier in the same purchase, so not finding it is logged.
     String requestId = newRequestId();
-    writes.recordOnboardingInputs(requestId, "es_ES", "EUR", "ES");
+    TestLogCapture log = TestLogCapture.attachTo(CheckoutRequestWrites.class, Level.WARN);
+    try {
+      writes.recordOnboardingInputs(requestId, "es_ES", "EUR", "ES");
 
+      assertEquals(List.of("[BILLING-RECONCILE] Checkout request " + requestId + " not found "
+          + "while recording its onboarding inputs; a server-side provisioning will fall back to "
+          + "the draft or the defaults"), log.messagesAt(Level.WARN));
+    } finally {
+      log.detach();
+    }
     assertNull(findCommittedRequest(requestId));
   }
 

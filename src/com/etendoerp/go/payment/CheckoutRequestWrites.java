@@ -33,6 +33,11 @@ public class CheckoutRequestWrites {
   private static final Pattern CURRENCY_PATTERN = Pattern.compile("^[A-Z]{3}$");
   private static final Pattern COUNTRY_PATTERN = Pattern.compile("^[A-Z]{2}$");
   private static final String PARAM_REQUEST_ID = "requestId";
+  /**
+   * The billing reconciliation's stable prefix: a value lost here surfaces later as a
+   * server-side provisioning that fell back to the draft or the defaults.
+   */
+  private static final String LOG_PREFIX = "[BILLING-RECONCILE]";
 
   /**
    * Records the onboarding inputs the purchaser's browser sent with the purchase, so the
@@ -44,6 +49,15 @@ public class CheckoutRequestWrites {
    * the account draft and then the onboarding defaults. Best effort: never throws and never
    * changes the status, because it runs on the purchase path, which must not fail over it.
    *
+   * <p>Nothing is dropped silently: a supplied value that is malformed, and a request that does
+   * not exist, are logged as a WARN with the billing prefix, so a later fallback can be explained.
+   * A malformed value is reported by its length only, never echoed, since it is user input.
+   *
+   * <p><b>Transaction.</b> It runs in {@code HostedCheckoutService.createSession}'s
+   * {@code beforeProvider} callback, after {@code CheckoutRequestStore.recordRequested} has
+   * committed the row in its own transaction, so the commit or rollback here holds only these
+   * writes, never the purchase flow's.
+   *
    * @param requestId correlation id
    * @param language UI language, e.g. {@code es_ES}, may be null
    * @param currency ISO 4217 code, may be null
@@ -51,9 +65,9 @@ public class CheckoutRequestWrites {
    */
   public void recordOnboardingInputs(String requestId, String language, String currency,
       String country) {
-    String cleanLanguage = matching(language, LANGUAGE_PATTERN, false);
-    String cleanCurrency = matching(currency, CURRENCY_PATTERN, true);
-    String cleanCountry = matching(country, COUNTRY_PATTERN, true);
+    String cleanLanguage = matching(requestId, "language", language, LANGUAGE_PATTERN, false);
+    String cleanCurrency = matching(requestId, "currency", currency, CURRENCY_PATTERN, true);
+    String cleanCountry = matching(requestId, "country", country, COUNTRY_PATTERN, true);
     if (cleanLanguage == null && cleanCurrency == null && cleanCountry == null) {
       return;
     }
@@ -61,6 +75,10 @@ public class CheckoutRequestWrites {
       try {
         CheckoutRequest request = CheckoutRequestStore.findByRequestId(requestId);
         if (request == null) {
+          // The row was committed moments earlier in this same purchase: not finding it is a bug.
+          log.warn("{} Checkout request {} not found while recording its onboarding inputs; a "
+              + "server-side provisioning will fall back to the draft or the defaults",
+              LOG_PREFIX, requestId);
           return;
         }
         if (request.getLanguage() == null) {
@@ -110,12 +128,18 @@ public class CheckoutRequestWrites {
     });
   }
 
-  private static String matching(String value, Pattern pattern, boolean upperCase) {
+  private static String matching(String requestId, String field, String value, Pattern pattern,
+      boolean upperCase) {
     String trimmed = StringUtils.trimToNull(value);
     if (trimmed == null) {
       return null;
     }
     String normalized = upperCase ? trimmed.toUpperCase(Locale.ROOT) : trimmed;
-    return pattern.matcher(normalized).matches() ? normalized : null;
+    if (pattern.matcher(normalized).matches()) {
+      return normalized;
+    }
+    log.warn("{} Checkout request {}: the {} sent with the purchase is malformed ({} characters) "
+        + "and is not recorded", LOG_PREFIX, requestId, field, trimmed.length());
+    return null;
   }
 }
