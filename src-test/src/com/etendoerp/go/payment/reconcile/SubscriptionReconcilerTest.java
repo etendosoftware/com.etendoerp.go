@@ -522,6 +522,40 @@ public class SubscriptionReconcilerTest {
     verifyNothingApplied();
     assertEquals(1, result.get(Counter.SUBSCRIPTIONS_CHECKED));
     assertEquals(0, result.get(Counter.ABSENT_SUBSCRIPTIONS));
+    // W3: an incomplete sweep is a failed run, and its stuck events are not swept.
+    assertTrue(result.hasFailures());
+    assertTrue(!result.isComplete(ReconciliationResult.Phase.SUBSCRIPTIONS));
+    assertTrue(result.toString(), result.toString().contains("subscription list sweep stopped"));
+  }
+
+  @Test
+  public void directReadsPastTheCapMarkThePhaseIncomplete() throws Exception {
+    settings = new ReconciliationSettings(60, 1, 48, 15, 60, 0.25d, 5);
+    activeRow("sub_a", "req-a", "cs_test_a", CURRENT);
+    activeRow("sub_b", "req-b", "cs_test_b", CURRENT);
+    when(stripe.get(direct("sub_a"))).thenReturn(
+        new StripeResponse(200, subscription("sub_a", "active", true)));
+
+    ReconciliationResult result = run(false);
+
+    verify(stripe, never()).get(direct("sub_b"));
+    assertTrue(!result.isComplete(ReconciliationResult.Phase.SUBSCRIPTIONS));
+    assertTrue(result.hasFailures());
+  }
+
+  @Test
+  public void aReconciledSubscriptionIsRecordedAsReReadWithItsProviderStatus() throws Exception {
+    activeRow("sub_a", "req-sub_a", "cs_test_a", CURRENT);
+    list("sub_a", "active");
+    activeRow("sub_f", "req-sub_f", "cs_test_f", CURRENT);
+    listed.put("sub_f", subscription("sub_f", "canceled", false));
+
+    ReconciliationResult result = run(false);
+
+    assertEquals("active", result.rereadSubscriptionStatus("sub_a"));
+    assertNull("A foreign subscription is never reconciled", result.rereadSubscriptionStatus(
+        "sub_f"));
+    assertTrue(result.isComplete(ReconciliationResult.Phase.SUBSCRIPTIONS));
   }
 
   @Test

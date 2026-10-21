@@ -23,6 +23,7 @@ import java.util.Map;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.service.OBDal;
 
@@ -40,7 +41,9 @@ import com.etendoerp.go.payment.StripeTransportException;
 import com.etendoerp.go.payment.SubscriptionLifecycleApplier;
 import com.etendoerp.go.payment.SystemContext;
 import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
+import com.etendoerp.go.payment.StripeEventTypes;
 import com.etendoerp.go.payment.reconcile.ReconciliationResult.Counter;
+import com.etendoerp.go.payment.reconcile.ReconciliationResult.Phase;
 import com.etendoerp.go.rest.PaidProvisioningService;
 import com.etendoerp.go.rest.PaidReactivationService;
 import com.etendoerp.go.schemaforge.data.BillingEvent;
@@ -69,7 +72,11 @@ import com.etendoerp.go.schemaforge.email.InternalAlertService;
  *       {@link SubscriptionLifecycleApplier} only when it changes the stored state. An absent
  *       subscription (404) is closed only behind the circuit breaker.</li>
  *   <li><b>Stuck events</b> — a provider event a crash left {@code RECEIVED} is superseded, never
- *       replayed: phases 1–4 have just re-read the provider state it could have moved.</li>
+ *       replayed, but only when this run re-read the state it could have moved: its family's
+ *       phases completed without an error, a failed read or a cap, and its own request or
+ *       subscription was among what they read. A stuck event the run cannot vouch for is parked
+ *       for review, once; one whose phase was incomplete is left for a later run. Alert-only
+ *       types (a dispute) are never swept.</li>
  * </ol>
  *
  * <p><b>A consistent dataset gets zero writes and zero alerts.</b> Every repair compares with the
@@ -99,6 +106,7 @@ public class BillingReconciliationService {
   private static final String STATUS_CREATING = "CREATING";
   private static final String STATUS_PAID = "PAID";
   private static final String STATUS_PROVISIONING = "PROVISIONING";
+  private static final String STATUS_PROVISIONED = "PROVISIONED";
   private static final String DERIVED_PAID = "paid";
   private static final String DERIVED_STALLED = CheckoutRequestStore.DERIVED_STATUS_STALLED;
   private static final String DERIVED_FAILED =
@@ -107,6 +115,15 @@ public class BillingReconciliationService {
   private static final String FIELD_METADATA = "metadata";
   private static final String FIELD_REQUEST_ID = "request_id";
   private static final String ITEM_CHECKOUT = "checkout ";
+  static final String KIND_STALE_EVENT_REVIEW = "stale-event-review";
+  /** Prefix of the review row of a stuck event: {@code reconcile:stale-event-review:<event>}. */
+  static final String STALE_REVIEW_ID_PREFIX =
+      ReconciliationAudit.eventId(KIND_STALE_EVENT_REVIEW) + ":";
+  /** At most this many pages of stuck events per run, so events left for later cannot loop. */
+  private static final int STALE_EVENT_PAGES = 10;
+  /** The provider statuses phase 4 applies or alerts on; the rest it leaves to the webhook. */
+  private static final List<String> STATUSES_PHASE_4_APPLIES = List.of("active", "trialing",
+      "canceled", "incomplete_expired", "paused");
   private static final long MILLIS_PER_MINUTE = 60_000L;
   /**
    * How long a request whose item failed (a provider read, an exception) is left out of the
@@ -184,22 +201,42 @@ public class BillingReconciliationService {
     ReconciliationAudit audit = new ReconciliationAudit(eventStore, dryRun, internalAlerts);
     reviews = new ReviewQueue(eventStore);
     Map<String, CheckoutRow> recovered = new HashMap<>();
-    runPhase("checkout recovery", result, () -> recoverCheckouts(result, audit, recovered));
-    runPhase("provisioning repair", result, () -> repairProvisioning(result, audit, recovered));
-    runPhase("no-session-id review", result, () -> reviewSessionlessCheckouts(result, audit));
-    runPhase("subscriptions", result, () -> subscriptions.run(result, audit));
-    runPhase("stuck events", result, () -> sweepStaleEvents(result, audit));
+    runPhase(Phase.CHECKOUT_RECOVERY.label(), Phase.CHECKOUT_RECOVERY, result,
+        () -> recoverCheckouts(result, audit, recovered));
+    runPhase(Phase.PROVISIONING_REPAIR.label(), Phase.PROVISIONING_REPAIR, result,
+        () -> repairProvisioning(result, audit, recovered));
+    runPhase("no-session-id review", null, result,
+        () -> reviewSessionlessCheckouts(result, audit));
+    runPhase(Phase.SUBSCRIPTIONS.label(), Phase.SUBSCRIPTIONS, result,
+        () -> subscriptions.run(result, audit));
+    runPhase("stuck events", null, result, () -> sweepStaleEvents(result, audit));
     return result;
   }
 
-  private static void runPhase(String name, ReconciliationResult result, Runnable phase) {
+  /**
+   * Runs one phase so that a failure never stops the next one. A phase that throws, records an
+   * error or meets a failed provider read is marked incomplete: it did not re-read everything,
+   * and the stuck-event sweep must not supersede anything on its strength.
+   */
+  private static void runPhase(String name, Phase phase, ReconciliationResult result,
+      Runnable body) {
+    int errorsBefore = result.getErrors().size();
+    int providerErrorsBefore = result.get(Counter.PROVIDER_ERRORS);
     try {
-      phase.run();
+      body.run();
     } catch (RuntimeException e) {
       log.error("{} Billing reconciliation phase '{}' failed", ReconciliationAudit.LOG_PREFIX,
           name, e);
       rollbackQuietly();
       result.error(name + " failed: " + e.getClass().getSimpleName());
+    }
+    if (phase == null) {
+      return;
+    }
+    if (result.getErrors().size() > errorsBefore) {
+      result.markIncomplete(phase, "it met errors");
+    } else if (result.get(Counter.PROVIDER_ERRORS) > providerErrorsBefore) {
+      result.markIncomplete(phase, "provider reads failed");
     }
   }
 
@@ -238,6 +275,7 @@ public class BillingReconciliationService {
       retryLater(row.requestId, "the provider session names another request", audit);
       return;
     }
+    result.noteCheckoutReread(row.requestId);
     String status = session.optString(FIELD_STATUS, "");
     String paymentStatus = session.optString("payment_status", "");
     if ("complete".equals(status)
@@ -497,16 +535,53 @@ public class BillingReconciliationService {
 
   // ── Phase 5: stuck RECEIVED events ──────────────────────────────────────────────────────
 
+  /**
+   * Supersedes the stuck events whose state this run re-read, parks for review those it cannot
+   * vouch for, and leaves the rest for a later run. A family is swept only when the phases that
+   * re-read its state completed: payments (phases 1 and 2) and subscriptions (phase 4).
+   */
   private void sweepStaleEvents(ReconciliationResult result, ReconciliationAudit audit) {
+    List<String> types = new ArrayList<>();
+    if (result.isComplete(Phase.CHECKOUT_RECOVERY)
+        && result.isComplete(Phase.PROVISIONING_REPAIR)) {
+      types.addAll(StripeEventTypes.CHECKOUT_PAID);
+    }
+    if (result.isComplete(Phase.SUBSCRIPTIONS)) {
+      types.addAll(StripeEventTypes.SUBSCRIPTION_LIFECYCLE);
+      types.add(StripeEventTypes.SUBSCRIPTION_PAUSED);
+    }
+    if (types.isEmpty()) {
+      return;
+    }
     Date before = minutesAgo(settings.getReceivedStaleMinutes());
-    for (BillingEventStore.StaleEvent event : eventStore.findStaleReceived(before,
-        settings.getBatchSize())) {
-      String type = StringUtils.defaultString(event.eventType());
-      boolean subscriptionEvent = type.startsWith("customer.subscription.")
-          || type.startsWith("invoice.");
-      if (subscriptionEvent && result.getBreakerReason() != null) {
-        continue; // the subscription state was not re-read in full this run
+    int batch = settings.getBatchSize();
+    int handled = 0;
+    int offset = 0;
+    for (int page = 0; page < STALE_EVENT_PAGES && handled < batch; page++) {
+      List<BillingEventStore.StaleEvent> events = eventStore.findStaleReceived(before, types,
+          STALE_REVIEW_ID_PREFIX, offset, batch);
+      for (BillingEventStore.StaleEvent event : events) {
+        boolean resolved = sweepOne(event, result, audit);
+        handled += resolved ? 1 : 0;
+        // A resolved event leaves the query (superseded or parked), except in a dry run.
+        offset += resolved && !audit.isDryRun() ? 0 : 1;
       }
+      if (events.size() < batch) {
+        break;
+      }
+    }
+  }
+
+  /** @return whether the event was resolved (superseded or parked) rather than left */
+  private boolean sweepOne(BillingEventStore.StaleEvent event, ReconciliationResult result,
+      ReconciliationAudit audit) {
+    String type = StringUtils.defaultString(event.eventType());
+    StaleVerdict verdict = StripeEventTypes.CHECKOUT_PAID.contains(type)
+        ? checkoutEventVerdict(event, result) : subscriptionEventVerdict(event, result);
+    if (verdict == StaleVerdict.LEAVE) {
+      return false;
+    }
+    if (verdict == StaleVerdict.SUPERSEDE) {
       if (!audit.isDryRun()) {
         eventStore.markIgnored(event.eventId(), "Superseded by billing reconciliation "
             + result.getRunId() + ": the provider state was re-read, the event not replayed");
@@ -514,7 +589,78 @@ public class BillingReconciliationService {
       audit.alert("Stuck provider event {} ({}) superseded; the provider state was re-read",
           event.eventId(), type);
       result.increment(Counter.STALE_EVENTS_SWEPT);
+      return true;
     }
+    if (audit.write(STALE_REVIEW_ID_PREFIX + event.eventId(), KIND_STALE_EVENT_REVIEW,
+        event.requestId(), BillingEventStore.RESULT_FAILED, "Stuck provider event " + type
+            + " could not be vouched for by a re-read of the provider; review it in the Stripe "
+            + "dashboard and set it to IGNORED or replay it", summary("event", event.eventId()))) {
+      audit.internalAlert("billing-reconcile-stale-event", event.eventId(), "stale-event-review",
+          null);
+    }
+    audit.alert("Stuck provider event {} ({}) needs review: the run could not vouch for it",
+        event.eventId(), type);
+    result.increment(Counter.STALE_EVENTS_PARKED);
+    return true;
+  }
+
+  /**
+   * A payment event is superseded when its request is past {@code PAID} and nothing of it is
+   * pending (a re-subscription not yet applied waits for phase 2). It is parked when it names no
+   * known request, or when this run read its session and the provider still says unpaid. A request
+   * phase 1 did not reach yet is left.
+   */
+  private StaleVerdict checkoutEventVerdict(BillingEventStore.StaleEvent event,
+      ReconciliationResult result) {
+    String requestId = StringUtils.trimToNull(event.requestId());
+    CheckoutRow row = requestId == null ? null : checkoutRow(requestId);
+    if (row == null) {
+      return StaleVerdict.REVIEW;
+    }
+    boolean paid = STATUS_PROVISIONED.equals(row.status)
+        || STATUS_PROVISIONING.equals(row.status)
+        || (STATUS_PAID.equals(row.status) && !row.reactivation);
+    if (paid) {
+      return StaleVerdict.SUPERSEDE;
+    }
+    if (STATUS_CREATED.equals(row.status) && result.wasCheckoutReread(requestId)) {
+      return StaleVerdict.REVIEW; // the provider says unpaid, the event says paid
+    }
+    return StaleVerdict.LEAVE;
+  }
+
+  /**
+   * A subscription event is superseded when this run read its subscription and the provider
+   * status is one phase 4 applies (or alerts on); it is parked when the status is one phase 4
+   * leaves to the webhook ({@code past_due}, {@code unpaid}, {@code incomplete}), or when the
+   * subscription was not read at all (no locally active row names it).
+   */
+  private static StaleVerdict subscriptionEventVerdict(BillingEventStore.StaleEvent event,
+      ReconciliationResult result) {
+    String subscriptionId = subscriptionIdOf(event);
+    String status = subscriptionId == null ? null
+        : result.rereadSubscriptionStatus(subscriptionId);
+    return status != null && STATUSES_PHASE_4_APPLIES.contains(status)
+        ? StaleVerdict.SUPERSEDE : StaleVerdict.REVIEW;
+  }
+
+  private static String subscriptionIdOf(BillingEventStore.StaleEvent event) {
+    if (StringUtils.isBlank(event.summary())) {
+      return null;
+    }
+    try {
+      JSONObject summary = new JSONObject(event.summary());
+      String key = StringUtils.startsWith(event.eventType(), "customer.subscription.")
+          ? "id" : "subscription";
+      return StringUtils.trimToNull(summary.optString(key, ""));
+    } catch (JSONException e) {
+      return null;
+    }
+  }
+
+  /** What the sweep does with one stuck event. */
+  private enum StaleVerdict {
+    SUPERSEDE, REVIEW, LEAVE
   }
 
   // ── Shared ──────────────────────────────────────────────────────────────────────────────
@@ -555,6 +701,14 @@ public class BillingReconciliationService {
     });
   }
 
+  /** The facts of one checkout request, or null when there is none. */
+  private CheckoutRow checkoutRow(String requestId) {
+    Map<String, Object> parameters = new HashMap<>();
+    parameters.put("requestId", requestId);
+    List<CheckoutRow> rows = checkoutRows("cr.request = :requestId", parameters);
+    return rows.isEmpty() ? null : rows.get(0);
+  }
+
   private Date minutesAgo(long minutes) {
     return new Date(clock.millis() - minutes * MILLIS_PER_MINUTE);
   }
@@ -571,6 +725,7 @@ public class BillingReconciliationService {
     private boolean retryAllowed;
     private boolean reactivation;
     private String subscriptionId;
+    private String status;
 
     private CheckoutRow() {
     }
@@ -587,7 +742,9 @@ public class BillingReconciliationService {
           : request.getProvisioningAttempts();
       this.createdAt = request.getCreatedAt();
       this.retryAllowed = retryAllowed;
-      this.reactivation = request.getCreatedClient() != null;
+      this.reactivation = request.getCreatedClient() != null
+          && !STATUS_PROVISIONED.equals(request.getCheckoutRequestStatus());
+      this.status = request.getCheckoutRequestStatus();
       this.subscriptionId = StringUtils.trimToNull(request.getStripeSubscription());
     }
 

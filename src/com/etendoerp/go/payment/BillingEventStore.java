@@ -3,6 +3,7 @@ package com.etendoerp.go.payment;
 
 import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Date;
 import java.util.List;
 import java.util.function.Supplier;
@@ -214,8 +215,20 @@ public class BillingEventStore implements CheckoutWebhookProcessor.EventStore {
    * @param eventId provider event id
    * @param eventType provider event type
    * @param requestId the correlation id the event carried, or null
+   * @param summary the allow-listed {@code PAYLOAD_SUMMARY}, or null
    */
-  public record StaleEvent(String eventId, String eventType, String requestId) {
+  public record StaleEvent(String eventId, String eventType, String requestId, String summary) {
+
+    /**
+     * A stuck event without its summary.
+     *
+     * @param eventId provider event id
+     * @param eventType provider event type
+     * @param requestId the correlation id the event carried, or null
+     */
+    public StaleEvent(String eventId, String eventType, String requestId) {
+      this(eventId, eventType, requestId, null);
+    }
   }
 
   /**
@@ -228,19 +241,55 @@ public class BillingEventStore implements CheckoutWebhookProcessor.EventStore {
    * @return the stuck events
    */
   public List<StaleEvent> findStaleReceived(Date receivedBefore, int max) {
+    return findStaleReceived(receivedBefore, null, null, 0, max);
+  }
+
+  /**
+   * ETP-5048 — one page of the provider events still {@code RECEIVED} that were received before
+   * {@code receivedBefore}, oldest first, narrowed for the billing reconciliation's sweep.
+   *
+   * @param receivedBefore only events received before this instant
+   * @param types only these event types; null for every type
+   * @param reviewIdPrefix leave out an event for which a row {@code <prefix><event id>} exists (one
+   *     parked for review); null to leave none out
+   * @param offset how many matching events to skip
+   * @param max how many at most
+   * @return the stuck events
+   */
+  public List<StaleEvent> findStaleReceived(Date receivedBefore, Collection<String> types,
+      String reviewIdPrefix, int offset, int max) {
+    if (types != null && types.isEmpty()) {
+      return new ArrayList<>();
+    }
     return runAsSystem(() -> {
-      List<StaleEvent> stale = new ArrayList<>();
-      for (BillingEvent event : OBDal.getInstance().createQuery(BillingEvent.class,
-              "as be where be.eventResult = :received and be.provider = :provider"
-                  + " and be.receivedAt < :before order by be.receivedAt asc")
+      StringBuilder where = new StringBuilder("as be where be.eventResult = :received"
+          + " and be.provider = :provider and be.receivedAt < :before");
+      if (types != null) {
+        where.append(" and be.eventType in (:types)");
+      }
+      if (reviewIdPrefix != null) {
+        where.append(" and not exists (select 1 from ").append(BillingEvent.ENTITY_NAME)
+            .append(" rv where rv.event = concat(:reviewPrefix, be.event))");
+      }
+      OBQuery<BillingEvent> query = OBDal.getInstance().createQuery(BillingEvent.class,
+              where.append(" order by be.receivedAt asc").toString())
           .setNamedParameter("received", RESULT_RECEIVED)
-          .setNamedParameter("provider", PROVIDER_STRIPE)
+          .setNamedParameter(PARAM_PROVIDER, PROVIDER_STRIPE)
           .setNamedParameter("before", receivedBefore)
           .setFilterOnReadableClients(false)
           .setFilterOnReadableOrganization(false)
-          .setMaxResult(Math.max(1, max))
-          .list()) {
-        stale.add(new StaleEvent(event.getEvent(), event.getEventType(), event.getRequestID()));
+          .setFirstResult(Math.max(0, offset))
+          .setMaxResult(Math.max(1, max));
+      if (types != null) {
+        query.setNamedParameter("types", types);
+      }
+      if (reviewIdPrefix != null) {
+        query.setNamedParameter("reviewPrefix", reviewIdPrefix);
+      }
+      List<StaleEvent> stale = new ArrayList<>();
+      for (BillingEvent event : query.list()) {
+        stale.add(new StaleEvent(event.getEvent(), event.getEventType(), event.getRequestID(),
+            event.getPayloadSummary()));
       }
       return stale;
     });

@@ -81,6 +81,8 @@ public class BillingReconciliationServiceTest {
   private final java.util.Set<String> parked = new java.util.HashSet<>();
   /** The HQL of every candidate query the run issued, in order. */
   private final List<String> candidateQueries = new ArrayList<>();
+  /** Checkout requests a single-request lookup (the stuck-event sweep) finds, by id. */
+  private final java.util.Map<String, CheckoutRequest> requestsById = new java.util.HashMap<>();
 
   private StripeApiClient stripe;
   private CheckoutRequestStore checkoutStore;
@@ -103,7 +105,6 @@ public class BillingReconciliationServiceTest {
     checkoutWrites = mock(CheckoutRequestWrites.class);
     reactivations = mock(PaidReactivationService.class);
     internalAlerts = mock(InternalAlertService.class);
-    when(eventStore.findStaleReceived(any(), anyInt())).thenReturn(staleEvents);
     when(eventStore.recordReconciliation(anyString(), anyString(), any(), anyString(), any(),
         any())).thenReturn(true);
     auditLog = TestLogCapture.attachTo(ReconciliationAudit.class, Level.INFO);
@@ -120,6 +121,9 @@ public class BillingReconciliationServiceTest {
     OBDal dal = mock(OBDal.class);
     when(dal.createQuery(eq(CheckoutRequest.class), anyString())).thenAnswer(call -> {
       String hql = call.getArgument(1, String.class);
+      if (hql.contains("cr.request = :requestId")) {
+        return lookupQuery();
+      }
       candidateQueries.add(hql);
       List<CheckoutRequest> rows = new ArrayList<>(hql.contains(":created") ? createdRows
           : hql.contains(":paid") ? paidRows : hql.contains(":creating") ? creatingRows
@@ -136,6 +140,17 @@ public class BillingReconciliationServiceTest {
       when(eventStore.hasOpenReconciliation(ReviewQueue.EVENT_TYPE, requestId)).thenReturn(true);
     }
     when(eventStore.countOpenReconciliations(ReviewQueue.EVENT_TYPE)).thenReturn(parked.size());
+    when(eventStore.findStaleReceived(any(), any(), any(), anyInt(), anyInt())).thenAnswer(call -> {
+      java.util.Collection<?> types = call.getArgument(1, java.util.Collection.class);
+      int offset = call.getArgument(3, Integer.class);
+      List<BillingEventStore.StaleEvent> page = new ArrayList<>();
+      for (BillingEventStore.StaleEvent event : staleEvents) {
+        if (types.contains(event.eventType())) {
+          page.add(event);
+        }
+      }
+      return offset >= page.size() ? List.of() : page.subList(offset, page.size());
+    });
     try (MockedStatic<OBDal> dalStatic = mockStatic(OBDal.class);
         MockedStatic<OBContext> context = mockStatic(OBContext.class)) {
       dalStatic.when(OBDal::getInstance).thenReturn(dal);
@@ -147,6 +162,28 @@ public class BillingReconciliationServiceTest {
       service.internalAlerts = internalAlerts;
       return service.run(dryRun);
     }
+  }
+
+  /** A lookup by request id, answered from {@link #requestsById} by the bound parameter. */
+  @SuppressWarnings("unchecked")
+  private OBQuery<CheckoutRequest> lookupQuery() {
+    OBQuery<CheckoutRequest> query = mock(OBQuery.class, RETURNS_SELF);
+    String[] bound = new String[1];
+    when(query.setNamedParameter(eq("requestId"), any())).thenAnswer(call -> {
+      bound[0] = call.getArgument(1, String.class);
+      return query;
+    });
+    when(query.list()).thenAnswer(call -> requestsById.containsKey(bound[0])
+        ? List.of(requestsById.get(bound[0])) : List.of());
+    return query;
+  }
+
+  /** A request the stuck-event sweep can look up, in {@code status}. */
+  private CheckoutRequest knownRequest(String requestId, String status) {
+    CheckoutRequest request = row(requestId, SESSION, ago(2, TimeUnit.HOURS), "pending");
+    when(request.getCheckoutRequestStatus()).thenReturn(status);
+    requestsById.put(requestId, request);
+    return request;
   }
 
   private static Date ago(long amount, TimeUnit unit) {
@@ -261,6 +298,9 @@ public class BillingReconciliationServiceTest {
 
     verifyNothingProvisionedOrWritten();
     assertEquals(1, result.get(Counter.PROVIDER_ERRORS));
+    // W3: a run that could not read the provider is never reported consistent.
+    assertTrue(result.hasFailures());
+    assertTrue(result.toString(), !result.toString().contains("Everything is consistent"));
   }
 
   @Test
@@ -558,8 +598,7 @@ public class BillingReconciliationServiceTest {
         "SQLSTATE 23505 on AD_CLIENT" }) {
       paidRows.clear();
       eventStore = mock(BillingEventStore.class);
-      when(eventStore.findStaleReceived(any(), anyInt())).thenReturn(staleEvents);
-      CheckoutRequest request = paidRow(REQ, ago(2, TimeUnit.HOURS), 1L,
+        CheckoutRequest request = paidRow(REQ, ago(2, TimeUnit.HOURS), 1L,
           CheckoutRequestStore.DERIVED_STATUS_PROVISIONING_FAILED);
       when(request.getFailureReason()).thenReturn(reason);
       paidRows.add(request);
@@ -664,7 +703,6 @@ public class BillingReconciliationServiceTest {
     // Second run: the open review row keeps it out of the batch; it is counted as awaiting and
     // stays silent.
     eventStore = mock(BillingEventStore.class);
-    when(eventStore.findStaleReceived(any(), anyInt())).thenReturn(staleEvents);
     parked.add(REQ);
 
     ReconciliationResult second = run(false);
@@ -679,14 +717,16 @@ public class BillingReconciliationServiceTest {
   // ── Phase 5: stuck RECEIVED events ───────────────────────────────────────────────────────
 
   @Test
-  public void aStuckEventIsMarkedIgnoredAsSupersededNotReplayed() {
+  public void aStuckPaymentEventWhoseRequestIsPaidIsSupersededNotReplayed() {
+    knownRequest(REQ, "PROVISIONED");
     staleEvents.add(new BillingEventStore.StaleEvent("evt_1", "checkout.session.completed",
         REQ));
 
     ReconciliationResult result = run(false);
 
     ArgumentCaptor<Date> before = ArgumentCaptor.forClass(Date.class);
-    verify(eventStore).findStaleReceived(before.capture(), eq(50));
+    verify(eventStore).findStaleReceived(before.capture(), any(),
+        eq(BillingReconciliationService.STALE_REVIEW_ID_PREFIX), eq(0), eq(50));
     assertEquals(ago(60, TimeUnit.MINUTES), before.getValue());
     verify(eventStore).markIgnored(eq("evt_1"),
         startsWith("Superseded by billing reconciliation " + result.getRunId()));
@@ -696,14 +736,37 @@ public class BillingReconciliationServiceTest {
   }
 
   @Test
+  public void anAlertOnlyEventIsNeverSwept() {
+    staleEvents.add(new BillingEventStore.StaleEvent("evt_dp", "charge.dispute.created", null));
+
+    run(false);
+
+    ArgumentCaptor<java.util.Collection<String>> types = typesSwept();
+    assertTrue(types.getValue().toString(), !types.getValue().contains("charge.dispute.created"));
+    verify(eventStore, never()).markIgnored(eq("evt_dp"), anyString());
+  }
+
+  @SuppressWarnings({ "unchecked", "rawtypes" })
+  private ArgumentCaptor<java.util.Collection<String>> typesSwept() {
+    ArgumentCaptor<java.util.Collection<String>> types =
+        (ArgumentCaptor) ArgumentCaptor.forClass(java.util.Collection.class);
+    verify(eventStore).findStaleReceived(any(), types.capture(), any(), anyInt(), anyInt());
+    return types;
+  }
+
+  @Test
   public void aTrippedBreakerKeepsSubscriptionEventsOutOfTheSweep() {
+    knownRequest(REQ, "PROVISIONED");
     staleEvents.add(new BillingEventStore.StaleEvent("evt_sub", "customer.subscription.updated",
-        null));
+        null, "{\"id\":\"sub_1\"}"));
     staleEvents.add(new BillingEventStore.StaleEvent("evt_inv", "invoice.payment_failed", null));
     staleEvents.add(new BillingEventStore.StaleEvent("evt_chk", "checkout.session.completed",
         REQ));
     doAnswer(call -> {
-      call.getArgument(0, ReconciliationResult.class).tripBreaker("key mode mismatch");
+      ReconciliationResult running = call.getArgument(0, ReconciliationResult.class);
+      running.noteSubscriptionReread("sub_1", "canceled");
+      running.tripBreaker("key mode mismatch");
+      running.markIncomplete(ReconciliationResult.Phase.SUBSCRIPTIONS, "breaker");
       return null;
     }).when(subscriptions).run(any(), any());
 
@@ -713,17 +776,86 @@ public class BillingReconciliationServiceTest {
     verify(eventStore, never()).markIgnored(eq("evt_inv"), anyString());
     verify(eventStore).markIgnored(eq("evt_chk"), anyString());
     assertEquals(1, result.get(Counter.STALE_EVENTS_SWEPT));
+    assertEquals("Left for a later run, not parked", 0, result.get(Counter.STALE_EVENTS_PARKED));
     assertTrue(result.hasFailures());
   }
 
   @Test
-  public void withoutABreakerSubscriptionEventsAreSweptToo() {
-    staleEvents.add(new BillingEventStore.StaleEvent("evt_sub", "customer.subscription.updated",
-        null));
+  public void aSubscriptionEventIsSupersededOnlyWhenItsSubscriptionWasReRead() {
+    staleEvents.add(new BillingEventStore.StaleEvent("evt_read", "customer.subscription.updated",
+        null, "{\"id\":\"sub_1\"}"));
+    staleEvents.add(new BillingEventStore.StaleEvent("evt_unread", "invoice.paid", null,
+        "{\"subscription\":\"sub_other\"}"));
+    staleEvents.add(new BillingEventStore.StaleEvent("evt_due", "invoice.payment_failed", null,
+        "{\"subscription\":\"sub_due\"}"));
+    doAnswer(call -> {
+      ReconciliationResult running = call.getArgument(0, ReconciliationResult.class);
+      running.noteSubscriptionReread("sub_1", "active");
+      running.noteSubscriptionReread("sub_due", "past_due");
+      return null;
+    }).when(subscriptions).run(any(), any());
 
-    run(false);
+    ReconciliationResult result = run(false);
 
-    verify(eventStore).markIgnored(eq("evt_sub"), anyString());
+    verify(eventStore).markIgnored(eq("evt_read"), anyString());
+    verify(eventStore, never()).markIgnored(eq("evt_unread"), anyString());
+    verify(eventStore, never()).markIgnored(eq("evt_due"), anyString());
+    // Not re-read, or past_due (left to the webhook): parked for a person, once.
+    verify(eventStore).recordReconciliation(eq("reconcile:stale-event-review:evt_unread"),
+        eq("reconciliation.stale-event-review"), any(), eq(BillingEventStore.RESULT_FAILED),
+        any(), any());
+    verify(eventStore).recordReconciliation(eq("reconcile:stale-event-review:evt_due"),
+        anyString(), any(), anyString(), any(), any());
+    assertEquals(1, result.get(Counter.STALE_EVENTS_SWEPT));
+    assertEquals(2, result.get(Counter.STALE_EVENTS_PARKED));
+  }
+
+  /** W2: a phase-1 provider error means payments were not all re-read; none is superseded. */
+  @Test
+  public void aPaymentEventIsNotSupersededWhenCheckoutRecoveryCouldNotReadTheProvider()
+      throws Exception {
+    createdRows.add(row("req-other", "cs_test_other", ago(20, TimeUnit.MINUTES), "pending"));
+    when(stripe.get("/v1/checkout/sessions/cs_test_other"))
+        .thenReturn(new StripeResponse(503, ""));
+    knownRequest(REQ, "PROVISIONED");
+    staleEvents.add(new BillingEventStore.StaleEvent("evt_1", "checkout.session.completed",
+        REQ));
+
+    ReconciliationResult result = run(false);
+
+    verify(eventStore, never()).markIgnored(anyString(), anyString());
+    assertTrue(typesSwept().getValue().isEmpty() || !typesSwept().getValue()
+        .contains("checkout.session.completed"));
+    assertTrue(result.hasFailures());
+  }
+
+  @Test
+  public void aPaymentEventTheProviderContradictsIsParkedForReview() throws Exception {
+    createdRows.add(row(REQ, SESSION, ago(20, TimeUnit.MINUTES), "pending"));
+    session(SESSION, "open", "unpaid", REQ);
+    knownRequest(REQ, "CREATED");
+    staleEvents.add(new BillingEventStore.StaleEvent("evt_1", "checkout.session.completed",
+        REQ));
+
+    ReconciliationResult result = run(false);
+
+    verify(eventStore, never()).markIgnored(anyString(), anyString());
+    verify(eventStore).recordReconciliation(eq("reconcile:stale-event-review:evt_1"),
+        anyString(), eq(REQ), eq(BillingEventStore.RESULT_FAILED), any(), any());
+    assertEquals(1, result.get(Counter.STALE_EVENTS_PARKED));
+  }
+
+  @Test
+  public void aPaymentEventForARequestNotYetReachedIsLeftForALaterRun() {
+    knownRequest(REQ, "CREATED");
+    staleEvents.add(new BillingEventStore.StaleEvent("evt_1", "checkout.session.completed",
+        REQ));
+
+    ReconciliationResult result = run(false);
+
+    verify(eventStore, never()).markIgnored(anyString(), anyString());
+    assertEquals(0, result.get(Counter.STALE_EVENTS_SWEPT));
+    assertEquals(0, result.get(Counter.STALE_EVENTS_PARKED));
   }
 
   // ── Dry run ──────────────────────────────────────────────────────────────────────────────
@@ -748,7 +880,8 @@ public class BillingReconciliationServiceTest {
     assertEquals("the recovered payment and the stalled row", 2,
         result.get(Counter.PROVISIONED));
     assertEquals(1, result.get(Counter.NEEDS_REVIEW));
-    assertEquals(1, result.get(Counter.STALE_EVENTS_SWEPT));
+    assertEquals("an event naming no request is parked, not superseded", 1,
+        result.get(Counter.STALE_EVENTS_PARKED));
     String summary = result.toString();
     assertTrue(summary, summary.startsWith("Dry run "));
     assertTrue(summary, summary.contains("Dry run: nothing was written"));
@@ -780,12 +913,21 @@ public class BillingReconciliationServiceTest {
   @Test
   public void aFailingPhaseIsRecordedAndTheNextPhasesStillRun() {
     doThrow(new IllegalStateException("db gone")).when(subscriptions).run(any(), any());
+    knownRequest(REQ, "PROVISIONED");
     staleEvents.add(new BillingEventStore.StaleEvent("evt_1", "checkout.session.completed",
-        null));
+        REQ));
+    staleEvents.add(new BillingEventStore.StaleEvent("evt_sub", "customer.subscription.deleted",
+        null, "{\"id\":\"sub_1\"}"));
 
     ReconciliationResult result = run(false);
 
     assertEquals(List.of("subscriptions failed: IllegalStateException"), result.getErrors());
+    // The sweep still runs, but only for the family whose state was re-read: the subscriptions
+    // phase threw, so its events are neither superseded nor parked.
     verify(eventStore).markIgnored(eq("evt_1"), anyString());
+    verify(eventStore, never()).markIgnored(eq("evt_sub"), anyString());
+    assertTrue(typesSwept().getValue().toString(),
+        !typesSwept().getValue().contains("customer.subscription.deleted"));
+    assertTrue(result.hasFailures());
   }
 }

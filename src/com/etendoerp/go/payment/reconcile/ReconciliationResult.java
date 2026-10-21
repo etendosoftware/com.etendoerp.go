@@ -8,8 +8,11 @@ package com.etendoerp.go.payment.reconcile;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.EnumMap;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -43,6 +46,7 @@ public final class ReconciliationResult {
     PREFERENCE_ROUTE_CHECKED("tenants on the preference route checked"),
     PREFERENCE_ROUTE_CORRECTED("tenants on the preference route corrected"),
     STALE_EVENTS_SWEPT("stuck provider events superseded"),
+    STALE_EVENTS_PARKED("stuck provider events needing review"),
     PROVIDER_ERRORS("provider reads that failed");
 
     private final String label;
@@ -57,11 +61,36 @@ public final class ReconciliationResult {
     }
   }
 
+  /**
+   * A phase whose re-read of the provider state the stuck-event sweep depends on. A phase that
+   * met an error, a failed provider read or a cap did not re-read everything, so no stuck event of
+   * its family may be superseded on its strength.
+   */
+  public enum Phase {
+    CHECKOUT_RECOVERY("checkout recovery"),
+    PROVISIONING_REPAIR("provisioning repair"),
+    SUBSCRIPTIONS("subscriptions");
+
+    private final String label;
+
+    Phase(String label) {
+      this.label = label;
+    }
+
+    /** @return the operator-facing wording */
+    public String label() {
+      return label;
+    }
+  }
+
   private final String runId = UUID.randomUUID().toString().substring(0, 8);
   private final boolean dryRun;
   private final Map<Counter, Integer> counts = new EnumMap<>(Counter.class);
   private final List<String> errors = new ArrayList<>();
   private String breakerReason;
+  private final Map<Phase, String> incomplete = new EnumMap<>(Phase.class);
+  private final Set<String> rereadCheckouts = new HashSet<>();
+  private final Map<String, String> rereadSubscriptions = new HashMap<>();
 
   ReconciliationResult(boolean dryRun) {
     this.dryRun = dryRun;
@@ -83,6 +112,40 @@ public final class ReconciliationResult {
 
   void tripBreaker(String reason) {
     this.breakerReason = reason;
+  }
+
+  /** Records that a phase did not re-read everything; the first reason is kept. */
+  void markIncomplete(Phase phase, String reason) {
+    incomplete.putIfAbsent(phase, reason);
+  }
+
+  /** Records a checkout request whose provider session this run read. */
+  void noteCheckoutReread(String requestId) {
+    rereadCheckouts.add(requestId);
+  }
+
+  /** Records a subscription this run read and reconciled, with the status the provider gave. */
+  void noteSubscriptionReread(String subscriptionId, String status) {
+    rereadSubscriptions.put(subscriptionId, status);
+  }
+
+  boolean wasCheckoutReread(String requestId) {
+    return rereadCheckouts.contains(requestId);
+  }
+
+  /** @return the provider status this run read for the subscription, or null when not read */
+  String rereadSubscriptionStatus(String subscriptionId) {
+    return rereadSubscriptions.get(subscriptionId);
+  }
+
+  /**
+   * Tells whether a phase re-read everything it should have.
+   *
+   * @param phase a phase
+   * @return whether it completed without errors, failed reads or caps
+   */
+  public boolean isComplete(Phase phase) {
+    return !incomplete.containsKey(phase);
   }
 
   /**
@@ -132,12 +195,15 @@ public final class ReconciliationResult {
   }
 
   /**
-   * Tells whether the run must be reported as failed: it met errors or tripped the breaker.
+   * Tells whether the run must be reported as failed: it met errors, a provider read failed, a
+   * phase could not re-read everything, or the breaker tripped. A run that could not read the
+   * provider never reports itself consistent.
    *
    * @return whether the run failed
    */
   public boolean hasFailures() {
-    return breakerReason != null || !errors.isEmpty();
+    return breakerReason != null || !errors.isEmpty() || get(Counter.PROVIDER_ERRORS) > 0
+        || !incomplete.isEmpty();
   }
 
   /**
@@ -152,7 +218,7 @@ public final class ReconciliationResult {
         + get(Counter.SUBSCRIPTIONS_CLOSED) + get(Counter.SUBSCRIPTIONS_CURRENT)
         + get(Counter.PRICES_FILLED) + get(Counter.PAUSE_COLLECTION_ALERTS)
         + get(Counter.PAUSED_ALERTS)
-        + get(Counter.STALE_EVENTS_SWEPT);
+        + get(Counter.STALE_EVENTS_SWEPT) + get(Counter.STALE_EVENTS_PARKED);
   }
 
   /**
@@ -176,10 +242,16 @@ public final class ReconciliationResult {
     } else {
       summary.append(String.join(", ", parts));
     }
-    if (repairs() == 0 && breakerReason == null && errors.isEmpty()) {
+    if (repairs() == 0 && !hasFailures()) {
       summary.append(". Everything is consistent; nothing was changed");
     } else if (dryRun) {
       summary.append(". Dry run: nothing was written");
+    }
+    if (!incomplete.isEmpty()) {
+      List<String> notes = new ArrayList<>();
+      incomplete.forEach((phase, reason) -> notes.add(phase.label() + ": " + reason));
+      summary.append(". Not everything could be checked, so the run is reported as failed (")
+          .append(String.join("; ", notes)).append(')');
     }
     if (breakerReason != null) {
       summary.append(". Absent-subscription breaker tripped, no absent subscription was closed: ")

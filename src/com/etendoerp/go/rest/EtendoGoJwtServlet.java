@@ -86,6 +86,7 @@ import com.etendoerp.go.payment.StripePriceService;
 import com.etendoerp.go.payment.CheckoutRequestStore;
 import com.etendoerp.go.payment.CheckoutRequestWrites;
 import com.etendoerp.go.payment.PausedSubscriptionAlert;
+import com.etendoerp.go.payment.StripeEventTypes;
 import com.etendoerp.go.payment.ProvisioningFailureReason;
 import com.etendoerp.go.payment.EnvironmentPlanCache;
 import com.etendoerp.go.payment.PlanCatalogService;
@@ -342,25 +343,23 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   /** Maximum accepted age of a Stripe-Signature timestamp, per the provider's guidance. */
   private static final long CHECKOUT_WEBHOOK_TOLERANCE_SECONDS = 300;
   /** The event types that confirm a hosted-checkout payment; every other type is ignored. */
-  private static final List<String> CHECKOUT_PAID_EVENT_TYPES = List.of(
-      "checkout.session.completed", "checkout.session.async_payment_succeeded");
-  private static final List<String> SUBSCRIPTION_EVENT_TYPES = List.of(
-      "invoice.payment_failed", "invoice.paid", "customer.subscription.updated",
-      "customer.subscription.deleted");
+  private static final List<String> CHECKOUT_PAID_EVENT_TYPES = StripeEventTypes.CHECKOUT_PAID;
+  private static final List<String> SUBSCRIPTION_EVENT_TYPES =
+      StripeEventTypes.SUBSCRIPTION_LIFECYCLE;
   /**
    * ETP-5047 — events that raise an operator alert and change nothing. A dispute is a chargeback
    * the provider is already arbitrating: blocking the tenant on it would punish a customer before
    * the outcome is known, and a lost dispute reaches the subscription through the ordinary
    * lifecycle events anyway.
    */
-  private static final List<String> ALERT_ONLY_EVENT_TYPES = List.of("charge.dispute.created");
+  private static final List<String> ALERT_ONLY_EVENT_TYPES = StripeEventTypes.ALERT_ONLY;
   /**
    * ETP-5048 — Stripe's dedicated event for a subscription that entered status {@code paused}.
    * Alert-only, like a {@code customer.subscription.updated} carrying that status: see
    * {@link PausedSubscriptionAlert}. {@code customer.subscription.resumed} stays unhandled, because
    * a pause never changed anything to undo.
    */
-  private static final String SUBSCRIPTION_PAUSED_EVENT = "customer.subscription.paused";
+  private static final String SUBSCRIPTION_PAUSED_EVENT = StripeEventTypes.SUBSCRIPTION_PAUSED;
   /** The stable prefix of the webhook's operator alerts (ETP-5048, aligned with the reconciler). */
   static final String BILLING_ALERT_PREFIX = "[BILLING-ALERT]";
   private static final String FIELD_DRAFT = "draft";

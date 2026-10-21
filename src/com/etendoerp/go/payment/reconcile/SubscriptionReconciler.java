@@ -50,6 +50,7 @@ import com.etendoerp.go.payment.SystemContext;
 import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.payment.TenantEnvironmentLifecycleService.LifecycleTarget;
 import com.etendoerp.go.payment.reconcile.ReconciliationResult.Counter;
+import com.etendoerp.go.payment.reconcile.ReconciliationResult.Phase;
 import com.etendoerp.go.schemaforge.data.CheckoutRequest;
 import com.etendoerp.go.schemaforge.data.Subscription;
 
@@ -130,11 +131,18 @@ final class SubscriptionReconciler {
     }
     Map<String, JSONObject> listed = new HashMap<>();
     StripeListPager.Sweep sweep = sweep(candidates, listed);
+    if (!sweep.isComplete()) {
+      result.markIncomplete(Phase.SUBSCRIPTIONS,
+          "the subscription list sweep stopped: " + sweep.getFailure());
+    }
     int directReads = 0;
     List<SubscriptionCandidate> absent = new ArrayList<>();
     for (SubscriptionCandidate candidate : candidates) {
       JSONObject subscription = listed.get(candidate.subscriptionId);
-      if (subscription == null && directReads < settings.getBatchSize()) {
+      if (subscription == null && directReads >= settings.getBatchSize()) {
+        result.markIncomplete(Phase.SUBSCRIPTIONS, "direct reads capped at "
+            + settings.getBatchSize() + "; the rest is read by a later run");
+      } else if (subscription == null) {
         directReads++;
         subscription = readDirectly(candidate, result, absent);
       }
@@ -190,7 +198,10 @@ final class SubscriptionReconciler {
   private void reconcileSafely(SubscriptionCandidate candidate, JSONObject subscription,
       ReconciliationResult result, ReconciliationAudit audit) {
     try {
-      reconcile(candidate, subscription, result, audit);
+      if (reconcile(candidate, subscription, result, audit)) {
+        result.noteSubscriptionReread(candidate.subscriptionId,
+            subscription.optString(FIELD_STATUS, ""));
+      }
     } catch (RuntimeException e) {
       itemFailed(result, "subscription " + candidate.subscriptionId, e);
     }
@@ -204,12 +215,17 @@ final class SubscriptionReconciler {
     }
   }
 
-  private void reconcile(SubscriptionCandidate candidate, JSONObject subscription,
+  /**
+   * Reconciles one subscription with what the provider says.
+   *
+   * @return whether it was reconciled; false for a foreign subscription, which is never touched
+   */
+  private boolean reconcile(SubscriptionCandidate candidate, JSONObject subscription,
       ReconciliationResult result, ReconciliationAudit audit) {
     if (!hasOurMetadata(subscription)) {
       log.debug("{} Subscription {} carries no request_id metadata; foreign, not touched",
           ReconciliationAudit.LOG_PREFIX, candidate.subscriptionId);
-      return;
+      return false;
     }
     String status = subscription.optString(FIELD_STATUS, "");
     boolean paying = STATUS_ACTIVE.equals(status) || STATUS_TRIALING.equals(status);
@@ -220,16 +236,17 @@ final class SubscriptionReconciler {
     if (STATUS_PAUSED.equals(status)) {
       // Alert only, never a state change (decided 2026-10-20): see PausedSubscriptionAlert.
       alertPaused(candidate, result, audit);
-      return;
+      return true;
     }
     if (!paying && !"canceled".equals(status) && !"incomplete_expired".equals(status)) {
       // past_due / unpaid stay with the webhook's grace logic; incomplete is still being paid.
-      return;
+      return true;
     }
     // The provider's clock, never this server's: see SubscriptionLifecycleApplier#providerStateAt.
     Instant providerAt = SubscriptionLifecycleApplier.providerStateAt(subscription);
     SystemContext.run("reconciling a subscription",
         () -> applyProviderStatus(candidate, subscription, status, providerAt, result, audit));
+    return true;
   }
 
   private void applyProviderStatus(SubscriptionCandidate candidate, JSONObject subscription,
@@ -392,6 +409,7 @@ final class SubscriptionReconciler {
         result.get(Counter.SUBSCRIPTIONS_CHECKED));
     if (breaker != null) {
       result.tripBreaker(breaker);
+      result.markIncomplete(Phase.SUBSCRIPTIONS, "the absent-subscription breaker tripped");
       audit.alert("Absent-subscription breaker tripped, nothing closed: {}", breaker);
       alertBreakerOncePerDay(breaker, result, audit);
       return;
