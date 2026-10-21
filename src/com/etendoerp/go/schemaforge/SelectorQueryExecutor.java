@@ -44,8 +44,8 @@ import com.etendoerp.go.schemaforge.util.NeoTrl;
 final class SelectorQueryExecutor {
 
   private static final Logger log = LogManager.getLogger(SelectorQueryExecutor.class);
-  private static final String PARAM_SEARCH = "search";
-  private static final String ORDER_BY = " ORDER BY ";
+  static final String PARAM_SEARCH = "search";
+  static final String ORDER_BY = " ORDER BY ";
   private static final String PARAM_SEARCH_LANG = "searchLang";
   private static final String FIELD_LABEL = "label";
   private static final String PARAM_LANGUAGE = "language";
@@ -183,13 +183,13 @@ final class SelectorQueryExecutor {
 
     // For view-backed selectors whose Value Field is not the entity PK (e.g. Product Complete →
     // M_Product_Stock_V, one row per product×warehouse×locator), the same value appears in many
-    // rows. Those are paged BY VALUE (see executeValuePagedRichQuery) so the response holds one
+    // rows. Those are paged BY VALUE (see {@link ValuePagedRichQuery}) so the response holds one
     // item per value and the paging math is correct. Guard mirrors resolveRichItemId exactly: only
     // when valueProperty is a non-PK path. Stock-breakdown selectors are the deliberate exception
     // (see shouldDistinctByValue): they MUST keep every per-locator row. When the guard is false the
     // where clause is byte-identical to before (zero regression).
     if (shouldDistinctByValue(meta)) {
-      return executeValuePagedRichQuery(meta, alias, whereClause, search, limit, offset,
+      return ValuePagedRichQuery.execute(meta, alias, whereClause, search, limit, offset,
           extraFilterParams);
     }
     String effectiveWhere = whereClause.getHql();
@@ -222,7 +222,7 @@ final class SelectorQueryExecutor {
    * The {id, label, grid fields, aux} item of every row, translated. Shared by the row-paged and
    * the value-paged rich flows.
    */
-  private static JSONArray buildRichItems(List<BaseOBObject> rows, SelectorMeta meta)
+  static JSONArray buildRichItems(List<BaseOBObject> rows, SelectorMeta meta)
       throws Exception {
     JSONArray items = new JSONArray();
     for (BaseOBObject bob : rows) {
@@ -238,148 +238,6 @@ final class SelectorQueryExecutor {
     }
     enrichTranslations(items, meta.entityName, resolveEnrichLanguage(null));
     return items;
-  }
-
-  private static final String PARAM_PAGE_VALUES = "sfPageValues";
-
-  /** A filtered HQL ready to be extended, with every named parameter it needs. */
-  private static final class RichHql {
-    final String hql;
-    final Map<String, Object> params;
-
-    RichHql(String hql, Map<String, Object> params) {
-      this.hql = hql;
-      this.params = params;
-    }
-  }
-
-  /**
-   * ETP-5707: pages a view-backed rich selector BY VALUE, as ETP-5703 does for custom HQL.
-   *
-   * <p>The row-per-value collapse used to be {@code e.id in (select min(e.id) … group by value)}:
-   * the whole filter twice, and a plan that re-evaluated the grouped subquery once per outer row
-   * (40 s for 1000 products × 8 warehouses). Here the filter runs once per query and the three
-   * steps share one unit, the value: (1) {@code count(distinct value)} is the {@code totalCount};
-   * (2) one page of distinct values, {@code group by value order by min(display), value}, with
-   * offset/limit; (3) the rows of those values, of which the one with the lowest id is kept, the row
-   * the old {@code min(id)} chose, so the {@code _aux} values do not change.
-   *
-   * <p>The filtered HQL comes from {@link OBQuery} (readable client/organization/active filters
-   * already inlined) and is extended on the session, because an {@code OBQuery} where clause cannot
-   * carry a {@code group by}. Rows whose value is null are left out of every step: they cannot be
-   * selected, and {@code count(distinct)} would otherwise disagree with the grouped page.
-   */
-  private static NeoResponse executeValuePagedRichQuery(SelectorMeta meta, String alias,
-      SelectorQueryBuilder.HqlWithParams whereClause, String search, int limit, int offset,
-      Map<String, Object> extraFilterParams) throws Exception {
-    boolean hasSearch = StringUtils.isNotBlank(search) && !meta.searchableProperties.isEmpty();
-    String valueExpr = alias + "." + meta.valueProperty;
-    Map<String, Object> params = new HashMap<>(whereClause.getParams());
-    if (extraFilterParams != null) {
-      params.putAll(extraFilterParams);
-    }
-    if (hasSearch) {
-      params.put(PARAM_SEARCH, "%" + search.toLowerCase() + "%");
-    }
-    String where = andCondition(whereClause.getHql(), valueExpr + " is not null");
-
-    RichHql countHql = buildRichHql(meta, where, "count(distinct " + valueExpr + ")", params);
-    org.hibernate.query.Query<Long> countQuery = OBDal.getInstance().getSession()
-        .createQuery(countHql.hql, Long.class);
-    NeoSelectorExecutionHelper.bindNamedParameters(countQuery, countHql.params);
-    Long count = countQuery.uniqueResult();
-    int totalCount = count != null ? count.intValue() : 0;
-
-    List<String> pageValues = new ArrayList<>();
-    if (totalCount > 0 && offset < totalCount) {
-      RichHql pageHql = buildRichHql(meta, where, valueExpr, params);
-      org.hibernate.query.Query<?> pageQuery = OBDal.getInstance().getSession()
-          .createQuery(pageHql.hql + " group by " + valueExpr + ORDER_BY
-              + (displayIsPrimitivePath(meta)
-                  // min() is only valid on a primitive property; an association display (the price
-                  // view's identifier is the product itself) orders by the value alone, as it did
-                  ? "min(" + alias + "." + meta.displayProperty + "), " + valueExpr
-                  : valueExpr));
-      NeoSelectorExecutionHelper.bindNamedParameters(pageQuery, pageHql.params);
-      pageQuery.setMaxResults(limit);
-      pageQuery.setFirstResult(offset);
-      for (Object value : pageQuery.list()) {
-        pageValues.add(idValueAsString(value));
-      }
-    }
-
-    JSONArray items = new JSONArray();
-    if (!pageValues.isEmpty()) {
-      RichHql rowsHql = buildRichHql(meta, where, null, params);
-      org.hibernate.query.Query<?> rowsQuery = OBDal.getInstance().getSession()
-          .createQuery(rowsHql.hql + SelectorQueryBuilder.SQL_AND + valueExpr + " in (:"
-              + PARAM_PAGE_VALUES + ")" + ORDER_BY + valueExpr + ", " + alias + ".id");
-      NeoSelectorExecutionHelper.bindNamedParameters(rowsQuery, rowsHql.params);
-      rowsQuery.setParameterList(PARAM_PAGE_VALUES, pageValues);
-      Map<String, BaseOBObject> firstRowOfValue = new java.util.LinkedHashMap<>();
-      for (Object row : rowsQuery.list()) {
-        BaseOBObject bob = (BaseOBObject) row;
-        firstRowOfValue.putIfAbsent(resolveRichItemId(bob, meta), bob);
-      }
-      List<BaseOBObject> pageRows = new ArrayList<>();
-      for (String value : pageValues) {
-        BaseOBObject bob = firstRowOfValue.get(value);
-        if (bob != null) {
-          pageRows.add(bob);
-        }
-      }
-      items = buildRichItems(pageRows, meta);
-    }
-    return SelectorResponseSupport.buildSelectorResponse(items,
-        SelectorResponseSupport.buildGridColumnMetadata(meta.gridFields), totalCount, limit, offset);
-  }
-
-  /**
-   * The filtered HQL of {@code where} with an optional select clause, plus every named parameter it
-   * uses (the caller's and the readable-client/organization ones {@link OBQuery} adds).
-   */
-  private static RichHql buildRichHql(SelectorMeta meta, String where, String selectClause,
-      Map<String, Object> params) {
-    OBQuery<BaseOBObject> query = OBDal.getInstance().createQuery(meta.entityName, where);
-    NeoSelectorExecutionHelper.bindNamedParameters(query, params);
-    if (selectClause != null) {
-      query.setSelectClause(selectClause);
-    }
-    String hql = query.createQuery(Object.class).getQueryString();
-    return new RichHql(hql, new HashMap<>(query.getNamedParameters()));
-  }
-
-  /**
-   * {@code baseWhere} ({@code "as e"} or {@code "as e where <conditions>"}) with one more AND-ed
-   * condition; the existing conditions are parenthesised so an {@code or} inside them cannot
-   * swallow it.
-   */
-  private static String andCondition(String baseWhere, String condition) {
-    final String whereKeyword = " where ";
-    int whereIdx = StringUtils.indexOfIgnoreCase(baseWhere, whereKeyword);
-    if (whereIdx < 0) {
-      return baseWhere + whereKeyword + condition;
-    }
-    return baseWhere.substring(0, whereIdx + whereKeyword.length()) + "("
-        + baseWhere.substring(whereIdx + whereKeyword.length()) + ")" + SelectorQueryBuilder.SQL_AND
-        + condition;
-  }
-
-  /** Whether the display property, possibly a dotted path, ends in a primitive property. */
-  static boolean displayIsPrimitivePath(SelectorMeta meta) {
-    if (meta == null || StringUtils.isBlank(meta.displayProperty)) {
-      return false;
-    }
-    try {
-      Entity entity = ModelProvider.getInstance().getEntity(meta.entityName);
-      org.openbravo.base.model.Property property = entity != null
-          ? org.openbravo.dal.core.DalUtil.getPropertyFromPath(entity, meta.displayProperty) : null;
-      return property != null && property.isPrimitive();
-    } catch (RuntimeException e) {
-      log.debug("[ETP-5707] Display property {} of {} not resolvable; ordering by value: {}",
-          meta.displayProperty, meta.entityName, e.getMessage());
-      return false;
-    }
   }
 
   /**
@@ -717,7 +575,7 @@ final class SelectorQueryExecutor {
     return HQL_KEYWORDS.contains(candidate.toLowerCase()) ? null : candidate;
   }
 
-  private static String idValueAsString(Object value) {
+  static String idValueAsString(Object value) {
     return value instanceof BaseOBObject ? ((BaseOBObject) value).getId().toString()
         : String.valueOf(value);
   }
@@ -792,7 +650,7 @@ final class SelectorQueryExecutor {
     return asIdx >= 0 ? expr.substring(0, asIdx).trim() : expr;
   }
 
-  private static String resolveRichItemId(BaseOBObject bob, SelectorMeta meta) {
+  static String resolveRichItemId(BaseOBObject bob, SelectorMeta meta) {
     if (meta.valueProperty != null && !"id".equals(meta.valueProperty)) {
       Object val = resolvePropertyValue(bob, meta.valueProperty);
       if (val != null) {

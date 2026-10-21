@@ -67,6 +67,7 @@ import com.etendoerp.go.schemaforge.util.NeoTrl;
  * language extraction, and country-translation enrichment.
  *
  * @covers com.etendoerp.go.schemaforge.SelectorQueryExecutor
+ * @covers com.etendoerp.go.schemaforge.ValuePagedRichQuery
  */
 public class SelectorQueryExecutorTest {
 
@@ -94,10 +95,10 @@ public class SelectorQueryExecutorTest {
   }
 
   /**
-   * Invokes the private {@code andCondition} method.
+   * Invokes {@code ValuePagedRichQuery.andCondition} (package-visible).
    */
   private static String invokeAndCondition(String baseWhere, String condition) throws Exception {
-    Method m = SelectorQueryExecutor.class.getDeclaredMethod("andCondition", String.class,
+    Method m = ValuePagedRichQuery.class.getDeclaredMethod("andCondition", String.class,
         String.class);
     m.setAccessible(true);
     return (String) m.invoke(null, baseWhere, condition);
@@ -1294,7 +1295,7 @@ public class SelectorQueryExecutorTest {
         dalUtilMock.when(() -> DalUtil.getPropertyFromPath(any(Entity.class), anyString()))
             .thenReturn(resolved);
       }
-      return SelectorQueryExecutor.displayIsPrimitivePath(meta);
+      return ValuePagedRichQuery.displayIsPrimitivePath(meta);
     }
   }
 
@@ -1327,7 +1328,7 @@ public class SelectorQueryExecutorTest {
   public void testDisplayIsPrimitivePathFalseForBlankDisplay() {
     assertFalse(displayIsPrimitive("", property(true), true, null));
     assertFalse(displayIsPrimitive("  ", property(true), true, null));
-    assertFalse(SelectorQueryExecutor.displayIsPrimitivePath(null));
+    assertFalse(ValuePagedRichQuery.displayIsPrimitivePath(null));
   }
 
   /** An entity the model does not know, or a path it cannot resolve, falls back to false. */
