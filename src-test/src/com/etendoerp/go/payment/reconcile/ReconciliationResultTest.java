@@ -41,7 +41,7 @@ public class ReconciliationResultTest {
     result.increment(Counter.SUBSCRIPTIONS_CHECKED);
     result.increment(Counter.AWAITING_REVIEW);
 
-    assertEquals("Run " + result.getRunId() + ": 1 checkouts checked, 1 purchases still awaiting "
+    assertEquals("Run " + result.getRunId() + ": 1 checkout checked, 1 purchase still awaiting "
         + "review, 2 subscriptions checked. Everything is consistent; nothing was changed.",
         result.toString());
     assertEquals("Checks and awaiting-review are not writes", 0, result.repairs());
@@ -75,16 +75,57 @@ public class ReconciliationResultTest {
     String summary = dry.toString();
 
     assertTrue(summary, summary.contains("would close 2 abandoned checkouts"));
-    assertTrue(summary, summary.contains("would provision 1 environments"));
-    assertTrue(summary, summary.contains("would close/expire 1 subscriptions"));
-    assertTrue(summary, summary.contains("would park 1 purchases for review"));
+    assertTrue(summary, summary.contains("would provision 1 environment"));
+    assertTrue(summary, summary.contains("would close/expire 1 subscription"));
+    assertTrue(summary, summary.contains("would park 1 purchase for review"));
     assertTrue("A count that is no write keeps its wording", summary.contains(
-        "1 checkouts checked"));
+        "1 checkout checked"));
     assertFalse(summary, summary.contains("abandoned checkouts closed"));
 
     ReconciliationResult real = new ReconciliationResult(false);
     real.increment(Counter.CHECKOUTS_EXPIRED);
-    assertTrue(real.toString(), real.toString().contains("1 abandoned checkouts closed"));
+    assertTrue(real.toString(), real.toString().contains("1 abandoned checkout closed"));
+  }
+
+  /** Martin, 2026-10-21: a count of one takes the singular noun, in real and dry runs alike. */
+  @Test
+  public void aCountOfOneReadsInTheSingular() {
+    assertEquals("1 checkout checked", Counter.CHECKOUTS_CHECKED.describe(1, true));
+    assertEquals("would park 1 purchase for review", Counter.NEEDS_REVIEW.describe(1, true));
+    assertEquals("1 new purchase needing review", Counter.NEEDS_REVIEW.describe(1, false));
+    assertEquals("1 subscription absent at the provider",
+        Counter.ABSENT_SUBSCRIPTIONS.describe(1, false));
+    assertEquals("1 tenant on the preference route checked",
+        Counter.PREFERENCE_ROUTE_CHECKED.describe(1, false));
+    for (Counter counter : Counter.values()) {
+      for (boolean dryRun : new boolean[] { false, true }) {
+        String worded = counter.describe(1, dryRun);
+        assertFalse(worded, worded.contains("{") || worded.contains("%d"));
+      }
+    }
+    ReconciliationResult result = new ReconciliationResult(true);
+    result.increment(Counter.CHECKOUTS_EXPIRED);
+    result.error("e1");
+    String summary = result.toString();
+    assertTrue(summary, summary.contains("would close 1 abandoned checkout,")
+        || summary.contains("would close 1 abandoned checkout."));
+    assertTrue(summary, summary.contains(". 1 error: e1"));
+    assertEquals(summary, result.toPlainText());
+  }
+
+  @Test
+  public void aCountOfTwoReadsInThePlural() {
+    assertEquals("2 checkouts checked", Counter.CHECKOUTS_CHECKED.describe(2, false));
+    assertEquals("would park 2 purchases for review", Counter.NEEDS_REVIEW.describe(2, true));
+    assertEquals("2 purchases still awaiting review", Counter.AWAITING_REVIEW.describe(2, true));
+    assertEquals("2 subscriptions absent at the provider",
+        Counter.ABSENT_SUBSCRIPTIONS.describe(2, false));
+    assertEquals("would correct 2 tenants on the preference route",
+        Counter.PREFERENCE_ROUTE_CORRECTED.describe(2, true));
+    assertEquals("2 of 4 subscriptions are absent", ReconciliationResult.counted(2, "%d of ")
+        + ReconciliationResult.counted(4, "%d {subscription|subscriptions} ")
+        + ReconciliationResult.counted(2, "{is|are} absent"));
+    assertEquals("0 errors", ReconciliationResult.counted(0, "%d {error|errors}"));
   }
 
   @Test
@@ -177,7 +218,7 @@ public class ReconciliationResultTest {
     assertTrue(result.hasFailures());
     assertEquals(7, result.getErrors().size());
     String summary = result.toString();
-    assertTrue(summary, summary.endsWith(". 7 error(s): e1; e2; e3; e4; e5."));
+    assertTrue(summary, summary.endsWith(". 7 errors: e1; e2; e3; e4; e5."));
   }
 
   // ── Phase completeness (ETP-5048 review fixes) ────────────────────────────────────────────
@@ -217,7 +258,7 @@ public class ReconciliationResultTest {
     result.increment(Counter.PROVIDER_ERRORS);
 
     assertTrue(result.hasFailures());
-    assertEquals("Run " + result.getRunId() + ": 1 checkouts checked, 1 provider reads that "
+    assertEquals("Run " + result.getRunId() + ": 1 checkout checked, 1 provider read that "
         + "failed.", result.toString());
   }
 

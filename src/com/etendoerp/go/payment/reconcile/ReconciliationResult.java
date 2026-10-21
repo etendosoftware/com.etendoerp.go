@@ -14,6 +14,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import org.apache.commons.lang3.StringUtils;
 
@@ -31,37 +33,45 @@ public final class ReconciliationResult {
   /**
    * One counted kind. The label is the operator-facing wording of a real run; a kind that is a
    * write also has the wording of a dry run ("would close N …"), so a dry run never reads as if
-   * it had done something.
+   * it had done something. Both are {@link #counted} templates, so a count of one reads in the
+   * singular.
    */
   public enum Counter {
-    CHECKOUTS_CHECKED("checkouts checked", null),
-    PAYMENTS_RECOVERED("payments recovered from the provider",
-        "would record %d payments recovered from the provider"),
-    CHECKOUTS_EXPIRED("abandoned checkouts closed", "would close %d abandoned checkouts"),
-    PROVISIONED("environments provisioned", "would provision %d environments"),
-    REACTIVATIONS_APPLIED("re-subscriptions applied", "would apply %d re-subscriptions"),
-    PROVISIONING_FAILED("provisioning attempts failed", null),
-    NEEDS_REVIEW("new purchases needing review", "would park %d purchases for review"),
-    AWAITING_REVIEW("purchases still awaiting review", null),
-    SUBSCRIPTIONS_CHECKED("subscriptions checked", null),
-    SUBSCRIPTIONS_CLOSED("subscriptions closed", "would close/expire %d subscriptions"),
-    SUBSCRIPTIONS_CURRENT("subscriptions set back to current",
-        "would set %d subscriptions back to current"),
-    PRICES_FILLED("subscription prices filled", "would fill %d subscription prices"),
-    PAUSE_COLLECTION_ALERTS("paused-collection alerts", "would raise %d paused-collection alerts"),
-    PAUSED_ALERTS("paused subscriptions needing review",
-        "would raise %d paused-subscription review alerts"),
-    ABSENT_SUBSCRIPTIONS("subscriptions absent at the provider", null),
+    CHECKOUTS_CHECKED("%d {checkout|checkouts} checked", null),
+    PAYMENTS_RECOVERED("%d {payment|payments} recovered from the provider",
+        "would record %d {payment|payments} recovered from the provider"),
+    CHECKOUTS_EXPIRED("%d abandoned {checkout|checkouts} closed",
+        "would close %d abandoned {checkout|checkouts}"),
+    PROVISIONED("%d {environment|environments} provisioned",
+        "would provision %d {environment|environments}"),
+    REACTIVATIONS_APPLIED("%d {re-subscription|re-subscriptions} applied",
+        "would apply %d {re-subscription|re-subscriptions}"),
+    PROVISIONING_FAILED("%d provisioning {attempt|attempts} failed", null),
+    NEEDS_REVIEW("%d new {purchase|purchases} needing review",
+        "would park %d {purchase|purchases} for review"),
+    AWAITING_REVIEW("%d {purchase|purchases} still awaiting review", null),
+    SUBSCRIPTIONS_CHECKED("%d {subscription|subscriptions} checked", null),
+    SUBSCRIPTIONS_CLOSED("%d {subscription|subscriptions} closed",
+        "would close/expire %d {subscription|subscriptions}"),
+    SUBSCRIPTIONS_CURRENT("%d {subscription|subscriptions} set back to current",
+        "would set %d {subscription|subscriptions} back to current"),
+    PRICES_FILLED("%d subscription {price|prices} filled",
+        "would fill %d subscription {price|prices}"),
+    PAUSE_COLLECTION_ALERTS("%d paused-collection {alert|alerts}",
+        "would raise %d paused-collection {alert|alerts}"),
+    PAUSED_ALERTS("%d paused {subscription|subscriptions} needing review",
+        "would raise %d paused-subscription review {alert|alerts}"),
+    ABSENT_SUBSCRIPTIONS("%d {subscription|subscriptions} absent at the provider", null),
     // ETP-5046-TRANSITIONAL-FALLBACK — tenants with no subscription row, counted on their own so
     // the cutover's progress shows; delete with the preference route in Phase F.
-    PREFERENCE_ROUTE_CHECKED("tenants on the preference route checked", null),
-    PREFERENCE_ROUTE_CORRECTED("tenants on the preference route corrected",
-        "would correct %d tenants on the preference route"),
-    STALE_EVENTS_SWEPT("stuck provider events superseded",
-        "would supersede %d stuck provider events"),
-    STALE_EVENTS_PARKED("stuck provider events needing review",
-        "would park %d stuck provider events for review"),
-    PROVIDER_ERRORS("provider reads that failed", null);
+    PREFERENCE_ROUTE_CHECKED("%d {tenant|tenants} on the preference route checked", null),
+    PREFERENCE_ROUTE_CORRECTED("%d {tenant|tenants} on the preference route corrected",
+        "would correct %d {tenant|tenants} on the preference route"),
+    STALE_EVENTS_SWEPT("%d stuck provider {event|events} superseded",
+        "would supersede %d stuck provider {event|events}"),
+    STALE_EVENTS_PARKED("%d stuck provider {event|events} needing review",
+        "would park %d stuck provider {event|events} for review"),
+    PROVIDER_ERRORS("%d provider {read|reads} that failed", null);
 
     private final String label;
     private final String dryRunTemplate;
@@ -71,23 +81,39 @@ public final class ReconciliationResult {
       this.dryRunTemplate = dryRunTemplate;
     }
 
-    /** @return the operator-facing wording of a real run */
-    public String label() {
-      return label;
-    }
-
     /**
      * Words a count for the summary.
      *
      * @param count the count
      * @param dryRun whether the run wrote nothing
-     * @return e.g. {@code 2 abandoned checkouts closed}, or {@code would close 2 abandoned
-     *     checkouts} in a dry run
+     * @return e.g. {@code 2 abandoned checkouts closed}, {@code 1 abandoned checkout closed}, or
+     *     {@code would close 2 abandoned checkouts} in a dry run
      */
     public String describe(int count, boolean dryRun) {
-      return dryRun && dryRunTemplate != null ? String.format(dryRunTemplate, count)
-          : count + " " + label;
+      return counted(count, dryRun && dryRunTemplate != null ? dryRunTemplate : label);
     }
+  }
+
+  private static final Pattern NUMBER_CHOICE = Pattern.compile("\\{([^|}]*)\\|([^}]*)}");
+
+  /**
+   * Words a counted phrase: every {@code {singular|plural}} group takes the singular when the
+   * count is 1, and {@code %d} is the count. {@code counted(1, "%d {checkout|checkouts} checked")}
+   * is {@code 1 checkout checked}; with 2 it is {@code 2 checkouts checked}.
+   *
+   * @param count the count the nouns agree with
+   * @param template the phrase
+   * @return the worded phrase
+   */
+  static String counted(long count, String template) {
+    Matcher choice = NUMBER_CHOICE.matcher(template);
+    StringBuilder worded = new StringBuilder();
+    while (choice.find()) {
+      choice.appendReplacement(worded, Matcher.quoteReplacement(
+          choice.group(count == 1 ? 1 : 2)));
+    }
+    choice.appendTail(worded);
+    return worded.toString().replace("%d", String.valueOf(count));
   }
 
   /** At most this many item lines are listed; the rest is summed up as "+N more". */
@@ -371,7 +397,7 @@ public final class ReconciliationResult {
           .append(breakerReason);
     }
     if (!errors.isEmpty()) {
-      summary.append(". ").append(errors.size()).append(" error(s): ")
+      summary.append(". ").append(counted(errors.size(), "%d {error|errors}")).append(": ")
           .append(String.join("; ", errors.subList(0, Math.min(5, errors.size()))));
     }
     if (ranWithoutLock) {

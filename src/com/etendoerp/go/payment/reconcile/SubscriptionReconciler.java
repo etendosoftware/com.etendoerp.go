@@ -521,7 +521,9 @@ final class SubscriptionReconciler {
     }
     int allowed = Math.max(1, (int) Math.floor(settings.getAbsentMaxShare() * checked));
     if (absent.size() > allowed) {
-      return absent.size() + " of " + checked + " subscriptions are absent, more than the "
+      return ReconciliationResult.counted(absent.size(), "%d of ")
+          + ReconciliationResult.counted(checked, "%d {subscription|subscriptions} ")
+          + ReconciliationResult.counted(absent.size(), "{is|are} absent, more than the ")
           + allowed + " allowed";
     }
     return null;

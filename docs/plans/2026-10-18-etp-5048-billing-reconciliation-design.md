@@ -256,8 +256,9 @@ connection available); concurrent runs were not excluded".
 
 **What the operator reads** (Martin, 2026-10-21; AC5, readable without the database or the logs).
 The summary words a dry run as what it would do ("would close 2 abandoned checkouts", "would
-provision 1 environments", "would close/expire N subscriptions", "would park N for review"); a real
-run keeps the past tense. Under the counts, one line per affected item — the short request id or the
+provision 1 environment", "would close/expire N subscriptions", "would park N for review"); a real
+run keeps the past tense. A count of one takes the singular noun in both ("1 checkout checked",
+"would park 1 purchase for review"), through the one `ReconciliationResult.counted` helper. Under the counts, one line per affected item — the short request id or the
 subscription id, the company name, the action and the reason — capped at 20 lines plus "+N more".
 The popup shows them one per line (HTML, every value escaped), and the run log Process Monitor shows
 carries the same lines. Only ids, the company name and short reasons, as the billing-event rows.

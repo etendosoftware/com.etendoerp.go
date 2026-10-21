@@ -416,7 +416,8 @@ public class BillingReconciliationService {
     }
     if (attemptsExhausted(row)) {
       reviews.park(row.requestId, row.clientName, CODE_ATTEMPTS_EXHAUSTED,
-          row.attempts + " provisioning attempts did not complete", row.attempts, result, audit);
+          ReconciliationResult.counted(row.attempts,
+              "%d provisioning {attempt|attempts} did not complete"), row.attempts, result, audit);
       return;
     }
     if (audit.isDryRun()) {
