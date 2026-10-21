@@ -6652,6 +6652,17 @@ execution against every environment (new or existing), which is the one guarante
 actually needs. The "Admin"
 (`is_client_admin = 'Y'`) role stays client-level, per tenant, untouched.
 
+**The template matrix exists twice — change both (ETP-5830).** The window grants per template live in
+`TemplateRoleWindowAccess.java` (runtime, read by the access-propagation sweep and the tests) **and** in
+a hand-kept copy inside `src-util/modulescript/.../EnsureSystemRoleTemplatesScript.java` (the seeding
+`ModuleScript`, compiled on its own). Editing only the first is reverted by the next
+`update.database`. After editing both, rebuild with `./gradlew compile.modulescript
+-Dmodule=com.etendoerp.go` and `git add -f` the rebuilt `.class` files under
+`build/classes/com/etendoerp/go/modulescript/` (they are committed). A grant you remove is cleaned off
+existing tenants with no data-fix: `update.database` runs `removeStaleWindowAccess`, then the startup
+sweep re-derives the personal roles. ETP-5830 used this path to drop Smart Scan from all four
+templates (Admin/client-admin keep it through the sidebar exemption).
+
 **The mechanism (`com.etendoerp.go.roles.UserRoleCompositionService`):** each user gets exactly
 ONE personal, non-template, non-admin `AD_Role` (found by reuse or created on first use), which
 inherits — via a real `AD_Role_Inheritance` row per requested template, added through `OBDal`
