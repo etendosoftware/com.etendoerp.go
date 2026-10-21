@@ -25,6 +25,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.math.BigDecimal;
 import java.util.stream.Stream;
 
 import org.codehaus.jettison.json.JSONObject;
@@ -245,9 +246,9 @@ class InvoiceLineAmountSupportTest {
         Arguments.of("repriced with an explicit list price in the patch → the caller's list price",
             LineAmountTestSupport.storedInvoiceLine("2", "50", "50", "0", "0", "TAX21"),
             "{\"unitPrice\":60,\"listPrice\":65}", "65"),
-        Arguments.of("a discounted line repriced → the discount rule decides, the list is left",
+        Arguments.of("a discounted line repriced → discount kept, list worked back (ETP-5703)",
             LineAmountTestSupport.storedInvoiceLine("2", "22.5", "25", "10", "0", "TAX21"),
-            "{\"unitPrice\":30}", null),
+            "{\"unitPrice\":30}", "33.333333"),
         Arguments.of("legacy discounted line (list 0, discount 2): the price edit does not invent a list",
             LineAmountTestSupport.storedInvoiceLine("10", "24.5", "0", "2", "0", "TAX21"),
             "{\"unitPrice\":30}", null),
@@ -316,7 +317,8 @@ class InvoiceLineAmountSupportTest {
             "{\"etgoDiscount\":10}", "22.5", "225", "272.25"),
         Arguments.of("list price changes → price re-derived with the stored discount",
             storedLine(), "{\"listPrice\":30}", "29.4", "294", "355.74"),
-        Arguments.of("a price different from the list price is the caller's", storedLine(),
+        Arguments.of("a new price on a discounted line is the caller's (list worked back)",
+            storedLine(),
             "{\"unitPrice\":30}", null, "300", "363"),
         Arguments.of("tax change → gross follows, net does not move", storedLine(),
             "{\"tax\":\"TAX10\"}", null, "245", "269.50"),
@@ -365,6 +367,95 @@ class InvoiceLineAmountSupportTest {
     assertAmount(label, net, json, InvoiceLineAmountSupport.FIELD_LINE_NET_AMOUNT);
     if (gross != null) {
       assertAmount(label, gross, json, InvoiceLineAmountSupport.FIELD_GROSS_AMOUNT);
+    }
+  }
+
+  // ── ETP-5703: without a discount the price IS the list price (the form's "Precio") ──
+
+  /** 3 x 1.50, no discount, VAT 10 %: invoice FV1000156 of the QA case CP-B3. */
+  private static InvoiceLine undiscounted() {
+    return LineAmountTestSupport.storedInvoiceLine("3", "1.5", "1.5", "0", "0", "TAX10");
+  }
+
+  /** 3 x 1.35 (list 1.50, 10 %), VAT 10 %. */
+  private static InvoiceLine discounted() {
+    return LineAmountTestSupport.storedInvoiceLine("3", "1.35", "1.5", "10", "0", "TAX10");
+  }
+
+  static Stream<Arguments> pricesOnUpdate() {
+    return Stream.of(
+        // label, stored, patch, unitPrice, listPrice (null: as sent, or absent), net, gross
+        Arguments.of("unitPrice only → the list price follows (CP-B3)", undiscounted(),
+            "{\"unitPrice\":1.25}", null, "1.25", "3.75", "4.13"),
+        Arguments.of("listPrice only → the price follows", undiscounted(),
+            "{\"listPrice\":1.25}", "1.25", null, "3.75", "4.13"),
+        Arguments.of("unitPrice 0 → list price 0 (the form saves a Precio of 0)", undiscounted(),
+            "{\"unitPrice\":0}", null, "0", "0", "0"),
+        Arguments.of("discount taken to 0 alone → the price is the stored list price",
+            discounted(), "{\"etgoDiscount\":0}", "1.5", null, "4.50", "4.95"),
+        Arguments.of("discount 0 alone on a legacy line without list price → price kept",
+            LineAmountTestSupport.storedInvoiceLine("10", "25", "0", "0", "0", "TAX10"),
+            "{\"etgoDiscount\":0}", null, null, "250", "275"),
+        Arguments.of("both prices sent and different → both are the caller's", undiscounted(),
+            "{\"unitPrice\":1.25,\"listPrice\":1.5}", null, null, "3.75", "4.13"),
+        Arguments.of("SPA side panel, Precio edited → no-op", undiscounted(),
+            "{\"listPrice\":1.25,\"unitPrice\":1.25}", null, null, "3.75", "4.13"),
+        Arguments.of("SPA side panel, quantity edited → no-op", undiscounted(),
+            "{\"invoicedQuantity\":5,\"unitPrice\":1.5}", null, null, "7.50", "8.25"),
+        Arguments.of("SPA side panel, quantity edited on a discounted line → no-op",
+            discounted(), "{\"invoicedQuantity\":5,\"unitPrice\":1.35}", null, null, "6.75",
+            "7.43"),
+        // ETP-5714's alignListPriceWithPrice re-writes the stored list price (1.50) into the body
+        Arguments.of("SPA side panel, discount taken to 0 → list stays 1.50", discounted(),
+            "{\"etgoDiscount\":0,\"unitPrice\":1.5}", null, "1.5", "4.50", "4.95"),
+        // ── with a discount: a new net price keeps it and works the list price back ──
+        Arguments.of("discounted line, unitPrice only → list = 1.25 / 0.9, discount kept",
+            discounted(), "{\"unitPrice\":1.25}", null, "1.388889", "3.75", "4.13"),
+        Arguments.of("discounted line, the computed price within half a cent (SPA) → no-op",
+            discounted(), "{\"unitPrice\":1.349999}", null, null, "4.05", "4.46"),
+        Arguments.of("100 % discount, unitPrice only → nothing to work back, list kept",
+            LineAmountTestSupport.storedInvoiceLine("3", "0", "1.5", "100", "0", "TAX10"),
+            "{\"unitPrice\":1.25}", null, null, "3.75", "4.13"),
+        Arguments.of("discounted line, unitPrice + etgoDiscount → list kept (existing rule)",
+            discounted(), "{\"unitPrice\":1.25,\"etgoDiscount\":10}", null, null, "3.75",
+            "4.13"));
+  }
+
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("pricesOnUpdate")
+  void priceAndListPriceStayCoherentOnUpdate(String label, InvoiceLine stored,
+      String patch, String unitPrice, String listPrice, String net, String gross)
+      throws Exception {
+    JSONObject json = new JSONObject(patch);
+    JSONObject sent = new JSONObject(patch);
+    NeoContext ctx = NeoContext.builder().specName("sales-invoice").entityName("lines")
+        .httpMethod("PUT").endpointType(NeoEndpointType.CRUD)
+        .recordId(LineAmountTestSupport.STORED_LINE_ID).requestBody(json).build();
+
+    try (MockedStatic<OBDal> dal = LineAmountTestSupport.taxRate(10.0, stored)) {
+      InvoiceLineAmountSupport.deriveAmountsOnUpdate(ctx);
+    }
+
+    assertPriceOrUntouched(label, unitPrice, sent, json, InvoiceLineAmountSupport.FIELD_UNIT_PRICE);
+    assertPriceOrUntouched(label, listPrice, sent, json, InvoiceLineAmountSupport.FIELD_LIST_PRICE);
+    assertAmount(label, net, json, InvoiceLineAmountSupport.FIELD_LINE_NET_AMOUNT);
+    assertAmount(label, gross, json, InvoiceLineAmountSupport.FIELD_GROSS_AMOUNT);
+  }
+
+  /**
+   * {@code expected} (compared exactly: a price keeps 6 decimals) when given; otherwise the key
+   * keeps exactly what was sent, or stays absent.
+   */
+  private static void assertPriceOrUntouched(String label, String expected, JSONObject sent,
+      JSONObject body, String key) {
+    if (expected != null) {
+      assertEquals(0, new BigDecimal(expected).compareTo(new BigDecimal(String.valueOf(
+          body.opt(key)))), label + ": " + key + " expected " + expected + ", was " + body.opt(key));
+    } else if (sent.has(key)) {
+      assertEquals(String.valueOf(sent.opt(key)), String.valueOf(body.opt(key)),
+          label + ": " + key + " as sent");
+    } else {
+      assertFalse(body.has(key), label + ": " + key + " untouched, was " + body.opt(key));
     }
   }
 

@@ -52,6 +52,7 @@ import org.openbravo.model.financialmgmt.accounting.coa.ElementValue;
 import org.openbravo.model.financialmgmt.calendar.Calendar;
 
 import com.etendoerp.go.schemaforge.util.PostingAccountCombinations;
+import com.etendoerp.go.schemaforge.util.PostingAccountGuard;
 
 /**
  * Aggregate handler for the custom General Ledger Configuration window.
@@ -204,7 +205,7 @@ public class GeneralLedgerConfigurationHandler implements NeoHandler {
       // A caught error still commits at request end: drop whatever was applied before the throw.
       SessionHandler.getInstance().rollback();
       log.warn("general-ledger-configuration business error: {}", e.getMessage());
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, e);
     } catch (Exception e) {
       SessionHandler.getInstance().rollback();
       log.error("general-ledger-configuration aggregate error", e);
@@ -486,7 +487,8 @@ public class GeneralLedgerConfigurationHandler implements NeoHandler {
   private void applyDefaultChanges(AggregateState state, JSONObject defaults) {
     for (DefaultFieldMapping mapping : DEFAULT_FIELD_MAPPINGS) {
       if (defaults.has(mapping.apiKey)) {
-        state.defaults.set(mapping.property, resolveAccountingCombination(defaults, mapping.apiKey));
+        state.defaults.set(mapping.property, resolveAccountingCombination(defaults, mapping.apiKey,
+            state.schema, (AccountingCombination) state.defaults.get(mapping.property)));
       }
     }
   }
@@ -497,22 +499,27 @@ public class GeneralLedgerConfigurationHandler implements NeoHandler {
       ga.setSuspenseBalancingUse(generalAccounts.optBoolean(FIELD_SUSPENSE_BALANCING_USE));
     }
     if (generalAccounts.has(FIELD_SUSPENSE_BALANCING)) {
-      ga.setSuspenseBalancing(resolveAccountingCombination(generalAccounts, FIELD_SUSPENSE_BALANCING));
+      ga.setSuspenseBalancing(resolveAccountingCombination(generalAccounts, FIELD_SUSPENSE_BALANCING,
+          state.schema, ga.getSuspenseBalancing()));
     }
     if (generalAccounts.has(FIELD_CURRENCY_BALANCING_USE)) {
       ga.setCurrencyBalancingUse(generalAccounts.optBoolean(FIELD_CURRENCY_BALANCING_USE));
     }
     if (generalAccounts.has(FIELD_CURRENCY_BALANCING_ACCOUNT)) {
-      ga.setCurrencyBalancingAcct(resolveAccountingCombination(generalAccounts, FIELD_CURRENCY_BALANCING_ACCOUNT));
+      ga.setCurrencyBalancingAcct(resolveAccountingCombination(generalAccounts, FIELD_CURRENCY_BALANCING_ACCOUNT,
+          state.schema, ga.getCurrencyBalancingAcct()));
     }
     if (generalAccounts.has(FIELD_RETAINED_EARNING)) {
-      ga.setRetainedEarning(resolveAccountingCombination(generalAccounts, FIELD_RETAINED_EARNING));
+      ga.setRetainedEarning(resolveAccountingCombination(generalAccounts, FIELD_RETAINED_EARNING,
+          state.schema, ga.getRetainedEarning()));
     }
     if (generalAccounts.has(FIELD_INCOME_SUMMARY)) {
-      ga.setIncomeSummary(resolveAccountingCombination(generalAccounts, FIELD_INCOME_SUMMARY));
+      ga.setIncomeSummary(resolveAccountingCombination(generalAccounts, FIELD_INCOME_SUMMARY,
+          state.schema, ga.getIncomeSummary()));
     }
     if (generalAccounts.has(FIELD_CFS_ORDER_ACCOUNT)) {
-      ga.setCFSOrderAccount(resolveAccountingCombination(generalAccounts, FIELD_CFS_ORDER_ACCOUNT));
+      ga.setCFSOrderAccount(resolveAccountingCombination(generalAccounts, FIELD_CFS_ORDER_ACCOUNT,
+          state.schema, ga.getCFSOrderAccount()));
     }
     if (generalAccounts.has(FIELD_ACTIVE)) {
       ga.setActive(generalAccounts.optBoolean(FIELD_ACTIVE));
@@ -526,9 +533,11 @@ public class GeneralLedgerConfigurationHandler implements NeoHandler {
    * Resolves a combination id from the request. A bare {@code OBDal.get} applies no tenant predicate
    * and this handler runs in admin mode, so a foreign id was written into another tenant's ledger
    * setup (ETP-5722). A row of another tenant is reported as "not found", indistinguishable from a
-   * missing one; client-0 combinations stay visible.
+   * missing one; client-0 combinations stay visible. A changed value must be a posting account of
+   * the ledger being edited (ETP-5693); the stored one is not re-checked.
    */
-  private AccountingCombination resolveAccountingCombination(JSONObject payload, String key) {
+  private AccountingCombination resolveAccountingCombination(JSONObject payload, String key,
+      AcctSchema ledger, AccountingCombination current) {
     Object raw = payload.opt(key);
     if (raw == null || raw == JSONObject.NULL) {
       return null;
@@ -540,6 +549,9 @@ public class GeneralLedgerConfigurationHandler implements NeoHandler {
     AccountingCombination combo = TenantOwnership.loadOwned(AccountingCombination.class, id);
     if (combo == null) {
       throw new OBException("Accounting combination not found: " + id);
+    }
+    if (current == null || !id.equals(current.getId())) {
+      PostingAccountGuard.requirePosting(combo, ledger, key);
     }
     return combo;
   }

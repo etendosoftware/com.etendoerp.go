@@ -166,7 +166,20 @@ public class FinancialAccountsPageHandler implements NeoHandler {
           // Appended at the END for the same positional-read reason as the columns above
           // (ETP-5582). Written by the PSD2 module after each successful sync; NULL until the
           // account has synced once.
-          + "       fa.em_psd2_last_sync_date "
+          + "       fa.em_psd2_last_sync_date, "
+          // Appended at the END for the same positional-read reason (ETP-5089). True when the
+          // account's ACTIVE connection (the one SaltEdgeAccountLinkHelper.getActiveConnectionForFinAcc
+          // resolves: same Salt Edge account, status AC) is stale: Salt Edge still reports it active,
+          // but its last failed fetch is newer than its last success. Same rule as
+          // SaltEdgeAccountLinkHelper.isConnectionStale and the Classic header's Reconnect logic
+          // (AD_AUXILIARINPUT) — keep the three in lockstep.
+          + "       EXISTS (SELECT 1 FROM psd2_finacc_connection sc "
+          + "                WHERE sc.fin_financial_account_id = fa.fin_financial_account_id "
+          + "                  AND sc.salt_edge_account_id = fa.em_psd2_salt_edge_account_id "
+          + "                  AND sc.connection_status = 'AC' "
+          + "                  AND sc.last_fail_at IS NOT NULL "
+          + "                  AND (sc.last_success_at IS NULL "
+          + "                       OR sc.last_fail_at > sc.last_success_at)) "
           + "  FROM fin_financial_account fa "
           + "  JOIN c_currency cur ON cur.c_currency_id = fa.c_currency_id "
           + "  LEFT JOIN c_glitem gli ON gli.c_glitem_id = fa.em_aprm_glitem_diff "
@@ -400,6 +413,7 @@ public class FinancialAccountsPageHandler implements NeoHandler {
           row.updated = auditToken != null ? auditToken : "";
           // Left null when the account never synced (ETP-5582): the UI shows "never synced".
           row.lastSyncDate = rs.getTimestamp(25);
+          row.bankConnectionStale = rs.getBoolean(26);
           rows.add(row);
         }
       }
@@ -481,6 +495,7 @@ public class FinancialAccountsPageHandler implements NeoHandler {
       json.put("maskedPan", account.maskedPan);
       json.put("bankConnected", account.bankConnected);
       json.put("bankReconnectable", account.bankReconnectable);
+      json.put("bankConnectionStale", account.bankConnectionStale);
       json.put("providerLogoUrl", account.providerLogoUrl);
       json.put("bankConnectionPending", account.bankConnectionPending);
       json.put("isDefault", account.isDefault);
@@ -665,6 +680,15 @@ public class FinancialAccountsPageHandler implements NeoHandler {
      * {@code bankConnected === true} in several places. Set by the loader.
      */
     boolean bankReconnectable = false;
+    /**
+     * Whether the account's active bank connection is stale (ETP-5089): Salt Edge still reports it
+     * active but its last failed fetch is newer than its last success, so the data is frozen. NOT
+     * folded into {@code bankReconnectable}: that flag means "deactivated, can be revived" and the
+     * SPA uses it to block transfers and to hide the connected actions, none of which applies to a
+     * connection that is still linked. Only meaningful alongside {@code bankConnected}. Set by the
+     * loader.
+     */
+    boolean bankConnectionStale = false;
     /**
      * The connected provider's logo image URL ({@code PSD2_Provider.Logo_Url}), or blank when the
      * account has no bank provider or the provider has none on record yet. Read from the provider

@@ -6,6 +6,7 @@
       </parameter>
       <body><![CDATA[v_total NUMBER:= 0;
 v_delivered NUMBER:= 0;
+v_rectificative character varying;
 BEGIN
   -- Returns the delivery progress (0-100) of an invoice as the qty-weighted
   -- ratio of physically delivered/received units to invoiced units, using
@@ -27,6 +28,34 @@ BEGIN
   -- aggregate is capped at ABS(m_inoutline.movementqty), so several match
   -- rows of the same invoice line on the same movement line can never add up
   -- to more than that line moved. The per-invoice-line cap by ABS(qtyinvoiced) still applies on top.
+  -- ETP-5706: a SALES rectificative invoice has no delivery to track, so it
+  -- answers NULL ("not applicable") instead of 0-100. Its return receipt used
+  -- to be counted as a delivery, so every rectificative showed 0 or 100 on
+  -- MCP/REST and matched advanced-filter conditions such as "delivered < 100".
+  -- The criterion mirrors SalesInvoiceHeaderHandler.classifyDocType (the rule
+  -- behind arInvoiceSubtype = RECTIFICATIVA), applied to the target document
+  -- type (c_doctypetarget_id, the transactionDocument field): the doc type is
+  -- flagged em_etsg_isrectificative = 'Y', or its docbasetype is a legacy
+  -- credit memo (ARC) / return material invoice (ARI_RM). Purchase invoices
+  -- (issotrx = 'N') are deliberately untouched. em_etsg_isrectificative belongs
+  -- to the optional SIF General module, so it is never referenced by name: it is
+  -- read through to_jsonb(row), which yields NULL when the column does not exist
+  -- and keeps this function total on databases without that module.
+  SELECT CASE
+           WHEN i.issotrx = 'Y'
+            AND (COALESCE(to_jsonb(dt) ->> 'em_etsg_isrectificative', 'N') = 'Y'
+                 OR dt.docbasetype IN ('ARC', 'ARI_RM'))
+           THEN 'Y' ELSE 'N'
+         END
+  INTO v_rectificative
+  FROM c_invoice i
+  LEFT JOIN c_doctype dt ON dt.c_doctype_id = i.c_doctypetarget_id
+  WHERE i.c_invoice_id = p_c_invoice_id;
+
+  IF v_rectificative = 'Y' THEN
+    RETURN NULL;
+  END IF;
+
   SELECT
     COALESCE(SUM(ABS(il.qtyinvoiced)), 0),
     COALESCE(SUM(
