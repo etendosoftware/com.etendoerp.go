@@ -656,12 +656,7 @@ public class McpToolRouter {
     // got a 422 for parent-derived fields it was never told to send. Copied into `fields`
     // rather than handled separately so there stays exactly ONE downstream reader of it (the
     // resolveParentFK block below); the top-level argument wins, because it is the declared one.
-    if (args.has(McpConstants.PARAM_PARENT_ID) && !args.isNull(McpConstants.PARAM_PARENT_ID)) {
-      String topLevelParentId = args.getString(McpConstants.PARAM_PARENT_ID);
-      if (StringUtils.isNotBlank(topLevelParentId)) {
-        fields.put(McpConstants.PARAM_PARENT_ID, topLevelParentId);
-      }
-    }
+    copyTopLevelParentId(args, fields);
 
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
     SFEntity sfEntity = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, entityName);
@@ -675,6 +670,14 @@ public class McpToolRouter {
     // unmappable link on its own and attach the record to a parent nobody chose.
     McpWriteRequestSupport.requireApplicableParent(sfEntity,
         fields.optString(McpConstants.PARAM_PARENT_ID, null));
+    // ETP-5785: the parent must be a row of the caller's client or of System. Checked before the
+    // selector context, the defaults pass or resolveParentFK read it.
+    JSONObject unownedParent = McpWriteRequestSupport.refuseUnownedReferences(adTab, null,
+        fields.optString(McpConstants.PARAM_PARENT_ID, null),
+        NeoCrudHelper.snapshotBodyFields(fields));
+    if (unownedParent != null) {
+      return wrapAsErrorContent(unownedParent);
+    }
 
     String dalEntityName = adTab.getTable().getName();
     DefaultJsonDataService jsonService = DefaultJsonDataService.getInstance();
@@ -719,6 +722,14 @@ public class McpToolRouter {
             adTab), log);
     if (fkError != null) {
       return wrapAsErrorContent(fkError);
+    }
+
+    // ETP-5785: every reference the agent set is now an id (names were resolved above), and must
+    // be a row of the caller's client or of System — checked before defaults or callouts use it.
+    JSONObject unownedReference = McpWriteRequestSupport.refuseUnownedReferences(adTab,
+        filteredBody, null, NeoCrudHelper.snapshotBodyFields(filteredBody));
+    if (unownedReference != null) {
+      return wrapAsErrorContent(unownedReference);
     }
 
     // Snapshot user-provided fields BEFORE callout cascade can overwrite them.
@@ -877,6 +888,24 @@ public class McpToolRouter {
     return wrapAsTextContent(flat);
   }
 
+  /**
+   * IMP-40: copies a non-blank top-level {@code parentId} argument into {@code fields}, where it
+   * overrides any {@code parentId} the fields already carry.
+   *
+   * @param args   the tool arguments
+   * @param fields the record fields of the create
+   * @throws JSONException if the argument cannot be read or copied
+   */
+  private static void copyTopLevelParentId(JSONObject args, JSONObject fields)
+      throws JSONException {
+    if (args.has(McpConstants.PARAM_PARENT_ID) && !args.isNull(McpConstants.PARAM_PARENT_ID)) {
+      String topLevelParentId = args.getString(McpConstants.PARAM_PARENT_ID);
+      if (StringUtils.isNotBlank(topLevelParentId)) {
+        fields.put(McpConstants.PARAM_PARENT_ID, topLevelParentId);
+      }
+    }
+  }
+
   // ── etendo_update ────────────────────────────────────────────────────────
 
   /**
@@ -895,6 +924,10 @@ public class McpToolRouter {
     String recordId = args.getString("id");
     JSONObject fields = args.getJSONObject(McpConstants.PARAM_FIELDS);
     String updated = args.getString(McpConstants.PARAM_UPDATED);
+    if (StringUtils.isBlank(updated) || "null".equals(updated)) {
+      throw McpRoutingException.missingArgument(
+          "Missing required argument: " + McpConstants.PARAM_UPDATED, McpConstants.PARAM_UPDATED);
+    }
 
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
     SFEntity sfEntity = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, entityName);
@@ -902,6 +935,11 @@ public class McpToolRouter {
     // role-level check — so the entity-level flag consulted here is ISPUT.
     McpToolRouterSupport.requireMethodEnabled(spec, sfEntity, HTTP_METHOD_PUT);
     Tab adTab = McpWriteRequestSupport.getAdTabOrThrow(sfEntity, entityName);
+    NeoResponse targetRefusal = NeoActionRecordGuard.writeRefusalFor(sfEntity, recordId);
+    if (targetRefusal != null) {
+      return McpHookExecutor.neoResponseToMcpResult(targetRefusal);
+    }
+
 
     String dalEntityName = adTab.getTable().getName();
     DefaultJsonDataService jsonService = DefaultJsonDataService.getInstance();
@@ -938,6 +976,13 @@ public class McpToolRouter {
         McpSelectorContextHelper.buildSelectorContextParams(null, adTab), log);
     if (fkError != null) {
       return wrapAsErrorContent(fkError);
+    }
+
+    // ETP-5785: same reference-ownership check as handleCreate; an update has no parent.
+    JSONObject unownedReference = McpWriteRequestSupport.refuseUnownedReferences(adTab,
+        filteredBody, null, updateUserProvidedFields);
+    if (unownedReference != null) {
+      return wrapAsErrorContent(unownedReference);
     }
 
     // ETP-4793 / IMP-16: the same coercion pass handleCreate runs, and for the same reason. Until
@@ -1035,6 +1080,11 @@ public class McpToolRouter {
     // ETP-4254: entity-level DELETE flag, refused before any DAL work happens.
     McpToolRouterSupport.requireMethodEnabled(spec, sfEntity, HTTP_METHOD_DELETE);
     Tab adTab = McpWriteRequestSupport.getAdTabOrThrow(sfEntity, entityName);
+    NeoResponse targetRefusal = NeoActionRecordGuard.writeRefusalFor(sfEntity, recordId);
+    if (targetRefusal != null) {
+      return McpHookExecutor.neoResponseToMcpResult(targetRefusal);
+    }
+
 
     String dalEntityName = adTab.getTable().getName();
     DefaultJsonDataService jsonService = DefaultJsonDataService.getInstance();

@@ -66,6 +66,7 @@ import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.ad.ui.Window;
 
 import com.etendoerp.go.schemaforge.AmortizationPlanService;
+import com.etendoerp.go.schemaforge.NeoActionRecordGuard;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoDefaultsService;
 import com.etendoerp.go.schemaforge.NeoHandler;
@@ -1103,6 +1104,24 @@ class McpToolRouterRouteTest {
       assertTrue(result.getBoolean("isError"));
       String text = result.getJSONArray("content").getJSONObject(0).getString("text");
       assertTrue(text.contains("id"));
+    }
+    @Test
+    @DisplayName("etendo_update rejects blank and null-string versions before record lookup")
+    void updateRejectsUnusableVersion() throws Exception {
+      setupSpecLookup(mockSpec());
+      for (String updated : new String[] { "", "  ", "null" }) {
+        JSONObject args = buildCrudArgs();
+        args.put("id", "record-id");
+        args.put("fields", new JSONObject());
+        args.put("updated", updated);
+
+        JSONObject result = router.route("etendo_update", args, WRITE_SCOPES);
+
+        assertTrue(result.getBoolean("isError"));
+        JSONObject envelope = new JSONObject(contentText(result));
+        assertEquals(422, envelope.getInt("status"));
+        assertTrue(envelope.getString("detail").contains("updated"), envelope.toString());
+      }
     }
   }
 
@@ -2278,8 +2297,18 @@ class McpToolRouterRouteTest {
      */
     private static final String HANDLER_QUALIFIER = "action-test-handler";
 
+    /**
+     * ETP-5558's record-ownership guard runs before every action. Unstubbed it reaches the real
+     * {@code ModelProvider}, which initializes against the database: these tests passed only while
+     * a local PostgreSQL was up, and failed with a 404 instead of the action result when it was not.
+     * The guard has its own coverage in {@code NeoActionRecordGuardTest}; here it admits the record.
+     */
+    private MockedStatic<NeoActionRecordGuard> recordGuardMock;
+
     @BeforeEach
     void setupActionSupport() {
+      recordGuardMock = mockStatic(NeoActionRecordGuard.class);
+      recordGuardMock.when(() -> NeoActionRecordGuard.refusalFor(any(), any())).thenReturn(null);
       supportMock.when(() -> McpToolRouterSupport.mapNeoResponseToActionResult(any()))
           .thenCallRealMethod();
       supportMock.when(() -> McpToolRouterSupport.resolveStatusFromErrorBody(any()))
@@ -2290,6 +2319,13 @@ class McpToolRouterRouteTest {
       // the body is passed through so the test asserts on what the handler said.
       supportMock.when(() -> McpToolRouterSupport.toMcpHandlerError(any(), anyInt()))
           .thenAnswer(invocation -> invocation.getArgument(0));
+    }
+
+    @AfterEach
+    void closeRecordGuard() {
+      if (recordGuardMock != null) {
+        recordGuardMock.close();
+      }
     }
 
     private JSONObject buildActionArgs() throws Exception {
