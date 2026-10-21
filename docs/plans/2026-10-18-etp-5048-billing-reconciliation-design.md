@@ -141,8 +141,11 @@ checkout and subscription rows, and its audit rows are ordinary billing events.
       immediate one included, so the request's timing is what tells a schedule apart. While the
       flag is off such a run does no work and **ends as an ERROR** (`fail()`: error result and
       exception, plus a `[BILLING-RECONCILE]` WARN), so Process Monitor shows a schedule firing for
-      nothing; the message says to turn the flag on or unschedule the request. No internal alert,
-      so it does not fire every hour.
+      nothing; the message says to turn the flag on or unschedule the request. The first such run
+      of each UTC day also sends **one internal alert** (`billing-reconcile-schedule-flag-off`,
+      approved by Martin 2026-10-21), the breaker's pattern: a
+      `reconcile:schedule-flag-off:<yyyy-MM-dd>` row, and only the call that wrote it alerts, so
+      the hourly runs the same day stay silent.
     - A run started from the menu, or a Process Request run immediately or later once, is never
       gated.
     - The startup never inserts its fixed request id twice: a row with that id in any status
@@ -287,6 +290,7 @@ Billing-event ids are deterministic:
 | back-off after a failed item | `reconcile:retry-later:<requestId>` (one row, refreshed) | `FAILED` |
 | stuck event parked for review | `reconcile:stale-event-review:<eventId>` | `FAILED` |
 | breaker tripped | `reconcile:breaker-tripped:<yyyy-MM-dd>` | `IGNORED` |
+| scheduled run while the flag is off | `reconcile:schedule-flag-off:<yyyy-MM-dd>` | `IGNORED` |
 | checkout expired | `reconcile:checkout-expired:<requestId>` | `APPLIED` |
 | subscription closed | `reconcile:subscription-closed:<stripeSubscriptionId>` | `APPLIED` |
 | subscription back to current | `reconcile:subscription-current:<stripeSubscriptionId>:<runId>` | `APPLIED` |
@@ -348,13 +352,15 @@ The back-off after a failed item is fixed at 6 h (`BillingReconciliationService.
   there. Turn the flag on (ConfigCat or the property), then in the Process Request window create a
   request for **Billing Reconciliation**, client System, timing *Schedule*, every 60 minutes, as for
   Demo Trial Notices. A scheduled run while the flag is off does nothing and ends as an ERROR in
-  Process Monitor: turn the flag on, or unschedule the request.
+  Process Monitor (and alerts once a day): turn the flag on, or unschedule the request.
 - **Switch the schedule on elsewhere:** in an environment that restarts, set the flag and restart;
   the startup plants the request. An unscheduled request is never planted again by the startup.
 - **Alerts:** grep `[BILLING-RECONCILE]`. Provisioning repairs also send the internal
   `environment-provisioning` alert. A new review sends `billing-reconcile-needs-review`, a parked
   stuck event `billing-reconcile-stale-event`, a tripped breaker
-  `billing-reconcile-breaker-tripped` (once a day).
+  `billing-reconcile-breaker-tripped` (once a day), and a scheduled request firing while the
+  `billing-reconciliation-schedule` flag is off `billing-reconcile-schedule-flag-off` (once a day:
+  no reconciliation is happening; turn the flag on or unschedule the request).
 - **Release a parked purchase** (after the cause is fixed). A parked purchase is left out of every
   batch until its open `reconciliation.needs-review` row is released:
 

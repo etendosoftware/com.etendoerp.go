@@ -415,7 +415,8 @@ Whether the billing reconciliation (`ETGO_BillingReconciliation`) runs on a sche
   as it is, never planted again.
 - **The flag gates every scheduled run** (timing *Schedule*), the planted one or one an
   administrator created. While it is off such a run does no work and ends as an **ERROR** in
-  Process Monitor, saying to turn the flag on or unschedule the request.
+  Process Monitor, saying to turn the flag on or unschedule the request; the first such run of each
+  UTC day also sends one internal alert (`billing-reconcile-schedule-flag-off`).
 - A run started from the Classic menu **Billing Reconciliation**, or a Process Request run
   immediately or later once, is never gated. Environment
 level, evaluated with an empty context. Its callers are `BillingReconciliationScheduleStartup` and

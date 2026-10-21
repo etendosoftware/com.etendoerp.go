@@ -134,7 +134,9 @@ so there the reconciliation is scheduled by hand in the Process Request window, 
 that request already stops it. On top of that, the flag:
 
 - gates every scheduled run (timing *Schedule*, whoever created the request);
-- turns a scheduled run into an ERROR in Process Monitor while it is off;
+- turns a scheduled run into an ERROR in Process Monitor while it is off, and sends one internal
+  alert per UTC day for it (`billing-reconcile-schedule-flag-off`, a
+  `reconcile:schedule-flag-off:<yyyy-MM-dd>` row; approved 2026-10-21);
 - drives `BillingReconciliationScheduleStartup`, which plants the request on environments that do
   restart.
 
@@ -146,7 +148,8 @@ that request already stops it. On top of that, the flag:
 
 **What removing it deletes:** the `FLAG_BILLING_RECONCILIATION_SCHEDULE` flag, the startup hook
 (`BillingReconciliationScheduleStartup` and its fixed request id), the in-run gate and the flag-off
-ERROR path in `BillingReconciliationProcess` (`isScheduledRun`, `timingOf`), their tests
+ERROR path with its once-a-day alert in `BillingReconciliationProcess` (`isScheduledRun`,
+`timingOf`, `alertFlagOffOncePerDay`), their tests
 (`BillingReconciliationScheduleStartupTest`, the gate cases of `BillingReconciliationProcessTest`)
 and their documentation (design `plans/2026-10-18-etp-5048-billing-reconciliation-design.md`
 decision 11 and §8, the flag section of `feature-flags-and-tenant-upgrade.md`). The menu entry, the

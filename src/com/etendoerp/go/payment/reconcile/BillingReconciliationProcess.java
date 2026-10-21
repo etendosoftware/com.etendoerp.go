@@ -16,6 +16,9 @@
  */
 package com.etendoerp.go.payment.reconcile;
 
+import java.time.Clock;
+import java.time.LocalDate;
+import java.time.ZoneOffset;
 import java.util.Map;
 import java.util.function.Supplier;
 
@@ -31,7 +34,9 @@ import org.openbravo.service.db.DalBaseProcess;
 
 import com.etendoerp.go.featureflags.FeatureFlagContext;
 import com.etendoerp.go.featureflags.GoFeatureFlags;
+import com.etendoerp.go.payment.BillingEventStore;
 import com.etendoerp.go.startup.BillingReconciliationScheduleStartup;
+import com.etendoerp.go.schemaforge.email.InternalAlertService;
 import com.etendoerp.go.usage.UsageMessages;
 
 /**
@@ -58,6 +63,7 @@ import com.etendoerp.go.usage.UsageMessages;
  * Scheduler fires for a request whose timing is <em>Schedule</em> ({@code S}) — the startup's or
  * one an administrator created — does nothing while the flag is off, and ends as an ERROR (error
  * result and exception) so Process Monitor shows that a scheduled request is firing for nothing.
+ * The first such run of each UTC day also sends one internal alert.
  * A launch from the menu, or a Process Request run immediately or later once, is never gated.
  */
 public class BillingReconciliationProcess extends DalBaseProcess {
@@ -72,7 +78,17 @@ public class BillingReconciliationProcess extends DalBaseProcess {
   static final String TIMING_SCHEDULED = "S";
   private static final FeatureFlagContext ENVIRONMENT = FeatureFlagContext.forAccount(null);
 
+  static final String KIND_SCHEDULE_FLAG_OFF = "schedule-flag-off";
+  private static final String ALERT_SCHEDULE_FLAG_OFF = "billing-reconcile-schedule-flag-off";
+  private static final String ALERT_STAGE_SCHEDULE_FLAG_OFF = "turn-flag-on-or-unschedule-request";
+
   private final Supplier<BillingReconciliationService> serviceFactory;
+  /** Where the flag-off alert row goes; package-visible so tests can substitute it. */
+  BillingEventStore eventStore = new BillingEventStore();
+  /** Where the flag-off alert goes; package-visible so tests can substitute it. */
+  InternalAlertService internalAlerts = new InternalAlertService();
+  /** Decides the UTC day of the once-a-day alert; package-visible for tests. */
+  Clock clock = Clock.systemUTC();
 
   /** Production wiring. */
   public BillingReconciliationProcess() {
@@ -91,6 +107,7 @@ public class BillingReconciliationProcess extends DalBaseProcess {
           + "the request in the Process Request window.";
       log.warn("{} Scheduled run of process request {} skipped: {}",
           ReconciliationAudit.LOG_PREFIX, bundle.getProcessRequestId(), message);
+      alertFlagOffOncePerDay(bundle.getProcessRequestId(), readDryRun(bundle));
       fail(bundle, TITLE_SKIPPED, message);
     }
     boolean dryRun = readDryRun(bundle);
@@ -113,6 +130,32 @@ public class BillingReconciliationProcess extends DalBaseProcess {
     success.setTitle(TITLE_DONE);
     success.setMessage(summary);
     bundle.setResult(success);
+  }
+
+  /**
+   * Tells a person, once per UTC day, that a scheduled request keeps firing while the flag is off,
+   * so no reconciliation is happening. The breaker's pattern: a deterministic
+   * {@code reconcile:schedule-flag-off:<yyyy-MM-dd>} billing-event row, and only the call that
+   * wrote it sends the internal alert. Hourly runs the same day stay silent, and a dry run writes
+   * and sends nothing, like every reconciliation alert. Never throws: the run ends as an ERROR
+   * whatever happens here.
+   */
+  private void alertFlagOffOncePerDay(String requestId, boolean dryRun) {
+    try {
+      ReconciliationAudit audit = new ReconciliationAudit(eventStore, dryRun, internalAlerts);
+      String day = LocalDate.ofInstant(clock.instant(), ZoneOffset.UTC).toString();
+      if (audit.write(ReconciliationAudit.eventId(KIND_SCHEDULE_FLAG_OFF, day),
+          KIND_SCHEDULE_FLAG_OFF, null, BillingEventStore.RESULT_IGNORED, "The "
+              + GoFeatureFlags.FLAG_BILLING_RECONCILIATION_SCHEDULE + " flag is off while a "
+              + "scheduled Billing Reconciliation request keeps firing, so no reconciliation is "
+              + "happening. Turn the flag on, or unschedule the request in the Process Request "
+              + "window.", ReconciliationSupport.summary("processRequest", requestId))) {
+        audit.internalAlert(ALERT_SCHEDULE_FLAG_OFF, day, ALERT_STAGE_SCHEDULE_FLAG_OFF, null);
+      }
+    } catch (RuntimeException e) {
+      log.warn("{} Could not record the schedule-flag-off alert ({})",
+          ReconciliationAudit.LOG_PREFIX, e.getClass().getSimpleName());
+    }
   }
 
   /**

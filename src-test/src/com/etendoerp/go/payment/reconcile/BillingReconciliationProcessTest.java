@@ -9,12 +9,20 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.fail;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -28,8 +36,11 @@ import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.scheduling.ProcessBundle;
 import org.openbravo.scheduling.ProcessLogger;
 
+import com.etendoerp.go.payment.BillingEventStore;
 import com.etendoerp.go.payment.TestLogCapture;
 import com.etendoerp.go.payment.reconcile.ReconciliationResult.Counter;
+import com.etendoerp.go.schemaforge.email.InternalAlertEvent;
+import com.etendoerp.go.schemaforge.email.InternalAlertService;
 import com.etendoerp.go.startup.BillingReconciliationScheduleStartup;
 
 /**
@@ -56,6 +67,8 @@ public class BillingReconciliationProcessTest {
   private AtomicInteger flagReads;
   /** The timing option each process request answers, by id. */
   private Map<String, String> timings;
+  private BillingEventStore eventStore;
+  private InternalAlertService internalAlerts;
 
   @Before
   public void setUp() {
@@ -65,12 +78,14 @@ public class BillingReconciliationProcessTest {
     params = new HashMap<>();
     flagReads = new AtomicInteger();
     timings = new HashMap<>();
+    eventStore = mock(BillingEventStore.class);
+    internalAlerts = mock(InternalAlertService.class);
     when(bundle.getParams()).thenReturn(params);
     when(bundle.getLogger()).thenReturn(processLogger);
   }
 
   private BillingReconciliationProcess process(boolean flagOn) {
-    return new BillingReconciliationProcess(() -> service) {
+    BillingReconciliationProcess process = new BillingReconciliationProcess(() -> service) {
       @Override
       boolean scheduleEnabled() {
         flagReads.incrementAndGet();
@@ -82,6 +97,10 @@ public class BillingReconciliationProcessTest {
         return timings.get(requestId);
       }
     };
+    process.eventStore = eventStore;
+    process.internalAlerts = internalAlerts;
+    process.clock = Clock.fixed(Instant.parse("2026-10-21T10:00:00Z"), ZoneOffset.UTC);
+    return process;
   }
 
   /** A run the Process Scheduler fires for request {@code requestId} with {@code timing}. */
@@ -139,6 +158,45 @@ public class BillingReconciliationProcessTest {
     assertTrue(result.getMessage(), result.getMessage().contains(
         "billing-reconciliation-schedule flag is off, so this scheduled request did nothing"));
     assertTrue(result.getMessage(), result.getMessage().contains("unschedule"));
+  }
+
+  /**
+   * A schedule firing hourly with the flag off means no reconciliation at all, and Process Monitor
+   * is only seen by someone who opens it: the first such run of the UTC day sends one internal
+   * alert, the later runs that day stay silent (the breaker's pattern).
+   */
+  @Test
+  public void theFirstFlagOffScheduledRunOfTheDayAlertsOnceAndTheNextOneDoesNot() {
+    firedByTheScheduler("ADMIN-SCHEDULED-REQUEST", "S");
+    when(eventStore.recordReconciliation(eq("reconcile:schedule-flag-off:2026-10-21"),
+        eq("reconciliation.schedule-flag-off"), isNull(), eq(BillingEventStore.RESULT_IGNORED),
+        anyString(), anyString())).thenReturn(true, false);
+
+    expectFailure();
+    expectFailure();
+
+    ArgumentCaptor<String> reason = ArgumentCaptor.forClass(String.class);
+    verify(eventStore, times(2)).recordReconciliation(
+        eq("reconcile:schedule-flag-off:2026-10-21"), anyString(), isNull(), anyString(),
+        reason.capture(), anyString());
+    assertTrue(reason.getValue(), reason.getValue().contains("no reconciliation is happening"));
+    ArgumentCaptor<InternalAlertEvent> alert = ArgumentCaptor.forClass(InternalAlertEvent.class);
+    verify(internalAlerts, times(1)).sendAfterTransaction(alert.capture());
+    assertEquals("billing-reconcile-schedule-flag-off", alert.getValue().getEvent());
+    assertEquals("turn-flag-on-or-unschedule-request", alert.getValue().getStage());
+    verify(service, never()).run(anyBoolean());
+  }
+
+  @Test
+  public void aFlagOffAlertThatCannotBeRecordedStillEndsTheRunAsAnError() {
+    firedByTheScheduler("ADMIN-SCHEDULED-REQUEST", "S");
+    when(eventStore.recordReconciliation(anyString(), anyString(), any(), anyString(), any(),
+        any())).thenThrow(new IllegalStateException("db gone"));
+
+    expectFailure();
+
+    verify(internalAlerts, never()).sendAfterTransaction(any());
+    assertEquals("Error", resultOf().getType());
   }
 
   /** The gate is not tied to the startup's fixed id: an administrator's schedule obeys it too. */
