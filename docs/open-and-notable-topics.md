@@ -1342,9 +1342,10 @@ is an operator's deliberate switch-off, and a backfilled active row would undo i
 consequence (product decision) is that such a tenant loses its marker and reads as free until the
 operator restores the row. Before this module's close-on-cancel deploys no tenant has a closed row,
 so the only tenants whose outcome changes from the ETP-5046 text are hand-deactivated ones — on
-purpose. Pinned by `SubscriptionBackfillIdempotencyIntegrationTest`
-(`#testAnActiveMarkerNextToAClosedSubscriptionIsRetiredWithoutABackfill`,
-`#testAnActiveMarkerNextToAnInactiveSubscriptionIsRetiredWithoutABackfill`).
+purpose. This was pinned by `SubscriptionBackfillIdempotencyIntegrationTest`, which executed the
+real SQL; the class was removed once R37 had been applied in production, since a one-shot fix
+that has already run everywhere has no environment left to break. The schema_forge source test
+(`cli/test/data-fixes-r37-tenant-subscription-backfill.test.js`) still guards the file's text.
 
 **The trap: "open" ignores the dates.** `OPEN_ROW_PREDICATE` in `SubscriptionService` is
 `endDate is null and active = true`; the partial unique index `ETGO_SUB_OPEN_ENVCLIENT_UQ` uses the
