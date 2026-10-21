@@ -10,6 +10,7 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.startsWith;
@@ -58,6 +59,8 @@ import com.etendoerp.go.payment.TestLogCapture;
 import com.etendoerp.go.payment.reconcile.ReconciliationResult.Counter;
 import com.etendoerp.go.schemaforge.data.CheckoutRequest;
 import com.etendoerp.go.schemaforge.data.Subscription;
+import com.etendoerp.go.schemaforge.email.InternalAlertEvent;
+import com.etendoerp.go.schemaforge.email.InternalAlertService;
 
 /**
  * Specs for {@link SubscriptionReconciler}, phase 4 of the billing reconciliation: the real Stripe
@@ -104,6 +107,7 @@ public class SubscriptionReconcilerTest {
   private TenantEnvironmentLifecycleService lifecycle;
   private PausedSubscriptionAlert pausedAlert;
   private BillingEventStore eventStore;
+  private InternalAlertService internalAlerts;
   private ReconciliationSettings settings = ReconciliationSettings.defaults();
   private String secretKey = "sk_test_key";
   /** When set, the answer of the list endpoint instead of the page built from {@link #listed}. */
@@ -117,6 +121,7 @@ public class SubscriptionReconcilerTest {
     lifecycle = mock(TenantEnvironmentLifecycleService.class);
     pausedAlert = mock(PausedSubscriptionAlert.class);
     eventStore = mock(BillingEventStore.class);
+    internalAlerts = mock(InternalAlertService.class);
     when(eventStore.recordReconciliation(anyString(), anyString(), any(), anyString(), any(),
         any())).thenReturn(true);
     when(lifecycle.applySubscriptionEvent(any(), any(), any())).thenReturn(true);
@@ -154,7 +159,7 @@ public class SubscriptionReconcilerTest {
       new SubscriptionReconciler(settings, stripe, checkoutStore,
           new SubscriptionLifecycleApplier(), lifecycle, pausedAlert,
           Clock.fixed(NOW, ZoneOffset.UTC))
-          .run(result, new ReconciliationAudit(eventStore, dryRun));
+          .run(result, new ReconciliationAudit(eventStore, dryRun, internalAlerts));
     }
     return result;
   }
@@ -229,9 +234,11 @@ public class SubscriptionReconcilerTest {
     return outcome.getValue();
   }
 
+  /** Nothing applied and no row written, apart from a tripped breaker's own alert row. */
   private void verifyNothingApplied() {
     verify(lifecycle, never()).applySubscriptionEvent(any(), any(), any());
-    verify(eventStore, never()).recordReconciliation(anyString(), anyString(), any(), any(),
+    verify(eventStore, never()).recordReconciliation(
+        argThat(id -> !id.startsWith("reconcile:breaker-tripped:")), anyString(), any(), any(),
         any(), any());
   }
 
@@ -416,6 +423,28 @@ public class SubscriptionReconcilerTest {
     assertTrue(auditLog.messagesAt(Level.WARN).toString(), auditLog.messagesAt(Level.WARN)
         .stream().anyMatch(line -> line.startsWith(
             "[BILLING-RECONCILE] Absent-subscription breaker tripped")));
+  }
+
+  /** S5: a tripped breaker reaches a person once a day, not on every hourly run. */
+  @Test
+  public void aTrippedBreakerSendsOneInternalAlertPerDay() throws Exception {
+    activeRow("sub_gone", "req-gone", "cs_live_gone", CURRENT);
+    absent("sub_gone");
+
+    run(false);
+
+    verify(eventStore).recordReconciliation(eq("reconcile:breaker-tripped:2026-10-21"),
+        eq("reconciliation.breaker-tripped"), any(), eq(BillingEventStore.RESULT_IGNORED), any(),
+        any());
+    ArgumentCaptor<InternalAlertEvent> alert = ArgumentCaptor.forClass(InternalAlertEvent.class);
+    verify(internalAlerts).sendAfterTransaction(alert.capture());
+    assertEquals("billing-reconcile-breaker-tripped", alert.getValue().getEvent());
+
+    // The same day's row exists: the next run trips again, silently.
+    when(eventStore.recordReconciliation(eq("reconcile:breaker-tripped:2026-10-21"),
+        anyString(), any(), anyString(), any(), any())).thenReturn(false);
+    run(false);
+    verify(internalAlerts).sendAfterTransaction(any());
   }
 
   @Test

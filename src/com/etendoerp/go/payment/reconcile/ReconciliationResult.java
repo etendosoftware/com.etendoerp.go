@@ -71,6 +71,12 @@ public final class ReconciliationResult {
     counts.merge(counter, 1, Integer::sum);
   }
 
+  void add(Counter counter, int amount) {
+    if (amount > 0) {
+      counts.merge(counter, amount, Integer::sum);
+    }
+  }
+
   void error(String message) {
     errors.add(message);
   }

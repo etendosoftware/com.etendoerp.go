@@ -43,7 +43,9 @@ import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.payment.reconcile.ReconciliationResult.Counter;
 import com.etendoerp.go.rest.PaidProvisioningService;
 import com.etendoerp.go.rest.PaidReactivationService;
+import com.etendoerp.go.schemaforge.data.BillingEvent;
 import com.etendoerp.go.schemaforge.data.CheckoutRequest;
+import com.etendoerp.go.schemaforge.email.InternalAlertService;
 
 /**
  * ETP-5048 — makes money taken and service delivered agree, without a human reading Stripe.
@@ -85,7 +87,8 @@ public class BillingReconciliationService {
   static final String KIND_CHECKOUT_EXPIRED = "checkout-expired";
   static final String KIND_PROVISIONED = "provisioned";
   static final String KIND_PROVISIONING_FAILED = "provisioning-failed";
-  static final String KIND_NEEDS_REVIEW = "needs-review";
+  static final String KIND_NEEDS_REVIEW = ReviewQueue.KIND;
+  static final String KIND_RETRY_LATER = "retry-later";
   static final String KIND_REACTIVATION_APPLIED = "reactivation-applied";
 
   static final String CODE_NO_SESSION_ID = "NO_SESSION_ID";
@@ -105,6 +108,20 @@ public class BillingReconciliationService {
   private static final String FIELD_REQUEST_ID = "request_id";
   private static final String ITEM_CHECKOUT = "checkout ";
   private static final long MILLIS_PER_MINUTE = 60_000L;
+  /**
+   * How long a request whose item failed (a provider read, an exception) is left out of the
+   * batch, so rows that fail on every run cannot fill it and starve the rows behind them.
+   */
+  static final long RETRY_BACKOFF_MINUTES = 6 * 60L;
+  /**
+   * HQL condition, on a checkout request aliased {@code cr}: no item of it failed within the
+   * back-off. The marker is one {@code reconciliation.retry-later} row per request, refreshed on
+   * each failure ({@link BillingEventStore#touchReconciliation}).
+   */
+  private static final String NOT_BACKING_OFF = "not exists (select 1 from "
+      + BillingEvent.ENTITY_NAME + " rl where rl.requestID = cr.request"
+      + " and rl.provider = :retryProvider and rl.eventType = :retryType"
+      + " and coalesce(rl.lastDuplicateAt, rl.receivedAt) > :retryAfter)";
 
   /**
    * The text of a unique-constraint violation in a persisted failure reason. A unique key that is
@@ -125,6 +142,9 @@ public class BillingReconciliationService {
   CheckoutRequestWrites checkoutWrites = new CheckoutRequestWrites();
   /** Applies paid re-subscriptions; package-visible so tests can substitute it. */
   PaidReactivationService reactivations = new PaidReactivationService();
+  /** Where review alerts go; package-visible so tests can substitute it. */
+  InternalAlertService internalAlerts = new InternalAlertService();
+  private ReviewQueue reviews;
 
   /** Production wiring. */
   public BillingReconciliationService() {
@@ -161,7 +181,8 @@ public class BillingReconciliationService {
    */
   public ReconciliationResult run(boolean dryRun) {
     ReconciliationResult result = new ReconciliationResult(dryRun);
-    ReconciliationAudit audit = new ReconciliationAudit(eventStore, dryRun);
+    ReconciliationAudit audit = new ReconciliationAudit(eventStore, dryRun, internalAlerts);
+    reviews = new ReviewQueue(eventStore);
     Map<String, CheckoutRow> recovered = new HashMap<>();
     runPhase("checkout recovery", result, () -> recoverCheckouts(result, audit, recovered));
     runPhase("provisioning repair", result, () -> repairProvisioning(result, audit, recovered));
@@ -188,14 +209,18 @@ public class BillingReconciliationService {
       Map<String, CheckoutRow> recovered) {
     Date graceBefore = minutesAgo(settings.getPaidGraceMinutes());
     Date abandonedBefore = minutesAgo(settings.getAbandonedHours() * 60L);
+    Map<String, Object> parameters = new HashMap<>();
+    parameters.put("created", STATUS_CREATED);
+    parameters.put("before", graceBefore);
     for (CheckoutRow row : checkoutRows("cr.checkoutRequestStatus = :created"
-        + " and cr.stripeSession is not null and cr.createdAt <= :before",
-        Map.of("created", STATUS_CREATED, "before", graceBefore))) {
+        + " and cr.stripeSession is not null and cr.createdAt <= :before"
+        + " and " + NOT_BACKING_OFF, withBackOff(parameters))) {
       result.increment(Counter.CHECKOUTS_CHECKED);
       try {
         recoverCheckout(row, abandonedBefore, result, audit, recovered);
       } catch (RuntimeException e) {
         itemFailed(result, ITEM_CHECKOUT + row.requestId, e);
+        retryLater(row.requestId, e.getClass().getSimpleName(), audit);
       }
     }
   }
@@ -204,11 +229,13 @@ public class BillingReconciliationService {
       ReconciliationAudit audit, Map<String, CheckoutRow> recovered) {
     JSONObject session = retrieve("/v1/checkout/sessions/", row.sessionId, result);
     if (session == null) {
+      retryLater(row.requestId, "the provider session could not be read", audit);
       return;
     }
     if (!belongsTo(session, row.requestId)) {
       result.error(ITEM_CHECKOUT + row.requestId
           + ": its provider session names another request");
+      retryLater(row.requestId, "the provider session names another request", audit);
       return;
     }
     String status = session.optString(FIELD_STATUS, "");
@@ -259,9 +286,14 @@ public class BillingReconciliationService {
     Date graceBefore = minutesAgo(settings.getPaidGraceMinutes());
     // A new purchase is paid and has no environment yet; a re-subscription (ETP-5742) names its
     // environment from the start, so it is the paid request that does.
+    Map<String, Object> parameters = new HashMap<>();
+    parameters.put("paid", STATUS_PAID);
+    parameters.put("provisioning", STATUS_PROVISIONING);
+    ReviewQueue.bind(parameters);
     List<CheckoutRow> rows = checkoutRows("cr.checkoutRequestStatus in (:paid, :provisioning)"
-        + " and (cr.createdClient is null or cr.checkoutRequestStatus = :paid)",
-        Map.of("paid", STATUS_PAID, "provisioning", STATUS_PROVISIONING));
+        + " and (cr.createdClient is null or cr.checkoutRequestStatus = :paid)"
+        + " and " + ReviewQueue.NOT_PARKED + " and " + NOT_BACKING_OFF,
+        withBackOff(parameters));
     // A payment recovered by phase 1 in a dry run is still CREATED in the database.
     if (audit.isDryRun()) {
       rows.addAll(recovered.values());
@@ -276,16 +308,13 @@ public class BillingReconciliationService {
         repairOne(row, graceBefore, result, audit, recovered.containsKey(row.requestId));
       } catch (RuntimeException e) {
         itemFailed(result, "provisioning of " + row.requestId, e);
+        retryLater(row.requestId, e.getClass().getSimpleName(), audit);
       }
     }
   }
 
   private void repairOne(CheckoutRow row, Date graceBefore, ReconciliationResult result,
       ReconciliationAudit audit, boolean justRecovered) {
-    if (audit.alreadyRecorded(ReconciliationAudit.eventId(KIND_NEEDS_REVIEW, row.requestId))) {
-      result.increment(Counter.AWAITING_REVIEW);
-      return;
-    }
     String derived = row.derivedStatus;
     if (DERIVED_PAID.equals(derived)) {
       if (!justRecovered && isInsideGrace(row, graceBefore)) {
@@ -294,22 +323,22 @@ public class BillingReconciliationService {
     } else if (DERIVED_FAILED.equals(derived)) {
       String code = ProvisioningFailureReason.codeOf(row.failureReason);
       if (!row.retryAllowed) {
-        needsReview(row.requestId, code, "The recorded failure cannot succeed on a retry",
-            result, audit);
+        reviews.park(row.requestId, code, "The recorded failure cannot succeed on a retry",
+            row.attempts, result, audit);
         return;
       }
       if (isDeterministic(row.failureReason)) {
-        needsReview(row.requestId, CODE_DETERMINISTIC_FAILURE,
-            "The recorded failure is a unique-key collision, which a retry repeats", result,
-            audit);
+        reviews.park(row.requestId, CODE_DETERMINISTIC_FAILURE,
+            "The recorded failure is a unique-key collision, which a retry repeats",
+            row.attempts, result, audit);
         return;
       }
     } else if (!DERIVED_STALLED.equals(derived)) {
       return; // an attempt holds a live lease
     }
-    if (row.attempts >= settings.getMaxProvisioningAttempts()) {
-      needsReview(row.requestId, CODE_ATTEMPTS_EXHAUSTED,
-          row.attempts + " provisioning attempts did not complete", result, audit);
+    if (attemptsExhausted(row)) {
+      reviews.park(row.requestId, CODE_ATTEMPTS_EXHAUSTED,
+          row.attempts + " provisioning attempts did not complete", row.attempts, result, audit);
       return;
     }
     if (audit.isDryRun()) {
@@ -319,7 +348,16 @@ public class BillingReconciliationService {
     }
     PaidProvisioningService.Outcome outcome = provisioning.provision(row.requestId,
         new LoggingOnboardingProgressSink(ReconciliationAudit.LOG_PREFIX + " " + row.requestId));
-    recordProvisioningOutcome(row.requestId, outcome, result, audit);
+    recordProvisioningOutcome(row, outcome, result, audit);
+  }
+
+  /**
+   * Whether the attempt budget is spent: counted from the attempts a released review was parked
+   * at, so a purchase an operator released after fixing the cause gets the full budget again.
+   */
+  private boolean attemptsExhausted(CheckoutRow row) {
+    int max = settings.getMaxProvisioningAttempts();
+    return row.attempts >= max && row.attempts - reviews.attemptsBaseline(row.requestId) >= max;
   }
 
   /**
@@ -333,10 +371,6 @@ public class BillingReconciliationService {
    */
   private void applyReactivation(CheckoutRow row, Date graceBefore, ReconciliationResult result,
       ReconciliationAudit audit, boolean justRecovered) {
-    if (audit.alreadyRecorded(ReconciliationAudit.eventId(KIND_NEEDS_REVIEW, row.requestId))) {
-      result.increment(Counter.AWAITING_REVIEW);
-      return;
-    }
     if (!justRecovered && isInsideGrace(row, graceBefore)) {
       return; // the payment webhook applies it right after recording the payment
     }
@@ -344,7 +378,8 @@ public class BillingReconciliationService {
     if (row.subscriptionId != null) {
       JSONObject subscription = retrieve("/v1/subscriptions/", row.subscriptionId, result);
       if (subscription == null) {
-        return; // counted as a provider error; retried by a later run
+        retryLater(row.requestId, "the new subscription could not be read", audit);
+        return; // counted as a provider error
       }
       paidAt = SubscriptionLifecycleApplier.providerStateAt(subscription);
     }
@@ -365,8 +400,9 @@ public class BillingReconciliationService {
     result.increment(Counter.REACTIVATIONS_APPLIED);
   }
 
-  private void recordProvisioningOutcome(String requestId, PaidProvisioningService.Outcome outcome,
+  private void recordProvisioningOutcome(CheckoutRow row, PaidProvisioningService.Outcome outcome,
       ReconciliationResult result, ReconciliationAudit audit) {
+    String requestId = row.requestId;
     switch (outcome.status()) {
       case PROVISIONED:
         audit.write(ReconciliationAudit.eventId(KIND_PROVISIONED, requestId), KIND_PROVISIONED,
@@ -389,8 +425,8 @@ public class BillingReconciliationService {
         break;
       case NEEDS_REVIEW:
       case NOT_PAID:
-        needsReview(requestId, StringUtils.defaultIfBlank(outcome.code(), "NOT_PAID"),
-            outcome.detail(), result, audit);
+        reviews.park(requestId, StringUtils.defaultIfBlank(outcome.code(), "NOT_PAID"),
+            outcome.detail(), row.attempts, result, audit);
         break;
       default:
         // NOT_CLAIMED: another attempt holds it, or it finished meanwhile; nothing to record.
@@ -408,17 +444,31 @@ public class BillingReconciliationService {
     return reason.contains(UNIQUE_VIOLATION_TEXT) || reason.contains(UNIQUE_VIOLATION_SQLSTATE);
   }
 
-  private void needsReview(String requestId, String code, String detail,
-      ReconciliationResult result, ReconciliationAudit audit) {
-    String eventId = ReconciliationAudit.eventId(KIND_NEEDS_REVIEW, requestId);
-    if (audit.alreadyRecorded(eventId)) {
-      result.increment(Counter.AWAITING_REVIEW);
+  /**
+   * Leaves a request out of the next runs' batches for {@link #RETRY_BACKOFF_MINUTES}, after one
+   * of its items failed. Best effort: a marker that cannot be written only costs the back-off.
+   */
+  private void retryLater(String requestId, String why, ReconciliationAudit audit) {
+    if (audit.isDryRun()) {
       return;
     }
-    audit.write(eventId, KIND_NEEDS_REVIEW, requestId, BillingEventStore.RESULT_FAILED,
-        "Needs manual review (" + code + "): " + StringUtils.defaultString(detail), null);
-    audit.alert("Purchase {} needs manual review ({}): {}", requestId, code, detail);
-    result.increment(Counter.NEEDS_REVIEW);
+    try {
+      eventStore.touchReconciliation(ReconciliationAudit.eventId(KIND_RETRY_LATER, requestId),
+          ReconciliationAudit.EVENT_TYPE_PREFIX + KIND_RETRY_LATER, requestId,
+          "Reconciliation could not complete this request (" + why + "); retried after "
+              + RETRY_BACKOFF_MINUTES + " minutes");
+    } catch (RuntimeException e) {
+      log.warn("{} Could not record the back-off of request {}", ReconciliationAudit.LOG_PREFIX,
+          requestId, e);
+      rollbackQuietly();
+    }
+  }
+
+  private Map<String, Object> withBackOff(Map<String, Object> parameters) {
+    parameters.put("retryProvider", BillingEventStore.PROVIDER_RECONCILER);
+    parameters.put("retryType", ReconciliationAudit.EVENT_TYPE_PREFIX + KIND_RETRY_LATER);
+    parameters.put("retryAfter", minutesAgo(RETRY_BACKOFF_MINUTES));
+    return parameters;
   }
 
   // ── Phase 3: no-session-id review ───────────────────────────────────────────────────────
@@ -426,17 +476,23 @@ public class BillingReconciliationService {
   private void reviewSessionlessCheckouts(ReconciliationResult result,
       ReconciliationAudit audit) {
     Date abandonedBefore = minutesAgo(settings.getAbandonedHours() * 60L);
+    Map<String, Object> parameters = new HashMap<>();
+    parameters.put("creating", STATUS_CREATING);
+    parameters.put("before", abandonedBefore);
+    ReviewQueue.bind(parameters);
     for (CheckoutRow row : checkoutRows("cr.checkoutRequestStatus = :creating"
-        + " and cr.stripeSession is null and cr.creatingAt <= :before",
-        Map.of("creating", STATUS_CREATING, "before", abandonedBefore))) {
+        + " and cr.stripeSession is null and cr.creatingAt <= :before"
+        + " and " + ReviewQueue.NOT_PARKED, parameters)) {
       try {
-        needsReview(row.requestId, CODE_NO_SESSION_ID, "The checkout never received a provider "
+        reviews.park(row.requestId, CODE_NO_SESSION_ID, "The checkout never received a provider "
             + "session id, so the provider cannot confirm it was not paid; it is never closed "
-            + "automatically", result, audit);
+            + "automatically", row.attempts, result, audit);
       } catch (RuntimeException e) {
         itemFailed(result, ITEM_CHECKOUT + row.requestId, e);
       }
     }
+    // Parked purchases are out of every batch; the run still says how many wait for a person.
+    result.add(Counter.AWAITING_REVIEW, reviews.countAwaiting());
   }
 
   // ── Phase 5: stuck RECEIVED events ──────────────────────────────────────────────────────

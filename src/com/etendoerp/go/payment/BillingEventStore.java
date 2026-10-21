@@ -15,6 +15,7 @@ import org.hibernate.exception.ConstraintViolationException;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 
@@ -97,6 +98,13 @@ public class BillingEventStore implements CheckoutWebhookProcessor.EventStore {
   /** Name of the event-id parameter bound by every one of those updates. */
   private static final String PARAM_EVENT_ID = "eventId";
   private static final int SUMMARY_WIDTH = WebhookPayloadSummary.MAX_LENGTH;
+  /** ETP-5048 — the rows of one type the billing reconciliation wrote. */
+  private static final String RECONCILIATION_ROWS =
+      "as be where be.provider = :provider and be.eventType = :eventType";
+  private static final String PARAM_PROVIDER = "provider";
+  private static final String PARAM_EVENT_TYPE = "eventType";
+  private static final String PARAM_REQUEST_ID = "requestId";
+  private static final String PARAM_RESULT = "result";
 
   /**
    * Id-only claim, kept for the {@link CheckoutWebhookProcessor.EventStore} contract.
@@ -258,6 +266,124 @@ public class BillingEventStore implements CheckoutWebhookProcessor.EventStore {
         .setMaxResult(1)
         .list()
         .isEmpty());
+  }
+
+  /**
+   * ETP-5048 — whether the billing reconciliation holds an open ({@code FAILED}) row of this type
+   * for a request: for {@code reconciliation.needs-review}, a purchase parked for review. An
+   * operator releases it by setting the row to {@code IGNORED}.
+   *
+   * @param eventType a reconciliation event type
+   * @param requestId the checkout correlation id
+   * @return whether such a row exists
+   */
+  public boolean hasOpenReconciliation(String eventType, String requestId) {
+    return runAsSystem(() -> reconciliationRows(eventType, requestId, RESULT_FAILED)
+        .setMaxResult(1).count() > 0);
+  }
+
+  /**
+   * ETP-5048 — how many rows of this type the billing reconciliation wrote for a request, whatever
+   * their result.
+   *
+   * @param eventType a reconciliation event type
+   * @param requestId the checkout correlation id
+   * @return the count
+   */
+  public int countReconciliations(String eventType, String requestId) {
+    return runAsSystem(() -> reconciliationRows(eventType, requestId, null).count());
+  }
+
+  /**
+   * ETP-5048 — how many open ({@code FAILED}) rows of this type the billing reconciliation holds,
+   * across requests: for {@code reconciliation.needs-review}, the purchases awaiting review.
+   *
+   * @param eventType a reconciliation event type
+   * @return the count
+   */
+  public int countOpenReconciliations(String eventType) {
+    return runAsSystem(() -> reconciliationRows(eventType, null, RESULT_FAILED).count());
+  }
+
+  /**
+   * ETP-5048 — the {@code PAYLOAD_SUMMARY} of the newest row of this type and result the billing
+   * reconciliation wrote for a request.
+   *
+   * @param eventType a reconciliation event type
+   * @param requestId the checkout correlation id
+   * @param result the row result, e.g. {@link #RESULT_IGNORED} for a released review
+   * @return the summary, or null when there is no such row or it has none
+   */
+  public String latestReconciliationSummary(String eventType, String requestId, String result) {
+    return runAsSystem(() -> {
+      List<BillingEvent> rows = OBDal.getInstance().createQuery(BillingEvent.class,
+              RECONCILIATION_ROWS + " and be.requestID = :requestId and be.eventResult = :result"
+                  + " order by be.receivedAt desc")
+          .setNamedParameter(PARAM_PROVIDER, PROVIDER_RECONCILER)
+          .setNamedParameter(PARAM_EVENT_TYPE, eventType)
+          .setNamedParameter(PARAM_REQUEST_ID, requestId)
+          .setNamedParameter(PARAM_RESULT, result)
+          .setFilterOnReadableClients(false)
+          .setFilterOnReadableOrganization(false)
+          .setMaxResult(1)
+          .list();
+      return rows.isEmpty() ? null : rows.get(0).getPayloadSummary();
+    });
+  }
+
+  /**
+   * ETP-5048 — records a reconciliation marker row ({@link #RESULT_FAILED}), or, when it already
+   * exists, refreshes it: {@code LAST_DUPLICATE_AT} becomes now, {@code DUPLICATE_COUNT} grows by
+   * one and the reason is replaced. One row per marker, however often it is touched. Commits.
+   *
+   * @param eventId deterministic id
+   * @param eventType e.g. {@code reconciliation.retry-later}
+   * @param requestId the checkout correlation id
+   * @param reason operationally safe explanation
+   */
+  public void touchReconciliation(String eventId, String eventType, String requestId,
+      String reason) {
+    if (recordReconciliation(eventId, eventType, requestId, RESULT_FAILED, reason, null)) {
+      return;
+    }
+    Date now = new Date();
+    runAsSystem(() -> {
+      OBDal.getInstance().getSession().createQuery(UPDATE_BILLING_EVENT
+              + "   set be.duplicateCount = be.duplicateCount + 1,"
+              + "       be.lastDuplicateAt = :now,"
+              + "       be.failureReason = :reason,"
+              + "       be.updated = :now"
+              + " where be.event = :eventId")
+          .setParameter("now", now)
+          .setParameter("reason", StringUtils.abbreviate(StringUtils.trimToNull(reason),
+              REASON_WIDTH))
+          .setParameter(PARAM_EVENT_ID, StringUtils.trim(eventId))
+          .executeUpdate();
+      flushAndCommit();
+    });
+  }
+
+  private static OBQuery<BillingEvent> reconciliationRows(
+      String eventType, String requestId, String result) {
+    StringBuilder where = new StringBuilder(RECONCILIATION_ROWS);
+    if (requestId != null) {
+      where.append(" and be.requestID = :requestId");
+    }
+    if (result != null) {
+      where.append(" and be.eventResult = :result");
+    }
+    var query = OBDal.getInstance().createQuery(BillingEvent.class, where.toString())
+        .setNamedParameter(PARAM_PROVIDER, PROVIDER_RECONCILER)
+        .setNamedParameter(PARAM_EVENT_TYPE, eventType)
+        .setFilterOnReadableClients(false)
+        .setFilterOnReadableOrganization(false);
+    if (requestId != null) {
+      query.setNamedParameter(PARAM_REQUEST_ID, requestId);
+    }
+    if (result != null) {
+      query.setNamedParameter(PARAM_RESULT, result);
+    }
+    return query;
   }
 
   /**

@@ -51,6 +51,8 @@ import com.etendoerp.go.rest.PaidProvisioningService.Outcome;
 import com.etendoerp.go.rest.PaidProvisioningService.Status;
 import com.etendoerp.go.rest.PaidReactivationService;
 import com.etendoerp.go.schemaforge.data.CheckoutRequest;
+import com.etendoerp.go.schemaforge.email.InternalAlertEvent;
+import com.etendoerp.go.schemaforge.email.InternalAlertService;
 
 /**
  * Specs for {@link BillingReconciliationService}: the checkout phases (recovery, provisioning
@@ -75,6 +77,10 @@ public class BillingReconciliationServiceTest {
   private final List<CheckoutRequest> paidRows = new ArrayList<>();
   private final List<CheckoutRequest> creatingRows = new ArrayList<>();
   private final List<BillingEventStore.StaleEvent> staleEvents = new ArrayList<>();
+  /** Requests with an open review row: the candidate queries leave them out. */
+  private final java.util.Set<String> parked = new java.util.HashSet<>();
+  /** The HQL of every candidate query the run issued, in order. */
+  private final List<String> candidateQueries = new ArrayList<>();
 
   private StripeApiClient stripe;
   private CheckoutRequestStore checkoutStore;
@@ -83,6 +89,7 @@ public class BillingReconciliationServiceTest {
   private SubscriptionReconciler subscriptions;
   private CheckoutRequestWrites checkoutWrites;
   private PaidReactivationService reactivations;
+  private InternalAlertService internalAlerts;
   private ReconciliationSettings settings = ReconciliationSettings.defaults();
   private TestLogCapture auditLog;
 
@@ -95,6 +102,7 @@ public class BillingReconciliationServiceTest {
     subscriptions = mock(SubscriptionReconciler.class);
     checkoutWrites = mock(CheckoutRequestWrites.class);
     reactivations = mock(PaidReactivationService.class);
+    internalAlerts = mock(InternalAlertService.class);
     when(eventStore.findStaleReceived(any(), anyInt())).thenReturn(staleEvents);
     when(eventStore.recordReconciliation(anyString(), anyString(), any(), anyString(), any(),
         any())).thenReturn(true);
@@ -112,14 +120,22 @@ public class BillingReconciliationServiceTest {
     OBDal dal = mock(OBDal.class);
     when(dal.createQuery(eq(CheckoutRequest.class), anyString())).thenAnswer(call -> {
       String hql = call.getArgument(1, String.class);
-      List<CheckoutRequest> rows = hql.contains(":created") ? createdRows
+      candidateQueries.add(hql);
+      List<CheckoutRequest> rows = new ArrayList<>(hql.contains(":created") ? createdRows
           : hql.contains(":paid") ? paidRows : hql.contains(":creating") ? creatingRows
-              : List.of();
+              : List.of());
+      if (hql.contains(ReviewQueue.NOT_PARKED)) {
+        rows.removeIf(request -> parked.contains(request.getRequest()));
+      }
       @SuppressWarnings("unchecked")
       OBQuery<CheckoutRequest> query = mock(OBQuery.class, RETURNS_SELF);
-      when(query.list()).thenReturn(new ArrayList<>(rows));
+      when(query.list()).thenReturn(rows);
       return query;
     });
+    for (String requestId : parked) {
+      when(eventStore.hasOpenReconciliation(ReviewQueue.EVENT_TYPE, requestId)).thenReturn(true);
+    }
+    when(eventStore.countOpenReconciliations(ReviewQueue.EVENT_TYPE)).thenReturn(parked.size());
     try (MockedStatic<OBDal> dalStatic = mockStatic(OBDal.class);
         MockedStatic<OBContext> context = mockStatic(OBContext.class)) {
       dalStatic.when(OBDal::getInstance).thenReturn(dal);
@@ -128,6 +144,7 @@ public class BillingReconciliationServiceTest {
           Clock.fixed(NOW, ZoneOffset.UTC));
       service.checkoutWrites = checkoutWrites;
       service.reactivations = reactivations;
+      service.internalAlerts = internalAlerts;
       return service.run(dryRun);
     }
   }
@@ -425,7 +442,7 @@ public class BillingReconciliationServiceTest {
   public void aRowAlreadyInReviewIsCountedAsAwaitingAndNeitherRetriedNorReAlerted() {
     paidRows.add(paidRow(REQ, ago(2, TimeUnit.HOURS), 5L,
         CheckoutRequestStore.DERIVED_STATUS_STALLED));
-    when(eventStore.exists("reconcile:needs-review:" + REQ)).thenReturn(true);
+    parked.add(REQ);
 
     ReconciliationResult result = run(false);
 
@@ -433,6 +450,93 @@ public class BillingReconciliationServiceTest {
     verifyNoRows();
     assertEquals(1, result.get(Counter.AWAITING_REVIEW));
     assertTrue(warnings().toString(), warnings().isEmpty());
+  }
+
+  /**
+   * A parked row and a row whose provider read fails on every run must not fill the fixed-size
+   * batch: the candidate queries leave out what is parked and what failed within the back-off.
+   */
+  @Test
+  public void theCandidateQueriesLeaveOutParkedAndBackingOffRows() {
+    run(false);
+
+    assertEquals(3, candidateQueries.size());
+    String recovery = candidateQueries.get(0);
+    String provisioningRepair = candidateQueries.get(1);
+    String sessionless = candidateQueries.get(2);
+    assertTrue(recovery, recovery.contains("rl.eventType = :retryType"));
+    assertTrue(provisioningRepair, provisioningRepair.contains(ReviewQueue.NOT_PARKED));
+    assertTrue(provisioningRepair, provisioningRepair.contains("rl.eventType = :retryType"));
+    assertTrue(sessionless, sessionless.contains(ReviewQueue.NOT_PARKED));
+  }
+
+  @Test
+  public void aFailedSessionReadBacksTheRowOffInsteadOfRetryingItEveryRun() throws Exception {
+    createdRows.add(row(REQ, SESSION, ago(20, TimeUnit.MINUTES), "pending"));
+    when(stripe.get("/v1/checkout/sessions/" + SESSION)).thenReturn(new StripeResponse(503, ""));
+
+    run(false);
+
+    verify(eventStore).touchReconciliation(eq("reconcile:retry-later:" + REQ),
+        eq("reconciliation.retry-later"), eq(REQ), anyString());
+  }
+
+  @Test
+  public void aDryRunWritesNoBackOffMarker() throws Exception {
+    createdRows.add(row(REQ, SESSION, ago(20, TimeUnit.MINUTES), "pending"));
+    when(stripe.get("/v1/checkout/sessions/" + SESSION)).thenReturn(new StripeResponse(503, ""));
+
+    run(true);
+
+    verify(eventStore, never()).touchReconciliation(anyString(), anyString(), any(), any());
+  }
+
+  /** Released after five attempts: the budget counts again from the attempts it was parked at. */
+  @Test
+  public void aReleasedPurchaseGetsItsAttemptBudgetBack() {
+    paidRows.add(paidRow(REQ, ago(2, TimeUnit.HOURS), 6L,
+        CheckoutRequestStore.DERIVED_STATUS_STALLED));
+    when(eventStore.latestReconciliationSummary(ReviewQueue.EVENT_TYPE, REQ,
+        BillingEventStore.RESULT_IGNORED)).thenReturn("{\"code\":\"ATTEMPTS_EXHAUSTED\","
+            + "\"attempts\":\"5\"}");
+    when(provisioning.provision(eq(REQ), any()))
+        .thenReturn(new Outcome(Status.PROVISIONED, null, "Environment created", 7L));
+
+    run(false);
+
+    verify(provisioning).provision(eq(REQ), any());
+  }
+
+  @Test
+  public void aReleasedPurchaseThatSpendsItsBudgetAgainIsParkedUnderANewRow() {
+    paidRows.add(paidRow(REQ, ago(2, TimeUnit.HOURS), 10L,
+        CheckoutRequestStore.DERIVED_STATUS_STALLED));
+    when(eventStore.latestReconciliationSummary(ReviewQueue.EVENT_TYPE, REQ,
+        BillingEventStore.RESULT_IGNORED)).thenReturn("{\"attempts\":\"5\"}");
+    when(eventStore.countReconciliations(ReviewQueue.EVENT_TYPE, REQ)).thenReturn(1);
+
+    run(false);
+
+    verify(provisioning, never()).provision(anyString(), any());
+    verify(eventStore).recordReconciliation(eq("reconcile:needs-review:" + REQ + ":2"),
+        eq("reconciliation.needs-review"), eq(REQ), eq(BillingEventStore.RESULT_FAILED), any(),
+        eq("{\"code\":\"ATTEMPTS_EXHAUSTED\",\"attempts\":\"10\"}"));
+  }
+
+  /** S5: a purchase parked for review reaches a person, once. */
+  @Test
+  public void aNewReviewSendsOneInternalAlertAndADryRunNone() {
+    creatingRows.add(row(REQ, null, ago(3, TimeUnit.DAYS), "pending"));
+
+    run(true);
+    verify(internalAlerts, never()).sendAfterTransaction(any());
+
+    run(false);
+    ArgumentCaptor<InternalAlertEvent> alert = ArgumentCaptor.forClass(InternalAlertEvent.class);
+    verify(internalAlerts).sendAfterTransaction(alert.capture());
+    assertEquals("billing-reconcile-needs-review", alert.getValue().getEvent());
+    assertEquals(REQ, alert.getValue().getAttemptId());
+    assertEquals("NO_SESSION_ID", alert.getValue().getStage());
   }
 
   @Test
@@ -557,10 +661,11 @@ public class BillingReconciliationServiceTest {
     assertEquals(1, warnings().size());
     verify(checkoutWrites, never()).recordExpired(anyString());
 
-    // Second run: the deterministic id is found, so it is awaiting review and stays silent.
+    // Second run: the open review row keeps it out of the batch; it is counted as awaiting and
+    // stays silent.
     eventStore = mock(BillingEventStore.class);
     when(eventStore.findStaleReceived(any(), anyInt())).thenReturn(staleEvents);
-    when(eventStore.exists("reconcile:needs-review:" + REQ)).thenReturn(true);
+    parked.add(REQ);
 
     ReconciliationResult second = run(false);
 
@@ -658,7 +763,7 @@ public class BillingReconciliationServiceTest {
     session(SESSION, "open", "unpaid", REQ);
     paidRows.add(paidRow("req-live", ago(2, TimeUnit.HOURS), 1L, "provisioning"));
     creatingRows.add(row("req-nosession", null, ago(3, TimeUnit.DAYS), "pending"));
-    when(eventStore.exists("reconcile:needs-review:req-nosession")).thenReturn(true);
+    parked.add("req-nosession");
 
     ReconciliationResult result = run(false);
 

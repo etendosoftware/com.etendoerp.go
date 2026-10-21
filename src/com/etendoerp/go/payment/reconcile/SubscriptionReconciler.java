@@ -14,6 +14,8 @@ import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -74,6 +76,7 @@ final class SubscriptionReconciler {
   static final String KIND_SUBSCRIPTION_CURRENT = "subscription-current";
   static final String KIND_SUBSCRIPTION_PRICE = "subscription-price";
   static final String KIND_PAUSE_COLLECTION = "pause-collection";
+  static final String KIND_BREAKER_TRIPPED = "breaker-tripped";
 
   private static final String SUBSCRIPTION_UPDATED = "customer.subscription.updated";
   private static final String STATUS_ACTIVE = "active";
@@ -390,6 +393,7 @@ final class SubscriptionReconciler {
     if (breaker != null) {
       result.tripBreaker(breaker);
       audit.alert("Absent-subscription breaker tripped, nothing closed: {}", breaker);
+      alertBreakerOncePerDay(breaker, result, audit);
       return;
     }
     Instant now = clock.instant();
@@ -400,6 +404,22 @@ final class SubscriptionReconciler {
       } catch (RuntimeException e) {
         itemFailed(result, "absent subscription " + candidate.subscriptionId, e);
       }
+    }
+  }
+
+  /**
+   * Sends the internal alert of a tripped breaker once per UTC day: the breaker keeps tripping on
+   * every run until a person fixes the key, and one alert a day says so without flooding.
+   */
+  private void alertBreakerOncePerDay(String breaker, ReconciliationResult result,
+      ReconciliationAudit audit) {
+    String day = LocalDate.ofInstant(clock.instant(), ZoneOffset.UTC).toString();
+    if (audit.write(ReconciliationAudit.eventId(KIND_BREAKER_TRIPPED, day), KIND_BREAKER_TRIPPED,
+        null, BillingEventStore.RESULT_IGNORED,
+        "Absent-subscription breaker tripped, nothing closed: " + breaker,
+        summary("run", result.getRunId()))) {
+      audit.internalAlert("billing-reconcile-breaker-tripped", result.getRunId(),
+          "absent-subscription-breaker", null);
     }
   }
 
