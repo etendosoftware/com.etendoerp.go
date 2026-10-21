@@ -33,7 +33,8 @@ public class SubscriptionLifecycleApplier {
   static final String INVOICE_PAYMENT_FAILED = "invoice.payment_failed";
   static final String SUBSCRIPTION_UPDATED = "customer.subscription.updated";
   static final String SUBSCRIPTION_DELETED = "customer.subscription.deleted";
-  static final String SUBSCRIPTION_EVENT_PREFIX = "customer.subscription.";
+  /** The prefix of every {@code customer.subscription.*} event type. */
+  public static final String SUBSCRIPTION_EVENT_PREFIX = "customer.subscription.";
 
   static final String CURRENT_PERIOD_START = "current_period_start";
   static final String CURRENT_PERIOD_END = "current_period_end";

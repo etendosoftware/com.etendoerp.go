@@ -18,6 +18,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 
@@ -43,6 +44,70 @@ public class PausedSubscriptionAlertTest {
   private final BillingEventStore store = mock(BillingEventStore.class);
   private final InternalAlertService internalAlerts = mock(InternalAlertService.class);
   private final PausedSubscriptionAlert alert = new PausedSubscriptionAlert(store, internalAlerts);
+
+  // ── Review F5: once per pause episode ─────────────────────────────────────────────────────
+
+  @Test
+  public void aResumedSubscriptionEndsItsOpenEpisodeSoTheNextPauseAlertsAgain() throws Exception {
+    when(store.exists(EVENT_ID)).thenReturn(true);
+    when(store.renameReconciliationMarker(eq(EVENT_ID), anyString(), anyString()))
+        .thenReturn(true);
+
+    int ended = alert.endResolved(SUB, new JSONObject("{\"status\":\"active\"}"));
+
+    assertEquals(1, ended);
+    ArgumentCaptor<String> keptAs = ArgumentCaptor.forClass(String.class);
+    verify(store).renameReconciliationMarker(eq(EVENT_ID), keptAs.capture(), anyString());
+    assertTrue(keptAs.getValue(), keptAs.getValue().startsWith(EVENT_ID + ":ended:"));
+  }
+
+  @Test
+  public void aStillPausedSubscriptionKeepsItsEpisodeOpenAndStaysSilent() throws Exception {
+    when(store.exists(anyString())).thenReturn(true);
+
+    int ended = alert.endResolved(SUB, new JSONObject(
+        "{\"status\":\"paused\",\"pause_collection\":{\"behavior\":\"void\"}}"));
+
+    assertEquals(0, ended);
+    verify(store, never()).renameReconciliationMarker(anyString(), anyString(), anyString());
+  }
+
+  @Test
+  public void clearedPauseCollectionEndsThePausedCollectionEpisode() throws Exception {
+    String collectionId = PausedSubscriptionAlert.pauseCollectionEventIdOf(SUB);
+    when(store.exists(collectionId)).thenReturn(true);
+    when(store.renameReconciliationMarker(eq(collectionId), anyString(), anyString()))
+        .thenReturn(true);
+
+    assertEquals(1, alert.endResolved(SUB, new JSONObject(
+        "{\"status\":\"active\",\"pause_collection\":null}")));
+    assertEquals("reconcile:pause-collection:" + SUB, collectionId);
+  }
+
+  @Test
+  public void noOpenEpisodeMeansNoWrite() throws Exception {
+    assertEquals(0, alert.endResolved(SUB, new JSONObject("{\"status\":\"active\"}")));
+    verify(store, never()).renameReconciliationMarker(anyString(), anyString(), anyString());
+  }
+
+  /** The whole cycle: pause alerts, a re-read in the same pause is silent, resume, pause alerts. */
+  @Test
+  public void aSecondPauseAfterAResumeAlertsAgainButAReRunWithinOnePauseDoesNot() throws Exception {
+    java.util.Set<String> rows = new java.util.HashSet<>();
+    when(store.exists(anyString())).thenAnswer(call -> rows.contains(call.getArgument(0)));
+    when(store.recordReconciliation(anyString(), anyString(), any(), anyString(), anyString(),
+        anyString())).thenAnswer(call -> rows.add(call.getArgument(0)));
+    when(store.renameReconciliationMarker(anyString(), anyString(), anyString()))
+        .thenAnswer(call -> rows.remove(call.getArgument(0, String.class))
+            && rows.add(call.getArgument(1, String.class)));
+
+    assertTrue(alert.raiseOnce("[P]", SUB, null, null, "webhook"));
+    assertFalse("Same pause: silent", alert.raiseOnce("[P]", SUB, null, null, "reconciliation"));
+    alert.endResolved(SUB, new JSONObject("{\"status\":\"active\"}"));
+    assertTrue("A new pause alerts again", alert.raiseOnce("[P]", SUB, null, null, "webhook"));
+
+    verify(internalAlerts, org.mockito.Mockito.times(2)).sendAfterTransaction(any());
+  }
 
   @Test
   public void theEventIdIsTheSharedDeterministicOne() {

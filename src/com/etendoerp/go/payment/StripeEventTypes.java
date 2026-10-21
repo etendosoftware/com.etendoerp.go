@@ -34,6 +34,12 @@ public final class StripeEventTypes {
    */
   public static final String SUBSCRIPTION_PAUSED = "customer.subscription.paused";
 
+  /**
+   * ETP-5048 — a paused subscription resumed: ends the pause episode, so the next pause alerts
+   * again. Changes no state, since a pause changed none.
+   */
+  public static final String SUBSCRIPTION_RESUMED = "customer.subscription.resumed";
+
   private StripeEventTypes() {
   }
 }

@@ -89,6 +89,7 @@ public class BillingEventStore implements CheckoutWebhookProcessor.EventStore {
   private static final int EVENT_TYPE_WIDTH = 120;
   private static final int REQUEST_ID_WIDTH = 64;
   private static final int REASON_WIDTH = 255;
+  private static final int EVENT_ID_WIDTH = 255;
   /**
    * Opening clause shared by every bulk update in this class. The entity is named by
    * {@link BillingEvent#ENTITY_NAME} rather than the Java simple name, which Etendo does not
@@ -422,6 +423,35 @@ public class BillingEventStore implements CheckoutWebhookProcessor.EventStore {
           .executeUpdate();
       flushAndCommit();
       return updated;
+    });
+  }
+
+  /**
+   * ETP-5048 — renames a reconciliation marker row, which keeps it as history and frees its
+   * deterministic id for the next occurrence (a pause episode that ended). Commits.
+   *
+   * @param eventId the current id
+   * @param newEventId the id it is kept under
+   * @param reason operationally safe note, stored as the row's reason
+   * @return whether a row was renamed
+   */
+  public boolean renameReconciliationMarker(String eventId, String newEventId, String reason) {
+    Date now = new Date();
+    return runAsSystem(() -> {
+      int renamed = OBDal.getInstance().getSession().createQuery(UPDATE_BILLING_EVENT
+              + "   set be.event = :newEventId,"
+              + "       be.failureReason = :reason,"
+              + "       be.updated = :now"
+              + " where be.event = :eventId and be.provider = :provider")
+          .setParameter("newEventId", StringUtils.abbreviate(newEventId, EVENT_ID_WIDTH))
+          .setParameter("reason", StringUtils.abbreviate(StringUtils.trimToNull(reason),
+              REASON_WIDTH))
+          .setParameter("now", now)
+          .setParameter(PARAM_EVENT_ID, StringUtils.trim(eventId))
+          .setParameter(PARAM_PROVIDER, PROVIDER_RECONCILER)
+          .executeUpdate();
+      flushAndCommit();
+      return renamed > 0;
     });
   }
 

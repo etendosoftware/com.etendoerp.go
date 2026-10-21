@@ -8,6 +8,7 @@ package com.etendoerp.go.payment;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONObject;
 
 import com.etendoerp.go.schemaforge.email.InternalAlertEvent;
 import com.etendoerp.go.schemaforge.email.InternalAlertService;
@@ -21,11 +22,26 @@ import com.etendoerp.go.schemaforge.email.InternalAlertService;
  * reconciliation. Our checkout sets no trial, so {@code paused} means somebody configured a trial
  * or a pause in Stripe by hand, and a paused subscription can be resumed; a person has to look.
  *
- * <p><b>Raised once per subscription.</b> The alert is recorded as an {@code ETGO_BILLING_EVENT}
- * row with a deterministic id ({@code reconcile:subscription-paused:<sub>}), shared by every path,
- * and only the call that writes it logs the WARN and sends the internal alert. A redelivered
- * webhook or a second reconciliation run over the same paused subscription finds the row and stays
- * silent — the zero-alerts criterion for a consistent dataset.
+ * <p><b>Raised once per pause</b> (decided by Martin, 2026-10-21; it was once per subscription).
+ * The open episode is an {@code ETGO_BILLING_EVENT} row with a deterministic id
+ * ({@code reconcile:subscription-paused:<sub>}), shared by every path, and only the call that
+ * writes it logs the WARN and sends the internal alert. A redelivered webhook or a second
+ * reconciliation run within the same pause finds the row and stays silent — the zero-alerts
+ * criterion for a consistent dataset.
+ *
+ * <p><b>The episode ends when the subscription is seen not paused</b> ({@link #endResolved}): the
+ * webhook on {@code customer.subscription.updated} and {@code customer.subscription.resumed}, and
+ * the reconciliation on every re-read. Ending renames the open row to
+ * {@code <id>:ended:<epoch millis>}, which keeps it as history and frees the id, so the next pause
+ * writes it again and alerts again. The same holds for paused <em>collection</em>
+ * ({@code reconcile:pause-collection:<sub>}, raised by the reconciliation), which ends when
+ * {@code pause_collection} is cleared.
+ *
+ * <p>Why ending on an observed resume rather than an id derived from the pause's start: Stripe
+ * gives a {@code paused} status no start instant on the subscription, and {@code pause_collection}
+ * none at all, while the reconciliation, unlike the webhook, has no event time to use. A resume
+ * missed by every path (the subscription paused, resumed and paused again between two reads, and
+ * the webhooks lost) folds two pauses into one alert: one alert too few, never one too many.
  */
 public class PausedSubscriptionAlert {
 
@@ -34,6 +50,10 @@ public class PausedSubscriptionAlert {
   /** The deterministic event-id kind, shared with the reconciliation's own ids. */
   public static final String KIND = "subscription-paused";
   static final String EVENT_ID_PREFIX = "reconcile:" + KIND + ":";
+  /** The paused-collection episode kind, raised by the reconciliation. */
+  public static final String KIND_PAUSE_COLLECTION = "pause-collection";
+  private static final String STATUS_PAUSED = "paused";
+  private static final String FIELD_PAUSE_COLLECTION = "pause_collection";
   static final String EVENT_TYPE = "reconciliation." + KIND;
   private static final String ALERT_EVENT = "subscription-paused-review";
   private static final String ALERT_STAGE = "trial-or-pause-configured-in-stripe";
@@ -107,6 +127,56 @@ public class PausedSubscriptionAlert {
    */
   public static String eventIdOf(String subscriptionId) {
     return EVENT_ID_PREFIX + StringUtils.trimToEmpty(subscriptionId);
+  }
+
+  /**
+   * Builds the deterministic event id of a subscription's open paused-collection episode.
+   *
+   * @param subscriptionId a {@code sub_...}
+   * @return the event id
+   */
+  public static String pauseCollectionEventIdOf(String subscriptionId) {
+    return "reconcile:" + KIND_PAUSE_COLLECTION + ":" + StringUtils.trimToEmpty(subscriptionId);
+  }
+
+  /**
+   * Ends the open pause episodes the subscription has left: the paused one when its status is not
+   * {@code paused}, the paused-collection one when {@code pause_collection} is cleared. A
+   * subscription with no open episode costs one lookup per kind and no write.
+   *
+   * <p>Commits on its own; call it where nothing else is pending.
+   *
+   * @param subscriptionId the {@code sub_...}
+   * @param subscription the subscription as the provider reports it now
+   * @return how many episodes this call ended
+   */
+  public int endResolved(String subscriptionId, JSONObject subscription) {
+    String id = StringUtils.trimToNull(subscriptionId);
+    if (id == null || subscription == null) {
+      return 0;
+    }
+    int ended = 0;
+    if (!STATUS_PAUSED.equals(subscription.optString("status", ""))
+        && endEpisode(eventIdOf(id), "resumed")) {
+      ended++;
+    }
+    if ((!subscription.has(FIELD_PAUSE_COLLECTION) || subscription.isNull(FIELD_PAUSE_COLLECTION))
+        && endEpisode(pauseCollectionEventIdOf(id), "collection resumed")) {
+      ended++;
+    }
+    return ended;
+  }
+
+  private boolean endEpisode(String eventId, String how) {
+    if (!store.exists(eventId)) {
+      return false;
+    }
+    boolean ended = store.renameReconciliationMarker(eventId,
+        eventId + ":ended:" + System.currentTimeMillis(), "Pause ended: " + how);
+    if (ended) {
+      log.info("Pause episode {} ended ({}); the next pause alerts again", eventId, how);
+    }
+    return ended;
   }
 
   private void sendInternalAlert(String subscriptionId, String clientId) {

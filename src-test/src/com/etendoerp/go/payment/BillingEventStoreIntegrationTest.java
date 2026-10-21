@@ -1047,6 +1047,29 @@ public class BillingEventStoreIntegrationTest extends OBBaseTest {
     return REQUEST_MARKER + "rq-" + UUID.randomUUID().toString().replace("-", "");
   }
 
+  /**
+   * Review F5: ending a pause episode renames its open marker, which keeps it as history and frees
+   * the deterministic id, so the next pause writes it (and alerts) again.
+   */
+  @Test
+  public void testRenamingAMarkerFreesItsIdForTheNextEpisode() {
+    String eventId = newEventId();
+    String requestId = uniqueRequest();
+    assertTrue(store.recordReconciliation(eventId, "reconciliation.subscription-paused",
+        requestId, BillingEventStore.RESULT_IGNORED, "paused", null));
+
+    assertTrue(store.renameReconciliationMarker(eventId, eventId + ":ended:1", "Pause ended"));
+
+    assertEquals(0L, rawCount(eventId));
+    assertEquals(1L, rawCount(eventId + ":ended:1"));
+    assertEquals("Pause ended", rawColumn(eventId + ":ended:1", "FAILURE_REASON"));
+    assertFalse("Nothing left to rename",
+        store.renameReconciliationMarker(eventId, eventId + ":ended:2", "again"));
+    assertTrue("The id is free for the next episode", store.recordReconciliation(eventId,
+        "reconciliation.subscription-paused", requestId, BillingEventStore.RESULT_IGNORED,
+        "paused again", null));
+  }
+
   @Test
   public void testTouchReconciliationInsertsOnceThenRefreshesTheSameRow() {
     String eventId = newEventId();

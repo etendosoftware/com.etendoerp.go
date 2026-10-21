@@ -356,8 +356,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   /**
    * ETP-5048 — Stripe's dedicated event for a subscription that entered status {@code paused}.
    * Alert-only, like a {@code customer.subscription.updated} carrying that status: see
-   * {@link PausedSubscriptionAlert}. {@code customer.subscription.resumed} stays unhandled, because
-   * a pause never changed anything to undo.
+   * {@link PausedSubscriptionAlert}. {@code customer.subscription.resumed} only ends the pause
+   * episode (so the next pause alerts again): a pause never changed anything to undo.
    */
   private static final String SUBSCRIPTION_PAUSED_EVENT = StripeEventTypes.SUBSCRIPTION_PAUSED;
   /** The stable prefix of the webhook's operator alerts (ETP-5048, aligned with the reconciler). */
@@ -1738,6 +1738,13 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       });
       return;
     }
+    if (StripeEventTypes.SUBSCRIPTION_RESUMED.equals(type)) {
+      SystemContext.run("a resumed subscription event", () -> {
+        endResolvedPauseEpisodes(type, event);
+        billingEventStore.markApplied(eventId);
+      });
+      return;
+    }
     billingEventStore.markIgnored(eventId, "unhandled event type");
   }
 
@@ -1755,6 +1762,18 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     new PausedSubscriptionAlert(billingEventStore, internalAlertService).raiseOnce(
         BILLING_ALERT_PREFIX, subscriptionId, target == null ? null : target.clientId(),
         purchase == null ? null : purchase.getRequest(), "webhook");
+  }
+
+  /**
+   * ETP-5048 — ends the pause episodes a subscription event shows are over (status no longer
+   * {@code paused}, {@code pause_collection} cleared), so the next pause alerts again. Commits on
+   * its own, before the event's own writes. Changes no subscription state.
+   */
+  private void endResolvedPauseEpisodes(String type, JSONObject event) {
+    JSONObject data = event.optJSONObject("data");
+    JSONObject object = data == null ? null : data.optJSONObject(STRIPE_EVENT_OBJECT);
+    new PausedSubscriptionAlert(billingEventStore, internalAlertService).endResolved(
+        SubscriptionLifecycleApplier.subscriptionIdOf(type, object), object);
   }
 
   /**
@@ -1918,6 +1937,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   private void applySubscriptionLifecycleAsSystem(String eventId, String type, JSONObject event) {
+    if (type.startsWith(SubscriptionLifecycleApplier.SUBSCRIPTION_EVENT_PREFIX)) {
+      // ETP-5048 — a pause alerts once per episode: one this update shows has ended is closed.
+      endResolvedPauseEpisodes(type, event);
+    }
     SubscriptionEventOutcome screened = subscriptionLifecycleApplier.evaluate(type, event);
     if (screened.isIgnored()) {
       if (SubscriptionLifecycleApplier.REASON_PAUSED.equals(screened.reason())) {
