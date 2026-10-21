@@ -149,6 +149,11 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  * <p>And the purchase-source eligibility specs (ETP-5548, ETP-5047): a spent demo or a productive
  * environment, a canceled one included, is never the demo source of a purchase.
  *
+ * <p>And the specs for {@code provisionPaidPurchase} (ETP-5048), the browser-less paid onboarding
+ * the billing reconciliation drives through {@code PaidProvisioningService}: it runs under the
+ * same fenced {@code claimForProvisioning} as the HTTP path, a refused claim runs nothing, and the
+ * NDJSON progress reaches the given sink.
+ *
  * @covers com.etendoerp.go.rest.EtendoGoJwtServlet
  */
 public class EtendoGoJwtServletCoverageTest {
@@ -3833,6 +3838,110 @@ public class EtendoGoJwtServletCoverageTest {
     }
   }
 
+  /** What a staged run executes instead of {@code doPost}, when set (ETP-5048). */
+  private StagedAction stagedAction;
+
+  /** A staged run's body other than the HTTP POST. */
+  @FunctionalInterface
+  private interface StagedAction {
+    void run() throws Exception;
+  }
+
+  /** Records what a browser-less paid onboarding reports to its sink. */
+  private static final class RecordingSink implements com.etendoerp.go.onboarding.OnboardingProgressSink {
+    final List<String> lines = new ArrayList<>();
+
+    @Override
+    public void progress(String step, String status, String message) {
+      lines.add("progress:" + step + ":" + status);
+    }
+
+    @Override
+    public void result(boolean success, String message, String code) {
+      lines.add("result:" + success + ":" + code);
+    }
+  }
+
+  private static PaidProvisioningService.PaidInput paidInput(String currencyIso) {
+    return new PaidProvisioningService.PaidInput("purchase-1", "account-1", "user@test.com",
+        "User", "Acme", null, "en_US", currencyIso, "ES");
+  }
+
+  /** ETP-5048 — a currency the instance does not know needs review; nothing is claimed. */
+  @Test
+  public void aPaidPurchaseInAnUnknownCurrencyNeedsReviewAndIsNeverClaimed() throws Exception {
+    PaidOnboardingStage stage = stagePaidOnboarding(true);
+    PaidProvisioningService.Outcome[] outcome = new PaidProvisioningService.Outcome[1];
+    stagedAction = () -> outcome[0] = servlet.provisionPaidPurchase(paidInput("XXX"),
+        new RecordingSink());
+
+    runStagedPaidOnboarding(stage, (support, dal, transactions) -> { },
+        (support, dal, transactions) -> { });
+
+    assertEquals(PaidProvisioningService.Status.NEEDS_REVIEW, outcome[0].status());
+    assertEquals("UNKNOWN_CURRENCY", outcome[0].code());
+    verify(stage.store, never()).claimForProvisioning(anyString(), anyString(), anyString());
+  }
+
+  /**
+   * ETP-5048 — the reconciliation provisions under the same fence as the browser: when another
+   * attempt holds the purchase the claim is refused and no tenant is touched.
+   */
+  @Test
+  public void aPaidPurchaseWhoseClaimIsRefusedRunsNothing() throws Exception {
+    PaidOnboardingStage stage = stagePaidOnboarding(true);
+    when(stage.store.claimForProvisioning("purchase-1", "account-1", "user@test.com"))
+        .thenReturn(false);
+    RecordingSink sink = new RecordingSink();
+    PaidProvisioningService.Outcome[] outcome = new PaidProvisioningService.Outcome[1];
+    stagedAction = () -> outcome[0] = servlet.provisionPaidPurchase(paidInput("EUR"), sink);
+
+    runStagedPaidOnboarding(stage, (support, dal, transactions) -> { },
+        (support, dal, transactions) -> { });
+
+    assertEquals(PaidProvisioningService.Status.NOT_CLAIMED, outcome[0].status());
+    assertNull(outcome[0].attempt());
+    verify(stage.store).claimForProvisioning("purchase-1", "account-1", "user@test.com");
+    verify(servlet.pooledTenantClaimService, never()).claim(any(), any(), anyString());
+    assertTrue(sink.lines.toString(), sink.lines.isEmpty());
+  }
+
+  /**
+   * ETP-5048 — a claimed purchase runs the shared onboarding to its commit; the outcome carries
+   * the claimed attempt and the sink receives the run's progress and its successful result.
+   */
+  @Test
+  public void aClaimedPaidPurchaseIsProvisionedAndReportsToTheSink() throws Exception {
+    RecordingSink sink = new RecordingSink();
+    PaidProvisioningService.Outcome[] outcome = new PaidProvisioningService.Outcome[1];
+    stagedAction = () -> outcome[0] = servlet.provisionPaidPurchase(paidInput("EUR"), sink);
+    List<String> steps = new ArrayList<>();
+
+    runCommittedPaidOnboarding(true, mock(SubscriptionService.class), steps);
+
+    assertEquals(PaidProvisioningService.Status.PROVISIONED, outcome[0].status());
+    assertEquals(Long.valueOf(1L), outcome[0].attempt());
+    assertTrue(steps.toString(), steps.contains("recordProvisioned"));
+    assertTrue(sink.lines.toString(), sink.lines.stream().anyMatch(l -> l.startsWith("progress:")));
+    assertEquals("result:true:null", sink.lines.get(sink.lines.size() - 1));
+  }
+
+  /** ETP-5048 — a failed run is classified FAILED with the step's own code and the attempt. */
+  @Test
+  public void aFailedPaidPurchaseRunIsReportedAsFailedWithItsAttempt() throws Exception {
+    RecordingSink sink = new RecordingSink();
+    PaidProvisioningService.Outcome[] outcome = new PaidProvisioningService.Outcome[1];
+    stagedAction = () -> outcome[0] = servlet.provisionPaidPurchase(paidInput("EUR"), sink);
+
+    runPaidOnboarding(true, false);
+
+    assertEquals(PaidProvisioningService.Status.FAILED, outcome[0].status());
+    assertEquals(Long.valueOf(1L), outcome[0].attempt());
+    assertNotNull(outcome[0].code());
+    assertTrue(sink.lines.toString(), sink.lines.get(sink.lines.size() - 1)
+        .startsWith("result:false:"));
+  }
+
   /** Per-spec stubs or verifications on the static mocks of a staged paid onboarding. */
   @FunctionalInterface
   private interface StagedStatics {
@@ -3905,7 +4014,11 @@ public class EtendoGoJwtServletCoverageTest {
       support.when(() -> EtendoGoJwtSupport.findStarOrgId("client-1")).thenReturn("star-org");
       dal.when(() -> EtendoGoJwtDalHelper.findFirstOrganization("client-1")).thenReturn(org);
       before.apply(support, dal, transactions);
-      servlet.doPost(stage.request, stage.response.response);
+      if (stagedAction == null) {
+        servlet.doPost(stage.request, stage.response.response);
+      } else {
+        stagedAction.run();
+      }
       after.apply(support, dal, transactions);
     }
   }

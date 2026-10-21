@@ -92,7 +92,13 @@ import com.etendoerp.go.schemaforge.data.CheckoutRequest;
  * <p>Assertions on committed values load fresh DAL entities rather than retaining objects from a
  * previous session, so they read committed state after bulk HQL updates.
  *
+ * <p><b>Group 7 (ETP-5048) — the two writes the billing reconciliation added</b>, kept in
+ * {@link CheckoutRequestWrites} beside the store: the conditional {@code CREATED → EXPIRED} close
+ * (a bulk update whose row count is the answer) and the first-write-wins onboarding inputs, plus
+ * the store's guard that keeps {@code EXPIRED} terminal.
+ *
  * @covers com.etendoerp.go.payment.CheckoutRequestStore
+ * @covers com.etendoerp.go.payment.CheckoutRequestWrites
  */
 public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
 
@@ -121,6 +127,7 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
   private static final Timestamp DISTANT_PAST = Timestamp.valueOf("2020-01-01 00:00:00");
 
   private final CheckoutRequestStore store = new CheckoutRequestStore();
+  private final CheckoutRequestWrites writes = new CheckoutRequestWrites();
 
   /**
    * Deletes the committed fixtures, closes the session, and clears the thread context.
@@ -900,6 +907,124 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
     assertNotNull("The fixture must genuinely fail, or this test asserts nothing at all", failure);
     assertSame("A store call that throws must still give the caller's context back — the caller "
         + "handles the failure next, and it must do so as itself", caller, contextAfterFailure);
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Group 7 — ETP-5048: EXPIRED and the onboarding inputs (CheckoutRequestWrites)
+  // ---------------------------------------------------------------------------------------------
+
+  /** A request at {@code CREATED} with a fake test-mode session id, as the real flow leaves it. */
+  private String createCreatedRequest(String accountId, String email) {
+    String requestId = createRequest(accountId, email);
+    store.recordSessionCreated(requestId, "cs_test_" + requestId);
+    return requestId;
+  }
+
+  @Test
+  public void testRecordExpiredClosesACreatedRequest() {
+    String email = newEmail("expire-created");
+    String requestId = createCreatedRequest(createAccount(email), email);
+
+    assertTrue("The conditional update must report that it closed the request",
+        writes.recordExpired(requestId));
+
+    CheckoutRequest closed = findCommittedRequest(requestId);
+    assertEquals(CheckoutRequestStore.STATUS_EXPIRED, closed.getCheckoutRequestStatus());
+    assertNotNull("EXPIRED_AT is stamped", closed.getExpiredAt());
+    assertEquals(CheckoutRequestStore.DERIVED_STATUS_EXPIRED,
+        store.deriveProvisioningStatus(closed));
+  }
+
+  /** The webhook racing the reconciliation: a payment recorded first is never overwritten. */
+  @Test
+  public void testRecordExpiredNeverClosesAPaidRequest() {
+    String email = newEmail("expire-paid");
+    String requestId = createPaidRequest(createAccount(email), email);
+
+    assertFalse(writes.recordExpired(requestId));
+
+    assertEquals(STATUS_PAID, rawStatus(requestId));
+    assertNull(findCommittedRequest(requestId).getExpiredAt());
+  }
+
+  @Test
+  public void testRecordExpiredOfAnUnknownRequestClosesNothing() {
+    assertFalse(writes.recordExpired(newRequestId()));
+  }
+
+  /**
+   * EXPIRED sits outside the forward-only rank, so without the guard in {@code advance} every
+   * later step would look "forward" of it. A late payment or a provisioning claim must not reopen
+   * a closed request.
+   */
+  @Test
+  public void testAnExpiredRequestIsTerminal() {
+    String email = newEmail("expired-terminal");
+    String accountId = createAccount(email);
+    String requestId = createCreatedRequest(accountId, email);
+    assertTrue(writes.recordExpired(requestId));
+
+    store.recordPaid(requestId, "cus_" + requestId, "sub_" + requestId);
+    assertEquals("A late payment must not reopen it", CheckoutRequestStore.STATUS_EXPIRED,
+        rawStatus(requestId));
+    assertNull(findCommittedRequest(requestId).getPaidAt());
+
+    assertFalse("An expired request cannot be claimed",
+        store.claimForProvisioning(requestId, accountId, email));
+    assertEquals(CheckoutRequestStore.STATUS_EXPIRED, rawStatus(requestId));
+    assertFalse("A second close finds nothing to close", writes.recordExpired(requestId));
+  }
+
+  @Test
+  public void testOnboardingInputsAreRecordedNormalized() {
+    String email = newEmail("inputs-normalized");
+    String requestId = createCreatedRequest(createAccount(email), email);
+
+    writes.recordOnboardingInputs(requestId, " es_ES ", "usd", "ar");
+
+    CheckoutRequest request = findCommittedRequest(requestId);
+    assertEquals("es_ES", request.getLanguage());
+    assertEquals("USD", request.getCurrency());
+    assertEquals("AR", request.getCountry());
+    assertEquals("Recording inputs never changes the status", "CREATED",
+        request.getCheckoutRequestStatus());
+  }
+
+  @Test
+  public void testTheFirstWriteOfAnOnboardingInputWins() {
+    String email = newEmail("inputs-first-wins");
+    String requestId = createCreatedRequest(createAccount(email), email);
+
+    writes.recordOnboardingInputs(requestId, "es_ES", null, null);
+    writes.recordOnboardingInputs(requestId, "fr_FR", "GBP", "FR");
+
+    CheckoutRequest request = findCommittedRequest(requestId);
+    assertEquals("The first language stays", "es_ES", request.getLanguage());
+    assertEquals("An empty column is filled by a later write", "GBP", request.getCurrency());
+    assertEquals("FR", request.getCountry());
+  }
+
+  @Test
+  public void testMalformedOnboardingInputsAreDropped() {
+    String email = newEmail("inputs-malformed");
+    String requestId = createCreatedRequest(createAccount(email), email);
+
+    writes.recordOnboardingInputs(requestId, "Spanish", "EURO", "ESP");
+    writes.recordOnboardingInputs(requestId, "ES_es", "€", "1");
+
+    CheckoutRequest request = findCommittedRequest(requestId);
+    assertNull(request.getLanguage());
+    assertNull(request.getCurrency());
+    assertNull(request.getCountry());
+  }
+
+  @Test
+  public void testOnboardingInputsForAnUnknownRequestAreANoOp() {
+    // Best effort on the purchase path: it must neither throw nor create a row.
+    String requestId = newRequestId();
+    writes.recordOnboardingInputs(requestId, "es_ES", "EUR", "ES");
+
+    assertNull(findCommittedRequest(requestId));
   }
 
   // ---------------------------------------------------------------------------------------------

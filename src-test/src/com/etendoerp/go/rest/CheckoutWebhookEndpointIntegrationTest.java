@@ -25,7 +25,10 @@ import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.io.BufferedReader;
@@ -56,6 +59,8 @@ import org.openbravo.test.base.OBBaseTest;
 
 import com.etendoerp.go.payment.CheckoutRequestStore;
 import com.etendoerp.go.payment.CheckoutWebhookProcessor;
+import com.etendoerp.go.payment.PausedSubscriptionAlert;
+import com.etendoerp.go.payment.SubscriptionLifecycleApplier;
 import com.etendoerp.go.payment.SubscriptionModelSwitch;
 import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.payment.TenantPlanService;
@@ -93,8 +98,14 @@ import com.etendoerp.go.schemaforge.data.Account;
  * and are deleted in {@link #cleanUp()} in FK order. The environment's own live Stripe replay rows
  * are never matched by those markers and are left alone.
  *
+ * <p>ETP-5048 adds the two Stripe statuses the billing reconciliation also reads through the same
+ * mapping: {@code incomplete_expired} closes the row, and {@code paused} is alert-only — one
+ * {@link PausedSubscriptionAlert} row shared by the {@code customer.subscription.updated} and the
+ * {@code customer.subscription.paused} paths, and no state change.
+ *
  * @covers com.etendoerp.go.rest.EtendoGoJwtServlet
  * @covers com.etendoerp.go.payment.TenantEnvironmentLifecycleService
+ * @covers com.etendoerp.go.payment.PausedSubscriptionAlert
  */
 public class CheckoutWebhookEndpointIntegrationTest extends OBBaseTest {
 
@@ -839,6 +850,83 @@ public class CheckoutWebhookEndpointIntegrationTest extends OBBaseTest {
     assertNull(subscriptionColumn(subscriptionId, "GRACE_ANCHOR"));
   }
 
+  /** ETP-5048 — {@code incomplete_expired} is terminal at Stripe: the row closes at ended_at. */
+  @Test
+  public void testAnIncompleteExpiredUpdateClosesTheRow() throws Exception {
+    String tenantId = createTenant("inc-expired");
+    String requestId = createPaidRequestFor(tenantId, newEmail("lifecycle-incomplete-expired"));
+    String subscriptionId = createOpenSubscription(tenantId);
+    String eventId = newEventId();
+    long now = Instant.now().getEpochSecond();
+    long endedAt = now - 120;
+
+    OBContext.setOBContext((OBContext) null);
+    ResponseCapture response = deliver(lifecycleEvent(eventId, "customer.subscription.updated",
+        now - 60, "\"id\":\"sub_" + requestId + "\",\"customer\":\"cus_" + requestId + "\","
+            + "\"status\":\"incomplete_expired\",\"ended_at\":" + endedAt));
+
+    assertEquals(200, response.status);
+    assertEquals(APPLIED, rawEvent(eventId, "EVENT_RESULT"));
+    assertEquals("canceled", subscriptionColumn(subscriptionId, "STATUS"));
+    assertEquals(endedAt * 1000L,
+        ((Timestamp) subscriptionColumn(subscriptionId, "END_DATE")).getTime());
+  }
+
+  /**
+   * ETP-5048 — {@code paused} is alert-only, and the alert fires exactly once per subscription:
+   * an update carrying the status raises it, and a later {@code customer.subscription.paused}
+   * event and a redelivered update find its row and stay silent. Nothing about the subscription
+   * changes — not the status, not the end date, not the event watermark.
+   */
+  @Test
+  public void testAPausedSubscriptionIsAlertedOnceAcrossBothWebhookPathsAndChangesNothing()
+      throws Exception {
+    servlet.internalAlertService =
+        mock(com.etendoerp.go.schemaforge.email.InternalAlertService.class);
+    String tenantId = createTenant("paused");
+    String requestId = createPaidRequestFor(tenantId, newEmail("lifecycle-paused"));
+    String subscriptionId = createOpenSubscription(tenantId);
+    String stripeSubscription = "sub_" + requestId;
+    String alertId = PausedSubscriptionAlert.eventIdOf(stripeSubscription);
+    long now = Instant.now().getEpochSecond();
+    String pausedObject = "\"id\":\"" + stripeSubscription + "\",\"customer\":\"cus_"
+        + requestId + "\",\"status\":\"paused\",\"ended_at\":" + (now - 30);
+
+    String updatedId = newEventId();
+    OBContext.setOBContext((OBContext) null);
+    ResponseCapture updated = deliver(lifecycleEvent(updatedId, "customer.subscription.updated",
+        now - 20, pausedObject));
+
+    assertEquals(200, updated.status);
+    assertEquals(IGNORED, rawEvent(updatedId, "EVENT_RESULT"));
+    assertEquals(SubscriptionLifecycleApplier.REASON_PAUSED, rawEvent(updatedId,
+        "FAILURE_REASON"));
+    assertEquals(1L, rawEventCount(alertId));
+    assertEquals("reconciler", rawEvent(alertId, "PROVIDER"));
+    assertEquals(IGNORED, rawEvent(alertId, "EVENT_RESULT"));
+    assertEquals(requestId, rawEvent(alertId, "REQUEST_ID"));
+
+    String pausedId = newEventId();
+    OBContext.setOBContext((OBContext) null);
+    ResponseCapture paused = deliver(lifecycleEvent(pausedId, "customer.subscription.paused",
+        now - 10, pausedObject));
+    String redeliveredId = newEventId();
+    OBContext.setOBContext((OBContext) null);
+    ResponseCapture redelivered = deliver(lifecycleEvent(redeliveredId,
+        "customer.subscription.updated", now - 5, pausedObject));
+
+    assertEquals(200, paused.status);
+    assertEquals(APPLIED, rawEvent(pausedId, "EVENT_RESULT"));
+    assertEquals(200, redelivered.status);
+    assertEquals(IGNORED, rawEvent(redeliveredId, "EVENT_RESULT"));
+    assertEquals("Still exactly one alert row", 1L, rawEventCount(alertId));
+    verify(servlet.internalAlertService, times(1)).sendAfterTransaction(any());
+    assertEquals("active", subscriptionColumn(subscriptionId, "STATUS"));
+    assertNull(subscriptionColumn(subscriptionId, "END_DATE"));
+    assertNull(subscriptionColumn(subscriptionId, "LAST_EVENT_AT"));
+    assertNull(subscriptionColumn(subscriptionId, "GRACE_ANCHOR"));
+  }
+
   /**
    * Same event for a tenant WITHOUT a subscription row — a productive tenant the R37 backfill has
    * not reached: the outcome lands on the {@code ETGO_SubscriptionStatus} /
@@ -1209,6 +1297,14 @@ public class CheckoutWebhookEndpointIntegrationTest extends OBBaseTest {
           .createNativeQuery("DELETE FROM ETGO_BILLING_EVENT WHERE EVENT_ID LIKE :marker");
       deleteEvents.setParameter("marker", EVENT_MARKER + "%");
       deleteEvents.executeUpdate();
+
+      // ETP-5048 — the paused-review alert rows of this class's subscriptions (sub_<requestId>),
+      // before the requests their FK names.
+      NativeQuery deleteAlerts = OBDal.getInstance()
+          .getSession()
+          .createNativeQuery("DELETE FROM ETGO_BILLING_EVENT WHERE EVENT_ID LIKE :alertMarker");
+      deleteAlerts.setParameter("alertMarker", "reconcile:%:sub_" + REQUEST_MARKER + "%");
+      deleteAlerts.executeUpdate();
 
       NativeQuery deleteRequests = OBDal.getInstance()
           .getSession()

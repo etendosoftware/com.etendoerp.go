@@ -27,7 +27,10 @@ import static org.junit.Assert.fail;
 
 import java.sql.SQLException;
 import java.sql.Timestamp;
+import java.util.Date;
+import java.util.List;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 import javax.persistence.PersistenceException;
 
@@ -75,6 +78,14 @@ import com.etendoerp.go.schemaforge.data.Account;
  * admin-mode stack and leaves the context swap in place — so the caller silently continued as
  * system. The same defect {@code CheckoutRequestStore} carried (ETP-5045), fixed here the same
  * way, and pinned here by the same three specs.
+ */
+/**
+ * Real-database specs for {@link BillingEventStore}: the claim protocol of provider events, and
+ * (Group 10, ETP-5048) the three methods the billing reconciliation uses — the deterministic
+ * {@code recordReconciliation} row and its duplicate answer, {@code exists}, and the
+ * {@code findStaleReceived} query behind the stuck-event sweep.
+ *
+ * @covers com.etendoerp.go.payment.BillingEventStore
  */
 public class BillingEventStoreIntegrationTest extends OBBaseTest {
 
@@ -924,6 +935,102 @@ public class BillingEventStoreIntegrationTest extends OBBaseTest {
     assertNotNull("The fixture must genuinely fail, or this test asserts nothing at all", failure);
     assertSame("A store call that throws must still give the caller's context back — the caller "
         + "handles the failure next, and it must do so as itself", caller, contextAfterFailure);
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Group 10 — ETP-5048: what the billing reconciliation reads and writes
+  // ---------------------------------------------------------------------------------------------
+
+  @Test
+  public void testRecordReconciliationWritesAReconcilerRowLinkedToItsRequest() {
+    String email = newEmail("reconcile-row");
+    String requestId = createRequest(createAccount(email), email);
+    String eventId = newEventId();
+
+    assertTrue(store.recordReconciliation(eventId, "reconciliation.checkout-expired", requestId,
+        BillingEventStore.RESULT_APPLIED, "Abandoned checkout closed", "{\"session\":\"cs_x\"}"));
+
+    assertEquals(1L, rawCount(eventId));
+    assertEquals(BillingEventStore.PROVIDER_RECONCILER, rawColumn(eventId, "PROVIDER"));
+    assertEquals("reconciliation.checkout-expired", rawColumn(eventId, "EVENT_TYPE"));
+    assertEquals(APPLIED, rawResult(eventId));
+    assertEquals(requestId, rawColumn(eventId, "REQUEST_ID"));
+    assertEquals(rawRequestPk(requestId), rawColumn(eventId, "ETGO_CHECKOUT_REQUEST_ID"));
+    assertEquals("Abandoned checkout closed", rawColumn(eventId, "FAILURE_REASON"));
+    assertNotNull(rawTimestamp(eventId, "PROCESSED_AT"));
+  }
+
+  /** A deterministic id already recorded is the "already done" answer, never a second row. */
+  @Test
+  public void testRecordReconciliationOfAnExistingIdAnswersFalseAndWritesNothing() {
+    String eventId = newEventId();
+    assertTrue(store.recordReconciliation(eventId, "reconciliation.needs-review", null,
+        BillingEventStore.RESULT_FAILED, "first", null));
+
+    assertFalse(store.recordReconciliation(eventId, "reconciliation.needs-review", null,
+        BillingEventStore.RESULT_FAILED, "second", null));
+
+    assertEquals(1L, rawCount(eventId));
+    assertEquals("The first row is kept", "first", rawColumn(eventId, "FAILURE_REASON"));
+    assertNull("No request named, no FK", rawColumn(eventId, "ETGO_CHECKOUT_REQUEST_ID"));
+  }
+
+  @Test
+  public void testRecordReconciliationRefusesABlankId() {
+    try {
+      store.recordReconciliation("  ", "reconciliation.x", null, APPLIED, null, null);
+      fail("A reconciliation row needs an event id");
+    } catch (IllegalArgumentException expected) {
+      assertTrue(expected.getMessage().contains("event id"));
+    }
+  }
+
+  @Test
+  public void testExistsTellsWhetherAnIdIsRecorded() {
+    String eventId = newEventId();
+    assertFalse(store.exists(eventId));
+
+    assertTrue(store.claim(eventId, COMPLETED, null, null));
+
+    assertTrue(store.exists(eventId));
+    assertTrue("The id is trimmed", store.exists(" " + eventId + " "));
+    assertFalse(store.exists(null));
+    assertFalse(store.exists("  "));
+  }
+
+  /**
+   * Only provider events still {@code RECEIVED} before the threshold come back. The threshold is
+   * moved rather than the rows backdated, so no fixture is ever old enough for a live
+   * reconciliation run to sweep.
+   */
+  @Test
+  public void testFindStaleReceivedReturnsOnlyStripeEventsStillReceivedBeforeTheThreshold() {
+    Date beforeAnything = new Date(System.currentTimeMillis() - 60_000L);
+    String received = newEventId();
+    String applied = newEventId();
+    String reconcilerRow = newEventId();
+    assertTrue(store.claim(received, "customer.subscription.updated", "req-x", null));
+    assertTrue(store.claim(applied, COMPLETED, null, null));
+    store.markApplied(applied);
+    // A reconciliation row is never a provider event, even in RECEIVED.
+    assertTrue(store.recordReconciliation(reconcilerRow, "reconciliation.x", null, RECEIVED,
+        null, null));
+    Date afterEverything = new Date(System.currentTimeMillis() + 60_000L);
+
+    List<BillingEventStore.StaleEvent> stale = ours(store.findStaleReceived(afterEverything,
+        10_000));
+
+    assertEquals(1, stale.size());
+    assertEquals(received, stale.get(0).eventId());
+    assertEquals("customer.subscription.updated", stale.get(0).eventType());
+    assertEquals("req-x", stale.get(0).requestId());
+    assertTrue("Nothing of ours was received before a minute ago",
+        ours(store.findStaleReceived(beforeAnything, 10_000)).isEmpty());
+  }
+
+  private static List<BillingEventStore.StaleEvent> ours(List<BillingEventStore.StaleEvent> all) {
+    return all.stream().filter(event -> event.eventId().startsWith(EVENT_MARKER))
+        .collect(Collectors.toList());
   }
 
   // ---------------------------------------------------------------------------------------------

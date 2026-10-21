@@ -37,7 +37,7 @@ import org.apache.logging.log4j.core.config.Property;
  * attaching and restored on {@link #detach()}; without that an INFO or WARN would never reach the
  * appender and a spec asserting on one would pass vacuously.
  */
-final class TestLogCapture extends AbstractAppender {
+public final class TestLogCapture extends AbstractAppender {
 
   private final List<LogEvent> events = new ArrayList<>();
   private final String loggerName;
@@ -50,7 +50,7 @@ final class TestLogCapture extends AbstractAppender {
     this.previousLevel = previousLevel;
   }
 
-  static TestLogCapture attachTo(Class<?> type, Level level) {
+  public static TestLogCapture attachTo(Class<?> type, Level level) {
     String name = type.getName();
     Level previous = LogManager.getLogger(name).getLevel();
     Configurator.setLevel(name, level);
@@ -60,13 +60,13 @@ final class TestLogCapture extends AbstractAppender {
     return appender;
   }
 
-  void detach() {
+  public void detach() {
     ((org.apache.logging.log4j.core.Logger) LogManager.getLogger(loggerName)).removeAppender(this);
     stop();
     Configurator.setLevel(loggerName, previousLevel);
   }
 
-  List<String> messagesAt(Level level) {
+  public List<String> messagesAt(Level level) {
     List<String> messages = new ArrayList<>();
     synchronized (events) {
       for (LogEvent event : events) {

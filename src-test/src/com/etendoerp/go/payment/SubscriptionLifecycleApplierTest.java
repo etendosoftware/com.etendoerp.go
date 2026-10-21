@@ -2,6 +2,7 @@
 package com.etendoerp.go.payment;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
@@ -10,6 +11,13 @@ import java.time.Instant;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
 
+/**
+ * Specs for how {@link SubscriptionLifecycleApplier} maps a Stripe event onto a subscription
+ * outcome — the one mapping the webhook and the billing reconciliation both read, so they cannot
+ * disagree.
+ *
+ * @covers com.etendoerp.go.payment.SubscriptionLifecycleApplier
+ */
 public class SubscriptionLifecycleApplierTest {
 
   private final SubscriptionLifecycleApplier applier = new SubscriptionLifecycleApplier();
@@ -67,6 +75,37 @@ public class SubscriptionLifecycleApplierTest {
     SubscriptionEventOutcome outcome = applier.evaluate("customer.subscription.updated",
         event("{\"data\":{\"object\":{\"id\":\"sub_1\",\"status\":\"incomplete\"}}}"));
     assertTrue(outcome.isIgnored());
+  }
+
+  /**
+   * ETP-5048 — {@code incomplete_expired}: the first payment never succeeded and Stripe gave up.
+   * Terminal, like {@code canceled}, so it closes the row at {@code ended_at}.
+   */
+  @Test
+  public void incompleteExpiredClosesTheSubscriptionLikeCanceled() throws Exception {
+    SubscriptionEventOutcome outcome = applier.evaluate("customer.subscription.updated",
+        event("{\"data\":{\"object\":{\"id\":\"sub_1\",\"status\":\"incomplete_expired\","
+            + "\"ended_at\":1793750400}}}"));
+    assertTrue(outcome.isApplied());
+    assertEquals(EnvironmentAccessPolicy.SubscriptionStatus.EXPIRED, outcome.status());
+    assertTrue(outcome.closesSubscription());
+    assertEquals(Instant.ofEpochSecond(1793750400L), outcome.endedAt());
+  }
+
+  /**
+   * ETP-5048 — {@code paused} is alert-only: the outcome is an ignore with the public reason the
+   * webhook and the reconciliation recognise, and it never closes the row or changes the status.
+   */
+  @Test
+  public void pausedIsIgnoredWithThePausedReasonAndNeverCloses() throws Exception {
+    SubscriptionEventOutcome outcome = applier.evaluate("customer.subscription.updated",
+        event("{\"data\":{\"object\":{\"id\":\"sub_1\",\"status\":\"paused\","
+            + "\"ended_at\":1793750400}}}"),
+        new SubscriptionLifecycleApplier.StoredState(
+            EnvironmentAccessPolicy.SubscriptionStatus.CURRENT, null, null));
+    assertTrue(outcome.isIgnored());
+    assertEquals(SubscriptionLifecycleApplier.REASON_PAUSED, outcome.reason());
+    assertFalse(outcome.closesSubscription());
   }
 
   // ===================== Past-due subscriptions anchor on the paid period =====================
