@@ -58,16 +58,23 @@ import org.openbravo.test.base.TestConstants;
  * on which {@code importOrderLines} must produce ONE line of 4, linked to the order line only
  * ({@code goodsShipmentLine} NULL). A change of the native swap rule in core makes it fail here.
  *
- * <p>Fixture: copies of a real, single-line purchase order and receipt of the F&amp;B demo client
- * (the copies are made draft, resized and marked completed with SQL inside the transaction), so no
- * demo document is touched. Everything is rolled back in {@code tearDown}; nothing is committed.
+ * <p>Fixture: copies of a real, single-line purchase order and receipt of the F&amp;B demo client,
+ * whatever their quantities (the copies are made draft, resized to ORDERED and RECEIVED, and marked completed
+ * with SQL inside the transaction), so no demo document is touched and the test does not depend on
+ * a hand-made document. Everything is rolled back in {@code tearDown}; nothing is committed.
  *
  * <p>Runs in its own JVM: listed in {@code isolatedDalTests} (see {@code docs/test-jvm-isolation.md}).
  *
- * @covers com.etendoerp.go.schemaforge.ImportOrderLinesIntoInvoiceHandler
  * @covers com.etendoerp.go.schemaforge.ImportInOutLinesIntoInvoiceHandler
  */
 public class ImportOrderLinesIntoInvoiceHandlerIntegrationTest extends WeldBaseTest {
+
+  /** Quantity of the copied order line. */
+  private static final BigDecimal ORDERED = BigDecimal.TEN;
+  /** Quantity of the copied, completed receipt line (covered by the first draft). */
+  private static final BigDecimal RECEIVED = new BigDecimal("6");
+  /** What is left to invoice once the receipt is covered by another draft. */
+  private static final BigDecimal REST = ORDERED.subtract(RECEIVED);
 
   @Inject
   private ImportOrderLinesIntoInvoiceHandler orderImport;
@@ -96,14 +103,14 @@ public class ImportOrderLinesIntoInvoiceHandlerIntegrationTest extends WeldBaseT
     OrderLine templateLine = (OrderLine) OBDal.getInstance().getSession().createQuery(
         "select ol from OrderLine ol where ol.salesOrder.client.id = :client "
             + "and ol.salesOrder.salesTransaction = false and ol.salesOrder.documentStatus = 'CO' "
-            + "and ol.orderedQuantity = 10 and size(ol.salesOrder.orderLineList) = 1 "
+            + "and size(ol.salesOrder.orderLineList) = 1 "
             + "and size(ol.materialMgmtShipmentInOutLineList) = 1 "
             + "order by ol.creationDate desc")
         .setParameter("client", clientId).setMaxResults(1).uniqueResult();
-    assertNotNull("fixture: the demo client needs a single-line purchase order of 10 with one"
-        + " receipt line", templateLine);
+    assertNotNull("fixture: the demo client needs a completed single-line purchase order with one"
+        + " receipt line (any quantity: the copy is resized below)", templateLine);
 
-    // Order of 10 and a completed receipt of 6, copies of the template documents.
+    // Order of ORDERED and a completed receipt of RECEIVED, copies of the template documents.
     // Header and line are copied WITHOUT children: the DB triggers write the tax rows themselves.
     Order order = (Order) DalUtil.copy(templateLine.getSalesOrder(), false);
     order.setDocumentNo("IT5713-PO-" + System.currentTimeMillis());
@@ -113,6 +120,7 @@ public class ImportOrderLinesIntoInvoiceHandlerIntegrationTest extends WeldBaseT
     OBDal.getInstance().save(order);
     OrderLine orderLine = (OrderLine) DalUtil.copy(templateLine, false);
     orderLine.setSalesOrder(order);
+    orderLine.setOrderedQuantity(ORDERED);
     orderLine.setDeliveredQuantity(BigDecimal.ZERO);
     orderLine.setInvoicedQuantity(BigDecimal.ZERO);
     OBDal.getInstance().save(orderLine);
@@ -133,7 +141,7 @@ public class ImportOrderLinesIntoInvoiceHandlerIntegrationTest extends WeldBaseT
     ShipmentInOutLine receiptLine = (ShipmentInOutLine) DalUtil.copy(templateReceiptLine, false);
     receiptLine.setShipmentReceipt(receipt);
     receiptLine.setSalesOrderLine(OBDal.getInstance().get(OrderLine.class, orderLineId));
-    receiptLine.setMovementQuantity(new BigDecimal("6"));
+    receiptLine.setMovementQuantity(RECEIVED);
     OBDal.getInstance().save(receiptLine);
     OBDal.getInstance().flush();
     String receiptId = receipt.getId();
@@ -141,26 +149,26 @@ public class ImportOrderLinesIntoInvoiceHandlerIntegrationTest extends WeldBaseT
     complete("M_InOut", "M_InOut_ID", receiptId);
     OBDal.getInstance().getSession().clear();
 
-    // First draft: the whole receipt (6), through the real receipt import.
+    // First draft: the whole receipt (RECEIVED), through the real receipt import.
     String draftA = newDraftInvoice(orderId);
     NeoResponse first = receiptImport.handle(action("importReceiptLines", draftA,
         "{\"receiptId\":\"" + receiptId + "\"}"));
     assertEquals(String.valueOf(first.getBody()), 200, first.getHttpStatus());
 
-    // Second draft: the order import must give the rest, 10 - 6 = 4, against the order line only.
+    // Second draft: the order import must give the rest (REST), against the order line only.
     String draftB = newDraftInvoice(orderId);
     NeoResponse second = orderImport.handle(action("importOrderLines", draftB,
         "{\"orderId\":\"" + orderId + "\"}"));
     assertEquals(String.valueOf(second.getBody()), 200, second.getHttpStatus());
     JSONObject data = second.getBody().getJSONObject("response").getJSONObject("data");
     assertEquals(1, data.getInt("importedCount"));
-    assertEquals(0, new BigDecimal("4").compareTo(
+    assertEquals(0, REST.compareTo(
         new BigDecimal(data.getJSONArray("lines").getJSONObject(0).get("quantity").toString())));
 
     OBDal.getInstance().flush();
     OBDal.getInstance().getSession().clear();
-    assertDraftLines(draftA, 1, new BigDecimal("6"), receiptLineId);
-    assertDraftLines(draftB, 1, new BigDecimal("4"), null);
+    assertDraftLines(draftA, 1, RECEIVED, receiptLineId);
+    assertDraftLines(draftB, 1, REST, null);
 
     // Drafts count: a second import of the same order finds nothing left.
     NeoResponse again = orderImport.handle(action("importOrderLines", draftB,

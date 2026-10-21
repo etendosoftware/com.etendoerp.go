@@ -1354,6 +1354,16 @@ public class McpToolRouter {
    * Reads AD_Column metadata directly (same source as the Etendo classic UI form),
    * so the agent sees exactly the same fields the UI would show.
    */
+  private static String[] schemaRequiredArgs(JSONObject args) {
+    boolean viewMissing = args == null
+        || args.optString(McpActionsView.PARAM_VIEW, "").trim().isEmpty();
+    boolean entityMissing = args == null || !args.has(McpConstants.PARAM_ENTITY)
+        || args.isNull(McpConstants.PARAM_ENTITY);
+    return viewMissing && entityMissing
+        ? new String[] { McpConstants.PARAM_ENTITY, McpActionsView.PARAM_VIEW }
+        : new String[] { McpConstants.PARAM_ENTITY };
+  }
+
   private JSONObject handleSchema(String specName, JSONObject args) throws Exception {
     // ETP-5468: a report spec whose handler declares named actions (bank-reconciliation) is
     // answered with its action catalog BEFORE the generic path, which rejects every SPEC_TYPE=R
@@ -1364,7 +1374,9 @@ public class McpToolRouter {
     if (declaredActionsSchema != null) {
       return declaredActionsSchema;
     }
-    McpToolRouterSupport.validateArgs(args, McpConstants.PARAM_ENTITY);
+    // ETP-5669: an absent view is named together with an absent entity, not one call later. A
+    // present entity keeps the view check below, which lists the views.
+    McpToolRouterSupport.validateArgs(args, schemaRequiredArgs(args));
 
     String entityName = args.getString(McpConstants.PARAM_ENTITY);
 

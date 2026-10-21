@@ -146,6 +146,24 @@ class HostedCheckoutServiceTest {
   }
 
   @Test
+  void returnsAReSubscriptionToItsBlockedEnvironmentNotToTheUpgradePage()
+      throws UnsupportedEncodingException {
+    // ETP-5742: nothing is provisioned after a re-subscription; the blocked screen waits for the
+    // payment webhook to apply it, so both URLs lead back into the environment.
+    String body = HostedCheckoutService.buildSessionForm(REQUEST_ID, ACCOUNT_EMAIL, CLIENT_NAME,
+        ORIGIN, PRICE_ID, PLAN_KEY, CheckoutConfiguration.mode(), true);
+
+    assertTrue(body.contains("success_url=https%3A%2F%2Fgo.experimental.etendo.cloud%2Fdashboard"
+        + "%3Freactivation%3Dsuccess%26requestId%3D" + REQUEST_ID), body);
+    assertTrue(body.contains("cancel_url=https%3A%2F%2Fgo.experimental.etendo.cloud%2Fdashboard"
+        + "%3Freactivation%3Dcancelled%26requestId%3D" + REQUEST_ID), body);
+    assertFalse(body.contains("%2Fupgrade"), body);
+    // Everything else of the agreement is the purchase's: same correlation, same price.
+    assertTrue(body.contains("metadata%5Brequest_id%5D=" + REQUEST_ID), body);
+    assertTrue(body.contains("line_items%5B0%5D%5Bprice%5D=" + PRICE_ID), body);
+  }
+
+  @Test
   void repeatsTheCorrelationOnTheSubscriptionItself() throws UnsupportedEncodingException {
     System.setProperty(MODE_PROPERTY, "subscription");
 

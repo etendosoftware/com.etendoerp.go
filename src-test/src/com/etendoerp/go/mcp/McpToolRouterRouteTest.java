@@ -900,6 +900,26 @@ class McpToolRouterRouteTest {
       assertEquals("unknown_argument", envelope.getString("error"));
       assertTrue(envelope.getJSONArray("available").toString().contains("spec"));
     }
+
+    @Test
+    @DisplayName("ETP-5669: etendo_action refuses a top-level docAction and points at 'parameters'")
+    void actionRejectsTopLevelDocAction() throws Exception {
+      stubCatalog();
+
+      JSONObject args = new JSONObject();
+      args.put("spec", SPEC_NAME);
+      args.put("entity", "header");
+      args.put("id", "J1");
+      args.put("action", "documentAction");
+      args.put("docAction", "CO");
+      JSONObject result = router.route("etendo_action", args, WRITE_SCOPES);
+
+      assertTrue(result.getBoolean("isError"), result.toString());
+      JSONObject envelope = bodyOf(result);
+      assertEquals("unknown_argument", envelope.getString("error"));
+      assertEquals("docAction", envelope.getString("field"));
+      assertTrue(envelope.getString("hint").contains("'parameters'"), envelope.toString());
+    }
   }
 
   // ── etendo_list ──────────────────────────────────────────────────────────

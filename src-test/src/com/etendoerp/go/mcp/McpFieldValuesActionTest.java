@@ -108,7 +108,9 @@ class McpFieldValuesActionTest {
     lookupMock = mockStatic(NeoHandlerLookup.class);
     lookupMock.when(() -> NeoHandlerLookup.byQualifierQuietly(anyString()))
         .thenReturn(new PeriodOpenCloseHandler());
-    buttonMock = mockStatic(NeoButtonActionHelper.class);
+    buttonMock = mockStatic(NeoButtonActionHelper.class,
+        inv -> "propertyNameOf".equals(inv.getMethod().getName()) ? inv.callRealMethod()
+            : org.mockito.Mockito.RETURNS_DEFAULTS.answer(inv));
     ModelProvider provider = mock(ModelProvider.class);
     Entity dal = mock(Entity.class);
     modelMock = mockStatic(ModelProvider.class);

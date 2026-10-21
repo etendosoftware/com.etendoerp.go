@@ -3,10 +3,10 @@
 # Verifies the split that the `goTestUnit` Gradle task relies on (see build.gradle).
 #
 # `goTestUnit` runs this module's Java tests with no database, selecting them by name: every
-# `*IntegrationTest` is excluded, plus two classes that predate that convention. A test that needs
-# the DAL but is not named that way would be picked up by `goTestUnit` and fail with an
-# OBBaseTest/DAL stack trace in a pipeline that has no database — a failure that reads like broken
-# infrastructure rather than a misnamed test. This script turns that into an explicit, early error.
+# `*IntegrationTest` is excluded. A test that needs the DAL but is not named that way would be
+# picked up by `goTestUnit` and fail with an OBBaseTest/DAL stack trace in a pipeline that has no
+# database — a failure that reads like broken infrastructure rather than a misnamed test. This
+# script turns that into an explicit, early error.
 #
 # Exit 0: every DB-backed test class is excluded from the unit suite.
 # Exit 1: at least one is not. The offender is printed with the rename that fixes it.
@@ -17,9 +17,6 @@ TEST_ROOT="src-test/src"
 
 # Base classes whose @BeforeClass initializes the DAL layer, so any subclass needs a live database.
 DAL_BASES="OBBaseTest WeldBaseTest"
-
-# Excluded by name in build.gradle because docs/ refers to them in prose. Keep both lists in sync.
-ALLOWED_EXCEPTIONS="UserRoleCompositionServiceOverlapReverificationTest BusinessPartnerHandlerDbTest"
 
 if [ ! -d "$TEST_ROOT" ]; then
   echo "check-unit-test-classification: $TEST_ROOT not found" >&2
@@ -62,7 +59,6 @@ offenders=""
 for cls in $db_classes; do
   case " $DAL_BASES " in *" $cls "*) continue ;; esac
   case "$cls" in *IntegrationTest) continue ;; esac
-  case " $ALLOWED_EXCEPTIONS " in *" $cls "*) continue ;; esac
   offenders="$offenders $cls"
 done
 

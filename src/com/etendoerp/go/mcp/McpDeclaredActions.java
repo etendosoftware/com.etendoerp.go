@@ -240,7 +240,7 @@ final class McpDeclaredActions {
     }
     try {
       Column fired = NeoButtonActionHelper.findButtonColumn(entity.getId(), action);
-      String property = fired == null ? null : propertyNameOf(fired);
+      String property = fired == null ? null : NeoButtonActionHelper.propertyNameOf(fired);
       return property == null ? action : property;
     } catch (RuntimeException e) {
       log.debug("Button lookup failed for {} on {}: {}", action, entity.getName(), e.getMessage());
@@ -387,7 +387,7 @@ final class McpDeclaredActions {
     }
     for (Column column : columns) {
       if (Boolean.TRUE.equals(column.isActive()) && McpSchemaActionFields.isButtonColumn(column)
-          && (action.equals(column.getDBColumnName()) || action.equals(propertyNameOf(column)))) {
+          && (action.equals(column.getDBColumnName()) || action.equals(NeoButtonActionHelper.propertyNameOf(column)))) {
         return column;
       }
     }
@@ -404,23 +404,12 @@ final class McpDeclaredActions {
     names.add(action);
     if (button != null) {
       names.add(button.getDBColumnName());
-      String property = propertyNameOf(button);
+      String property = NeoButtonActionHelper.propertyNameOf(button);
       if (property != null) {
         names.add(property);
       }
     }
     return names;
-  }
-
-  private static String propertyNameOf(Column column) {
-    try {
-      Entity dal = ModelProvider.getInstance()
-          .getEntityByTableName(column.getTable().getDBTableName());
-      Property property = dal == null ? null : dal.getPropertyByColumnName(column.getDBColumnName());
-      return property == null ? null : property.getName();
-    } catch (RuntimeException e) {
-      return null;
-    }
   }
 
   /** Annotation first, qualifier second — the order {@code NeoExtensionDispatcher} resolves in. */

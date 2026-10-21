@@ -22,6 +22,7 @@ import javax.servlet.http.HttpServletResponse;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import com.etendoerp.go.common.MalformedJsonException;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
 
@@ -62,6 +63,9 @@ class NeoButtonHandler {
       }
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
           "POST requires an action name: /{spec}/{entity}/{recordId}/action/{columnName}");
+    } catch (MalformedJsonException e) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          "Invalid JSON body: " + e.getMessage());
     } catch (Exception e) {
       log.error("Error handling button action: {}", e.getMessage(), e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,

@@ -326,6 +326,20 @@ original POST (including one forced by upstream logic before the request reached
 rectifying-document key per ETP-4783) is in the step-1 snapshot and stays protected from being
 overwritten by a re-cascaded callout.
 
+**REST / batch create (`NeoCrudHandler#executePostCreate`).** This path runs the defaults pass
+without its cascade and then its own cascade, protecting the caller's fields **plus** every
+mandatory field present after the defaults (ETP-4258, so a genuine field/session/parent default —
+e.g. an asset's `calculateType` — is not replaced by a callout). Since ETP-5669 a mandatory field
+the defaults pass filled with a **placeholder** — the first combo row (`tryInjectFirstFromLookup`)
+or the safe-type fallback — is recorded on the context (`NeoContext#getFallbackDefaults`) and left
+**out** of that protected set: it only satisfies NOT NULL, so a callout may refine it. Reference
+case: `etendo_batch` created G/L journals in the first open period (Apr-26) whatever the
+accounting date, because `SL_Journal_Period`'s answer for `period` was discarded. Side effect,
+intended: e.g. `A_Asset.Amortizationtype` / `Assetschedule` (no AD default) now follow the asset
+group's callout, as the SPA form shows. Because fallback picks (the first combo row or a safe-type default) are no longer
+protected from the callout cascade, a placeholder document type is now re-applied from the tab filter
+by `DocTypeResolver`.
+
 **PUT / PATCH update** -- `PUT|PATCH /{specName}/{entityName}/{recordId}`
 
 Both PUT and PATCH are delegated to DataSourceServlet's PUT handler internally. PATCH is handled via a `service()` override that intercepts the PATCH method at the Servlet API level.
@@ -703,6 +717,7 @@ that nobody else saved the record in between.
 
 | Condition | Status | `error` | Meaning / remedy |
 |---|---|---|---|
+| No request body at all (blank) — also a blank `POST` create (ETP-5475) | `400` | `{"error":{"message":"Request body is required"}}` (standard NEO error) | Nothing to write was sent; logged at WARN without a stack trace. Send the JSON body. |
 | `updated` absent, blank, or the literal string `"null"` | `400` | `missing_updated` | The caller never read the record, or dropped the field before writing. Re-`GET` the same URL (or `etendo_get`) and send its `updated` back verbatim alongside the changed fields. |
 | `updated` present but no longer matches the stored row | `409` | `stale_record` | Someone else saved the record after the caller's read and before this write. Re-read, reapply the intended changes on top of the fresh state, retry. |
 
@@ -1296,6 +1311,12 @@ Classic processes return OBError results, translated to:
 ```
 
 Errors from either type return HTTP 400 with `"status": "error"`.
+
+**Bundle context (ETP-5669).** For a `DalBaseProcess`, `NeoProcessService.newClassicBundle` builds the
+`ProcessBundle` with a `ProcessContext` taken from `OBContext` and calls
+`init(new DalConnectionProvider(false))`, then sets the parameters (`init` resets them). The
+`org.openbravo.scheduling.Process` path (`executeSchedulingProcess`) is unchanged: its bundle has no
+`init`, so `getConnection()` is `null` there — a known limitation.
 
 ### 4.6a Attachments Endpoint (ETP-4315)
 
@@ -3794,6 +3815,8 @@ Same handler, same business validations, but the MCP channel refuses more, on pu
 | `createDraftInvoice` on `goods-shipment` (ETP-5709) | served; reads `shipmentIds`, `priceListId`, `lines` and ignores other keys | **declared** by `GoodsShipmentHeaderHandler.actionContracts()` (`CreateDraftInvoiceHandler.SHIPMENT_CONTRACT`): optional `shipmentIds[]`, `priceListId`, `lines[{shipmentLineId, quantity}]` (partial invoicing, honoured exactly; above pending, against the line's sign or nothing pending is a 400 naming the line). Created AND completed in the same call; the shipment(s) must be completed (400 naming number and status, checked in `loadAndValidateShipments`, nothing created); nothing pending answers 400 `No hay líneas pendientes de facturar en este albarán`. The SPA's bodies (`{priceListId}`, `{shipmentIds, priceListId}`) satisfy it. The classic `Invoicefromshipment` button is redirected here (see the `actions` table). Until ETP-5709 it was served but undeclared |
 | `createPurchaseInvoice` on `goods-receipt` (ETP-5709) | served; reads `receiptIds`, `priceListId`, `lines` and ignores other keys | **declared** by `GoodsReceiptHeaderHandler.actionContracts()` (`CreatePurchaseInvoiceHandler.RECEIPT_CONTRACT`): optional `receiptIds[]` (invoice several receipts of one partner together; when sent, exactly those), optional `priceListId`, optional `lines[{receiptLineId, quantity}]` (partial invoicing; a quantity above what is pending for the line, against its sign, or for a line with nothing pending is a 400 naming the line and the pending quantity, never a silent cap). Only the pending quantity is invoiced, so a repeated call answers 400 `Goods receipt <no> has nothing left to invoice` (several receipts: `Goods receipts <no>, <no> have nothing left to invoice`). The SPA's bodies (`{priceListId}`, `{receiptIds, priceListId}`, `{}`) all satisfy it. A partial `lines` quantity is honoured exactly and the invoice is scoped to the receipt's own lines (see *Invoice quantities*); it cannot be corrected afterwards, so give it at creation. Created AND completed in the same call |
 | `post`, `unpost` (ETP-5692) | served; `unpost` refused **422** unless `documentStatus` is `CO` and `posted` is `Y` | same handler, same refusals, and **declared**: both headers publish them as `NeoActionContract`s (no parameters, `id` = the invoice id, preconditions in the description), so `view:"actions"` and `etendo_discover` list them and an unknown parameter is a **422** `unknownParameters`. Until ETP-5692 they were callable but undeclared and `unpost` had no status gate (§4.12.29) |
+| `documentAction` on the G/L journal header (ETP-5587 / ETP-5669) | served | **declared** by `GlJournalHeaderHandler.actionContracts()`: required `docAction`, restricted to `CO` or `RE`; any other value is a **422** naming what was sent (e.g. `docAction 'VO' is not allowed`) |
+| `post`, `unpost` on the G/L journal header (ETP-5587 / ETP-5669) | served | **declared** by the same handler (no parameters); the `gLJournal` row in `ETGO_SF_ENTITY.xml` carries `MCP_CONFIG` `actions.hidden:["posted"]` with its reason, so agents use `post` / `unpost` instead of the blind `posted` toggle |
 | the `posted` AD button (by field or DB column name) | served (Classic toggle) | **405** — `MCP_CONFIG.actions.hidden`, with its own `reasons.posted` pointing at `post` / `unpost`; the field stays readable as a value |
 | `registerPayment` with `pis` or any key its contract does not declare | accepted (unread keys ignored) | **422** `unknownParameters` before anything runs |
 | `currencyOptions` | `GET` only | called as `GET` (the contract says so) |
@@ -3897,7 +3920,13 @@ in the context it builds.
 
 ##### Closed: an AD button reaches the customization under its field name on MCP (ETP-5710)
 
-`etendo_schema` advertises a button under its DB column name (`action: "DocAction"`) and the REST
+Until ETP-5669, `etendo_schema` advertised a button under its DB column name (`action: "DocAction"`);
+it now advertises the field (DAL property) name (`action: "documentAction"`, `column` keeps
+`"DocAction"`), and `etendo_action` accepts both. `NeoButtonActionHelper.findButtonColumn` matches
+the DB column name and the pushed `Java_Qualifier` first and then, for button columns only, the DAL
+property — the qualifier is computed by the extractor and differs from the DAL name on some
+buttons (`C_Order.RM_CreateInvoice`: qualifier `rMCreateInvoice`, property `createInvoice`), so
+without that second pass the advertised name could not be fired. The REST
 action route reaches the customization under the name in its URL — the SPA posts `documentAction`
 for the document-action button. `McpToolRouter.handleAction` used to hand the agent's string to the
 customization as it was typed, so a completion typed `DocAction` was invisible to the header
@@ -4185,6 +4214,13 @@ A refusal for a date with no open period is named `PeriodNotAvailable` (or `Peri
 It also rewrites core `Utilities.checkPeriod`'s raw `@ETPR_PeriodClosedForUnRemovePayment@` into
 the translated, keyed refusal. Still divergent: inside an `etendo_batch` / `/sws/neo/batch` body,
 a per-operation error is not keyed — only the envelope goes through these two places.
+
+Not a period refusal: completing a G/L journal whose **stored** period does not contain its
+accounting date. Core's trigger would answer `PeriodNotValid`, which the SPA words as "open the
+period" — wrong advice when the period is open but is the wrong one. `GlJournalHeaderHandler`
+refuses CO first with its own plain key `ETGO_GLJournalPeriodMismatch` and `messageParams`
+`{period, accountingDate}` (ETP-5669); a body that already names its keys is left alone by
+`identifyPeriodRefusal`.
 
 ##### REST and MCP on list filters over a rewritten value (ETP-5705, declared)
 
@@ -4840,7 +4876,8 @@ counted server-side, not reported to the caller).
 | Rate limit | Two fixed one-minute windows, in memory and per instance (bounded maps); an event must pass **both**, the excess is dropped and counted. **Per session:** 600 events per client + user + `sessionKey`. **Per user:** 1200 events per client + user, whatever the `sessionKey` — the body names the session key, so the per-session limit alone can be evaded by rotating it; the per-user one is keyed only on the token. The per-session limit is checked first, so an event it refuses does not consume the user's budget. |
 | Opt-out | `usage.events.enabled=false` in `Openbravo.properties` — the endpoint still answers `202`, nothing is stored. |
 
-**Errors:** `400` only when the body is not a JSON object with an `events` array; `413` when the
+**Errors:** `400` only when the body is not a JSON object with an `events` array (a body nested
+deeper than 32 levels counts as malformed — see §7 *Client-supplied JSON*); `413` when the
 body exceeds 256 KB; `405` for any method other than `POST`; `401` without a valid token. Any
 unexpected failure after parsing answers `202` with the unprocessed events counted as dropped —
 never `500`, so an older or newer UI degrades to "not recorded" instead of failing.
@@ -6012,6 +6049,77 @@ every action of every entity, before the customization and before the AD button:
   organization's) record, or one whose ownership lookup fails, now answers 404 instead of running. Every action on the caller's own
   records is unchanged, and the SPA only ever sends ids it read through NEO.
 
+### Client-supplied JSON (ETP-5475)
+
+Every JSON text a client sends — a request body, or a JSON-valued request parameter such as
+`criteria`, `items` or `valueMaps` — is parsed through `com.etendoerp.go.common.BoundedJsonParser`,
+never straight into jettison's `new JSONObject(String)` / `new JSONArray(String)`. This holds on
+every channel: NEO REST (single and batch), MCP, `/sws/go/*` (`EtendoGoJwtServlet`), `/oauth2/*`,
+support, survey and agent-chat servlets.
+
+**Why.** jettison 1.3 does not fail cleanly on all malformed input. `{"x":[` recurses until
+`StackOverflowError`, `{"x":[1,` loops appending nulls until `OutOfMemoryError`, and a valid 40 KB
+body nested 20,000 levels deep recurses into `StackOverflowError`. Those are `Error`s, so no
+`catch (Exception)` saw them: the client got a container 500 while the request thread burned CPU,
+or the JVM ran short of heap. Several affected endpoints answer **without a token** (`/oauth2/token`,
+`/oauth2/register`, `/sws/go/login`, `/register`, password reset, session create, invitation accept,
+Google sign-in), so this was a denial-of-service vector.
+
+**What is refused**, by a linear scan before jettison runs: unbalanced or mismatched brackets, an
+unterminated string, nesting deeper than **64** levels (the usage endpoint keeps its own **32**),
+a comment (`/`, `#`) outside a string — jettison skips comments, so they could hide brackets
+from the scan —, a quote inside a bare token (jettison opens a string only where a key or value
+starts, after `{ [ , : ; = >` or at the start; elsewhere a quote is an ordinary character, and a
+scan that opened a string there would see different brackets than jettison), and anything but
+whitespace after the root closes. None of these is valid JSON. Anything jettison still throws on a
+text that passes is reported as `MalformedJsonException` (a `JSONException`), so a
+`catch (JSONException)` that already answered `400` keeps doing so. Its message never echoes the
+body: jettison's `at character N of <text>` suffix is cut.
+
+**What the client gets** is the endpoint's ordinary bad-request answer, never a `500`:
+
+| Channel | Answer |
+|---|---|
+| NEO REST (`/sws/neo/*`, incl. batch, callouts, actions, process and report specs, images, fiscal) | `400` `Invalid JSON body…`; a malformed `criteria` parameter on a CRUD request: `400` `Invalid criteria: malformed JSON` before anything parses it |
+| MCP (`/sws/mcp`) | `400`, JSON-RPC `-32700` *Parse error*, `id: null` (§4.12, dual-era note) |
+| `/sws/go/*` | `400`, as before for any malformed body |
+| `/oauth2/*` | `400` `invalid_request` *Malformed request body* — the token and client-management endpoints answered `500` for any malformed body before |
+
+**Multi-criteria joined by `__;__` are rejected.** Core's datasource accepts several JSON
+criteria in one `criteria` parameter, joined by `JsonConstants.IN_PARAMETER_SEPARATOR` (`__;__`).
+Because the scan refuses anything after the root closes, such a value is a `400`
+`Invalid criteria: malformed JSON`. This is deliberate and not supported: the SPA, core's NEO
+path and this module never send it. An external REST client must send a single criteria object
+(combine conditions inside it, e.g. with an `AdvancedCriteria` `and`).
+
+**Logging.** A refused text is logged once at `WARN`, with no stack trace and without the body —
+it is the client's mistake, not a server fault. `ERROR` with a stack trace stays for failures after
+a successful parse.
+
+**Not every parameter fails the request.** A malformed `valueMaps` on an export is ignored and the
+file is written with raw codes (§4.3 *File export*); the refusal above only removes the crash.
+
+**Two neighbouring type errors answer 4xx too (ETP-5475).** On `PUT /oauth2/clients/{id}` and
+`PUT /oauth2/api-keys/{id}`, an `isActive` that is not a boolean is a `400` `invalid_request`
+*isActive must be a boolean*, logged at `WARN` without a stack trace (it was a `500` with a stack
+trace). The JSON itself is well formed, so the description names the field rather than a
+malformed body. A Google sign-in credential that is
+not a parseable ID token is a `401` *Invalid Google credential* with one quiet `WARN`, as any other
+rejected credential.
+
+Valid JSON within the depth limit parses exactly as before. **Out of scope by design**, still on raw
+jettison: JSON the server itself stored or produced — the stored copy of onboarding drafts, First
+Steps, saved filter presets, the fiscal models catalog and `FiscalDecl` `manualData`, MCP config —,
+the document download token (its signature is verified before its payload is parsed), and responses
+from external providers. The *writes* of filter presets, the fiscal models catalog and `FiscalDecl`
+bodies come from the client and are bounded. The checkout webhook payload (signature-verified) and
+the batch path's re-serialized content still go through `NeoRequestBodyParser` as defense in depth.
+
+**For new code:** parse a client's JSON with `BoundedJsonParser.parseObject` / `parseArray`. A
+`catch (JSONException)` that means "server error" must catch `MalformedJsonException` first.
+`NeoRequestBodyParser`'s `parseJsonObjectSafely` / `parseJsonArraySafely` (and the body helpers
+built on them) are thin delegates to the same parser, never a second scanner.
+
 ---
 
 ## 7b. Dashboard Widget Access (ETP-5088)
@@ -6823,7 +6931,7 @@ method-scoped `OBContext.setAdminMode(false)` bypass core's own `copyRoleAccess`
 bypass, which stays at `setAdminMode(true)` so `enforceCallerClientBoundary`'s tenant-boundary
 guarantee (above) stays intact for the rest of this class. See
 `UserRoleCompositionServiceOverlapIntegrationTest` and
-`UserRoleCompositionServiceOverlapReverificationTest` (§9) for the real-DB proof (conflicting
+`UserRoleCompositionServiceOverlapReverificationIntegrationTest` (§9) for the real-DB proof (conflicting
 access levels resolve to full regardless of which template is added second, a real union of both
 templates' non-shared windows, a no-op re-run stays correct, and — independently re-verified
 against the real ETP-4878 matrix rather than a synthetic window — the fix holds for 3
@@ -6951,7 +7059,7 @@ in ETP-4906's plan doc ("B6 Findings" sections, `etendo_schema_forge` repo) — 
 canonical for current-state mechanics; the plan doc's per-round sections are historical trail.
 `WindowAccessOverlapCorruptionGuard` has no dedicated unit-test file of its own — it is exercised
 entirely through `UserRoleCompositionServiceOverlapIntegrationTest` (all 7 triggers plus BUG-2 and
-its 2 coverage-gap follow-ups, real DB, `WeldBaseTest`), `UserRoleCompositionServiceOverlapReverificationTest`
+its 2 coverage-gap follow-ups, real DB, `WeldBaseTest`), `UserRoleCompositionServiceOverlapReverificationIntegrationTest`
 (an independent re-verification of the same overlap fix, deliberately not reusing the fix author's
 own test), and `UserRoleCompositionServiceRealAccessControlIntegrationTest` (real seed-data
 access-control scenarios) — see §9.
@@ -8143,7 +8251,7 @@ The module includes unit tests that run without a backend:
 | `UserRoleCompositionServiceIntegrationTest` | 446 | Real-DB, end-to-end proof (6 tests) of the full add/reconcile/retract lifecycle: a system-level (`AD_Client_ID = '0'`) template's `AD_Window_Access` propagates onto a per-tenant personal role purely via core's own `RoleInheritanceEventHandler`/`RoleInheritanceManager` (no hand-rolled copy in this module); removing a template on a later call retracts what it had propagated; re-running with the identical template set is a no-op (0 added, 0 removed); an empty template list on a user's FIRST-EVER composition call still creates the personal role and syncs `AD_User_Roles`/`Default_Ad_Role_ID` rather than leaving the user role-less; three occurrences of the same valid template id in one request collapse into exactly one `AD_Role_Inheritance` row instead of one per occurrence; and a recompose call mixing one still-valid template with one bogus id is rejected wholesale without mutating the inheritance/access an earlier, unrelated successful call had already applied. Extends `WeldBaseTest`, NOT plain `OBBaseTest` — role-inheritance propagation is driven by a Hibernate interceptor firing a CDI event that only `WeldBaseTest`'s Arquillian-booted container wires to an observer; under plain `OBBaseTest` the propagation silently never fires, which is a test-harness gap, not a bug in the service. |
 | `UserRoleCompositionServiceOverlapIntegrationTest` | 1181 | Real-DB proof (13 tests, `WeldBaseTest`) of the cross-template `AD_Window_Access` overlap fix AND `WindowAccessOverlapCorruptionGuard`, all 7 triggers plus BUG-2 (see §8d above): composing Finance (full) + Sales (read-only) on a shared window succeeds (no `OBSecurityException`) and resolves to full access, with `client`/`organization` on the shared row matching the personal role's own, and both templates' non-shared windows also present (a real union); the same conflicting grants requested in the OPPOSITE order still resolve to full; re-running the identical overlapping template set is a no-op; `getAppliedTemplateRoleIds` reflects a real overlapping composition. **Triggers 1-5 (B6 rounds 1-5):** a bystander role never passed to `assignTemplateRoles` (e.g. gaining 2 overlapping inheritances via a raw Classic edit) is also protected (triggers 1-2); removing one of two overlapping template inheritances from a composed role is protected on the REMOVE path (trigger 3); gaining a read-only template inheritance never downgrades an existing full grant from another active template (trigger 4); removing the template that justified a previously-widened access level correctly downgrades the row instead of staying stuck at full (trigger 5, `InheritedFrom` bookkeeping). **Triggers 6-7 (B6 rounds 6-7):** removing one of FOUR overlapping templates (2 remaining templates still overlapping on a window) no longer duplicate-INSERTs (trigger 6); updating a template's own access level in place never deletes an already-correctly-sourced dependent row (trigger 7, the `onUpdate`/`UPDATED_GRANT` path). **BUG-2 + coverage gaps (round 8):** downgrading one of two overlapping templates' own access never downgrades a dependent when the other still grants full (`testDowngradingOneOfTwoOverlappingTemplatesNeverDowngradesDependentWhenTheOtherStillGrantsFullAccess`); a single inheritance event touching 3 windows at once resolves each window's most-permissive-wins independently (`testSingleInheritanceEventAffectingMultipleWindowsResolvesEachWindowIndependently`); two guard-triggering template updates inside one shared flush do not cause Hibernate reentrancy (`testTwoGuardTriggeringTemplateUpdatesInsideASingleFlushDoNotCauseHibernateReentrancy`). Uses the real Finance/Sales system templates (not throwaway roles) plus one confirmed-unused window (`AD_Window_ID = 100`) for the shared grant, so it is independent of whatever the templates' own real grants happen to be. |
 | `UserRoleCompositionServiceRealAccessControlIntegrationTest` (B5, ETP-4906) | 228 | Real-DB proof (3 tests, `WeldBaseTest`) that `WindowAccessOverlapCorruptionGuard`'s protection produces the CORRECT effective access outcome, not just a crash-free one, against real ETP-4878 seed-data templates: a Sales-only composed role has no access to Purchase Invoice; a Purchasing-only composed role has no access to Sales Invoice; and a Sales-only role is read-only on "Categoría del producto", then adding Finance upgrades it to full (most-permissive-wins) — the same scenario §8d's four outcomes (no-access ×2, read-only, full) are meant to cover end-to-end. |
-| `UserRoleCompositionServiceOverlapReverificationTest` | 308 | QA (Sentinel) independent re-verification (3 tests) of the same overlap fix, deliberately NOT reusing the fix author's own integration test: 3 simultaneously-overlapping templates (Finance/Sales/Purchasing on a shared window) resolve to most-permissive-wins with the "winner" (Purchasing, full) in the middle of the composition order — ruling out a pairwise-only fix that only checks the newest template against the immediately-preceding state; and two cases seeded with the REAL ETP-4878 matrix's own access levels (not the synthetic window `100`) — Sales (full) + Inventory (read-only) on Contactos resolves to full, and Sales + Purchasing both read-only on Categoría del producto stays read-only (confirms the fix does not spuriously promote a window to full just because 2+ templates share it). Also closes a data point the original QA report got wrong: `ad_window_access_un_key` is a plain `CREATE UNIQUE INDEX` on `(ad_role_id, ad_window_id)`, invisible to a `pg_constraint`-only query — Sales already had a live pre-existing row for Contactos, so this suite seeds only the missing side instead of inserting a duplicate. |
+| `UserRoleCompositionServiceOverlapReverificationIntegrationTest` | 308 | QA (Sentinel) independent re-verification (3 tests) of the same overlap fix, deliberately NOT reusing the fix author's own integration test: 3 simultaneously-overlapping templates (Finance/Sales/Purchasing on a shared window) resolve to most-permissive-wins with the "winner" (Purchasing, full) in the middle of the composition order — ruling out a pairwise-only fix that only checks the newest template against the immediately-preceding state; and two cases seeded with the REAL ETP-4878 matrix's own access levels (not the synthetic window `100`) — Sales (full) + Inventory (read-only) on Contactos resolves to full, and Sales + Purchasing both read-only on Categoría del producto stays read-only (confirms the fix does not spuriously promote a window to full just because 2+ templates share it). Also closes a data point the original QA report got wrong: `ad_window_access_un_key` is a plain `CREATE UNIQUE INDEX` on `(ad_role_id, ad_window_id)`, invisible to a `pg_constraint`-only query — Sales already had a live pre-existing row for Contactos, so this suite seeds only the missing side instead of inserting a duplicate. |
 | `TemplateAccessPropagationServiceIntegrationTest` (ETP-5565) | -- | Real-DB proof (14 tests) of §8d.1's sweep rule, rolled back after each test: every combination after a template removal (narrowed, removed, manual row kept, inactive copy reactivated, a second sweep changes nothing), most-permissive level with highest-`SeqNo` source (also on equal levels), additions inserted unless a manual row exists (an inactive one included), OBUIAPP rows without duplicates and duplicate inherited copies collapsed to the oldest (copies from non-system roles untouched), template deactivation changes the fingerprint, inactive grants do not, roles inheriting a non-system template skipped, stale-copy detection, purge limited to inactive template rows past the grace period, the process-grant diagnostic, owner resolution. |
 | `TemplateRoleAccessStartupTest` (ETP-5565) | -- | Unit test (10 tests, mocked service and store) of the tick: unchanged templates take no lease, an empty sync table sweeps every template's inheritors and stores fingerprints, only changed templates are swept, a fingerprint from a newer `ALGO_VERSION` counts as unchanged, a busy lease skips the tick, a failed chunk keeps the old fingerprints and releases the lease with an error, stale copies are swept without a fingerprint change, purge runs under the lease before the sweep, owners are locked before their chunk, `tickSafely` never throws. |
 | `TemplateRoleSyncStoreIntegrationTest` (ETP-5565) | -- | Real-DB proof (5 tests) of the lease SQL (take once, holder-only renew/release, expired takeover, missing row seeded) and that an older `ALGO_VERSION` never overwrites a newer fingerprint. Restores the real lease row afterwards and skips itself when a live task holds the lease. |
@@ -8177,13 +8285,13 @@ branch described in §8g (`resendinvitation` and `promoteuserrole` have no such 
 §8i). The `AD_Role`-templates/composition classes —
 `UserRoleCompositionServiceTest`, `UserRoleCompositionServiceIntegrationTest`,
 `UserRoleCompositionServiceOverlapIntegrationTest`,
-`UserRoleCompositionServiceOverlapReverificationTest`,
+`UserRoleCompositionServiceOverlapReverificationIntegrationTest`,
 `UserRoleCompositionServiceRealAccessControlIntegrationTest`, and `TemplateRoleWindowAccessTest` —
 are the exception, living under `src-test/src/com/etendoerp/go/roles/` alongside the
 `com.etendoerp.go.roles` production classes they cover, which also includes
 `WindowAccessOverlapCorruptionGuard` itself (§8d) — it has no dedicated test class of its own and
 is exercised entirely through `UserRoleCompositionServiceOverlapIntegrationTest`/
-`UserRoleCompositionServiceOverlapReverificationTest`/
+`UserRoleCompositionServiceOverlapReverificationIntegrationTest`/
 `UserRoleCompositionServiceRealAccessControlIntegrationTest` above.
 
 ---
@@ -9015,6 +9123,16 @@ unknown-argument guard (IMP-40) covers it too: `etendo_discover({entity:"header"
 with `unknown_argument` instead of being ignored. The tool annotations (§4.12.25) do not change:
 the tool is still read-only and idempotent.
 
+**`etendo_action` is covered by the same guard (ETP-5669).** `ToolRegistry.declaredArgumentNames` has a
+`TOOL_NEO_ACTION` case, so a stray top-level key (e.g. `docAction`) is refused `unknown_argument`; the
+hint adds that the action's own parameters (e.g. `docAction`) go inside `parameters`.
+
+**Missing arguments are reported together (ETP-5669).** `McpToolRouterSupport.validateArgs` names every
+missing key in one answer instead of one per round trip: `Missing required arguments: spec, id` for
+several, `Missing required argument: spec` for one. `field` is the first missing key and the error
+envelope carries a new `missing[]` array with all of them. `etendo_schema` with no `entity` and a blank
+`view` asks for `entity` and `view` together.
+
 #### 4.12.27 Named filters can be found from the catalog and from the response (ETP-5639, IMP-50)
 
 A **named filter** is a business state that a human writes per entity in
@@ -9247,6 +9365,10 @@ always legacy. Anything else is legacy and behaves exactly as §4.12.24 describe
 | a mirror header, `_meta` version or `clientCapabilities` **missing** | served, one `WARN MCP modern request served without: …`; `400` (`-32020` / `-32602`) only with `mcp.modern.strict=true` |
 | `ping` or any unknown method | `404`, `-32601` |
 | `resources/read` of a missing or inaccessible resource | `-32602` `Resource not found: <uri>` (legacy keeps `-32603`); both eras log one `WARN`, no stack trace. An unknown entity inside a known spec is the same answer |
+
+**A body that is not JSON** — malformed, truncated, nested deeper than 64 levels (§7 *Client-supplied
+JSON*) — answers `400` with JSON-RPC `-32700` *Parse error* and `id: null` in **both** eras: the era,
+like the id, can only be read from a body that parses. It used to be a `500` (ETP-5475).
 
 **The one legacy-visible change.** Everything else in the legacy era is ETP-5639 as it was, but a
 legacy `resources/read` of a missing or inaccessible resource changes on purpose: the code stays

@@ -69,6 +69,7 @@ import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.enterprise.Warehouse;
 
 import com.auth0.jwt.interfaces.DecodedJWT;
+import com.etendoerp.go.common.BoundedJsonParser;
 import com.etendoerp.go.common.EtendoGoCorsServlet;
 import com.etendoerp.go.common.JwtAuthUtils;
 import com.etendoerp.go.common.ProtocolErrorAdapters;
@@ -99,6 +100,7 @@ import com.etendoerp.go.payment.StripeCustomerPortalService;
 import com.etendoerp.go.payment.DemoDataTransferService;
 import com.etendoerp.go.schemaforge.data.CheckoutRequest;
 import com.etendoerp.go.schemaforge.data.Plan;
+import com.etendoerp.go.schemaforge.data.Subscription;
 import com.etendoerp.go.payment.CheckoutWebhookProcessor;
 import com.etendoerp.go.onboarding.OnboardingAcctdimCentrallyMaintainedService;
 import com.etendoerp.go.onboarding.OnboardingAdminIdentityService;
@@ -246,6 +248,13 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       "You already have a productive environment with this name. Choose a different name.";
   private static final String RESERVED_CLIENT_NAME_MESSAGE =
       "This company name is reserved. Choose a different name.";
+  /** ETP-5742 — refusals of {@code POST /billing/reactivation}. */
+  private static final String CODE_REACTIVATION_OWNER_REQUIRED = "REACTIVATION_OWNER_REQUIRED";
+  private static final String REACTIVATION_OWNER_MESSAGE =
+      "Only the owner of this environment can reactivate its subscription";
+  private static final String CODE_REACTIVATION_NOT_AVAILABLE = "REACTIVATION_NOT_AVAILABLE";
+  private static final String REACTIVATION_NOT_AVAILABLE_MESSAGE =
+      "This environment has no canceled subscription to reactivate";
   private static final String FIELD_ERROR = "error";
   private static final String ERROR_PAYMENT_REQUIRED = "payment_required";
   // javax.servlet.http.HttpServletResponse predates RFC 7231 and has no 402 constant.
@@ -726,6 +735,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleBillingPurchaseCreate(request, response);
     } else if (isPath(path, "/billing/subscription/portal")) {
       handleBillingPortal(request, response);
+    } else if (isPath(path, "/billing/reactivation")) {
+      handleSubscriptionReactivation(request, response);
     } else if (isPath(path, "/demo-data-transfer/retry")) {
       handleDemoDataTransferRetry(request, response);
     } else if (isPath(path, PATH_CALENDAR_REVIEW + "/confirm")) {
@@ -975,15 +986,39 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     });
   }
 
-  /** Caller provides the admin context. Case and surrounding blanks are ignored. */
+  /**
+   * Caller provides the admin context. Case and surrounding blanks are ignored.
+   *
+   * <p>ETP-5742 — a canceled productive environment still holds its name: its closed subscription
+   * row makes the plan read {@code free}, so the plan alone let a purchase under that name through
+   * to a new environment that the company-name constraint then refuses, after the payment. The
+   * lifecycle type is asked too; the way back into that environment is re-subscribing it, not
+   * buying it again.
+   */
   private boolean ownsProductiveNamed(String clientName, String accountEmail) {
     for (String clientId : EtendoGoJwtSupport.findClientIdsByName(clientName)) {
       if (EtendoGoJwtDalHelper.clientBelongsToAccountEmail(clientId, accountEmail)
-          && TenantPlanService.PLAN_PRODUCTIVE.equals(tenantPlanService.resolvePlan(clientId))) {
+          && (TenantPlanService.PLAN_PRODUCTIVE.equals(tenantPlanService.resolvePlan(clientId))
+              || hasProductiveLifecycle(clientId))) {
         return true;
       }
     }
     return false;
+  }
+
+  /**
+   * Whether the lifecycle snapshot says productive. Deliberately {@code resolve}, not
+   * {@link TenantEnvironmentLifecycleService#isProductiveEnvironment}: that one fails closed (an
+   * unreadable tenant counts as productive, the safe answer for a purchase source), while a name
+   * check must fail open — onboarding repeats it after the payment, and a lookup error there would
+   * refuse a paid environment as a non-retryable name collision. {@code resolve} answers null on
+   * an error.
+   */
+  private boolean hasProductiveLifecycle(String clientId) {
+    TenantEnvironmentLifecycleService.EnvironmentSnapshot snapshot =
+        tenantEnvironmentLifecycleService.resolve(clientId);
+    return snapshot != null
+        && snapshot.getType() == EnvironmentAccessPolicy.EnvironmentType.PRODUCTIVE;
   }
 
   /**
@@ -1014,7 +1049,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     String planKey = StringUtils.trimToNull(body.optString(FIELD_PLAN_KEY, ""));
     // Billing redirects are server-owned. Never trust a browser-supplied Origin as a return URL.
     final String origin = PublicUrlResolver.resolveConfiguredAppBaseUrl();
-    try {
+    writeStartedCheckout(response, accountBillingPurchase, () -> {
       // The source, transfer choice, plan and Stripe Price are persisted on the purchase row, and
       // the flag-gated transfer selection is recorded before the provider is contacted.
       JSONObject result = hostedCheckoutService.createSession(account.getId(), account.getEmail(),
@@ -1023,7 +1058,29 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
               requestId -> recordDemoDataTransferSelection(body, requestId, selection)));
       addDemoDataTransferSelectionBestEffort(result, result.optString(FIELD_REQUEST_ID, ""),
           selection.demoClientId);
-      writeResponse(response, HttpServletResponse.SC_CREATED, result);
+      return result;
+    });
+  }
+
+  /** Starts a provider checkout session; see {@link #writeStartedCheckout}. */
+  @FunctionalInterface
+  private interface CheckoutStart {
+    JSONObject start() throws IOException, JSONException;
+  }
+
+  /**
+   * Answers a started checkout with {@code 201}, translating each failure mode into the response
+   * the checkout contract promises. Shared by the new-environment purchase and the ETP-5742
+   * re-subscription, so both refuse an unavailable plan, an unconfigured checkout and a provider
+   * error the same way.
+   *
+   * @param accountBillingPurchase whether the caller is the account billing boundary, which words
+   *     a provider error as a billing purchase rather than a checkout session
+   */
+  private void writeStartedCheckout(HttpServletResponse response, boolean accountBillingPurchase,
+      CheckoutStart start) throws IOException {
+    try {
+      writeResponse(response, HttpServletResponse.SC_CREATED, start.start());
     } catch (PlanNotAvailableException e) {
       // Logged with the key, answered without it: the caller learns that this key is not usable
       // and nothing about the rest of the plan catalog. The message carries the key already
@@ -1094,6 +1151,123 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       createHostedCheckoutSession(response, account, body, clientName, selection,
           true);
     });
+  }
+
+  /**
+   * POST /sws/go/billing/reactivation — ETP-5742: re-subscribes the session's own environment
+   * after its subscription was canceled, instead of buying a new one.
+   *
+   * <p>The environment is the session's, never a request field, and it must be:
+   * <ul>
+   *   <li><b>owned by the account</b> ({@code clientOwnedByAccountEmail}, ETP-5743): an invited
+   *       member is refused {@code 403 REACTIVATION_OWNER_REQUIRED} — paying for someone else's
+   *       environment is the owner's decision;</li>
+   *   <li><b>a productive environment whose subscription is canceled</b>
+   *       ({@code EXPIRED} in the lifecycle snapshot, whether it reads from a closed
+   *       {@code ETGO_SUBSCRIPTION} row or from the preference projection); anything else is
+   *       {@code 409 REACTIVATION_NOT_AVAILABLE}. A payment that failed ({@code PAST_DUE}) is
+   *       fixed in the Customer Portal, not by a second subscription.</li>
+   * </ul>
+   *
+   * <p>Answers like a purchase: {@code 201} with {@code requestId} and {@code checkoutUrl}. A
+   * re-subscription of the same environment still open is reopened ({@code 200}); one already paid
+   * and waiting for the payment webhook answers {@code 200 {"requestId", "status": "paid"}}. The
+   * request names the environment as its {@code CREATED_CLIENT_ID} from the start, which is what
+   * the payment webhook applies the purchase to ({@link #applyReactivationIfPending}) and what
+   * routes the new subscription's lifecycle events. Same plan as the canceled subscription when
+   * it had one, otherwise the legacy price fallback, exactly as a purchase naming no plan.
+   */
+  private void handleSubscriptionReactivation(HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    runWithAuthenticatedContext(request, response, "subscription-reactivation", authenticated -> {
+      Account account = authenticated.account;
+      String clientId = currentSessionClientId(request, response, authenticated);
+      if (clientId == null) return;
+      if (StringUtils.isBlank(clientId) || ZERO_ID.equals(clientId)) {
+        writeError(response, HttpServletResponse.SC_CONFLICT, CODE_REACTIVATION_NOT_AVAILABLE,
+            REACTIVATION_NOT_AVAILABLE_MESSAGE, REACTIVATION_NOT_AVAILABLE_MESSAGE);
+        return;
+      }
+      if (!isOwnedClient(clientId, account.getEmail())) {
+        writeError(response, HttpServletResponse.SC_FORBIDDEN, CODE_REACTIVATION_OWNER_REQUIRED,
+            REACTIVATION_OWNER_MESSAGE, REACTIVATION_OWNER_MESSAGE);
+        return;
+      }
+      if (!isCanceledProductive(clientId)) {
+        writeError(response, HttpServletResponse.SC_CONFLICT, CODE_REACTIVATION_NOT_AVAILABLE,
+            REACTIVATION_NOT_AVAILABLE_MESSAGE, REACTIVATION_NOT_AVAILABLE_MESSAGE);
+        return;
+      }
+      CheckoutRequest active = checkoutRequestStore.findActiveReactivation(account.getId(),
+          account.getEmail(), clientId);
+      if (active != null) {
+        handleExistingReactivation(response, account, active);
+        return;
+      }
+      ReactivationTarget target = SystemContext.call("the re-subscription target",
+          () -> reactivationTarget(clientId));
+      // Billing redirects are server-owned. Never trust a browser-supplied Origin as a return URL.
+      final String origin = PublicUrlResolver.resolveConfiguredAppBaseUrl();
+      writeStartedCheckout(response, true, () -> hostedCheckoutService.createSession(
+          account.getId(), account.getEmail(), target.clientName, origin, target.planKey,
+          HostedCheckoutService.SessionOptions.reactivating(clientId)));
+    });
+  }
+
+  /** The environment name and the plan a re-subscription is bought under. */
+  private static final class ReactivationTarget {
+    private final String clientName;
+    private final String planKey;
+
+    private ReactivationTarget(String clientName, String planKey) {
+      this.clientName = clientName;
+      this.planKey = planKey;
+    }
+  }
+
+  /**
+   * Caller provides the system context. The plan is the canceled subscription's when the tenant
+   * has a row; a tenant with none (the preference projection) names no plan, which asks for the
+   * legacy price fallback like any purchase that names none.
+   */
+  private ReactivationTarget reactivationTarget(String clientId) {
+    Client client = OBDal.getInstance().get(Client.class, clientId);
+    String planKey = subscriptionService.findLatest(clientId)
+        .map(Subscription::getPlan)
+        .map(Plan::getSearchKey)
+        .orElse(null);
+    return new ReactivationTarget(client == null ? "" : client.getName(), planKey);
+  }
+
+  /**
+   * Whether the environment is productive and its subscription canceled: the lifecycle snapshot,
+   * so a closed {@code ETGO_SUBSCRIPTION} row and the {@code ETGO_SubscriptionStatus} preference
+   * answer alike. Fails closed: an unreadable lifecycle is not offered a re-subscription.
+   */
+  private boolean isCanceledProductive(String clientId) {
+    return SystemContext.call("the re-subscription eligibility check", () -> {
+      TenantEnvironmentLifecycleService.EnvironmentSnapshot snapshot =
+          tenantEnvironmentLifecycleService.resolve(clientId);
+      return snapshot != null
+          && snapshot.getType() == EnvironmentAccessPolicy.EnvironmentType.PRODUCTIVE
+          && snapshot.getSubscriptionStatus() == EnvironmentAccessPolicy.SubscriptionStatus.EXPIRED;
+    });
+  }
+
+  /**
+   * A second click or a second tab: an unpaid re-subscription is reopened like any unpaid purchase
+   * ({@link #handleExistingBillingPurchase}); a paid one is only waiting for its webhook.
+   */
+  private void handleExistingReactivation(HttpServletResponse response, Account account,
+      CheckoutRequest active) throws IOException, JSONException {
+    if ("PAID".equals(active.getCheckoutRequestStatus())) {
+      JSONObject result = new JSONObject();
+      result.put(FIELD_REQUEST_ID, active.getRequest());
+      result.put(FIELD_STATUS, "paid");
+      writeResponse(response, HttpServletResponse.SC_OK, result);
+      return;
+    }
+    handleExistingBillingPurchase(response, account, active);
   }
 
   private void handleActiveBillingPurchase(HttpServletResponse response, Account account,
@@ -1591,8 +1765,62 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       billingEventStore.markIgnored(eventId, "unknown checkout request");
       return;
     }
+    applyReactivationIfPending(requestId, event);
     billingEventStore.markApplied(eventId);
     log.info("Checkout webhook event '{}' ({}) applied", eventId, type);
+  }
+
+  /**
+   * ETP-5742 — applies a paid re-subscription to the canceled environment it names, here in the
+   * payment webhook: unlike a new purchase there is nothing for onboarding to provision, and the
+   * customer is waiting on the blocked screen, not on the upgrade page.
+   *
+   * <p>The payment is recorded exactly as a paid upgrade records it
+   * ({@link #applyPaidUpgradeSideEffects}), so both data shapes take the same path they would on a
+   * purchase:
+   * <ul>
+   *   <li><b>a tenant with a subscription row</b> (closed, since its subscription was canceled) —
+   *       a fresh row is opened for the new Stripe subscription next to the closed one, and the
+   *       period is then read from the provider ({@link #fillSubscriptionPeriodBestEffort}), as
+   *       after an onboarding;</li>
+   *   <li><b>a tenant with no row</b> while the subscription model is off — the plan marker and
+   *       {@code ETGO_SubscriptionStatus = CURRENT} are written, and the event watermark is moved
+   *       to this payment, so a late event of the canceled subscription can no longer expire the
+   *       tenant again.</li>
+   * </ul>
+   *
+   * <p>The request is then closed as {@code PROVISIONED}, which commits the writes above with it:
+   * a failure before that rolls them back with the event, the webhook answers 500 and the provider
+   * redelivers, and the request is still {@code PAID} for the retry. Opening the row is idempotent
+   * for an already open, active one.
+   */
+  private void applyReactivationIfPending(String requestId, JSONObject event) {
+    CheckoutRequest reactivation = checkoutRequestStore.findPaidReactivation(requestId);
+    if (reactivation == null) {
+      return;
+    }
+    String clientId = reactivation.getCreatedClient().getId();
+    SystemContext.run("a subscription re-subscription",
+        () -> applyReactivation(reactivation, clientId,
+            SubscriptionLifecycleApplier.eventCreatedAt(event)));
+    fillSubscriptionPeriodBestEffort(clientId);
+  }
+
+  private void applyReactivation(CheckoutRequest reactivation, String clientId,
+      Instant paidAt) {
+    String requestId = reactivation.getRequest();
+    // Decided before the payment is recorded, the way recordPaymentAsSubscription decides it: once
+    // a row is opened below, the tenant has one.
+    boolean preferenceRoute = !subscriptionModelSwitch.isOn()
+        && !subscriptionService.hasAnySubscription(clientId);
+    applyPaidUpgradeSideEffects(clientId, EtendoGoJwtSupport.findStarOrgId(clientId),
+        reactivation.getClientName(), reactivation.getAccountEmail(), requestId);
+    if (preferenceRoute) {
+      // ETP-5046-TRANSITIONAL-FALLBACK — the preference route keeps its own watermark.
+      tenantEnvironmentLifecycleService.recordSubscriptionEventAt(clientId, paidAt);
+    }
+    checkoutRequestStore.recordProvisioned(requestId, clientId);
+    log.info("Re-subscription '{}' applied to environment {}", requestId, clientId);
   }
 
   /**
@@ -3845,12 +4073,13 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * <p><b>Trade-off, accepted (decided 2026-10-14, recorded in register §2.9).</b> Answering
    * {@code false} on a failed lookup means that a tenant which DID have a row would get its payment
    * recorded only in the marker — invisible behind that row. Since ETP-5047 a tenant whose only row
-   * is closed reads as canceled, so such a tenant would stay canceled while it pays. The case is
-   * reachable in principle only: letting a canceled tenant re-subscribe its own environment was
-   * decided on 2026-10-14 (Martin Taal), but that flow is ETP-5742 and does not exist yet. Today
-   * every checkout provisions a new environment, and since ETP-5047 a canceled productive tenant is
-   * no longer a demo source either, so no current purchase reaches a tenant with a closed row. The
-   * acceptance does not depend on that: it fails closed in practice. On PostgreSQL a failed SQL
+   * is closed reads as canceled, so such a tenant would stay canceled while it pays. A new purchase
+   * never reaches a tenant with a closed row (it provisions a new environment, and since ETP-5047 a
+   * canceled productive tenant is no longer a demo source). The ETP-5742 re-subscription does, and
+   * it does not rely on this lookup: {@code applyReactivation} asks
+   * {@link SubscriptionService#hasAnySubscription} itself, unguarded, before recording the payment,
+   * so a failing lookup fails the payment webhook (which the provider redelivers) instead of
+   * reaching the marker path. The acceptance holds anyway: it fails closed in practice. On PostgreSQL a failed SQL
    * statement aborts the transaction, so the onboarding writes that follow fail too and the upgrade
    * fails instead of being recorded in the marker. Only a failure other than a failed SQL statement
    * (a mapping or hydration error after the statement ran, for instance) could reach the marker
@@ -5913,7 +6142,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    */
   private JSONObject readJsonBody(HttpServletRequest request)
       throws IOException, JSONException {
-    return new JSONObject(readRawBody(request));
+    return BoundedJsonParser.parseObject(readRawBody(request));
   }
 
   private String readRawBody(HttpServletRequest request) throws IOException {

@@ -37,8 +37,11 @@ import org.codehaus.jettison.json.JSONObject;
 
 import org.openbravo.dal.core.OBContext;
 
+import com.etendoerp.go.auth.EnvironmentRequestAuthenticator;
+import com.etendoerp.go.common.BoundedJsonParser;
 import com.etendoerp.go.auth.EffectiveClientResolver;
 import com.etendoerp.go.common.CorsUtils;
+import com.etendoerp.go.common.MalformedJsonException;
 import com.etendoerp.go.common.ProtocolErrorAdapters;
 import com.etendoerp.go.common.PublicUrlResolver;
 import com.etendoerp.go.oauth2.ApiScopes;
@@ -77,6 +80,8 @@ public class McpServlet extends HttpServlet {
   private static final Logger log = LogManager.getLogger(McpServlet.class);
 
   private static final String CONTENT_TYPE_JSON = "application/json;charset=UTF-8";
+  /** JSON-RPC 2.0: the body is not valid JSON. */
+  static final int JSON_RPC_PARSE_ERROR = -32700;
   /** JSON-RPC 2.0: the method does not exist or is not available. */
   static final int JSON_RPC_METHOD_NOT_FOUND = -32601;
   /** JSON-RPC 2.0: internal JSON-RPC error. */
@@ -195,10 +200,20 @@ public class McpServlet extends HttpServlet {
     String method = null;
     McpRequestEra.Classification era = McpRequestEra.Classification.legacy();
 
+    JSONObject rpcMessage;
+    try {
+      rpcMessage = BoundedJsonParser.parseObject(body);
+    } catch (MalformedJsonException e) {
+      // The client's error, not ours: JSON-RPC parse error, and no id can be read from the body.
+      // Answered before any telemetry thread-local is bound, so there is nothing to clear.
+      writeRpcError(response, null, JSON_RPC_PARSE_ERROR, "Parse error",
+          HttpServletResponse.SC_BAD_REQUEST, null);
+      return;
+    }
+
     McpUsageTelemetry.setCurrentSessionKey(
         StringUtils.trimToNull(request.getHeader(McpUsageTelemetry.HEADER_SESSION_ID)));
     try {
-      JSONObject rpcMessage = new JSONObject(body);
       method = rpcMessage.optString("method", "");
       Object id = rpcMessage.opt("id");
       callParams = rpcMessage.optJSONObject("params");
@@ -281,8 +296,8 @@ public class McpServlet extends HttpServlet {
   private String writeRpcError(HttpServletResponse response, String body, int code,
       String message, int httpStatus, JSONObject data) throws IOException {
     try {
-      Object rpcId = new JSONObject(body).opt("id");
-      JSONObject error = buildJsonRpcError(rpcId, code, message);
+      Object rpcId = requestId(body);
+      JSONObject error = ProtocolErrorAdapters.buildJsonRpcError(rpcId, code, message);
       if (data != null) {
         error.getJSONObject("error").put("data", data);
       }
@@ -293,6 +308,21 @@ public class McpServlet extends HttpServlet {
     } catch (Exception ex) {
       response.setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
       response.getWriter().write("{\"error\":\"Internal server error\"}");
+      return null;
+    }
+  }
+
+  /**
+   * The JSON-RPC id of the request in {@code body}, or {@code null} when there is none to read —
+   * no body, or one that is not a parseable JSON object.
+   */
+  private static Object requestId(String body) {
+    if (body == null) {
+      return null;
+    }
+    try {
+      return BoundedJsonParser.parseObject(body).opt("id");
+    } catch (MalformedJsonException e) {
       return null;
     }
   }
@@ -371,7 +401,8 @@ public class McpServlet extends HttpServlet {
     }
     log.warn("MCP modern request refused ({}): {} (method={}, client={}) session={}",
         refusal.code(), refusal.message(), method, client, McpUsageTelemetry.sessionForLog());
-    JSONObject error = buildJsonRpcError(id, refusal.code(), refusal.message());
+    JSONObject error = ProtocolErrorAdapters.buildJsonRpcError(id, refusal.code(),
+        refusal.message());
     if (refusal.data() != null) {
       error.getJSONObject("error").put("data", refusal.data());
     }
@@ -964,12 +995,6 @@ public class McpServlet extends HttpServlet {
             OBContext.restorePreviousMode();
           }
         });
-  }
-
-  // ── JSON-RPC error builder ──────────────────────────────────────────────
-
-  private JSONObject buildJsonRpcError(Object id, int code, String message) throws JSONException {
-    return ProtocolErrorAdapters.buildJsonRpcError(id, code, message);
   }
 
   // ── Utility methods ─────────────────────────────────────────────────────
