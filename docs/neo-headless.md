@@ -7298,8 +7298,8 @@ reads a template's rows with `setFilterOnActive(false)`, so every composition us
 soft-deleted rows too. When two or more templates share a soft-deleted grant (the Smart Scan removal
 took it off all four), removing one template makes core recalculate the remaining ones in a single
 flush: each one copies the inactive row again, the second cannot see the first one's pending insert,
-and the flush fails on `ad_window_access_un_key`. Every multi-template role change failed this way
-until the 7-day purge. `ActiveTemplateWindowAccessInjector`, `ActiveTemplateProcessAccessInjector`
+and the flush fails on `ad_window_access_un_key`. Removing a template failed this way whenever two or
+more of the remaining ones shared the soft-deleted row, until the 7-day purge. `ActiveTemplateWindowAccessInjector`, `ActiveTemplateProcessAccessInjector`
 and `ActiveTemplateProcessDefinitionAccessInjector` `@Specializes` core's window, classic-process
 and OBUIAPP-process injectors (the three tables the modulescript soft-deletes) and drop a system
 template's inactive rows from that list (`SystemTemplateAccessRows`). Only the template-side read
@@ -7308,6 +7308,16 @@ so deleting copies on removal works as before. `isInheritable` is deliberately n
 also calls it in `propagateUpdatedAccess`, which carries a template row's deactivation to its copies.
 Because the injectors replace core's beans, a composition made from Etendo Classic is covered too.
 Proof: `CompositionSweepIntegrationTest#inactiveRowSharedByTemplatesIsNeverCopiedOnAddOrRemove`.
+
+Scope and limits of the filter:
+- **System templates must not carry `AD_Tab_Access` / `AD_Field_Access`.** Tab and field injectors
+  are not specialized, so a tab row under an inactive window row would still be copied and find no
+  parent window on the personal role (NPE in core's `setParent`). The modulescript writes none; if
+  templates ever get tab/field grants, specialize `TabAccessInjector` the same way.
+- Core's event-handler paths are untouched: reactivating a soft-deleted template row reaches
+  personal roles on the next startup-tick sweep, not through core (there is no copy to update);
+  `propagateDeletedAccess` may still fall back to another template's inactive row, and the sweep
+  corrects it; `propagateNewAccess` would copy a row inserted inactive, which no writer does.
 
 **The sweep rule** (`TemplateAccessPropagationService`): for each personal role and element (window,
 classic process, OBUIAPP process), look at the role's active inheritances of active system templates

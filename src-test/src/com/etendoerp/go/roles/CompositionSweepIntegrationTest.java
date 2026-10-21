@@ -52,6 +52,9 @@ import com.etendoerp.go.roles.overlap.TemplateRemovalTracker;
  * <p>{@code WeldBaseTest}, not plain {@code OBBaseTest}: core's propagation only runs with the CDI
  * interceptor installed (see {@code UserRoleCompositionServiceIntegrationTest}). Nothing is
  * committed.</p>
+ *
+ * @covers com.etendoerp.go.roles.TemplateAccessPropagationService
+ * @covers com.etendoerp.go.roles.SystemTemplateAccessRows
  */
 public class CompositionSweepIntegrationTest extends WeldBaseTest {
 
