@@ -269,6 +269,8 @@ public class McpToolRouter {
           case McpConstants.TOOL_NEO_LIST_ATTACHMENTS:
           case McpConstants.TOOL_NEO_DELETE_ATTACHMENT:
             return McpAttachmentTools.handle(toolName, arguments);
+          case McpConstants.TOOL_NEO_GET_DOCUMENT_PDF:
+            return McpDocumentPdfTool.handle(arguments);
           case "docs":
             return handleDocs(arguments);
           default:

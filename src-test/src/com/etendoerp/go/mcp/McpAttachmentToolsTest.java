@@ -651,7 +651,9 @@ class McpAttachmentToolsTest {
       List<McpToolDefinition> none = new java.util.ArrayList<>();
       McpAttachmentToolDefinitions.addTo(none, List.of(), true, true);
 
-      assertEquals(List.of(McpConstants.TOOL_NEO_LIST_ATTACHMENTS), names(read));
+      // ETP-5715: the document PDF tool rides on the read scope, next to the list.
+      assertEquals(List.of(McpConstants.TOOL_NEO_LIST_ATTACHMENTS,
+          McpConstants.TOOL_NEO_GET_DOCUMENT_PDF), names(read));
       assertEquals(List.of(McpConstants.TOOL_NEO_REQUEST_ATTACHMENT_UPLOAD,
           McpConstants.TOOL_NEO_DELETE_ATTACHMENT), names(write));
       assertTrue(none.isEmpty());

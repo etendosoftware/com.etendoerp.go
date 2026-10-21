@@ -60,7 +60,8 @@ final class McpToolAnnotations {
       McpConstants.TOOL_NEO_WIDGET,
       McpConstants.TOOL_NEO_VECTOR_SEARCH,
       McpConstants.TOOL_NEO_GET_IMAGE_UPLOAD,
-      McpConstants.TOOL_NEO_LIST_ATTACHMENTS);
+      McpConstants.TOOL_NEO_LIST_ATTACHMENTS,
+      McpConstants.TOOL_NEO_GET_DOCUMENT_PDF);
 
   /** Tools that add something new and never change or remove what exists. */
   static final Set<String> ADDITIVE = Set.of(

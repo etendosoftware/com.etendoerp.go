@@ -56,6 +56,8 @@ com.etendoerp.go.schemaforge.NeoDefaultsServiceTest
 com.etendoerp.go.schemaforge.NeoDiscoveryHandlerTest
 com.etendoerp.go.schemaforge.NeoDisplayLogicHandlerTest
 com.etendoerp.go.schemaforge.NeoDocumentDownloadServiceTest
+com.etendoerp.go.schemaforge.NeoDocumentPdfTest
+com.etendoerp.go.schemaforge.NeoPdfSourceConfigTest
 com.etendoerp.go.schemaforge.NeoExtensionParityTest
 com.etendoerp.go.schemaforge.NeoFavoritesServiceTest
 com.etendoerp.go.schemaforge.NeoFavoritesServletTest

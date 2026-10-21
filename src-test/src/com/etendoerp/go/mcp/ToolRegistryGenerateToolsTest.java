@@ -1037,6 +1037,23 @@ class ToolRegistryGenerateToolsTest {
           McpConstants.TOOL_NEO_REQUEST_ATTACHMENT_UPLOAD, McpConstants.TOOL_NEO_DELETE_ATTACHMENT)));
     }
 
+    /** ETP-5715: the PDF tool is a read: published to a read session, hidden from a write-only one. */
+    @Test
+    @DisplayName("the document PDF tool follows the read scope and declares ids")
+    void documentPdfToolFollowsTheReadScope() {
+      SFSpec salesOrder = createWindowSpec(SPEC_SALES_ORDER);
+      when(salesOrder.getADWindow()).thenReturn(null);
+      mockSpecCriteria(List.of(salesOrder));
+
+      List<String> readOnly = toolNames(registry.generateTools(scopesOf("neo:read")));
+      List<String> writeOnly = toolNames(registry.generateTools(scopesOf("neo:write")));
+
+      assertTrue(readOnly.contains(McpConstants.TOOL_NEO_GET_DOCUMENT_PDF), readOnly.toString());
+      assertFalse(writeOnly.contains(McpConstants.TOOL_NEO_GET_DOCUMENT_PDF), writeOnly.toString());
+      assertTrue(ToolRegistry.declaredArgumentNames(McpConstants.TOOL_NEO_GET_DOCUMENT_PDF)
+          .orElseThrow().containsAll(List.of("spec", "id", "ids", "entity")));
+    }
+
     /** ETP-5715: they take the spec from the `spec` argument, so the router authorizes that spec. */
     @Test
     @DisplayName("the attachment tools resolve their spec from the arguments, like the CRUD tools")
@@ -1044,7 +1061,8 @@ class ToolRegistryGenerateToolsTest {
       org.codehaus.jettison.json.JSONObject arguments = new org.codehaus.jettison.json.JSONObject();
       arguments.put("spec", SPEC_SALES_ORDER);
       for (String tool : List.of(McpConstants.TOOL_NEO_REQUEST_ATTACHMENT_UPLOAD,
-          McpConstants.TOOL_NEO_LIST_ATTACHMENTS, McpConstants.TOOL_NEO_DELETE_ATTACHMENT)) {
+          McpConstants.TOOL_NEO_LIST_ATTACHMENTS, McpConstants.TOOL_NEO_DELETE_ATTACHMENT,
+          McpConstants.TOOL_NEO_GET_DOCUMENT_PDF)) {
         assertTrue(ToolRegistry.isCrudTool(tool), tool);
         assertEquals(SPEC_SALES_ORDER, ToolRegistry.resolveSpecName(tool, arguments), tool);
         assertTrue(ToolRegistry.declaredArgumentNames(tool).orElseThrow().contains("spec"), tool);

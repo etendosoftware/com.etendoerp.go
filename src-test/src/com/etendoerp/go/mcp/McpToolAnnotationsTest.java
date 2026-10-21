@@ -42,14 +42,14 @@ class McpToolAnnotationsTest {
       "etendo_create", "etendo_update", "etendo_delete", "etendo_selectors", "etendo_defaults", "etendo_schema",
       "etendo_batch", "etendo_action", "etendo_action_batch", "etendo_widget", "etendo_vector_search", "etendo_upload_image",
       "etendo_request_image_upload", "etendo_get_image_upload", "etendo_request_attachment_upload",
-      "etendo_list_attachments", "etendo_delete_attachment", "etendo_generate_amortization_plan",
-      "etendo_feedback", "docs");
+      "etendo_list_attachments", "etendo_delete_attachment", "etendo_get_document_pdf",
+      "etendo_generate_amortization_plan", "etendo_feedback", "docs");
 
   @Test
   void readOnlySetIsPinned() {
     assertEquals(Set.of("etendo_list", "etendo_get", "etendo_schema", "etendo_discover", "etendo_selectors",
         "etendo_defaults", "docs", "etendo_widget", "etendo_vector_search", "etendo_get_image_upload",
-        "etendo_list_attachments"),
+        "etendo_list_attachments", "etendo_get_document_pdf"),
         McpToolAnnotations.READ_ONLY);
   }
 
@@ -84,6 +84,8 @@ class McpToolAnnotationsTest {
     // ETP-5715: listing reads; the upload link is NOT additive because main:true replaces the
     // previous main file; deleting an attachment is the removal class.
     assertHints("etendo_list_attachments", true, false, true);
+    // ETP-5715: the PDF of a document is a read of the stored file, never a render.
+    assertHints("etendo_get_document_pdf", true, false, true);
     assertHints("etendo_request_attachment_upload", false, true, false);
     assertHints("etendo_delete_attachment", false, true, true);
     assertHints("complete_order", false, true, false);

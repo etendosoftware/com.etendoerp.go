@@ -64,6 +64,15 @@ class McpAuthorizationServiceVectorTest {
     }
   }
 
+  /** ETP-5715: getting the stored PDF of a document is a read, so a read-only session may do it. */
+  @Test
+  void documentPdfToolIsReadTier() {
+    McpAuthorizationService.authorizeToolCall(McpConstants.TOOL_NEO_GET_DOCUMENT_PDF,
+        Set.of("etendo:read"));
+    assertThrows(OBSecurityException.class, () -> McpAuthorizationService.authorizeToolCall(
+        McpConstants.TOOL_NEO_GET_DOCUMENT_PDF, Set.of("etendo:process")));
+  }
+
   /** ETP-5715: a read-only session may list a document's attachments; changing them needs write. */
   @Test
   void attachmentToolsAreSplitBetweenReadAndWrite() {

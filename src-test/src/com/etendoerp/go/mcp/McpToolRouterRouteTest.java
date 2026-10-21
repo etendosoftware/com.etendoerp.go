@@ -3581,6 +3581,24 @@ class McpToolRouterRouteTest {
     }
 
     @Test
+    @DisplayName("the document PDF tool is dispatched to its handler on a read scope, after the spec check")
+    void documentPdfIsDispatchedAfterTheChecks() throws Exception {
+      setupSpecLookup(mockSpec());
+      JSONObject sentinel = McpToolRouter.wrapAsTextContent("pdf");
+      try (MockedStatic<McpDocumentPdfTool> handler = mockStatic(McpDocumentPdfTool.class)) {
+        handler.when(() -> McpDocumentPdfTool.handle(any())).thenReturn(sentinel);
+
+        assertEquals(sentinel,
+            router.route(McpConstants.TOOL_NEO_GET_DOCUMENT_PDF, attachmentArgs(), READ_SCOPES));
+
+        handler.verify(() -> McpDocumentPdfTool.handle(any()));
+        authMock.verify(() -> McpAuthorizationService
+            .authorizeToolCall(eq(McpConstants.TOOL_NEO_GET_DOCUMENT_PDF), any()));
+      }
+      supportMock.verify(() -> McpToolRouterSupport.hasSpecAccess(any(), anyString(), eq("GET")));
+    }
+
+    @Test
     @DisplayName("a role without access to the spec is refused before the handler is reached")
     void roleWithoutSpecAccessNeverReachesTheHandler() throws Exception {
       setupSpecLookup(mockSpec());

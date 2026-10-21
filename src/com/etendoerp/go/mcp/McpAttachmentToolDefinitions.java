@@ -86,6 +86,7 @@ final class McpAttachmentToolDefinitions {
     }
     if (canRead) {
       tools.add(listAttachments(specNames));
+      tools.add(McpDocumentPdfToolDefinition.definition(specNames));
     }
     if (canWrite) {
       tools.add(requestAttachmentUpload(specNames));

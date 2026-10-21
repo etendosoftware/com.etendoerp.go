@@ -3800,6 +3800,10 @@ not: `etendo_create` does not run it in shared code, so it is in the table below
 | attachments on windows the SPA gives no Attachments tab (ETP-5715) | REST serves attachments of any table | **refused `405`** on the spec whose root entity carries `MCP_CONFIG.attachments.enabled:false` (the nine windows with `attachments:false` in `decisions.json`); parity with the SPA is enforced, REST is not changed | the MCP must not offer what the application hides; see §4.12.37 |
  | attachment writes — organization (ETP-5715) | upload/delete do not check that the record's organization is writable by the role | **required** (`getWritableOrganizations`); a readable-only organization is the same `404` | as the row above |
 | attachment upload (ETP-5715) | multipart `POST` with the caller's bearer token | a **single-use link** (`PUT /sws/neo/attachment/upload/{token}`, no bearer: the token is the credential) bound to session, role, document, file name and the main flag; the upload runs **as the session that asked for the link** and the document is authorized again at upload time | the bytes must not pass through the conversation; the validation and the storage are the SAME code (`NeoAttachmentStore`) |
+| the PDF of a document (ETP-5715) | REST has no "PDF" operation: the SPA renders it in the browser (jsreport) when the document's preview is opened and stores it as the record's main attachment | `etendo_get_document_pdf` **never renders**: it returns the PDF the application already stored (link + metadata) or a `409` saying there is none (§4.12.38) | the PDF is produced by the front end from the template and the data the browser fetches; a server-side render would be a second renderer to keep identical (five consumption points, `docs/document-printables.md`). Declared so nobody "fixes" the 409 by adding a render |
+| staleness of the stored PDF (ETP-5715) | the SPA serves a cached PDF only if it is not older than the record (`updated`) or the company branding (`brandingUpdated`) or the bundle that rendered it (`attachmentFreshness.js`); otherwise it **re-renders and re-uploads** | the MCP applies the first two (whole-second, strict, fail-open, the same inputs) to the main attachment of a `rendered` entity — **whatever the file is named**, as `fetchCachedBlob` does — and answers `409 pdf_stale` instead of regenerating; it **cannot** apply the bundle rule (the build epoch lives in the browser), so a PDF rendered by an older template is served as long as the data did not change | a stale PDF must not be handed out as current, and the MCP cannot regenerate; it asks for the preview to be opened again |
+| the uploaded document of a purchase invoice or goods receipt as its "PDF" (ETP-5715) | those windows pass no `recordUpdated`: their main attachment is the counterparty's own file, never judged stale | declared per entity: `MCP_CONFIG.pdf.source:"supplier"` returns the main file as is, never stale, and answers `409 no_pdf` "This document has no supplier document attached." when there is none (§4.12.38) | the main-attachment flag marks both kinds of file; the SPA tells them apart by window (a frontend decision), so the backend must be told. **Rule: a window whose preview shows an uploaded document instead of a rendered one MUST declare `pdf.source:"supplier"`**; `McpConfigSourcedataTest.supplierPdfEntitiesAreDeclared` is the drift guard |
+| a legacy customer file as the PDF of a return material receipt (ETP-5715) | since ETP-5124 the preview renders fresh and never reads the stored file, so a customer file marked main by the retired ETP-4408 upload is invisible there | the window is `rendered`: its main file is returned as "the PDF" when newer than the record, `pdf_stale` when older | the main-attachment flag cannot tell a legacy upload from an emailed copy; declared so it is not mistaken for a bug. The fix is a data check that no such files remain (D18), not code |
 | attachment download (ETP-5715) | `GET /sws/neo/attachments/file/{id}` with a bearer token, no parent check | a signed link (`/sws/neo/document-download/{token}`, the email link's token plus an attachment-id claim), valid **10 minutes**, bound to the record, the client and the attachment | the agent never receives bytes; the email links (7 days, main attachment only) are unchanged |
 
 This is a **declared** list, not an unknown one: the point is that the next person to touch either
@@ -10405,7 +10409,7 @@ fail-closed: only an explicit boolean `true` or no section opens attachments —
 MCP — and nothing derives one from the other yet: a window that sets `attachments:false` MUST also set `MCP_CONFIG.attachments.enabled:false`.
 `McpConfigSourcedataTest.attachmentLessWindowsAreDeclared` lists the specs that carry it as the drift guard. *Proposed follow-up (not
 implemented, it needs `schema_forge_core`):* have the pusher (`sf-push-neo`) write the section from `window.attachments` so there is a single
-source. Existing tenants need the one-off SQL that mirrors the XML (`etp5715_attachments.sql`, md5-guarded, idempotent).
+source. The flags are sourcedata (`ETGO_SF_ENTITY.xml`) and reach an instance through `update.database`; no separate SQL is shipped.
 
 **Upload flow.** `etendo_request_attachment_upload` answers `{uploadUrl, expiresAt, maxBytes: 10485760, allowedExtensions, spec, entity,
 id, name, main, curlExample, hint}`. Whoever holds the file does `curl -X PUT --upload-file ./factura.pdf "<uploadUrl>"`; no
@@ -10488,3 +10492,99 @@ request itself; a document of another client → `404 Record not found`, identic
 `McpAttachmentToolsTest` (the three tools), `NeoDocumentDownloadServiceTest` (the attachment token), `McpToolRouterRouteTest`, `ToolRegistryGenerateToolsTest`,
 `McpToolAnnotationsTest`, `McpToolTitlesTest`, `McpAuthorizationServiceVectorTest`, `NeoServletProcessRequestTest`. The existing `NeoAttachmentsHelperTest`
 (the multipart upload) passes unchanged on the extracted store.
+
+#### 4.12.38 The PDF of a document: `etendo_get_document_pdf` (ETP-5715)
+
+One read-only MCP tool, piece B1 of ETP-5715 stage 2: "give me the PDF of invoice X". It **returns the PDF the application already
+stored; it never renders one.** Reuses piece A (§4.12.37): the document is authorized by `NeoAttachmentTarget` and the file is handed out as
+the same signed, 10-minute attachment link (`att` claim). Emailing a document (B2) and OCR are separate.
+
+**What the SPA does (measured, `tools/app-shell`).** The PDF of a document is rendered **in the browser** (jsreport; `documentPdf.js`,
+`pdfUtils.js`). Opening the preview of a **non-draft** document (`GenericPreviewModal`) uploads that PDF as a real attachment of the record,
+named `<recordId>.pdf`, and marks it main (`C_File.EM_ETGO_IsPreviewMain = 'Y'`), once per document; sending the document by email stores the
+sent copy the same way, named `<spec>-<number>.pdf`. The preview reads that file back instead of re-rendering (`fetchCachedBlob`) **unless it is
+stale**: the cached file's own `updated` is older than the record's `updated` (ETP-4787), than the bundle that rendered it (ETP-5125) or than the
+company branding's `updated` (the session's `brandingUpdated`, ETP-5541). A stale file is not an error in the SPA: it re-renders and replaces it.
+Documents whose preview caches a rendered PDF: sales invoice, sales order, purchase order, quotation, goods shipment, return to vendor. **Return material receipt** does not (ETP-5124/D18: its preview renders fresh and stores nothing); a main file appears there only when the document is emailed (the sent copy is stored) or from a legacy customer upload (ETP-4408).
+**Purchase invoice** (and goods receipt) pass no `recordUpdated`: they have no printable of their own, and their main attachment is the **supplier's
+document** the user uploads (the two-area layout), which no edit of ours can outdate. **Payments** (`payment-in`, `payment-out`) set
+`hidePrint: true` and `attachments: false` in `decisions.json`; the three fiscal monitors set `attachments: false` and have no `print-*` artifact:
+the application offers no PDF there.
+
+**What distinguishes a rendered PDF from an uploaded document: a declaration.** Nothing in the data model: **the same column**,
+`C_File.EM_ETGO_IsPreviewMain = 'Y'`, marks both (local DB, `C_Invoice`: 17 main files named `<recordId>.pdf`, 24 with other names,
+e.g. `segundo-documento.pdf` on purchase invoice 10000110 and `factura_blanquiceleste_iva_variado.pdf`, whose record was completed 13 minutes after the
+file was attached). The SPA tells them apart per window, in its preview component, which the backend never sees. So the entity says it, in
+`MCP_CONFIG` (`NeoPdfSourceConfig`, registered by `McpPdfSection`, strict validation: `source` is `"supplier"` or `"rendered"`, `reason` mandatory, unknown keys
+rejected and the entity unpublished like any bad section; entity level wins over spec level):
+
+```json
+{"pdf":{"source":"supplier","reason":"a purchase invoice has no printable: its PDF is the supplier document the user uploads as the main attachment"}}
+```
+
+- **`rendered`** (the default, no section needed): the PDF is the main attachment the preview (or the email) stored. Freshness is the SPA's, applied to the
+  main attachment **whatever its name** — measured in `pdfUtils.js fetchCachedBlob`, which takes the main attachment's id and runs
+  `isCachedRenderingStale` on it, with no name test. (A user's file attached as main on a rendered window is therefore judged exactly as the SPA would judge it,
+  and the SPA would overwrite it on the next preview.)
+- **`supplier`**: the document has no printable; its PDF is the main attachment the user uploaded. Returned as is, never stale; none attached is
+  `409 no_pdf` with the detail `This document has no supplier document attached.` (generic on purpose: the flag is on a purchase invoice and on a goods receipt).
+
+**Measured list of `supplier` entities (SPA, `tools/app-shell`):** `purchase-invoice/header` (`InvoicePreview` purchase branch: `autoFetch:false`, no
+`sourceBlob`, no `recordUpdated`, `hidePrintWhen:true`; the OCR drop zone) and `goods-receipt/goodsReceipt` (`GoodsReceiptPreview`: `useMainAttachment:true`,
+`autoFetch:false`, no render, no `recordUpdated`, `hidePrint:true`, no `print-*` artifact for it). Not supplier: `return-material-receipt` — its preview stores
+nothing (D18), so its only stored PDF is the emailed copy; it stays `rendered`. **Known risk:** a legacy customer file marked main before ETP-5124 is a main file like any
+other, so it is returned as "the PDF" when it is newer than the record, and called stale when older; the SPA would not show it (it renders fresh). The no-PDF and stale
+hints therefore say "open the preview **or send the document by email**", the one pair that is true for every rendered window. Everything else with a preview caches a rendered PDF on open.
+**Rule for new windows: a window whose preview shows an uploaded document instead of a rendered one must declare `pdf.source:"supplier"`** (data row + `McpConfigSourcedataTest`).
+Both rows already carried an `MCP_CONFIG`; the `pdf` section is merged into it in the sourcedata XML and reaches an instance through `update.database` (no separate SQL is shipped).
+
+**Tool.** `etendo_get_document_pdf({spec, id | ids[], entity?})`, scope `etendo:read`, read-only annotations, titles en/es, telemetry verb
+`document_pdf`. One tool rather than a mode of `etendo_list_attachments`: an agent finds it by the word "PDF", it needs the staleness verdict and
+the "no PDF" errors (which a list cannot express), and it carries the bulk shape. `etendo_action_batch` is for state-changing actions; a read with
+`ids[]` is the bulk path, so nothing is added there.
+
+**Answer, one document.** `{id, spec, file:{id, name, size, type, updated}, downloadUrl, linkExpiresInMinutes: 10, hint}`. Without a configured signing
+secret (`etendo.go.email.documentDownloadTokenSecret`) there is no `downloadUrl` and the hint says the signing secret is not configured (the same
+as `etendo_list_attachments`).
+
+**Answer, `ids[]` (at most 50; more is `422` before anything runs).** `{spec, count, found, failed, results:[{id, ok:true, file, downloadUrl}|
+{id, ok:false, status, error, detail, hint}]}`, one entry per distinct id in order; each id is authorized on its own and a failure never stops the
+others.
+
+**Errors (the agent tells them apart by status).**
+
+| situation | status / code | detail |
+|---|---|---|
+| document missing, or of another client/organization | `404 not_found` | `Record not found` (identical for both; never mentions a PDF) |
+| role cannot read the window | `403 forbidden` | access denied |
+| window with no Attachments tab (payments, fiscal monitors) | `405 method_not_allowed` | `Attachments are not available for this document type, as in the application.` |
+| `rendered` entity with no main attachment | `409 no_pdf` | `This document has no PDF yet.` + hint: open the document's preview in the application, or send the document by email (a return receipt's preview stores nothing, only sending it does), and ask again; a draft never stores a PDF: complete it first |
+| `supplier` entity with no main attachment | `409 no_pdf` | `This document has no supplier document attached.` + hint: attach it as main with `etendo_request_attachment_upload` (`main:true`) |
+| `rendered` main file older than the document or the branding | `409 pdf_stale` | `The stored PDF of this document is out of date…` + hint: ask the user to open the document's preview (or send it by email, where the preview stores nothing) so the application regenerates it |
+| unexpected failure on one document | `500 server_error` | `The PDF of this document could not be looked up.`; in `ids[]` it is that entry only, the others still answer (the exception class is logged, never its message) |
+| lookup failed | `500 server_error` | the helper's message |
+| spec header entity missing / a line entity | `422` | as the attachment tools |
+
+**Why 409 and not 404 for "no PDF".** 404 means "that document does not exist or is not yours" on every MCP tool; the PDF case is a document that
+exists whose PDF is not there yet and that a user action resolves, which is what a conflict of state is. Both `no_pdf` variants share status and code and differ in
+the detail and hint, chosen by the entity's declared `pdf.source`, not by any spec name in code.
+
+**Windows without Attachments tab.** Refused with the same `405` as piece A, measured against the SPA: payments hide Print and the Attachments tab;
+the fiscal monitors have no printable. Nothing to mirror beyond reusing `NeoAttachmentTarget`.
+
+**Behaviour notes and known limits.** A `rendered` window returns its main file whatever its type (`file.type` is reported), like the SPA. `ids` are de-duplicated: `count` is the number of distinct ids, while the cap of 50 applies to the raw list length. Known limits, not fixed: the tool is published for every window spec, including non-document ones where the hint makes little sense; the branding timestamp is read for the MCP session's organization, as the SPA reads it for the user's.
+
+**Not covered.** The SPA's third staleness rule (renderer bundle changed) cannot be evaluated here; a PDF rendered by an older template but from
+unchanged data is served. A document that was changed by raw SQL does not move `updated`, so its old PDF is served (same as the SPA).
+
+**Examples.**
+
+*Purchases — the supplier's PDF of a purchase invoice:* `etendo_get_document_pdf({spec:"purchase-invoice", id:<invoice id>})` →
+`file:{name:"segundo-documento.pdf", …}` and a link; with no main attachment → `409 no_pdf` and the hint to attach it.
+*Sales — the PDF of a completed sales invoice whose preview was opened:* `etendo_get_document_pdf({spec:"sales-invoice", id})` →
+`file:{name:"<id>.pdf"}` and a link. Never opened → `409 no_pdf`; edited after it was opened → `409 pdf_stale`.
+*Several:* `etendo_get_document_pdf({spec:"sales-invoice", ids:[a, b, c]})` → one `results` entry each.
+
+**Tests:** `NeoDocumentPdfTest` (the decision and its inputs), `NeoPdfSourceConfigTest` (the section), `McpDocumentPdfToolTest` (answers, errors, bulk, definition), `McpEntityConfigTest` and `McpConfigSourcedataTest` (registration, validation, the declared set), plus the wiring in
+`McpToolRouterRouteTest`, `ToolRegistryGenerateToolsTest`, `McpToolAnnotationsTest`, `McpToolTitlesTest`, `McpAuthorizationServiceVectorTest`,
+`McpUsageTenantQaTest`, `McpAttachmentToolsTest`.

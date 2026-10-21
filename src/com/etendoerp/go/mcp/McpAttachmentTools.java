@@ -299,7 +299,7 @@ final class McpAttachmentTools {
    *
    * @return the link, or {@code null} when the signing secret is not configured
    */
-  private static String downloadUrl(NeoAttachmentTarget target, String attachmentId) {
+  static String downloadUrl(NeoAttachmentTarget target, String attachmentId) {
     String clientId = (String) OBContext.getOBContext().getCurrentClient().getId();
     Optional<String> token = DocumentDownloadTokenService.createAttachmentToken(
         target.getSpecName(), target.getRecordId(), clientId, attachmentId,
@@ -357,7 +357,7 @@ final class McpAttachmentTools {
    * The spec's document entity: the one the caller names, or — when none is named — the first
    * included entity at tab level 0 (the header). Lines are refused later, by the target.
    */
-  private static SFEntity rootEntityOf(SFSpec spec, JSONObject args) {
+  static SFEntity rootEntityOf(SFSpec spec, JSONObject args) {
     String entityName = StringUtils.trimToNull(
         McpArgumentUtils.optionalString(args, McpConstants.PARAM_ENTITY));
     if (entityName != null) {
@@ -424,7 +424,7 @@ final class McpAttachmentTools {
   }
 
   /** The IMP-5 envelope shape every other MCP error uses. */
-  private static JSONObject errorEnvelope(int status, String code, String detail, String hint)
+  static JSONObject errorEnvelope(int status, String code, String detail, String hint)
       throws JSONException {
     JSONObject error = new JSONObject();
     error.put(McpConstants.KEY_STATUS, status);

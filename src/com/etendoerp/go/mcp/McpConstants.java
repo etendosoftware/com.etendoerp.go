@@ -85,6 +85,12 @@ final class McpConstants {
   static final String TOOL_NEO_LIST_ATTACHMENTS = "etendo_list_attachments";
   /** Tool name of the removal of one attachment of a document (ETP-5715). */
   static final String TOOL_NEO_DELETE_ATTACHMENT = "etendo_delete_attachment";
+  /** Tool name of the read-only fetch of the PDF the application stored for a document (ETP-5715). */
+  static final String TOOL_NEO_GET_DOCUMENT_PDF = "etendo_get_document_pdf";
+  /** Error code: the document has no stored PDF yet (409, ETP-5715). */
+  static final String ERROR_NO_PDF = "no_pdf";
+  /** Error code: the stored PDF predates the document's last change and is not current (409, ETP-5715). */
+  static final String ERROR_PDF_STALE = "pdf_stale";
   /**
    * Hard cap on the DECODED size of {@link #TOOL_NEO_UPLOAD_IMAGE}'s {@code data_base64}.
    *

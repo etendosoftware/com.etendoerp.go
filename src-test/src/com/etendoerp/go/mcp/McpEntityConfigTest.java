@@ -130,6 +130,7 @@ class McpEntityConfigTest {
       assertSame(McpVerbsSection.declaration(), McpVerbsSection.declaration());
       assertSame(McpActionsSection.declaration(), McpActionsSection.declaration());
       assertSame(McpAttachmentsSection.declaration(), McpAttachmentsSection.declaration());
+      assertSame(McpPdfSection.declaration(), McpPdfSection.declaration());
       McpEntityConfig.register(McpParentSection.declaration());
       McpEntityConfig.register(McpParentSection.declaration());
     }
@@ -285,6 +286,41 @@ class McpEntityConfigTest {
           "{\"attachments\":{\"enable\":false,\"reason\":\"x\"}}"));
 
       assertTrue(ok.isUsable(), ok.describeProblems());
+      assertFalse(typo.isUsable());
+      McpConfigSections.resetForTests();
+    }
+  }
+
+  /**
+   * ETP-5715 — the {@code pdf} section is registered too: a window declared supplier-document stays
+   * published, and a misspelt key or an unknown {@code source} value unpublishes the entity like any
+   * other bad section instead of silently falling back to "rendered".
+   */
+  @Nested
+  @DisplayName("the pdf section")
+  class PdfSection {
+
+    private SFEntity entityWith(String id, String config) {
+      SFEntity entity = org.mockito.Mockito.mock(SFEntity.class);
+      org.mockito.Mockito.when(entity.getId()).thenReturn(id);
+      org.mockito.Mockito.when(entity.get(McpEntityConfig.PROPERTY_MCP_CONFIG)).thenReturn(config);
+      return entity;
+    }
+
+    @Test
+    @DisplayName("a valid declaration is usable; a bad value, a misspelt key or no source is not")
+    void registeredAndValidated() {
+      McpConfigSections.resetForTests();
+
+      McpEntityConfig.Resolved ok = McpEntityConfig.forEntity(entityWith("PDF-OK",
+          "{\"pdf\":{\"source\":\"supplier\",\"reason\":\"no printable\"}}"));
+      McpEntityConfig.Resolved badValue = McpEntityConfig.forEntity(entityWith("PDF-VAL",
+          "{\"pdf\":{\"source\":\"uploaded\",\"reason\":\"x\"}}"));
+      McpEntityConfig.Resolved typo = McpEntityConfig.forEntity(entityWith("PDF-KEY",
+          "{\"pdf\":{\"sourse\":\"supplier\",\"reason\":\"x\"}}"));
+
+      assertTrue(ok.isUsable(), ok.describeProblems());
+      assertFalse(badValue.isUsable());
       assertFalse(typo.isUsable());
       McpConfigSections.resetForTests();
     }

@@ -389,6 +389,7 @@ public class ToolRegistry {
       case McpConstants.TOOL_NEO_REQUEST_ATTACHMENT_UPLOAD:
       case McpConstants.TOOL_NEO_LIST_ATTACHMENTS:
       case McpConstants.TOOL_NEO_DELETE_ATTACHMENT:
+      case McpConstants.TOOL_NEO_GET_DOCUMENT_PDF:
         return true;
       default:
         return false;
@@ -705,6 +706,8 @@ public class ToolRegistry {
         definition = McpAttachmentToolDefinitions.listAttachments(List.of()); break;
       case McpConstants.TOOL_NEO_DELETE_ATTACHMENT:
         definition = McpAttachmentToolDefinitions.deleteAttachment(List.of()); break;
+      case McpConstants.TOOL_NEO_GET_DOCUMENT_PDF:
+        definition = McpDocumentPdfToolDefinition.definition(List.of()); break;
       default: return Optional.empty();
     }
     Object props = definition.getInputSchema().get(McpConstants.KEY_PROPERTIES);

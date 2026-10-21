@@ -70,6 +70,7 @@ final class McpConfigSections {
       McpEntityConfig.register(McpVerbsSection.declaration());
       McpEntityConfig.register(McpActionsSection.declaration());
       McpEntityConfig.register(McpAttachmentsSection.declaration());
+      McpEntityConfig.register(McpPdfSection.declaration());
       REGISTERED.set(true);
     }
   }

@@ -81,6 +81,8 @@ final class McpAuthorizationService {
       case McpConstants.TOOL_NEO_VECTOR_SEARCH:
       // ETP-5715: listing a document's attachments is a read, so a read-only session can verify.
       case McpConstants.TOOL_NEO_LIST_ATTACHMENTS:
+      // ETP-5715: the stored PDF of a document is read-only too.
+      case McpConstants.TOOL_NEO_GET_DOCUMENT_PDF:
       // B3: read-tier on purpose. Reporting friction writes no business data, and gating it behind
       // etendo:write would silence exactly the read-only sessions most likely to get lost.
       case McpConstants.TOOL_NEO_FEEDBACK:

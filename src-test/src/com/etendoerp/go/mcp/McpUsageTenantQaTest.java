@@ -397,5 +397,7 @@ public class McpUsageTenantQaTest {
         McpUsageTelemetry.verbFor(McpConstants.TOOL_NEO_LIST_ATTACHMENTS));
     assertEquals("attachment_delete",
         McpUsageTelemetry.verbFor(McpConstants.TOOL_NEO_DELETE_ATTACHMENT));
+    assertEquals("document_pdf",
+        McpUsageTelemetry.verbFor(McpConstants.TOOL_NEO_GET_DOCUMENT_PDF));
   }
 }
