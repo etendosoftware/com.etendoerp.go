@@ -12,13 +12,13 @@ import static com.etendoerp.go.payment.reconcile.ReconciliationSupport.summary;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Date;
-import java.util.HashSet;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Set;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -42,6 +42,7 @@ import com.etendoerp.go.payment.SystemContext;
 import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.payment.reconcile.ReconciliationResult.Counter;
 import com.etendoerp.go.rest.PaidProvisioningService;
+import com.etendoerp.go.rest.PaidReactivationService;
 import com.etendoerp.go.schemaforge.data.CheckoutRequest;
 
 /**
@@ -55,7 +56,9 @@ import com.etendoerp.go.schemaforge.data.CheckoutRequest;
  *       abandoned window, is closed as {@code EXPIRED}.</li>
  *   <li><b>Provisioning repair</b> — a paid request with no environment (the browser gave up, or
  *       an attempt crashed or failed) is provisioned through {@link PaidProvisioningService},
- *       fenced by {@code claimForProvisioning}. A failure no retry can fix goes to review once.</li>
+ *       fenced by {@code claimForProvisioning}. A failure no retry can fix goes to review once. A
+ *       paid re-subscription (ETP-5742, a request naming its canceled environment) is applied
+ *       through {@link PaidReactivationService}, the payment webhook's own path.</li>
  *   <li><b>No-session-id review</b> — a {@code CREATING} request never received a provider session
  *       id. It is never closed automatically; it is alerted once and then counted as awaiting
  *       review.</li>
@@ -83,6 +86,7 @@ public class BillingReconciliationService {
   static final String KIND_PROVISIONED = "provisioned";
   static final String KIND_PROVISIONING_FAILED = "provisioning-failed";
   static final String KIND_NEEDS_REVIEW = "needs-review";
+  static final String KIND_REACTIVATION_APPLIED = "reactivation-applied";
 
   static final String CODE_NO_SESSION_ID = "NO_SESSION_ID";
   static final String CODE_DETERMINISTIC_FAILURE = "DETERMINISTIC_FAILURE";
@@ -119,6 +123,8 @@ public class BillingReconciliationService {
   private final Clock clock;
   /** Closes abandoned requests; package-visible so tests can substitute it. */
   CheckoutRequestWrites checkoutWrites = new CheckoutRequestWrites();
+  /** Applies paid re-subscriptions; package-visible so tests can substitute it. */
+  PaidReactivationService reactivations = new PaidReactivationService();
 
   /** Production wiring. */
   public BillingReconciliationService() {
@@ -156,7 +162,7 @@ public class BillingReconciliationService {
   public ReconciliationResult run(boolean dryRun) {
     ReconciliationResult result = new ReconciliationResult(dryRun);
     ReconciliationAudit audit = new ReconciliationAudit(eventStore, dryRun);
-    Set<String> recovered = new HashSet<>();
+    Map<String, CheckoutRow> recovered = new HashMap<>();
     runPhase("checkout recovery", result, () -> recoverCheckouts(result, audit, recovered));
     runPhase("provisioning repair", result, () -> repairProvisioning(result, audit, recovered));
     runPhase("no-session-id review", result, () -> reviewSessionlessCheckouts(result, audit));
@@ -179,7 +185,7 @@ public class BillingReconciliationService {
   // ── Phase 1: checkout recovery (provider → local) ───────────────────────────────────────
 
   private void recoverCheckouts(ReconciliationResult result, ReconciliationAudit audit,
-      Set<String> recovered) {
+      Map<String, CheckoutRow> recovered) {
     Date graceBefore = minutesAgo(settings.getPaidGraceMinutes());
     Date abandonedBefore = minutesAgo(settings.getAbandonedHours() * 60L);
     for (CheckoutRow row : checkoutRows("cr.checkoutRequestStatus = :created"
@@ -195,7 +201,7 @@ public class BillingReconciliationService {
   }
 
   private void recoverCheckout(CheckoutRow row, Date abandonedBefore, ReconciliationResult result,
-      ReconciliationAudit audit, Set<String> recovered) {
+      ReconciliationAudit audit, Map<String, CheckoutRow> recovered) {
     JSONObject session = retrieve("/v1/checkout/sessions/", row.sessionId, result);
     if (session == null) {
       return;
@@ -221,7 +227,7 @@ public class BillingReconciliationService {
       audit.alert("Recovered a paid checkout the webhook never applied: request {} session {}",
           row.requestId, row.sessionId);
       result.increment(Counter.PAYMENTS_RECOVERED);
-      recovered.add(row.requestId);
+      recovered.put(row.requestId, CheckoutRow.recovered(row, subscription));
     } else if ("expired".equals(status) && row.createdAt != null
         && !row.createdAt.after(abandonedBefore)) {
       boolean closed = audit.isDryRun() || checkoutWrites.recordExpired(row.requestId);
@@ -249,20 +255,25 @@ public class BillingReconciliationService {
   // ── Phase 2: provisioning repair ────────────────────────────────────────────────────────
 
   private void repairProvisioning(ReconciliationResult result, ReconciliationAudit audit,
-      Set<String> recovered) {
+      Map<String, CheckoutRow> recovered) {
     Date graceBefore = minutesAgo(settings.getPaidGraceMinutes());
+    // A new purchase is paid and has no environment yet; a re-subscription (ETP-5742) names its
+    // environment from the start, so it is the paid request that does.
     List<CheckoutRow> rows = checkoutRows("cr.checkoutRequestStatus in (:paid, :provisioning)"
-        + " and cr.createdClient is null",
+        + " and (cr.createdClient is null or cr.checkoutRequestStatus = :paid)",
         Map.of("paid", STATUS_PAID, "provisioning", STATUS_PROVISIONING));
     // A payment recovered by phase 1 in a dry run is still CREATED in the database.
     if (audit.isDryRun()) {
-      for (String requestId : recovered) {
-        rows.add(CheckoutRow.recoveredInDryRun(requestId));
-      }
+      rows.addAll(recovered.values());
     }
     for (CheckoutRow row : rows) {
       try {
-        repairOne(row, graceBefore, result, audit, recovered.contains(row.requestId));
+        if (row.reactivation) {
+          applyReactivation(row, graceBefore, result, audit,
+              recovered.containsKey(row.requestId));
+          continue;
+        }
+        repairOne(row, graceBefore, result, audit, recovered.containsKey(row.requestId));
       } catch (RuntimeException e) {
         itemFailed(result, "provisioning of " + row.requestId, e);
       }
@@ -277,7 +288,7 @@ public class BillingReconciliationService {
     }
     String derived = row.derivedStatus;
     if (DERIVED_PAID.equals(derived)) {
-      if (!justRecovered && (row.paidAt == null || row.paidAt.after(graceBefore))) {
+      if (!justRecovered && isInsideGrace(row, graceBefore)) {
         return; // the browser normally provisions it within the grace
       }
     } else if (DERIVED_FAILED.equals(derived)) {
@@ -311,6 +322,49 @@ public class BillingReconciliationService {
     recordProvisioningOutcome(row.requestId, outcome, result, audit);
   }
 
+  /**
+   * Applies a paid re-subscription the payment webhook never applied (ETP-5742), through the
+   * webhook's own fenced path. Without it the payment is recorded and the customer stays blocked,
+   * because a re-subscription is never provisioned.
+   *
+   * <p>The preference route's watermark moves to the new subscription's start on the provider's
+   * clock, as the webhook moves it to its event's: read from the provider, and the attempt is left
+   * for a later run when that read fails.
+   */
+  private void applyReactivation(CheckoutRow row, Date graceBefore, ReconciliationResult result,
+      ReconciliationAudit audit, boolean justRecovered) {
+    if (audit.alreadyRecorded(ReconciliationAudit.eventId(KIND_NEEDS_REVIEW, row.requestId))) {
+      result.increment(Counter.AWAITING_REVIEW);
+      return;
+    }
+    if (!justRecovered && isInsideGrace(row, graceBefore)) {
+      return; // the payment webhook applies it right after recording the payment
+    }
+    Instant paidAt = null;
+    if (row.subscriptionId != null) {
+      JSONObject subscription = retrieve("/v1/subscriptions/", row.subscriptionId, result);
+      if (subscription == null) {
+        return; // counted as a provider error; retried by a later run
+      }
+      paidAt = SubscriptionLifecycleApplier.providerStateAt(subscription);
+    }
+    if (audit.isDryRun()) {
+      audit.repaired("apply paid re-subscription {} to its environment", row.requestId);
+      result.increment(Counter.REACTIVATIONS_APPLIED);
+      return;
+    }
+    if (!reactivations.applyIfPending(row.requestId, paidAt)) {
+      return; // applied meanwhile by the webhook, or no longer pending
+    }
+    audit.write(ReconciliationAudit.eventId(KIND_REACTIVATION_APPLIED, row.requestId),
+        KIND_REACTIVATION_APPLIED, row.requestId, BillingEventStore.RESULT_APPLIED,
+        "Re-subscription applied by the reconciliation; its payment webhook never applied it",
+        summary("subscription", row.subscriptionId));
+    audit.alert("Applied a paid re-subscription the webhook never applied: request {}",
+        row.requestId);
+    result.increment(Counter.REACTIVATIONS_APPLIED);
+  }
+
   private void recordProvisioningOutcome(String requestId, PaidProvisioningService.Outcome outcome,
       ReconciliationResult result, ReconciliationAudit audit) {
     switch (outcome.status()) {
@@ -342,6 +396,11 @@ public class BillingReconciliationService {
         // NOT_CLAIMED: another attempt holds it, or it finished meanwhile; nothing to record.
         break;
     }
+  }
+
+  /** Paid too recently for anyone but its own browser or webhook to act on it yet. */
+  private static boolean isInsideGrace(CheckoutRow row, Date graceBefore) {
+    return row.paidAt == null || row.paidAt.after(graceBefore);
   }
 
   private static boolean isDeterministic(String failureReason) {
@@ -454,6 +513,8 @@ public class BillingReconciliationService {
     private long attempts;
     private Date createdAt;
     private boolean retryAllowed;
+    private boolean reactivation;
+    private String subscriptionId;
 
     private CheckoutRow() {
     }
@@ -463,19 +524,29 @@ public class BillingReconciliationService {
       this.sessionId = request.getStripeSession();
       this.derivedStatus = derivedStatus;
       this.failureReason = request.getFailureReason();
-      this.paidAt = request.getPaidAt();
+      // A row paid before PAID_AT existed has none: its creation stands in, so it still leaves
+      // the browser's grace instead of waiting for a payment instant it will never get.
+      this.paidAt = request.getPaidAt() != null ? request.getPaidAt() : request.getCreationDate();
       this.attempts = request.getProvisioningAttempts() == null ? 0L
           : request.getProvisioningAttempts();
       this.createdAt = request.getCreatedAt();
       this.retryAllowed = retryAllowed;
+      this.reactivation = request.getCreatedClient() != null;
+      this.subscriptionId = StringUtils.trimToNull(request.getStripeSubscription());
     }
 
-    /** A payment phase 1 recovered in a dry run: still {@code CREATED} in the database. */
-    static CheckoutRow recoveredInDryRun(String requestId) {
+    /**
+     * A payment phase 1 recovered: what phase 2 needs of it in a dry run, where the database
+     * still holds it as {@code CREATED}.
+     */
+    static CheckoutRow recovered(CheckoutRow created, String subscriptionId) {
       CheckoutRow row = new CheckoutRow();
-      row.requestId = requestId;
+      row.requestId = created.requestId;
       row.derivedStatus = DERIVED_PAID;
       row.retryAllowed = true;
+      row.reactivation = created.reactivation;
+      row.subscriptionId = StringUtils.trimToNull(subscriptionId);
+      row.paidAt = created.createdAt;
       return row;
     }
   }

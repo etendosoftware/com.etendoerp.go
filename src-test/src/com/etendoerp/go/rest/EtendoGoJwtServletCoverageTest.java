@@ -3864,7 +3864,7 @@ public class EtendoGoJwtServletCoverageTest {
 
   private static PaidProvisioningService.PaidInput paidInput(String currencyIso) {
     return new PaidProvisioningService.PaidInput("purchase-1", "account-1", "user@test.com",
-        "User", "Acme", null, "en_US", currencyIso, "ES");
+        "User", "Acme", null, "en_US", currencyIso, "ES", null, null);
   }
 
   /** ETP-5048 — a currency the instance does not know needs review; nothing is claimed. */

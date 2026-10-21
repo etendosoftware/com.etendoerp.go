@@ -12,6 +12,8 @@ import java.util.function.Supplier;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.hibernate.LockMode;
+import org.hibernate.LockOptions;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
@@ -893,15 +895,31 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
    * ETP-5742 — the re-subscription a confirmed payment has to be applied to, read by the payment
    * webhook right after {@link #recordPaid}.
    *
+   * <p>ETP-5048 — <b>the fence of that application.</b> The billing reconciliation applies a
+   * re-subscription whose webhook was lost through the same path, so two callers can reach one
+   * request. A pending request is therefore locked ({@code SELECT ... FOR UPDATE}) and re-read
+   * before it is returned: the lock is held until the caller's transaction ends (the
+   * {@code PROVISIONED} write commits it), so a second caller waits, then reads the request
+   * applied and gets {@code null}.
+   *
    * @param requestId correlation id read from {@code metadata[request_id]}
    * @return the request when it is a re-subscription paid but not yet applied, else {@code null}
    */
   public CheckoutRequest findPaidReactivation(String requestId) {
     return runAsSystem(() -> {
       CheckoutRequest request = findByRequestId(requestId);
-      return isPendingReactivation(request)
-          && STATUS_PAID.equals(request.getCheckoutRequestStatus()) ? request : null;
+      if (!isPaidReactivation(request)) {
+        return null;
+      }
+      OBDal.getInstance().getSession().refresh(request,
+          new LockOptions(LockMode.PESSIMISTIC_WRITE));
+      return isPaidReactivation(request) ? request : null;
     });
+  }
+
+  private static boolean isPaidReactivation(CheckoutRequest request) {
+    return isPendingReactivation(request)
+        && STATUS_PAID.equals(request.getCheckoutRequestStatus());
   }
 
   /**

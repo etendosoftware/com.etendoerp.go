@@ -49,6 +49,7 @@ import com.etendoerp.go.payment.reconcile.ReconciliationResult.Counter;
 import com.etendoerp.go.rest.PaidProvisioningService;
 import com.etendoerp.go.rest.PaidProvisioningService.Outcome;
 import com.etendoerp.go.rest.PaidProvisioningService.Status;
+import com.etendoerp.go.rest.PaidReactivationService;
 import com.etendoerp.go.schemaforge.data.CheckoutRequest;
 
 /**
@@ -81,6 +82,7 @@ public class BillingReconciliationServiceTest {
   private PaidProvisioningService provisioning;
   private SubscriptionReconciler subscriptions;
   private CheckoutRequestWrites checkoutWrites;
+  private PaidReactivationService reactivations;
   private ReconciliationSettings settings = ReconciliationSettings.defaults();
   private TestLogCapture auditLog;
 
@@ -92,6 +94,7 @@ public class BillingReconciliationServiceTest {
     provisioning = mock(PaidProvisioningService.class);
     subscriptions = mock(SubscriptionReconciler.class);
     checkoutWrites = mock(CheckoutRequestWrites.class);
+    reactivations = mock(PaidReactivationService.class);
     when(eventStore.findStaleReceived(any(), anyInt())).thenReturn(staleEvents);
     when(eventStore.recordReconciliation(anyString(), anyString(), any(), anyString(), any(),
         any())).thenReturn(true);
@@ -124,6 +127,7 @@ public class BillingReconciliationServiceTest {
           checkoutStore, eventStore, provisioning, subscriptions,
           Clock.fixed(NOW, ZoneOffset.UTC));
       service.checkoutWrites = checkoutWrites;
+      service.reactivations = reactivations;
       return service.run(dryRun);
     }
   }
@@ -255,6 +259,81 @@ public class BillingReconciliationServiceTest {
   @Test
   public void aPaidRowPastTheGraceIsProvisionedUnderTheClaim() {
     paidRows.add(paidRow(REQ, ago(20, TimeUnit.MINUTES), 0L, "paid"));
+    when(provisioning.provision(eq(REQ), any()))
+        .thenReturn(new Outcome(Status.PROVISIONED, null, "Environment created", 1L));
+
+    ReconciliationResult result = run(false);
+
+    verify(provisioning).provision(eq(REQ), any());
+    assertEquals(1, result.get(Counter.PROVISIONED));
+  }
+
+  /** A re-subscription (ETP-5742): a request naming its canceled environment from the start. */
+  private CheckoutRequest reactivationRow(CheckoutRequest request) {
+    org.openbravo.model.ad.system.Client tenant = mock(org.openbravo.model.ad.system.Client.class);
+    when(tenant.getId()).thenReturn("TENANT-1");
+    when(request.getCreatedClient()).thenReturn(tenant);
+    when(request.getStripeSubscription()).thenReturn("sub_new");
+    return request;
+  }
+
+  /**
+   * A re-subscription whose payment webhook was lost: recording the payment alone would leave the
+   * customer paid and blocked. The run applies it through the webhook's own path, ordered at the
+   * new subscription's start on the provider's clock.
+   */
+  @Test
+  public void aLostReSubscriptionPaymentIsRecordedAndThenApplied() throws Exception {
+    createdRows.add(reactivationRow(row(REQ, SESSION, ago(20, TimeUnit.MINUTES), "pending")));
+    session(SESSION, "complete", "paid", REQ);
+    paidRows.add(reactivationRow(paidRow(REQ, ago(1, TimeUnit.MINUTES), 0L, "paid")));
+    when(stripe.get("/v1/subscriptions/sub_new")).thenReturn(new StripeResponse(200,
+        "{\"id\":\"sub_new\",\"status\":\"active\",\"current_period_start\":1792000000}"));
+    when(reactivations.applyIfPending(eq(REQ), any())).thenReturn(true);
+
+    ReconciliationResult result = run(false);
+
+    verify(checkoutStore).recordPaid(REQ, "cus_1", "sub_1");
+    verify(reactivations).applyIfPending(REQ, Instant.ofEpochSecond(1_792_000_000L));
+    verify(provisioning, never()).provision(anyString(), any());
+    verifyRow("reconcile:reactivation-applied:" + REQ, "reconciliation.reactivation-applied",
+        BillingEventStore.RESULT_APPLIED);
+    assertEquals(1, result.get(Counter.REACTIVATIONS_APPLIED));
+    assertTrue(result.getErrors().isEmpty());
+  }
+
+  @Test
+  public void aReSubscriptionThatCannotBeAppliedFailsTheRunInsteadOfReportingItRecovered()
+      throws Exception {
+    paidRows.add(reactivationRow(paidRow(REQ, ago(2, TimeUnit.HOURS), 0L, "paid")));
+    when(stripe.get("/v1/subscriptions/sub_new")).thenReturn(new StripeResponse(200,
+        "{\"id\":\"sub_new\",\"status\":\"active\"}"));
+    when(reactivations.applyIfPending(eq(REQ), any()))
+        .thenThrow(new IllegalStateException("could not mark productive"));
+
+    ReconciliationResult result = run(false);
+
+    assertEquals(0, result.get(Counter.REACTIVATIONS_APPLIED));
+    assertTrue(result.hasFailures());
+    assertTrue(result.toString(), !result.toString().contains("Everything is consistent"));
+  }
+
+  @Test
+  public void aReSubscriptionInsideTheGraceIsLeftToItsWebhook() throws Exception {
+    paidRows.add(reactivationRow(paidRow(REQ, ago(5, TimeUnit.MINUTES), 0L, "paid")));
+
+    run(false);
+
+    verify(reactivations, never()).applyIfPending(anyString(), any());
+    verify(stripe, never()).get(anyString());
+  }
+
+  /** A row paid before PAID_AT was recorded is provisioned once its creation leaves the grace. */
+  @Test
+  public void aPaidRowWithoutAPaidAtFallsBackToItsCreation() {
+    CheckoutRequest legacy = paidRow(REQ, null, 0L, "paid");
+    when(legacy.getCreationDate()).thenReturn(ago(2, TimeUnit.HOURS));
+    paidRows.add(legacy);
     when(provisioning.provision(eq(REQ), any()))
         .thenReturn(new Outcome(Status.PROVISIONED, null, "Environment created", 1L));
 

@@ -27,6 +27,7 @@ public final class ReconciliationResult {
     PAYMENTS_RECOVERED("payments recovered from the provider"),
     CHECKOUTS_EXPIRED("abandoned checkouts closed"),
     PROVISIONED("environments provisioned"),
+    REACTIVATIONS_APPLIED("re-subscriptions applied"),
     PROVISIONING_FAILED("provisioning attempts failed"),
     NEEDS_REVIEW("new purchases needing review"),
     AWAITING_REVIEW("purchases still awaiting review"),
@@ -140,7 +141,8 @@ public final class ReconciliationResult {
    */
   public int repairs() {
     return get(Counter.PAYMENTS_RECOVERED) + get(Counter.CHECKOUTS_EXPIRED)
-        + get(Counter.PROVISIONED) + get(Counter.PROVISIONING_FAILED) + get(Counter.NEEDS_REVIEW)
+        + get(Counter.PROVISIONED) + get(Counter.REACTIVATIONS_APPLIED)
+        + get(Counter.PROVISIONING_FAILED) + get(Counter.NEEDS_REVIEW)
         + get(Counter.SUBSCRIPTIONS_CLOSED) + get(Counter.SUBSCRIPTIONS_CURRENT)
         + get(Counter.PRICES_FILLED) + get(Counter.PAUSE_COLLECTION_ALERTS)
         + get(Counter.PAUSED_ALERTS)

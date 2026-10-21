@@ -51,7 +51,9 @@ import com.etendoerp.go.schemaforge.data.CheckoutRequest;
  * <p><b>Inputs.</b> {@code LANGUAGE}, {@code CURRENCY} and {@code COUNTRY} recorded on the checkout
  * row at purchase time; when a column is empty (a purchase made before ETP-5048, or one whose
  * browser did not send the value) the account's stored onboarding draft, then {@code en_US},
- * {@code EUR} and {@code ES} — the same defaults the onboarding request parser applies.
+ * {@code EUR} and {@code ES} — the same defaults the onboarding request parser applies. The
+ * company address and fiscal identifier come from the draft too, so a server-repaired environment
+ * gets the same company data the browser would have sent.
  *
  * <p>The caller's {@link OBContext} is restored afterwards: the run switches the thread to the
  * system context and then into the new tenant.
@@ -69,6 +71,8 @@ public class PaidProvisioningService {
   private static final String DRAFT_CURRENCY = "currency";
   private static final String DRAFT_COUNTRY = "countryCode";
   private static final String DRAFT_FULL_NAME = "fullName";
+  private static final String DRAFT_ADDRESS = "address";
+  private static final String DRAFT_TAX_ID = "fiscalIdValue";
 
   /** How a server-side provisioning attempt ended. */
   public enum Status {
@@ -111,10 +115,12 @@ public class PaidProvisioningService {
    * @param language the UI language, never blank
    * @param currencyIso the ISO currency code, never blank
    * @param countryCode the ISO country code, never blank
+   * @param address the company address from the stored draft, may be blank
+   * @param taxId the fiscal identifier from the stored draft ({@code fiscalIdValue}), may be blank
    */
   public record PaidInput(String requestId, String accountId, String accountEmail,
       String accountName, String clientName, String fullName, String language, String currencyIso,
-      String countryCode) {
+      String countryCode, String address, String taxId) {
   }
 
   private final Supplier<EtendoGoJwtServlet> runnerFactory;
@@ -182,7 +188,8 @@ public class PaidProvisioningService {
         account.getName(), request.getClientName(), draftValue(draft, DRAFT_FULL_NAME),
         firstNonBlank(request.getLanguage(), draftValue(draft, DRAFT_LANGUAGE), DEFAULT_LANGUAGE),
         firstNonBlank(request.getCurrency(), draftValue(draft, DRAFT_CURRENCY), DEFAULT_CURRENCY),
-        firstNonBlank(request.getCountry(), draftValue(draft, DRAFT_COUNTRY), DEFAULT_COUNTRY));
+        firstNonBlank(request.getCountry(), draftValue(draft, DRAFT_COUNTRY), DEFAULT_COUNTRY),
+        draftValue(draft, DRAFT_ADDRESS), draftValue(draft, DRAFT_TAX_ID));
   }
 
   private static String firstNonBlank(String recorded, String fromDraft, String fallback) {

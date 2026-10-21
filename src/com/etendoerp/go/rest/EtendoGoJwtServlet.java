@@ -84,6 +84,7 @@ import com.etendoerp.go.payment.BillingOfferConfiguration;
 import com.etendoerp.go.payment.StripeCurrencyScale;
 import com.etendoerp.go.payment.StripePriceService;
 import com.etendoerp.go.payment.CheckoutRequestStore;
+import com.etendoerp.go.payment.CheckoutRequestWrites;
 import com.etendoerp.go.payment.PausedSubscriptionAlert;
 import com.etendoerp.go.payment.ProvisioningFailureReason;
 import com.etendoerp.go.payment.EnvironmentPlanCache;
@@ -118,6 +119,8 @@ import com.etendoerp.go.onboarding.OnboardingPeriodControlService;
 import com.etendoerp.go.onboarding.OnboardingCostingScheduleService;
 import com.etendoerp.go.onboarding.OnboardingWarehouseAddressService;
 import com.etendoerp.go.onboarding.NdjsonOnboardingProgressSink;
+import com.etendoerp.go.onboarding.NdjsonSinkWriter;
+import com.etendoerp.go.onboarding.OnboardingProgressSink;
 import com.etendoerp.go.onboarding.OnboardingStreamWriter;
 import com.etendoerp.go.common.SpanishTaxIdValidator;
 import com.etendoerp.go.onboarding.OnboardingCompanyDataService;
@@ -449,8 +452,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   DemoDataTransferService demoDataTransferService = new DemoDataTransferService();
   BillingEventStore billingEventStore = new BillingEventStore();
   /** ETP-5048 — records the onboarding inputs of a purchase; package-visible for tests. */
-  com.etendoerp.go.payment.CheckoutRequestWrites checkoutRequestWrites =
-      new com.etendoerp.go.payment.CheckoutRequestWrites();
+  CheckoutRequestWrites checkoutRequestWrites = new CheckoutRequestWrites();
   CheckoutWebhookProcessor checkoutWebhookProcessor =
       new CheckoutWebhookProcessor(billingEventStore, CHECKOUT_WEBHOOK_TOLERANCE_SECONDS);
   SubscriptionLifecycleApplier subscriptionLifecycleApplier = new SubscriptionLifecycleApplier();
@@ -1811,7 +1813,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       billingEventStore.markIgnored(eventId, "unknown checkout request");
       return;
     }
-    applyReactivationIfPending(requestId, event);
+    applyReactivationIfPending(requestId, SubscriptionLifecycleApplier.eventCreatedAt(event));
     billingEventStore.markApplied(eventId);
     log.info("Checkout webhook event '{}' ({}) applied", eventId, type);
   }
@@ -1839,17 +1841,29 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * a failure before that rolls them back with the event, the webhook answers 500 and the provider
    * redelivers, and the request is still {@code PAID} for the retry. Opening the row is idempotent
    * for an already open, active one.
+   *
+   * <p><b>One path, two callers (ETP-5048).</b> The billing reconciliation applies a
+   * re-subscription whose payment webhook was lost through this same method, via
+   * {@link PaidReactivationService}. Two callers on one request are fenced by
+   * {@link CheckoutRequestStore#findPaidReactivation}, which locks the request row and re-reads
+   * it: the second waits for the first to commit, then finds it {@code PROVISIONED} and does
+   * nothing.
+   *
+   * @param requestId the paid request
+   * @param paidAt the provider instant of the payment, the preference route's new watermark; null
+   *     leaves the watermark as it is
+   * @return whether this call applied a re-subscription
    */
-  private void applyReactivationIfPending(String requestId, JSONObject event) {
+  boolean applyReactivationIfPending(String requestId, Instant paidAt) {
     CheckoutRequest reactivation = checkoutRequestStore.findPaidReactivation(requestId);
     if (reactivation == null) {
-      return;
+      return false;
     }
     String clientId = reactivation.getCreatedClient().getId();
     SystemContext.run("a subscription re-subscription",
-        () -> applyReactivation(reactivation, clientId,
-            SubscriptionLifecycleApplier.eventCreatedAt(event)));
+        () -> applyReactivation(reactivation, clientId, paidAt));
     fillSubscriptionPeriodBestEffort(clientId);
+    return true;
   }
 
   private void applyReactivation(CheckoutRequest reactivation, String clientId,
@@ -4549,7 +4563,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * the transport-independent part of {@code POST /sws/go/onboarding}: the HTTP path calls it with
    * the response stream, and {@link PaidProvisioningService} (ETP-5048) calls it for a paid
    * purchase with no browser attached, with a writer that feeds an
-   * {@link com.etendoerp.go.onboarding.OnboardingProgressSink}.
+   * {@link OnboardingProgressSink}.
    *
    * <p>Provisioning has many graceful exits that write a result line and answer {@code false}
    * rather than throw; they are promoted to the same exception path as thrown failures, so the
@@ -4625,16 +4639,16 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * @return how the attempt ended
    */
   PaidProvisioningService.Outcome provisionPaidPurchase(PaidProvisioningService.PaidInput input,
-      com.etendoerp.go.onboarding.OnboardingProgressSink sink) {
+      OnboardingProgressSink sink) {
     OnboardingRequestData data = new OnboardingRequestData();
     data.clientName = input.clientName();
     data.currencyIso = input.currencyIso();
     data.language = input.language();
     data.countryCode = input.countryCode();
-    data.address = "";
+    data.address = serverSideAddress(input);
     data.fullName = EtendoGoJwtSupport.resolveOwnerDisplayName(input.fullName(),
         input.accountName(), input.accountEmail());
-    data.taxId = "";
+    data.taxId = serverSideTaxId(input);
     data.paymentToken = input.requestId();
     data.upgradeAction = "create-productive";
     data.includeSampleData = false;
@@ -4669,7 +4683,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     OnboardingPreparation preparation = new OnboardingPreparation(accountId, accountEmail, data,
         currencyId, true, attempt);
     OnboardingStreamWriter writer = new OnboardingStreamWriter(
-        new PrintWriter(new com.etendoerp.go.onboarding.NdjsonSinkWriter(sink)));
+        new PrintWriter(new NdjsonSinkWriter(sink)));
     boolean completed = runOnboarding(preparation, writer, () -> { });
     if (completed) {
       return new PaidProvisioningService.Outcome(PaidProvisioningService.Status.PROVISIONED, null,
@@ -4679,6 +4693,42 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         StringUtils.defaultIfBlank(writer.getResultCode(),
             ProvisioningFailureReason.CODE_PROVISIONING_FAILED),
         StringUtils.left(StringUtils.normalizeSpace(writer.getResultMessage()), 200), attempt);
+  }
+
+  /**
+   * ETP-5048 — the company address of a server-side provisioning: the draft's, under the limit
+   * the HTTP path enforces. Too long a value is dropped, not truncated: the owner fixes it in the
+   * Organization window, while a provisioning that fails over it helps nobody.
+   */
+  private static String serverSideAddress(PaidProvisioningService.PaidInput input) {
+    String address = StringUtils.trimToEmpty(input.address());
+    if (OnboardingFieldLimits.exceeds(address, OnboardingFieldLimits.ADDRESS)) {
+      log.warn("Server-side provisioning of {}: the draft address exceeds {} characters and is "
+          + "left out", input.requestId(), OnboardingFieldLimits.ADDRESS);
+      return "";
+    }
+    return address;
+  }
+
+  /**
+   * ETP-5048 — the fiscal identifier of a server-side provisioning: the draft's, when it passes
+   * the check the HTTP path runs before streaming ({@link #validateOnboardingTaxId}). A value that
+   * fails it is left out rather than failing the provisioning; the owner sets it later.
+   */
+  private static String serverSideTaxId(PaidProvisioningService.PaidInput input) {
+    String taxId = StringUtils.trimToEmpty(input.taxId());
+    if (taxId.isEmpty()
+        || !SpanishTaxIdValidator.SPAIN_COUNTRY_CODE.equalsIgnoreCase(input.countryCode())) {
+      return taxId;
+    }
+    SpanishTaxIdValidator.Result check = SpanishTaxIdValidator.validate(taxId);
+    if (check == SpanishTaxIdValidator.Result.BAD_FORMAT
+        || check == SpanishTaxIdValidator.Result.BAD_CHECK_DIGIT) {
+      log.warn("Server-side provisioning of {}: the draft fiscal identifier is not valid ({}) "
+          + "and is left out", input.requestId(), check);
+      return "";
+    }
+    return taxId;
   }
 
   /**
