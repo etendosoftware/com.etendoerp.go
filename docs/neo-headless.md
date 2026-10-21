@@ -5144,7 +5144,7 @@ class reads each flag, and what breaks if it is wrong); the user-facing behaviou
 | `httpMethod` | `String` | `GET`, `POST`, `PUT`, `PATCH`, or `DELETE`. |
 | `recordId` | `String` | Record ID from URL (null for list operations). |
 | `requestBody` | `JSONObject` | Parsed request body (null for GET/DELETE). |
-| `queryParams` | `Map<String, String>` | URL query parameters. |
+| `queryParams` | `Map<String, String>` | URL query parameters. Populated on CRUD, on MCP and — since ETP-5680 — on the REST `/defaults` hook context (`NeoSubEndpointDispatcher` forwards the query string); `null` on the other REST sub-endpoint hook contexts (actions, selectors, callouts), so guard it. |
 | `adTab` | `Tab` | Resolved AD_Tab (null for process specs). |
 | `obContext` | `OBContext` | Authenticated user context. |
 | `previousResult` | `NeoResponse` | Mutable. Can be set by the handler for post-processing patterns. |

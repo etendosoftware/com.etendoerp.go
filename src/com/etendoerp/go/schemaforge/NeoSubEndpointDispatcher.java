@@ -137,18 +137,20 @@ class NeoSubEndpointDispatcher {
           "Defaults endpoint only supports GET");
       return true;
     }
+    // ETP-5680: the hooks must see the same query string the defaults resolver itself reads, so a
+    // customization can honor a parameter such as `productType` without reaching for the servlet
+    // request.
     return handleHookedSubEndpoint(new HookedSubEndpointRequest(spec, pathInfo.entityName,
         NeoEndpointType.DEFAULTS, null, method, null,
-        () -> servlet.defaultsEndpoint.handleDefaults(spec, pathInfo, request)), response);
+        () -> servlet.defaultsEndpoint.handleDefaults(spec, pathInfo, request),
+        servlet.extractQueryParams(request)), response);
   }
 
   private boolean handleHookedSubEndpoint(HookedSubEndpointRequest request,
       HttpServletResponse response) throws IOException {
-    NeoResponse endpointResult = request.actionParams == null
-        ? servlet.hookDispatcher.dispatchWithHooks(request.spec, request.entityName, request.endpointType,
-            request.fieldName, request.method, request.defaultAction)
-        : servlet.hookDispatcher.dispatchWithHooks(request.spec, request.entityName, request.endpointType,
-            request.fieldName, request.method, request.actionParams, request.defaultAction);
+    NeoResponse endpointResult = servlet.hookDispatcher.dispatchWithHooks(request.spec,
+        request.entityName, request.endpointType, request.fieldName, request.method,
+        request.actionParams, request.queryParams, request.defaultAction);
     servlet.writeResponse(response, endpointResult);
     return true;
   }
@@ -188,10 +190,20 @@ class NeoSubEndpointDispatcher {
     final String method;
     final ActionDispatchParams actionParams;
     final java.util.function.Supplier<NeoResponse> defaultAction;
+    /** Query string forwarded to the hook context; {@code null} when the endpoint has none. */
+    final java.util.Map<String, String> queryParams;
 
     HookedSubEndpointRequest(SFSpec spec, String entityName, NeoEndpointType endpointType,
         String fieldName, String method, ActionDispatchParams actionParams,
         java.util.function.Supplier<NeoResponse> defaultAction) {
+      this(spec, entityName, endpointType, fieldName, method, actionParams, defaultAction, null);
+    }
+
+    HookedSubEndpointRequest(SFSpec spec, String entityName, NeoEndpointType endpointType,
+        String fieldName, String method, ActionDispatchParams actionParams,
+        java.util.function.Supplier<NeoResponse> defaultAction,
+        java.util.Map<String, String> queryParams) {
+      this.queryParams = queryParams;
       this.spec = spec;
       this.entityName = entityName;
       this.endpointType = endpointType;

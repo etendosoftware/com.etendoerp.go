@@ -46,6 +46,9 @@ import com.etendoerp.go.schemaforge.util.NeoAuditTokenRefresh;
 /**
  * Unit tests for {@link NeoHookDispatcher}.
  * Verifies hook resolution, chain execution, and error handling.
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoHookDispatcher
+ * @covers com.etendoerp.go.schemaforge.NeoSubEndpointDispatcher
  */
 class NeoHookDispatcherTest {
 
@@ -440,5 +443,43 @@ class NeoHookDispatcherTest {
       assertEquals("hook", noParams.getBody().getString("source"));
       guard.verify(() -> NeoActionRecordGuard.refusalFor(Mockito.any(), Mockito.any()), never());
     }
+  }
+  // ── ETP-5680: the hook context of a sub-endpoint carries the request's query string ──
+
+  @Test
+  @DisplayName("Query params passed to the dispatcher reach handle() and afterHandle() contexts")
+  void queryParamsReachTheHookContext() throws Exception {
+    NeoHandler handler = mock(NeoHandler.class);
+    SFEntity entity = mock(SFEntity.class);
+    when(entity.getJavaQualifier()).thenReturn("myQualifier");
+    when(servlet.findEntity(eq("spec-id-1"), eq("Header"))).thenReturn(entity);
+    servletSupportStatic.when(() -> NeoServletSupport.lookupHandler("myQualifier")).thenReturn(handler);
+    java.util.Map<String, String> query = java.util.Map.of("productType", "S");
+
+    dispatcher.dispatchWithHooks(spec, "Header", NeoEndpointType.DEFAULTS, null, "GET", null,
+        query, defaultAction);
+
+    org.mockito.ArgumentCaptor<NeoContext> pre = org.mockito.ArgumentCaptor.forClass(NeoContext.class);
+    org.mockito.ArgumentCaptor<NeoContext> post = org.mockito.ArgumentCaptor.forClass(NeoContext.class);
+    verify(handler).handle(pre.capture());
+    verify(handler).afterHandle(post.capture());
+    assertEquals("S", pre.getValue().getQueryParams().get("productType"));
+    assertEquals("S", post.getValue().getQueryParams().get("productType"));
+  }
+
+  @Test
+  @DisplayName("Without query params the context keeps no query map (previous behavior)")
+  void noQueryParamsLeavesContextUnset() throws Exception {
+    NeoHandler handler = mock(NeoHandler.class);
+    SFEntity entity = mock(SFEntity.class);
+    when(entity.getJavaQualifier()).thenReturn("myQualifier");
+    when(servlet.findEntity(eq("spec-id-1"), eq("Header"))).thenReturn(entity);
+    servletSupportStatic.when(() -> NeoServletSupport.lookupHandler("myQualifier")).thenReturn(handler);
+
+    dispatcher.dispatchWithHooks(spec, "Header", NeoEndpointType.CRUD, null, "GET", defaultAction);
+
+    org.mockito.ArgumentCaptor<NeoContext> pre = org.mockito.ArgumentCaptor.forClass(NeoContext.class);
+    verify(handler).handle(pre.capture());
+    org.junit.jupiter.api.Assertions.assertNull(pre.getValue().getQueryParams());
   }
 }

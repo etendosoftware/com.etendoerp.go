@@ -72,6 +72,20 @@ class NeoHookDispatcher {
       NeoEndpointType endpointType, String fieldName,
       String httpMethod, NeoSubEndpointDispatcher.ActionDispatchParams actionParams,
       java.util.function.Supplier<NeoResponse> defaultAction) {
+    return dispatchWithHooks(spec, entityName, endpointType, fieldName, httpMethod, actionParams,
+        null, defaultAction);
+  }
+
+  /**
+   * ETP-5680: as above, additionally exposing the request's query string to the hooks through
+   * {@link NeoContext#getQueryParams()} (null leaves it unset, as before).
+   */
+  NeoResponse dispatchWithHooks(
+      SFSpec spec, String entityName,
+      NeoEndpointType endpointType, String fieldName,
+      String httpMethod, NeoSubEndpointDispatcher.ActionDispatchParams actionParams,
+      java.util.Map<String, String> queryParams,
+      java.util.function.Supplier<NeoResponse> defaultAction) {
 
     SFEntity entity = servlet.findEntity(spec.getId(), entityName);
     String qualifier = (entity != null) ? entity.getJavaQualifier() : null;
@@ -85,7 +99,7 @@ class NeoHookDispatcher {
     }
 
     NeoContext hookCtx = buildHookContext(spec, entityName, endpointType, fieldName,
-        httpMethod, entity, actionParams);
+        httpMethod, entity, actionParams, queryParams);
 
     // ETP-5415: routed through NeoExtensionDispatcher, which is what brings the SELECTOR,
     // CALLOUT and EVALUATE_DISPLAY surfaces into the trace — they reach an entity's
@@ -115,7 +129,8 @@ class NeoHookDispatcher {
 
   private NeoContext buildHookContext(SFSpec spec, String entityName,
       NeoEndpointType endpointType, String fieldName, String httpMethod,
-      SFEntity entity, NeoSubEndpointDispatcher.ActionDispatchParams actionParams) {
+      SFEntity entity, NeoSubEndpointDispatcher.ActionDispatchParams actionParams,
+      java.util.Map<String, String> queryParams) {
     Tab adTab = entity != null ? entity.getADTab() : null;
     NeoContext.Builder contextBuilder = NeoContext.builder()
         .specName(spec.getName())
@@ -126,6 +141,9 @@ class NeoHookDispatcher {
         .sfEntity(entity)
         .adTab(adTab)
         .obContext(OBContext.getOBContext());
+    if (queryParams != null) {
+      contextBuilder.queryParams(queryParams);
+    }
     if (actionParams != null) {
       contextBuilder.recordId(actionParams.recordId)
           .requestBody(actionParams.requestBody);
