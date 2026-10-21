@@ -908,18 +908,16 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
   public CheckoutRequest findPaidReactivation(String requestId) {
     return runAsSystem(() -> {
       CheckoutRequest request = findByRequestId(requestId);
-      if (!isPaidReactivation(request)) {
+      if (!isPendingReactivation(request)
+          || !STATUS_PAID.equals(request.getCheckoutRequestStatus())) {
         return null;
       }
       OBDal.getInstance().getSession().refresh(request,
           new LockOptions(LockMode.PESSIMISTIC_WRITE));
-      return isPaidReactivation(request) ? request : null;
+      // Re-read under the lock: a concurrent caller may have applied it meanwhile.
+      return isPendingReactivation(request)
+          && STATUS_PAID.equals(request.getCheckoutRequestStatus()) ? request : null;
     });
-  }
-
-  private static boolean isPaidReactivation(CheckoutRequest request) {
-    return isPendingReactivation(request)
-        && STATUS_PAID.equals(request.getCheckoutRequestStatus());
   }
 
   /**

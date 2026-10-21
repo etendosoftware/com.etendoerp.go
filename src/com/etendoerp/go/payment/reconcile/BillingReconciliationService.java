@@ -114,6 +114,7 @@ public class BillingReconciliationService {
   private static final String FIELD_STATUS = "status";
   private static final String FIELD_METADATA = "metadata";
   private static final String FIELD_REQUEST_ID = "request_id";
+  private static final String FIELD_SUBSCRIPTION = "subscription";
   private static final String ITEM_CHECKOUT = "checkout ";
   static final String KIND_STALE_EVENT_REVIEW = "stale-event-review";
   /** Prefix of the review row of a stuck event: {@code reconcile:stale-event-review:<event>}. */
@@ -281,14 +282,15 @@ public class BillingReconciliationService {
     if ("complete".equals(status)
         && ("paid".equals(paymentStatus) || "no_payment_required".equals(paymentStatus))) {
       String customer = StripeJson.text(session, "customer");
-      String subscription = StripeJson.text(session, "subscription");
+      String subscription = StripeJson.text(session, FIELD_SUBSCRIPTION);
       if (!audit.isDryRun()) {
         checkoutStore.recordPaid(row.requestId, customer, subscription);
       }
       audit.write(ReconciliationAudit.eventId(KIND_PAYMENT_RECOVERED, row.requestId),
           KIND_PAYMENT_RECOVERED, row.requestId, BillingEventStore.RESULT_APPLIED,
           "Payment confirmed by re-reading the provider; the webhook never applied it",
-          summary("session", row.sessionId, "customer", customer, "subscription", subscription));
+          summary("session", row.sessionId, "customer", customer, FIELD_SUBSCRIPTION,
+              subscription));
       audit.alert("Recovered a paid checkout the webhook never applied: request {} session {}",
           row.requestId, row.sessionId);
       result.increment(Counter.PAYMENTS_RECOVERED);
@@ -432,7 +434,7 @@ public class BillingReconciliationService {
     audit.write(ReconciliationAudit.eventId(KIND_REACTIVATION_APPLIED, row.requestId),
         KIND_REACTIVATION_APPLIED, row.requestId, BillingEventStore.RESULT_APPLIED,
         "Re-subscription applied by the reconciliation; its payment webhook never applied it",
-        summary("subscription", row.subscriptionId));
+        summary(FIELD_SUBSCRIPTION, row.subscriptionId));
     audit.alert("Applied a paid re-subscription the webhook never applied: request {}",
         row.requestId);
     result.increment(Counter.REACTIVATIONS_APPLIED);
@@ -541,6 +543,28 @@ public class BillingReconciliationService {
    * re-read its state completed: payments (phases 1 and 2) and subscriptions (phase 4).
    */
   private void sweepStaleEvents(ReconciliationResult result, ReconciliationAudit audit) {
+    List<String> types = sweptTypes(result);
+    if (types.isEmpty()) {
+      return;
+    }
+    Date before = minutesAgo(settings.getReceivedStaleMinutes());
+    int batch = settings.getBatchSize();
+    int handled = 0;
+    int offset = 0;
+    boolean more = true;
+    for (int page = 0; more && page < STALE_EVENT_PAGES && handled < batch; page++) {
+      List<BillingEventStore.StaleEvent> events = eventStore.findStaleReceived(before, types,
+          STALE_REVIEW_ID_PREFIX, offset, batch);
+      int resolved = sweepPage(events, result, audit);
+      handled += resolved;
+      // A resolved event leaves the query (superseded or parked), except in a dry run.
+      offset += audit.isDryRun() ? events.size() : events.size() - resolved;
+      more = events.size() == batch;
+    }
+  }
+
+  /** The event types whose state this run re-read in full: those of its complete phases. */
+  private static List<String> sweptTypes(ReconciliationResult result) {
     List<String> types = new ArrayList<>();
     if (result.isComplete(Phase.CHECKOUT_RECOVERY)
         && result.isComplete(Phase.PROVISIONING_REPAIR)) {
@@ -550,26 +574,19 @@ public class BillingReconciliationService {
       types.addAll(StripeEventTypes.SUBSCRIPTION_LIFECYCLE);
       types.add(StripeEventTypes.SUBSCRIPTION_PAUSED);
     }
-    if (types.isEmpty()) {
-      return;
-    }
-    Date before = minutesAgo(settings.getReceivedStaleMinutes());
-    int batch = settings.getBatchSize();
-    int handled = 0;
-    int offset = 0;
-    for (int page = 0; page < STALE_EVENT_PAGES && handled < batch; page++) {
-      List<BillingEventStore.StaleEvent> events = eventStore.findStaleReceived(before, types,
-          STALE_REVIEW_ID_PREFIX, offset, batch);
-      for (BillingEventStore.StaleEvent event : events) {
-        boolean resolved = sweepOne(event, result, audit);
-        handled += resolved ? 1 : 0;
-        // A resolved event leaves the query (superseded or parked), except in a dry run.
-        offset += resolved && !audit.isDryRun() ? 0 : 1;
-      }
-      if (events.size() < batch) {
-        break;
+    return types;
+  }
+
+  /** @return how many events of the page were resolved (superseded or parked) */
+  private int sweepPage(List<BillingEventStore.StaleEvent> events, ReconciliationResult result,
+      ReconciliationAudit audit) {
+    int resolved = 0;
+    for (BillingEventStore.StaleEvent event : events) {
+      if (sweepOne(event, result, audit)) {
+        resolved++;
       }
     }
+    return resolved;
   }
 
   /** @return whether the event was resolved (superseded or parked) rather than left */
@@ -595,7 +612,7 @@ public class BillingReconciliationService {
         event.requestId(), BillingEventStore.RESULT_FAILED, "Stuck provider event " + type
             + " could not be vouched for by a re-read of the provider; review it in the Stripe "
             + "dashboard and set it to IGNORED or replay it", summary("event", event.eventId()))) {
-      audit.internalAlert("billing-reconcile-stale-event", event.eventId(), "stale-event-review",
+      audit.internalAlert("billing-reconcile-stale-event", event.eventId(), KIND_STALE_EVENT_REVIEW,
           null);
     }
     audit.alert("Stuck provider event {} ({}) needs review: the run could not vouch for it",
@@ -651,7 +668,7 @@ public class BillingReconciliationService {
     try {
       JSONObject summary = new JSONObject(event.summary());
       String key = StringUtils.startsWith(event.eventType(), "customer.subscription.")
-          ? "id" : "subscription";
+          ? "id" : FIELD_SUBSCRIPTION;
       return StringUtils.trimToNull(summary.optString(key, ""));
     } catch (JSONException e) {
       return null;

@@ -89,6 +89,7 @@ final class SubscriptionReconciler {
   private static final String FIELD_METADATA = "metadata";
   private static final String FIELD_REQUEST_ID = "request_id";
   private static final String SUMMARY_SUBSCRIPTION = "subscription";
+  private static final String ITEM_SUBSCRIPTION = "subscription ";
   private static final String CHECKOUT_PROVISIONED = "PROVISIONED";
   private static final String MODE_LIVE = "live";
   private static final String MODE_TEST = "test";
@@ -203,7 +204,7 @@ final class SubscriptionReconciler {
             subscription.optString(FIELD_STATUS, ""));
       }
     } catch (RuntimeException e) {
-      itemFailed(result, "subscription " + candidate.subscriptionId, e);
+      itemFailed(result, ITEM_SUBSCRIPTION + candidate.subscriptionId, e);
     }
   }
 
@@ -339,7 +340,7 @@ final class SubscriptionReconciler {
     if (!audit.isDryRun()) {
       if (!lifecycle.applySubscriptionEvent(target, outcome, eventAt)) {
         rollbackQuietly();
-        result.error("subscription " + candidate.subscriptionId + ": the correction could not "
+        result.error(ITEM_SUBSCRIPTION + candidate.subscriptionId + ": the correction could not "
             + "be stored");
         return;
       }
@@ -349,7 +350,7 @@ final class SubscriptionReconciler {
         // The insert rolled the correction back with it. A close is recorded once per
         // subscription, so finding it again means the subscription was closed by an earlier run
         // and is open again: a person has to look, it is never closed a second time silently.
-        result.error("subscription " + candidate.subscriptionId + ": correction " + eventId
+        result.error(ITEM_SUBSCRIPTION + candidate.subscriptionId + ": correction " + eventId
             + " is already recorded, so it was not applied again; review it");
         audit.alert("Subscription {} of client {} needs review: correction {} is already "
             + "recorded and was not applied again", candidate.subscriptionId, target.clientId(),
