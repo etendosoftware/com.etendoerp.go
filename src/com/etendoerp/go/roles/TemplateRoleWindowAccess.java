@@ -105,8 +105,8 @@ import java.util.Map;
  * against. "Informes financieros" / Financial Reports ({@code
  * D647D118F5014D00AF47A636B2CD0DD3}) is granted FULL to Financiero ONLY, matching the rest of
  * that role's finance-only tooling; Ventas/Compras/Almacén get nothing. "Escaneo inteligente" /
- * Smart Scan ({@code 33705E0F52874D91B0BB2FF8BB648B8E}) is granted FULL to ALL FOUR non-Admin
- * templates — a deliberate product decision that this page stays open to everyone once real
+ * Smart Scan ({@code 33705E0F52874D91B0BB2FF8BB648B8E}) was granted FULL to ALL FOUR non-Admin
+ * templates (removed again by ETP-5830, see below) — a deliberate product decision that this page stays open to everyone once real
  * access control exists, replacing what was previously just a cosmetic {@code hidden: true} in
  * the frontend menu with zero real enforcement behind it. Admin needs no explicit row for either
  * window: {@code NeoAccessHelper#isAdminOrClientAdmin} already bypasses window-access checks
@@ -140,7 +140,6 @@ public final class TemplateRoleWindowAccess {
   private TemplateRoleWindowAccess() {
     // constants holder
   }
-
 
   /**
    * {@code AD_Window_ID} for the "Informes de inventario" / Inventory Stock Report pseudo-window
@@ -185,9 +184,10 @@ public final class TemplateRoleWindowAccess {
   /**
    * Sales ("Ventas") column of the ETP-4878 matrix — 12 grants (13 in the original ticket matrix,
    * minus the {@code full("168")} over-grant on Inventario físico / Physical Inventory removed by
-   * ETP-5116, plus {@code full("33705E0F52874D91B0BB2FF8BB648B8E")} — Smart Scan, granted to all
-   * four non-Admin templates per this later ETP-5116 pass, see class javadoc). Comments name the
-   * matrix row in Spanish (matching the ticket) followed by the AD_Window's own English name.
+   * ETP-5116; the {@code full("33705E0F52874D91B0BB2FF8BB648B8E")} Smart Scan grant a later
+   * ETP-5116 pass added to all four non-Admin templates was removed again by ETP-5830, see class
+   * javadoc). Comments name the matrix row in Spanish (matching the ticket) followed by the
+   * AD_Window's own English name.
    */
   private static List<WindowGrant> salesGrants() {
     return list(
@@ -208,8 +208,7 @@ public final class TemplateRoleWindowAccess {
   /**
    * Purchasing ("Compras") column of the ETP-4878 matrix — 13 grants: 11 from the original
    * matrix, plus {@code 107} (Receipt-Invoice Link, added after the original matrix by
-   * ETP-5075), plus {@code full("33705E0F52874D91B0BB2FF8BB648B8E")} — Smart Scan, granted to
-   * all four non-Admin templates per a later ETP-5116 pass, plus {@code
+   * ETP-5075), plus {@code
    * full("6346B88619F948F9A42224BDB0B239FA")} — Informes de inventario / Inventory Stock Report,
    * granted to Compras/Financiero/Almacén (NOT Ventas) per a still-later ETP-5116 pass, see class
    * javadoc.
@@ -252,10 +251,9 @@ public final class TemplateRoleWindowAccess {
    * access control — SII Configuration ({@code C1D3A2A017AC4B82B9FEE6F4D2A0C55A}), TBAI
    * Configuration ({@code C327DE215AC945F69363905840118177}), and Verifactu Configuration
    * ({@code 27A453FA86974745977672F1A8DCCEFF}) — so all three are granted directly, unlike the
-   * proxy pattern above — 2 more ETP-5116 grants from a later pass: "Informes financieros" /
-   * Financial Reports ({@code D647D118F5014D00AF47A636B2CD0DD3}, Financiero-only) and "Escaneo
-   * inteligente" / Smart Scan ({@code 33705E0F52874D91B0BB2FF8BB648B8E}, shared with every other
-   * non-Admin template), and 1 more grant from a still-later ETP-5116 pass: "Informes de
+   * proxy pattern above — 1 more ETP-5116 grant from a later pass: "Informes financieros" /
+   * Financial Reports ({@code D647D118F5014D00AF47A636B2CD0DD3}, Financiero-only; the Smart Scan
+   * grant that pass also added was removed again by ETP-5830), and 1 more grant from a still-later ETP-5116 pass: "Informes de
    * inventario" / Inventory Stock Report ({@code 6346B88619F948F9A42224BDB0B239FA}, shared with
    * Compras/Almacén, NOT Ventas — see class javadoc).
    */
@@ -298,8 +296,7 @@ public final class TemplateRoleWindowAccess {
 
   /**
    * Inventory ("Almacén") column of the ETP-4878 matrix — 14 grants: 13 from the original matrix,
-   * plus {@code full("33705E0F52874D91B0BB2FF8BB648B8E")} — Smart Scan, granted to all four
-   * non-Admin templates per a later ETP-5116 pass, plus {@code
+   * plus {@code
    * full("6346B88619F948F9A42224BDB0B239FA")} — Informes de inventario / Inventory Stock Report,
    * granted to Compras/Financiero/Almacén (NOT Ventas) per a still-later ETP-5116 pass, see class
    * javadoc.

@@ -47,6 +47,8 @@ import com.etendoerp.go.roles.TemplateRoleWindowAccess.WindowGrant;
  * proxy grants — see the affected tests below). See {@link TemplateRoleWindowAccess}'s own
  * javadoc for the full per-role breakdown and the 3 deferred, windowless matrix rows this suite
  * does not (and should never) reference.</p>
+ *
+ * @covers com.etendoerp.go.roles.TemplateRoleWindowAccess
  */
 class TemplateRoleWindowAccessTest {
 
