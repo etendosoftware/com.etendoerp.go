@@ -128,8 +128,16 @@ public class OnboardingProvisioningChain {
   OnboardingCostingScheduleService onboardingCostingScheduleService =
       new OnboardingCostingScheduleService();
 
-  /** The signup form's fiscal/address data the {@code orgInfo} step persists. */
-  public record OrgInfoInput(String countryCode, String address, String taxId) {
+  /**
+   * The signup form's fiscal/address data the {@code orgInfo} step persists.
+   *
+   * <p>{@code streetName}/{@code buildingNumber}/{@code buildingName} (ETP-5806) are the
+   * structured address fields from the onboarding company step; {@code address} is kept as a
+   * legacy free-text fallback used only when none of the 3 structured fields is present — see
+   * {@code OnboardingOrgInfoService#createLocation}.
+   */
+  public record OrgInfoInput(String countryCode, String address, String streetName,
+      String buildingNumber, String buildingName, String taxId) {
   }
 
   /** The admin identity the chain runs under once the client exists. */
@@ -537,9 +545,12 @@ public class OnboardingProvisioningChain {
     try {
       String countryCode = orgInfo != null ? orgInfo.countryCode() : null;
       String address = orgInfo != null ? orgInfo.address() : null;
+      String streetName = orgInfo != null ? orgInfo.streetName() : null;
+      String buildingNumber = orgInfo != null ? orgInfo.buildingNumber() : null;
+      String buildingName = orgInfo != null ? orgInfo.buildingName() : null;
       String taxId = orgInfo != null ? orgInfo.taxId() : null;
       onboardingOrgInfoService.ensureOrgInfo(clientId, orgId, adminUserId, adminRoleId,
-          countryCode, address, taxId);
+          countryCode, address, streetName, buildingNumber, buildingName, taxId);
       sink.progress(PROGRESS_ORG_INFO, PROGRESS_DONE, "Organization address ready");
       return true;
     } catch (Exception e) {

@@ -121,6 +121,12 @@ public class OnboardingWarehouseAddressService extends OnboardingContextSupport 
     dst.setRegion(src.getRegion());
     dst.setRegionName(src.getRegionName());
     dst.setCity(src.getCity());
+    // ETP-5806 — carry the structured SEPA fields too, so a warehouse address created from the
+    // onboarding fiscal address is not left with composed Address1/2 lines but no structured
+    // source data behind them (e.g. if it is later re-edited via the Warehouse popup).
+    dst.setOBSEPAStreetName(src.getOBSEPAStreetName());
+    dst.setOBSEPABuildingNumber(src.getOBSEPABuildingNumber());
+    dst.setOBSEPABuildingName(src.getOBSEPABuildingName());
   }
 
   @Override

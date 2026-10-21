@@ -29,6 +29,9 @@ import org.openbravo.model.common.enterprise.OrganizationInformation;
 import org.openbravo.model.common.geography.Country;
 import org.openbravo.model.common.geography.Location;
 
+import com.etendoerp.go.schemaforge.util.StructuredAddressComposer;
+import com.etendoerp.go.schemaforge.util.StructuredAddressComposer.ComposedAddress;
+
 /**
  * Ensures the onboarding organization has an {@code AD_ORGINFO} record pointing to a
  * {@code C_LOCATION} with a country, and carries over the Tax ID entered in the wizard.
@@ -59,12 +62,20 @@ public class OnboardingOrgInfoService extends OnboardingContextSupport {
    * @param orgId       target organization identifier
    * @param adminUserId administrator user for DAL context
    * @param adminRoleId administrator role for DAL context
-   * @param countryIso  ISO country code from the onboarding request (defaults to {@code ES})
-   * @param address     optional street address line from the onboarding request
-   * @param taxId       optional Tax ID from the onboarding request; left untouched when blank
+   * @param countryIso     ISO country code from the onboarding request (defaults to {@code ES})
+   * @param address        optional legacy free-text address line, used only when none of the 3
+   *                        structured fields below is present
+   * @param streetName     optional Street Name ({@code EM_OBSEPA_StrtNm}) from the onboarding
+   *                        request's structured address block (ETP-5806)
+   * @param buildingNumber optional Building Number ({@code EM_OBSEPA_BldgNb}); mandatory together
+   *                        with {@code streetName} when the structured block was started — already
+   *                        enforced by the servlet before this method is called
+   * @param buildingName   optional Building Name ({@code EM_OBSEPA_BldgNm})
+   * @param taxId          optional Tax ID from the onboarding request; left untouched when blank
    */
   public void ensureOrgInfo(String clientId, String orgId, String adminUserId, String adminRoleId,
-      String countryIso, String address, String taxId) {
+      String countryIso, String address, String streetName, String buildingNumber,
+      String buildingName, String taxId) {
     validateContext(clientId, orgId, adminUserId, adminRoleId);
     OBContext previousContext = captureCurrentContext();
     applyExecutionContext(adminUserId, adminRoleId, clientId, orgId);
@@ -79,7 +90,8 @@ public class OnboardingOrgInfoService extends OnboardingContextSupport {
         if (org == null) {
           throw new OBException("Organization not found for org-info setup: " + orgId);
         }
-        ensureOrgInfoLocation(client, org, countryIso, address, taxId);
+        ensureOrgInfoLocation(client, org, countryIso, address, streetName, buildingNumber,
+            buildingName, taxId);
         flushChanges();
       } finally {
         exitAdminMode();
@@ -90,7 +102,8 @@ public class OnboardingOrgInfoService extends OnboardingContextSupport {
   }
 
   protected void ensureOrgInfoLocation(Client client, Organization org, String countryIso,
-      String address, String taxId) {
+      String address, String streetName, String buildingNumber, String buildingName,
+      String taxId) {
     OrganizationInformation orgInfo = resolveOrgInfo(org);
     if (orgInfo == null) {
       orgInfo = createOrgInfo(client, org);
@@ -104,7 +117,8 @@ public class OnboardingOrgInfoService extends OnboardingContextSupport {
     if (country == null) {
       throw new OBException("No country available to locate onboarding organization");
     }
-    Location location = createLocation(client, org, country, address);
+    Location location = createLocation(client, org, country, address, streetName, buildingNumber,
+        buildingName);
     orgInfo.setLocationAddress(location);
     OBDal.getInstance().save(orgInfo);
   }
@@ -142,14 +156,25 @@ public class OnboardingOrgInfoService extends OnboardingContextSupport {
   }
 
   protected Location createLocation(Client client, Organization org, Country country,
-      String address) {
+      String address, String streetName, String buildingNumber, String buildingName) {
     Location location = OBProvider.getInstance().get(Location.class);
     location.setNewOBObject(true);
     location.setClient(client);
     location.setOrganization(org);
     location.setActive(true);
     location.setCountry(country);
-    if (StringUtils.isNotBlank(address)) {
+    // ETP-5806 — the structured fields take priority over the legacy free-text `address`: the
+    // servlet already guarantees streetName+buildingNumber are both present whenever the
+    // structured block was used at all (buildingName alone can never reach here).
+    if (StringUtils.isNotBlank(streetName)) {
+      location.setOBSEPAStreetName(streetName.trim());
+      location.setOBSEPABuildingNumber(StringUtils.trimToNull(buildingNumber));
+      location.setOBSEPABuildingName(StringUtils.trimToNull(buildingName));
+      ComposedAddress composed = StructuredAddressComposer.composeAddressLines(streetName,
+          buildingNumber, buildingName);
+      location.setAddressLine1(composed.getAddress1());
+      location.setAddressLine2(composed.getAddress2());
+    } else if (StringUtils.isNotBlank(address)) {
       location.setAddressLine1(address.trim());
     }
     OBDal.getInstance().save(location);

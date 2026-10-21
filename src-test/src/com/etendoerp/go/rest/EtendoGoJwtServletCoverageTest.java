@@ -3803,7 +3803,8 @@ public class EtendoGoJwtServletCoverageTest {
       throws Exception {
     PaidOnboardingStage stage = stagePaidOnboarding(pooled);
     doThrow(new OBException("Org info unavailable")).when(servlet.onboardingOrgInfoService)
-        .ensureOrgInfo(anyString(), anyString(), anyString(), anyString(), any(), any(), any());
+        .ensureOrgInfo(anyString(), anyString(), anyString(), anyString(), any(), any(), any(),
+            any(), any(), any());
     when(servlet.tenantPlanService.resolvePlan("own-productive"))
         .thenReturn(TenantPlanService.PLAN_PRODUCTIVE);
     runStagedPaidOnboarding(stage, (support, dal, transactions) -> {

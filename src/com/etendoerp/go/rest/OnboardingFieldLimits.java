@@ -63,6 +63,13 @@ public final class OnboardingFieldLimits {
   public static final int ADDRESS = 60;
 
   /**
+   * ETP-5806 — the onboarding company step's structured address fields (Street/Number/Building
+   * Name) are NOT re-declared here: their length is validated via
+   * {@code StructuredAddressComposer#fieldsExceedingMaxLength}, the single source of truth
+   * already used by the Contacts/Warehouse address handlers.
+   */
+
+  /**
    * A field that exceeded its limit. {@code field} is the JSON key the client sent, so the UI can
    * point at the right input.
    */
