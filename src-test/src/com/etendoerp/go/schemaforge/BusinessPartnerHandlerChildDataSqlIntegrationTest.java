@@ -81,8 +81,10 @@ import org.openbravo.test.base.OBBaseTest;
  * deliberately does not create (it only reads). This class answers one question — "do these two
  * statements still match the database?" — which is the question the silent failure mode needs
  * answered.
+ *
+ * @covers com.etendoerp.go.schemaforge.BusinessPartnerHandler
  */
-public class BusinessPartnerHandlerDbTest extends OBBaseTest {
+public class BusinessPartnerHandlerChildDataSqlIntegrationTest extends OBBaseTest {
 
   /** Business partners to bind, and the ceiling on how many rows either statement may return. */
   private static final int SAMPLE_SIZE = 50;

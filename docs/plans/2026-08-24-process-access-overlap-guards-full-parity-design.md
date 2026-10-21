@@ -148,7 +148,7 @@ enum, exercised entirely through the integration tests above).
 **Regression-safety requirement, same discipline as the original Task 3:** after refactoring
 `WindowAccessOverlapCorruptionGuard` to delegate its own `PropagationTrigger`/`findActiveTemplate
 GrantingFullAccess` to the 2 new shared pieces, `UserRoleCompositionServiceOverlapIntegrationTest`
-and `UserRoleCompositionServiceOverlapReverificationTest` must pass completely unchanged.
+and `UserRoleCompositionServiceOverlapReverificationIntegrationTest` must pass completely unchanged.
 
 ## Out of scope
 

@@ -38,6 +38,7 @@ import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.service.OBDal;
 
 import com.etendoerp.go.schemaforge.util.DocumentStatusGuard;
+import com.etendoerp.go.schemaforge.util.NeoActionAvailability;
 
 /**
  * The rules every "import lines from a source document into a DRAFT document" action shares
@@ -103,6 +104,11 @@ final class DocumentLineImport {
   static final String KEY_PRODUCT = "product";
   /** Start of the {@code etendo_action} id description of every import action. */
   static final String ID_OF_THE_DRAFT = "The id of the draft ";
+  /**
+   * What every import action of a draft target declares (ETP-5714): it applies while the target
+   * document is a draft. Advisory — {@code importXxx} still refuses a non-draft target itself.
+   */
+  static final NeoActionAvailability TARGET_IS_DRAFT = DocumentAvailability.WHEN_DRAFT;
   private static final String DOCUMENT = "Document ";
 
   private static final String KEY_RESPONSE = "response";
