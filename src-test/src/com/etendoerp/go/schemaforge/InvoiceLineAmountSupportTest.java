@@ -405,8 +405,9 @@ class InvoiceLineAmountSupportTest {
         Arguments.of("SPA side panel, quantity edited on a discounted line → no-op",
             discounted(), "{\"invoicedQuantity\":5,\"unitPrice\":1.35}", null, null, "6.75",
             "7.43"),
-        Arguments.of("SPA side panel, discount taken to 0 → no-op", discounted(),
-            "{\"etgoDiscount\":0,\"unitPrice\":1.5}", null, null, "4.50", "4.95"),
+        // ETP-5714's alignListPriceWithPrice re-writes the stored list price (1.50) into the body
+        Arguments.of("SPA side panel, discount taken to 0 → list stays 1.50", discounted(),
+            "{\"etgoDiscount\":0,\"unitPrice\":1.5}", null, "1.5", "4.50", "4.95"),
         // ── with a discount: a new net price keeps it and works the list price back ──
         Arguments.of("discounted line, unitPrice only → list = 1.25 / 0.9, discount kept",
             discounted(), "{\"unitPrice\":1.25}", null, "1.388889", "3.75", "4.13"),
