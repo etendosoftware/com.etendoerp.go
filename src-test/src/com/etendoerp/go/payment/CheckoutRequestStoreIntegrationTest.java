@@ -697,16 +697,16 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
     String accountId = createAccount(email);
     String requestId = createPaidRequest(accountId, email);
 
-    assertNotNull("Sanity: the first payment must have stamped PAID_AT",
-        rawTimestamp(requestId, "PAID_AT"));
+    Timestamp firstPaidAt = rawTimestamp(requestId, "PAID_AT");
+    assertNotNull("Sanity: the first payment must have stamped PAID_AT", firstPaidAt);
 
-    // Same device as in the retry test: an expected value "now" can never coincide with makes the
-    // assertion about the guard, not about clock resolution.
-    forceTimestamp(requestId, "PAID_AT", DISTANT_PAST);
+    // Compared with the first stamp rather than a backdated one: a PAID row backdated past the
+    // paid grace would be a provisioning candidate for a live billing reconciliation run. The
+    // redelivery is a full DB round trip later, so a rewritten stamp would differ from the first.
     store.recordPaid(requestId, "cus_" + requestId, "sub_" + requestId);
 
     assertEquals("A redelivered webhook must leave PAID_AT at the moment the payment was "
-        + "actually confirmed", DISTANT_PAST, rawTimestamp(requestId, "PAID_AT"));
+        + "actually confirmed", firstPaidAt, rawTimestamp(requestId, "PAID_AT"));
     assertEquals("A redelivery must not change the status either", STATUS_PAID,
         rawStatus(requestId));
   }
