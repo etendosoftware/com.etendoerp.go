@@ -456,8 +456,9 @@ class NeoHookDispatcherTest {
     servletSupportStatic.when(() -> NeoServletSupport.lookupHandler("myQualifier")).thenReturn(handler);
     java.util.Map<String, String> query = java.util.Map.of("productType", "S");
 
-    dispatcher.dispatchWithHooks(spec, "Header", NeoEndpointType.DEFAULTS, null, "GET", null,
-        query, defaultAction);
+    dispatcher.dispatchWithHooks(new NeoSubEndpointDispatcher.HookedSubEndpointRequest(spec,
+        "Header", NeoEndpointType.DEFAULTS, null, "GET", null, defaultAction)
+        .withQueryParams(query));
 
     org.mockito.ArgumentCaptor<NeoContext> pre = org.mockito.ArgumentCaptor.forClass(NeoContext.class);
     org.mockito.ArgumentCaptor<NeoContext> post = org.mockito.ArgumentCaptor.forClass(NeoContext.class);

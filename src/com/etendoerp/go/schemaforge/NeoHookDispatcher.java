@@ -72,20 +72,24 @@ class NeoHookDispatcher {
       NeoEndpointType endpointType, String fieldName,
       String httpMethod, NeoSubEndpointDispatcher.ActionDispatchParams actionParams,
       java.util.function.Supplier<NeoResponse> defaultAction) {
-    return dispatchWithHooks(spec, entityName, endpointType, fieldName, httpMethod, actionParams,
-        null, defaultAction);
+    return dispatchWithHooks(new NeoSubEndpointDispatcher.HookedSubEndpointRequest(spec,
+        entityName, endpointType, fieldName, httpMethod, actionParams, defaultAction));
   }
 
   /**
-   * ETP-5680: as above, additionally exposing the request's query string to the hooks through
+   * ETP-5680: dispatches an already-built sub-endpoint request. Besides what the other overloads
+   * carry, it exposes the request's query string to the hooks through
    * {@link NeoContext#getQueryParams()} (null leaves it unset, as before).
    */
-  NeoResponse dispatchWithHooks(
-      SFSpec spec, String entityName,
-      NeoEndpointType endpointType, String fieldName,
-      String httpMethod, NeoSubEndpointDispatcher.ActionDispatchParams actionParams,
-      java.util.Map<String, String> queryParams,
-      java.util.function.Supplier<NeoResponse> defaultAction) {
+  NeoResponse dispatchWithHooks(NeoSubEndpointDispatcher.HookedSubEndpointRequest call) {
+    SFSpec spec = call.spec;
+    String entityName = call.entityName;
+    NeoEndpointType endpointType = call.endpointType;
+    String fieldName = call.fieldName;
+    String httpMethod = call.method;
+    NeoSubEndpointDispatcher.ActionDispatchParams actionParams = call.actionParams;
+    java.util.Map<String, String> queryParams = call.queryParams;
+    java.util.function.Supplier<NeoResponse> defaultAction = call.defaultAction;
 
     SFEntity entity = servlet.findEntity(spec.getId(), entityName);
     String qualifier = (entity != null) ? entity.getJavaQualifier() : null;
