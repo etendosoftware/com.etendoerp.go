@@ -67,7 +67,6 @@ dependencies {
     implementation('com.etendoerp:copilot.toolpack:[3.3.0,)')
     implementation('com.etendoerp:db.extended:[1.3.7,)')
     implementation('com.etendoerp:localization.spain.extensions:[4.0.0,)')
-    implementation('com.etendoerp:go.localization.es.data:[1.0.0,)')
     implementation('com.etendoerp:bulk.posting.es_es:1.4.0')
     implementation('com.etendoerp:bulk.posting:3.0.0')
     implementation('com.etendoerp:psd2.bank.integration:[2.0.0,)')
@@ -169,6 +168,9 @@ def isolatedDalTests = [
         // ETP-5778: passes alone but trips OBBaseTest's admin-mode check after other classes ran
         // in the same worker (a leaked setAdminMode() from an earlier test), so it gets its own JVM.
         '**/NeoListAggregateQueryIntegrationTest.class',
+        // ETP-5863: same symptom in the merge-block cut; neither the class nor the selector path it
+        // runs calls setAdminMode() unbalanced, so the leak comes from an earlier class in the worker.
+        '**/NeoSelectorServiceValuePagingIntegrationTest.class',
 ]
 
 def isolatedDalTestClasses = [
@@ -186,6 +188,7 @@ def isolatedDalTestClasses = [
         'com.etendoerp.go.schemaforge.NeoCloneRecordHandlerInvoiceLinksIntegrationTest',
         'com.etendoerp.go.schemaforge.ImportOrderLinesIntoInvoiceHandlerIntegrationTest',
         'com.etendoerp.go.schemaforge.handlers.NeoListAggregateQueryIntegrationTest',
+        'com.etendoerp.go.schemaforge.NeoSelectorServiceValuePagingIntegrationTest',
 ]
 
 def commandLineFilterReachesIsolatedGoTest = { requestedTestPatterns ->
@@ -257,9 +260,7 @@ rootProject.afterEvaluate { rootProj ->
  *
  * <p>This task runs the second half on its own: the suite a developer can run with no Postgres and
  * no Tomcat, and the one a PR pipeline can run before any environment exists. Membership is by
- * naming convention — every {@code *IntegrationTest} is excluded — plus two classes that predate
- * the convention and are referenced by name throughout {@code docs/}, so they are excluded by name
- * instead of being renamed.</p>
+ * naming convention: every {@code *IntegrationTest} is excluded, with no exceptions.</p>
  *
  * <p>{@code scripts/check-unit-test-classification.sh} enforces that split: a new DB-backed test
  * that does not follow the convention fails that check, instead of failing inside a
@@ -271,9 +272,6 @@ rootProject.afterEvaluate { rootProj ->
  */
 def dbBackedGoTests = [
         '**/*IntegrationTest.class',
-        // Predate the *IntegrationTest convention; both extend a DAL base class.
-        '**/UserRoleCompositionServiceOverlapReverificationTest.class',
-        '**/BusinessPartnerHandlerDbTest.class',
 ]
 
 rootProject.afterEvaluate { rootProj ->
@@ -346,7 +344,7 @@ rootProject.afterEvaluate { rootProj ->
  * Tests de schemaforge separados por célula (ventas, compras, almacenes, financiero, contabilidad, localizacion, plataforma).
  *
  * <p>Cada célula es un archivo {@code src-test/cells/<célula>.txt} con una clase de test por
- * línea. Las clases {@code *IntegrationTest} / {@code *DbTest} usan la base de datos; el resto
+ * línea. Las clases {@code *IntegrationTest} usan la base de datos; el resto
  * son con mocks. Los tests que pertenecen a varias células van en
  * {@code src-test/cells/compartidos/<grupo>.txt}, y cada célula los suma con una línea
  * {@code @incluye <grupo>}. Ejemplos:</p>
@@ -402,7 +400,7 @@ def readCells = {
     cells
 }
 
-def isIntegrationTest = { String className -> className ==~ /.*(IntegrationTest|DbTest)$/ }
+def isIntegrationTest = { String className -> className ==~ /.*IntegrationTest$/ }
 
 def selectedCellTests = { String kind ->
     def cells = readCells()

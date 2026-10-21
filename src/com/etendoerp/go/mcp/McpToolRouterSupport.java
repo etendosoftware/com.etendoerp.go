@@ -746,12 +746,21 @@ final class McpToolRouterSupport {
     // IllegalArgumentException the router can only classify as a 500. The exception carries its own
     // 422 envelope and names the argument in `field`.
     if (args == null) {
-      throw McpRoutingException.missingArgument("Missing arguments", null);
+      throw McpRoutingException.missingArgument("Missing arguments", null)
+          .withMissing(java.util.Arrays.asList(required));
     }
+    // ETP-5669: every missing key at once (the agent used to fix them one round trip each).
+    // The field attribute stays the first one for callers that read only that.
+    List<String> missing = new java.util.ArrayList<>();
     for (String key : required) {
       if (!args.has(key) || args.isNull(key)) {
-        throw McpRoutingException.missingArgument("Missing required argument: " + key, key);
+        missing.add(key);
       }
+    }
+    if (!missing.isEmpty()) {
+      throw McpRoutingException.missingArgument(
+          "Missing required argument" + (missing.size() > 1 ? "s: " : ": ")
+              + String.join(", ", missing), missing.get(0)).withMissing(missing);
     }
   }
 

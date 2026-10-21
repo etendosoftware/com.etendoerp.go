@@ -936,6 +936,25 @@ class McpSchemaFieldBuilderTest {
     }
 
     @Test
+    @DisplayName("ETP-5669: action is the field (DAL property) name; column keeps the DB name")
+    void buttonActionIsTheFieldName() throws Exception {
+      org.openbravo.model.ad.datamodel.Column col = mock(
+          org.openbravo.model.ad.datamodel.Column.class);
+      when(col.getDBColumnName()).thenReturn("DocAction");
+
+      JSONObject fieldObj = new JSONObject();
+      fieldObj.put("name", "documentAction");
+      fieldObj.put("column", "DocAction");
+      invokeStatic("addButtonInfo",
+          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class,
+              String.class, boolean.class },
+          fieldObj, col, null, false);
+
+      assertEquals("documentAction", fieldObj.getString("action"));
+      assertEquals("DocAction", fieldObj.getString("column"));
+    }
+
+    @Test
     @DisplayName("buttonColumnWithClassicProcessEmitsAllFields")
     void buttonColumnWithClassicProcessEmitsAllFields() throws Exception {
       org.openbravo.model.ad.datamodel.Column col = mock(

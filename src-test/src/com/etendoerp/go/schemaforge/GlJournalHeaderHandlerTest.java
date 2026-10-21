@@ -22,6 +22,7 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
+import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
@@ -100,30 +101,146 @@ public class GlJournalHeaderHandlerTest {
     assertNull(handler.handle(ctx));
   }
 
+  // ETP-5669: the process defaults a missing inpdocaction to CO, so the document-action button
+  // must never fall through to the generic executor with no (or another) docAction.
+
   @Test
-  public void handleIgnoresActionWithNullBody() {
-    // ACTION + correct fieldName but body is null → isCompleteAction returns false.
+  public void documentActionWithNullBodyIsRefused() {
     NeoContext ctx = NeoContext.builder()
         .endpointType(NeoEndpointType.ACTION)
         .fieldName("documentAction")
         .httpMethod("POST")
         .requestBody(null)
         .build();
-    assertNull(handler.handle(ctx));
+    assertEquals(422, handler.handle(ctx).getHttpStatus());
   }
 
   @Test
-  public void handleIgnoresActionWhenDocActionIsNotCO() throws Exception {
-    // ACTION + documentAction field, body says "PO" (post) not "CO" → not a complete-action.
+  public void documentActionWithBlankDocActionIsRefused() throws Exception {
     JSONObject body = new JSONObject();
-    body.put("documentAction", "PO");
-    NeoContext ctx = NeoContext.builder()
+    body.put("docAction", "");
+    assertEquals(422, handler.handle(actionContext("documentAction", body)).getHttpStatus());
+  }
+
+  @Test
+  public void documentActionWithAnotherDocActionIsRefused() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("documentAction", "VO");
+    NeoResponse response = handler.handle(actionContext("documentAction", body));
+    assertEquals(422, response.getHttpStatus());
+    assertTrue(response.getBody().toString().contains("docAction 'VO' is not allowed"));
+  }
+
+  @Test
+  public void dbColumnSpellingIsRefusedWithoutDocAction() {
+    // REST /action/DocAction with no docAction used to reach the generic executor.
+    assertEquals(422, handler.handle(actionContext("DocAction", new JSONObject())).getHttpStatus());
+  }
+
+  @Test
+  public void dbColumnSpellingIsHandledLikeTheFieldName() throws Exception {
+    RequestContext rc = requestContextWithRequest();
+    JSONObject body = new JSONObject();
+    body.put("docAction", "RE");
+    try (MockedStatic<RequestContext> rcMock = mockStatic(RequestContext.class);
+        MockedStatic<NeoDefaultsService> neoMock = mockStatic(NeoDefaultsService.class)) {
+      rcMock.when(RequestContext::get).thenReturn(rc);
+      neoMock.when(() -> NeoDefaultsService.buildVariablesSecureApp(any()))
+          .thenThrow(new RuntimeException("stop before the process runs"));
+      NeoContext ctx = NeoContext.builder()
+          .endpointType(NeoEndpointType.ACTION)
+          .fieldName("DocAction")
+          .httpMethod("POST")
+          .requestBody(body)
+          .recordId("GL-JOURNAL-001")
+          .build();
+      handler.handle(ctx);
+    }
+    verify(rc).setRequestParameter("inpdocaction", "RE");
+  }
+
+  // ETP-5669: the MCP action surface — documentAction (CO/RE only), post, unpost.
+
+  @Test
+  public void declaresDocumentActionPostAndUnpost() {
+    assertEquals(java.util.List.of("documentAction", "post", "unpost"),
+        new java.util.ArrayList<>(handler.actionContracts().keySet()));
+    assertTrue(handler.actionContracts().get("post").getDescription().contains("Completing does not post"));
+  }
+
+  @Test
+  public void documentActionContractAcceptsOnlyCoAndRe() throws Exception {
+    java.util.Map<String, com.etendoerp.go.schemaforge.util.NeoActionContract> contracts =
+        handler.actionContracts();
+    assertNull(com.etendoerp.go.schemaforge.util.NeoActionContract.validate(contracts,
+        "documentAction", new JSONObject().put("docAction", "RE")));
+    assertEquals(422, com.etendoerp.go.schemaforge.util.NeoActionContract.validate(contracts,
+        "documentAction", new JSONObject().put("docAction", "VO")).getHttpStatus());
+    assertEquals(422, com.etendoerp.go.schemaforge.util.NeoActionContract.validate(contracts,
+        "documentAction", new JSONObject()).getHttpStatus());
+  }
+
+  // ETP-5669: CO refuses a journal whose stored period does not contain its accounting date.
+
+  private static org.openbravo.model.financialmgmt.gl.GLJournal journalIn(String periodName,
+      String start, String end, String dateAcct) throws Exception {
+    java.text.SimpleDateFormat iso = new java.text.SimpleDateFormat("yyyy-MM-dd");
+    org.openbravo.model.financialmgmt.calendar.Period period =
+        mock(org.openbravo.model.financialmgmt.calendar.Period.class);
+    when(period.getName()).thenReturn(periodName);
+    when(period.getStartingDate()).thenReturn(iso.parse(start));
+    when(period.getEndingDate()).thenReturn(iso.parse(end));
+    org.openbravo.model.financialmgmt.gl.GLJournal journal =
+        mock(org.openbravo.model.financialmgmt.gl.GLJournal.class);
+    when(journal.getPeriod()).thenReturn(period);
+    when(journal.getAccountingDate()).thenReturn(iso.parse(dateAcct));
+    return journal;
+  }
+
+  @Test
+  public void periodMismatchNamesThePeriodAndTheDateUnderItsOwnKey() throws Exception {
+    NeoResponse response = GlJournalHeaderHandler.periodMismatch(
+        journalIn("Apr-26", "2026-04-01", "2026-04-30", "2026-06-20"));
+    assertEquals(422, response.getHttpStatus());
+    JSONObject body = response.getBody();
+    assertTrue(body.getString("message").contains("Apr-26"));
+    assertTrue(body.getString("message").contains("2026-06-20"));
+    assertEquals("[\"ETGO_GLJournalPeriodMismatch\"]", body.getJSONArray("messageKeys").toString());
+    assertEquals("Apr-26", body.getJSONObject("messageParams").getString("period"));
+    // Not re-tagged as a "period not open" refusal (that one sends the user to the calendar).
+    NeoResponse.identifyPeriodRefusal(response);
+    assertEquals("[\"ETGO_GLJournalPeriodMismatch\"]", body.getJSONArray("messageKeys").toString());
+  }
+
+  @Test
+  public void periodMismatchIsNullWhenThePeriodContainsTheDate() throws Exception {
+    assertNull(GlJournalHeaderHandler.periodMismatch(
+        journalIn("Jun-26", "2026-06-01", "2026-06-30", "2026-06-30")));
+    assertNull(GlJournalHeaderHandler.periodMismatch(null));
+  }
+
+  @Test
+  public void completeWithAMismatchedPeriodNeverRunsTheProcess() throws Exception {
+    GlJournalHeaderHandler spyHandler = spy(new GlJournalHeaderHandler());
+    doReturn(journalIn("Apr-26", "2026-04-01", "2026-04-30", "2026-06-20"))
+        .when(spyHandler).loadJournal("GL-JOURNAL-001");
+    RequestContext rc = requestContextWithRequest();
+    try (MockedStatic<RequestContext> rcMock = mockStatic(RequestContext.class);
+        MockedStatic<NeoDefaultsService> neoMock = mockStatic(NeoDefaultsService.class)) {
+      rcMock.when(RequestContext::get).thenReturn(rc);
+      assertEquals(422, spyHandler.handle(docActionContext("CO")).getHttpStatus());
+      neoMock.verify(() -> NeoDefaultsService.buildVariablesSecureApp(any()), never());
+    }
+  }
+
+  private static NeoContext actionContext(String fieldName, JSONObject body) {
+    return NeoContext.builder()
         .endpointType(NeoEndpointType.ACTION)
-        .fieldName("documentAction")
+        .fieldName(fieldName)
         .httpMethod("POST")
         .requestBody(body)
+        .recordId("GL-JOURNAL-001")
         .build();
-    assertNull(handler.handle(ctx));
   }
 
   // ─── completeJournal(): missing record id → 400 ──────────────────────────
@@ -205,23 +322,15 @@ public class GlJournalHeaderHandlerTest {
     assertNull(handler.handle(ctx));
   }
 
-  // ─── isCompleteAction(): fieldValues present with non-CO docAction ─────────
+  // ─── resolveDocAction(): fieldValues present with non-CO/RE docAction ──────
 
   @Test
-  public void handleActionWithFieldValuesDocActionNotCO() throws Exception {
-    // isCompleteAction() ternary true-branch: fieldValues present but docAction ≠ CO → false.
-    // httpMethod=GET so handle() short-circuits before any DB call.
+  public void handleActionWithFieldValuesDocActionNotCoOrReIsRefused() throws Exception {
     JSONObject fieldValues = new JSONObject();
     fieldValues.put("documentAction", "VD");
     JSONObject body = new JSONObject();
     body.put("fieldValues", fieldValues);
-    NeoContext ctx = NeoContext.builder()
-        .endpointType(NeoEndpointType.ACTION)
-        .fieldName("documentAction")
-        .httpMethod("GET")
-        .requestBody(body)
-        .build();
-    assertNull(handler.handle(ctx));
+    assertEquals(422, handler.handle(actionContext("documentAction", body)).getHttpStatus());
   }
 
   // ─── completeJournal(): exception path → 500 ─────────────────────────────

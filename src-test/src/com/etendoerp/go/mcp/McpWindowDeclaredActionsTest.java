@@ -118,7 +118,9 @@ class McpWindowDeclaredActionsTest {
     when(handler.actionContracts()).thenReturn(contracts());
     // The AD buttons etendo_action can fire, as NeoButtonActionHelper.findButtonColumn resolves them:
     // by DB column name or by field name. The DAL names each column the way etendo_schema does.
-    buttonMock = mockStatic(NeoButtonActionHelper.class);
+    buttonMock = mockStatic(NeoButtonActionHelper.class,
+        inv -> "propertyNameOf".equals(inv.getMethod().getName()) ? inv.callRealMethod()
+            : org.mockito.Mockito.RETURNS_DEFAULTS.answer(inv));
     ModelProvider provider = mock(ModelProvider.class);
     Entity dal = mock(Entity.class);
     modelMock = mockStatic(ModelProvider.class);
@@ -353,6 +355,68 @@ class McpWindowDeclaredActionsTest {
       assertEquals("method_not_allowed", env.getString(McpConstants.KEY_ERROR));
       assertTrue(env.getString(McpConstants.KEY_DETAIL).contains("authorize at the bank"));
       assertTrue(env.getString(McpConstants.KEY_DETAIL).contains("Nothing was run"));
+    }
+
+    /**
+     * ETP-5714: an agent typed {@code cancelAndReplace} for the button whose DB column is
+     * {@code Cancelandreplace} and got a bare 404 "Action not found", with no reason. A name that
+     * matches a hidden or redirected entry once case and separators are ignored gets the configured
+     * answer instead.
+     */
+    @Test
+    @DisplayName("another spelling of a hidden action (camelCase, underscores) still gets its reason")
+    void hiddenIsMatchedIgnoringCaseAndSeparators() throws Exception {
+      String config = "{\"actions\":{\"hidden\":[\"Cancelandreplace\",\"RM_Pickfromreceipt\"],"
+          + "\"reason\":\"section reason\",\"reasons\":{\"Cancelandreplace\":\"multi-step flow\"}}}";
+      for (String typed : List.of("cancelAndReplace", "CANCELANDREPLACE", "cancel_and_replace")) {
+        McpRoutingException e = assertThrows(McpRoutingException.class,
+            () -> McpDeclaredActions.precheck(entity("W", config), typed, new JSONObject()), typed);
+        assertEquals(405, e.toEnvelope().getInt(McpConstants.KEY_STATUS), typed);
+        assertTrue(e.toEnvelope().getString(McpConstants.KEY_DETAIL).contains("multi-step flow"),
+            typed + ": " + e.toEnvelope());
+      }
+      McpRoutingException pick = assertThrows(McpRoutingException.class,
+          () -> McpDeclaredActions.precheck(entity("W", config), "rmPickFromReceipt",
+              new JSONObject()));
+      assertTrue(pick.toEnvelope().getString(McpConstants.KEY_DETAIL).contains("section reason"));
+    }
+
+    /**
+     * ETP-5714 (review W3): the loose match must not shadow an action the customization DECLARES. A
+     * hidden {@code RegisterPayment} next to the declared {@code registerPayment} is two different
+     * names: the declared one is judged by its contract (a 422 here), never by the hidden entry.
+     */
+    @Test
+    @DisplayName("a declared contract wins over a hidden entry that differs only by case")
+    void declaredNameIsNotCaughtByTheLooseMatch() throws Exception {
+      String config = "{\"actions\":{\"hidden\":[\"RegisterPayment\"],\"reason\":\"hidden one\"}}";
+      McpRoutingException e = assertThrows(McpRoutingException.class,
+          () -> McpDeclaredActions.precheck(entity("W", config), "registerPayment",
+              new JSONObject("{\"pis\":true}")));
+      assertEquals(422, e.toEnvelope().getInt(McpConstants.KEY_STATUS),
+          "judged by its contract, not refused as hidden");
+      assertFalse(e.toEnvelope().toString().contains("hidden one"));
+      McpRoutingException other = assertThrows(McpRoutingException.class,
+          () -> McpDeclaredActions.precheck(entity("W", config), "REGISTERPAYMENT",
+              new JSONObject()));
+      assertEquals(405, other.toEnvelope().getInt(McpConstants.KEY_STATUS),
+          "a spelling that is not the declared name still gets the hidden reason");
+    }
+
+    @Test
+    @DisplayName("another spelling of a redirected button names the action to use instead")
+    void redirectedIsMatchedIgnoringCase() throws Exception {
+      McpRoutingException e = assertThrows(McpRoutingException.class,
+          () -> McpDeclaredActions.precheck(entity("W", HIDE_PIS), "APRMADDPAYMENT",
+              new JSONObject()));
+      assertTrue(e.toEnvelope().getString(McpConstants.KEY_HINT).contains("registerPayment"));
+    }
+
+    @Test
+    @DisplayName("a name that matches nothing hidden is not refused by the normalised match")
+    void unrelatedNameIsNotCaught() throws Exception {
+      assertNull(McpDeclaredActions.precheck(entity("W", HIDE_PIS), "somethingElse",
+          new JSONObject()));
     }
 
     @Test
@@ -1284,6 +1348,47 @@ class McpWindowDeclaredActionsTest {
       return entity;
     }
 
+    /**
+     * ETP-5714: the hidden {@code Posted} button of a goods document answers with its reason
+     * under every spelling an agent can use, instead of running core's raw posting process.
+     */
+    @Test
+    @DisplayName("Posted on a goods document is refused with the reason, whatever its spelling")
+    void postedOnAGoodsDocumentIsRefused() throws Exception {
+      for (String rowId : McpConfigSourcedataTest.goodsHeaders()) {
+        SFEntity entity = shipped("M_InOut", rowId, new String[][] { { "Posted", "posted" } });
+        for (String typed : List.of("Posted", "posted", "POSTED")) {
+          McpRoutingException e = assertThrows(McpRoutingException.class,
+              () -> McpDeclaredActions.precheck(entity, typed, new JSONObject()), rowId + typed);
+          assertEquals(405, e.toEnvelope().getInt(McpConstants.KEY_STATUS));
+          String detail = e.toEnvelope().getString(McpConstants.KEY_DETAIL);
+          assertTrue(detail.contains("post action") && detail.contains("unpost action"), detail);
+        }
+      }
+    }
+
+    @Test
+    @DisplayName("Bulk Posting on a receipt, shipment, return or invoice is refused with the reason, by field or column name")
+    void bulkPostingOnGoodsDocumentsIsRefused() throws Exception {
+      List<String[]> rows = List.of(new String[] { "M_InOut", "6102D47FD12A4162858D948885F80544" },
+          new String[] { "M_InOut", "6882D245E7964685A14DCF0ACD66FB13" },
+          new String[] { "M_InOut", "40D5EE72A0F24464BABD21886059F3D8" },
+          new String[] { "M_InOut", "963A22BC87B144E18470530BA256FA78" },
+          new String[] { "C_Invoice", "7240CAF07810439B85DE61E70BE8DC0B" },
+          new String[] { "C_Invoice", "0D654005B02741A29A0491FD5AFEA6E8" });
+      for (String[] row : rows) {
+        String rowId = row[1];
+        SFEntity entity = shipped(row[0], rowId,
+            new String[][] { { "EM_Etblkp_Bulkposting", "etblkpBulkposting" } });
+        for (String typed : List.of("etblkpBulkposting", "EM_Etblkp_Bulkposting", "etblkpbulkposting")) {
+          McpRoutingException e = assertThrows(McpRoutingException.class,
+              () -> McpDeclaredActions.precheck(entity, typed, new JSONObject()), rowId + typed);
+          assertEquals(405, e.toEnvelope().getInt(McpConstants.KEY_STATUS));
+          assertTrue(e.toEnvelope().getString(McpConstants.KEY_DETAIL).contains("unpost action"));
+        }
+      }
+    }
+
     private SFEntity payment() throws Exception {
       return shipped("FIN_Payment", PAYMENT_IN, new String[][] {
           { "em_etpr_remove_payment", "eTPRRemovePayment" },
@@ -1379,6 +1484,56 @@ class McpWindowDeclaredActionsTest {
       assertFalse(McpActionsSection.validate(new JSONObject(
           "{\"redirect\":{\"a\":\"b\"},\"reason\":\"r\",\"redirectReason\":\" \"}")).isEmpty(),
           "a blank redirectReason is refused");
+    }
+    @Test
+    @DisplayName("availableWhen / valuesByStatus alone are valid without a reason (ETP-5714)")
+    void availabilityOnlySectionNeedsNoReason() throws Exception {
+      assertTrue(McpActionsSection.validate(new JSONObject(
+          "{\"availableWhen\":{\"post\":{\"documentStatus\":[\"CO\"],\"posted\":[\"!Y\"]}}}"))
+          .isEmpty());
+      assertTrue(McpActionsSection.validate(new JSONObject("{\"valuesByStatus\":{\"documentAction\":"
+          + "{\"property\":\"documentStatus\",\"values\":{\"DR\":[\"CO\"],\"CO\":[]}}}}")).isEmpty());
+    }
+
+    @Test
+    @DisplayName("an action that is also hidden or redirected still needs its reason")
+    void withholdingStillNeedsAReason() throws Exception {
+      assertFalse(McpActionsSection.validate(new JSONObject("{\"hidden\":[\"a\"],"
+          + "\"availableWhen\":{\"b\":{\"documentStatus\":[\"CO\"]}}}")).isEmpty());
+    }
+
+    @Test
+    @DisplayName("malformed availability is refused, naming the action")
+    void malformedAvailabilityIsRefused() throws Exception {
+      for (String bad : List.of(
+          "{\"availableWhen\":{}}",
+          "{\"availableWhen\":{\"post\":[\"CO\"]}}",
+          "{\"availableWhen\":{\"post\":{\"documentStatus\":[]}}}",
+          "{\"valuesByStatus\":{\"a\":{\"values\":{\"CO\":[\"RE\"]}}}}",
+          "{\"valuesByStatus\":{\"a\":{\"property\":\"s\"}}}",
+          "{\"valuesByStatus\":{\"a\":{\"property\":\"s\",\"values\":{\"CO\":\"RE\"}}}}")) {
+        assertFalse(McpActionsSection.validate(new JSONObject(bad)).isEmpty(), bad);
+      }
+      assertTrue(McpActionsSection.validate(new JSONObject(
+          "{\"availableWhen\":{\"post\":{\"documentStatus\":[]}}}")).toString().contains("post"));
+    }
+
+    @Test
+    @DisplayName("the resolved view hands back the availability declared for an action")
+    void viewExposesAvailability() throws Exception {
+      SFEntity e = entity("W", "{\"actions\":{\"valuesByStatus\":{\"documentAction\":{"
+          + "\"property\":\"documentStatus\",\"values\":{\"CO\":[\"CL\",\"RE\"]}}},"
+          + "\"availableWhen\":{\"other\":{\"posted\":[\"Y\"]}}}}");
+
+      McpActionsSection.View view = McpActionsSection.forEntity(e);
+
+      assertEquals(List.of("CL", "RE"), view.availabilityOf("documentAction")
+          .evaluate(Map.of("documentStatus", "CO")::get).valuesNow());
+      assertEquals(Boolean.TRUE, view.availabilityOf("other")
+          .evaluate(Map.of("posted", "Y")::get).available());
+      assertNull(view.availabilityOf("undeclared"));
+      assertNull(view.availabilityOf(null));
+      assertFalse(view.isUnusable());
     }
   }
 

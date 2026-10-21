@@ -66,6 +66,7 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
@@ -1656,40 +1657,27 @@ class NeoCrudHandlerTest {
       verify(servlet).handleWithHooks(eq("myHandler"), eq(context), eq(request), eq(response));
     }
 
-    @Test
-    @DisplayName("Falls through to handleDefault when javaQualifier is blank")
-    void fallsToDefaultWhenQualifierBlank() throws Exception {
+    @ParameterizedTest
+    @NullAndEmptySource
+    @ValueSource(strings = { "  " })
+    @DisplayName("ETP-5693: a blank/null javaQualifier still goes through handleWithHooks")
+    void delegatesToHooksWhenQualifierBlank(String qualifier) throws Exception {
+      // An @NeoExtension on a qualifier-less entity must run on REST; the hook pipeline itself
+      // falls back to handleDefault when nothing resolves.
       SFEntity entity = mock(SFEntity.class);
-      when(entity.getJavaQualifier()).thenReturn("");
+      when(entity.getJavaQualifier()).thenReturn(qualifier);
 
       NeoContext context = buildContext("GET", null, null,
           entity, null, null);
       HttpServletRequest request = mock(HttpServletRequest.class);
       HttpServletResponse response = mock(HttpServletResponse.class);
-
-      // handleDefault with null adTab returns 500
-      NeoResponse result = invokeDispatch(entity, context, request, response);
-
-      assertNotNull(result);
-      assertEquals(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, result.getHttpStatus());
-      verify(servlet, never()).handleWithHooks(anyString(), any(), any(), any());
-    }
-
-    @Test
-    @DisplayName("Falls through to handleDefault when javaQualifier is null")
-    void fallsToDefaultWhenQualifierNull() throws Exception {
-      SFEntity entity = mock(SFEntity.class);
-      when(entity.getJavaQualifier()).thenReturn(null);
-
-      NeoContext context = buildContext("GET", null, null,
-          entity, null, null);
-      HttpServletRequest request = mock(HttpServletRequest.class);
-      HttpServletResponse response = mock(HttpServletResponse.class);
+      NeoResponse expected = NeoResponse.ok(new JSONObject());
+      when(servlet.handleWithHooks(qualifier, context, request, response)).thenReturn(expected);
 
       NeoResponse result = invokeDispatch(entity, context, request, response);
 
-      assertNotNull(result);
-      verify(servlet, never()).handleWithHooks(anyString(), any(), any(), any());
+      assertEquals(expected, result);
+      verify(servlet).handleWithHooks(qualifier, context, request, response);
     }
   }
 

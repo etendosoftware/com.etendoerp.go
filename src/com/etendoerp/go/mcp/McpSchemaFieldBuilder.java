@@ -96,6 +96,8 @@ final class McpSchemaFieldBuilder {
   static final String VISIBILITY_DISCARDED = "discarded";
   static final String TYPE_BUTTON = McpActionsView.TYPE_BUTTON;
   static final String KEY_INVOKE_VIA = "invokeVia";
+  /** The only value of {@code invokeVia}: the tool that runs an action. */
+  static final String INVOKE_VIA_ETENDO_ACTION = "etendo_action";
   static final String KEY_INVOKABLE = "invokable";
   static final String KEY_NOT_INVOKABLE_REASON = "notInvokableReason";
   /** AD column of the accounting trigger, present on every accountable document. */
@@ -711,7 +713,8 @@ final class McpSchemaFieldBuilder {
   private static void addButtonInfo(JSONObject fieldObj, Column col, String visibility,
       boolean hiddenInTab) throws JSONException {
     fieldObj.put("triggerValue", "Y");
-    fieldObj.put("action", col.getDBColumnName());
+    // ETP-5669: the field (DAL property) name, which customizations see; "column" keeps the DB name.
+    fieldObj.put("action", fieldObj.optString("name", col.getDBColumnName()));
     McpSchemaActionFields.addActionValues(fieldObj, col);
     // Resolve process info — mirror NeoButtonActionHelper / NeoProcessService logic
     Process classicProcess = col.getProcess();

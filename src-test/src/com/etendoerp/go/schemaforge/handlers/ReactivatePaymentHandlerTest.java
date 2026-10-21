@@ -1485,7 +1485,9 @@ public class ReactivatePaymentHandlerTest {
     FIN_Payment[] payment = new FIN_Payment[1];
     OBDal[] dal = new OBDal[1];
     try (MockedStatic<NeoButtonActionHelper> buttons =
-             Mockito.mockStatic(NeoButtonActionHelper.class);
+             Mockito.mockStatic(NeoButtonActionHelper.class,
+        inv -> "propertyNameOf".equals(inv.getMethod().getName()) ? inv.callRealMethod()
+            : Mockito.RETURNS_DEFAULTS.answer(inv));
         MockedStatic<PaymentRemovalUtil> removal = Mockito.mockStatic(PaymentRemovalUtil.class)) {
       NeoResponse result = runOnForeignPayment(fieldName, payment, dal);
 
@@ -1700,7 +1702,9 @@ public class ReactivatePaymentHandlerTest {
     FIN_Payment payment = mock(FIN_Payment.class);
     when(payment.getStatus()).thenReturn("RPAP");
     try (MockedStatic<NeoButtonActionHelper> buttons =
-             Mockito.mockStatic(NeoButtonActionHelper.class);
+             Mockito.mockStatic(NeoButtonActionHelper.class,
+        inv -> "propertyNameOf".equals(inv.getMethod().getName()) ? inv.callRealMethod()
+            : Mockito.RETURNS_DEFAULTS.answer(inv));
         MockedStatic<ModelProvider> models = Mockito.mockStatic(ModelProvider.class);
         MockedStatic<OBDal> dal = Mockito.mockStatic(OBDal.class);
         MockedStatic<OBContext> ctx = Mockito.mockStatic(OBContext.class)) {
@@ -1742,7 +1746,9 @@ public class ReactivatePaymentHandlerTest {
   public void mcpRemoveByColumnNameRefusesVoidPayment() throws Exception {
     FIN_Payment payment = processedPayment("pay-void", "RPVOID");
     try (MockedStatic<NeoButtonActionHelper> buttons =
-             Mockito.mockStatic(NeoButtonActionHelper.class);
+             Mockito.mockStatic(NeoButtonActionHelper.class,
+        inv -> "propertyNameOf".equals(inv.getMethod().getName()) ? inv.callRealMethod()
+            : Mockito.RETURNS_DEFAULTS.answer(inv));
         MockedStatic<ModelProvider> models = Mockito.mockStatic(ModelProvider.class);
         MockedStatic<PaymentRemovalUtil> removal = Mockito.mockStatic(PaymentRemovalUtil.class);
         MockedStatic<PisDeferredPaymentService> pis = Mockito.mockStatic(
@@ -1765,7 +1771,9 @@ public class ReactivatePaymentHandlerTest {
   @Test
   public void unknownActionWithEntityIsLeftToDefaultPath() {
     try (MockedStatic<NeoButtonActionHelper> buttons =
-             Mockito.mockStatic(NeoButtonActionHelper.class);
+             Mockito.mockStatic(NeoButtonActionHelper.class,
+        inv -> "propertyNameOf".equals(inv.getMethod().getName()) ? inv.callRealMethod()
+            : Mockito.RETURNS_DEFAULTS.answer(inv));
         MockedStatic<OBContext> ctx = Mockito.mockStatic(OBContext.class)) {
       buttons.when(() -> NeoButtonActionHelper.findButtonColumn(ENTITY_ID, "somethingElse"))
           .thenReturn(null);
@@ -1779,7 +1787,9 @@ public class ReactivatePaymentHandlerTest {
   @Test
   public void otherButtonByColumnNameIsLeftToDefaultPath() {
     try (MockedStatic<NeoButtonActionHelper> buttons =
-             Mockito.mockStatic(NeoButtonActionHelper.class);
+             Mockito.mockStatic(NeoButtonActionHelper.class,
+        inv -> "propertyNameOf".equals(inv.getMethod().getName()) ? inv.callRealMethod()
+            : Mockito.RETURNS_DEFAULTS.answer(inv));
         MockedStatic<ModelProvider> models = Mockito.mockStatic(ModelProvider.class);
         MockedStatic<OBContext> ctx = Mockito.mockStatic(OBContext.class)) {
       stubButton(buttons, models, "Posted", "posted");
@@ -1916,7 +1926,9 @@ public class ReactivatePaymentHandlerTest {
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
          MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
          MockedStatic<FIN_Utility> utilMock = Mockito.mockStatic(FIN_Utility.class);
-         MockedStatic<NeoButtonActionHelper> actionMock = Mockito.mockStatic(NeoButtonActionHelper.class);
+         MockedStatic<NeoButtonActionHelper> actionMock = Mockito.mockStatic(NeoButtonActionHelper.class,
+        inv -> "propertyNameOf".equals(inv.getMethod().getName()) ? inv.callRealMethod()
+            : Mockito.RETURNS_DEFAULTS.answer(inv));
          MockedConstruction<ReconciliationHandler> reconHandlers =
              Mockito.mockConstruction(ReconciliationHandler.class)) {
       ReactivateScenario sc = wireScenario(obDalMock, ctxMock, actionMock, STATUS_RECONCILED, true, true);
@@ -1946,7 +1958,9 @@ public class ReactivatePaymentHandlerTest {
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
          MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
          MockedStatic<FIN_Utility> utilMock = Mockito.mockStatic(FIN_Utility.class);
-         MockedStatic<NeoButtonActionHelper> actionMock = Mockito.mockStatic(NeoButtonActionHelper.class);
+         MockedStatic<NeoButtonActionHelper> actionMock = Mockito.mockStatic(NeoButtonActionHelper.class,
+        inv -> "propertyNameOf".equals(inv.getMethod().getName()) ? inv.callRealMethod()
+            : Mockito.RETURNS_DEFAULTS.answer(inv));
          MockedConstruction<ReconciliationHandler> reconHandlers =
              Mockito.mockConstruction(ReconciliationHandler.class)) {
       ReactivateScenario sc = wireScenario(obDalMock, ctxMock, actionMock, STATUS_RECONCILED, true, true);
@@ -1965,7 +1979,9 @@ public class ReactivatePaymentHandlerTest {
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
          MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
          MockedStatic<FIN_Utility> utilMock = Mockito.mockStatic(FIN_Utility.class);
-         MockedStatic<NeoButtonActionHelper> actionMock = Mockito.mockStatic(NeoButtonActionHelper.class);
+         MockedStatic<NeoButtonActionHelper> actionMock = Mockito.mockStatic(NeoButtonActionHelper.class,
+        inv -> "propertyNameOf".equals(inv.getMethod().getName()) ? inv.callRealMethod()
+            : Mockito.RETURNS_DEFAULTS.answer(inv));
          MockedConstruction<ReconciliationHandler> reconHandlers =
              Mockito.mockConstruction(ReconciliationHandler.class)) {
       ReactivateScenario sc =
@@ -1989,7 +2005,9 @@ public class ReactivatePaymentHandlerTest {
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
          MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
          MockedStatic<FIN_Utility> utilMock = Mockito.mockStatic(FIN_Utility.class);
-         MockedStatic<NeoButtonActionHelper> actionMock = Mockito.mockStatic(NeoButtonActionHelper.class);
+         MockedStatic<NeoButtonActionHelper> actionMock = Mockito.mockStatic(NeoButtonActionHelper.class,
+        inv -> "propertyNameOf".equals(inv.getMethod().getName()) ? inv.callRealMethod()
+            : Mockito.RETURNS_DEFAULTS.answer(inv));
          MockedConstruction<ReconciliationHandler> reconHandlers =
              Mockito.mockConstruction(ReconciliationHandler.class)) {
       ReactivateScenario sc = wireScenario(obDalMock, ctxMock, actionMock, STATUS_RECONCILED, true, false);
@@ -2017,7 +2035,9 @@ public class ReactivatePaymentHandlerTest {
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
          MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
          MockedStatic<FIN_Utility> utilMock = Mockito.mockStatic(FIN_Utility.class);
-         MockedStatic<NeoButtonActionHelper> actionMock = Mockito.mockStatic(NeoButtonActionHelper.class);
+         MockedStatic<NeoButtonActionHelper> actionMock = Mockito.mockStatic(NeoButtonActionHelper.class,
+        inv -> "propertyNameOf".equals(inv.getMethod().getName()) ? inv.callRealMethod()
+            : Mockito.RETURNS_DEFAULTS.answer(inv));
          MockedConstruction<ReconciliationHandler> reconHandlers =
              Mockito.mockConstruction(ReconciliationHandler.class)) {
       ReactivateScenario sc = wireScenario(obDalMock, ctxMock, actionMock, STATUS_RECONCILED, true, false);

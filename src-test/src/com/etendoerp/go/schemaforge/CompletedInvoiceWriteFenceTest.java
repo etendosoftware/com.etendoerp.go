@@ -199,6 +199,24 @@ public class CompletedInvoiceWriteFenceTest {
     assertFalse("never the SPA's drop-and-retry code", "read_only_field".equals(error.optString(ERROR)));
   }
 
+  /**
+   * ETP-5714: the refusal says how to change a locked field — reactivate (documentAction RE), edit,
+   * complete again — and that RE depends on the reactivation guard, instead of only listing the
+   * editable fields. The SPA reads {@code messageKeys}, so the extra {@code hint} key is harmless.
+   */
+  @Test
+  public void completedInvoiceRefusalSaysToReactivateFirst() throws Exception {
+    JSONObject error = errorOf(header(invoice(STATUS_CO, "N", true), SALES,
+        body(PAYMENT_METHOD, "PM-2")));
+
+    String hint = error.getString("hint");
+    assertTrue(hint, hint.contains("documentAction"));
+    assertTrue(hint, hint.contains("RE"));
+    assertTrue(hint, hint.contains("complete it again"));
+    assertTrue(hint, hint.contains("view:'actions'"));
+    assertEquals(CompletedInvoiceWriteFence.MSG_FIELDS_LOCKED, only(error.getJSONArray("messageKeys")));
+  }
+
   @Test
   public void completedInvoiceNamesEveryRefusedField() throws Exception {
     JSONObject error = errorOf(header(invoice(STATUS_CO, "N", true), SALES,

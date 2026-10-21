@@ -118,6 +118,9 @@ class NeoSelectorExecutionHelper {
     for (Map.Entry<String, Object> entry : params.entrySet()) {
       if (entry.getValue() instanceof Collection<?>) {
         query.setParameterList(entry.getKey(), (Collection<?>) entry.getValue());
+      } else if (entry.getValue() instanceof Object[]) {
+        // OBQuery keeps its readable client/organization filters as String[] (ETP-5707 reuses them)
+        query.setParameterList(entry.getKey(), (Object[]) entry.getValue());
       } else {
         query.setParameter(entry.getKey(), entry.getValue());
       }
