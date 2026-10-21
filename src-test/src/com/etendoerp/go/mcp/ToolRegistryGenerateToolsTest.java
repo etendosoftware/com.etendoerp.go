@@ -75,6 +75,7 @@ import com.etendoerp.go.schemaforge.util.NeoReportParam;
  * @covers com.etendoerp.go.mcp.McpIndentResponse
  * @covers com.etendoerp.go.mcp.McpNamedFilterCatalog
  * @covers com.etendoerp.go.mcp.McpImageToolDefinitions
+ * @covers com.etendoerp.go.mcp.McpAttachmentToolDefinitions
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -1008,6 +1009,48 @@ class ToolRegistryGenerateToolsTest {
       Map<?, ?> specProp = (Map<?, ?>) ((Map<?, ?>) listSchema.get("properties")).get("spec");
       assertEquals(List.of(SPEC_INVOICES, SPEC_SALES_ORDER), specProp.get("enum"),
           "the spec enum keeps the query order");
+    }
+
+    /**
+     * ETP-5715: the attachment tools address a window spec like every CRUD tool, so they are only
+     * published when a spec is accessible, and each follows its own scope — a read-only session can
+     * list (verify) a document's attachments but is never offered the upload or the delete.
+     */
+    @Test
+    @DisplayName("the attachment tools follow the scopes and need an accessible window spec")
+    void attachmentToolsFollowTheScopes() {
+      SFSpec salesOrder = createWindowSpec(SPEC_SALES_ORDER);
+      when(salesOrder.getADWindow()).thenReturn(null);
+      mockSpecCriteria(List.of(salesOrder));
+
+      List<String> readOnly = toolNames(registry.generateTools(scopesOf("neo:read")));
+      List<String> writeOnly = toolNames(registry.generateTools(scopesOf("neo:write")));
+      List<String> both = toolNames(registry.generateTools(scopesOf("neo:read", "neo:write")));
+
+      assertTrue(readOnly.contains(McpConstants.TOOL_NEO_LIST_ATTACHMENTS), readOnly.toString());
+      assertFalse(readOnly.contains(McpConstants.TOOL_NEO_REQUEST_ATTACHMENT_UPLOAD));
+      assertFalse(readOnly.contains(McpConstants.TOOL_NEO_DELETE_ATTACHMENT));
+      assertFalse(writeOnly.contains(McpConstants.TOOL_NEO_LIST_ATTACHMENTS), writeOnly.toString());
+      assertTrue(writeOnly.contains(McpConstants.TOOL_NEO_REQUEST_ATTACHMENT_UPLOAD));
+      assertTrue(writeOnly.contains(McpConstants.TOOL_NEO_DELETE_ATTACHMENT));
+      assertTrue(both.containsAll(List.of(McpConstants.TOOL_NEO_LIST_ATTACHMENTS,
+          McpConstants.TOOL_NEO_REQUEST_ATTACHMENT_UPLOAD, McpConstants.TOOL_NEO_DELETE_ATTACHMENT)));
+    }
+
+    /** ETP-5715: they take the spec from the `spec` argument, so the router authorizes that spec. */
+    @Test
+    @DisplayName("the attachment tools resolve their spec from the arguments, like the CRUD tools")
+    void attachmentToolsResolveTheSpecFromTheArguments() throws Exception {
+      org.codehaus.jettison.json.JSONObject arguments = new org.codehaus.jettison.json.JSONObject();
+      arguments.put("spec", SPEC_SALES_ORDER);
+      for (String tool : List.of(McpConstants.TOOL_NEO_REQUEST_ATTACHMENT_UPLOAD,
+          McpConstants.TOOL_NEO_LIST_ATTACHMENTS, McpConstants.TOOL_NEO_DELETE_ATTACHMENT)) {
+        assertTrue(ToolRegistry.isCrudTool(tool), tool);
+        assertEquals(SPEC_SALES_ORDER, ToolRegistry.resolveSpecName(tool, arguments), tool);
+        assertTrue(ToolRegistry.declaredArgumentNames(tool).orElseThrow().contains("spec"), tool);
+      }
+      assertTrue(ToolRegistry.declaredArgumentNames(McpConstants.TOOL_NEO_DELETE_ATTACHMENT)
+          .orElseThrow().contains("attachment_id"));
     }
 
     @Test

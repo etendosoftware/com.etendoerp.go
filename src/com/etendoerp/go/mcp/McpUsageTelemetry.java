@@ -432,6 +432,12 @@ final class McpUsageTelemetry {
         return "action";
       case "etendo_action_batch":
         return "action_batch";
+      case McpConstants.TOOL_NEO_REQUEST_ATTACHMENT_UPLOAD:
+        return "attachment_upload";
+      case McpConstants.TOOL_NEO_LIST_ATTACHMENTS:
+        return "attachment_list";
+      case McpConstants.TOOL_NEO_DELETE_ATTACHMENT:
+        return "attachment_delete";
       case "etendo_schema":
         return "schema";
       case "etendo_defaults":

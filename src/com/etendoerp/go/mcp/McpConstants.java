@@ -79,6 +79,12 @@ final class McpConstants {
   static final String TOOL_NEO_REQUEST_IMAGE_UPLOAD = "etendo_request_image_upload";
   /** Tool name of the read-only ticket-status lookup (ETP-5184). */
   static final String TOOL_NEO_GET_IMAGE_UPLOAD = "etendo_get_image_upload";
+  /** Tool name of the single-use attachment upload link request (ETP-5715). */
+  static final String TOOL_NEO_REQUEST_ATTACHMENT_UPLOAD = "etendo_request_attachment_upload";
+  /** Tool name of the read-only listing of a document's attachments, download links included (ETP-5715). */
+  static final String TOOL_NEO_LIST_ATTACHMENTS = "etendo_list_attachments";
+  /** Tool name of the removal of one attachment of a document (ETP-5715). */
+  static final String TOOL_NEO_DELETE_ATTACHMENT = "etendo_delete_attachment";
   /**
    * Hard cap on the DECODED size of {@link #TOOL_NEO_UPLOAD_IMAGE}'s {@code data_base64}.
    *

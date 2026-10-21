@@ -79,6 +79,8 @@ final class McpAuthorizationService {
       case "docs":
       case McpConstants.TOOL_NEO_WIDGET:
       case McpConstants.TOOL_NEO_VECTOR_SEARCH:
+      // ETP-5715: listing a document's attachments is a read, so a read-only session can verify.
+      case McpConstants.TOOL_NEO_LIST_ATTACHMENTS:
       // B3: read-tier on purpose. Reporting friction writes no business data, and gating it behind
       // etendo:write would silence exactly the read-only sessions most likely to get lost.
       case McpConstants.TOOL_NEO_FEEDBACK:
@@ -94,6 +96,9 @@ final class McpAuthorizationService {
       case McpConstants.TOOL_NEO_REQUEST_IMAGE_UPLOAD:
       case McpConstants.TOOL_NEO_UPLOAD_IMAGE:
       case McpConstants.TOOL_NEO_GET_IMAGE_UPLOAD:
+      // ETP-5715: uploading and deleting a document's attachments change business data.
+      case McpConstants.TOOL_NEO_REQUEST_ATTACHMENT_UPLOAD:
+      case McpConstants.TOOL_NEO_DELETE_ATTACHMENT:
         return SCOPE_WRITE;
       default:
         return toolName.startsWith(McpConstants.GENERATE_PREFIX)

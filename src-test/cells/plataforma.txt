@@ -23,6 +23,11 @@ com.etendoerp.go.schemaforge.NeoActionSurfaceTest
 com.etendoerp.go.schemaforge.NeoAttachmentAuthorizationMatrixTest
 com.etendoerp.go.schemaforge.NeoAttachmentAuthorizerTest
 com.etendoerp.go.schemaforge.NeoAttachmentPolicyTest
+com.etendoerp.go.schemaforge.NeoAttachmentStoreTest
+com.etendoerp.go.schemaforge.NeoAttachmentTargetTest
+com.etendoerp.go.schemaforge.NeoAttachmentUploadEndpointTest
+com.etendoerp.go.schemaforge.NeoAttachmentUploadTicketsTest
+com.etendoerp.go.schemaforge.NeoAttachmentsConfigTest
 com.etendoerp.go.schemaforge.NeoAttachmentsHelperTest
 com.etendoerp.go.schemaforge.NeoAuthenticatorEnvironmentAccessTest
 com.etendoerp.go.schemaforge.NeoAuthenticatorSchemeParityTest

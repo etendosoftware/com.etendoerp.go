@@ -59,7 +59,8 @@ final class McpToolAnnotations {
       McpConstants.TOOL_DOCS,
       McpConstants.TOOL_NEO_WIDGET,
       McpConstants.TOOL_NEO_VECTOR_SEARCH,
-      McpConstants.TOOL_NEO_GET_IMAGE_UPLOAD);
+      McpConstants.TOOL_NEO_GET_IMAGE_UPLOAD,
+      McpConstants.TOOL_NEO_LIST_ATTACHMENTS);
 
   /** Tools that add something new and never change or remove what exists. */
   static final Set<String> ADDITIVE = Set.of(
@@ -69,7 +70,8 @@ final class McpToolAnnotations {
       McpConstants.TOOL_NEO_FEEDBACK);
 
   /** The removal tool: destructive, and deleting the same record twice changes nothing more. */
-  static final Set<String> DELETE = Set.of(McpConstants.TOOL_NEO_DELETE);
+  static final Set<String> DELETE = Set.of(McpConstants.TOOL_NEO_DELETE,
+      McpConstants.TOOL_NEO_DELETE_ATTACHMENT);
 
   /** Fixed tools that can change existing data; process tools are treated the same way. */
   static final Set<String> MODIFYING = Set.of(
@@ -77,6 +79,8 @@ final class McpToolAnnotations {
       McpConstants.TOOL_NEO_BATCH,
       McpConstants.TOOL_NEO_ACTION,
       McpConstants.TOOL_NEO_ACTION_BATCH,
+      // ETP-5715: not additive — main:true replaces (deletes) the document's previous main file.
+      McpConstants.TOOL_NEO_REQUEST_ATTACHMENT_UPLOAD,
       McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN);
 
   private McpToolAnnotations() {

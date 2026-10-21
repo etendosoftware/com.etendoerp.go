@@ -63,4 +63,19 @@ class McpAuthorizationServiceVectorTest {
       McpAuthorizationService.authorizeToolCall(tool, Set.of("etendo:write"));
     }
   }
+
+  /** ETP-5715: a read-only session may list a document's attachments; changing them needs write. */
+  @Test
+  void attachmentToolsAreSplitBetweenReadAndWrite() {
+    McpAuthorizationService.authorizeToolCall(McpConstants.TOOL_NEO_LIST_ATTACHMENTS,
+        Set.of("etendo:read"));
+    for (String tool : new String[] {McpConstants.TOOL_NEO_REQUEST_ATTACHMENT_UPLOAD,
+        McpConstants.TOOL_NEO_DELETE_ATTACHMENT}) {
+      assertThrows(OBSecurityException.class,
+          () -> McpAuthorizationService.authorizeToolCall(tool, Set.of("etendo:read")), tool);
+      assertThrows(OBSecurityException.class,
+          () -> McpAuthorizationService.authorizeToolCall(tool, Set.of("etendo:process")), tool);
+      McpAuthorizationService.authorizeToolCall(tool, Set.of("etendo:write"));
+    }
+  }
 }

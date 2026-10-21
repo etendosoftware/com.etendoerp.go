@@ -1688,6 +1688,10 @@ delete-old-then-mark-new semantics), so there is nothing left to serve.
 The send event remains audited by the transactional email service, but download authorization does
 not rely on in-memory audit state.
 
+**Attachment links (ETP-5715).** The MCP's download links are the same token with one more claim, `att` (the attachment id), valid 10 minutes
+(`DocumentDownloadTokenService#createAttachmentToken`). With the claim present the endpoint serves exactly that attachment — never the main one —
+after checking it belongs to the signed record and client; without it, nothing changes. See §4.12.37.
+
 #### Frontend integration
 
 The React hook `useMainAttachment` (`tools/app-shell/src/windows/custom/shared/useMainAttachment.js`, see 4.6a) is what actually gets uploaded here — `documentEmailSend.js`'s `cacheDocumentPreviewFile()` uploads-and-marks through the same Attachments endpoint before the email send request, for the 8 windows in `WINDOW_ATTACHMENT_TABLE`. The legacy hook `usePreviewAttachment` (`tools/app-shell/src/windows/custom/shared/usePreviewAttachment.js`) wraps the retired endpoint in 4.7 and is no longer reachable for any window's preview panel; it remains wired as `GenericPreviewModal`'s unselected fallback branch only until Phase 9 removes it.
@@ -3792,6 +3796,11 @@ not: `etendo_create` does not run it in shared code, so it is in the table below
 | availability, `etendo_schema` `id`, entity-name case, message-key hints (ETP-5714) | **not applicable**: the actions view, `availableNow` and the hints are MCP surfaces (`McpActionsView`, `McpToolRouter`); REST has no equivalent view and answers its own bodies | MCP only | declared, not a bug: availability is advisory and never judged by any channel, so a REST call and an MCP call to the same action are refused or served identically by the same handler. The costing retry (409 `costNotCalculated`) is NOT a divergence: it comes from `DocumentPostingService.handleAction`, shared by REST and MCP |
 | the grid price (`listPrice`) of an agent-written order line (ETP-5714) | explicit price → `listPrice` 0 (`OrderLineDiscountSupport`; 17 of 73 order lines in 3 days of local data) | same | declared, not fixed: the invoice-line side now aligns the list price on create, update and every native copy, so an invoice created or imported from such an order shows the price; the order line itself still shows 0,00 until its own helper gets the same rule |
 | document actions over several documents (ETP-5715) | one document per call (`etendo_action`), one transaction, the call's own answer | `etendo_batch` is **create-only and atomic**; it has no ACTION surface | **`etendo_action_batch` is neither: per-document, NOT atomic, capped at 50 ids**, one result per document. Each document runs the `etendo_action` path in its own transaction (commit on success, rollback and a clean session on failure) and the batch carries on after a failure. REST has no equivalent call: the SPA's list toolbar posts one request per record. **Aligned with the SPA (bulk bar, row kebab, form kebab) and the same in single `etendo_action`:** reactivating a *posted* **invoice** un-posts it first (`preUnpostActions`), by per-entity opt-in (`NeoHandler#unpostBeforeReactivate`: goods documents, returns and journals do not, as in the SPA), §4.12.36. In `etendo_action` the un-post is committed in its own transaction before the reactivation, which REST/the SPA do as two requests; amortization's SPA un-posts but the module declares no `unpost` for it, so the MCP does not. **Not aligned, on purpose:** concurrency, the client-side `rowFilter` omission, and the SPA clone dialog stopping at the first failure. Declared in §4.12.36 |
+| attachments of a document — **read authorization and parent ownership** (ETP-5715) | `GET /sws/neo/attachments/{table}/{record}` and `/file/{id}` check **nothing** about the parent: no client/organization ownership, no window-access tier for a read, no existence check on a download (ADR-0003 is still "Proposed", ETP-4570). Writes check only the window-access tier of *a* window that shows the table (`NeoAttachmentAuthorizer`, ETP-5205) | **enforced, on every operation** (`etendo_request_attachment_upload`, `etendo_list_attachments`, `etendo_delete_attachment`; §4.12.37): the role must have access to the **spec** (read tier to list, write tier to upload and delete), the record must exist and belong to a client AND organization the session reads (`TenantOwnership`), a missing and a foreign record answer the same `404`, and an attachment id must belong to **that** record (a bare id of another document is the same `404` as an unknown one) | the MCP does not inherit a gap the platform is about to close. Until ETP-4570 lands in REST, a REST caller can still list/download/delete the attachments of another tenant's record by id; the MCP cannot. **Do not "fix" this by relaxing the MCP side** |
+| attachments on windows the SPA gives no Attachments tab (ETP-5715) | REST serves attachments of any table | **refused `405`** on the spec whose root entity carries `MCP_CONFIG.attachments.enabled:false` (the nine windows with `attachments:false` in `decisions.json`); parity with the SPA is enforced, REST is not changed | the MCP must not offer what the application hides; see §4.12.37 |
+ | attachment writes — organization (ETP-5715) | upload/delete do not check that the record's organization is writable by the role | **required** (`getWritableOrganizations`); a readable-only organization is the same `404` | as the row above |
+| attachment upload (ETP-5715) | multipart `POST` with the caller's bearer token | a **single-use link** (`PUT /sws/neo/attachment/upload/{token}`, no bearer: the token is the credential) bound to session, role, document, file name and the main flag; the upload runs **as the session that asked for the link** and the document is authorized again at upload time | the bytes must not pass through the conversation; the validation and the storage are the SAME code (`NeoAttachmentStore`) |
+| attachment download (ETP-5715) | `GET /sws/neo/attachments/file/{id}` with a bearer token, no parent check | a signed link (`/sws/neo/document-download/{token}`, the email link's token plus an attachment-id claim), valid **10 minutes**, bound to the record, the client and the attachment | the agent never receives bytes; the email links (7 days, main attachment only) are unchanged |
 
 This is a **declared** list, not an unknown one: the point is that the next person to touch either
 path can see what is deliberately unequal. Closing a row means adding the step to
@@ -10345,3 +10354,137 @@ new accounting write nobody asked for. The note tells the agent to post again if
 
 **Tests:** `McpActionBatchTest` (unit, mocked runner and DAL), `McpToolRouterRouteTest` (routing of the tool),
 `ToolRegistryTest`, `McpToolAnnotationsTest`, `McpToolTitlesTest`.
+
+
+#### 4.12.37 Attachments of a document: `etendo_request_attachment_upload`, `etendo_list_attachments`, `etendo_delete_attachment` (ETP-5715)
+
+Three MCP tools that do what the SPA's **Adjuntos** tab does, on the document itself and in **any status** (the SPA also
+attaches to completed documents). Piece A of ETP-5715 stage 2; obtaining the document's PDF and emailing it reuse this.
+
+**What the SPA does (measured in `tools/app-shell`, the contract the MCP mirrors).** `AttachmentsTab` is added by the generator to
+every default-layout window that has a header table (`resolveAttachmentsConfig` in `generate-frontend.js`; opt-out per window with
+`window.attachments: false` in `decisions.json` — `payment-in`, `payment-out`, the SII/VeriFactu/TicketBAI monitors, `matched-purchase-invoices`
+…); 37 generated pages carry it today (orders, quotations, invoices, goods receipts and shipments, both returns, products, business
+partners, payment terms, inventories, …). It always hangs on the **header** record's table (`tableName: "C_Order"`, `"C_Invoice"`,
+`"M_InOut"`, …). Upload is the multipart `POST /sws/neo/attachments/{table}/{record}`; the purchase-invoice window adds
+`saveBeforeAttach` (a new record is saved first) and its supplier-document upload uses `?markAsMain=true`
+(`uploadAndMarkMainAttachment`), which deletes the previously marked main attachment in the same transaction. The list shows every
+attachment of the record, the main one included. Limits are `NeoAttachmentPolicy`'s: 10 MB, an extension allow-list, a magic-byte check.
+
+**The set of tools, and why this one.**
+
+| tool | scope | what it does |
+|---|---|---|
+| `etendo_request_attachment_upload` | `etendo:write` | authorizes the document, checks the file name, returns a **single-use upload URL** (+ a `curl` command) |
+| `etendo_list_attachments` | `etendo:read` | `id, name, size, type, description, created, createdBy, isMain` per attachment, each with a short-lived `downloadUrl` |
+| `etendo_delete_attachment` | `etendo:write` | deletes one attachment of that document |
+
+Three tools, no more: download is not a tool of its own — the list answer already carries one signed link per file, and a separate
+"get" would only repeat the authorization. **There is no inline base64 variant** (unlike `etendo_upload_image`, 256 KB): a document is
+routinely above that, base64 in an argument is model output (tokens), and an agent that cannot run a shell can still hand the user the
+`uploadUrl`. If a client turns out to need it, it is one more tool ending at `NeoAttachmentStore.store`, nothing else changes.
+
+**Arguments.** All three take `spec` (a window spec), `id` (the document's id) and an optional `entity` (the spec's document entity;
+omitted = its header, i.e. the first included entity at tab level 0; **a line entity is refused** `422`, attachments belong to the
+document). The upload also takes `name` (file name **with extension**, required) and `main` (boolean, default `false`); the delete takes
+`attachment_id` (required, from the list). **File-name rule (shell safety):** the name may only contain letters of any language (accents
+and combining marks are fine), digits, spaces and `. _ ( ) -`; quotes, `$`, backticks, `;`, `|`, `&`, `<`, `>`, control characters and newlines are
+refused `422 validation_error` ("The file name may only contain letters, digits, spaces and . _ ( ) - …") before any link exists. A name is also
+refused when it is longer than **255** characters (`C_File.name` is `varchar(1000)`, but 255 is the file-system limit of the segment the name becomes; the
+255 are also enforced as UTF-8 **bytes**, so accented letters count twice) and when it is only an extension (`.pdf`). The
+`curlExample` never contains the name — it is the fixed text `curl -X PUT --upload-file ./<your-file> "<uploadUrl>"` — because the name is agent
+input and that line is meant to be run in a shell. Which windows? Every window spec the role can access whose entity has an AD tab (resolved
+from `SFEntity#getADTab()`, no spec named in shared code). **Parity with the SPA's opt-out (user decision).** A window that sets `window.attachments:false` in its
+`decisions.json` (re-measured: `matched-purchase-invoices`, `monitor-verifactu`, `payment-in`, `payment-out`, `sii-config`, `sii-monitor`,
+`tbai-config`, `tbai-facturas-enviadas`, `verifactu-config`) has no Attachments tab, and the MCP refuses all three tools on it —
+and the PUT of an already issued link — with **`405 method_not_allowed`** ("Attachments are not available for this document type, as in the
+application." — exactly that sentence; the `reason` stored in the data is for operators and never reaches the agent), **before** any role or record lookup (it is not a secret, so it does not mimic the 404). The decision is declared in data,
+not in code: `MCP_CONFIG` of the spec's ROOT entity carries `{"attachments":{"enabled":false,"reason":"..."}}`
+(`ETGO_SF_ENTITY.xml`; read by `NeoAttachmentsConfig`, registered for validation by `McpAttachmentsSection`; entity level wins over spec level;
+fail-closed: only an explicit boolean `true` or no section opens attachments — `"false"`, `0`, `null`, a missing `enabled` or an unreadable configuration refuse). **The flag lives in two places** — `decisions.json` for the SPA and `MCP_CONFIG` for the
+MCP — and nothing derives one from the other yet: a window that sets `attachments:false` MUST also set `MCP_CONFIG.attachments.enabled:false`.
+`McpConfigSourcedataTest.attachmentLessWindowsAreDeclared` lists the specs that carry it as the drift guard. *Proposed follow-up (not
+implemented, it needs `schema_forge_core`):* have the pusher (`sf-push-neo`) write the section from `window.attachments` so there is a single
+source. Existing tenants need the one-off SQL that mirrors the XML (`etp5715_attachments.sql`, md5-guarded, idempotent).
+
+**Upload flow.** `etendo_request_attachment_upload` answers `{uploadUrl, expiresAt, maxBytes: 10485760, allowedExtensions, spec, entity,
+id, name, main, curlExample, hint}`. Whoever holds the file does `curl -X PUT --upload-file ./factura.pdf "<uploadUrl>"`; no
+`Authorization` header (the 192-bit token is the credential, exactly as for the image link and the email download links, and
+`NeoServlet` answers it **before** authentication). The answer of the PUT is `201 {name, message:"uploaded", id, isMain}`. The link:
+single use, **10 minutes**, at most **10 pending per session**, bound to (client, organization, user, **role**, warehouse) and to
+(spec, entity, record, file name, main flag) — nothing in the PUT can change any of them. The upload does **not** run as an
+administrator: `NeoAttachmentUploadEndpoint` binds the OBContext of the session that asked for the link, authorizes the document
+**again** (`NeoAttachmentTarget`, write tier — the role or the record may have changed in the minutes since) and then calls the very code
+the SPA's upload calls (`NeoAttachmentStore`, extracted unchanged from `NeoAttachmentsHelper.handleUpload`): declared size, extension,
+then table, tab, record, then the bytes and their magic-byte check, `AttachImplementationManager.upload`, and with `main:true` the same
+`markAsMain` (the previous main attachment is deleted). A rejected file (too large, wrong type, content that does not match its
+extension) answers `400` with the policy's own text and **does not burn the link** — PUT the corrected file to the same URL. The body is
+copied to a directory of its own (two uploads of the same name cannot overwrite each other) and never past the cap by more than a buffer;
+a `PUT` with a declared length over 10 MB is refused before a byte is read.
+
+**Messages (verbatim from `NeoAttachmentPolicy`, the same ones REST returns).** `File exceeds the maximum allowed size of 10 MB`; `File type not
+allowed: .exe. Allowed types: pdf, doc, docx, xls, xlsx, ppt, pptx, png, jpg, jpeg, gif, bmp, webp, tif, tiff, heic, heif, svg, xml, zip, rtf`;
+`File content does not match its .pdf extension`. They are English in REST and in the SPA's error toast; the Spanish texts of the dropzone are
+client-side. The tool also runs the extension check **before issuing the link** (`422 validation_error`, same text), so a doomed upload fails
+before any bytes are sent.
+
+**Download.** Each item of the list carries `downloadUrl = <base>/sws/neo/document-download/<token>`. It is the **same signed token** as the
+email links (§4.8; `DocumentDownloadTokenService`) with one extra claim, `att` (the attachment id), created by `createAttachmentToken` with a
+**10-minute TTL** (the email links keep their 7 days). `NeoDocumentDownloadService` serves the main attachment when the claim is absent and
+exactly the named one when it is present, after checking that it belongs to the signed record and the signed client; a deleted or foreign
+attachment is `404`. The bytes never travel through the MCP. Without a configured signing secret
+(`etendo.go.email.documentDownloadTokenSecret`) the list still works and says the links are unavailable.
+
+**Security, per operation** (`NeoAttachmentTarget` is the one place; ADR-0003 slice, see the divergence rows in §4.12.9):
+
+| check | list | upload (link) | PUT | delete |
+|---|---|---|---|---|
+| scope | read | write | the token | write |
+| role has access to the spec | read tier (`GET`) | write tier (`POST`) + a window showing the table (`NeoAttachmentAuthorizer.checkWrite`) | the same, again, as the issuing role | the same as upload |
+| record exists and its client AND organization are readable by the session (`TenantOwnership`) | yes | yes | yes | yes |
+| for a **change**, the record's organization is one the role may WRITE in (`OBContext#getWritableOrganizations`, `TenantOwnership#isWritableByCurrentTenant`) | n/a (read) | yes | yes | yes — a readable-but-not-writable organization answers the same `404`, so it is no oracle |
+| missing record / foreign record | the SAME `404 Record not found` | idem | idem (link is spent) | idem |
+| the attachment id belongs to THAT record (same table and record) | n/a | n/a | n/a | yes; another record's id is the same `404 Attachment not found` as an unknown one |
+| the entity is the document, not a line | yes (`422`) | yes | yes | yes |
+| document status | not consulted | not consulted | not consulted | not consulted |
+
+The fiscal-declaration guard of REST's delete (`409` on a non-draft declaration) applies unchanged, because the delete calls
+`NeoAttachmentsHelper.handleDelete`.
+
+**Two things to know about the link and about `main:true`.**
+- The upload token travels in the URL **path**, so it appears in Tomcat and proxy access logs (no code of this module logs it). The exposure is bounded:
+  the token is single use and lives 10 minutes, and a used or expired token only answers `403`.
+- `main:true` takes effect **at PUT time**, not when the link is requested, and it **irreversibly deletes the previous main attachment** through
+  `NeoAttachmentsHelper.markAsMain` — which, exactly as the SPA's `markAsMain=true` upload does, does NOT go through the fiscal-declaration guard that
+  `handleDelete` applies. That is parity with the SPA, declared here so nobody is surprised.
+- A link is also refused at PUT time if its spec or entity was switched off (inactive, not shown in the MCP, not included) within the TTL: the generic
+  `403` of an invalid link.
+
+**Known limit — the link store is in memory and single-node**, exactly like `NeoImageUploadTickets` (decision 2026-09-07): links are lost on
+restart and invisible to another node; a lost link answers the generic `403 This upload link is not valid, has already been used, or has expired`,
+which is the same answer as an expired one, so the agent just requests another. If Etendo GO ever runs multi-node, `NeoAttachmentUploadTickets` MUST
+become a small AD table keyed by the token. The two stores are separate classes on purpose (an image ticket is image-shaped).
+
+**Annotations and telemetry.** `etendo_list_attachments` is read-only; `etendo_delete_attachment` is the removal class; `etendo_request_attachment_upload`
+is classified *modifying* (not additive) because `main:true` replaces a file. Verbs in `ETGO_MCP_USAGE`: `attachment_list`, `attachment_upload`,
+`attachment_delete`. Titles (en/es) in `mcp_titles_*.properties`. No `AD_MESSAGE`, servlet mapping or sourcedata is involved: the PUT is a route of the
+existing `NeoServlet` (`/sws/neo/*`).
+
+**Examples.**
+
+*Purchases — the supplier's PDF on a draft purchase invoice, as the main attachment:*
+`etendo_request_attachment_upload({spec:"purchase-invoice", id:<invoice id>, name:"factura-proveedor.pdf", main:true})`, then
+`curl -X PUT --upload-file ./factura-proveedor.pdf "<uploadUrl>"`, then `etendo_list_attachments({spec:"purchase-invoice", id})` →
+`items:[{id, name:"factura-proveedor.pdf", size, type:"application/pdf", created, createdBy, isMain:true, downloadUrl}]`.
+*A PDF on a purchase order:* the same with `spec:"purchase-order"` and `main` omitted (`isMain:false`).
+*Sales — a PDF on a completed sales invoice:* `spec:"sales-invoice"`; the status is not consulted.
+*Delete:* `etendo_delete_attachment({spec:"purchase-order", id:<order id>, attachment_id:<from the list>})` → `{deleted:true, attachment_id, name, id}`.
+*Refusals:* a 12 MB file → `400 File exceeds the maximum allowed size of 10 MB` from the PUT (the link stays valid); `virus.exe` → `422` from the
+request itself; a document of another client → `404 Record not found`, identical to an id that does not exist; a role with read-only access to the window
+→ the list works, the request/delete answer `403`.
+
+**Tests:** `NeoAttachmentTargetTest` (the authorization rules), `NeoAttachmentStoreTest` (the policy, order of the checks and clean-up, through a materializer),
+`NeoAttachmentUploadEndpointTest` (the unauthenticated PUT), `NeoAttachmentUploadTicketsTest` (single use, TTL, cap, session binding),
+`McpAttachmentToolsTest` (the three tools), `NeoDocumentDownloadServiceTest` (the attachment token), `McpToolRouterRouteTest`, `ToolRegistryGenerateToolsTest`,
+`McpToolAnnotationsTest`, `McpToolTitlesTest`, `McpAuthorizationServiceVectorTest`, `NeoServletProcessRequestTest`. The existing `NeoAttachmentsHelperTest`
+(the multipart upload) passes unchanged on the extracted store.

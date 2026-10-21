@@ -129,6 +129,7 @@ class McpEntityConfigTest {
       assertSame(McpFieldsSection.declaration(), McpFieldsSection.declaration());
       assertSame(McpVerbsSection.declaration(), McpVerbsSection.declaration());
       assertSame(McpActionsSection.declaration(), McpActionsSection.declaration());
+      assertSame(McpAttachmentsSection.declaration(), McpAttachmentsSection.declaration());
       McpEntityConfig.register(McpParentSection.declaration());
       McpEntityConfig.register(McpParentSection.declaration());
     }
@@ -254,6 +255,38 @@ class McpEntityConfigTest {
       // this test fails and someone reads the note above instead of rediscovering it the hard way.
       assertNotEquals("mcpConfig", McpEntityConfig.PROPERTY_MCP_CONFIG,
           "if this now passes, the generator changed — update the javadoc, not just the constant");
+    }
+  }
+
+  /**
+   * ETP-5715 — the {@code attachments} section is registered with the others, so an entity that
+   * declares it stays published, and a misspelt key inside it is an error rather than a permissive
+   * "unconfigured".
+   */
+  @Nested
+  @DisplayName("the attachments section")
+  class AttachmentsSection {
+
+    private SFEntity entityWith(String id, String config) {
+      SFEntity entity = org.mockito.Mockito.mock(SFEntity.class);
+      org.mockito.Mockito.when(entity.getId()).thenReturn(id);
+      org.mockito.Mockito.when(entity.get(McpEntityConfig.PROPERTY_MCP_CONFIG)).thenReturn(config);
+      return entity;
+    }
+
+    @Test
+    @DisplayName("a valid declaration is usable and a misspelt key makes the entity unusable")
+    void registeredAndValidated() {
+      McpConfigSections.resetForTests();
+
+      McpEntityConfig.Resolved ok = McpEntityConfig.forEntity(entityWith("ATT-OK",
+          "{\"attachments\":{\"enabled\":false,\"reason\":\"no tab in the app\"}}"));
+      McpEntityConfig.Resolved typo = McpEntityConfig.forEntity(entityWith("ATT-TYPO",
+          "{\"attachments\":{\"enable\":false,\"reason\":\"x\"}}"));
+
+      assertTrue(ok.isUsable(), ok.describeProblems());
+      assertFalse(typo.isUsable());
+      McpConfigSections.resetForTests();
     }
   }
 }

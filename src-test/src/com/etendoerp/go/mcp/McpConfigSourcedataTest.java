@@ -187,6 +187,58 @@ class McpConfigSourcedataTest {
         + String.join("\n  ", failures));
   }
 
+  /**
+   * ETP-5715 — the windows whose SPA hides the Attachments tab ({@code window.attachments:false} in
+   * {@code schema_forge/artifacts/<window>/decisions.json}) carry {@code MCP_CONFIG.attachments
+   * .enabled:false} on their root entity, so the MCP offers no attachments either. The flag lives in
+   * two places and nothing derives one from the other yet, so this list is the drift guard: a window
+   * that adds {@code attachments:false} must be added here and in the sourcedata, and the reverse.
+   */
+  private static final Set<String> SPECS_WITHOUT_ATTACHMENTS = new TreeSet<>(List.of(
+      "matched-purchase-invoices", "monitor-verifactu", "payment-in", "payment-out", "sii-config",
+      "sii-monitor", "tbai-config", "tbai-facturas-enviadas", "verifactu-config"));
+
+  @Test
+  @DisplayName("exactly the windows without an Attachments tab in the app declare attachments.enabled:false")
+  void attachmentLessWindowsAreDeclared() throws Exception {
+    Path dir = sourcedataDir();
+    String specXml = new String(Files.readAllBytes(dir.resolve("ETGO_SF_SPEC.xml")),
+        StandardCharsets.UTF_8);
+    java.util.Map<String, String> specNames = new java.util.HashMap<>();
+    Matcher specs = Pattern.compile(
+        "<!--([0-9A-F]{32})--><ETGO_SF_SPEC>.*?<NAME><!\\[CDATA\\[(.*?)]]></NAME>", Pattern.DOTALL)
+        .matcher(specXml);
+    while (specs.find()) {
+      specNames.put(specs.group(1), specs.group(2));
+    }
+    String entityXml = new String(Files.readAllBytes(dir.resolve("ETGO_SF_ENTITY.xml")),
+        StandardCharsets.UTF_8);
+    Matcher rows = Pattern.compile("<!--[0-9A-F]{32}--><ETGO_SF_ENTITY>(.*?)</ETGO_SF_ENTITY>",
+        Pattern.DOTALL).matcher(entityXml);
+    Set<String> declared = new TreeSet<>();
+    McpConfigSections.resetForTests();
+    while (rows.find()) {
+      Matcher config = ROW.matcher(rows.group(1));
+      if (!config.find()) {
+        continue;
+      }
+      JSONObject body = new JSONObject(config.group(2));
+      if (!body.has("attachments")) {
+        continue;
+      }
+      JSONObject section = body.getJSONObject("attachments");
+      assertEquals(List.of(), com.etendoerp.go.schemaforge.NeoAttachmentsConfig.validate(section));
+      assertFalse(section.getBoolean("enabled"), "only the opt-out is declared in data");
+      // Internal pointers (decisions.json) belong in comments, never in data an agent can receive.
+      assertFalse(section.getString("reason").contains("decisions.json"));
+      Matcher spec = Pattern.compile("<ETGO_SF_SPEC_ID><!\\[CDATA\\[([0-9A-F]{32})]]>")
+          .matcher(rows.group(1));
+      assertTrue(spec.find());
+      declared.add(specNames.get(spec.group(1)));
+    }
+    assertEquals(SPECS_WITHOUT_ATTACHMENTS, declared);
+  }
+
   private static final String SALES_INVOICE_HEADER = "7240CAF07810439B85DE61E70BE8DC0B";
   private static final String PURCHASE_INVOICE_HEADER = "0D654005B02741A29A0491FD5AFEA6E8";
   /** sales-invoice/header and purchase-invoice/header. */

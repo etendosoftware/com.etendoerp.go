@@ -264,6 +264,11 @@ public class McpToolRouter {
             return imageToolResult(McpImageTools.uploadImage(arguments));
           case McpConstants.TOOL_NEO_GET_IMAGE_UPLOAD:
             return imageToolResult(McpImageTools.getUpload(arguments));
+          // ETP-5715: a document's attachments. Authorized per document by NeoAttachmentTarget.
+          case McpConstants.TOOL_NEO_REQUEST_ATTACHMENT_UPLOAD:
+          case McpConstants.TOOL_NEO_LIST_ATTACHMENTS:
+          case McpConstants.TOOL_NEO_DELETE_ATTACHMENT:
+            return McpAttachmentTools.handle(toolName, arguments);
           case "docs":
             return handleDocs(arguments);
           default:

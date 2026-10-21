@@ -384,4 +384,18 @@ public class McpUsageTenantQaTest {
         .sessionKey());
     assertNull(new McpCallObservation(null, "{}", "{}", System.nanoTime()).sessionKey());
   }
+
+  /**
+   * ETP-5715 — the usage row records the verb of the attachment tools, so their use shows up in the
+   * telemetry instead of being filed under the {@code process} default.
+   */
+  @Test
+  public void attachmentToolsHaveTheirOwnTelemetryVerbs() {
+    assertEquals("attachment_upload",
+        McpUsageTelemetry.verbFor(McpConstants.TOOL_NEO_REQUEST_ATTACHMENT_UPLOAD));
+    assertEquals("attachment_list",
+        McpUsageTelemetry.verbFor(McpConstants.TOOL_NEO_LIST_ATTACHMENTS));
+    assertEquals("attachment_delete",
+        McpUsageTelemetry.verbFor(McpConstants.TOOL_NEO_DELETE_ATTACHMENT));
+  }
 }

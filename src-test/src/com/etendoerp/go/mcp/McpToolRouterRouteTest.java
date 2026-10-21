@@ -3548,4 +3548,65 @@ class McpToolRouterRouteTest {
       }
     }
   }
+
+  // ── attachment tools (ETP-5715) ───────────────────────────────────────────
+
+  @Nested
+  @DisplayName("route — attachment tools")
+  class AttachmentToolsTests {
+
+    private final String[] tools = {McpConstants.TOOL_NEO_REQUEST_ATTACHMENT_UPLOAD,
+        McpConstants.TOOL_NEO_LIST_ATTACHMENTS, McpConstants.TOOL_NEO_DELETE_ATTACHMENT};
+
+    private JSONObject attachmentArgs() throws Exception {
+      return new JSONObject().put("spec", SPEC_NAME).put("id", "REC1");
+    }
+
+    @Test
+    @DisplayName("each tool is dispatched to the attachment handler, after the scope and spec checks")
+    void dispatchedAfterTheChecks() throws Exception {
+      setupSpecLookup(mockSpec());
+      JSONObject sentinel = McpToolRouter.wrapAsTextContent("handled");
+      try (MockedStatic<McpAttachmentTools> handler = mockStatic(McpAttachmentTools.class)) {
+        handler.when(() -> McpAttachmentTools.handle(anyString(), any())).thenReturn(sentinel);
+
+        for (String tool : tools) {
+          assertEquals(sentinel, router.route(tool, attachmentArgs(), WRITE_SCOPES), tool);
+          handler.verify(() -> McpAttachmentTools.handle(eq(tool), any()));
+          authMock.verify(() -> McpAuthorizationService.authorizeToolCall(eq(tool), any()));
+        }
+      }
+      supportMock.verify(() -> McpToolRouterSupport.hasSpecAccess(any(), anyString(), eq("GET")),
+          org.mockito.Mockito.times(3));
+    }
+
+    @Test
+    @DisplayName("a role without access to the spec is refused before the handler is reached")
+    void roleWithoutSpecAccessNeverReachesTheHandler() throws Exception {
+      setupSpecLookup(mockSpec());
+      supportMock.when(() -> McpToolRouterSupport.hasSpecAccess(any(), anyString(), anyString()))
+          .thenReturn(false);
+      try (MockedStatic<McpAttachmentTools> handler = mockStatic(McpAttachmentTools.class)) {
+        for (String tool : tools) {
+          JSONObject result = router.route(tool, attachmentArgs(), WRITE_SCOPES);
+
+          assertTrue(result.getBoolean("isError"), tool);
+        }
+        handler.verifyNoInteractions();
+      }
+    }
+
+    @Test
+    @DisplayName("an argument the tool does not declare is refused, not silently dropped")
+    void unknownArgumentIsRefused() throws Exception {
+      setupSpecLookup(mockSpec());
+      try (MockedStatic<McpAttachmentTools> handler = mockStatic(McpAttachmentTools.class)) {
+        JSONObject result = router.route(McpConstants.TOOL_NEO_LIST_ATTACHMENTS,
+            attachmentArgs().put("attachmentId", "F1"), READ_SCOPES);
+
+        assertTrue(result.getBoolean("isError"));
+        handler.verifyNoInteractions();
+      }
+    }
+  }
 }

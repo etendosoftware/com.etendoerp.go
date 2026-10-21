@@ -292,6 +292,9 @@ public class ToolRegistry {
       tools.add(McpActionBatch.definition(
           ToolRegistryActionSpecs.withActionSpecs(accessibleWindowSpecs, actionReportSpecs)));
     }
+    // ETP-5715: the attachment tools — list on the read scope, upload and delete on the write scope.
+    McpAttachmentToolDefinitions.addTo(tools, accessibleWindowSpecs, permissions.canRead,
+        permissions.canWrite);
   }
 
   // ── Amortization plan tool ─────────────────────────────────────────────
@@ -382,6 +385,10 @@ public class ToolRegistry {
       case McpConstants.TOOL_NEO_REQUEST_IMAGE_UPLOAD:
       case McpConstants.TOOL_NEO_UPLOAD_IMAGE:
       case McpConstants.TOOL_NEO_GET_IMAGE_UPLOAD:
+      // ETP-5715: these address a spec by the `spec` argument like every CRUD tool.
+      case McpConstants.TOOL_NEO_REQUEST_ATTACHMENT_UPLOAD:
+      case McpConstants.TOOL_NEO_LIST_ATTACHMENTS:
+      case McpConstants.TOOL_NEO_DELETE_ATTACHMENT:
         return true;
       default:
         return false;
@@ -692,6 +699,12 @@ public class ToolRegistry {
       // generic executor; the action's own parameters belong under 'parameters'.
       case McpConstants.TOOL_NEO_ACTION: definition = registry.buildActionTool(List.of()); break;
       case McpConstants.TOOL_NEO_ACTION_BATCH: definition = McpActionBatch.definition(List.of()); break;
+      case McpConstants.TOOL_NEO_REQUEST_ATTACHMENT_UPLOAD:
+        definition = McpAttachmentToolDefinitions.requestAttachmentUpload(List.of()); break;
+      case McpConstants.TOOL_NEO_LIST_ATTACHMENTS:
+        definition = McpAttachmentToolDefinitions.listAttachments(List.of()); break;
+      case McpConstants.TOOL_NEO_DELETE_ATTACHMENT:
+        definition = McpAttachmentToolDefinitions.deleteAttachment(List.of()); break;
       default: return Optional.empty();
     }
     Object props = definition.getInputSchema().get(McpConstants.KEY_PROPERTIES);
