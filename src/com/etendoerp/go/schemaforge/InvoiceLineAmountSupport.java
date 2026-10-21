@@ -79,6 +79,17 @@ import org.openbravo.model.common.invoice.InvoiceLine;
  * a caller that deliberately sends {@code unitPrice == listPrice} together with a discount gets the
  * discount applied.
  *
+ * <p><b>An update without a discount</b> (ETP-5703, "work as the UI does"). The form's "Precio" is
+ * {@code listPrice}; {@code unitPrice} is not a form input, and with no discount the SPA always
+ * posts {@code unitPrice = listPrice}. So when the line's final discount is 0 (or null) and there is
+ * no non-zero {@code grossUnitPrice}, a patch that carries only one of the two prices sets the other
+ * to it: {@code unitPrice} alone → {@code listPrice = unitPrice} (MCP {@code {unitPrice: 1.25}} on
+ * 3 × 1.50 now stores list 1.25, net 3.75, as editing Precio does); {@code listPrice} alone →
+ * {@code unitPrice = listPrice}; {@code etgoDiscount} alone, taken to 0 → {@code unitPrice} = the
+ * stored non-zero list price. A patch that sends both prices, or one already equal to the other —
+ * every SPA body — is left alone. A {@code unitPrice} alone on a line WITH a discount is still the
+ * caller's price (unchanged): the UI offers no such edit.
+ *
  * <p><b>The amounts.</b> {@link NeoCommercialLinePolicy#injectCommercialAmounts} over the line's
  * final quantity, price, gross price and tax, rounded to the invoice currency's standard precision
  * ({@link NeoCurrencyPrecision}, ETP-5703). {@code lineNetAmount} needs no tax; {@code grossAmount} is written only when the line
@@ -301,7 +312,8 @@ final class InvoiceLineAmountSupport {
   /**
    * The discount rule of the class javadoc: rewrites {@code unitPrice} in {@code patch} (and, on a
    * create that had no list price, {@code listPrice}) when the line's discount is not reflected in
-   * its price yet.
+   * its price yet. On an update of a line without a discount it aligns the two prices instead
+   * ({@link #alignUndiscountedPrice}).
    *
    * @param patch  the request body; mutated in place
    * @param state  the line as it will be stored — {@code patch} itself on a create, the stored line
@@ -311,10 +323,12 @@ final class InvoiceLineAmountSupport {
    */
   static boolean applyDiscount(JSONObject patch, JSONObject state, boolean create)
       throws JSONException {
-    BigDecimal discount = LineAmountSupport.decimal(state.opt(FIELD_DISCOUNT));
-    if (discount == null || discount.signum() == 0
-        || !LineAmountSupport.isZero(state.opt(FIELD_GROSS_UNIT_PRICE))) {
+    if (!LineAmountSupport.isZero(state.opt(FIELD_GROSS_UNIT_PRICE))) {
       return false;
+    }
+    BigDecimal discount = LineAmountSupport.decimal(state.opt(FIELD_DISCOUNT));
+    if (discount == null || discount.signum() == 0) {
+      return !create && alignUndiscountedPrice(patch, state);
     }
     BigDecimal list = nonZero(state.opt(FIELD_LIST_PRICE));
     BigDecimal unit = nonZero(state.opt(FIELD_UNIT_PRICE));
@@ -326,6 +340,51 @@ final class InvoiceLineAmountSupport {
     patch.put(FIELD_UNIT_PRICE, base.multiply(factor).divide(HUNDRED, PRICE_SCALE,
         RoundingMode.HALF_UP));
     return true;
+  }
+
+  /**
+   * The update rule of a line without a discount (ETP-5703): the form's "Precio" is
+   * {@code listPrice}, and with no discount the SPA always posts {@code unitPrice = listPrice}
+   * ({@code computeUnitPriceForPost}), so the two are the same price. A patch that sends only one
+   * of them sets the other to it:
+   * <ul>
+   *   <li>{@code unitPrice} without {@code listPrice} → {@code listPrice = unitPrice} (0 included,
+   *       as the form saves a Precio of 0);</li>
+   *   <li>{@code listPrice} without {@code unitPrice} → {@code unitPrice = listPrice};</li>
+   *   <li>{@code etgoDiscount} alone (taken to 0) → {@code unitPrice} = the stored non-zero list
+   *       price; a legacy line with no list price keeps its price.</li>
+   * </ul>
+   * A patch that sends both, or one already equal to the other (every SPA body), is left alone.
+   *
+   * @return {@code true} when {@code unitPrice} was rewritten
+   */
+  private static boolean alignUndiscountedPrice(JSONObject patch, JSONObject state)
+      throws JSONException {
+    boolean sentUnit = patch.has(FIELD_UNIT_PRICE) && !patch.isNull(FIELD_UNIT_PRICE);
+    boolean sentList = patch.has(FIELD_LIST_PRICE) && !patch.isNull(FIELD_LIST_PRICE);
+    BigDecimal unit = LineAmountSupport.decimal(state.opt(FIELD_UNIT_PRICE));
+    if (sentUnit && !sentList) {
+      if (unit != null && !sameValue(unit, state.opt(FIELD_LIST_PRICE))) {
+        patch.put(FIELD_LIST_PRICE, unit);
+        state.put(FIELD_LIST_PRICE, unit);
+      }
+      return false;
+    }
+    if (sentUnit || !(sentList || patch.has(FIELD_DISCOUNT))) {
+      return false;
+    }
+    BigDecimal list = sentList ? LineAmountSupport.decimal(state.opt(FIELD_LIST_PRICE))
+        : nonZero(state.opt(FIELD_LIST_PRICE));
+    if (list == null || sameValue(list, state.opt(FIELD_UNIT_PRICE))) {
+      return false;
+    }
+    patch.put(FIELD_UNIT_PRICE, list);
+    return true;
+  }
+
+  private static boolean sameValue(BigDecimal value, Object other) {
+    BigDecimal decimal = LineAmountSupport.decimal(other);
+    return decimal != null && decimal.compareTo(value) == 0;
   }
 
   /** The price to discount on a create, or {@code null} when the price is the caller's. */

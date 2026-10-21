@@ -229,6 +229,79 @@ class InvoiceLineAmountSupportTest {
     }
   }
 
+  // ── ETP-5703: without a discount the price IS the list price (the form's "Precio") ──
+
+  /** 3 x 1.50, no discount, VAT 10 %: invoice FV1000156 of the QA case CP-B3. */
+  private static InvoiceLine undiscounted() {
+    return LineAmountTestSupport.storedInvoiceLine("3", "1.5", "1.5", "0", "0", "TAX10");
+  }
+
+  /** 3 x 1.35 (list 1.50, 10 %), VAT 10 %. */
+  private static InvoiceLine discounted() {
+    return LineAmountTestSupport.storedInvoiceLine("3", "1.35", "1.5", "10", "0", "TAX10");
+  }
+
+  static Stream<Arguments> undiscountedPriceOnUpdate() {
+    return Stream.of(
+        // label, stored, patch, unitPrice, listPrice (null: as sent, or absent), net, gross
+        Arguments.of("unitPrice only → the list price follows (CP-B3)", undiscounted(),
+            "{\"unitPrice\":1.25}", null, "1.25", "3.75", "4.13"),
+        Arguments.of("listPrice only → the price follows", undiscounted(),
+            "{\"listPrice\":1.25}", "1.25", null, "3.75", "4.13"),
+        Arguments.of("unitPrice 0 → list price 0 (the form saves a Precio of 0)", undiscounted(),
+            "{\"unitPrice\":0}", null, "0", "0", "0"),
+        Arguments.of("discount taken to 0 alone → the price is the stored list price",
+            discounted(), "{\"etgoDiscount\":0}", "1.5", null, "4.50", "4.95"),
+        Arguments.of("discount 0 alone on a legacy line without list price → price kept",
+            LineAmountTestSupport.storedInvoiceLine("10", "25", "0", "0", "0", "TAX10"),
+            "{\"etgoDiscount\":0}", null, null, "250", "275"),
+        Arguments.of("both prices sent and different → both are the caller's", undiscounted(),
+            "{\"unitPrice\":1.25,\"listPrice\":1.5}", null, null, "3.75", "4.13"),
+        Arguments.of("SPA side panel, Precio edited → no-op", undiscounted(),
+            "{\"listPrice\":1.25,\"unitPrice\":1.25}", null, null, "3.75", "4.13"),
+        Arguments.of("SPA side panel, quantity edited → no-op", undiscounted(),
+            "{\"invoicedQuantity\":5,\"unitPrice\":1.5}", null, null, "7.50", "8.25"),
+        Arguments.of("SPA side panel, quantity edited on a discounted line → no-op",
+            discounted(), "{\"invoicedQuantity\":5,\"unitPrice\":1.35}", null, null, "6.75",
+            "7.43"),
+        Arguments.of("SPA side panel, discount taken to 0 → no-op", discounted(),
+            "{\"etgoDiscount\":0,\"unitPrice\":1.5}", null, null, "4.50", "4.95"));
+  }
+
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("undiscountedPriceOnUpdate")
+  void undiscountedPriceAndListPriceStayTheSameOnUpdate(String label, InvoiceLine stored,
+      String patch, String unitPrice, String listPrice, String net, String gross)
+      throws Exception {
+    JSONObject json = new JSONObject(patch);
+    JSONObject sent = new JSONObject(patch);
+    NeoContext ctx = NeoContext.builder().specName("sales-invoice").entityName("lines")
+        .httpMethod("PUT").endpointType(NeoEndpointType.CRUD)
+        .recordId(LineAmountTestSupport.STORED_LINE_ID).requestBody(json).build();
+
+    try (MockedStatic<OBDal> dal = LineAmountTestSupport.taxRate(10.0, stored)) {
+      InvoiceLineAmountSupport.deriveAmountsOnUpdate(ctx);
+    }
+
+    assertPriceOrUntouched(label, unitPrice, sent, json, InvoiceLineAmountSupport.FIELD_UNIT_PRICE);
+    assertPriceOrUntouched(label, listPrice, sent, json, InvoiceLineAmountSupport.FIELD_LIST_PRICE);
+    assertAmount(label, net, json, InvoiceLineAmountSupport.FIELD_LINE_NET_AMOUNT);
+    assertAmount(label, gross, json, InvoiceLineAmountSupport.FIELD_GROSS_AMOUNT);
+  }
+
+  /** {@code expected} when given; otherwise the key keeps exactly what was sent, or stays absent. */
+  private static void assertPriceOrUntouched(String label, String expected, JSONObject sent,
+      JSONObject body, String key) {
+    if (expected != null) {
+      assertAmount(label, expected, body, key);
+    } else if (sent.has(key)) {
+      assertEquals(String.valueOf(sent.opt(key)), String.valueOf(body.opt(key)),
+          label + ": " + key + " as sent");
+    } else {
+      assertFalse(body.has(key), label + ": " + key + " untouched, was " + body.opt(key));
+    }
+  }
+
   /**
    * ETP-5703: the recalculated amounts are written rounded to the invoice currency's precision, as
    * {@link java.math.BigDecimal}s — 3 x 1.50 at 21 % is 4.50 / 5.45, never the unrounded 5.445 the

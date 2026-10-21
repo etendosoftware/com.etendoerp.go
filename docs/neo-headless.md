@@ -8978,6 +8978,24 @@ discounted price with no list price (a legacy line) would otherwise be discounte
 edit. Accepted edge case (same as order lines): a caller that deliberately sends `unitPrice == listPrice`
 with a discount gets the discount applied.
 
+**Update without a discount (ETP-5703).** The form's "Precio" is `listPrice` (`PriceList`); `unitPrice` is
+not a form input, and with no discount the SPA always posts `unitPrice = listPrice`
+(`computeUnitPriceForPost`, sent by both the side-panel save and the inline autosave). An MCP / REST
+update must end with the same values, so when the line's final `etgoDiscount` is 0 (or null) and there is
+no non-zero `grossUnitPrice`:
+
+| Patch | Result |
+|---|---|
+| `unitPrice` without `listPrice` | `listPrice = unitPrice` (0 included) |
+| `listPrice` without `unitPrice` | `unitPrice = listPrice` |
+| `etgoDiscount` alone, taken to 0 | `unitPrice` = the stored list price when non-zero (a legacy line with no list price keeps its price) |
+| both prices, or one already equal to the other (every SPA body) | untouched |
+
+QA case CP-B3: 3 × 1.50, VAT 10 %, `etendo_update {unitPrice: 1.25}` → `listPrice 1.25`, net 3.75, gross
+4.13 — what editing Precio stores — instead of `listPrice 1.50` with net 3.75 ("Subtotal sin descuento"
+4.50 against a subtotal of 3.75). A `unitPrice` alone on a line **with** a discount is unchanged (below):
+the UI offers no such edit.
+
 **Discount range.** `etgoDiscount` must be within **[0, 100]**. A create (POST) or update (PATCH, PUT) whose
 body carries a discount outside that range is refused **before** anything is derived, with **422**,
 `error.code = invalidLineDiscount`, message `The line discount must be between 0 and 100 (percent).`
