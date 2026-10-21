@@ -22,7 +22,10 @@ import java.util.function.Supplier;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.openbravo.base.exception.OBException;
+import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBError;
+import org.openbravo.model.ad.ui.ProcessRequest;
 import org.openbravo.scheduling.ProcessBundle;
 import org.openbravo.service.db.DalBaseProcess;
 
@@ -45,10 +48,17 @@ import com.etendoerp.go.usage.UsageMessages;
  * <p>Parameter (optional): <b>Dry run</b> ({@code dryrun}, Yes/No). Yes reads and decides
  * everything and writes nothing.
  *
- * <p>The startup plants the scheduled request (the fixed id
- * {@link BillingReconciliationScheduleStartup#REQUEST_ID}) only while the
- * {@value GoFeatureFlags#FLAG_BILLING_RECONCILIATION_SCHEDULE} flag is on. As a safety net a run of
- * that request also does nothing while the flag is off; every other launch runs.
+ * <p><b>Scheduling.</b> Production is updated by delta and never restarted (see
+ * {@code DemoTrialNoticeProcess}), so there the reconciliation is scheduled by hand in the Process
+ * Request window, like Demo Trial Notices. Environments that do restart get the request planted
+ * by {@link BillingReconciliationScheduleStartup}, only while the
+ * {@value GoFeatureFlags#FLAG_BILLING_RECONCILIATION_SCHEDULE} flag is on.
+ *
+ * <p><b>The flag gates every scheduled run</b> (decided by Martin, 2026-10-21): a run the Process
+ * Scheduler fires for a request whose timing is <em>Schedule</em> ({@code S}) — the startup's or
+ * one an administrator created — does nothing while the flag is off, and ends as an ERROR (error
+ * result and exception) so Process Monitor shows that a scheduled request is firing for nothing.
+ * A launch from the menu, or a Process Request run immediately or later once, is never gated.
  */
 public class BillingReconciliationProcess extends DalBaseProcess {
 
@@ -57,6 +67,9 @@ public class BillingReconciliationProcess extends DalBaseProcess {
   static final String PARAM_DRY_RUN = "dryrun";
   private static final String TITLE_DONE = "Billing Reconciliation Complete";
   private static final String TITLE_FAILED = "Billing Reconciliation Finished With Errors";
+  private static final String TITLE_SKIPPED = "Billing Reconciliation Schedule Is Off";
+  /** {@code AD_PROCESS_REQUEST.TIMING_OPTION} of a recurring schedule. */
+  static final String TIMING_SCHEDULED = "S";
   private static final FeatureFlagContext ENVIRONMENT = FeatureFlagContext.forAccount(null);
 
   private final Supplier<BillingReconciliationService> serviceFactory;
@@ -72,15 +85,13 @@ public class BillingReconciliationProcess extends DalBaseProcess {
 
   @Override
   public void doExecute(ProcessBundle bundle) throws Exception {
-    if (isScheduledRequest(bundle) && !scheduleEnabled()) {
-      log.debug("{} Scheduled billing reconciliation skipped: the {} flag is off",
-          ReconciliationAudit.LOG_PREFIX, GoFeatureFlags.FLAG_BILLING_RECONCILIATION_SCHEDULE);
-      OBError skipped = new OBError();
-      skipped.setType("Success");
-      skipped.setTitle(TITLE_DONE);
-      skipped.setMessage("Scheduled run skipped: the billing-reconciliation-schedule flag is off.");
-      bundle.setResult(skipped);
-      return;
+    if (isScheduledRun(bundle) && !scheduleEnabled()) {
+      String message = "The " + GoFeatureFlags.FLAG_BILLING_RECONCILIATION_SCHEDULE
+          + " flag is off, so this scheduled request did nothing. Turn the flag on, or unschedule "
+          + "the request in the Process Request window.";
+      log.warn("{} Scheduled run of process request {} skipped: {}",
+          ReconciliationAudit.LOG_PREFIX, bundle.getProcessRequestId(), message);
+      fail(bundle, TITLE_SKIPPED, message);
     }
     boolean dryRun = readDryRun(bundle);
     ReconciliationResult result;
@@ -104,9 +115,32 @@ public class BillingReconciliationProcess extends DalBaseProcess {
     bundle.setResult(success);
   }
 
-  private static boolean isScheduledRequest(ProcessBundle bundle) {
-    return BillingReconciliationScheduleStartup.REQUEST_ID.equals(
-        bundle.getProcessRequestId());
+  /**
+   * Whether this run was fired by a recurring schedule: the Process Scheduler channel, for a
+   * request whose timing is <em>Schedule</em>. {@code ProcessBundle.request} builds every
+   * scheduler-run bundle on {@link ProcessBundle.Channel#SCHEDULED}, an immediate Process Request
+   * run included, so the request's timing is what tells a schedule apart.
+   */
+  boolean isScheduledRun(ProcessBundle bundle) {
+    String requestId = bundle.getProcessRequestId();
+    return bundle.getChannel() == ProcessBundle.Channel.SCHEDULED && requestId != null
+        && TIMING_SCHEDULED.equals(timingOf(requestId));
+  }
+
+  /**
+   * The timing option of a process request. Package-visible so tests can answer it without a
+   * database.
+   *
+   * @return {@code I}, {@code L} or {@code S}; null when the request does not exist
+   */
+  String timingOf(String requestId) {
+    OBContext.setAdminMode(true);
+    try {
+      ProcessRequest request = OBDal.getInstance().get(ProcessRequest.class, requestId);
+      return request == null ? null : request.getTiming();
+    } finally {
+      OBContext.restorePreviousMode();
+    }
   }
 
   boolean scheduleEnabled() {

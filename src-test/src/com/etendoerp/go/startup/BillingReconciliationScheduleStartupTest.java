@@ -171,6 +171,26 @@ public class BillingReconciliationScheduleStartupTest {
     assertEquals(0, registrations);
   }
 
+  /**
+   * An operator unscheduled the fixed request (status UNS): it is left alone, never inserted again,
+   * which would also fail the startup on a duplicate primary key.
+   */
+  @Test
+  public void anUnscheduledFixedRequestIsLeftAloneAndNeverReinserted() {
+    flagOn = true;
+    ProcessRequest unscheduled = mock(ProcessRequest.class);
+    when(unscheduled.getStatus()).thenReturn("UNS");
+    when(dal.get(ProcessRequest.class, BillingReconciliationScheduleStartup.REQUEST_ID))
+        .thenReturn(unscheduled);
+
+    startup.runPass();
+
+    verify(provider, never()).get(ProcessRequest.class);
+    verify(dal, never()).save(any());
+    verify(dal, never()).commitAndClose();
+    assertEquals(0, registrations);
+  }
+
   @Test
   public void aMissingProcessDefinitionIsSkipped() {
     when(dal.get(Process.class, BillingReconciliationScheduleStartup.PROCESS_ID)).thenReturn(null);

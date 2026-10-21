@@ -404,14 +404,20 @@ when `etendo.go.configcat.sdkKey` resolves, `PropertiesFeatureProvider` otherwis
 
 ### `billing-reconciliation-schedule` (ETP-5048) — backend-only, strictly off by default
 
-Whether the billing reconciliation (`ETGO_BillingReconciliation`) is scheduled. While the flag is
-off, `BillingReconciliationScheduleStartup` plants no process request. Turning it on takes effect at
-the **next restart**, when the System request is planted (hourly by default,
-`etendo.go.billing.reconcile.interval.minutes`). An operator can also schedule the process by hand in
-the Process Request window at any time. As a safety net, a run of the planted request does nothing
-while the flag is off, so turning it off stops the scheduled work without a restart; the row then
-fires as a no-op until someone unschedules it. A run started from the Classic menu
-**Billing Reconciliation**, or from an operator's own Process Request, is never gated. Environment
+Whether the billing reconciliation (`ETGO_BillingReconciliation`) runs on a schedule.
+
+- **Production schedules it by hand.** Production is updated by delta and never restarted, so no
+  startup hook runs there: turn the flag on and create a Process Request for **Billing
+  Reconciliation** (client System, timing *Schedule*, hourly), like Demo Trial Notices.
+- **Environments that restart:** while the flag is off, `BillingReconciliationScheduleStartup`
+  plants no process request; turning it on takes effect at the next restart (hourly by default,
+  `etendo.go.billing.reconcile.interval.minutes`). A fixed request an operator unscheduled is left
+  as it is, never planted again.
+- **The flag gates every scheduled run** (timing *Schedule*), the planted one or one an
+  administrator created. While it is off such a run does no work and ends as an **ERROR** in
+  Process Monitor, saying to turn the flag on or unschedule the request.
+- A run started from the Classic menu **Billing Reconciliation**, or a Process Request run
+  immediately or later once, is never gated. Environment
 level, evaluated with an empty context. Its callers are `BillingReconciliationScheduleStartup` and
 `BillingReconciliationProcess`. Design of record:
 [`plans/2026-10-18-etp-5048-billing-reconciliation-design.md`](plans/2026-10-18-etp-5048-billing-reconciliation-design.md).

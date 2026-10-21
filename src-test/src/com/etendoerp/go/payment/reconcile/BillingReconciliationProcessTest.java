@@ -19,6 +19,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import org.apache.logging.log4j.Level;
 import org.junit.Before;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
@@ -27,6 +28,7 @@ import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.scheduling.ProcessBundle;
 import org.openbravo.scheduling.ProcessLogger;
 
+import com.etendoerp.go.payment.TestLogCapture;
 import com.etendoerp.go.payment.reconcile.ReconciliationResult.Counter;
 import com.etendoerp.go.startup.BillingReconciliationScheduleStartup;
 
@@ -34,9 +36,10 @@ import com.etendoerp.go.startup.BillingReconciliationScheduleStartup;
  * Specs for {@link BillingReconciliationProcess}, the Classic entry point.
  *
  * <ul>
- *   <li>The {@code billing-reconciliation-schedule} flag gates only a run of the fixed request the
- *       startup plants; a run from the menu (or from an operator's own Process Request) is never
- *       gated.</li>
+ *   <li>The {@code billing-reconciliation-schedule} flag gates every run the Process Scheduler
+ *       fires for a recurring request (timing {@code S}), the startup's or an administrator's; a
+ *       run from the menu, or an immediate Process Request run, is never gated. A gated run does
+ *       no work and ends as an ERROR, so Process Monitor shows it.</li>
  *   <li>The optional Dry run parameter reaches the service, whatever the case of its key.</li>
  *   <li>A run with errors or a tripped breaker sets an Error result <em>and</em> throws, so
  *       Process Monitor records ERROR.</li>
@@ -51,6 +54,8 @@ public class BillingReconciliationProcessTest {
   private ProcessLogger processLogger;
   private Map<String, Object> params;
   private AtomicInteger flagReads;
+  /** The timing option each process request answers, by id. */
+  private Map<String, String> timings;
 
   @Before
   public void setUp() {
@@ -59,6 +64,7 @@ public class BillingReconciliationProcessTest {
     processLogger = mock(ProcessLogger.class);
     params = new HashMap<>();
     flagReads = new AtomicInteger();
+    timings = new HashMap<>();
     when(bundle.getParams()).thenReturn(params);
     when(bundle.getLogger()).thenReturn(processLogger);
   }
@@ -70,13 +76,29 @@ public class BillingReconciliationProcessTest {
         flagReads.incrementAndGet();
         return flagOn;
       }
+
+      @Override
+      String timingOf(String requestId) {
+        return timings.get(requestId);
+      }
     };
+  }
+
+  /** A run the Process Scheduler fires for request {@code requestId} with {@code timing}. */
+  private void firedByTheScheduler(String requestId, String timing) {
+    when(bundle.getChannel()).thenReturn(ProcessBundle.Channel.SCHEDULED);
+    when(bundle.getProcessRequestId()).thenReturn(requestId);
+    timings.put(requestId, timing);
   }
 
   /** Runs the process expecting it to throw, as Process Monitor needs to record ERROR. */
   private OBException expectFailure() {
+    return expectFailure(false);
+  }
+
+  private OBException expectFailure(boolean flagOn) {
     try {
-      process(false).doExecute(bundle);
+      process(flagOn).doExecute(bundle);
     } catch (OBException expected) {
       return expected;
     } catch (Exception other) {
@@ -92,21 +114,47 @@ public class BillingReconciliationProcessTest {
     return result.getValue();
   }
 
+  /**
+   * A scheduled run while the flag is off does no work and ends as an ERROR, so a request firing
+   * for nothing every hour is visible in Process Monitor rather than a silent success.
+   */
   @Test
-  public void aScheduledRunDoesNoWorkWhileTheFlagIsOff() throws Exception {
-    when(bundle.getProcessRequestId()).thenReturn(BillingReconciliationScheduleStartup.REQUEST_ID);
+  public void aScheduledRunWhileTheFlagIsOffDoesNoWorkAndFails() {
+    firedByTheScheduler(BillingReconciliationScheduleStartup.REQUEST_ID, "S");
+    TestLogCapture warnings = TestLogCapture.attachTo(BillingReconciliationProcess.class,
+        Level.WARN);
+    try {
+      expectFailure();
 
-    process(false).doExecute(bundle);
-
+      assertTrue(warnings.messagesAt(Level.WARN).toString(), warnings.messagesAt(Level.WARN)
+          .stream().anyMatch(line -> line.startsWith("[BILLING-RECONCILE] Scheduled run of "
+              + "process request " + BillingReconciliationScheduleStartup.REQUEST_ID)));
+    } finally {
+      warnings.detach();
+    }
     verify(service, never()).run(anyBoolean());
     OBError result = resultOf();
-    assertEquals("Success", result.getType());
-    assertTrue(result.getMessage(), result.getMessage().contains("flag is off"));
+    assertEquals("Error", result.getType());
+    assertEquals("Billing Reconciliation Schedule Is Off", result.getTitle());
+    assertTrue(result.getMessage(), result.getMessage().contains(
+        "billing-reconciliation-schedule flag is off, so this scheduled request did nothing"));
+    assertTrue(result.getMessage(), result.getMessage().contains("unschedule"));
+  }
+
+  /** The gate is not tied to the startup's fixed id: an administrator's schedule obeys it too. */
+  @Test
+  public void aScheduleAnAdministratorCreatedIsGatedByTheFlagToo() {
+    firedByTheScheduler("ADMIN-SCHEDULED-REQUEST", "S");
+
+    expectFailure();
+
+    verify(service, never()).run(anyBoolean());
+    assertEquals("Error", resultOf().getType());
   }
 
   @Test
   public void aScheduledRunWorksWhileTheFlagIsOn() throws Exception {
-    when(bundle.getProcessRequestId()).thenReturn(BillingReconciliationScheduleStartup.REQUEST_ID);
+    firedByTheScheduler("ADMIN-SCHEDULED-REQUEST", "S");
     when(service.run(false)).thenReturn(new ReconciliationResult(false));
 
     process(true).doExecute(bundle);
@@ -116,8 +164,10 @@ public class BillingReconciliationProcessTest {
   }
 
   @Test
-  public void aManualRunIsNeverGatedByTheFlag() throws Exception {
-    when(bundle.getProcessRequestId()).thenReturn("SOME-OPERATOR-REQUEST");
+  public void anImmediateProcessRequestRunIsNeverGatedByTheFlag() throws Exception {
+    // ProcessBundle.request puts every scheduler-run bundle on the SCHEDULED channel; the timing
+    // option is what tells a one-off run from a schedule.
+    firedByTheScheduler("SOME-OPERATOR-REQUEST", "I");
     when(service.run(false)).thenReturn(new ReconciliationResult(false));
 
     process(false).doExecute(bundle);
@@ -128,13 +178,15 @@ public class BillingReconciliationProcessTest {
   }
 
   @Test
-  public void aMenuRunWithNoRequestIdIsNeverGated() throws Exception {
+  public void aMenuRunIsNeverGated() throws Exception {
+    when(bundle.getChannel()).thenReturn(ProcessBundle.Channel.DIRECT);
     when(bundle.getProcessRequestId()).thenReturn(null);
     when(service.run(false)).thenReturn(new ReconciliationResult(false));
 
     process(false).doExecute(bundle);
 
     verify(service).run(false);
+    assertEquals(0, flagReads.get());
   }
 
   @Test

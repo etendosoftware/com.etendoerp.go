@@ -128,13 +128,26 @@ checkout and subscription rows, and its audit rows are ordinary billing events.
     - `startup/BillingReconciliationScheduleStartup` follows the `TenantPoolScheduleStartup` shape:
       fixed process id, fixed request id at client 0, idempotent.
     - The interval is configurable and defaults to hourly. Batches are bounded per run.
+    - **Production schedules it by hand** (decided by Martin, 2026-10-21). Production is updated
+      by delta and never restarted (`DemoTrialNoticeProcess` documents it), so the startup hook
+      never runs there: an operator schedules the process in the Process Request window, like Demo
+      Trial Notices. The hook stays for environments that do restart.
     - **Strictly off by default** (decided 2026-10-18). The startup plants the request only while
       the `GoFeatureFlags` flag `billing-reconciliation-schedule` is on, so turning it on takes
-      effect at the next restart. An operator can also schedule the process by hand from the Process
-      Request window at any time.
-    - As a safety net, a run of the fixed request does nothing while the flag is off, so turning the
-      flag off stops the scheduled work without a restart.
-    - A run started from the menu or from an operator's own Process Request is never gated.
+      effect at the next restart.
+    - **The flag gates every scheduled run** (2026-10-21): any run the Process Scheduler fires for a
+      request whose timing is *Schedule* (`S`), the startup's or one an administrator created.
+      `ProcessBundle.request` puts every scheduler-run bundle on the `SCHEDULED` channel, an
+      immediate one included, so the request's timing is what tells a schedule apart. While the
+      flag is off such a run does no work and **ends as an ERROR** (`fail()`: error result and
+      exception, plus a `[BILLING-RECONCILE]` WARN), so Process Monitor shows a schedule firing for
+      nothing; the message says to turn the flag on or unschedule the request. No internal alert,
+      so it does not fire every hour.
+    - A run started from the menu, or a Process Request run immediately or later once, is never
+      gated.
+    - The startup never inserts its fixed request id twice: a row with that id in any status
+      (typically unscheduled by an operator) is left as it is, logged at INFO. It inserts only when
+      no such row exists and no active scheduled request for the process exists.
     - Every alert and repair line starts with `[BILLING-RECONCILE]`.
 12. **Stuck `RECEIVED` events** — a Stripe event left `RECEIVED` past a threshold (the crash window
     `BillingEventStore` documents) is never replayed. It is marked `IGNORED` ("superseded by
@@ -305,8 +318,8 @@ wrong-mode key gets 404s, never a `paid` or `expired` answer.
 
 `DalBaseProcess`, modelled on `UsageAggregationProcess`: the `OBError` result, `fail()` sets an error
 result and throws, and `bundle.getLogger()` lines show in Process Monitor. The startup plants the
-fixed request only while the flag is on; a run of that request also returns at once while the flag
-is off.
+fixed request only while the flag is on; every scheduled run (timing `S`), whoever created its
+request, ends as an ERROR without doing work while the flag is off (decision 11).
 
 ## 7. Configuration
 
@@ -329,8 +342,13 @@ The back-off after a failed item is fixed at 6 h (`BillingReconciliationService.
 - **Read what changed:** the **Billing Event** window (filter `Provider = reconciler`) and the
   **Checkout Request → Billing Event** tab. The **Subscriptions** window shows corrected status and
   end dates. Scheduled runs are in **Process Monitor**.
-- **Switch the schedule on:** set the flag (ConfigCat or the property), then restart. Or schedule
-  the process by hand in the Process Request window.
+- **Schedule it in production:** production is never restarted, so the startup hook never runs
+  there. Turn the flag on (ConfigCat or the property), then in the Process Request window create a
+  request for **Billing Reconciliation**, client System, timing *Schedule*, every 60 minutes, as for
+  Demo Trial Notices. A scheduled run while the flag is off does nothing and ends as an ERROR in
+  Process Monitor: turn the flag on, or unschedule the request.
+- **Switch the schedule on elsewhere:** in an environment that restarts, set the flag and restart;
+  the startup plants the request. An unscheduled request is never planted again by the startup.
 - **Alerts:** grep `[BILLING-RECONCILE]`. Provisioning repairs also send the internal
   `environment-provisioning` alert. A new review sends `billing-reconcile-needs-review`, a parked
   stuck event `billing-reconcile-stale-event`, a tripped breaker
@@ -353,8 +371,16 @@ The back-off after a failed item is fixed at 6 h (`BillingReconciliationService.
     request whose recorded failure is deterministic, so also clear it:
     `update etgo_checkout_request set failure_reason = null where request_id = '<request id>';`
     Otherwise the next run parks it again (a new row, `…:2`) and alerts once more.
-  - `NO_SESSION_ID` — release only once Stripe confirms no payment; the run parks it again
-    otherwise, since a `CREATING` row is never closed automatically.
+  - `NO_SESSION_ID` — releasing it is pointless: the row stays `CREATING`, so the next run parks
+    it again. Close it instead, once Stripe confirms no payment was taken for that account and
+    time (search the Stripe dashboard by the account email): set it to `EXPIRED`, then release the
+    review row as above.
+
+    ```sql
+    update etgo_checkout_request
+       set checkout_status = 'EXPIRED', expired_at = now(), updated = now()
+     where request_id = '<request id>' and checkout_status = 'CREATING';
+    ```
 - **A row backing off** (`reconcile:retry-later:<request>`) is retried by itself after 6 h; to retry
   sooner, delete that row.
 - **A parked stuck event** (`reconcile:stale-event-review:<event>`): check the event in the Stripe

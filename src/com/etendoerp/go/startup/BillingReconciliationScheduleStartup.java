@@ -52,13 +52,21 @@ import com.etendoerp.go.payment.reconcile.ReconciliationSettings;
  * registration does not happen, {@code OBScheduler.initialize()} picks the row up on the next
  * restart.
  *
+ * <p><b>Production never runs this hook.</b> It is updated by delta and never restarted (see
+ * {@code DemoTrialNoticeProcess}), so there the reconciliation is scheduled by hand in the Process
+ * Request window, like Demo Trial Notices. This hook is for environments that do restart.
+ *
  * <p><b>Strictly off by default (decided 2026-10-18).</b> The request is planted only while the
  * {@code billing-reconciliation-schedule} flag is on, so turning the flag on takes effect at the
- * next restart; an operator can also schedule the process by hand from the Process Request window
- * at any time. As a safety net the process checks the flag again on every run of this fixed
- * request, so turning the flag off stops the scheduled work without a restart (the row stays and
- * fires as a no-op until it is unscheduled). The interval is read when the request is first
- * planted; changing it later means editing the request in the Process Request window.
+ * next restart. The process checks the flag on every scheduled run, this request's or one an
+ * administrator created, so turning the flag off stops the scheduled work without a restart: each
+ * firing then ends as an ERROR in Process Monitor until the request is unscheduled. The interval
+ * is read when the request is first planted; changing it later means editing the request in the
+ * Process Request window.
+ *
+ * <p><b>Its fixed id is never inserted twice.</b> When a row with {@link #REQUEST_ID} exists in
+ * any status, typically unscheduled by an operator, it is left as it is: an unscheduled request was
+ * unscheduled on purpose, and inserting the same primary key again would fail the startup.
  */
 @ApplicationScoped
 @ComponentProvider.Qualifier(BillingReconciliationScheduleStartup.QUALIFIER)
@@ -146,6 +154,12 @@ public class BillingReconciliationScheduleStartup extends SessionAwareStartup {
     OBContext.setAdminMode(true);
     try {
       if (activeScheduledRequestExists()) {
+        return false;
+      }
+      ProcessRequest own = OBDal.getInstance().get(ProcessRequest.class, REQUEST_ID);
+      if (own != null) {
+        log.info("BillingReconciliationScheduleStartup: process request {} exists with status {}; "
+            + "it was unscheduled on purpose and is left as it is", REQUEST_ID, own.getStatus());
         return false;
       }
       Process process = OBDal.getInstance().get(Process.class, PROCESS_ID);
