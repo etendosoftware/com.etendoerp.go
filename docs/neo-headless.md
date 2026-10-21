@@ -200,8 +200,8 @@ OAuth2 tokens (MCP clients, API keys, `client_credentials`) carry these scopes:
 | Scope | Grants |
 |-------|--------|
 | `etendo:read` | REST `GET`/`HEAD`; MCP read tools and resources |
-| `etendo:write` | REST writes; MCP write tools (`etendo_create`, `etendo_update`, `etendo_delete`, `etendo_action`, image upload) |
-| `etendo:process` | MCP per-spec process tools |
+| `etendo:write` | REST writes **except** action routes and process specs (below); MCP write tools (`etendo_create`, `etendo_update`, `etendo_delete`, `etendo_action`, image upload) |
+| `etendo:process` | REST action routes `POST /{spec}/{entity}/{id}/action/{name}` and `POST` on a process spec; MCP per-spec process tools |
 | `etendo:report` | MCP `generate_*` report tools |
 | `etendo:*` | everything above |
 
@@ -232,6 +232,21 @@ scopes keep working unchanged; nothing in the database is rewritten.
   can be dropped once no active client, token or API key stores a `neo:` scope
   (`SELECT count(*) FROM etgo_oauth2_client WHERE scopes LIKE '%neo:%'`, ignoring the internal
   `neo:public-api-*` markers below, and the same on `etgo_oauth2_token`).
+
+**Scope rule on REST (ETP-5783).** The check is decided by the request's structure, never by a
+name. `GET`/`HEAD` need `etendo:read`. A non-read request needs `etendo:process` when its path is a
+NEO action route (`/{spec}/{entity}/{recordId}/action/{name}`, parsed by the same
+`NeoServletSupport.parsePath` the servlet dispatches with — `NeoActionPath`), and `etendo:write`
+otherwise; a key holding only `etendo:write` can no longer complete, void or close a document. A
+`POST` on a process spec (`specType = 'P'`) is recognised by its spec row, not its path, so it needs
+`etendo:write` at the door (the authenticator keeps the token's scopes on the request) **and**
+`etendo:process` in `NeoRequestRouter.handleProcessSpecRequest`. `POST /sws/neo/batch` runs
+create operations only and never an action, so it stays `etendo:write`. Cookie sessions and legacy
+JWTs (the SPA) are never narrowed by scope: RBAC decides, as before. A scope failure answers **403**
+`{"error":{"status":403,"message":"Insufficient scope: this request requires etendo:process"}}`
+with `WWW-Authenticate: Bearer error="insufficient_scope"` (RFC 6750 §3.1) — no longer `401`, which
+clients read as "your token expired" and discard. A token with no usable identity claims stays 401.
+MCP's own scope failures are unchanged (tool errors from `McpAuthorizationService`).
 
 The MCP tool names follow a different rule: the old `neo_<x>` names are refused with a pointer to
 the new name, not accepted (see *MCP tool names* at the start of §4.12).
@@ -1050,6 +1065,33 @@ is detached.
 When the batch closes it logs one line with the hits and misses per namespace (owning class +
 lookup name), e.g. `[NEO-PERF] batch memo BatchService|spec hits=39 misses=1, BatchService|entity
 hits=36 misses=4, …`; nothing is logged for a batch that memoized nothing.
+
+#### 4.3.9 Document actions over REST: refusal and idempotency (ETP-5783)
+
+`POST /sws/neo/{spec}/{entity}/{id}/action/documentAction` with `{"docAction":"CO"}` runs the
+document's DB procedure. Scope: see §4.1.1. (Numbered 4.3.9 because §4.3.8 is ETP-5782's error
+classification.)
+
+- **A refusal by the document's rules is `422`.** When the procedure reports an error result
+  (`AD_PInstance.Result = 0`: no lines, a closed period, an unreconciled payment ...) the answer is
+  `422` with the translated message and the AD message keys, in the nested envelope of §4.3.8
+  *and* the flat fields the SPA has always read:
+  `{"status":"error","message":"...","messageKeys":["..."],"error":{"status":422,"code":"business_rule","message":"...","messageKeys":["..."]}}`.
+  A malformed request keeps its status: no record id `400`, unknown action `404`, no process access
+  `403`. Class-backed and OBUIAPP processes still answer their refusals `400`.
+- **Asking for the status a document already has is a success.** `CO`, `VO` and `CL` on a record
+  whose document status is already that value answer
+  `200 {"status":"success","message":"<ETGO_DocActionAlreadyApplied>","alreadyApplied":true}` and
+  the procedure is **not** called, so a retry after a timeout is safe. Only these three are
+  decided: they lead to the status of the same code; the others (`RE` leads to draft although `RE`
+  is also a status, "Reversed") run the procedure as before, as does any other status, a missing
+  record, or any lookup that fails. The status column is found structurally: the single active List
+  column of the record's table whose reference list holds both the draft status (`DR`) and the target
+  status (the action's own list never holds `DR`); two candidates count as ambiguous.
+  `DocActionIdempotency`.
+- Both changes live in `NeoProcessService.executeDbProcedure`, which MCP (`etendo_action`) also
+  reaches, so both channels behave the same; MCP reads `status >= 400` and the flat body, so the
+  422 needs no change there.
 
 ### 4.4 Selectors (FK Dropdowns)
 

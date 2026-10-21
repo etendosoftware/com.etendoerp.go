@@ -109,6 +109,8 @@ public class NeoProcessService {
   private static final String PARAM_DOC_ACTION = "docAction";
   /** Key Classic Java processes read the list-backed button value from. */
   private static final String PARAM_ACTION = "action";
+  private static final int HTTP_UNPROCESSABLE_ENTITY = 422;
+  private static final String CODE_BUSINESS_RULE = "business_rule";
   private static final String PROCESS_EXECUTION_FAILED_PREFIX = "Process execution failed: ";
   private static final String ACCESS_DENIED_FOR_CURRENT_ROLE =
       "Access denied to process for current role";
@@ -866,6 +868,11 @@ public class NeoProcessService {
       if (docAction != null) {
         String tabId = params.optString(INP_TAB_ID, null);
         if (tabId != null) {
+          // ETP-5783 — a document already in the status this action leads to has nothing to run.
+          NeoResponse alreadyApplied = DocActionIdempotency.alreadyApplied(tabId, recordId, docAction);
+          if (alreadyApplied != null) {
+            return alreadyApplied;
+          }
           setDocAction(tabId, recordId, docAction);
         }
       }
@@ -936,7 +943,7 @@ public class NeoProcessService {
       if (!messageKeys.isEmpty()) {
         result.put(MESSAGE_KEYS, new JSONArray(messageKeys));
       }
-      return new NeoResponse(400, result);
+      return businessRuleRefusal(result);
     }
 
     // Success
@@ -948,6 +955,25 @@ public class NeoProcessService {
           "Process " + process.getName() + " executed successfully");
     }
     return NeoResponse.ok(result);
+  }
+
+  /**
+   * ETP-5783 — a process the document's own rules refused: {@code 422 business_rule}, not 400. The
+   * request was well formed (a malformed one — no record id, unknown action — keeps 400/404);
+   * what failed is the document's state, which the caller has to fix. The body keeps the flat
+   * {@code status}/{@code message}/{@code messageKeys} the SPA has always read and adds the nested
+   * {@code error} envelope every other NEO refusal uses, so a client reads either.
+   */
+  private static NeoResponse businessRuleRefusal(JSONObject flatBody) throws JSONException {
+    JSONObject error = new JSONObject();
+    error.put(MESSAGE, flatBody.optString(MESSAGE));
+    error.put("status", HTTP_UNPROCESSABLE_ENTITY);
+    error.put("code", CODE_BUSINESS_RULE);
+    if (flatBody.has(MESSAGE_KEYS)) {
+      error.put(MESSAGE_KEYS, flatBody.get(MESSAGE_KEYS));
+    }
+    flatBody.put(ERROR, error);
+    return new NeoResponse(HTTP_UNPROCESSABLE_ENTITY, flatBody);
   }
 
   private static final class RequestContextScope implements AutoCloseable {

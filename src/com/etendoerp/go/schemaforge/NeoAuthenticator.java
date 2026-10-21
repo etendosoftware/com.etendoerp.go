@@ -89,6 +89,14 @@ class NeoAuthenticator {
     } else {
       log.warn("Unauthorized NEO request: {}", outcome.getMessage());
     }
+    if (outcome.getStatus() == EnvironmentAuthOutcome.Status.INSUFFICIENT_SCOPE) {
+      // ETP-5783 — RFC 6750 §3.1: a valid token that lacks the scope is a 403 naming the error, so
+      // a client keeps the token instead of discarding it as expired.
+      servlet.writeResponse(response,
+          NeoResponse.error(outcome.getHttpStatus(), outcome.getMessage())
+              .withHeader("WWW-Authenticate", "Bearer error=\"insufficient_scope\""));
+      return false;
+    }
     servlet.sendError(response, outcome.getHttpStatus(), outcome.getMessage());
     return false;
   }

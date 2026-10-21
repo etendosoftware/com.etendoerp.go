@@ -460,8 +460,10 @@ class EnvironmentRequestAuthenticatorTest {
 
     EnvironmentAuthOutcome outcome = authenticator.authenticate(request, SurfacePolicy.NEO_API);
 
-    assertEquals(401, outcome.getHttpStatus());
-    assertEquals("Insufficient scope or invalid token context", outcome.getMessage());
+    // ETP-5783: a valid token without the scope is 403, not the 401 a client reads as "expired".
+    assertEquals(Status.INSUFFICIENT_SCOPE, outcome.getStatus());
+    assertEquals(403, outcome.getHttpStatus());
+    assertEquals("Insufficient scope: this request requires etendo:write", outcome.getMessage());
     verify(lifecycleService, never()).evaluateAccess(anyString(), eq(true), any(Instant.class));
   }
 
@@ -492,6 +494,115 @@ class EnvironmentRequestAuthenticatorTest {
     EnvironmentAuthOutcome outcome = authenticator.authenticate(request, SurfacePolicy.NEO_API);
 
     assertEquals(authenticated, outcome.isAuthenticated(), outcome.getMessage());
+    if (!authenticated) {
+      assertEquals(403, outcome.getHttpStatus());
+    }
+  }
+
+  /**
+   * ETP-5783: a NEO action route runs a document action or a process, which is what
+   * {@code etendo:process} grants. {@code etendo:write} alone (any alias) is not enough, a process
+   * scope alone is, and the decision reads the path's structure, never a name in it.
+   */
+  @ParameterizedTest(name = "POST {0} with [{1}] -> authenticated={2}")
+  @CsvSource({
+      "/sales-order/header/ID1/action/documentAction, etendo:write,             false",
+      "/sales-order/header/ID1/action/documentAction, neo:write,                false",
+      "/sales-order/header/ID1/action/documentAction, etendo:read etendo:write, false",
+      "/sales-order/header/ID1/action/documentAction, etendo:process,           true",
+      "/sales-order/header/ID1/action/documentAction, neo:process,              true",
+      "/sales-order/header/ID1/action/documentAction, etendo:*,                 true",
+      "/anything/at-all/ANY/action/whatever,          etendo:write,             false",
+      "/anything/at-all/ANY/action/whatever,          etendo:process,           true",
+      "/sales-order/header,                           etendo:write,             true",
+      "/sales-order/header/ID1,                       etendo:write,             true",
+      "/sales-order/header/ID1,                       etendo:process,           false",
+      "/batch,                                        etendo:write,             true",
+      "/batch,                                        etendo:process,           false",
+      "/sales-order/header/selectors/action,          etendo:write,             true"
+  })
+  void anActionRouteNeedsTheProcessScope(String pathInfo, String scopes, boolean authenticated) {
+    when(sessionAuthenticator.authenticate(any())).thenReturn(GoSessionAuthResult.noSession());
+    stubOAuth2(scopes);
+    HttpServletRequest request = bearerRequest(OAUTH2_TOKEN);
+    when(request.getMethod()).thenReturn("POST");
+    when(request.getPathInfo()).thenReturn(pathInfo);
+
+    EnvironmentAuthOutcome outcome = authenticator.authenticate(request, SurfacePolicy.NEO_API);
+
+    assertEquals(authenticated, outcome.isAuthenticated(), outcome.getMessage());
+    if (!authenticated) {
+      assertEquals(Status.INSUFFICIENT_SCOPE, outcome.getStatus());
+      assertEquals(403, outcome.getHttpStatus());
+    }
+  }
+
+  /** Listing the actions of a record is a read: GET on an action route needs no process scope. */
+  @Test
+  void listingTheActionsOfARecordOnlyNeedsTheReadScope() {
+    when(sessionAuthenticator.authenticate(any())).thenReturn(GoSessionAuthResult.noSession());
+    stubOAuth2("etendo:read");
+    HttpServletRequest request = bearerRequest(OAUTH2_TOKEN);
+    when(request.getPathInfo()).thenReturn("/sales-order/header/ID1/action");
+
+    assertTrue(authenticator.authenticate(request, SurfacePolicy.NEO_API).isAuthenticated());
+  }
+
+  /** The SPA's credentials are never narrowed by scope: a cookie session may run an action. */
+  @Test
+  void aCookieSessionRunsAnActionWithoutAnyScope() {
+    stubCookie();
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    when(request.getMethod()).thenReturn("POST");
+    when(request.getPathInfo()).thenReturn("/sales-order/header/ID1/action/documentAction");
+    when(request.getHeader("Accept-Language")).thenReturn(LANGUAGE);
+
+    assertTrue(authenticator.authenticate(request, SurfacePolicy.NEO_API).isAuthenticated());
+  }
+
+  /** The scope an OAuth2 token holds is kept for the check a process spec needs (not a path). */
+  @Test
+  void theGrantedScopesAreKeptOnTheRequestForTheProcessSpecCheck() {
+    when(sessionAuthenticator.authenticate(any())).thenReturn(GoSessionAuthResult.noSession());
+    stubOAuth2("etendo:write");
+    HttpServletRequest request = bearerRequest(OAUTH2_TOKEN);
+    when(request.getMethod()).thenReturn("POST");
+
+    authenticator.authenticate(request, SurfacePolicy.NEO_API);
+
+    verify(request).setAttribute(EnvironmentRequestAuthenticator.ATTR_GRANTED_SCOPES,
+        "etendo:write");
+  }
+
+  @ParameterizedTest(name = "scopes [{0}] require process -> {1}")
+  @CsvSource({ "etendo:write, false", "neo:process, true", "etendo:*, true", "etendo:process, true" })
+  void isScopeGrantedReadsTheKeptScopesAndNeverLimitsOtherCredentials(String scopes,
+      boolean granted) {
+    HttpServletRequest oauth2 = mock(HttpServletRequest.class);
+    when(oauth2.getAttribute(EnvironmentRequestAuthenticator.ATTR_GRANTED_SCOPES))
+        .thenReturn(scopes);
+    assertEquals(granted, EnvironmentRequestAuthenticator.isScopeGranted(oauth2,
+        com.etendoerp.go.oauth2.ApiScopes.PROCESS));
+
+    HttpServletRequest session = mock(HttpServletRequest.class);
+    assertTrue(EnvironmentRequestAuthenticator.isScopeGranted(session,
+        com.etendoerp.go.oauth2.ApiScopes.PROCESS));
+  }
+
+  /** An identity that lacks its claims is still a 401: that is a bad token, not a missing scope. */
+  @Test
+  void anOAuth2TokenWithoutItsClaimsStaysA401() {
+    when(sessionAuthenticator.authenticate(any())).thenReturn(GoSessionAuthResult.noSession());
+    swsStatic.when(() -> SecureWebServicesUtils.decodeToken(OAUTH2_TOKEN)).thenReturn(null);
+    Map<String, String> identity = new HashMap<>();
+    identity.put(OAuth2Filter.ATTR_SCOPES, "etendo:*");
+    oauth2FilterStatic.when(() -> OAuth2Filter.validateToken(OAUTH2_TOKEN)).thenReturn(identity);
+
+    EnvironmentAuthOutcome outcome =
+        authenticator.authenticate(bearerRequest(OAUTH2_TOKEN), SurfacePolicy.NEO_API);
+
+    assertEquals(401, outcome.getHttpStatus());
+    assertEquals("Insufficient scope or invalid token context", outcome.getMessage());
   }
 
   // ============================== bind failures (ETP-5489) ==============================

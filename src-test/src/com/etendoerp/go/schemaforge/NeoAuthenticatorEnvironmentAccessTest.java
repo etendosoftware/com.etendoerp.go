@@ -393,7 +393,7 @@ class NeoAuthenticatorEnvironmentAccessTest {
    * runs — same guarantee as the missing-identity case above.
    */
   @Test
-  void oauth2InsufficientScopeReturns401AndNeverConsultsLifecycleService() throws Exception {
+  void oauth2InsufficientScopeReturns403AndNeverConsultsLifecycleService() throws Exception {
     System.setProperty(LEGACY_BEARER_PROPERTY, "true");
     when(sessionAuthenticator.authenticate(any())).thenReturn(GoSessionAuthResult.noSession());
     swsStatic.when(() -> SecureWebServicesUtils.decodeToken(OAUTH2_TOKEN)).thenReturn(null);
@@ -414,8 +414,11 @@ class NeoAuthenticatorEnvironmentAccessTest {
     boolean authenticated = authenticator.authenticateRequest(request, response);
 
     assertFalse(authenticated, "insufficient scope must not authenticate the request");
-    verify(servlet).sendError(response, HttpServletResponse.SC_UNAUTHORIZED,
-        "Insufficient scope or invalid token context");
+    // ETP-5783: 403 insufficient_scope, not the 401 a client reads as an expired token.
+    org.mockito.ArgumentCaptor<NeoResponse> written =
+        org.mockito.ArgumentCaptor.forClass(NeoResponse.class);
+    verify(servlet).writeResponse(org.mockito.ArgumentMatchers.eq(response), written.capture());
+    assertEquals(HttpServletResponse.SC_FORBIDDEN, written.getValue().getHttpStatus());
     verifyNoInteractions(lifecycleService);
   }
 

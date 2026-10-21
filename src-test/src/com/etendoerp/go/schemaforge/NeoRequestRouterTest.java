@@ -435,6 +435,46 @@ class NeoRequestRouterTest {
   }
 
   /**
+   * ETP-5783: a process spec is told apart by its spec type, not its path, so the process scope is
+   * asked here. An OAuth2 key holding only the write scope must not run a process.
+   */
+  @Test
+  void testHandleProcessSpecPostRefusesAnOAuth2KeyWithoutTheProcessScope() throws Exception {
+    SFSpec spec = mock(SFSpec.class);
+    Process process = mock(Process.class);
+    when(process.getId()).thenReturn("proc-id");
+    when(spec.getProcess()).thenReturn(process);
+    when(servlet.authenticator.hasProcessAccess("proc-id")).thenReturn(true);
+    when(request.getAttribute(
+        com.etendoerp.go.auth.EnvironmentRequestAuthenticator.ATTR_GRANTED_SCOPES))
+        .thenReturn("etendo:write");
+
+    router.handleProcessSpecRequest(spec, "POST", request, response);
+
+    ArgumentCaptor<NeoResponse> written = ArgumentCaptor.forClass(NeoResponse.class);
+    verify(servlet).writeResponse(eq(response), written.capture());
+    assertEquals(HttpServletResponse.SC_FORBIDDEN, written.getValue().getHttpStatus());
+    verify(servlet.processReportEndpoint, never()).handleProcessSpec(any(), any(), any());
+  }
+
+  /** The same key with the process scope, and any non-OAuth2 credential, still runs it. */
+  @Test
+  void testHandleProcessSpecPostAllowsTheProcessScope() throws Exception {
+    SFSpec spec = mock(SFSpec.class);
+    Process process = mock(Process.class);
+    when(process.getId()).thenReturn("proc-id");
+    when(spec.getProcess()).thenReturn(process);
+    when(servlet.authenticator.hasProcessAccess("proc-id")).thenReturn(true);
+    when(request.getAttribute(
+        com.etendoerp.go.auth.EnvironmentRequestAuthenticator.ATTR_GRANTED_SCOPES))
+        .thenReturn("etendo:process");
+
+    router.handleProcessSpecRequest(spec, "POST", request, response);
+
+    verify(servlet.processReportEndpoint).handleProcessSpec(spec, request, response);
+  }
+
+  /**
    * Verifies that PUT returns 405.
    */
   @Test

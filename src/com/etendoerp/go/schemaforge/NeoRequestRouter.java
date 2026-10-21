@@ -26,6 +26,8 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.model.ad.ui.Process;
 
+import com.etendoerp.go.auth.EnvironmentRequestAuthenticator;
+import com.etendoerp.go.oauth2.ApiScopes;
 import com.etendoerp.go.schemaforge.NeoServlet.NeoPathInfo;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy;
@@ -104,6 +106,16 @@ class NeoRequestRouter {
     if (!"POST".equals(method)) {
       servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
           "Process specs only support GET (describe) and POST (execute)");
+      return;
+    }
+    // ETP-5783 — running a process is what etendo:process grants. The authenticator asks for it
+    // on an action route by its path; a process spec is only recognisable by its spec type, so the
+    // same scope is asked here, from the scopes the authenticator kept on the request.
+    if (!EnvironmentRequestAuthenticator.isScopeGranted(request, ApiScopes.PROCESS)) {
+      NeoResponse refusal = NeoResponse.error(HttpServletResponse.SC_FORBIDDEN,
+          "Insufficient scope: this request requires " + ApiScopes.PROCESS)
+          .withHeader("WWW-Authenticate", "Bearer error=\"insufficient_scope\"");
+      servlet.writeResponse(response, refusal);
       return;
     }
     servlet.processReportEndpoint.handleProcessSpec(spec, request, response);

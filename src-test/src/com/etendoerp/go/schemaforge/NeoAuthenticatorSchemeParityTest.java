@@ -316,6 +316,38 @@ class NeoAuthenticatorSchemeParityTest {
         "Invalid or expired session");
   }
 
+  /**
+   * ETP-5783: a write-only API key calling an action route is refused 403 {@code insufficient_scope}
+   * with the RFC 6750 challenge, not 401 — the token is valid, so the client must not discard it.
+   */
+  @Test
+  void aWriteOnlyOAuth2KeyOnAnActionRouteIsRefusedWith403AndTheScopeChallenge() throws Exception {
+    System.setProperty(LEGACY_BEARER_PROPERTY, "true");
+    stubNoSession();
+    stubOAuth2Token();
+    Map<String, String> identity = new HashMap<>();
+    identity.put(OAuth2Filter.ATTR_USER_ID, USER_ID);
+    identity.put(OAuth2Filter.ATTR_ROLE_ID, ROLE_ID);
+    identity.put(OAuth2Filter.ATTR_ORG_ID, ORG_ID);
+    identity.put(OAuth2Filter.ATTR_CLIENT_ID, CLIENT_ID);
+    identity.put(OAuth2Filter.ATTR_SCOPES, "etendo:write");
+    oauth2FilterStatic.when(() -> OAuth2Filter.validateToken(OAUTH2_TOKEN)).thenReturn(identity);
+    HttpServletRequest request = oauth2Request();
+    when(request.getMethod()).thenReturn("POST");
+    when(request.getPathInfo()).thenReturn("/sales-order/header/ID1/action/documentAction");
+    HttpServletResponse response = mock(HttpServletResponse.class);
+
+    assertFalse(authenticator.authenticateRequest(request, response));
+
+    org.mockito.ArgumentCaptor<NeoResponse> written =
+        org.mockito.ArgumentCaptor.forClass(NeoResponse.class);
+    verify(servlet).writeResponse(org.mockito.ArgumentMatchers.eq(response), written.capture());
+    assertEquals(403, written.getValue().getHttpStatus());
+    assertEquals("Bearer error=\"insufficient_scope\"",
+        written.getValue().getHeaders().get("WWW-Authenticate"));
+    assertTrue(written.getValue().getBody().toString().contains("etendo:process"));
+  }
+
   @Test
   void noCredentialAtAllIsRefusedWith401() throws Exception {
     System.setProperty(LEGACY_BEARER_PROPERTY, "true");
