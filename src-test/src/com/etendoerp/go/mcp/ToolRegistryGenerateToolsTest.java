@@ -1757,16 +1757,18 @@ class ToolRegistryGenerateToolsTest {
   class NeoActionToolTests {
 
     @Test
-    @DisplayName("write scope registers etendo_action alongside write CRUD tools")
-    void writeScopeRegistersNeoAction() {
+    @DisplayName("process scope registers etendo_action, write scope alone does not (ETP-5783)")
+    void processScopeRegistersNeoAction() {
       SFSpec spec = createWindowSpec(SPEC_SALES_ORDER);
       when(spec.getADWindow()).thenReturn(null);
       mockSpecCriteria(List.of(spec));
 
-      List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:write"));
-      List<String> names = toolNames(tools);
+      List<String> withProcess = toolNames(registry.generateTools(scopesOf("neo:process")));
+      List<String> writeOnly = toolNames(registry.generateTools(scopesOf("neo:write")));
 
-      assertTrue(names.contains("etendo_action"), "etendo_action should be registered with write scope");
+      assertTrue(withProcess.contains("etendo_action"), "etendo_action needs the process scope");
+      assertFalse(writeOnly.contains("etendo_action"), "write alone must not publish etendo_action");
+      assertTrue(writeOnly.contains("etendo_create"), "write CRUD tools are unaffected");
     }
 
     @Test
@@ -1790,7 +1792,7 @@ class ToolRegistryGenerateToolsTest {
       when(spec.getADWindow()).thenReturn(null);
       mockSpecCriteria(List.of(spec));
 
-      List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:write"));
+      List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:process"));
 
       McpToolDefinition actionTool = tools.stream()
           .filter(t -> "etendo_action".equals(t.getName()))
@@ -1974,7 +1976,7 @@ class ToolRegistryGenerateToolsTest {
       try (MockedStatic<McpToolRouterSupport> supportMock =
           setupMixedCatalog(writable, readOnly)) {
         List<McpToolDefinition> tools =
-            registry.generateTools(scopesOf("neo:read", "neo:write"));
+            registry.generateTools(scopesOf("neo:read", "neo:write", "neo:process"));
 
         List<String> actionEnum = specEnumOf(tools, "etendo_action");
         assertTrue(actionEnum.contains(SPEC_SALES_ORDER));
@@ -2033,7 +2035,7 @@ class ToolRegistryGenerateToolsTest {
             .thenReturn(false);
 
         List<McpToolDefinition> tools =
-            registry.generateTools(scopesOf("neo:read", "neo:write"));
+            registry.generateTools(scopesOf("neo:read", "neo:write", "neo:process"));
         List<String> names = toolNames(tools);
 
         assertTrue(names.contains("etendo_list"), "reads must still be available");
@@ -2278,7 +2280,7 @@ class ToolRegistryGenerateToolsTest {
         supportMock.when(() -> McpToolRouterSupport.isCatalogExcludedSpec(actionSpec))
             .thenReturn(false);
 
-        List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:write"));
+        List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:write", "neo:process"));
 
         McpToolDefinition actionTool = tools.stream()
             .filter(t -> "etendo_action".equals(t.getName()))
