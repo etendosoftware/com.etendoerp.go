@@ -304,6 +304,37 @@ public class BillingReconciliationProcessTest {
     assertEquals(21, message.split("<br/>", -1).length - 1);
   }
 
+  /** The popup renders HTML; the exception reaches the log and Process Monitor as plain text. */
+  @Test
+  public void aFailedRunThrowsPlainTextWhileThePopupKeepsTheHtml() throws Exception {
+    ReconciliationResult run = new ReconciliationResult(false);
+    run.error("checkout req-1: its provider session names another request");
+    run.item("req 1a2b3c4d", "Acme & Co", "close abandoned checkout", null);
+    when(service.run(false)).thenReturn(run);
+
+    OBException thrown = expectFailure();
+
+    String plain = thrown.getMessage();
+    assertFalse(plain, plain.contains("<br/>"));
+    assertFalse(plain, plain.contains("&amp;"));
+    assertTrue(plain, plain.contains("\nreq 1a2b3c4d (Acme & Co): close abandoned checkout"));
+    String popup = resultOf().getMessage();
+    assertTrue(popup, popup.contains("<br/>req 1a2b3c4d (Acme &amp; Co)"));
+  }
+
+  /** Fail-open is visible: a run that could not take the lock says so in its summary. */
+  @Test
+  public void aRunWithoutTheLockSaysConcurrentRunsWereNotExcluded() throws Exception {
+    when(heldLock.isUnlocked()).thenReturn(true);
+    when(service.run(false)).thenReturn(new ReconciliationResult(false));
+
+    process(false).doExecute(bundle);
+
+    String message = resultOf().getMessage();
+    assertTrue(message, message.contains("Ran without the run lock (no connection available); "
+        + "concurrent runs were not excluded"));
+  }
+
   @Test
   public void aFlagOffAlertThatCannotBeRecordedStillEndsTheRunAsAnError() {
     firedByTheScheduler("ADMIN-SCHEDULED-REQUEST", "S");

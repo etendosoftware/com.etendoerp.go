@@ -312,7 +312,7 @@ public class BillingReconciliationService {
         "Payment confirmed by re-reading the provider; the webhook never applied it",
         summary("session", row.sessionId, "customer", customer, FIELD_SUBSCRIPTION,
             subscription))) {
-      auditRowMissing(eventId, true, result, audit);
+      auditRowMissing(row.requestId, eventId, true, result, audit);
       if (!audit.isDryRun()) {
         return;
       }
@@ -339,7 +339,7 @@ public class BillingReconciliationService {
         BillingEventStore.RESULT_APPLIED,
         "Abandoned checkout closed after the provider confirmed its session expired",
         summary("session", row.sessionId)) && !audit.isDryRun()) {
-      auditRowMissing(eventId, true, result, audit);
+      auditRowMissing(row.requestId, eventId, true, result, audit);
       return;
     }
     audit.repaired("closed abandoned checkout {} (session {} expired)", row.requestId,
@@ -479,7 +479,7 @@ public class BillingReconciliationService {
         BillingEventStore.RESULT_APPLIED,
         "Re-subscription applied by the reconciliation; its payment webhook never applied it",
         summary(FIELD_SUBSCRIPTION, row.subscriptionId))) {
-      auditRowMissing(eventId, false, result, audit);
+      auditRowMissing(row.requestId, eventId, false, result, audit);
     }
     audit.alert("Applied a paid re-subscription the webhook never applied: request {}",
         row.requestId);
@@ -498,7 +498,7 @@ public class BillingReconciliationService {
             BillingEventStore.RESULT_APPLIED,
             "Environment provisioned by the reconciliation; the browser never completed it",
             summary("attempt", String.valueOf(outcome.attempt())))) {
-          auditRowMissing(provisionedId, false, result, audit);
+          auditRowMissing(requestId, provisionedId, false, result, audit);
         }
         audit.alert("Provisioned a paid purchase with no environment: request {} (attempt {})",
             requestId, outcome.attempt());
@@ -543,19 +543,25 @@ public class BillingReconciliationService {
   /**
    * A repair whose audit row was not written is an error of the run, never silent. Most repairs
    * are committed together with their row ({@code rolledBack}): the failed insert rolled the
-   * repair back too, and a later run retries it. A provisioning or a re-subscription commits in
-   * its own transaction (the whole onboarding, the webhook's own path), so there the repair stands
-   * without its row and the error says so.
+   * repair back too, and a later run retries it after the back-off (an id that already exists,
+   * say after a status reverted by hand, then costs one error per back-off, not one per hourly
+   * run). A provisioning or a re-subscription commits in its own transaction (the whole
+   * onboarding, the webhook's own path), so there the repair stands without its row and the error
+   * says so.
    */
-  private static void auditRowMissing(String eventId, boolean rolledBack,
+  private void auditRowMissing(String requestId, String eventId, boolean rolledBack,
       ReconciliationResult result, ReconciliationAudit audit) {
     if (audit.isDryRun()) {
       return;
     }
-    String consequence = rolledBack ? "the repair was rolled back with it and is retried"
+    String consequence = rolledBack
+        ? "the repair was rolled back with it and is retried after the back-off"
         : "the repair stands without its audit row";
     result.error("audit row " + eventId + " could not be written; " + consequence);
     audit.alert("Audit row {} could not be written; {}", eventId, consequence);
+    if (rolledBack) {
+      retryLater(requestId, "its audit row could not be written", audit);
+    }
   }
 
   /**

@@ -429,7 +429,12 @@ public class BillingEventStore implements CheckoutWebhookProcessor.EventStore {
 
   /**
    * ETP-5048 — renames a reconciliation marker row, which keeps it as history and frees its
-   * deterministic id for the next occurrence (a pause episode that ended). Commits.
+   * deterministic id for the next occurrence (a pause episode that ended). Commits; a failure
+   * rolls the session back before it is rethrown, so the caller's next write is not poisoned.
+   *
+   * <p>The renamed row keeps its event type ({@code reconciliation.subscription-paused} or
+   * {@code reconciliation.pause-collection}): any future count by type must exclude the
+   * {@code :ended:} ids.
    *
    * @param eventId the current id
    * @param newEventId the id it is kept under
@@ -439,20 +444,25 @@ public class BillingEventStore implements CheckoutWebhookProcessor.EventStore {
   public boolean renameReconciliationMarker(String eventId, String newEventId, String reason) {
     Date now = new Date();
     return runAsSystem(() -> {
-      int renamed = OBDal.getInstance().getSession().createQuery(UPDATE_BILLING_EVENT
-              + "   set be.event = :newEventId,"
-              + "       be.failureReason = :reason,"
-              + "       be.updated = :now"
-              + " where be.event = :eventId and be.provider = :provider")
-          .setParameter("newEventId", StringUtils.abbreviate(newEventId, EVENT_ID_WIDTH))
-          .setParameter(PARAM_REASON, StringUtils.abbreviate(StringUtils.trimToNull(reason),
-              REASON_WIDTH))
-          .setParameter("now", now)
-          .setParameter(PARAM_EVENT_ID, StringUtils.trim(eventId))
-          .setParameter(PARAM_PROVIDER, PROVIDER_RECONCILER)
-          .executeUpdate();
-      flushAndCommit();
-      return renamed > 0;
+      try {
+        int renamed = OBDal.getInstance().getSession().createQuery(UPDATE_BILLING_EVENT
+                + "   set be.event = :newEventId,"
+                + "       be.failureReason = :reason,"
+                + "       be.updated = :now"
+                + " where be.event = :eventId and be.provider = :provider")
+            .setParameter("newEventId", StringUtils.abbreviate(newEventId, EVENT_ID_WIDTH))
+            .setParameter(PARAM_REASON, StringUtils.abbreviate(StringUtils.trimToNull(reason),
+                REASON_WIDTH))
+            .setParameter("now", now)
+            .setParameter(PARAM_EVENT_ID, StringUtils.trim(eventId))
+            .setParameter(PARAM_PROVIDER, PROVIDER_RECONCILER)
+            .executeUpdate();
+        flushAndCommit();
+        return renamed > 0;
+      } catch (RuntimeException e) {
+        OBDal.getInstance().rollbackAndClose();
+        throw e;
+      }
     });
   }
 

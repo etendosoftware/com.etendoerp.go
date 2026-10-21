@@ -107,6 +107,11 @@ class ReconciliationRunLock {
       this.connection = connection;
     }
 
+    /** Whether this run goes ahead without the lock (the fail-open case). */
+    boolean isUnlocked() {
+      return connection == null;
+    }
+
     @Override
     public void close() {
       if (connection == null) {

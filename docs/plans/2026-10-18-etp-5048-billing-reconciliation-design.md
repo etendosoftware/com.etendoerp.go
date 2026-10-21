@@ -104,7 +104,13 @@ checkout and subscription rows, and its audit rows are ordinary billing events.
      `paused` status no start instant and `pause_collection` none at all, and the reconciliation
      has no event time to use. A resume no path saw (paused, resumed and paused again between two
      reads with the webhooks lost) folds two pauses into one alert: one too few, never one too
-     many.
+     many. The other way round, an event delivered out of order (an older "active" after a newer
+     pause) may end an episode early: at worst one duplicate alert on the same pause later, never
+     a missed one. On the webhook the rename is best effort: a failure is a WARN and the event
+     goes on, so it never fails the lifecycle event nor makes Stripe redeliver it in a loop; the
+     episode stays open until the next resume is seen.
+   - An ended row keeps its event type (`reconciliation.subscription-paused` or
+     `reconciliation.pause-collection`): any future count by type must exclude the `:ended:` ids.
    - `pause_collection` on an active subscription raises an alert only, once per episode
      (`reconcile:pause-collection:<sub>`), ended when `pause_collection` is cleared.
    - `past_due`/`unpaid` stay with the existing webhook grace logic: the reconciler does not touch
@@ -225,7 +231,9 @@ everything and changed nothing.
 **A repair commits with its audit row** (review F1, 2026-10-21). A recovered payment and an
 abandoned-checkout close are left pending (`CheckoutRequestWrites.recordPaidPending` /
 `recordExpiredPending`) and committed by the insert of their billing-event row, so a failed insert
-rolls the repair back too; the run reports it as an error and a later run retries it. Subscription
+rolls the repair back too; the run reports it as an error and the request backs off
+(`retry-later`) before a later run retries it, so an id that already exists (after a status reverted
+by hand) costs one error per back-off, not one per hourly run. Subscription
 corrections and price fills already worked this way. A provisioning and a re-subscription commit
 in their own transactions (the whole onboarding; the webhook's own path), so for those a failed
 audit insert leaves the repair standing without its row: an error of the run that says exactly
@@ -242,7 +250,9 @@ connection for the whole run, released in `finally`. A second run (a menu launch
 does not wait: it ends at once with the warning "A billing reconciliation is already running;
 nothing was done." Without a dedicated connection the run goes ahead unlocked, with a WARN: every
 repair is fenced or idempotent on its own, so an overlap costs false error reports, never a double
-repair.
+repair, while failing closed would stop the reconciliation under pool strain. The fail-open is
+visible: the summary (popup, log, Process Monitor) then says "Ran without the run lock (no
+connection available); concurrent runs were not excluded".
 
 **What the operator reads** (Martin, 2026-10-21; AC5, readable without the database or the logs).
 The summary words a dry run as what it would do ("would close 2 abandoned checkouts", "would
@@ -393,6 +403,12 @@ The back-off after a failed item is fixed at 6 h (`BillingReconciliationService.
   Monitor (and alerts once a day); a flag on with no request does nothing at all.
 - **Process Groups are not gated:** a run fired as part of a Process Group has no process-request
   id of its own, so it is not recognised as a scheduled run and the flag does not gate it.
+- **Database timeouts end the run lock:** the lock lives in an open transaction on its own
+  connection that is idle for the whole run. A server-side `idle_in_transaction_session_timeout`
+  shorter than a run would end that session, and with it the lock, silently and mid-run. Keep the
+  setting off (the PostgreSQL default) or longer than a run for the Etendo database user.
+- **A failed run** shows HTML lines in the popup; the exception, the log and Process Monitor get
+  the same content as plain text.
 - **Read what changed:** the **Billing Event** window (filter `Provider = reconciler`) and the
   **Checkout Request → Billing Event** tab. The **Subscriptions** window shows corrected status and
   end dates. Scheduled runs are in **Process Monitor**.

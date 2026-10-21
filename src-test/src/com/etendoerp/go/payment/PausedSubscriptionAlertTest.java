@@ -84,6 +84,23 @@ public class PausedSubscriptionAlertTest {
     assertEquals("reconcile:pause-collection:" + SUB, collectionId);
   }
 
+  /** A webhook must not fail (and be redelivered in a loop) over a marker that will not rename. */
+  @Test
+  public void aFailedRenameIsBestEffortForTheWebhookAndEndsNothing() throws Exception {
+    when(store.exists(EVENT_ID)).thenReturn(true);
+    when(store.renameReconciliationMarker(eq(EVENT_ID), anyString(), anyString()))
+        .thenThrow(new IllegalStateException("db gone"));
+    JSONObject active = new JSONObject("{\"status\":\"active\"}");
+
+    assertEquals(0, alert.endResolvedBestEffort(SUB, active));
+    try {
+      alert.endResolved(SUB, active);
+      org.junit.Assert.fail("Outside the webhook a failed rename still surfaces");
+    } catch (IllegalStateException expected) {
+      assertEquals("db gone", expected.getMessage());
+    }
+  }
+
   @Test
   public void noOpenEpisodeMeansNoWrite() throws Exception {
     assertEquals(0, alert.endResolved(SUB, new JSONObject("{\"status\":\"active\"}")));

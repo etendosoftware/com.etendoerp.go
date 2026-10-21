@@ -121,7 +121,7 @@ public class BillingReconciliationProcess extends DalBaseProcess {
       // About the schedule, not the reconciliation's writes: alerts whatever the request's Dry
       // run parameter says (review F3).
       alertFlagOffOncePerDay(bundle.getProcessRequestId());
-      throw fail(bundle, TITLE_SKIPPED, message);
+      throw fail(bundle, TITLE_SKIPPED, message, message);
     }
     boolean dryRun = readDryRun(bundle);
     ReconciliationRunLock.Held lock = runLock.tryAcquire();
@@ -134,9 +134,13 @@ public class BillingReconciliationProcess extends DalBaseProcess {
       result = serviceFactory.get().run(dryRun);
     } catch (RuntimeException e) {
       log.error("{} Billing reconciliation failed", ReconciliationAudit.LOG_PREFIX, e);
-      throw fail(bundle, "Billing Reconciliation Failed", UsageMessages.atSafe(e.getMessage()));
+      String reason = UsageMessages.atSafe(e.getMessage());
+      throw fail(bundle, "Billing Reconciliation Failed", reason, reason);
     } finally {
       lock.close();
+    }
+    if (lock.isUnlocked()) {
+      result.markRanWithoutLock();
     }
     String summary = UsageMessages.atSafe(result.toString());
     // Process Monitor shows the run log: the summary and the same item lines the popup lists.
@@ -146,7 +150,8 @@ public class BillingReconciliationProcess extends DalBaseProcess {
     }
     String message = UsageMessages.atSafe(result.toHtml());
     if (result.hasFailures()) {
-      throw fail(bundle, TITLE_FAILED, message);
+      // The popup renders HTML; the exception reaches the log and Process Monitor as text.
+      throw fail(bundle, TITLE_FAILED, message, UsageMessages.atSafe(result.toPlainText()));
     }
     log.info("{} {}", ReconciliationAudit.LOG_PREFIX, summary);
     OBError success = new OBError();
@@ -257,15 +262,18 @@ public class BillingReconciliationProcess extends DalBaseProcess {
   /**
    * Reports a failed run on both surfaces — see {@code UsageAggregationProcess#fail} for why both.
    *
+   * @param popupMessage the popup text, which may carry HTML line breaks
+   * @param plainMessage the same content as plain text, for the log and the exception
    * @return the exception for the caller to throw, so the compiler sees the run end there
    */
-  private static OBException fail(ProcessBundle bundle, String title, String message) {
-    log.error("{} {}: {}", ReconciliationAudit.LOG_PREFIX, title, message);
+  private static OBException fail(ProcessBundle bundle, String title, String popupMessage,
+      String plainMessage) {
+    log.error("{} {}: {}", ReconciliationAudit.LOG_PREFIX, title, plainMessage);
     OBError error = new OBError();
     error.setType("Error");
     error.setTitle(title);
-    error.setMessage(message);
+    error.setMessage(popupMessage);
     bundle.setResult(error);
-    return new OBException(message);
+    return new OBException(plainMessage);
   }
 }

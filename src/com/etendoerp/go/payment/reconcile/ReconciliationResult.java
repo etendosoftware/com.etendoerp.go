@@ -124,6 +124,7 @@ public final class ReconciliationResult {
   private final Set<String> rereadCheckouts = new HashSet<>();
   private final Map<String, String> rereadSubscriptions = new HashMap<>();
   private final List<String> items = new ArrayList<>();
+  private boolean ranWithoutLock;
 
   ReconciliationResult(boolean dryRun) {
     this.dryRun = dryRun;
@@ -189,6 +190,28 @@ public final class ReconciliationResult {
       html.append("<br/>").append(EmailEscape.escapeHtml(line));
     }
     return html.toString();
+  }
+
+  /**
+   * The summary and its item lines as plain text, one line each, for the log and the exception
+   * a failed run throws: no markup and no escaping.
+   *
+   * @return the plain-text message
+   */
+  public String toPlainText() {
+    StringBuilder text = new StringBuilder(toString());
+    for (String line : itemLines()) {
+      text.append('\n').append(line);
+    }
+    return text.toString();
+  }
+
+  /**
+   * Records that the run went ahead without the run lock (it fails open, see
+   * {@code ReconciliationRunLock}), so the summary says concurrent runs were not excluded.
+   */
+  void markRanWithoutLock() {
+    ranWithoutLock = true;
   }
 
   /** A checkout request id in the short form the item lines use. */
@@ -350,6 +373,10 @@ public final class ReconciliationResult {
     if (!errors.isEmpty()) {
       summary.append(". ").append(errors.size()).append(" error(s): ")
           .append(String.join("; ", errors.subList(0, Math.min(5, errors.size()))));
+    }
+    if (ranWithoutLock) {
+      summary.append(". Ran without the run lock (no connection available); concurrent runs "
+          + "were not excluded");
     }
     return summary.append('.').toString();
   }

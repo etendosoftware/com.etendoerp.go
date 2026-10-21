@@ -167,10 +167,31 @@ public class PausedSubscriptionAlert {
     return ended;
   }
 
+  /**
+   * {@link #endResolved}, best effort: a failure is logged as a WARN and reads as "nothing
+   * ended". For a webhook, which must not fail the whole lifecycle event over a marker rename
+   * (Stripe would redeliver it again and again). An episode left open only costs a missed
+   * re-alert on the next pause of the same subscription; the next resume observed retries it.
+   *
+   * @param subscriptionId the {@code sub_...}
+   * @param subscription the subscription as the provider reports it now
+   * @return how many episodes this call ended, 0 when it failed
+   */
+  public int endResolvedBestEffort(String subscriptionId, JSONObject subscription) {
+    try {
+      return endResolved(subscriptionId, subscription);
+    } catch (RuntimeException e) {
+      log.warn("Pause episodes of subscription {} could not be ended ({}); the event goes on",
+          subscriptionId, e.getClass().getSimpleName());
+      return 0;
+    }
+  }
+
   private boolean endEpisode(String eventId, String how) {
     if (!store.exists(eventId)) {
       return false;
     }
+    // The renamed row keeps its event type: a future count by type must exclude ":ended:" ids.
     boolean ended = store.renameReconciliationMarker(eventId,
         eventId + ":ended:" + System.currentTimeMillis(), "Pause ended: " + how);
     if (ended) {

@@ -291,8 +291,12 @@ public class BillingReconciliationServiceTest {
     verify(checkoutStore, never()).recordPaid(anyString(), any(), any());
     assertEquals(0, result.get(Counter.PAYMENTS_RECOVERED));
     assertEquals(List.of("audit row reconcile:payment-recovered:" + REQ + " could not be "
-        + "written; the repair was rolled back with it and is retried"), result.getErrors());
+        + "written; the repair was rolled back with it and is retried after the back-off"),
+        result.getErrors());
     verify(provisioning, never()).provision(anyString(), any());
+    // An id that already exists would otherwise fail every hourly run: the request backs off.
+    verify(eventStore).touchReconciliation(eq("reconcile:retry-later:" + REQ),
+        eq("reconciliation.retry-later"), eq(REQ), anyString());
   }
 
   @Test
@@ -322,6 +326,8 @@ public class BillingReconciliationServiceTest {
     assertEquals(0, result.get(Counter.CHECKOUTS_EXPIRED));
     assertTrue(result.getErrors().toString(), result.getErrors().get(0).contains(
         "rolled back with it"));
+    verify(eventStore).touchReconciliation(eq("reconcile:retry-later:" + REQ),
+        eq("reconciliation.retry-later"), eq(REQ), anyString());
   }
 
   @Test

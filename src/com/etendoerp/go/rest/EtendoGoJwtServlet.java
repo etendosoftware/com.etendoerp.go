@@ -1768,11 +1768,16 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * ETP-5048 — ends the pause episodes a subscription event shows are over (status no longer
    * {@code paused}, {@code pause_collection} cleared), so the next pause alerts again. Commits on
    * its own, before the event's own writes. Changes no subscription state.
+   *
+   * <p>Best effort: a failed rename is a WARN and the event goes on, so it never fails the
+   * lifecycle event (and never makes Stripe redeliver it in a loop). An event delivered out of
+   * order (an older "active" after a newer pause) may end an episode early; the worst case is one
+   * duplicate alert on the same pause later, never a missed one.
    */
   private void endResolvedPauseEpisodes(String type, JSONObject event) {
     JSONObject data = event.optJSONObject("data");
     JSONObject object = data == null ? null : data.optJSONObject(STRIPE_EVENT_OBJECT);
-    new PausedSubscriptionAlert(billingEventStore, internalAlertService).endResolved(
+    new PausedSubscriptionAlert(billingEventStore, internalAlertService).endResolvedBestEffort(
         SubscriptionLifecycleApplier.subscriptionIdOf(type, object), object);
   }
 
