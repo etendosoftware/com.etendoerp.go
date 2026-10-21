@@ -76,7 +76,7 @@ final class SubscriptionReconciler {
   static final String KIND_SUBSCRIPTION_CLOSED = "subscription-closed";
   static final String KIND_SUBSCRIPTION_CURRENT = "subscription-current";
   static final String KIND_SUBSCRIPTION_PRICE = "subscription-price";
-  static final String KIND_PAUSE_COLLECTION = "pause-collection";
+  static final String KIND_PAUSE_COLLECTION = PausedSubscriptionAlert.KIND_PAUSE_COLLECTION;
   static final String KIND_BREAKER_TRIPPED = "breaker-tripped";
 
   private static final String SUBSCRIPTION_UPDATED = "customer.subscription.updated";
@@ -151,6 +151,21 @@ final class SubscriptionReconciler {
         countChecked(candidate, result);
         reconcileSafely(candidate, subscription, result, audit);
       }
+    }
+    if (!absent.isEmpty() && !sweep.isComplete()) {
+      // Review F2: a 404 is trusted only next to a complete list sweep. Without it there is no
+      // evidence the key reads our account (the breaker's floor would let one 404 close the only
+      // candidate), so absent subscriptions are counted, left open, and the phase is incomplete.
+      absent.forEach(candidate -> {
+        result.increment(Counter.ABSENT_SUBSCRIPTIONS);
+        result.item(candidate.subscriptionId, candidate.clientName, "leave open",
+            "404 at the provider, unverified: the list sweep did not complete");
+      });
+      result.markIncomplete(Phase.SUBSCRIPTIONS, absent.size() + " subscription(s) answered 404 "
+          + "but were not closed: the list sweep did not complete, so the absence is unverified");
+      audit.alert("{} absent subscription(s) left open: the list sweep did not complete",
+          absent.size());
+      return;
     }
     closeAbsent(absent, sweep.isComplete() && listed.isEmpty(), result, audit);
   }
@@ -232,6 +247,11 @@ final class SubscriptionReconciler {
           ReconciliationAudit.LOG_PREFIX, candidate.subscriptionId);
       return false;
     }
+    if (!audit.isDryRun()) {
+      // A pause alerts once per episode: an episode the provider shows has ended is closed here,
+      // so the next pause alerts again (PausedSubscriptionAlert#endResolved).
+      pausedAlert.endResolved(candidate.subscriptionId, subscription);
+    }
     String status = subscription.optString(FIELD_STATUS, "");
     boolean paying = STATUS_ACTIVE.equals(status) || STATUS_TRIALING.equals(status);
     if (paying && subscription.has(FIELD_PAUSE_COLLECTION)
@@ -292,11 +312,13 @@ final class SubscriptionReconciler {
       return;
     }
     result.increment(Counter.PAUSED_ALERTS);
+    result.item(candidate.subscriptionId, candidate.clientName, "raise the paused review alert",
+        "paused at the provider; access unchanged");
   }
 
   private static void alertPauseCollection(SubscriptionCandidate candidate,
       JSONObject subscription, ReconciliationResult result, ReconciliationAudit audit) {
-    String eventId = ReconciliationAudit.eventId(KIND_PAUSE_COLLECTION, candidate.subscriptionId);
+    String eventId = PausedSubscriptionAlert.pauseCollectionEventIdOf(candidate.subscriptionId);
     if (audit.alreadyRecorded(eventId)) {
       return;
     }
@@ -309,6 +331,8 @@ final class SubscriptionReconciler {
     audit.alert("Subscription {} has collection paused at the provider ({}); review it in the "
         + "Stripe dashboard", candidate.subscriptionId, behavior);
     result.increment(Counter.PAUSE_COLLECTION_ALERTS);
+    result.item(candidate.subscriptionId, candidate.clientName,
+        "raise the paused-collection alert", "collection paused (" + behavior + ")");
   }
 
   /**
@@ -371,6 +395,9 @@ final class SubscriptionReconciler {
         candidate.subscriptionId, target.clientId(), why,
         candidate.preferenceRoute ? ", preference route" : "");
     result.increment(closes ? Counter.SUBSCRIPTIONS_CLOSED : Counter.SUBSCRIPTIONS_CURRENT);
+    result.item(candidate.subscriptionId, candidate.clientName,
+        closes ? "close (expire) the subscription" : "set the subscription back to current",
+        why);
     if (candidate.preferenceRoute) {
       // ETP-5046-TRANSITIONAL-FALLBACK
       result.increment(Counter.PREFERENCE_ROUTE_CORRECTED);
@@ -396,12 +423,17 @@ final class SubscriptionReconciler {
           BillingEventStore.RESULT_APPLIED, "Missing price filled from the provider",
           summary(SUMMARY_SUBSCRIPTION, candidate.subscriptionId, "price", price.priceId,
               "currency", price.currency))) {
+        // The failed insert rolled the fill back with it; a later run retries it.
+        result.error(ITEM_SUBSCRIPTION + candidate.subscriptionId + ": the price fill was rolled "
+            + "back because its audit row could not be written");
         return;
       }
     }
     audit.repaired("filled the price of subscription {} ({} {} {})", candidate.subscriptionId,
         price.priceId, price.amount, price.currency);
     result.increment(Counter.PRICES_FILLED);
+    result.item(candidate.subscriptionId, candidate.clientName, "fill the missing price",
+        price.priceId);
   }
 
   /**
@@ -420,6 +452,7 @@ final class SubscriptionReconciler {
         result.get(Counter.SUBSCRIPTIONS_CHECKED));
     if (breaker != null) {
       result.tripBreaker(breaker);
+      result.item("breaker", null, "close no absent subscription", breaker);
       result.markIncomplete(Phase.SUBSCRIPTIONS, "the absent-subscription breaker tripped");
       audit.alert("Absent-subscription breaker tripped, nothing closed: {}", breaker);
       alertBreakerOncePerDay(breaker, result, audit);
@@ -660,11 +693,13 @@ final class SubscriptionReconciler {
     private final String requestId;
     private final String sessionId;
     private final boolean preferenceRoute;
+    private final String clientName;
 
     private SubscriptionCandidate(String subscriptionId, String clientId,
         CheckoutRequest purchase, boolean preferenceRoute) {
       this.subscriptionId = subscriptionId;
       this.clientId = clientId;
+      this.clientName = purchase == null ? null : purchase.getClientName();
       this.requestId = purchase == null ? null : purchase.getRequest();
       this.sessionId = purchase == null ? null : purchase.getStripeSession();
       this.preferenceRoute = preferenceRoute;

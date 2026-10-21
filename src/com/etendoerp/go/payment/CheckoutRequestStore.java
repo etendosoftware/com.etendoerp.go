@@ -441,8 +441,9 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
    *
    * <p>Commits on purpose: the row must survive a crash during the outbound Stripe call, otherwise
    * a session can exist at the provider that nothing on this side can name. A row left in
-   * {@code CREATING} is always safe to expire, because the {@code checkoutUrl} only reaches the
-   * browser after this method returns — nobody can have paid for it.
+   * {@code CREATING} never received a session id, so the provider cannot confirm it was not paid:
+   * the billing reconciliation never closes it on its own, it parks it for a person to review
+   * (ETP-5048 decision 6), who closes it once Stripe confirms no payment.
    *
    * @param requestId server-generated correlation id, the {@code REQUEST_ID} column and not the
    *     primary key
@@ -606,24 +607,11 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
   public boolean recordPaid(String requestId, String stripeCustomerId,
       String stripeSubscriptionId) {
     return runAsSystem(() -> {
-      CheckoutRequest request = findByRequestId(requestId);
-      if (request == null) {
-        log.error("No checkout request found for '{}' while recording a confirmed payment",
-            requestId);
+      // One payment write for the webhook and the billing reconciliation; only the commit is
+      // the caller's to decide (CheckoutRequestWrites#recordPaidPending leaves it pending).
+      if (!CheckoutRequestWrites.applyPaid(requestId, stripeCustomerId, stripeSubscriptionId)) {
         return false;
       }
-      // Captured regardless of the status transition: these are the join keys every future
-      // subscription and invoice event arrives on, and only this event carries them.
-      if (request.getStripeCustomer() == null && StringUtils.isNotBlank(stripeCustomerId)) {
-        request.setStripeCustomer(stripeCustomerId);
-      }
-      if (request.getStripeSubscription() == null && StringUtils.isNotBlank(stripeSubscriptionId)) {
-        request.setStripeSubscription(stripeSubscriptionId);
-      }
-      if (advance(request, STATUS_PAID) && request.getPaidAt() == null) {
-        request.setPaidAt(new Date());
-      }
-      OBDal.getInstance().save(request);
       flushAndCommit();
       return true;
     });
@@ -1240,7 +1228,7 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
    * @param target the status to move to
    * @return true when the transition was applied
    */
-  private boolean advance(CheckoutRequest request, String target) {
+  static boolean advance(CheckoutRequest request, String target) {
     // EXPIRED ranks -1 (it is not in LIFECYCLE), so without this guard every target would look
     // "later" than it and a closed request could be reopened.
     if (STATUS_EXPIRED.equals(StringUtils.trimToEmpty(request.getCheckoutRequestStatus()))) {
@@ -1259,7 +1247,7 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
    * @param status a checkout status
    * @return its lifecycle rank
    */
-  private int rank(String status) {
+  private static int rank(String status) {
     return LIFECYCLE.indexOf(StringUtils.trimToEmpty(status));
   }
 

@@ -558,6 +558,39 @@ public class SubscriptionReconcilerTest {
     assertTrue(result.isComplete(ReconciliationResult.Phase.SUBSCRIPTIONS));
   }
 
+  /**
+   * Review F2: without a complete list sweep there is no evidence the key reads our account, so a
+   * 404 never closes, not even the only candidate the breaker floor would let through.
+   */
+  @Test
+  public void aDirect404WithoutACompleteSweepNeverCloses() throws Exception {
+    activeRow("sub_only", "req-only", "cs_test_only", CURRENT);
+    absent("sub_only");
+    listAnswer = new StripeResponse(500, "{\"error\":{\"code\":\"api_error\"}}");
+
+    ReconciliationResult result = run(false);
+
+    verifyNothingApplied();
+    assertEquals(1, result.get(Counter.ABSENT_SUBSCRIPTIONS));
+    assertNull("No breaker is needed: nothing could be closed anyway", result.getBreakerReason());
+    assertTrue(!result.isComplete(ReconciliationResult.Phase.SUBSCRIPTIONS));
+    assertEquals(java.util.List.of("sub_only: leave open — 404 at the provider, unverified: the "
+        + "list sweep did not complete"), result.itemLines());
+  }
+
+  /** Review F5: every re-read ends a pause episode the provider shows is over. */
+  @Test
+  public void aReReadEndsResolvedPauseEpisodesButADryRunDoesNot() throws Exception {
+    activeRow("sub_a", "req-sub_a", "cs_test_a", CURRENT);
+    list("sub_a", "active");
+
+    run(true);
+    verify(pausedAlert, never()).endResolved(anyString(), any());
+
+    run(false);
+    verify(pausedAlert).endResolved(eq("sub_a"), any());
+  }
+
   @Test
   public void keyAndSessionModesAreReadFromTheirPrefixes() {
     assertEquals("live", SubscriptionReconciler.modeOfKey("sk_live_1"));

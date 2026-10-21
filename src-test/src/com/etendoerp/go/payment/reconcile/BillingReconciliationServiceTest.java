@@ -106,6 +106,7 @@ public class BillingReconciliationServiceTest {
     subscriptions = mock(SubscriptionReconciler.class);
     checkoutWrites = mock(CheckoutRequestWrites.class);
     reactivations = mock(PaidReactivationService.class);
+    when(checkoutWrites.recordPaidPending(anyString(), any(), any())).thenReturn(true);
     internalAlerts = mock(InternalAlertService.class);
     when(eventStore.recordReconciliation(anyString(), anyString(), any(), anyString(), any(),
         any())).thenReturn(true);
@@ -233,8 +234,8 @@ public class BillingReconciliationServiceTest {
   }
 
   private void verifyNothingProvisionedOrWritten() {
-    verify(checkoutStore, never()).recordPaid(anyString(), any(), any());
-    verify(checkoutWrites, never()).recordExpired(anyString());
+    verify(checkoutWrites, never()).recordPaidPending(anyString(), any(), any());
+    verify(checkoutWrites, never()).recordExpiredPending(anyString());
     verify(provisioning, never()).provision(anyString(), any());
     verify(eventStore, never()).markIgnored(anyString(), anyString());
     verifyNoRows();
@@ -251,7 +252,7 @@ public class BillingReconciliationServiceTest {
       throws Exception {
     createdRows.add(row(REQ, SESSION, ago(20, TimeUnit.MINUTES), "pending"));
     session(SESSION, "complete", "paid", REQ);
-    // recordPaid moved it to PAID; it was paid a minute ago, inside the browser's grace, but a
+    // recordPaidPending moved it to PAID; it was paid a minute ago, inside the browser's grace, but a
     // payment recovered in this very run is provisioned at once.
     paidRows.add(paidRow(REQ, ago(1, TimeUnit.MINUTES), 0L, "paid"));
     when(provisioning.provision(eq(REQ), any()))
@@ -259,7 +260,7 @@ public class BillingReconciliationServiceTest {
 
     ReconciliationResult result = run(false);
 
-    verify(checkoutStore).recordPaid(REQ, "cus_1", "sub_1");
+    verify(checkoutWrites).recordPaidPending(REQ, "cus_1", "sub_1");
     verifyRow("reconcile:payment-recovered:" + REQ, "reconciliation.payment-recovered",
         BillingEventStore.RESULT_APPLIED);
     verify(provisioning).provision(eq(REQ), any());
@@ -273,6 +274,84 @@ public class BillingReconciliationServiceTest {
     assertTrue(result.getErrors().isEmpty());
   }
 
+  /**
+   * Review F1: the recovered payment is left pending and committed by its audit row's insert, so
+   * a failed insert rolls the payment back too. The run says so as an error, never silently.
+   */
+  @Test
+  public void aRecoveredPaymentWhoseAuditRowFailsIsRolledBackAndIsAnError() throws Exception {
+    createdRows.add(row(REQ, SESSION, ago(20, TimeUnit.MINUTES), "pending"));
+    session(SESSION, "complete", "paid", REQ);
+    when(eventStore.recordReconciliation(eq("reconcile:payment-recovered:" + REQ), anyString(),
+        any(), anyString(), any(), any())).thenReturn(false);
+
+    ReconciliationResult result = run(false);
+
+    verify(checkoutWrites).recordPaidPending(REQ, "cus_1", "sub_1");
+    verify(checkoutStore, never()).recordPaid(anyString(), any(), any());
+    assertEquals(0, result.get(Counter.PAYMENTS_RECOVERED));
+    assertEquals(List.of("audit row reconcile:payment-recovered:" + REQ + " could not be "
+        + "written; the repair was rolled back with it and is retried"), result.getErrors());
+    verify(provisioning, never()).provision(anyString(), any());
+  }
+
+  @Test
+  public void aPaymentForARequestThatVanishedIsAnErrorWithNoAuditRow() throws Exception {
+    createdRows.add(row(REQ, SESSION, ago(20, TimeUnit.MINUTES), "pending"));
+    session(SESSION, "complete", "paid", REQ);
+    when(checkoutWrites.recordPaidPending(anyString(), any(), any())).thenReturn(false);
+
+    ReconciliationResult result = run(false);
+
+    verifyNoRows();
+    assertEquals(0, result.get(Counter.PAYMENTS_RECOVERED));
+    assertEquals(1, result.getErrors().size());
+    assertTrue(result.getErrors().get(0), result.getErrors().get(0).contains("vanished"));
+  }
+
+  @Test
+  public void anAbandonedCloseWhoseAuditRowFailsIsRolledBackAndIsAnError() throws Exception {
+    createdRows.add(row(REQ, SESSION, ago(3, TimeUnit.DAYS), "pending"));
+    session(SESSION, "expired", "unpaid", REQ);
+    when(checkoutWrites.recordExpiredPending(REQ)).thenReturn(true);
+    when(eventStore.recordReconciliation(eq("reconcile:checkout-expired:" + REQ), anyString(),
+        any(), anyString(), any(), any())).thenReturn(false);
+
+    ReconciliationResult result = run(false);
+
+    assertEquals(0, result.get(Counter.CHECKOUTS_EXPIRED));
+    assertTrue(result.getErrors().toString(), result.getErrors().get(0).contains(
+        "rolled back with it"));
+  }
+
+  @Test
+  public void aProvisioningWhoseAuditRowFailsStandsAndTheRunSaysSo() {
+    paidRows.add(paidRow(REQ, ago(2, TimeUnit.HOURS), 0L, "paid"));
+    when(provisioning.provision(eq(REQ), any()))
+        .thenReturn(new Outcome(Status.PROVISIONED, null, "Environment created", 1L));
+    when(eventStore.recordReconciliation(eq("reconcile:provisioned:" + REQ), anyString(),
+        any(), anyString(), any(), any())).thenReturn(false);
+
+    ReconciliationResult result = run(false);
+
+    assertTrue(result.getErrors().toString(), result.getErrors().get(0).contains(
+        "the repair stands without its audit row"));
+  }
+
+  @Test
+  public void eachRepairIsListedWithTheCompanyName() throws Exception {
+    CheckoutRequest abandoned = row(REQ, SESSION, ago(3, TimeUnit.DAYS), "pending");
+    when(abandoned.getClientName()).thenReturn("Acme S.L.");
+    createdRows.add(abandoned);
+    session(SESSION, "expired", "unpaid", REQ);
+    when(checkoutWrites.recordExpiredPending(REQ)).thenReturn(true);
+
+    ReconciliationResult result = run(false);
+
+    assertEquals(List.of("req " + REQ + " (Acme S.L.): close abandoned checkout — the provider "
+        + "session expired"), result.itemLines());
+  }
+
   @Test
   public void aNoPaymentRequiredSessionIsRecoveredToo() throws Exception {
     createdRows.add(row(REQ, SESSION, ago(20, TimeUnit.MINUTES), "pending"));
@@ -280,7 +359,7 @@ public class BillingReconciliationServiceTest {
 
     ReconciliationResult result = run(false);
 
-    verify(checkoutStore).recordPaid(REQ, "cus_1", "sub_1");
+    verify(checkoutWrites).recordPaidPending(REQ, "cus_1", "sub_1");
     assertEquals(1, result.get(Counter.PAYMENTS_RECOVERED));
   }
 
@@ -357,7 +436,7 @@ public class BillingReconciliationServiceTest {
 
     ReconciliationResult result = run(false);
 
-    verify(checkoutStore).recordPaid(REQ, "cus_1", "sub_1");
+    verify(checkoutWrites).recordPaidPending(REQ, "cus_1", "sub_1");
     verify(reactivations).applyIfPending(REQ, Instant.ofEpochSecond(1_792_000_000L));
     verify(provisioning, never()).provision(anyString(), any());
     verifyRow("reconcile:reactivation-applied:" + REQ, "reconciliation.reactivation-applied",
@@ -413,11 +492,11 @@ public class BillingReconciliationServiceTest {
   public void anExpiredSessionPastTheAbandonedWindowClosesTheRow() throws Exception {
     createdRows.add(row(REQ, SESSION, ago(49, TimeUnit.HOURS), "pending"));
     session(SESSION, "expired", "unpaid", REQ);
-    when(checkoutWrites.recordExpired(REQ)).thenReturn(true);
+    when(checkoutWrites.recordExpiredPending(REQ)).thenReturn(true);
 
     ReconciliationResult result = run(false);
 
-    verify(checkoutWrites).recordExpired(REQ);
+    verify(checkoutWrites).recordExpiredPending(REQ);
     verifyRow("reconcile:checkout-expired:" + REQ, "reconciliation.checkout-expired",
         BillingEventStore.RESULT_APPLIED);
     assertEquals(1, result.get(Counter.CHECKOUTS_EXPIRED));
@@ -441,7 +520,7 @@ public class BillingReconciliationServiceTest {
 
     run(false);
 
-    verify(checkoutWrites, never()).recordExpired(anyString());
+    verify(checkoutWrites, never()).recordExpiredPending(anyString());
   }
 
   @Test
@@ -459,7 +538,7 @@ public class BillingReconciliationServiceTest {
   public void aPaymentThatRacedTheCloseWinsAndNothingIsAudited() throws Exception {
     createdRows.add(row(REQ, SESSION, ago(49, TimeUnit.HOURS), "pending"));
     session(SESSION, "expired", "unpaid", REQ);
-    when(checkoutWrites.recordExpired(REQ)).thenReturn(false);
+    when(checkoutWrites.recordExpiredPending(REQ)).thenReturn(false);
 
     ReconciliationResult result = run(false);
 
@@ -768,7 +847,7 @@ public class BillingReconciliationServiceTest {
     assertTrue(why.getValue(), why.getValue().contains("NO_SESSION_ID"));
     assertEquals(1, first.get(Counter.NEEDS_REVIEW));
     assertEquals(1, warnings().size());
-    verify(checkoutWrites, never()).recordExpired(anyString());
+    verify(checkoutWrites, never()).recordExpiredPending(anyString());
 
     // Second run: the open review row keeps it out of the batch; it is counted as awaiting and
     // stays silent.
@@ -781,7 +860,7 @@ public class BillingReconciliationServiceTest {
     assertEquals(1, second.get(Counter.AWAITING_REVIEW));
     assertEquals(0, second.get(Counter.NEEDS_REVIEW));
     assertEquals("No second alert", 1, warnings().size());
-    verify(checkoutWrites, never()).recordExpired(anyString());
+    verify(checkoutWrites, never()).recordExpiredPending(anyString());
   }
 
   // ── Phase 5: stuck RECEIVED events ───────────────────────────────────────────────────────
@@ -801,7 +880,7 @@ public class BillingReconciliationServiceTest {
     verify(eventStore).markIgnored(eq("evt_1"),
         startsWith("Superseded by billing reconciliation " + result.getRunId()));
     verify(eventStore, never()).markApplied(anyString());
-    verify(checkoutStore, never()).recordPaid(anyString(), any(), any());
+    verify(checkoutWrites, never()).recordPaidPending(anyString(), any(), any());
     assertEquals(1, result.get(Counter.STALE_EVENTS_SWEPT));
   }
 

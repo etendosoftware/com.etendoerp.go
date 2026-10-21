@@ -69,6 +69,8 @@ public class BillingReconciliationProcessTest {
   private Map<String, String> timings;
   private BillingEventStore eventStore;
   private InternalAlertService internalAlerts;
+  private ReconciliationRunLock runLock;
+  private ReconciliationRunLock.Held heldLock;
 
   @Before
   public void setUp() {
@@ -80,6 +82,9 @@ public class BillingReconciliationProcessTest {
     timings = new HashMap<>();
     eventStore = mock(BillingEventStore.class);
     internalAlerts = mock(InternalAlertService.class);
+    runLock = mock(ReconciliationRunLock.class);
+    heldLock = mock(ReconciliationRunLock.Held.class);
+    when(runLock.tryAcquire()).thenReturn(heldLock);
     when(bundle.getParams()).thenReturn(params);
     when(bundle.getLogger()).thenReturn(processLogger);
   }
@@ -100,6 +105,7 @@ public class BillingReconciliationProcessTest {
     process.eventStore = eventStore;
     process.internalAlerts = internalAlerts;
     process.clock = Clock.fixed(Instant.parse("2026-10-21T10:00:00Z"), ZoneOffset.UTC);
+    process.runLock = runLock;
     return process;
   }
 
@@ -185,6 +191,75 @@ public class BillingReconciliationProcessTest {
     assertEquals("billing-reconcile-schedule-flag-off", alert.getValue().getEvent());
     assertEquals("turn-flag-on-or-unschedule-request", alert.getValue().getStage());
     verify(service, never()).run(anyBoolean());
+  }
+
+  /**
+   * Review F3: a scheduled request with Dry run = Y and the flag off fires every hour for nothing
+   * too. The alert is about the schedule, so the Dry run parameter does not silence it.
+   */
+  @Test
+  public void aDryRunScheduleFiringWithTheFlagOffStillAlertsOnceADay() {
+    firedByTheScheduler("ADMIN-SCHEDULED-REQUEST", "S");
+    params.put("dryrun", "Y");
+    when(eventStore.recordReconciliation(eq("reconcile:schedule-flag-off:2026-10-21"),
+        anyString(), isNull(), anyString(), anyString(), anyString())).thenReturn(true);
+
+    expectFailure();
+
+    verify(internalAlerts, times(1)).sendAfterTransaction(any());
+    verify(service, never()).run(anyBoolean());
+  }
+
+  /**
+   * Review F4: a second run while one holds the lock (a menu launch over the schedule) does no
+   * work and says so as a warning, never a false "closed by an earlier run" error.
+   */
+  @Test
+  public void aSecondConcurrentRunDoesNothingAndSaysSoAsAWarning() throws Exception {
+    when(runLock.tryAcquire()).thenReturn(null);
+
+    process(false).doExecute(bundle);
+
+    verify(service, never()).run(anyBoolean());
+    OBError result = resultOf();
+    assertEquals("Warning", result.getType());
+    assertEquals("A billing reconciliation is already running; nothing was done.",
+        result.getMessage());
+    verify(processLogger).logln("A billing reconciliation is already running; nothing was done.");
+  }
+
+  @Test
+  public void theRunLockIsReleasedAfterARunEvenWhenTheRunFails() throws Exception {
+    when(service.run(false)).thenReturn(new ReconciliationResult(false));
+    process(false).doExecute(bundle);
+    verify(heldLock, times(1)).close();
+
+    when(service.run(false)).thenThrow(new IllegalStateException("no database"));
+    expectFailure();
+    verify(heldLock, times(2)).close();
+  }
+
+  /**
+   * AC5: a run is readable without the database or the logs. The popup lists the affected items
+   * one per line (HTML), and the run log Process Monitor shows carries the same lines.
+   */
+  @Test
+  public void theAffectedItemsReachThePopupAndTheProcessMonitorLog() throws Exception {
+    ReconciliationResult run = new ReconciliationResult(false);
+    run.increment(Counter.CHECKOUTS_EXPIRED);
+    run.item("req 1a2b3c4d", "Acme S.L.", "close abandoned checkout",
+        "the provider session expired");
+    when(service.run(false)).thenReturn(run);
+
+    process(false).doExecute(bundle);
+
+    String line = "req 1a2b3c4d (Acme S.L.): close abandoned checkout — the provider session "
+        + "expired";
+    verify(processLogger).logln(run.toString());
+    verify(processLogger).logln(line);
+    OBError result = resultOf();
+    assertEquals("Success", result.getType());
+    assertEquals(run.toString() + "<br/>" + line, result.getMessage());
   }
 
   @Test

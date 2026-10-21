@@ -15,6 +15,10 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
+import org.apache.commons.lang3.StringUtils;
+
+import com.etendoerp.go.schemaforge.email.render.EmailEscape;
+
 /**
  * ETP-5048 — what one billing reconciliation run did, counted per kind, plus the errors it met.
  *
@@ -24,42 +28,70 @@ import java.util.UUID;
  */
 public final class ReconciliationResult {
 
-  /** One counted kind. The label is the operator-facing wording. */
+  /**
+   * One counted kind. The label is the operator-facing wording of a real run; a kind that is a
+   * write also has the wording of a dry run ("would close N …"), so a dry run never reads as if
+   * it had done something.
+   */
   public enum Counter {
-    CHECKOUTS_CHECKED("checkouts checked"),
-    PAYMENTS_RECOVERED("payments recovered from the provider"),
-    CHECKOUTS_EXPIRED("abandoned checkouts closed"),
-    PROVISIONED("environments provisioned"),
-    REACTIVATIONS_APPLIED("re-subscriptions applied"),
-    PROVISIONING_FAILED("provisioning attempts failed"),
-    NEEDS_REVIEW("new purchases needing review"),
-    AWAITING_REVIEW("purchases still awaiting review"),
-    SUBSCRIPTIONS_CHECKED("subscriptions checked"),
-    SUBSCRIPTIONS_CLOSED("subscriptions closed"),
-    SUBSCRIPTIONS_CURRENT("subscriptions set back to current"),
-    PRICES_FILLED("subscription prices filled"),
-    PAUSE_COLLECTION_ALERTS("paused-collection alerts"),
-    PAUSED_ALERTS("paused subscriptions needing review"),
-    ABSENT_SUBSCRIPTIONS("subscriptions absent at the provider"),
+    CHECKOUTS_CHECKED("checkouts checked", null),
+    PAYMENTS_RECOVERED("payments recovered from the provider",
+        "would record %d payments recovered from the provider"),
+    CHECKOUTS_EXPIRED("abandoned checkouts closed", "would close %d abandoned checkouts"),
+    PROVISIONED("environments provisioned", "would provision %d environments"),
+    REACTIVATIONS_APPLIED("re-subscriptions applied", "would apply %d re-subscriptions"),
+    PROVISIONING_FAILED("provisioning attempts failed", null),
+    NEEDS_REVIEW("new purchases needing review", "would park %d purchases for review"),
+    AWAITING_REVIEW("purchases still awaiting review", null),
+    SUBSCRIPTIONS_CHECKED("subscriptions checked", null),
+    SUBSCRIPTIONS_CLOSED("subscriptions closed", "would close/expire %d subscriptions"),
+    SUBSCRIPTIONS_CURRENT("subscriptions set back to current",
+        "would set %d subscriptions back to current"),
+    PRICES_FILLED("subscription prices filled", "would fill %d subscription prices"),
+    PAUSE_COLLECTION_ALERTS("paused-collection alerts", "would raise %d paused-collection alerts"),
+    PAUSED_ALERTS("paused subscriptions needing review",
+        "would raise %d paused-subscription review alerts"),
+    ABSENT_SUBSCRIPTIONS("subscriptions absent at the provider", null),
     // ETP-5046-TRANSITIONAL-FALLBACK — tenants with no subscription row, counted on their own so
     // the cutover's progress shows; delete with the preference route in Phase F.
-    PREFERENCE_ROUTE_CHECKED("tenants on the preference route checked"),
-    PREFERENCE_ROUTE_CORRECTED("tenants on the preference route corrected"),
-    STALE_EVENTS_SWEPT("stuck provider events superseded"),
-    STALE_EVENTS_PARKED("stuck provider events needing review"),
-    PROVIDER_ERRORS("provider reads that failed");
+    PREFERENCE_ROUTE_CHECKED("tenants on the preference route checked", null),
+    PREFERENCE_ROUTE_CORRECTED("tenants on the preference route corrected",
+        "would correct %d tenants on the preference route"),
+    STALE_EVENTS_SWEPT("stuck provider events superseded",
+        "would supersede %d stuck provider events"),
+    STALE_EVENTS_PARKED("stuck provider events needing review",
+        "would park %d stuck provider events for review"),
+    PROVIDER_ERRORS("provider reads that failed", null);
 
     private final String label;
+    private final String dryRunTemplate;
 
-    Counter(String label) {
+    Counter(String label, String dryRunTemplate) {
       this.label = label;
+      this.dryRunTemplate = dryRunTemplate;
     }
 
-    /** @return the operator-facing wording */
+    /** @return the operator-facing wording of a real run */
     public String label() {
       return label;
     }
+
+    /**
+     * Words a count for the summary.
+     *
+     * @param count the count
+     * @param dryRun whether the run wrote nothing
+     * @return e.g. {@code 2 abandoned checkouts closed}, or {@code would close 2 abandoned
+     *     checkouts} in a dry run
+     */
+    public String describe(int count, boolean dryRun) {
+      return dryRun && dryRunTemplate != null ? String.format(dryRunTemplate, count)
+          : count + " " + label;
+    }
   }
+
+  /** At most this many item lines are listed; the rest is summed up as "+N more". */
+  static final int MAX_ITEM_LINES = 20;
 
   /**
    * A phase whose re-read of the provider state the stuck-event sweep depends on. A phase that
@@ -91,6 +123,7 @@ public final class ReconciliationResult {
   private final Map<Phase, String> incomplete = new EnumMap<>(Phase.class);
   private final Set<String> rereadCheckouts = new HashSet<>();
   private final Map<String, String> rereadSubscriptions = new HashMap<>();
+  private final List<String> items = new ArrayList<>();
 
   ReconciliationResult(boolean dryRun) {
     this.dryRun = dryRun;
@@ -104,6 +137,63 @@ public final class ReconciliationResult {
     if (amount > 0) {
       counts.merge(counter, amount, Integer::sum);
     }
+  }
+
+  /**
+   * Lists one affected item under the counts, in dry runs and real runs alike: what it is, whose,
+   * what the run did (or would do) and why. Only ids, the company name and short reasons — the
+   * same facts the billing-event rows show, never raw user input.
+   *
+   * @param subject e.g. {@code req 1a2b3c4d} or {@code sub_123}
+   * @param name the company or client name, or null
+   * @param action in the imperative, e.g. {@code close abandoned checkout}; a dry run prefixes
+   *     it with "would"
+   * @param reason why, e.g. {@code provider session expired}
+   */
+  void item(String subject, String name, String action, String reason) {
+    StringBuilder line = new StringBuilder(StringUtils.defaultIfBlank(subject, "-"));
+    if (StringUtils.isNotBlank(name)) {
+      line.append(" (").append(name.trim()).append(')');
+    }
+    line.append(": ").append(dryRun ? "would " : "").append(action);
+    if (StringUtils.isNotBlank(reason)) {
+      line.append(" — ").append(reason);
+    }
+    items.add(line.toString());
+  }
+
+  /**
+   * The item lines an operator reads under the counts, capped at {@link #MAX_ITEM_LINES} plus a
+   * {@code +N more} line.
+   *
+   * @return the lines, empty when nothing was affected
+   */
+  public List<String> itemLines() {
+    if (items.size() <= MAX_ITEM_LINES) {
+      return Collections.unmodifiableList(items);
+    }
+    List<String> lines = new ArrayList<>(items.subList(0, MAX_ITEM_LINES));
+    lines.add("+" + (items.size() - MAX_ITEM_LINES) + " more");
+    return lines;
+  }
+
+  /**
+   * The summary and its item lines as HTML for the Classic popup, one line each. Every piece of
+   * text is escaped, a company name included.
+   *
+   * @return the HTML message
+   */
+  public String toHtml() {
+    StringBuilder html = new StringBuilder(EmailEscape.escapeHtml(toString()));
+    for (String line : itemLines()) {
+      html.append("<br/>").append(EmailEscape.escapeHtml(line));
+    }
+    return html.toString();
+  }
+
+  /** A checkout request id in the short form the item lines use. */
+  static String shortRequest(String requestId) {
+    return "req " + StringUtils.left(StringUtils.defaultString(requestId), 8);
   }
 
   void error(String message) {
@@ -234,7 +324,7 @@ public final class ReconciliationResult {
     for (Counter counter : Counter.values()) {
       int value = get(counter);
       if (value > 0) {
-        parts.add(value + " " + counter.label());
+        parts.add(counter.describe(value, dryRun));
       }
     }
     if (parts.isEmpty()) {

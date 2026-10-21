@@ -61,6 +61,81 @@ public class ReconciliationResultTest {
     assertEquals(2, result.repairs());
   }
 
+  /** QA D4: a dry run never reads as if it had done something. */
+  @Test
+  public void aDryRunWordsEveryWriteAsWhatItWouldDo() {
+    ReconciliationResult dry = new ReconciliationResult(true);
+    dry.increment(Counter.CHECKOUTS_EXPIRED);
+    dry.increment(Counter.CHECKOUTS_EXPIRED);
+    dry.increment(Counter.PROVISIONED);
+    dry.increment(Counter.SUBSCRIPTIONS_CLOSED);
+    dry.increment(Counter.NEEDS_REVIEW);
+    dry.increment(Counter.CHECKOUTS_CHECKED);
+
+    String summary = dry.toString();
+
+    assertTrue(summary, summary.contains("would close 2 abandoned checkouts"));
+    assertTrue(summary, summary.contains("would provision 1 environments"));
+    assertTrue(summary, summary.contains("would close/expire 1 subscriptions"));
+    assertTrue(summary, summary.contains("would park 1 purchases for review"));
+    assertTrue("A count that is no write keeps its wording", summary.contains(
+        "1 checkouts checked"));
+    assertFalse(summary, summary.contains("abandoned checkouts closed"));
+
+    ReconciliationResult real = new ReconciliationResult(false);
+    real.increment(Counter.CHECKOUTS_EXPIRED);
+    assertTrue(real.toString(), real.toString().contains("1 abandoned checkouts closed"));
+  }
+
+  @Test
+  public void affectedItemsAreListedWithWhoWhatAndWhyInBothKindsOfRun() {
+    ReconciliationResult dry = new ReconciliationResult(true);
+    dry.item("req 1a2b3c4d", "Acme S.L.", "close abandoned checkout", "the session expired");
+    ReconciliationResult real = new ReconciliationResult(false);
+    real.item("sub_1", null, "close (expire) the subscription", "provider status canceled");
+
+    assertEquals(java.util.List.of("req 1a2b3c4d (Acme S.L.): would close abandoned checkout"
+        + " — the session expired"), dry.itemLines());
+    assertEquals(java.util.List.of("sub_1: close (expire) the subscription — provider status "
+        + "canceled"), real.itemLines());
+  }
+
+  @Test
+  public void theItemListIsCappedWithACountOfTheRest() {
+    ReconciliationResult result = new ReconciliationResult(false);
+    for (int i = 0; i < ReconciliationResult.MAX_ITEM_LINES + 7; i++) {
+      result.item("req " + i, null, "park for review", "NO_SESSION_ID");
+    }
+
+    java.util.List<String> lines = result.itemLines();
+
+    assertEquals(ReconciliationResult.MAX_ITEM_LINES + 1, lines.size());
+    assertEquals("+7 more", lines.get(lines.size() - 1));
+  }
+
+  /** The popup renders HTML: one line per item, and a company name can never inject markup. */
+  @Test
+  public void theHtmlMessageHasOneLinePerItemAndEscapesEveryName() {
+    ReconciliationResult result = new ReconciliationResult(false);
+    result.increment(Counter.CHECKOUTS_EXPIRED);
+    result.item("req 1", "<b>Evil</b> & Co", "close abandoned checkout", "expired");
+    result.item("req 2", "Plain", "close abandoned checkout", "expired");
+
+    String html = result.toHtml();
+
+    assertEquals(2, html.split("<br/>", -1).length - 1);
+    assertTrue(html, html.contains("req 1 (&lt;b&gt;Evil&lt;/b&gt; &amp; Co)"));
+    assertFalse(html, html.contains("<b>"));
+    assertTrue(html, html.startsWith(org.apache.commons.lang3.StringUtils.replace(
+        result.toString(), "'", "&#39;")));
+  }
+
+  @Test
+  public void aShortRequestIdKeepsItsFirstEightCharacters() {
+    assertEquals("req 1a2b3c4d", ReconciliationResult.shortRequest("1a2b3c4d-5e6f-7a8b"));
+    assertEquals("req ", ReconciliationResult.shortRequest(null));
+  }
+
   @Test
   public void everyWriteKindCountsAsARepair() {
     ReconciliationResult result = new ReconciliationResult(false);

@@ -50,6 +50,12 @@ import com.etendoerp.go.usage.UsageMessages;
  * tripped, sets an error result <em>and</em> throws: the interactive popup reads the result, while
  * Process Monitor records ERROR only when an exception leaves the process.
  *
+ * <p><b>Output.</b> The popup and the run log (Process Monitor) carry the summary and one line per
+ * affected item; a dry run words everything as what it would do. <b>One run at a time</b>
+ * ({@link ReconciliationRunLock}): a second run ends at once with a warning that one is already
+ * running. A run fired by a Process Group has no process-request id of its own and is not gated
+ * by the flag.
+ *
  * <p>Parameter (optional): <b>Dry run</b> ({@code dryrun}, Yes/No). Yes reads and decides
  * everything and writes nothing.
  *
@@ -74,6 +80,9 @@ public class BillingReconciliationProcess extends DalBaseProcess {
   private static final String TITLE_DONE = "Billing Reconciliation Complete";
   private static final String TITLE_FAILED = "Billing Reconciliation Finished With Errors";
   private static final String TITLE_SKIPPED = "Billing Reconciliation Schedule Is Off";
+  private static final String TITLE_BUSY = "Billing Reconciliation Already Running";
+  static final String ALREADY_RUNNING = "A billing reconciliation is already running; nothing "
+      + "was done.";
   /** {@code AD_PROCESS_REQUEST.TIMING_OPTION} of a recurring schedule. */
   static final String TIMING_SCHEDULED = "S";
   private static final FeatureFlagContext ENVIRONMENT = FeatureFlagContext.forAccount(null);
@@ -89,6 +98,8 @@ public class BillingReconciliationProcess extends DalBaseProcess {
   InternalAlertService internalAlerts = new InternalAlertService();
   /** Decides the UTC day of the once-a-day alert; package-visible for tests. */
   Clock clock = Clock.systemUTC();
+  /** At most one run at a time (review F4); package-visible so tests can substitute it. */
+  ReconciliationRunLock runLock = new ReconciliationRunLock();
 
   /** Production wiring. */
   public BillingReconciliationProcess() {
@@ -107,10 +118,17 @@ public class BillingReconciliationProcess extends DalBaseProcess {
           + "the request in the Process Request window.";
       log.warn("{} Scheduled run of process request {} skipped: {}",
           ReconciliationAudit.LOG_PREFIX, bundle.getProcessRequestId(), message);
-      alertFlagOffOncePerDay(bundle.getProcessRequestId(), readDryRun(bundle));
+      // About the schedule, not the reconciliation's writes: alerts whatever the request's Dry
+      // run parameter says (review F3).
+      alertFlagOffOncePerDay(bundle.getProcessRequestId());
       fail(bundle, TITLE_SKIPPED, message);
     }
     boolean dryRun = readDryRun(bundle);
+    ReconciliationRunLock.Held lock = runLock.tryAcquire();
+    if (lock == null) {
+      alreadyRunning(bundle);
+      return;
+    }
     ReconciliationResult result;
     try {
       result = serviceFactory.get().run(dryRun);
@@ -118,31 +136,54 @@ public class BillingReconciliationProcess extends DalBaseProcess {
       log.error("{} Billing reconciliation failed", ReconciliationAudit.LOG_PREFIX, e);
       fail(bundle, "Billing Reconciliation Failed", UsageMessages.atSafe(e.getMessage()));
       return;
+    } finally {
+      lock.close();
     }
     String summary = UsageMessages.atSafe(result.toString());
+    // Process Monitor shows the run log: the summary and the same item lines the popup lists.
     bundle.getLogger().logln(summary);
+    for (String line : result.itemLines()) {
+      bundle.getLogger().logln(UsageMessages.atSafe(line));
+    }
+    String message = UsageMessages.atSafe(result.toHtml());
     if (result.hasFailures()) {
-      fail(bundle, TITLE_FAILED, summary);
+      fail(bundle, TITLE_FAILED, message);
     }
     log.info("{} {}", ReconciliationAudit.LOG_PREFIX, summary);
     OBError success = new OBError();
     success.setType("Success");
     success.setTitle(TITLE_DONE);
-    success.setMessage(summary);
+    success.setMessage(message);
     bundle.setResult(success);
+  }
+
+  /**
+   * Review F4: another run holds the run lock (a menu launch overlapping the schedule). This one
+   * does nothing and says so, as a warning rather than a failure: nothing is wrong, the other
+   * run does the work.
+   */
+  private static void alreadyRunning(ProcessBundle bundle) {
+    log.warn("{} {}", ReconciliationAudit.LOG_PREFIX, ALREADY_RUNNING);
+    bundle.getLogger().logln(ALREADY_RUNNING);
+    OBError warning = new OBError();
+    warning.setType("Warning");
+    warning.setTitle(TITLE_BUSY);
+    warning.setMessage(ALREADY_RUNNING);
+    bundle.setResult(warning);
   }
 
   /**
    * Tells a person, once per UTC day, that a scheduled request keeps firing while the flag is off,
    * so no reconciliation is happening. The breaker's pattern: a deterministic
    * {@code reconcile:schedule-flag-off:<yyyy-MM-dd>} billing-event row, and only the call that
-   * wrote it sends the internal alert. Hourly runs the same day stay silent, and a dry run writes
-   * and sends nothing, like every reconciliation alert. Never throws: the run ends as an ERROR
-   * whatever happens here.
+   * wrote it sends the internal alert. Hourly runs the same day stay silent. The request's Dry
+   * run parameter does not apply: the alert is about the schedule, not the reconciliation's
+   * writes, and a dry-run schedule firing for nothing must be seen too. Never throws: the run
+   * ends as an ERROR whatever happens here.
    */
-  private void alertFlagOffOncePerDay(String requestId, boolean dryRun) {
+  private void alertFlagOffOncePerDay(String requestId) {
     try {
-      ReconciliationAudit audit = new ReconciliationAudit(eventStore, dryRun, internalAlerts);
+      ReconciliationAudit audit = new ReconciliationAudit(eventStore, false, internalAlerts);
       String day = LocalDate.ofInstant(clock.instant(), ZoneOffset.UTC).toString();
       if (audit.write(ReconciliationAudit.eventId(KIND_SCHEDULE_FLAG_OFF, day),
           KIND_SCHEDULE_FLAG_OFF, null, BillingEventStore.RESULT_IGNORED, "The "

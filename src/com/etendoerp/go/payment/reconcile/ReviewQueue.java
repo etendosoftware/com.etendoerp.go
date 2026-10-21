@@ -64,17 +64,27 @@ final class ReviewQueue {
   }
 
   /**
+   * {@link #park(String, String, String, String, long, ReconciliationResult, ReconciliationAudit)}
+   * for a purchase whose company name is not at hand.
+   */
+  void park(String requestId, String code, String detail, long attempts,
+      ReconciliationResult result, ReconciliationAudit audit) {
+    park(requestId, null, code, detail, attempts, result, audit);
+  }
+
+  /**
    * Parks one purchase for review, once: a purchase already parked is left as it is. Writes the
    * row, logs the alert and, when the row was written, sends the internal alert.
    *
    * @param requestId the purchase
+   * @param clientName the company name, for the run's item list; may be null
    * @param code a stable reason code
    * @param detail an operationally safe explanation
    * @param attempts the provisioning attempts made so far, recorded for a later release
    * @param result the run's result
    * @param audit the run's audit
    */
-  void park(String requestId, String code, String detail, long attempts,
+  void park(String requestId, String clientName, String code, String detail, long attempts,
       ReconciliationResult result, ReconciliationAudit audit) {
     if (store.hasOpenReconciliation(EVENT_TYPE, requestId)) {
       return; // parked before; counted by countAwaiting
@@ -90,6 +100,8 @@ final class ReviewQueue {
       audit.internalAlert(ALERT_EVENT, requestId, code, null);
     }
     result.increment(Counter.NEEDS_REVIEW);
+    result.item(ReconciliationResult.shortRequest(requestId), clientName, "park for review",
+        code);
   }
 
   /**

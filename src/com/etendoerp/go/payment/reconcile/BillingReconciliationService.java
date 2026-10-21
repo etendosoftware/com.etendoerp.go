@@ -5,6 +5,7 @@
  */
 package com.etendoerp.go.payment.reconcile;
 
+import static com.etendoerp.go.payment.reconcile.ReconciliationResult.shortRequest;
 import static com.etendoerp.go.payment.reconcile.ReconciliationSupport.itemFailed;
 import static com.etendoerp.go.payment.reconcile.ReconciliationSupport.rollbackQuietly;
 import static com.etendoerp.go.payment.reconcile.ReconciliationSupport.summary;
@@ -285,31 +286,53 @@ public class BillingReconciliationService {
         && ("paid".equals(paymentStatus) || "no_payment_required".equals(paymentStatus))) {
       String customer = StripeJson.text(session, "customer");
       String subscription = StripeJson.text(session, FIELD_SUBSCRIPTION);
-      if (!audit.isDryRun()) {
-        checkoutStore.recordPaid(row.requestId, customer, subscription);
+      // The payment and its audit row commit together (the write is left pending until the row
+      // is inserted): a payment is never recorded without the row that explains it.
+      if (!audit.isDryRun() && !checkoutWrites.recordPaidPending(row.requestId, customer,
+          subscription)) {
+        rollbackQuietly();
+        result.error(ITEM_CHECKOUT + row.requestId + ": the request vanished before its "
+            + "recovered payment could be recorded");
+        return;
       }
-      audit.write(ReconciliationAudit.eventId(KIND_PAYMENT_RECOVERED, row.requestId),
-          KIND_PAYMENT_RECOVERED, row.requestId, BillingEventStore.RESULT_APPLIED,
+      String eventId = ReconciliationAudit.eventId(KIND_PAYMENT_RECOVERED, row.requestId);
+      if (!audit.write(eventId, KIND_PAYMENT_RECOVERED, row.requestId,
+          BillingEventStore.RESULT_APPLIED,
           "Payment confirmed by re-reading the provider; the webhook never applied it",
           summary("session", row.sessionId, "customer", customer, FIELD_SUBSCRIPTION,
-              subscription));
+              subscription))) {
+        auditRowMissing(eventId, true, result, audit);
+        if (!audit.isDryRun()) {
+          return;
+        }
+      }
       audit.alert("Recovered a paid checkout the webhook never applied: request {} session {}",
           row.requestId, row.sessionId);
       result.increment(Counter.PAYMENTS_RECOVERED);
+      result.item(shortRequest(row.requestId), row.clientName,
+          "record the payment the webhook lost", "the provider session is paid");
       recovered.put(row.requestId, CheckoutRow.recovered(row, subscription));
     } else if ("expired".equals(status) && row.createdAt != null
         && !row.createdAt.after(abandonedBefore)) {
-      boolean closed = audit.isDryRun() || checkoutWrites.recordExpired(row.requestId);
+      // The close and its audit row commit together, as for a recovered payment.
+      boolean closed = audit.isDryRun() || checkoutWrites.recordExpiredPending(row.requestId);
       if (!closed) {
+        rollbackQuietly();
         return; // a payment raced the reconciliation and won; nothing to close
       }
-      audit.write(ReconciliationAudit.eventId(KIND_CHECKOUT_EXPIRED, row.requestId),
-          KIND_CHECKOUT_EXPIRED, row.requestId, BillingEventStore.RESULT_APPLIED,
+      String eventId = ReconciliationAudit.eventId(KIND_CHECKOUT_EXPIRED, row.requestId);
+      if (!audit.write(eventId, KIND_CHECKOUT_EXPIRED, row.requestId,
+          BillingEventStore.RESULT_APPLIED,
           "Abandoned checkout closed after the provider confirmed its session expired",
-          summary("session", row.sessionId));
+          summary("session", row.sessionId)) && !audit.isDryRun()) {
+        auditRowMissing(eventId, true, result, audit);
+        return;
+      }
       audit.repaired("closed abandoned checkout {} (session {} expired)", row.requestId,
           row.sessionId);
       result.increment(Counter.CHECKOUTS_EXPIRED);
+      result.item(shortRequest(row.requestId), row.clientName, "close abandoned checkout",
+          "the provider session expired");
     }
   }
 
@@ -365,12 +388,12 @@ public class BillingReconciliationService {
     } else if (DERIVED_FAILED.equals(derived)) {
       String code = ProvisioningFailureReason.codeOf(row.failureReason);
       if (!row.retryAllowed) {
-        reviews.park(row.requestId, code, "The recorded failure cannot succeed on a retry",
-            row.attempts, result, audit);
+        reviews.park(row.requestId, row.clientName, code,
+            "The recorded failure cannot succeed on a retry", row.attempts, result, audit);
         return;
       }
       if (isDeterministic(row.failureReason)) {
-        reviews.park(row.requestId, CODE_DETERMINISTIC_FAILURE,
+        reviews.park(row.requestId, row.clientName, CODE_DETERMINISTIC_FAILURE,
             "The recorded failure is a unique-key collision, which a retry repeats",
             row.attempts, result, audit);
         return;
@@ -379,13 +402,15 @@ public class BillingReconciliationService {
       return; // an attempt holds a live lease
     }
     if (attemptsExhausted(row)) {
-      reviews.park(row.requestId, CODE_ATTEMPTS_EXHAUSTED,
+      reviews.park(row.requestId, row.clientName, CODE_ATTEMPTS_EXHAUSTED,
           row.attempts + " provisioning attempts did not complete", row.attempts, result, audit);
       return;
     }
     if (audit.isDryRun()) {
       audit.repaired("provision paid purchase {} ({})", row.requestId, derived);
       result.increment(Counter.PROVISIONED);
+      result.item(shortRequest(row.requestId), row.clientName, "provision the environment",
+          "paid with no environment (" + derived + ")");
       return;
     }
     PaidProvisioningService.Outcome outcome = provisioning.provision(row.requestId,
@@ -429,18 +454,25 @@ public class BillingReconciliationService {
     if (audit.isDryRun()) {
       audit.repaired("apply paid re-subscription {} to its environment", row.requestId);
       result.increment(Counter.REACTIVATIONS_APPLIED);
+      result.item(shortRequest(row.requestId), row.clientName, "apply the re-subscription",
+          "its payment webhook was never applied");
       return;
     }
     if (!reactivations.applyIfPending(row.requestId, paidAt)) {
       return; // applied meanwhile by the webhook, or no longer pending
     }
-    audit.write(ReconciliationAudit.eventId(KIND_REACTIVATION_APPLIED, row.requestId),
-        KIND_REACTIVATION_APPLIED, row.requestId, BillingEventStore.RESULT_APPLIED,
+    String eventId = ReconciliationAudit.eventId(KIND_REACTIVATION_APPLIED, row.requestId);
+    if (!audit.write(eventId, KIND_REACTIVATION_APPLIED, row.requestId,
+        BillingEventStore.RESULT_APPLIED,
         "Re-subscription applied by the reconciliation; its payment webhook never applied it",
-        summary(FIELD_SUBSCRIPTION, row.subscriptionId));
+        summary(FIELD_SUBSCRIPTION, row.subscriptionId))) {
+      auditRowMissing(eventId, false, result, audit);
+    }
     audit.alert("Applied a paid re-subscription the webhook never applied: request {}",
         row.requestId);
     result.increment(Counter.REACTIVATIONS_APPLIED);
+    result.item(shortRequest(row.requestId), row.clientName, "apply the re-subscription",
+        "its payment webhook was never applied");
   }
 
   private void recordProvisioningOutcome(CheckoutRow row, PaidProvisioningService.Outcome outcome,
@@ -448,13 +480,18 @@ public class BillingReconciliationService {
     String requestId = row.requestId;
     switch (outcome.status()) {
       case PROVISIONED:
-        audit.write(ReconciliationAudit.eventId(KIND_PROVISIONED, requestId), KIND_PROVISIONED,
-            requestId, BillingEventStore.RESULT_APPLIED,
+        String provisionedId = ReconciliationAudit.eventId(KIND_PROVISIONED, requestId);
+        if (!audit.write(provisionedId, KIND_PROVISIONED, requestId,
+            BillingEventStore.RESULT_APPLIED,
             "Environment provisioned by the reconciliation; the browser never completed it",
-            summary("attempt", String.valueOf(outcome.attempt())));
+            summary("attempt", String.valueOf(outcome.attempt())))) {
+          auditRowMissing(provisionedId, false, result, audit);
+        }
         audit.alert("Provisioned a paid purchase with no environment: request {} (attempt {})",
             requestId, outcome.attempt());
         result.increment(Counter.PROVISIONED);
+        result.item(shortRequest(requestId), row.clientName, "provision the environment",
+            "paid with no environment (attempt " + outcome.attempt() + ")");
         break;
       case FAILED:
         audit.write(ReconciliationAudit.eventId(KIND_PROVISIONING_FAILED, requestId,
@@ -465,10 +502,13 @@ public class BillingReconciliationService {
         audit.alert("Provisioning of paid purchase {} failed (attempt {}, code {})", requestId,
             outcome.attempt(), outcome.code());
         result.increment(Counter.PROVISIONING_FAILED);
+        result.item(shortRequest(requestId), row.clientName, "provision the environment",
+            "the attempt failed (" + outcome.code() + ")");
         break;
       case NEEDS_REVIEW:
       case NOT_PAID:
-        reviews.park(requestId, StringUtils.defaultIfBlank(outcome.code(), "NOT_PAID"),
+        reviews.park(requestId, row.clientName,
+            StringUtils.defaultIfBlank(outcome.code(), "NOT_PAID"),
             outcome.detail(), row.attempts, result, audit);
         break;
       default:
@@ -485,6 +525,24 @@ public class BillingReconciliationService {
   private static boolean isDeterministic(String failureReason) {
     String reason = StringUtils.defaultString(failureReason).toLowerCase(Locale.ROOT);
     return reason.contains(UNIQUE_VIOLATION_TEXT) || reason.contains(UNIQUE_VIOLATION_SQLSTATE);
+  }
+
+  /**
+   * A repair whose audit row was not written is an error of the run, never silent. Most repairs
+   * are committed together with their row ({@code rolledBack}): the failed insert rolled the
+   * repair back too, and a later run retries it. A provisioning or a re-subscription commits in
+   * its own transaction (the whole onboarding, the webhook's own path), so there the repair stands
+   * without its row and the error says so.
+   */
+  private static void auditRowMissing(String eventId, boolean rolledBack,
+      ReconciliationResult result, ReconciliationAudit audit) {
+    if (audit.isDryRun()) {
+      return;
+    }
+    String consequence = rolledBack ? "the repair was rolled back with it and is retried"
+        : "the repair stands without its audit row";
+    result.error("audit row " + eventId + " could not be written; " + consequence);
+    audit.alert("Audit row {} could not be written; {}", eventId, consequence);
   }
 
   /**
@@ -527,7 +585,8 @@ public class BillingReconciliationService {
         + " and cr.stripeSession is null and cr.creatingAt <= :before"
         + " and " + ReviewQueue.NOT_PARKED, parameters)) {
       try {
-        reviews.park(row.requestId, CODE_NO_SESSION_ID, "The checkout never received a provider "
+        reviews.park(row.requestId, row.clientName, CODE_NO_SESSION_ID,
+            "The checkout never received a provider "
             + "session id, so the provider cannot confirm it was not paid; it is never closed "
             + "automatically", row.attempts, result, audit);
       } catch (RuntimeException e) {
@@ -609,6 +668,8 @@ public class BillingReconciliationService {
       audit.alert("Stuck provider event {} ({}) superseded; the provider state was re-read",
           event.eventId(), type);
       result.increment(Counter.STALE_EVENTS_SWEPT);
+      result.item("event " + event.eventId(), null, "supersede stuck " + type,
+          "its provider state was re-read");
       return true;
     }
     if (audit.write(STALE_REVIEW_ID_PREFIX + event.eventId(), KIND_STALE_EVENT_REVIEW,
@@ -621,6 +682,8 @@ public class BillingReconciliationService {
     audit.alert("Stuck provider event {} ({}) needs review: the run could not vouch for it",
         event.eventId(), type);
     result.increment(Counter.STALE_EVENTS_PARKED);
+    result.item("event " + event.eventId(), null, "park stuck " + type + " for review",
+        "no re-read could vouch for it");
     return true;
   }
 
@@ -759,6 +822,7 @@ public class BillingReconciliationService {
     private boolean reactivation;
     private String subscriptionId;
     private String status;
+    private String clientName;
 
     private CheckoutRow() {
     }
@@ -778,6 +842,7 @@ public class BillingReconciliationService {
       this.reactivation = request.getCreatedClient() != null
           && !STATUS_PROVISIONED.equals(request.getCheckoutRequestStatus());
       this.status = request.getCheckoutRequestStatus();
+      this.clientName = request.getClientName();
       this.subscriptionId = StringUtils.trimToNull(request.getStripeSubscription());
     }
 
@@ -793,6 +858,7 @@ public class BillingReconciliationService {
       row.reactivation = created.reactivation;
       row.subscriptionId = StringUtils.trimToNull(subscriptionId);
       row.paidAt = created.createdAt;
+      row.clientName = created.clientName;
       return row;
     }
   }

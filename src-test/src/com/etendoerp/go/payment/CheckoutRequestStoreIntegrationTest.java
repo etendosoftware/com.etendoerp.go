@@ -974,6 +974,32 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
    * later step would look "forward" of it. A late payment or a provisioning claim must not reopen
    * a closed request.
    */
+  /**
+   * Review F1: the reconciliation's repairs are left pending, so the commit of their audit row
+   * commits them and a failed audit insert (a rollback) discards them. Nothing commits on its own.
+   */
+  @Test
+  public void testPendingRepairsCommitOnlyWithTheCallerAndARollbackDiscardsThem() {
+    String email = newEmail("pending-repairs");
+    String requestId = createCreatedRequest(createAccount(email), email);
+
+    assertTrue(writes.recordPaidPending(requestId, "cus_" + requestId, "sub_" + requestId));
+    OBDal.getInstance().rollbackAndClose();
+    assertEquals("A rolled-back payment leaves no trace", "CREATED", rawStatus(requestId));
+
+    assertTrue(writes.recordExpiredPending(requestId));
+    OBDal.getInstance().rollbackAndClose();
+    assertEquals("A rolled-back close leaves no trace", "CREATED", rawStatus(requestId));
+
+    assertTrue(writes.recordPaidPending(requestId, "cus_" + requestId, "sub_" + requestId));
+    OBDal.getInstance().commitAndClose();
+    CheckoutRequest paid = findCommittedRequest(requestId);
+    assertEquals("PAID", paid.getCheckoutRequestStatus());
+    assertNotNull(paid.getPaidAt());
+    assertEquals("sub_" + requestId, paid.getStripeSubscription());
+    assertFalse("No row, nothing recorded", writes.recordPaidPending(newRequestId(), null, null));
+  }
+
   @Test
   public void testAnExpiredRequestIsTerminal() {
     String email = newEmail("expired-terminal");

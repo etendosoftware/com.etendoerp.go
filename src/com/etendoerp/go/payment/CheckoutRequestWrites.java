@@ -17,9 +17,14 @@ import org.openbravo.dal.service.OBDal;
 import com.etendoerp.go.schemaforge.data.CheckoutRequest;
 
 /**
- * ETP-5048 — the two checkout-request writes the billing reconciliation added: the onboarding
- * inputs recorded at purchase time, and the close of an abandoned request as
- * {@link CheckoutRequestStore#STATUS_EXPIRED}.
+ * ETP-5048 — the checkout-request writes the billing reconciliation added: the onboarding inputs
+ * recorded at purchase time, the close of an abandoned request as
+ * {@link CheckoutRequestStore#STATUS_EXPIRED}, and a recovered payment.
+ *
+ * <p><b>Pending variants.</b> {@link #recordPaidPending} and {@link #recordExpiredPending} flush
+ * without committing, so the reconciliation commits the repair together with the billing-event
+ * row that explains it ({@code BillingEventStore.recordReconciliation}): a repair is never
+ * committed without its audit row, and a failed audit insert rolls the repair back too.
  *
  * <p>Kept beside {@link CheckoutRequestStore} rather than in it, which already carries the whole
  * checkout lifecycle; both follow its conventions — system context, rows at client {@code 0}, bulk
@@ -110,6 +115,21 @@ public class CheckoutRequestWrites {
    */
   public boolean recordExpired(String requestId) {
     return SystemContext.call("closing an abandoned checkout request", () -> {
+      boolean closed = recordExpiredPending(requestId);
+      OBDal.getInstance().commitAndClose();
+      return closed;
+    });
+  }
+
+  /**
+   * {@link #recordExpired} without the commit: the caller commits the close together with its
+   * audit row.
+   *
+   * @param requestId correlation id
+   * @return whether this call closed the request
+   */
+  public boolean recordExpiredPending(String requestId) {
+    return SystemContext.call("closing an abandoned checkout request", () -> {
       Date now = new Date();
       int updated = OBDal.getInstance().getSession().createQuery(
               "update " + CheckoutRequest.ENTITY_NAME + " cr"
@@ -123,9 +143,60 @@ public class CheckoutRequestWrites {
           .setParameter("openStatus", CheckoutRequestStore.STATUS_CREATED)
           .executeUpdate();
       OBDal.getInstance().flush();
-      OBDal.getInstance().commitAndClose();
       return updated == 1;
     });
+  }
+
+  /**
+   * Records a payment confirmed by the provider, like {@link CheckoutRequestStore#recordPaid}, but
+   * leaves it pending: the caller commits it together with its audit row.
+   *
+   * @param requestId correlation id
+   * @param stripeCustomerId {@code cus_...}, or null
+   * @param stripeSubscriptionId {@code sub_...}, or null
+   * @return whether the request exists and the payment was recorded on it
+   */
+  public boolean recordPaidPending(String requestId, String stripeCustomerId,
+      String stripeSubscriptionId) {
+    return SystemContext.call("recording a recovered payment", () -> {
+      boolean found = applyPaid(requestId, stripeCustomerId, stripeSubscriptionId);
+      if (found) {
+        OBDal.getInstance().flush();
+      }
+      return found;
+    });
+  }
+
+  /**
+   * The one payment write, shared by {@link CheckoutRequestStore#recordPaid} (the webhook) and
+   * {@link #recordPaidPending} (the reconciliation). Captures the provider ids, moves the request
+   * to {@code PAID} when that is forward, and stamps {@code PAID_AT} once. Not committed; the
+   * caller provides the system context.
+   *
+   * @return false when no request carries the id (logged)
+   */
+  static boolean applyPaid(String requestId, String stripeCustomerId,
+      String stripeSubscriptionId) {
+    CheckoutRequest request = CheckoutRequestStore.findByRequestId(requestId);
+    if (request == null) {
+      log.error("No checkout request found for '{}' while recording a confirmed payment",
+          requestId);
+      return false;
+    }
+    // Captured regardless of the status transition: these are the join keys every future
+    // subscription and invoice event arrives on, and only this event carries them.
+    if (request.getStripeCustomer() == null && StringUtils.isNotBlank(stripeCustomerId)) {
+      request.setStripeCustomer(stripeCustomerId);
+    }
+    if (request.getStripeSubscription() == null && StringUtils.isNotBlank(stripeSubscriptionId)) {
+      request.setStripeSubscription(stripeSubscriptionId);
+    }
+    if (CheckoutRequestStore.advance(request, CheckoutRequestStore.STATUS_PAID)
+        && request.getPaidAt() == null) {
+      request.setPaidAt(new Date());
+    }
+    OBDal.getInstance().save(request);
+    return true;
   }
 
   private static String matching(String requestId, String field, String value, Pattern pattern,
