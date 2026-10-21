@@ -155,7 +155,9 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  * NDJSON progress reaches the given sink. The draft's address and fiscal identifier reach the
  * organization, and a value the HTTP path would refuse is dropped with a WARN instead of failing
  * the run. A lost paid re-subscription is applied through {@code PaidReactivationService} over
- * the webhook's own {@code applyReactivationIfPending}.
+ * the webhook's own {@code applyReactivationIfPending}. A purchase that is not the owner's, not
+ * confirmed as paid, or whose recorded demo is gone is refused before the claim, and a successful
+ * repair sends the provisioning alert and the environment-ready email like the browser path.
  *
  * @covers com.etendoerp.go.rest.EtendoGoJwtServlet
  * @covers com.etendoerp.go.rest.PaidReactivationService
@@ -4100,6 +4102,122 @@ public class EtendoGoJwtServletCoverageTest {
     assertTrue(steps.toString(), steps.contains("recordProvisioned"));
     assertTrue(sink.lines.toString(), sink.lines.stream().anyMatch(l -> l.startsWith("progress:")));
     assertEquals("result:true:null", sink.lines.get(sink.lines.size() - 1));
+  }
+
+  /** Runs a browser-less paid onboarding that is refused before its claim, and returns why. */
+  private PaidProvisioningService.Outcome refusedPaidPurchase(PaidOnboardingStage stage,
+      StagedStatics before) throws Exception {
+    PaidProvisioningService.Outcome[] outcome = new PaidProvisioningService.Outcome[1];
+    stagedAction = () -> outcome[0] = servlet.provisionPaidPurchase(paidInput("EUR"),
+        new RecordingSink());
+    runStagedPaidOnboarding(stage, before, (support, dal, transactions) -> { });
+    verify(stage.store, never()).claimForProvisioning(anyString(), anyString(), anyString());
+    verify(servlet.pooledTenantClaimService, never()).claim(any(), any(), anyString());
+    return outcome[0];
+  }
+
+  private static void confirmPayments(TenantPaywallService paywall, boolean confirmed)
+      throws Exception {
+    Field confirmation = TenantPaywallService.class.getDeclaredField("paymentConfirmation");
+    confirmation.setAccessible(true);
+    confirmation.set(paywall,
+        (TenantPaywallService.PaymentConfirmation) (token, email, name) -> confirmed);
+  }
+
+  /** ETP-5048 G1 — an account owning environments must be a marked owner to be provisioned. */
+  @Test
+  public void aPaidPurchaseOfAnAccountThatIsNotTheOwnerNeedsReviewAndIsNeverClaimed()
+      throws Exception {
+    PaidOnboardingStage stage = stagePaidOnboarding(true);
+
+    PaidProvisioningService.Outcome outcome = refusedPaidPurchase(stage,
+        (support, dal, transactions) -> dal.when(
+            () -> EtendoGoJwtDalHelper.hasOwnedEnvironmentForAccountEmail("user@test.com"))
+            .thenReturn(false));
+
+    assertEquals(PaidProvisioningService.Status.NEEDS_REVIEW, outcome.status());
+    assertEquals("BILLING_OWNER_REQUIRED", outcome.code());
+    assertNull(outcome.attempt());
+  }
+
+  /** ETP-5048 G1 — a paywall that blocks the purchase (no confirmed payment) is NOT_PAID. */
+  @Test
+  public void aPaidPurchaseThePaywallBlocksIsNotPaidAndIsNeverClaimed() throws Exception {
+    PaidOnboardingStage stage = stagePaidOnboarding(true);
+    confirmPayments(servlet.tenantPaywallService, false);
+
+    PaidProvisioningService.Outcome outcome = refusedPaidPurchase(stage,
+        (support, dal, transactions) -> { });
+
+    assertEquals(PaidProvisioningService.Status.NOT_PAID, outcome.status());
+    assertNull(outcome.code());
+  }
+
+  /**
+   * ETP-5048 G1 — a paywall that allows the purchase only as a free one (the account owns no
+   * environment, and no payment is confirmed) is not productive, so it is NOT_PAID too.
+   */
+  @Test
+  public void aPaidPurchaseThePaywallDoesNotConfirmAsProductiveIsNotPaid() throws Exception {
+    PaidOnboardingStage stage = stagePaidOnboarding(true);
+    confirmPayments(servlet.tenantPaywallService, false);
+
+    PaidProvisioningService.Outcome outcome = refusedPaidPurchase(stage,
+        (support, dal, transactions) -> dal.when(
+            () -> EtendoGoJwtDalHelper.countTenantsOwnedByAccountEmail("user@test.com"))
+            .thenReturn(0));
+
+    assertEquals(PaidProvisioningService.Status.NOT_PAID, outcome.status());
+  }
+
+  /** ETP-5048 G1 — a recorded demo source that is no longer a free demo of the account. */
+  @Test
+  public void aPaidPurchaseWhoseRecordedDemoIsGoneNeedsReviewAndIsNeverClaimed()
+      throws Exception {
+    PaidOnboardingStage stage = stagePaidOnboarding(true);
+    when(stage.store.hasRecordedDemoSelection("purchase-1", "account-1", "user@test.com"))
+        .thenReturn(true);
+    when(stage.store.findDemoClientId("purchase-1", "account-1", "user@test.com"))
+        .thenReturn("demo-1");
+
+    PaidProvisioningService.Outcome outcome = refusedPaidPurchase(stage,
+        (support, dal, transactions) -> dal.when(
+            () -> EtendoGoJwtDalHelper.findFreeTenantIdsByAccountEmail("user@test.com"))
+            .thenReturn(java.util.Set.of("demo-other")));
+
+    assertEquals(PaidProvisioningService.Status.NEEDS_REVIEW, outcome.status());
+    assertEquals(EtendoGoJwtServlet.CODE_DEMO_SELECTION_REQUIRED, outcome.code());
+    assertTrue(outcome.detail(), outcome.detail().contains("no longer available"));
+  }
+
+  /**
+   * ETP-5048 G4 (decision 10) — a browser-less repair runs the same post-commit steps as the
+   * browser: the internal {@code environment-provisioning} alert and the customer's
+   * environment-ready email both go out.
+   */
+  @Test
+  public void aServerSideRepairSendsTheProvisioningAlertAndTheEnvironmentReadyEmail()
+      throws Exception {
+    PaidProvisioningService.Outcome[] outcome = new PaidProvisioningService.Outcome[1];
+    stagedAction = () -> outcome[0] = servlet.provisionPaidPurchase(paidInput("EUR"),
+        new RecordingSink());
+
+    runCommittedPaidOnboarding(true, mock(SubscriptionService.class), new ArrayList<>());
+
+    assertEquals(PaidProvisioningService.Status.PROVISIONED, outcome[0].status());
+    ArgumentCaptor<com.etendoerp.go.schemaforge.email.InternalAlertEvent> alerts =
+        ArgumentCaptor.forClass(com.etendoerp.go.schemaforge.email.InternalAlertEvent.class);
+    verify(servlet.internalAlertService, org.mockito.Mockito.atLeastOnce())
+        .sendAfterTransaction(alerts.capture());
+    assertTrue(alerts.getAllValues().stream().anyMatch(alert ->
+        "environment-provisioning".equals(alert.getEvent())
+            && alert.getStatus() == com.etendoerp.go.schemaforge.email.InternalAlertEvent.Status.OK
+            && "PRODUCTIVE".equals(alert.getEnvironmentType())
+            && "client-1".equals(alert.getClientId())));
+    Field sender = EtendoGoJwtServlet.class.getDeclaredField("authEmailSender");
+    sender.setAccessible(true);
+    TransactionalAuthEmailSender emails = (TransactionalAuthEmailSender) sender.get(servlet);
+    verify(emails).sendEnvironmentReady(any(), eq("client-1"), eq("en_US"));
   }
 
   /** ETP-5048 — a failed run is classified FAILED with the step's own code and the attempt. */
