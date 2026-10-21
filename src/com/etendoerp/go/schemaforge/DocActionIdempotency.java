@@ -103,7 +103,7 @@ final class DocActionIdempotency {
    */
   static NeoResponse orAlreadyApplied(NeoResponse refusal, String tabId, String recordId,
       String docAction) {
-    if (refusal == null || refusal.getHttpStatus() != DocActionRefusal.STATUS) {
+    if (refusal == null || refusal.getHttpStatus() != NeoErrorClassifier.STATUS_UNPROCESSABLE) {
       return refusal;
     }
     NeoResponse applied = check(tabId, recordId, docAction, true);

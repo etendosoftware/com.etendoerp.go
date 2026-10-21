@@ -261,8 +261,8 @@ class DocActionIdempotencyTest {
   // ---- refusal re-read (a concurrent request reached the target status first) ----
 
   private static NeoResponse refusal422() throws Exception {
-    return DocActionRefusal.businessRule(new org.codehaus.jettison.json.JSONObject()
-        .put("status", "error").put("message", "Document already processed"));
+    return NeoErrorResponses.toResponse(422, NeoErrorClassifier.CODE_BUSINESS_RULE,
+        "Document already processed", null);
   }
 
   @Test

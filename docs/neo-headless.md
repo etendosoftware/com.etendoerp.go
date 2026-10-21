@@ -1148,8 +1148,10 @@ Known limits, deliberate:
 - **No `field` key yet.** Naming the offending field is deferred until it is combined with
   ETP-5785's reference ownership.
 - **The gateway** still maps NEO's 422/503 to 502 until ETP-5369.
-- **Period/process refusal split.** A captured period refusal or a process reporting failure
-  keeps REST 400; a thrown keyed or P0001 refusal is 422. See the declared divergence in §4.12.9.
+- **Period/process refusal split.** A captured period refusal keeps REST 400; a thrown keyed or
+  P0001 refusal is 422, and so is a process whose `AD_PInstance` reports failure
+  (`Result = 0`, ETP-5783, §4.3.9). Class-backed and OBUIAPP process refusals keep 400. See the
+  declared divergence in §4.12.9.
 - **SPA follow-up required before delivery.** Localize generic errors by `error.code`:
   `business_rule`, `unknown_reference`, `record_in_use`, `invalid_value`,
   `missing_required_value`, `forbidden`, `retryable_conflict`, `service_unavailable` and
@@ -4040,7 +4042,7 @@ not: `etendo_create` does not run it in shared code, so it is in the table below
 | step | in `etendo_create` | in `etendo_batch` | consequence |
 |---|---|---|---|
 | `NeoCommercialLinePolicy.injectCommercialAmounts` | **no** in shared code — only from the customizations of sales order, sales quotation, sales invoice and purchase invoice lines (ETP-5528, ETP-5710, §4.12.20, §4.12.31) | yes | `etendo_batch` runs it in `NeoCrudHandler.executePostCreate`; `etendo_create` never reaches that method — it is a separate pipeline. Since ETP-5528, sales order and sales quotation lines get the amounts on every create from their own customizations (`OrderLineDiscountSupport.deriveAmountsOnCreate`), and so do sales and purchase invoice lines (`SalesInvoiceLineHandler` / `PurchaseInvoiceLineHandler` → `InvoiceLineAmountSupport.deriveAmountsOnCreate`; purchase since ETP-5710). Every other entity is as on `develop`: a generic commercial line persists `lineGrossAmount = 0` on a net price list, and purchase order lines still do not get it (measured 2026-09-30: purchase order line gross 0; the purchase invoice line 0 / 0 of that measurement is fixed by ETP-5710). Declared, not fixed in shared code. (`grossUnitPrice` still persists as 0 on both verbs — a separate, undiagnosed defect, not a divergence) |
-| error classification (ETP-5782) — period and process refusals | captured period refusals and process-reported failures keep REST `400` | thrown keyed or P0001 refusals are `422` | existing funnel divergence preserved; status does not depend on translated prose (§4.3.8). |
+| error classification (ETP-5782) — period and process refusals | captured period refusals keep REST `400`; process failures reported through `AD_PInstance` are `422` (§4.3.9) | thrown keyed or P0001 refusals are `422` | existing funnel divergence preserved for periods; status does not depend on translated prose (§4.3.8). |
 | error classification (ETP-5782) — `unknown_reference`, `missing_required_value` | REST `400` | MCP `422 validation_error`, same `code` | MCP answers every rejected value as 422 already (§4.3.1.1); the class travels in `code`, so a caller branches on it on either channel. Declared in `McpToolResponses.classifiedEnvelope`. |
 | error classification (ETP-5782) — a captured write failure classified `500` | REST `500 server_error`, sanitized | MCP keeps its existing write answer (`422`) | the MCP write path answered every DAL failure 422 before ETP-5782; only the classified 4xx/503 changed it. A 500-class failure keeps the old answer rather than turn a 422 into a 500 for agents. |
 | `buildInvalidDatesError` | yes | **no** | no explicit 422 for an unreadable or ambiguous date (ETP-4793 / IMP-24). Type coercion itself does run on the shared path (`executePostCreate` → `coerceTypes`), so the value is not silently mangled — the agent just gets a less precise failure |
