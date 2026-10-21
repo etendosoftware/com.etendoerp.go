@@ -1043,7 +1043,7 @@ public class GoodsShipmentHeaderHandlerTest {
         new GoodsShipmentHeaderHandler().actionContracts();
 
     assertEquals(java.util.List.of("documentAction", "availableOrders", "availableOrderLines",
-            "importOrderLines", "createDraftInvoice", "createReturn", "cloneRecord"),
+            "importOrderLines", "createDraftInvoice", "createReturn", "cloneRecord", "post", "unpost"),
         java.util.List.copyOf(contracts.keySet()));
     assertEquals("POST", contracts.get("cloneRecord").getHttpMethod());
     assertNull(com.etendoerp.go.schemaforge.util.NeoActionContract.validate(contracts, "cloneRecord", new JSONObject()));
@@ -1204,5 +1204,19 @@ public class GoodsShipmentHeaderHandlerTest {
     when(delegate.handle(ctx)).thenReturn(expected);
 
     assertSame(expected, handler.handle(ctx));
+  }
+
+  /**
+   * ETP-5714: the keys GoodsShipmentHeaderHandler's afterHandle adds to a GET record are declared, so an MCP
+   * {@code fields:[…]} projection does not report them in {@code unknownFields} while the same
+   * response carries them.
+   */
+  @org.junit.jupiter.api.Test
+  @org.junit.jupiter.api.DisplayName("goods shipment: enriched response keys are declared")
+  void enrichedKeysAreDeclaredGoodsShipmentHeaderHandler() {
+    java.util.Set<String> declared = new GoodsShipmentHeaderHandler().responseEnrichedFields();
+    for (String key : java.util.List.of("invoiceStatus", "linkedOrders", "linkedInvoices", "returnReceipts", "canCreateReturn")) {
+      org.junit.jupiter.api.Assertions.assertTrue(declared.contains(key), key + " in " + declared);
+    }
   }
 }

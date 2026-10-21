@@ -406,6 +406,8 @@ public class ImportInOutLinesIntoInvoiceHandlerTest {
         Set.of("il-0", "il-1"));
     verify(probe.invoiceFromOrderSupport).ensureLineGrossAmounts(probe.invoice,
         Set.of("il-0", "il-1"));
+    verify(probe.invoiceFromOrderSupport).alignLineListPrices(probe.invoice,
+        Set.of("il-0", "il-1"));
   }
 
   // ── the preconditions ─────────────────────────────────────────────────────

@@ -25,6 +25,8 @@ import javax.inject.Named;
 
 import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
+import org.openbravo.base.structure.BaseOBObject;
+import java.util.Set;
 
 /**
  * NeoHandler for the Purchase Order header entity.
@@ -84,6 +86,21 @@ public class PurchaseOrderHeaderHandler extends AbstractOrderHeaderHandler {
         CreatePurchaseInvoiceHandler.ORDER_CONTRACT);
     contracts.put(NeoCloneRecordHandler.CONTRACT.getName(), NeoCloneRecordHandler.CONTRACT);
     return contracts;
+  }
+
+  /**
+   * {@inheritDoc} The order header adds {@code hasLinkedDocuments}, {@code needsPrimaryDoc} and
+   * {@code needsInvoiceDoc} to every GET record (ETP-5714).
+   */
+  @Override
+  public Set<String> responseEnrichedFields() {
+    return OrderDocumentAvailability.RESPONSE_ENRICHED_FIELDS;
+  }
+
+  /** {@inheritDoc} Reactivate is ruled out for an order that has linked documents (ETP-5714). */
+  @Override
+  public Map<String, String> unavailableActions(BaseOBObject subject) {
+    return OrderDocumentAvailability.unavailable(subject);
   }
 
   @Override

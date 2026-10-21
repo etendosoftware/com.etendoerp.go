@@ -56,6 +56,8 @@ import org.openbravo.model.financialmgmt.tax.TaxRate;
 
 /**
  * Unit tests for {@link InvoiceFromOrderSupport}.
+ *
+ * @covers com.etendoerp.go.schemaforge.InvoiceFromOrderSupport
  */
 public class InvoiceFromOrderSupportTest {
 
@@ -136,6 +138,151 @@ public class InvoiceFromOrderSupportTest {
 
       verify(il).setGrossAmount(new BigDecimal("10.00"));
       verify(dal).save(il);
+    }
+  }
+
+  // ── alignLineListPrices (ETP-5714 round 8): a copied line carries the list price the form stores ──
+
+  private static InvoiceLine pricedLine(String unit, String list, String discount, String gross) {
+    InvoiceLine line = mock(InvoiceLine.class);
+    when(line.getId()).thenReturn("L-" + unit + "-" + list);
+    when(line.getUnitPrice()).thenReturn(unit == null ? null : new BigDecimal(unit));
+    when(line.getListPrice()).thenReturn(list == null ? null : new BigDecimal(list));
+    when(line.getEtgoDiscount()).thenReturn(discount == null ? null : new BigDecimal(discount));
+    when(line.getGrossUnitPrice()).thenReturn(gross == null ? null : new BigDecimal(gross));
+    return line;
+  }
+
+  /**
+   * The native line copy takes the prices of its source line exactly, so a source whose list price is
+   * 0 (an order line an agent created with only a price) gives an invoice line with a price and a
+   * list price of 0: the grid's "Precio" is the list price and showed 0,00. The form stores the price
+   * the user typed as the list price when there is no discount.
+   */
+  @Test
+  public void testAlignLineListPricesGivesAPricedLineWithoutListPriceItsPrice() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      InvoiceLine zeroList = pricedLine("50", "0", null, null);
+      InvoiceLine nullList = pricedLine("50", null, "0", "0");
+      InvoiceLine hasList = pricedLine("45", "50", null, null);
+      InvoiceLine discounted = pricedLine("45", "0", "10", null);
+      InvoiceLine grossPriced = pricedLine("50", "0", null, "60.5");
+      InvoiceLine free = pricedLine("0", "0", null, null);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getInvoiceLineList()).thenReturn(
+          Arrays.asList(zeroList, nullList, hasList, discounted, grossPriced, free));
+
+      new InvoiceFromOrderSupport().alignLineListPrices(invoice, null);
+
+      verify(zeroList).setListPrice(new BigDecimal("50"));
+      verify(nullList).setListPrice(new BigDecimal("50"));
+      verify(hasList, never()).setListPrice(any(BigDecimal.class));
+      // a discounted copy: the form sends unit = list x (1 - d/100), so list = unit / (1 - d/100)
+      ArgumentCaptor<BigDecimal> derived = ArgumentCaptor.forClass(BigDecimal.class);
+      verify(discounted).setListPrice(derived.capture());
+      assertEquals(0, new BigDecimal("50").compareTo(derived.getValue()));
+      verify(grossPriced, never()).setListPrice(any(BigDecimal.class));
+      verify(free, never()).setListPrice(any(BigDecimal.class));
+      verify(dal).save(zeroList);
+      verify(dal).flush();
+    }
+  }
+
+  /** Only the lines of the import are touched; the draft's own lines are left alone, and nothing flushes when nothing changed. */
+  @Test
+  public void testAlignLineListPricesScopedToTheGivenLines() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      InvoiceLine added = pricedLine("50", "0", null, null);
+      InvoiceLine existing = pricedLine("70", "0", null, null);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getInvoiceLineList()).thenReturn(Arrays.asList(added, existing));
+
+      new InvoiceFromOrderSupport().alignLineListPrices(invoice,
+          Collections.singleton(added.getId()));
+
+      verify(added).setListPrice(new BigDecimal("50"));
+      verify(existing, never()).setListPrice(any(BigDecimal.class));
+
+      InvoiceLine fine = pricedLine("50", "50", null, null);
+      when(invoice.getInvoiceLineList()).thenReturn(Collections.singletonList(fine));
+      org.mockito.Mockito.clearInvocations(dal);
+      new InvoiceFromOrderSupport().alignLineListPrices(invoice, null);
+      verify(dal, never()).flush();
+    }
+  }
+
+  /** Cases the form could not have produced, or that leave nothing to derive: left alone. */
+  @Test
+  public void testAlignLineListPricesLeavesUnderivableLinesAlone() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      InvoiceLine noPrice = pricedLine(null, "0", null, null);
+      InvoiceLine fullDiscount = pricedLine("0", "0", "100", null);
+      InvoiceLine over = pricedLine("5", "0", "120", null);
+      InvoiceLine markup = pricedLine("5", "0", "-10", null);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getInvoiceLineList()).thenReturn(
+          Arrays.asList(noPrice, fullDiscount, over, markup));
+
+      new InvoiceFromOrderSupport().alignLineListPrices(invoice, null);
+
+      for (InvoiceLine line : Arrays.asList(noPrice, fullDiscount, over, markup)) {
+        verify(line, never()).setListPrice(any(BigDecimal.class));
+      }
+      verify(dal, never()).flush();
+    }
+  }
+
+  /** A return line (negative price) is aligned like any other: the list price keeps the sign. */
+  @Test
+  public void testAlignLineListPricesKeepsTheSignOfANegativePrice() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      InvoiceLine negative = pricedLine("-50", "0", null, null);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getInvoiceLineList()).thenReturn(Collections.singletonList(negative));
+
+      new InvoiceFromOrderSupport().alignLineListPrices(invoice, null);
+
+      verify(negative).setListPrice(new BigDecimal("-50"));
+    }
+  }
+
+  /** An empty scope is a scope: nothing is touched, nothing flushed. */
+  @Test
+  public void testAlignLineListPricesWithAnEmptyScopeTouchesNothing() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      InvoiceLine line = pricedLine("50", "0", null, null);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getInvoiceLineList()).thenReturn(Collections.singletonList(line));
+
+      new InvoiceFromOrderSupport().alignLineListPrices(invoice, Collections.emptySet());
+
+      verify(line, never()).setListPrice(any(BigDecimal.class));
+      verify(dal, never()).flush();
+    }
+  }
+
+  /** A failing flush is the caller's failure (the import rolls back), never swallowed here. */
+  @Test(expected = IllegalStateException.class)
+  public void testAlignLineListPricesPropagatesAFailingFlush() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      org.mockito.Mockito.doThrow(new IllegalStateException("flush failed")).when(dal).flush();
+      InvoiceLine line = pricedLine("50", "0", null, null);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getInvoiceLineList()).thenReturn(Collections.singletonList(line));
+
+      new InvoiceFromOrderSupport().alignLineListPrices(invoice, null);
     }
   }
 
