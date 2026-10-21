@@ -149,6 +149,8 @@ checkout and subscription rows, and its audit rows are ordinary billing events.
       (typically unscheduled by an operator) is left as it is, logged at INFO. It inserts only when
       no such row exists and no active scheduled request for the process exists.
     - Every alert and repair line starts with `[BILLING-RECONCILE]`.
+    - Whether the flag is needed at all, given that production schedules by hand, is an open
+      decision for Martin: `docs/open-and-notable-topics.md` §1.8 (decide later).
 12. **Stuck `RECEIVED` events** — a Stripe event left `RECEIVED` past a threshold (the crash window
     `BillingEventStore` documents) is never replayed. It is marked `IGNORED` ("superseded by
     reconciliation") only when the run re-read the state it could have moved (review W2,

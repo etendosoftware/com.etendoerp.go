@@ -122,6 +122,36 @@ count reaches 0, and the fallback WARN no longer appears. The cutover deletes §
 
 The one 🔴 decision the 2026-09-28 answers did not touch. Options and default: §5.13.
 
+### 🟡 1.8 Is the `billing-reconciliation-schedule` flag overkill? — decide later (ETP-5048)
+
+**Ticket:** related ETP-5048; no ticket of its own. **Status:** open, **decide later** — safe to
+revisit after the first production weeks.
+
+**To raise with / decides:** Martin
+
+The flag is a second switch on top of one production already has. Production is never restarted,
+so there the reconciliation is scheduled by hand in the Process Request window, and unscheduling
+that request already stops it. On top of that, the flag:
+
+- gates every scheduled run (timing *Schedule*, whoever created the request);
+- turns a scheduled run into an ERROR in Process Monitor while it is off;
+- drives `BillingReconciliationScheduleStartup`, which plants the request on environments that do
+  restart.
+
+**Options:**
+
+1. **Keep it as a master kill switch** — stop every scheduled reconciliation from ConfigCat (or the
+   property) without touching Process Request, on every environment at once.
+2. **Drop it, and the startup hook** — rely on Process Request alone, as Demo Trial Notices does.
+
+**What removing it deletes:** the `FLAG_BILLING_RECONCILIATION_SCHEDULE` flag, the startup hook
+(`BillingReconciliationScheduleStartup` and its fixed request id), the in-run gate and the flag-off
+ERROR path in `BillingReconciliationProcess` (`isScheduledRun`, `timingOf`), their tests
+(`BillingReconciliationScheduleStartupTest`, the gate cases of `BillingReconciliationProcessTest`)
+and their documentation (design `plans/2026-10-18-etp-5048-billing-reconciliation-design.md`
+decision 11 and §8, the flag section of `feature-flags-and-tenant-upgrade.md`). The menu entry, the
+process and Process Request scheduling are unaffected either way.
+
 ---
 
 ## 2. Deployment — constraints that are not visible in the code
