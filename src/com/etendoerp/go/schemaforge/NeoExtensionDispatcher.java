@@ -200,6 +200,13 @@ public final class NeoExtensionDispatcher {
    * that is indistinguishable from a working dispatch everywhere else in the system.</p>
    */
   private static void logTrace(NeoExtensionTrace trace) {
+    // ETP-5693: an entity with no qualifier and no annotation is the normal case, not the anomaly
+    // the INFO line exists for; every REST call now dispatches, so keep that one at DEBUG.
+    if (trace.outcome() == NeoExtensionOutcome.NO_CUSTOMIZATION && StringUtils.isBlank(trace.qualifier())) {
+      log.debug("NeoExtension dispatched: spec={} entity={} surface={} channel={} outcome={}",
+          trace.specName(), trace.entityName(), trace.surface(), trace.channel(), trace.outcome());
+      return;
+    }
     String prefix = trace.outcome() == NeoExtensionOutcome.RESOLVED_AND_RAN
         || trace.outcome() == NeoExtensionOutcome.RESOLVED_RETURNED_NULL ? "(debug)" : "(warn)";
     log.info(

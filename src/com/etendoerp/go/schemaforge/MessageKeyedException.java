@@ -17,6 +17,8 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.util.Map;
+
 import org.openbravo.base.exception.OBException;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
 
@@ -38,6 +40,18 @@ public class MessageKeyedException extends OBException {
    */
   public MessageKeyedException(String messageKey) {
     super(OBMessageUtils.messageBD(messageKey));
+    this.messageKey = messageKey;
+  }
+
+  /**
+   * Creates the exception with the message's text in the GO locale, its {@code @name@}
+   * placeholders replaced from {@code params}.
+   *
+   * @param messageKey the {@code AD_MESSAGE.VALUE}
+   * @param params     placeholder name (without the {@code @}) to value
+   */
+  public MessageKeyedException(String messageKey, Map<String, String> params) {
+    super(OBMessageUtils.parseTranslation(OBMessageUtils.messageBD(messageKey), params));
     this.messageKey = messageKey;
   }
 
