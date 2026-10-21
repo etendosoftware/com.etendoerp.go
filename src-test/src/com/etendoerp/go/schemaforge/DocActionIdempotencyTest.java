@@ -21,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
@@ -70,6 +71,7 @@ class DocActionIdempotencyTest {
   private BaseOBObject record;
   private Table table;
   private OBCriteria<org.openbravo.model.ad.domain.List> listCriteria;
+  private final List<org.openbravo.model.ad.domain.List> listValues = new java.util.ArrayList<>();
 
   @SuppressWarnings("unchecked")
   @BeforeEach
@@ -91,7 +93,7 @@ class DocActionIdempotencyTest {
     when(dal.get(Tab.class, TAB_ID)).thenReturn(tab);
     listCriteria = mock(OBCriteria.class);
     when(dal.createCriteria(org.openbravo.model.ad.domain.List.class)).thenReturn(listCriteria);
-    when(listCriteria.count()).thenReturn(2);
+    when(listCriteria.list()).thenAnswer(inv -> listValues);
   }
 
   @AfterEach
@@ -106,6 +108,18 @@ class DocActionIdempotencyTest {
     Column column = listColumn("DocStatus", "ref-status");
     when(table.getADColumnList()).thenReturn(List.of(column));
     bindProperty(column, "lifecycle", status);
+    listValues("ref-status", "DR", status);
+  }
+
+  private void listValues(String referenceId, String... keys) {
+    for (String key : keys) {
+      org.openbravo.model.ad.domain.List value = mock(org.openbravo.model.ad.domain.List.class);
+      Reference reference = mock(Reference.class);
+      when(reference.getId()).thenReturn(referenceId);
+      when(value.getReference()).thenReturn(reference);
+      when(value.getSearchKey()).thenReturn(key);
+      listValues.add(value);
+    }
   }
 
   private static Column listColumn(String dbName, String referenceValueId) {
@@ -175,7 +189,7 @@ class DocActionIdempotencyTest {
   @Test
   void aListWithoutBothStatusesIsNotTheStatusColumn() {
     tableWithStatusColumn("CO");
-    when(listCriteria.count()).thenReturn(1);
+    listValues.remove(0); // only the target status is in the list, no draft
 
     assertNull(DocActionIdempotency.alreadyApplied(TAB_ID, RECORD_ID, "CO"));
   }
@@ -186,6 +200,8 @@ class DocActionIdempotencyTest {
     Column second = listColumn("OtherStatus", "ref-b");
     when(table.getADColumnList()).thenReturn(List.of(first, second));
     bindProperty(first, "lifecycle", "CO");
+    listValues("ref-a", "DR", "CO");
+    listValues("ref-b", "DR", "CO");
     Entity entity = record.getEntity();
     Property other = mock(Property.class);
     when(other.getName()).thenReturn("other");
@@ -240,5 +256,45 @@ class DocActionIdempotencyTest {
 
     assertEquals("The document is already in the requested status.",
         response.getBody().getString("message"));
+  }
+
+  // ---- refusal re-read (a concurrent request reached the target status first) ----
+
+  private static NeoResponse refusal422() throws Exception {
+    return DocActionRefusal.businessRule(new org.codehaus.jettison.json.JSONObject()
+        .put("status", "error").put("message", "Document already processed"));
+  }
+
+  @Test
+  void aRefusalIsAnAlreadyAppliedWhenTheStatusIsNowTheTarget() throws Exception {
+    tableWithStatusColumn("CO");
+
+    NeoResponse response =
+        DocActionIdempotency.orAlreadyApplied(refusal422(), TAB_ID, RECORD_ID, "CO");
+
+    assertEquals(200, response.getHttpStatus());
+    assertTrue(response.getBody().getBoolean("alreadyApplied"));
+    org.mockito.Mockito.verify(dal).refresh(record);
+  }
+
+  @Test
+  void aRefusalStandsWhenTheStatusIsNotTheTarget() throws Exception {
+    tableWithStatusColumn("DR");
+    NeoResponse refusal = refusal422();
+
+    assertEquals(refusal,
+        DocActionIdempotency.orAlreadyApplied(refusal, TAB_ID, RECORD_ID, "CO"));
+  }
+
+  @Test
+  void anAnswerThatIsNotARefusalIsNeverRewritten() throws Exception {
+    tableWithStatusColumn("CO");
+    NeoResponse ok = NeoResponse.ok(new org.codehaus.jettison.json.JSONObject());
+    NeoResponse badRequest = NeoResponse.error(400, "no");
+
+    assertEquals(ok, DocActionIdempotency.orAlreadyApplied(ok, TAB_ID, RECORD_ID, "CO"));
+    assertEquals(badRequest,
+        DocActionIdempotency.orAlreadyApplied(badRequest, TAB_ID, RECORD_ID, "CO"));
+    org.mockito.Mockito.verify(dal, never()).refresh(any());
   }
 }

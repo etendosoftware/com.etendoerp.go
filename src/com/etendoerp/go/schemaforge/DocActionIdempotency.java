@@ -17,6 +17,11 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import org.apache.commons.lang3.StringUtils;
@@ -30,7 +35,6 @@ import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Column;
-import org.openbravo.model.ad.domain.Reference;
 import org.openbravo.model.ad.ui.Tab;
 
 import com.etendoerp.go.schemaforge.util.NeoMessages;
@@ -82,11 +86,37 @@ final class DocActionIdempotency {
    * @return the answer, or {@code null}
    */
   static NeoResponse alreadyApplied(String tabId, String recordId, String docAction) {
+    return check(tabId, recordId, docAction, false);
+  }
+
+  /**
+   * A refusal of the procedure, or the {@code alreadyApplied} success when a concurrent request got
+   * the record to the target status first: the status is re-read from the database once
+   * (the cached instance would still show the old one).
+   *
+   * @param refusal   what the procedure answered
+   * @param tabId     the AD tab whose table holds the record
+   * @param recordId  the record id
+   * @param docAction the requested action code
+   * @return {@code alreadyApplied} when the record is now in the target status, else the refusal
+   *         untouched (also for any answer that is not a refusal)
+   */
+  static NeoResponse orAlreadyApplied(NeoResponse refusal, String tabId, String recordId,
+      String docAction) {
+    if (refusal == null || refusal.getHttpStatus() != DocActionRefusal.STATUS) {
+      return refusal;
+    }
+    NeoResponse applied = check(tabId, recordId, docAction, true);
+    return applied != null ? applied : refusal;
+  }
+
+  private static NeoResponse check(String tabId, String recordId, String docAction,
+      boolean refresh) {
     if (!SELF_TARGETING_ACTIONS.contains(docAction)) {
       return null;
     }
     try {
-      if (!isAlreadyInStatus(tabId, recordId, docAction)) {
+      if (!isAlreadyInStatus(tabId, recordId, docAction, refresh)) {
         return null;
       }
       JSONObject body = new JSONObject();
@@ -95,31 +125,23 @@ final class DocActionIdempotency {
       body.put("alreadyApplied", true);
       return NeoResponse.ok(body);
     } catch (JSONException | RuntimeException e) {
-      // Undecidable is not "applied": let the procedure speak.
+      // Undecidable is not "applied": let the procedure's own answer stand.
       log.debug("Idempotency check skipped for record {}: {}", recordId, e.getMessage());
       return null;
     }
   }
 
-  private static boolean isAlreadyInStatus(String tabId, String recordId, String status) {
+  private static boolean isAlreadyInStatus(String tabId, String recordId, String status,
+      boolean refresh) {
     BaseOBObject record = DocActionResolution.loadDocActionRecord(tabId, recordId);
     Tab tab = OBDal.getInstance().get(Tab.class, tabId);
     if (record == null || tab == null || tab.getTable() == null) {
       return false;
     }
-    Property statusProperty = null;
-    for (Column column : tab.getTable().getADColumnList()) {
-      Property property = isDocumentStatusColumn(column, status)
-          ? record.getEntity().getPropertyByColumnName(column.getDBColumnName(), false)
-          : null;
-      if (property == null) {
-        continue;
-      }
-      if (statusProperty != null) {
-        return false; // two candidates: ambiguous
-      }
-      statusProperty = property;
+    if (refresh) {
+      OBDal.getInstance().refresh(record);
     }
+    Property statusProperty = statusProperty(tab, record, status);
     if (statusProperty == null) {
       return false;
     }
@@ -127,21 +149,60 @@ final class DocActionIdempotency {
     return current != null && status.equals(current.toString());
   }
 
-  /** Active List column whose reference list holds the draft status and {@code status}. */
-  private static boolean isDocumentStatusColumn(Column column, String status) {
-    Reference list = column.getReferenceSearchKey();
-    if (!Boolean.TRUE.equals(column.isActive()) || column.getReference() == null
-        || !LIST_REFERENCE_ID.equals(column.getReference().getId()) || list == null) {
-      return false;
+  /**
+   * The single property of {@code record} that is its document status for {@code status}: an
+   * active List column of the table whose reference list holds the draft status and
+   * {@code status}. One query over {@code AD_Ref_List} for all the table's List references; none or
+   * several candidate columns mean {@code null} (do not decide).
+   */
+  private static Property statusProperty(Tab tab, BaseOBObject record, String status) {
+    Map<String, List<Column>> columnsByReference = new HashMap<>();
+    for (Column column : tab.getTable().getADColumnList()) {
+      if (isActiveListColumn(column)) {
+        columnsByReference.computeIfAbsent(column.getReferenceSearchKey().getId(),
+            id -> new ArrayList<>()).add(column);
+      }
     }
+    if (columnsByReference.isEmpty()) {
+      return null;
+    }
+    Map<String, Set<String>> valuesByReference = new HashMap<>();
     OBCriteria<org.openbravo.model.ad.domain.List> values = OBDal.getInstance()
         .createCriteria(org.openbravo.model.ad.domain.List.class);
-    values.add(Restrictions.eq(org.openbravo.model.ad.domain.List.PROPERTY_REFERENCE + ".id",
-        list.getId()));
+    values.add(Restrictions.in(org.openbravo.model.ad.domain.List.PROPERTY_REFERENCE + ".id",
+        columnsByReference.keySet()));
     values.add(Restrictions.eq(org.openbravo.model.ad.domain.List.PROPERTY_ACTIVE, Boolean.TRUE));
     values.add(Restrictions.in(org.openbravo.model.ad.domain.List.PROPERTY_SEARCHKEY,
         DRAFT_STATUS, status));
-    return values.count() == 2;
+    for (org.openbravo.model.ad.domain.List value : values.list()) {
+      valuesByReference.computeIfAbsent(value.getReference().getId(), id -> new HashSet<>())
+          .add(value.getSearchKey());
+    }
+    Property found = null;
+    for (Map.Entry<String, List<Column>> entry : columnsByReference.entrySet()) {
+      Set<String> held = valuesByReference.get(entry.getKey());
+      if (held == null || held.size() != 2) {
+        continue;
+      }
+      for (Column column : entry.getValue()) {
+        Property property = record.getEntity().getPropertyByColumnName(column.getDBColumnName(),
+            false);
+        if (property == null) {
+          continue;
+        }
+        if (found != null) {
+          return null; // two candidates: ambiguous
+        }
+        found = property;
+      }
+    }
+    return found;
+  }
+
+  private static boolean isActiveListColumn(Column column) {
+    return Boolean.TRUE.equals(column.isActive()) && column.getReference() != null
+        && LIST_REFERENCE_ID.equals(column.getReference().getId())
+        && column.getReferenceSearchKey() != null;
   }
 
   private static String message() {

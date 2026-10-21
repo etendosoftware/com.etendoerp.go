@@ -247,6 +247,9 @@ public class NeoProcessServiceTest {
       dalMock.when(OBDal::getInstance).thenReturn(dal);
       callProcess.when(org.openbravo.service.db.CallProcess::getInstance).thenReturn(cp);
       resolution.when(() -> DocActionResolution.requestedDocAction(any())).thenReturn("CO");
+      // The refusal re-read runs for real: no record to re-read, so the 422 stands.
+      idempotency.when(() -> DocActionIdempotency.orAlreadyApplied(any(), any(), any(), any()))
+          .thenCallRealMethod();
 
       NeoResponse resp = NeoProcessService.executeProcess(docActionProcedure(),
           docActionParams("CO"));

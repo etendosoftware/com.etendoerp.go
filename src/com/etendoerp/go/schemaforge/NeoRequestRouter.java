@@ -27,6 +27,7 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.model.ad.ui.Process;
 
 import com.etendoerp.go.auth.EnvironmentRequestAuthenticator;
+import com.etendoerp.go.auth.ScopeRefusal;
 import com.etendoerp.go.oauth2.ApiScopes;
 import com.etendoerp.go.schemaforge.NeoServlet.NeoPathInfo;
 import com.etendoerp.go.schemaforge.data.SFSpec;
@@ -113,8 +114,8 @@ class NeoRequestRouter {
     // same scope is asked here, from the scopes the authenticator kept on the request.
     if (!EnvironmentRequestAuthenticator.isScopeGranted(request, ApiScopes.PROCESS)) {
       NeoResponse refusal = NeoResponse.error(HttpServletResponse.SC_FORBIDDEN,
-          "Insufficient scope: this request requires " + ApiScopes.PROCESS)
-          .withHeader("WWW-Authenticate", "Bearer error=\"insufficient_scope\"");
+          ScopeRefusal.message(ApiScopes.PROCESS))
+          .withHeader(ScopeRefusal.CHALLENGE_HEADER, ScopeRefusal.CHALLENGE_VALUE);
       servlet.writeResponse(response, refusal);
       return;
     }

@@ -288,6 +288,9 @@ public class ToolRegistry {
       if (McpConstants.batchToolEnabled()) {
         tools.add(buildBatchTool());
       }
+    }
+    // ETP-5783: published under the scope its call requires (etendo:process), not under write.
+    if (permissions.canProcess) {
       tools.add(buildActionTool(ToolRegistryActionSpecs.withActionSpecs(accessibleWindowSpecs, actionReportSpecs)));
     }
   }

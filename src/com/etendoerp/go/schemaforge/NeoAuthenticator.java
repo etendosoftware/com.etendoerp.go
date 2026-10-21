@@ -28,6 +28,7 @@ import org.openbravo.dal.core.OBContext;
 
 import com.etendoerp.go.auth.EnvironmentAuthOutcome;
 import com.etendoerp.go.auth.EnvironmentRequestAuthenticator;
+import com.etendoerp.go.auth.ScopeRefusal;
 import com.etendoerp.go.auth.SurfacePolicy;
 import com.etendoerp.go.payment.EnvironmentAccessGuard;
 import com.etendoerp.go.schemaforge.data.SFSpec;
@@ -94,7 +95,7 @@ class NeoAuthenticator {
       // a client keeps the token instead of discarding it as expired.
       servlet.writeResponse(response,
           NeoResponse.error(outcome.getHttpStatus(), outcome.getMessage())
-              .withHeader("WWW-Authenticate", "Bearer error=\"insufficient_scope\""));
+              .withHeader(ScopeRefusal.CHALLENGE_HEADER, ScopeRefusal.CHALLENGE_VALUE));
       return false;
     }
     servlet.sendError(response, outcome.getHttpStatus(), outcome.getMessage());

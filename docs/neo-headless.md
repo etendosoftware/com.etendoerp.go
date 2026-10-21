@@ -200,8 +200,8 @@ OAuth2 tokens (MCP clients, API keys, `client_credentials`) carry these scopes:
 | Scope | Grants |
 |-------|--------|
 | `etendo:read` | REST `GET`/`HEAD`; MCP read tools and resources |
-| `etendo:write` | REST writes **except** action routes and process specs (below); MCP write tools (`etendo_create`, `etendo_update`, `etendo_delete`, `etendo_action`, image upload) |
-| `etendo:process` | REST action routes `POST /{spec}/{entity}/{id}/action/{name}` and `POST` on a process spec; MCP per-spec process tools |
+| `etendo:write` | REST writes **except** action routes and process specs (below); MCP write tools (`etendo_create`, `etendo_update`, `etendo_delete`, image upload) |
+| `etendo:process` | REST action routes `POST /{spec}/{entity}/{id}/action/{name}` and `POST` on a process spec; MCP `etendo_action` and per-spec process tools (ETP-5783: same scope as the REST action route) |
 | `etendo:report` | MCP `generate_*` report tools |
 | `etendo:*` | everything above |
 
@@ -246,7 +246,7 @@ JWTs (the SPA) are never narrowed by scope: RBAC decides, as before. A scope fai
 `{"error":{"status":403,"message":"Insufficient scope: this request requires etendo:process"}}`
 with `WWW-Authenticate: Bearer error="insufficient_scope"` (RFC 6750 §3.1) — no longer `401`, which
 clients read as "your token expired" and discard. A token with no usable identity claims stays 401.
-MCP's own scope failures are unchanged (tool errors from `McpAuthorizationService`).
+MCP's own scope failures are unchanged (tool errors from `McpAuthorizationService`); what changed is that `etendo_action` is now process-tier there too, so the REST action route, process specs and MCP `etendo_action` all require `etendo:process` (parity, §4.12.9). MCP clients registered by default hold `etendo:*` and keep working; a client registered with only `etendo:write` loses `etendo_action` until `etendo:process` is added.
 
 The MCP tool names follow a different rule: the old `neo_<x>` names are refused with a pointer to
 the new name, not accepted (see *MCP tool names* at the start of §4.12).
@@ -2192,7 +2192,7 @@ stays retired (IMP-19: it is not a report generator); its actions are published 
   `message:"Not a report generator; '<spec>' serves named actions through etendo_action (entity
   <entity>)."`, plus `actionEntity`, `actions[]` and `actionsHint`. Three-way: a report generator
   gets `callable:true` + `reportTool`; a spec with neither keeps `not_configured_for_report_generation`.
-- **Scope.** `etendo_action` is registered only for write-capable tokens (`etendo:write` / `etendo:*`, or their deprecated `neo:` aliases), so a
+- **Scope.** `etendo_action` is registered and authorized only for process-capable tokens (`etendo:process` / `etendo:*`, or their deprecated `neo:` aliases; ETP-5783 — it was write-tier before, which let a write-only key complete a document), so a
   read-only token cannot call the read helpers (`pendingLines`, `candidates`, `autoMatch`) either.
 - **Schema.** For an entity whose handler declares actions, `etendo_schema` returns the action catalog
   whatever `view` is asked (`McpActionsView.buildDeclaredResponse`): each entry is
@@ -3763,6 +3763,12 @@ this fix.
 ---
 
 #### 4.12.9 `etendo_batch` is on again, and what still differs (ETP-5335 → ETP-5415)
+
+> **Scope parity for actions (ETP-5783).** Running a document action or a process needs
+> `etendo:process` on every channel: the REST action route (by path), `POST` on a process spec (by
+> spec type) and MCP `etendo_action` (`McpAuthorizationService.requiredScopeFor`; the tool is
+> also published only to process-capable tokens). `etendo:write` alone no longer completes a
+> document through any of them. See §4.1.1.
 
 `McpConstants.batchToolEnabled()` returns `true`. The tool is published in `tools/list`
 (`ToolRegistry`) and routable by name (`McpToolRouter.route`).

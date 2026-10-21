@@ -36,6 +36,8 @@ import com.etendoerp.go.oauth2.OAuth2Filter;
 import com.etendoerp.go.payment.EnvironmentAccessGuard;
 import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.schemaforge.util.NeoLanguage;
+// Known package cycle (auth <-> schemaforge, as with NeoLanguage below): the action-path rule must be
+// the very parser NeoServlet dispatches with, which lives in schemaforge.
 import com.etendoerp.go.schemaforge.NeoActionPath;
 import com.etendoerp.go.session.GoLegacyBearer;
 import com.etendoerp.go.session.GoSessionAuthResult;
@@ -102,8 +104,6 @@ public class EnvironmentRequestAuthenticator {
   static final String MSG_MISSING_CLAIMS = "Invalid token: missing required claims";
   static final String MSG_INVALID_TOKEN = "Invalid or expired token";
   static final String MSG_INSUFFICIENT_SCOPE = "Insufficient scope or invalid token context";
-  /** ETP-5783 — followed by the scope the request needed. */
-  static final String MSG_SCOPE_REQUIRED_PREFIX = "Insufficient scope: this request requires ";
   /** Request attribute holding the OAuth2 token's scopes; absent for sessions and legacy JWTs. */
   public static final String ATTR_GRANTED_SCOPES = "com.etendoerp.go.auth.grantedScopes";
   static final String MSG_CONTEXT_UNAVAILABLE = "Environment context could not be established";
@@ -336,7 +336,7 @@ public class EnvironmentRequestAuthenticator {
     String required = requiredScope(request.getMethod(), request.getPathInfo());
     if (!ApiScopes.grants(scopes, required)) {
       // ETP-5783 — 403, not 401: the token is valid, it just does not carry this scope.
-      return Resolution.refused(Status.INSUFFICIENT_SCOPE, MSG_SCOPE_REQUIRED_PREFIX + required,
+      return Resolution.refused(Status.INSUFFICIENT_SCOPE, ScopeRefusal.message(required),
           AuthScheme.OAUTH2);
     }
     // Kept for the one decision the path cannot make (a process spec is told apart by its

@@ -52,4 +52,16 @@ class McpAuthorizationServiceVectorTest {
     org.junit.jupiter.api.Assertions.assertTrue(
         e.getMessage().contains("'etendo:write'"), e.getMessage());
   }
+
+  /** ETP-5783: etendo_action runs a document action, so it needs the process scope like REST. */
+  @Test
+  void etendoActionRequiresProcessNotWrite() {
+    assertThrows(OBSecurityException.class,
+        () -> McpAuthorizationService.authorizeToolCall("etendo_action", Set.of("etendo:write")));
+    assertThrows(OBSecurityException.class,
+        () -> McpAuthorizationService.authorizeToolCall("etendo_action", Set.of("neo:write")));
+    McpAuthorizationService.authorizeToolCall("etendo_action", Set.of("neo:process"));
+    McpAuthorizationService.authorizeToolCall("etendo_action", Set.of("etendo:process"));
+    McpAuthorizationService.authorizeToolCall("etendo_action", Set.of("etendo:*"));
+  }
 }
