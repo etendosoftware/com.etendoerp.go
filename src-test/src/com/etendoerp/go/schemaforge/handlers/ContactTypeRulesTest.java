@@ -26,6 +26,7 @@ import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -64,7 +65,8 @@ import com.etendoerp.go.schemaforge.NeoResponse;
 /**
  * Specifies the contact-type rules: a contact ({@code C_BPartner}) and a contact category
  * ({@code C_BP_Group}) must keep at least one of customer / vendor, and a new contact inherits each
- * type it was not sent explicitly from its category.
+ * type it was not sent explicitly from its category, and an update of the contact header that moves
+ * it to a different category without sending either type re-inherits both from the new one.
  *
  * <p>The rules live in {@link ContactTypeRules}; the category and Customer/Vendor tab
  * customizations only delegate to it, so they are exercised through their {@code handle()} here
@@ -87,6 +89,7 @@ class ContactTypeRulesTest {
   private static final String CATEGORY_TYPES_SQL = "em_etgo_isvendor FROM c_bp_group";
   private static final String CONTACT_TYPES_SQL = "iscustomer, isvendor FROM c_bpartner";
   private static final String DEFAULT_CATEGORY_SQL = "isdefault = 'Y'";
+  private static final String CONTACT_CATEGORY_SQL = "c_bp_group_id FROM c_bpartner";
 
   /** Marks a value the request does not carry (or an attribute that is not set). */
   private static final String ABSENT = "-";
@@ -234,6 +237,80 @@ class ContactTypeRulesTest {
   }
 
   // ── Customer / Vendor tabs ─────────────────────────────────────────────────────────────────
+
+  /**
+   * The header update re-inherits BOTH types from the new category only when the request changes
+   * the category and sends neither flag: either flag carries the caller's own decision, and a
+   * category with neither flag defines nothing. The stored category is read only when the body
+   * names one, and the category flags only once the category actually changed.
+   *
+   * <p>Columns: sent category, sent customer, sent vendor ({@code -} = key left out), stored
+   * category, new category customer/vendor flags, expected body customer/vendor ({@code -} = key
+   * still absent), whether the stored category is read, whether the category flags are read.
+   * The stored contact is customer-only, so none of these rows is rejected.</p>
+   */
+  @ParameterizedTest(name = "{0}")
+  @CsvSource({
+      "changed + no flag takes both from the category, CAT-NEW, -,     -,     CAT-OLD, N, Y, false, true,  true,  true",
+      "changed + explicit customer inherits nothing,   CAT-NEW, true,  -,     CAT-OLD, N, Y, true,  -,     false, false",
+      "changed + explicit vendor inherits nothing,     CAT-NEW, -,     false, CAT-OLD, Y, Y, -,     false, false, false",
+      "changed + both flags explicit inherits nothing, CAT-NEW, false, true,  CAT-OLD, Y, N, false, true,  false, false",
+      "changed to a category with neither flag,        CAT-NEW, -,     -,     CAT-OLD, N, N, -,     -,     true,  true",
+      "same category as stored is not a change,        CAT-OLD, -,     -,     CAT-OLD, N, Y, -,     -,     true,  false",
+      "no category in the body reads no category,      -,       -,     -,     CAT-OLD, N, Y, -,     -,     false, false",
+  })
+  void headerUpdateReinheritsBothTypesOnlyOnACategoryChangeWithoutFlags(String scenario,
+      String sentCategory, String sentCustomer, String sentVendor, String storedCategory,
+      String categoryCustomer, String categoryVendor, String expectedCustomer,
+      String expectedVendor, boolean readsStoredCategory, boolean readsCategoryFlags)
+      throws Exception {
+    JSONObject body = new JSONObject().put("etgoFirstname", "Pedro");
+    put(body, "businessPartnerCategory", sentCategory);
+    put(body, "customer", sentCustomer);
+    put(body, "vendor", sentVendor);
+    givenRow(CONTACT_TYPES_SQL, "Y", "N");
+    givenRow(CONTACT_CATEGORY_SQL, storedCategory);
+    PreparedStatement categoryTypes = givenRow(CATEGORY_TYPES_SQL, categoryCustomer, categoryVendor);
+
+    assertNull(ContactTypeRules.inheritOnCategoryChangeAndValidateUpdate(
+        crudContext("PATCH", body, null), body));
+
+    assertBodyValue(expectedCustomer, body, "customer");
+    assertBodyValue(expectedVendor, body, "vendor");
+    verify(conn, times(readsStoredCategory ? 1 : 0)).prepareStatement(
+        argThat(sql -> sql != null && sql.contains(CONTACT_CATEGORY_SQL)));
+    verify(conn, times(readsCategoryFlags ? 1 : 0)).prepareStatement(
+        argThat(sql -> sql != null && sql.contains(CATEGORY_TYPES_SQL)));
+    if (readsCategoryFlags) {
+      verify(categoryTypes).setString(1, sentCategory);
+    }
+  }
+
+  /**
+   * Re-inheritance does not bypass the header rule: the write is still refused when the contact
+   * ends with no type — a new category with neither flag cannot give one to a contact stored
+   * without any, and an explicit flag that switches off the only type is kept, not overwritten by
+   * the new category.
+   */
+  @ParameterizedTest(name = "{0}")
+  @CsvSource({
+      "neither-flag category cannot rescue a typeless contact, -,     N, N, N, N",
+      "explicit customer off is not overwritten by a category, false, Y, N, Y, Y",
+  })
+  void headerUpdateChangingTheCategoryIsStillRejectedWhenNoTypeRemains(String scenario,
+      String sentCustomer, String storedCustomer, String storedVendor, String categoryCustomer,
+      String categoryVendor) throws Exception {
+    JSONObject body = new JSONObject().put("businessPartnerCategory", "CAT-NEW");
+    put(body, "customer", sentCustomer);
+    givenRow(CONTACT_TYPES_SQL, storedCustomer, storedVendor);
+    givenRow(CONTACT_CATEGORY_SQL, "CAT-OLD");
+    givenRow(CATEGORY_TYPES_SQL, categoryCustomer, categoryVendor);
+
+    NeoResponse response = ContactTypeRules.inheritOnCategoryChangeAndValidateUpdate(
+        crudContext("PATCH", body, null), body);
+
+    assertRejected(response, ContactTypeRules.MSG_CONTACT_TYPE_REQUIRED);
+  }
 
   static Stream<Arguments> tabsClearingTheOnlyType() {
     return Stream.of(

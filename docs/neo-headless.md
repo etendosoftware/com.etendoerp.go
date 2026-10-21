@@ -3288,7 +3288,7 @@ metadata.
 | Section | Level | Purpose |
 |---|---|---|
 | `parent` | entity | How a child entity identifies its parent, and for which verbs the parent key is required (`field`, `entity`, `optionalFor`, `mode`, `reason`). See §6. |
-| `fields` | spec / entity / field | Reclassifies the MCP's view of field curation — `visibility`, `included`, `readOnly`, `businessCritical`, `reason`. |
+| `fields` | spec / entity / field | Reclassifies the MCP's view of field curation — `visibility`, `included`, `readOnly`, `businessCritical`, `userRequired`, `reason`. |
 | `verbs` | entity (spec applies to every entity without its own) | Hides MCP write verbs the `ETGO_SF_ENTITY` flags still enable for REST and the SPA — `create`, `update`, `delete`, `reason`, `instead` (ETP-5558). |
 | `actions` | entity (spec applies to every entity without its own) | Hides actions (declared handler actions or AD buttons) from the MCP and redirects buttons to the action to use instead — `hidden`, `redirect`, `reason` (ETP-5558). See §4.12.1.3. |
 
@@ -3301,6 +3301,7 @@ metadata.
     "included": true,
     "readOnly": false,
     "businessCritical": true,
+    "userRequired": false,
     "reason": "why the shared curation is wrong for agent use"
   }
 }
@@ -3319,6 +3320,17 @@ metadata.
   carry. Like `visibility`, it widens what is *offered*, never what is *allowed*.
 - `readOnly`, `businessCritical` — JSON booleans, unquoted. An absent key is *not* a configured
   `false`: it leaves the `ETGO_SF_FIELD` value standing.
+- `userRequired` — JSON boolean (ETP-5791). Replaces the `userRequired` flag `etendo_schema`
+  derives for the field (editable + AD-mandatory + no AD default), and with it whether
+  `view:"create"` lists the field under `required` or `optional`. For a value a customization
+  supplies in its pre-hook, which the structural rule cannot see: `contacts/businessPartner.vendor`
+  (`C_BPartner.IsVendor`, mandatory, no default) carries `userRequired:false` at field level because
+  `BusinessPartnerHandler` inherits it from the business partner category when a create omits it.
+  It changes the advice, never the contract: the raw `required` (AD NOT NULL) is left as it is and
+  no write-side check is relaxed. Ignored on buttons. Applied before the precondition overlay
+  (`ETGO_SF_ENTITY.preconditions`), which can still force `userRequired:true`. An absent key leaves
+  the derived flag standing. Meant for the field level — at entity/spec level it would set the flag
+  on every field of the scope.
 - `reason` — **mandatory** whenever the section is present, and non-blank. Every row of this section
   asserts that the shared curation is wrong for agent use; that claim has to be auditable on the row
   that makes it.
@@ -5819,7 +5831,8 @@ pass, so there the body holds exactly what the caller sent. MCP `etendo_create` 
 (`"neo.clientProvidedFields"`): a `Set<String>` of the DAL property names the agent itself sent,
 snapshotted before defaults. It is the only setter. A customization reads "explicit" as: attribute
 present → the set contains the key; attribute absent → `body.has(key)`. See
-`ContactTypeRules#isExplicit`. Updates never need it (no defaults pass runs on PATCH/PUT).
+`ContactTypeRules#isExplicit`. Updates never need it (no defaults pass runs on PATCH/PUT or on
+MCP `etendo_update`, so the body handed to the pre-hook is exactly what the caller sent).
 
 **Contact types (ETP-5791).** `C_BP_Group.EM_Etgo_Iscustomer/Isvendor` say whether a category's
 contacts are customers, vendors/creditors or both. Rules live in `handlers/ContactTypeRules`
@@ -5827,7 +5840,7 @@ contacts are customers, vendors/creditors or both. Rules live in `handlers/Conta
 
 | Customization | Binding | Behaviour |
 |---|---|---|
-| `BusinessPartnerHandler` | `@Named` / `contacts/businessPartner` | On create, `customer`/`vendor` not sent explicitly are taken from the category (the request's, else the AD default category); a category with neither flag passes nothing on. Create and every update reject a contact with neither type (`ETGO_BPartnerContactTypeRequired`). After create, missing posting-account rows are backfilled. Existing contacts are never re-derived. |
+| `BusinessPartnerHandler` | `@Named` / `contacts/businessPartner` | On create, `customer`/`vendor` not sent explicitly are taken from the category (the request's, else the AD default category); a category with neither flag passes nothing on. On update, a write that changes `businessPartnerCategory` to a different category and carries **neither** `customer` nor `vendor` takes **both** from the new category (parity with the Contacts form, which overwrites its checkboxes on a category change); a write that carries either flag decides the type itself. Same rule on REST PATCH/PUT and MCP `etendo_update` (both hand the pre-hook the body as sent; `/batch` is create-only). Create and every update reject a contact with neither type (`ETGO_BPartnerContactTypeRequired`). After create, missing posting-account rows are backfilled; after an update that sets a flag to true (sent or re-inherited), the ETP-4565 backfill adds the missing row. Otherwise existing contacts are never re-derived. MCP: `vendor` carries `MCP_CONFIG.fields.userRequired:false` (§4.12.6), so `view:"create"` lists it as optional. |
 | `BusinessPartnerCategoryHandler` | `@NeoExtension business-partner-category/businessPartnerCategory` | Create/update reject a category with neither flag (`ETGO_BPGroupContactTypeRequired`). |
 | `ContactCustomerTabHandler`, `ContactVendorTabHandler` (base `ContactTypeFlagGuardHandler`) | `@NeoExtension contacts/customer`, `contacts/vendorCreditor` | Same contact rule on updates through those tabs, only when the write sends `customer` or `vendor`. |
 

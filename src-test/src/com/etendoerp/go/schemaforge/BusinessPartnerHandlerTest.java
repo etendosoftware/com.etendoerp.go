@@ -2090,6 +2090,8 @@ class BusinessPartnerHandlerTest {
   private static final String CONTACT_TYPES_SQL_MARKER = "iscustomer, isvendor FROM c_bpartner";
   /** Distinctive part of the category-types lookup {@code ContactTypeRules} runs on a create. */
   private static final String CATEGORY_TYPES_SQL_MARKER = "em_etgo_isvendor FROM c_bp_group";
+  /** Distinctive part of the stored-category lookup {@code ContactTypeRules} runs on an update. */
+  private static final String CONTACT_CATEGORY_SQL_MARKER = "c_bp_group_id FROM c_bpartner";
 
   /**
    * A create that does not send {@code customer}/{@code vendor} takes them from its category, and
@@ -2164,6 +2166,42 @@ class BusinessPartnerHandlerTest {
       assertContactTypeRejection(handler.handle(ctx));
     }
     assertFalse(body.has("name"));
+  }
+
+  /**
+   * The header update path re-inherits the types on a category change: a PATCH that moves a
+   * customer-only contact to a vendor category and sends neither flag continues with both flags
+   * taken from the new category (the rule matrix itself is in {@code ContactTypeRulesTest}).
+   */
+  @Test
+  void testHandlePatchChangingTheCategoryWithoutFlagsReinheritsBothTypes() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("businessPartnerCategory", "CAT_VENDORS");
+    when(ctx.getHttpMethod()).thenReturn("PATCH");
+    when(ctx.getRequestBody()).thenReturn(body);
+    when(ctx.getRecordId()).thenReturn("REC_001");
+    Connection connMock = mock(Connection.class);
+    givenStoredContactTypes(connMock, "Y", "N");
+    ResultSet storedCategory = mock(ResultSet.class);
+    when(storedCategory.next()).thenReturn(true);
+    when(storedCategory.getString(1)).thenReturn("CAT_CUSTOMERS");
+    PreparedStatement psCategory = mock(PreparedStatement.class);
+    when(psCategory.executeQuery()).thenReturn(storedCategory);
+    when(connMock.prepareStatement(
+        argThat(s -> s != null && s.contains(CONTACT_CATEGORY_SQL_MARKER)))).thenReturn(psCategory);
+    givenTypesRow(connMock, CATEGORY_TYPES_SQL_MARKER, "N", "Y");
+
+    try (MockedStatic<OBDal> mDal = mockStatic(OBDal.class)) {
+      OBDal obDalMock = mock(OBDal.class);
+      when(obDalMock.getConnection()).thenReturn(connMock);
+      mDal.when(OBDal::getInstance).thenReturn(obDalMock);
+
+      assertNull(handler.handle(ctx));
+    }
+
+    verify(psCategory).setString(1, "REC_001");
+    assertFalse(body.getBoolean("customer"));
+    assertTrue(body.getBoolean("vendor"));
   }
 
   /**

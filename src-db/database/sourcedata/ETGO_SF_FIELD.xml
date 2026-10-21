@@ -83003,6 +83003,7 @@
 <!--D1BD49D2C4CD4F7AAE5890A39E0931DF-->  <SEQNO><![CDATA[100]]></SEQNO>
 <!--D1BD49D2C4CD4F7AAE5890A39E0931DF-->  <VISIBILITY><![CDATA[editable]]></VISIBILITY>
 <!--D1BD49D2C4CD4F7AAE5890A39E0931DF-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
+<!--D1BD49D2C4CD4F7AAE5890A39E0931DF-->  <MCP_CONFIG><![CDATA[{"fields":{"userRequired":false,"reason":"C_BPartner.IsVendor is mandatory with no AD default, so the structural rule marks it userRequired, but BusinessPartnerHandler inherits it from the business partner category when a create omits it (ETP-5791). The agent should normally not send it."}}]]></MCP_CONFIG>
 <!--D1BD49D2C4CD4F7AAE5890A39E0931DF--></ETGO_SF_FIELD>
 
 <!--D1BE8B9391B0470DB29219B6FC7EE8CA--><ETGO_SF_FIELD>

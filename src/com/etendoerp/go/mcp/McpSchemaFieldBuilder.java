@@ -199,6 +199,7 @@ final class McpSchemaFieldBuilder {
     Map<String, Boolean> businessCriticalByColumnId = new HashMap<>();
     Map<String, Boolean> readOnlyByColumnId = new HashMap<>();
     java.util.Set<String> excludedColumnIds = new java.util.HashSet<>();
+    Map<String, Boolean> userRequiredByColumnId = new HashMap<>();
     OBCriteria<SFField> fieldCrit = OBDal.getInstance().createCriteria(SFField.class);
     fieldCrit.add(Restrictions.eq(
         SFField.PROPERTY_ETGOSFENTITY + ".id", sfEntity.getId()));
@@ -225,9 +226,12 @@ final class McpSchemaFieldBuilder {
       if (!view.isIncluded()) {
         excludedColumnIds.add(colId);
       }
+      // ETP-5791: only an override that states the flag lands here; an absent entry keeps the
+      // derived userRequired (see applyUserRequiredOverride).
+      view.getUserRequiredOverride().ifPresent(flag -> userRequiredByColumnId.put(colId, flag));
     }
     return new FieldMetadata(visibilityByColumnId, businessCriticalByColumnId, readOnlyByColumnId,
-        excludedColumnIds);
+        excludedColumnIds, userRequiredByColumnId);
   }
 
   static final class FieldMetadata {
@@ -249,15 +253,31 @@ final class McpSchemaFieldBuilder {
      * excluded, so nothing changes for them.</p>
      */
     final java.util.Set<String> excludedColumnIds;
+    /**
+     * AD_Column ids whose {@code userRequired} an {@code MCP_CONFIG.fields.userRequired} override
+     * states (ETP-5791), with the stated value. A column absent from the map keeps the flag
+     * {@link #addVisibility} derives.
+     */
+    final Map<String, Boolean> userRequiredByColumnId;
 
     FieldMetadata(Map<String, String> visibilityByColumnId,
         Map<String, Boolean> businessCriticalByColumnId,
         Map<String, Boolean> readOnlyByColumnId,
         java.util.Set<String> excludedColumnIds) {
+      this(visibilityByColumnId, businessCriticalByColumnId, readOnlyByColumnId, excludedColumnIds,
+          Map.of());
+    }
+
+    FieldMetadata(Map<String, String> visibilityByColumnId,
+        Map<String, Boolean> businessCriticalByColumnId,
+        Map<String, Boolean> readOnlyByColumnId,
+        java.util.Set<String> excludedColumnIds,
+        Map<String, Boolean> userRequiredByColumnId) {
       this.visibilityByColumnId = visibilityByColumnId;
       this.businessCriticalByColumnId = businessCriticalByColumnId;
       this.readOnlyByColumnId = readOnlyByColumnId;
       this.excludedColumnIds = excludedColumnIds;
+      this.userRequiredByColumnId = userRequiredByColumnId;
     }
 
     /**
@@ -544,12 +564,33 @@ final class McpSchemaFieldBuilder {
     JSONArray fieldsArray = new JSONArray();
     for (Column col : adTab.getTable().getADColumnList()) {
       if (shouldIncludeSchemaColumn(col, systemColumns, fieldMetadata)) {
-        fieldsArray.put(buildSchemaField(col, adTab, dalEntity,
+        JSONObject fieldObj = buildSchemaField(col, adTab, dalEntity,
             fieldMetadata.visibilityByColumnId, fieldMetadata.businessCriticalByColumnId,
-            fieldMetadata.readOnlyByColumnId, promptByColumnId, selectorRefs));
+            fieldMetadata.readOnlyByColumnId, promptByColumnId, selectorRefs);
+        applyUserRequiredOverride(fieldObj,
+            fieldMetadata.userRequiredByColumnId.get((String) col.getId()));
+        fieldsArray.put(fieldObj);
       }
     }
     return fieldsArray;
+  }
+
+  /**
+   * Replaces the derived {@code userRequired} with the {@code MCP_CONFIG.fields.userRequired}
+   * override when one is configured (ETP-5791); a no-op otherwise, and always for a button, which
+   * carries no payload value to require. Runs after {@link #addVisibility}, so it overrides the
+   * structural rule, and before {@link #applyPreconditionRequirements}, so an explicit precondition
+   * can still force the flag on. The raw {@code required} (AD NOT NULL) is left untouched.
+   *
+   * @param fieldObj the built descriptor, mutated in place
+   * @param override the configured flag, or {@code null} when none is configured
+   */
+  static void applyUserRequiredOverride(JSONObject fieldObj, Boolean override)
+      throws JSONException {
+    if (override == null || TYPE_BUTTON.equals(fieldObj.optString("type", null))) {
+      return;
+    }
+    fieldObj.put(KEY_USER_REQUIRED, override.booleanValue());
   }
 
   /**

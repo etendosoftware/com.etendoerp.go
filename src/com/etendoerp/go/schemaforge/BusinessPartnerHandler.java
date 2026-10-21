@@ -82,8 +82,9 @@ import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
  *
  * <p>On POST/PATCH/PUT, {@code handle()} also applies the contact-type rules (ETP-5791, see
  * {@link ContactTypeRules}): on create, {@code customer}/{@code vendor} not sent explicitly are
- * inherited from the contact's category; on create and update, a contact left with neither type is
- * rejected with {@code ETGO_BPartnerContactTypeRequired}. After a create, {@code afterHandle()}
+ * inherited from the contact's category; on an update that changes the category and carries neither
+ * flag, both are re-inherited from the new category; on create and update, a contact left with
+ * neither type is rejected with {@code ETGO_BPartnerContactTypeRequired}. After a create, {@code afterHandle()}
  * makes sure each type the contact ended up with has its posting-account row.
  *
  * <p>On GET (single record, i.e. {@code /contacts/businessPartner/{id}}):
@@ -442,8 +443,11 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
    * ETP-5791 — contact type (customer / vendor-creditor) rules, see {@link ContactTypeRules}.
    *
    * <p>On create, every type flag the request did not carry explicitly is taken from the contact's
-   * category ({@code C_BP_Group.EM_Etgo_Iscustomer/Isvendor}); on create and on every update the
-   * write is rejected when the contact would end up with neither type. Only CRUD writes are
+   * category ({@code C_BP_Group.EM_Etgo_Iscustomer/Isvendor}); on an update that moves the contact
+   * to a different category and carries neither flag, both flags are re-inherited from the new
+   * category (MCP / API parity with the Contacts form, which overwrites its checkboxes on a
+   * category change); on create and on every update the write is rejected when the contact would
+   * end up with neither type. Only CRUD writes are
    * judged — a selector or action request that happens to carry a body is not a save of the
    * contact.</p>
    *
@@ -457,7 +461,7 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
     if ("POST".equals(method)) {
       return ContactTypeRules.inheritAndValidateOnCreate(ctx, body);
     }
-    return ContactTypeRules.validateContactUpdate(ctx, body, false);
+    return ContactTypeRules.inheritOnCategoryChangeAndValidateUpdate(ctx, body);
   }
 
   /**

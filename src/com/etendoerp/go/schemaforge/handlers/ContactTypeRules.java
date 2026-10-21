@@ -54,7 +54,22 @@ import com.etendoerp.go.schemaforge.util.NeoBooleanFormat;
  *       category, unless the request carries the flag explicitly — an explicit value always wins.
  *       Existing contacts are never touched. A category with neither flag (legacy data, not yet
  *       migrated) defines nothing, so nothing is inherited from it and the AD defaults apply.</li>
+ *   <li><b>Re-inheritance on a category change.</b> An update of the contact header that moves it
+ *       to a different category, and carries neither {@code customer} nor {@code vendor}, takes
+ *       BOTH flags from the new category — the same overwrite the Contacts form applies to its
+ *       checkboxes when the category changes. A request that carries either flag decides the type
+ *       itself and nothing is inherited: the two flags travel together. A category with neither
+ *       flag defines nothing and leaves the contact's flags as they are.</li>
  * </ul>
+ *
+ * <p>Why "either flag present" switches inheritance off on update, rather than inheriting each
+ * missing flag on its own as create does: the Contacts form sends a PATCH diff against the
+ * persisted record, so a flag the user restored by hand to its saved value is absent from the
+ * body. Inheriting that flag would overwrite what the user sees on screen. When the form applies
+ * a new category it always emits at least one flag whenever the category changes the type, so its
+ * request already carries the decision; a request with no flag at all only happens when the new
+ * category agrees with the saved type (inheritance is then a no-op) or when the caller is an API
+ * or MCP client that changed only the category, which is the case this rule exists for.</p>
  *
  * <h2>"Explicit" is presence in the request, not a value</h2>
  * <p>{@code IsCustomer} defaults to {@code 'Y'} in AD, so a {@code customer:true} cannot say
@@ -108,6 +123,8 @@ public final class ContactTypeRules {
       "SELECT em_etgo_iscustomer, em_etgo_isvendor FROM c_bp_group WHERE c_bp_group_id = ?";
   private static final String CONTACT_TYPES_SQL =
       "SELECT iscustomer, isvendor FROM c_bpartner WHERE c_bpartner_id = ?";
+  private static final String CONTACT_CATEGORY_SQL =
+      "SELECT c_bp_group_id FROM c_bpartner WHERE c_bpartner_id = ?";
 
   private ContactTypeRules() {
   }
@@ -199,6 +216,44 @@ public final class ContactTypeRules {
     boolean customer = effective(body, FIELD_CUSTOMER, persisted.customer);
     boolean vendor = effective(body, FIELD_VENDOR, persisted.vendor);
     return customer || vendor ? null : reject(MSG_CONTACT_TYPE_REQUIRED);
+  }
+
+  /**
+   * Update of the contact header: when the write moves the contact to a different category and
+   * carries neither type flag, takes both flags from the new category (see the class javadoc for
+   * why either flag switches this off); then rejects the write when the contact would be left with
+   * no type, exactly as {@link #validateContactUpdate} does for {@code onlyWhenTouched = false}.
+   *
+   * @return the rejection, or {@code null} to continue with the (possibly enriched) body
+   */
+  public static NeoResponse inheritOnCategoryChangeAndValidateUpdate(NeoContext ctx, JSONObject body)
+      throws SQLException, JSONException {
+    inheritOnCategoryChange(ctx, body);
+    return validateContactUpdate(ctx, body, false);
+  }
+
+  /**
+   * Writes both type flags of the request's category into {@code body} when the request changes
+   * the contact's category, carries neither flag, and the new category defines a type. Otherwise
+   * a no-op. The persisted category is only read once the request qualifies, so an ordinary edit
+   * of the header pays no extra query.
+   */
+  static void inheritOnCategoryChange(NeoContext ctx, JSONObject body)
+      throws SQLException, JSONException {
+    if (!body.has(FIELD_CATEGORY)
+        || isExplicit(ctx, body, FIELD_CUSTOMER) || isExplicit(ctx, body, FIELD_VENDOR)) {
+      return;
+    }
+    String newCategoryId = idOf(body.opt(FIELD_CATEGORY));
+    if (newCategoryId == null || newCategoryId.equals(queryContactCategoryId(ctx.getRecordId()))) {
+      return;
+    }
+    Types inherited = queryCategoryTypes(newCategoryId);
+    if (inherited == null || !inherited.any()) {
+      return; // unknown or legacy category (neither flag): it defines nothing
+    }
+    body.put(FIELD_CUSTOMER, inherited.customer);
+    body.put(FIELD_VENDOR, inherited.vendor);
   }
 
   // ── Category (C_BP_Group) ────────────────────────────────────────────────────────────────────
@@ -302,6 +357,20 @@ public final class ContactTypeRules {
   /** The category's two flags, or {@code null} when the id is blank or the row does not exist. */
   static Types queryCategoryTypes(String categoryId) throws SQLException {
     return queryTypes(CATEGORY_TYPES_SQL, categoryId);
+  }
+
+  /** The persisted contact's category id, or {@code null} when the id is blank or the row is gone. */
+  static String queryContactCategoryId(String contactId) throws SQLException {
+    if (StringUtils.isBlank(contactId)) {
+      return null;
+    }
+    Connection conn = OBDal.getInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(CONTACT_CATEGORY_SQL)) {
+      ps.setString(1, contactId);
+      try (ResultSet rs = ps.executeQuery()) {
+        return rs.next() ? StringUtils.trimToNull(rs.getString(1)) : null;
+      }
+    }
   }
 
   private static Types queryTypes(String sql, String id) throws SQLException {
