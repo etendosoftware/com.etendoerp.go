@@ -302,6 +302,9 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
    * {@inheritDoc} AR: {@code EM_Etsg_Isrectificative = 'Y'} (ETP-4737 unified "Factura
    * Rectificativa") → RECTIFICATIVA; legacy fallback for pre-existing invoices — ARC (Credit
    * Memo) or ARI_RM (Return Material Sales Invoice) → RECTIFICATIVA; otherwise FAC.
+   *
+   * <p>{@code ETGO_GET_DELIVERY_STATUS} mirrors this rule in SQL to answer {@code NULL} for a
+   * sales rectificative (ETP-5706): keep both in sync.
    */
   @Override
   protected String classifyDocType(DocumentType dt) {
