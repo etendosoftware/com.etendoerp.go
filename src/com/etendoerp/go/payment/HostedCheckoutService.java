@@ -216,8 +216,9 @@ public class HostedCheckoutService {
     // Recorded and committed BEFORE the provider is contacted. A crash during the call below would
     // otherwise leave a session at Stripe that nothing on this side can name, and therefore that no
     // reconciliation could ever find. The row is deliberately not rolled back when the call fails:
-    // it is the evidence that someone tried to buy something, and it is always safe to expire
-    // because the checkoutUrl only reaches the browser once this method returns.
+    // it is the evidence that someone tried to buy something. A row left without a session id is
+    // never closed automatically: the provider cannot confirm it was not paid, so the billing
+    // reconciliation parks it for review (ETP-5048 decision 6).
     checkoutRequestStore.recordRequested(requestId, accountId, accountEmail, clientName,
         new CheckoutRequestStore.RequestOptions(sessionOptions.demoClientId, true,
             sessionOptions.transferProducts, sessionOptions.transferContacts, price.getId(),

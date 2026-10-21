@@ -382,6 +382,17 @@ open no row, and the lifecycle webhooks keep the `ETGO_SubscriptionStatus`/`DueA
 - **Residual after the switch:** R42 re-inserts the `ETGO_TenantPlan` marker for tenants that first
   reach it after the switch — its own topic, §3.13 (interim workaround and proper fix there).
 
+### 🟠 2.10 Billing reconciliation go-live: the flag and the Process Request go together (ETP-5048)
+
+**Ticket:** ETP-5048. Production is never restarted, so the reconciliation is scheduled by hand
+there (design `plans/2026-10-18-etp-5048-billing-reconciliation-design.md` §8).
+
+Turn the `billing-reconciliation-schedule` flag on **and** create the production Process Request
+(**Billing Reconciliation**, client System, timing *Schedule*, hourly) in the same step. A request
+firing while the flag is off does no work and ends as an ERROR in Process Monitor every hour, plus
+one internal alert a day (`billing-reconcile-schedule-flag-off`); a flag on with no request does
+nothing at all. Whether the flag is needed is open: §1.8.
+
 ---
 
 ## 3. Legacy plans and the cutover
@@ -635,11 +646,16 @@ calling user, whose role can read neither `AD_Preference` nor `ETGO_SUBSCRIPTION
 - **`paused` is alert-only, on every path (ETP-5048, Martin 2026-10-20).** A
   `customer.subscription.updated` carrying `paused`, the dedicated `customer.subscription.paused`
   event, and the billing reconciliation all leave the status, the grace anchor and access untouched
-  and raise **one** review alert per subscription (`PausedSubscriptionAlert`: a
-  `reconcile:subscription-paused:<sub>` billing-event row, a WARN, an internal alert). Our checkout
-  sets no trial, so `paused` means a trial or a pause was configured in Stripe by hand, and a paused
-  subscription can be resumed — closing the row would make that impossible, since a closed row is
-  never reopened. `customer.subscription.resumed` stays unhandled: a pause changed nothing.
+  and raise **one review alert per pause episode** (`PausedSubscriptionAlert`: an open
+  `reconcile:subscription-paused:<sub>` billing-event row, a WARN, an internal alert; once per
+  episode decided by Martin on 2026-10-21, it was once per subscription). The episode ends when a
+  path sees the subscription not paused — the webhook on `customer.subscription.updated` and
+  `customer.subscription.resumed` (handled only for this), the reconciliation on every re-read —
+  which renames the open row to `<id>:ended:<millis>`, so the next pause alerts again; paused
+  collection (`reconcile:pause-collection:<sub>`) the same, ended when `pause_collection` is
+  cleared. Our checkout sets no trial, so `paused` means a trial or a pause was configured in
+  Stripe by hand, and a paused subscription can be resumed — closing the row would make that
+  impossible, since a closed row is never reopened.
 - **The row, not the marker, makes a tenant productive (ETP-5047 review, B1).**
   `TenantEnvironmentLifecycleService.resolve` checks for any active subscription row (open or
   closed — `findLatest` ignores an inactive one) **first** and takes the productive path when

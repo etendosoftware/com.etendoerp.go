@@ -90,13 +90,23 @@ checkout and subscription rows, and its audit rows are ordinary billing events.
      (`HostedCheckoutService.buildSessionForm` sends no `trial_*`), so `paused` means a trial or a
      pause was configured in Stripe by hand, and a paused subscription can be resumed; closing the
      row would make that resume impossible, because a closed row is never reopened.
-     `PausedSubscriptionAlert` raises one review alert per subscription, shared by every path: a
+     `PausedSubscriptionAlert` raises **one review alert per pause episode** (decided by Martin
+     on 2026-10-21; it was once per subscription), shared by every path: an open
      `reconcile:subscription-paused:<sub>` billing-event row, a WARN (`[BILLING-RECONCILE]` from
      the job, `[BILLING-ALERT]` from the webhook), and an internal alert
-     (`subscription-paused-review`). A re-run or a redelivery finds the row and stays silent.
-   - `customer.subscription.resumed` stays unhandled (`IGNORED`, "unhandled event type"): a pause
-     changed nothing, so there is nothing to undo.
-   - `pause_collection` on an active subscription raises an alert only, once.
+     (`subscription-paused-review`). A re-run or a redelivery within the same pause finds the open
+     row and stays silent, so a consistent dataset still costs zero alerts.
+   - **The episode ends when the subscription is seen not paused**: by the webhook on
+     `customer.subscription.updated` and `customer.subscription.resumed` (now handled, changing
+     no state), and by the reconciliation on every re-read. Ending renames the open row to
+     `<id>:ended:<epoch millis>`, which keeps it as history and frees the id, so the next pause
+     alerts again. Chosen over an id derived from the pause's start because Stripe gives a
+     `paused` status no start instant and `pause_collection` none at all, and the reconciliation
+     has no event time to use. A resume no path saw (paused, resumed and paused again between two
+     reads with the webhooks lost) folds two pauses into one alert: one too few, never one too
+     many.
+   - `pause_collection` on an active subscription raises an alert only, once per episode
+     (`reconcile:pause-collection:<sub>`), ended when `pause_collection` is cleared.
    - `past_due`/`unpaid` stay with the existing webhook grace logic: the reconciler does not touch
      them.
    - `incomplete` is left alone, since the payment is still in progress.
@@ -212,6 +222,36 @@ fail (`fail()`: error result and exception, so Process Monitor records ERROR), a
 what could not be checked. "Everything is consistent" is printed only by a run that read
 everything and changed nothing.
 
+**A repair commits with its audit row** (review F1, 2026-10-21). A recovered payment and an
+abandoned-checkout close are left pending (`CheckoutRequestWrites.recordPaidPending` /
+`recordExpiredPending`) and committed by the insert of their billing-event row, so a failed insert
+rolls the repair back too; the run reports it as an error and a later run retries it. Subscription
+corrections and price fills already worked this way. A provisioning and a re-subscription commit
+in their own transactions (the whole onboarding; the webhook's own path), so for those a failed
+audit insert leaves the repair standing without its row: an error of the run that says exactly
+that, never silent.
+
+**A 404 closes only next to a complete sweep** (review F2, 2026-10-21). When the list sweep did
+not complete there is no evidence the key reads our account, so a subscription answering 404 is
+counted, left open, listed as unverified, and the phase is marked incomplete: nothing is closed on a
+404 in that run, not even the single candidate the breaker's floor would otherwise let through.
+
+**One run at a time** (review F4, 2026-10-21). `ReconciliationRunLock` takes a PostgreSQL
+transaction-scoped advisory lock (`pg_try_advisory_xact_lock(5048, 1)`) on a dedicated pooled
+connection for the whole run, released in `finally`. A second run (a menu launch over the schedule)
+does not wait: it ends at once with the warning "A billing reconciliation is already running;
+nothing was done." Without a dedicated connection the run goes ahead unlocked, with a WARN: every
+repair is fenced or idempotent on its own, so an overlap costs false error reports, never a double
+repair.
+
+**What the operator reads** (Martin, 2026-10-21; AC5, readable without the database or the logs).
+The summary words a dry run as what it would do ("would close 2 abandoned checkouts", "would
+provision 1 environments", "would close/expire N subscriptions", "would park N for review"); a real
+run keeps the past tense. Under the counts, one line per affected item — the short request id or the
+subscription id, the company name, the action and the reason — capped at 20 lines plus "+N more".
+The popup shows them one per line (HTML, every value escaped), and the run log Process Monitor shows
+carries the same lines. Only ids, the company name and short reasons, as the billing-event rows.
+
 **Batches cannot starve** (review W1, 2026-10-21). A purchase parked for review is left out of the
 B and C queries (no open `reconciliation.needs-review` row), and a request whose item failed is left
 out of the A and B queries for a fixed 6 h back-off (one `reconcile:retry-later:<request>` row,
@@ -295,8 +335,9 @@ Billing-event ids are deterministic:
 | subscription closed | `reconcile:subscription-closed:<stripeSubscriptionId>` | `APPLIED` |
 | subscription back to current | `reconcile:subscription-current:<stripeSubscriptionId>:<runId>` | `APPLIED` |
 | price/amount filled (R37 adoption) | `reconcile:subscription-price:<stripeSubscriptionId>` | `APPLIED` |
-| `pause_collection` alert | `reconcile:pause-collection:<stripeSubscriptionId>` | `IGNORED` |
-| paused subscription review alert (webhook or job) | `reconcile:subscription-paused:<stripeSubscriptionId>` | `IGNORED` |
+| `pause_collection` alert (open episode) | `reconcile:pause-collection:<stripeSubscriptionId>` | `IGNORED` |
+| paused subscription review alert (webhook or job; open episode) | `reconcile:subscription-paused:<stripeSubscriptionId>` | `IGNORED` |
+| an ended pause episode, kept as history | `<the open id>:ended:<epoch millis>` | `IGNORED` |
 
 An existing id is the "already alerted" answer: the row is not written again. A close whose id
 already exists means the subscription was closed by an earlier run and is open again: that is an
@@ -344,7 +385,14 @@ The back-off after a failed item is fixed at 6 h (`BillingReconciliationService.
 ## 8. Operating it
 
 - **Run by hand:** Classic, System Administrator, menu **Billing Reconciliation**. Tick *Dry run*
-  for a first look. The popup shows the summary.
+  for a first look. The popup shows the summary and one line per affected item; a scheduled or
+  Process Request run shows the same lines in Process Monitor. Only one run at a time: a second
+  one says a reconciliation is already running and does nothing.
+- **Go-live:** turn the `billing-reconciliation-schedule` flag on and create the production Process
+  Request **together**. A request firing with the flag off ends as an ERROR every hour in Process
+  Monitor (and alerts once a day); a flag on with no request does nothing at all.
+- **Process Groups are not gated:** a run fired as part of a Process Group has no process-request
+  id of its own, so it is not recognised as a scheduled run and the flag does not gate it.
 - **Read what changed:** the **Billing Event** window (filter `Provider = reconciler`) and the
   **Checkout Request → Billing Event** tab. The **Subscriptions** window shows corrected status and
   end dates. Scheduled runs are in **Process Monitor**.
