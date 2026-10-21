@@ -113,6 +113,12 @@ checkout and subscription rows, and its audit rows are ordinary billing events.
    resolved with `TenantEnvironmentLifecycleService.targetForTenant`, which already decides between
    the row and the preferences. The subscription id is the one the creating request recorded, never
    one found by Stripe customer: a customer can own several environments.
+   **Only the latest purchase of a tenant is read** (review B1, 2026-10-21). The preference
+   projection holds no subscription id, so `targetForTenant` answers the same projection for every
+   purchase of the tenant. A tenant re-subscribed after a cancellation (ETP-5742) has two
+   provisioned purchases, and reading the canceled one would expire a paying tenant. The candidates
+   are read newest first (`coalesce(PAID_AT, CREATED)`), and a purchase a later one of the same
+   tenant supersedes is skipped.
 10. **Notifications** (amended by Martin on 2026-10-20) — the internal alert is sent
     (`InternalAlertService`, the same `environment-provisioning` event the onboarding sends), and so
     is the existing customer `environment-ready` email. A repair runs the shared onboarding
@@ -131,15 +137,44 @@ checkout and subscription rows, and its audit rows are ordinary billing events.
     - A run started from the menu or from an operator's own Process Request is never gated.
     - Every alert and repair line starts with `[BILLING-RECONCILE]`.
 12. **Stuck `RECEIVED` events** — a Stripe event left `RECEIVED` past a threshold (the crash window
-    `BillingEventStore` documents) is not replayed. The run re-reads the provider state of every local
-    row the event could have moved, and then the event row is marked `IGNORED` with the reason
-    "superseded by reconciliation".
+    `BillingEventStore` documents) is never replayed. It is marked `IGNORED` ("superseded by
+    reconciliation") only when the run re-read the state it could have moved (review W2,
+    2026-10-21):
+    - **Per family, per phase.** Payment events (`checkout.session.*`) are swept only when phases A
+      and B completed; subscription events (`customer.subscription.*`, `invoice.*`) only when phase
+      D completed. A phase is incomplete when it threw, recorded an error, met a failed provider
+      read, a stopped list sweep, capped direct reads, or a tripped breaker. Alert-only types
+      (`charge.dispute.created`) are never swept. The type lists are `StripeEventTypes`, shared
+      with the webhook.
+    - **Per event.** A payment event is superseded when its request is past `PAID` with nothing
+      pending (a re-subscription not yet applied waits for phase B). A subscription event is
+      superseded when phase D read its own subscription and the provider status is one D applies or
+      alerts on (`active`, `trialing`, `canceled`, `incomplete_expired`, `paused`).
+    - **Otherwise** the event is parked for review once (`reconcile:stale-event-review:<event>`,
+      internal alert): it names no request, the provider contradicts it, its subscription was not
+      read, or D leaves the status to the webhook (`past_due`, `unpaid`, `incomplete`). A payment
+      event whose request phase A has not reached yet is left for a later run.
 13. **Tags and counts** — every preference-route branch carries `ETP-5046-TRANSITIONAL-FALLBACK` and
     has its own count in the run summary.
 14. **Non-retryable failures** — a provisioning failure whose code is deterministic
     (`ProvisioningFailureReason.isRetryable` = false; ETP-5737, the `ad_client_name` unique violation,
     is one) goes to **needs review** once and is not retried on every run. ETP-5737 itself is not
     fixed here.
+15. **Re-subscriptions** (ETP-5742, review B2, 2026-10-21) — the payment webhook records a
+    re-subscription's payment and then applies it to the canceled environment. When the webhook is
+    lost, phase A records the payment and phase B applies the re-subscription through
+    `PaidReactivationService`, a facade over the webhook's own `applyReactivationIfPending`: one
+    path, two callers. `CheckoutRequestStore.findPaidReactivation` locks the request row
+    (`SELECT … FOR UPDATE`) and re-reads it, so a racing webhook and run apply it once. The
+    preference route's watermark moves to the new subscription's start on the provider's clock.
+    A re-subscription that cannot be applied is an error of the run, never "recovered".
+16. **Provider time, never server time** (review W4, 2026-10-21) — a correction is ordered against
+    the stored watermark, and stored as the new one, at the instant the provider asserted the
+    state (`SubscriptionLifecycleApplier.providerStateAt`): `ended_at`/`canceled_at` for a close;
+    otherwise the later of the current period start and the latest invoice's `paid_at` (the reads
+    expand `latest_invoice`). So a correction is stale exactly when the webhook would drop the same
+    change. An absent (404) subscription has no provider instant: it is closed now and the
+    watermark is left as it is.
 
 ## 5. What a run does
 
@@ -147,11 +182,22 @@ The phases run in this order, each with its own transactions:
 
 | # | Phase | Candidates | Provider read | Repair |
 |---|---|---|---|---|
-| A | Checkout recovery (provider → local) | `CREATED` rows with a session id, older than the paid grace | `GET /v1/checkout/sessions/{id}` | `complete` + `paid`/`no_payment_required` → `recordPaid`, then provision. `expired`, past the abandoned window → `EXPIRED`. `open` → nothing. |
-| B | Provisioning repair | `PAID` rows older than the paid grace; `PROVISIONING` rows whose lease is stale or whose failure is retryable; all without a created client | none (the payment is already recorded) | `PaidProvisioningService` under the `claimForProvisioning` lease. A non-retryable failure → needs review, once. |
-| C | No-session-id review | `CREATING` rows older than the abandoned window | none | alert once, then count as awaiting review |
-| D | Subscriptions (local → provider) | open active rows with a Stripe subscription id; preference-route tenants (decision 9) | `GET /v1/subscriptions` paginated, then `GET /v1/subscriptions/{id}` for every local id the list did not return | the status mapping of decision 7, applied through `SubscriptionLifecycleApplier` + `TenantEnvironmentLifecycleService.applySubscriptionEvent`, after the no-op diff. Missing price/amount/currency on an open row (the R37 adoption step, register §2.4) is filled from the subscription's first item price, only where NULL. |
-| E | Stale `RECEIVED` sweep | Stripe events `RECEIVED` older than the threshold | none (A–D already re-read the state) | mark `IGNORED`, "superseded by reconciliation". Skipped for subscription events when D tripped its breaker. |
+| A | Checkout recovery (provider → local) | `CREATED` rows with a session id, older than the paid grace, not backing off | `GET /v1/checkout/sessions/{id}` | `complete` + `paid`/`no_payment_required` → `recordPaid`, then provision (or apply the re-subscription) in B. `expired`, past the abandoned window → `EXPIRED`. `open` → nothing. A failed read → back-off. |
+| B | Provisioning repair | `PAID` rows older than the paid grace (`PAID_AT`, else the creation); `PROVISIONING` rows whose lease is stale or whose failure is retryable; without a created client, or a `PAID` re-subscription; not parked, not backing off | none for a new purchase; `GET /v1/subscriptions/{id}` for a re-subscription | `PaidProvisioningService` under the `claimForProvisioning` lease, or `PaidReactivationService` (decision 15). A non-retryable failure, a unique violation, or an exhausted attempt budget → needs review, once. |
+| C | No-session-id review | `CREATING` rows older than the abandoned window, not parked | none | parked for review once; the run then counts the open reviews as awaiting |
+| D | Subscriptions (local → provider) | open active rows with a Stripe subscription id; preference-route tenants, latest purchase only (decision 9) | `GET /v1/subscriptions?status=all&expand[]=data.latest_invoice` paginated, then `GET /v1/subscriptions/{id}` for every local id the list did not return, up to the batch size | the status mapping of decision 7, applied through `SubscriptionLifecycleApplier` + `TenantEnvironmentLifecycleService.applySubscriptionEvent` on the provider's clock (decision 16), after the no-op diff. Missing price/amount/currency on an open row (the R37 adoption step, register §2.4) is filled from the subscription's first item price, only where NULL. |
+| E | Stale `RECEIVED` sweep | Stripe events of the families whose phases completed, `RECEIVED` older than the threshold, not parked | none | per decision 12: superseded (`IGNORED`), parked for review, or left. |
+
+**A run that could not check everything fails** (review W3, 2026-10-21). A failed provider read,
+an incomplete list sweep, capped direct reads, an item error or a tripped breaker make the run
+fail (`fail()`: error result and exception, so Process Monitor records ERROR), and its summary says
+what could not be checked. "Everything is consistent" is printed only by a run that read
+everything and changed nothing.
+
+**Batches cannot starve** (review W1, 2026-10-21). A purchase parked for review is left out of the
+B and C queries (no open `reconciliation.needs-review` row), and a request whose item failed is left
+out of the A and B queries for a fixed 6 h back-off (one `reconcile:retry-later:<request>` row,
+refreshed on each failure). So rows no run can repair do not fill the fixed-size batch on every run.
 
 **Foreign subscriptions.** A Stripe subscription that does not carry `metadata.request_id`
 (`HostedCheckoutService` writes `subscription_data[metadata][request_id]`) is not ours. The
@@ -182,6 +228,14 @@ given `OnboardingProgressSink`, and returns a classified outcome: provisioned, f
 failed needs-review, claim refused, or inputs unavailable. `handleOnboarding` still prepares from
 the HTTP request and streams NDJSON exactly as before.
 
+A server-repaired environment gets the same company data as a browser-driven one (review S4): the
+draft's `address` and `fiscalIdValue` are carried, checked as the HTTP path checks them (the
+address length limit, the Spanish tax-id check). A value that fails is left out with a WARN rather
+than failing the provisioning; the owner sets it later.
+
+`rest/PaidReactivationService` (decision 15) is the same shape for a re-subscription: a facade over
+the webhook's own `applyReactivationIfPending`.
+
 ### 6.2 `payment/StripeListPager`
 
 Stripe list pagination on top of `StripeApiClient.get`: `limit`, `starting_after=<last id>`, and a
@@ -199,7 +253,12 @@ treats every id it did not see as unknown, never as absent.
   shared by the webhook and the job.
 - `ReconciliationSettings` holds the properties of §7.
 - `ReconciliationResult` holds the counts and the summary.
-- `ReconciliationAudit` writes the billing-event rows and the `[BILLING-RECONCILE]` lines.
+- `ReconciliationAudit` writes the billing-event rows and the `[BILLING-RECONCILE]` lines, and
+  sends the internal review alerts (review S5): one per new review, per parked stuck event, and
+  one per UTC day for a tripped breaker. Each is sent only by the call that wrote its row.
+- `ReviewQueue` parks purchases for review, keeps them out of the batches, counts the open ones,
+  and restores the attempt budget of a released one (§8).
+- `payment/StripeEventTypes` holds the event-type lists the webhook acts on and the sweep reads.
 
 Billing-event ids are deterministic:
 
@@ -208,7 +267,11 @@ Billing-event ids are deterministic:
 | payment recorded from the provider | `reconcile:payment-recovered:<requestId>` | `APPLIED` |
 | environment provisioned | `reconcile:provisioned:<requestId>` | `APPLIED` |
 | provisioning failed, retryable | `reconcile:provisioning-failed:<requestId>:<attempt>` | `FAILED` |
-| needs review (non-retryable failure, missing inputs, no session id) | `reconcile:needs-review:<requestId>` | `FAILED` |
+| needs review (non-retryable failure, missing inputs, no session id, attempts exhausted) | `reconcile:needs-review:<requestId>`, then `…:<requestId>:2`, … after a release | `FAILED` while open; `IGNORED` once released |
+| re-subscription applied | `reconcile:reactivation-applied:<requestId>` | `APPLIED` |
+| back-off after a failed item | `reconcile:retry-later:<requestId>` (one row, refreshed) | `FAILED` |
+| stuck event parked for review | `reconcile:stale-event-review:<eventId>` | `FAILED` |
+| breaker tripped | `reconcile:breaker-tripped:<yyyy-MM-dd>` | `IGNORED` |
 | checkout expired | `reconcile:checkout-expired:<requestId>` | `APPLIED` |
 | subscription closed | `reconcile:subscription-closed:<stripeSubscriptionId>` | `APPLIED` |
 | subscription back to current | `reconcile:subscription-current:<stripeSubscriptionId>:<runId>` | `APPLIED` |
@@ -216,8 +279,9 @@ Billing-event ids are deterministic:
 | `pause_collection` alert | `reconcile:pause-collection:<stripeSubscriptionId>` | `IGNORED` |
 | paused subscription review alert (webhook or job) | `reconcile:subscription-paused:<stripeSubscriptionId>` | `IGNORED` |
 
-An existing id is the "already alerted" answer: the row is not written again, and the case counts as
-awaiting review.
+An existing id is the "already alerted" answer: the row is not written again. A close whose id
+already exists means the subscription was closed by an earlier run and is open again: that is an
+error of the run for a person to review, never a silent skip (review S6).
 
 ### 6.4 The circuit breaker (decision 7)
 
@@ -227,10 +291,14 @@ that run**, when either:
 
 - the absent count exceeds `max(1, floor(absent.max.share × subscriptions checked))`; or
 - the key mode does not match the data: the configured key is `sk_live_`/`rk_live_` and an absent
-  row's creating session is `cs_test_…`, or the reverse.
+  row's creating session is `cs_test_…`, or the reverse; or
+- the list sweep completed and returned **none** of the local subscriptions (review S1): the key
+  reads another account, even in the same mode. Stripe lists canceled subscriptions too, so on the
+  right account every id we hold is listed. Without this, the floor of one would let a foreign
+  same-mode key close a tenant that is the only one.
 
-A tripped breaker is alerted, the run is reported as an error, and every other repair of the run
-stands. The other repairs are safe because each one acts on a positive provider answer; a
+A tripped breaker is alerted (an internal alert once per UTC day), the run is reported as an
+error, its subscription events are not swept, and every other repair of the run stands. The other repairs are safe because each one acts on a positive provider answer; a
 wrong-mode key gets 404s, never a `paid` or `expired` answer.
 
 ### 6.5 `payment/reconcile/BillingReconciliationProcess` and the schedule
@@ -252,6 +320,8 @@ is off.
 | `etendo.go.billing.reconcile.received.stale.minutes` / `ETGO_BILLING_RECONCILE_RECEIVED_STALE_MINUTES` | 60 | Age before a `RECEIVED` event counts as stuck |
 | `etendo.go.billing.reconcile.absent.max.share` / `ETGO_BILLING_RECONCILE_ABSENT_MAX_SHARE` | 0.25 | Breaker threshold |
 
+The back-off after a failed item is fixed at 6 h (`BillingReconciliationService.RETRY_BACKOFF_MINUTES`).
+
 ## 8. Operating it
 
 - **Run by hand:** Classic, System Administrator, menu **Billing Reconciliation**. Tick *Dry run*
@@ -262,9 +332,45 @@ is off.
 - **Switch the schedule on:** set the flag (ConfigCat or the property), then restart. Or schedule
   the process by hand in the Process Request window.
 - **Alerts:** grep `[BILLING-RECONCILE]`. Provisioning repairs also send the internal
-  `environment-provisioning` alert.
+  `environment-provisioning` alert. A new review sends `billing-reconcile-needs-review`, a parked
+  stuck event `billing-reconcile-stale-event`, a tripped breaker
+  `billing-reconcile-breaker-tripped` (once a day).
+- **Release a parked purchase** (after the cause is fixed). A parked purchase is left out of every
+  batch until its open `reconciliation.needs-review` row is released:
 
-## 9. Tests
+  ```sql
+  update etgo_billing_event
+     set event_result = 'IGNORED',
+         failure_reason = 'Released by <who>: <what was fixed>'
+   where provider = 'reconciler' and event_type = 'reconciliation.needs-review'
+     and request_id = '<request id>' and event_result = 'FAILED';
+  ```
+
+  The next run picks the purchase up again. Per code:
+  - `ATTEMPTS_EXHAUSTED` — the released purchase gets the full attempt budget again, counted from
+    the attempts recorded on the released row.
+  - a non-retryable failure or `DETERMINISTIC_FAILURE` (a unique violation) — the claim refuses a
+    request whose recorded failure is deterministic, so also clear it:
+    `update etgo_checkout_request set failure_reason = null where request_id = '<request id>';`
+    Otherwise the next run parks it again (a new row, `…:2`) and alerts once more.
+  - `NO_SESSION_ID` — release only once Stripe confirms no payment; the run parks it again
+    otherwise, since a `CREATING` row is never closed automatically.
+- **A row backing off** (`reconcile:retry-later:<request>`) is retried by itself after 6 h; to retry
+  sooner, delete that row.
+- **A parked stuck event** (`reconcile:stale-event-review:<event>`): check the event in the Stripe
+  dashboard, then set the original event row to `IGNORED` (or let Stripe redeliver it) and delete or
+  ignore the review row.
+
+## 9. Known limitations
+
+- **Large accounts** (review S2, accepted 2026-10-21, not fixed). Phase D reads every local
+  candidate per run: one query per candidate row for its checkout request (N+1), a list sweep
+  capped at 100 pages (10 000 subscriptions), and direct reads capped at the batch size in a fixed
+  order, so on an account past those sizes the same tail is read on every run and the run reports
+  itself incomplete. Fine at today's volumes; revisit with a paged, rotating candidate cursor
+  before an account nears them. Also recorded in `docs/open-and-notable-topics.md`.
+
+## 10. Tests
 
 The developer writes none beyond repro tests. tester-go owns the coverage required by the
 acceptance criteria: both directions, the never-close branch, pagination, the idempotent re-run

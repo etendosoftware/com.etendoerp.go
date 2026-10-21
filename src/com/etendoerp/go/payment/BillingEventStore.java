@@ -61,9 +61,10 @@ import com.etendoerp.go.schemaforge.data.CheckoutRequest;
  * never applied <em>and</em> never retried; it is visible only as a row stuck in {@code RECEIVED}.
  * Committing after the handler instead would trade this for double-application, which is worse for
  * a payment, so the window is accepted deliberately. ETP-5048's billing reconciliation closes it:
- * it re-reads the provider state of every local row such an event could have moved, then marks
- * each row left {@code RECEIVED} past a threshold ({@link #findStaleReceived}) {@code IGNORED} as
- * superseded — it never replays the event through this at-most-once path. The narrower lost-write
+ * it re-reads the provider state such an event could have moved, then marks a row left
+ * {@code RECEIVED} past a threshold ({@link #findStaleReceived}) {@code IGNORED} as superseded —
+ * but only one whose own request or subscription it re-read in full; any other it parks for
+ * review. It never replays the event through this at-most-once path. The narrower lost-write
  * variant is noted on {@link #markFailed}.
  */
 public class BillingEventStore implements CheckoutWebhookProcessor.EventStore {

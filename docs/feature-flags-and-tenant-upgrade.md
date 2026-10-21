@@ -997,6 +997,10 @@ environment again, with its data. It is not a purchase of a new one.
   - **a tenant with no row** (switch OFF) — the `ETGO_TenantPlan` marker and
     `ETGO_SubscriptionStatus = CURRENT` are written, and `ETGO_SubscriptionEventAt` moves to the
     payment, so a late event of the canceled subscription is stale.
+- **A lost payment webhook is repaired by the billing reconciliation** (ETP-5048): it records the
+  payment from Stripe and applies the re-subscription through the same method, via
+  `PaidReactivationService`. `CheckoutRequestStore.findPaidReactivation` locks and re-reads the
+  request, so the webhook and the reconciliation apply it once.
 
   A failure rolls back with the event: the webhook answers 500, Stripe redelivers, and the request
   is still `PAID` for the retry. The new subscription's own lifecycle events find the tenant

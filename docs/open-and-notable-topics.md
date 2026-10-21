@@ -595,6 +595,18 @@ calling user, whose role can read neither `AD_Preference` nor `ETGO_SUBSCRIPTION
   falls through to the preference fallback nor to `LEGACY_ENTITLEMENT`. Onboarding a canceled
   tenant again would run `forceTestModeForFreeTenant` on it, routing its SII / TicketBAI /
   VeriFactu submissions to the test endpoints — a compliance stake, not a config nit.
+- **`incomplete_expired` closes the row too (ETP-5048, Martin 2026-10-20).** A subscription whose
+  first payment never completed is terminal at Stripe; `SubscriptionLifecycleApplier` maps it like
+  `canceled` (`EXPIRED`, row closed at `ended_at`), on the webhook and in the billing
+  reconciliation alike.
+- **`paused` is alert-only, on every path (ETP-5048, Martin 2026-10-20).** A
+  `customer.subscription.updated` carrying `paused`, the dedicated `customer.subscription.paused`
+  event, and the billing reconciliation all leave the status, the grace anchor and access untouched
+  and raise **one** review alert per subscription (`PausedSubscriptionAlert`: a
+  `reconcile:subscription-paused:<sub>` billing-event row, a WARN, an internal alert). Our checkout
+  sets no trial, so `paused` means a trial or a pause was configured in Stripe by hand, and a paused
+  subscription can be resumed — closing the row would make that impossible, since a closed row is
+  never reopened. `customer.subscription.resumed` stays unhandled: a pause changed nothing.
 - **The row, not the marker, makes a tenant productive (ETP-5047 review, B1).**
   `TenantEnvironmentLifecycleService.resolve` checks for any active subscription row (open or
   closed — `findLatest` ignores an inactive one) **first** and takes the productive path when
@@ -1215,6 +1227,26 @@ an `OnboardingProgressSink`. What shipped is narrower:
 2. Have the servlet build an `NdjsonOnboardingProgressSink` and call it.
 3. `PaidProvisioningService` then stops instantiating a servlet, and `NdjsonSinkWriter` can be
    deleted.
+4. The same for `PaidReactivationService` (ETP-5048 review B2): it is a facade that calls the
+   webhook's `applyReactivationIfPending` on a fresh servlet instance, so the lost-webhook repair of a
+   re-subscription and the webhook share one fenced path. Move that method (with
+   `applyPaidUpgradeSideEffects`) into a service both call.
+
+### 🟡 4.16 Billing reconciliation phase D does not scale to very large accounts (ETP-5048)
+
+**Ticket:** accepted by the coordinator for Martin on 2026-10-21 (review S2), not fixed; no ticket.
+Related ETP-5048, design `docs/plans/2026-10-18-etp-5048-billing-reconciliation-design.md` §9.
+
+The subscriptions phase reads every locally active subscription on every run:
+
+- one query per candidate row to find its checkout request (N+1);
+- the `/v1/subscriptions` list sweep stops at 100 pages (10 000 subscriptions);
+- the direct reads of ids the sweep did not return are capped at the batch size, in a fixed order.
+
+On an account past those sizes the same tail is read, or left unread, on every run, and the run
+reports itself incomplete (so its subscription events are never swept). Fine at today's volumes.
+**Fix when an account nears them:** a paged candidate cursor that rotates across runs, the checkout
+lookup joined into the candidate query, and the list sweep resumed from where the last run stopped.
 
 ## 5. Handed forward to later tickets
 
