@@ -152,9 +152,13 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  * <p>And the specs for {@code provisionPaidPurchase} (ETP-5048), the browser-less paid onboarding
  * the billing reconciliation drives through {@code PaidProvisioningService}: it runs under the
  * same fenced {@code claimForProvisioning} as the HTTP path, a refused claim runs nothing, and the
- * NDJSON progress reaches the given sink.
+ * NDJSON progress reaches the given sink. The draft's address and fiscal identifier reach the
+ * organization, and a value the HTTP path would refuse is dropped with a WARN instead of failing
+ * the run. A lost paid re-subscription is applied through {@code PaidReactivationService} over
+ * the webhook's own {@code applyReactivationIfPending}.
  *
  * @covers com.etendoerp.go.rest.EtendoGoJwtServlet
+ * @covers com.etendoerp.go.rest.PaidReactivationService
  */
 public class EtendoGoJwtServletCoverageTest {
 
@@ -2921,6 +2925,83 @@ public class EtendoGoJwtServletCoverageTest {
     verify(servlet.billingEventStore).markApplied("evt_1");
   }
 
+  // ===================== PaidReactivationService over the webhook path (ETP-5048) =============
+  //
+  // The billing reconciliation applies a re-subscription whose payment webhook was lost through
+  // applyReactivationIfPending, the webhook's own method, with the provider instant it read.
+
+  private boolean applyThroughTheReconciliation(java.time.Instant paidAt, OBContext caller) {
+    try (MockedStatic<OBContext> context = mockStatic(OBContext.class);
+        MockedStatic<EtendoGoJwtSupport> support = mockStatic(EtendoGoJwtSupport.class);
+        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class)) {
+      context.when(OBContext::getOBContext).thenReturn(caller);
+      support.when(() -> EtendoGoJwtSupport.findStarOrgId(PAID_CLIENT_ID))
+          .thenReturn(PAID_STAR_ORG_ID);
+      boolean applied = new PaidReactivationService(() -> servlet).applyIfPending(PAID_TOKEN,
+          paidAt);
+      if (applied) {
+        // Every context switch on the way was undone: the last context installed is the caller's.
+        ArgumentCaptor<OBContext> restored = ArgumentCaptor.forClass(OBContext.class);
+        context.verify(() -> OBContext.setOBContext(restored.capture()),
+            org.mockito.Mockito.atLeastOnce());
+        assertSame(caller, restored.getValue());
+      }
+      return applied;
+    }
+  }
+
+  @Test
+  public void theReconciliationAppliesALostReactivationThroughTheWebhookPath() {
+    PaidUpgradeFixture fixture = givenPaidReactivation();
+    servlet.subscriptionModelSwitch = switchThatIs(false);
+    when(fixture.subscriptionService.hasAnySubscription(PAID_CLIENT_ID)).thenReturn(false);
+    when(fixture.tenantPlanService.markProductive(PAID_CLIENT_ID, PAID_STAR_ORG_ID))
+        .thenReturn(true);
+    java.time.Instant paidAt = java.time.Instant.ofEpochSecond(REACTIVATION_PAID_EPOCH + 60);
+
+    assertTrue(applyThroughTheReconciliation(paidAt, mock(OBContext.class)));
+
+    verify(fixture.lifecycleService).markProductive(PAID_CLIENT_ID);
+    // The preference watermark moves to the provider instant the reconciliation read.
+    verify(fixture.lifecycleService).recordSubscriptionEventAt(PAID_CLIENT_ID, paidAt);
+    verify(fixture.checkoutRequestStore).recordProvisioned(PAID_TOKEN, PAID_CLIENT_ID);
+    verify(fixture.subscriptionService).fillPeriodFromProviderAfterCommit(PAID_CLIENT_ID);
+  }
+
+  @Test
+  public void theReconciliationFindsNothingToApplyOnceTheWebhookApplied() {
+    PaidUpgradeFixture fixture = givenPaidReactivation();
+    when(fixture.checkoutRequestStore.findPaidReactivation(PAID_TOKEN)).thenReturn(null);
+
+    assertFalse(applyThroughTheReconciliation(null, mock(OBContext.class)));
+
+    verify(fixture.checkoutRequestStore, never()).recordProvisioned(anyString(), anyString());
+    verify(fixture.lifecycleService, never()).markProductive(anyString());
+  }
+
+  @Test
+  public void aReactivationTheReconciliationCannotRecordFailsItsCaller() {
+    PaidUpgradeFixture fixture = givenPaidReactivation();
+    when(fixture.lifecycleService.markProductive(PAID_CLIENT_ID)).thenReturn(false);
+    OBContext caller = mock(OBContext.class);
+
+    try (MockedStatic<OBContext> context = mockStatic(OBContext.class);
+        MockedStatic<EtendoGoJwtSupport> support = mockStatic(EtendoGoJwtSupport.class);
+        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class)) {
+      context.when(OBContext::getOBContext).thenReturn(caller);
+      support.when(() -> EtendoGoJwtSupport.findStarOrgId(PAID_CLIENT_ID))
+          .thenReturn(PAID_STAR_ORG_ID);
+      assertThrows(OBException.class, () -> new PaidReactivationService(() -> servlet)
+          .applyIfPending(PAID_TOKEN, null));
+      ArgumentCaptor<OBContext> restored = ArgumentCaptor.forClass(OBContext.class);
+      context.verify(() -> OBContext.setOBContext(restored.capture()),
+          org.mockito.Mockito.atLeastOnce());
+      assertSame("A failure still hands the caller its context back", caller,
+          restored.getValue());
+    }
+    verify(fixture.checkoutRequestStore, never()).recordProvisioned(anyString(), anyString());
+  }
+
   // ===================== fillSubscriptionPeriodBestEffort — the post-commit period read ========
   //
   // A paid onboarding opens the subscription row without a billing period: the purchase's first
@@ -3865,6 +3946,101 @@ public class EtendoGoJwtServletCoverageTest {
   private static PaidProvisioningService.PaidInput paidInput(String currencyIso) {
     return new PaidProvisioningService.PaidInput("purchase-1", "account-1", "user@test.com",
         "User", "Acme", null, "en_US", currencyIso, "ES", null, null);
+  }
+
+  private static PaidProvisioningService.PaidInput paidInput(String countryCode, String address,
+      String taxId) {
+    return new PaidProvisioningService.PaidInput("purchase-1", "account-1", "user@test.com",
+        "User", "Acme", null, "en_US", "EUR", countryCode, address, taxId);
+  }
+
+  /**
+   * Runs a committed browser-less paid onboarding with these inputs and returns the address and
+   * the fiscal identifier the organization step received, plus the outcome and the servlet WARNs.
+   */
+  private String[] provisionWithCompanyData(PaidProvisioningService.PaidInput input,
+      List<String> warnings) throws Exception {
+    PaidProvisioningService.Outcome[] outcome = new PaidProvisioningService.Outcome[1];
+    stagedAction = () -> outcome[0] = servlet.provisionPaidPurchase(input, new RecordingSink());
+    com.etendoerp.go.payment.TestLogCapture log = com.etendoerp.go.payment.TestLogCapture
+        .attachTo(EtendoGoJwtServlet.class, org.apache.logging.log4j.Level.WARN);
+    try {
+      runCommittedPaidOnboarding(true, mock(SubscriptionService.class), new ArrayList<>());
+      warnings.addAll(log.messagesAt(org.apache.logging.log4j.Level.WARN));
+    } finally {
+      log.detach();
+    }
+    assertEquals("Company data never fails the provisioning",
+        PaidProvisioningService.Status.PROVISIONED, outcome[0].status());
+    ArgumentCaptor<String> address = ArgumentCaptor.forClass(String.class);
+    ArgumentCaptor<String> taxId = ArgumentCaptor.forClass(String.class);
+    verify(servlet.onboardingOrgInfoService).ensureOrgInfo(anyString(), anyString(), anyString(),
+        anyString(), eq(input.countryCode()), address.capture(), taxId.capture());
+    return new String[] { address.getValue(), taxId.getValue() };
+  }
+
+  /** ETP-5048 S4 — the draft's address and fiscal identifier reach the organization. */
+  @Test
+  public void aPaidPurchaseCarriesTheDraftAddressAndTaxIdToTheOrganization() throws Exception {
+    List<String> warnings = new ArrayList<>();
+
+    String[] orgInfo = provisionWithCompanyData(paidInput("ES", " Calle Mayor 1 ", "12345678Z"),
+        warnings);
+
+    assertEquals("Calle Mayor 1", orgInfo[0]);
+    assertEquals("12345678Z", orgInfo[1]);
+    assertTrue(warnings.toString(), warnings.stream().noneMatch(w -> w.contains("left out")));
+  }
+
+  /** ETP-5048 S4 — an address over the HTTP limit is dropped with a WARN, never truncated. */
+  @Test
+  public void anOverLongDraftAddressIsDroppedWithAWarning() throws Exception {
+    List<String> warnings = new ArrayList<>();
+    String tooLong = org.apache.commons.lang3.StringUtils.repeat('a',
+        OnboardingFieldLimits.ADDRESS + 1);
+
+    String[] orgInfo = provisionWithCompanyData(paidInput("ES", tooLong, "12345678Z"), warnings);
+
+    assertEquals("", orgInfo[0]);
+    assertEquals("The tax id is unaffected", "12345678Z", orgInfo[1]);
+    assertTrue(warnings.toString(), warnings.contains("Server-side provisioning of purchase-1: "
+        + "the draft address exceeds " + OnboardingFieldLimits.ADDRESS + " characters and is "
+        + "left out"));
+  }
+
+  /** ETP-5048 S4 — an invalid Spanish tax id is dropped with a WARN, never failing the run. */
+  @Test
+  public void anInvalidSpanishDraftTaxIdIsDroppedWithAWarning() throws Exception {
+    List<String> badCheckDigit = new ArrayList<>();
+    String[] orgInfo = provisionWithCompanyData(paidInput("ES", "Calle Mayor 1", "12345678A"),
+        badCheckDigit);
+
+    assertEquals("Calle Mayor 1", orgInfo[0]);
+    assertEquals("", orgInfo[1]);
+    assertTrue(badCheckDigit.toString(), badCheckDigit.contains("Server-side provisioning of "
+        + "purchase-1: the draft fiscal identifier is not valid (BAD_CHECK_DIGIT) and is left out"));
+  }
+
+  @Test
+  public void aMalformedSpanishDraftTaxIdIsDroppedToo() throws Exception {
+    List<String> warnings = new ArrayList<>();
+
+    String[] orgInfo = provisionWithCompanyData(paidInput("ES", "", "not-a-nif"), warnings);
+
+    assertEquals("", orgInfo[1]);
+    assertTrue(warnings.toString(), warnings.stream()
+        .anyMatch(w -> w.contains("is not valid (BAD_FORMAT) and is left out")));
+  }
+
+  /** Only a Spanish identifier is checked: another country's is passed through as given. */
+  @Test
+  public void aForeignDraftTaxIdIsPassedThroughUnchecked() throws Exception {
+    List<String> warnings = new ArrayList<>();
+
+    String[] orgInfo = provisionWithCompanyData(paidInput("FR", null, "FR12345678901"), warnings);
+
+    assertEquals("A missing address is blank, not null", "", orgInfo[0]);
+    assertEquals("FR12345678901", orgInfo[1]);
   }
 
   /** ETP-5048 — a currency the instance does not know needs review; nothing is claimed. */

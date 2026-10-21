@@ -79,6 +79,8 @@ public class BillingReconciliationServiceTest {
   private final List<BillingEventStore.StaleEvent> staleEvents = new ArrayList<>();
   /** Requests with an open review row: the candidate queries leave them out. */
   private final java.util.Set<String> parked = new java.util.HashSet<>();
+  /** Stuck events a run marked IGNORED: the page query no longer returns them. */
+  private final java.util.Set<String> superseded = new java.util.HashSet<>();
   /** The HQL of every candidate query the run issued, in order. */
   private final List<String> candidateQueries = new ArrayList<>();
   /** Checkout requests a single-request lookup (the stuck-event sweep) finds, by id. */
@@ -107,6 +109,8 @@ public class BillingReconciliationServiceTest {
     internalAlerts = mock(InternalAlertService.class);
     when(eventStore.recordReconciliation(anyString(), anyString(), any(), anyString(), any(),
         any())).thenReturn(true);
+    doAnswer(call -> superseded.add(call.getArgument(0, String.class))).when(eventStore)
+        .markIgnored(anyString(), anyString());
     auditLog = TestLogCapture.attachTo(ReconciliationAudit.class, Level.INFO);
   }
 
@@ -143,13 +147,16 @@ public class BillingReconciliationServiceTest {
     when(eventStore.findStaleReceived(any(), any(), any(), anyInt(), anyInt())).thenAnswer(call -> {
       java.util.Collection<?> types = call.getArgument(1, java.util.Collection.class);
       int offset = call.getArgument(3, Integer.class);
+      int max = call.getArgument(4, Integer.class);
       List<BillingEventStore.StaleEvent> page = new ArrayList<>();
       for (BillingEventStore.StaleEvent event : staleEvents) {
-        if (types.contains(event.eventType())) {
+        // A superseded event is IGNORED, so it leaves the query, as it does in the database.
+        if (types.contains(event.eventType()) && !superseded.contains(event.eventId())) {
           page.add(event);
         }
       }
-      return offset >= page.size() ? List.of() : page.subList(offset, page.size());
+      return offset >= page.size() ? List.of()
+          : new ArrayList<>(page.subList(offset, Math.min(page.size(), offset + max)));
     });
     try (MockedStatic<OBDal> dalStatic = mockStatic(OBDal.class);
         MockedStatic<OBContext> context = mockStatic(OBContext.class)) {
@@ -531,6 +538,69 @@ public class BillingReconciliationServiceTest {
     verify(eventStore, never()).touchReconciliation(anyString(), anyString(), any(), any());
   }
 
+  /** An item that throws is backed off and rolled back; the next item still runs. */
+  @Test
+  public void aProvisioningItemThatThrowsIsBackedOffAndTheNextOneStillRuns() {
+    paidRows.add(paidRow(REQ, ago(2, TimeUnit.HOURS), 1L,
+        CheckoutRequestStore.DERIVED_STATUS_STALLED));
+    paidRows.add(paidRow("req-2", ago(2, TimeUnit.HOURS), 1L,
+        CheckoutRequestStore.DERIVED_STATUS_STALLED));
+    when(provisioning.provision(eq(REQ), any())).thenThrow(new IllegalStateException("boom"));
+    when(provisioning.provision(eq("req-2"), any()))
+        .thenReturn(new Outcome(Status.PROVISIONED, null, "Environment created", 2L));
+
+    ReconciliationResult result = run(false);
+
+    verify(eventStore).touchReconciliation(eq("reconcile:retry-later:" + REQ),
+        eq("reconciliation.retry-later"), eq(REQ), org.mockito.ArgumentMatchers.contains(
+            "IllegalStateException"));
+    verify(eventStore, never()).touchReconciliation(eq("reconcile:retry-later:req-2"),
+        anyString(), anyString(), anyString());
+    verify(provisioning).provision(eq("req-2"), any());
+    assertEquals(1, result.get(Counter.PROVISIONED));
+    assertEquals(List.of("provisioning of " + REQ + ": IllegalStateException"),
+        result.getErrors());
+    assertTrue("The phase did not finish cleanly",
+        !result.isComplete(ReconciliationResult.Phase.PROVISIONING_REPAIR));
+  }
+
+  @Test
+  public void aBackOffMarkerThatCannotBeWrittenDoesNotStopTheRun() {
+    paidRows.add(paidRow(REQ, ago(2, TimeUnit.HOURS), 1L,
+        CheckoutRequestStore.DERIVED_STATUS_STALLED));
+    paidRows.add(paidRow("req-2", ago(2, TimeUnit.HOURS), 1L,
+        CheckoutRequestStore.DERIVED_STATUS_STALLED));
+    when(provisioning.provision(eq(REQ), any())).thenThrow(new IllegalStateException("boom"));
+    doThrow(new IllegalStateException("db gone")).when(eventStore)
+        .touchReconciliation(anyString(), anyString(), anyString(), anyString());
+    when(provisioning.provision(eq("req-2"), any()))
+        .thenReturn(new Outcome(Status.PROVISIONED, null, "Environment created", 2L));
+
+    ReconciliationResult result = run(false);
+
+    verify(provisioning).provision(eq("req-2"), any());
+    assertEquals(1, result.get(Counter.PROVISIONED));
+  }
+
+  /** A dry run that meets a failing item writes no back-off marker and goes on with the next. */
+  @Test
+  public void aDryRunWritesNoBackOffMarkerForAFailingProvisioningItem() {
+    paidRows.add(paidRow(REQ, ago(2, TimeUnit.HOURS), 5L,
+        CheckoutRequestStore.DERIVED_STATUS_STALLED));
+    paidRows.add(paidRow("req-2", ago(2, TimeUnit.HOURS), 1L,
+        CheckoutRequestStore.DERIVED_STATUS_STALLED));
+    // Parking REQ for review reads the store, which fails.
+    when(eventStore.hasOpenReconciliation(ReviewQueue.EVENT_TYPE, REQ))
+        .thenThrow(new IllegalStateException("boom"));
+
+    ReconciliationResult result = run(true);
+
+    verify(eventStore, never()).touchReconciliation(anyString(), anyString(), any(), any());
+    assertEquals(List.of("provisioning of " + REQ + ": IllegalStateException"),
+        result.getErrors());
+    assertEquals("req-2 is still counted", 1, result.get(Counter.PROVISIONED));
+  }
+
   /** Released after five attempts: the budget counts again from the attempts it was parked at. */
   @Test
   public void aReleasedPurchaseGetsItsAttemptBudgetBack() {
@@ -733,6 +803,55 @@ public class BillingReconciliationServiceTest {
     verify(eventStore, never()).markApplied(anyString());
     verify(checkoutStore, never()).recordPaid(anyString(), any(), any());
     assertEquals(1, result.get(Counter.STALE_EVENTS_SWEPT));
+  }
+
+  /**
+   * Four stuck payment events, two pages of two: e1 and e4 belong to provisioned requests and are
+   * superseded, e2 and e3 to requests the run has not reached, so they are left.
+   */
+  private void fourStuckEventsOverTwoPages() {
+    settings = new ReconciliationSettings(60, 2, 48, 15, 60, 0.25d, 5);
+    knownRequest("req-e1", "PROVISIONED");
+    knownRequest("req-e2", "CREATED");
+    knownRequest("req-e3", "CREATED");
+    knownRequest("req-e4", "PROVISIONED");
+    for (String n : new String[] { "1", "2", "3", "4" }) {
+      staleEvents.add(new BillingEventStore.StaleEvent("evt_e" + n, "checkout.session.completed",
+          "req-e" + n));
+    }
+  }
+
+  /** A superseded event leaves the query, so the next page starts that many rows earlier. */
+  @Test
+  public void theStuckEventSweepPagesPastTheEventsItLeaves() {
+    fourStuckEventsOverTwoPages();
+
+    ReconciliationResult result = run(false);
+
+    verify(eventStore).findStaleReceived(any(), any(), any(), eq(0), eq(2));
+    verify(eventStore).findStaleReceived(any(), any(), any(), eq(1), eq(2));
+    verify(eventStore).markIgnored(eq("evt_e1"), anyString());
+    verify(eventStore).markIgnored(eq("evt_e4"), anyString());
+    verify(eventStore, never()).markIgnored(eq("evt_e2"), anyString());
+    verify(eventStore, never()).markIgnored(eq("evt_e3"), anyString());
+    assertEquals(2, result.get(Counter.STALE_EVENTS_SWEPT));
+  }
+
+  /**
+   * In a dry run nothing leaves the query, so the offset moves by the whole page: every event is
+   * seen once, none twice, and nothing is written.
+   */
+  @Test
+  public void aDryRunPagesTheStuckEventsByWholePagesAndWritesNothing() {
+    fourStuckEventsOverTwoPages();
+
+    ReconciliationResult result = run(true);
+
+    verify(eventStore).findStaleReceived(any(), any(), any(), eq(0), eq(2));
+    verify(eventStore).findStaleReceived(any(), any(), any(), eq(2), eq(2));
+    verify(eventStore, never()).findStaleReceived(any(), any(), any(), eq(1), anyInt());
+    verify(eventStore, never()).markIgnored(anyString(), anyString());
+    assertEquals("e1 and e4, each once", 2, result.get(Counter.STALE_EVENTS_SWEPT));
   }
 
   @Test

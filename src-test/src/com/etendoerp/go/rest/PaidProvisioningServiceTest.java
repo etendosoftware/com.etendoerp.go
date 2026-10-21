@@ -35,7 +35,8 @@ import com.etendoerp.go.schemaforge.data.CheckoutRequest;
 /**
  * Specs for {@link PaidProvisioningService}: how the onboarding inputs of a paid purchase are
  * resolved without the browser that would have sent them — the checkout column, then the
- * account's {@code ONBOARDING_DRAFT}, then {@code en_US} / {@code EUR} / {@code ES} — and that the
+ * account's {@code ONBOARDING_DRAFT}, then {@code en_US} / {@code EUR} / {@code ES}; the company
+ * address and fiscal identifier from the draft — and that the
  * run is handed to the servlet's shared onboarding with the caller's context restored after.
  *
  * <p>The fenced claim and the run itself are {@link EtendoGoJwtServlet#provisionPaidPurchase}'s;
@@ -108,6 +109,24 @@ public class PaidProvisioningServiceTest {
     assertEquals("A non-text draft value is ignored", "en_US", partial.language());
     assertEquals("EUR", partial.currencyIso());
     assertEquals("The column still wins", "PT", partial.countryCode());
+  }
+
+  /** S4 — the company data the browser would have sent comes from the draft, as given. */
+  @Test
+  public void theDraftAddressAndFiscalIdAreCarriedOver() {
+    PaidInput input = PaidProvisioningService.inputOf(request("es_ES", "EUR", "ES",
+        "{\"form\":{\"address\":\" Calle Mayor 1 \",\"fiscalIdValue\":\"12345678Z\"}}"));
+
+    assertEquals("Calle Mayor 1", input.address());
+    assertEquals("12345678Z", input.taxId());
+  }
+
+  @Test
+  public void withoutADraftThereIsNoAddressOrFiscalId() {
+    PaidInput input = PaidProvisioningService.inputOf(request("es_ES", "EUR", "ES", null));
+
+    assertNull(input.address());
+    assertNull(input.taxId());
   }
 
   @Test

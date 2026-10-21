@@ -28,9 +28,17 @@ import java.sql.Timestamp;
 import java.util.Date;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 import org.apache.logging.log4j.Level;
 import org.junit.After;
+import org.hibernate.query.NativeQuery;
 import org.junit.Test;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
@@ -97,6 +105,12 @@ import com.etendoerp.go.schemaforge.data.CheckoutRequest;
  * {@link CheckoutRequestWrites} beside the store: the conditional {@code CREATED → EXPIRED} close
  * (a bulk update whose row count is the answer) and the first-write-wins onboarding inputs, plus
  * the store's guard that keeps {@code EXPIRED} terminal.
+ *
+ * <p><b>Group 8 (ETP-5048) — the fence of a paid re-subscription.</b> The payment webhook and the
+ * billing reconciliation can both reach one paid re-subscription. {@code findPaidReactivation}
+ * locks the row ({@code SELECT ... FOR UPDATE}) and re-reads it, so of two racing callers exactly
+ * one applies it; the other waits for that commit and then finds nothing to do. Proven with two
+ * threads, each with its own DAL session, against the real row lock; every wait is bounded.
  *
  * @covers com.etendoerp.go.payment.CheckoutRequestStore
  * @covers com.etendoerp.go.payment.CheckoutRequestWrites
@@ -1049,6 +1063,115 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
       log.detach();
     }
     assertNull(findCommittedRequest(requestId));
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Group 8 — ETP-5048: the fence of a paid re-subscription
+  // ---------------------------------------------------------------------------------------------
+
+  /** How long the first caller holds the row lock before it commits. */
+  private static final long HOLD_MILLIS = 1_500L;
+  /** Every wait of the race is bounded by this, so a regression cannot hang the build. */
+  private static final long BOUND_SECONDS = 60L;
+
+  /** A re-subscription of client {@code 0}, paid and not applied: what the webhook would apply. */
+  private String createPaidReactivation(String accountId, String email) {
+    String requestId = newRequestId();
+    store.recordRequested(requestId, accountId, email, ENVIRONMENT,
+        new CheckoutRequestStore.RequestOptions(null, false, false, false, null, ZERO));
+    store.recordSessionCreated(requestId, "cs_test_" + requestId);
+    // No subscription id: a provisioned row without one is never a reconciliation candidate.
+    store.recordPaid(requestId, "cus_" + requestId, null);
+    return requestId;
+  }
+
+  /** Runs {@code body} in this thread's own DAL session, closed and cleared afterwards. */
+  private static <T> T inOwnSession(Callable<T> body) throws Exception {
+    try {
+      return body.call();
+    } finally {
+      try {
+        OBDal.getInstance().rollbackAndClose();
+      } finally {
+        OBContext.setOBContext((OBContext) null);
+      }
+    }
+  }
+
+  /** Bounds this transaction's wait for a row lock, so a broken fence fails instead of hanging. */
+  @SuppressWarnings("rawtypes")
+  private static void boundTheLockWait() {
+    NativeQuery statement = OBDal.getInstance().getSession()
+        .createNativeQuery("SET LOCAL lock_timeout = '" + BOUND_SECONDS + "s'");
+    statement.executeUpdate();
+  }
+
+  @Test
+  public void testAPaidReactivationIsFoundOnlyWhileItIsPending() {
+    String email = newEmail("reactivation-pending");
+    String accountId = createAccount(email);
+    String requestId = createPaidReactivation(accountId, email);
+    String newPurchase = createPaidRequest(accountId, email);
+
+    CheckoutRequest found = store.findPaidReactivation(requestId);
+
+    assertNotNull(found);
+    assertEquals(requestId, found.getRequest());
+    OBDal.getInstance().rollbackAndClose(); // releases the lock the lookup took
+    assertNull("A new purchase is provisioned, never applied", store.findPaidReactivation(
+        newPurchase));
+    OBDal.getInstance().rollbackAndClose();
+    store.recordProvisioned(requestId, ZERO);
+    assertNull("Once applied it is no longer pending", store.findPaidReactivation(requestId));
+  }
+
+  /**
+   * The webhook and the reconciliation race on one paid re-subscription. The first takes the row
+   * lock and applies it; the second blocks on that lock, and once the first commits it re-reads
+   * the row as {@code PROVISIONED} and gets nothing to apply.
+   */
+  @Test
+  public void testTwoCallersRacingOnAPaidReactivationApplyItExactlyOnce() throws Exception {
+    String email = newEmail("reactivation-race");
+    String accountId = createAccount(email);
+    String requestId = createPaidReactivation(accountId, email);
+    assertEquals(STATUS_PAID, rawStatus(requestId));
+    OBDal.getInstance().rollbackAndClose();
+
+    CountDownLatch firstHoldsTheLock = new CountDownLatch(1);
+    AtomicLong firstCommittedAt = new AtomicLong();
+    ExecutorService callers = Executors.newFixedThreadPool(2);
+    try {
+      Future<Boolean> webhook = callers.submit(() -> inOwnSession(() -> {
+        boundTheLockWait();
+        CheckoutRequest found = store.findPaidReactivation(requestId);
+        firstHoldsTheLock.countDown();
+        if (found == null) {
+          return false;
+        }
+        Thread.sleep(HOLD_MILLIS);
+        store.recordProvisioned(requestId, ZERO); // commits, releasing the lock
+        firstCommittedAt.set(System.nanoTime());
+        return true;
+      }));
+      assertTrue("The first caller must take the lock",
+          firstHoldsTheLock.await(BOUND_SECONDS, TimeUnit.SECONDS));
+      Future<long[]> reconciler = callers.submit(() -> inOwnSession(() -> {
+        boundTheLockWait();
+        CheckoutRequest found = store.findPaidReactivation(requestId);
+        return new long[] { found == null ? 0L : 1L, System.nanoTime() };
+      }));
+
+      assertTrue("The first caller applies it", webhook.get(BOUND_SECONDS, TimeUnit.SECONDS));
+      long[] second = reconciler.get(BOUND_SECONDS, TimeUnit.SECONDS);
+      assertEquals("The second caller finds it applied and does nothing", 0L, second[0]);
+      assertTrue("The second caller returned only after the first committed",
+          second[1] >= firstCommittedAt.get());
+    } finally {
+      callers.shutdownNow();
+      callers.awaitTermination(BOUND_SECONDS, TimeUnit.SECONDS);
+    }
+    assertEquals(STATUS_PROVISIONED, rawStatus(requestId));
   }
 
   // ---------------------------------------------------------------------------------------------

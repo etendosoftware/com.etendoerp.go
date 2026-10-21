@@ -108,6 +108,74 @@ public class SubscriptionLifecycleApplierTest {
     assertFalse(outcome.closesSubscription());
   }
 
+  // ===================== providerStateAt — the provider instant of a re-read (ETP-5048) =========
+
+  private static Instant stateAt(String objectJson) throws Exception {
+    return SubscriptionLifecycleApplier.providerStateAt(new JSONObject(objectJson));
+  }
+
+  @Test
+  public void aClosedSubscriptionIsAssertedWhenItEnded() throws Exception {
+    assertEquals("ended_at wins over canceled_at and the period", Instant.ofEpochSecond(300L),
+        stateAt("{\"status\":\"canceled\",\"ended_at\":300,\"canceled_at\":200,"
+            + "\"current_period_start\":400,\"start_date\":100,\"created\":50}"));
+    assertEquals("canceled_at without ended_at", Instant.ofEpochSecond(200L),
+        stateAt("{\"status\":\"canceled\",\"canceled_at\":200,\"current_period_start\":400}"));
+    assertEquals("incomplete_expired is a close too", Instant.ofEpochSecond(300L),
+        stateAt("{\"status\":\"incomplete_expired\",\"ended_at\":300,"
+            + "\"current_period_start\":400}"));
+  }
+
+  @Test
+  public void aClosedSubscriptionWithoutAnEndFallsBackToItsStartThenItsCreation()
+      throws Exception {
+    assertEquals(Instant.ofEpochSecond(100L), stateAt("{\"status\":\"canceled\","
+        + "\"current_period_start\":400,\"start_date\":100,\"created\":50}"));
+    assertEquals(Instant.ofEpochSecond(50L), stateAt("{\"status\":\"incomplete_expired\","
+        + "\"created\":50}"));
+  }
+
+  @Test
+  public void anOpenSubscriptionIsAssertedAtTheLaterOfItsPeriodStartAndItsLastPayment()
+      throws Exception {
+    assertEquals("the payment followed the period start", Instant.ofEpochSecond(500L),
+        stateAt("{\"status\":\"active\",\"current_period_start\":400,"
+            + "\"latest_invoice\":{\"status_transitions\":{\"paid_at\":500}}}"));
+    assertEquals("the period started after the last payment", Instant.ofEpochSecond(400L),
+        stateAt("{\"status\":\"active\",\"current_period_start\":400,"
+            + "\"latest_invoice\":{\"status_transitions\":{\"paid_at\":350}}}"));
+    assertEquals("only the payment is known", Instant.ofEpochSecond(500L),
+        stateAt("{\"status\":\"past_due\","
+            + "\"latest_invoice\":{\"status_transitions\":{\"paid_at\":500}}}"));
+    assertEquals("the period read from the first item", Instant.ofEpochSecond(400L),
+        stateAt("{\"status\":\"trialing\",\"items\":{\"data\":[{\"current_period_start\":"
+            + "400}]}}"));
+  }
+
+  @Test
+  public void anUnexpandedOrUnpaidLatestInvoiceIsIgnored() throws Exception {
+    assertEquals(Instant.ofEpochSecond(400L), stateAt("{\"status\":\"active\","
+        + "\"current_period_start\":400,\"latest_invoice\":\"in_1\"}"));
+    assertEquals(Instant.ofEpochSecond(400L), stateAt("{\"status\":\"active\","
+        + "\"current_period_start\":400,\"latest_invoice\":{\"status_transitions\":"
+        + "{\"paid_at\":null}}}"));
+  }
+
+  @Test
+  public void anOpenSubscriptionWithoutAPeriodOrPaymentFallsBackToItsStartThenItsCreation()
+      throws Exception {
+    assertEquals(Instant.ofEpochSecond(100L), stateAt("{\"status\":\"active\","
+        + "\"start_date\":100,\"created\":50}"));
+    assertEquals(Instant.ofEpochSecond(50L), stateAt("{\"status\":\"active\",\"created\":50}"));
+  }
+
+  @Test
+  public void aSubscriptionWithNoInstantAtAllHasNoProviderState() throws Exception {
+    assertNull(stateAt("{\"status\":\"active\"}"));
+    assertNull(stateAt("{}"));
+    assertNull(SubscriptionLifecycleApplier.providerStateAt(null));
+  }
+
   // ===================== Past-due subscriptions anchor on the paid period =====================
 
   /** 2026-11-04T00:00:00Z: end of the paid period, start of the unpaid one. */
