@@ -119,6 +119,7 @@ public class BillingReconciliationService {
   /** Expands the latest invoice, as phase 4 reads it, so the provider instant is the same. */
   private static final String EXPAND_LATEST_INVOICE = "?expand%5B%5D=latest_invoice";
   private static final String ITEM_CHECKOUT = "checkout ";
+  private static final String ACTION_PROVISION = "provision the environment";
   static final String KIND_STALE_EVENT_REVIEW = "stale-event-review";
   /** Prefix of the review row of a stuck event: {@code reconcile:stale-event-review:<event>}. */
   static final String STALE_REVIEW_ID_PREFIX =
@@ -284,56 +285,68 @@ public class BillingReconciliationService {
     String paymentStatus = session.optString("payment_status", "");
     if ("complete".equals(status)
         && ("paid".equals(paymentStatus) || "no_payment_required".equals(paymentStatus))) {
-      String customer = StripeJson.text(session, "customer");
-      String subscription = StripeJson.text(session, FIELD_SUBSCRIPTION);
-      // The payment and its audit row commit together (the write is left pending until the row
-      // is inserted): a payment is never recorded without the row that explains it.
-      if (!audit.isDryRun() && !checkoutWrites.recordPaidPending(row.requestId, customer,
-          subscription)) {
-        rollbackQuietly();
-        result.error(ITEM_CHECKOUT + row.requestId + ": the request vanished before its "
-            + "recovered payment could be recorded");
-        return;
-      }
-      String eventId = ReconciliationAudit.eventId(KIND_PAYMENT_RECOVERED, row.requestId);
-      if (!audit.write(eventId, KIND_PAYMENT_RECOVERED, row.requestId,
-          BillingEventStore.RESULT_APPLIED,
-          "Payment confirmed by re-reading the provider; the webhook never applied it",
-          summary("session", row.sessionId, "customer", customer, FIELD_SUBSCRIPTION,
-              subscription))) {
-        auditRowMissing(eventId, true, result, audit);
-        if (!audit.isDryRun()) {
-          return;
-        }
-      }
-      audit.alert("Recovered a paid checkout the webhook never applied: request {} session {}",
-          row.requestId, row.sessionId);
-      result.increment(Counter.PAYMENTS_RECOVERED);
-      result.item(shortRequest(row.requestId), row.clientName,
-          "record the payment the webhook lost", "the provider session is paid");
-      recovered.put(row.requestId, CheckoutRow.recovered(row, subscription));
+      recoverPayment(row, session, result, audit, recovered);
     } else if ("expired".equals(status) && row.createdAt != null
         && !row.createdAt.after(abandonedBefore)) {
-      // The close and its audit row commit together, as for a recovered payment.
-      boolean closed = audit.isDryRun() || checkoutWrites.recordExpiredPending(row.requestId);
-      if (!closed) {
-        rollbackQuietly();
-        return; // a payment raced the reconciliation and won; nothing to close
-      }
-      String eventId = ReconciliationAudit.eventId(KIND_CHECKOUT_EXPIRED, row.requestId);
-      if (!audit.write(eventId, KIND_CHECKOUT_EXPIRED, row.requestId,
-          BillingEventStore.RESULT_APPLIED,
-          "Abandoned checkout closed after the provider confirmed its session expired",
-          summary("session", row.sessionId)) && !audit.isDryRun()) {
-        auditRowMissing(eventId, true, result, audit);
+      closeAbandoned(row, result, audit);
+    }
+  }
+
+  /** The provider session is paid but the webhook never applied it: record the payment. */
+  private void recoverPayment(CheckoutRow row, JSONObject session, ReconciliationResult result,
+      ReconciliationAudit audit, Map<String, CheckoutRow> recovered) {
+    String customer = StripeJson.text(session, "customer");
+    String subscription = StripeJson.text(session, FIELD_SUBSCRIPTION);
+    // The payment and its audit row commit together (the write is left pending until the row
+    // is inserted): a payment is never recorded without the row that explains it.
+    if (!audit.isDryRun() && !checkoutWrites.recordPaidPending(row.requestId, customer,
+        subscription)) {
+      rollbackQuietly();
+      result.error(ITEM_CHECKOUT + row.requestId + ": the request vanished before its "
+          + "recovered payment could be recorded");
+      return;
+    }
+    String eventId = ReconciliationAudit.eventId(KIND_PAYMENT_RECOVERED, row.requestId);
+    if (!audit.write(eventId, KIND_PAYMENT_RECOVERED, row.requestId,
+        BillingEventStore.RESULT_APPLIED,
+        "Payment confirmed by re-reading the provider; the webhook never applied it",
+        summary("session", row.sessionId, "customer", customer, FIELD_SUBSCRIPTION,
+            subscription))) {
+      auditRowMissing(eventId, true, result, audit);
+      if (!audit.isDryRun()) {
         return;
       }
-      audit.repaired("closed abandoned checkout {} (session {} expired)", row.requestId,
-          row.sessionId);
-      result.increment(Counter.CHECKOUTS_EXPIRED);
-      result.item(shortRequest(row.requestId), row.clientName, "close abandoned checkout",
-          "the provider session expired");
     }
+    audit.alert("Recovered a paid checkout the webhook never applied: request {} session {}",
+        row.requestId, row.sessionId);
+    result.increment(Counter.PAYMENTS_RECOVERED);
+    result.item(shortRequest(row.requestId), row.clientName,
+        "record the payment the webhook lost", "the provider session is paid");
+    recovered.put(row.requestId, CheckoutRow.recovered(row, subscription));
+  }
+
+  /** The provider session expired and the request is old enough: close it as abandoned. */
+  private void closeAbandoned(CheckoutRow row, ReconciliationResult result,
+      ReconciliationAudit audit) {
+    // The close and its audit row commit together, as for a recovered payment.
+    boolean closed = audit.isDryRun() || checkoutWrites.recordExpiredPending(row.requestId);
+    if (!closed) {
+      rollbackQuietly();
+      return; // a payment raced the reconciliation and won; nothing to close
+    }
+    String eventId = ReconciliationAudit.eventId(KIND_CHECKOUT_EXPIRED, row.requestId);
+    if (!audit.write(eventId, KIND_CHECKOUT_EXPIRED, row.requestId,
+        BillingEventStore.RESULT_APPLIED,
+        "Abandoned checkout closed after the provider confirmed its session expired",
+        summary("session", row.sessionId)) && !audit.isDryRun()) {
+      auditRowMissing(eventId, true, result, audit);
+      return;
+    }
+    audit.repaired("closed abandoned checkout {} (session {} expired)", row.requestId,
+        row.sessionId);
+    result.increment(Counter.CHECKOUTS_EXPIRED);
+    result.item(shortRequest(row.requestId), row.clientName, "close abandoned checkout",
+        "the provider session expired");
   }
 
   private static boolean belongsTo(JSONObject session, String requestId) {
@@ -409,7 +422,7 @@ public class BillingReconciliationService {
     if (audit.isDryRun()) {
       audit.repaired("provision paid purchase {} ({})", row.requestId, derived);
       result.increment(Counter.PROVISIONED);
-      result.item(shortRequest(row.requestId), row.clientName, "provision the environment",
+      result.item(shortRequest(row.requestId), row.clientName, ACTION_PROVISION,
           "paid with no environment (" + derived + ")");
       return;
     }
@@ -490,7 +503,7 @@ public class BillingReconciliationService {
         audit.alert("Provisioned a paid purchase with no environment: request {} (attempt {})",
             requestId, outcome.attempt());
         result.increment(Counter.PROVISIONED);
-        result.item(shortRequest(requestId), row.clientName, "provision the environment",
+        result.item(shortRequest(requestId), row.clientName, ACTION_PROVISION,
             "paid with no environment (attempt " + outcome.attempt() + ")");
         break;
       case FAILED:
@@ -502,7 +515,7 @@ public class BillingReconciliationService {
         audit.alert("Provisioning of paid purchase {} failed (attempt {}, code {})", requestId,
             outcome.attempt(), outcome.code());
         result.increment(Counter.PROVISIONING_FAILED);
-        result.item(shortRequest(requestId), row.clientName, "provision the environment",
+        result.item(shortRequest(requestId), row.clientName, ACTION_PROVISION,
             "the attempt failed (" + outcome.code() + ")");
         break;
       case NEEDS_REVIEW:

@@ -121,7 +121,7 @@ public class BillingReconciliationProcess extends DalBaseProcess {
       // About the schedule, not the reconciliation's writes: alerts whatever the request's Dry
       // run parameter says (review F3).
       alertFlagOffOncePerDay(bundle.getProcessRequestId());
-      fail(bundle, TITLE_SKIPPED, message);
+      throw fail(bundle, TITLE_SKIPPED, message);
     }
     boolean dryRun = readDryRun(bundle);
     ReconciliationRunLock.Held lock = runLock.tryAcquire();
@@ -134,8 +134,7 @@ public class BillingReconciliationProcess extends DalBaseProcess {
       result = serviceFactory.get().run(dryRun);
     } catch (RuntimeException e) {
       log.error("{} Billing reconciliation failed", ReconciliationAudit.LOG_PREFIX, e);
-      fail(bundle, "Billing Reconciliation Failed", UsageMessages.atSafe(e.getMessage()));
-      return;
+      throw fail(bundle, "Billing Reconciliation Failed", UsageMessages.atSafe(e.getMessage()));
     } finally {
       lock.close();
     }
@@ -147,7 +146,7 @@ public class BillingReconciliationProcess extends DalBaseProcess {
     }
     String message = UsageMessages.atSafe(result.toHtml());
     if (result.hasFailures()) {
-      fail(bundle, TITLE_FAILED, message);
+      throw fail(bundle, TITLE_FAILED, message);
     }
     log.info("{} {}", ReconciliationAudit.LOG_PREFIX, summary);
     OBError success = new OBError();
@@ -258,15 +257,15 @@ public class BillingReconciliationProcess extends DalBaseProcess {
   /**
    * Reports a failed run on both surfaces — see {@code UsageAggregationProcess#fail} for why both.
    *
-   * @throws OBException always
+   * @return the exception for the caller to throw, so the compiler sees the run end there
    */
-  private static void fail(ProcessBundle bundle, String title, String message) {
+  private static OBException fail(ProcessBundle bundle, String title, String message) {
     log.error("{} {}: {}", ReconciliationAudit.LOG_PREFIX, title, message);
     OBError error = new OBError();
     error.setType("Error");
     error.setTitle(title);
     error.setMessage(message);
     bundle.setResult(error);
-    throw new OBException(message);
+    return new OBException(message);
   }
 }

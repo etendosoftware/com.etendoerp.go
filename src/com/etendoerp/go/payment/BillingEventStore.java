@@ -100,6 +100,7 @@ public class BillingEventStore implements CheckoutWebhookProcessor.EventStore {
       "update " + BillingEvent.ENTITY_NAME + " be";
   /** Name of the event-id parameter bound by every one of those updates. */
   private static final String PARAM_EVENT_ID = "eventId";
+  private static final String PARAM_REASON = "reason";
   private static final int SUMMARY_WIDTH = WebhookPayloadSummary.MAX_LENGTH;
   /** ETP-5048 — the rows of one type the billing reconciliation wrote. */
   private static final String RECONCILIATION_ROWS =
@@ -417,7 +418,7 @@ public class BillingEventStore implements CheckoutWebhookProcessor.EventStore {
               + "       be.updated = :now"
               + " where be.event = :eventId")
           .setParameter("now", now)
-          .setParameter("reason", StringUtils.abbreviate(StringUtils.trimToNull(reason),
+          .setParameter(PARAM_REASON, StringUtils.abbreviate(StringUtils.trimToNull(reason),
               REASON_WIDTH))
           .setParameter(PARAM_EVENT_ID, StringUtils.trim(eventId))
           .executeUpdate();
@@ -444,7 +445,7 @@ public class BillingEventStore implements CheckoutWebhookProcessor.EventStore {
               + "       be.updated = :now"
               + " where be.event = :eventId and be.provider = :provider")
           .setParameter("newEventId", StringUtils.abbreviate(newEventId, EVENT_ID_WIDTH))
-          .setParameter("reason", StringUtils.abbreviate(StringUtils.trimToNull(reason),
+          .setParameter(PARAM_REASON, StringUtils.abbreviate(StringUtils.trimToNull(reason),
               REASON_WIDTH))
           .setParameter("now", now)
           .setParameter(PARAM_EVENT_ID, StringUtils.trim(eventId))
@@ -680,7 +681,7 @@ public class BillingEventStore implements CheckoutWebhookProcessor.EventStore {
             .setParameter("now", new Date())
             .setParameter(PARAM_EVENT_ID, id);
         if (trimmedReason != null) {
-          update.setParameter("reason", trimmedReason);
+          update.setParameter(PARAM_REASON, trimmedReason);
         }
         if (guardApplied) {
           update.setParameter("applied", RESULT_APPLIED);
