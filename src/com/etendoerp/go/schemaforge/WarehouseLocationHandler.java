@@ -198,10 +198,20 @@ public class WarehouseLocationHandler implements NeoHandler {
         nullIfEmpty(body.optString(FIELD_BUILDING_NUMBER, null)),
         nullIfEmpty(body.optString("cityName", null)),
         countryId);
-    if (missing.isEmpty()) {
-      return null;
+    if (!missing.isEmpty()) {
+      return NeoResponse.error(400, "Missing required field(s): " + String.join(", ", missing));
     }
-    return NeoResponse.error(400, "Missing required field(s): " + String.join(", ", missing));
+    // ETP-5806 follow-up — see StructuredAddressComposer#fieldsExceedingMaxLength: without this,
+    // a value longer than the DB column (EM_OBSEPA_StrtNm/BldgNb/BldgNm) reached OBDal.flush() as
+    // a raw data-truncation SQL exception, surfaced as an opaque 500 on both create and update.
+    List<String> tooLong = StructuredAddressComposer.fieldsExceedingMaxLength(
+        nullIfEmpty(body.optString(FIELD_STREET_NAME, null)),
+        nullIfEmpty(body.optString(FIELD_BUILDING_NUMBER, null)),
+        nullIfEmpty(body.optString(FIELD_BUILDING_NAME, null)));
+    if (!tooLong.isEmpty()) {
+      return NeoResponse.error(400, "Field(s) exceed maximum length: " + String.join(", ", tooLong));
+    }
+    return null;
   }
 
   // ------------------------------------------------------------------ field mapping

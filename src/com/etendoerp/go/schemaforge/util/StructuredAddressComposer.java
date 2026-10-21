@@ -41,6 +41,20 @@ public final class StructuredAddressComposer {
   /** Length of {@code C_Location.Address1}/{@code Address2} — NOT the 70 of EM_OBSEPA_StrtNm. */
   private static final int ADDRESS_LINE_MAX_LENGTH = 60;
 
+  /**
+   * Field lengths of the 3 structured SEPA columns themselves ({@code org.openbravo.sepa.iso20022}'s
+   * {@code AD_COLUMN.FIELDLENGTH} for {@code EM_OBSEPA_StrtNm}/{@code BldgNb}/{@code BldgNm}:
+   * VARCHAR(70)/(16)/(35) respectively). ETP-5806 follow-up: neither the UI nor this handler
+   * enforced them before a value was written, so a value longer than the DB column reached
+   * {@code OBDal.flush()} as a raw data-truncation SQL exception — surfaced to the caller as an
+   * opaque 500 with no indication of which field or why. {@link #fieldsExceedingMaxLength} turns
+   * that into a clean 400 before the write is attempted, on both create and update, for both
+   * handlers that call into this composer.
+   */
+  private static final int STREET_NAME_MAX_LENGTH = 70;
+  private static final int BUILDING_NUMBER_MAX_LENGTH = 16;
+  private static final int BUILDING_NAME_MAX_LENGTH = 35;
+
   private StructuredAddressComposer() {
   }
 
@@ -122,6 +136,28 @@ public final class StructuredAddressComposer {
       missing.add("country");
     }
     return missing;
+  }
+
+  /**
+   * The structured-address fields whose value exceeds the DB column's own length — see the
+   * constants' doc comment above for why this check exists. A blank/{@code null} value is never
+   * "too long" regardless of length (that is {@link #missingMandatoryFields}'s concern).
+   *
+   * @return the offending field names (payload keys), in a stable order; empty when none are too long
+   */
+  public static List<String> fieldsExceedingMaxLength(String streetName, String buildingNumber,
+      String buildingName) {
+    List<String> tooLong = new ArrayList<>();
+    if (streetName != null && streetName.length() > STREET_NAME_MAX_LENGTH) {
+      tooLong.add("streetName");
+    }
+    if (buildingNumber != null && buildingNumber.length() > BUILDING_NUMBER_MAX_LENGTH) {
+      tooLong.add("buildingNumber");
+    }
+    if (buildingName != null && buildingName.length() > BUILDING_NAME_MAX_LENGTH) {
+      tooLong.add("buildingName");
+    }
+    return tooLong;
   }
 
   private static String append(String base, String separator, String part) {

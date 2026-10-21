@@ -297,7 +297,28 @@ public class ContactsLocationAddressHandler implements NeoHandler {
     if (!missing.isEmpty()) {
       return NeoResponse.error(400, "Missing required field(s): " + String.join(", ", missing));
     }
+    NeoResponse tooLong = rejectOversizedFields(body);
+    if (tooLong != null) {
+      return tooLong;
+    }
     return null;
+  }
+
+  /**
+   * The 400 for a body whose structured address fields overflow their DB column (see
+   * {@link StructuredAddressComposer#fieldsExceedingMaxLength}), or {@code null} when none do.
+   * Shared by create and update so a too-long value is rejected cleanly on both instead of
+   * reaching {@code OBDal.flush()} as a raw data-truncation SQL exception (a bare 500).
+   */
+  private static NeoResponse rejectOversizedFields(JSONObject body) {
+    List<String> tooLong = StructuredAddressComposer.fieldsExceedingMaxLength(
+        nullIfEmpty(body.optString(FIELD_STREET_NAME, null)),
+        nullIfEmpty(body.optString(FIELD_BUILDING_NUMBER, null)),
+        nullIfEmpty(body.optString(FIELD_BUILDING_NAME, null)));
+    if (tooLong.isEmpty()) {
+      return null;
+    }
+    return NeoResponse.error(400, "Field(s) exceed maximum length: " + String.join(", ", tooLong));
   }
 
   /** The C_Country_ID of {@code geoLoc}, or {@code null} when it carries no country. */
@@ -340,6 +361,10 @@ public class ContactsLocationAddressHandler implements NeoHandler {
           effectiveCountryForValidation);
       if (!missing.isEmpty()) {
         return NeoResponse.error(400, "Missing required field(s): " + String.join(", ", missing));
+      }
+      NeoResponse tooLong = rejectOversizedFields(body);
+      if (tooLong != null) {
+        return tooLong;
       }
       String bpId = bpLoc.getBusinessPartner() != null ? bpLoc.getBusinessPartner().getId() : null;
       String preSaveKey = (countryId != null && bpId != null) ? queryBPKey(bpId) : null;
