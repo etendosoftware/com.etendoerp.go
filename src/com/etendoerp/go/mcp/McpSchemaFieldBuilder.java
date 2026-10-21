@@ -96,6 +96,8 @@ final class McpSchemaFieldBuilder {
   static final String VISIBILITY_DISCARDED = "discarded";
   static final String TYPE_BUTTON = McpActionsView.TYPE_BUTTON;
   static final String KEY_INVOKE_VIA = "invokeVia";
+  /** The only value of {@code invokeVia}: the tool that runs an action. */
+  static final String INVOKE_VIA_ETENDO_ACTION = "etendo_action";
   static final String KEY_INVOKABLE = "invokable";
   static final String KEY_NOT_INVOKABLE_REASON = "notInvokableReason";
   /** AD column of the accounting trigger, present on every accountable document. */

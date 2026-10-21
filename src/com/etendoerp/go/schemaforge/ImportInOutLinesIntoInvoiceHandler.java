@@ -106,7 +106,8 @@ public class ImportInOutLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
             + "that still have quantity to invoice: {data:[{id, documentNo, date, businessPartner, "
             + "businessPartner$_identifier, currency, pendingLines}], hasMore, limit, scanLimit}. hasMore true means the list may be incomplete: it looks at the scanLimit most recent candidates and returns at most limit documents, so a document it does not list may still be importable when you know its id. Pending is what completed "
             + "AND draft invoices have not covered. Step 1." + flow)
-        .withIdDescription(DocumentLineImport.ID_OF_THE_DRAFT + doc + " the lines would be imported into."));
+        .withIdDescription(DocumentLineImport.ID_OF_THE_DRAFT + doc + " the lines would be imported into.")
+        .availableWhen(DocumentLineImport.TARGET_IS_DRAFT));
     contracts.put(listLines, NeoActionContract.read(listLines,
         "Lists the lines of a " + inout + " that can still be invoiced here: {data:[{id, lineNo, "
             + "product, product$_identifier, uOM, pendingQuantity}], hasMore:false}, where pendingQuantity is "
@@ -114,7 +115,8 @@ public class ImportInOutLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
             + "sourceLineId " + imp + " takes. Step 2." + flow,
         NeoActionContract.Param.required(param, NeoActionContract.TYPE_STRING,
             "Id of a document returned by " + list + "."))
-        .withIdDescription(DocumentLineImport.ID_OF_THE_DRAFT + doc + " the lines would be imported into."));
+        .withIdDescription(DocumentLineImport.ID_OF_THE_DRAFT + doc + " the lines would be imported into.")
+        .availableWhen(DocumentLineImport.TARGET_IS_DRAFT));
     contracts.put(imp, NeoActionContract.write(imp,
         "Adds lines of a completed " + inout + " to this DRAFT " + doc + " (product, unit of "
             + "measure, tax, price and discount from its order line, linked to the " + inout
@@ -135,7 +137,8 @@ public class ImportInOutLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
             "Each {sourceLineId, quantity}: sourceLineId is the id of a line from " + listLines
                 + ", quantity a number not above its pendingQuantity. Omit to import every "
                 + "pending line in full."))
-        .withIdDescription(DocumentLineImport.ID_OF_THE_DRAFT + doc + " the lines are added to."));
+        .withIdDescription(DocumentLineImport.ID_OF_THE_DRAFT + doc + " the lines are added to.")
+        .availableWhen(DocumentLineImport.TARGET_IS_DRAFT));
     return contracts;
   }
 

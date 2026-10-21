@@ -57,6 +57,9 @@ public class InvoiceFromOrderSupport {
 
   private static final Logger log = LogManager.getLogger(InvoiceFromOrderSupport.class);
   private static final RoundingMode ROUNDING = RoundingMode.HALF_UP;
+  private static final BigDecimal HUNDRED = BigDecimal.valueOf(100);
+  /** Decimals of a derived list price: the form rounds the price it sends to 6 (toFixed(6)). */
+  private static final int LIST_PRICE_SCALE = 6;
 
   /**
    * Copies {@code etgoTotalDiscount} from the source order to the new invoice and materialises
@@ -218,6 +221,71 @@ public class InvoiceFromOrderSupport {
     if (dirty) {
       OBDal.getInstance().flush();
     }
+  }
+
+  /**
+   * Gives a copied invoice line the list price the form would have stored for its price (ETP-5714):
+   * a line with a non-zero price, no list price (absent or 0) and no gross price gets
+   * {@code listPrice = unitPrice} when it has no discount, and
+   * {@code listPrice = unitPrice / (1 − discount / 100)} (6 decimals, as the form rounds) when it has
+   * one.
+   *
+   * <p>The native line copy ({@code CreateInvoiceLinesFromProcess}, behind the line import and the
+   * one-step create from an order or a receipt) takes the prices of the source line exactly. A
+   * source whose list price is 0 — an order line an agent created with only a price — therefore gives
+   * an invoice line with a price and a list price of 0, and the grid's "Precio" (which is the list
+   * price) shows 0,00 next to correct totals. In the form the user types the list price and the unit
+   * price is derived from it ({@code unit = list × (1 − d/100)}), so the list price is the inverse of
+   * that. Run it AFTER {@link #copyLineDiscountsFromOrder}: the rule reads the discount. A list price
+   * the source carries is never replaced; a discount of 100 % or outside 0..100 cannot be inverted
+   * and leaves the line alone. A line carrying a gross price is left alone too: the form never
+   * persists one (net prices are 0 on a taxes-included price list, so there is no price to align).
+   * Same rule as {@code InvoiceLineAmountSupport#alignListPriceWithPrice}, over the typed line
+   * instead of a JSON body.
+   *
+   * @param invoice     the invoice whose lines are considered
+   * @param onlyLineIds the ids of the lines to consider (the lines of an import: the draft may hold
+   *                    others), or {@code null} for every line
+   */
+  public void alignLineListPrices(Invoice invoice, java.util.Set<String> onlyLineIds) {
+    boolean dirty = false;
+    for (InvoiceLine il : invoice.getInvoiceLineList()) {
+      BigDecimal list = onlyLineIds == null || onlyLineIds.contains(il.getId())
+          ? derivedListPrice(il) : null;
+      if (list != null) {
+        il.setListPrice(list);
+        OBDal.getInstance().save(il);
+        dirty = true;
+      }
+    }
+    if (dirty) {
+      OBDal.getInstance().flush();
+    }
+  }
+
+  /**
+   * The list price the form would store for a line that has a price and no list price, or
+   * {@code null} when nothing should be written. Same rule as
+   * {@code InvoiceLineAmountSupport#alignListPriceWithPrice} (there over a JSON body).
+   */
+  private static BigDecimal derivedListPrice(InvoiceLine il) {
+    BigDecimal unit = il.getUnitPrice();
+    if (!isNonZero(unit) || isNonZero(il.getListPrice()) || isNonZero(il.getGrossUnitPrice())) {
+      return null;
+    }
+    BigDecimal discount = il.getEtgoDiscount();
+    if (!isNonZero(discount)) {
+      return unit;
+    }
+    if (discount.signum() < 0 || discount.compareTo(HUNDRED) >= 0) {
+      return null;
+    }
+    return unit.multiply(HUNDRED).divide(HUNDRED.subtract(discount), LIST_PRICE_SCALE,
+        RoundingMode.HALF_UP);
+  }
+
+  private static boolean isNonZero(BigDecimal value) {
+    return value != null && value.signum() != 0;
   }
 
   /**

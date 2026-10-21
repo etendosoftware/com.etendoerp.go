@@ -109,6 +109,10 @@ public class CreatePurchaseInvoiceHandlerTest {
     DocumentType docTypeToReturn;
     JSONArray selectedLinesToReturn;
     Invoice copiedDiscountsInvoice;
+    /** ETP-5714: the copy-side support calls in the order they happened (copy, align, gross). */
+    final List<String> supportCalls = new ArrayList<>();
+    Invoice alignedInvoice;
+    java.util.Set<String> alignedScope = java.util.Collections.singleton("unset");
     /** ETP-5381: the quantity map createFromReceipt ended up using, explicit or seeded. */
     Map<String, BigDecimal> receivedReceiptOverrides;
     /** The selectedLines that map produced — what actually drives the invoice line quantities. */
@@ -147,6 +151,14 @@ public class CreatePurchaseInvoiceHandlerTest {
         @Override
         public void ensureLineGrossAmounts(Invoice invoice) {
           // no-op: tested separately in InvoiceFromOrderSupportTest
+          supportCalls.add("gross");
+        }
+
+        @Override
+        public void alignLineListPrices(Invoice invoice, java.util.Set<String> onlyLineIds) {
+          supportCalls.add("align");
+          alignedInvoice = invoice;
+          alignedScope = onlyLineIds;
         }
 
         // ETP-4780: no-op here so tests that don't stub invoice.getInvoiceLineList()
@@ -155,6 +167,7 @@ public class CreatePurchaseInvoiceHandlerTest {
         @Override
         public void copyLineDiscountsFromOrder(Invoice invoice) {
           copiedDiscountsInvoice = invoice;
+          supportCalls.add("copy");
         }
       };
     }
@@ -307,7 +320,26 @@ public class CreatePurchaseInvoiceHandlerTest {
       assertSame(invoice, result);
       assertSame("createFromOrder must delegate discount copy to getSupport()",
           invoice, handler.copiedDiscountsInvoice);
+      assertAlignedAfterCopyAndBeforeGross(handler, invoice);
     }
+  }
+
+  /**
+   * ETP-5714: the native copy takes the source line's list price exactly, so a line whose source has
+   * none must be given the price as list price (the form's value) — for the whole invoice (scope
+   * {@code null}), after the discount copy (the rule reads the discount) and before the gross
+   * amounts.
+   */
+  private static void assertAlignedAfterCopyAndBeforeGross(TestableHandler handler,
+      Invoice invoice) {
+    assertSame("the list prices are aligned on the new invoice", invoice, handler.alignedInvoice);
+    org.junit.Assert.assertNull("for every line of it", handler.alignedScope);
+    int copy = handler.supportCalls.indexOf("copy");
+    int align = handler.supportCalls.indexOf("align");
+    int gross = handler.supportCalls.indexOf("gross");
+    assertTrue("copy then align then gross: " + handler.supportCalls,
+        copy >= 0 && copy < align && align < gross);
+    assertEquals("once per path", 1, java.util.Collections.frequency(handler.supportCalls, "align"));
   }
 
   /**
@@ -379,6 +411,7 @@ public class CreatePurchaseInvoiceHandlerTest {
       assertSame(invoice, result);
       assertSame("createFromReceipt (linked-PO branch) must delegate discount copy to getSupport()",
           invoice, handler.copiedDiscountsInvoice);
+      assertAlignedAfterCopyAndBeforeGross(handler, invoice);
     }
   }
 
@@ -1174,12 +1207,20 @@ public class CreatePurchaseInvoiceHandlerTest {
       weldUtilsMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(CreateInvoiceLinesFromProcess.class))
           .thenReturn(process);
 
+      // ETP-5714: a line the native copy left with a price and no list price gets the price
+      InvoiceLine copied = mock(InvoiceLine.class);
+      when(copied.getId()).thenReturn("il-nopo");
+      when(copied.getUnitPrice()).thenReturn(new BigDecimal("50"));
+      when(copied.getListPrice()).thenReturn(BigDecimal.ZERO);
+      when(invoice.getInvoiceLineList()).thenReturn(Collections.singletonList(copied));
+
       Invoice result = new CreatePurchaseInvoiceHandler()
           .createFromReceiptNoPo(receipt, Collections.emptyMap());
 
       assertSame(invoice, result);
       verify(invoice).setPriceList(bpPriceList);
       verify(invoice).setCurrency(receiptCurrency);
+      verify(copied).setListPrice(new BigDecimal("50"));
     }
   }
 
@@ -2694,9 +2735,18 @@ public class CreatePurchaseInvoiceHandlerTest {
       HeaderStubHandler handler = new HeaderStubHandler();
       handler.headerToReturn = invoice;
 
+      // ETP-5714: the bulk path keeps no per-line source order, so a copied line with a price and
+      // no list price is aligned like on every other native-copy path
+      InvoiceLine copied = mock(InvoiceLine.class);
+      when(copied.getId()).thenReturn("il-bulk");
+      when(copied.getUnitPrice()).thenReturn(new BigDecimal("50"));
+      when(copied.getListPrice()).thenReturn(BigDecimal.ZERO);
+      when(invoice.getInvoiceLineList()).thenReturn(Collections.singletonList(copied));
+
       Invoice result = handler.createFromReceipts(Arrays.asList("r-1", "r-2"), null);
       assertSame(invoice, result);
       assertEquals(2, handler.receivedReceiptsForHeader.size());
+      verify(copied).setListPrice(new BigDecimal("50"));
 
       ArgumentCaptor<JSONArray> linesCaptor = ArgumentCaptor.forClass(JSONArray.class);
       verify(process).createInvoiceLinesFromDocumentLines(
