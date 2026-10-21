@@ -82,6 +82,8 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  *
  * <p>No database: the pipeline is built over mocked collaborators and the statics are mocked,
  * like {@link NeoAuthenticatorEnvironmentAccessTest}.
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoAuthenticator
  */
 class NeoAuthenticatorSchemeParityTest {
 

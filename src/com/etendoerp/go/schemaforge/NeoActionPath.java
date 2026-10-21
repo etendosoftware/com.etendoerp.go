@@ -32,6 +32,8 @@ public final class NeoActionPath {
   }
 
   /**
+   * Whether a NEO path is an action route, decided by the same parser the servlet dispatches with.
+   *
    * @param pathInfo the servlet path info ({@code /sws/neo} stripped); may be {@code null}
    * @return {@code true} when {@code NeoServlet} would dispatch it as an action route
    */

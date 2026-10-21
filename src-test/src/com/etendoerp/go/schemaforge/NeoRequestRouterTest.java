@@ -67,6 +67,8 @@ import com.etendoerp.go.schemaforge.util.NeoReportCallability;
  * (process/report/window), handleProcessSpecRequest (access denied, GET describe,
  * GET with null process, POST execute, unsupported methods), handleWindowSpecRequest
  * (access denied, spec describe on GET without entity, method not allowed without entity).
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoRequestRouter
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)

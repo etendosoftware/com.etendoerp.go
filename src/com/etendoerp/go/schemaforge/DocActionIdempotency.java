@@ -133,51 +133,34 @@ final class DocActionIdempotency {
 
   private static boolean isAlreadyInStatus(String tabId, String recordId, String status,
       boolean refresh) {
-    BaseOBObject record = DocActionResolution.loadDocActionRecord(tabId, recordId);
+    BaseOBObject document = DocActionResolution.loadDocActionRecord(tabId, recordId);
     Tab tab = OBDal.getInstance().get(Tab.class, tabId);
-    if (record == null || tab == null || tab.getTable() == null) {
+    if (document == null || tab == null || tab.getTable() == null) {
       return false;
     }
     if (refresh) {
-      OBDal.getInstance().refresh(record);
+      OBDal.getInstance().refresh(document);
     }
-    Property statusProperty = statusProperty(tab, record, status);
+    Property statusProperty = statusProperty(tab, document, status);
     if (statusProperty == null) {
       return false;
     }
-    Object current = record.get(statusProperty.getName());
+    Object current = document.get(statusProperty.getName());
     return current != null && status.equals(current.toString());
   }
 
   /**
-   * The single property of {@code record} that is its document status for {@code status}: an
+   * The single property of {@code document} that is its document status for {@code status}: an
    * active List column of the table whose reference list holds the draft status and
    * {@code status}. One query over {@code AD_Ref_List} for all the table's List references; none or
    * several candidate columns mean {@code null} (do not decide).
    */
-  private static Property statusProperty(Tab tab, BaseOBObject record, String status) {
-    Map<String, List<Column>> columnsByReference = new HashMap<>();
-    for (Column column : tab.getTable().getADColumnList()) {
-      if (isActiveListColumn(column)) {
-        columnsByReference.computeIfAbsent(column.getReferenceSearchKey().getId(),
-            id -> new ArrayList<>()).add(column);
-      }
-    }
+  private static Property statusProperty(Tab tab, BaseOBObject document, String status) {
+    Map<String, List<Column>> columnsByReference = listColumnsByReference(tab);
     if (columnsByReference.isEmpty()) {
       return null;
     }
-    Map<String, Set<String>> valuesByReference = new HashMap<>();
-    OBCriteria<org.openbravo.model.ad.domain.List> values = OBDal.getInstance()
-        .createCriteria(org.openbravo.model.ad.domain.List.class);
-    values.add(Restrictions.in(org.openbravo.model.ad.domain.List.PROPERTY_REFERENCE + ".id",
-        columnsByReference.keySet()));
-    values.add(Restrictions.eq(org.openbravo.model.ad.domain.List.PROPERTY_ACTIVE, Boolean.TRUE));
-    values.add(Restrictions.in(org.openbravo.model.ad.domain.List.PROPERTY_SEARCHKEY,
-        DRAFT_STATUS, status));
-    for (org.openbravo.model.ad.domain.List value : values.list()) {
-      valuesByReference.computeIfAbsent(value.getReference().getId(), id -> new HashSet<>())
-          .add(value.getSearchKey());
-    }
+    Map<String, Set<String>> valuesByReference = heldValues(columnsByReference.keySet(), status);
     Property found = null;
     for (Map.Entry<String, List<Column>> entry : columnsByReference.entrySet()) {
       Set<String> held = valuesByReference.get(entry.getKey());
@@ -185,7 +168,7 @@ final class DocActionIdempotency {
         continue;
       }
       for (Column column : entry.getValue()) {
-        Property property = record.getEntity().getPropertyByColumnName(column.getDBColumnName(),
+        Property property = document.getEntity().getPropertyByColumnName(column.getDBColumnName(),
             false);
         if (property == null) {
           continue;
@@ -197,6 +180,35 @@ final class DocActionIdempotency {
       }
     }
     return found;
+  }
+
+  /** The table's active List columns, grouped by their list reference id. */
+  private static Map<String, List<Column>> listColumnsByReference(Tab tab) {
+    Map<String, List<Column>> columnsByReference = new HashMap<>();
+    for (Column column : tab.getTable().getADColumnList()) {
+      if (isActiveListColumn(column)) {
+        columnsByReference.computeIfAbsent(column.getReferenceSearchKey().getId(),
+            id -> new ArrayList<>()).add(column);
+      }
+    }
+    return columnsByReference;
+  }
+
+  /** For each list reference, which of the draft status and {@code status} it holds. */
+  private static Map<String, Set<String>> heldValues(Set<String> referenceIds, String status) {
+    Map<String, Set<String>> valuesByReference = new HashMap<>();
+    OBCriteria<org.openbravo.model.ad.domain.List> values = OBDal.getInstance()
+        .createCriteria(org.openbravo.model.ad.domain.List.class);
+    values.add(Restrictions.in(org.openbravo.model.ad.domain.List.PROPERTY_REFERENCE + ".id",
+        referenceIds));
+    values.add(Restrictions.eq(org.openbravo.model.ad.domain.List.PROPERTY_ACTIVE, Boolean.TRUE));
+    values.add(Restrictions.in(org.openbravo.model.ad.domain.List.PROPERTY_SEARCHKEY,
+        DRAFT_STATUS, status));
+    for (org.openbravo.model.ad.domain.List value : values.list()) {
+      valuesByReference.computeIfAbsent(value.getReference().getId(), id -> new HashSet<>())
+          .add(value.getSearchKey());
+    }
+    return valuesByReference;
   }
 
   private static boolean isActiveListColumn(Column column) {

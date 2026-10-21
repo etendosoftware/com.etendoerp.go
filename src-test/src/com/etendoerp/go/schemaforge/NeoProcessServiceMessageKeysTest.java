@@ -55,6 +55,8 @@ import org.openbravo.model.ad.ui.Process;
  * for {@link ProcessInstance} / {@link Process}. {@code OBMessageUtils.parseTranslation} is
  * mocked statically so the translated text is deterministic and clearly DIFFERENT from the raw
  * message — otherwise a test could not tell "translated" from "passed through unchanged".
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoProcessService
  */
 public class NeoProcessServiceMessageKeysTest {
 

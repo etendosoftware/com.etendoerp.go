@@ -79,6 +79,8 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  * OAuth2 client-credentials token ({@code authenticateOAuth2Token}, reached when the Bearer token
  * fails JWT decoding). All three now call {@code enforceEnvironmentAccess} at the same point —
  * after {@code OBContext} is set up, before {@code applyRequestLanguage} — so they must agree.
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoAuthenticator
  */
 class NeoAuthenticatorEnvironmentAccessTest {
 

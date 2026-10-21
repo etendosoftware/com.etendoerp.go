@@ -68,7 +68,7 @@ class DocActionIdempotencyTest {
   private MockedStatic<DocActionResolution> resolutionStatic;
   private MockedStatic<NeoMessages> messagesStatic;
   private OBDal dal;
-  private BaseOBObject record;
+  private BaseOBObject document;
   private Table table;
   private OBCriteria<org.openbravo.model.ad.domain.List> listCriteria;
   private final List<org.openbravo.model.ad.domain.List> listValues = new java.util.ArrayList<>();
@@ -84,9 +84,9 @@ class DocActionIdempotencyTest {
     messagesStatic.when(() -> NeoMessages.tr("ETGO_DocActionAlreadyApplied"))
         .thenReturn("El documento ya está en ese estado.");
 
-    record = mock(BaseOBObject.class);
+    document = mock(BaseOBObject.class);
     resolutionStatic.when(() -> DocActionResolution.loadDocActionRecord(TAB_ID, RECORD_ID))
-        .thenReturn(record);
+        .thenReturn(document);
     Tab tab = mock(Tab.class);
     table = mock(Table.class);
     when(tab.getTable()).thenReturn(table);
@@ -140,8 +140,8 @@ class DocActionIdempotencyTest {
     Property property = mock(Property.class);
     when(property.getName()).thenReturn(propertyName);
     when(entity.getPropertyByColumnName(column.getDBColumnName(), false)).thenReturn(property);
-    when(record.getEntity()).thenReturn(entity);
-    when(record.get(propertyName)).thenReturn(value);
+    when(document.getEntity()).thenReturn(entity);
+    when(document.get(propertyName)).thenReturn(value);
   }
 
   @ParameterizedTest(name = "{0} on a document already in {0}")
@@ -202,7 +202,7 @@ class DocActionIdempotencyTest {
     bindProperty(first, "lifecycle", "CO");
     listValues("ref-a", "DR", "CO");
     listValues("ref-b", "DR", "CO");
-    Entity entity = record.getEntity();
+    Entity entity = document.getEntity();
     Property other = mock(Property.class);
     when(other.getName()).thenReturn("other");
     when(entity.getPropertyByColumnName("OtherStatus", false)).thenReturn(other);
@@ -274,7 +274,7 @@ class DocActionIdempotencyTest {
 
     assertEquals(200, response.getHttpStatus());
     assertTrue(response.getBody().getBoolean("alreadyApplied"));
-    org.mockito.Mockito.verify(dal).refresh(record);
+    org.mockito.Mockito.verify(dal).refresh(document);
   }
 
   @Test

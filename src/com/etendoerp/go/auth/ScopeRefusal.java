@@ -33,6 +33,8 @@ public final class ScopeRefusal {
   }
 
   /**
+   * The client-safe text of an insufficient-scope refusal.
+   *
    * @param requiredScope the scope the request needed
    * @return the client-safe refusal message
    */
