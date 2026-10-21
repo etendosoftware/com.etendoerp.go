@@ -531,6 +531,8 @@ public class BillingReconciliationService {
     result.item(shortRequest(requestId), row.clientName, ACTION_PROVISION,
         "the attempt failed (" + outcome.code() + ")");
     long attempts = outcome.attempt() == null ? row.attempts : outcome.attempt();
+    // The detail is cut to 200 characters (EtendoGoJwtServlet), so a 23505 text past that is
+    // caught only by the next run's check of the full row.failureReason.
     if (parkIfNoRetryCanFix(row, outcome.code(),
         ProvisioningFailureReason.isRetryableCode(outcome.code()),
         outcome.code() + " " + StringUtils.defaultString(outcome.detail()), attempts, result,

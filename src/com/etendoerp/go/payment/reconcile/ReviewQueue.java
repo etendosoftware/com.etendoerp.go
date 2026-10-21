@@ -38,6 +38,9 @@ final class ReviewQueue {
   private static final String SUMMARY_ATTEMPTS = "attempts";
   private static final String ALERT_EVENT = "billing-reconcile-needs-review";
 
+  /** Review rows this run wrote; the queue lives for one run. */
+  private int writtenThisRun;
+
   /**
    * HQL condition, on a checkout request aliased {@code cr}: it has no open review row. Binds
    * {@code :reviewProvider}, {@code :reviewType} and {@code :reviewOpen} ({@link #bind}).
@@ -97,6 +100,7 @@ final class ReviewQueue {
         summary("code", code, SUMMARY_ATTEMPTS, String.valueOf(attempts)));
     audit.alert("Purchase {} needs manual review ({}): {}", requestId, code, detail);
     if (written) {
+      writtenThisRun++;
       audit.internalAlert(ALERT_EVENT, requestId, code, null);
     }
     result.increment(Counter.NEEDS_REVIEW);
@@ -125,9 +129,12 @@ final class ReviewQueue {
   }
 
   /**
-   * @return how many purchases are parked and not yet released
+   * The purchases parked by earlier runs and still open. A row this run parked is already counted
+   * as a new review, so it is left out here: one parked purchase never reads as two.
+   *
+   * @return how many purchases earlier runs parked that are not yet released
    */
   int countAwaiting() {
-    return store.countOpenReconciliations(EVENT_TYPE);
+    return Math.max(0, store.countOpenReconciliations(EVENT_TYPE) - writtenThisRun);
   }
 }

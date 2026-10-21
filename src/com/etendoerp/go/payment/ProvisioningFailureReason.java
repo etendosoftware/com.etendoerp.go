@@ -94,7 +94,7 @@ public final class ProvisioningFailureReason {
   /**
    * Tells whether a retry can fix the failure recorded in {@code failureReason}.
    *
-   * @param failureReason persisted {@code FAILURE_REASON}
+   * @param failureReason persisted {@code FAILURE_REASON}; null or blank reads as retryable
    * @return {@code false} for a deterministic failure (see {@link #NON_RETRYABLE_CODES})
    */
   static boolean isRetryable(String failureReason) {
@@ -104,10 +104,11 @@ public final class ProvisioningFailureReason {
   /**
    * Tells whether a retry can fix a failure with this code, as an attempt's outcome reports it.
    *
-   * @param failureCode a stable failure code
+   * @param failureCode a stable failure code; null or blank reads as retryable
    * @return {@code false} for a deterministic failure (see {@link #NON_RETRYABLE_CODES})
    */
   public static boolean isRetryableCode(String failureCode) {
-    return !NON_RETRYABLE_CODES.contains(failureCode);
+    // Set.of(...).contains(null) throws, so a missing code is answered before the lookup.
+    return StringUtils.isBlank(failureCode) || !NON_RETRYABLE_CODES.contains(failureCode);
   }
 }

@@ -220,7 +220,7 @@ The phases run in this order, each with its own transactions:
 |---|---|---|---|---|
 | A | Checkout recovery (provider → local) | `CREATED` rows with a session id, older than the paid grace, not backing off | `GET /v1/checkout/sessions/{id}` | `complete` + `paid`/`no_payment_required` → `recordPaid`, then provision (or apply the re-subscription) in B. `expired`, past the abandoned window → `EXPIRED`. `open` → nothing. A failed read → back-off. |
 | B | Provisioning repair | `PAID` rows older than the paid grace (`PAID_AT`, else the creation); `PROVISIONING` rows whose lease is stale or whose failure is retryable; without a created client, or a `PAID` re-subscription; not parked, not backing off | none for a new purchase; `GET /v1/subscriptions/{id}` for a re-subscription | `PaidProvisioningService` under the `claimForProvisioning` lease, or `PaidReactivationService` (decision 15). A non-retryable failure, a unique violation, or an exhausted attempt budget → needs review, once, in the same run, whether the failure was recorded earlier or met by this run's attempt (then alerted once, by the review). |
-| C | No-session-id review | `CREATING` rows older than the abandoned window, not parked | none | parked for review once; the run then counts the open reviews as awaiting |
+| C | No-session-id review | `CREATING` rows older than the abandoned window, not parked | none | parked for review once; the run then counts as awaiting the open reviews earlier runs parked (one parked in this run is counted as a new review only) |
 | D | Subscriptions (local → provider) | open active rows with a Stripe subscription id; preference-route tenants, latest purchase only (decision 9) | `GET /v1/subscriptions?status=all&expand[]=data.latest_invoice` paginated, then `GET /v1/subscriptions/{id}` for every local id the list did not return, up to the batch size | the status mapping of decision 7, applied through `SubscriptionLifecycleApplier` + `TenantEnvironmentLifecycleService.applySubscriptionEvent` on the provider's clock (decision 16), after the no-op diff. Missing price/amount/currency on an open row (the R37 adoption step, register §2.4) is filled from the subscription's first item price, only where NULL. |
 | E | Stale `RECEIVED` sweep | Stripe events of the families whose phases completed, `RECEIVED` older than the threshold, not parked | none | per decision 12: superseded (`IGNORED`), parked for review, or left. |
 
@@ -337,7 +337,7 @@ Billing-event ids are deterministic:
 |---|---|---|
 | payment recorded from the provider | `reconcile:payment-recovered:<requestId>` | `APPLIED` |
 | environment provisioned | `reconcile:provisioned:<requestId>` | `APPLIED` |
-| provisioning failed, retryable | `reconcile:provisioning-failed:<requestId>:<attempt>` | `FAILED` |
+| provisioning attempt failed (every failed attempt; a non-retryable or unique-violation one is also parked for review in the same run) | `reconcile:provisioning-failed:<requestId>:<attempt>` | `FAILED` |
 | needs review (non-retryable failure, missing inputs, no session id, attempts exhausted) | `reconcile:needs-review:<requestId>`, then `…:<requestId>:2`, … after a release | `FAILED` while open; `IGNORED` once released |
 | re-subscription applied | `reconcile:reactivation-applied:<requestId>` | `APPLIED` |
 | back-off after a failed item | `reconcile:retry-later:<requestId>` (one row, refreshed) | `FAILED` |

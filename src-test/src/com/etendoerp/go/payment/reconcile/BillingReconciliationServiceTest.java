@@ -16,6 +16,7 @@ import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockingDetails;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -146,7 +147,13 @@ public class BillingReconciliationServiceTest {
     for (String requestId : parked) {
       when(eventStore.hasOpenReconciliation(ReviewQueue.EVENT_TYPE, requestId)).thenReturn(true);
     }
-    when(eventStore.countOpenReconciliations(ReviewQueue.EVENT_TYPE)).thenReturn(parked.size());
+    // Open review rows as the database would count them: those parked before the run, plus the
+    // ones this run writes (the store mock accepts every write).
+    when(eventStore.countOpenReconciliations(ReviewQueue.EVENT_TYPE)).thenAnswer(call -> parked
+        .size() + (int) mockingDetails(eventStore).getInvocations().stream()
+            .filter(invocation -> "recordReconciliation".equals(invocation.getMethod().getName())
+                && ReviewQueue.EVENT_TYPE.equals(invocation.getArgument(1)))
+            .count());
     when(eventStore.findStaleReceived(any(), any(), any(), anyInt(), anyInt())).thenAnswer(call -> {
       java.util.Collection<?> types = call.getArgument(1, java.util.Collection.class);
       int offset = call.getArgument(3, Integer.class);
@@ -952,6 +959,8 @@ public class BillingReconciliationServiceTest {
         why.capture(), any());
     assertTrue(why.getValue(), why.getValue().contains("NO_SESSION_ID"));
     assertEquals(1, first.get(Counter.NEEDS_REVIEW));
+    assertEquals("Parked in this run, so a new review only, never also awaiting", 0,
+        first.get(Counter.AWAITING_REVIEW));
     assertEquals(1, warnings().size());
     verify(checkoutWrites, never()).recordExpiredPending(anyString());
 
