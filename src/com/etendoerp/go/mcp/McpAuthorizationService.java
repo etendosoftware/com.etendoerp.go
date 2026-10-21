@@ -87,6 +87,7 @@ final class McpAuthorizationService {
       case "etendo_update":
       case "etendo_delete":
       case "etendo_action":
+      case McpConstants.TOOL_NEO_ACTION_BATCH:
       // ETP-5184: all three image-upload tools are write-tier. The two upload tools create an
       // AD_Image row; the status lookup is bundled with them deliberately — it is a step of the
       // write flow and has nothing to offer a read-only session.

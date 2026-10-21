@@ -158,6 +158,19 @@ public class ToolRegistryTest {
   }
 
   /**
+   * ETP-5715: the unknown-argument guard knows {@code etendo_action_batch}'s arguments — {@code ids}
+   * is accepted, the singular {@code id} of {@code etendo_action} is not.
+   */
+  @Test
+  public void testActionBatchDeclaresItsOwnArguments() {
+    java.util.Optional<java.util.Set<String>> declared =
+        ToolRegistry.declaredArgumentNames("etendo_action_batch");
+
+    assertTrue(declared.isPresent());
+    assertEquals(java.util.Set.of("spec", "entity", "action", "ids", "parameters"), declared.get());
+  }
+
+  /**
    * The vector-search tool requires only {@code query} and remains read-only.
    *
    * <p>IMP-41: {@code targets} used to be required, which forced a caller to name an index before

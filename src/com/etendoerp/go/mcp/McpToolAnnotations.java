@@ -76,6 +76,7 @@ final class McpToolAnnotations {
       McpConstants.TOOL_NEO_UPDATE,
       McpConstants.TOOL_NEO_BATCH,
       McpConstants.TOOL_NEO_ACTION,
+      McpConstants.TOOL_NEO_ACTION_BATCH,
       McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN);
 
   private McpToolAnnotations() {

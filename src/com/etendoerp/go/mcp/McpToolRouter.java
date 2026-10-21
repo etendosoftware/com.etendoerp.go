@@ -248,7 +248,9 @@ public class McpToolRouter {
             }
             return handleBatch(arguments);
           case "etendo_action":
-            return handleAction(specName, arguments);
+            return McpActionBatchUnpost.runSingle(specName, arguments, this::handleAction);
+          case McpConstants.TOOL_NEO_ACTION_BATCH:
+            return McpActionBatch.handle(specName, arguments, this::handleAction);
           case McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN:
             return handleGenerateAmortizationPlan(arguments);
           case McpConstants.TOOL_NEO_WIDGET:
@@ -1878,6 +1880,10 @@ public class McpToolRouter {
     // ETP-5558: another tenant's record is a 404 before the customization or the button sees it,
     // the same check the REST action path runs (NeoHookDispatcher).
     NeoResponse foreignRecord = NeoActionRecordGuard.refusalFor(sfEntity, recordId);
+    if (foreignRecord == null) {
+      // ETP-5715: a document action on an id that is no row of the table answers the same 404.
+      foreignRecord = NeoActionRecordGuard.refusalForMissingDocument(sfEntity, recordId, firedName);
+    }
     if (foreignRecord != null) {
       return McpHookExecutor.neoResponseToMcpResult(foreignRecord);
     }

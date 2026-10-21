@@ -445,6 +445,8 @@ final class McpConstants {
   static final String TOOL_NEO_BATCH = "etendo_batch";
   /** Tool name for the document action / process tool. */
   static final String TOOL_NEO_ACTION = "etendo_action";
+  /** Tool name for one document action over several documents, one result each (ETP-5715). */
+  static final String TOOL_NEO_ACTION_BATCH = "etendo_action_batch";
 
   /** Tool name for the business-widget enum tool (gap G4, ETP-4284). */
   static final String TOOL_NEO_WIDGET = "etendo_widget";

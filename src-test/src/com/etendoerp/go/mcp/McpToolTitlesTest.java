@@ -42,7 +42,7 @@ class McpToolTitlesTest {
 
   private static final String[] FIXED_TOOLS = { "etendo_discover", "etendo_list", "etendo_get",
       "etendo_create", "etendo_update", "etendo_delete", "etendo_selectors", "etendo_defaults", "etendo_schema",
-      "etendo_batch", "etendo_action", "etendo_widget", "etendo_vector_search", "etendo_upload_image",
+      "etendo_batch", "etendo_action", "etendo_action_batch", "etendo_widget", "etendo_vector_search", "etendo_upload_image",
       "etendo_request_image_upload", "etendo_get_image_upload", "etendo_generate_amortization_plan",
       "etendo_feedback", "docs" };
 

@@ -430,6 +430,8 @@ final class McpUsageTelemetry {
         return "batch";
       case "etendo_action":
         return "action";
+      case "etendo_action_batch":
+        return "action_batch";
       case "etendo_schema":
         return "schema";
       case "etendo_defaults":

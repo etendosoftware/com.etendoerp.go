@@ -52,4 +52,15 @@ class McpAuthorizationServiceVectorTest {
     org.junit.jupiter.api.Assertions.assertTrue(
         e.getMessage().contains("'etendo:write'"), e.getMessage());
   }
+
+  @Test
+  void actionBatchRequiresTheSameWriteScopeAsEtendoAction() {
+    for (String tool : new String[] {"etendo_action", McpConstants.TOOL_NEO_ACTION_BATCH}) {
+      assertThrows(OBSecurityException.class,
+          () -> McpAuthorizationService.authorizeToolCall(tool, Set.of("etendo:read")), tool);
+      assertThrows(OBSecurityException.class,
+          () -> McpAuthorizationService.authorizeToolCall(tool, Set.of("etendo:process")), tool);
+      McpAuthorizationService.authorizeToolCall(tool, Set.of("etendo:write"));
+    }
+  }
 }

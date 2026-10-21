@@ -3791,6 +3791,7 @@ not: `etendo_create` does not run it in shared code, so it is in the table below
 | line creation of receipts, shipments and invoices (ETP-5713) | the lines CRUD, which is what the SPA's "Add from ..." modals post one line at a time: **not capped** by the server (the modal limits the quantity client-side), invoice-line `salesOrderLine` / `goodsShipmentLine` and header `salesOrder` refused as `read_only_field` on MCP | `etendo_batch` reaches the same CRUD: same refusals, same lack of cap | the declared import actions (`importOrderLines`, `importReceiptLines`, `importShipmentLines`, §4.12.34) are the MCP way to create linked lines: capped by what is pending (drafts included), linked, one transaction. They are served by the same delegates on REST and MCP, so the two channels agree on them; what differs is the CRUD line create, which the actions deliberately do not reuse |
 | availability, `etendo_schema` `id`, entity-name case, message-key hints (ETP-5714) | **not applicable**: the actions view, `availableNow` and the hints are MCP surfaces (`McpActionsView`, `McpToolRouter`); REST has no equivalent view and answers its own bodies | MCP only | declared, not a bug: availability is advisory and never judged by any channel, so a REST call and an MCP call to the same action are refused or served identically by the same handler. The costing retry (409 `costNotCalculated`) is NOT a divergence: it comes from `DocumentPostingService.handleAction`, shared by REST and MCP |
 | the grid price (`listPrice`) of an agent-written order line (ETP-5714) | explicit price → `listPrice` 0 (`OrderLineDiscountSupport`; 17 of 73 order lines in 3 days of local data) | same | declared, not fixed: the invoice-line side now aligns the list price on create, update and every native copy, so an invoice created or imported from such an order shows the price; the order line itself still shows 0,00 until its own helper gets the same rule |
+| document actions over several documents (ETP-5715) | one document per call (`etendo_action`), one transaction, the call's own answer | `etendo_batch` is **create-only and atomic**; it has no ACTION surface | **`etendo_action_batch` is neither: per-document, NOT atomic, capped at 50 ids**, one result per document. Each document runs the `etendo_action` path in its own transaction (commit on success, rollback and a clean session on failure) and the batch carries on after a failure. REST has no equivalent call: the SPA's list toolbar posts one request per record. **Aligned with the SPA (bulk bar, row kebab, form kebab) and the same in single `etendo_action`:** reactivating a *posted* **invoice** un-posts it first (`preUnpostActions`), by per-entity opt-in (`NeoHandler#unpostBeforeReactivate`: goods documents, returns and journals do not, as in the SPA), §4.12.36. In `etendo_action` the un-post is committed in its own transaction before the reactivation, which REST/the SPA do as two requests; amortization's SPA un-posts but the module declares no `unpost` for it, so the MCP does not. **Not aligned, on purpose:** concurrency, the client-side `rowFilter` omission, and the SPA clone dialog stopping at the first failure. Declared in §4.12.36 |
 
 This is a **declared** list, not an unknown one: the point is that the next person to touch either
 path can see what is deliberately unequal. Closing a row means adding the step to
@@ -9041,7 +9042,7 @@ everywhere — every tool stays inside the ERP.
 | `etendo_list`, `etendo_get`, `etendo_schema`, `etendo_discover`, `etendo_selectors`, `etendo_defaults`, `docs`, `etendo_widget`, `etendo_vector_search`, `etendo_get_image_upload`, every `generate_*` report | true | false | true |
 | `etendo_create`, `etendo_request_image_upload`, `etendo_upload_image`, `etendo_feedback` | false | false | false |
 | `etendo_delete` | false | true | true |
-| `etendo_update`, `etendo_batch`, `etendo_action`, `etendo_generate_amortization_plan`, every process tool (`complete_order` …) | false | true (conservative) | false |
+| `etendo_update`, `etendo_batch`, `etendo_action`, `etendo_action_batch`, `etendo_generate_amortization_plan`, every process tool (`complete_order` …) | false | true (conservative) | false |
 
 Fixed in code (`McpToolAnnotations`), with **no `MCP_CONFIG` override**: annotations are per tool,
 and the shared `etendo_update` / `etendo_batch` / `etendo_action` serve every entity, so a per-entity setting
@@ -10078,7 +10079,7 @@ verdict. Shared code names no entity; the handlers' customizations declare their
 |---|---|
 | goods receipt, goods shipment, return to vendor, customer return | `documentAction` (contract): `DR` only, `valuesByStatus` `DR` → CO, `CO` → none, with the "corrected with a return" note; a `docAction` outside `CO` answers 422 with that sentence as `hint`. `importOrderLines` / `importReceiptLines` / `importShipmentLines` and their `available*` lists: `DR` (the `id` is the draft target; ETP-5713). `createPurchaseInvoice`, `createDraftInvoice`, `createPurchaseReturn`, `createReturn`, `rectifiableInvoices`, `createReturnInvoice`: `CO`. `cloneRecord`: any state |
 | return documents | `createReturnInvoice` is also **derived**: a completed return with a non-voided factura rectificativa is `availableNow:false` ("calling it again would NOT be refused and would create a second one"), from `ReturnShipmentUtils.fetchPreviousReturnInvoices`, the query behind `hasReturnInvoice` |
-| purchase and sales invoice | `post`: `CO` and `posted` not `Y`; `unpost`: `CO` and `posted` = `Y`; import actions: `DR`. `documentAction` (AD button, `MCP_CONFIG.valuesByStatus`): `DR` → CO, `IP` → CO, VO, `CO` → RC, RE. Derived: RE is ruled out (`unavailableValues`) when `InvoiceReactivationGuard` would refuse it (fiscally accepted and already rectified) |
+| purchase and sales invoice | `post`: `CO` and `posted` not `Y`; `unpost`: `CO` and `posted` = `Y`; import actions: `DR`. `documentAction` (AD button, `MCP_CONFIG.valuesByStatus`): `DR` → CO, `IP` → CO, VO, `CO` → RC, RE. Derived: RE is ruled out (`unavailableValues`) when `InvoiceReactivationGuard` would refuse it (fiscally accepted and already rectified). `RE` on a posted **invoice** un-posts it first, in `etendo_action` and in `etendo_action_batch` — invoice-only, by opt-in (`NeoHandler#unpostBeforeReactivate`, §4.12.36); when RE is ruled out nothing is un-posted |
 | purchase and sales order | `createGoodsReceipt` / `createShipment`, `createPurchaseInvoice` / `createDraftInvoice`: `CO`. `documentAction` (`MCP_CONFIG.valuesByStatus`): `DR` → CO, VO, PR; `IP` → CO, VO; `CO` → CL, RE. Derived: RE is ruled out while the order has linked shipments, receipts or invoices (`AbstractOrderHeaderHandler.hasLinkedDocuments`, the query behind the UI flag; enforced on the sales order by `OrderReactivationGuard`, only advised on the purchase order) |
 
 The `documentAction` values come from core's `ActionButtonUtility.docAction` (the real transitions), not from the AD list:
@@ -10226,3 +10227,121 @@ the source, and an idempotent SQL file with `md5` guards brings an existing data
 status-field curation (five duplicates, `taxableAmount`), the FK text filter errors, the `etendo_action` response-shape
 unification, the tax selector, `serverResolvedCreateFields` for purchase lines, stale totals after `etendo_update` and the
 mandatory-field i18n. The `sales-order` / `purchase-order` windows still have no spec prompt.
+
+#### 4.12.36 `etendo_action_batch`: one action over several documents, one result each (ETP-5715)
+
+A new MCP tool, next to `etendo_action` and `etendo_batch`. `etendo_batch` stays as it is (creates only, atomic); a call that
+mixes creations and actions is not possible, the tool takes **one** action. Creations still go through `etendo_batch` or
+`etendo_create`.
+
+**Arguments.** `spec`, `entity`, `action`, `ids[]` (1 to **50**), optional `parameters` — the same names and shapes as
+`etendo_action`, with `ids` in place of `id`. The `parameters` are the same for every document and are validated against the
+action's contract exactly as `etendo_action` validates them (`McpDeclaredActions.precheck`).
+
+**What it runs per document.** The very method `etendo_action` runs (`McpToolRouter.handleAction`, handed to `McpActionBatch`
+as an `ActionRunner`), so the logic is shared and not copied: declared-contract check, tenant guard
+(`NeoActionRecordGuard`), the `NeoExtensionDispatcher` customization (ACTION surface, MCP channel) and
+`NeoButtonActionHelper.executeButtonActionCore`. It accepts exactly the actions `etendo_action` accepts for that entity:
+declared contracts, AD buttons (`documentAction` with `parameters:{docAction:'CO'|'RE'|...}`), `post` / `unpost`
+(`DocumentPostingService`), `cloneRecord`. Every document gets a fresh copy of `parameters` (the action path writes the
+record id into the object and a handler may normalise it).
+
+**Semantics (mirrors the SPA's list toolbar).**
+
+| | |
+|---|---|
+| Order | the order of `ids`; documents run one after another (the DAL session is per request, so there is no parallelism to offer) |
+| Transaction | **one per document.** Success: `commitAndClose`. Failure (an error answer or an exception): `rollbackAndClose`. The next document therefore starts on a fresh DAL session |
+| After a failure | **continues with the next document**; the failure is reported, never hidden |
+| Context | the router's administrator mode is checked after every document and put back if a handler lost it |
+| Atomicity | **none, declared**: `"atomic": false` in the answer; `ok:true` documents stay done whatever happens later |
+| Availability (`availableWhen`, ETP-5714) | **advisory, exactly as in `etendo_action`**: no document is refused because the action does not apply to its state; the core's answer is that document's result |
+| Foreign or missing id | answered per document exactly as `etendo_action` answers it (`404`, no leak), and the others still run |
+
+**Refused before anything runs** (`422 validation_error`, `field` names the argument, "Nothing was run."): `ids` missing, not
+an array, empty, longer than `McpActionBatch.MAX_DOCUMENTS` (50), with a non-string element, or **with a repeated id** (a
+document run twice would be completed or cloned twice, so it is refused rather than silently de-duplicated); an unknown entity
+(the router's `entity_not_found` with `available`); an action the entity hides or redirects, parameters the declared contract
+rejects (the same 405/422 `etendo_action` gives), and an action that is neither a declared contract nor an AD button of the
+entity. An unknown spec or a role without access to it is refused by the router before the handler, as for `etendo_action`.
+The tool requires the `etendo:write` scope, like `etendo_action`, and the per-spec check is the same one `etendo_action` runs.
+
+**Answer** (HTTP 200 / not `isError`, even when some documents failed):
+
+```json
+{
+  "spec": "purchase-order", "entity": "header", "action": "documentAction",
+  "summary": {"total": 3, "succeeded": 2, "failed": 1},
+  "atomic": false,
+  "results": [
+    {"id": "A1…", "ok": true,  "status": "success", "result": {"processResult": "success", "processMessage": "…"}},
+    {"id": "B2…", "ok": false, "error": {"processResult": "error", "processMessage": "…"}},
+    {"id": "C3…", "ok": true,  "status": "success", "result": {"processResult": "success", "processMessage": "…"}}
+  ],
+  "hint": "Each document ran in its own transaction: …"
+}
+```
+
+`result` is that document's own `etendo_action` answer (the clone's new id, the handler's JSON, `processResult:"warning"` is
+`status:"warning"`); `error` is its own error envelope (`status`, `error`, `detail`, `hint`, `messageKeys`... or the
+process's `processResult:"error"` body). `hint` appears only when something failed.
+
+**Examples.** *Purchases* — complete three draft purchase orders:
+`etendo_action_batch({spec:"purchase-order", entity:"header", action:"documentAction", ids:[o1,o2,o3], parameters:{docAction:"CO"}})`.
+Clone three purchase invoices: `etendo_action_batch({spec:"purchase-invoice", entity:"header", action:"cloneRecord", ids:[i1,i2,i3]})`
+(each `result` carries the new id). *Sales* — complete three sales invoices:
+`etendo_action_batch({spec:"sales-invoice", entity:"header", action:"documentAction", ids:[v1,v2,v3], parameters:{docAction:"CO"}})`.
+*One failing id among the others* — `ids:[d1, "<an id that is already completed>", d3]` with `docAction:"CO"`: the answer is
+`summary:{total:3, succeeded:2, failed:1}` with the middle result `ok:false` and the core's refusal as its `error`; `d1` and `d3`
+are completed.
+
+**Reactivating a posted document un-posts it first, in `etendo_action_batch` AND in a single `etendo_action` (aligned with the SPA).** The SPA's bulk bar, row kebab and form kebab run
+`runPreUnpost` for the Reactivate entry of the sales and purchase invoice windows (`preUnpost: true` in their `decisions.json`,
+`preUnpostActions={['RE']}` on the bulk bar): when the row is posted (`posted` = `Y`) the `unpost` action runs first and only then
+`RE`; a failed un-post stops that document (nothing is reactivated, the failure is its result) and the next one goes on; and when
+the reactivation is already known to be refused (fiscally accepted and rectified, ETP-5745: "if it can't reactivate, it must not do
+anything") the un-post is skipped. `etendo_action_batch` and a single-document `etendo_action` do the same (ETP-5715 rounds 2 and 3), **derived from structure, with no spec named**
+(`McpActionBatchUnpost`). Both call the one method `McpActionBatchUnpost#unpostFirst`, so they cannot diverge; the single call enters through `McpActionBatchUnpost.runSingle`, wired in `McpToolRouter.route` for the `etendo_action` case only. The step runs for a document when ALL hold: the call is the document-action button (AD column `DocAction`)
+with `docAction` `RE`; the entity's customization **opts in** (`NeoHandler#unpostBeforeReactivate()`, `false` by default; only `SalesInvoiceHeaderHandler` and `PurchaseInvoiceHeaderHandler` answer `true`, because only those windows' SPA un-posts) and **declares an `unpost` action** (`etendo_schema` lists it);
+the table has the standard AD `Posted` column (the one `AcctServer` and `DocumentPostingService` already require on every posted
+table) and it is `Y` for this record, read fresh from the database; and the customization has not declared the reactivation
+unavailable for this record (`NeoHandler#unavailableActions` — for invoices, the same `InvoiceReactivationGuard` condition the SPA
+reads as `reactivationBlocked`). The un-post goes through the very same single-document path as any `etendo_action` (tenant guard,
+declared-contract check, the invoice's completed-and-posted gate). **A foreign id never gets the step:** the gate asks `NeoActionRecordGuard.refusalFor` first, so the call reaches the normal guard and answers a bare `404` with no `steps` to give away that the id exists and is posted.
+**Invoice-only, by opt-in.** Receipts, shipments, both returns, the G/L journal and the matched invoices also declare `unpost` and have a `Posted` column, but their SPA windows deliberately do NOT un-post on Reactivate (asserted by `GoodsReceiptWindow.vitest.jsx` and `return-material-receipt/__tests__/index.test.js`), so they do not opt in and a `RE` on them is exactly what it was. An order, or anything without a declared `unpost`, is untouched too. Amortization's SPA does un-post on Reactivate, but the module declares no `unpost` contract for it, so the MCP cannot and does not (declared divergence below).
+A document's result carries `steps:["unpost","documentAction"]` when the step ran (`steps:["unpost"]` if it failed); a document that
+did not need it has no `steps` key. In a single `etendo_action` the same keys are **added to the action's own answer**, only when the step ran
+(`processResult`/`processMessage` and every other key are unchanged); every other call, `docAction` or entity answers byte for byte as before.
+**MCP path only:** the hook is in `McpToolRouter.route` (`etendo_action` case), not in `handleAction` or `NeoButtonActionHelper`, so the REST action endpoint and the SPA (which
+un-posts on its own and then posts `documentAction RE` to `/sws/neo`) never reach it: a double un-post is impossible. A single call leaves the final commit of the
+reactivation to the request, as every `etendo_action` does; the un-post is committed on its own before it.
+
+**An id that is not a document (ETP-5715, round 5).** A `documentAction` on an id that is no row of the entity's table used to reach the core process, which answered an unrelated *NotCorrectOrgDoctypeInvoice*. `NeoActionRecordGuard.refusalForMissingDocument`, called in `McpToolRouter.handleAction` right after the foreign-record check, now answers the same `404 Record not found` a foreign id gets, so an unknown id and another tenant's id cannot be told apart, in `etendo_action` and per document in `etendo_action_batch`. Only the `DocAction` button (whose id always names a row of the entity's own table) is judged; every other action, whose id may name another table, is untouched. REST and the SPA are unchanged (the check lives in the MCP path only).
+
+**Partial failure, stated plainly.** Each step is its own transaction. *Un-post fails:* that is the document's error, nothing is
+reactivated, the session is rolled back, the next document goes on. *Un-post succeeds, reactivation fails* (or throws): the un-post is
+**already committed and is not undone** — the document stays Completed and un-posted — and the reactivation's own session is rolled
+back. An exception thrown by the reactivation after the un-post is reported the same way, in the batch and in a single `etendo_action` (the single call used to rethrow and lose the news that the un-post had committed). The result is `ok:false`, carries the reactivation's error, `steps:["unpost","documentAction"]` and a `partial` note saying the
+un-post stays. There is no compensating re-post: the SPA leaves the document in the same state, and an automatic re-post would be a
+new accounting write nobody asked for. The note tells the agent to post again if that is wanted.
+
+**Where it still differs from the SPA** (measured in ETP-5715; each left as it is, on purpose):
+
+| | SPA | `etendo_action_batch` | why not aligned |
+|---|---|---|---|
+| Concurrency | per-record requests fired together (`Promise.allSettled`, uncapped) | one document after another | the DAL session is per request: there is nothing to run in parallel on, and a document per transaction in order is easier to read back |
+| `rowFilter` omission | rows that cannot apply (post of an unprocessed row, un-post of an unposted one) are filtered **in the client and never sent** | every id is sent; the core answers per document | availability is advisory (ETP-5714 decision (2)): the server adds no refusal rule of its own, so an omitted row would become a hidden one |
+| Clone | the multi-clone dialog is sequential and **stops at the first failing clone** | continues and reports each | a stop-at-first-failure leaves the rest silently unprocessed; the approved model is a per-document result |
+
+**Further divergences with REST / the SPA, declared (round 5):**
+
+| | REST / SPA | MCP | why |
+|---|---|---|---|
+| Transaction of the un-post in a single `etendo_action` | the SPA sends `unpost` and `documentAction RE` as two requests, each its own transaction | the un-post is committed in a SEPARATE transaction before the reactivation, inside one tool call (if the reactivation then fails the un-post stays, `partial` says so) | the SPA's two requests behave the same; the difference is only that one MCP call carries both |
+| Amortization | the SPA un-posts on Reactivate | the MCP does **not**: the module declares no `unpost` contract for it | inventing one is a separate change; until then a posted amortization must be un-posted with its own SPA action |
+| Which entities un-post | the invoice windows only | the same, by opt-in (`unpostBeforeReactivate`), never by "declares `unpost`" | goods documents, returns and journals declare `unpost` too, and the SPA deliberately leaves them alone |
+| `steps` / `partial` keys | n/a | added to a single answer only when the step ran; a decimal in the body is not re-rendered (the keys are spliced into the rendered text) | additive, so every other answer is byte for byte unchanged |
+| A nonexistent id of a document-action button | REST / the SPA reach the core process and answer its unrelated "not correct organization/doctype" message | MCP answers the same 404 "Record not found" a foreign id gets (`NeoActionRecordGuard.refusalForMissingDocument`, called from `McpToolRouter.handleAction`; `etendo_action` and `etendo_action_batch` alike), only for the `DocAction` button | the old answer hid the real cause and told a caller a foreign id (404) and a missing one (org message) apart, so an id could be probed for existence; the SPA never sends an absent id, so it is left unchanged |
+
+**Tests:** `McpActionBatchTest` (unit, mocked runner and DAL), `McpToolRouterRouteTest` (routing of the tool),
+`ToolRegistryTest`, `McpToolAnnotationsTest`, `McpToolTitlesTest`.

@@ -326,6 +326,25 @@ public interface NeoHandler {
   }
 
   /**
+   * Whether reactivating one of this entity's posted records first un-posts it, exactly as the
+   * SPA's Reactivate does for it (ETP-5715).
+   *
+   * <p>Opt-in on purpose: reversing a document's accounting is not something a reactivation does
+   * everywhere. The SPA un-posts first only in the sales and purchase invoice windows
+   * ({@code preUnpost: true}); goods documents, returns and journals never do, so a customization
+   * answers {@code true} only for the windows whose SPA does. The MCP then un-posts through the
+   * entity's declared {@code unpost} action before a {@code documentAction} {@code RE}, in
+   * {@code etendo_action} and {@code etendo_action_batch} alike. MCP only: REST and the SPA ignore
+   * it, because the SPA already sends the un-post itself.</p>
+   *
+   * @return {@code true} when a posted record is un-posted before it is reactivated; {@code false}
+   *         by default
+   */
+  default boolean unpostBeforeReactivate() {
+    return false;
+  }
+
+  /**
    * Names the actions this handler serves to the SPA but that an agent must never run
    * (ETP-5558), e.g. a bank-initiated payment that ends in an authorization only a person can give.
    *

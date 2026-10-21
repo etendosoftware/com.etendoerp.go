@@ -289,6 +289,8 @@ public class ToolRegistry {
         tools.add(buildBatchTool());
       }
       tools.add(buildActionTool(ToolRegistryActionSpecs.withActionSpecs(accessibleWindowSpecs, actionReportSpecs)));
+      tools.add(McpActionBatch.definition(
+          ToolRegistryActionSpecs.withActionSpecs(accessibleWindowSpecs, actionReportSpecs)));
     }
   }
 
@@ -371,6 +373,7 @@ public class ToolRegistry {
       case McpConstants.TOOL_NEO_SCHEMA:
       case "etendo_batch":
       case "etendo_action":
+      case McpConstants.TOOL_NEO_ACTION_BATCH:
       case McpConstants.TOOL_NEO_WIDGET:
       case McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN:
       // ETP-5184: listed here so resolveSpecName does not derive a spec name from the tool name.
@@ -688,6 +691,7 @@ public class ToolRegistry {
       // ETP-5669: a top-level docAction was silently ignored and the call fell through to the
       // generic executor; the action's own parameters belong under 'parameters'.
       case McpConstants.TOOL_NEO_ACTION: definition = registry.buildActionTool(List.of()); break;
+      case McpConstants.TOOL_NEO_ACTION_BATCH: definition = McpActionBatch.definition(List.of()); break;
       default: return Optional.empty();
     }
     Object props = definition.getInputSchema().get(McpConstants.KEY_PROPERTIES);
@@ -1149,6 +1153,10 @@ public class ToolRegistry {
             + "Which values are legal depends on the record's current state (e.g. "
             + "documentStatus): read the field's 'agentPrompt' for the document's workflow "
             + "rules, and etendo_get the record first if unsure. "
+            + "Reactivating (docAction 'RE') a POSTED document whose entity declares an unpost action "
+            + "(the invoices) un-posts it first, as the app does, and the answer then also carries "
+            + "steps:['unpost','documentAction']; if the reactivation fails after that, the un-post "
+            + "stays done ('partial' says so). "
             + "Returns {processResult: success|error|warning, processMessage: ...}. "
             + "Handler-served actions are listed by etendo_schema view:\"actions\" with a JSON "
             + "Schema for 'parameters' and an 'idDescription' saying what 'id' is; they return "

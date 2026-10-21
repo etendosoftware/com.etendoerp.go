@@ -1826,6 +1826,46 @@ class ToolRegistryGenerateToolsTest {
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:*"));
       assertTrue(toolNames(tools).contains("etendo_action"));
     }
+
+    @Test
+    @DisplayName("etendo_action_batch is published with write scope and withheld from read-only")
+    void actionBatchFollowsTheWriteScope() {
+      SFSpec spec = createWindowSpec(SPEC_SALES_ORDER);
+      when(spec.getADWindow()).thenReturn(null);
+      mockSpecCriteria(List.of(spec));
+
+      assertTrue(toolNames(registry.generateTools(scopesOf("neo:write")))
+          .contains("etendo_action_batch"));
+      assertFalse(toolNames(registry.generateTools(scopesOf("neo:read")))
+          .contains("etendo_action_batch"));
+    }
+
+    @Test
+    @DisplayName("etendo_action_batch offers the same spec enum as etendo_action")
+    @SuppressWarnings("unchecked")
+    void actionBatchOffersTheSameSpecsAsEtendoAction() {
+      SFSpec spec = createWindowSpec(SPEC_SALES_ORDER);
+      when(spec.getADWindow()).thenReturn(null);
+      mockSpecCriteria(List.of(spec));
+
+      List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:write"));
+
+      java.util.function.Function<String, Object> specEnum = toolName -> {
+        McpToolDefinition tool = tools.stream().filter(t -> toolName.equals(t.getName()))
+            .findFirst().orElse(null);
+        assertNotNull(tool, toolName + " must be registered");
+        return ((Map<String, Object>) ((Map<String, Object>) tool.getInputSchema()
+            .get("properties")).get("spec")).get("enum");
+      };
+      assertEquals(specEnum.apply("etendo_action"), specEnum.apply("etendo_action_batch"));
+      assertTrue(((List<String>) specEnum.apply("etendo_action_batch")).contains(SPEC_SALES_ORDER));
+    }
+
+    @Test
+    @DisplayName("isCrudTool returns true for etendo_action_batch (the spec comes from arguments)")
+    void actionBatchIsACrudTool() {
+      assertTrue(ToolRegistry.isCrudTool("etendo_action_batch"));
+    }
   }
 
   // ── write-tool spec enum split (ETP-4254) ─────────────────────────────────

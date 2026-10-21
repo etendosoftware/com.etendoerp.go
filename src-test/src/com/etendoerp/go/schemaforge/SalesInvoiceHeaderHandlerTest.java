@@ -175,6 +175,12 @@ public class SalesInvoiceHeaderHandlerTest {
   /**
    * Verifies that handle returns the register-payment response when the payment handler matches.
    */
+  /** ETP-5715: the invoice window opts into un-posting before a reactivation, like its SPA. */
+  @Test
+  public void testUnpostsBeforeReactivation() {
+    assertTrue(new SalesInvoiceHeaderHandler().unpostBeforeReactivate());
+  }
+
   @Test
   public void testHandleDispatchesToRegisterPaymentHandler() throws Exception {
     NeoCloneRecordHandler mockClone = mock(NeoCloneRecordHandler.class);
