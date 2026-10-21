@@ -66,7 +66,8 @@ public class CreateShipmentHandler implements NeoHandler {
           + "call answers 400 (naming the draft shipment when one covers everything) instead of "
           + "creating another shipment. Complete the shipment afterwards with documentAction "
           + "(docAction CO) on the goods-shipment spec.")
-      .withIdDescription("the id of the sales order to ship");
+      .withIdDescription("the id of the sales order to ship")
+      .availableWhen(DocumentAvailability.WHEN_COMPLETED);
 
   @Override
   public NeoResponse handle(NeoContext context) {

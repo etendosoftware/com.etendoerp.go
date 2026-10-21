@@ -25,6 +25,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 import javax.inject.Inject;
@@ -65,6 +66,8 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
   private static final String FIELD_MOVEMENT_DATE = "movementDate";
   private static final String FIELD_ACCOUNTING_DATE = "accountingDate";
   private static final String ACTION_DOCUMENT_ACTION = "documentAction";
+  private static final String FIELD_INVOICE_STATUS = "invoiceStatus";
+  private static final String FIELD_LINKED_ORDERS = "linkedOrders";
   private static final String FIELD_RESOLVED_PRICE_LIST_ID = "resolvedPriceListId";
   private static final String FIELD_RESOLVED_PRICE_LIST_IDENTIFIER = "resolvedPriceList$_identifier";
 
@@ -102,7 +105,29 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
     contracts.put(CreatePurchaseReturnHandler.CONTRACT.getName(),
         CreatePurchaseReturnHandler.CONTRACT);
     contracts.put(NeoCloneRecordHandler.CONTRACT.getName(), NeoCloneRecordHandler.CONTRACT);
+    contracts.putAll(GoodsPostingContracts.CONTRACTS);
     return contracts;
+  }
+
+  /**
+   * The keys {@link #afterHandle} adds to a GET record that no spec field backs (ETP-5714):
+   * {@code invoiceStatus} (0 to 100: the percentage of the receipt already invoiced),
+   * {@code returnStatus} (the percentage already returned), {@code linkedInvoices},
+   * {@code linkedReturns}, {@code linkedOrders} and the resolved price list. Declared so an MCP
+   * {@code fields:[…]} projection does not report them in {@code unknownFields} while the same
+   * response carries them.
+   */
+  static final Set<String> RESPONSE_ENRICHED_FIELDS = Set.of(FIELD_INVOICE_STATUS, "returnStatus",
+      "linkedInvoices", "linkedReturns", FIELD_LINKED_ORDERS, FIELD_RESOLVED_PRICE_LIST_ID,
+      FIELD_RESOLVED_PRICE_LIST_IDENTIFIER);
+
+  /**
+   * {@inheritDoc} The keys {@link #afterHandle} adds to a GET record (see
+   * {@link #RESPONSE_ENRICHED_FIELDS}).
+   */
+  @Override
+  public Set<String> responseEnrichedFields() {
+    return RESPONSE_ENRICHED_FIELDS;
   }
 
   /** Package-private seam so unit tests can inject a mocked {@link DocumentPostingService}. */
@@ -210,7 +235,7 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
       JSONObject body = context.getPreviousResult().getBody();
       if (context.getRecordId() != null) {
         JSONObject rec = dataArr.getJSONObject(0);
-        rec.put("invoiceStatus", computeInvoiceStatus(context.getRecordId()));
+        rec.put(FIELD_INVOICE_STATUS, computeInvoiceStatus(context.getRecordId()));
         rec.put("returnStatus", computeReturnStatus(context.getRecordId()));
         enrichLinkedInvoices(rec, context.getRecordId());
         enrichLinkedOrder(rec, context.getRecordId());
@@ -223,7 +248,7 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
           JSONObject rec = dataArr.getJSONObject(i);
           String id = rec.optString("id", null);
           if (id != null) {
-            rec.put("invoiceStatus", statusMap.getOrDefault(id, 0));
+            rec.put(FIELD_INVOICE_STATUS, statusMap.getOrDefault(id, 0));
           }
         }
       }
@@ -447,7 +472,7 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
           orders.put(order);
         }
       }
-      rec.put("linkedOrders", orders);
+      rec.put(FIELD_LINKED_ORDERS, orders);
     } catch (Exception e) {
       log.warn("Could not enrich linked orders for receipt {}: {}", receiptId, e.getMessage());
     }
@@ -493,7 +518,7 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
   }
 
   private boolean applyPriceListFromLinkedOrder(JSONObject rec) throws JSONException {
-    JSONArray linkedOrders = rec.optJSONArray("linkedOrders");
+    JSONArray linkedOrders = rec.optJSONArray(FIELD_LINKED_ORDERS);
     if (linkedOrders == null || linkedOrders.length() == 0) {
       return false;
     }

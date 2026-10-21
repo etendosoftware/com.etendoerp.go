@@ -103,7 +103,8 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
             + "that still have quantity to invoice: {data:[{id, documentNo, date, businessPartner, "
             + "businessPartner$_identifier, currency, pendingLines}], hasMore, limit, scanLimit}. hasMore true means the list may be incomplete: it looks at the scanLimit most recent candidates and returns at most limit documents, so a document it does not list may still be importable when you know its id. Pending counts what draft "
             + "invoices already hold. Step 1." + flow)
-        .withIdDescription(DocumentLineImport.ID_OF_THE_DRAFT + doc + " the lines would be imported into."));
+        .withIdDescription(DocumentLineImport.ID_OF_THE_DRAFT + doc + " the lines would be imported into.")
+        .availableWhen(DocumentLineImport.TARGET_IS_DRAFT));
     contracts.put(ACTION_AVAILABLE_LINES, NeoActionContract.read(ACTION_AVAILABLE_LINES,
         "Lists the lines of a " + order + " that can still be invoiced here: {data:[{id, lineNo, "
             + "product, product$_identifier, uOM, pendingQuantity}], hasMore:false}, where pendingQuantity is "
@@ -111,7 +112,8 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
             + "holds, and the id is the sourceLineId importOrderLines takes. Step 2." + flow,
         NeoActionContract.Param.required(PARAM_ORDER_ID, NeoActionContract.TYPE_STRING,
             "Id of an order returned by availableOrders."))
-        .withIdDescription(DocumentLineImport.ID_OF_THE_DRAFT + doc + " the lines would be imported into."));
+        .withIdDescription(DocumentLineImport.ID_OF_THE_DRAFT + doc + " the lines would be imported into.")
+        .availableWhen(DocumentLineImport.TARGET_IS_DRAFT));
     contracts.put(ACTION_IMPORT, NeoActionContract.write(ACTION_IMPORT,
         "Adds lines of a completed " + order + " to this DRAFT " + doc + " (product, unit of "
             + "measure, tax, price and discount copied from the order line, linked to it), in ONE "
@@ -139,7 +141,8 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
             "Each {sourceLineId, quantity}: sourceLineId is the id of a line from "
                 + "availableOrderLines, quantity a number not above its pendingQuantity. Omit to "
                 + "import every pending line in full."))
-        .withIdDescription(DocumentLineImport.ID_OF_THE_DRAFT + doc + " the lines are added to."));
+        .withIdDescription(DocumentLineImport.ID_OF_THE_DRAFT + doc + " the lines are added to.")
+        .availableWhen(DocumentLineImport.TARGET_IS_DRAFT));
     return contracts;
   }
 

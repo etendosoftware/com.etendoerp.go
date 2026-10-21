@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - **Scope is REMOVE-path only.** Do not build anything for the ADD path (a template gaining a new grant, or a role gaining a new inheritance) or the UPDATE path (a template's own existing grant changing level) for `AD_Process_Access`/`OBUIAPP_Process_Access`. Those are the other 6 triggers `WindowAccessOverlapCorruptionGuard` needed and are explicitly deferred — not proven necessary for process/report access yet. This applies to every task below; do not add `onSave`/`onUpdate` handling to either new guard.
-- **Never touch `AD_Window_Access` behavior.** `WindowAccessOverlapCorruptionGuard`'s own 7 triggers stay exactly as they are; Task 3's refactor must be a pure delegation, not a behavior change — every existing test in `UserRoleCompositionServiceOverlapIntegrationTest` and `UserRoleCompositionServiceOverlapReverificationTest` must still pass, unmodified, after the refactor.
+- **Never touch `AD_Window_Access` behavior.** `WindowAccessOverlapCorruptionGuard`'s own 7 triggers stay exactly as they are; Task 3's refactor must be a pure delegation, not a behavior change — every existing test in `UserRoleCompositionServiceOverlapIntegrationTest` and `UserRoleCompositionServiceOverlapReverificationIntegrationTest` must still pass, unmodified, after the refactor.
 - **No hand-typed UUIDs.** Every AD record id used in test fixtures below was looked up via a live, read-only DB query (see each task) — never invent one.
 - **All commits follow `Feature ETP-4830: <description>` (first line ≤ 80 chars), no `Co-Authored-By`.**
 - **Run tests via the ROOT project**, not the module-scoped Gradle task: `cd /Users/gremiger/workspaces/etendogoclean/etendo && ./gradlew test --tests "*ClassName*"`. The module-scoped `:modules:com.etendoerp.go:compileTestJava` reports a false `NO-SOURCE` in this environment — see `santo_4830_roles.md`'s own "Gradle note" for the full explanation. Ignore `*TestSuite > initializationError` failures from a `--tests`-filtered run; they are pre-existing suite-aggregator noise, not a regression signal.
@@ -375,7 +375,7 @@ git commit -m "Feature ETP-4830: Extract shared overlap-winner reconciliation co
 - Consumes: nothing new (plain Hibernate DAL calls).
 - Produces: `TemplateRemovalTracker.markRemoved(String templateId)`, `TemplateRemovalTracker.isBeingRemoved(String templateId)`, `TemplateRemovalTracker.clear()`. `ActiveTemplateInheritance.findActiveTemplatesFor(Role dependent, String excludedInheritanceId)` → `List<Role>`, ordered `AD_Role_Inheritance.SequenceNumber` descending, excluding the given inheritance id and every template `TemplateRemovalTracker.isBeingRemoved` currently reports. Task 3 (refactor) and Task 4 (new guard) both call these.
 
-No dedicated unit test for this task: both methods require a live Hibernate session (`OBCriteria`) exactly like the method they are extracted from (`WindowAccessOverlapCorruptionGuard#findActiveTemplatesFor`), which itself has never had isolated coverage — it is exercised indirectly by every integration test in `UserRoleCompositionServiceOverlapIntegrationTest`/`UserRoleCompositionServiceOverlapReverificationTest` today, and will be exercised the same way by Task 3's regression run and Task 4's new integration test. Task 3's regression-safety step is what actually proves this extraction is behavior-preserving.
+No dedicated unit test for this task: both methods require a live Hibernate session (`OBCriteria`) exactly like the method they are extracted from (`WindowAccessOverlapCorruptionGuard#findActiveTemplatesFor`), which itself has never had isolated coverage — it is exercised indirectly by every integration test in `UserRoleCompositionServiceOverlapIntegrationTest`/`UserRoleCompositionServiceOverlapReverificationIntegrationTest` today, and will be exercised the same way by Task 3's regression run and Task 4's new integration test. Task 3's regression-safety step is what actually proves this extraction is behavior-preserving.
 
 - [ ] **Step 1: Create `TemplateRemovalTracker.java`**
 
@@ -613,7 +613,7 @@ In `WindowAccessOverlapCorruptionGuard.java`:
    ```
    (remove the now-unused `beingRemoved` local variable and, if now unused, the `java.util.Set`/`LinkedHashSet` imports — check first, `Set`/`LinkedHashSet` are still used elsewhere in this file for `seenTemplateIds`/`WindowGrantors`, so only remove an import if a compile warning confirms it is genuinely unused).
 
-Run: `cd /Users/gremiger/workspaces/etendogoclean/etendo && ./gradlew test --tests "*UserRoleCompositionServiceOverlapIntegrationTest*" --tests "*UserRoleCompositionServiceOverlapReverificationTest*"`
+Run: `cd /Users/gremiger/workspaces/etendogoclean/etendo && ./gradlew test --tests "*UserRoleCompositionServiceOverlapIntegrationTest*" --tests "*UserRoleCompositionServiceOverlapReverificationIntegrationTest*"`
 Expected: PASS, every test — same count as before this change (no test added or removed yet).
 
 - [ ] **Step 2: Delegate `findActiveTemplatesFor`'s query body to `ActiveTemplateInheritance`**
@@ -626,7 +626,7 @@ private List<Role> findActiveTemplatesFor(Role dependent, String excludedInherit
 ```
 Add the import: `import com.etendoerp.go.roles.overlap.ActiveTemplateInheritance;`. Leave the method itself in place (still called by `findOtherActiveTemplates` and `findActiveTemplateGrantingFullAccess`) — only its body changes, so every existing caller is untouched. The `@SuppressWarnings("unchecked")` annotation on the old body can now be removed (the cast lives inside `ActiveTemplateInheritance` now); remove it only if the compiler no longer warns without it.
 
-Run: `cd /Users/gremiger/workspaces/etendogoclean/etendo && ./gradlew test --tests "*UserRoleCompositionServiceOverlapIntegrationTest*" --tests "*UserRoleCompositionServiceOverlapReverificationTest*"`
+Run: `cd /Users/gremiger/workspaces/etendogoclean/etendo && ./gradlew test --tests "*UserRoleCompositionServiceOverlapIntegrationTest*" --tests "*UserRoleCompositionServiceOverlapReverificationIntegrationTest*"`
 Expected: PASS, same count as Step 1.
 
 - [ ] **Step 3: Delegate the winner/level decision in `collectWindowGrantors`/`repointWindowIfNeeded` to `OverlapReconciliationCore`**
@@ -687,7 +687,7 @@ private boolean repointWindowIfNeeded(Role dependent, Window window, WindowGrant
 
 Add imports: `import com.etendoerp.go.roles.overlap.GrantCandidate;`, `import com.etendoerp.go.roles.overlap.OverlapReconciliationCore;`, `import com.etendoerp.go.roles.overlap.OverlapWinner;`. `guardRemovedInheritance`'s own body (which calls `collectWindowGrantors`/`repointWindowIfNeeded` in a loop over `grantors.windowsById.values()`) does not need to change — both methods keep their same names and signatures.
 
-Run: `cd /Users/gremiger/workspaces/etendogoclean/etendo && ./gradlew test --tests "*UserRoleCompositionServiceOverlapIntegrationTest*" --tests "*UserRoleCompositionServiceOverlapReverificationTest*"`
+Run: `cd /Users/gremiger/workspaces/etendogoclean/etendo && ./gradlew test --tests "*UserRoleCompositionServiceOverlapIntegrationTest*" --tests "*UserRoleCompositionServiceOverlapReverificationIntegrationTest*"`
 Expected: PASS, same count as Step 1 — in particular `testRemovingOneOfFourTemplatesLeavesTwoRemainingOverlappingTemplatesUnbroken` (the exact 3+-overlapping-template reproduction) must still pass with the delegated logic.
 
 - [ ] **Step 4: Run the FULL module test suite as a final regression check**
@@ -1234,7 +1234,7 @@ Expected: PASS.
 
 - [ ] **Step 5: Run the Task 3 regression suites again (defense in depth — confirm the new guard's shared-code use didn't disturb the window guard)**
 
-Run: `cd /Users/gremiger/workspaces/etendogoclean/etendo && ./gradlew test --tests "*UserRoleCompositionServiceOverlapIntegrationTest*" --tests "*UserRoleCompositionServiceOverlapReverificationTest*"`
+Run: `cd /Users/gremiger/workspaces/etendogoclean/etendo && ./gradlew test --tests "*UserRoleCompositionServiceOverlapIntegrationTest*" --tests "*UserRoleCompositionServiceOverlapReverificationIntegrationTest*"`
 Expected: PASS, same count as Task 3.
 
 - [ ] **Step 6: Commit**

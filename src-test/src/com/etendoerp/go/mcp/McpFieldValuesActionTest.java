@@ -321,6 +321,60 @@ class McpFieldValuesActionTest {
       assertTrue(fields.getJSONObject(0).has(PARAMETERS));
     }
 
+    /**
+     * ETP-5714: {@code documentAction} of a goods receipt is a button AD does not display in the tab,
+     * so the schema builder marked it {@code invokable:false}; but its declared contract IS what
+     * {@code etendo_action} runs, and view:"actions" lists that contract as invokable. The full view
+     * contradicted it until the described button dropped the AD flags and said how to invoke it.
+     */
+    @Test
+    @DisplayName("a button its contract describes is invokable: no invokable:false, invokeVia set")
+    void describedButtonIsInvokable() throws Exception {
+      JSONObject button = adButton().put("name", "documentAction");
+      button.remove("invokeVia");
+      button.put("invokable", false).put("notInvokableReason",
+          "hidden: AD does not display this button in the tab");
+      JSONArray fields = new JSONArray().put(button);
+
+      McpActionsView.describeDeclaredButtons(fields,
+          Map.of("documentAction", NeoActionContract.write("documentAction", "x")));
+
+      JSONObject described = fields.getJSONObject(0);
+      assertFalse(described.has("invokable"), described.toString());
+      assertFalse(described.has("notInvokableReason"), described.toString());
+      assertEquals("etendo_action", described.getString("invokeVia"));
+      assertEquals("documentAction", described.getString("declaredAction"));
+    }
+
+    @Test
+    @DisplayName("a withdrawal made by MCP_CONFIG (redirected, unusable) is NOT undone by the description")
+    void configWithdrawalSurvivesTheDescription() throws Exception {
+      JSONObject button = adButton().put("name", "documentAction");
+      button.remove("invokeVia");
+      button.put("invokable", false).put("notInvokableReason",
+          "Not run through MCP: use another action");
+      JSONArray fields = new JSONArray().put(button);
+
+      McpActionsView.describeDeclaredButtons(fields,
+          Map.of("documentAction", NeoActionContract.write("documentAction", "x")));
+
+      assertFalse(fields.getJSONObject(0).getBoolean("invokable"));
+      assertFalse(fields.getJSONObject(0).has("invokeVia"));
+    }
+
+    @Test
+    @DisplayName("a described button carries the contract's availability too")
+    void describedButtonCarriesAvailability() throws Exception {
+      JSONArray fields = new JSONArray().put(adButton().put("name", "documentAction"));
+
+      McpActionsView.describeDeclaredButtons(fields, Map.of("documentAction",
+          NeoActionContract.write("documentAction", "x").availableWhen(
+              com.etendoerp.go.schemaforge.util.NeoActionAvailability.whenIn("documentStatus", "DR"))));
+
+      assertEquals("DR", fields.getJSONObject(0).getJSONObject("availableWhen")
+          .getJSONArray("documentStatus").getString(0));
+    }
+
     @Test
     @DisplayName("a button no contract describes keeps its reference list")
     void undescribedButtonUnchanged() throws Exception {
