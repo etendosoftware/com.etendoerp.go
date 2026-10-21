@@ -168,6 +168,9 @@ def isolatedDalTests = [
         // ETP-5778: passes alone but trips OBBaseTest's admin-mode check after other classes ran
         // in the same worker (a leaked setAdminMode() from an earlier test), so it gets its own JVM.
         '**/NeoListAggregateQueryIntegrationTest.class',
+        // ETP-5863: same symptom in the merge-block cut; neither the class nor the selector path it
+        // runs calls setAdminMode() unbalanced, so the leak comes from an earlier class in the worker.
+        '**/NeoSelectorServiceValuePagingIntegrationTest.class',
 ]
 
 def isolatedDalTestClasses = [
@@ -185,6 +188,7 @@ def isolatedDalTestClasses = [
         'com.etendoerp.go.schemaforge.NeoCloneRecordHandlerInvoiceLinksIntegrationTest',
         'com.etendoerp.go.schemaforge.ImportOrderLinesIntoInvoiceHandlerIntegrationTest',
         'com.etendoerp.go.schemaforge.handlers.NeoListAggregateQueryIntegrationTest',
+        'com.etendoerp.go.schemaforge.NeoSelectorServiceValuePagingIntegrationTest',
 ]
 
 def commandLineFilterReachesIsolatedGoTest = { requestedTestPatterns ->
