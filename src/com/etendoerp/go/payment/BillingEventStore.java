@@ -382,9 +382,13 @@ public class BillingEventStore implements CheckoutWebhookProcessor.EventStore {
   }
 
   /**
-   * ETP-5048 — records a reconciliation marker row ({@link #RESULT_FAILED}), or, when it already
-   * exists, refreshes it: {@code LAST_DUPLICATE_AT} becomes now, {@code DUPLICATE_COUNT} grows by
-   * one and the reason is replaced. One row per marker, however often it is touched. Commits.
+   * ETP-5048 — refreshes a reconciliation marker row, or records it ({@link #RESULT_FAILED}) when
+   * there is none yet: {@code LAST_DUPLICATE_AT} becomes now, {@code DUPLICATE_COUNT} grows by one
+   * and the reason is replaced. One row per marker, however often it is touched. Commits.
+   *
+   * <p>Update first, insert only when no row matched, so a refresh never logs a duplicate-key
+   * error. Race-safe: an insert that loses to a concurrent one (the deterministic id is unique)
+   * falls back to the update.
    *
    * @param eventId deterministic id
    * @param eventType e.g. {@code reconciliation.retry-later}
@@ -393,12 +397,19 @@ public class BillingEventStore implements CheckoutWebhookProcessor.EventStore {
    */
   public void touchReconciliation(String eventId, String eventType, String requestId,
       String reason) {
-    if (recordReconciliation(eventId, eventType, requestId, RESULT_FAILED, reason, null)) {
+    if (refreshMarker(eventId, reason) > 0) {
       return;
     }
+    if (!recordReconciliation(eventId, eventType, requestId, RESULT_FAILED, reason, null)) {
+      refreshMarker(eventId, reason); // a concurrent caller inserted it first
+    }
+  }
+
+  /** @return how many rows the refresh updated, 0 or 1; committed */
+  private int refreshMarker(String eventId, String reason) {
     Date now = new Date();
-    runAsSystem(() -> {
-      OBDal.getInstance().getSession().createQuery(UPDATE_BILLING_EVENT
+    return runAsSystem(() -> {
+      int updated = OBDal.getInstance().getSession().createQuery(UPDATE_BILLING_EVENT
               + "   set be.duplicateCount = be.duplicateCount + 1,"
               + "       be.lastDuplicateAt = :now,"
               + "       be.failureReason = :reason,"
@@ -410,6 +421,7 @@ public class BillingEventStore implements CheckoutWebhookProcessor.EventStore {
           .setParameter(PARAM_EVENT_ID, StringUtils.trim(eventId))
           .executeUpdate();
       flushAndCommit();
+      return updated;
     });
   }
 

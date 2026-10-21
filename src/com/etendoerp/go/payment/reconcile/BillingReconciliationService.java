@@ -115,6 +115,8 @@ public class BillingReconciliationService {
   private static final String FIELD_METADATA = "metadata";
   private static final String FIELD_REQUEST_ID = "request_id";
   private static final String FIELD_SUBSCRIPTION = "subscription";
+  /** Expands the latest invoice, as phase 4 reads it, so the provider instant is the same. */
+  private static final String EXPAND_LATEST_INVOICE = "?expand%5B%5D=latest_invoice";
   private static final String ITEM_CHECKOUT = "checkout ";
   static final String KIND_STALE_EVENT_REVIEW = "stale-event-review";
   /** Prefix of the review row of a stuck event: {@code reconcile:stale-event-review:<event>}. */
@@ -416,7 +418,8 @@ public class BillingReconciliationService {
     }
     Instant paidAt = null;
     if (row.subscriptionId != null) {
-      JSONObject subscription = retrieve("/v1/subscriptions/", row.subscriptionId, result);
+      JSONObject subscription = retrieve("/v1/subscriptions/", row.subscriptionId,
+          EXPAND_LATEST_INVOICE, result);
       if (subscription == null) {
         retryLater(row.requestId, "the new subscription could not be read", audit);
         return; // counted as a provider error
@@ -623,9 +626,11 @@ public class BillingReconciliationService {
 
   /**
    * A payment event is superseded when its request is past {@code PAID} and nothing of it is
-   * pending (a re-subscription not yet applied waits for phase 2). It is parked when it names no
-   * known request, or when this run read its session and the provider still says unpaid. A request
-   * phase 1 did not reach yet is left.
+   * pending. It is left for a later run while its request is {@code CREATED} and phase 1 has not
+   * read it yet, or is a paid re-subscription phase 2 has not applied yet. Anything else is parked
+   * for review once: it names no known request, the provider contradicts it (its session was read
+   * and is unpaid), or its request is {@code CREATING} or {@code EXPIRED}, which a payment event
+   * should never find and no later run will change.
    */
   private StaleVerdict checkoutEventVerdict(BillingEventStore.StaleEvent event,
       ReconciliationResult result) {
@@ -640,10 +645,15 @@ public class BillingReconciliationService {
     if (paid) {
       return StaleVerdict.SUPERSEDE;
     }
-    if (STATUS_CREATED.equals(row.status) && result.wasCheckoutReread(requestId)) {
-      return StaleVerdict.REVIEW; // the provider says unpaid, the event says paid
+    if (STATUS_CREATED.equals(row.status)) {
+      // Read this run and still unpaid: the provider contradicts the event. Otherwise phase 1
+      // reaches it in a later run.
+      return result.wasCheckoutReread(requestId) ? StaleVerdict.REVIEW : StaleVerdict.LEAVE;
     }
-    return StaleVerdict.LEAVE;
+    if (STATUS_PAID.equals(row.status)) {
+      return StaleVerdict.LEAVE; // a re-subscription phase 2 applies
+    }
+    return StaleVerdict.REVIEW;
   }
 
   /**
@@ -683,9 +693,15 @@ public class BillingReconciliationService {
   // ── Shared ──────────────────────────────────────────────────────────────────────────────
 
   private JSONObject retrieve(String pathPrefix, String id, ReconciliationResult result) {
+    return retrieve(pathPrefix, id, "", result);
+  }
+
+  /** @param query appended after the id, e.g. {@code ?expand%5B%5D=latest_invoice}; may be empty */
+  private JSONObject retrieve(String pathPrefix, String id, String query,
+      ReconciliationResult result) {
     try {
       StripeResponse response = stripe.get(pathPrefix
-          + URLEncoder.encode(id, StandardCharsets.UTF_8));
+          + URLEncoder.encode(id, StandardCharsets.UTF_8) + query);
       if (!response.isSuccess()) {
         log.warn("{} Reading {}{} answered {} ({})", ReconciliationAudit.LOG_PREFIX, pathPrefix,
             id, response.status(), response.errorCode());

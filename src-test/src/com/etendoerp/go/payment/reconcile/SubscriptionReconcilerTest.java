@@ -771,6 +771,51 @@ public class SubscriptionReconcilerTest {
         appliedOutcome(lifecycle.targetForSubscription("sub_r"), paidAt).status());
   }
 
+  /**
+   * Review B (2026-10-21): a correction ignored as stale vouches for nothing. The row stays
+   * PAST_DUE while the provider says active, so a stuck {@code invoice.paid} of this subscription
+   * must be parked for a person, not superseded on the strength of this read.
+   */
+  @Test
+  public void aCorrectionIgnoredAsStaleIsNotNotedAsReRead() throws Exception {
+    Instant failedAt = Instant.ofEpochSecond(1_792_100_000L);
+    activeRow("sub_r", "req-sub_r", "cs_test_r",
+        new StoredState(SubscriptionStatus.PAST_DUE, NOW.minusSeconds(86400), failedAt));
+    // The provider asserts the state at the period start, before the stored failure: stale.
+    listed.put("sub_r", "{\"id\":\"sub_r\",\"status\":\"active\","
+        + "\"current_period_start\":1792000000,\"metadata\":{\"request_id\":\"req-sub_r\"}}");
+
+    ReconciliationResult result = run(false);
+
+    verifyNothingApplied();
+    assertNull(result.rereadSubscriptionStatus("sub_r"));
+  }
+
+  @Test
+  public void aStateThatAlreadyMatchesIsNotedAsReRead() throws Exception {
+    activeRow("sub_ok", "req-sub_ok", "cs_test_ok", CURRENT);
+    list("sub_ok", "active");
+
+    ReconciliationResult result = run(false);
+
+    verifyNothingApplied();
+    assertEquals("active", result.rereadSubscriptionStatus("sub_ok"));
+  }
+
+  @Test
+  public void aTargetTheWebhookWouldIgnoreIsNotNotedAsReRead() throws Exception {
+    provisionedPurchases.add(purchase("req-pref", "cs_test_pref", "sub_pref", "CLIENT-PREF"));
+    when(lifecycle.targetForTenant("CLIENT-PREF", "sub_pref"))
+        .thenReturn(LifecycleTargetFixtures.preferences("CLIENT-PREF", CURRENT))
+        .thenReturn(LifecycleTargetFixtures.ignored("CLIENT-PREF", "subscription closed"));
+    list("sub_pref", "canceled");
+
+    ReconciliationResult result = run(false);
+
+    verifyNothingApplied();
+    assertNull(result.rereadSubscriptionStatus("sub_pref"));
+  }
+
   @Test
   public void aCompleteSweepThatListsNoneOfOurSubscriptionsTripsTheBreaker() throws Exception {
     // One local subscription, a same-mode key, and an account that lists only foreign ones: the

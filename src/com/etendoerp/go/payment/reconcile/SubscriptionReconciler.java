@@ -219,7 +219,11 @@ final class SubscriptionReconciler {
   /**
    * Reconciles one subscription with what the provider says.
    *
-   * @return whether it was reconciled; false for a foreign subscription, which is never touched
+   * @return whether the stored state now agrees with the provider, or the status is one this phase
+   *     deliberately leaves alone (alert-only, or the webhook's grace logic): only then may a stuck
+   *     event of this subscription be superseded on its strength. False for a foreign
+   *     subscription, for a target the webhook would also ignore, for a correction ignored as
+   *     stale, and for a correction that could not be stored
    */
   private boolean reconcile(SubscriptionCandidate candidate, JSONObject subscription,
       ReconciliationResult result, ReconciliationAudit audit) {
@@ -245,29 +249,34 @@ final class SubscriptionReconciler {
     }
     // The provider's clock, never this server's: see SubscriptionLifecycleApplier#providerStateAt.
     Instant providerAt = SubscriptionLifecycleApplier.providerStateAt(subscription);
-    SystemContext.run("reconciling a subscription",
+    return SystemContext.call("reconciling a subscription",
         () -> applyProviderStatus(candidate, subscription, status, providerAt, result, audit));
-    return true;
   }
 
-  private void applyProviderStatus(SubscriptionCandidate candidate, JSONObject subscription,
+  /** @return whether the stored state agrees with the provider afterwards; see reconcile */
+  private boolean applyProviderStatus(SubscriptionCandidate candidate, JSONObject subscription,
       String status, Instant providerAt, ReconciliationResult result,
       ReconciliationAudit audit) {
     LifecycleTarget target = resolveTarget(candidate);
     if (target == null || target.isIgnored()) {
-      return;
+      return false;
     }
     SubscriptionEventOutcome outcome = applier.evaluate(SUBSCRIPTION_UPDATED,
         syntheticEvent(subscription, providerAt), target.storedState());
     if (outcome.isIgnored()) {
-      return;
+      // Typically stale: the stored watermark is newer than what the provider asserted. The stored
+      // state may still disagree (a PAST_DUE row the provider reports active), so nothing is
+      // vouched for and a stuck event of this subscription is parked rather than superseded.
+      return false;
     }
     if (changesStoredState(target, outcome)) {
-      applyOutcome(candidate, target, outcome, providerAt, "provider status " + status, result,
-          audit);
-    } else if (outcome.status() != SubscriptionStatus.EXPIRED && target.subscription() != null) {
+      return applyOutcome(candidate, target, outcome, providerAt, "provider status " + status,
+          result, audit);
+    }
+    if (outcome.status() != SubscriptionStatus.EXPIRED && target.subscription() != null) {
       fillMissingPrice(candidate, target.subscription(), subscription, result, audit);
     }
+    return true;
   }
 
   private void alertPaused(SubscriptionCandidate candidate, ReconciliationResult result,
@@ -329,7 +338,7 @@ final class SubscriptionReconciler {
    * @param eventAt the provider instant the correction is ordered at, stored as the watermark;
    *     null leaves the watermark as it is (an absent subscription has no provider instant)
    */
-  private void applyOutcome(SubscriptionCandidate candidate, LifecycleTarget target,
+  private boolean applyOutcome(SubscriptionCandidate candidate, LifecycleTarget target,
       SubscriptionEventOutcome outcome, Instant eventAt, String why, ReconciliationResult result,
       ReconciliationAudit audit) {
     boolean closes = outcome.status() == SubscriptionStatus.EXPIRED;
@@ -342,7 +351,7 @@ final class SubscriptionReconciler {
         rollbackQuietly();
         result.error(ITEM_SUBSCRIPTION + candidate.subscriptionId + ": the correction could not "
             + "be stored");
-        return;
+        return false;
       }
       if (!audit.write(eventId, kind, candidate.requestId, BillingEventStore.RESULT_APPLIED,
           "Corrected from the provider (" + why + ")", summary(SUMMARY_SUBSCRIPTION,
@@ -355,7 +364,7 @@ final class SubscriptionReconciler {
         audit.alert("Subscription {} of client {} needs review: correction {} is already "
             + "recorded and was not applied again", candidate.subscriptionId, target.clientId(),
             eventId);
-        return;
+        return false;
       }
     }
     audit.repaired("{} subscription {} of client {} ({}{})", closes ? "closed" : "set current",
@@ -366,6 +375,7 @@ final class SubscriptionReconciler {
       // ETP-5046-TRANSITIONAL-FALLBACK
       result.increment(Counter.PREFERENCE_ROUTE_CORRECTED);
     }
+    return true;
   }
 
   /**

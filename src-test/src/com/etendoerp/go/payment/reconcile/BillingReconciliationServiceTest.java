@@ -344,7 +344,7 @@ public class BillingReconciliationServiceTest {
     createdRows.add(reactivationRow(row(REQ, SESSION, ago(20, TimeUnit.MINUTES), "pending")));
     session(SESSION, "complete", "paid", REQ);
     paidRows.add(reactivationRow(paidRow(REQ, ago(1, TimeUnit.MINUTES), 0L, "paid")));
-    when(stripe.get("/v1/subscriptions/sub_new")).thenReturn(new StripeResponse(200,
+    when(stripe.get("/v1/subscriptions/sub_new?expand%5B%5D=latest_invoice")).thenReturn(new StripeResponse(200,
         "{\"id\":\"sub_new\",\"status\":\"active\",\"current_period_start\":1792000000}"));
     when(reactivations.applyIfPending(eq(REQ), any())).thenReturn(true);
 
@@ -363,7 +363,7 @@ public class BillingReconciliationServiceTest {
   public void aReSubscriptionThatCannotBeAppliedFailsTheRunInsteadOfReportingItRecovered()
       throws Exception {
     paidRows.add(reactivationRow(paidRow(REQ, ago(2, TimeUnit.HOURS), 0L, "paid")));
-    when(stripe.get("/v1/subscriptions/sub_new")).thenReturn(new StripeResponse(200,
+    when(stripe.get("/v1/subscriptions/sub_new?expand%5B%5D=latest_invoice")).thenReturn(new StripeResponse(200,
         "{\"id\":\"sub_new\",\"status\":\"active\"}"));
     when(reactivations.applyIfPending(eq(REQ), any()))
         .thenThrow(new IllegalStateException("could not mark productive"));
@@ -843,6 +843,26 @@ public class BillingReconciliationServiceTest {
     verify(eventStore).recordReconciliation(eq("reconcile:stale-event-review:evt_1"),
         anyString(), eq(REQ), eq(BillingEventStore.RESULT_FAILED), any(), any());
     assertEquals(1, result.get(Counter.STALE_EVENTS_PARKED));
+  }
+
+  /** A payment event whose request is CREATING or EXPIRED will never resolve: parked once. */
+  @Test
+  public void aPaymentEventWhoseRequestIsCreatingOrExpiredIsParkedNotLeftForever() {
+    knownRequest("req-creating", "CREATING");
+    knownRequest("req-expired", "EXPIRED");
+    staleEvents.add(new BillingEventStore.StaleEvent("evt_creating",
+        "checkout.session.completed", "req-creating"));
+    staleEvents.add(new BillingEventStore.StaleEvent("evt_expired",
+        "checkout.session.completed", "req-expired"));
+
+    ReconciliationResult result = run(false);
+
+    verify(eventStore, never()).markIgnored(anyString(), anyString());
+    verify(eventStore).recordReconciliation(eq("reconcile:stale-event-review:evt_creating"),
+        anyString(), eq("req-creating"), eq(BillingEventStore.RESULT_FAILED), any(), any());
+    verify(eventStore).recordReconciliation(eq("reconcile:stale-event-review:evt_expired"),
+        anyString(), eq("req-expired"), eq(BillingEventStore.RESULT_FAILED), any(), any());
+    assertEquals(2, result.get(Counter.STALE_EVENTS_PARKED));
   }
 
   @Test
