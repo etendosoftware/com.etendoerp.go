@@ -619,12 +619,12 @@ class FinancialAccountAccountingHandlerTest {
     wireAccountWithLedger();
     FIN_FinancialAccountAccounting existingRow = mock(FIN_FinancialAccountAccounting.class);
     wireFindRowCriteria(existingRow);
-    ElementValue account = mock(ElementValue.class);
-    when(account.isSummaryLevel()).thenReturn(true);
+    ElementValue summaryAccount = mock(ElementValue.class);
+    when(summaryAccount.isSummaryLevel()).thenReturn(true);
     AccountingCombination summary = mock(AccountingCombination.class);
     when(summary.isActive()).thenReturn(true);
     when(summary.getId()).thenReturn("deposit-sum");
-    when(summary.getAccount()).thenReturn(account);
+    when(summary.getAccount()).thenReturn(summaryAccount);
     when(obDal.get(AccountingCombination.class, "deposit-sum")).thenReturn(summary);
     JSONObject body = new JSONObject()
         .put(PARAM_ACCOUNT_ID, ACCOUNT_ID)
