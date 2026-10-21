@@ -1749,8 +1749,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
-   * ETP-5048 — raises the review alert of a paused subscription, once per subscription whatever
-   * path noticed it first. Changes no subscription status, grace anchor or access decision.
+   * ETP-5048 — raises the review alert of a paused subscription, once per pause episode whatever
+   * path noticed it first (a later pause, after a resume was seen, alerts again). Changes no
+   * subscription status, grace anchor or access decision.
    */
   private void raisePausedSubscriptionAlert(String type, JSONObject event) {
     JSONObject data = event.optJSONObject("data");
