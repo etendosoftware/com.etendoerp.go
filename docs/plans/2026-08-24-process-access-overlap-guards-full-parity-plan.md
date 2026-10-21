@@ -14,7 +14,7 @@
 
 - Commit message: first line `Feature ETP-4830: <description>` (<=80 chars), no `Co-Authored-By` trailer.
 - Run tests via the ROOT Etendo project, never the module-scoped Gradle task: `cd /Users/gremiger/workspaces/etendogoclean/etendo && ./gradlew test --tests "..."`.
-- `WindowAccessOverlapCorruptionGuard.java`'s own 7-trigger behavior for `AD_Window_Access` must never change except at the 2 named delegation points (Task 2) — every existing test in `UserRoleCompositionServiceOverlapIntegrationTest`/`UserRoleCompositionServiceOverlapReverificationTest` must keep passing, unmodified, after Task 2.
+- `WindowAccessOverlapCorruptionGuard.java`'s own 7-trigger behavior for `AD_Window_Access` must never change except at the 2 named delegation points (Task 2) — every existing test in `UserRoleCompositionServiceOverlapIntegrationTest`/`UserRoleCompositionServiceOverlapReverificationIntegrationTest` must keep passing, unmodified, after Task 2.
 - No generic adapter/engine shared between the Process and OBUIAPP guards — each is its own independent CDI observer class, per the approved design's "Approach" section.
 - Test fixture discipline (learned the hard way building the original REMOVE-path guard): integration tests that grant access directly to system templates must use FRESH, throwaway system-client (`AD_Client_ID='0'`) template roles, never the 4 real `SystemRoleTemplates` — this shared dev DB has a real pre-existing role ("Classic Role") that already composes 3 of them, and granting to real templates fans out onto it unguarded until a test's own guard code is what's under test.
 - `IsReport='Y'` processes need no special handling anywhere in this plan — `AD_Process_Access` covers reports and processes identically.
@@ -217,7 +217,7 @@ In `WindowAccessOverlapCorruptionGuard.java`:
 2. Add the import: `import com.etendoerp.go.roles.overlap.PropagationTrigger;`
 3. No other change needed — every existing reference (`guardDependentsOf(WindowAccess, PropagationTrigger)`'s parameter type, `onSave`'s `PropagationTrigger.NEW_GRANT`, `onUpdate`'s `PropagationTrigger.UPDATED_GRANT`) resolves identically via the import, since the shared enum has the exact same 2 values in the same order.
 
-Run: `cd /Users/gremiger/workspaces/etendogoclean/etendo && ./gradlew test --tests "*UserRoleCompositionServiceOverlapIntegrationTest*" --tests "*UserRoleCompositionServiceOverlapReverificationTest*"`
+Run: `cd /Users/gremiger/workspaces/etendogoclean/etendo && ./gradlew test --tests "*UserRoleCompositionServiceOverlapIntegrationTest*" --tests "*UserRoleCompositionServiceOverlapReverificationIntegrationTest*"`
 Expected: PASS, every test — same count as before this change.
 
 - [ ] **Step 2: Delegate `findActiveTemplateGrantingFullAccess`'s decision to `findJustifyingFullGrant`**
@@ -246,7 +246,7 @@ Replace the body of the 3-argument overload:
 
 Leave the no-exclusion 2-argument overload (`findActiveTemplateGrantingFullAccess(Role, Window)` → delegates to the 3-arg one with `null`) exactly as-is — it already just calls the 3-arg overload, no change needed. No new imports are needed (`Map`, `LinkedHashMap`, `List`, `ArrayList`, `GrantCandidate`, `OverlapReconciliationCore` are all already imported in this file from the original item 7 Task 3 refactor).
 
-Run: `cd /Users/gremiger/workspaces/etendogoclean/etendo && ./gradlew test --tests "*UserRoleCompositionServiceOverlapIntegrationTest*" --tests "*UserRoleCompositionServiceOverlapReverificationTest*"`
+Run: `cd /Users/gremiger/workspaces/etendogoclean/etendo && ./gradlew test --tests "*UserRoleCompositionServiceOverlapIntegrationTest*" --tests "*UserRoleCompositionServiceOverlapReverificationIntegrationTest*"`
 Expected: PASS, same count as Step 1 — in particular `testDowngradingOneOfTwoOverlappingTemplatesNeverDowngradesDependentWhenTheOtherStillGrantsFullAccess` and `testGainingReadOnlyTemplateInheritanceNeverDowngradesExistingFullAccess` (the two tests that most directly exercise this method) must still pass identically.
 
 - [ ] **Step 3: Run the full module regression suite as a final check**
@@ -671,7 +671,7 @@ Expected: PASS, all 4 tests (the 3 new ones plus the pre-existing REMOVE-path on
 
 - [ ] **Step 5: Run the window-guard regression suites (defense in depth)**
 
-Run: `cd /Users/gremiger/workspaces/etendogoclean/etendo && ./gradlew test --tests "*UserRoleCompositionServiceOverlapIntegrationTest*" --tests "*UserRoleCompositionServiceOverlapReverificationTest*"`
+Run: `cd /Users/gremiger/workspaces/etendogoclean/etendo && ./gradlew test --tests "*UserRoleCompositionServiceOverlapIntegrationTest*" --tests "*UserRoleCompositionServiceOverlapReverificationIntegrationTest*"`
 Expected: PASS, same count as Task 2.
 
 - [ ] **Step 6: Commit**
@@ -904,7 +904,7 @@ Expected: PASS, all 6 tests.
 
 - [ ] **Step 5: Run the window-guard regression suites**
 
-Run: `cd /Users/gremiger/workspaces/etendogoclean/etendo && ./gradlew test --tests "*UserRoleCompositionServiceOverlapIntegrationTest*" --tests "*UserRoleCompositionServiceOverlapReverificationTest*"`
+Run: `cd /Users/gremiger/workspaces/etendogoclean/etendo && ./gradlew test --tests "*UserRoleCompositionServiceOverlapIntegrationTest*" --tests "*UserRoleCompositionServiceOverlapReverificationIntegrationTest*"`
 Expected: PASS, unchanged.
 
 - [ ] **Step 6: Commit**
@@ -2029,7 +2029,7 @@ Expected: PASS, all 6 tests.
 - [ ] **Step 5: Run the FULL package regression suite (final check for this plan)**
 
 Run: `cd /Users/gremiger/workspaces/etendogoclean/etendo && ./gradlew test --tests "com.etendoerp.go.roles.*"`
-Expected: BUILD SUCCESSFUL. Every test in the package green (known `*TestSuite` noise aside): `OverlapReconciliationCoreTest` (11 tests), `TemplateRemovalTrackerTest`, `UserRoleCompositionServiceOverlapIntegrationTest` (unchanged), `UserRoleCompositionServiceOverlapReverificationTest` (unchanged), `ProcessAccessOverlapCorruptionGuardIntegrationTest` (6 tests), `ObuiappProcessAccessOverlapCorruptionGuardIntegrationTest` (6 tests), plus every other pre-existing test in the package.
+Expected: BUILD SUCCESSFUL. Every test in the package green (known `*TestSuite` noise aside): `OverlapReconciliationCoreTest` (11 tests), `TemplateRemovalTrackerTest`, `UserRoleCompositionServiceOverlapIntegrationTest` (unchanged), `UserRoleCompositionServiceOverlapReverificationIntegrationTest` (unchanged), `ProcessAccessOverlapCorruptionGuardIntegrationTest` (6 tests), `ObuiappProcessAccessOverlapCorruptionGuardIntegrationTest` (6 tests), plus every other pre-existing test in the package.
 
 - [ ] **Step 6: Commit**
 

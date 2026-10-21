@@ -190,6 +190,7 @@ abstract class AbstractInvoiceLineImportHandler extends AbstractLineImportHandle
   /** Only the new lines are touched: the draft may hold others, edited or deliberately zero. */
   private void postProcess(Invoice invoice, Set<String> addedIds) {
     getSupport().copyLineDiscountsFromOrder(invoice, addedIds);
+    getSupport().alignLineListPrices(invoice, addedIds);
     getSupport().ensureLineGrossAmounts(invoice, addedIds);
   }
 

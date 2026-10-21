@@ -1050,7 +1050,8 @@ public class ReturnToVendorShipmentHeaderHandlerTest {
     java.util.Map<String, NeoActionContract> contracts = handler.actionContracts();
 
     assertEquals(java.util.List.of("availableReceipts", "availableReceiptLines",
-        "importReceiptLines", "rectifiableInvoices", "createReturnInvoice", "documentAction"),
+        "importReceiptLines", "rectifiableInvoices", "createReturnInvoice", "post", "unpost",
+        "documentAction"),
         java.util.List.copyOf(contracts.keySet()));
     assertFalse(contracts.get("availableReceipts").isMutating());
     assertFalse(contracts.get("availableReceiptLines").isMutating());
@@ -1069,6 +1070,11 @@ public class ReturnToVendorShipmentHeaderHandlerTest {
       NeoResponse result = handler.handle(ctx);
       if ("documentAction".equals(action)) {
         assertNull("completion is the native process", result);
+        continue;
+      }
+      if ("post".equals(action) || "unpost".equals(action)) {
+        // ETP-5714: served by DocumentPostingService, which handle() consults first; it is not
+        // injected here, so handle() falls through exactly as for any action the entity leaves out.
         continue;
       }
       assertNotNull(action + " is dispatched by handle()", result);
@@ -1792,5 +1798,19 @@ public class ReturnToVendorShipmentHeaderHandlerTest {
   /** Reads the human-readable message out of a {@code NeoResponse.error} payload. */
   private static String errorMessage(NeoResponse response) {
     return response.getBody().optJSONObject("error").optString("message", null);
+  }
+
+  /**
+   * ETP-5714: the keys ReturnToVendorShipmentHeaderHandler's afterHandle adds to a GET record are declared, so an MCP
+   * {@code fields:[…]} projection does not report them in {@code unknownFields} while the same
+   * response carries them.
+   */
+  @org.junit.jupiter.api.Test
+  @org.junit.jupiter.api.DisplayName("return to vendor: enriched response keys are declared")
+  void enrichedKeysAreDeclaredReturnToVendorShipmentHeaderHandler() {
+    java.util.Set<String> declared = new ReturnToVendorShipmentHeaderHandler().responseEnrichedFields();
+    for (String key : java.util.List.of("sourceReceipts", "sourceReceiptDocNo", "returnInvoices", "hasReturnInvoice", "linesCount", "invoiceStatus")) {
+      org.junit.jupiter.api.Assertions.assertTrue(declared.contains(key), key + " in " + declared);
+    }
   }
 }

@@ -26,6 +26,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 import javax.inject.Inject;
@@ -121,7 +122,28 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
     contracts.put(CreateReturnReceiptHandler.CONTRACT.getName(),
         CreateReturnReceiptHandler.CONTRACT);
     contracts.put(NeoCloneRecordHandler.CONTRACT.getName(), NeoCloneRecordHandler.CONTRACT);
+    contracts.putAll(GoodsPostingContracts.CONTRACTS);
     return contracts;
+  }
+
+  /**
+   * The keys {@link #afterHandle} adds to a GET record that no spec field backs (ETP-5714):
+   * {@code invoiceStatus} (0 to 100: the percentage of the shipment already invoiced),
+   * {@code linkedOrders}, {@code linkedInvoices}, {@code returnReceipts}, {@code canCreateReturn},
+   * {@code issuerOrg} and the resolved price list. Declared so an MCP {@code fields:[…]}
+   * projection does not report them in {@code unknownFields} while the same response carries them.
+   */
+  static final Set<String> RESPONSE_ENRICHED_FIELDS = Set.of(FIELD_INVOICE_STATUS,
+      FIELD_LINKED_ORDERS, "linkedInvoices", "returnReceipts", "canCreateReturn", "issuerOrg",
+      FIELD_RESOLVED_PRICE_LIST_ID, FIELD_RESOLVED_PRICE_LIST_IDENTIFIER);
+
+  /**
+   * {@inheritDoc} The keys {@link #afterHandle} adds to a GET record (see
+   * {@link #RESPONSE_ENRICHED_FIELDS}).
+   */
+  @Override
+  public Set<String> responseEnrichedFields() {
+    return RESPONSE_ENRICHED_FIELDS;
   }
 
   @Override

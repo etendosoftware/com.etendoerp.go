@@ -3817,14 +3817,112 @@ public class NeoDefaultsServiceTest {
       parentMock.when(() -> NeoParentValuesLoader.load(adTab, null))
           .thenReturn(java.util.Collections.emptyMap());
 
+      cascadeMock.when(() -> NeoDefaultsCascadeHelper.injectSafeTypeDefault(
+          eq(body), eq("processingStatus"), eq(flagCol))).thenAnswer(inv -> {
+            body.put("processingStatus", "N");
+            return null;
+          });
+
       NeoMandatoryDefaultsService.injectMandatoryDefaults(body, adTab, ctx);
 
       // The mandatory column must reach the safe-type fallback — proving the !mandatory gate
       // does NOT short-circuit mandatory columns (NOT NULL parity preserved).
       cascadeMock.verify(() -> NeoDefaultsCascadeHelper.injectSafeTypeDefault(
           eq(body), eq("processingStatus"), eq(flagCol)));
+      // ETP-5669: and the placeholder is recorded, so the create's cascade may refine it.
+      assertTrue(ctx.getFallbackDefaults().contains("processingStatus"));
     }
   }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testInjectMandatoryDefaultsRecordsAFirstComboPickAsAFallback() {
+    JSONObject body = new JSONObject();
+    Tab adTab = mock(Tab.class);
+    Table table = mock(Table.class);
+    OBContext obContext = mock(OBContext.class);
+    SFEntity sfEntity = mock(SFEntity.class);
+    Entity dalEntity = mock(Entity.class);
+    VariablesSecureApp vars = mock(VariablesSecureApp.class);
+    OBDal obDal = mock(OBDal.class);
+
+    // Mandatory non-FK column with no AD default, no session, no parent value. Passes 1-3
+    // fail; because it IS mandatory, execution must continue past the !mandatory gate and
+    // reach the NOT-NULL fallbacks (combo lookup, then injectSafeTypeDefault).
+    Column flagCol = mock(Column.class);
+    when(flagCol.getDBColumnName()).thenReturn("ProcessingStatus");
+    when(flagCol.isMandatory()).thenReturn(true);
+    when(flagCol.isActive()).thenReturn(true);
+    when(flagCol.isKeyColumn()).thenReturn(false);
+    when(flagCol.getDefaultValue()).thenReturn(null);
+    when(flagCol.isLinkToParentColumn()).thenReturn(false);
+    when(flagCol.isUseAutomaticSequence()).thenReturn(false);
+
+    Property flagProp = mock(Property.class);
+    when(flagProp.getName()).thenReturn("processingStatus");
+    when(flagProp.isAuditInfo()).thenReturn(false);
+    when(dalEntity.getPropertyByColumnName("ProcessingStatus")).thenReturn(flagProp);
+
+    when(adTab.getTable()).thenReturn(table);
+    when(table.getId()).thenReturn("TABLE-FLAG");
+    when(table.getADColumnList()).thenReturn(Collections.singletonList(flagCol));
+
+    when(vars.getSessionValue(anyString())).thenReturn("");
+
+    OBCriteria<SFField> sfFieldCriteria = mock(OBCriteria.class);
+    when(sfFieldCriteria.add(any())).thenReturn(sfFieldCriteria);
+    when(sfFieldCriteria.list()).thenReturn(Collections.emptyList());
+    when(obDal.createCriteria(SFField.class)).thenReturn(sfFieldCriteria);
+    when(sfEntity.getId()).thenReturn("entity-flag");
+
+    NeoContext ctx = NeoContext.builder()
+        .sfEntity(sfEntity)
+        .obContext(obContext)
+        .build();
+
+    try (MockedStatic<ModelProvider> modelMock = mockStatic(ModelProvider.class);
+         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
+         MockedStatic<NeoDefaultsCascadeHelper> cascadeMock =
+             mockStatic(NeoDefaultsCascadeHelper.class);
+         MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
+         MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class);
+         MockedStatic<NeoSelectorService> selectorMock = mockStatic(NeoSelectorService.class);
+         MockedStatic<NeoParentValuesLoader> parentMock =
+             mockStatic(NeoParentValuesLoader.class);
+         MockedStatic<NeoDefaultsService> defaultsMock =
+             mockStatic(NeoDefaultsService.class, org.mockito.Mockito.CALLS_REAL_METHODS)) {
+      // ETP-5669: the first-combo branch fills the key (GL_Journal.C_Period_ID's case).
+      defaultsMock.when(() -> NeoDefaultsService.resolveFirstComboOption(eq(flagCol), any()))
+          .thenReturn("FIRST-ROW");
+      defaultsMock.when(() -> NeoDefaultsService.tryInjectIdentifier(any(), any(), anyString(),
+          anyString())).thenAnswer(inv -> null);
+      ModelProvider mp = mock(ModelProvider.class);
+      modelMock.when(ModelProvider::getInstance).thenReturn(mp);
+      when(mp.getEntityByTableId("TABLE-FLAG")).thenReturn(dalEntity);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      obContextMock.when(() -> OBContext.setAdminMode(true)).thenAnswer(inv -> null);
+      obContextMock.when(OBContext::restorePreviousMode).thenAnswer(inv -> null);
+      calloutMock.when(() -> NeoCalloutService.buildVars(obContext, adTab)).thenReturn(vars);
+      utilityMock.when(() -> Utility.getPreference(eq(vars), eq("ProcessingStatus"), anyString()))
+          .thenReturn(null);
+      docTypeMock.when(() -> DocTypeResolver.resolveDefaultDocTypeId(eq(flagCol), any()))
+          .thenReturn(null);
+      // Combo first-pick (pass 4) returns no combo reference, so pass 5 (safe-type) must run.
+      selectorMock.when(() -> NeoSelectorService.getBaseReferenceId(flagCol)).thenReturn("10");
+      parentMock.when(() -> NeoParentValuesLoader.load(adTab, null))
+          .thenReturn(java.util.Collections.emptyMap());
+
+      NeoMandatoryDefaultsService.injectMandatoryDefaults(body, adTab, ctx);
+
+      assertEquals("FIRST-ROW", body.optString("processingStatus"));
+      cascadeMock.verify(() -> NeoDefaultsCascadeHelper.injectSafeTypeDefault(any(), anyString(),
+          any()), never());
+      assertTrue(ctx.getFallbackDefaults().contains("processingStatus"));
+    }
+  }
+
 
   // ═══════════════════════════════════════════════════════════════════════════
   // injectMandatoryDefaults — a business partner created without IsProspect gets

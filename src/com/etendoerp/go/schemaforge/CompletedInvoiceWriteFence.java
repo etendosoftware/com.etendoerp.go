@@ -139,6 +139,18 @@ public final class CompletedInvoiceWriteFence {
       "createdBy", "parentId", "recordTime");
 
   static final String CODE_FIELDS_LOCKED = "completed_invoice_fields_locked";
+  /**
+   * What to do to change a field a completed invoice has locked (ETP-5714): reactivate it, edit,
+   * complete again. Reactivation is itself guarded ({@link InvoiceReactivationGuard}: a fiscally
+   * accepted invoice already rectified cannot be reactivated), so the hint points at the actions
+   * view, which reports whether {@code RE} applies to this very invoice.
+   */
+  static final String HINT_REACTIVATE_FIRST = "To change any other field, reactivate the invoice "
+      + "first (etendo_action documentAction with docAction RE), edit it, then complete it again. "
+      + "Reactivation can be refused, for example for an invoice a fiscal system accepted that is "
+      + "already rectified: etendo_schema(view:'actions', id:<invoice id>) says whether RE is "
+      + "available for this invoice now.";
+
   static final String CODE_POSTED_LOCKED = "posted_invoice_fields_locked";
   static final String CODE_STATUS_LOCKED = "invoice_status_fields_locked";
   static final String CODE_SII_SENT_LOCKED = "sii_sent_invoice_fields_locked";
@@ -286,7 +298,7 @@ public final class CompletedInvoiceWriteFence {
       return reject(CODE_FIELDS_LOCKED, MSG_FIELDS_LOCKED, refused, editableWhenCompleted, null,
           "This invoice is completed, so @fields@ can no longer be changed. Fields that can still "
               + "be changed: @allowedFields@.",
-          null);
+          HINT_REACTIVATE_FIRST);
     }
     if (changed.contains(FIELD_ORDER_REFERENCE) && Boolean.TRUE.equals(invoice.isAeatsiiIssent())
         && !Boolean.TRUE.equals(invoice.isSalesTransaction())) {

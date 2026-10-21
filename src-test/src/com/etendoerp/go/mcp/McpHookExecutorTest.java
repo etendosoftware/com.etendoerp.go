@@ -264,6 +264,82 @@ public class McpHookExecutorTest {
     assertFalse(envelope.has("hint"));
   }
 
+  /**
+   * ETP-5714: core's "Documento ya procesado" (message key {@code 20501}) gets a hint that names
+   * reactivation and the actions view, wherever the key sits — keyed on the message identity, never
+   * on the entity — and a body that already carries its own hint keeps it.
+   */
+  @Test
+  public void testNeoResponseToMcpResultAddsProcessedDocumentHint() throws Exception {
+    JSONObject flat = new JSONObject().put("message", "Documento ya procesado")
+        .put("messageKeys", new JSONArray().put("20501"));
+    JSONObject nested = new JSONObject().put("error", new JSONObject()
+        .put("message", "Documento ya procesado").put("status", 400)
+        .put("messageKeys", new JSONArray().put("20501")));
+
+    for (JSONObject body : List.of(flat, nested)) {
+      JSONObject result = McpHookExecutor.neoResponseToMcpResult(NeoResponse.error(400, body));
+      JSONObject envelope = new JSONObject(
+          result.getJSONArray(FIELD_CONTENT).getJSONObject(0).getString(FIELD_TEXT));
+      assertEquals(McpToolRouter.DOCUMENT_PROCESSED_HINT, envelope.getString("hint"));
+    }
+    assertTrue(McpToolRouter.DOCUMENT_PROCESSED_HINT.contains("documentAction RE"));
+    assertTrue(McpToolRouter.DOCUMENT_PROCESSED_HINT.contains("view:'actions'"));
+    assertFalse("the hint is keyed by message, not entity: no goods-specific wording",
+        McpToolRouter.DOCUMENT_PROCESSED_HINT.contains("goods"));
+
+    JSONObject own = new JSONObject().put("message", "x").put("hint", "mine")
+        .put("messageKeys", new JSONArray().put("20501"));
+    JSONObject kept = new JSONObject(McpHookExecutor.neoResponseToMcpResult(
+        NeoResponse.error(400, own)).getJSONArray(FIELD_CONTENT).getJSONObject(0)
+        .getString(FIELD_TEXT));
+    assertEquals("mine", kept.getString("hint"));
+  }
+
+  /** The two keyed hints do not leak into each other, and a key that merely contains 20501 is not it. */
+  @Test
+  public void testMessageKeyHintsAreKeyedExactly() throws Exception {
+    JSONObject period = new JSONObject().put("message", "p")
+        .put("messageKeys", new JSONArray().put("PeriodNotAvailable"));
+    JSONObject lookalike = new JSONObject().put("message", "l")
+        .put("messageKeys", new JSONArray().put("205010"));
+
+    JSONObject periodEnvelope = new JSONObject(McpHookExecutor.neoResponseToMcpResult(
+        NeoResponse.error(400, period)).getJSONArray(FIELD_CONTENT).getJSONObject(0)
+        .getString(FIELD_TEXT));
+    JSONObject lookalikeEnvelope = new JSONObject(McpHookExecutor.neoResponseToMcpResult(
+        NeoResponse.error(400, lookalike)).getJSONArray(FIELD_CONTENT).getJSONObject(0)
+        .getString(FIELD_TEXT));
+
+    assertEquals(McpToolRouter.PERIOD_NOT_AVAILABLE_HINT, periodEnvelope.getString("hint"));
+    assertFalse(lookalikeEnvelope.has("hint"));
+  }
+
+  /**
+   * ETP-5714: the retryable posting refusal keeps its own code through the MCP funnel, with the
+   * 409, {@code retryable} and {@code retryAfterSeconds}, instead of the generic code the status
+   * would give it.
+   */
+  @Test
+  public void testNeoResponseToMcpResultKeepsTheCostNotCalculatedCode() throws Exception {
+    JSONObject body = new JSONObject().put("success", false)
+        .put("message", "Cost has not yet been calculated for all products in the document.")
+        .put("messageKeys", new JSONArray().put("NotCalculatedCost"))
+        .put("error", "costNotCalculated").put("status", 409).put("retryable", true)
+        .put("retryAfterSeconds", 30).put("hint", "wait");
+
+    JSONObject result = McpHookExecutor.neoResponseToMcpResult(NeoResponse.error(409, body));
+
+    assertTrue(result.getBoolean(FIELD_IS_ERROR));
+    JSONObject envelope = new JSONObject(
+        result.getJSONArray(FIELD_CONTENT).getJSONObject(0).getString(FIELD_TEXT));
+    assertEquals("costNotCalculated", envelope.getString("error"));
+    assertEquals(409, envelope.getInt(FIELD_STATUS));
+    assertTrue(envelope.getBoolean("retryable"));
+    assertEquals(30, envelope.getInt("retryAfterSeconds"));
+    assertEquals("wait", envelope.getString("hint"));
+  }
+
   // ── runPreHook ────────────────────────────────────────────────────────
 
   @Test

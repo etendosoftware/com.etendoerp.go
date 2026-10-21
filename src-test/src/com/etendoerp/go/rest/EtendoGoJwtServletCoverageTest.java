@@ -107,6 +107,7 @@ import com.etendoerp.go.payment.ProvisioningFailureReason;
 import com.etendoerp.go.payment.EnvironmentPlanCache;
 import com.etendoerp.go.payment.SubscriptionModelSwitch;
 import com.etendoerp.go.payment.SubscriptionService;
+import com.etendoerp.go.payment.EnvironmentAccessPolicy;
 import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.payment.TenantPlanService;
 import com.etendoerp.go.schemaforge.data.Account;
@@ -2806,6 +2807,115 @@ public class EtendoGoJwtServletCoverageTest {
     verify(store).recordPaid("purchase-1", "", "");
   }
 
+  // ===================== applyCheckoutPaid — a paid re-subscription (ETP-5742) ===============
+  //
+  // A re-subscription names its canceled tenant on the request, so the payment webhook applies
+  // the purchase to that tenant itself — the same records a paid upgrade writes — and closes the
+  // request, instead of leaving it PAID for an onboarding that would provision a second tenant.
+
+  private static final long REACTIVATION_PAID_EPOCH = 1_790_000_000L;
+
+  private PaidUpgradeFixture givenPaidReactivation() {
+    PaidUpgradeFixture fixture = givenPaidUpgrade(true);
+    Client tenant = mock(Client.class);
+    when(tenant.getId()).thenReturn(PAID_CLIENT_ID);
+    CheckoutRequest reactivation = mock(CheckoutRequest.class);
+    when(reactivation.getCreatedClient()).thenReturn(tenant);
+    when(reactivation.getRequest()).thenReturn(PAID_TOKEN);
+    when(reactivation.getClientName()).thenReturn("Acme S.L.");
+    when(reactivation.getAccountEmail()).thenReturn("user@test.com");
+    when(fixture.checkoutRequestStore.recordPaid(anyString(), anyString(), anyString()))
+        .thenReturn(true);
+    when(fixture.checkoutRequestStore.findPaidReactivation(PAID_TOKEN)).thenReturn(reactivation);
+    servlet.billingEventStore = mock(com.etendoerp.go.payment.BillingEventStore.class);
+    return fixture;
+  }
+
+  private void payReactivation() throws Exception {
+    JSONObject event = new JSONObject("{\"type\":\"checkout.session.completed\",\"created\":"
+        + REACTIVATION_PAID_EPOCH + ",\"data\":{\"object\":{\"id\":\"cs_1\","
+        + "\"customer\":\"cus_1\",\"subscription\":\"sub_new\",\"metadata\":{\"request_id\":\""
+        + PAID_TOKEN + "\",\"account_email\":\"user@test.com\"}}}}");
+    Method applyCheckoutPaid = EtendoGoJwtServlet.class.getDeclaredMethod("applyCheckoutPaid",
+        String.class, String.class, JSONObject.class);
+    applyCheckoutPaid.setAccessible(true);
+    try (MockedStatic<OBContext> context = mockStatic(OBContext.class);
+        MockedStatic<EtendoGoJwtSupport> support = mockStatic(EtendoGoJwtSupport.class);
+        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class)) {
+      support.when(() -> EtendoGoJwtSupport.findStarOrgId(PAID_CLIENT_ID))
+          .thenReturn(PAID_STAR_ORG_ID);
+      applyCheckoutPaid.invoke(servlet, "evt_1", "checkout.session.completed", event);
+    }
+  }
+
+  @Test
+  public void aPaidReactivationOfARowTenantOpensANewRowAndClosesTheRequest() throws Exception {
+    PaidUpgradeFixture fixture = givenPaidReactivation();
+    when(fixture.subscriptionService.hasAnySubscription(PAID_CLIENT_ID)).thenReturn(true);
+
+    payReactivation();
+
+    org.mockito.InOrder order = org.mockito.Mockito.inOrder(fixture.subscriptionService,
+        fixture.checkoutRequestStore, servlet.billingEventStore);
+    order.verify(fixture.subscriptionService)
+        .openSubscription(eq(PAID_CLIENT_ID), any(), any(), any(), any(), any());
+    // Closing the request commits the payment record with it, so it comes after.
+    order.verify(fixture.checkoutRequestStore).recordProvisioned(PAID_TOKEN, PAID_CLIENT_ID);
+    order.verify(servlet.billingEventStore).markApplied("evt_1");
+    // A row tenant keeps its watermark on the row: the preference one is never written.
+    verify(fixture.lifecycleService, never()).recordSubscriptionEventAt(anyString(), any());
+    // The new row's period is read from the provider, as after an onboarding.
+    verify(fixture.subscriptionService).fillPeriodFromProviderAfterCommit(PAID_CLIENT_ID);
+  }
+
+  @Test
+  public void aPaidReactivationOfARowlessTenantWritesThePreferenceProjection() throws Exception {
+    PaidUpgradeFixture fixture = givenPaidReactivation();
+    servlet.subscriptionModelSwitch = switchThatIs(false);
+    when(fixture.subscriptionService.hasAnySubscription(PAID_CLIENT_ID)).thenReturn(false);
+    when(fixture.tenantPlanService.markProductive(PAID_CLIENT_ID, PAID_STAR_ORG_ID))
+        .thenReturn(true);
+
+    payReactivation();
+
+    verify(fixture.subscriptionService, never())
+        .openSubscription(anyString(), any(), any(), any(), any(), any());
+    verify(fixture.tenantPlanService).markProductive(PAID_CLIENT_ID, PAID_STAR_ORG_ID);
+    verify(fixture.lifecycleService).markProductive(PAID_CLIENT_ID);
+    // The watermark moves to this payment, so a late event of the canceled subscription is stale.
+    verify(fixture.lifecycleService).recordSubscriptionEventAt(PAID_CLIENT_ID,
+        java.time.Instant.ofEpochSecond(REACTIVATION_PAID_EPOCH));
+    verify(fixture.checkoutRequestStore).recordProvisioned(PAID_TOKEN, PAID_CLIENT_ID);
+    verify(servlet.billingEventStore).markApplied("evt_1");
+  }
+
+  @Test
+  public void aReactivationThatCannotBeRecordedLeavesTheRequestPaidForTheRetry() throws Exception {
+    PaidUpgradeFixture fixture = givenPaidReactivation();
+    when(fixture.lifecycleService.markProductive(PAID_CLIENT_ID)).thenReturn(false);
+
+    InvocationTargetException thrown = assertThrows(InvocationTargetException.class,
+        this::payReactivation);
+
+    // The webhook handler turns this into a FAILED event and a 500, so the provider redelivers.
+    assertTrue(thrown.getCause() instanceof OBException);
+    verify(fixture.checkoutRequestStore, never()).recordProvisioned(anyString(), anyString());
+    verify(servlet.billingEventStore, never()).markApplied(anyString());
+  }
+
+  @Test
+  public void aPaidNewPurchaseIsLeftToOnboarding() throws Exception {
+    PaidUpgradeFixture fixture = givenPaidReactivation();
+    when(fixture.checkoutRequestStore.findPaidReactivation(PAID_TOKEN)).thenReturn(null);
+
+    payReactivation();
+
+    verify(fixture.subscriptionService, never())
+        .openSubscription(anyString(), any(), any(), any(), any(), any());
+    verify(fixture.checkoutRequestStore, never()).recordProvisioned(anyString(), anyString());
+    verify(servlet.billingEventStore).markApplied("evt_1");
+  }
+
   // ===================== fillSubscriptionPeriodBestEffort — the post-commit period read ========
   //
   // A paid onboarding opens the subscription row without a billing period: the purchase's first
@@ -3388,6 +3498,41 @@ public class EtendoGoJwtServletCoverageTest {
           isProductiveNameTakenByAccount("Demo", "owner@example.test"));
       assertTrue("this account's productive is taken",
           isProductiveNameTakenByAccount("Acme", "owner@example.test"));
+    }
+  }
+
+  /**
+   * ETP-5742 — a canceled productive environment reads plan "free" (its closed row) but keeps its
+   * name: buying a new environment under it would be refused by the company-name constraint after
+   * the payment. Its lifecycle type still says productive, and that counts.
+   */
+  @Test
+  public void productiveNameCheckCountsACanceledProductiveWhosePlanReadsFree() throws Exception {
+    TenantPlanService tenantPlan = mock(TenantPlanService.class);
+    servlet.tenantPlanService = tenantPlan;
+    when(tenantPlan.resolvePlan(anyString())).thenReturn(TenantPlanService.PLAN_FREE);
+    TenantEnvironmentLifecycleService lifecycle = mock(TenantEnvironmentLifecycleService.class);
+    servlet.tenantEnvironmentLifecycleService = lifecycle;
+    TenantEnvironmentLifecycleService.EnvironmentSnapshot canceled =
+        mock(TenantEnvironmentLifecycleService.EnvironmentSnapshot.class);
+    when(canceled.getType()).thenReturn(EnvironmentAccessPolicy.EnvironmentType.PRODUCTIVE);
+    when(lifecycle.resolve("OWN-CANCELED")).thenReturn(canceled);
+
+    try (ContextThread thread = new ContextThread(mock(OBContext.class), 0);
+        MockedStatic<EtendoGoJwtSupport> support = mockStatic(EtendoGoJwtSupport.class);
+        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dal.when(() -> EtendoGoJwtDalHelper.clientBelongsToAccountEmail(anyString(),
+          eq("owner@example.test"))).thenReturn(true);
+      support.when(() -> EtendoGoJwtSupport.findClientIdsByName("Canceled"))
+          .thenReturn(List.of("OWN-CANCELED"));
+      support.when(() -> EtendoGoJwtSupport.findClientIdsByName("Unknown"))
+          .thenReturn(List.of("OWN-UNREADABLE"));
+
+      assertTrue("a canceled productive keeps its name",
+          isProductiveNameTakenByAccount("Canceled", "owner@example.test"));
+      // An unreadable lifecycle (resolve answers null) does not take a name: the check fails open.
+      assertFalse("an unreadable lifecycle is not a productive environment",
+          isProductiveNameTakenByAccount("Unknown", "owner@example.test"));
     }
   }
 

@@ -376,6 +376,9 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
     assertEquals(Set.of("il-1", "il-2"), scoped.getValue());
     verify(probe.invoiceFromOrderSupport).ensureLineGrossAmounts(probe.invoice,
         Set.of("il-1", "il-2"));
+    // ETP-5714: an imported line carries the list price the form would store, only for the new lines
+    verify(probe.invoiceFromOrderSupport).alignLineListPrices(probe.invoice,
+        Set.of("il-1", "il-2"));
   }
 
   // ── the cap ───────────────────────────────────────────────────────────────

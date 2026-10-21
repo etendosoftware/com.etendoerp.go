@@ -939,15 +939,63 @@ for that reason.
 A `paymentToken` the webhook confirmed is what makes an environment productive — including for an
 account's first environment.
 
-**Today's checkout provisions a new environment for every purchase (ETP-5548) — but that is a
-property of the current flow, not a rule the plan record may rely on.** Letting a canceled tenant
-re-subscribe its own environment was decided on 2026-10-14 (Martin Taal); the flow is **ETP-5742**
-and does not exist yet. What the code does today: `resolveCheckoutSelection` turns a purchase from
-a productive or spent-demo session into a clean new environment, and the paid onboarding's
-`selectTenant` only ever picks a pooled tenant, a new classic client, or the half-built client this
-same checkout left under its provisioning name — never a finished environment. Since ETP-5047 a
-canceled productive tenant is no longer a demo source either (§2, *A productive environment is
-never a source*). The plan record is already built for a tenant that buys again:
+**A purchase provisions a new environment (ETP-5548); a re-subscription does not (ETP-5742).**
+`resolveCheckoutSelection` turns a purchase from a productive or spent-demo session into a clean
+new environment, and the paid onboarding's `selectTenant` only ever picks a pooled tenant, a new
+classic client, or the half-built client this same checkout left under its provisioning name —
+never a finished environment. Since ETP-5047 a canceled productive tenant is no longer a demo
+source either (§2, *A productive environment is never a source*). Getting a canceled environment
+back is the re-subscription below, decided 2026-10-14 (Martin Taal).
+
+#### Re-subscribing a canceled environment (ETP-5742)
+
+The owner of a productive environment whose subscription was **canceled** pays for that same
+environment again, with its data. It is not a purchase of a new one.
+
+- **Where.** The blocked screen of a `SUBSCRIPTION_REQUIRED` environment whose `/environments`
+  entry reads `subscriptionStatus: "EXPIRED"` (`isCanceledSubscription` in
+  `environmentPresentation.js`) says the subscription was canceled. The owner
+  (`ownedByAccount: true`) gets **Reactivar suscripción**, which goes straight to Stripe Checkout.
+  An invited member is told to ask the owner. A subscription left **unpaid** (`PAST_DUE` past its
+  grace) keeps **Gestionar suscripción** → `/account`: the Customer Portal fixes the payment
+  method, and a second subscription would bill twice.
+- **`POST /sws/go/billing/reactivation`.** The body is empty. The environment is the session's,
+  never a request field, and the call is account-level like every other pay endpoint, so a blocked
+  session reaches it. It refuses `403 REACTIVATION_OWNER_REQUIRED` unless
+  `clientOwnedByAccountEmail` (ETP-5743), and `409 REACTIVATION_NOT_AVAILABLE` unless the lifecycle
+  snapshot is `PRODUCTIVE` + `EXPIRED` (a closed `ETGO_SUBSCRIPTION` row and the
+  `ETGO_SubscriptionStatus` preference answer alike). It answers like a purchase: `201` with
+  `requestId` and `checkoutUrl`. An unpaid re-subscription of the same environment is reopened
+  (`200`); one already paid answers `200 {"requestId", "status": "paid"}`. The plan is the canceled
+  row's; with no row it is the legacy price fallback, as a purchase naming no plan.
+- **The request names its tenant from the start.** `ETGO_CHECKOUT_REQUEST.CREATED_CLIENT_ID` is set
+  when the request is recorded. A new purchase sets it only at `PROVISIONED`, so "names a tenant
+  and is not provisioned" identifies a re-subscription (`CheckoutRequestStore.isPendingReactivation`)
+  with no column of its own. Onboarding never claims one: `claimForProvisioning` requires
+  `CREATED_CLIENT_ID is null`.
+- **The payment webhook applies it** (`applyReactivationIfPending`, on `checkout.session.completed`).
+  It records the payment exactly as a paid upgrade does (`applyPaidUpgradeSideEffects`), then
+  closes the request as `PROVISIONED`, which commits both together:
+  - **a tenant with a row** — a fresh row opens next to the closed one, and its period is read from
+    Stripe afterwards, as after an onboarding;
+  - **a tenant with no row** (switch OFF) — the `ETGO_TenantPlan` marker and
+    `ETGO_SubscriptionStatus = CURRENT` are written, and `ETGO_SubscriptionEventAt` moves to the
+    payment, so a late event of the canceled subscription is stale.
+
+  A failure rolls back with the event: the webhook answers 500, Stripe redelivers, and the request
+  is still `PAID` for the retry. The new subscription's own lifecycle events find the tenant
+  through the request (`findByStripeSubscription`) or through the open row.
+- **Return.** Stripe returns to `/dashboard?reactivation=success&requestId=…` (cancel:
+  `reactivation=cancelled`, back to the button). The blocked screen polls
+  `GET /checkout/sessions/{requestId}` until `provisioned` and reloads the app. Usually the webhook
+  has already applied it and the app simply loads.
+- **The canceled environment keeps its name.** The pre-checkout and onboarding name checks
+  (`ownsProductiveNamed`) also count a tenant whose lifecycle type is productive. A closed row makes
+  its plan read `free`, and without that a new purchase under its name would be charged and then
+  refused by the company-name constraint. That check reads `resolve` and fails open; it does not use
+  `isProductiveEnvironment`, which fails closed.
+
+The plan record was built for this already:
 
 - a tenant with any `ETGO_SUBSCRIPTION` row, open or closed, is recorded on a row whatever the
   subscription-model switch says (*Only a tenant's first row is switched*, below), so its payment
@@ -957,9 +1005,10 @@ never a source*). The plan record is already built for a tenant that buys again:
   (`SubscriptionResubscriptionIntegrationTest`; `open-and-notable-topics.md` §3.7,
   "Re-subscribing opens a fresh row").
 
-The one way such a tenant's payment can still reach the marker is a *failed* row lookup with the
-switch OFF — an accepted edge, see *Only a tenant's first row is switched*. That acceptance does
-not depend on ETP-5742: it holds whether or not a tenant can buy again.
+The one way such a tenant's payment could still reach the marker is a *failed* row lookup with the
+switch OFF — an accepted edge, see *Only a tenant's first row is switched*. The re-subscription
+does not take it: it asks `hasAnySubscription` itself, unguarded, before recording the payment, so a
+failing lookup fails the webhook for a retry instead.
 
 ### Transitional read fallback (ETP-5046 cutover) — grep `ETP-5046-TRANSITIONAL-FALLBACK`
 
@@ -1069,8 +1118,8 @@ what every read answers from; a payment recorded only in the marker would leave 
 canceled or closed row. **A failed row lookup takes the marker path — accepted, decided 2026-10-14
 (Martin Taal), no code change.** With the switch OFF, a lookup that throws is logged at ERROR and
 answered "no row", so a re-purchasing tenant whose only row is closed would stay blocked while it
-pays. That is reachable in principle only: the re-subscribe flow is ETP-5742, and no current
-purchase reaches a tenant with a closed row (above). The acceptance does not depend on it — it
+pays. No purchase reaches a tenant with a closed row, and the ETP-5742 re-subscription, which does,
+checks for a row itself and fails instead (above). The acceptance does not depend on it — it
 fails closed in practice: the lookup runs in the onboarding transaction, and on PostgreSQL a failed
 SQL statement aborts it, so the upgrade fails and stays retryable; only a failure other than a
 failed SQL statement (a mapping or hydration error after the statement ran, for instance) can reach

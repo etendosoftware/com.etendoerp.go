@@ -421,11 +421,11 @@ else
 fi
 
 # 2. Run the database-free half of the Etendo Go suite (goTestUnit, ETP-5695): no
-# Postgres, no Tomcat. The DB-backed *IntegrationTest classes run in CI's full
-# suite, not here. goTestUnitCoverageReport turns this run's goTestUnit.exec into
-# the XML that step 3 reads. The previous run's exec, XML and results are deleted
-# first: when this step fails, Gradle stops before the report, and step 3 must find
-# no XML rather than measure coverage from an older run.
+# Postgres, no Tomcat. The DB-backed *IntegrationTest classes run in CI (the PR's
+# mini pipeline and the daily cut), not here. goTestUnitCoverageReport turns this
+# run's goTestUnit.exec into the XML that step 3 reads. The previous run's exec,
+# XML and results are deleted first: when this step fails, Gradle stops before the
+# report, and step 3 must find no XML rather than measure coverage from an older run.
 # Step 2 is deliberately NOT keyed: it runs Gradle in $CORE_DIR, so its real input
 # set is the whole etendo_core build, not just this module's sources. A key built
 # from the module alone would miss a core change and produce a false pass.

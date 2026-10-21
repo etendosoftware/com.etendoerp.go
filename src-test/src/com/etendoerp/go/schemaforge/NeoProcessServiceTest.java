@@ -20,21 +20,31 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockConstruction;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
+import org.mockito.InOrder;
+import org.mockito.MockedConstruction;
 import org.mockito.MockedStatic;
+import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
@@ -45,6 +55,8 @@ import org.openbravo.model.ad.domain.ModelImplementation;
 import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.ad.ui.ProcessParameter;
 import org.openbravo.model.ad.ui.Tab;
+import org.openbravo.scheduling.ProcessBundle;
+import org.openbravo.service.db.DalConnectionProvider;
 
 import com.etendoerp.go.schemaforge.NeoResponse;
 
@@ -52,7 +64,11 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 
-/** Tests for {@link NeoProcessService}. */
+/**
+ * Tests for {@link NeoProcessService}.
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoProcessService
+ */
 public class NeoProcessServiceTest {
 
   // ===================== executeProcess =====================
@@ -594,5 +610,58 @@ public class NeoProcessServiceTest {
 
     assertEquals(200, resp.getHttpStatus());
     assertEquals("custom result", resp.getBody().getString("message"));
+  }
+
+  // ETP-5669: a classic DalBaseProcess gets a bundle with a context and a connection (it NPE'd on
+  // bundle.getContext() with the bare map-built one), and its params survive init's reset.
+  @Test
+  public void classicBundleHasContextAndConnectionAndKeepsParams() throws Exception {
+    VariablesSecureApp vars = new VariablesSecureApp("u", "c", "o", "r", "en_US");
+    Map<String, Object> params = Collections.singletonMap("GL_Journal_ID", "J1");
+    List<Object> ctorArgs = new ArrayList<>();
+    try (MockedStatic<OBContext> obMock = mockStatic(OBContext.class);
+        MockedStatic<NeoDefaultsService> neoMock = mockStatic(NeoDefaultsService.class);
+        MockedConstruction<DalConnectionProvider> connMock = mockConstruction(DalConnectionProvider.class);
+        MockedConstruction<ProcessBundle> bundleMock = mockConstruction(ProcessBundle.class,
+            (b, c) -> {
+              ctorArgs.addAll(c.arguments());
+              when(b.init(any())).thenReturn(b);
+            })) {
+      neoMock.when(() -> NeoDefaultsService.buildVariablesSecureApp(any())).thenReturn(vars);
+
+      ProcessBundle bundle = NeoProcessService.newClassicBundle("P1", params);
+
+      ProcessBundle built = bundleMock.constructed().get(0);
+      assertSame(built, bundle);
+      assertEquals(List.of("P1", vars), ctorArgs);
+      InOrder order = inOrder(built);
+      order.verify(built).init(connMock.constructed().get(0));
+      order.verify(built).setParams(params);
+    }
+  }
+
+  // ETP-5669: building the bundle only reads the context; it must not switch user, role, client or
+  // org, nor leave admin mode on for the rest of the request.
+  @Test
+  public void classicBundleLeavesTheOBContextUntouched() throws Exception {
+    OBContext ctx = mock(OBContext.class);
+    VariablesSecureApp vars = new VariablesSecureApp("u", "c", "o", "r", "en_US");
+    try (MockedStatic<OBContext> obMock = mockStatic(OBContext.class);
+        MockedStatic<NeoDefaultsService> neoMock = mockStatic(NeoDefaultsService.class);
+        MockedConstruction<DalConnectionProvider> connMock = mockConstruction(DalConnectionProvider.class);
+        MockedConstruction<ProcessBundle> bundleMock = mockConstruction(ProcessBundle.class,
+            (b, c) -> when(b.init(any())).thenReturn(b))) {
+      obMock.when(OBContext::getOBContext).thenReturn(ctx);
+      neoMock.when(() -> NeoDefaultsService.buildVariablesSecureApp(any())).thenReturn(vars);
+
+      NeoProcessService.newClassicBundle("P1", Collections.emptyMap());
+
+      neoMock.verify(() -> NeoDefaultsService.buildVariablesSecureApp(ctx));
+      obMock.verify(OBContext::setAdminMode, never());
+      obMock.verify(() -> OBContext.setAdminMode(anyBoolean()), never());
+      obMock.verify(OBContext::restorePreviousMode, never());
+      obMock.verify(() -> OBContext.setOBContext(any(OBContext.class)), never());
+      verifyNoInteractions(ctx);
+    }
   }
 }
