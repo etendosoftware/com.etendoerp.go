@@ -104,17 +104,6 @@ public class SelectorQueryExecutorTest {
   }
 
   /**
-   * Invokes the private {@code valuePageOrder} method.
-   */
-  private static String invokeValuePageOrder(SelectorMeta meta, String alias, String valueExpr)
-      throws Exception {
-    Method m = SelectorQueryExecutor.class.getDeclaredMethod("valuePageOrder", SelectorMeta.class,
-        String.class, String.class);
-    m.setAccessible(true);
-    return (String) m.invoke(null, meta, alias, valueExpr);
-  }
-
-  /**
    * Invokes the private {@code shouldDistinctByValue} method (the de-dup guard decision).
    */
   private static boolean invokeShouldDistinctByValue(SelectorMeta meta) throws Exception {
@@ -1148,10 +1137,21 @@ public class SelectorQueryExecutorTest {
    * @param pageValues  what the page-of-values query answers
    * @param rows        what the rows query answers
    */
-  @SuppressWarnings({ "unchecked", "rawtypes" })
   private static PagedRun runPaged(SelectorMeta meta, String search, int limit, int offset,
       String validationFilter, Long count, List<Object> pageValues, List<BaseOBObject> rows)
       throws Exception {
+    return runPaged(meta, search, limit, offset, validationFilter, count, pageValues, rows, null);
+  }
+
+  /**
+   * Same as above; a non-null {@code resolvedDisplay} makes the model know the entity and resolve
+   * the display property path to it, which is how the flow tells a primitive display from an
+   * association. Null leaves the entity unknown, so the display is not primitive.
+   */
+  @SuppressWarnings({ "unchecked", "rawtypes" })
+  private static PagedRun runPaged(SelectorMeta meta, String search, int limit, int offset,
+      String validationFilter, Long count, List<Object> pageValues, List<BaseOBObject> rows,
+      Property resolvedDisplay) throws Exception {
     PagedRun run = new PagedRun();
     run.limit = limit;
     run.offset = offset;
@@ -1204,16 +1204,20 @@ public class SelectorQueryExecutorTest {
     });
 
     ModelProvider modelProvider = mock(ModelProvider.class);
-    when(modelProvider.getEntity(anyString())).thenReturn(null);
+    when(modelProvider.getEntity(anyString()))
+        .thenReturn(resolvedDisplay != null ? mock(Entity.class) : null);
 
     try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
         MockedStatic<ModelProvider> mpMock = mockStatic(ModelProvider.class);
+        MockedStatic<DalUtil> dalUtilMock = mockStatic(DalUtil.class);
         MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
         MockedStatic<SelectorAuxResolver> auxMock = mockStatic(SelectorAuxResolver.class);
         MockedStatic<SelectorResponseSupport> respMock = mockStatic(
             SelectorResponseSupport.class)) {
       obDalMock.when(OBDal::getInstance).thenReturn(obDal);
       mpMock.when(ModelProvider::getInstance).thenReturn(modelProvider);
+      dalUtilMock.when(() -> DalUtil.getPropertyFromPath(any(Entity.class), anyString()))
+          .thenReturn(resolvedDisplay);
       ctxMock.when(OBContext::getOBContext).thenReturn(null);
       auxMock.when(() -> SelectorAuxResolver.appendAuxFields(any(), any(), any()))
           .thenAnswer(inv -> null);
@@ -1271,7 +1275,7 @@ public class SelectorQueryExecutorTest {
         invokeAndCondition("as e WHERE e.a = 1", "e.v is not null"));
   }
 
-  // --- displayIsPrimitivePath / valuePageOrder ---
+  // --- displayIsPrimitivePath / the page-of-values ORDER BY (through the value-paged flow) ---
 
   private static boolean displayIsPrimitive(String displayProperty, Property resolved,
       boolean entityKnown, RuntimeException failure) {
@@ -1340,19 +1344,14 @@ public class SelectorQueryExecutorTest {
   public void testValuePageOrderUsesMinOfPrimitiveDisplay() throws Exception {
     SelectorMeta meta = new SelectorMeta.Builder("ProductByPriceAndWarehouse", "product.name")
         .isRich(true).valueProperty("product.id").build();
-    ModelProvider modelProvider = mock(ModelProvider.class);
-    when(modelProvider.getEntity(anyString())).thenReturn(mock(Entity.class));
     // built before any stubbing starts: property() stubs the mock itself
     Property resolved = property(true);
-    try (MockedStatic<ModelProvider> mpMock = mockStatic(ModelProvider.class);
-        MockedStatic<DalUtil> dalUtilMock = mockStatic(DalUtil.class)) {
-      mpMock.when(ModelProvider::getInstance).thenReturn(modelProvider);
-      dalUtilMock.when(() -> DalUtil.getPropertyFromPath(any(Entity.class), anyString()))
-          .thenReturn(resolved);
 
-      assertEquals("min(e.product.name), e.product.id",
-          invokeValuePageOrder(meta, "e", "e.product.id"));
-    }
+    PagedRun run = runPaged(meta, "", 20, 0, null, 1L, Arrays.asList((Object) "P1"),
+        Arrays.asList(valueRow("idA", "P1", "A")), resolved);
+
+    assertTrue(run.hql.get(1), run.hql.get(1)
+        .endsWith(" group by e.product.id ORDER BY min(e.product.name), e.product.id"));
   }
 
   /** A display that is not primitive orders by the value alone (min() would not be valid HQL). */
@@ -1360,18 +1359,14 @@ public class SelectorQueryExecutorTest {
   public void testValuePageOrderIsTheValueAloneForAnAssociationDisplay() throws Exception {
     SelectorMeta meta = new SelectorMeta.Builder("ProductByPriceAndWarehouse", "product")
         .isRich(true).valueProperty("product.id").build();
-    ModelProvider modelProvider = mock(ModelProvider.class);
-    when(modelProvider.getEntity(anyString())).thenReturn(mock(Entity.class));
     // built before any stubbing starts: property() stubs the mock itself
     Property resolved = property(false);
-    try (MockedStatic<ModelProvider> mpMock = mockStatic(ModelProvider.class);
-        MockedStatic<DalUtil> dalUtilMock = mockStatic(DalUtil.class)) {
-      mpMock.when(ModelProvider::getInstance).thenReturn(modelProvider);
-      dalUtilMock.when(() -> DalUtil.getPropertyFromPath(any(Entity.class), anyString()))
-          .thenReturn(resolved);
 
-      assertEquals("e.product.id", invokeValuePageOrder(meta, "e", "e.product.id"));
-    }
+    PagedRun run = runPaged(meta, "", 20, 0, null, 1L, Arrays.asList((Object) "P1"),
+        Arrays.asList(valueRow("idA", "P1", "A")), resolved);
+
+    assertTrue(run.hql.get(1),
+        run.hql.get(1).endsWith(" group by e.product.id ORDER BY e.product.id"));
   }
 
   // --- count / page / rows flow ---

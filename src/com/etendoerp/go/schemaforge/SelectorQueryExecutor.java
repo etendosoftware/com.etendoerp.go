@@ -189,7 +189,7 @@ final class SelectorQueryExecutor {
     // (see shouldDistinctByValue): they MUST keep every per-locator row. When the guard is false the
     // where clause is byte-identical to before (zero regression).
     if (shouldDistinctByValue(meta)) {
-      return executeValuePagedRichQuery(meta, alias, whereClause, search, hasSearch, limit, offset,
+      return executeValuePagedRichQuery(meta, alias, whereClause, search, limit, offset,
           extraFilterParams);
     }
     String effectiveWhere = whereClause.getHql();
@@ -270,8 +270,9 @@ final class SelectorQueryExecutor {
    * selected, and {@code count(distinct)} would otherwise disagree with the grouped page.
    */
   private static NeoResponse executeValuePagedRichQuery(SelectorMeta meta, String alias,
-      SelectorQueryBuilder.HqlWithParams whereClause, String search, boolean hasSearch,
-      int limit, int offset, Map<String, Object> extraFilterParams) throws Exception {
+      SelectorQueryBuilder.HqlWithParams whereClause, String search, int limit, int offset,
+      Map<String, Object> extraFilterParams) throws Exception {
+    boolean hasSearch = StringUtils.isNotBlank(search) && !meta.searchableProperties.isEmpty();
     String valueExpr = alias + "." + meta.valueProperty;
     Map<String, Object> params = new HashMap<>(whereClause.getParams());
     if (extraFilterParams != null) {
@@ -294,7 +295,11 @@ final class SelectorQueryExecutor {
       RichHql pageHql = buildRichHql(meta, where, valueExpr, params);
       org.hibernate.query.Query<?> pageQuery = OBDal.getInstance().getSession()
           .createQuery(pageHql.hql + " group by " + valueExpr + ORDER_BY
-              + valuePageOrder(meta, alias, valueExpr));
+              + (displayIsPrimitivePath(meta)
+                  // min() is only valid on a primitive property; an association display (the price
+                  // view's identifier is the product itself) orders by the value alone, as it did
+                  ? "min(" + alias + "." + meta.displayProperty + "), " + valueExpr
+                  : valueExpr));
       NeoSelectorExecutionHelper.bindNamedParameters(pageQuery, pageHql.params);
       pageQuery.setMaxResults(limit);
       pageQuery.setFirstResult(offset);
@@ -358,18 +363,6 @@ final class SelectorQueryExecutor {
     return baseWhere.substring(0, whereIdx + whereKeyword.length()) + "("
         + baseWhere.substring(whereIdx + whereKeyword.length()) + ")" + SelectorQueryBuilder.SQL_AND
         + condition;
-  }
-
-  /**
-   * ORDER BY of the page of values: the first display value of each value, then the value, so the
-   * order is total and stable across pages. {@code min()} is only valid on a primitive property, so
-   * a display that resolves to an association (the identifier of the price view is the product
-   * itself) orders by the value alone, which is what ordering by that association did.
-   */
-  private static String valuePageOrder(SelectorMeta meta, String alias, String valueExpr) {
-    return displayIsPrimitivePath(meta)
-        ? "min(" + alias + "." + meta.displayProperty + "), " + valueExpr
-        : valueExpr;
   }
 
   /** Whether the display property, possibly a dotted path, ends in a primitive property. */
