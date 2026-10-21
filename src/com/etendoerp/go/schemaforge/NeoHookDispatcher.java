@@ -72,6 +72,24 @@ class NeoHookDispatcher {
       NeoEndpointType endpointType, String fieldName,
       String httpMethod, NeoSubEndpointDispatcher.ActionDispatchParams actionParams,
       java.util.function.Supplier<NeoResponse> defaultAction) {
+    return dispatchWithHooks(new NeoSubEndpointDispatcher.HookedSubEndpointRequest(spec,
+        entityName, endpointType, fieldName, httpMethod, actionParams, defaultAction));
+  }
+
+  /**
+   * ETP-5680: dispatches an already-built sub-endpoint request. Besides what the other overloads
+   * carry, it exposes the request's query string to the hooks through
+   * {@link NeoContext#getQueryParams()} (null leaves it unset, as before).
+   */
+  NeoResponse dispatchWithHooks(NeoSubEndpointDispatcher.HookedSubEndpointRequest call) {
+    SFSpec spec = call.spec;
+    String entityName = call.entityName;
+    NeoEndpointType endpointType = call.endpointType;
+    String fieldName = call.fieldName;
+    String httpMethod = call.method;
+    NeoSubEndpointDispatcher.ActionDispatchParams actionParams = call.actionParams;
+    java.util.Map<String, String> queryParams = call.queryParams;
+    java.util.function.Supplier<NeoResponse> defaultAction = call.defaultAction;
 
     SFEntity entity = servlet.findEntity(spec.getId(), entityName);
     String qualifier = (entity != null) ? entity.getJavaQualifier() : null;
@@ -85,7 +103,7 @@ class NeoHookDispatcher {
     }
 
     NeoContext hookCtx = buildHookContext(spec, entityName, endpointType, fieldName,
-        httpMethod, entity, actionParams);
+        httpMethod, entity, actionParams, queryParams);
 
     // ETP-5415: routed through NeoExtensionDispatcher, which is what brings the SELECTOR,
     // CALLOUT and EVALUATE_DISPLAY surfaces into the trace — they reach an entity's
@@ -115,7 +133,8 @@ class NeoHookDispatcher {
 
   private NeoContext buildHookContext(SFSpec spec, String entityName,
       NeoEndpointType endpointType, String fieldName, String httpMethod,
-      SFEntity entity, NeoSubEndpointDispatcher.ActionDispatchParams actionParams) {
+      SFEntity entity, NeoSubEndpointDispatcher.ActionDispatchParams actionParams,
+      java.util.Map<String, String> queryParams) {
     Tab adTab = entity != null ? entity.getADTab() : null;
     NeoContext.Builder contextBuilder = NeoContext.builder()
         .specName(spec.getName())
@@ -126,6 +145,9 @@ class NeoHookDispatcher {
         .sfEntity(entity)
         .adTab(adTab)
         .obContext(OBContext.getOBContext());
+    if (queryParams != null) {
+      contextBuilder.queryParams(queryParams);
+    }
     if (actionParams != null) {
       contextBuilder.recordId(actionParams.recordId)
           .requestBody(actionParams.requestBody);
