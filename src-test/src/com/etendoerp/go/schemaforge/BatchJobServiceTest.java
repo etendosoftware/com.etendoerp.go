@@ -100,7 +100,7 @@ public class BatchJobServiceTest {
     };
   }
 
-  private static JSONObject rejected(String opId) throws Exception {
+  private static JSONObject rejected(String opId) throws org.codehaus.jettison.json.JSONException {
     return new JSONObject().put("committed", false).put("atomic", true)
         .put("persisted", new JSONArray())
         .put("failedAt", new JSONObject().put("id", opId).put("index", 0))
@@ -112,7 +112,8 @@ public class BatchJobServiceTest {
     return service.submit(owner, ops, "rest", runner).getString("jobId");
   }
 
-  private JSONObject status(Owner owner, String jobId) throws Exception {
+  private JSONObject status(Owner owner, String jobId)
+      throws org.codehaus.jettison.json.JSONException {
     return service.status(owner, jobId);
   }
 
@@ -258,6 +259,56 @@ public class BatchJobServiceTest {
     assertEquals("p1", failed.getJSONArray("ids").getString(0));
     assertTrue(rowResults.getJSONObject(2).getBoolean("committed"));
     assertTrue(job.getString("hint").contains("committed:false"));
+  }
+
+  @Test
+  public void onlyAProvenRollbackIsMarkedSafeToResend() throws Exception {
+    BatchJobService.RowRunner runner = rowOps -> {
+      String id = rowOps.getJSONObject(0).getString("id");
+      if ("p1".equals(id)) {
+        // a process committed underneath the row: its records survive
+        return rejected(id).put("atomic", false).put("persisted", new JSONArray().put("REC-9"));
+      }
+      if ("p2".equals(id)) {
+        return new JSONObject().put("committed", false).put("error", new JSONObject().put("message", "?"));
+      }
+      return "p0".equals(id) ? committing(new ArrayList<>()).run(rowOps) : rejected(id);
+    };
+    String id = submit(ALICE, rows(4), runner);
+
+    executor.runAll();
+
+    JSONArray rowResults = status(ALICE, id).getJSONArray("rows");
+    assertFalse("a committed row has nothing to resend", rowResults.getJSONObject(0).has("safeToResend"));
+    assertFalse("atomic:false: records survive", rowResults.getJSONObject(1).getBoolean("safeToResend"));
+    assertEquals("REC-9", rowResults.getJSONObject(1).getJSONArray("persisted").getString(0));
+    assertFalse("no outcome proves nothing", rowResults.getJSONObject(2).getBoolean("safeToResend"));
+    assertTrue("rolled back: safe", rowResults.getJSONObject(3).getBoolean("safeToResend"));
+    assertTrue(status(ALICE, id).getString("hint").contains("safeToResend:true"));
+  }
+
+  @Test
+  public void aRowWhoseRunnerThrewIsNeverMarkedSafeToResend() throws Exception {
+    String id = submit(ALICE, rows(1), rowOps -> {
+      throw new IllegalStateException("boom");
+    });
+    executor.runAll();
+    assertFalse(status(ALICE, id).getJSONArray("rows").getJSONObject(0).getBoolean("safeToResend"));
+  }
+
+  @Test
+  public void aFailedBindStillReleasesTheThread() throws Exception {
+    binder.failBind = true;
+    submit(ALICE, rows(1), committing(new ArrayList<>()));
+    executor.runAll();
+    assertEquals(1, binder.unbinds);
+    assertTrue(service.heldJobs().isEmpty());
+  }
+
+  @Test
+  public void shutdownStopsTheWorkerThreads() throws Exception {
+    service.shutdown();
+    assertTrue(executor.stopped);
   }
 
   @Test
@@ -634,6 +685,7 @@ public class BatchJobServiceTest {
   private static final class ManualExecutor extends AbstractExecutorService {
     final List<Runnable> queue = new ArrayList<>();
     boolean reject;
+    boolean stopped;
 
     void runAll() {
       while (!queue.isEmpty()) {
@@ -655,6 +707,7 @@ public class BatchJobServiceTest {
 
     @Override
     public List<Runnable> shutdownNow() {
+      stopped = true;
       return List.of();
     }
 
@@ -678,12 +731,16 @@ public class BatchJobServiceTest {
     int binds;
     int unbinds;
     int rollbacks;
+    boolean failBind;
     Owner lastOwner;
 
     @Override
     public void bind(Owner owner) {
       binds++;
       lastOwner = owner;
+      if (failBind) {
+        throw new IllegalStateException("cannot bind");
+      }
     }
 
     @Override

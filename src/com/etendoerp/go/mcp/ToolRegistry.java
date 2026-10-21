@@ -1049,7 +1049,8 @@ public class ToolRegistry {
             + "The async job commits ROW BY ROW (a row = an op plus everything it references "
             + "through parentRef/$ref), not as one atomic unit: a rejected row does not undo the "
             + "others, and the status reports for every row whether it committed (with its "
-            + "recordIds) or why not. Resend only the rows reported committed:false."));
+            + "recordIds) or why not. Resend only rows reported committed:false AND "
+            + "safeToResend:true."));
 
     return new McpToolDefinition(
         "etendo_batch",
@@ -1088,12 +1089,14 @@ public class ToolRegistry {
         McpConstants.TOOL_NEO_JOB_STATUS,
         "Status of an asynchronous batch job started with etendo_batch {async:true}. Returns "
             + "{jobId, state, done, totalRows, processedRows, committedRows, failedRows, rows:[{index, "
-            + "ids, committed, operations:[{id,ok,recordId}] | failedAt, error}], hint?}. state is "
+            + "ids, committed, operations:[{id,ok,recordId}] | failedAt, error, safeToResend}], hint?}. state is "
             + "QUEUED, RUNNING, SUCCEEDED (every row committed), PARTIAL (some rows rejected), "
             + "FAILED, CANCELLED or INTERRUPTED (the server running it stopped: rows listed are "
             + "final, rows not listed may or may not exist — look them up before resending). Poll "
-            + "until done is true (every few seconds). A committed row exists; resend only rows "
-            + "with committed:false. Only the user who started the job can read it.",
+            + "until done is true (every few seconds). A committed row exists. Resend only rows "
+            + "with committed:false AND safeToResend:true; a row with safeToResend:false (atomic:false, "
+            + "or no outcome) may have left records — see its 'persisted' and look them up first. "
+            + "Only the user who started the job can read it.",
         jobIdSchema("The jobId returned by etendo_batch with async:true."));
   }
 

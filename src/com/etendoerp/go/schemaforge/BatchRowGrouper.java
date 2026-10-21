@@ -30,7 +30,7 @@ import org.codehaus.jettison.json.JSONObject;
 /**
  * Splits the operations of an asynchronous batch into <b>rows</b> (ETP-5677): the connected
  * components of the operations graph, where two operations are linked when one names the other in
- * its {@code parentRef} or in a {@code ":<id>"} string anywhere in its body.
+ * its {@code parentRef} or in a {@code "$ref:<id>"} string anywhere in its body.
  *
  * <p>A product plus its price, or a document plus its lines, is one row; two unrelated products are
  * two rows. The async worker commits one row at a time, so a rejected row costs only itself while

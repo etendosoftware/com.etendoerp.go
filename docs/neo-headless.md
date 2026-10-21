@@ -1228,12 +1228,15 @@ its synchronous call does).
 it references through `parentRef` or a `"$ref:<id>"` string anywhere in its body (a product and its
 price, a document and its lines — `BatchRowGrouper`). Each row is its own atomic transaction; a
 rejected row does not stop the others. The status carries, per row, `committed:true` with its
-`operations:[{id,ok,recordId}]`, or `committed:false` with `failedAt` / `error{status,message}`. A row
-reported `committed:true` exists; resend only the rows with `committed:false`.
+`operations:[{id,ok,recordId}]`, or `committed:false` with `failedAt` / `error{status,message}` and
+`safeToResend`. A row reported `committed:true` exists. Resend only rows with `committed:false` **and**
+`safeToResend:true` (the batch vouches it was rolled back: `atomic:true`, empty `persisted`); a row with
+`safeToResend:false` (`atomic:false` — a process committed underneath it — or no outcome) may have left
+records, listed in its `persisted`: look them up first.
 
 ```
 { jobId, state, done, channel, totalRows, totalOps, processedRows, committedRows, failedRows,
-  rows:[{index, ids:[opId…], committed, operations? | failedAt?, error?}], hint?, cancelRequested? }
+  rows:[{index, ids:[opId…], committed, operations? | failedAt?, error?, safeToResend?}], hint?, cancelRequested? }
 ```
 
 `state`: `QUEUED` → `RUNNING` → `SUCCEEDED` (every row committed) / `PARTIAL` / `FAILED` (no row
@@ -1247,9 +1250,9 @@ older than 90 s belongs to a dead node and is reported `INTERRUPTED` by whicheve
 submits — so a load balancer routing a poll to another node never flips a live job. Every state change
 is a conditional update, so a worker cannot overwrite `INTERRUPTED`/`CANCELLED`. The result is flushed
 after every row: after an `INTERRUPTED` job the listed rows are final and the rows not listed may or may
-not exist (look them up before resending). Finished jobs are purged after 24 h.
+not exist (look them up before resending). Finished jobs are purged after 24 h (by `FINISHED`; there is no `EXPIRES` column). The worker and heartbeat threads are stopped when `NeoServlet` is destroyed.
 
-**Limits and access.** At most 2 active jobs per user and 4 per client; over the limit, or with a full
+**Limits and access.** At most 2 active jobs per user and 4 per client (soft limits: the count and the insert are not one atomic step, so simultaneous submits can overshoot them); over the limit, or with a full
 queue (2 workers, 50 slots), the submit answers **429** with `Retry-After: 5` and creates no job. At most
 5000 operations per job; a malformed payload (empty, duplicate ids, a `parentRef` that is not an earlier
 operation, missing `id`/`spec`/`entity`) answers **400** and never becomes a job. Only the user who

@@ -95,6 +95,14 @@ public final class BatchJobService {
   private static final String KEY_COMMITTED = BatchService.FIELD_COMMITTED;
   private static final String KEY_JOB_ID = "jobId";
   private static final String KEY_STATE = "state";
+  private static final String KEY_ERROR = "error";
+  private static final String KEY_STATUS = "status";
+  private static final String KEY_MESSAGE = "message";
+  /**
+   * Per-row flag: {@code true} only when the row is proven rolled back ({@code atomic:true} and an
+   * empty {@code persisted}), the one case in which sending it again cannot duplicate a record.
+   */
+  static final String KEY_SAFE_TO_RESEND = "safeToResend";
 
   private static volatile BatchJobService instance;
 
@@ -102,7 +110,10 @@ public final class BatchJobService {
   public record Owner(String userId, String roleId, String clientId, String orgId,
       String language, String warehouseId) {
 
-    /** @return the owner of the current request, read from the thread's {@link OBContext} */
+    /**
+     * @return the owner of the current request, read from the thread's {@link OBContext}
+     * @throws JobException 401 when the thread has no authenticated user
+     */
     public static Owner current() {
       OBContext ctx = OBContext.getOBContext();
       if (ctx == null || ctx.getUser() == null) {
@@ -123,9 +134,9 @@ public final class BatchJobService {
     /**
      * @param rowOps the operations of one row, in request order
      * @return the batch envelope ({@code committed}, {@code operations} / {@code failedAt}, …)
-     * @throws Exception any failure; it becomes that row's error
+     * @throws JSONException on an unexpected serialisation failure; it becomes that row's error
      */
-    JSONObject run(JSONArray rowOps) throws Exception;
+    JSONObject run(JSONArray rowOps) throws JSONException;
   }
 
   /** Puts the owner's identity on the worker thread and removes it again. */
@@ -229,6 +240,11 @@ public final class BatchJobService {
    * @param runner  runs one row's operations atomically
    * @return {@code {jobId, state:"QUEUED", totalRows, totalOps}}
    * @throws JobException 400 malformed payload, 429 over the concurrency limit or queue full
+   * @throws JSONException on an unexpected serialisation failure
+   *
+   * <p>The per-user / per-client limits are <i>soft</i>: the count and the insert are not one atomic
+   * step, so simultaneous submits can overshoot them by the number of racing requests. They bound
+   * a runaway client, not a precise quota.</p>
    */
   public JSONObject submit(Owner owner, JSONArray ops, String channel, RowRunner runner)
       throws JSONException {
@@ -274,6 +290,10 @@ public final class BatchJobService {
     return new JobException(429, message, RETRY_AFTER_SECONDS);
   }
 
+  private static String opPrefix(int index) {
+    return "operations[" + index + "]";
+  }
+
   /** @return the reason the payload is unacceptable, or {@code null} when it is well-formed */
   static String validate(JSONArray ops) {
     if (ops == null || ops.length() == 0) {
@@ -286,19 +306,19 @@ public final class BatchJobService {
     for (int i = 0; i < ops.length(); i++) {
       JSONObject op = ops.optJSONObject(i);
       if (op == null) {
-        return "operations[" + i + "] must be an object";
+        return opPrefix(i) + " must be an object";
       }
       String id = op.optString("id", null);
       if (StringUtils.isBlank(id) || StringUtils.isBlank(op.optString("spec", null))
           || StringUtils.isBlank(op.optString("entity", null))) {
-        return "operations[" + i + "] requires 'id', 'spec', 'entity'";
+        return opPrefix(i) + " requires 'id', 'spec', 'entity'";
       }
       if (!ids.add(id)) {
-        return "operations[" + i + "].id duplicates an earlier op";
+        return opPrefix(i) + ".id duplicates an earlier op";
       }
       String parentRef = op.optString("parentRef", null);
       if (StringUtils.isNotBlank(parentRef) && !ids.contains(parentRef)) {
-        return "operations[" + i + "].parentRef '" + parentRef
+        return opPrefix(i) + ".parentRef '" + parentRef
             + "' does not match any earlier op id";
       }
     }
@@ -308,8 +328,11 @@ public final class BatchJobService {
   // ── status / cancel ───────────────────────────────────────────────────────
 
   /**
+   * @param owner the caller; only the job's own user and client can read it
+   * @param jobId the id returned by {@link #submit}
    * @return the job as seen by its owner: state, progress and the per-row results so far
    * @throws JobException 404 when the job does not exist or belongs to someone else
+   * @throws JSONException on an unexpected serialisation failure
    */
   public JSONObject status(Owner owner, String jobId) throws JSONException {
     housekeeping(false);
@@ -319,8 +342,11 @@ public final class BatchJobService {
   /**
    * Asks the worker to stop between rows. Rows already committed stay committed.
    *
+   * @param owner the caller; only the job's own user and client can cancel it
+   * @param jobId the id returned by {@link #submit}
    * @return the job after the request
    * @throws JobException 404 unknown/foreign job; 409 when the job already finished
+   * @throws JSONException on an unexpected serialisation failure
    */
   public JSONObject cancel(Owner owner, String jobId) throws JSONException {
     BatchJobStore.JobRecord job = load(owner, jobId);
@@ -371,6 +397,30 @@ public final class BatchJobService {
     }
   }
 
+  /**
+   * Stops the worker and heartbeat threads of the production instance, if one was ever created.
+   * Called when the servlet is destroyed (a webapp stop or redeploy), so the daemon threads do not
+   * keep the old classloader alive. Jobs still running stop refreshing their heartbeat and are
+   * reported {@code INTERRUPTED} by the next node that reads them.
+   */
+  public static void shutdownInstance() {
+    BatchJobService local;
+    synchronized (BatchJobService.class) {
+      local = instance;
+      instance = null;
+    }
+    if (local != null) {
+      local.shutdown();
+    }
+  }
+
+  void shutdown() {
+    if (heartbeatTimer != null) {
+      heartbeatTimer.shutdownNow();
+    }
+    executor.shutdownNow();
+  }
+
   /** @return the job ids this node currently holds (test seam) */
   Set<String> heldJobs() {
     return Set.copyOf(held);
@@ -383,8 +433,10 @@ public final class BatchJobService {
       if (!store.claim(jobId)) {
         return;
       }
-      binder.bind(owner);
+      // Set first: a bind that fails halfway has still touched the pooled thread, and unbind is
+      // idempotent, so the cleanup must run either way.
       bound = true;
+      binder.bind(owner);
       JSONArray results = new JSONArray();
       BatchJobState outcome = null;
       for (int r = 0; r < rows.size(); r++) {
@@ -460,24 +512,42 @@ public final class BatchJobService {
     } catch (Exception e) { // NOSONAR — a row's failure is its result, never the job's death
       log.error("[BATCH-JOB] row {} threw", rowIndex, e);
       row.put(KEY_COMMITTED, false);
-      row.put("error", new JSONObject().put("status", 500)
-          .put("message", "Batch row failed: " + e.getMessage()));
+      row.put(KEY_SAFE_TO_RESEND, false);
+      row.put(KEY_ERROR, new JSONObject().put(KEY_STATUS, 500)
+          .put(KEY_MESSAGE, "Batch row failed: " + e.getMessage()));
       return row;
     } finally {
       binder.rollback();
     }
-    row.put(KEY_COMMITTED, envelope != null && envelope.optBoolean(KEY_COMMITTED, false));
+    boolean committed = envelope != null && envelope.optBoolean(KEY_COMMITTED, false);
+    row.put(KEY_COMMITTED, committed);
     if (envelope == null) {
-      row.put("error", new JSONObject().put("status", 500).put("message", "Empty batch outcome"));
+      row.put(KEY_SAFE_TO_RESEND, false);
+      row.put(KEY_ERROR, new JSONObject().put(KEY_STATUS, 500).put(KEY_MESSAGE, "Empty batch outcome"));
       return row;
     }
-    for (String key : Arrays.asList("operations", "failedAt", "error", BatchService.FIELD_ATOMIC,
+    for (String key : Arrays.asList("operations", "failedAt", KEY_ERROR, BatchService.FIELD_ATOMIC,
         BatchService.FIELD_PERSISTED, BatchService.FIELD_HINT)) {
       if (envelope.has(key)) {
         row.put(key, envelope.get(key));
       }
     }
+    if (!committed) {
+      row.put(KEY_SAFE_TO_RESEND, provenRollback(envelope));
+    }
     return row;
+  }
+
+  /**
+   * A rejected row may be sent again only when the batch itself vouches that nothing of it exists:
+   * {@code atomic:true} and an empty {@code persisted}. {@code atomic:false} means a process
+   * committed underneath the row (its records survive and a resend would duplicate them), and an
+   * envelope that says nothing proves nothing.
+   */
+  private static boolean provenRollback(JSONObject envelope) {
+    JSONArray persisted = envelope.optJSONArray(BatchService.FIELD_PERSISTED);
+    return envelope.optBoolean(BatchService.FIELD_ATOMIC, false) && persisted != null
+        && persisted.length() == 0;
   }
 
   // ── rendering (one serialiser for both channels) ──────────────────────────
@@ -515,8 +585,9 @@ public final class BatchJobService {
         return "Cancelled between rows. Rows listed as committed stay created; rows not listed "
             + "were never started.";
       case PARTIAL:
-        return "Some rows were rejected. Resend only the rows with committed:false; committed "
-            + "rows already exist.";
+        return "Some rows were rejected. Committed rows already exist. Resend only the rows with "
+            + "committed:false AND safeToResend:true; a row with safeToResend:false (atomic:false "
+            + "or no outcome) may have left records, see its 'persisted': look them up first.";
       default:
         return null;
     }

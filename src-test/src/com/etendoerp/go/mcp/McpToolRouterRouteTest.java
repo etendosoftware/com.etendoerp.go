@@ -677,6 +677,60 @@ class McpToolRouterRouteTest {
       }
     }
 
+    /**
+     * REST/MCP parity: the job's per-row runner IS the synchronous MCP call — same
+     * {@code executeBatch} with the MCP preprocessor and the request's options, under admin mode,
+     * and a failed row gets the same IMP-5 envelope rewrite the synchronous tool applies.
+     */
+    @Test
+    @DisplayName("the async row runner is the synchronous MCP call, row by row")
+    void theAsyncRowRunnerIsTheSynchronousMcpCall() throws Exception {
+      SFSpec spec = mockSpec();
+      supportMock.when(() -> McpToolRouterSupport.findActiveSpecByName(SPEC_NAME)).thenReturn(spec);
+      supportMock.when(() -> McpToolRouterSupport.hasSpecAccess(spec, "W", "POST")).thenReturn(true);
+      com.etendoerp.go.schemaforge.BatchJobService jobs =
+          mock(com.etendoerp.go.schemaforge.BatchJobService.class);
+      when(jobs.submit(any(), any(), eq("mcp"), any())).thenReturn(new JSONObject().put("jobId", "J1"));
+      JSONObject failure = new JSONObject().put("committed", false).put("error", new JSONObject());
+      JSONArray rowOps = new JSONArray().put(new JSONObject().put("id", "r"));
+
+      try (MockedStatic<com.etendoerp.go.schemaforge.BatchJobService> jobsMock =
+          mockStatic(com.etendoerp.go.schemaforge.BatchJobService.class);
+          MockedStatic<com.etendoerp.go.schemaforge.BatchJobService.Owner> ownerMock =
+              mockStatic(com.etendoerp.go.schemaforge.BatchJobService.Owner.class);
+          MockedStatic<com.etendoerp.go.schemaforge.BatchService> batchMock =
+              mockStatic(com.etendoerp.go.schemaforge.BatchService.class);
+          MockedStatic<McpBatchEnvelope> envelopeMock = mockStatic(McpBatchEnvelope.class)) {
+        jobsMock.when(com.etendoerp.go.schemaforge.BatchJobService::getInstance).thenReturn(jobs);
+        ownerMock.when(com.etendoerp.go.schemaforge.BatchJobService.Owner::current)
+            .thenReturn(new com.etendoerp.go.schemaforge.BatchJobService.Owner("U", "R", "C", "O",
+                "en_US", null));
+        com.etendoerp.go.schemaforge.BatchService mockBatch =
+            mock(com.etendoerp.go.schemaforge.BatchService.class);
+        batchMock.when(com.etendoerp.go.schemaforge.BatchService::forBatchOnly).thenReturn(mockBatch);
+        when(mockBatch.executeBatch(any(), any(), org.mockito.ArgumentMatchers.anyBoolean(),
+            org.mockito.ArgumentMatchers.anyBoolean())).thenReturn(failure);
+        JSONObject args = asyncArgs();
+        args.put(com.etendoerp.go.schemaforge.BatchService.PARAM_ONLY_RETURN_IDS, true);
+        args.put(com.etendoerp.go.schemaforge.BatchService.PARAM_SKIP_REDUNDANT_CALLOUTS, true);
+
+        router.handleBatch(args);
+
+        ArgumentCaptor<com.etendoerp.go.schemaforge.BatchJobService.RowRunner> runner =
+            ArgumentCaptor.forClass(com.etendoerp.go.schemaforge.BatchJobService.RowRunner.class);
+        verify(jobs).submit(any(), any(), eq("mcp"), runner.capture());
+        obContextMock.clearInvocations();
+        JSONObject outcome = runner.getValue().run(rowOps);
+
+        assertEquals(failure, outcome);
+        verify(mockBatch).executeBatch(eq(rowOps), org.mockito.ArgumentMatchers.notNull(), eq(true),
+            eq(true));
+        envelopeMock.verify(() -> McpBatchEnvelope.toMcpBatchFailure(failure));
+        obContextMock.verify(OBContext::setAdminMode);
+        obContextMock.verify(OBContext::restorePreviousMode);
+      }
+    }
+
     @Test
     @DisplayName("a read-only role cannot start an async batch either")
     void asyncIsDeniedForAReadOnlyRole() throws Exception {
