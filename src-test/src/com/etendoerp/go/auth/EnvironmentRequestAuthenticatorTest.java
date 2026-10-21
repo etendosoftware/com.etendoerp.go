@@ -519,7 +519,13 @@ class EnvironmentRequestAuthenticatorTest {
       "/sales-order/header/ID1,                       etendo:process,           false",
       "/batch,                                        etendo:write,             true",
       "/batch,                                        etendo:process,           false",
-      "/sales-order/header/selectors/action,          etendo:write,             true"
+      "/sales-order/header/selectors/action,          etendo:write,             true",
+      "/sales-order//ID1/action/documentAction,       etendo:write,             false",
+      "/sales-order/header/ID1/ACTION/documentAction, etendo:write,             true",
+      "/sales-order/header/ID1/action/documentAction/, etendo:write,            false",
+      "/sales-order/header/ID1/action/documentAction/x/y, etendo:write,         false",
+      "/sales-order/header/ID1/action/documentAction/x/y, etendo:process,       true",
+      "/sales-order/header/ID1/action,                etendo:write,             false"
   })
   void anActionRouteNeedsTheProcessScope(String pathInfo, String scopes, boolean authenticated) {
     when(sessionAuthenticator.authenticate(any())).thenReturn(GoSessionAuthResult.noSession());

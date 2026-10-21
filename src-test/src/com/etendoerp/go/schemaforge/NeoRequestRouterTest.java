@@ -474,6 +474,23 @@ class NeoRequestRouterTest {
     verify(servlet.processReportEndpoint).handleProcessSpec(spec, request, response);
   }
 
+  /** A cookie or legacy-JWT session carries no granted-scopes attribute: never narrowed by scope. */
+  @Test
+  void testHandleProcessSpecPostAllowsASessionWithoutGrantedScopes() throws Exception {
+    SFSpec spec = mock(SFSpec.class);
+    Process process = mock(Process.class);
+    when(process.getId()).thenReturn("proc-id");
+    when(spec.getProcess()).thenReturn(process);
+    when(servlet.authenticator.hasProcessAccess("proc-id")).thenReturn(true);
+    when(request.getAttribute(
+        com.etendoerp.go.auth.EnvironmentRequestAuthenticator.ATTR_GRANTED_SCOPES))
+        .thenReturn(null);
+
+    router.handleProcessSpecRequest(spec, "POST", request, response);
+
+    verify(servlet.processReportEndpoint).handleProcessSpec(spec, request, response);
+  }
+
   /**
    * Verifies that PUT returns 405.
    */
