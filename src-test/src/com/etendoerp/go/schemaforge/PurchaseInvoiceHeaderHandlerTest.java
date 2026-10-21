@@ -1591,4 +1591,62 @@ public class PurchaseInvoiceHeaderHandlerTest {
         contracts.keySet().containsAll(java.util.List.of("currencyOptions", "post", "unpost")));
     assertNull(NeoActionContract.validate(contracts, "cloneRecord", new JSONObject()));
   }
+
+
+  // ── line import (ETP-5713) ────────────────────────────────────────────────
+
+  private static PurchaseInvoiceHeaderHandler purchaseWithImportDelegates(
+      ImportOrderLinesIntoInvoiceHandler orders, ImportInOutLinesIntoInvoiceHandler receipts)
+      throws Exception {
+    PurchaseInvoiceHeaderHandler handler = new PurchaseInvoiceHeaderHandler();
+    java.lang.reflect.Field ordersField =
+        PurchaseInvoiceHeaderHandler.class.getDeclaredField("importOrderLinesHandler");
+    ordersField.setAccessible(true);
+    ordersField.set(handler, orders);
+    java.lang.reflect.Field receiptsField =
+        PurchaseInvoiceHeaderHandler.class.getDeclaredField("importReceiptLinesHandler");
+    receiptsField.setAccessible(true);
+    receiptsField.set(handler, receipts);
+    return handler;
+  }
+
+  @Test
+  public void actionContracts_publishTheOrderAndReceiptImports() throws Exception {
+    java.util.Map<String, NeoActionContract> contracts =
+        new PurchaseInvoiceHeaderHandler().actionContracts();
+
+    assertTrue(contracts.keySet().containsAll(java.util.List.of("availableOrders",
+        "availableOrderLines", "importOrderLines", "availableReceipts", "availableReceiptLines",
+        "importReceiptLines")));
+    assertFalse("a purchase invoice does not take shipments",
+        contracts.containsKey("importShipmentLines"));
+    assertTrue("the existing declarations are kept",
+        contracts.keySet().containsAll(java.util.List.of("currencyOptions", "post", "unpost",
+            "cloneRecord", "createGoodsReceipt")));
+    assertNull(NeoActionContract.validate(contracts, "importOrderLines",
+        new JSONObject().put("orderId", "o1")));
+    assertNull(NeoActionContract.validate(contracts, "importReceiptLines",
+        new JSONObject().put("receiptId", "rc1")));
+    assertEquals(NeoActionContract.SC_UNPROCESSABLE, NeoActionContract.validate(contracts,
+        "importReceiptLines", new JSONObject().put("shipmentId", "rc1")).getHttpStatus());
+  }
+
+  @Test
+  public void handle_dispatchesTheImportsToTheirDelegates() throws Exception {
+    ImportOrderLinesIntoInvoiceHandler orders = mock(ImportOrderLinesIntoInvoiceHandler.class);
+    ImportInOutLinesIntoInvoiceHandler receipts = mock(ImportInOutLinesIntoInvoiceHandler.class);
+    PurchaseInvoiceHeaderHandler header = purchaseWithImportDelegates(orders, receipts);
+    NeoContext orderCtx = NeoContext.builder().httpMethod("POST")
+        .endpointType(NeoEndpointType.ACTION).fieldName("importOrderLines").recordId("i1").build();
+    NeoContext receiptCtx = NeoContext.builder().httpMethod("POST")
+        .endpointType(NeoEndpointType.ACTION).fieldName("importReceiptLines").recordId("i1")
+        .build();
+    NeoResponse fromOrders = NeoResponse.ok(new JSONObject().put("from", "orders"));
+    NeoResponse fromReceipts = NeoResponse.ok(new JSONObject().put("from", "receipts"));
+    when(orders.handle(orderCtx)).thenReturn(fromOrders);
+    when(receipts.handle(receiptCtx)).thenReturn(fromReceipts);
+
+    assertSame(fromOrders, header.handle(orderCtx));
+    assertSame(fromReceipts, header.handle(receiptCtx));
+  }
 }

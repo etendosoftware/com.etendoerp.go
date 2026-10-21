@@ -28,6 +28,9 @@ import org.openbravo.model.ad.access.User;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.ad.system.Client;
 
+import com.etendoerp.go.common.BoundedJsonParser;
+import com.etendoerp.go.common.MalformedJsonException;
+
 /**
  * Persists named filter presets per window per user via AD_PREFERENCE.
  *
@@ -81,8 +84,13 @@ class NeoFiltersService {
     JSONObject all = loadAll();
     try {
       JSONObject windowPresets = all.has(windowName) ? all.getJSONObject(windowName) : new JSONObject();
-      windowPresets.put(presetName, new JSONObject(filtersJson));
+      windowPresets.put(presetName, BoundedJsonParser.parseObject(filtersJson));
       all.put(windowName, windowPresets);
+    } catch (MalformedJsonException e) {
+      // The client's body: a 400, not a server fault worth a stack trace.
+      log.warn("Invalid filters JSON for window {}, preset {}: {}", windowName, presetName,
+          e.getMessage());
+      throw new IllegalArgumentException("Invalid JSON body");
     } catch (Exception e) {
       log.error("Invalid filters JSON for window {}, preset {}: {}", windowName, presetName, e.getMessage(), e);
       throw new IllegalArgumentException("Invalid JSON body");

@@ -42,6 +42,7 @@ import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
 import org.openbravo.model.financialmgmt.calendar.Period;
 import org.openbravo.module.taxreportlauncher.TaxReport;
 
+import com.etendoerp.go.common.MalformedJsonException;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 import com.etendoerp.go.schemaforge.util.NeoMessageTranslator;
 import com.etendoerp.go.schemaforge.util.RoleAccessMatrix;
@@ -134,6 +135,49 @@ abstract class AbstractFiscalHandler {
       throw new AlreadySubmittedException(
           "This declaration was already submitted (status: " + status + ") for org=" + orgId
               + " year=" + year + " period=" + period + " model=" + model);
+    }
+  }
+
+  /**
+   * ETP-5725 (reopened QA fix) — shared defense-in-depth for {@code generate} (file generation,
+   * both {@code /fiscal303/generate} and {@code /fiscal349/generate}): rejects a request whose
+   * EFFECTIVE corrective/ordinaria identification would violate the same business rule enforced
+   * on the {@code PUT} path by {@link FiscalDeclCorrectiveConsistencySupport#checkCorrectiveConsistency} ("a
+   * corrective declaration needs a presented ordinaria to correct" / "only one presented
+   * ordinaria per period") — see that method's javadoc for the rule itself. {@code generate} is
+   * the actual AEAT submission artifact (the literal file the user uploads to the AEAT portal),
+   * not a preview, so it must never be generatable while the declaration is in an invalid state,
+   * exactly like "Guardar"/"Registrar/Presentar".
+   *
+   * <p>{@code generate} has no declaration id of its own — only {@code (orgId, year, period,
+   * model)} — so the natural key's sibling search excludes the LATEST declaration for that key,
+   * if one already exists (mirroring {@link #guardNotAlreadySubmitted}'s own "latest DECL_SEQ
+   * wins" natural-key lookup), rather than a specific row like the PUT path excludes itself.
+   *
+   * @param effectivelyCorrective whether THIS generate call's own identification — as the
+   *                               caller's request describes it, since {@code generate} has no
+   *                               persisted row of its own to trust at call time (the frontend
+   *                               never flushes a save before generating) — marks it as
+   *                               rectificativa (303) / sustitutiva (349). Each handler's own
+   *                               {@code dispatch} resolves this from its own unambiguous request
+   *                               parameter — see {@link Fiscal303BoxesHandler#dispatch} /
+   *                               {@link Fiscal349BoxesHandler#dispatch}.
+   * @throws AlreadySubmittedException when the rule is violated — caught by {@link #runDispatch}
+   *                                    exactly like {@link #guardNotAlreadySubmitted}'s own, and
+   *                                    turned into a clean 409.
+   */
+  protected void guardCorrectiveConsistency(String orgId, int year, String period, String model,
+      boolean effectivelyCorrective) {
+    String clientId = OBContext.getOBContext().getCurrentClient().getId();
+    BaseOBObject latest = declHandler().findLatestDeclaration(clientId, declarationOrgId(), model,
+        year, period);
+    String excludeId = latest != null && latest.getId() != null ? String.valueOf(latest.getId()) : null;
+    String violation = declHandler().correctiveConsistencySupport.checkCorrectiveConsistency(
+        clientId, declarationOrgId(), model, year, period, excludeId, effectivelyCorrective);
+    if (violation != null) {
+      throw new AlreadySubmittedException(
+          violation + " for org=" + orgId + " year=" + year + " period=" + period
+              + " model=" + model);
     }
   }
 
@@ -302,6 +346,8 @@ abstract class AbstractFiscalHandler {
       } else {
         declHandler.handleIncidents(method, request, response);
       }
+    } catch (MalformedJsonException e) {
+      servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST, "Invalid JSON body");
     } catch (Exception e) {
       log.error("Error in /" + getModelKey() + "/" + entityName, e);
       servlet.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, userMessage(e));
@@ -417,6 +463,12 @@ abstract class AbstractFiscalHandler {
     } catch (AlreadySubmittedException e) {
       try {
         servlet.sendError(response, HttpServletResponse.SC_CONFLICT, e.getMessage());
+      } catch (Exception ioEx) {
+        throw new FiscalHandlerException(ioEx);
+      }
+    } catch (MalformedJsonException e) {
+      try {
+        servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST, "Invalid JSON body");
       } catch (Exception ioEx) {
         throw new FiscalHandlerException(ioEx);
       }

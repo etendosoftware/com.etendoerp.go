@@ -34,6 +34,8 @@ import org.junit.Test;
  *
  * Tests verify which combinations of endpoint type, HTTP method, field name, and
  * request body cause TotalDiscountService.recalculate() to fire — and which do not.
+ *
+ * @covers com.etendoerp.go.schemaforge.AbstractOrderHeaderHandler
  */
 public class AbstractOrderHeaderHandlerTest {
 
@@ -493,6 +495,23 @@ public class AbstractOrderHeaderHandlerTest {
   @Test
   public void calculatePercentage_zeroInvoiced_returnsZero() {
     assertEquals(0L, AbstractOrderHeaderHandler.calculatePercentage(0, 5, false));
+  }
+
+  // ── filterAliases (ETP-5705) ────────────────────────────────────────────────
+
+  /**
+   * The aliases live with applyCorrectedStatusPercentages, which every order header handler
+   * inherits; a subclass that overrode filterAliases would keep the rewrite in afterHandle but
+   * filter on the raw virtual value again. So each handler must use the base declaration.
+   */
+  @Test
+  public void filterAliases_isInheritedUnchangedByEveryOrderHeaderHandler() throws Exception {
+    for (Class<? extends AbstractOrderHeaderHandler> handlerClass : java.util.List.of(
+        SalesOrderHeaderHandler.class, PurchaseOrderHeaderHandler.class,
+        SalesQuotationHeaderHandler.class)) {
+      assertEquals(handlerClass.getSimpleName(), AbstractOrderHeaderHandler.class,
+          handlerClass.getMethod("filterAliases", NeoContext.class).getDeclaringClass());
+    }
   }
 
   // ── helpers ───────────────────────────────────────────────────────────────

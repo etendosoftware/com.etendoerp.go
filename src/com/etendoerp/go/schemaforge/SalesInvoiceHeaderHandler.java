@@ -40,6 +40,7 @@ import org.openbravo.model.common.enterprise.DocumentType;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import com.etendoerp.go.schemaforge.handlers.DocumentPostingService;
 import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
+import org.openbravo.base.structure.BaseOBObject;
 
 /**
  * NeoHandler for the Sales Invoice header entity.
@@ -100,6 +101,12 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
   @Inject
   private CurrencyOptionsHandler currencyOptionsHandler;
 
+  @Inject
+  private ImportOrderLinesIntoInvoiceHandler importOrderLinesHandler;
+
+  @Inject
+  private ImportInOutLinesIntoInvoiceHandler importShipmentLinesHandler;
+
   /** Package-private seam so unit tests can inject a mocked {@link DocumentPostingService}. */
   void setPostingService(DocumentPostingService postingService) {
     this.postingService = postingService;
@@ -123,7 +130,19 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
     contracts.putAll(InvoicePostingGate.CONTRACTS);
     // ETP-5709: cloneRecord was served (see handle) but undeclared.
     contracts.put(NeoCloneRecordHandler.CONTRACT.getName(), NeoCloneRecordHandler.CONTRACT);
+    // ETP-5713: import the pending lines of a completed order / goods shipment into this draft.
+    contracts.putAll(ImportOrderLinesIntoInvoiceHandler.contracts(true));
+    contracts.putAll(ImportInOutLinesIntoInvoiceHandler.contracts(true));
     return contracts;
+  }
+
+  /**
+   * {@inheritDoc} Reactivate is ruled out for an invoice {@link InvoiceReactivationGuard} would
+   * refuse to reactivate (ETP-5714).
+   */
+  @Override
+  public Map<String, String> unavailableActions(BaseOBObject subject) {
+    return InvoiceDocumentAvailability.unavailable(subject);
   }
 
   /** The PIS actions: served to the SPA, never to an agent (ETP-5558). */
@@ -188,7 +207,8 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
       return reactivationGuard;
     }
     return NeoHeaderActionRouter.dispatch(context, currencyOptionsHandler, cloneRecordHandler,
-        registerPaymentHandler, siiSendHandler, tbaiXmlgeneratorHandler, followUp.actionHandler());
+        registerPaymentHandler, siiSendHandler, tbaiXmlgeneratorHandler, importOrderLinesHandler,
+        importShipmentLinesHandler, followUp.actionHandler());
   }
 
   /**

@@ -18,6 +18,7 @@
 package com.etendoerp.go.mcp;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -26,6 +27,7 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 
+import com.etendoerp.go.schemaforge.util.NeoActionAvailability;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 
 /**
@@ -60,6 +62,20 @@ final class McpActionsView {
   static final String TYPE_BUTTON = "button";
   static final String KEY_ACTIONS = "actions";
   static final String KEY_INVOKABLE_COUNT = "invokableCount";
+
+  /** Key of the sentence that explains how to read the availability keys. */
+  static final String KEY_AVAILABILITY_HINT = "availabilityHint";
+
+  /** How an agent should read {@code availableWhen}, {@code valuesByStatus} and {@code availableNow}. */
+  static final String AVAILABILITY_HINT = "An action carrying availableWhen / valuesByStatus says "
+      + "in which record states it applies; one carrying neither applies in every state. Pass the "
+      + "record's id to etendo_schema to also get availableNow, unavailableReason and, for a "
+      + "list-backed action, availableValuesNow for that record. Unavailable actions stay listed so "
+      + "you can tell the user why. This is advice only: it never blocks a call, and the server "
+      + "still validates the call itself.";
+
+  /** Key of the {@code value → reason} object for values of a list-backed action ruled out here. */
+  static final String KEY_UNAVAILABLE_VALUES = "unavailableValues";
 
   /** @return {@code true} when {@code view} requests the actions-only projection. */
   static boolean isActionsView(String view) {
@@ -146,10 +162,28 @@ final class McpActionsView {
    *
    * @param excluded the excluded action names
    */
-  @SuppressWarnings("java:S107") // the catalogue's inputs; a holder would only rename them
   static JSONObject buildResponse(String specName, String entityName, JSONArray fields,
       Map<String, NeoActionContract> declared, McpActionsSection.View config,
       Set<String> excluded) throws JSONException {
+    return buildResponse(specName, entityName, fields, declared, config, excluded, null);
+  }
+
+  /**
+   * The same catalogue, judged against one record (ETP-5714).
+   *
+   * <p>Every action that declares when it applies ({@code availableWhen} / {@code valuesByStatus},
+   * from its contract or from {@code MCP_CONFIG.actions}) shows that declaration; when a record
+   * is given it also carries {@code availableNow} and, when false, {@code unavailableReason}, and a
+   * list-backed action carries {@code availableValuesNow}. Unavailable actions stay LISTED — the
+   * catalogue is complete — and nothing here refuses a call: availability is advisory, the
+   * handlers' own guards stay the enforcement.</p>
+   *
+   * @param subject the record the agent asked about, or {@code null} for the static catalogue
+   */
+  @SuppressWarnings("java:S107") // the catalogue's inputs; a holder would only rename them
+  static JSONObject buildResponse(String specName, String entityName, JSONArray fields,
+      Map<String, NeoActionContract> declared, McpActionsSection.View config,
+      Set<String> excluded, McpActionAvailabilityContext subject) throws JSONException {
     Map<String, NeoActionContract> offered = declared != null ? declared : Map.of();
     boolean hasDeclared = !offered.isEmpty();
     JSONObject response = new JSONObject();
@@ -157,8 +191,13 @@ final class McpActionsView {
     response.put("entity", entityName);
     JSONArray actions = withoutDescribedButtons(apply(applyConfig(fields, config, excluded)),
         offered);
+    for (int i = 0; i < actions.length(); i++) {
+      decorateButton(actions.getJSONObject(i), config, subject);
+    }
     for (NeoActionContract contract : offered.values()) {
-      actions.put(contract.toJson());
+      JSONObject entry = contract.toJson();
+      judge(entry, contract.getAvailability(), List.of(contract.getName()), subject);
+      actions.put(entry);
     }
     withdrawAllIfUnusable(actions, config);
     response.put(KEY_ACTIONS, actions);
@@ -170,7 +209,108 @@ final class McpActionsView {
           + "entry's 'action', id = the record its idDescription names, and parameters matching "
           + "its schema. Prefer them over an AD button with a similar meaning.");
     }
+    if (subject != null) {
+      response.put("recordId", subject.getRecordId());
+    }
+    if (declaresAvailability(actions)) {
+      response.put(KEY_AVAILABILITY_HINT, AVAILABILITY_HINT);
+    }
     return response;
+  }
+
+  private static boolean declaresAvailability(JSONArray actions) throws JSONException {
+    for (int i = 0; i < actions.length(); i++) {
+      JSONObject action = actions.getJSONObject(i);
+      if (action.has(NeoActionAvailability.KEY_AVAILABLE_WHEN)
+          || action.has(NeoActionAvailability.KEY_VALUES_BY_STATUS)
+          || action.has(NeoActionAvailability.KEY_AVAILABLE_NOW)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** An AD button: its availability comes from {@code MCP_CONFIG.actions}, under any of its names. */
+  private static void decorateButton(JSONObject button, McpActionsSection.View config,
+      McpActionAvailabilityContext subject) throws JSONException {
+    List<String> names = namesOf(button);
+    NeoActionAvailability declared = null;
+    for (String name : names) {
+      declared = config == null ? null : config.availabilityOf(name);
+      if (declared != null) {
+        break;
+      }
+    }
+    if (declared != null) {
+      declared.writeTo(button);
+    }
+    judge(button, declared, names, subject);
+  }
+
+  /**
+   * Adds {@code availableNow} / {@code unavailableReason} / {@code availableValuesNow} to one
+   * action when a record was given. The handler's derived refusals win over the static
+   * declaration; an action with neither says nothing.
+   */
+  private static void judge(JSONObject action, NeoActionAvailability declared, List<String> names,
+      McpActionAvailabilityContext subject) throws JSONException {
+    if (subject == null) {
+      return;
+    }
+    for (String name : names) {
+      String derived = subject.derivedReasonOf(name);
+      if (derived != null) {
+        action.put(NeoActionAvailability.KEY_AVAILABLE_NOW, false);
+        action.put(NeoActionAvailability.KEY_UNAVAILABLE_REASON, derived);
+        return;
+      }
+    }
+    if (declared != null) {
+      judgeDeclared(action, declared, subject);
+    }
+    ruleOutValues(action, names, subject);
+  }
+
+  private static void judgeDeclared(JSONObject action, NeoActionAvailability declared,
+      McpActionAvailabilityContext subject) throws JSONException {
+    NeoActionAvailability.Verdict verdict = declared.evaluate(subject.getReader());
+    if (verdict.available() == null) {
+      return;
+    }
+    action.put(NeoActionAvailability.KEY_AVAILABLE_NOW, verdict.available().booleanValue());
+    if (!verdict.available() && verdict.reason() != null) {
+      action.put(NeoActionAvailability.KEY_UNAVAILABLE_REASON, verdict.reason());
+    }
+    if (!verdict.valuesNow().isEmpty()) {
+      action.put(NeoActionAvailability.KEY_AVAILABLE_VALUES_NOW,
+          new JSONArray(verdict.valuesNow()));
+    }
+  }
+
+  /**
+   * Applies the customization's {@code action:value} rulings: the value leaves
+   * {@code availableValuesNow} and is reported, with its reason, under {@code unavailableValues}.
+   */
+  private static void ruleOutValues(JSONObject action, List<String> names,
+      McpActionAvailabilityContext subject) throws JSONException {
+    Map<String, String> ruledOut = new LinkedHashMap<>();
+    for (String name : names) {
+      ruledOut.putAll(subject.derivedValueReasonsOf(name));
+    }
+    if (ruledOut.isEmpty()) {
+      return;
+    }
+    JSONArray now = action.optJSONArray(NeoActionAvailability.KEY_AVAILABLE_VALUES_NOW);
+    if (now != null) {
+      JSONArray kept = new JSONArray();
+      for (int i = 0; i < now.length(); i++) {
+        if (!ruledOut.containsKey(now.optString(i))) {
+          kept.put(now.optString(i));
+        }
+      }
+      action.put(NeoActionAvailability.KEY_AVAILABLE_VALUES_NOW, kept);
+    }
+    action.put(KEY_UNAVAILABLE_VALUES, new JSONObject(ruledOut));
   }
 
   /**
@@ -279,12 +419,35 @@ final class McpActionsView {
       if (contract != null) {
         field.remove(McpConstants.KEY_ACTION_VALUES);
         field.remove(McpConstants.KEY_ACTION_PARAMETER);
+        JSONObject described = contract.toJson();
         field.put(McpConstants.PARAM_PARAMETERS,
-            contract.toJson().getJSONObject(McpConstants.PARAM_PARAMETERS));
+            described.getJSONObject(McpConstants.PARAM_PARAMETERS));
         field.put("declaredAction", contract.getName());
+        markInvokable(field);
+        if (contract.getAvailability() != null) {
+          contract.getAvailability().writeTo(field);
+        }
       }
     }
     return fields;
+  }
+
+  /**
+   * A button a declared contract stands for IS invokable: the contract is what {@code etendo_action}
+   * runs and validates (ETP-5714). The AD flags the schema builder derived for the bare button —
+   * {@code invokable:false} because the column is not displayed in the tab, as on
+   * {@code DocAction} of a goods receipt — no longer apply, and {@code invokeVia} says so
+   * consistently with the actions view, which lists the contract itself. A withdrawal made by
+   * {@code MCP_CONFIG.actions} (redirected, unusable) is left alone: that one is real.
+   */
+  private static void markInvokable(JSONObject field) throws JSONException {
+    String reason = field.optString(McpSchemaFieldBuilder.KEY_NOT_INVOKABLE_REASON, null);
+    if (reason != null && reason.startsWith(NOT_RUN_THROUGH_MCP)) {
+      return;
+    }
+    field.remove(McpSchemaFieldBuilder.KEY_INVOKABLE);
+    field.remove(McpSchemaFieldBuilder.KEY_NOT_INVOKABLE_REASON);
+    field.put(McpSchemaFieldBuilder.KEY_INVOKE_VIA, McpSchemaFieldBuilder.INVOKE_VIA_ETENDO_ACTION);
   }
 
   /** @return the declared contract that stands for this button, or {@code null} */

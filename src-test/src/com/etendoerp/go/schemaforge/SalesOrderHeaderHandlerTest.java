@@ -1102,4 +1102,18 @@ public class SalesOrderHeaderHandlerTest {
     assertEquals(com.etendoerp.go.schemaforge.util.NeoActionContract.SC_UNPROCESSABLE, com.etendoerp.go.schemaforge.util.NeoActionContract.validate(contracts,
         "createShipment", new JSONObject().put("warehouseId", "W1")).getHttpStatus());
   }
+
+  /**
+   * ETP-5714: the keys SalesOrderHeaderHandler's afterHandle adds to a GET record are declared, so an MCP
+   * {@code fields:[…]} projection does not report them in {@code unknownFields} while the same
+   * response carries them.
+   */
+  @org.junit.jupiter.api.Test
+  @org.junit.jupiter.api.DisplayName("sales order: enriched response keys are declared")
+  void enrichedKeysAreDeclaredSalesOrderHeaderHandler() {
+    java.util.Set<String> declared = new SalesOrderHeaderHandler().responseEnrichedFields();
+    for (String key : java.util.List.of("hasLinkedDocuments", "needsPrimaryDoc", "needsInvoiceDoc")) {
+      org.junit.jupiter.api.Assertions.assertTrue(declared.contains(key), key + " in " + declared);
+    }
+  }
 }

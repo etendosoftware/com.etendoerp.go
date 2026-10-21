@@ -42,6 +42,7 @@ import org.openbravo.model.common.enterprise.DocumentType;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import com.etendoerp.go.schemaforge.handlers.DocumentPostingService;
 import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
+import org.openbravo.base.structure.BaseOBObject;
 
 /**
  * NeoHandler for the Purchase Invoice header entity.
@@ -103,6 +104,12 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
   @Inject
   private CurrencyOptionsHandler currencyOptionsHandler;
 
+  @Inject
+  private ImportOrderLinesIntoInvoiceHandler importOrderLinesHandler;
+
+  @Inject
+  private ImportInOutLinesIntoInvoiceHandler importReceiptLinesHandler;
+
   /** Package-private seam so unit tests can inject a mocked {@link DocumentPostingService}. */
   void setPostingService(DocumentPostingService postingService) {
     this.postingService = postingService;
@@ -126,6 +133,9 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
     contracts.putAll(InvoicePostingGate.CONTRACTS);
     // ETP-5709: cloneRecord was served (see handle) but undeclared.
     contracts.put(NeoCloneRecordHandler.CONTRACT.getName(), NeoCloneRecordHandler.CONTRACT);
+    // ETP-5713: import the pending lines of a completed order / goods receipt into this draft.
+    contracts.putAll(ImportOrderLinesIntoInvoiceHandler.contracts(false));
+    contracts.putAll(ImportInOutLinesIntoInvoiceHandler.contracts(false));
     return contracts;
   }
 
@@ -136,6 +146,15 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
   @Override
   protected Set<String> completedEditableHeaderFields() {
     return CompletedInvoiceWriteFence.purchaseHeaderEditableWhenCompleted();
+  }
+
+  /**
+   * {@inheritDoc} Reactivate is ruled out for an invoice {@link InvoiceReactivationGuard} would
+   * refuse to reactivate (ETP-5714).
+   */
+  @Override
+  public Map<String, String> unavailableActions(BaseOBObject subject) {
+    return InvoiceDocumentAvailability.unavailable(subject);
   }
 
   /** The PIS actions: served to the SPA, never to an agent (ETP-5558). */
@@ -206,6 +225,8 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
         registerPaymentOutHandler,
         siiSendHandler,
         tbaiXmlgeneratorHandler,
+        importOrderLinesHandler,
+        importReceiptLinesHandler,
         followUp.actionHandler());
   }
 

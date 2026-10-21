@@ -35,6 +35,7 @@ import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.client.kernel.RequestContext;
 import org.openbravo.dal.service.OBDal;
 
+import com.etendoerp.go.common.BoundedJsonParser;
 import com.etendoerp.go.schemaforge.handlers.DocumentPostingService;
 
 /**
@@ -166,11 +167,11 @@ public class AmortizationHeaderHandler implements NeoHandler {
   static String rewritePostedInCriteria(String rawCriteria) throws JSONException {
     String trimmed = rawCriteria.trim();
     if (trimmed.startsWith("[")) {
-      JSONArray arr = new JSONArray(trimmed);
+      JSONArray arr = BoundedJsonParser.parseArray(trimmed);
       rewriteCriteriaArray(arr);
       return arr.toString();
     }
-    JSONObject obj = new JSONObject(trimmed);
+    JSONObject obj = BoundedJsonParser.parseObject(trimmed);
     rewriteCriteriaObject(obj);
     return obj.toString();
   }

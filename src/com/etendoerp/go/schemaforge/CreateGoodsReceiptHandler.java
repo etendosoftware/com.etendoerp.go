@@ -67,7 +67,8 @@ public class CreateGoodsReceiptHandler implements NeoHandler {
           + "draft receipt when one covers everything) instead of creating another receipt. "
           + "Complete the receipt afterwards with documentAction (docAction CO) on the "
           + "goods-receipt spec.")
-      .withIdDescription("the id of the purchase order to receive");
+      .withIdDescription("the id of the purchase order to receive")
+      .availableWhen(DocumentAvailability.WHEN_COMPLETED);
 
   @Override
   public NeoResponse handle(NeoContext context) {

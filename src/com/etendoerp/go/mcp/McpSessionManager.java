@@ -26,6 +26,7 @@ import org.apache.logging.log4j.Logger;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 
+import com.etendoerp.go.auth.EffectiveClientResolver;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
@@ -34,7 +35,9 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  * MCP uses long-lived SSE connections where multiple tool calls happen over time.
  * Each tool call MUST have its own OBContext and Hibernate session to prevent
  * cross-contamination between calls. This class wraps tool execution with proper
- * setup/teardown following the same pattern as NeoServlet's authenticateJwt.
+ * setup/teardown, building the context the same way NEO's shared authentication pipeline does
+ * ({@code EnvironmentRequestAuthenticator}'s bind step, through
+ * {@link SecureWebServicesUtils#createContext}).
  */
 public class McpSessionManager {
 
@@ -87,14 +90,18 @@ public class McpSessionManager {
         }
       }
 
-      String effectiveClient = resolveEffectiveClientId(clientId, roleId);
+      // Resolve client: if "0" (System), get the client from the role
+      // Tables with access level "Organization" reject clientId=0
+      // (ETP-5047: the shared resolver, the same one McpServlet judges the call with; a failed
+      // lookup throws instead of falling back to "0")
+      String effectiveClient = EffectiveClientResolver.effectiveClientId(clientId, roleId);
 
       // Telemetry only (ETP-5594): the usage row must carry the tenant the call runs under, not
       // the token's "0" wildcard. Bound before createContext so a call that fails there is still
       // attributed; cleared by McpServlet.doPost once the row has been recorded.
       McpUsageTelemetry.setCurrentTenant(effectiveClient, effectiveOrg);
 
-      // Set OBContext using the same method as NeoServlet.authenticateJwt
+      // Set OBContext the way EnvironmentRequestAuthenticator's bind step does for NEO
       OBContext context = SecureWebServicesUtils.createContext(
           userId, roleId, effectiveOrg, warehouseId, effectiveClient);
       OBContext.setOBContext(context);
@@ -167,56 +174,6 @@ public class McpSessionManager {
   public static void runInContext(String userId, String roleId,
       String clientId, Runnable action) throws Exception {
     runInContext(userId, roleId, clientId, DEFAULT_ORG, null, action);
-  }
-
-  /**
-   * Returns the client an MCP call actually runs under. A credential carrying the System wildcard
-   * ({@code "0"}, e.g. an OAuth2 token) runs under its role's client, because tables with access
-   * level "Organization" reject client 0. Any other value is returned unchanged.
-   *
-   * <p>Shared by the context setup and by {@code McpServlet}'s commercial-access check, so the
-   * check evaluates exactly the tenant the call will touch (ETP-5642).
-   *
-   * @param clientId client carried by the credential
-   * @param roleId   role carried by the credential
-   * @return the effective client id; the given one when the role cannot resolve another
-   */
-  static String resolveEffectiveClientId(String clientId, String roleId) {
-    if (!"0".equals(clientId)) {
-      return clientId;
-    }
-    String resolvedClient = resolveClientFromRole(roleId);
-    if (resolvedClient == null) {
-      return clientId;
-    }
-    log.debug("Resolved client from role {}: {}", roleId, resolvedClient);
-    return resolvedClient;
-  }
-
-  /**
-   * Resolve the AD_Client_ID from the role record.
-   * When the OAuth2 token stores clientId="0" (System), we need the role's actual client
-   * because tables with access level "Organization" reject client 0.
-   */
-  private static String resolveClientFromRole(String roleId) {
-    try {
-      return OBDal.getInstance().getSession().doReturningWork(connection -> {
-        String sql = "SELECT ad_client_id FROM ad_role WHERE ad_role_id = ?";
-        try (PreparedStatement ps = connection.prepareStatement(sql)) {
-          ps.setString(1, roleId);
-          try (ResultSet rs = ps.executeQuery()) {
-            if (rs.next()) {
-              String cid = rs.getString(1);
-              return "0".equals(cid) ? null : cid;
-            }
-          }
-        }
-        return null;
-      });
-    } catch (Exception e) {
-      log.warn("Failed to resolve client from role {}: {}", roleId, e.getMessage());
-      return null;
-    }
   }
 
   /**

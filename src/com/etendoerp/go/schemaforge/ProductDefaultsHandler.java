@@ -19,6 +19,7 @@ package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import javax.inject.Named;
@@ -105,6 +106,17 @@ public class ProductDefaultsHandler implements NeoHandler {
   /** Display-only flag consumed by the Product window's cost banner and save gate. */
   private static final String FIELD_HAS_COST = "etgoHasCost";
   /**
+   * ETP-5676: create-body directive. {@code true} skips {@link #seedDefaultPrices} for this
+   * product. Read and removed by {@link #handle} before the generic CRUD path sees the body, so it
+   * never reaches the field filter or the DAL.
+   */
+  static final String DIRECTIVE_SKIP_PRICES_SEED = "_skipPricesSeed";
+  /** In a parsed {@link #DIRECTIVE_SKIP_PRICES_SEED}: skip both directions, whatever the tariff. */
+  static final String SKIP_ALL_TARIFFS = "*";
+  /** Carries {@link #DIRECTIVE_SKIP_PRICES_SEED} from the pre-hook to {@link #afterHandle}. */
+  private static final String ATTR_SKIP_PRICES_SEED =
+      ProductDefaultsHandler.class.getName() + ".skipPricesSeed";
+  /**
    * ETP-5009: excludes products whose category is flagged {@code EM_Etgo_IsSystemCategory = 'Y'}
    * (DAL property {@code etgoIssystemcategory}, a Yes/No column mapped as {@code Boolean} — the
    * same property {@code ProductCategorySystemFlagSelectorPolicy} already filters on). A
@@ -135,6 +147,12 @@ public class ProductDefaultsHandler implements NeoHandler {
     if (body == null) {
       return null;
     }
+    // Stripped on PATCH too, so the directive never reaches the generic write path; honoured on
+    // create only, the one place a price is seeded.
+    Set<String> skipPricesSeed = consumeSkipPricesSeed(body);
+    if (isCreate && !skipPricesSeed.isEmpty()) {
+      context.setAttribute(ATTR_SKIP_PRICES_SEED, skipPricesSeed);
+    }
     try {
       enforceNonStockableProductTypes(body);
     } catch (Exception e) {
@@ -153,6 +171,59 @@ public class ProductDefaultsHandler implements NeoHandler {
     // body already corrected (so the generic "first combo option" fallback never fires for
     // uOM/taxCategory, and a Service product can never persist as stocked/returnable).
     return null;
+  }
+
+  /**
+   * ETP-5676: reads and removes {@link #DIRECTIVE_SKIP_PRICES_SEED} from a write body.
+   *
+   * <p>For a caller that sends its own prices in the same request — the products import writes a
+   * sales and a purchase price op right after the product op. Seeding zero rows first only for
+   * {@code ProductPriceHandler} to find and overwrite them doubled every price write, and cost a
+   * flush plus core's price observer per row.
+   *
+   * <p>Two forms. An array of price list version ids — what the import sends: the versions the
+   * same request prices — skips a direction only when the version the seed would use for it is
+   * listed. Once a user clears the default flag on a direction, the caller (selector order) and
+   * {@link PriceListVersionResolver} (org before {@code *}) can fall back to different lists, so
+   * this is the form that cannot leave the server's default tariff without a row. {@code true} skips both directions unconditionally.
+   *
+   * @param body the request body, mutated in place
+   * @return the listed version ids, {@link #SKIP_ALL_TARIFFS} alone for {@code true}, or an empty
+   *     set when the seed must run as usual
+   */
+  static Set<String> consumeSkipPricesSeed(JSONObject body) {
+    if (body == null || !body.has(DIRECTIVE_SKIP_PRICES_SEED)) {
+      return Set.of();
+    }
+    Object raw = body.opt(DIRECTIVE_SKIP_PRICES_SEED);
+    body.remove(DIRECTIVE_SKIP_PRICES_SEED);
+    if (raw instanceof JSONArray) {
+      JSONArray ids = (JSONArray) raw;
+      Set<String> listed = new java.util.HashSet<>();
+      for (int i = 0; i < ids.length(); i++) {
+        String id = StringUtils.trimToNull(ids.optString(i, null));
+        if (id != null && !SKIP_ALL_TARIFFS.equals(id)) {
+          listed.add(id);
+        }
+      }
+      return listed;
+    }
+    return Boolean.TRUE.equals(raw) || "true".equals(raw) ? Set.of(SKIP_ALL_TARIFFS) : Set.of();
+  }
+
+  /**
+   * ETP-5676: published to agents by {@code etendo_schema(view:"create")} and accepted by the MCP
+   * write verbs without being reported as an unknown field.
+   */
+  @Override
+  public Map<String, String> createDirectives() {
+    return Map.of(DIRECTIVE_SKIP_PRICES_SEED,
+        "Optional. An array of price list version ids this same request (e.g. the same "
+            + "etendo_batch) prices the product on: the new product is not given the zero-priced row "
+            + "on a default sales/purchase tariff whose version is in the list — your price op "
+            + "writes it instead. A default tariff not in the list is still seeded. true skips "
+            + "both unconditionally (only when you price both default tariffs yourself). Create "
+            + "only: accepted and ignored on etendo_update.");
   }
 
   /**
@@ -200,7 +271,7 @@ public class ProductDefaultsHandler implements NeoHandler {
       return injectDefaults(context);
     }
     if (NeoEndpointType.CRUD.equals(context.getEndpointType())) {
-      if (METHOD_POST.equals(context.getHttpMethod())) {
+      if (METHOD_POST.equals(context.getHttpMethod()) && !skipsAllTariffs(context)) {
         seedDefaultPrices(context);
       }
       return annotateCostPresence(context, hideSystemCategoryProducts(context));
@@ -233,6 +304,10 @@ public class ProductDefaultsHandler implements NeoHandler {
     // flag absent — and an absent flag means "has a cost", so the banner stayed hidden until the
     // user reloaded the page. Only a GET list is excluded, where this would be one count per row.
     if (METHOD_GET.equals(context.getHttpMethod()) && !context.isReadById()) {
+      return filtered;
+    }
+    // ETP-5676: a batch sent with _onlyReturnIds reads only the id; the flag is for the form.
+    if (context.isIdsOnlyResponse()) {
       return filtered;
     }
     NeoResponse target = filtered != null ? filtered : context.getPreviousResult();
@@ -300,7 +375,8 @@ public class ProductDefaultsHandler implements NeoHandler {
    * <p>Idempotent by construction — it skips any tariff the product is already priced on. That
    * matters beyond retries: the products import posts its own price for the same tariff in the
    * same {@code /batch} call, and {@code ProductPriceHandler} turns that second write into an
-   * update of the row seeded here rather than a duplicate.
+   * update of the row seeded here rather than a duplicate. ETP-5676: such a caller should send
+   * {@link #DIRECTIVE_SKIP_PRICES_SEED} instead, so the price is written once.
    *
    * @param context the CRUD POST context whose previous result carries the created product
    */
@@ -329,6 +405,17 @@ public class ProductDefaultsHandler implements NeoHandler {
     }
   }
 
+  /** The {@link #DIRECTIVE_SKIP_PRICES_SEED} the pre-hook kept for this operation; empty if none. */
+  @SuppressWarnings("unchecked")
+  private static Set<String> skippedTariffs(NeoContext context) {
+    Object kept = context.getAttribute(ATTR_SKIP_PRICES_SEED);
+    return kept instanceof Set ? (Set<String>) kept : Set.of();
+  }
+
+  private static boolean skipsAllTariffs(NeoContext context) {
+    return skippedTariffs(context).contains(SKIP_ALL_TARIFFS);
+  }
+
   /**
    * Creates the zero-priced row for one direction, unless the product already has one there.
    *
@@ -338,11 +425,14 @@ public class ProductDefaultsHandler implements NeoHandler {
    */
   private void seedPriceOnDefaultTariff(NeoContext context, Product product,
       boolean salesPriceList) {
-    String versionId = PriceListVersionResolver.resolveDefaultVersionId(context.getObContext(),
-        salesPriceList);
+    String versionId = resolveDefaultVersionId(context.getObContext(), salesPriceList);
     if (StringUtils.isBlank(versionId)) {
       log.debug("No default {} price list configured; product {} gets no seeded price",
           salesPriceList ? "sales" : "purchase", product.getId());
+      return;
+    }
+    if (skippedTariffs(context).contains(versionId)) {
+      // ETP-5676: the same request prices this very version itself.
       return;
     }
     if (ProductHandlerUtils.findExistingPrice(product.getId(), versionId) != null) {
@@ -366,6 +456,22 @@ public class ProductDefaultsHandler implements NeoHandler {
     price.setListPrice(BigDecimal.ZERO);
     price.setPriceLimit(BigDecimal.ZERO);
     OBDal.getInstance().save(price);
+  }
+
+  /**
+   * The default tariff version for one direction, resolved once per batch request (ETP-5676).
+   * Keyed by client and current organisation — the two inputs
+   * {@link PriceListVersionResolver#resolveDefaultVersionId} reads from the context.
+   */
+  private static String resolveDefaultVersionId(OBContext obContext, boolean salesPriceList) {
+    String clientId = obContext != null && obContext.getCurrentClient() != null
+        ? obContext.getCurrentClient().getId() : null;
+    String orgId = obContext != null && obContext.getCurrentOrganization() != null
+        ? obContext.getCurrentOrganization().getId() : null;
+    return NeoBatchScope.memoize(
+        ProductDefaultsHandler.class.getName() + "|priceListVersion|" + salesPriceList + "|"
+            + clientId + "|" + orgId,
+        () -> PriceListVersionResolver.resolveDefaultVersionId(obContext, salesPriceList));
   }
 
   /**
@@ -551,6 +657,15 @@ public class ProductDefaultsHandler implements NeoHandler {
    *         row marked as default
    */
   String resolveDefaultId(Class<? extends BaseOBObject> entityClass, String clientId) {
+    // ETP-5676: once per batch request and client — every product of an import asks the same.
+    return NeoBatchScope.memoize(
+        ProductDefaultsHandler.class.getName() + "|default|" + entityClass.getName() + "|"
+            + clientId,
+        () -> resolveDefaultIdUncached(entityClass, clientId));
+  }
+
+  private String resolveDefaultIdUncached(Class<? extends BaseOBObject> entityClass,
+      String clientId) {
     if (StringUtils.isNotBlank(clientId)) {
       String ownDefault = queryDefaultId(entityClass, clientId);
       if (ownDefault != null) {

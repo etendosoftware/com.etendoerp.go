@@ -54,8 +54,10 @@ final class InOutCompletionContract {
           + "Only CO is offered: completing cannot be undone from here and "
           + "voiding is not available; a completed document is corrected with a return.",
       NeoActionContract.Param.requiredOptions("docAction",
-          "The only value accepted is CO (complete).", List.of(DOC_ACTION_COMPLETE)))
-      .withIdDescription("the id of the draft goods receipt / goods shipment to complete");
+          "The only value accepted is CO (complete).", List.of(DOC_ACTION_COMPLETE))
+          .withRefusalHint(DocumentAvailability.GOODS_REFUSAL_HINT))
+      .withIdDescription("the id of the draft goods receipt / goods shipment to complete")
+      .availableWhen(DocumentAvailability.GOODS_DOCUMENT_ACTION);
 
   private InOutCompletionContract() {
   }

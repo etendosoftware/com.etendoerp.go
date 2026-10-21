@@ -165,6 +165,142 @@ class InvoiceLineAmountSupportTest {
     }
   }
 
+  // ── ETP-5710 follow-up: the grid's "Precio" is listPrice ──────────────────────
+
+  /**
+   * The grid column "Precio" of an invoice line is {@code listPrice}; the form edits it and derives
+   * {@code unitPrice} from it, so a form-created line at 50 has {@code listPrice 50}. An agent that
+   * sent only {@code unitPrice 50} left {@code listPrice 0} (the price injector abstains when the
+   * price is not the product's standard one): net and gross were right (100 / 121.00) but the grid
+   * showed 0,00. With a price, no discount and no list price, the price is the list price.
+   */
+  static Stream<Arguments> listPriceOnCreate() {
+    return Stream.of(
+        // label, body, expected listPrice (null: absent), unitPrice, net, gross
+        Arguments.of("explicit price, no list price → list = price (2 x 50, 21 %)",
+            "{\"invoicedQuantity\":2,\"unitPrice\":50" + TAX + "}", "50", "50", "100", "121"),
+        Arguments.of("explicit price, list price 0 → list = price",
+            "{\"invoicedQuantity\":2,\"unitPrice\":50,\"listPrice\":0" + TAX + "}", "50", "50",
+            "100", "121"),
+        Arguments.of("explicit price, discount 0 → list = price",
+            "{\"invoicedQuantity\":2,\"unitPrice\":50,\"etgoDiscount\":0" + TAX + "}", "50", "50",
+            "100", "121"),
+        Arguments.of("explicit price and explicit list price → both untouched",
+            "{\"invoicedQuantity\":2,\"unitPrice\":50,\"listPrice\":60" + TAX + "}", "60", "50",
+            "100", "121"),
+        Arguments.of("price equals the resolved list price (standard price) → unchanged",
+            "{\"invoicedQuantity\":2,\"unitPrice\":50,\"listPrice\":50" + TAX + "}", "50", "50",
+            "100", "121"),
+        Arguments.of("discount present → the discount rule as before (list = price, price discounted)",
+            "{\"invoicedQuantity\":2,\"unitPrice\":50,\"etgoDiscount\":10" + TAX + "}", "50", "45",
+            "90", "108.90"),
+        Arguments.of("an explicit gross price → the list price is left alone",
+            "{\"invoicedQuantity\":2,\"unitPrice\":50,\"grossUnitPrice\":60.5" + TAX + "}", null, "50",
+            "100", null),
+        Arguments.of("discount 100 → list = price, price 0, net and gross 0",
+            "{\"invoicedQuantity\":2,\"unitPrice\":50,\"etgoDiscount\":100" + TAX + "}", "50", "0",
+            "0", "0"),
+        Arguments.of("a negative price (a return) → list = price, signs kept",
+            "{\"invoicedQuantity\":2,\"unitPrice\":-50" + TAX + "}", "-50", "-50", "-100", "-121"),
+        Arguments.of("no price → no list price invented",
+            "{\"invoicedQuantity\":2" + TAX + "}", null, null, null, null));
+  }
+
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("listPriceOnCreate")
+  void listPriceFollowsAnExplicitPriceOnCreate(String label, String body, String listPrice,
+      String unitPrice, String net, String gross) throws Exception {
+    JSONObject json = new JSONObject(body);
+    NeoContext ctx = NeoContext.builder().specName("purchase-invoice").entityName("lines")
+        .httpMethod("POST").endpointType(NeoEndpointType.CRUD).requestBody(json).build();
+
+    try (MockedStatic<OBDal> dal = LineAmountTestSupport.taxRate(21.0)) {
+      InvoiceLineAmountSupport.deriveAmountsOnCreate(ctx);
+    }
+
+    if (listPrice == null) {
+      assertFalse(json.has(InvoiceLineAmountSupport.FIELD_LIST_PRICE), label + ": " + json);
+    } else {
+      assertAmount(label, listPrice, json, InvoiceLineAmountSupport.FIELD_LIST_PRICE);
+    }
+    if (unitPrice != null) {
+      assertAmount(label, unitPrice, json, InvoiceLineAmountSupport.FIELD_UNIT_PRICE);
+    }
+    if (net != null) {
+      assertAmount(label, net, json, InvoiceLineAmountSupport.FIELD_LINE_NET_AMOUNT);
+    }
+    if (gross != null) {
+      assertAmount(label, gross, json, InvoiceLineAmountSupport.FIELD_GROSS_AMOUNT);
+    }
+  }
+
+  static Stream<Arguments> listPriceOnUpdate() {
+    return Stream.of(
+        // label, stored line, patch, expected listPrice written (null: not written)
+        Arguments.of("price set on a line whose list price is 0, no discount → list = price",
+            LineAmountTestSupport.storedInvoiceLine("2", "0", "0", "0", "0", "TAX21"),
+            "{\"unitPrice\":50}", "50"),
+        Arguments.of("a line created at 50 / list 50, no discount, repriced to 60 → list follows (the form)",
+            LineAmountTestSupport.storedInvoiceLine("2", "50", "50", "0", "0", "TAX21"),
+            "{\"unitPrice\":60}", "60"),
+        Arguments.of("repriced with an explicit list price in the patch → the caller's list price",
+            LineAmountTestSupport.storedInvoiceLine("2", "50", "50", "0", "0", "TAX21"),
+            "{\"unitPrice\":60,\"listPrice\":65}", "65"),
+        Arguments.of("a discounted line repriced → discount kept, list worked back (ETP-5703)",
+            LineAmountTestSupport.storedInvoiceLine("2", "22.5", "25", "10", "0", "TAX21"),
+            "{\"unitPrice\":30}", "33.333333"),
+        Arguments.of("legacy discounted line (list 0, discount 2): the price edit does not invent a list",
+            LineAmountTestSupport.storedInvoiceLine("10", "24.5", "0", "2", "0", "TAX21"),
+            "{\"unitPrice\":30}", null),
+        Arguments.of("an explicit listPrice 0 with the price is read as absent → list = price",
+            LineAmountTestSupport.storedInvoiceLine("2", "0", "0", "0", "0", "TAX21"),
+            "{\"unitPrice\":50,\"listPrice\":0}", "50"),
+        Arguments.of("a stored non-zero gross unit price → the helper does not fire",
+            LineAmountTestSupport.storedInvoiceLine("2", "0", "0", "0", "60.5", "TAX21"),
+            "{\"unitPrice\":50}", null),
+        Arguments.of("a patch that only clears the discount does not re-price → no list invented",
+            LineAmountTestSupport.storedInvoiceLine("10", "24.5", "0", "2", "0", "TAX21"),
+            "{\"etgoDiscount\":0}", null),
+        Arguments.of("unitPrice null in the patch → not a re-price",
+            LineAmountTestSupport.storedInvoiceLine("2", "0", "0", "0", "0", "TAX21"),
+            "{\"unitPrice\":null}", null),
+        Arguments.of("the SAME unit price re-sent → the list price is not touched (the form only moves it when Precio is edited)",
+            LineAmountTestSupport.storedInvoiceLine("2", "90", "100", "0", "0", "TAX21"),
+            "{\"unitPrice\":90}", null),
+        Arguments.of("a legacy line (list 100, price 90) repriced to 80 → list follows",
+            LineAmountTestSupport.storedInvoiceLine("2", "90", "100", "0", "0", "TAX21"),
+            "{\"unitPrice\":80}", "80"),
+        Arguments.of("the same price re-sent as a number with other scale → still the same price",
+            LineAmountTestSupport.storedInvoiceLine("2", "90", "100", "0", "0", "TAX21"),
+            "{\"unitPrice\":\"90.000000\"}", null),
+        Arguments.of("an explicit list price in the patch is the caller's",
+            LineAmountTestSupport.storedInvoiceLine("2", "0", "0", "0", "0", "TAX21"),
+            "{\"unitPrice\":50,\"listPrice\":55}", "55"),
+        Arguments.of("a patch that does not re-price leaves the list price alone",
+            LineAmountTestSupport.storedInvoiceLine("2", "50", "0", "0", "0", "TAX21"),
+            "{\"invoicedQuantity\":3}", null));
+  }
+
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("listPriceOnUpdate")
+  void listPriceFollowsAnExplicitPriceOnUpdate(String label, InvoiceLine stored, String patch,
+      String listPrice) throws Exception {
+    JSONObject json = new JSONObject(patch);
+    NeoContext ctx = NeoContext.builder().specName("purchase-invoice").entityName("lines")
+        .httpMethod("PATCH").endpointType(NeoEndpointType.CRUD)
+        .recordId(LineAmountTestSupport.STORED_LINE_ID).requestBody(json).build();
+
+    try (MockedStatic<OBDal> dal = LineAmountTestSupport.taxRate(21.0, stored)) {
+      InvoiceLineAmountSupport.deriveAmountsOnUpdate(ctx);
+    }
+
+    if (listPrice == null) {
+      assertFalse(json.has(InvoiceLineAmountSupport.FIELD_LIST_PRICE), label + ": " + json);
+    } else {
+      assertAmount(label, listPrice, json, InvoiceLineAmountSupport.FIELD_LIST_PRICE);
+    }
+  }
+
   // ── ETP-5710: update (PATCH / PUT) overlays the patch on the stored line ──────
 
   /** 10 x 24.50 (list 25, 2 %), 21 %: the line case 1 of the ticket should have stored. */
@@ -186,6 +322,9 @@ class InvoiceLineAmountSupportTest {
             "{\"unitPrice\":30}", null, "300", "363"),
         Arguments.of("tax change → gross follows, net does not move", storedLine(),
             "{\"tax\":\"TAX10\"}", null, "245", "269.50"),
+        Arguments.of("price set on a line with list price 0 → list follows, price and net final",
+            LineAmountTestSupport.storedInvoiceLine("2", "0", "0", "0", "0", "TAX21"),
+            "{\"unitPrice\":50}", "50", "100", "121"),
         Arguments.of("legacy line (price 25, no list price): price kept, quantity re-derives net",
             LineAmountTestSupport.storedInvoiceLine("10", "25", "0", "2", "0", "TAX21"),
             "{\"invoicedQuantity\":20}", null, "500", "605"),

@@ -19,12 +19,16 @@ package com.etendoerp.go.schemaforge;
 
 import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.stubProviderLookup;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
+import java.time.LocalDate;
+import java.time.ZoneOffset;
+import java.util.Date;
 
 import org.junit.After;
 import org.junit.Test;
@@ -37,6 +41,8 @@ import org.openbravo.dal.service.OBDal;
 
 import com.etendoerp.psd2.bank.integration.data.FinaccConnection;
 import com.etendoerp.psd2.bank.integration.data.Provider;
+import com.etendoerp.psd2.bank.integration.utils.SaltEdgeAccountLinkHelper;
+import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 
 /**
  * Unit tests for {@link FinancialAccountBankConnectionSupport#maxFetchIntervalOf}, the ETP-5181
@@ -57,6 +63,8 @@ import com.etendoerp.psd2.bank.integration.data.Provider;
  * asserted to short-circuit BEFORE any DAL work, via {@code verifyNoInteractions} on the mocked
  * {@link OBDal} — that ordering is what keeps {@code GET status} from paying for a criteria query
  * on every account that cannot sync anyway.
+ *
+ * @covers com.etendoerp.go.schemaforge.FinancialAccountBankConnectionSupport
  */
 @RunWith(MockitoJUnitRunner.Silent.class)
 public class FinancialAccountBankConnectionSupportFetchIntervalTest {
@@ -243,6 +251,129 @@ public class FinancialAccountBankConnectionSupportFetchIntervalTest {
 
       assertEquals(Integer.valueOf(730),
           FinancialAccountBankConnectionSupport.maxFetchIntervalOf(connection));
+    }
+  }
+
+  // ── ETP-5805: findImportFromBeyondFetchInterval ───────────────────────────
+
+  private static final LocalDate TODAY = LocalDate.of(2026, 10, 19);
+
+  private static Date utcMidnight(LocalDate day) {
+    return Date.from(day.atStartOfDay(ZoneOffset.UTC).toInstant());
+  }
+
+  /** Runs the rule with an active connection whose provider publishes {@code days} (null = none). */
+  private static FinancialAccountBankConnectionSupport.FetchIntervalExceeded evaluate(
+      BigDecimal days, Date importFrom) {
+    FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
+    FinaccConnection connection = connection(Boolean.TRUE, PROVIDER_CODE);
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<SaltEdgeAccountLinkHelper> helper = mockStatic(SaltEdgeAccountLinkHelper.class)) {
+      helper.when(() -> SaltEdgeAccountLinkHelper.getActiveConnectionForFinAcc(finAcc))
+          .thenReturn(connection);
+      stubProviderLookup(obDal, provider(days));
+      return FinancialAccountBankConnectionSupport.findImportFromBeyondFetchInterval(finAcc,
+          importFrom, TODAY);
+    }
+  }
+
+  /** The exact boundary day (today - N) does not warn: the comparison is strict. */
+  @Test
+  public void testImportFromOnTheBoundaryDayDoesNotWarn() {
+    assertNull(evaluate(BigDecimal.valueOf(90), utcMidnight(TODAY.minusDays(90))));
+  }
+
+  /** One day older than the boundary warns and carries the limit and the earliest usable day. */
+  @Test
+  public void testImportFromOneDayBeyondTheBoundaryWarns() {
+    FinancialAccountBankConnectionSupport.FetchIntervalExceeded out =
+        evaluate(BigDecimal.valueOf(90), utcMidnight(TODAY.minusDays(91)));
+    assertNotNull(out);
+    assertEquals(90, out.getDays());
+    assertEquals(TODAY.minusDays(90), out.getEarliestDate());
+  }
+
+  /** A date inside the window does not warn. */
+  @Test
+  public void testImportFromWithinTheWindowDoesNotWarn() {
+    assertNull(evaluate(BigDecimal.valueOf(90), utcMidnight(TODAY.minusDays(10))));
+  }
+
+  /** No import-from date, nothing to advise. */
+  @Test
+  public void testNullImportFromDoesNotWarn() {
+    assertNull(evaluate(BigDecimal.valueOf(90), null));
+  }
+
+  /** An undeclared (null) or zero limit never warns. */
+  @Test
+  public void testUndeclaredOrZeroLimitDoesNotWarn() {
+    Date ancient = utcMidnight(TODAY.minusYears(5));
+    assertNull(evaluate(null, ancient));
+    assertNull(evaluate(BigDecimal.ZERO, ancient));
+  }
+
+  /** An account with no active connection has no limit. */
+  @Test
+  public void testNoActiveConnectionDoesNotWarn() {
+    FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
+    try (MockedStatic<SaltEdgeAccountLinkHelper> helper = mockStatic(SaltEdgeAccountLinkHelper.class)) {
+      helper.when(() -> SaltEdgeAccountLinkHelper.getActiveConnectionForFinAcc(finAcc))
+          .thenReturn(null);
+      assertNull(FinancialAccountBankConnectionSupport.findImportFromBeyondFetchInterval(finAcc,
+          utcMidnight(TODAY.minusYears(5)), TODAY));
+    }
+  }
+
+  /** The rule is total: a lookup failure means "say nothing", never an exception. */
+  @Test
+  public void testLookupFailureDoesNotThrow() {
+    FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
+    try (MockedStatic<SaltEdgeAccountLinkHelper> helper = mockStatic(SaltEdgeAccountLinkHelper.class)) {
+      helper.when(() -> SaltEdgeAccountLinkHelper.getActiveConnectionForFinAcc(finAcc))
+          .thenThrow(new IllegalStateException("boom"));
+      assertNull(FinancialAccountBankConnectionSupport.findImportFromBeyondFetchInterval(finAcc,
+          utcMidnight(TODAY.minusYears(5)), TODAY));
+    }
+  }
+
+  /** The translated text carries the days and the earliest date as the language writes it. */
+  @Test
+  public void testExceededTextIsTranslatedAndFormatted() {
+    FinancialAccountBankConnectionSupport.FetchIntervalExceeded exceeded =
+        new FinancialAccountBankConnectionSupport.FetchIntervalExceeded(730, LocalDate.of(2024, 10, 19));
+    String en = FinancialAccountBankConnectionSupport.fetchIntervalExceededText(exceeded, "en_US");
+    String es = FinancialAccountBankConnectionSupport.fetchIntervalExceededText(exceeded, "es_ES");
+    org.junit.Assert.assertTrue(en, en.contains("730") && en.contains("2024-10-19"));
+    org.junit.Assert.assertTrue(es, es.contains("730") && es.contains("19/10/2024")
+        && es.contains("d\u00edas"));
+  }
+
+  /**
+   * The calendar-day form is time-zone independent: under a zone ahead of UTC the boundary day does
+   * not warn and the day before it does (the PUT hook feeds it the day from the request string).
+   */
+  @Test
+  public void testCalendarDayRuleIsIndependentOfDefaultTimeZone() {
+    java.util.TimeZone original = java.util.TimeZone.getDefault();
+    java.util.TimeZone.setDefault(java.util.TimeZone.getTimeZone("Europe/Madrid"));
+    try {
+      FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
+      FinaccConnection connection = connection(Boolean.TRUE, PROVIDER_CODE);
+      try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+          MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+          MockedStatic<SaltEdgeAccountLinkHelper> helper = mockStatic(SaltEdgeAccountLinkHelper.class)) {
+        helper.when(() -> SaltEdgeAccountLinkHelper.getActiveConnectionForFinAcc(finAcc))
+            .thenReturn(connection);
+        stubProviderLookup(obDal, provider(BigDecimal.valueOf(90)));
+        assertNull(FinancialAccountBankConnectionSupport.findImportFromBeyondFetchInterval(finAcc,
+            TODAY.minusDays(90), TODAY));
+        assertNotNull(FinancialAccountBankConnectionSupport.findImportFromBeyondFetchInterval(finAcc,
+            TODAY.minusDays(91), TODAY));
+      }
+    } finally {
+      java.util.TimeZone.setDefault(original);
     }
   }
 

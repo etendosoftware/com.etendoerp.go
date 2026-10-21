@@ -157,6 +157,9 @@ public final class NeoDiscoveryHelper {
 
       JSONArray entitiesArray = new JSONArray();
       for (SFEntity entity : entities) {
+        if (!NeoAccountingAccessPolicy.isEntityAllowed(entity)) {
+          continue; // ETP-5648: accounting entities need the showAccountingFields capability
+        }
         JSONObject entityObj = new JSONObject();
         entityObj.put("id", entity.getId());
         entityObj.put("name", entity.getName());
@@ -200,6 +203,9 @@ public final class NeoDiscoveryHelper {
     List<SFEntity> entities = criteria.list();
     JSONArray arr = new JSONArray();
     for (SFEntity entity : entities) {
+      if (!NeoAccountingAccessPolicy.isEntityAllowed(entity)) {
+        continue; // ETP-5648: accounting entities need the showAccountingFields capability
+      }
       JSONObject obj = new JSONObject();
       obj.put("name", entity.getName());
       obj.put("methods", buildMethodsArray(entity));

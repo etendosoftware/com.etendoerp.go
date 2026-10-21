@@ -67,7 +67,6 @@ dependencies {
     implementation('com.etendoerp:copilot.toolpack:[3.3.0,)')
     implementation('com.etendoerp:db.extended:[1.3.7,)')
     implementation('com.etendoerp:localization.spain.extensions:[4.0.0,)')
-    implementation('com.etendoerp:go.localization.es.data:[1.0.0,)')
     implementation('com.etendoerp:bulk.posting.es_es:1.4.0')
     implementation('com.etendoerp:bulk.posting:3.0.0')
     implementation('com.etendoerp:psd2.bank.integration:[2.0.0,)')
@@ -159,7 +158,16 @@ def isolatedDalTests = [
         '**/CreateGoodsReceiptHandlerNegativeQuantityIntegrationTest.class',
         '**/CreatePurchaseInvoiceHandlerNegativeQuantityIntegrationTest.class',
         '**/AbstractInvoiceHeaderHandlerOriginInvoiceIntegrationTest.class',
+        '**/SubscriptionServiceIntegrationTest.class',
+        '**/GrandfatheredSubscriptionIntegrationTest.class',
+        '**/SubscriptionBackfillIdempotencyIntegrationTest.class',
+        '**/SubscriptionResubscriptionIntegrationTest.class',
+        '**/SubscriptionModelSwitchIntegrationTest.class',
         '**/NeoCloneRecordHandlerInvoiceLinksIntegrationTest.class',
+        '**/ImportOrderLinesIntoInvoiceHandlerIntegrationTest.class',
+        // ETP-5778: passes alone but trips OBBaseTest's admin-mode check after other classes ran
+        // in the same worker (a leaked setAdminMode() from an earlier test), so it gets its own JVM.
+        '**/NeoListAggregateQueryIntegrationTest.class',
 ]
 
 def isolatedDalTestClasses = [
@@ -169,7 +177,14 @@ def isolatedDalTestClasses = [
         'com.etendoerp.go.schemaforge.CreateGoodsReceiptHandlerNegativeQuantityIntegrationTest',
         'com.etendoerp.go.schemaforge.CreatePurchaseInvoiceHandlerNegativeQuantityIntegrationTest',
         'com.etendoerp.go.schemaforge.AbstractInvoiceHeaderHandlerOriginInvoiceIntegrationTest',
+        'com.etendoerp.go.payment.SubscriptionServiceIntegrationTest',
+        'com.etendoerp.go.payment.GrandfatheredSubscriptionIntegrationTest',
+        'com.etendoerp.go.payment.SubscriptionBackfillIdempotencyIntegrationTest',
+        'com.etendoerp.go.payment.SubscriptionResubscriptionIntegrationTest',
+        'com.etendoerp.go.payment.SubscriptionModelSwitchIntegrationTest',
         'com.etendoerp.go.schemaforge.NeoCloneRecordHandlerInvoiceLinksIntegrationTest',
+        'com.etendoerp.go.schemaforge.ImportOrderLinesIntoInvoiceHandlerIntegrationTest',
+        'com.etendoerp.go.schemaforge.handlers.NeoListAggregateQueryIntegrationTest',
 ]
 
 def commandLineFilterReachesIsolatedGoTest = { requestedTestPatterns ->
@@ -241,9 +256,7 @@ rootProject.afterEvaluate { rootProj ->
  *
  * <p>This task runs the second half on its own: the suite a developer can run with no Postgres and
  * no Tomcat, and the one a PR pipeline can run before any environment exists. Membership is by
- * naming convention — every {@code *IntegrationTest} is excluded — plus two classes that predate
- * the convention and are referenced by name throughout {@code docs/}, so they are excluded by name
- * instead of being renamed.</p>
+ * naming convention: every {@code *IntegrationTest} is excluded, with no exceptions.</p>
  *
  * <p>{@code scripts/check-unit-test-classification.sh} enforces that split: a new DB-backed test
  * that does not follow the convention fails that check, instead of failing inside a
@@ -255,9 +268,6 @@ rootProject.afterEvaluate { rootProj ->
  */
 def dbBackedGoTests = [
         '**/*IntegrationTest.class',
-        // Predate the *IntegrationTest convention; both extend a DAL base class.
-        '**/UserRoleCompositionServiceOverlapReverificationTest.class',
-        '**/BusinessPartnerHandlerDbTest.class',
 ]
 
 rootProject.afterEvaluate { rootProj ->
@@ -322,6 +332,182 @@ rootProject.afterEvaluate { rootProj ->
             csv.required = false
             xml.outputLocation = rootProj.file(
                     "${rootProj.buildDir}/reports/jacoco/goTestUnit/goTestUnit.xml")
+        }
+    }
+}
+
+/**
+ * Tests de schemaforge separados por célula (ventas, compras, almacenes, financiero, contabilidad, localizacion, plataforma).
+ *
+ * <p>Cada célula es un archivo {@code src-test/cells/<célula>.txt} con una clase de test por
+ * línea. Las clases {@code *IntegrationTest} usan la base de datos; el resto
+ * son con mocks. Los tests que pertenecen a varias células van en
+ * {@code src-test/cells/compartidos/<grupo>.txt}, y cada célula los suma con una línea
+ * {@code @incluye <grupo>}. Ejemplos:</p>
+ *
+ * <pre>
+ *   ./gradlew goCellTest -Pcell=ventas                      # mocks + integración de ventas
+ *   ./gradlew goCellTest -Pcell=ventas,compras -Pkind=mock  # solo los de mocks
+ *   ./gradlew goCellTest -Pcell=all -Pkind=integration      # todos los de integración
+ *   ./gradlew goCellList                                    # células y número de tests
+ *   ./gradlew goCellCheck                                   # falla si hay tests sin célula
+ * </pre>
+ *
+ * <p>Los de integración se ejecutan en {@code goCellIntegrationTest} con una JVM por clase, por
+ * el mismo motivo que {@code goIsolatedDalTest} (ver arriba). Los de mocks, en
+ * {@code goCellMockTest}.</p>
+ */
+def cellsDir = file('src-test/cells')
+def schemaforgeTestsDir = file('src-test/src/com/etendoerp/go/schemaforge')
+
+def sharedCellsDir = new File(cellsDir, 'compartidos')
+
+// Clases listadas directamente en cada archivo, sin resolver los '@incluye': una entrada por archivo
+// ('ventas', 'compartidos/ventas-compras', ...). Es lo que valida goCellCheck.
+def readCellFiles = {
+    def files = [:] as TreeMap
+    def readDir = { File dir, String prefix ->
+        dir.listFiles({ f -> f.isFile() && f.name.endsWith('.txt') } as FileFilter)?.each { f ->
+            files[prefix + (f.name - '.txt')] = f.readLines('UTF-8')*.trim()
+                    .findAll { it && !it.startsWith('#') }
+        }
+    }
+    readDir(cellsDir, '')
+    readDir(sharedCellsDir, 'compartidos/')
+    files
+}
+
+// Células ejecutables con sus clases, incluyendo los grupos compartidos ('@incluye ventas-compras').
+def readCells = {
+    def files = readCellFiles()
+    def cells = [:] as TreeMap
+    files.findAll { !it.key.startsWith('compartidos/') }.each { cell, lines ->
+        cells[cell] = lines.collectMany { line ->
+            if (!line.startsWith('@incluye ')) {
+                return [line]
+            }
+            String shared = 'compartidos/' + line.substring('@incluye '.length()).trim()
+            if (!files.containsKey(shared)) {
+                throw new GradleException("La célula ${cell} incluye ${shared}.txt, que no existe en src-test/cells/")
+            }
+            files[shared]
+        }.unique()
+    }
+    cells
+}
+
+def isIntegrationTest = { String className -> className ==~ /.*IntegrationTest$/ }
+
+def selectedCellTests = { String kind ->
+    def cells = readCells()
+    String requested = rootProject.findProperty('cell')?.toString()
+    if (!requested) {
+        throw new GradleException("Indica la célula con -Pcell=<${cells.keySet().join('|')}|all>")
+    }
+    def names = requested == 'all' ? cells.keySet() : requested.split(',')*.trim()
+    def unknown = names.findAll { !cells.containsKey(it) }
+    if (unknown) {
+        throw new GradleException("Célula desconocida: ${unknown.join(', ')}. Disponibles: ${cells.keySet().join(', ')}")
+    }
+    String wanted = rootProject.findProperty('kind')?.toString() ?: 'all'
+    if (!(wanted in ['mock', 'integration', 'all'])) {
+        throw new GradleException("-Pkind debe ser mock, integration o all (recibido: ${wanted})")
+    }
+    if (wanted != 'all' && wanted != kind) {
+        return []
+    }
+    names.collectMany { cells[it] }.unique().findAll { isIntegrationTest(it) == (kind == 'integration') }
+}
+
+rootProject.afterEvaluate { rootProj ->
+    def rootTest = rootProj.tasks.findByName('test')
+    if (rootTest == null || rootProj.tasks.findByName('goCellTest') != null) {
+        return
+    }
+
+    def cellTask = { String name, String kind, boolean ownJvmPerClass ->
+        rootProj.tasks.create(name, Test) { Test t ->
+            t.group = 'verification'
+            t.description = "Tests de schemaforge (${kind}) de las células indicadas con -Pcell."
+            t.testClassesDirs = rootTest.testClassesDirs
+            t.classpath = rootTest.classpath
+            t.useJUnitPlatform()
+            if (ownJvmPerClass) {
+                t.forkEvery = 1
+                t.maxParallelForks = 1
+            }
+            t.systemProperties = rootTest.systemProperties
+            t.jvmArgs = rootTest.jvmArgs
+            t.minHeapSize = rootTest.minHeapSize
+            t.maxHeapSize = rootTest.maxHeapSize
+            t.workingDir = rootTest.workingDir
+            t.environment(rootTest.environment)
+            t.filter.failOnNoMatchingTests = false
+            // Siempre se ejecutan: el resultado depende de -Pcell/-Pkind, no de las entradas.
+            t.outputs.upToDateWhen { false }
+
+            // Solo se lee -Pcell cuando se pide una de estas tareas, para no romper el resto de builds.
+            def runsCellTests = rootProj.gradle.startParameter.taskNames.any { taskName ->
+                taskName.tokenize(':').last() in ['goCellTest', 'goCellMockTest', 'goCellIntegrationTest']
+            }
+            def selected = runsCellTests ? selectedCellTests(kind) : []
+            selected.each { className -> t.filter.includeTestsMatching(className) }
+            t.onlyIf { !selected.isEmpty() }
+        }
+    }
+
+    def mockTask = cellTask('goCellMockTest', 'mock', false)
+    def integrationTask = cellTask('goCellIntegrationTest', 'integration', true)
+    integrationTask.mustRunAfter mockTask
+
+    rootProj.tasks.create('goCellTest') { t ->
+        t.group = 'verification'
+        t.description = 'Tests de schemaforge por célula: -Pcell=ventas[,compras|all] -Pkind=mock|integration|all'
+        t.dependsOn mockTask, integrationTask
+    }
+
+    rootProj.tasks.create('goCellList') { t ->
+        t.group = 'verification'
+        t.description = 'Lista las células de tests de schemaforge y cuántos tests tiene cada una.'
+        t.doLast {
+            readCells().each { cell, tests ->
+                int integration = tests.count { isIntegrationTest(it) }
+                println String.format('%-28s mocks=%3d  integración=%2d', cell, tests.size() - integration, integration)
+            }
+        }
+    }
+
+    rootProj.tasks.create('goCellCheck') { t ->
+        t.group = 'verification'
+        t.description = 'Falla si algún test de schemaforge no está en ninguna célula o está en varias.'
+        t.doLast {
+            // Cada clase debe estar en un solo archivo; una célula puede además incluir grupos compartidos.
+            readCells()
+            def assigned = readCellFiles().collectMany { cell, tests ->
+                tests.findAll { !it.startsWith('@incluye ') }.collect { [it, cell] }
+            }
+            def byClass = assigned.groupBy { it[0] }
+            def existing = []
+            schemaforgeTestsDir.eachFileRecurse(groovy.io.FileType.FILES) { f ->
+                if (!f.name.endsWith('.java')) {
+                    return
+                }
+                String src = f.getText('UTF-8')
+                if (src =~ /@(org\.junit\.(jupiter\.api\.)?)?(Test|ParameterizedTest)\b/ && !(src =~ /abstract\s+class/)) {
+                    String rel = schemaforgeTestsDir.toPath().relativize(f.toPath()).toString()
+                    existing << 'com.etendoerp.go.schemaforge.' + (rel - '.java').replace(File.separator, '.')
+                }
+            }
+            def missing = existing - byClass.keySet()
+            def stale = byClass.keySet() - existing
+            def duplicated = byClass.findAll { it.value.size() > 1 }
+            missing.each { println "Sin célula: ${it}" }
+            stale.each { println "En una célula pero ya no existe: ${it}" }
+            duplicated.each { k, v -> println "En varias células (${v*.getAt(1).join(', ')}): ${k}" }
+            if (missing || stale || duplicated) {
+                throw new GradleException("Revisa src-test/cells/: ${missing.size()} sin célula, ${stale.size()} obsoletos, ${duplicated.size()} duplicados.")
+            }
+            println "OK: ${existing.size()} tests de schemaforge, cada uno en un solo archivo de célula."
         }
     }
 }

@@ -7,10 +7,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Set;
 import java.util.function.Supplier;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -24,6 +21,7 @@ import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.data.CheckoutRequest;
+import com.etendoerp.go.schemaforge.data.Plan;
 
 /**
  * Durable persistence for hosted-checkout requests. Together with {@link BillingEventStore}
@@ -53,7 +51,6 @@ import com.etendoerp.go.schemaforge.data.CheckoutRequest;
  * browser can re-enter the flow on reload, so both are ordinary occurrences rather than errors.
  */
 abstract class CheckoutRequestStoreQuerySupport {
-  private static final Logger log = LogManager.getLogger(CheckoutRequestStore.class);
   protected static final String ZERO_ID = "0";
 
   /** Immutable product/contact selection stored with a purchase. */
@@ -86,6 +83,7 @@ abstract class CheckoutRequestStoreQuerySupport {
     private final boolean transferProducts;
     private final boolean transferContacts;
     private final String stripePriceId;
+    private final String reactivatedClientId;
 
     /**
      * Creates immutable choices to persist with a checkout request.
@@ -98,11 +96,30 @@ abstract class CheckoutRequestStoreQuerySupport {
      */
     public RequestOptions(String demoClientId, boolean demoSelectionRecorded,
         boolean transferProducts, boolean transferContacts, String stripePriceId) {
+      this(demoClientId, demoSelectionRecorded, transferProducts, transferContacts, stripePriceId,
+          null);
+    }
+
+    /**
+     * Creates immutable choices to persist with a checkout request.
+     *
+     * @param demoClientId selected demo client id, or {@code null}
+     * @param demoSelectionRecorded whether the selection was explicitly recorded
+     * @param transferProducts whether products should be transferred
+     * @param transferContacts whether contacts should be transferred
+     * @param stripePriceId selected Stripe Price id, or {@code null}
+     * @param reactivatedClientId the canceled tenant this purchase re-subscribes (ETP-5742), or
+     *     {@code null} for a purchase that provisions a new environment
+     */
+    public RequestOptions(String demoClientId, boolean demoSelectionRecorded,
+        boolean transferProducts, boolean transferContacts, String stripePriceId,
+        String reactivatedClientId) {
       this.demoClientId = demoClientId;
       this.demoSelectionRecorded = demoSelectionRecorded;
       this.transferProducts = transferProducts;
       this.transferContacts = transferContacts;
       this.stripePriceId = stripePriceId;
+      this.reactivatedClientId = reactivatedClientId;
     }
 
     @Override
@@ -114,13 +131,14 @@ abstract class CheckoutRequestStoreQuerySupport {
           && transferProducts == that.transferProducts
           && transferContacts == that.transferContacts
           && Objects.equals(demoClientId, that.demoClientId)
-          && Objects.equals(stripePriceId, that.stripePriceId);
+          && Objects.equals(stripePriceId, that.stripePriceId)
+          && Objects.equals(reactivatedClientId, that.reactivatedClientId);
     }
 
     @Override
     public int hashCode() {
       return Objects.hash(demoClientId, demoSelectionRecorded, transferProducts,
-          transferContacts, stripePriceId);
+          transferContacts, stripePriceId, reactivatedClientId);
     }
 
     String getDemoClientId() { return demoClientId; }
@@ -128,6 +146,26 @@ abstract class CheckoutRequestStoreQuerySupport {
     boolean isTransferProducts() { return transferProducts; }
     boolean isTransferContacts() { return transferContacts; }
     String getStripePriceId() { return stripePriceId; }
+    String getReactivatedClientId() { return reactivatedClientId; }
+  }
+
+  /**
+   * ETP-5742 — whether a request re-subscribes an existing canceled tenant instead of provisioning
+   * a new one.
+   *
+   * <p>No column of its own: a new purchase names its {@code CREATED_CLIENT_ID} only when it
+   * reaches {@code PROVISIONED} (both writes are one statement, see
+   * {@link CheckoutRequestStore#recordProvisioned}), while a re-subscription names its tenant from
+   * the moment it is requested. So a named tenant on a request that is not yet provisioned can only
+   * be a re-subscription. Once provisioned the two are alike on purpose: both are "the purchase
+   * that backs this tenant", which is what the lifecycle webhooks and the billing page read.
+   *
+   * @param request durable checkout row, possibly {@code null}
+   * @return true for an unfinished re-subscription
+   */
+  static boolean isPendingReactivation(CheckoutRequest request) {
+    return request != null && request.getCreatedClient() != null
+        && !CheckoutRequestStore.STATUS_PROVISIONED.equals(request.getCheckoutRequestStatus());
   }
 
   /**
@@ -239,9 +277,7 @@ abstract class CheckoutRequestStoreQuerySupport {
   }
 
   private CheckoutRequest findByProviderField(String field, String value) {
-    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
-    OBContext.setAdminMode(true);
-    try {
+    return runAsSystem(() -> {
       if (StringUtils.isBlank(value)) return null;
       OBQuery<CheckoutRequest> query = OBDal.getInstance().createQuery(CheckoutRequest.class,
           "as cr where cr." + field + " = :providerValue and cr.createdClient is not null"
@@ -251,12 +287,11 @@ abstract class CheckoutRequestStoreQuerySupport {
       query.setFilterOnReadableOrganization(false);
       query.setMaxResult(1);
       return query.uniqueResult();
-    } finally {
-      OBContext.restorePreviousMode();
-    }
+    });
   }
 
   protected abstract CheckoutRequest find(String requestId, String accountId, String accountEmail);
+
   /**
    * Runs {@code body} as the system user ({@code "0","0","0","0"}) with admin mode on, and hands
    * the caller back exactly the execution context it arrived with.
@@ -276,26 +311,15 @@ abstract class CheckoutRequestStoreQuerySupport {
    * handed {@code null}, which is precisely the wanted behaviour — substituting a system context
    * for it would leave the thread more privileged than it was found.
    *
+   * <p>Delegates to {@link SystemContext#call(String, Supplier)}, the one implementation of this
+   * capture / install / unwind sequence.
+   *
    * @param body the work to run as system
    * @param <T> the body's result type
    * @return whatever the body returned
    */
   protected <T> T runAsSystem(Supplier<T> body) {
-    OBContext previousContext = OBContext.getOBContext();
-    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
-    OBContext.setAdminMode(true);
-    try {
-      return body.get();
-    } finally {
-      // Order is load-bearing. Admin mode was entered on top of the system context, so it has to
-      // be left before that context is taken away: restorePreviousMode() pops the admin-mode stack
-      // and then looks at whichever context is current at that moment, clearing it outright when
-      // the stack empties on the shared admin context. Putting the caller's context back first
-      // would expose that context to the check and could null it out — reintroducing, from the
-      // other end, the very leak this method exists to close.
-      exitAdminModeQuietly();
-      restoreContextQuietly(previousContext);
-    }
+    return SystemContext.call("a checkout-request store operation", body);
   }
 
   /**
@@ -308,34 +332,6 @@ abstract class CheckoutRequestStoreQuerySupport {
       body.run();
       return null;
     });
-  }
-
-  /**
-   * Leaves admin mode without ever throwing: this runs in a {@code finally}, and an exception here
-   * would replace the real failure from the body with a misleading one.
-   */
-  private void exitAdminModeQuietly() {
-    try {
-      OBContext.restorePreviousMode();
-    } catch (RuntimeException e) {
-      log.error("Could not leave admin mode after a checkout-request store operation", e);
-    }
-  }
-
-  /**
-   * Reinstates the caller's context without ever throwing, for the same reason as
-   * {@link #exitAdminModeQuietly()}.
-   *
-   * @param previousContext the context captured on entry; {@code null} is a real value and is
-   *     restored as "no context"
-   */
-  private void restoreContextQuietly(OBContext previousContext) {
-    try {
-      OBContext.setOBContext(previousContext);
-    } catch (RuntimeException e) {
-      log.error("Could not restore the caller's OBContext after a checkout-request store operation",
-          e);
-    }
   }
 
   protected void flushAndCommit() {
@@ -411,8 +407,8 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
 
   /**
    * Tells whether a new fenced provisioning attempt may be claimed for the row. A failure whose
-   * code is deterministic (see {@link #NON_RETRYABLE_FAILURE_CODES}) is never retryable: the same
-   * request would fail the same way on every attempt.
+   * code is deterministic (see {@link ProvisioningFailureReason#isRetryable}) is never retryable:
+   * the same request would fail the same way on every attempt.
    *
    * @param request durable checkout row, or {@code null}
    * @return whether the row may be retried
@@ -420,79 +416,9 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
   public boolean isProvisioningRetryAllowed(CheckoutRequest request) {
     String derived = deriveProvisioningStatus(request);
     if (DERIVED_STATUS_PROVISIONING_FAILED.equals(derived)) {
-      return !NON_RETRYABLE_FAILURE_CODES.contains(failureCode(request.getFailureReason()));
+      return ProvisioningFailureReason.isRetryable(request.getFailureReason());
     }
     return "paid".equals(derived) || DERIVED_STATUS_STALLED.equals(derived);
-  }
-
-  /** Failure code of a provisioning attempt whose cause is not known more precisely. */
-  public static final String FAILURE_CODE_PROVISIONING_FAILED = "PROVISIONING_FAILED";
-  /**
-   * The account already has a productive environment with the requested company name (ETP-5548;
-   * before it, the name belonged to another account's environment).
-   */
-  public static final String FAILURE_CODE_CLIENT_NAME_IN_USE = "CLIENT_NAME_IN_USE";
-
-  /**
-   * Failure codes a retry cannot fix. The checkout request fixes the company name, so a name
-   * collision fails again on every attempt; offering a retry would only loop the customer.
-   */
-  static final Set<String> NON_RETRYABLE_FAILURE_CODES = Set.of(FAILURE_CODE_CLIENT_NAME_IN_USE);
-
-  /**
-   * Customer-safe description of each failure code. The persisted reason keeps the raw cause for
-   * operations; it can carry exception text, internal ids or SQL, so it never leaves the backend.
-   */
-  private static final Map<String, String> SAFE_FAILURE_DESCRIPTIONS = Map.of(
-      FAILURE_CODE_CLIENT_NAME_IN_USE,
-      "The account already has a productive environment with this company name",
-      FAILURE_CODE_PROVISIONING_FAILED, "The environment setup did not complete");
-
-  private static final Pattern FAILURE_CODE_PREFIX = Pattern.compile("^([A-Z][A-Z0-9_]*): ");
-
-  /**
-   * Encodes a failure as {@code CODE: message}, the format {@link #failureCode} reads back.
-   *
-   * <p>The code travels as a prefix of the existing {@code FAILURE_REASON} column rather than in a
-   * column of its own: the reason is an operational annotation of a row whose lifecycle stays
-   * {@code PROVISIONING}, and rows written before codes existed simply read back as
-   * {@link #FAILURE_CODE_PROVISIONING_FAILED}.
-   *
-   * @param code stable failure code, {@code null} for {@link #FAILURE_CODE_PROVISIONING_FAILED}
-   * @param message raw operational cause, kept for diagnostics only
-   * @return the value to persist
-   */
-  public static String encodeFailureReason(String code, String message) {
-    String safeCode = StringUtils.defaultIfBlank(code, FAILURE_CODE_PROVISIONING_FAILED);
-    return safeCode + ": " + StringUtils.defaultIfBlank(StringUtils.normalizeSpace(message),
-        "Provisioning did not complete");
-  }
-
-  /**
-   * Reads the failure code back from a persisted reason written by {@link #encodeFailureReason}.
-   *
-   * @param failureReason persisted {@code FAILURE_REASON}
-   * @return its failure code; {@code null} when there is no failure, and
-   *     {@link #FAILURE_CODE_PROVISIONING_FAILED} for a reason written without one
-   */
-  public static String failureCode(String failureReason) {
-    if (StringUtils.isBlank(failureReason)) {
-      return null;
-    }
-    Matcher matcher = FAILURE_CODE_PREFIX.matcher(failureReason);
-    return matcher.find() ? matcher.group(1) : FAILURE_CODE_PROVISIONING_FAILED;
-  }
-
-  /**
-   * Maps a failure code to its fixed customer-facing description; unknown codes get the generic
-   * one.
-   *
-   * @param failureCode a code from {@link #failureCode}
-   * @return a fixed description of it that is safe to return to the customer
-   */
-  public static String safeFailureDescription(String failureCode) {
-    return SAFE_FAILURE_DESCRIPTIONS.getOrDefault(failureCode,
-        SAFE_FAILURE_DESCRIPTIONS.get(FAILURE_CODE_PROVISIONING_FAILED));
   }
 
   /** Lifecycle order. A request may only move to a strictly later element. */
@@ -516,7 +442,7 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
   public void recordRequested(String requestId, String accountId, String accountEmail,
       String clientName) {
     recordRequested(requestId, accountId, accountEmail, clientName,
-        new RequestOptions(null, false, false, false, null));
+        new RequestOptions(null, false, false, false, null), null);
   }
 
   /**
@@ -531,11 +457,13 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
   public void recordRequested(String requestId, String accountId, String accountEmail,
       String clientName, String demoClientId) {
     recordRequested(requestId, accountId, accountEmail, clientName,
-        new RequestOptions(demoClientId, true, false, false, null));
+        new RequestOptions(demoClientId, true, false, false, null), null);
   }
 
   /**
-   * Records the immutable source, transfer choices, and price for a new purchase.
+   * Records the immutable source, transfer choices, and price for a new purchase that names no
+   * plan. Production checkouts always name one; see
+   * {@link #recordRequested(String, String, String, String, RequestOptions, Plan)}.
    *
    * @param requestId server-generated checkout correlation id
    * @param accountId authenticated platform account id
@@ -545,6 +473,23 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
    */
   public void recordRequested(String requestId, String accountId, String accountEmail,
       String clientName, RequestOptions options) {
+    recordRequested(requestId, accountId, accountEmail, clientName, options, null);
+  }
+
+  /**
+   * Records the immutable source, transfer choices, price and plan for a new purchase.
+   *
+   * @param requestId server-generated checkout correlation id
+   * @param accountId authenticated platform account id
+   * @param accountEmail authenticated account email
+   * @param clientName requested environment name
+   * @param options immutable demo, transfer, and price choices for this purchase
+   * @param plan the Subscription Plan Catalog row being bought, kept so the subscription opened
+   *     after payment records the plan the buyer actually saw rather than whatever is current by
+   *     then
+   */
+  public void recordRequested(String requestId, String accountId, String accountEmail,
+      String clientName, RequestOptions options, Plan plan) {
     RequestOptions requestOptions = options == null
         ? new RequestOptions(null, false, false, false, null) : options;
     runAsSystem(() -> {
@@ -555,6 +500,7 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
       request.setEtendoGoAccount(OBDal.getInstance().get(Account.class, accountId));
       request.setAccountEmail(StringUtils.trimToEmpty(accountEmail));
       request.setClientName(StringUtils.trimToEmpty(clientName));
+      request.setPlan(plan);
       request.setDemoClient(StringUtils.isBlank(requestOptions.getDemoClientId()) ? null
           : OBDal.getInstance().get(Client.class,
               StringUtils.trimToEmpty(requestOptions.getDemoClientId())));
@@ -562,6 +508,12 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
       request.setTransferProducts(requestOptions.isTransferProducts());
       request.setTransferContacts(requestOptions.isTransferContacts());
       request.setStripePrice(StringUtils.trimToNull(requestOptions.getStripePriceId()));
+      // ETP-5742 — a re-subscription names its tenant up front: it is what the payment webhook
+      // applies the purchase to, and what routes the new subscription's lifecycle events.
+      String reactivatedClientId = StringUtils.trimToNull(requestOptions.getReactivatedClientId());
+      if (reactivatedClientId != null) {
+        request.setCreatedClient(OBDal.getInstance().get(Client.class, reactivatedClientId));
+      }
       request.setCheckoutRequestStatus(STATUS_CREATING);
       request.setCreatingAt(new Date());
       request.setProvisioningAttempts(0L);
@@ -705,9 +657,7 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
    * @return the matching request, or {@code null} when the identity tuple does not match
    */
   public CheckoutRequest find(String requestId, String accountId, String accountEmail) {
-    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
-    OBContext.setAdminMode(true);
-    try {
+    return runAsSystem(() -> {
       if (StringUtils.isBlank(requestId) || StringUtils.isBlank(accountId)
           || StringUtils.isBlank(accountEmail)) {
         return null;
@@ -723,9 +673,7 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
       query.setFilterOnReadableOrganization(false);
       query.setMaxResult(1);
       return query.uniqueResult();
-    } finally {
-      OBContext.restorePreviousMode();
-    }
+    });
   }
 
   /**
@@ -756,9 +704,7 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
    * @return recent requests for the account
    */
   public List<CheckoutRequest> findForAccount(String accountId, String accountEmail) {
-    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
-    OBContext.setAdminMode(true);
-    try {
+    return runAsSystem(() -> {
       if (StringUtils.isBlank(accountId) || StringUtils.isBlank(accountEmail)) return List.of();
       OBQuery<CheckoutRequest> query = OBDal.getInstance().createQuery(CheckoutRequest.class,
           "as cr where cr.etendoGoAccount.id = :accountId"
@@ -771,9 +717,7 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
       query.setFilterOnReadableOrganization(false);
       query.setMaxResult(20);
       return query.list();
-    } finally {
-      OBContext.restorePreviousMode();
-    }
+    });
   }
 
   /**
@@ -832,9 +776,7 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
    * @return newest purchase with a nonblank Stripe subscription and customer, or {@code null}
    */
   public CheckoutRequest findSubscriptionForAccount(String accountId, String accountEmail) {
-    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
-    OBContext.setAdminMode(true);
-    try {
+    return runAsSystem(() -> {
       if (StringUtils.isBlank(accountId) || StringUtils.isBlank(accountEmail)) {
         return null;
       }
@@ -851,9 +793,7 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
       query.setFilterOnReadableOrganization(false);
       query.setMaxResult(1);
       return query.uniqueResult();
-    } finally {
-      OBContext.restorePreviousMode();
-    }
+    });
   }
 
   /**
@@ -893,9 +833,7 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
       String clientName) {
     if (StringUtils.isBlank(accountId) || StringUtils.isBlank(accountEmail)
         || StringUtils.isBlank(clientName)) return null;
-    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
-    OBContext.setAdminMode(true);
-    try {
+    return runAsSystem(() -> {
       OBQuery<CheckoutRequest> query = OBDal.getInstance().createQuery(CheckoutRequest.class,
           "as cr where cr.etendoGoAccount.id = :accountId"
               + " and lower(cr.accountEmail) = lower(:accountEmail)"
@@ -909,9 +847,52 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
       query.setFilterOnReadableOrganization(false);
       query.setMaxResult(1);
       return query.uniqueResult();
-    } finally {
-      OBContext.restorePreviousMode();
-    }
+    });
+  }
+
+  /**
+   * ETP-5742 — the account's unfinished re-subscription of one tenant, so a second click or a
+   * second tab reopens the same checkout instead of charging twice.
+   *
+   * @param accountId immutable platform account id
+   * @param accountEmail authenticated platform account email
+   * @param clientId the canceled tenant being re-subscribed
+   * @return the newest re-subscription of that tenant not yet applied, or {@code null}
+   */
+  public CheckoutRequest findActiveReactivation(String accountId, String accountEmail,
+      String clientId) {
+    if (StringUtils.isBlank(accountId) || StringUtils.isBlank(accountEmail)
+        || StringUtils.isBlank(clientId)) return null;
+    return runAsSystem(() -> {
+      OBQuery<CheckoutRequest> query = OBDal.getInstance().createQuery(CheckoutRequest.class,
+          "as cr where cr.etendoGoAccount.id = :accountId"
+              + " and lower(cr.accountEmail) = lower(:accountEmail)"
+              + " and cr.createdClient.id = :clientId"
+              + " and cr.checkoutRequestStatus in ('CREATING', 'CREATED', 'PAID')"
+              + " order by cr.creationDate desc");
+      query.setNamedParameter(PARAM_ACCOUNT_ID, StringUtils.trimToEmpty(accountId));
+      query.setNamedParameter(PARAM_ACCOUNT_EMAIL, StringUtils.trimToEmpty(accountEmail));
+      query.setNamedParameter("clientId", StringUtils.trimToEmpty(clientId));
+      query.setFilterOnReadableClients(false);
+      query.setFilterOnReadableOrganization(false);
+      query.setMaxResult(1);
+      return query.uniqueResult();
+    });
+  }
+
+  /**
+   * ETP-5742 — the re-subscription a confirmed payment has to be applied to, read by the payment
+   * webhook right after {@link #recordPaid}.
+   *
+   * @param requestId correlation id read from {@code metadata[request_id]}
+   * @return the request when it is a re-subscription paid but not yet applied, else {@code null}
+   */
+  public CheckoutRequest findPaidReactivation(String requestId) {
+    return runAsSystem(() -> {
+      CheckoutRequest request = findByRequestId(requestId);
+      return isPendingReactivation(request)
+          && STATUS_PAID.equals(request.getCheckoutRequestStatus()) ? request : null;
+    });
   }
 
   /**
@@ -986,6 +967,10 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
    * renewed only by that stale-lease branch; {@code PROVISIONING_ATTEMPTS} carries the fencing
    * token.
    *
+   * <p>ETP-5742 — a re-subscription ({@link #isPendingReactivation}) is never claimed: it is
+   * applied to its existing tenant by the payment webhook, and onboarding must not provision a
+   * second environment for the same payment.
+   *
    * @param requestId checkout request correlation id
    * @param accountEmail authenticated platform account email
    * @return {@code true} when this caller won the claim
@@ -1005,7 +990,8 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
               + "       cr.updated = :now"
               + " where cr.request = :requestId"
               + "   and lower(cr.accountEmail) = lower(:" + PARAM_ACCOUNT_EMAIL + ")"
-              + "   and cr.checkoutRequestStatus = :paid")
+              + "   and cr.checkoutRequestStatus = :paid"
+              + "   and cr.createdClient is null")
           .setParameter(HQL_PROVISIONING, STATUS_PROVISIONING)
           .setParameter("paid", STATUS_PAID)
           .setParameter("now", now)
@@ -1025,13 +1011,14 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
                 + "   and cr.checkoutRequestStatus = :" + HQL_PROVISIONING
                 + "   and (cr.failureReason is not null or cr.provisioningAt <= :staleBefore)"
                 // A deterministic failure is never reclaimed, whoever asks: see
-                // NON_RETRYABLE_FAILURE_CODES.
+                // ProvisioningFailureReason.isRetryable.
                 + "   and (cr.failureReason is null"
                 + "        or cr.failureReason not like :nameInUsePrefix)")
             .setParameter(HQL_PROVISIONING, STATUS_PROVISIONING)
             .setParameter("now", now)
             .setParameter("staleBefore", staleBefore)
-            .setParameter("nameInUsePrefix", FAILURE_CODE_CLIENT_NAME_IN_USE + ": %")
+            .setParameter("nameInUsePrefix",
+                ProvisioningFailureReason.CODE_CLIENT_NAME_IN_USE + ": %")
             .setParameter(PARAM_REQUEST_ID, StringUtils.trimToEmpty(requestId))
             .setParameter(PARAM_ACCOUNT_EMAIL, StringUtils.trimToEmpty(accountEmail))
             .executeUpdate();

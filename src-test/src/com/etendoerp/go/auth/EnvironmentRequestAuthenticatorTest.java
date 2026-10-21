@@ -43,6 +43,7 @@ import java.util.stream.Stream;
 
 import javax.servlet.http.HttpServletRequest;
 
+import org.hibernate.Session;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -55,11 +56,13 @@ import org.mockito.MockedStatic;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.base.exception.OBSecurityException;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBDal;
 
 import com.auth0.jwt.interfaces.Claim;
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.etendoerp.go.auth.EnvironmentAuthOutcome.Status;
 import com.etendoerp.go.oauth2.OAuth2Filter;
+import com.etendoerp.go.payment.EnvironmentAccessGuard;
 import com.etendoerp.go.payment.EnvironmentAccessPolicy.Decision;
 import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.schemaforge.util.NeoLanguage;
@@ -92,6 +95,9 @@ class EnvironmentRequestAuthenticatorTest {
   private static final String OAUTH2_TOKEN = "oauth2-opaque-token-xyz";
   private static final String LANGUAGE = "es_ES";
   private static final String LEGACY_BEARER_PROPERTY = "etgo.legacy.bearer.enabled";
+  /** ETP-5047 — the local form of the {@code environment-access-enforcement-off} kill switch. */
+  private static final String ENFORCEMENT_OFF_PROPERTY =
+      "etendo.go.flags.environment-access-enforcement-off";
 
   private GoSessionAuthenticator sessionAuthenticator;
   private TenantEnvironmentLifecycleService lifecycleService;
@@ -170,14 +176,16 @@ class EnvironmentRequestAuthenticatorTest {
     } else if (policy.isCommercialAccessRequired() && blocked) {
       assertEquals(Status.PAYMENT_REQUIRED, outcome.getStatus());
       assertEquals(402, outcome.getHttpStatus());
-      assertEquals("Environment access is not available: " + decision.name(),
-          outcome.getMessage());
+      assertEquals(EnvironmentAccessGuard.MESSAGE_PREFIX + decision.name(), outcome.getMessage());
       assertEquals(scheme, outcome.getScheme());
+      // ETP-5047 — the refusal carries the shared guard's denial for the structured 402 body.
+      assertEquals(decision, outcome.getAccessDenial().decision());
     } else {
       assertTrue(outcome.isAuthenticated(), "expected the request to be let through");
       assertEquals(scheme, outcome.getScheme());
       assertSame(context, outcome.getContext());
       assertNull(outcome.getMessage());
+      assertNull(outcome.getAccessDenial());
     }
 
     int expectedPolicyChecks = schemeAccepted && policy.isCommercialAccessRequired() ? 1 : 0;
@@ -199,6 +207,29 @@ class EnvironmentRequestAuthenticatorTest {
 
     assertTrue(outcome.isAuthenticated());
     verify(lifecycleService, never()).evaluateAccess(anyString(), eq(true), any(Instant.class));
+  }
+
+  /**
+   * ETP-5047 — the bind step decides through {@code EnvironmentAccessGuard}, so the
+   * {@code environment-access-enforcement-off} kill switch holds on every commercially gated
+   * surface: switched off, a blocked tenant is let through.
+   */
+  @ParameterizedTest(name = "{0}")
+  @EnumSource(value = SurfacePolicy.class, names = { "NEO_API", "NEO_DATA" })
+  void theEnforcementKillSwitchLetsABlockedTenantThrough(SurfacePolicy policy) {
+    System.setProperty(ENFORCEMENT_OFF_PROPERTY, "true");
+    try {
+      when(lifecycleService.evaluateAccess(eq(CLIENT_ID), eq(true), any(Instant.class)))
+          .thenReturn(Decision.SUBSCRIPTION_REQUIRED);
+
+      EnvironmentAuthOutcome outcome = authenticator.authenticate(requestFor(AuthScheme.COOKIE),
+          policy);
+
+      assertTrue(outcome.isAuthenticated());
+      assertNull(outcome.getAccessDenial());
+    } finally {
+      System.clearProperty(ENFORCEMENT_OFF_PROPERTY);
+    }
   }
 
   // ============================== kill switch ==============================
@@ -592,6 +623,97 @@ class EnvironmentRequestAuthenticatorTest {
         authenticator.identify(requestFor(AuthScheme.JWT), SurfacePolicy.NEO_AUXILIARY);
     assertEquals(401, jwt.getHttpStatus());
     assertEquals("Missing or invalid Authorization header", jwt.getMessage());
+  }
+
+  // ======================= the wildcard client of an OAuth2 token (ETP-5047) =======================
+
+  /** The tenant the token's role belongs to, as the role lookup answers it. */
+  private static final String ROLE_TENANT = "tenant-of-role-1";
+
+  /**
+   * An OAuth2 token on org {@code 0}: {@code OAuth2Filter} derives its client with
+   * {@code COALESCE(org.ad_client_id, oauth2_client.ad_client_id)}, so it carries the System
+   * client {@code "0"}. The role lookup answers {@code roleLookup} (a client id, null, or a
+   * failure to throw).
+   */
+  private EnvironmentAuthOutcome authenticateWildcardOAuth2(Object roleLookup) {
+    when(sessionAuthenticator.authenticate(any())).thenReturn(GoSessionAuthResult.noSession());
+    swsStatic.when(() -> SecureWebServicesUtils.decodeToken(OAUTH2_TOKEN)).thenReturn(null);
+    Map<String, String> identity = new HashMap<>();
+    identity.put(OAuth2Filter.ATTR_USER_ID, USER_ID);
+    identity.put(OAuth2Filter.ATTR_ROLE_ID, ROLE_ID);
+    identity.put(OAuth2Filter.ATTR_ORG_ID, "0");
+    identity.put(OAuth2Filter.ATTR_CLIENT_ID, "0");
+    identity.put(OAuth2Filter.ATTR_SCOPES, "neo:*");
+    oauth2FilterStatic.when(() -> OAuth2Filter.validateToken(OAUTH2_TOKEN)).thenReturn(identity);
+    OBDal dal = mock(OBDal.class);
+    Session session = mock(Session.class);
+    when(dal.getSession()).thenReturn(session);
+    if (roleLookup instanceof RuntimeException) {
+      when(session.doReturningWork(any())).thenThrow((RuntimeException) roleLookup);
+    } else {
+      when(session.doReturningWork(any())).thenReturn(roleLookup);
+    }
+    try (MockedStatic<OBDal> dalStatic = mockStatic(OBDal.class)) {
+      dalStatic.when(OBDal::getInstance).thenReturn(dal);
+      return authenticator.authenticate(bearerRequest(OAUTH2_TOKEN), SurfacePolicy.NEO_API);
+    }
+  }
+
+  /**
+   * ETP-5047 review W1 — the guard AND the context get the role's tenant, one value: judging the
+   * tenant but running as {@code "0"} (or the reverse) would split the request in two.
+   */
+  @Test
+  void anOrg0OAuth2TokenIsJudgedAndRunsAsItsRolesTenant() {
+    when(lifecycleService.evaluateAccess(eq(ROLE_TENANT), eq(true), any(Instant.class)))
+        .thenReturn(Decision.ALLOWED);
+
+    EnvironmentAuthOutcome outcome = authenticateWildcardOAuth2(ROLE_TENANT);
+
+    assertTrue(outcome.isAuthenticated(), outcome.getMessage());
+    verify(lifecycleService).evaluateAccess(eq(ROLE_TENANT), eq(true), any(Instant.class));
+    verify(lifecycleService, never()).evaluateAccess(eq("0"), eq(true), any(Instant.class));
+    swsStatic.verify(() -> SecureWebServicesUtils.createContext(USER_ID, ROLE_ID, "0", null,
+        ROLE_TENANT));
+    assertEquals(ROLE_TENANT, outcome.getClientId());
+  }
+
+  /** Before the fix the guard was asked about {@code "0"}, found no lifecycle and allowed. */
+  @Test
+  void anOrg0OAuth2TokenOfABlockedTenantIsRefusedWith402() {
+    when(lifecycleService.evaluateAccess(eq(ROLE_TENANT), eq(true), any(Instant.class)))
+        .thenReturn(Decision.SUBSCRIPTION_REQUIRED);
+
+    EnvironmentAuthOutcome outcome = authenticateWildcardOAuth2(ROLE_TENANT);
+
+    assertEquals(402, outcome.getHttpStatus());
+  }
+
+  /**
+   * ETP-5047 review W2 — fail closed: a role lookup that FAILED must not fall back to {@code "0"},
+   * which the guard allows. The request is refused before any context exists.
+   */
+  @Test
+  void aFailedRoleLookupRefusesTheRequestWithoutJudgingOrBinding() {
+    EnvironmentAuthOutcome outcome =
+        authenticateWildcardOAuth2(new IllegalStateException("db down"));
+
+    assertFalse(outcome.isAuthenticated());
+    assertEquals(503, outcome.getHttpStatus());
+    verify(lifecycleService, never()).evaluateAccess(anyString(), eq(true), any(Instant.class));
+    swsStatic.verify(() -> SecureWebServicesUtils.createContext(
+        anyString(), anyString(), anyString(), any(), anyString()), never());
+  }
+
+  /** A System role legitimately has no tenant: it keeps {@code "0"} and is allowed, as before. */
+  @Test
+  void aSystemRoleKeepsTheSystemClientAndIsAllowed() {
+    EnvironmentAuthOutcome outcome = authenticateWildcardOAuth2(null);
+
+    assertTrue(outcome.isAuthenticated(), outcome.getMessage());
+    swsStatic.verify(() -> SecureWebServicesUtils.createContext(USER_ID, ROLE_ID, "0", null, "0"));
+    assertEquals("0", outcome.getClientId());
   }
 
   // ============================== fixtures ==============================

@@ -76,6 +76,34 @@ public class ToolRegistryTest {
     assertEquals(java.util.Set.of("spec"), declared.get());
   }
 
+  /**
+   * ETP-5714: {@code etendo_schema} declares an optional {@code id} (the record whose actions are
+   * judged), next to its other arguments, so the unknown-argument guard accepts it.
+   */
+  @Test
+  public void testSchemaDeclaresTheOptionalIdArgument() {
+    java.util.Optional<java.util.Set<String>> declared =
+        ToolRegistry.declaredArgumentNames("etendo_schema");
+
+    assertTrue(declared.isPresent());
+    assertTrue(declared.get().toString(), declared.get().containsAll(
+        java.util.Set.of("spec", "entity", "view", "fields", "id")));
+  }
+
+  /**
+   * ETP-5714: the entity argument's description gave 'Header' as its example while the catalogue
+   * spells entities in lower camel case ('header'), so an agent following the description failed on
+   * its first call. The example is now the real spelling.
+   */
+  @Test
+  public void testEntityExampleUsesTheCatalogueSpelling() {
+    String source = McpSourceScanner.stripComments(
+        McpSourceScanner.read("com/etendoerp/go/mcp/ToolRegistry.java"));
+
+    assertFalse(source.contains("e.g. 'Header'"));
+    assertTrue(source.contains("e.g. 'header', 'lines'"));
+  }
+
   /** Tests that McpToolDefinition getters return the values provided at construction. */
   @Test
   public void testMcpToolDefinitionGetters() {
@@ -195,6 +223,13 @@ public class ToolRegistryTest {
     assertNotNull(itemProps.get("entity"));
     assertNotNull(itemProps.get("parentRef"));
     assertNotNull(itemProps.get("body"));
+
+    // ETP-5676: the same option the REST body takes, optional (not in 'required').
+    Map<String, Object> onlyReturnIds =
+        (Map<String, Object>) props.get(com.etendoerp.go.schemaforge.BatchService.PARAM_ONLY_RETURN_IDS);
+    assertNotNull("etendo_batch must publish _onlyReturnIds", onlyReturnIds);
+    assertEquals("boolean", onlyReturnIds.get("type"));
+    assertTrue(String.valueOf(onlyReturnIds.get("description")).contains("default false"));
   }
 
   // ── IMP-41: targets enum on the vector-search tool ─────────────────────
