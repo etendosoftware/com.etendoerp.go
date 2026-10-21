@@ -30,6 +30,11 @@ import java.sql.Timestamp;
 import java.util.Date;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 import javax.persistence.PersistenceException;
@@ -1066,6 +1071,51 @@ public class BillingEventStoreIntegrationTest extends OBBaseTest {
         rawTimestamp(eventId, "LAST_DUPLICATE_AT"));
     assertEquals("third failure", rawColumn(eventId, "FAILURE_REASON"));
     assertEquals(FAILED, rawResult(eventId));
+  }
+
+  /**
+   * Two runs failing the same request at once both touch a marker that does not exist yet. One
+   * inserts it; the other either refreshes it or loses the insert and refreshes instead. Either
+   * way there is one row, touched twice, and neither caller fails.
+   */
+  @Test
+  public void testTwoConcurrentTouchesOfANewMarkerEndInOneRow() throws Exception {
+    String eventId = newEventId();
+    String requestId = uniqueRequest();
+    CountDownLatch go = new CountDownLatch(1);
+    ExecutorService callers = Executors.newFixedThreadPool(2);
+    try {
+      List<Future<Boolean>> touches = List.of(
+          callers.submit(() -> touchWhenReleased(go, eventId, requestId, "run A")),
+          callers.submit(() -> touchWhenReleased(go, eventId, requestId, "run B")));
+      go.countDown();
+      for (Future<Boolean> touch : touches) {
+        assertTrue("Neither caller fails", touch.get(60, TimeUnit.SECONDS));
+      }
+    } finally {
+      go.countDown();
+      callers.shutdownNow();
+      callers.awaitTermination(60, TimeUnit.SECONDS);
+    }
+
+    assertEquals("One row per marker", 1L, rawCount(eventId));
+    assertEquals("Touched twice: one insert and one refresh", 1L, rawDuplicateCount(eventId));
+    assertEquals(FAILED, rawResult(eventId));
+  }
+
+  private boolean touchWhenReleased(CountDownLatch go, String eventId, String requestId,
+      String reason) throws InterruptedException {
+    try {
+      assertTrue(go.await(60, TimeUnit.SECONDS));
+      store.touchReconciliation(eventId, "reconciliation.retry-later", requestId, reason);
+      return true;
+    } finally {
+      try {
+        OBDal.getInstance().rollbackAndClose();
+      } finally {
+        OBContext.setOBContext((OBContext) null);
+      }
+    }
   }
 
   @Test

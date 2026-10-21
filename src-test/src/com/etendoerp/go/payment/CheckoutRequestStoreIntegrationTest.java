@@ -23,6 +23,7 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 import java.sql.Timestamp;
 import java.util.Date;
@@ -34,7 +35,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.apache.logging.log4j.Level;
 import org.junit.After;
@@ -1069,8 +1071,8 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
   // Group 8 — ETP-5048: the fence of a paid re-subscription
   // ---------------------------------------------------------------------------------------------
 
-  /** How long the first caller holds the row lock before it commits. */
-  private static final long HOLD_MILLIS = 1_500L;
+  /** How often the main thread looks whether the second caller is blocked yet. */
+  private static final long POLL_MILLIS = 50L;
   /** Every wait of the race is bounded by this, so a regression cannot hang the build. */
   private static final long BOUND_SECONDS = 60L;
 
@@ -1125,10 +1127,54 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
     assertNull("Once applied it is no longer pending", store.findPaidReactivation(requestId));
   }
 
+  /** @return the PostgreSQL backend of this thread's DAL session */
+  @SuppressWarnings("rawtypes")
+  private static int backendPid() {
+    NativeQuery query = OBDal.getInstance().getSession()
+        .createNativeQuery("SELECT pg_backend_pid()");
+    return ((Number) query.uniqueResult()).intValue();
+  }
+
+  /**
+   * @return whether that backend is waiting on a lock now, read in a fresh transaction each time:
+   *     PostgreSQL keeps one snapshot of {@code pg_stat_activity} per transaction
+   */
+  @SuppressWarnings("rawtypes")
+  private static boolean isWaitingOnALock(int pid) {
+    try {
+      NativeQuery query = OBDal.getInstance().getSession().createNativeQuery(
+          "SELECT count(*) FROM pg_stat_activity WHERE pid = :pid AND wait_event_type = 'Lock'");
+      query.setParameter("pid", pid);
+      return ((Number) query.uniqueResult()).longValue() > 0L;
+    } finally {
+      OBDal.getInstance().rollbackAndClose();
+    }
+  }
+
+  /**
+   * Waits, bounded, until the second caller's backend is blocked on a lock. Polls with a bounded
+   * {@code Future.get}, which also fails the test at once if that caller returned without waiting.
+   */
+  private static void awaitBlockedOnTheLock(Future<?> contender, int pid) throws Exception {
+    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(BOUND_SECONDS);
+    while (!isWaitingOnALock(pid)) {
+      assertTrue("The second caller never blocked on the row lock",
+          System.nanoTime() < deadline);
+      try {
+        contender.get(POLL_MILLIS, TimeUnit.MILLISECONDS);
+        fail("The second caller returned while the first still held the row lock");
+      } catch (TimeoutException stillRunning) {
+        // not blocked yet, or blocked and not yet visible: look again
+      }
+    }
+  }
+
   /**
    * The webhook and the reconciliation race on one paid re-subscription. The first takes the row
-   * lock and applies it; the second blocks on that lock, and once the first commits it re-reads
-   * the row as {@code PROVISIONED} and gets nothing to apply.
+   * lock and holds it; the second is shown, in {@code pg_stat_activity}, to be blocked on it. Only
+   * then does the first apply the re-subscription and commit, and the second re-reads the row as
+   * {@code PROVISIONED} and gets nothing to apply. No step rests on a sleep: each hand-over is a
+   * latch or a database state, and every wait is bounded.
    */
   @Test
   public void testTwoCallersRacingOnAPaidReactivationApplyItExactlyOnce() throws Exception {
@@ -1139,7 +1185,9 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
     OBDal.getInstance().rollbackAndClose();
 
     CountDownLatch firstHoldsTheLock = new CountDownLatch(1);
-    AtomicLong firstCommittedAt = new AtomicLong();
+    CountDownLatch secondIsBlocked = new CountDownLatch(1);
+    CountDownLatch secondHasItsBackend = new CountDownLatch(1);
+    AtomicInteger secondPid = new AtomicInteger();
     ExecutorService callers = Executors.newFixedThreadPool(2);
     try {
       Future<Boolean> webhook = callers.submit(() -> inOwnSession(() -> {
@@ -1149,25 +1197,30 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
         if (found == null) {
           return false;
         }
-        Thread.sleep(HOLD_MILLIS);
+        assertTrue("The main thread never saw the second caller blocked",
+            secondIsBlocked.await(BOUND_SECONDS, TimeUnit.SECONDS));
         store.recordProvisioned(requestId, ZERO); // commits, releasing the lock
-        firstCommittedAt.set(System.nanoTime());
         return true;
       }));
       assertTrue("The first caller must take the lock",
           firstHoldsTheLock.await(BOUND_SECONDS, TimeUnit.SECONDS));
-      Future<long[]> reconciler = callers.submit(() -> inOwnSession(() -> {
+      Future<Boolean> reconciler = callers.submit(() -> inOwnSession(() -> {
         boundTheLockWait();
-        CheckoutRequest found = store.findPaidReactivation(requestId);
-        return new long[] { found == null ? 0L : 1L, System.nanoTime() };
+        secondPid.set(backendPid());
+        secondHasItsBackend.countDown();
+        // Null only once it reads PROVISIONED, which exists only after the first commit.
+        return store.findPaidReactivation(requestId) == null;
       }));
+      assertTrue(secondHasItsBackend.await(BOUND_SECONDS, TimeUnit.SECONDS));
+
+      awaitBlockedOnTheLock(reconciler, secondPid.get());
+      secondIsBlocked.countDown();
 
       assertTrue("The first caller applies it", webhook.get(BOUND_SECONDS, TimeUnit.SECONDS));
-      long[] second = reconciler.get(BOUND_SECONDS, TimeUnit.SECONDS);
-      assertEquals("The second caller finds it applied and does nothing", 0L, second[0]);
-      assertTrue("The second caller returned only after the first committed",
-          second[1] >= firstCommittedAt.get());
+      assertTrue("The second caller finds it applied and does nothing",
+          reconciler.get(BOUND_SECONDS, TimeUnit.SECONDS));
     } finally {
+      secondIsBlocked.countDown();
       callers.shutdownNow();
       callers.awaitTermination(BOUND_SECONDS, TimeUnit.SECONDS);
     }
