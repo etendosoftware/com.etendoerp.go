@@ -46,6 +46,15 @@ final class NeoInvoiceSupport {
   private static final String MATCHED_QTY_EXPR =
       InOutInvoiceLinks.matchedQtyByMovementDirectionExpr("sil.m_inoutline_id", "sio.issotrx");
 
+  /**
+   * Restricts a {@code c_invoiceline} aggregation arm to the requested movement's lines. It is
+   * applied to the arm's own {@code GROUP BY} key ({@code m_inoutline_id}), so it keeps or drops
+   * whole groups and never changes a sum, while letting the planner read only the requested
+   * movement's lines instead of the whole {@code c_invoiceline} table (ETP-5653).
+   */
+  private static final String IN_OUT_LINE_SCOPE =
+      "IN (SELECT m_inoutline_id FROM m_inoutline WHERE m_inout_id = ?)";
+
   private NeoInvoiceSupport() {
   }
 
@@ -105,6 +114,9 @@ final class NeoInvoiceSupport {
     // (MATCHED_QTY_EXPR), direct m_inoutline_id, and ol_qty (invoice
     // created from the ORDER: m_inoutline_id IS NULL, joined via c_orderline_id scoped to this
     // shipment). Used for the billing-status badge and for blocking duplicate invoice creation.
+    // The match arm is a correlated per-line lookup and ol_qty is already scoped to the movement,
+    // so only direct_qty needs the movement scope; it is applied to the arm's GROUP BY key, so no
+    // sum changes (ETP-5653).
     //
     // includeDrafts=true: same three paths plus draft_all (draft invoice lines joined via
     // c_orderline_id, scoped to this shipment). Prevents a second draft from being created even
@@ -127,6 +139,7 @@ final class NeoInvoiceSupport {
           + "  FROM c_invoiceline il2 "
           + "  JOIN c_invoice i2 ON i2.c_invoice_id = il2.c_invoice_id "
           + "  WHERE i2.docstatus NOT IN ('VO','CL','DR') AND i2.isactive = 'Y' "
+          + "    AND il2.m_inoutline_id " + IN_OUT_LINE_SCOPE + " "
           + "  GROUP BY il2.m_inoutline_id "
           + ") direct_qty ON direct_qty.m_inoutline_id = sil.m_inoutline_id "
           // Invoice created from the order (m_inoutline_id is NULL on the invoice line):
@@ -144,7 +157,8 @@ final class NeoInvoiceSupport {
           + "  GROUP BY iol2.m_inoutline_id "
           + ") ol_qty ON ol_qty.m_inoutline_id = sil.m_inoutline_id "
           + "WHERE sil.m_inout_id = ? AND sil.isactive = 'Y'";
-      paramCount = 2;  // first ? = inOutId (ol_qty scope), second ? = inOutId (WHERE)
+      // placeholders: direct_qty scope, ol_qty scope, outer WHERE — all bound to inOutId.
+      paramCount = 3;
     } else {
       // draft_all: ANY draft invoice linked to the same order line as the receipt line,
       // regardless of whether m_inoutline_id is NULL (created from PO) or points to a
@@ -166,6 +180,7 @@ final class NeoInvoiceSupport {
           + "  JOIN c_invoice i2 ON i2.c_invoice_id = il2.c_invoice_id "
           + "  WHERE i2.docstatus NOT IN ('VO','CL') AND i2.isactive = 'Y' "
           + "    AND il2.m_inoutline_id IS NOT NULL "
+          + "    AND il2.m_inoutline_id " + IN_OUT_LINE_SCOPE + " "
           + "  GROUP BY il2.m_inoutline_id "
           + ") direct_qty ON direct_qty.m_inoutline_id = sil.m_inoutline_id "
           + "LEFT JOIN ("
@@ -179,7 +194,8 @@ final class NeoInvoiceSupport {
           + "  GROUP BY iol.m_inoutline_id "
           + ") draft_all ON draft_all.m_inoutline_id = sil.m_inoutline_id "
           + "WHERE sil.m_inout_id = ? AND sil.isactive = 'Y'";
-      paramCount = 2;  // first ? = inOutId (draft_all scope), second ? = inOutId (WHERE)
+      // placeholders: direct_qty scope, draft_all scope, outer WHERE — all bound to inOutId.
+      paramCount = 3;
     }
 
     Map<String, BigDecimal> result = new HashMap<>();

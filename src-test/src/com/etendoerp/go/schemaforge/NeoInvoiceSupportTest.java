@@ -497,4 +497,40 @@ public class NeoInvoiceSupportTest {
       }
     }
   }
+
+  // ─── ETP-5653: the direct arm is scoped to the requested movement's lines ─
+
+  /**
+   * The pending-quantity query's {@code direct_qty} arm aggregates {@code C_InvoiceLine} by
+   * {@code m_inoutline_id}. It must be restricted to the requested movement's lines — the very key
+   * it groups by, so it keeps or drops whole groups and no sum changes — or it aggregates the
+   * whole table and only then discards the other movements' groups, which grows the read with the
+   * instance's invoice count. Both variants build their own SQL, so both are checked, together
+   * with the placeholder count the binding loop relies on.
+   */
+  @Test
+  public void computePendingQtyPerLine_scopesDirectArmToTheRequestedMovement() throws Exception {
+    for (boolean includeDrafts : new boolean[] { false, true }) {
+      try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+        OBDal dal = mock(OBDal.class);
+        Connection conn = stubDalConnection(obDalMock, dal);
+        PreparedStatement ps = mock(PreparedStatement.class);
+        ResultSet rs = mock(ResultSet.class);
+        when(conn.prepareStatement(Mockito.anyString())).thenReturn(ps);
+        when(ps.executeQuery()).thenReturn(rs);
+        when(rs.next()).thenReturn(false);
+
+        NeoInvoiceSupport.computePendingQtyPerLineOrThrow("inout-scope", includeDrafts);
+
+        ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+        Mockito.verify(conn).prepareStatement(sqlCaptor.capture());
+        String sql = sqlCaptor.getValue();
+        assertTrue("includeDrafts=" + includeDrafts
+                + ": the direct arm must be scoped to the requested movement's lines",
+            sql.contains("AND il2.m_inoutline_id IN "
+                + "(SELECT m_inoutline_id FROM m_inoutline WHERE m_inout_id = ?)"));
+        Mockito.verify(ps, Mockito.times(3)).setString(Mockito.anyInt(), Mockito.anyString());
+      }
+    }
+  }
 }
