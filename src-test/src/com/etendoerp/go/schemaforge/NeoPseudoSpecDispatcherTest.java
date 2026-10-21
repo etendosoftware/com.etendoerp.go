@@ -123,6 +123,32 @@ public class NeoPseudoSpecDispatcherTest {
     verify(batchService, never()).handle(any(), any());
   }
 
+  // ETP-5677: GET/DELETE /sws/neo/batch/jobs/{id}
+
+  private static NeoServlet.NeoPathInfo jobPath(String id) {
+    return new NeoServlet.NeoPathInfo("batch", "jobs", id);
+  }
+
+  @Test
+  public void batchJobsGetAndDeleteDelegateToHandleJob() throws Exception {
+    assertTrue(dispatcher.handle(jobPath("J1"), "GET", request, response));
+    assertTrue(dispatcher.handle(jobPath("J1"), "DELETE", request, response));
+
+    verify(batchService).handleJob("GET", "J1", response);
+    verify(batchService).handleJob("DELETE", "J1", response);
+    verify(batchService, never()).handle(any(), any());
+  }
+
+  @Test
+  public void batchJobsRejectOtherMethodsAndAMissingId() throws Exception {
+    assertTrue(dispatcher.handle(jobPath("J1"), "POST", request, response));
+    assertTrue(dispatcher.handle(jobPath(null), "GET", request, response));
+
+    verify(servlet, org.mockito.Mockito.times(2)).sendError(eq(response),
+        eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED), org.mockito.ArgumentMatchers.startsWith("Batch jobs support"));
+    verify(batchService, never()).handleJob(any(), any(), any());
+  }
+
   // -------------------------------------------------------------------------
   // usage (ETP-5462)
   // -------------------------------------------------------------------------

@@ -1207,6 +1207,56 @@ The `recordId` from the URL path is injected into the process parameters automat
 
 Process access is checked before execution. If the current role lacks access to the process, the request returns `403 Forbidden`.
 
+#### 4.3.7 Asynchronous batch jobs — `async:true`, status polling, cancel (ETP-5677)
+
+A long synchronous batch can commit on the server while its response is lost to an idle timeout in
+front of Tomcat; the client then sees an error for records that exist, and a retry duplicates them. The
+asynchronous mode answers at once and keeps the outcome where the client can read it. The synchronous
+`POST /sws/neo/batch` and `etendo_batch` are unchanged and stay one atomic transaction.
+
+| | REST | MCP |
+|---|---|---|
+| Start | `POST /sws/neo/batch` with `"async": true` → **202** `{jobId, state:"QUEUED", totalRows, totalOps}` | `etendo_batch` with `async:true` → the same JSON |
+| Status | `GET /sws/neo/batch/jobs/{jobId}` | `etendo_job_status {jobId}` (read scope) |
+| Cancel | `DELETE /sws/neo/batch/jobs/{jobId}` | `etendo_job_cancel {jobId}` (write scope) |
+
+Both channels call `BatchJobService`, which runs every row through the same `BatchService.executeBatch`
+the synchronous request uses (the MCP channel passes its own per-operation preprocessor, exactly as
+its synchronous call does).
+
+**Commit unit: one row.** The worker splits the operations into *rows*: an operation plus everything
+it references through `parentRef` or a `"$ref:<id>"` string anywhere in its body (a product and its
+price, a document and its lines — `BatchRowGrouper`). Each row is its own atomic transaction; a
+rejected row does not stop the others. The status carries, per row, `committed:true` with its
+`operations:[{id,ok,recordId}]`, or `committed:false` with `failedAt` / `error{status,message}`. A row
+reported `committed:true` exists; resend only the rows with `committed:false`.
+
+```
+{ jobId, state, done, channel, totalRows, totalOps, processedRows, committedRows, failedRows,
+  rows:[{index, ids:[opId…], committed, operations? | failedAt?, error?}], hint?, cancelRequested? }
+```
+
+`state`: `QUEUED` → `RUNNING` → `SUCCEEDED` (every row committed) / `PARTIAL` / `FAILED` (no row
+committed); `CANCELLED` (stopped between rows at the owner's request — rows already committed stay
+committed); `INTERRUPTED` (see below). `done` is `true` for every state except `QUEUED`/`RUNNING`.
+
+**Storage and liveness.** Jobs live in `ETGO_BATCH_JOB` (written by JDBC on its own pooled connection,
+never through the DAL, so progress is visible while a row's transaction is open). The node holding a
+job refreshes its `HEARTBEAT` every 10 s (queued or running); a `QUEUED`/`RUNNING` job whose heartbeat is
+older than 90 s belongs to a dead node and is reported `INTERRUPTED` by whichever node next reads or
+submits — so a load balancer routing a poll to another node never flips a live job. Every state change
+is a conditional update, so a worker cannot overwrite `INTERRUPTED`/`CANCELLED`. The result is flushed
+after every row: after an `INTERRUPTED` job the listed rows are final and the rows not listed may or may
+not exist (look them up before resending). Finished jobs are purged after 24 h.
+
+**Limits and access.** At most 2 active jobs per user and 4 per client; over the limit, or with a full
+queue (2 workers, 50 slots), the submit answers **429** with `Retry-After: 5` and creates no job. At most
+5000 operations per job; a malformed payload (empty, duplicate ids, a `parentRef` that is not an earlier
+operation, missing `id`/`spec`/`entity`) answers **400** and never becomes a job. Only the user who
+started a job can read or cancel it (anyone else gets **404**); a finished job cannot be cancelled
+(**409**). The worker runs as the requester (user, role, client, organization, language captured at
+submit) and always releases its context and DAL session.
+
 #### Failure body: `message` + `messageKeys` (ETP-5316)
 
 When the action runs a DB procedure (`CallProcess` -> `ProcessInstance`) and it fails, the `400`
@@ -4243,6 +4293,13 @@ on the virtual column gets the raw value; filter on the stored twin instead.
 `orderBy` is not aliased on **either** channel: sorting on `deliveryStatus` (and the other two)
 uses the raw virtual value on MCP and REST alike, and can disagree with the order of the values
 shown. Filters are aliased on MCP; sorts are not, anywhere.
+
+**Asynchronous mode (ETP-5677).** `async:true` exists on both channels with the same envelope and the
+same service (§4.3.7); it is declared here because it is the one place where `etendo_batch` is **not**
+all-or-nothing: an async job commits **per row**, and the status reports each row. The synchronous call
+keeps its single-transaction contract on both channels. REST and MCP differ in the async mode only
+by what already differs in the synchronous one (the MCP preprocessor and its failure-envelope rewrite
+inside each row's result).
 
 #### 4.12.10 An excluded field does not exist, on every verb (ETP-5335, IMP-39)
 

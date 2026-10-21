@@ -45,6 +45,7 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.ui.Process;
 
 import com.etendoerp.go.oauth2.ApiScopes;
+import com.etendoerp.go.schemaforge.BatchJobService;
 import com.etendoerp.go.schemaforge.BatchService;
 import com.etendoerp.go.schemaforge.NeoVectorSearchEndpoint;
 import com.etendoerp.go.schemaforge.data.SFEntity;
@@ -287,6 +288,9 @@ public class ToolRegistry {
       // still refuses. See McpConstants#batchToolEnabled.
       if (McpConstants.batchToolEnabled()) {
         tools.add(buildBatchTool());
+        // ETP-5677: the follow-up of etendo_batch {async:true}; published with it.
+        tools.add(buildJobStatusTool());
+        tools.add(buildJobCancelTool());
       }
       tools.add(buildActionTool(ToolRegistryActionSpecs.withActionSpecs(accessibleWindowSpecs, actionReportSpecs)));
     }
@@ -379,6 +383,9 @@ public class ToolRegistry {
       case McpConstants.TOOL_NEO_REQUEST_IMAGE_UPLOAD:
       case McpConstants.TOOL_NEO_UPLOAD_IMAGE:
       case McpConstants.TOOL_NEO_GET_IMAGE_UPLOAD:
+      // ETP-5677: they address a job, not a spec.
+      case McpConstants.TOOL_NEO_JOB_STATUS:
+      case McpConstants.TOOL_NEO_JOB_CANCEL:
         return true;
       default:
         return false;
@@ -1033,6 +1040,17 @@ public class ToolRegistry {
             + "value, showed that every value it sets is overwritten by fields you send yourself. "
             + "The response is the same either way; the server may ignore it."));
 
+    // ETP-5677: the asynchronous mode, next to the synchronous one.
+    props.put(BatchJobService.PARAM_ASYNC, booleanProp(
+        "Optional, default false. true = do not wait: the call returns at once with "
+            + "{jobId, state:'QUEUED', totalRows, totalOps} and a background job writes the "
+            + "operations. Use it for long batches (dozens of rows), where a synchronous call can "
+            + "time out although the server keeps writing. Follow it with etendo_job_status. "
+            + "The async job commits ROW BY ROW (a row = an op plus everything it references "
+            + "through parentRef/$ref), not as one atomic unit: a rejected row does not undo the "
+            + "others, and the status reports for every row whether it committed (with its "
+            + "recordIds) or why not. Resend only the rows reported committed:false."));
+
     return new McpToolDefinition(
         "etendo_batch",
         "Run a sequence of cross-spec create operations in order, atomically: a failure rolls "
@@ -1055,6 +1073,38 @@ public class ToolRegistry {
             + "(validation_error, not_found, method_not_allowed, server_error) naming what to fix "
             + "and 'persisted' is non-empty only in the process-commit case above.",
         buildObjectSchema(props, List.of("operations")));
+  }
+
+  // ── Async batch job tools (ETP-5677) ───────────────────────────────────
+
+  private static Map<String, Object> jobIdSchema(String description) {
+    Map<String, Object> props = new LinkedHashMap<>();
+    props.put("jobId", stringProp(description));
+    return buildObjectSchema(props, List.of("jobId"));
+  }
+
+  McpToolDefinition buildJobStatusTool() {
+    return new McpToolDefinition(
+        McpConstants.TOOL_NEO_JOB_STATUS,
+        "Status of an asynchronous batch job started with etendo_batch {async:true}. Returns "
+            + "{jobId, state, done, totalRows, processedRows, committedRows, failedRows, rows:[{index, "
+            + "ids, committed, operations:[{id,ok,recordId}] | failedAt, error}], hint?}. state is "
+            + "QUEUED, RUNNING, SUCCEEDED (every row committed), PARTIAL (some rows rejected), "
+            + "FAILED, CANCELLED or INTERRUPTED (the server running it stopped: rows listed are "
+            + "final, rows not listed may or may not exist — look them up before resending). Poll "
+            + "until done is true (every few seconds). A committed row exists; resend only rows "
+            + "with committed:false. Only the user who started the job can read it.",
+        jobIdSchema("The jobId returned by etendo_batch with async:true."));
+  }
+
+  McpToolDefinition buildJobCancelTool() {
+    return new McpToolDefinition(
+        McpConstants.TOOL_NEO_JOB_CANCEL,
+        "Ask an asynchronous batch job to stop. It stops before its next row: rows already "
+            + "committed stay committed and are listed by etendo_job_status; rows not started are "
+            + "never written. Answers with the job's status. Only the user who started the job "
+            + "can cancel it; a finished job cannot be cancelled.",
+        jobIdSchema("The jobId returned by etendo_batch with async:true."));
   }
 
   // ── Schema tool ────────────────────────────────────────────────────────

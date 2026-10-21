@@ -621,6 +621,164 @@ class McpToolRouterRouteTest {
     }
   }
 
+  // ── etendo_batch async + job tools (ETP-5677) ────────────────────────────
+
+  /**
+   * The async mode shares the synchronous call's access check and hands the job to
+   * {@code BatchJobService}; the two job tools only forward to the same service.
+   */
+  @Nested
+  @DisplayName("etendo_batch async and etendo_job_* (ETP-5677)")
+  class BatchJobTests {
+
+    private JSONObject asyncArgs() throws Exception {
+      JSONObject op = new JSONObject().put("id", "op1").put("spec", SPEC_NAME)
+          .put("entity", ENTITY_NAME).put("body", new JSONObject());
+      return new JSONObject().put("operations", new JSONArray().put(op)).put("async", true);
+    }
+
+    private String textOf(JSONObject result) throws Exception {
+      return result.getJSONArray("content").getJSONObject(0).getString("text");
+    }
+
+    @Test
+    @DisplayName("async:true is access-checked per spec, then submitted as an mcp job without running a batch")
+    void asyncSubmitsAJobAfterTheAccessCheck() throws Exception {
+      SFSpec spec = mockSpec();
+      supportMock.when(() -> McpToolRouterSupport.findActiveSpecByName(SPEC_NAME)).thenReturn(spec);
+      supportMock.when(() -> McpToolRouterSupport.hasSpecAccess(spec, "W", "POST")).thenReturn(true);
+
+      com.etendoerp.go.schemaforge.BatchJobService jobs =
+          mock(com.etendoerp.go.schemaforge.BatchJobService.class);
+      when(jobs.submit(any(), any(), eq("mcp"), any()))
+          .thenReturn(new JSONObject().put("jobId", "J1").put("state", "QUEUED"));
+      try (MockedStatic<com.etendoerp.go.schemaforge.BatchJobService> jobsMock =
+          mockStatic(com.etendoerp.go.schemaforge.BatchJobService.class);
+          MockedStatic<com.etendoerp.go.schemaforge.BatchJobService.Owner> ownerMock =
+              mockStatic(com.etendoerp.go.schemaforge.BatchJobService.Owner.class);
+          MockedStatic<com.etendoerp.go.schemaforge.BatchService> batchMock =
+              mockStatic(com.etendoerp.go.schemaforge.BatchService.class)) {
+        jobsMock.when(com.etendoerp.go.schemaforge.BatchJobService::getInstance).thenReturn(jobs);
+        ownerMock.when(com.etendoerp.go.schemaforge.BatchJobService.Owner::current)
+            .thenReturn(new com.etendoerp.go.schemaforge.BatchJobService.Owner("U", "R", "C", "O",
+                "en_US", null));
+        com.etendoerp.go.schemaforge.BatchService mockBatch =
+            mock(com.etendoerp.go.schemaforge.BatchService.class);
+        batchMock.when(com.etendoerp.go.schemaforge.BatchService::forBatchOnly)
+            .thenReturn(mockBatch);
+
+        JSONObject result = router.handleBatch(asyncArgs());
+
+        assertFalse(result.has("isError"));
+        assertEquals("J1", new JSONObject(textOf(result)).getString("jobId"));
+        org.mockito.Mockito.verify(mockBatch, org.mockito.Mockito.never())
+            .executeBatch(any(), any(), org.mockito.ArgumentMatchers.anyBoolean(),
+                org.mockito.ArgumentMatchers.anyBoolean());
+      }
+    }
+
+    @Test
+    @DisplayName("a read-only role cannot start an async batch either")
+    void asyncIsDeniedForAReadOnlyRole() throws Exception {
+      SFSpec spec = mockSpec();
+      supportMock.when(() -> McpToolRouterSupport.findActiveSpecByName(SPEC_NAME)).thenReturn(spec);
+      supportMock.when(() -> McpToolRouterSupport.hasSpecAccess(spec, "W", "POST")).thenReturn(false);
+
+      JSONObject result = router.handleBatch(asyncArgs());
+
+      assertTrue(result.getBoolean("isError"));
+      assertTrue(textOf(result).contains("Access denied"));
+    }
+
+    @Test
+    @DisplayName("a refused submit (429) tells the agent when to retry")
+    void aTooBusySubmitCarriesTheRetryHint() throws Exception {
+      SFSpec spec = mockSpec();
+      supportMock.when(() -> McpToolRouterSupport.findActiveSpecByName(SPEC_NAME)).thenReturn(spec);
+      supportMock.when(() -> McpToolRouterSupport.hasSpecAccess(spec, "W", "POST")).thenReturn(true);
+      com.etendoerp.go.schemaforge.BatchJobService jobs =
+          mock(com.etendoerp.go.schemaforge.BatchJobService.class);
+      when(jobs.submit(any(), any(), any(), any())).thenThrow(
+          new com.etendoerp.go.schemaforge.BatchJobService.JobException(429, "Too many", 5));
+      try (MockedStatic<com.etendoerp.go.schemaforge.BatchJobService> jobsMock =
+          mockStatic(com.etendoerp.go.schemaforge.BatchJobService.class);
+          MockedStatic<com.etendoerp.go.schemaforge.BatchJobService.Owner> ownerMock =
+              mockStatic(com.etendoerp.go.schemaforge.BatchJobService.Owner.class);
+          MockedStatic<com.etendoerp.go.schemaforge.BatchService> batchMock =
+              mockStatic(com.etendoerp.go.schemaforge.BatchService.class)) {
+        jobsMock.when(com.etendoerp.go.schemaforge.BatchJobService::getInstance).thenReturn(jobs);
+        ownerMock.when(com.etendoerp.go.schemaforge.BatchJobService.Owner::current)
+            .thenReturn(new com.etendoerp.go.schemaforge.BatchJobService.Owner("U", "R", "C", "O",
+                "en_US", null));
+        batchMock.when(com.etendoerp.go.schemaforge.BatchService::forBatchOnly)
+            .thenReturn(mock(com.etendoerp.go.schemaforge.BatchService.class));
+
+        JSONObject result = router.handleBatch(asyncArgs());
+
+        assertTrue(result.getBoolean("isError"));
+        assertTrue(textOf(result).contains("retry after 5 s"));
+      }
+    }
+
+    @Test
+    @DisplayName("etendo_job_status returns the stored status of the caller's job")
+    void jobStatusForwardsToTheService() throws Exception {
+      com.etendoerp.go.schemaforge.BatchJobService jobs =
+          mock(com.etendoerp.go.schemaforge.BatchJobService.class);
+      com.etendoerp.go.schemaforge.BatchJobService.Owner owner =
+          new com.etendoerp.go.schemaforge.BatchJobService.Owner("U", "R", "C", "O", "en_US", null);
+      when(jobs.status(owner, "J1")).thenReturn(new JSONObject().put("state", "RUNNING"));
+      try (MockedStatic<com.etendoerp.go.schemaforge.BatchJobService> jobsMock =
+          mockStatic(com.etendoerp.go.schemaforge.BatchJobService.class);
+          MockedStatic<com.etendoerp.go.schemaforge.BatchJobService.Owner> ownerMock =
+              mockStatic(com.etendoerp.go.schemaforge.BatchJobService.Owner.class)) {
+        jobsMock.when(com.etendoerp.go.schemaforge.BatchJobService::getInstance).thenReturn(jobs);
+        ownerMock.when(com.etendoerp.go.schemaforge.BatchJobService.Owner::current).thenReturn(owner);
+
+        JSONObject result = router.handleBatchJob("etendo_job_status",
+            new JSONObject().put("jobId", "J1"));
+
+        assertFalse(result.has("isError"));
+        assertEquals("RUNNING", new JSONObject(textOf(result)).getString("state"));
+      }
+    }
+
+    @Test
+    @DisplayName("etendo_job_cancel forwards to cancel, and a stranger's job answers not found")
+    void jobCancelForwardsAndMapsRefusals() throws Exception {
+      com.etendoerp.go.schemaforge.BatchJobService jobs =
+          mock(com.etendoerp.go.schemaforge.BatchJobService.class);
+      com.etendoerp.go.schemaforge.BatchJobService.Owner owner =
+          new com.etendoerp.go.schemaforge.BatchJobService.Owner("U", "R", "C", "O", "en_US", null);
+      when(jobs.cancel(owner, "MINE")).thenReturn(new JSONObject().put("state", "CANCELLED"));
+      when(jobs.cancel(owner, "THEIRS")).thenThrow(
+          new com.etendoerp.go.schemaforge.BatchJobService.JobException(404, "Job not found: THEIRS",
+              null));
+      try (MockedStatic<com.etendoerp.go.schemaforge.BatchJobService> jobsMock =
+          mockStatic(com.etendoerp.go.schemaforge.BatchJobService.class);
+          MockedStatic<com.etendoerp.go.schemaforge.BatchJobService.Owner> ownerMock =
+              mockStatic(com.etendoerp.go.schemaforge.BatchJobService.Owner.class)) {
+        jobsMock.when(com.etendoerp.go.schemaforge.BatchJobService::getInstance).thenReturn(jobs);
+        ownerMock.when(com.etendoerp.go.schemaforge.BatchJobService.Owner::current).thenReturn(owner);
+
+        JSONObject mine = router.handleBatchJob("etendo_job_cancel", new JSONObject().put("jobId", "MINE"));
+        JSONObject theirs = router.handleBatchJob("etendo_job_cancel", new JSONObject().put("jobId", "THEIRS"));
+
+        assertEquals("CANCELLED", new JSONObject(textOf(mine)).getString("state"));
+        assertTrue(theirs.getBoolean("isError"));
+        assertTrue(textOf(theirs).contains("Job not found"));
+      }
+    }
+
+    @Test
+    @DisplayName("a job tool without a jobId is refused")
+    void jobToolsRequireAJobId() throws Exception {
+      JSONObject result = router.handleBatchJob("etendo_job_status", new JSONObject());
+      assertTrue(result.getBoolean("isError"));
+      assertTrue(textOf(result).contains("jobId is required"));
+    }
+  }
+
   // ── etendo_discover ──────────────────────────────────────────────────────
 
   @Nested

@@ -53,6 +53,7 @@ import org.openbravo.service.json.JsonConstants;
 
 import com.etendoerp.go.schemaforge.AmortizationPlanService;
 import com.etendoerp.go.schemaforge.util.NeoRecordVersion;
+import com.etendoerp.go.schemaforge.BatchJobService;
 import com.etendoerp.go.schemaforge.BatchService;
 import com.etendoerp.go.schemaforge.NeoActionRecordGuard;
 import com.etendoerp.go.schemaforge.NeoCommercialLinePolicy;
@@ -247,6 +248,12 @@ public class McpToolRouter {
               return wrapAsErrorContent(McpRouterErrorBodies.batchDisabled());
             }
             return handleBatch(arguments);
+          case McpConstants.TOOL_NEO_JOB_STATUS:
+          case McpConstants.TOOL_NEO_JOB_CANCEL:
+            if (!McpConstants.batchToolEnabled()) {
+              return wrapAsErrorContent(McpRouterErrorBodies.batchDisabled());
+            }
+            return handleBatchJob(toolName, arguments);
           case "etendo_action":
             return handleAction(specName, arguments);
           case McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN:
@@ -1639,6 +1646,9 @@ public class McpToolRouter {
           authorizeSpecAccess(specName, HTTP_METHOD_POST);
         }
       }
+      if (args.optBoolean(BatchJobService.PARAM_ASYNC, false)) {
+        return submitBatchJob(operations, args);
+      }
       // IMP-15 / ETP-5415: the body transforms that make etendo_batch accept exactly what etendo_create
       // accepts — FK-by-name and legacy-numeric ids, the UoM derivation, the bill-to and
       // line-price injections. They run per operation, from inside the batch loop, because that is
@@ -1660,10 +1670,68 @@ public class McpToolRouter {
     } catch (SecurityException e) {
       log.warn("etendo_batch access denied session={}", McpUsageTelemetry.sessionForLog(), e);
       return wrapAsErrorContent(e.getMessage());
+    } catch (BatchJobService.JobException e) {
+      return wrapAsErrorContent(jobErrorMessage(e));
     } catch (Exception e) {
       log.error("Error executing etendo_batch session={}", McpUsageTelemetry.sessionForLog(), e);
       return wrapAsErrorContent("Error executing etendo_batch: " + e.getMessage());
     }
+  }
+
+  /**
+   * {@code etendo_batch} with {@code async:true} (ETP-5677): records the batch as a job and answers
+   * with its id. The worker runs every row through the same {@code executeBatch} and the same MCP
+   * body transforms the synchronous call uses, as admin-mode DAL work under the caller's identity —
+   * exactly the context {@link #routeCall} gives the synchronous tool.
+   */
+  private JSONObject submitBatchJob(JSONArray operations, JSONObject args) throws JSONException {
+    boolean onlyReturnIds = args.optBoolean(BatchService.PARAM_ONLY_RETURN_IDS, false);
+    boolean skipCallouts = args.optBoolean(BatchService.PARAM_SKIP_REDUNDANT_CALLOUTS, false);
+    BatchService batchService = BatchService.forBatchOnly();
+    return wrapAsTextContent(BatchJobService.getInstance().submit(BatchJobService.Owner.current(),
+        operations, "mcp", rowOps -> runMcpBatchRow(batchService, rowOps, onlyReturnIds,
+            skipCallouts)));
+  }
+
+  /** One row of an async MCP batch, shaped exactly like the synchronous call's outcome. */
+  private JSONObject runMcpBatchRow(BatchService batchService, JSONArray rowOps,
+      boolean onlyReturnIds, boolean skipCallouts) throws JSONException {
+    OBContext.setAdminMode();
+    try {
+      JSONObject result = batchService.executeBatch(rowOps, this::preprocessBatchOperation,
+          onlyReturnIds, skipCallouts);
+      if (!result.optBoolean("committed", false)) {
+        McpBatchEnvelope.toMcpBatchFailure(result);
+      }
+      return result;
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /** {@code etendo_job_status} / {@code etendo_job_cancel} (ETP-5677). */
+  JSONObject handleBatchJob(String toolName, JSONObject args) {
+    String jobId = args == null ? null : args.optString("jobId", null);
+    if (StringUtils.isBlank(jobId)) {
+      return wrapAsErrorContent("jobId is required");
+    }
+    try {
+      BatchJobService.Owner owner = BatchJobService.Owner.current();
+      JSONObject job = McpConstants.TOOL_NEO_JOB_CANCEL.equals(toolName)
+          ? BatchJobService.getInstance().cancel(owner, jobId)
+          : BatchJobService.getInstance().status(owner, jobId);
+      return wrapAsTextContent(job);
+    } catch (BatchJobService.JobException e) {
+      return wrapAsErrorContent(jobErrorMessage(e));
+    } catch (Exception e) {
+      log.error("Error executing {} session={}", toolName, McpUsageTelemetry.sessionForLog(), e);
+      return wrapAsErrorContent("Error executing " + toolName + ": " + e.getMessage());
+    }
+  }
+
+  private static String jobErrorMessage(BatchJobService.JobException e) {
+    return e.getRetryAfter() == null ? e.getMessage()
+        : e.getMessage() + " (retry after " + e.getRetryAfter() + " s)";
   }
 
   /**
