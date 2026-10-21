@@ -534,6 +534,25 @@ public class BillingReconciliationServiceTest {
     assertEquals(1, result.get(Counter.CHECKOUTS_CHECKED));
   }
 
+  /**
+   * G5: a session that completed with an asynchronous payment still pending ({@code complete},
+   * {@code unpaid}) is not a payment yet: nothing is recorded, audited or provisioned.
+   */
+  @Test
+  public void aCompleteSessionWhosePaymentIsStillPendingWritesNothing() throws Exception {
+    createdRows.add(row(REQ, SESSION, ago(20, TimeUnit.MINUTES), "pending"));
+    session(SESSION, "complete", "unpaid", REQ);
+
+    ReconciliationResult result = run(false);
+
+    verifyNothingProvisionedOrWritten();
+    verify(eventStore, never()).touchReconciliation(anyString(), anyString(), any(), any());
+    assertEquals(0, result.get(Counter.PAYMENTS_RECOVERED));
+    assertEquals(0, result.get(Counter.PROVISIONED));
+    assertEquals(1, result.get(Counter.CHECKOUTS_CHECKED));
+    assertTrue(result.getErrors().isEmpty());
+  }
+
   @Test
   public void aPaymentThatRacedTheCloseWinsAndNothingIsAudited() throws Exception {
     createdRows.add(row(REQ, SESSION, ago(49, TimeUnit.HOURS), "pending"));
@@ -830,6 +849,26 @@ public class BillingReconciliationServiceTest {
     verifyRow("reconcile:needs-review:" + REQ, "reconciliation.needs-review",
         BillingEventStore.RESULT_FAILED);
     assertEquals(1, result.get(Counter.NEEDS_REVIEW));
+  }
+
+  /** G1, second half: a paywall that does not confirm the payment parks it as NOT_PAID. */
+  @Test
+  public void aNotPaidOutcomeParksThePurchaseWithCodeNotPaid() {
+    paidRows.add(paidRow(REQ, ago(2, TimeUnit.HOURS), 1L,
+        CheckoutRequestStore.DERIVED_STATUS_STALLED));
+    when(provisioning.provision(eq(REQ), any())).thenReturn(new Outcome(Status.NOT_PAID, null,
+        "The paywall does not confirm this purchase as paid", null));
+
+    ReconciliationResult result = run(false);
+
+    ArgumentCaptor<String> reason = ArgumentCaptor.forClass(String.class);
+    verify(eventStore).recordReconciliation(eq("reconcile:needs-review:" + REQ),
+        eq("reconciliation.needs-review"), eq(REQ), eq(BillingEventStore.RESULT_FAILED),
+        reason.capture(), eq("{\"code\":\"NOT_PAID\",\"attempts\":\"1\"}"));
+    assertTrue(reason.getValue(), reason.getValue().startsWith("Needs manual review (NOT_PAID): "
+        + "The paywall does not confirm this purchase as paid"));
+    assertEquals(1, result.get(Counter.NEEDS_REVIEW));
+    assertEquals(0, result.get(Counter.PROVISIONED));
   }
 
   // ── Phase 3: a checkout with no session id is never closed ───────────────────────────────

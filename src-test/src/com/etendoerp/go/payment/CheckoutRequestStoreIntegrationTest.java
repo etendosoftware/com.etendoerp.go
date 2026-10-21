@@ -1000,6 +1000,77 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
     assertFalse("No row, nothing recorded", writes.recordPaidPending(newRequestId(), null, null));
   }
 
+  /** The pending close commits with the caller's commit, and closes a request only once. */
+  @Test
+  public void testAPendingCloseCommitsWithTheCallerAndOnlyOnce() {
+    String email = newEmail("pending-close");
+    String requestId = createCreatedRequest(createAccount(email), email);
+
+    assertTrue(writes.recordExpiredPending(requestId));
+    OBDal.getInstance().commitAndClose();
+
+    CheckoutRequest closed = findCommittedRequest(requestId);
+    assertEquals(CheckoutRequestStore.STATUS_EXPIRED, closed.getCheckoutRequestStatus());
+    assertNotNull(closed.getExpiredAt());
+    OBDal.getInstance().rollbackAndClose();
+    assertFalse("Already closed: nothing to close", writes.recordExpiredPending(requestId));
+    OBDal.getInstance().rollbackAndClose();
+  }
+
+  /** The shared payment write keeps EXPIRED terminal on the reconciliation's path too. */
+  @Test
+  public void testAPendingPaymentLeavesAnExpiredRequestExpired() {
+    String email = newEmail("pending-paid-expired");
+    String requestId = createCreatedRequest(createAccount(email), email);
+    assertTrue(writes.recordExpired(requestId));
+
+    assertTrue("The request exists", writes.recordPaidPending(requestId, "cus_" + requestId,
+        null));
+    OBDal.getInstance().commitAndClose();
+
+    CheckoutRequest request = findCommittedRequest(requestId);
+    assertEquals(CheckoutRequestStore.STATUS_EXPIRED, request.getCheckoutRequestStatus());
+    assertNull(request.getPaidAt());
+  }
+
+  /**
+   * A payment recorded twice through the pending path, as a re-run would, keeps its first
+   * {@code PAID_AT} and the provider ids it captured first.
+   */
+  @Test
+  public void testAPendingPaymentRecordedTwiceKeepsItsFirstPaidAtAndIds() {
+    String email = newEmail("pending-paid-twice");
+    String requestId = createCreatedRequest(createAccount(email), email);
+    assertTrue(writes.recordPaidPending(requestId, "cus_first", "sub_first_" + requestId));
+    OBDal.getInstance().commitAndClose();
+    Date firstPaidAt = findCommittedRequest(requestId).getPaidAt();
+    assertNotNull(firstPaidAt);
+    OBDal.getInstance().rollbackAndClose();
+
+    assertTrue(writes.recordPaidPending(requestId, "cus_second", "sub_second_" + requestId));
+    OBDal.getInstance().commitAndClose();
+
+    CheckoutRequest paid = findCommittedRequest(requestId);
+    assertEquals(STATUS_PAID, paid.getCheckoutRequestStatus());
+    assertEquals(firstPaidAt.getTime(), paid.getPaidAt().getTime());
+    assertEquals("cus_first", paid.getStripeCustomer());
+    assertEquals("sub_first_" + requestId, paid.getStripeSubscription());
+  }
+
+  /** The webhook's recordPaid now writes through the same code: CREATING advances to PAID. */
+  @Test
+  public void testRecordPaidAdvancesARequestThatNeverGotItsSessionRecorded() {
+    String email = newEmail("paid-from-creating");
+    String requestId = createRequest(createAccount(email), email);
+
+    assertTrue(store.recordPaid(requestId, "cus_" + requestId, null));
+
+    CheckoutRequest paid = findCommittedRequest(requestId);
+    assertEquals(STATUS_PAID, paid.getCheckoutRequestStatus());
+    assertNotNull(paid.getPaidAt());
+    assertEquals("cus_" + requestId, paid.getStripeCustomer());
+  }
+
   @Test
   public void testAnExpiredRequestIsTerminal() {
     String email = newEmail("expired-terminal");

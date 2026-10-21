@@ -262,6 +262,48 @@ public class BillingReconciliationProcessTest {
     assertEquals(run.toString() + "<br/>" + line, result.getMessage());
   }
 
+  /**
+   * The same run through a real {@link ProcessBundle} and {@link ProcessLogger}, as the Classic
+   * menu launch builds them, and the real run lock failing open (no dedicated connection): the
+   * summary and the capped item lines land in the run log Process Monitor shows, and the popup
+   * text is escaped HTML with one {@code <br/>} per line.
+   */
+  @Test
+  public void aRealProcessBundleGetsTheSummaryAndTheCappedItemLines() throws Exception {
+    ReconciliationResult run = new ReconciliationResult(false);
+    run.increment(Counter.CHECKOUTS_EXPIRED);
+    run.item("req 00000000", "<b>Acme & Co</b>", "close abandoned checkout",
+        "the provider session expired");
+    for (int i = 1; i < ReconciliationResult.MAX_ITEM_LINES + 5; i++) {
+      run.item(String.format("req %08d", i), "Tenant " + i, "close abandoned checkout", null);
+    }
+    when(service.run(false)).thenReturn(run);
+    // A menu launch: the direct channel, no process request.
+    ProcessBundle realBundle = new ProcessBundle("ETGO_BillingReconciliation",
+        new org.openbravo.base.secureApp.VariablesSecureApp("100", "0", "0"));
+    realBundle.setLog(new ProcessLogger(null));
+    BillingReconciliationProcess process = process(false);
+    process.runLock = new ReconciliationRunLock(() -> null);
+
+    process.doExecute(realBundle);
+
+    String log = realBundle.getLog();
+    assertTrue(log, log.contains(" - " + run.toString() + "\n"));
+    assertTrue(log, log.contains(" - req 00000000 (<b>Acme & Co</b>): close abandoned checkout"
+        + " — the provider session expired\n"));
+    assertTrue(log, log.contains(" - req 00000019 (Tenant 19): close abandoned checkout\n"));
+    assertFalse("Only 20 item lines are listed", log.contains("req 00000020"));
+    assertTrue(log, log.contains(" - +5 more\n"));
+    assertEquals("The summary plus 20 items plus the rest", 22, log.split("\n").length);
+    OBError popup = (OBError) realBundle.getResult();
+    assertEquals("Success", popup.getType());
+    String message = popup.getMessage();
+    assertTrue(message, message.contains("<br/>req 00000000 (&lt;b&gt;Acme &amp; Co&lt;/b&gt;)"));
+    assertFalse("No raw markup from a name reaches the popup", message.contains("<b>"));
+    assertTrue(message, message.endsWith("<br/>+5 more"));
+    assertEquals(21, message.split("<br/>", -1).length - 1);
+  }
+
   @Test
   public void aFlagOffAlertThatCannotBeRecordedStillEndsTheRunAsAnError() {
     firedByTheScheduler("ADMIN-SCHEDULED-REQUEST", "S");

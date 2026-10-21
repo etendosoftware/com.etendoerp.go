@@ -465,6 +465,24 @@ public class SubscriptionReconcilerTest {
     assertEquals(2, result.get(Counter.SUBSCRIPTIONS_CLOSED));
   }
 
+  /** G6: a key of unknown mode cannot vouch for test-mode data, so an absence is not trusted. */
+  @Test
+  public void aKeyOfUnknownModeOverTestDataTripsTheBreaker() throws Exception {
+    secretKey = "pk_test_publishable_not_secret";
+    activeRow("sub_gone", "req-gone", "cs_test_gone", CURRENT);
+    for (int i = 0; i < 9; i++) {
+      activeRow("sub_ok" + i, "req-ok" + i, "cs_test_ok" + i, CURRENT);
+      list("sub_ok" + i, "active");
+    }
+    absent("sub_gone");
+
+    ReconciliationResult result = run(false);
+
+    verifyNothingApplied();
+    assertEquals("the configured key is of unknown mode but subscription sub_gone was bought in "
+        + "test mode", result.getBreakerReason());
+  }
+
   @Test
   public void aLiveKeyOverTestDataTripsTheBreakerEvenForOneAbsent() throws Exception {
     secretKey = "sk_live_key";
