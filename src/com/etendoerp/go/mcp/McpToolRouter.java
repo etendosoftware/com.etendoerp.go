@@ -301,8 +301,6 @@ public class McpToolRouter {
           toolName, e.getMessage(), McpUsageTelemetry.sessionForLog());
       return wrapAsErrorContent(McpRouterErrorBodies.forbidden(toolName, e.getMessage()));
     } catch (Exception e) {
-      log.error("Error routing MCP tool '{}' session={}", toolName,
-          McpUsageTelemetry.sessionForLog(), e);
       return wrapAsErrorContent(buildUnexpectedErrorBody(toolName, e));
     }
   }
@@ -724,7 +722,9 @@ public class McpToolRouter {
         fields.optString(McpConstants.PARAM_PARENT_ID, null));
 
     String dalEntityName = adTab.getTable().getName();
-    DefaultJsonDataService jsonService = DefaultJsonDataService.getInstance();
+    // ETP-5782: NEO's write service, which keeps the exception of a failed write so the
+    // failure is classified by what it is (see McpWriteRequestSupport.checkJsonServiceError).
+    DefaultJsonDataService jsonService = BatchService.currentJsonService();
     NeoFieldFilter fieldFilter = NeoFieldFilter.forEntity(sfEntity, dalEntityName);
 
     Map<String, String> params = McpWriteRequestSupport.buildBaseParams(adTab, dalEntityName);
@@ -951,7 +951,9 @@ public class McpToolRouter {
     Tab adTab = McpWriteRequestSupport.getAdTabOrThrow(sfEntity, entityName);
 
     String dalEntityName = adTab.getTable().getName();
-    DefaultJsonDataService jsonService = DefaultJsonDataService.getInstance();
+    // ETP-5782: NEO's write service, which keeps the exception of a failed write so the
+    // failure is classified by what it is (see McpWriteRequestSupport.checkJsonServiceError).
+    DefaultJsonDataService jsonService = BatchService.currentJsonService();
     NeoFieldFilter fieldFilter = NeoFieldFilter.forEntity(sfEntity, dalEntityName);
 
     Map<String, String> params = McpWriteRequestSupport.buildBaseParams(adTab, dalEntityName);
@@ -1084,7 +1086,9 @@ public class McpToolRouter {
     Tab adTab = McpWriteRequestSupport.getAdTabOrThrow(sfEntity, entityName);
 
     String dalEntityName = adTab.getTable().getName();
-    DefaultJsonDataService jsonService = DefaultJsonDataService.getInstance();
+    // ETP-5782: NEO's write service, which keeps the exception of a failed write so the
+    // failure is classified by what it is (see McpWriteRequestSupport.checkJsonServiceError).
+    DefaultJsonDataService jsonService = BatchService.currentJsonService();
 
     Map<String, String> params = McpWriteRequestSupport.buildBaseParams(adTab, dalEntityName);
     params.put(JsonConstants.ID, recordId);

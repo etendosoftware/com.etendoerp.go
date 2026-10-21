@@ -29,7 +29,9 @@ import java.util.regex.Pattern;
 
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
+import org.openbravo.service.db.DalConnectionProvider;
 
 /**
  * Single place where NEO resolves {@code @AD_Message_Key@} tokens into the text of the current
@@ -84,6 +86,40 @@ public final class NeoMessageTranslator {
     }
     try {
       return OBMessageUtils.parseTranslation(text);
+    } catch (Exception e) {
+      return text;
+    }
+  }
+
+  /**
+   * Translates a raw failure message the way core's datasource does, but in an explicit language:
+   * {@code @Key@} tokens are resolved through {@code AD_Message}, and a constraint violation is
+   * replaced by the AD message named after the constraint, when there is one (ETP-5782).
+   *
+   * <p>Why not {@link OBMessageUtils#messageBD(String)}: it reads the language from the request's
+   * session variables, which NEO's token-authenticated requests do not carry, and it has already
+   * echoed a message code straight back to a client (ETP-5073). The language here is the
+   * {@link OBContext} one, which {@code NeoAuthenticator} sets from {@code Accept-Language}.
+   *
+   * <p>Never throws, and needs a usable session: a translation that fails — no context, an aborted
+   * transaction — returns {@code text} unchanged.
+   *
+   * @param text the raw message; may be {@code null}
+   * @return the translated message, or {@code text} when nothing could be resolved
+   */
+  public static String translateDbMessage(String text) {
+    if (text == null || text.isBlank()) {
+      return text;
+    }
+    try {
+      OBContext context = OBContext.getOBContext();
+      String language = context != null && context.getLanguage() != null
+          ? context.getLanguage().getLanguage()
+          : null;
+      OBError translated = OBMessageUtils.translateError(new DalConnectionProvider(false), null,
+          language, text);
+      String message = translated != null ? translated.getMessage() : null;
+      return message == null || message.isBlank() ? text : message;
     } catch (Exception e) {
       return text;
     }
