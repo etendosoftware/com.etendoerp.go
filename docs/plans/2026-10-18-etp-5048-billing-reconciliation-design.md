@@ -193,7 +193,9 @@ checkout and subscription rows, and its audit rows are ordinary billing events.
 14. **Non-retryable failures** — a provisioning failure whose code is deterministic
     (`ProvisioningFailureReason.isRetryable` = false; ETP-5737, the `ad_client_name` unique violation,
     is one) goes to **needs review** once and is not retried on every run. ETP-5737 itself is not
-    fixed here.
+    fixed here. An attempt of the reconciliation's own that fails this way is parked in the same
+    run (Martin, 2026-10-21): it keeps its `provisioning-failed` audit row, and the review alert
+    is its only alert.
 15. **Re-subscriptions** (ETP-5742, review B2, 2026-10-21) — the payment webhook records a
     re-subscription's payment and then applies it to the canceled environment. When the webhook is
     lost, phase A records the payment and phase B applies the re-subscription through
@@ -217,7 +219,7 @@ The phases run in this order, each with its own transactions:
 | # | Phase | Candidates | Provider read | Repair |
 |---|---|---|---|---|
 | A | Checkout recovery (provider → local) | `CREATED` rows with a session id, older than the paid grace, not backing off | `GET /v1/checkout/sessions/{id}` | `complete` + `paid`/`no_payment_required` → `recordPaid`, then provision (or apply the re-subscription) in B. `expired`, past the abandoned window → `EXPIRED`. `open` → nothing. A failed read → back-off. |
-| B | Provisioning repair | `PAID` rows older than the paid grace (`PAID_AT`, else the creation); `PROVISIONING` rows whose lease is stale or whose failure is retryable; without a created client, or a `PAID` re-subscription; not parked, not backing off | none for a new purchase; `GET /v1/subscriptions/{id}` for a re-subscription | `PaidProvisioningService` under the `claimForProvisioning` lease, or `PaidReactivationService` (decision 15). A non-retryable failure, a unique violation, or an exhausted attempt budget → needs review, once. |
+| B | Provisioning repair | `PAID` rows older than the paid grace (`PAID_AT`, else the creation); `PROVISIONING` rows whose lease is stale or whose failure is retryable; without a created client, or a `PAID` re-subscription; not parked, not backing off | none for a new purchase; `GET /v1/subscriptions/{id}` for a re-subscription | `PaidProvisioningService` under the `claimForProvisioning` lease, or `PaidReactivationService` (decision 15). A non-retryable failure, a unique violation, or an exhausted attempt budget → needs review, once, in the same run, whether the failure was recorded earlier or met by this run's attempt (then alerted once, by the review). |
 | C | No-session-id review | `CREATING` rows older than the abandoned window, not parked | none | parked for review once; the run then counts the open reviews as awaiting |
 | D | Subscriptions (local → provider) | open active rows with a Stripe subscription id; preference-route tenants, latest purchase only (decision 9) | `GET /v1/subscriptions?status=all&expand[]=data.latest_invoice` paginated, then `GET /v1/subscriptions/{id}` for every local id the list did not return, up to the batch size | the status mapping of decision 7, applied through `SubscriptionLifecycleApplier` + `TenantEnvironmentLifecycleService.applySubscriptionEvent` on the provider's clock (decision 16), after the no-op diff. Missing price/amount/currency on an open row (the R37 adoption step, register §2.4) is filled from the subscription's first item price, only where NULL. |
 | E | Stale `RECEIVED` sweep | Stripe events of the families whose phases completed, `RECEIVED` older than the threshold, not parked | none | per decision 12: superseded (`IGNORED`), parked for review, or left. |

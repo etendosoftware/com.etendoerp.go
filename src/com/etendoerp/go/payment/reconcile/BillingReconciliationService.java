@@ -399,16 +399,8 @@ public class BillingReconciliationService {
         return; // the browser normally provisions it within the grace
       }
     } else if (DERIVED_FAILED.equals(derived)) {
-      String code = ProvisioningFailureReason.codeOf(row.failureReason);
-      if (!row.retryAllowed) {
-        reviews.park(row.requestId, row.clientName, code,
-            "The recorded failure cannot succeed on a retry", row.attempts, result, audit);
-        return;
-      }
-      if (isDeterministic(row.failureReason)) {
-        reviews.park(row.requestId, row.clientName, CODE_DETERMINISTIC_FAILURE,
-            "The recorded failure is a unique-key collision, which a retry repeats",
-            row.attempts, result, audit);
+      if (parkIfNoRetryCanFix(row, ProvisioningFailureReason.codeOf(row.failureReason),
+          row.retryAllowed, row.failureReason, row.attempts, result, audit)) {
         return;
       }
     } else if (!DERIVED_STALLED.equals(derived)) {
@@ -508,16 +500,7 @@ public class BillingReconciliationService {
             "paid with no environment (attempt " + outcome.attempt() + ")");
         break;
       case FAILED:
-        audit.write(ReconciliationAudit.eventId(KIND_PROVISIONING_FAILED, requestId,
-            String.valueOf(outcome.attempt())), KIND_PROVISIONING_FAILED, requestId,
-            BillingEventStore.RESULT_FAILED,
-            "Provisioning attempt failed: " + outcome.code(), summary("attempt",
-                String.valueOf(outcome.attempt())));
-        audit.alert("Provisioning of paid purchase {} failed (attempt {}, code {})", requestId,
-            outcome.attempt(), outcome.code());
-        result.increment(Counter.PROVISIONING_FAILED);
-        result.item(shortRequest(requestId), row.clientName, ACTION_PROVISION,
-            "the attempt failed (" + outcome.code() + ")");
+        recordFailedAttempt(row, outcome, result, audit);
         break;
       case NEEDS_REVIEW:
       case NOT_PAID:
@@ -529,6 +512,55 @@ public class BillingReconciliationService {
         // NOT_CLAIMED: another attempt holds it, or it finished meanwhile; nothing to record.
         break;
     }
+  }
+
+  /**
+   * A failed attempt keeps its own audit row. A failure no retry can fix (a non-retryable code, a
+   * unique-key collision) is parked for review in the same run (decision 14): parking alerts, so
+   * the failure alerts no second time, and a parked row leaves the next runs' candidates. Any
+   * other failure alerts and is retried by a later run.
+   */
+  private void recordFailedAttempt(CheckoutRow row, PaidProvisioningService.Outcome outcome,
+      ReconciliationResult result, ReconciliationAudit audit) {
+    String requestId = row.requestId;
+    String attempt = String.valueOf(outcome.attempt());
+    audit.write(ReconciliationAudit.eventId(KIND_PROVISIONING_FAILED, requestId, attempt),
+        KIND_PROVISIONING_FAILED, requestId, BillingEventStore.RESULT_FAILED,
+        "Provisioning attempt failed: " + outcome.code(), summary("attempt", attempt));
+    result.increment(Counter.PROVISIONING_FAILED);
+    result.item(shortRequest(requestId), row.clientName, ACTION_PROVISION,
+        "the attempt failed (" + outcome.code() + ")");
+    long attempts = outcome.attempt() == null ? row.attempts : outcome.attempt();
+    if (parkIfNoRetryCanFix(row, outcome.code(),
+        ProvisioningFailureReason.isRetryableCode(outcome.code()),
+        outcome.code() + " " + StringUtils.defaultString(outcome.detail()), attempts, result,
+        audit)) {
+      return;
+    }
+    audit.alert("Provisioning of paid purchase {} failed (attempt {}, code {})", requestId,
+        outcome.attempt(), outcome.code());
+  }
+
+  /**
+   * Parks a provisioning failure that no retry can fix: a non-retryable code, or a unique-key
+   * collision, which a retry repeats.
+   *
+   * @return whether the row was parked
+   */
+  private boolean parkIfNoRetryCanFix(CheckoutRow row, String code, boolean retryable,
+      String failureText, long attempts, ReconciliationResult result, ReconciliationAudit audit) {
+    if (!retryable) {
+      reviews.park(row.requestId, row.clientName, code,
+          "The recorded failure cannot succeed on a retry", attempts, result, audit);
+      return true;
+    }
+    if (isDeterministic(failureText)) {
+      reviews.park(row.requestId, row.clientName, CODE_DETERMINISTIC_FAILURE,
+          "The recorded failure is a unique-key collision, which a retry repeats", attempts,
+          result, audit);
+      return true;
+    }
+    return false;
   }
 
   /** Paid too recently for anyone but its own browser or webhook to act on it yet. */

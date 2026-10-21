@@ -18,6 +18,7 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -42,6 +43,7 @@ import org.openbravo.dal.service.OBQuery;
 import com.etendoerp.go.payment.BillingEventStore;
 import com.etendoerp.go.payment.CheckoutRequestStore;
 import com.etendoerp.go.payment.CheckoutRequestWrites;
+import com.etendoerp.go.payment.ProvisioningFailureReason;
 import com.etendoerp.go.payment.StripeApiClient;
 import com.etendoerp.go.payment.StripeResponse;
 import com.etendoerp.go.payment.TestLogCapture;
@@ -817,6 +819,65 @@ public class BillingReconciliationServiceTest {
     verifyRow("reconcile:provisioning-failed:" + REQ + ":2", "reconciliation.provisioning-failed",
         BillingEventStore.RESULT_FAILED);
     assertEquals(1, result.get(Counter.PROVISIONING_FAILED));
+    // A failure a retry may fix is alerted and left for a later run, never parked.
+    assertEquals(0, result.get(Counter.NEEDS_REVIEW));
+    verify(eventStore, never()).recordReconciliation(eq("reconcile:needs-review:" + REQ),
+        anyString(), any(), anyString(), any(), any());
+    assertTrue(warnings().toString(), warnings().stream().anyMatch(
+        warning -> warning.contains("failed (attempt 2, code TIMEOUT)")));
+  }
+
+  /**
+   * Decision 14, from a real run: an attempt that fails with a non-retryable code is parked for
+   * review in the same run, with one review alert, instead of waiting for the next run to park it.
+   * A second run leaves the parked row alone.
+   */
+  @Test
+  public void aNonRetryableFailedAttemptIsParkedInTheSameRunAndTheNextRunIsANoOp() {
+    paidRows.add(paidRow(REQ, ago(2, TimeUnit.HOURS), 0L, "paid"));
+    when(provisioning.provision(eq(REQ), any())).thenReturn(new Outcome(Status.FAILED,
+        ProvisioningFailureReason.CODE_CLIENT_NAME_IN_USE, "The company name is in use", 1L));
+
+    ReconciliationResult result = run(false);
+
+    verifyRow("reconcile:provisioning-failed:" + REQ + ":1", "reconciliation.provisioning-failed",
+        BillingEventStore.RESULT_FAILED);
+    ArgumentCaptor<String> why = ArgumentCaptor.forClass(String.class);
+    verify(eventStore).recordReconciliation(eq("reconcile:needs-review:" + REQ),
+        eq("reconciliation.needs-review"), eq(REQ), eq(BillingEventStore.RESULT_FAILED),
+        why.capture(), any());
+    assertTrue(why.getValue(), why.getValue().contains("CLIENT_NAME_IN_USE"));
+    assertEquals(1, result.get(Counter.PROVISIONING_FAILED));
+    assertEquals(1, result.get(Counter.NEEDS_REVIEW));
+    assertTrue("One review alert, no separate failure alert", warnings().stream().noneMatch(
+        warning -> warning.contains("failed (attempt")));
+    verify(internalAlerts, times(1)).sendAfterTransaction(any());
+
+    // The next run: the row is parked, so the candidate query leaves it out.
+    parked.add(REQ);
+    ReconciliationResult next = run(false);
+
+    verify(provisioning, times(1)).provision(eq(REQ), any());
+    verify(eventStore, times(1)).recordReconciliation(eq("reconcile:needs-review:" + REQ),
+        anyString(), any(), anyString(), any(), any());
+    assertEquals(0, next.get(Counter.NEEDS_REVIEW));
+    verify(internalAlerts, times(1)).sendAfterTransaction(any());
+  }
+
+  @Test
+  public void aFailedAttemptWithAUniqueKeyCollisionIsParkedInTheSameRun() {
+    paidRows.add(paidRow(REQ, ago(2, TimeUnit.HOURS), 0L, "paid"));
+    when(provisioning.provision(eq(REQ), any())).thenReturn(new Outcome(Status.FAILED,
+        ProvisioningFailureReason.CODE_PROVISIONING_FAILED,
+        "ERROR: duplicate key value violates unique constraint (23505)", 1L));
+
+    ReconciliationResult result = run(false);
+
+    ArgumentCaptor<String> why = ArgumentCaptor.forClass(String.class);
+    verify(eventStore).recordReconciliation(eq("reconcile:needs-review:" + REQ), anyString(),
+        eq(REQ), eq(BillingEventStore.RESULT_FAILED), why.capture(), any());
+    assertTrue(why.getValue(), why.getValue().contains("DETERMINISTIC_FAILURE"));
+    assertEquals(1, result.get(Counter.NEEDS_REVIEW));
   }
 
   @Test

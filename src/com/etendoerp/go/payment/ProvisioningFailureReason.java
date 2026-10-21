@@ -98,6 +98,16 @@ public final class ProvisioningFailureReason {
    * @return {@code false} for a deterministic failure (see {@link #NON_RETRYABLE_CODES})
    */
   static boolean isRetryable(String failureReason) {
-    return !NON_RETRYABLE_CODES.contains(codeOf(failureReason));
+    return isRetryableCode(codeOf(failureReason));
+  }
+
+  /**
+   * Tells whether a retry can fix a failure with this code, as an attempt's outcome reports it.
+   *
+   * @param failureCode a stable failure code
+   * @return {@code false} for a deterministic failure (see {@link #NON_RETRYABLE_CODES})
+   */
+  public static boolean isRetryableCode(String failureCode) {
+    return !NON_RETRYABLE_CODES.contains(failureCode);
   }
 }
