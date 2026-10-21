@@ -25,6 +25,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.math.BigDecimal;
 import java.util.stream.Stream;
 
 import org.codehaus.jettison.json.JSONObject;
@@ -180,7 +181,8 @@ class InvoiceLineAmountSupportTest {
             "{\"etgoDiscount\":10}", "22.5", "225", "272.25"),
         Arguments.of("list price changes → price re-derived with the stored discount",
             storedLine(), "{\"listPrice\":30}", "29.4", "294", "355.74"),
-        Arguments.of("a price different from the list price is the caller's", storedLine(),
+        Arguments.of("a new price on a discounted line is the caller's (list worked back)",
+            storedLine(),
             "{\"unitPrice\":30}", null, "300", "363"),
         Arguments.of("tax change → gross follows, net does not move", storedLine(),
             "{\"tax\":\"TAX10\"}", null, "245", "269.50"),
@@ -241,7 +243,7 @@ class InvoiceLineAmountSupportTest {
     return LineAmountTestSupport.storedInvoiceLine("3", "1.35", "1.5", "10", "0", "TAX10");
   }
 
-  static Stream<Arguments> undiscountedPriceOnUpdate() {
+  static Stream<Arguments> pricesOnUpdate() {
     return Stream.of(
         // label, stored, patch, unitPrice, listPrice (null: as sent, or absent), net, gross
         Arguments.of("unitPrice only → the list price follows (CP-B3)", undiscounted(),
@@ -265,12 +267,23 @@ class InvoiceLineAmountSupportTest {
             discounted(), "{\"invoicedQuantity\":5,\"unitPrice\":1.35}", null, null, "6.75",
             "7.43"),
         Arguments.of("SPA side panel, discount taken to 0 → no-op", discounted(),
-            "{\"etgoDiscount\":0,\"unitPrice\":1.5}", null, null, "4.50", "4.95"));
+            "{\"etgoDiscount\":0,\"unitPrice\":1.5}", null, null, "4.50", "4.95"),
+        // ── with a discount: a new net price keeps it and works the list price back ──
+        Arguments.of("discounted line, unitPrice only → list = 1.25 / 0.9, discount kept",
+            discounted(), "{\"unitPrice\":1.25}", null, "1.388889", "3.75", "4.13"),
+        Arguments.of("discounted line, the computed price within half a cent (SPA) → no-op",
+            discounted(), "{\"unitPrice\":1.349999}", null, null, "4.05", "4.46"),
+        Arguments.of("100 % discount, unitPrice only → nothing to work back, list kept",
+            LineAmountTestSupport.storedInvoiceLine("3", "0", "1.5", "100", "0", "TAX10"),
+            "{\"unitPrice\":1.25}", null, null, "3.75", "4.13"),
+        Arguments.of("discounted line, unitPrice + etgoDiscount → list kept (existing rule)",
+            discounted(), "{\"unitPrice\":1.25,\"etgoDiscount\":10}", null, null, "3.75",
+            "4.13"));
   }
 
   @ParameterizedTest(name = "{0}")
-  @MethodSource("undiscountedPriceOnUpdate")
-  void undiscountedPriceAndListPriceStayTheSameOnUpdate(String label, InvoiceLine stored,
+  @MethodSource("pricesOnUpdate")
+  void priceAndListPriceStayCoherentOnUpdate(String label, InvoiceLine stored,
       String patch, String unitPrice, String listPrice, String net, String gross)
       throws Exception {
     JSONObject json = new JSONObject(patch);
@@ -289,11 +302,15 @@ class InvoiceLineAmountSupportTest {
     assertAmount(label, gross, json, InvoiceLineAmountSupport.FIELD_GROSS_AMOUNT);
   }
 
-  /** {@code expected} when given; otherwise the key keeps exactly what was sent, or stays absent. */
+  /**
+   * {@code expected} (compared exactly: a price keeps 6 decimals) when given; otherwise the key
+   * keeps exactly what was sent, or stays absent.
+   */
   private static void assertPriceOrUntouched(String label, String expected, JSONObject sent,
       JSONObject body, String key) {
     if (expected != null) {
-      assertAmount(label, expected, body, key);
+      assertEquals(0, new BigDecimal(expected).compareTo(new BigDecimal(String.valueOf(
+          body.opt(key)))), label + ": " + key + " expected " + expected + ", was " + body.opt(key));
     } else if (sent.has(key)) {
       assertEquals(String.valueOf(sent.opt(key)), String.valueOf(body.opt(key)),
           label + ": " + key + " as sent");

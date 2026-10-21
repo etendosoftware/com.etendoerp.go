@@ -87,8 +87,16 @@ import org.openbravo.model.common.invoice.InvoiceLine;
  * 3 × 1.50 now stores list 1.25, net 3.75, as editing Precio does); {@code listPrice} alone →
  * {@code unitPrice = listPrice}; {@code etgoDiscount} alone, taken to 0 → {@code unitPrice} = the
  * stored non-zero list price. A patch that sends both prices, or one already equal to the other —
- * every SPA body — is left alone. A {@code unitPrice} alone on a line WITH a discount is still the
- * caller's price (unchanged): the UI offers no such edit.
+ * every SPA body — is left alone.
+ *
+ * <p><b>A new net price on a discounted line</b> (ETP-5703). With a final discount {@code d}
+ * (0 &lt; d &lt; 100) and a patch carrying {@code unitPrice} but neither {@code listPrice} nor
+ * {@code etgoDiscount}, a price that is not (within half a cent) what the stored list price and
+ * discount already give keeps the discount and the caller's price, and the list price is worked
+ * back: {@code listPrice = unitPrice / (1 − d/100)}, 6 decimals (list 1.50, 10 %,
+ * {@code unitPrice 1.25} → list 1.388889, net of 3 units 3.75). The SPA body (exactly the computed
+ * price), a 100 % discount, a line with no list price and a price equal to the list price are left
+ * as before.
  *
  * <p><b>The amounts.</b> {@link NeoCommercialLinePolicy#injectCommercialAmounts} over the line's
  * final quantity, price, gross price and tax, rounded to the invoice currency's standard precision
@@ -122,6 +130,8 @@ final class InvoiceLineAmountSupport {
   private static final String METHOD_PATCH = "PATCH";
   private static final String METHOD_PUT = "PUT";
   private static final BigDecimal HUNDRED = BigDecimal.valueOf(100);
+  /** Absorbs the SPA's {@code toFixed(6)} float rounding of a computed price. */
+  private static final BigDecimal HALF_CENT = new BigDecimal("0.005");
 
   /** The inputs {@link NeoCommercialLinePolicy#injectCommercialAmounts} reads for an invoice line. */
   private static final List<String> AMOUNT_INPUTS = Arrays.asList(FIELD_INVOICED_QTY,
@@ -332,6 +342,9 @@ final class InvoiceLineAmountSupport {
     }
     BigDecimal list = nonZero(state.opt(FIELD_LIST_PRICE));
     BigDecimal unit = nonZero(state.opt(FIELD_UNIT_PRICE));
+    if (!create && backDeriveListPrice(patch, state, discount, list, unit)) {
+      return false;
+    }
     BigDecimal base = create ? createBase(patch, list, unit) : updateBase(patch, list, unit);
     if (base == null) {
       return false;
@@ -379,6 +392,39 @@ final class InvoiceLineAmountSupport {
       return false;
     }
     patch.put(FIELD_UNIT_PRICE, list);
+    return true;
+  }
+
+  /**
+   * The update rule of a line WITH a discount whose patch sends a new net price (ETP-5703): a
+   * {@code unitPrice} with no {@code listPrice} and no {@code etgoDiscount} key keeps the discount
+   * and the caller's price, and the list price is worked back from them:
+   * {@code listPrice = unitPrice / (1 − d/100)}, rounded to {@value #PRICE_SCALE} decimals
+   * (list 1.50, 10 %, {@code unitPrice 1.25} → list 1.388889, net of 3 units 3.75).
+   *
+   * <p>Left alone (as before): a price within half a cent of what the stored list price and
+   * discount already give — the SPA's body, which sends exactly that computed price (the tolerance
+   * of {@code OrderLineDiscountSupport.shouldDeriveDiscountFromPrice}); a price equal to the list
+   * price (the discount rule applies it); a 100 % discount (nothing to work back from); a line with
+   * no list price, or a price of 0.
+   *
+   * @return {@code true} when {@code listPrice} was back-derived
+   */
+  private static boolean backDeriveListPrice(JSONObject patch, JSONObject state,
+      BigDecimal discount, BigDecimal list, BigDecimal unit) throws JSONException {
+    boolean sentUnit = patch.has(FIELD_UNIT_PRICE) && !patch.isNull(FIELD_UNIT_PRICE);
+    if (!sentUnit || patch.has(FIELD_LIST_PRICE) || patch.has(FIELD_DISCOUNT) || list == null
+        || unit == null || unit.compareTo(list) == 0 || discount.compareTo(HUNDRED) >= 0) {
+      return false;
+    }
+    BigDecimal factor = HUNDRED.subtract(discount);
+    BigDecimal current = list.multiply(factor).divide(HUNDRED, PRICE_SCALE, RoundingMode.HALF_UP);
+    if (unit.subtract(current).abs().compareTo(HALF_CENT) < 0) {
+      return false;
+    }
+    BigDecimal derived = unit.multiply(HUNDRED).divide(factor, PRICE_SCALE, RoundingMode.HALF_UP);
+    patch.put(FIELD_LIST_PRICE, derived);
+    state.put(FIELD_LIST_PRICE, derived);
     return true;
   }
 

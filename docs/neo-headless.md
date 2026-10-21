@@ -8993,8 +8993,21 @@ no non-zero `grossUnitPrice`:
 
 QA case CP-B3: 3 × 1.50, VAT 10 %, `etendo_update {unitPrice: 1.25}` → `listPrice 1.25`, net 3.75, gross
 4.13 — what editing Precio stores — instead of `listPrice 1.50` with net 3.75 ("Subtotal sin descuento"
-4.50 against a subtotal of 3.75). A `unitPrice` alone on a line **with** a discount is unchanged (below):
-the UI offers no such edit.
+4.50 against a subtotal of 3.75).
+
+**New net price on a discounted line (ETP-5703).** When the line's final `etgoDiscount` `d` is non-zero
+(0 < d < 100) and there is no non-zero `grossUnitPrice`, a patch carrying `unitPrice` but neither
+`listPrice` nor `etgoDiscount` keeps the discount and the caller's price, and works the list price back:
+`listPrice = unitPrice / (1 − d/100)`, 6 decimals, HALF_UP. List 1.50, 10 %, qty 3, VAT 10 %,
+`etendo_update {unitPrice: 1.25}` → `listPrice 1.388889`, `unitPrice 1.25`, net 3.75, gross 4.13; the UI
+shows Precio 1.39, Subtotal sin descuento 4.17, Descuento 0.42, Subtotal 3.75. Left as before:
+
+- a `unitPrice` within half a cent of the stored `listPrice × (1 − d/100)` — the SPA body, which sends
+  exactly that computed price (same tolerance as `OrderLineDiscountSupport.shouldDeriveDiscountFromPrice`);
+- `unitPrice` equal to the list price (the discount rule above applies the discount to it);
+- `d = 100`: there is nothing to work back from, the list price is kept;
+- a stored list price of 0 (legacy line) or a `unitPrice` of 0;
+- a patch that also carries `listPrice` or `etgoDiscount` (the rules above apply).
 
 **Discount range.** `etgoDiscount` must be within **[0, 100]**. A create (POST) or update (PATCH, PUT) whose
 body carries a discount outside that range is refused **before** anything is derived, with **422**,
@@ -9048,8 +9061,8 @@ so the form, the row quick action and a single-record bulk completion show it in
 
 ##### Edge cases of an update (PATCH / PUT) on a discounted line
 
-- A PATCH carrying only `unitPrice` on a line with a stored discount keeps that price as-is: the
-  caller's price wins and is not re-derived or discounted.
+- A PATCH carrying only `unitPrice` on a line with a stored discount keeps that price as-is (it is not
+  re-derived or discounted) and works the list price back from it (ETP-5703, above).
 - A PATCH carrying only `etgoDiscount` re-derives the price from the stored list price
   (`U = L × (1 − d/100)`), overwriting a price that was chosen by hand.
 - **Known limitation.** When an explicit non-zero `grossUnitPrice` is sent (tax-included price lists), the
