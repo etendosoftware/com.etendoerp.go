@@ -175,6 +175,59 @@ public class SubscriptionLifecycleApplier {
   }
 
   /**
+   * ETP-5048 — the provider instant a re-read subscription's state was asserted at, for a
+   * correction made from a re-read instead of from an event. It plays the event's
+   * {@code created}: the stale check runs against it and it becomes the stored watermark, so a
+   * correction is ordered against the webhook's events on the provider's clock, never on this
+   * server's.
+   *
+   * <ul>
+   *   <li><b>Terminated</b> ({@code canceled}, {@code incomplete_expired}) — when it ended
+   *       ({@link #subscriptionEndedAt}).</li>
+   *   <li><b>Anything else</b> — the later of the start of its current period and the moment its
+   *       latest invoice was paid ({@code latest_invoice.status_transitions.paid_at}, present
+   *       when the read expanded {@code latest_invoice}): a subscription that recovered from a
+   *       failed renewal is asserted current at the payment, which follows the failure.</li>
+   * </ul>
+   * Falls back to {@code start_date}, then {@code created}.
+   *
+   * @param subscription a Stripe subscription object
+   * @return the instant, or null when the object carries none
+   */
+  public static Instant providerStateAt(JSONObject subscription) {
+    if (subscription == null) {
+      return null;
+    }
+    String status = StringUtils.trimToEmpty(subscription.optString("status", ""));
+    Instant asserted;
+    if ("canceled".equals(status) || "incomplete_expired".equals(status)) {
+      asserted = subscriptionEndedAt(subscription);
+    } else {
+      asserted = later(subscriptionPeriodBoundary(subscription, CURRENT_PERIOD_START),
+          latestInvoicePaidAt(subscription));
+    }
+    if (asserted != null) {
+      return asserted;
+    }
+    Instant start = epochSeconds(subscription, "start_date");
+    return start != null ? start : epochSeconds(subscription, "created");
+  }
+
+  private static Instant latestInvoicePaidAt(JSONObject subscription) {
+    JSONObject invoice = subscription.optJSONObject("latest_invoice");
+    JSONObject transitions = invoice == null ? null
+        : invoice.optJSONObject("status_transitions");
+    return transitions == null ? null : epochSeconds(transitions, "paid_at");
+  }
+
+  private static Instant later(Instant first, Instant second) {
+    if (first == null) {
+      return second;
+    }
+    return second == null || first.isAfter(second) ? first : second;
+  }
+
+  /**
    * The Stripe subscription an event belongs to.
    *
    * <p>Subscription events are keyed by their own object id; invoice events carry the id either

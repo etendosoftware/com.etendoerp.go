@@ -85,7 +85,11 @@ import com.etendoerp.go.schemaforge.data.Subscription;
 public class SubscriptionReconcilerTest {
 
   private static final Instant NOW = Instant.parse("2026-10-21T12:00:00Z");
-  private static final String LIST_PATH = "/v1/subscriptions?status=all&limit=100";
+  private static final String LIST_PATH =
+      "/v1/subscriptions?status=all&expand%5B%5D=data.latest_invoice&limit=100";
+  private static final String DIRECT_SUFFIX = "?expand%5B%5D=latest_invoice";
+  /** The {@code ended_at} every terminated fixture carries: the provider instant of a close. */
+  private static final Instant ENDED = Instant.ofEpochSecond(1_792_000_000L);
   private static final String CLIENT = "CLIENT-1";
   private static final StoredState CURRENT = new StoredState(SubscriptionStatus.CURRENT, null,
       Instant.parse("2026-10-01T00:00:00Z"));
@@ -206,14 +210,22 @@ public class SubscriptionReconcilerTest {
   }
 
   private void absent(String id) throws Exception {
-    when(stripe.get("/v1/subscriptions/" + id)).thenReturn(new StripeResponse(404,
+    when(stripe.get(direct(id))).thenReturn(new StripeResponse(404,
         "{\"error\":{\"code\":\"resource_missing\"}}"));
   }
 
-  private SubscriptionEventOutcome appliedOutcome(LifecycleTarget target) {
+  private static String direct(String id) {
+    return "/v1/subscriptions/" + id + DIRECT_SUFFIX;
+  }
+
+  /**
+   * The outcome applied to {@code target}, checking the watermark it was stored with: the
+   * provider's instant, never this server's clock (null for an absent subscription).
+   */
+  private SubscriptionEventOutcome appliedOutcome(LifecycleTarget target, Instant eventAt) {
     ArgumentCaptor<SubscriptionEventOutcome> outcome =
         ArgumentCaptor.forClass(SubscriptionEventOutcome.class);
-    verify(lifecycle).applySubscriptionEvent(eq(target), outcome.capture(), eq(NOW));
+    verify(lifecycle).applySubscriptionEvent(eq(target), outcome.capture(), eq(eventAt));
     return outcome.getValue();
   }
 
@@ -233,7 +245,7 @@ public class SubscriptionReconcilerTest {
     ReconciliationResult result = run(false);
 
     SubscriptionEventOutcome outcome =
-        appliedOutcome(lifecycle.targetForSubscription("sub_c"));
+        appliedOutcome(lifecycle.targetForSubscription("sub_c"), ENDED);
     assertEquals(SubscriptionStatus.EXPIRED, outcome.status());
     assertTrue(outcome.closesSubscription());
     verify(eventStore).recordReconciliation(eq("reconcile:subscription-closed:sub_c"),
@@ -251,7 +263,7 @@ public class SubscriptionReconcilerTest {
     ReconciliationResult result = run(false);
 
     SubscriptionEventOutcome outcome =
-        appliedOutcome(lifecycle.targetForSubscription("sub_ie"));
+        appliedOutcome(lifecycle.targetForSubscription("sub_ie"), ENDED);
     assertEquals(SubscriptionStatus.EXPIRED, outcome.status());
     assertTrue(outcome.closesSubscription());
     assertEquals(1, result.get(Counter.SUBSCRIPTIONS_CLOSED));
@@ -324,7 +336,7 @@ public class SubscriptionReconcilerTest {
     ReconciliationResult result = run(false);
 
     assertEquals(SubscriptionStatus.CURRENT,
-        appliedOutcome(lifecycle.targetForSubscription("sub_r")).status());
+        appliedOutcome(lifecycle.targetForSubscription("sub_r"), null).status());
     verify(eventStore).recordReconciliation(
         eq("reconcile:subscription-current:sub_r:" + result.getRunId()),
         eq("reconciliation.subscription-current"), eq("req-sub_r"),
@@ -372,7 +384,7 @@ public class SubscriptionReconcilerTest {
     ReconciliationResult result = run(false);
 
     SubscriptionEventOutcome outcome =
-        appliedOutcome(lifecycle.targetForSubscription("sub_gone"));
+        appliedOutcome(lifecycle.targetForSubscription("sub_gone"), null);
     assertEquals(SubscriptionStatus.EXPIRED, outcome.status());
     assertTrue(outcome.closesSubscription());
     verify(eventStore).recordReconciliation(eq("reconcile:subscription-closed:sub_gone"),
@@ -455,9 +467,9 @@ public class SubscriptionReconcilerTest {
   @Test
   public void aFailedReadIsAProviderErrorNeverAnAbsence() throws Exception {
     activeRow("sub_x", "req-x", "cs_test_x", CURRENT);
-    when(stripe.get("/v1/subscriptions/sub_x")).thenReturn(new StripeResponse(500, ""));
+    when(stripe.get(direct("sub_x"))).thenReturn(new StripeResponse(500, ""));
     activeRow("sub_y", "req-y", "cs_test_y", CURRENT);
-    when(stripe.get("/v1/subscriptions/sub_y"))
+    when(stripe.get(direct("sub_y")))
         .thenThrow(new StripeTransportException("timeout"));
 
     ReconciliationResult result = run(false);
@@ -471,13 +483,13 @@ public class SubscriptionReconcilerTest {
   @Test
   public void aFailedSweepFallsBackToDirectReadsAndClosesNothingItDidNotSee() throws Exception {
     activeRow("sub_a", "req-a", "cs_test_a", CURRENT);
-    when(stripe.get("/v1/subscriptions/sub_a")).thenReturn(
+    when(stripe.get(direct("sub_a"))).thenReturn(
         new StripeResponse(200, subscription("sub_a", "active", true)));
     listAnswer = new StripeResponse(500, "{\"error\":{\"code\":\"api_error\"}}");
 
     ReconciliationResult result = run(false);
 
-    verify(stripe).get("/v1/subscriptions/sub_a");
+    verify(stripe).get(direct("sub_a"));
     verifyNothingApplied();
     assertEquals(1, result.get(Counter.SUBSCRIPTIONS_CHECKED));
     assertEquals(0, result.get(Counter.ABSENT_SUBSCRIPTIONS));
@@ -573,7 +585,7 @@ public class SubscriptionReconcilerTest {
 
     ReconciliationResult result = run(false);
 
-    assertEquals(SubscriptionStatus.EXPIRED, appliedOutcome(onPreferences).status());
+    assertEquals(SubscriptionStatus.EXPIRED, appliedOutcome(onPreferences, ENDED).status());
     verify(lifecycle, never()).targetForSubscription(anyString());
     verify(stripe, never()).get(startsWith("/v1/customers"));
     verify(eventStore).recordReconciliation(eq("reconcile:subscription-closed:sub_pref"),
@@ -606,6 +618,127 @@ public class SubscriptionReconcilerTest {
     run(false);
 
     verifyNothingApplied();
+  }
+
+  /**
+   * A tenant re-subscribed after a cancellation (ETP-5742) has two provisioned purchases, and the
+   * preference projection holds no subscription id to tell them apart. Only the latest is read:
+   * the canceled one would otherwise expire the tenant while its new subscription keeps billing.
+   */
+  @Test
+  public void aPurchaseSupersededByALaterOneOfTheSameTenantIsNeverRead() throws Exception {
+    // The candidate query orders a tenant's purchases newest first; P2 is the re-subscription.
+    provisionedPurchases.add(purchase("req-p2", "cs_test_p2", "sub_B", "CLIENT-PREF"));
+    provisionedPurchases.add(purchase("req-p1", "cs_test_p1", "sub_A", "CLIENT-PREF"));
+    LifecycleTarget onPreferences = LifecycleTargetFixtures.preferences("CLIENT-PREF", CURRENT);
+    when(lifecycle.targetForTenant(eq("CLIENT-PREF"), anyString())).thenReturn(onPreferences);
+    list("sub_B", "active");
+    list("sub_A", "canceled");
+
+    ReconciliationResult result = run(false);
+
+    verify(lifecycle, never()).targetForTenant("CLIENT-PREF", "sub_A");
+    verifyNothingApplied();
+    assertEquals(1, result.get(Counter.PREFERENCE_ROUTE_CHECKED));
+  }
+
+  @Test
+  public void thePreferenceCandidatesAreReadNewestPurchaseFirst() throws Exception {
+    provisionedPurchases.add(purchase("req-p", "cs_test_p", "sub_p", "CLIENT-PREF"));
+    when(lifecycle.targetForTenant("CLIENT-PREF", "sub_p")).thenReturn(
+        LifecycleTargetFixtures.preferences("CLIENT-PREF", CURRENT));
+    list("sub_p", "active");
+    OBDal dal = mock(OBDal.class);
+    ArgumentCaptor<String> hql = ArgumentCaptor.forClass(String.class);
+    when(dal.createQuery(eq(Subscription.class), anyString())).thenAnswer(call -> query(rows));
+    when(dal.createQuery(eq(CheckoutRequest.class), hql.capture()))
+        .thenAnswer(call -> query(provisionedPurchases));
+    when(stripe.get(LIST_PATH)).thenReturn(new StripeResponse(200,
+        "{\"has_more\":false,\"data\":[" + listed.get("sub_p") + "]}"));
+    try (MockedStatic<OBDal> dalStatic = mockStatic(OBDal.class);
+        MockedStatic<OBContext> context = mockStatic(OBContext.class);
+        MockedStatic<CheckoutConfiguration> configuration =
+            mockStatic(CheckoutConfiguration.class)) {
+      dalStatic.when(OBDal::getInstance).thenReturn(dal);
+      new SubscriptionReconciler(settings, stripe, checkoutStore,
+          new SubscriptionLifecycleApplier(), lifecycle, pausedAlert,
+          Clock.fixed(NOW, ZoneOffset.UTC))
+          .run(new ReconciliationResult(false), new ReconciliationAudit(eventStore, false));
+    }
+
+    assertTrue(hql.getValue(), hql.getValue().endsWith(
+        "order by coalesce(cr.paidAt, cr.creationDate) desc, cr.creationDate desc"));
+  }
+
+  /**
+   * Defence in depth for the case above: a close is ordered at the subscription's own end on the
+   * provider's clock, so a tenant whose watermark moved past it (a re-subscription paid later) is
+   * not expired by it, exactly as the webhook would drop the late event.
+   */
+  @Test
+  public void aCloseOlderThanTheStoredWatermarkIsStaleAndChangesNothing() throws Exception {
+    provisionedPurchases.add(purchase("req-pref", "cs_test_pref", "sub_pref", "CLIENT-PREF"));
+    when(lifecycle.targetForTenant("CLIENT-PREF", "sub_pref")).thenReturn(
+        LifecycleTargetFixtures.preferences("CLIENT-PREF", new StoredState(
+            SubscriptionStatus.CURRENT, null, ENDED.plusSeconds(3600))));
+    list("sub_pref", "canceled");
+
+    ReconciliationResult result = run(false);
+
+    verifyNothingApplied();
+    assertEquals(0, result.get(Counter.SUBSCRIPTIONS_CLOSED));
+  }
+
+  @Test
+  public void aSubscriptionPaidAfterItsFailedRenewalIsSetCurrentAtThePaymentInstant()
+      throws Exception {
+    Instant failedAt = Instant.ofEpochSecond(1_792_100_000L);
+    Instant paidAt = Instant.ofEpochSecond(1_792_200_000L);
+    activeRow("sub_r", "req-sub_r", "cs_test_r",
+        new StoredState(SubscriptionStatus.PAST_DUE, NOW.minusSeconds(86400), failedAt));
+    listed.put("sub_r", "{\"id\":\"sub_r\",\"status\":\"active\","
+        + "\"current_period_start\":1792000000,"
+        + "\"latest_invoice\":{\"id\":\"in_1\",\"status_transitions\":{\"paid_at\":"
+        + paidAt.getEpochSecond() + "}},"
+        + "\"metadata\":{\"request_id\":\"req-sub_r\"}}");
+
+    run(false);
+
+    assertEquals(SubscriptionStatus.CURRENT,
+        appliedOutcome(lifecycle.targetForSubscription("sub_r"), paidAt).status());
+  }
+
+  @Test
+  public void aCompleteSweepThatListsNoneOfOurSubscriptionsTripsTheBreaker() throws Exception {
+    // One local subscription, a same-mode key, and an account that lists only foreign ones: the
+    // floor of one allowed absence must not let that key close the only tenant.
+    activeRow("sub_only", "req-only", "cs_test_only", CURRENT);
+    listed.put("sub_foreign", subscription("sub_foreign", "active", false));
+    absent("sub_only");
+
+    ReconciliationResult result = run(false);
+
+    verifyNothingApplied();
+    assertNotNull(result.getBreakerReason());
+    assertTrue(result.getBreakerReason(),
+        result.getBreakerReason().contains("returned none of the local subscriptions"));
+  }
+
+  @Test
+  public void aCloseAlreadyRecordedIsAnErrorForReviewNotASilentSkip() throws Exception {
+    activeRow("sub_c", "req-sub_c", "cs_test_c", CURRENT);
+    list("sub_c", "canceled");
+    when(eventStore.recordReconciliation(eq("reconcile:subscription-closed:sub_c"), anyString(),
+        any(), anyString(), any(), any())).thenReturn(false);
+
+    ReconciliationResult result = run(false);
+
+    assertEquals(0, result.get(Counter.SUBSCRIPTIONS_CLOSED));
+    assertEquals(1, result.getErrors().size());
+    assertTrue(result.getErrors().get(0),
+        result.getErrors().get(0).contains("reconcile:subscription-closed:sub_c"));
+    assertTrue(auditLog.messagesAt(Level.WARN).toString(), auditLog.messagesAt(Level.WARN)
+        .stream().anyMatch(line -> line.contains("needs review")));
   }
 
   // ── Dry run ──────────────────────────────────────────────────────────────────────────────

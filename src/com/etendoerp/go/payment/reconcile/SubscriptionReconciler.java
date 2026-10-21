@@ -89,6 +89,9 @@ final class SubscriptionReconciler {
   private static final String MODE_LIVE = "live";
   private static final String MODE_TEST = "test";
   private static final int SUBSCRIPTION_PAGES = 100;
+  /** {@code expand[]=}, URL-encoded. */
+  private static final String EXPAND_LATEST_INVOICE_PREFIX = "expand%5B%5D=";
+  private static final String FIELD_LATEST_INVOICE = "latest_invoice";
 
   private final ReconciliationSettings settings;
   private final StripeApiClient stripe;
@@ -122,7 +125,8 @@ final class SubscriptionReconciler {
     if (candidates.isEmpty()) {
       return;
     }
-    Map<String, JSONObject> listed = sweep(candidates);
+    Map<String, JSONObject> listed = new HashMap<>();
+    StripeListPager.Sweep sweep = sweep(candidates, listed);
     int directReads = 0;
     List<SubscriptionCandidate> absent = new ArrayList<>();
     for (SubscriptionCandidate candidate : candidates) {
@@ -136,24 +140,30 @@ final class SubscriptionReconciler {
         reconcileSafely(candidate, subscription, result, audit);
       }
     }
-    closeAbsent(absent, result, audit);
+    closeAbsent(absent, sweep.isComplete() && listed.isEmpty(), result, audit);
   }
 
-  /** Every candidate the paginated sweep returned, by id. */
-  private Map<String, JSONObject> sweep(List<SubscriptionCandidate> candidates) {
+  /**
+   * Pages through every subscription of the account, keeping the candidates it returns by id in
+   * {@code listed}. The latest invoice is expanded so a correction can be ordered on the provider's
+   * clock ({@link SubscriptionLifecycleApplier#providerStateAt}).
+   *
+   * @return how the sweep ended
+   */
+  private StripeListPager.Sweep sweep(List<SubscriptionCandidate> candidates,
+      Map<String, JSONObject> listed) {
     Set<String> wanted = new HashSet<>();
     for (SubscriptionCandidate candidate : candidates) {
       wanted.add(candidate.subscriptionId);
     }
-    Map<String, JSONObject> listed = new HashMap<>();
-    new StripeListPager(stripe, StripeListPager.MAX_PAGE_SIZE, SUBSCRIPTION_PAGES)
-        .forEach("/v1/subscriptions?status=all", subscription -> {
-          String id = subscription.optString("id", "");
-          if (wanted.contains(id)) {
-            listed.put(id, subscription);
-          }
-        });
-    return listed;
+    return new StripeListPager(stripe, StripeListPager.MAX_PAGE_SIZE, SUBSCRIPTION_PAGES)
+        .forEach("/v1/subscriptions?status=all&" + EXPAND_LATEST_INVOICE_PREFIX + "data."
+            + FIELD_LATEST_INVOICE, subscription -> {
+              String id = subscription.optString("id", "");
+              if (wanted.contains(id)) {
+                listed.put(id, subscription);
+              }
+            });
   }
 
   /**
@@ -213,24 +223,27 @@ final class SubscriptionReconciler {
       // past_due / unpaid stay with the webhook's grace logic; incomplete is still being paid.
       return;
     }
-    Instant now = clock.instant();
+    // The provider's clock, never this server's: see SubscriptionLifecycleApplier#providerStateAt.
+    Instant providerAt = SubscriptionLifecycleApplier.providerStateAt(subscription);
     SystemContext.run("reconciling a subscription",
-        () -> applyProviderStatus(candidate, subscription, status, now, result, audit));
+        () -> applyProviderStatus(candidate, subscription, status, providerAt, result, audit));
   }
 
   private void applyProviderStatus(SubscriptionCandidate candidate, JSONObject subscription,
-      String status, Instant now, ReconciliationResult result, ReconciliationAudit audit) {
+      String status, Instant providerAt, ReconciliationResult result,
+      ReconciliationAudit audit) {
     LifecycleTarget target = resolveTarget(candidate);
     if (target == null || target.isIgnored()) {
       return;
     }
     SubscriptionEventOutcome outcome = applier.evaluate(SUBSCRIPTION_UPDATED,
-        syntheticEvent(subscription, now), target.storedState());
+        syntheticEvent(subscription, providerAt), target.storedState());
     if (outcome.isIgnored()) {
       return;
     }
     if (changesStoredState(target, outcome)) {
-      applyOutcome(candidate, target, outcome, now, "provider status " + status, result, audit);
+      applyOutcome(candidate, target, outcome, providerAt, "provider status " + status, result,
+          audit);
     } else if (outcome.status() != SubscriptionStatus.EXPIRED && target.subscription() != null) {
       fillMissingPrice(candidate, target.subscription(), subscription, result, audit);
     }
@@ -289,8 +302,14 @@ final class SubscriptionReconciler {
     return status;
   }
 
+  /**
+   * Stores one correction with its audit row.
+   *
+   * @param eventAt the provider instant the correction is ordered at, stored as the watermark;
+   *     null leaves the watermark as it is (an absent subscription has no provider instant)
+   */
   private void applyOutcome(SubscriptionCandidate candidate, LifecycleTarget target,
-      SubscriptionEventOutcome outcome, Instant now, String why, ReconciliationResult result,
+      SubscriptionEventOutcome outcome, Instant eventAt, String why, ReconciliationResult result,
       ReconciliationAudit audit) {
     boolean closes = outcome.status() == SubscriptionStatus.EXPIRED;
     String kind = closes ? KIND_SUBSCRIPTION_CLOSED : KIND_SUBSCRIPTION_CURRENT;
@@ -298,7 +317,7 @@ final class SubscriptionReconciler {
         ? ReconciliationAudit.eventId(kind, candidate.subscriptionId)
         : ReconciliationAudit.eventId(kind, candidate.subscriptionId, result.getRunId());
     if (!audit.isDryRun()) {
-      if (!lifecycle.applySubscriptionEvent(target, outcome, now)) {
+      if (!lifecycle.applySubscriptionEvent(target, outcome, eventAt)) {
         rollbackQuietly();
         result.error("subscription " + candidate.subscriptionId + ": the correction could not "
             + "be stored");
@@ -307,7 +326,15 @@ final class SubscriptionReconciler {
       if (!audit.write(eventId, kind, candidate.requestId, BillingEventStore.RESULT_APPLIED,
           "Corrected from the provider (" + why + ")", summary(SUMMARY_SUBSCRIPTION,
               candidate.subscriptionId, "client", target.clientId()))) {
-        return; // the same correction was already recorded; the insert rolled this one back
+        // The insert rolled the correction back with it. A close is recorded once per
+        // subscription, so finding it again means the subscription was closed by an earlier run
+        // and is open again: a person has to look, it is never closed a second time silently.
+        result.error("subscription " + candidate.subscriptionId + ": correction " + eventId
+            + " is already recorded, so it was not applied again; review it");
+        audit.alert("Subscription {} of client {} needs review: correction {} is already "
+            + "recorded and was not applied again", candidate.subscriptionId, target.clientId(),
+            eventId);
+        return;
       }
     }
     audit.repaired("{} subscription {} of client {} ({}{})", closes ? "closed" : "set current",
@@ -352,13 +379,14 @@ final class SubscriptionReconciler {
    * configured maximum, or when the key's test/live mode differs from the mode an absent
    * subscription was bought in (a wrong key answers 404 for everything it does not own).
    */
-  private void closeAbsent(List<SubscriptionCandidate> absent, ReconciliationResult result,
-      ReconciliationAudit audit) {
+  private void closeAbsent(List<SubscriptionCandidate> absent, boolean sweepFoundNone,
+      ReconciliationResult result, ReconciliationAudit audit) {
     if (absent.isEmpty()) {
       return;
     }
     absent.forEach(candidate -> result.increment(Counter.ABSENT_SUBSCRIPTIONS));
-    String breaker = breakerReason(absent, result.get(Counter.SUBSCRIPTIONS_CHECKED));
+    String breaker = breakerReason(absent, sweepFoundNone,
+        result.get(Counter.SUBSCRIPTIONS_CHECKED));
     if (breaker != null) {
       result.tripBreaker(breaker);
       audit.alert("Absent-subscription breaker tripped, nothing closed: {}", breaker);
@@ -381,14 +409,17 @@ final class SubscriptionReconciler {
     if (target == null || target.isIgnored()) {
       return;
     }
+    // An absent subscription has no provider instant: the row is closed now, and the watermark
+    // is left as it is rather than moved to this server's clock.
     SubscriptionEventOutcome outcome = SubscriptionEventOutcome.apply(
         SubscriptionStatus.EXPIRED, null).closing(now);
     if (changesStoredState(target, outcome)) {
-      applyOutcome(candidate, target, outcome, now, "absent at the provider", result, audit);
+      applyOutcome(candidate, target, outcome, null, "absent at the provider", result, audit);
     }
   }
 
-  private String breakerReason(List<SubscriptionCandidate> absent, int checked) {
+  private String breakerReason(List<SubscriptionCandidate> absent, boolean sweepFoundNone,
+      int checked) {
     String keyMode = modeOfKey(CheckoutConfiguration.secretKey());
     for (SubscriptionCandidate candidate : absent) {
       String dataMode = modeOfSession(candidate.sessionId);
@@ -397,6 +428,14 @@ final class SubscriptionReconciler {
             + " but subscription " + candidate.subscriptionId + " was bought in " + dataMode
             + " mode";
       }
+    }
+    if (sweepFoundNone) {
+      // A complete sweep of the account that returned none of our subscriptions: the key reads
+      // an account that is not ours, even in the same mode. Stripe lists canceled subscriptions
+      // too, so on the right account every id we hold is listed. Without this, the floor of one
+      // allowed absence below would let a foreign key close a tenant that is the only one.
+      return "the provider's subscription list returned none of the local subscriptions; the "
+          + "configured key reads another account";
     }
     int allowed = Math.max(1, (int) Math.floor(settings.getAbsentMaxShare() * checked));
     if (absent.size() > allowed) {
@@ -449,13 +488,20 @@ final class SubscriptionReconciler {
     return lifecycle.targetForSubscription(candidate.subscriptionId);
   }
 
-  private static JSONObject syntheticEvent(JSONObject subscription, Instant now) {
+  /**
+   * The re-read subscription as a {@code customer.subscription.updated} event created at
+   * {@code providerAt}, so the applier's stale check orders it against the stored watermark
+   * exactly as it orders a webhook event. No {@code created} when the provider gave no instant.
+   */
+  private static JSONObject syntheticEvent(JSONObject subscription, Instant providerAt) {
     try {
       JSONObject data = new JSONObject();
       data.put("object", subscription);
       JSONObject event = new JSONObject();
       event.put("type", SUBSCRIPTION_UPDATED);
-      event.put("created", now.getEpochSecond());
+      if (providerAt != null) {
+        event.put("created", providerAt.getEpochSecond());
+      }
       event.put("data", data);
       return event;
     } catch (JSONException e) {
@@ -501,19 +547,31 @@ final class SubscriptionReconciler {
   /**
    * ETP-5046-TRANSITIONAL-FALLBACK — provisioned purchases whose tenant has no active row at all
    * and whose preference projection is not already expired. Caller provides the system context.
+   *
+   * <p><b>Only the latest purchase of each tenant.</b> The preference projection holds no
+   * subscription id, so {@code targetForTenant} answers the same projection for every purchase of
+   * the tenant. A tenant re-subscribed after a cancellation (ETP-5742) has two provisioned
+   * purchases: the canceled one and the one it pays now. Reading the canceled one would expire a
+   * paying tenant, so a purchase a later purchase of the same tenant supersedes is never a
+   * candidate.
    */
   private void addPreferenceCandidates(Map<String, SubscriptionCandidate> bySubscription) {
+    Set<String> tenantsSeen = new HashSet<>();
     for (CheckoutRequest purchase : OBDal.getInstance().createQuery(CheckoutRequest.class,
             "as cr where cr.checkoutRequestStatus = :provisionedStatus"
                 + " and cr.createdClient is not null and cr.stripeSubscription is not null"
                 + " and not exists (select 1 from " + Subscription.ENTITY_NAME + " sub"
-                + "   where sub.environmentClient = cr.createdClient and sub.active = true)")
+                + "   where sub.environmentClient = cr.createdClient and sub.active = true)"
+                + " order by coalesce(cr.paidAt, cr.creationDate) desc, cr.creationDate desc")
         .setNamedParameter("provisionedStatus", CHECKOUT_PROVISIONED)
         .setFilterOnReadableClients(false)
         .setFilterOnReadableOrganization(false)
         .list()) {
       String subscriptionId = purchase.getStripeSubscription().trim();
       String clientId = purchase.getCreatedClient().getId();
+      if (!tenantsSeen.add(clientId)) {
+        continue; // superseded by a later purchase of the same tenant
+      }
       LifecycleTarget target = lifecycle.targetForTenant(clientId, subscriptionId);
       boolean onPreferences = target != null && !target.isIgnored()
           && target.subscription() == null
@@ -528,7 +586,8 @@ final class SubscriptionReconciler {
   private ProviderRead readSubscription(String subscriptionId) {
     try {
       StripeResponse response = stripe.get("/v1/subscriptions/"
-          + URLEncoder.encode(subscriptionId, StandardCharsets.UTF_8));
+          + URLEncoder.encode(subscriptionId, StandardCharsets.UTF_8) + "?"
+          + EXPAND_LATEST_INVOICE_PREFIX + FIELD_LATEST_INVOICE);
       if (response.status() == 404) {
         return new ProviderRead(null, true);
       }
