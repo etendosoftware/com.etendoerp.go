@@ -126,7 +126,8 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
               + "(it is never capped silently), and so is a list none of whose entries has an "
               + "orderLineId and a quantity above zero. Omit to invoice the pending quantity of "
               + "every line."))
-      .withIdDescription("the id of the sales order to invoice");
+      .withIdDescription("the id of the sales order to invoice")
+      .availableWhen(DocumentAvailability.WHEN_COMPLETED);
 
   /**
    * What an agent reads about {@code createDraftInvoice} on a sales quotation (ETP-5709). No
@@ -187,7 +188,8 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
               + "quantity (it is never capped silently), and so is a list none of whose entries "
               + "has a shipmentLineId and a quantity above zero. Omit to invoice the pending "
               + "quantity of every line."))
-      .withIdDescription("the id of the goods shipment to invoice");
+      .withIdDescription("the id of the goods shipment to invoice")
+      .availableWhen(DocumentAvailability.WHEN_COMPLETED);
 
   @Inject
   InvoiceFromOrderSupport invoiceFromOrderSupport;
@@ -340,6 +342,8 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
         ensureDocumentNo(invoice);
         if (SPEC_GOODS_SHIPMENT.equals(specName)) {
           getSupport().ensureLineGrossAmounts(invoice);
+          // ETP-5714: the native copy of a shipment line keeps a source list price of 0
+          getSupport().alignLineListPrices(invoice, null);
           OBDal.getInstance().flush();
         }
 
@@ -916,6 +920,8 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
     // ETP-4780: moved into InvoiceFromOrderSupport so CreatePurchaseInvoiceHandler
     // can reuse the same behaviour without duplication.
     getSupport().copyLineDiscountsFromOrder(invoice);
+    // ETP-5714: a source line without a list price gives a copied line the form would not store
+    getSupport().alignLineListPrices(invoice, null);
 
     InvoiceLineLinker.linkInvoiceLinesToExistingInouts(invoice.getId());
 

@@ -33,8 +33,10 @@ final class ReturnCompletionContract {
           + "completing cannot be undone from here and voiding is not available.",
       NeoActionContract.Param.requiredOptions("docAction",
           "The only value accepted is CO (complete).",
-          List.of(InOutCompletionContract.DOC_ACTION_COMPLETE)))
-      .withIdDescription("the id of the draft return to complete");
+          List.of(InOutCompletionContract.DOC_ACTION_COMPLETE))
+          .withRefusalHint(DocumentAvailability.GOODS_REFUSAL_HINT))
+      .withIdDescription("the id of the draft return to complete")
+      .availableWhen(DocumentAvailability.GOODS_DOCUMENT_ACTION);
 
   private ReturnCompletionContract() {
   }

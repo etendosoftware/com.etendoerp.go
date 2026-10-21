@@ -24,6 +24,7 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 import javax.inject.Inject;
@@ -113,6 +114,16 @@ public class ReturnToVendorShipmentHeaderHandler extends AbstractReturnDocumentH
     return ACTION_CONTRACTS;
   }
 
+  /**
+   * {@inheritDoc} The source receipts, the return invoices and the counters {@link #afterHandle}
+   * adds to every GET record (ETP-5714).
+   */
+  @Override
+  public Set<String> responseEnrichedFields() {
+    return ReturnDocumentAvailability.enrichedFields(FIELD_SOURCE_RECEIPTS,
+        FIELD_SOURCE_RECEIPT_DOC_NO);
+  }
+
   private static Map<String, NeoActionContract> buildActionContracts() {
     Map<String, NeoActionContract> contracts = new LinkedHashMap<>();
     contracts.put(ACTION_AVAILABLE_RECEIPTS, NeoActionContract.read(ACTION_AVAILABLE_RECEIPTS,
@@ -143,7 +154,8 @@ public class ReturnToVendorShipmentHeaderHandler extends AbstractReturnDocumentH
             "Each {sourceLineId, returnQuantity}: sourceLineId is the id of a line from "
                 + "availableReceiptLines, returnQuantity a positive number not above its "
                 + "movementQuantity."))
-        .withIdDescription("The id of the draft return shipment the lines are added to."));
+        .withIdDescription("The id of the draft return shipment the lines are added to.")
+        .availableWhen(DocumentAvailability.WHEN_DRAFT));
     contracts.put(ACTION_RECTIFIABLE_INVOICES, NeoActionContract.read(ACTION_RECTIFIABLE_INVOICES,
         "Lists the confirmed purchase invoices a completed return shipment can rectify, a page at "
             + "a time: {data:{invoices:[{id, documentNo, invoiceDate, grandTotalAmount, currency, "
@@ -155,7 +167,8 @@ public class ReturnToVendorShipmentHeaderHandler extends AbstractReturnDocumentH
             "Invoices per page. Default 80; the server clamps it to 1..500."),
         NeoActionContract.Param.optional("search", NeoActionContract.TYPE_STRING,
             "Case-insensitive fragment of the invoice document number or vendor name."))
-        .withIdDescription("The id of the completed return shipment."));
+        .withIdDescription("The id of the completed return shipment.")
+        .availableWhen(DocumentAvailability.WHEN_COMPLETED));
     contracts.put(ACTION_CREATE_RETURN_INVOICE, NeoActionContract.write(
         ACTION_CREATE_RETURN_INVOICE,
         "Creates the factura rectificativa (corrective purchase invoice, API rectificative) of a "
@@ -174,7 +187,9 @@ public class ReturnToVendorShipmentHeaderHandler extends AbstractReturnDocumentH
         NeoActionContract.Param.array("originInvoices", NeoActionContract.TYPE_STRING, false,
             "Ids of the invoices it rectifies, from rectifiableInvoices. Default: the invoice "
                 + "auto-detected from the returned receipt lines; refused when none is found."))
-        .withIdDescription("The id of the completed return shipment."));
+        .withIdDescription("The id of the completed return shipment.")
+        .availableWhen(DocumentAvailability.WHEN_COMPLETED));
+    contracts.putAll(GoodsPostingContracts.CONTRACTS);
     contracts.put(ReturnCompletionContract.CONTRACT.getName(), ReturnCompletionContract.CONTRACT);
     return Collections.unmodifiableMap(contracts);
   }
