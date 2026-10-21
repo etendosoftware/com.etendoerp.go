@@ -22,6 +22,7 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
+import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -1041,7 +1042,8 @@ public class GoodsShipmentHeaderHandlerTest {
     java.util.Map<String, com.etendoerp.go.schemaforge.util.NeoActionContract> contracts =
         new GoodsShipmentHeaderHandler().actionContracts();
 
-    assertEquals(java.util.List.of("documentAction", "createDraftInvoice", "createReturn", "cloneRecord"),
+    assertEquals(java.util.List.of("documentAction", "availableOrders", "availableOrderLines",
+            "importOrderLines", "createDraftInvoice", "createReturn", "cloneRecord", "post", "unpost"),
         java.util.List.copyOf(contracts.keySet()));
     assertEquals("POST", contracts.get("cloneRecord").getHttpMethod());
     assertNull(com.etendoerp.go.schemaforge.util.NeoActionContract.validate(contracts, "cloneRecord", new JSONObject()));
@@ -1162,5 +1164,59 @@ public class GoodsShipmentHeaderHandlerTest {
         "createReturn", new JSONObject().put("lines", "x")).getHttpStatus());
     assertEquals(NeoActionContract.SC_UNPROCESSABLE, NeoActionContract.validate(contracts,
         "createReturn", new JSONObject().put("orderId", "O1")).getHttpStatus());
+  }
+
+
+  // ── order import (ETP-5713) ───────────────────────────────────────────────
+
+  private static GoodsShipmentHeaderHandler shipmentWithImportDelegate(
+      ImportOrderLinesIntoInOutHandler delegate) throws Exception {
+    GoodsShipmentHeaderHandler handler = new GoodsShipmentHeaderHandler();
+    Field field = GoodsShipmentHeaderHandler.class.getDeclaredField("importOrderLinesHandler");
+    field.setAccessible(true);
+    field.set(handler, delegate);
+    return handler;
+  }
+
+  @Test
+  public void actionContracts_publishTheOrderImportForSalesOrders() throws Exception {
+    java.util.Map<String, com.etendoerp.go.schemaforge.util.NeoActionContract> contracts =
+        new GoodsShipmentHeaderHandler().actionContracts();
+
+    assertTrue(contracts.keySet().containsAll(
+        java.util.List.of("availableOrders", "availableOrderLines", "importOrderLines")));
+    assertTrue("a shipment takes sales orders, and names its one-step alternative",
+        contracts.get("importOrderLines").getDescription().contains("createShipment"));
+    assertNull(com.etendoerp.go.schemaforge.util.NeoActionContract.validate(contracts,
+        "importOrderLines", new JSONObject().put("orderId", "o1")));
+    assertEquals(com.etendoerp.go.schemaforge.util.NeoActionContract.SC_UNPROCESSABLE,
+        com.etendoerp.go.schemaforge.util.NeoActionContract.validate(contracts,
+            "importOrderLines", new JSONObject()).getHttpStatus());
+  }
+
+  @Test
+  public void handle_dispatchesTheOrderImportToItsDelegate() throws Exception {
+    ImportOrderLinesIntoInOutHandler delegate = mock(ImportOrderLinesIntoInOutHandler.class);
+    GoodsShipmentHeaderHandler handler = shipmentWithImportDelegate(delegate);
+    NeoContext ctx = NeoContext.builder().httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+        .fieldName("importOrderLines").recordId("s1").build();
+    NeoResponse expected = NeoResponse.ok(new JSONObject().put("imported", true));
+    when(delegate.handle(ctx)).thenReturn(expected);
+
+    assertSame(expected, handler.handle(ctx));
+  }
+
+  /**
+   * ETP-5714: the keys GoodsShipmentHeaderHandler's afterHandle adds to a GET record are declared, so an MCP
+   * {@code fields:[…]} projection does not report them in {@code unknownFields} while the same
+   * response carries them.
+   */
+  @org.junit.jupiter.api.Test
+  @org.junit.jupiter.api.DisplayName("goods shipment: enriched response keys are declared")
+  void enrichedKeysAreDeclaredGoodsShipmentHeaderHandler() {
+    java.util.Set<String> declared = new GoodsShipmentHeaderHandler().responseEnrichedFields();
+    for (String key : java.util.List.of("invoiceStatus", "linkedOrders", "linkedInvoices", "returnReceipts", "canCreateReturn")) {
+      org.junit.jupiter.api.Assertions.assertTrue(declared.contains(key), key + " in " + declared);
+    }
   }
 }

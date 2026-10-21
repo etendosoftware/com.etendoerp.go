@@ -31,6 +31,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.openbravo.dal.core.OBContext;
 
+import com.etendoerp.go.common.BoundedJsonParser;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoHandler;
@@ -324,7 +325,7 @@ public class DocumentSequenceHandler implements NeoHandler {
       return new JSONArray();
     }
     try {
-      return new JSONArray(raw);
+      return BoundedJsonParser.parseArray(raw);
     } catch (JSONException e) {
       log.debug("DocumentSequenceHandler: existing criteria is not a JSON array ({}); "
           + "replacing it with the window's own scope", e.getMessage());

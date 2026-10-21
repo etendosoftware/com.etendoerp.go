@@ -23,6 +23,8 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
+import org.openbravo.base.structure.BaseOBObject;
+
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import com.etendoerp.go.schemaforge.util.NeoReportParam;
 
@@ -114,6 +116,36 @@ public interface NeoHandler {
    */
   default List<String> readPredicates(NeoContext context) {
     return Collections.emptyList();
+  }
+
+  /**
+   * Declares list-filter keys that must be evaluated on another property of the same entity
+   * (ETP-5705).
+   *
+   * <p><b>Why this exists.</b> A handler that rewrites a value in {@link #afterHandle} changes
+   * what the caller sees, but not what the query filters on: the filter still runs against the
+   * raw database value. When the two differ, a filter matches rows whose displayed value does not
+   * satisfy it, and misses rows whose displayed value does — with a 200 and nothing to say so. A
+   * customization that keeps a second property holding the displayed value (canonically a stored
+   * computed twin of a virtual column) maps the displayed property to it here, and the filter is
+   * evaluated on that property instead.</p>
+   *
+   * <p><b>Contract.</b> Keys and values are DAL property names of the entity being read; the
+   * caller may still spell the key as its DB column name. Both properties must have the same type.
+   * The filter is rendered as {@code coalesce(<target>, <key>)}, so a row whose target has not
+   * been computed yet falls back to the key's own value rather than dropping out of the result.
+   * The target is not checked against the spec's excluded fields: the condition only ever
+   * compares the value the caller is already shown.</p>
+   *
+   * <p><b>Where it is applied.</b> MCP {@code etendo_list} only, and the response says so when it
+   * happens. The REST list does not consult it — the SPA filters on the stored columns directly —
+   * a divergence declared in {@code docs/neo-headless.md} §4.12.9.</p>
+   *
+   * @param context the read context: spec, entity, {@code GET}, no record id, the query params
+   * @return displayed property name to the property the filter is evaluated on; empty by default
+   */
+  default Map<String, String> filterAliases(NeoContext context) {
+    return Collections.emptyMap();
   }
 
   /**
@@ -267,6 +299,29 @@ public interface NeoHandler {
    * @return the declared actions by name, in the order they should be presented
    */
   default Map<String, NeoActionContract> actionContracts() {
+    return Collections.emptyMap();
+  }
+
+  /**
+   * Declares, for one concrete record, the actions that do not apply to it for a reason a column
+   * value cannot express (ETP-5714).
+   *
+   * <p>The static part of availability ({@code NeoActionContract#availableWhen}, the
+   * {@code MCP_CONFIG.actions} {@code availableWhen}) compares record properties with allowed
+   * values. Some rules depend on other rows: a return can be invoiced only while it has no
+   * corrective invoice yet, an order can be reactivated only while nothing is linked to it. The
+   * customization that owns the rule answers here, with one sentence per action.</p>
+   *
+   * <p>Advisory, like the rest of availability: {@code etendo_schema(view:"actions")} reports the
+   * entry as {@code availableNow:false} with the sentence as {@code unavailableReason} when it is
+   * asked about a record. It never refuses a call, so the handler's own guard stays the
+   * enforcement. An implementation must not throw for a record it cannot judge: it omits the
+   * action instead.</p>
+   *
+   * @param subject the record the agent asked about
+   * @return {@code action name → reason}; empty by default
+   */
+  default Map<String, String> unavailableActions(BaseOBObject subject) {
     return Collections.emptyMap();
   }
 

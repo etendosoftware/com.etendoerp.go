@@ -6,6 +6,10 @@ name: Mini Pipeline
 # tests. It runs here rather than in Jenkins: on the same commit and tests the Jenkins version took
 # more than twice as long, mostly waiting for its pod and cloning what it did not need.
 #
+# ETP-5838: then the database-backed tests, against the database the install built. Before, they
+# first ran on the daily cut into main, where one broken test held up the whole day's release
+# (etendo-go-tests #2403 failed after ~1h21m on a fixture that this job's database lacks too).
+#
 # On a push to develop it only fills the Gradle cache: a PR can restore its base branch's caches,
 # so even the first run of a new PR skips the ~3.5 min of dependency downloads.
 #
@@ -30,10 +34,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  go-unit:
-    name: ${{ github.event_name == 'push' && 'Warm the Gradle cache' || 'goTestUnit' }}
+  go-test:
+    name: ${{ github.event_name == 'push' && 'Warm the Gradle cache' || 'goTest' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     services:
       postgres:
         image: postgres:17
@@ -114,6 +118,25 @@ jobs:
             fi
           done
 
+      # SubscriptionBackfillIdempotencyIntegrationTest executes the shipped data-fix SQL, which lives
+      # in etendo_schema_forge; without it the class skips all of its tests. Jenkins clones the whole
+      # repo into etendo_core/schema_forge; this checks out only the data-fix SQL folder, at the same
+      # place. Branch as in Jenkins: the PR's branch when schema_forge has it, otherwise the base.
+      - name: Checkout the schema_forge data-fix SQL
+        if: github.event_name != 'push'
+        env:
+          BASE_BRANCH: ${{ github.base_ref || 'develop' }}
+        run: |
+          url=https://github.com/etendosoftware/etendo_schema_forge.git
+          branch="$BASE_BRANCH"
+          case "$MODULE_BRANCH" in
+            develop|main|hotfix/*|mergeblock/*) ;;
+            *) git ls-remote --exit-code --heads "$url" "$MODULE_BRANCH" >/dev/null && branch="$MODULE_BRANCH" ;;
+          esac
+          git clone -q --depth 1 --filter=blob:none --sparse --branch "$branch" "$url" etendo_core/schema_forge
+          git -C etendo_core/schema_forge sparse-checkout set cli/src/data-fixes/sql
+          echo "etendo_schema_forge: $branch ($(ls etendo_core/schema_forge/cli/src/data-fixes/sql | wc -l) files)"
+
       # The Gradle cache keys on the build files of the core and the cloned modules, so it runs after
       # the checkouts. Without it prepareConfig spends ~3.5 min downloading dependencies.
       - uses: actions/setup-java@v4
@@ -150,6 +173,7 @@ jobs:
         run: ./gradlew prepareConfig
 
       - name: Install
+        id: install
         if: github.event_name != 'push'
         working-directory: etendo_core
         run: |
@@ -162,11 +186,22 @@ jobs:
         working-directory: etendo_core
         run: ./gradlew goTestUnit
 
-      - name: Upload the test report
+      # Runs even when goTestUnit failed, so one run reports both halves. goTestUnit never writes to
+      # the database, so these start from the same clean data as on Jenkins. The root test task
+      # finalizes into goIsolatedDalTest, which runs the classes that need a JVM of their own.
+      - name: Integration tests
+        if: ${{ !cancelled() && github.event_name != 'push' && steps.install.outcome == 'success' }}
+        working-directory: etendo_core
+        run: ./gradlew test --tests 'com.etendoerp.go.*IntegrationTest'
+
+      - name: Upload the test reports
         if: always() && github.event_name != 'push'
         uses: actions/upload-artifact@v4
         with:
-          name: goTestUnit-report
-          path: etendo_core/build/reports/tests/goTestUnit
+          name: goTest-reports
+          path: |
+            etendo_core/build/reports/tests/goTestUnit
+            etendo_core/build/reports/tests/test
+            etendo_core/build/reports/tests/goIsolatedDalTest
           retention-days: 7
           if-no-files-found: ignore

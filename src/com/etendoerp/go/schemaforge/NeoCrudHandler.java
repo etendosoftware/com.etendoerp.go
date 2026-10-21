@@ -52,6 +52,7 @@ import org.openbravo.service.db.DalConnectionProvider;
 import org.openbravo.service.json.DefaultJsonDataService;
 import org.openbravo.service.json.JsonConstants;
 
+import com.etendoerp.go.common.BoundedJsonParser;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryService;
@@ -102,6 +103,7 @@ class NeoCrudHandler {
    * all the same string.
    */
   private static final String FIELD_UPDATED = "updated";
+  private static final String MSG_BODY_REQUIRED = "Request body is required";
 
   /**
    * Key names of the structured error envelopes this class returns.
@@ -176,6 +178,11 @@ class NeoCrudHandler {
     }
     Tab adTab = entity.getADTab();
     Map<String, String> queryParams = servlet.extractQueryParams(request);
+    if (!isCriteriaWithinLimits(queryParams)) {
+      servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
+          "Invalid criteria: malformed JSON");
+      return;
+    }
 
     NeoContext neoContext = NeoContext.builder()
         .specName(pathInfo.specName)
@@ -238,7 +245,7 @@ class NeoCrudHandler {
           .entityName(neoContext.getEntityName())
           .httpMethod(neoContext.getHttpMethod())
           .recordId(neoContext.getRecordId())
-          .requestBody(new JSONObject(bodyStr))
+          .requestBody(BoundedJsonParser.parseObject(bodyStr))
           .queryParams(neoContext.getQueryParams())
           .adTab(neoContext.getAdTab())
           .sfEntity(neoContext.getSfEntity())
@@ -296,11 +303,10 @@ class NeoCrudHandler {
 
   private NeoResponse dispatchCrudRequestInternal(SFEntity entity, NeoContext neoContext,
       HttpServletRequest request, HttpServletResponse response) {
-    String javaQualifier = entity.getJavaQualifier();
-    if (StringUtils.isNotBlank(javaQualifier)) {
-      return servlet.handleWithHooks(javaQualifier, neoContext, request, response);
-    }
-    return handleDefault(neoContext);
+    // ETP-5693: always through the hook pipeline, so an @NeoExtension on an entity without a
+    // Java_Qualifier runs on REST too (ETP-5415 removed this early return from batch/MCP only).
+    // handleWithDefaultStep falls back to handleDefault when nothing resolves.
+    return servlet.handleWithHooks(entity.getJavaQualifier(), neoContext, request, response);
   }
 
   /**
@@ -643,6 +649,12 @@ class NeoCrudHandler {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
           "POST (create) must not include a record ID in the URL");
     }
+    // A blank body reaches here as null (NeoRequestBodyParser.parseOptionalJsonObject); `{}` is a
+    // body and still goes through. Without this, create failed later with a NullPointerException.
+    if (context.getRequestBody() == null) {
+      NeoWriteRefusalLog.missingBody(context);
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, MSG_BODY_REQUIRED);
+    }
     return null;
   }
 
@@ -665,7 +677,11 @@ class NeoCrudHandler {
     // variant would) is the deliberate choice: a caller that cannot produce `updated` has not
     // read the record it is overwriting, and that is exactly the caller we must stop.
     JSONObject body = context.getRequestBody();
-    String updated = body == null ? null : body.optString(FIELD_UPDATED, null);
+    if (body == null) {
+      NeoWriteRefusalLog.missingBody(context);
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, MSG_BODY_REQUIRED);
+    }
+    String updated = body.optString(FIELD_UPDATED, null);
     if (StringUtils.isBlank(updated) || "null".equals(updated)) {
       NeoWriteRefusalLog.missingUpdated(context, FIELD_UPDATED);
       return buildMissingUpdatedResponse();
@@ -882,6 +898,10 @@ class NeoCrudHandler {
     NeoMandatoryDefaultsService.injectMandatoryDefaults(filteredBody, adTab, context, parentIdValue, false);
     long perfInjectDefaults = System.nanoTime();
     Set<String> protectedCalloutFields = NeoCrudHelper.snapshotMandatoryBodyFields(filteredBody, adTab);
+    // ETP-5669: a fallback pick (first combo row, safe type default) only satisfies NOT NULL, so a
+    // callout may refine it — e.g. GL_Journal.C_Period_ID from the accounting date, which /batch
+    // used to keep at the first period. Genuine defaults and the caller's values stay protected.
+    protectedCalloutFields.removeAll(context.getFallbackDefaults());
     protectedCalloutFields.addAll(userSubmittedFields);
     // ETP-5350: kept OUT of protectedCalloutFields. That set is a snapshot of keys the caller
     // actually sent, and "protected" there means "do not overwrite what is already here" - a
@@ -1275,6 +1295,17 @@ class NeoCrudHandler {
   }
 
   /**
+   * The {@code criteria} query parameter is JSON written by the client and parsed by core's
+   * datasource with jettison, which an unbalanced or deeply nested text crashes with an
+   * {@code Error} (see {@link BoundedJsonParser}). It is refused here, before anything parses it.
+   */
+  static boolean isCriteriaWithinLimits(Map<String, String> queryParams) {
+    String criteria = queryParams != null ? queryParams.get(CRITERIA_PARAM) : null;
+    return StringUtils.isBlank(criteria)
+        || BoundedJsonParser.isWithinLimits(criteria, BoundedJsonParser.DEFAULT_MAX_DEPTH);
+  }
+
+  /**
    * Rewrites the char {@code "Y"}/{@code "N"} filter value to a real boolean for any criterion
    * whose target property is a genuine {@link Boolean} DAL type.
    *
@@ -1297,7 +1328,7 @@ class NeoCrudHandler {
       return;
     }
     try {
-      JSONArray arr = new JSONArray(criteria);
+      JSONArray arr = BoundedJsonParser.parseArray(criteria);
       if (normalizeBooleanCriteriaArray(arr, entityDef)) {
         params.put(CRITERIA_PARAM, arr.toString());
       }

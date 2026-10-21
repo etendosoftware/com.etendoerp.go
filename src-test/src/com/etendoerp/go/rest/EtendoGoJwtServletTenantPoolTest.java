@@ -67,6 +67,7 @@ import com.etendoerp.go.onboarding.OnboardingPeriodControlService;
 import com.etendoerp.go.onboarding.OnboardingProgressSink;
 import com.etendoerp.go.onboarding.OnboardingWarehouseAddressService;
 import com.etendoerp.go.payment.EnvironmentAccessPolicy;
+import com.etendoerp.go.payment.SubscriptionService;
 import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.email.InternalAlertService;
@@ -74,6 +75,8 @@ import com.etendoerp.go.schemaforge.email.InternalAlertService;
 /**
  * ETP-5389 — the servlet chooses between a claimed pooled tenant and the classic path, and the
  * pooled branch runs only the per-request steps.
+ *
+ * @covers com.etendoerp.go.rest.EtendoGoJwtServlet
  */
 public class EtendoGoJwtServletTenantPoolTest {
 
@@ -103,6 +106,8 @@ public class EtendoGoJwtServletTenantPoolTest {
     servlet.onboardingWarehouseAddressService = warehouse;
     servlet.onboardingCostingScheduleService = costing;
     servlet.tenantEnvironmentLifecycleService = lifecycle;
+    SubscriptionService subscriptions = mock(SubscriptionService.class);
+    servlet.subscriptionService = subscriptions;
     StringWriter body = new StringWriter();
     HttpServletResponse response = response(body);
 
@@ -158,6 +163,8 @@ public class EtendoGoJwtServletTenantPoolTest {
         false);
     order.verify(initialState).applyIfPending("POOLED-CLIENT");
     order.verify(costing).activateSchedule("POOLED-CLIENT");
+    // ETP-5047: a demo has no subscription, so it never asks the provider for a billing period.
+    verify(subscriptions, never()).fillPeriodFromProviderAfterCommit(anyString());
   }
 
   @Test

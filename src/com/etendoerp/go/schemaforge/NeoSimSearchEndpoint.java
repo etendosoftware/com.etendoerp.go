@@ -27,6 +27,7 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 
 import com.etendoerp.copilot.toolpack.webhooks.SimSearch;
+import com.etendoerp.go.common.BoundedJsonParser;
 import com.etendoerp.go.schemaforge.util.NeoLanguage;
 import com.etendoerp.go.schemaforge.util.NeoTrl;
 import com.smf.securewebservices.utils.WSResult;
@@ -79,7 +80,7 @@ class NeoSimSearchEndpoint {
     String minSimPercent = coalesce(request.getParameter(PARAM_MIN_SIM_PERCENT), DEFAULT_MIN_SIM_PERCENT);
 
     try {
-      JSONArray itemsArray = new JSONArray(itemsJson);
+      JSONArray itemsArray = BoundedJsonParser.parseArray(itemsJson);
       JSONObject results = new JSONObject();
       for (int i = 0; i < itemsArray.length(); i++) {
         String searchTerm = itemsArray.getString(i).replace("'", "");

@@ -29,6 +29,7 @@ import org.openbravo.dal.core.OBContext;
 import com.etendoerp.go.auth.EnvironmentAuthOutcome;
 import com.etendoerp.go.auth.EnvironmentRequestAuthenticator;
 import com.etendoerp.go.auth.SurfacePolicy;
+import com.etendoerp.go.payment.EnvironmentAccessGuard;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 
 /**
@@ -39,10 +40,18 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  * branch per credential scheme, each re-implementing the context setup, the commercial access
  * check and the language — and the copies drifted. What stays here is NEO-specific: how a refusal
  * is written, and the per-window and per-process access questions for the current role.
+ *
+ * <p>ETP-5047 — the pipeline's commercial-access check is the shared {@link EnvironmentAccessGuard}
+ * (decision + kill switch). NEO answers its denial with the guard's structured body through
+ * {@link NeoServlet#writeResponse}: HTTP 402, the message text unchanged since ETP-5443, plus
+ * {@code error.code} and {@code error.decision}.
  */
 class NeoAuthenticator {
 
   private static final Logger log = LogManager.getLogger(NeoAuthenticator.class);
+
+  /** The entry-point label of the commercial-access log line (ETP-5047). */
+  private static final String ENTRY_POINT = "neo";
 
   private final NeoServlet servlet;
   private final EnvironmentRequestAuthenticator environmentAuthenticator;
@@ -63,13 +72,18 @@ class NeoAuthenticator {
   boolean authenticateRequest(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
     EnvironmentAuthOutcome outcome =
-        environmentAuthenticator.authenticate(request, SurfacePolicy.NEO_API);
+        environmentAuthenticator.authenticate(request, SurfacePolicy.NEO_API, ENTRY_POINT);
     if (outcome.isAuthenticated()) {
       return true;
     }
-    if (outcome.getStatus() == EnvironmentAuthOutcome.Status.PAYMENT_REQUIRED) {
-      log.info("Commercial access denied for NEO request: {}", outcome.getMessage());
-    } else if (outcome.getStatus() == EnvironmentAuthOutcome.Status.CONTEXT_UNAVAILABLE) {
+    EnvironmentAccessGuard.Denial denial = outcome.getAccessDenial();
+    if (denial != null) {
+      // The guard already logged the refusal (ETP-5047: one line, whichever surface refused).
+      servlet.writeResponse(response, NeoResponse.error(EnvironmentAccessGuard.Denial.STATUS,
+          denial.errorBody(EnvironmentAccessGuard.Denial.STATUS)));
+      return false;
+    }
+    if (outcome.getStatus() == EnvironmentAuthOutcome.Status.CONTEXT_UNAVAILABLE) {
       // Already logged with its stack trace by the authenticator; not an auth refusal.
       log.debug("NEO request context unavailable: {}", outcome.getMessage());
     } else {

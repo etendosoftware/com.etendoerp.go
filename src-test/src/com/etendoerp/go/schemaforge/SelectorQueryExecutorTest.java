@@ -21,6 +21,7 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.AdditionalMatchers.aryEq;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -28,6 +29,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.lang.reflect.InvocationTargetException;
@@ -47,7 +49,9 @@ import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
+import org.openbravo.base.model.Property;
 import org.openbravo.base.structure.BaseOBObject;
+import org.openbravo.dal.core.DalUtil;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
@@ -63,6 +67,7 @@ import com.etendoerp.go.schemaforge.util.NeoTrl;
  * language extraction, and country-translation enrichment.
  *
  * @covers com.etendoerp.go.schemaforge.SelectorQueryExecutor
+ * @covers com.etendoerp.go.schemaforge.ValuePagedRichQuery
  */
 public class SelectorQueryExecutorTest {
 
@@ -90,14 +95,13 @@ public class SelectorQueryExecutorTest {
   }
 
   /**
-   * Invokes the private {@code buildRepresentativeRowWhere} method.
+   * Invokes {@code ValuePagedRichQuery.andCondition} (package-visible).
    */
-  private static String invokeBuildRepresentativeRowWhere(String baseWhere, SelectorMeta meta,
-      String alias) throws Exception {
-    Method m = SelectorQueryExecutor.class.getDeclaredMethod("buildRepresentativeRowWhere",
-        String.class, SelectorMeta.class, String.class);
+  private static String invokeAndCondition(String baseWhere, String condition) throws Exception {
+    Method m = ValuePagedRichQuery.class.getDeclaredMethod("andCondition", String.class,
+        String.class);
     m.setAccessible(true);
-    return (String) m.invoke(null, baseWhere, meta, alias);
+    return (String) m.invoke(null, baseWhere, condition);
   }
 
   /**
@@ -1088,144 +1092,485 @@ public class SelectorQueryExecutorTest {
   }
 
   // ---------------------------------------------------------------
-  // buildRepresentativeRowWhere — DISTINCT-by-valueProperty query building
+  // Value-paged rich flow (ETP-5707) — view-backed selectors, Value Field is not the PK
   // ---------------------------------------------------------------
 
-  /**
-   * With an existing where clause, the representative-row where restricts the outer query to the
-   * MIN(id) per distinct valueProperty, re-applying the same conditions inside the subquery with
-   * the entity alias rewritten to the private sub-alias, and grouping by valueProperty.
-   */
-  @Test
-  public void testBuildRepresentativeRowWhereWithConditions() throws Exception {
-    SelectorMeta meta = new SelectorMeta.Builder("ProductStock", "name")
+  /** Everything one run of the value-paged flow handed to the DAL, and what it answered. */
+  private static final class PagedRun {
+    final List<String> where = new ArrayList<>();
+    final List<String> selectClauses = new ArrayList<>();
+    final List<String> hql = new ArrayList<>();
+    Session session;
+    Query<Long> countQuery;
+    Query<?> pageQuery;
+    Query<?> rowsQuery;
+    JSONArray items;
+    int total;
+    int limit;
+    int offset;
+  }
+
+  /** A view row: its own id, the product it points at (the Value Field) and its label. */
+  private static BaseOBObject valueRow(String rowId, String productId, String label) {
+    BaseOBObject row = mock(BaseOBObject.class);
+    BaseOBObject product = mock(BaseOBObject.class);
+    when(product.get("id")).thenReturn(productId);
+    when(row.get("product")).thenReturn(product);
+    when(row.getId()).thenReturn(rowId);
+    when(row.getIdentifier()).thenReturn(label);
+    return row;
+  }
+
+  /** The product-by-price selector shape with a plain display property. */
+  private static SelectorMeta valueFieldSelector() {
+    return new SelectorMeta.Builder("ProductByPriceAndWarehouse", "name")
         .isRich(true).valueProperty("product.id").build();
-
-    String result = invokeBuildRepresentativeRowWhere("as e where e.active = true", meta, "e");
-
-    assertTrue("outer conditions preserved", result.contains("(e.active = true)"));
-    assertTrue("restricts to representative ids", result.contains("e.id in (select min(e_dv.id)"));
-    assertTrue("subquery targets same entity", result.contains("from ProductStock e_dv"));
-    assertTrue("subquery re-applies conditions with rewritten alias",
-        result.contains("where e_dv.active = true"));
-    assertTrue("grouped by valueProperty", result.contains("group by e_dv.product.id"));
   }
 
   /**
-   * With no where clause ("as e"), the representative-row where adds only the MIN(id) restriction
-   * and GROUP BY valueProperty — the subquery carries no WHERE.
+   * Runs the value-paged flow through the REAL {@link SelectorQueryBuilder} and
+   * {@link NeoSelectorExecutionHelper} (so the where text and the parameter binding are the
+   * production ones); only the DAL, the model and the response are mocked. The OBQuery mock
+   * answers the HQL {@code select <clause|e> from <entity> <where>} and a readable-organization
+   * filter held as a {@code String[]}, as the real one does.
+   *
+   * @param count       what {@code count(distinct value)} answers
+   * @param pageValues  what the page-of-values query answers
+   * @param rows        what the rows query answers
    */
-  @Test
-  public void testBuildRepresentativeRowWhereWithoutConditions() throws Exception {
-    SelectorMeta meta = new SelectorMeta.Builder("ProductStock", "name")
-        .isRich(true).valueProperty("product.id").build();
-
-    String result = invokeBuildRepresentativeRowWhere("as e", meta, "e");
-
-    assertEquals("as e where e.id in (select min(e_dv.id) from ProductStock e_dv "
-        + "group by e_dv.product.id)", result);
-    assertFalse("no leftover WHERE inside subquery", result.contains("where e_dv"));
+  private static PagedRun runPaged(SelectorMeta meta, String search, int limit, int offset,
+      String validationFilter, Long count, List<Object> pageValues, List<BaseOBObject> rows)
+      throws Exception {
+    return runPaged(meta, search, limit, offset, validationFilter, count, pageValues, rows, null);
   }
 
   /**
-   * A search predicate keeps its named parameter untouched while only the alias references are
-   * rewritten in the subquery copy.
+   * Same as above; a non-null {@code resolvedDisplay} makes the model know the entity and resolve
+   * the display property path to it, which is how the flow tells a primitive display from an
+   * association. Null leaves the entity unknown, so the display is not primitive.
    */
-  @Test
-  public void testBuildRepresentativeRowWhereRewritesAliasButKeepsNamedParams() throws Exception {
-    SelectorMeta meta = new SelectorMeta.Builder("ProductStock", "name")
-        .isRich(true).valueProperty("product.id").build();
+  @SuppressWarnings({ "unchecked", "rawtypes" })
+  private static PagedRun runPaged(SelectorMeta meta, String search, int limit, int offset,
+      String validationFilter, Long count, List<Object> pageValues, List<BaseOBObject> rows,
+      Property resolvedDisplay) throws Exception {
+    PagedRun run = new PagedRun();
+    run.limit = limit;
+    run.offset = offset;
+    run.session = mock(Session.class);
+    run.countQuery = mock(Query.class);
+    Query pageQuery = mock(Query.class);
+    Query rowsQuery = mock(Query.class);
+    run.pageQuery = pageQuery;
+    run.rowsQuery = rowsQuery;
+    when(run.countQuery.uniqueResult()).thenReturn(count);
+    when(pageQuery.list()).thenReturn(pageValues);
+    when(rowsQuery.list()).thenReturn(rows);
 
-    String result = invokeBuildRepresentativeRowWhere(
-        "as e where lower(e.name) LIKE :search", meta, "e");
+    when(run.session.createQuery(anyString(), eq(Long.class))).thenAnswer(inv -> {
+      run.hql.add(inv.getArgument(0));
+      return run.countQuery;
+    });
+    int[] sessionCalls = new int[1];
+    when(run.session.createQuery(anyString())).thenAnswer(inv -> {
+      run.hql.add(inv.getArgument(0));
+      return sessionCalls[0]++ == 0 ? pageQuery : rowsQuery;
+    });
 
-    assertTrue("subquery rewrites alias reference", result.contains("lower(e_dv.name) LIKE :search"));
-    assertTrue("named parameter preserved in both occurrences",
-        result.indexOf(":search") != result.lastIndexOf(":search"));
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.getSession()).thenReturn(run.session);
+    when(obDal.createQuery(anyString(), anyString())).thenAnswer(inv -> {
+      String where = inv.getArgument(1);
+      run.where.add(where);
+      String[] select = new String[1];
+      OBQuery obQuery = mock(OBQuery.class);
+      when(obQuery.setSelectClause(anyString())).thenAnswer(sel -> {
+        select[0] = sel.getArgument(0);
+        run.selectClauses.add(select[0]);
+        return obQuery;
+      });
+      Query hibernate = mock(Query.class);
+      when(hibernate.getQueryString()).thenAnswer(q -> "select " + (select[0] != null ? select[0]
+          : "e") + " from " + inv.getArgument(0) + " " + where);
+      when(obQuery.createQuery(Object.class)).thenReturn(hibernate);
+      // like the real OBQuery: what was bound is what getNamedParameters() answers, plus its own
+      // readable-organization filter as a String[]
+      Map<String, Object> named = new HashMap<>();
+      named.put("sfOrgs", new String[] { "0", "ORG1" });
+      org.mockito.Mockito.doAnswer(bind -> {
+        named.put(bind.getArgument(0), bind.getArgument(1));
+        return null;
+      }).when(obQuery).setNamedParameter(anyString(), any());
+      when(obQuery.getNamedParameters()).thenReturn(named);
+      return obQuery;
+    });
+
+    ModelProvider modelProvider = mock(ModelProvider.class);
+    when(modelProvider.getEntity(anyString()))
+        .thenReturn(resolvedDisplay != null ? mock(Entity.class) : null);
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+        MockedStatic<ModelProvider> mpMock = mockStatic(ModelProvider.class);
+        MockedStatic<DalUtil> dalUtilMock = mockStatic(DalUtil.class);
+        MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<SelectorAuxResolver> auxMock = mockStatic(SelectorAuxResolver.class);
+        MockedStatic<SelectorResponseSupport> respMock = mockStatic(
+            SelectorResponseSupport.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      mpMock.when(ModelProvider::getInstance).thenReturn(modelProvider);
+      dalUtilMock.when(() -> DalUtil.getPropertyFromPath(any(Entity.class), anyString()))
+          .thenReturn(resolvedDisplay);
+      ctxMock.when(OBContext::getOBContext).thenReturn(null);
+      auxMock.when(() -> SelectorAuxResolver.appendAuxFields(any(), any(), any()))
+          .thenAnswer(inv -> null);
+      respMock.when(() -> SelectorResponseSupport.buildGridColumnMetadata(any()))
+          .thenReturn(new JSONArray());
+      respMock.when(
+          () -> SelectorResponseSupport.buildSelectorResponse(any(), any(), anyInt(), anyInt(), anyInt()))
+          .thenAnswer(inv -> {
+            run.items = inv.getArgument(0);
+            run.total = inv.getArgument(2);
+            return NeoResponse.ok(new JSONObject());
+          });
+
+      assertNotNull(SelectorQueryExecutor.execute(meta, search, limit, offset, validationFilter,
+          null, null));
+    }
+    return run;
   }
 
+  private static List<String> ids(JSONArray items) throws Exception {
+    List<String> ids = new ArrayList<>();
+    for (int i = 0; i < items.length(); i++) {
+      ids.add(items.getJSONObject(i).getString("id"));
+    }
+    return ids;
+  }
+
+  // --- andCondition ---
+
+  /** Without a where clause the condition opens one. */
+  @Test
+  public void testAndConditionWithoutWhereAddsWhere() throws Exception {
+    assertEquals("as e where e.product.id is not null",
+        invokeAndCondition("as e", "e.product.id is not null"));
+  }
+
+  /** With a where clause the existing conditions are kept, parenthesised, and the new one ANDed. */
+  @Test
+  public void testAndConditionWithWhereParenthesisesExistingConditions() throws Exception {
+    assertEquals("as e where (e.active = true) AND e.product.id is not null",
+        invokeAndCondition("as e where e.active = true", "e.product.id is not null"));
+  }
+
+  /** An {@code or} inside the existing conditions cannot swallow the new condition. */
+  @Test
+  public void testAndConditionParenthesisesAnOrInsideTheConditions() throws Exception {
+    assertEquals("as e where (e.a = 1 or e.b = 2) AND e.v is not null",
+        invokeAndCondition("as e where e.a = 1 or e.b = 2", "e.v is not null"));
+  }
+
+  /** The where keyword is found whatever its case. */
+  @Test
+  public void testAndConditionFindsWhereIgnoringCase() throws Exception {
+    assertEquals("as e WHERE (e.a = 1) AND e.v is not null",
+        invokeAndCondition("as e WHERE e.a = 1", "e.v is not null"));
+  }
+
+  // --- displayIsPrimitivePath / the page-of-values ORDER BY (through the value-paged flow) ---
+
+  private static boolean displayIsPrimitive(String displayProperty, Property resolved,
+      boolean entityKnown, RuntimeException failure) {
+    SelectorMeta meta = new SelectorMeta.Builder("ProductByPriceAndWarehouse", displayProperty)
+        .isRich(true).valueProperty("product.id").build();
+    ModelProvider modelProvider = mock(ModelProvider.class);
+    when(modelProvider.getEntity("ProductByPriceAndWarehouse"))
+        .thenReturn(entityKnown ? mock(Entity.class) : null);
+    try (MockedStatic<ModelProvider> mpMock = mockStatic(ModelProvider.class);
+        MockedStatic<DalUtil> dalUtilMock = mockStatic(DalUtil.class)) {
+      mpMock.when(ModelProvider::getInstance).thenReturn(modelProvider);
+      if (failure != null) {
+        dalUtilMock.when(() -> DalUtil.getPropertyFromPath(any(Entity.class), anyString()))
+            .thenThrow(failure);
+      } else {
+        dalUtilMock.when(() -> DalUtil.getPropertyFromPath(any(Entity.class), anyString()))
+            .thenReturn(resolved);
+      }
+      return ValuePagedRichQuery.displayIsPrimitivePath(meta);
+    }
+  }
+
+  private static Property property(boolean primitive) {
+    Property p = mock(Property.class);
+    when(p.isPrimitive()).thenReturn(primitive);
+    return p;
+  }
+
+  /** A primitive display property (name) can be aggregated. */
+  @Test
+  public void testDisplayIsPrimitivePathTrueForPrimitiveProperty() {
+    assertTrue(displayIsPrimitive("name", property(true), true, null));
+  }
+
+  /** A dotted path that ends in a primitive property (product.name) can be aggregated. */
+  @Test
+  public void testDisplayIsPrimitivePathTrueForDottedPrimitivePath() {
+    assertTrue(displayIsPrimitive("product.name", property(true), true, null));
+  }
+
+  /** An association (the identifier of the price view is the product itself) cannot. */
+  @Test
+  public void testDisplayIsPrimitivePathFalseForAssociation() {
+    assertFalse(displayIsPrimitive("product", property(false), true, null));
+  }
+
+  /** A blank or absent display property is never primitive and never touches the model. */
+  @Test
+  public void testDisplayIsPrimitivePathFalseForBlankDisplay() {
+    assertFalse(displayIsPrimitive("", property(true), true, null));
+    assertFalse(displayIsPrimitive("  ", property(true), true, null));
+    assertFalse(ValuePagedRichQuery.displayIsPrimitivePath(null));
+  }
+
+  /** An entity the model does not know, or a path it cannot resolve, falls back to false. */
+  @Test
+  public void testDisplayIsPrimitivePathFalseWhenUnresolvable() {
+    assertFalse("unknown entity", displayIsPrimitive("name", property(true), false, null));
+    assertFalse("null property", displayIsPrimitive("name", null, true, null));
+    assertFalse("path that does not resolve",
+        displayIsPrimitive("no.such", null, true, new IllegalArgumentException("no property")));
+  }
+
+  /** A primitive display orders the page of values by min(display) and then the value. */
+  @Test
+  public void testValuePageOrderUsesMinOfPrimitiveDisplay() throws Exception {
+    SelectorMeta meta = new SelectorMeta.Builder("ProductByPriceAndWarehouse", "product.name")
+        .isRich(true).valueProperty("product.id").build();
+    // built before any stubbing starts: property() stubs the mock itself
+    Property resolved = property(true);
+
+    PagedRun run = runPaged(meta, "", 20, 0, null, 1L, Arrays.asList((Object) "P1"),
+        Arrays.asList(valueRow("idA", "P1", "A")), resolved);
+
+    assertTrue(run.hql.get(1), run.hql.get(1)
+        .endsWith(" group by e.product.id ORDER BY min(e.product.name), e.product.id"));
+  }
+
+  /** A display that is not primitive orders by the value alone (min() would not be valid HQL). */
+  @Test
+  public void testValuePageOrderIsTheValueAloneForAnAssociationDisplay() throws Exception {
+    SelectorMeta meta = new SelectorMeta.Builder("ProductByPriceAndWarehouse", "product")
+        .isRich(true).valueProperty("product.id").build();
+    // built before any stubbing starts: property() stubs the mock itself
+    Property resolved = property(false);
+
+    PagedRun run = runPaged(meta, "", 20, 0, null, 1L, Arrays.asList((Object) "P1"),
+        Arrays.asList(valueRow("idA", "P1", "A")), resolved);
+
+    assertTrue(run.hql.get(1),
+        run.hql.get(1).endsWith(" group by e.product.id ORDER BY e.product.id"));
+  }
+
+  // --- count / page / rows flow ---
+
   /**
-   * A view-backed value-field selector wires the representative-row where into BOTH the count and
-   * the data query, so count(*) equals the distinct-value count and paging fills correctly. The
-   * data query is the count query plus the display ORDER BY, and it returns one item per row.
+   * One item per value, in the order of the page of values, each from the FIRST row of its value
+   * (the lowest id, the row the old min(id) picked); totalCount is the distinct-value count; the
+   * three steps share the where and the page is bound as a list.
    */
   @Test
   @SuppressWarnings("unchecked")
-  public void testExecuteRichQueryValueFieldSelectorAppliesDistinctToCountAndData() throws Exception {
-    SelectorMeta meta = new SelectorMeta.Builder("ProductStock", "name")
-        .isRich(true).valueProperty("product.id").build();
+  public void testValuePagedFlowReturnsOneItemPerValueKeepingTheFirstRow() throws Exception {
+    // rows arrive ordered by value then id; P1 has two rows (A first), P2 one (C)
+    List<BaseOBObject> rows = Arrays.asList(valueRow("idA", "P1", "A"),
+        valueRow("idB", "P1", "B"), valueRow("idC", "P2", "C"));
 
-    // Two representative product rows out of a view that (in the DB) would hold many duplicates.
-    BaseOBObject row1 = mock(BaseOBObject.class);
-    BaseOBObject prod1 = mock(BaseOBObject.class);
-    when(prod1.get("id")).thenReturn("P1");
-    when(row1.get("product")).thenReturn(prod1);
-    when(row1.getId()).thenReturn("stock1");
-    when(row1.getIdentifier()).thenReturn("Product One");
-    BaseOBObject row2 = mock(BaseOBObject.class);
-    BaseOBObject prod2 = mock(BaseOBObject.class);
-    when(prod2.get("id")).thenReturn("P2");
-    when(row2.get("product")).thenReturn(prod2);
-    when(row2.getId()).thenReturn("stock2");
-    when(row2.getIdentifier()).thenReturn("Product Two");
+    PagedRun run = runPaged(valueFieldSelector(), "", 20, 0, "e.active = true", 2L,
+        Arrays.asList((Object) "P2", "P1"), rows);
 
+    assertEquals(2, run.total);
+    assertEquals("page order, not row order", Arrays.asList("P2", "P1"), ids(run.items));
+    assertEquals("C", run.items.getJSONObject(0).getString("label"));
+    assertEquals("first row of P1, not the second", "A",
+        run.items.getJSONObject(1).getString("label"));
+    assertEquals(3, run.hql.size());
+    assertTrue(run.hql.get(0), run.hql.get(0)
+        .startsWith("select count(distinct e.product.id) from ProductByPriceAndWarehouse"));
+    assertTrue(run.hql.get(1), run.hql.get(1).endsWith(
+        " group by e.product.id ORDER BY e.product.id"));
+    assertTrue(run.hql.get(2), run.hql.get(2).endsWith(
+        " AND e.product.id in (:sfPageValues) ORDER BY e.product.id, e.id"));
+    verify(run.rowsQuery).setParameterList("sfPageValues", Arrays.asList("P2", "P1"));
+    assertEquals(Arrays.asList("count(distinct e.product.id)", "e.product.id"),
+        run.selectClauses.subList(0, 2));
+  }
+
+  /** The page query carries the caller's limit and offset; totalCount is not the page size. */
+  @Test
+  public void testValuePagedFlowPagesTheValuesWithLimitAndOffset() throws Exception {
+    PagedRun run = runPaged(valueFieldSelector(), "", 3, 6, null, 7L,
+        Arrays.asList((Object) "P7"), Arrays.asList(valueRow("idG", "P7", "G")));
+
+    verify(run.pageQuery).setFirstResult(6);
+    verify(run.pageQuery).setMaxResults(3);
+    assertEquals("totalCount is the distinct values, not what the page holds", 7, run.total);
+    assertEquals(Arrays.asList("P7"), ids(run.items));
+  }
+
+  /** An offset at or beyond the total answers no items and never runs the page or rows query. */
+  @Test
+  public void testValuePagedFlowOffsetBeyondTotalReturnsNoItemsAndSkipsThePage() throws Exception {
+    PagedRun run = runPaged(valueFieldSelector(), "", 20, 2, null, 2L,
+        Collections.emptyList(), Collections.emptyList());
+
+    assertEquals(2, run.total);
+    assertEquals(0, run.items.length());
+    verify(run.session, never()).createQuery(anyString());
+  }
+
+  /** No matching values: totalCount 0, no items, and only the count query runs. */
+  @Test
+  public void testValuePagedFlowEmptyResultOnlyRunsTheCount() throws Exception {
+    PagedRun run = runPaged(valueFieldSelector(), "", 20, 0, null, 0L,
+        Collections.emptyList(), Collections.emptyList());
+
+    assertEquals(0, run.total);
+    assertEquals(0, run.items.length());
+    verify(run.session, never()).createQuery(anyString());
+  }
+
+  /** A null count (no row) is read as zero. */
+  @Test
+  public void testValuePagedFlowNullCountIsZero() throws Exception {
+    PagedRun run = runPaged(valueFieldSelector(), "", 20, 0, null, null,
+        Collections.emptyList(), Collections.emptyList());
+
+    assertEquals(0, run.total);
+    assertEquals(0, run.items.length());
+  }
+
+  /**
+   * Rows with a null value are left out of count, page and rows alike, and the existing conditions
+   * are parenthesised so the exclusion cannot be swallowed by an {@code or}.
+   */
+  @Test
+  public void testValuePagedFlowExcludesNullValuesFromEveryStep() throws Exception {
+    PagedRun run = runPaged(valueFieldSelector(), "", 20, 0, "e.a = 1 or e.b = 2", 1L,
+        Arrays.asList((Object) "P1"), Arrays.asList(valueRow("idA", "P1", "A")));
+
+    assertEquals(3, run.where.size());
+    for (String where : run.where) {
+      assertEquals("as e where (e.a = 1 or e.b = 2) AND e.product.id is not null", where);
+    }
+  }
+
+  /** With no other condition the null-value exclusion is the whole where. */
+  @Test
+  public void testValuePagedFlowNullValueExclusionAloneWhenThereIsNoFilter() throws Exception {
+    PagedRun run = runPaged(valueFieldSelector(), "", 20, 0, null, 1L,
+        Arrays.asList((Object) "P1"), Arrays.asList(valueRow("idA", "P1", "A")));
+
+    assertEquals("as e where e.product.id is not null", run.where.get(0));
+  }
+
+  /**
+   * The search text is bound (lower-cased, wrapped in %) on the count, the page and the rows query,
+   * and every property the search touches belongs to the one alias {@code e}: the old copy into a
+   * sub-alias is gone, so there is nothing for a bare {@code product.} to bind to.
+   */
+  @Test
+  public void testValuePagedFlowBindsTheSearchOnEveryQueryWithAliasQualifiedProperties()
+      throws Exception {
+    SelectorMeta meta = productByPriceSelector().build();
+
+    PagedRun run = runPaged(meta, "Ab", 20, 0, "e.active = true", 1L,
+        Arrays.asList((Object) "P1"), Arrays.asList(valueRow("idA", "P1", "A")));
+
+    verify(run.countQuery).setParameter("search", "%ab%");
+    verify(run.pageQuery).setParameter("search", "%ab%");
+    verify(run.rowsQuery).setParameter("search", "%ab%");
+    String where = run.where.get(0);
+    assertTrue(where, where.contains("cast(e.product.name as string)"));
+    assertTrue(where, where.contains("cast(e.product.searchKey as string)"));
+    assertFalse("no bare relative path: " + where,
+        java.util.regex.Pattern.compile("(?<![\\w.])product\\.").matcher(where).find());
+    assertFalse("no sub-alias any more", where.contains("e_dv"));
+  }
+
+  /**
+   * The readable-organization filter OBQuery keeps as a {@code String[]} is bound as a list on all
+   * three queries; binding it as a single value was the 500 of every affected selector.
+   */
+  @Test
+  public void testValuePagedFlowBindsTheArrayOrganizationFilterAsAList() throws Exception {
+    PagedRun run = runPaged(valueFieldSelector(), "", 20, 0, null, 1L,
+        Arrays.asList((Object) "P1"), Arrays.asList(valueRow("idA", "P1", "A")));
+
+    String[] orgs = { "0", "ORG1" };
+    verify(run.countQuery).setParameterList(eq("sfOrgs"), aryEq(orgs));
+    verify(run.pageQuery).setParameterList(eq("sfOrgs"), aryEq(orgs));
+    verify(run.rowsQuery).setParameterList(eq("sfOrgs"), aryEq(orgs));
+    verify(run.countQuery, never()).setParameter(eq("sfOrgs"), any());
+  }
+
+  /** A value whose rows the rows query did not return yields no item rather than a null one. */
+  @Test
+  public void testValuePagedFlowSkipsAPageValueWithNoRow() throws Exception {
+    PagedRun run = runPaged(valueFieldSelector(), "", 20, 0, null, 2L,
+        Arrays.asList((Object) "P1", "P2"), Arrays.asList(valueRow("idB", "P2", "B")));
+
+    assertEquals(Arrays.asList("P2"), ids(run.items));
+  }
+
+  /** A page value that is a BaseOBObject is read by its id. */
+  @Test
+  public void testValuePagedFlowReadsAnEntityPageValueById() throws Exception {
+    BaseOBObject valueObject = mock(BaseOBObject.class);
+    when(valueObject.getId()).thenReturn("P1");
+
+    PagedRun run = runPaged(valueFieldSelector(), "", 20, 0, null, 1L,
+        Arrays.asList((Object) valueObject), Arrays.asList(valueRow("idA", "P1", "A")));
+
+    verify(run.rowsQuery).setParameterList("sfPageValues", Arrays.asList("P1"));
+    assertEquals(Arrays.asList("P1"), ids(run.items));
+  }
+
+  /** The stock-breakdown selector keeps the row-paged flow: no session query is ever built. */
+  @Test
+  @SuppressWarnings({ "unchecked", "rawtypes" })
+  public void testStockBreakdownSelectorStaysOnTheRowPagedFlow() throws Exception {
+    SelectorMeta meta = new SelectorMeta.Builder("MaterialMgmtProductStock", "name")
+        .isRich(true).valueProperty("product.id")
+        .auxFields(Arrays.asList(auxWithSuffix("_QTY"), auxWithSuffix("_LOC"))).build();
     OBQuery countQuery = mock(OBQuery.class);
     OBQuery dataQuery = mock(OBQuery.class);
-    when(countQuery.count()).thenReturn(2); // distinct product count
-    when(dataQuery.list()).thenReturn(Arrays.asList(row1, row2));
-
-    List<String> capturedWhere = new ArrayList<>();
+    when(countQuery.count()).thenReturn(0);
+    when(dataQuery.list()).thenReturn(Collections.emptyList());
     OBDal obDal = mock(OBDal.class);
+    List<String> capturedWhere = new ArrayList<>();
     when(obDal.createQuery(anyString(), anyString())).thenAnswer(inv -> {
       capturedWhere.add(inv.getArgument(1));
       return capturedWhere.size() == 1 ? countQuery : dataQuery;
     });
-
-    NeoResponse expected = NeoResponse.ok(new JSONObject());
-    SelectorQueryBuilder.HqlWithParams clause =
-        new SelectorQueryBuilder.HqlWithParams("as e where e.active = true", new HashMap<>());
-
-    try (MockedStatic<SelectorQueryBuilder> builderMock = mockStatic(
-        SelectorQueryBuilder.class); MockedStatic<NeoSelectorExecutionHelper> helperMock = mockStatic(
-        NeoSelectorExecutionHelper.class); MockedStatic<SelectorAuxResolver> auxMock = mockStatic(
-        SelectorAuxResolver.class); MockedStatic<OBDal> obDalMock = mockStatic(
-        OBDal.class); MockedStatic<SelectorResponseSupport> respMock = mockStatic(
-        SelectorResponseSupport.class)) {
-
+    try (MockedStatic<SelectorQueryBuilder> builderMock = mockStatic(SelectorQueryBuilder.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+        MockedStatic<SelectorResponseSupport> respMock = mockStatic(
+            SelectorResponseSupport.class)) {
       builderMock.when(
           () -> SelectorQueryBuilder.buildRichQueryWhereClause(any(), any(), any(), any(), any()))
-          .thenReturn(clause);
-      helperMock.when(() -> NeoSelectorExecutionHelper.bindNamedParameters(any(OBQuery.class), any()))
-          .thenAnswer(inv -> null);
-      auxMock.when(() -> SelectorAuxResolver.appendAuxFields(any(), any(), any())).thenAnswer(inv -> null);
+          .thenReturn(new SelectorQueryBuilder.HqlWithParams("as e where e.active = true",
+              new HashMap<>()));
       obDalMock.when(OBDal::getInstance).thenReturn(obDal);
-      respMock.when(() -> SelectorResponseSupport.buildGridColumnMetadata(any())).thenReturn(new JSONArray());
-
-      JSONArray[] capturedItems = new JSONArray[1];
-      int[] capturedTotal = new int[1];
+      respMock.when(() -> SelectorResponseSupport.buildGridColumnMetadata(any()))
+          .thenReturn(new JSONArray());
       respMock.when(
           () -> SelectorResponseSupport.buildSelectorResponse(any(), any(), anyInt(), anyInt(), anyInt()))
-          .thenAnswer(inv -> {
-            capturedItems[0] = inv.getArgument(0);
-            capturedTotal[0] = inv.getArgument(2);
-            return expected;
-          });
+          .thenReturn(NeoResponse.ok(new JSONObject()));
 
-      NeoResponse result = SelectorQueryExecutor.execute(meta, "", 20, 0, null, "org-1", null);
+      SelectorQueryExecutor.execute(meta, "", 20, 0, null, "org-1", null);
 
-      assertNotNull(result);
-      // Count query uses the representative-row where (distinct drives page math).
-      assertEquals(2, capturedWhere.size());
-      assertTrue("count query is distinct-restricted",
-          capturedWhere.get(0).contains("group by e_dv.product.id"));
-      // Data query = same representative where + display ORDER BY (consistent with count).
-      assertEquals(capturedWhere.get(0) + " ORDER BY e.name", capturedWhere.get(1));
-      // totalCount comes from count(*) over representative rows.
-      assertEquals(2, capturedTotal[0]);
-      // One item per representative row, id taken from valueProperty.
-      assertEquals(2, capturedItems[0].length());
-      assertEquals("P1", capturedItems[0].getJSONObject(0).getString("id"));
-      assertEquals("P2", capturedItems[0].getJSONObject(1).getString("id"));
+      assertEquals(Arrays.asList("as e where e.active = true",
+          "as e where e.active = true ORDER BY e.name"), capturedWhere);
+      verify(obDal, never()).getSession();
     }
   }
 
@@ -1273,6 +1618,7 @@ public class SelectorQueryExecutorTest {
       SelectorQueryExecutor.execute(meta, "", 20, 0, null, "org-1", null);
 
       assertEquals(2, capturedWhere.size());
+      org.mockito.Mockito.verify(obDal, never()).getSession();
       assertEquals("as e where e.active = true", capturedWhere.get(0));
       assertFalse("no DISTINCT subquery for PK-valued selector",
           capturedWhere.get(0).contains("min("));
@@ -1438,7 +1784,7 @@ public class SelectorQueryExecutorTest {
   }
 
   // ---------------------------------------------------------------
-  // Search inside the de-dup subquery (ETP-5670)
+  // Search of view-backed selectors (ETP-5670, value-paged since ETP-5707)
   // ---------------------------------------------------------------
 
   /**
@@ -1495,34 +1841,29 @@ public class SelectorQueryExecutorTest {
   }
 
   /**
-   * Repro ETP-5670: a de-dup selector searching dotted DAL paths copied {@code product.name} into
-   * the representative-row subquery unqualified, so Hibernate bound it to the OUTER row and
-   * PostgreSQL re-ran the subquery once per candidate row. Every property reference inside the
-   * subquery must belong to the sub-alias {@code e_dv}.
+   * The search of a view-backed selector over dotted DAL paths ({@code product.name}) reaches the
+   * value-paged queries alias-qualified: every property belongs to {@code e}, so Hibernate cannot
+   * bind a bare relative path to the wrong row (the ETP-5670 trap of the old sub-alias copy).
    */
   @Test
-  public void testDedupSubquerySearchesItsOwnRowsNotTheOuterOne() throws Exception {
-    List<String> where = captureRichWhere(productByPriceSelector().build(), "p", "e.active = true");
+  public void testValuePagedSearchWhereIsAliasQualifiedAndHasNoSubAlias() throws Exception {
+    PagedRun run = runPaged(productByPriceSelector().build(), "p", 20, 0, "e.active = true", 1L,
+        Arrays.asList((Object) "P1"), Arrays.asList(valueRow("idA", "P1", "A")));
 
-    assertEquals(2, where.size());
-    String count = where.get(0);
-    int subStart = count.indexOf("(select min(e_dv.id)");
-    assertTrue("de-dup subquery present: " + count, subStart > 0);
-    String outer = count.substring(0, subStart);
-    String sub = count.substring(subStart);
-
-    assertTrue("outer search is alias-qualified: " + outer,
-        outer.contains("cast(e.product.name as string)"));
-    assertTrue("subquery searches its own product: " + sub,
-        sub.contains("cast(e_dv.product.name as string)"));
-    assertTrue("subquery searches its own searchKey: " + sub,
-        sub.contains("cast(e_dv.product.searchKey as string)"));
-    assertFalse("no bare relative path may bind to the outer row: " + count,
-        java.util.regex.Pattern.compile("(?<![\\w.])product\\.").matcher(count).find());
+    assertEquals(3, run.where.size());
+    for (String where : run.where) {
+      assertTrue("search alias-qualified: " + where, where.contains("cast(e.product.name as string)"));
+      assertTrue("searchKey alias-qualified: " + where,
+          where.contains("cast(e.product.searchKey as string)"));
+      assertTrue("null values excluded: " + where, where.endsWith("AND e.product.id is not null"));
+      assertFalse("no sub-alias: " + where, where.contains("e_dv"));
+      assertFalse("no bare relative path: " + where,
+          java.util.regex.Pattern.compile("(?<![\\w.])product\\.").matcher(where).find());
+    }
   }
 
   /**
-   * A PK-valued selector gets no de-dup subquery; with a search over bare properties its where is
+   * A PK-valued selector is not value-paged; with a search over bare properties its where is
    * byte-identical to the pre-ETP-5670 output.
    */
   @Test
@@ -1540,11 +1881,11 @@ public class SelectorQueryExecutorTest {
   }
 
   /**
-   * A stock-breakdown selector keeps every per-locator row: no de-dup subquery even with a search,
+   * A stock-breakdown selector keeps every per-locator row: not value-paged even with a search,
    * and the where is exactly the builder output.
    */
   @Test
-  public void testStockBreakdownSelectorSearchHasNoDedupSubquery() throws Exception {
+  public void testStockBreakdownSelectorSearchKeepsTheRowPagedWhere() throws Exception {
     SelectorMeta meta = new SelectorMeta.Builder("MaterialMgmtProductStock", "product.name")
         .isRich(true).valueProperty("product.id")
         .auxFields(Arrays.asList(auxWithSuffix("_QTY"), auxWithSuffix("_LOC")))
@@ -1557,6 +1898,6 @@ public class SelectorQueryExecutorTest {
     assertEquals("as e where e.active = true AND ("
         + "lower(COALESCE(cast(e.product.name as string), '')) LIKE :search"
         + " OR lower(COALESCE(cast(e.product.searchKey as string), '')) LIKE :search)", where.get(0));
-    assertFalse("stock-breakdown selector must not be de-duplicated", where.get(0).contains("e_dv"));
+    assertFalse("stock-breakdown selector must not be de-duplicated", where.get(0).contains("not null"));
   }
 }

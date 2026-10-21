@@ -66,6 +66,7 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
@@ -639,6 +640,71 @@ class NeoCrudHandlerTest {
       verify(servlet, never()).writeResponse(any(), any());
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = { "{\"x\":[", "[[", "{\"a\":[}", "[{\"f\":1/*x*/}]" })
+    @DisplayName("Sends 400 for a malformed criteria before any handler or datasource runs")
+    void malformedCriteriaSends400BeforeDispatch(String criteria) throws Exception {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getId()).thenReturn("SPEC-1");
+
+      SFEntity entity = createMockEntity(true, false, false, false, false, false);
+      when(entity.getADTab()).thenReturn(mock(Tab.class));
+      when(entity.getJavaQualifier()).thenReturn("myHook");
+      when(servlet.findEntity("SPEC-1", "orders")).thenReturn(entity);
+      Map<String, String> params = new HashMap<>();
+      params.put("criteria", criteria);
+      when(servlet.extractQueryParams(any())).thenReturn(params);
+
+      NeoServlet.NeoPathInfo pathInfo = new NeoServlet.NeoPathInfo(
+          "testSpec", "orders", null);
+      HttpServletResponse response = mock(HttpServletResponse.class);
+
+      handler.handleWindowEntityCrud(spec, pathInfo, "GET",
+          mock(HttpServletRequest.class), response);
+
+      verify(servlet).sendError(response, HttpServletResponse.SC_BAD_REQUEST,
+          "Invalid criteria: malformed JSON");
+      verify(servlet, never()).handleWithHooks(anyString(), any(), any(), any());
+      verify(servlet, never()).writeResponse(any(), any());
+    }
+
+    @Test
+    @DisplayName("A well-formed criteria reaches the handler")
+    void wellFormedCriteriaIsDispatched() throws Exception {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getId()).thenReturn("SPEC-1");
+
+      SFEntity entity = createMockEntity(true, false, false, false, false, false);
+      when(entity.getADTab()).thenReturn(mock(Tab.class));
+      when(entity.getJavaQualifier()).thenReturn("myHook");
+      when(servlet.findEntity("SPEC-1", "orders")).thenReturn(entity);
+      Map<String, String> params = new HashMap<>();
+      params.put("criteria", "[{\"fieldName\":\"name\",\"operator\":\"iContains\",\"value\":\"a\"}]");
+      when(servlet.extractQueryParams(any())).thenReturn(params);
+      when(servlet.handleWithHooks(anyString(), any(), any(), any())).thenReturn(null);
+
+      NeoServlet.NeoPathInfo pathInfo = new NeoServlet.NeoPathInfo(
+          "testSpec", "orders", null);
+      HttpServletResponse response = mock(HttpServletResponse.class);
+
+      handler.handleWindowEntityCrud(spec, pathInfo, "GET",
+          mock(HttpServletRequest.class), response);
+
+      verify(servlet).handleWithHooks(eq("myHook"), any(), any(), any());
+      verify(servlet, never()).sendError(any(), Mockito.anyInt(), anyString());
+    }
+
+    @Test
+    @DisplayName("isCriteriaWithinLimits accepts an absent or blank criteria and refuses a deep one")
+    void isCriteriaWithinLimitsBoundaries() {
+      assertTrue(NeoCrudHandler.isCriteriaWithinLimits(null));
+      assertTrue(NeoCrudHandler.isCriteriaWithinLimits(new HashMap<>()));
+      assertTrue(NeoCrudHandler.isCriteriaWithinLimits(Map.of("criteria", "  ")));
+      assertTrue(NeoCrudHandler.isCriteriaWithinLimits(Map.of("criteria", "{\"a\":1}")));
+      String tooDeep = "[".repeat(65) + "]".repeat(65);
+      assertFalse(NeoCrudHandler.isCriteriaWithinLimits(Map.of("criteria", tooDeep)));
+    }
+
     @Test
     @DisplayName("Does not write response when dispatchCrudRequest returns null")
     void nullDispatchResponseNotWritten() throws Exception {
@@ -848,14 +914,33 @@ class NeoCrudHandlerTest {
     }
 
     @Test
-    @DisplayName("Returns null when POST has no record ID")
+    @DisplayName("Returns null when POST has no record ID and a body")
     void postWithoutRecordIdReturnsNull() throws Exception {
+      NeoContext context = buildContext("POST", null, mock(Tab.class),
+          mock(SFEntity.class), new JSONObject(), null);
+
+      NeoResponse result = invokeValidatePost(context);
+
+      assertNull(result);
+    }
+
+    /**
+     * A blank body reaches the handler as a null request body. Creating from it used to fail
+     * deep in the callout cascade with a NullPointerException: a 500 and an ERROR stack trace
+     * for what is the caller's mistake.
+     */
+    @Test
+    @DisplayName("Refuses POST with a blank body as a 400")
+    void postWithoutBodyIsRefused() throws Exception {
       NeoContext context = buildContext("POST", null, mock(Tab.class),
           mock(SFEntity.class), null, null);
 
       NeoResponse result = invokeValidatePost(context);
 
-      assertNull(result);
+      assertNotNull(result);
+      assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
+      assertEquals("Request body is required",
+          result.getBody().getJSONObject("error").getString("message"));
     }
   }
 
@@ -924,13 +1009,29 @@ class NeoCrudHandlerTest {
     @DisplayName("Refuses PUT/PATCH that has a record ID but no `updated`")
     void updateWithRecordIdButNoVersionIsRefused() throws Exception {
       NeoContext context = buildContext("PATCH", "REC-123", mock(Tab.class),
-          mock(SFEntity.class), null, null);
+          mock(SFEntity.class), new JSONObject(), null);
 
       NeoResponse result = invokeValidateUpdate(context);
 
       assertNotNull(result);
       assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
       assertEquals("missing_updated", result.getBody().getString("error"));
+    }
+
+    /** No body at all is not a missing token: the caller sent nothing to update with. */
+    @ParameterizedTest
+    @ValueSource(strings = { "PUT", "PATCH" })
+    @DisplayName("Refuses PUT/PATCH with a blank body as a 400")
+    void updateWithoutBodyIsRefused(String method) throws Exception {
+      NeoContext context = buildContext(method, "REC-123", mock(Tab.class),
+          mock(SFEntity.class), null, null);
+
+      NeoResponse result = invokeValidateUpdate(context);
+
+      assertNotNull(result);
+      assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
+      assertEquals("Request body is required",
+          result.getBody().getJSONObject("error").getString("message"));
     }
   }
 
@@ -1556,40 +1657,27 @@ class NeoCrudHandlerTest {
       verify(servlet).handleWithHooks(eq("myHandler"), eq(context), eq(request), eq(response));
     }
 
-    @Test
-    @DisplayName("Falls through to handleDefault when javaQualifier is blank")
-    void fallsToDefaultWhenQualifierBlank() throws Exception {
+    @ParameterizedTest
+    @NullAndEmptySource
+    @ValueSource(strings = { "  " })
+    @DisplayName("ETP-5693: a blank/null javaQualifier still goes through handleWithHooks")
+    void delegatesToHooksWhenQualifierBlank(String qualifier) throws Exception {
+      // An @NeoExtension on a qualifier-less entity must run on REST; the hook pipeline itself
+      // falls back to handleDefault when nothing resolves.
       SFEntity entity = mock(SFEntity.class);
-      when(entity.getJavaQualifier()).thenReturn("");
+      when(entity.getJavaQualifier()).thenReturn(qualifier);
 
       NeoContext context = buildContext("GET", null, null,
           entity, null, null);
       HttpServletRequest request = mock(HttpServletRequest.class);
       HttpServletResponse response = mock(HttpServletResponse.class);
-
-      // handleDefault with null adTab returns 500
-      NeoResponse result = invokeDispatch(entity, context, request, response);
-
-      assertNotNull(result);
-      assertEquals(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, result.getHttpStatus());
-      verify(servlet, never()).handleWithHooks(anyString(), any(), any(), any());
-    }
-
-    @Test
-    @DisplayName("Falls through to handleDefault when javaQualifier is null")
-    void fallsToDefaultWhenQualifierNull() throws Exception {
-      SFEntity entity = mock(SFEntity.class);
-      when(entity.getJavaQualifier()).thenReturn(null);
-
-      NeoContext context = buildContext("GET", null, null,
-          entity, null, null);
-      HttpServletRequest request = mock(HttpServletRequest.class);
-      HttpServletResponse response = mock(HttpServletResponse.class);
+      NeoResponse expected = NeoResponse.ok(new JSONObject());
+      when(servlet.handleWithHooks(qualifier, context, request, response)).thenReturn(expected);
 
       NeoResponse result = invokeDispatch(entity, context, request, response);
 
-      assertNotNull(result);
-      verify(servlet, never()).handleWithHooks(anyString(), any(), any(), any());
+      assertEquals(expected, result);
+      verify(servlet).handleWithHooks(qualifier, context, request, response);
     }
   }
 

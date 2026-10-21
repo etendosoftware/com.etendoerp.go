@@ -37,9 +37,6 @@ import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.advpaymentmngt.process.FIN_AddPayment;
 import org.openbravo.advpaymentmngt.utility.FIN_Utility;
-import org.openbravo.base.model.Entity;
-import org.openbravo.base.model.ModelProvider;
-import org.openbravo.base.model.Property;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
@@ -291,7 +288,7 @@ public class ReactivatePaymentHandler implements NeoHandler {
     try {
       Column button = NeoButtonActionHelper.findButtonColumn(context.getSfEntity().getId(),
           fieldName);
-      String property = button == null ? null : propertyNameOf(button);
+      String property = button == null ? null : NeoButtonActionHelper.propertyNameOf(button);
       return property == null ? fieldName : property;
     } catch (RuntimeException e) {
       log.debug("Could not resolve action {} to its button: {}", fieldName, e.getMessage());
@@ -299,13 +296,6 @@ public class ReactivatePaymentHandler implements NeoHandler {
     } finally {
       OBContext.restorePreviousMode();
     }
-  }
-
-  private static String propertyNameOf(Column column) {
-    Entity dal = ModelProvider.getInstance()
-        .getEntityByTableName(column.getTable().getDBTableName());
-    Property property = dal == null ? null : dal.getPropertyByColumnName(column.getDBColumnName());
-    return property == null ? null : property.getName();
   }
 
   /**

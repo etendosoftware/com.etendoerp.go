@@ -1789,6 +1789,218 @@ public class FinancialAccountHandlerTest {
     assertNull(handler.afterHandle(ctx));
   }
 
+  // ── afterHandle: PUT/PATCH advisory when pSD2ImportFromDate is beyond the bank's history (ETP-5805) ──
+
+  private NeoContext putContext(String bodyJson, boolean mcp, JSONObject responseBody) throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getSpecName()).thenReturn(SPEC);
+    when(ctx.getHttpMethod()).thenReturn("PUT");
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.CRUD);
+    when(ctx.getEntityName()).thenReturn("account");
+    when(ctx.getRecordId()).thenReturn(ACC_ID);
+    when(ctx.isMcpOrigin()).thenReturn(mcp);
+    when(ctx.getRequestBody()).thenReturn(new JSONObject(bodyJson));
+    when(ctx.getPreviousResult()).thenReturn(NeoResponse.ok(responseBody));
+    return ctx;
+  }
+
+  private static FinancialAccountBankConnectionSupport.FetchIntervalExceeded exceeded90() {
+    return new FinancialAccountBankConnectionSupport.FetchIntervalExceeded(90,
+        java.time.LocalDate.of(2026, 7, 21));
+  }
+
+  /** MCP origin: the warning lands inside the response wrapper, the save response is kept. */
+  @Test
+  public void testAfterHandlePutBeyondFetchIntervalAddsMcpWarning() throws Exception {
+    JSONObject body = new JSONObject().put("response", new JSONObject().put("status", 0));
+    NeoContext ctx = putContext("{\"pSD2ImportFromDate\":\"2019-01-01\"}", true, body);
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+
+    try (MockedStatic<FinancialAccountBankConnectionSupport> support =
+        mockStatic(FinancialAccountBankConnectionSupport.class, Mockito.CALLS_REAL_METHODS)) {
+      support.when(() -> FinancialAccountBankConnectionSupport.findImportFromBeyondFetchInterval(
+          eq(account), any(java.time.LocalDate.class), any(java.time.LocalDate.class)))
+          .thenReturn(exceeded90());
+
+      assertNull(handler.afterHandle(ctx));
+    }
+    verify(handler, times(1)).enterAdminMode();
+    verify(handler, times(1)).exitAdminMode();
+    JSONObject message = body.getJSONObject("response").getJSONArray("messages").getJSONObject(0);
+    assertEquals("warning", message.getString("type"));
+    assertTrue(message.getString("text").contains("90"));
+    assertFalse(body.has("messages"));
+  }
+
+  /** REST origin: the warning is at the body root. */
+  @Test
+  public void testAfterHandlePatchBeyondFetchIntervalAddsRestWarning() throws Exception {
+    JSONObject body = new JSONObject().put("response", new JSONObject().put("status", 0));
+    NeoContext ctx = putContext("{\"pSD2ImportFromDate\":\"2019-01-01\"}", false, body);
+    when(ctx.getHttpMethod()).thenReturn("PATCH");
+    doReturn(mock(FIN_FinancialAccount.class)).when(handler).loadAccount(ACC_ID);
+
+    try (MockedStatic<FinancialAccountBankConnectionSupport> support =
+        mockStatic(FinancialAccountBankConnectionSupport.class, Mockito.CALLS_REAL_METHODS)) {
+      support.when(() -> FinancialAccountBankConnectionSupport.findImportFromBeyondFetchInterval(
+          any(), any(java.time.LocalDate.class), any(java.time.LocalDate.class)))
+          .thenReturn(exceeded90());
+
+      assertNull(handler.afterHandle(ctx));
+    }
+    assertEquals("warning", body.getJSONArray("messages").getJSONObject(0).getString("type"));
+  }
+
+  /** Within range: no message. */
+  @Test
+  public void testAfterHandlePutWithinFetchIntervalAddsNothing() throws Exception {
+    JSONObject body = new JSONObject().put("response", new JSONObject());
+    NeoContext ctx = putContext("{\"pSD2ImportFromDate\":\"2026-10-01\"}", true, body);
+    doReturn(mock(FIN_FinancialAccount.class)).when(handler).loadAccount(ACC_ID);
+
+    try (MockedStatic<FinancialAccountBankConnectionSupport> support =
+        mockStatic(FinancialAccountBankConnectionSupport.class, Mockito.CALLS_REAL_METHODS)) {
+      support.when(() -> FinancialAccountBankConnectionSupport.findImportFromBeyondFetchInterval(
+          any(), any(java.time.LocalDate.class), any(java.time.LocalDate.class))).thenReturn(null);
+
+      assertNull(handler.afterHandle(ctx));
+    }
+    assertFalse(body.getJSONObject("response").has("messages"));
+  }
+
+  /** The field is not in the request (the SPA's generic form): no lookup, body untouched. */
+  @Test
+  public void testAfterHandlePutWithoutImportFromFieldIsUntouched() throws Exception {
+    JSONObject body = new JSONObject().put("response", new JSONObject());
+    NeoContext ctx = putContext("{\"name\":\"x\"}", true, body);
+
+    assertNull(handler.afterHandle(ctx));
+    verify(handler, never()).loadAccount(any());
+    verify(handler, never()).enterAdminMode();
+    verify(handler, never()).exitAdminMode();
+    assertFalse(body.getJSONObject("response").has("messages"));
+  }
+
+  /** Another entity of the spec (e.g. a transaction) is untouched even if it carries the field. */
+  @Test
+  public void testAfterHandlePutOnOtherEntityIsUntouched() throws Exception {
+    JSONObject body = new JSONObject().put("response", new JSONObject());
+    NeoContext ctx = putContext("{\"pSD2ImportFromDate\":\"2019-01-01\"}", true, body);
+    when(ctx.getEntityName()).thenReturn("transaction");
+
+    assertNull(handler.afterHandle(ctx));
+    verify(handler, never()).loadAccount(any());
+    verify(handler, never()).enterAdminMode();
+    verify(handler, never()).exitAdminMode();
+    assertFalse(body.getJSONObject("response").has("messages"));
+  }
+
+  /** A failed save (previous result 4xx) gets no advisory: no lookup, no admin mode, no message. */
+  @Test
+  public void testAfterHandlePutFailedSaveGetsNoAdvisory() throws Exception {
+    for (int status : new int[] {400, 404, 409}) {
+      JSONObject body = new JSONObject().put("response", new JSONObject());
+      NeoContext ctx = putContext("{\"pSD2ImportFromDate\":\"2019-01-01\"}", true, body);
+      when(ctx.getPreviousResult()).thenReturn(new NeoResponse(status, body));
+
+      assertNull(handler.afterHandle(ctx));
+      assertFalse("status " + status, body.getJSONObject("response").has("messages"));
+    }
+    verify(handler, never()).loadAccount(any());
+    verify(handler, never()).enterAdminMode();
+    verify(handler, never()).exitAdminMode();
+  }
+
+  /** A failure evaluating the advisory never breaks the already-committed save. */
+  @Test
+  public void testAfterHandlePutAdvisoryFailureIsSwallowed() throws Exception {
+    JSONObject body = new JSONObject().put("response", new JSONObject());
+    NeoContext ctx = putContext("{\"pSD2ImportFromDate\":\"2019-01-01\"}", true, body);
+    doThrow(new RuntimeException("boom")).when(handler).loadAccount(ACC_ID);
+
+    assertNull(handler.afterHandle(ctx));
+    verify(handler, times(1)).enterAdminMode();
+    verify(handler, times(1)).exitAdminMode();
+    assertFalse(body.getJSONObject("response").has("messages"));
+  }
+
+  /** Only the first 10 chars of the sent value are used: a timestamp warns like its date. */
+  @Test
+  public void testAfterHandlePutTimestampValueUsesOnlyTheCalendarDay() throws Exception {
+    JSONObject body = new JSONObject().put("response", new JSONObject().put("status", 0));
+    NeoContext ctx = putContext("{\"pSD2ImportFromDate\":\"2020-05-01T00:00:00\"}", true, body);
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+
+    try (MockedStatic<FinancialAccountBankConnectionSupport> support =
+        mockStatic(FinancialAccountBankConnectionSupport.class, Mockito.CALLS_REAL_METHODS)) {
+      support.when(() -> FinancialAccountBankConnectionSupport.findImportFromBeyondFetchInterval(
+          eq(account), eq(java.time.LocalDate.of(2020, 5, 1)), any(java.time.LocalDate.class)))
+          .thenReturn(exceeded90());
+
+      assertNull(handler.afterHandle(ctx));
+    }
+    assertEquals("warning", body.getJSONObject("response").getJSONArray("messages")
+        .getJSONObject(0).getString("type"));
+  }
+
+  /** Unparseable or too-short values add no message, do not throw and never reach the lookup. */
+  @Test
+  public void testAfterHandlePutUnusableDateValuesAddNothing() throws Exception {
+    for (String raw : new String[] {"abc", "01/05/2020", "2020-13-45", "null", "", "2020-05"}) {
+      JSONObject body = new JSONObject().put("response", new JSONObject());
+      NeoContext ctx = putContext(
+          new JSONObject().put("pSD2ImportFromDate", raw).toString(), true, body);
+
+      assertNull("value '" + raw + "'", handler.afterHandle(ctx));
+      assertFalse("value '" + raw + "'", body.getJSONObject("response").has("messages"));
+      assertFalse("value '" + raw + "'", body.has("messages"));
+    }
+    verify(handler, never()).loadAccount(any());
+    verify(handler, never()).enterAdminMode();
+    verify(handler, never()).exitAdminMode();
+  }
+
+  /** A blank record id (or a missing previous result) skips everything: no lookup, no admin mode. */
+  @Test
+  public void testAfterHandlePutBlankRecordIdOrNoPreviousResultSkipsEverything() throws Exception {
+    JSONObject body = new JSONObject().put("response", new JSONObject());
+    for (String recordId : new String[] {"", "  ", null}) {
+      NeoContext ctx = putContext("{\"pSD2ImportFromDate\":\"2019-01-01\"}", true, body);
+      when(ctx.getRecordId()).thenReturn(recordId);
+      assertNull(handler.afterHandle(ctx));
+    }
+    NeoContext noPrev = putContext("{\"pSD2ImportFromDate\":\"2019-01-01\"}", true, body);
+    when(noPrev.getPreviousResult()).thenReturn(null);
+    assertNull(handler.afterHandle(noPrev));
+
+    verify(handler, never()).loadAccount(any());
+    verify(handler, never()).enterAdminMode();
+    verify(handler, never()).exitAdminMode();
+    assertFalse(body.getJSONObject("response").has("messages"));
+  }
+
+  /** The advisory rule itself throwing is swallowed and admin mode is still exited exactly once. */
+  @Test
+  public void testAfterHandlePutRuleFailureIsSwallowedAndExitsAdminMode() throws Exception {
+    JSONObject body = new JSONObject().put("response", new JSONObject());
+    NeoContext ctx = putContext("{\"pSD2ImportFromDate\":\"2019-01-01\"}", true, body);
+    doReturn(mock(FIN_FinancialAccount.class)).when(handler).loadAccount(ACC_ID);
+
+    try (MockedStatic<FinancialAccountBankConnectionSupport> support =
+        mockStatic(FinancialAccountBankConnectionSupport.class, Mockito.CALLS_REAL_METHODS)) {
+      support.when(() -> FinancialAccountBankConnectionSupport.findImportFromBeyondFetchInterval(
+          any(), any(java.time.LocalDate.class), any(java.time.LocalDate.class)))
+          .thenThrow(new IllegalStateException("rule boom"));
+
+      assertNull(handler.afterHandle(ctx));
+    }
+    verify(handler, times(1)).enterAdminMode();
+    verify(handler, times(1)).exitAdminMode();
+    assertFalse(body.getJSONObject("response").has("messages"));
+  }
+
   // ── afterHandle: GET+CRUD injects the derived list fields (ETP-4530 / ETP-4658) ──
   //
   // Two things are injected post-hook over every row of a GET (list/getById) response for

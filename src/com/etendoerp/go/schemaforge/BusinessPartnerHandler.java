@@ -881,8 +881,9 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
    *
    * <p>The postal column is {@code C_Location.postal}. It is NOT {@code postcode}: that name shipped
    * once (ETP-4997) and, because a failed enrichment is deliberately non-fatal, the SQLException
-   * surfaced only as silently empty columns in the exported file. {@code BusinessPartnerHandlerDbTest}
-   * now executes both statements against a real schema so a wrong column name fails a test instead.
+   * surfaced only as silently empty columns in the exported file.
+   * {@code BusinessPartnerHandlerChildDataSqlIntegrationTest} now executes both statements against a
+   * real schema so a wrong column name fails a test instead.
    *
    * <p>One statement for the whole page (a window function, not a per-row query): a 5000-row
    * export must not turn into 5000 round trips.
@@ -922,10 +923,11 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
           + ") ranked WHERE rn = 1";
 
   // PRIMARY_LOCATIONS_SQL / PRIMARY_CONTACTS_SQL and the four arrays below are package-visible
-  // ONLY so BusinessPartnerHandlerDbTest can execute each statement against a live schema and
-  // assert its result set really exposes the columns queryChildData() reads by name; nothing else
-  // reads them. They are constants rather than literals inlined at the call site precisely so the
-  // test cannot drift from the code it guards: a column renamed here is renamed for both.
+  // ONLY so BusinessPartnerHandlerChildDataSqlIntegrationTest can execute each statement against a
+  // live schema and assert its result set really exposes the columns queryChildData() reads by
+  // name; nothing else reads them. They are constants rather than literals inlined at the call
+  // site precisely so the test cannot drift from the code it guards: a column renamed here is
+  // renamed for both.
 
   /** Result-set columns {@link #PRIMARY_LOCATIONS_SQL} exposes, positionally paired with {@link #LOCATION_KEYS}. */
   static final String[] LOCATION_COLUMNS = { "address1", "city", "postal", "country", "region" };

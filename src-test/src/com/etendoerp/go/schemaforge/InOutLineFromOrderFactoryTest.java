@@ -508,6 +508,42 @@ public class InOutLineFromOrderFactoryTest {
   }
 
   /**
+   * ETP-5713: the line import reports what it created, so {@code createAndLinkLine} hands back the
+   * very line it saved — flushed first, so its id is already assigned — with the order line it was
+   * copied from linked and the quantity it was asked for.
+   */
+  @Test
+  public void createAndLinkLine_returnsTheSavedLine_flushedAndLinkedToItsOrderLine() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      stubInvoiceLineLinker(dal);
+
+      Warehouse headerWarehouse = LocatorTestSupport.mockWarehouse(WH_PRINCIPAL);
+      Locator bin = LocatorTestSupport.mockLocator("loc-principal-A", headerWarehouse);
+      ShipmentInOut parentInOut = mock(ShipmentInOut.class);
+      when(parentInOut.getWarehouse()).thenReturn(headerWarehouse);
+      ShipmentInOutLine line = mock(ShipmentInOutLine.class);
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(ShipmentInOutLine.class)).thenReturn(line);
+      OrderLine orderLine = mockOrderLine();
+
+      ShipmentInOutLine returned = InOutLineFromOrderFactory.createAndLinkLine(parentInOut,
+          orderLine, bin, 30L, new BigDecimal("4"));
+
+      org.junit.Assert.assertSame(line, returned);
+      verify(line).setSalesOrderLine(orderLine);
+      verify(line).setMovementQuantity(new BigDecimal("4"));
+      verify(line).setLineNo(30L);
+      org.mockito.InOrder order = Mockito.inOrder(dal);
+      order.verify(dal).save(line);
+      order.verify(dal).flush();
+    }
+  }
+
+  /**
    * The caller-supplied locator already belongs to the header's warehouse — a legitimate choice
    * that must survive untouched, with no extra lookup issued.
    */

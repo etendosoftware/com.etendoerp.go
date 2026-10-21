@@ -17,6 +17,7 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
@@ -31,7 +32,11 @@ import com.etendoerp.go.schemaforge.NeoServlet.NeoPathInfo;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
 
-/** Tests for {@link NeoButtonHandler}. */
+/**
+ * Tests for {@link NeoButtonHandler}.
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoButtonHandler
+ */
 public class NeoButtonHandlerTest {
 
   private final NeoButtonHandler handler = new NeoButtonHandler();
@@ -115,5 +120,20 @@ public class NeoButtonHandlerTest {
     NeoResponse resp = handler.handleButtonAction(pathInfo, "GET", req, entity);
 
     assertEquals(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, resp.getHttpStatus());
+  }
+
+  /** A malformed action body is the client's error: 400, not the 500 of a failing action. */
+  @Test
+  public void postWithMalformedBodyReturnsBadRequest() {
+    NeoPathInfo pathInfo = new NeoPathInfo("spec", "order", "rec-1",
+        false, null, true, "complete");
+    SFEntity entity = mock(SFEntity.class);
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    when(req.getAttribute(NeoServlet.ACTION_REQUEST_BODY_ATTR)).thenReturn("{\"x\":[");
+
+    NeoResponse resp = handler.handleButtonAction(pathInfo, "POST", req, entity);
+
+    assertEquals(HttpServletResponse.SC_BAD_REQUEST, resp.getHttpStatus());
+    assertTrue(resp.getBody().toString().contains("Invalid JSON body"));
   }
 }

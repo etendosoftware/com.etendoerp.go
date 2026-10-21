@@ -163,8 +163,14 @@ public class EnvironmentAccessPolicyTest {
     OBDal dal = mock(OBDal.class);
     when(dal.createQuery(eq(Preference.class), anyString())).thenReturn(query);
     TenantPlanService plans = mock(TenantPlanService.class);
-    when(plans.resolvePlan("demo-client")).thenReturn(TenantPlanService.PLAN_FREE);
-    TenantEnvironmentLifecycleService lifecycle = new TenantEnvironmentLifecycleService(plans);
+    when(plans.resolvePlanWithoutSubscription("demo-client")).thenReturn(TenantPlanService.PLAN_FREE);
+    // ETP-5047 — resolve asks for a subscription row first (any row decides the productive
+    // path). Neither tenant here has one; without this mock the real SubscriptionService would
+    // throw on the mocked DAL and resolve would swallow it into a null snapshot.
+    SubscriptionService subscriptions = mock(SubscriptionService.class);
+    when(subscriptions.findLatest(anyString())).thenReturn(java.util.Optional.empty());
+    TenantEnvironmentLifecycleService lifecycle =
+        new TenantEnvironmentLifecycleService(plans, subscriptions);
 
     // readPreference enters admin mode, which needs no real session in a unit test.
     try (MockedStatic<OBDal> dalStatic = mockStatic(OBDal.class);
@@ -204,8 +210,14 @@ public class EnvironmentAccessPolicyTest {
     OBDal dal = mock(OBDal.class);
     when(dal.createQuery(eq(Preference.class), anyString())).thenReturn(query);
     TenantPlanService plans = mock(TenantPlanService.class);
-    when(plans.resolvePlan("demo-client")).thenReturn(TenantPlanService.PLAN_FREE);
-    TenantEnvironmentLifecycleService lifecycle = new TenantEnvironmentLifecycleService(plans);
+    when(plans.resolvePlanWithoutSubscription("demo-client")).thenReturn(TenantPlanService.PLAN_FREE);
+    // ETP-5047 — resolve asks for a subscription row first (any row decides the productive
+    // path). Neither tenant here has one; without this mock the real SubscriptionService would
+    // throw on the mocked DAL and resolve would swallow it into a null snapshot.
+    SubscriptionService subscriptions = mock(SubscriptionService.class);
+    when(subscriptions.findLatest(anyString())).thenReturn(java.util.Optional.empty());
+    TenantEnvironmentLifecycleService lifecycle =
+        new TenantEnvironmentLifecycleService(plans, subscriptions);
 
     // readPreference enters admin mode, which needs no real session in a unit test.
     try (MockedStatic<OBDal> dalStatic = mockStatic(OBDal.class);

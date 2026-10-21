@@ -54,7 +54,9 @@ import com.etendoerp.psd2.bank.integration.utils.BankIntegrationConstants;
 import com.etendoerp.psd2.bank.integration.utils.SaltEdgeAccountLinkHelper;
 
 /**
- * Regression suite for ETP-5097 — "Borrar conexión bancaria" silently did nothing when run
+ * @covers com.etendoerp.go.schemaforge.FinancialAccountBankConnectionHandler
+ *
+ * <p>Regression suite for ETP-5097 — "Borrar conexión bancaria" silently did nothing when run
  * against an account that had already been soft-disconnected.
  *
  * <p>Root cause: {@code handleDisconnect} used to resolve the connection through
@@ -265,6 +267,114 @@ public class FinancialAccountBankConnectionHandlerDisconnectTest {
       NeoResponse response = handler.handle(postContext(ACTION_DISCONNECT, body));
 
       assertEquals(404, response.getHttpStatus());
+    }
+  }
+
+  /** Builds an account whose Salt Edge link is cleared when the (mocked) helper unlinks it. */
+  private FIN_FinancialAccount linkedAccountUnlinkedBy(
+      MockedStatic<SaltEdgeAccountLinkHelper> linkHelper, FinaccConnection connection,
+      boolean permanent) {
+    FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
+    String[] saltEdgeId = { "SE-ACC-SHARED" };
+    when(finAcc.getPSD2SaltEdgeAccountID()).thenAnswer(inv -> saltEdgeId[0]);
+    doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
+    linkHelper.when(() -> SaltEdgeAccountLinkHelper.getLatestConnectionForFinAcc(finAcc))
+        .thenReturn(connection);
+    // A connection shared by several accounts is unlinked locally whatever the flag says
+    // (SaltEdgeAccountLinkHelper#disconnectConnection): the account loses its Salt Edge id.
+    linkHelper.when(() -> SaltEdgeAccountLinkHelper.disconnectConnection(connection, permanent))
+        .thenAnswer(inv -> {
+          saltEdgeId[0] = null;
+          return false;
+        });
+    return finAcc;
+  }
+
+  /** A soft request on a shared connection ends unlinked: the answer reports it as permanent. */
+  @Test
+  public void testSoftRequestOnSharedConnectionReportsPermanentNotReconnectable() throws Exception {
+    JSONObject body = new JSONObject()
+        .put(PARAM_ACCOUNT_ID, ACCOUNT_ID)
+        .put(PARAM_PERMANENT_DELETION, false);
+    FinaccConnection connection = mock(FinaccConnection.class);
+    when(connection.getConnectionStatus()).thenReturn("AC");
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
+            mockStatic(SaltEdgeAccountLinkHelper.class)) {
+      stubObContext(obContext);
+      linkedAccountUnlinkedBy(linkHelper, connection, false);
+
+      NeoResponse response = handler.handle(postContext(ACTION_DISCONNECT, body));
+
+      assertEquals(200, response.getHttpStatus());
+      assertTrue(dataOf(response).getBoolean("disconnected"));
+      assertTrue(dataOf(response).getBoolean("permanent"));
+      assertFalse(dataOf(response).getBoolean("reconnectable"));
+      linkHelper.verify(() -> SaltEdgeAccountLinkHelper.disconnectConnection(connection, false));
+    }
+  }
+
+  /**
+   * A permanent request on a shared connection is delegated once to the helper (which only
+   * unlinks locally and never deletes at Salt Edge: that is the helper's contract) and answers
+   * a permanent 200.
+   */
+  @Test
+  public void testPermanentRequestOnSharedConnectionUnlinksAndAnswersPermanent() throws Exception {
+    JSONObject body = new JSONObject()
+        .put(PARAM_ACCOUNT_ID, ACCOUNT_ID)
+        .put(PARAM_PERMANENT_DELETION, true);
+    FinaccConnection connection = mock(FinaccConnection.class);
+    when(connection.getConnectionStatus()).thenReturn("AC");
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
+            mockStatic(SaltEdgeAccountLinkHelper.class)) {
+      stubObContext(obContext);
+      linkedAccountUnlinkedBy(linkHelper, connection, true);
+
+      NeoResponse response = handler.handle(postContext(ACTION_DISCONNECT, body));
+
+      assertEquals(200, response.getHttpStatus());
+      assertTrue(dataOf(response).getBoolean("permanent"));
+      assertFalse(dataOf(response).getBoolean("reconnectable"));
+      linkHelper.verify(() -> SaltEdgeAccountLinkHelper.disconnectConnection(connection, true),
+          times(1));
+      linkHelper.verify(() -> SaltEdgeAccountLinkHelper.disconnectConnection(connection, false),
+          never());
+      linkHelper.verify(() -> SaltEdgeAccountLinkHelper.disconnectFinancialAccount(
+          org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.anyBoolean()), never());
+    }
+  }
+
+  /**
+   * A soft request on a connection already in status IN returns before the helper is reached
+   * (so before any shared-connection decision): 200, no unlink, the account keeps its link and
+   * stays reconnectable.
+   */
+  @Test
+  public void testSoftRequestOnInactiveConnectionIsANoOpThatKeepsTheLink() throws Exception {
+    JSONObject body = new JSONObject()
+        .put(PARAM_ACCOUNT_ID, ACCOUNT_ID)
+        .put(PARAM_PERMANENT_DELETION, false);
+    FinaccConnection connection = mock(FinaccConnection.class);
+    when(connection.getConnectionStatus()).thenReturn("IN");
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
+            mockStatic(SaltEdgeAccountLinkHelper.class)) {
+      stubObContext(obContext);
+      FIN_FinancialAccount finAcc = linkedAccountUnlinkedBy(linkHelper, connection, false);
+
+      NeoResponse response = handler.handle(postContext(ACTION_DISCONNECT, body));
+
+      assertEquals(200, response.getHttpStatus());
+      assertFalse(dataOf(response).getBoolean("permanent"));
+      assertTrue(dataOf(response).getBoolean("reconnectable"));
+      linkHelper.verify(() -> SaltEdgeAccountLinkHelper.disconnectConnection(connection, false),
+          never());
+      verify(finAcc, never()).setPSD2SaltEdgeAccountID(isNull());
     }
   }
 

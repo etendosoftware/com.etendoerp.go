@@ -13,7 +13,6 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
-import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.core.SessionHandler;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.service.OBDal;
@@ -38,6 +37,7 @@ import org.openbravo.model.financialmgmt.tax.TaxCategory;
 public class DemoDataTransferService {
   private static final Logger log = LogManager.getLogger(DemoDataTransferService.class);
   private static final String ZERO_ID = "0";
+  private static final String SYSTEM_CONTEXT_OPERATION = "the demo data transfer";
   private static final String SOURCE_UNAVAILABLE = "Source demo environment is unavailable";
   private static final String SAME_ENVIRONMENT = "Source and target environments are the same";
   /**
@@ -295,8 +295,12 @@ public class DemoDataTransferService {
       withSystemContext(() -> runInSystemContext(productiveClientId));
     } catch (RuntimeException e) {
       log.error("Demo data transfer failed for productive client {}", productiveClientId, e);
-      rollbackFailedTransfer();
-      withSystemContext(() -> recordFailure(productiveClientId, e));
+      // Both as system, as before: withSystemContext now hands the worker its own (empty)
+      // context back, so the rollback no longer runs on a system context left behind by chance.
+      withSystemContext(() -> {
+        rollbackFailedTransfer();
+        recordFailure(productiveClientId, e);
+      });
     }
   }
 
@@ -426,15 +430,30 @@ public class DemoDataTransferService {
       log.warn("Could not roll back failed demo data transfer", rollbackError);
     }
   }
-  private void withSystemContext(Runnable action) { OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID); OBContext.setAdminMode(true); try { action.run(); } finally { OBContext.restorePreviousMode(); } }
+  /**
+   * Runs {@code action} as system and hands the caller its own context back (ETP-5047). This used
+   * to set the system context and only leave admin mode afterwards, so a caller — the paid
+   * onboarding's {@code completeCommittedOnboarding} — kept running as system for the rest of its
+   * request. {@link SystemContext} is the shared implementation of the pattern.
+   */
+  private void withSystemContext(Runnable action) {
+    SystemContext.run(SYSTEM_CONTEXT_OPERATION, action);
+  }
+
   private <T> T withSystemResult(ResultSupplier<T> action) throws JSONException {
-    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
-    OBContext.setAdminMode(true);
-    try {
-      return action.get();
-    } finally {
-      OBContext.restorePreviousMode();
+    JSONException[] failure = new JSONException[1];
+    T result = SystemContext.call(SYSTEM_CONTEXT_OPERATION, () -> {
+      try {
+        return action.get();
+      } catch (JSONException e) {
+        failure[0] = e;
+        return null;
+      }
+    });
+    if (failure[0] != null) {
+      throw failure[0];
     }
+    return result;
   }
   @FunctionalInterface private interface ResultSupplier<T> { T get() throws JSONException; }
 }

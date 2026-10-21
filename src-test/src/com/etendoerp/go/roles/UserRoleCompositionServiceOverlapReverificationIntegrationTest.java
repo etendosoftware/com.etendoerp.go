@@ -58,8 +58,10 @@ import org.openbravo.model.ad.ui.Window;
  *       grants), the real matrix's grants are seeded directly on the templates here, mirroring
  *       exactly what that script will eventually write.</li>
  * </ul>
+ *
+ * @covers com.etendoerp.go.roles.UserRoleCompositionService
  */
-public class UserRoleCompositionServiceOverlapReverificationTest extends WeldBaseTest {
+public class UserRoleCompositionServiceOverlapReverificationIntegrationTest extends WeldBaseTest {
 
   /** Real ETP-4878 matrix window: "Contactos" (Business Partner) — full for Sales, RO for Inventory. */
   private static final String WINDOW_CONTACTOS = "123";

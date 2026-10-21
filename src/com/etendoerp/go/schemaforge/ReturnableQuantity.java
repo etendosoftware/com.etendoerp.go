@@ -84,12 +84,14 @@ final class ReturnableQuantity {
           + "JOIN M_InOut rh ON rh.M_InOut_ID = rl.M_InOut_ID "
           + "WHERE rl.Canceled_Inoutline_ID = ? AND rh.DocStatus NOT IN ('VO')";
   /**
-   * Row lock on one source line. Taken BEFORE the returned total is read and held to the end of the
+   * Row lock on one source line ({@code FOR NO KEY UPDATE}: a foreign-key insert that points at
+   * the line, an invoice line or a match row, takes {@code FOR KEY SHARE} on it and must not wait
+   * for a return — ETP-5713). Taken BEFORE the returned total is read and held to the end of the
    * transaction, so a second request on the same source line waits here, then reads a total that
    * includes the first one's lines (READ COMMITTED: each statement sees what was committed).
    */
   private static final String LOCK_SOURCE_LINE_SQL =
-      "SELECT M_InOutLine_ID FROM M_InOutLine WHERE M_InOutLine_ID = ? FOR UPDATE";
+      "SELECT M_InOutLine_ID FROM M_InOutLine WHERE M_InOutLine_ID = ? FOR NO KEY UPDATE";
   private static final String EXCLUDING_LINE_SQL = " AND rl.M_InOutLine_ID <> ?";
 
   private ReturnableQuantity() {
@@ -124,7 +126,7 @@ final class ReturnableQuantity {
   }
 
   /**
-   * Locks the given source lines ({@code SELECT ... FOR UPDATE}) in ascending id order, so two
+   * Locks the given source lines ({@code SELECT ... FOR NO KEY UPDATE}) in ascending id order, so two
    * requests touching overlapping lines can never wait on each other in opposite orders. It uses the
    * DAL's own connection: the lock lives in the very transaction that goes on to insert the return
    * lines, and is released when it ends. Call it BEFORE reading {@link #alreadyReturned}.
