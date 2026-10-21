@@ -75,6 +75,8 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  * is mocked and {@code OBContext}/{@code EtendoGoJwtDalHelper} are statically stubbed, so these run
  * fast with no database — the servlet wiring (routing → service → cookie/CSRF/response envelope) is
  * what's under test. DB-level store behavior is covered by {@code JdbcGoSessionStoreIntegrationTest}.
+ *
+ * @covers com.etendoerp.go.rest.EtendoGoJwtServlet
  */
 public class GoSessionEndpointsTest {
 
@@ -145,6 +147,68 @@ public class GoSessionEndpointsTest {
     }
 
     assertEquals(401, resp.status);
+    verify(goSessionService, never()).create(anyString(), anyString(), any(), any());
+  }
+
+  // ETP-5847 — POST /session/link: the signup API's one-time login link.
+
+  @Test
+  public void loginLinkSpendsTheLinkAndOpensALinkSession() throws Exception {
+    Account account = mock(Account.class);
+    when(account.getId()).thenReturn("ACC1");
+    when(account.getEmail()).thenReturn(EMAIL);
+    IssuedGoSession issued = new IssuedGoSession(
+        "sess-token-xyz", "refresh-abc", "csrf-xyz", new GoSessionRecord());
+    when(goSessionService.create(eq("ACC1"), eq("link"), any(), any())).thenReturn(issued);
+
+    CapturedResponse resp = new CapturedResponse();
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
+        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class);
+        MockedStatic<SignupAccountDalHelper> signup = mockStatic(SignupAccountDalHelper.class)) {
+      signup.when(() -> SignupAccountDalHelper.findAccountByLoginLinkHash(
+          eq(AccountRegistrationService.hashAuthToken("link-token")), any())).thenReturn(account);
+      dal.when(() -> EtendoGoJwtDalHelper.findActiveAccountById("ACC1")).thenReturn(account);
+      signup.when(() -> SignupAccountDalHelper.environmentUserId(account)).thenReturn("USER1");
+
+      servlet.doPost(jsonPost("/session/link", new JSONObject().put("token", "link-token")),
+          resp.response);
+
+      signup.verify(() -> SignupAccountDalHelper.consumeLoginLink(eq(account), any()));
+    }
+
+    assertEquals(200, resp.status);
+    assertNotNull(resp.cookie(GoSessionSecurity.COOKIE_NAME));
+    JSONObject body = new JSONObject(resp.body.toString());
+    assertEquals("csrf-xyz", body.getString("csrfToken"));
+    assertEquals("USER1", body.getJSONObject("environment").getString("userId"));
+    assertFalse("session token must NOT be in the body", body.has("token"));
+  }
+
+  @Test
+  public void anUnknownOrSpentLoginLinkOpensNoSession() throws Exception {
+    CapturedResponse resp = new CapturedResponse();
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
+        MockedStatic<SignupAccountDalHelper> signup = mockStatic(SignupAccountDalHelper.class)) {
+      servlet.doPost(jsonPost("/session/link", new JSONObject().put("token", "spent")),
+          resp.response);
+
+      signup.verify(() -> SignupAccountDalHelper.consumeLoginLink(any(), any()), never());
+    }
+
+    assertEquals(400, resp.status);
+    assertEquals("LOGIN_LINK_INVALID",
+        new JSONObject(resp.body.toString()).getJSONObject("error").getString("code"));
+    verify(goSessionService, never()).create(anyString(), anyString(), any(), any());
+  }
+
+  @Test
+  public void aLoginLinkCallWithoutATokenIsABadRequest() throws Exception {
+    CapturedResponse resp = new CapturedResponse();
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class)) {
+      servlet.doPost(jsonPost("/session/link", new JSONObject()), resp.response);
+    }
+
+    assertEquals(400, resp.status);
     verify(goSessionService, never()).create(anyString(), anyString(), any(), any());
   }
 
