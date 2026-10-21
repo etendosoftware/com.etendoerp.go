@@ -393,6 +393,10 @@ firing while the flag is off does no work and ends as an ERROR in Process Monito
 one internal alert a day (`billing-reconcile-schedule-flag-off`); a flag on with no request does
 nothing at all. Whether the flag is needed is open: §1.8.
 
+On a fresh local environment the menu popup answers "You do not have sufficient privileges" until a
+full build has run (`./gradlew compile.complete`, then a smartbuild): a class-mode smartbuild does
+not regenerate the WAD servlet the popup goes through. A normal deploy runs WAD. Design §8.
+
 ---
 
 ## 3. Legacy plans and the cutover
@@ -649,11 +653,12 @@ calling user, whose role can read neither `AD_Preference` nor `ETGO_SUBSCRIPTION
   and raise **one review alert per pause episode** (`PausedSubscriptionAlert`: an open
   `reconcile:subscription-paused:<sub>` billing-event row, a WARN, an internal alert; once per
   episode decided by Martin on 2026-10-21, it was once per subscription). The episode ends when a
-  path sees the subscription not paused — the webhook on `customer.subscription.updated` and
-  `customer.subscription.resumed` (handled only for this), the reconciliation on every re-read —
-  which renames the open row to `<id>:ended:<millis>`, so the next pause alerts again; paused
-  collection (`reconcile:pause-collection:<sub>`) the same, ended when `pause_collection` is
-  cleared. Our checkout sets no trial, so `paused` means a trial or a pause was configured in
+  path sees the subscription not paused — the webhook on `customer.subscription.updated` /
+  `.deleted` and on `customer.subscription.resumed` (handled only for this), the reconciliation on
+  every re-read — which renames the open row to `<id>:ended:<millis>`, so the next pause alerts
+  again. Paused collection (`reconcile:pause-collection:<sub>`, raised by the reconciliation only,
+  a WARN and the row without an internal alert) has the same episodes, ended when
+  `pause_collection` is cleared. Our checkout sets no trial, so `paused` means a trial or a pause was configured in
   Stripe by hand, and a paused subscription can be resumed — closing the row would make that
   impossible, since a closed row is never reopened.
 - **The row, not the marker, makes a tenant productive (ETP-5047 review, B1).**

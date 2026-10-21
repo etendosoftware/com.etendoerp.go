@@ -418,9 +418,11 @@ Whether the billing reconciliation (`ETGO_BillingReconciliation`) runs on a sche
   Process Monitor, saying to turn the flag on or unschedule the request; the first such run of each
   UTC day also sends one internal alert (`billing-reconcile-schedule-flag-off`).
 - A run started from the Classic menu **Billing Reconciliation**, or a Process Request run
-  immediately or later once, is never gated. Environment
-level, evaluated with an empty context. Its callers are `BillingReconciliationScheduleStartup` and
-`BillingReconciliationProcess`. Design of record:
+  immediately or later once, is never gated.
+
+Environment level, evaluated with an empty context; read on every scheduled run, so turning it off
+(ConfigCat, live within one poll) stops the scheduled work without a restart. Its callers are
+`BillingReconciliationScheduleStartup` and `BillingReconciliationProcess`. Design of record:
 [`plans/2026-10-18-etp-5048-billing-reconciliation-design.md`](plans/2026-10-18-etp-5048-billing-reconciliation-design.md).
 
 ## 2. The onboarding paywall
