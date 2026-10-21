@@ -65,6 +65,7 @@ import org.openbravo.model.ad.domain.Preference;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
+import org.openbravo.model.common.businesspartner.Category;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.plm.Product;
@@ -475,6 +476,48 @@ class DemoDataTransferServiceTest {
     verify(obDal).createQuery(eq(org.openbravo.model.common.geography.Location.class),
         contains("BusinessPartnerLocation"));
     verify(sessionHandler, times(3)).commitAndStart();
+  }
+
+  /**
+   * A demo contact category is copied with the contact types it defines: they decide the type of
+   * every contact later created in it, and a copy left at the column default (neither) would fail
+   * the category's own "at least one type" rule on its next edit. Each flag is copied on its own
+   * value, so a customer-only category stays customer-only.
+   *
+   * <p>The two accessors are module columns generated into core's {@code Category}, so they are
+   * reached by name, as the copier itself does: the test source then compiles against an
+   * environment whose entities were generated without them, and fails at run time there — which is
+   * right, since the copier would silently skip the flags in that environment.</p>
+   */
+  @Test
+  void aDemoContactCategoryIsCopiedWithItsContactTypes() throws Exception {
+    Client source = client(SOURCE_ID);
+    BusinessPartner sourceContact = mock(BusinessPartner.class);
+    BusinessPartner targetContact = mock(BusinessPartner.class);
+    Currency systemCurrency = currency(SYSTEM_ID);
+    Category sourceCategory = mock(Category.class);
+    Category copiedCategory = mock(Category.class);
+    Method isCustomer = Category.class.getMethod("isEtgoIscustomer");
+    Method isVendor = Category.class.getMethod("isEtgoIsvendor");
+    Method setCustomer = Category.class.getMethod("setEtgoIscustomer", Boolean.class);
+    Method setVendor = Category.class.getMethod("setEtgoIsvendor", Boolean.class);
+    when(sourceCategory.getClient()).thenReturn(source);
+    when(sourceCategory.getName()).thenReturn("Clientes");
+    when(isCustomer.invoke(sourceCategory)).thenReturn(Boolean.TRUE);
+    when(isVendor.invoke(sourceCategory)).thenReturn(Boolean.FALSE);
+    when(sourceContact.getCurrency()).thenReturn(systemCurrency);
+    when(sourceContact.getBusinessPartnerCategory()).thenReturn(sourceCategory);
+    givenOneContactToUpsert(sourceContact, targetContact);
+    OBQuery<Category> noTargetCategory = queryWithUniqueResult(null);
+    when(obDal.createQuery(eq(Category.class), anyString())).thenReturn(noTargetCategory);
+    when(obProvider.get(Category.class)).thenReturn(copiedCategory);
+
+    invokeCopy("copyContacts", Client.class, Client.class, Organization.class, source,
+        client(TARGET_ID), mock(Organization.class));
+
+    setCustomer.invoke(verify(copiedCategory), Boolean.TRUE);
+    setVendor.invoke(verify(copiedCategory), Boolean.FALSE);
+    verify(targetContact).setBusinessPartnerCategory(copiedCategory);
   }
 
   /**

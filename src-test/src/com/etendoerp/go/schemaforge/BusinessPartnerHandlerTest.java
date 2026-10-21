@@ -76,6 +76,12 @@ import com.etendoerp.go.common.SpanishTaxIdValidator;
  *
  * <p>Tests that touch the database use {@code mockStatic(OBDal.class)} to provide a
  * mock JDBC {@link Connection} and avoid requiring a live Etendo environment.
+ *
+ * <p>The contact-type rules themselves (the explicit/inherited matrix, the default category) are
+ * specified in {@code ContactTypeRulesTest}; this class only pins that {@code handle()} and
+ * {@code afterHandle()} apply them.
+ *
+ * @covers com.etendoerp.go.schemaforge.BusinessPartnerHandler
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -520,6 +526,7 @@ class BusinessPartnerHandlerTest {
     when(rsMock.getString(3)).thenReturn("López");
     when(psMock.executeQuery()).thenReturn(rsMock);
     when(connMock.prepareStatement(anyString())).thenReturn(psMock);
+    givenStoredContactTypes(connMock, "Y", "N");
 
     try (MockedStatic<OBDal> mDal = mockStatic(OBDal.class)) {
       OBDal obDalMock = mock(OBDal.class);
@@ -552,6 +559,7 @@ class BusinessPartnerHandlerTest {
     when(rsMock.getString(1)).thenReturn("Nombre Guardado");
     when(psMock.executeQuery()).thenReturn(rsMock);
     when(connMock.prepareStatement(anyString())).thenReturn(psMock);
+    givenStoredContactTypes(connMock, "Y", "N");
 
     try (MockedStatic<OBDal> mDal = mockStatic(OBDal.class)) {
       OBDal obDalMock = mock(OBDal.class);
@@ -780,6 +788,7 @@ class BusinessPartnerHandlerTest {
       when(rsMock.getString(2)).thenReturn("1");
       when(psMock.executeQuery()).thenReturn(rsMock);
       when(connMock.prepareStatement(anyString())).thenReturn(psMock);
+      givenStoredContactTypes(connMock, "Y", "N");
       OBDal obDalMock = mock(OBDal.class);
       when(obDalMock.getConnection()).thenReturn(connMock);
       mDal.when(OBDal::getInstance).thenReturn(obDalMock);
@@ -843,6 +852,7 @@ class BusinessPartnerHandlerTest {
       when(rsMock.getString(2)).thenReturn("1"); // persisted key: NIF
       when(psMock.executeQuery()).thenReturn(rsMock);
       when(connMock.prepareStatement(anyString())).thenReturn(psMock);
+      givenStoredContactTypes(connMock, "Y", "N");
       OBDal obDalMock = mock(OBDal.class);
       when(obDalMock.getConnection()).thenReturn(connMock);
       mDal.when(OBDal::getInstance).thenReturn(obDalMock);
@@ -2071,6 +2081,157 @@ class BusinessPartnerHandlerTest {
     handler.handle(ctx);
 
     assertEquals("Juan García", body.getString("name"));
+  }
+
+  // ── Contact type (customer / vendor) rules ───────────────────────────────────
+
+  /** Distinctive part of the stored-types lookup {@code ContactTypeRules} runs on an update. */
+  private static final String CONTACT_TYPES_SQL_MARKER = "iscustomer, isvendor FROM c_bpartner";
+  /** Distinctive part of the category-types lookup {@code ContactTypeRules} runs on a create. */
+  private static final String CATEGORY_TYPES_SQL_MARKER = "em_etgo_isvendor FROM c_bp_group";
+
+  /**
+   * A create that does not send {@code customer}/{@code vendor} takes them from its category, and
+   * the create then continues through the rest of the pre-save hook (searchKey placeholder).
+   */
+  @Test
+  void testHandlePostInheritsContactTypesFromTheCategoryAndContinues() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("name", "Proveedor SL");
+    body.put("businessPartnerCategory", "CAT_VENDORS");
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getRequestBody()).thenReturn(body);
+    Connection connMock = mock(Connection.class);
+    givenTypesRow(connMock, CATEGORY_TYPES_SQL_MARKER, "N", "Y");
+
+    try (MockedStatic<OBDal> mDal = mockStatic(OBDal.class)) {
+      OBDal obDalMock = mock(OBDal.class);
+      when(obDalMock.getConnection()).thenReturn(connMock);
+      mDal.when(OBDal::getInstance).thenReturn(obDalMock);
+
+      assertNull(handler.handle(ctx));
+    }
+
+    assertFalse(body.getBoolean("customer"));
+    assertTrue(body.getBoolean("vendor"));
+    assertEquals("Proveedor SL", body.getString("searchKey"));
+  }
+
+  /**
+   * A create sent with neither type is refused with {@code ETGO_BPartnerContactTypeRequired}
+   * before any other pre-save step mutates the body.
+   */
+  @Test
+  void testHandlePostRejectsAContactSentWithNoType() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("name", "Sin tipo");
+    body.put("customer", false);
+    body.put("vendor", false);
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    try (MockedStatic<OBMessageUtils> msg = mockStatic(OBMessageUtils.class)) {
+      msg.when(() -> OBMessageUtils.messageBD(anyString())).thenAnswer(inv -> inv.getArgument(0));
+
+      assertContactTypeRejection(handler.handle(ctx));
+    }
+    assertFalse(body.has("searchKey"));
+  }
+
+  /**
+   * The header judges every update, not only one that sends a flag: a stored contact with no type
+   * is refused on its next edit of an unrelated field (the Customer/Vendor tabs do not — see
+   * {@code ContactTypeRulesTest}).
+   */
+  @Test
+  void testHandlePatchOfAContactStoredWithNoTypeIsRejectedOnAnUnrelatedEdit() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("etgoFirstname", "Pedro");
+    when(ctx.getHttpMethod()).thenReturn("PATCH");
+    when(ctx.getRequestBody()).thenReturn(body);
+    when(ctx.getRecordId()).thenReturn("REC_001");
+    Connection connMock = mock(Connection.class);
+    givenStoredContactTypes(connMock, "N", "N");
+
+    try (MockedStatic<OBDal> mDal = mockStatic(OBDal.class);
+        MockedStatic<OBMessageUtils> msg = mockStatic(OBMessageUtils.class)) {
+      OBDal obDalMock = mock(OBDal.class);
+      when(obDalMock.getConnection()).thenReturn(connMock);
+      mDal.when(OBDal::getInstance).thenReturn(obDalMock);
+      msg.when(() -> OBMessageUtils.messageBD(anyString())).thenAnswer(inv -> inv.getArgument(0));
+
+      assertContactTypeRejection(handler.handle(ctx));
+    }
+    assertFalse(body.has("name"));
+  }
+
+  /**
+   * After a create, both posting-account backfills run bound to the new record: a type inherited
+   * from the category in {@code handle()} must not be left without its accounting row. Each
+   * statement is guarded in SQL by the contact's own flag, so running both is the contract.
+   */
+  @Test
+  void testAfterHandlePostProvisionsThePostingAccountRowsOfTheNewContact() throws Exception {
+    JSONObject body = buildResponseBody();
+    NeoResponse prevResult = mock(NeoResponse.class);
+    when(prevResult.getBody()).thenReturn(body);
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getPreviousResult()).thenReturn(prevResult);
+
+    Connection connMock = mock(Connection.class);
+    ResultSet noIdentifier = mock(ResultSet.class);
+    when(noIdentifier.next()).thenReturn(false);
+    PreparedStatement psIdentifier = mock(PreparedStatement.class);
+    when(psIdentifier.executeQuery()).thenReturn(noIdentifier);
+    PreparedStatement psCustomer = mock(PreparedStatement.class);
+    PreparedStatement psVendor = mock(PreparedStatement.class);
+    when(connMock.prepareStatement(argThat(s -> s != null && s.contains("em_etgo_identifier"))))
+        .thenReturn(psIdentifier);
+    when(connMock.prepareStatement(argThat(s -> s != null && s.contains("c_bp_customer_acct"))))
+        .thenReturn(psCustomer);
+    when(connMock.prepareStatement(argThat(s -> s != null && s.contains("c_bp_vendor_acct"))))
+        .thenReturn(psVendor);
+
+    try (MockedStatic<OBDal> mDal = mockStatic(OBDal.class)) {
+      OBDal obDalMock = mock(OBDal.class);
+      when(obDalMock.getConnection()).thenReturn(connMock);
+      mDal.when(OBDal::getInstance).thenReturn(obDalMock);
+
+      handler.afterHandle(ctx);
+    }
+
+    verify(psCustomer).setString(1, "REC_ID");
+    verify(psCustomer).executeUpdate();
+    verify(psVendor).setString(1, "REC_ID");
+    verify(psVendor).executeUpdate();
+  }
+
+  private static void assertContactTypeRejection(NeoResponse result) throws Exception {
+    assertNotNull(result);
+    assertEquals(400, result.getHttpStatus());
+    assertEquals("ETGO_BPartnerContactTypeRequired",
+        result.getBody().getJSONObject("error").getJSONArray("messageKeys").getString(0));
+  }
+
+  /**
+   * Routes the stored-types lookup that every contact update now runs to its own row, so a
+   * fixture whose generic statement answers another query (name parts, taxID) is not read as a
+   * contact with no type and rejected before the behaviour under test.
+   */
+  private static void givenStoredContactTypes(Connection conn, String isCustomer, String isVendor)
+      throws SQLException {
+    givenTypesRow(conn, CONTACT_TYPES_SQL_MARKER, isCustomer, isVendor);
+  }
+
+  private static void givenTypesRow(Connection conn, String sqlMarker, String first, String second)
+      throws SQLException {
+    ResultSet types = mock(ResultSet.class);
+    when(types.next()).thenReturn(true);
+    when(types.getString(1)).thenReturn(first);
+    when(types.getString(2)).thenReturn(second);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    when(ps.executeQuery()).thenReturn(types);
+    when(conn.prepareStatement(argThat(s -> s != null && s.contains(sqlMarker)))).thenReturn(ps);
   }
 
   private void stubEmptySelectorRequest(MockedStatic<RequestContext> reqCtx) {

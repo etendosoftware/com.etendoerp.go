@@ -76,6 +76,15 @@ public class NeoContext {
    */
   private final Map<String, Object> attributes = new HashMap<>();
 
+  /**
+   * ETP-5791 — {@link #getAttribute attribute} holding the {@code Set<String>} of body keys the
+   * caller itself sent on a create, when the channel has already filled defaults into the body
+   * before the pre-hook runs. Only MCP {@code etendo_create} sets it: REST single, REST batch and
+   * {@code etendo_batch} hand the pre-hook the body as sent, so there key presence already answers
+   * "did the caller choose this field". Absent means: presence in the body is the answer.
+   */
+  public static final String ATTR_CLIENT_PROVIDED_FIELDS = "neo.clientProvidedFields";
+
   private NeoContext(Builder builder) {
     this.specName = builder.specName;
     this.entityName = builder.entityName;

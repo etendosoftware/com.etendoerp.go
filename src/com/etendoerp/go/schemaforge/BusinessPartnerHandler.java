@@ -44,6 +44,7 @@ import org.openbravo.erpCommon.utility.OBCurrencyUtils;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
 
 import com.etendoerp.go.common.SpanishTaxIdValidator;
+import com.etendoerp.go.schemaforge.handlers.ContactTypeRules;
 import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
 
 /**
@@ -78,6 +79,12 @@ import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
  * {@code "4"}). To keep dirty legacy data editable, the check only runs on create or when the
  * incoming {@code TaxID} differs from what is already persisted — see
  * {@link #validateTaxId(NeoContext, JSONObject, String)}.
+ *
+ * <p>On POST/PATCH/PUT, {@code handle()} also applies the contact-type rules (ETP-5791, see
+ * {@link ContactTypeRules}): on create, {@code customer}/{@code vendor} not sent explicitly are
+ * inherited from the contact's category; on create and update, a contact left with neither type is
+ * rejected with {@code ETGO_BPartnerContactTypeRequired}. After a create, {@code afterHandle()}
+ * makes sure each type the contact ended up with has its posting-account row.
  *
  * <p>On GET (single record, i.e. {@code /contacts/businessPartner/{id}}):
  * <ul>
@@ -404,6 +411,10 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
       if (formatError != null) {
         return formatError;
       }
+      NeoResponse contactTypeError = applyContactTypeRules(ctx, body, method);
+      if (contactTypeError != null) {
+        return contactTypeError;
+      }
 
       deriveName(ctx, body);
 
@@ -425,6 +436,28 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
       throw new OBException("Error processing BusinessPartner pre-save hooks", e);
     }
     return null;
+  }
+
+  /**
+   * ETP-5791 — contact type (customer / vendor-creditor) rules, see {@link ContactTypeRules}.
+   *
+   * <p>On create, every type flag the request did not carry explicitly is taken from the contact's
+   * category ({@code C_BP_Group.EM_Etgo_Iscustomer/Isvendor}); on create and on every update the
+   * write is rejected when the contact would end up with neither type. Only CRUD writes are
+   * judged — a selector or action request that happens to carry a body is not a save of the
+   * contact.</p>
+   *
+   * @return the rejection, or {@code null} to continue with the (possibly enriched) body
+   */
+  private static NeoResponse applyContactTypeRules(NeoContext ctx, JSONObject body, String method)
+      throws Exception {
+    if (!ContactTypeRules.isCrudWrite(ctx)) {
+      return null;
+    }
+    if ("POST".equals(method)) {
+      return ContactTypeRules.inheritAndValidateOnCreate(ctx, body);
+    }
+    return ContactTypeRules.validateContactUpdate(ctx, body, false);
   }
 
   /**
@@ -710,6 +743,10 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
 
       if ("POST".equals(method)) {
         modified = applyPostCreateSearchKey(body);
+        // ETP-5791: the type flags may have been inherited from the category in handle(). The
+        // INSERT trigger already provisions both posting-account rows, so this is a safety net
+        // that only writes a row that is still missing for a type the contact now has.
+        provisionBpAcctRowsAfterCreate(extractRecordId(body));
       } else {
         // PUT/PATCH: flipping vendor/customer to Y on an already-persisted BP never runs through
         // c_bpartner_trg (it only fires on TG_OP='INSERT'), so backfill whichever posting-account
@@ -757,6 +794,25 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
       }
     } catch (Exception e) {
       log.warn("BusinessPartnerHandler: could not backfill customer/vendor posting accounts for bp={}",
+          recordId, e);
+    }
+  }
+
+  /**
+   * ETP-5791 — after a create, makes sure each type the new contact has (explicit or inherited
+   * from its category) has its posting-account row. Both statements are guarded by the BP's own
+   * {@code IsCustomer}/{@code IsVendor} and by {@code NOT EXISTS}, so they are a no-op for a type
+   * the contact does not have and for a row {@code c_bpartner_trg} already created on INSERT.
+   */
+  private static void provisionBpAcctRowsAfterCreate(String recordId) {
+    if (StringUtils.isBlank(recordId)) {
+      return;
+    }
+    try {
+      runBpAcctBackfill(BP_CUSTOMER_ACCT_FOR_BP_SQL, recordId);
+      runBpAcctBackfill(BP_VENDOR_ACCT_FOR_BP_SQL, recordId);
+    } catch (Exception e) {
+      log.warn("BusinessPartnerHandler: could not provision customer/vendor posting accounts for new bp={}",
           recordId, e);
     }
   }

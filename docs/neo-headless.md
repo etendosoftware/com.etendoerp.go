@@ -5602,6 +5602,31 @@ A list response carries one page, so a total drawn next to it covers the loaded 
 - `approximate` = a non-zero foreign-currency subtotal was converted. `byCurrency` shows original amounts (never approximate), organization currency first, then amount descending. `byMethod` is sorted by converted amount descending.
 - Cost: one grouped scan per page request over the whole filtered set.
 
+#### 5.3.5 "Did the caller send this field?" on create — `ATTR_CLIENT_PROVIDED_FIELDS` (ETP-5791)
+
+A pre-hook that must tell an explicit value from a default cannot always use key presence in the
+body. REST single, REST `/batch` and `etendo_batch` run the pre-hook **before** the create-defaults
+pass, so there the body holds exactly what the caller sent. MCP `etendo_create` runs
+`injectMandatoryDefaults` **first**, so its body also carries every defaulted field.
+
+`McpToolRouter#handleCreate` therefore sets `NeoContext.ATTR_CLIENT_PROVIDED_FIELDS`
+(`"neo.clientProvidedFields"`): a `Set<String>` of the DAL property names the agent itself sent,
+snapshotted before defaults. It is the only setter. A customization reads "explicit" as: attribute
+present → the set contains the key; attribute absent → `body.has(key)`. See
+`ContactTypeRules#isExplicit`. Updates never need it (no defaults pass runs on PATCH/PUT).
+
+**Contact types (ETP-5791).** `C_BP_Group.EM_Etgo_Iscustomer/Isvendor` say whether a category's
+contacts are customers, vendors/creditors or both. Rules live in `handlers/ContactTypeRules`
+(an entity util, called only by the customizations below):
+
+| Customization | Binding | Behaviour |
+|---|---|---|
+| `BusinessPartnerHandler` | `@Named` / `contacts/businessPartner` | On create, `customer`/`vendor` not sent explicitly are taken from the category (the request's, else the AD default category); a category with neither flag passes nothing on. Create and every update reject a contact with neither type (`ETGO_BPartnerContactTypeRequired`). After create, missing posting-account rows are backfilled. Existing contacts are never re-derived. |
+| `BusinessPartnerCategoryHandler` | `@NeoExtension business-partner-category/businessPartnerCategory` | Create/update reject a category with neither flag (`ETGO_BPGroupContactTypeRequired`). |
+| `ContactCustomerTabHandler`, `ContactVendorTabHandler` (base `ContactTypeFlagGuardHandler`) | `@NeoExtension contacts/customer`, `contacts/vendorCreditor` | Same contact rule on updates through those tabs, only when the write sends `customer` or `vendor`. |
+
+Rejections carry the key in `messageKeys`; the SPA translates it (`BACKEND_ERROR_KEY_MAP`).
+
 ## 6. Parent-Child Tab Filtering
 
 When an entity maps to a child tab (`tabLevel > 0`), the servlet automatically filters records by the parent record. The caller provides the parent record ID via the `parentId` query parameter:
