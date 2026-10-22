@@ -8756,7 +8756,14 @@ steps below in this order — both customizations call the single entry point
    sends the product callout's value, which is the same one. Without it `etendo_create` persisted
    `PriceStd 0`, or, with an explicit `unitPrice 20`, 20 (the defaults cascade copies `priceActual`
    into `inppricestd`). The parent is `salesOrder` on `etendo_create`, `parentId` on REST and batch.
-   `unitPrice` is never touched.
+   **`unitPrice` (ETP-5881):** a line sent with no price of its own — `unitPrice` and
+   `grossUnitPrice` each absent or 0 — takes the standard price of that same price-list entry as
+   `unitPrice` (and the entry's `listPrice` when it has a non-zero one and the body has none), through
+   the shared `LinePriceListSupport`. REST single and REST batch run no product callout at that point
+   (the SPA gets the price from it), so such a line used to persist price 0 and net 0; MCP already had
+   the price from `McpLinePriceInjector`, which this does not change, and a non-zero `unitPrice` /
+   `grossUnitPrice` in the body is never replaced. Tax-included lists and products with no price in
+   the list abstain, as the injector does.
    **`listPrice`** (`listPriceFromStandard`, QA reopen CP-8) is editable on both entities, so it is
    filled in one state only — the one the form itself corrects: the price list entry has list
    price 0 and a non-zero standard price, the body's `listPrice` is absent or 0, and the body's
@@ -9695,6 +9702,7 @@ guard in a shared service):
 | purchase invoice line customization | `PurchaseInvoiceLineHandler` — `@NeoExtension(spec = "purchase-invoice", entity = "lines")`, extends `InvoiceLineHandler`, no `@Named` |
 | sales invoice line customization (since ETP-5528; now also discount + update) | `SalesInvoiceLineHandler` |
 | price + amounts, create and update | `InvoiceLineAmountSupport.deriveAmountsOnWrite` (shared by both) |
+| price from the price list on a create sent without one (ETP-5881; sales and purchase invoice, every channel) | `SalesInvoiceLineHandler` → `InvoiceLineAmountSupport.setPriceFromPriceListOnCreate` → `LinePriceListSupport` (shared with the order lines). The parent invoice's price list at the invoice date, as the product callout gives the SPA; REST single/batch ran no callout and persisted price 0. A non-zero `unitPrice`/`grossUnitPrice` is never replaced; tax-included lists abstain. `PurchaseInvoiceLineHandler` calls it too. Purchase-order lines have their own `PurchaseOrderLineHandler` (`@NeoExtension(spec = "purchase-order", entity = "lines")`) that prices a line sent without a price from the order's purchase price list (`OrderLineDiscountSupport.setUnitPriceOnCreate`); the sales order discount/amount rules are not applied to them |
 | completion guard | `InvoiceCompletionLineGuard`, called first by `PurchaseInvoiceHeaderHandler` and `SalesInvoiceHeaderHandler` |
 
 **Precedence between the annotation and the row's qualifier.** The row `purchase-invoice/lines` keeps
