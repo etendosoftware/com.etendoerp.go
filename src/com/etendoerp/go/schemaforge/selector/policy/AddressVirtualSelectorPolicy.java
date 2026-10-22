@@ -33,6 +33,7 @@ import org.hibernate.criterion.Restrictions;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Column;
+import org.openbravo.model.common.geography.Location;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
 
@@ -67,6 +68,15 @@ public final class AddressVirtualSelectorPolicy {
   private static final String LOCATION_TABLE = "C_Location";
   private static final String BPARTNER_LOCATION_TABLE = "C_BPartner_Location";
   private static final String LOCATION_ADDRESS_ENTITY = "locationAddress";
+
+  /**
+   * ETP-5806 — the DAL property name of a single-FK pointer to {@code C_Location}, as declared on
+   * both {@code AD_OrgInfo} ({@code OrganizationInformation#PROPERTY_LOCATIONADDRESS}) and
+   * {@code M_Warehouse} ({@code Warehouse#PROPERTY_LOCATIONADDRESS}). Checking the property's name
+   * and target table is structural (same AD metadata shape on every entity that has it), not an
+   * identity check on a spec or table name.
+   */
+  private static final String LOCATION_POINTER_PROPERTY = "locationAddress";
 
   private static final String COLUMN_COUNTRY = "C_Country_ID";
   private static final String COLUMN_REGION = "C_Region_ID";
@@ -145,6 +155,15 @@ public final class AddressVirtualSelectorPolicy {
    * Whether the given Schema Forge entity is an address wrapper — one whose caller-facing address
    * fields live in {@code C_Location} rather than in its own table.
    *
+   * <p>ETP-5806 added a third, purely structural path: an entity whose own table carries an
+   * <em>optional</em> {@code locationAddress} FK to {@code C_Location} (e.g. {@code organization}'s
+   * {@code information} entity, backed by {@code AD_OrgInfo}). This is deliberately narrower than
+   * "has a {@code locationAddress} property" alone — {@code M_Warehouse} declares the exact same
+   * property name and target table, but its FK is {@code NOT NULL} (the warehouse cannot exist
+   * without a location, so it is the owner of a mandatory address, not a thin wrapper around an
+   * optional one) and is already served by its own tab-less {@code warehouse/location} entity. See
+   * the ETP-5806 handoff notes for this collision — flagged, not silently resolved.
+   *
    * @param entity source Schema Forge entity; may be {@code null}
    * @return {@code true} when the wrapper policy applies to this entity
    */
@@ -156,8 +175,32 @@ public final class AddressVirtualSelectorPolicy {
     String tableName = tab != null && tab.getTable() != null
         ? tab.getTable().getDBTableName()
         : null;
-    return BPARTNER_LOCATION_TABLE.equalsIgnoreCase(tableName)
-        || LOCATION_ADDRESS_ENTITY.equals(entity.getName());
+    if (BPARTNER_LOCATION_TABLE.equalsIgnoreCase(tableName)
+        || LOCATION_ADDRESS_ENTITY.equals(entity.getName())) {
+      return true;
+    }
+    return hasOptionalLocationPointer(tableName);
+  }
+
+  /**
+   * Structural check (ETP-5806): {@code tableName}'s DAL entity declares a {@code locationAddress}
+   * property whose target is {@code C_Location} and whose FK column is NOT mandatory. Names no
+   * spec or table — it asks the same "does this entity have this shape" question for any table.
+   */
+  private static boolean hasOptionalLocationPointer(String tableName) {
+    if (StringUtils.isBlank(tableName)) {
+      return false;
+    }
+    Entity dalEntity = ModelProvider.getInstance().getEntityByTableName(tableName);
+    if (dalEntity == null) {
+      return false;
+    }
+    Property property = dalEntity.getProperty(LOCATION_POINTER_PROPERTY, false);
+    if (property == null || property.isPrimitive() || property.getTargetEntity() == null) {
+      return false;
+    }
+    return Location.ENTITY_NAME.equals(property.getTargetEntity().getName())
+        && !property.isMandatory();
   }
 
   /**
