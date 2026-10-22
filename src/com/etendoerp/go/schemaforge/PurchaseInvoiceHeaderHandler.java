@@ -282,7 +282,7 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
       JSONArray dataArr = NeoHandlerUtils.extractGetDataArray(context);
       if (dataArr == null) {
         // ETP-5757: an empty list page still carries the (zeroed) whole-set footer totals.
-        if (injectListTotals(context)) {
+        if (DocumentListTotals.injectInto(context, true)) {
           return NeoResponse.ok(context.getPreviousResult().getBody());
         }
         // ETP-4783: for PATCH/POST, inject aeatsiiAuthorizationno written by
@@ -310,7 +310,7 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
         SifSubRecordAttachments.enrich(rec, context.getRecordId());
         InvoiceReactivationGuard.enrichReactivationBlock(rec, context.getRecordId());
       }
-      injectListTotals(context); // ETP-5757, last: see AbstractInvoiceHeaderHandler
+      DocumentListTotals.injectInto(context, true); // ETP-5757, last: see AbstractInvoiceHeaderHandler
       return NeoResponse.ok(body);
     } catch (Exception e) {
       log.error("Error enriching purchase invoice", e);

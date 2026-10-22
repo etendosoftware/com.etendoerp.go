@@ -509,19 +509,12 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
       }
       // ETP-5757: whole-set footer totals, also for an empty page. Last on purpose: a failed
       // grouped query aborts the PG transaction, so nothing may query after it.
-      if (context.getRecordId() == null) {
-        changed |= listTotals().inject(context, body);
-      }
+      changed |= DocumentListTotals.injectInto(context, false);
       return changed ? NeoResponse.ok(body) : null;
     } catch (Exception e) {
       log.error("Error post-processing order header GET response (id={})", context.getRecordId(), e);
       return null;
     }
-  }
-
-  /** Package-private seam: the whole-set footer totals for order lists (ETP-5757). */
-  DocumentListTotals listTotals() {
-    return new DocumentListTotals(false);
   }
 
   /**

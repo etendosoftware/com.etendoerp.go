@@ -85,6 +85,29 @@ public class DocumentListTotals {
   }
 
   /**
+   * Adds {@code response.listTotals} to the previous result of a list GET, also when the page is
+   * empty. Call it LAST in {@code afterHandle}: a failed grouped query aborts the PG transaction,
+   * so nothing may query after it. Never throws.
+   *
+   * @param context the current NeoContext
+   * @param invoices {@code true} for invoice lists, {@code false} for order lists
+   * @return whether the totals were added (the caller then returns the previous body)
+   */
+  static boolean injectInto(NeoContext context, boolean invoices) {
+    if (!"GET".equals(context.getHttpMethod()) || context.getRecordId() != null) {
+      return false;
+    }
+    NeoResponse prev = context.getPreviousResult();
+    return prev != null && prev.getBody() != null
+        && create(invoices).inject(context, prev.getBody());
+  }
+
+  /** Package-private seam: builds the totals for one document kind. */
+  static DocumentListTotals create(boolean invoices) {
+    return new DocumentListTotals(invoices);
+  }
+
+  /**
    * Adds {@code response.listTotals} to a list GET body.
    *
    * @param context the request context

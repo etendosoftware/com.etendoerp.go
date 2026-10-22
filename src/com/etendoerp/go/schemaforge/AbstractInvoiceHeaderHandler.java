@@ -838,27 +838,6 @@ public abstract class AbstractInvoiceHeaderHandler {
   }
 
 
-  /** Package-private seam: the whole-set footer totals for invoice lists (ETP-5757). */
-  DocumentListTotals listTotals() {
-    return new DocumentListTotals(true);
-  }
-
-  /**
-   * Adds {@code response.listTotals} (ETP-5757) to a list GET's previous result, also when the page
-   * is empty. Call it LAST in {@code afterHandle}: a failed grouped query aborts the PG
-   * transaction, so nothing may query after it. Never throws.
-   *
-   * @param context the current NeoContext
-   * @return whether the totals were added (the caller then returns {@code NeoResponse.ok(body)})
-   */
-  protected boolean injectListTotals(NeoContext context) {
-    if (!"GET".equals(context.getHttpMethod()) || context.getRecordId() != null) {
-      return false;
-    }
-    NeoResponse prev = context.getPreviousResult();
-    return prev != null && prev.getBody() != null && listTotals().inject(context, prev.getBody());
-  }
-
   /**
    * Adjusts {@code grandTotalAmount} and {@code outstandingAmount} for a draft invoice carrying
    * a positive {@code etgoTotalDiscount} percentage that has not yet been materialized as a real

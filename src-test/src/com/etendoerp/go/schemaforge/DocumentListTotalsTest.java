@@ -23,11 +23,14 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 import java.math.BigDecimal;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
+import org.mockito.MockedStatic;
+import org.mockito.Mockito;
 
 import com.etendoerp.go.schemaforge.NeoCurrencyTotals.TargetCurrency;
 
@@ -226,6 +229,91 @@ public class DocumentListTotalsTest {
     assertFalse(failing(false).inject(ctx, body));
     assertFalse(response.has("listTotals"));
     assertNull(response.opt("listTotals"));
+  }
+
+  private static NeoContext previousListBody(NeoContext ctx) throws Exception {
+    NeoListAggregateQuery.remember(ctx, Collections.emptyMap());
+    ctx.setPreviousResult(NeoResponse.ok(new JSONObject().put("response", new JSONObject())));
+    return ctx;
+  }
+
+  /** Totals whose inject records the call and returns {@code result}. */
+  private static DocumentListTotals recording(boolean result, List<JSONObject> injected) {
+    return new DocumentListTotals(true) {
+      @Override
+      public boolean inject(NeoContext context, JSONObject body) {
+        injected.add(body);
+        return result;
+      }
+    };
+  }
+
+  @Test
+  public void injectIntoSkipsNonGetRequestsWithoutBuildingTotals() throws Exception {
+    try (MockedStatic<DocumentListTotals> mocked = Mockito.mockStatic(DocumentListTotals.class,
+        Mockito.CALLS_REAL_METHODS)) {
+      NeoContext ctx = previousListBody(NeoContext.builder().httpMethod("POST").build());
+
+      assertFalse(DocumentListTotals.injectInto(ctx, true));
+
+      mocked.verify(() -> DocumentListTotals.create(Mockito.anyBoolean()), Mockito.never());
+    }
+  }
+
+  @Test
+  public void injectIntoSkipsSingleRecordGetWithoutBuildingTotals() throws Exception {
+    try (MockedStatic<DocumentListTotals> mocked = Mockito.mockStatic(DocumentListTotals.class,
+        Mockito.CALLS_REAL_METHODS)) {
+      NeoContext ctx = previousListBody(
+          NeoContext.builder().httpMethod("GET").recordId("rec-1").build());
+
+      assertFalse(DocumentListTotals.injectInto(ctx, false));
+
+      mocked.verify(() -> DocumentListTotals.create(Mockito.anyBoolean()), Mockito.never());
+    }
+  }
+
+  @Test
+  public void injectIntoSkipsListGetWithoutPreviousResultOrBody() throws Exception {
+    try (MockedStatic<DocumentListTotals> mocked = Mockito.mockStatic(DocumentListTotals.class,
+        Mockito.CALLS_REAL_METHODS)) {
+      NeoContext noResult = NeoContext.builder().httpMethod("GET").build();
+      NeoContext noBody = NeoContext.builder().httpMethod("GET").build();
+      noBody.setPreviousResult(NeoResponse.ok(null));
+
+      assertFalse(DocumentListTotals.injectInto(noResult, true));
+      assertFalse(DocumentListTotals.injectInto(noBody, true));
+
+      mocked.verify(() -> DocumentListTotals.create(Mockito.anyBoolean()), Mockito.never());
+    }
+  }
+
+  @Test
+  public void injectIntoDelegatesToTheCreatedTotalsAndReturnsItsResult() throws Exception {
+    List<JSONObject> injected = new java.util.ArrayList<>();
+    try (MockedStatic<DocumentListTotals> mocked = Mockito.mockStatic(DocumentListTotals.class,
+        Mockito.CALLS_REAL_METHODS)) {
+      mocked.when(() -> DocumentListTotals.create(true)).thenReturn(recording(true, injected));
+      NeoContext ctx = previousListBody(NeoContext.builder().httpMethod("GET").build());
+
+      assertTrue(DocumentListTotals.injectInto(ctx, true));
+
+      assertEquals(1, injected.size());
+      assertEquals(ctx.getPreviousResult().getBody(), injected.get(0));
+    }
+  }
+
+  @Test
+  public void injectIntoReturnsFalseWhenTheCreatedTotalsAddNothing() throws Exception {
+    List<JSONObject> injected = new java.util.ArrayList<>();
+    try (MockedStatic<DocumentListTotals> mocked = Mockito.mockStatic(DocumentListTotals.class,
+        Mockito.CALLS_REAL_METHODS)) {
+      mocked.when(() -> DocumentListTotals.create(false)).thenReturn(recording(false, injected));
+      NeoContext ctx = previousListBody(NeoContext.builder().httpMethod("GET").build());
+
+      assertFalse(DocumentListTotals.injectInto(ctx, false));
+      assertEquals(1, injected.size());
+    }
   }
 
   /** Totals that read {@code rows} instead of querying; EUR org, USD at 0.5. Shared by the handler tests. */
