@@ -221,7 +221,15 @@ public class BillingReconciliationService {
         () -> subscriptions.run(result, audit));
     runPhase("stuck events", null, result, () -> sweepStaleEvents(result, audit));
     // Its own step, after the sweep and whatever the sweep could do: a DB fact on every run.
-    runPhase("stuck-event reviews", null, result, () -> countStaleEventsAwaiting(result));
+    // Counts the stuck events parked by earlier runs and still unresolved (a review row exists,
+    // the event is still RECEIVED), so a parked event shows in every summary, not just one. This
+    // run's parked events are already counted as parked, so only rows actually written are
+    // subtracted (a dry run subtracts nothing): one stuck event normally never reads as two. The
+    // exception is a review row that already existed, which only a race with an unlocked
+    // concurrent run produces; that event counts as both, as ReviewQueue#countAwaiting does.
+    runPhase("stuck-event reviews", null, result,
+        () -> result.add(Counter.STALE_EVENTS_AWAITING, Math.max(0,
+            eventStore.countReceivedUnderReview(STALE_REVIEW_ID_PREFIX) - staleReviewsWritten)));
     return result;
   }
 
@@ -751,21 +759,6 @@ public class BillingReconciliationService {
     result.item("event " + event.eventId(), null, "park stuck " + type + " for review",
         "no re-read could vouch for it");
     return true;
-  }
-
-  /**
-   * Counts the stuck events parked by earlier runs that nobody has resolved yet: a review row
-   * exists and the original event is still {@code RECEIVED}. The sweep leaves them out, so without
-   * this a parked event would show in the summary of one run only. An event this run parked is
-   * already counted as parked, so it is left out here: one stuck event normally never reads as
-   * two. Only rows actually written are subtracted, so a dry run subtracts nothing. The exception
-   * is a review row that already existed ({@code audit.write} returned false, which only a race
-   * with an unlocked concurrent run produces): that event is counted as both parked and awaiting,
-   * as {@link ReviewQueue#countAwaiting} does for purchases.
-   */
-  private void countStaleEventsAwaiting(ReconciliationResult result) {
-    result.add(Counter.STALE_EVENTS_AWAITING, Math.max(0,
-        eventStore.countReceivedUnderReview(STALE_REVIEW_ID_PREFIX) - staleReviewsWritten));
   }
 
   /**

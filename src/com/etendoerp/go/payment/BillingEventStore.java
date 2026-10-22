@@ -116,6 +116,7 @@ public class BillingEventStore implements CheckoutWebhookProcessor.EventStore {
   private static final String PARAM_EVENT_TYPE = "eventType";
   private static final String PARAM_REQUEST_ID = "requestId";
   private static final String PARAM_RESULT = "result";
+  private static final String PARAM_RECEIVED = "received";
 
   /**
    * Id-only claim, kept for the {@link CheckoutWebhookProcessor.EventStore} contract.
@@ -282,7 +283,7 @@ public class BillingEventStore implements CheckoutWebhookProcessor.EventStore {
       }
       OBQuery<BillingEvent> query = OBDal.getInstance().createQuery(BillingEvent.class,
               where.append(" order by be.receivedAt asc").toString())
-          .setNamedParameter("received", RESULT_RECEIVED)
+          .setNamedParameter(PARAM_RECEIVED, RESULT_RECEIVED)
           .setNamedParameter(PARAM_PROVIDER, PROVIDER_STRIPE)
           .setNamedParameter("before", receivedBefore)
           .setFilterOnReadableClients(false)
@@ -323,7 +324,7 @@ public class BillingEventStore implements CheckoutWebhookProcessor.EventStore {
     return runAsSystem(() -> OBDal.getInstance().createQuery(BillingEvent.class,
             "as be where be.eventResult = :received and be.provider = :provider and "
                 + UNDER_REVIEW)
-        .setNamedParameter("received", RESULT_RECEIVED)
+        .setNamedParameter(PARAM_RECEIVED, RESULT_RECEIVED)
         .setNamedParameter(PARAM_PROVIDER, PROVIDER_STRIPE)
         .setNamedParameter(PARAM_REVIEW_PREFIX, reviewIdPrefix)
         .setFilterOnReadableClients(false)
@@ -647,7 +648,7 @@ public class BillingEventStore implements CheckoutWebhookProcessor.EventStore {
             + "       be.updated = :now"
             + " where be.event = :eventId"
             + "   and be.eventResult = :failed")
-        .setParameter("received", RESULT_RECEIVED)
+        .setParameter(PARAM_RECEIVED, RESULT_RECEIVED)
         .setParameter("failed", RESULT_FAILED)
         .setParameter("now", now)
         .setParameter(PARAM_EVENT_ID, eventId)

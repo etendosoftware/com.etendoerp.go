@@ -240,6 +240,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       "This login link is invalid, already used or expired";
   private static final String ERROR_UNKNOWN_ENDPOINT = "Unknown endpoint: ";
   private static final String FIELD_PAYMENT_TOKEN = "paymentToken";
+  /** Default {@code upgradeAction} of an onboarding: create a new environment. */
+  private static final String UPGRADE_ACTION_CREATE_PRODUCTIVE = "create-productive";
   private static final String FIELD_PLAN_KEY = "planKey";
   private static final String CODE_PLAN_NOT_AVAILABLE = "PLAN_NOT_AVAILABLE";
   private static final String PLAN_NOT_AVAILABLE_MESSAGE =
@@ -4686,7 +4688,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         input.accountName(), input.accountEmail());
     data.taxId = serverSideTaxId(input);
     data.paymentToken = input.requestId();
-    data.upgradeAction = "create-productive";
+    data.upgradeAction = UPGRADE_ACTION_CREATE_PRODUCTIVE;
     data.includeSampleData = false;
     String accountId = input.accountId();
     String accountEmail = input.accountEmail();
@@ -4796,7 +4798,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     onboardingRequest.address = "";
     onboardingRequest.taxId = form.optString(FIELD_FISCAL_ID_VALUE, "").trim();
     onboardingRequest.paymentToken = "";
-    onboardingRequest.upgradeAction = "create-productive";
+    onboardingRequest.upgradeAction = UPGRADE_ACTION_CREATE_PRODUCTIVE;
     onboardingRequest.includeSampleData = form.optBoolean(FIELD_INCLUDE_SAMPLE_DATA, false);
     onboardingRequest.fullName = EtendoGoJwtSupport.resolveOwnerDisplayName(
         form.optString(FIELD_FULL_NAME, ""), accountName, accountEmail);
@@ -5827,7 +5829,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       // must not fail the request — wireOrgInfo() only persists it when non-blank.
       data.taxId = body.optString(FIELD_FISCAL_ID_VALUE, "").trim();
       data.paymentToken = body.optString(FIELD_PAYMENT_TOKEN, "").trim();
-      data.upgradeAction = body.optString("upgradeAction", "create-productive").trim();
+      data.upgradeAction = body.optString("upgradeAction", UPGRADE_ACTION_CREATE_PRODUCTIVE).trim();
       // ETP-5426: opt-in, off unless the form explicitly sends true.
       data.includeSampleData = body.optBoolean(FIELD_INCLUDE_SAMPLE_DATA, false);
       if ("convert-demo".equalsIgnoreCase(data.upgradeAction)) {
