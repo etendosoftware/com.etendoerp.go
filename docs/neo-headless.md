@@ -5810,6 +5810,18 @@ A list response carries one page, so a total drawn next to it covers the loaded 
 - `approximate` = a non-zero foreign-currency subtotal was converted. `byCurrency` shows original amounts (never approximate), organization currency first, then amount descending. `byMethod` is sorted by converted amount descending.
 - Cost: one grouped scan per page request over the whole filtered set.
 
+**Document list totals** (`sales-quotation`, `sales-order`, `purchase-order`, `sales-invoice`, `purchase-invoice`; ETP-5757). `response.listTotals`, a sibling of `data`, replaces the client-side footer sum that mixed currencies. `DocumentListTotals` runs one grouped query over the whole filtered set (same filters as the grid, so quotation/order and sales/purchase are separated by the tab where clause, not the page) and folds each column into the organization currency at TODAY's rate (`NeoCurrencyTotals`). Present on every page, also an empty one; a failure is logged and the key omitted; MCP lists do not get it (`NeoListAggregateQuery.of` is `null`).
+
+```json
+{ "orgCurrencyIso":"EUR", "rowCount":18,
+  "columns":{
+    "grandTotalAmount":{"amount":10960.18,"iso":"EUR","approximate":true,"missingRateCurrencies":[]},
+    "outstandingAmount":{"amount":1200.00,"iso":"EUR","approximate":false,"missingRateCurrencies":[]} } }
+```
+
+- `outstandingAmount` exists for invoices only. `approximate` and `missingRateCurrencies` follow the `NeoCurrencyTotals` rule: a non-zero foreign subtotal was converted / a currency without rate is left out and listed.
+- Draft discount compensation: the grid rewrites `grandTotalAmount` (and invoice `outstandingAmount`) of an unprocessed document with `etgoTotalDiscount > 0` and no active discount line to `amount * (1 - pct/100)`. The aggregate applies the same rule per row in HQL, so the footer adds up to the visible rows. Rounding differs slightly: the server uses PostgreSQL `round(numeric, 2)` (half away from zero) per row, the grid uses Java half-up (`NeoHandlerUtils.roundHalfUp`); they can differ by one cent only for negative exact halves or floating-point edge cases.
+
 ## 6. Parent-Child Tab Filtering
 
 When an entity maps to a child tab (`tabLevel > 0`), the servlet automatically filters records by the parent record. The caller provides the parent record ID via the `parentId` query parameter:
