@@ -141,8 +141,19 @@ final class McpAttachmentTools {
    * <p>The document is authorized (write tier, tenant, record exists) and the file name is checked
    * against the extension allow-list BEFORE the link exists, so a doomed upload fails here, with
    * the policy's own message, and not after the bytes have been sent.</p>
+   *
+   * <p>With {@code staged_document_id} (ETP-5715) there is no link at all: the PDF the user already
+   * uploaded for extraction is attached to the document right away
+   * ({@link McpStagedAttachment}), so it is never uploaded twice.</p>
    */
   static JSONObject requestUpload(JSONObject args) throws JSONException {
+    String stagedId = StringUtils.trimToNull(
+        McpArgumentUtils.optionalString(args, McpOcrTools.PARAM_STAGED_DOCUMENT_ID));
+    if (stagedId != null) {
+      // ETP-5715: the PDF the user already uploaded for extraction is attached as it is.
+      return McpStagedAttachment.attach(authorize(args, true).target, stagedId,
+          args.optBoolean(PARAM_MAIN, false));
+    }
     if (StringUtils.isBlank(McpArgumentUtils.optionalString(args, PARAM_NAME))) {
       return errorEnvelope(McpConstants.STATUS_UNPROCESSABLE, McpConstants.ERROR_VALIDATION,
           "'" + PARAM_NAME + "' is required.",
@@ -180,7 +191,7 @@ final class McpAttachmentTools {
    * {@link #MAX_FILE_NAME_LENGTH} (characters, as {@code C_File.name} counts them, and UTF-8 bytes,
    * as a file system does), made only of an extension, or outside the safe character set.
    */
-  private static String fileNameProblem(String fileName) {
+  static String fileNameProblem(String fileName) {
     if (fileName.length() > MAX_FILE_NAME_LENGTH
         || fileName.getBytes(StandardCharsets.UTF_8).length > MAX_FILE_NAME_LENGTH) {
       return "The file name is too long: at most " + MAX_FILE_NAME_LENGTH
@@ -391,7 +402,7 @@ final class McpAttachmentTools {
   }
 
   /** A target refusal as the IMP-5 envelope: 403 forbidden, 404 not_found, otherwise validation. */
-  private static JSONObject refusal(NeoAttachmentTarget.Refused refused) throws JSONException {
+  static JSONObject refusal(NeoAttachmentTarget.Refused refused) throws JSONException {
     int status = refused.getStatus();
     if (status == McpConstants.STATUS_FORBIDDEN) {
       return errorEnvelope(status, McpConstants.ERROR_FORBIDDEN, refused.getMessage(),
@@ -412,7 +423,7 @@ final class McpAttachmentTools {
   }
 
   /** A failed REST-level answer from the shared helpers, re-spelled as the IMP-5 envelope. */
-  private static JSONObject failure(NeoResponse response) throws JSONException {
+  static JSONObject failure(NeoResponse response) throws JSONException {
     JSONObject error = response.getBody() == null ? null
         : response.getBody().optJSONObject(KEY_ERROR_BODY);
     String detail = error == null ? "The attachment operation failed."

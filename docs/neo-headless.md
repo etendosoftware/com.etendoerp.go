@@ -3808,6 +3808,11 @@ not: `etendo_create` does not run it in shared code, so it is in the table below
 | sending a document by email (ETP-5715) | `POST /sws/neo/email-contracts/{window}-send` from the send modal, which first renders the document in the browser and stores that PDF as the record's main attachment, then posts the command | `etendo_send_document_email` posts **the same command** to the **same `TransactionalEmailService`** (same contract checks, throttles, idempotency, suppression, audit rows) but **cannot render**: it refuses with `409 no_pdf` / `pdf_stale` (the `etendo_get_document_pdf` answers) before sending when the record has no current stored PDF (§4.12.39) | the email's "Descargar documento" link serves the record's main attachment when clicked; the server does NOT check it exists (the application guarantees it by caching first), so a send without a PDF would deliver a link that answers 404. The MCP has no render, so the gate is the only safe equivalent |
 | a `DUPLICATE` email (ETP-5715) | the modal shows the duplicate as a **success** toast ("<document> ya fue enviado") and closes | reported as an **error envelope**, `409 email_duplicate`, `sent:false`, "Not sent: an identical email was already sent at <time>" (`previousSentAt`, new additive field of the `DUPLICATE` answer) | nothing is delivered on a duplicate; an agent that read it as success would tell the user a mail is on its way. Every non-`SENT` status (`DUPLICATE`, `THROTTLED`, `SUPPRESSED`, `NO_RECIPIENT`, `PROVIDER_FAILED`, `VALIDATION_FAILED`, `UNAUTHORIZED`) is `sent:false` with the server's status in `emailStatus` |
 | email subject, recipients and message from an agent (ETP-5715) | an operator types them; the server repairs a subject's CR/LF silently and validates an address with a permissive regex | **refused, never repaired**: CR/LF/control characters in an address or the subject, a malformed address (`a..b`, leading/trailing dot, `-` labels, more than 254 characters), more than the contract's recipient cap (10) between `to` and `cc`, a subject over 200 or a message over 5000 characters; no rejected value is echoed back | an agent's text is not an operator's keystrokes; the refusal happens before anything reaches the send path, which re-validates as before (§4.12.39) |
+| the detected supplier number and date of a scanned invoice (ETP-5715) | the review modal has a toggle for each, but the batch builder falls back to the OCR value when the toggle is off (`buildHeaderBody`: `extras.documentNo ?? safe.document_no`), so a user who declines the number or the date still gets them | **respected**: `etendo_extract_invoice_document` offers them as `apply_documentNo` / `apply_invoiceDate` decisions (default `true`, asked of the user) and the `batchTemplate` carries them only as **optional** entries, to be sent only if the user accepted. The SPA's behaviour is deliberately NOT changed | a user's explicit "do not apply" is a decision, not a hint (§4.12.40) |
+| totals of a scanned invoice (ETP-5715) | not compared (the extraction schema has no totals) | not compared, by decision | parity; declared so nobody adds a comparison to one side only |
+| who supervises the scanned invoice (ETP-5715) | a person drives the review modals, so every decision is taken before anything is sent | the **agent** must ask the user every `pendingDecisions` entry and create only after the whole summary is confirmed. The server cannot enforce that: `status`, the `supervision` block, the tool descriptions and the agent prompt say it; nothing blocks `etendo_batch` | an agent is not a modal. Same class of known risk as the free recipients of `etendo_send_document_email` (§4.12.39): a prompt, not a control |
+| reading the PDF (ETP-5715) | the browser uploads it to `/sws/copilot/file` and runs `/sws/copilot/executeTool`; the copilot module's HTTP client waits **without a timeout** | the MCP uses its **own client** to the same service (same properties, same two calls, same question and schema from the same configuration) with a **90 s** budget in total: a service that does not answer is `503 ocr_unavailable`, and a successful reading is **cached per staged document** so a retry does not pay again (§4.12.40) | an MCP call that waits forever on a paid external model holds a server thread |
+| the supplier's PDF as the invoice's main attachment (ETP-5715) | the panel attaches it to the new record right after the batch commits (`uploadAndMarkMainAttachment`, `?markAsMain=true`); a failure is non-fatal | the agent attaches the **staged** file with `etendo_request_attachment_upload {staged_document_id, main:true}` after creating the invoice (the same store, no second upload); if it never does, the invoice has no PDF — the same non-fatal outcome | the creation is the agent's `etendo_batch`, not a server flow, so the attach is a separate step |
 
 This is a **declared** list, not an unknown one: the point is that the next person to touch either
 path can see what is deliberately unequal. Closing a row means adding the step to
@@ -10596,7 +10601,7 @@ unchanged data is served. A document that was changed by raw SQL does not move `
 
 One write-scope MCP tool, piece B2 of ETP-5715 stage 2: "send purchase order X to the supplier". It behaves **exactly like the SPA's "Enviar"**
 because it goes through the **same server path**, never a parallel one. Reuses piece A (§4.12.37, `NeoAttachmentTarget`) and piece B1
-(§4.12.38, `NeoDocumentPdf`). OCR is out of scope.
+(§4.12.38, `NeoDocumentPdf`). OCR is a separate piece (§4.12.40).
 
 **What the SPA does (measured, `tools/app-shell`: `SendDocumentModal`, `documentEmailSend.js`, `recipientEdits.js`).**
 `POST /sws/neo/email-contracts/{window}-send` with `{version:"v1", recordId, intent:"send-document", language, messageEdits:{subject, message}}`,
@@ -10698,3 +10703,154 @@ the ETP-5715 prompts SQL (guarded by the previous value of each row).
 `DefaultDocumentSendEmailContractTest` (`sendDefaults`, and that the defaults sent as edits render the modal's email), `TransactionalEmailServiceTest`
 (`previousSentAt`), `InitialEmailContractsTest` (`contracts()`), `McpToolRouterRouteTest`, `ToolRegistryGenerateToolsTest`, `McpToolAnnotationsTest`,
 `McpToolTitlesTest`, `McpAuthorizationServiceVectorTest`, `McpUsageTenantQaTest`, `McpAttachmentToolsTest`.
+
+#### 4.12.40 Creating a purchase invoice from a supplier's PDF: `etendo_request_document_extraction_upload`, `etendo_extract_invoice_document` (ETP-5715)
+
+Piece E of ETP-5715 stage 2: the application's purchase-invoice **"Subir factura" → "Extraer y completar"**, for an agent, **with mandatory human
+supervision**. It reuses piece A (§4.12.37: the upload link, `NeoAttachmentStore`, `NeoAttachmentTarget`). Nothing is created by these tools:
+they stage the PDF, read it and hand back **what was detected plus every decision the user must take**; the invoice itself is created by the agent
+with `etendo_batch` after the user confirmed, and the same PDF is then attached as its main attachment.
+
+**What the SPA does (measured in `tools/app-shell/src/components/copilot/ocr/`, the contract the MCP mirrors).** Only on a **new** purchase invoice
+(`OcrSidePanel`). The panel uploads the PDF to `/sws/copilot/file`, then `POST /sws/copilot/executeTool {tool_name:"SimpleOcrTool", params:{path, question,
+structured_output_schema}}`; the answer (a JSON text, possibly fenced) is parsed loosely and rejected as "nothing read" when every field is empty
+(`hasExtractedData`). A pre-flight compares the **receiver's** tax id with the organization's (`receiverTaxIdCheck.js`: VAT prefixes ignored, an NIE's `X`
+never stripped, receiver equal to issuer = the model confused the blocks): a mismatch **blocks**, an absent receiver id or an organization without a tax id
+only warns. The review then settles: the vendor (**by name only**: an exact, unique, case-insensitive name in the vendor selector's rows, else a contains-search
+limited to two rows that returns exactly one; otherwise the user picks or creates), that the vendor has an **address** (`C_Invoice.C_BPartner_Location_ID` is
+NOT NULL), a **duplicate** warning (same vendor, same supplier number case-insensitively, not voided), the number and date **toggles**, and per line a
+**product** (a similarity search, 3 candidates from 50 %: one same-name candidate is taken, anything else is only a suggestion) and a **tax** (never searched
+by label: the server's `defaultTax` for the vendor's address, the date and the printed rate, one lookup per distinct rate; no printed rate = no tax, the form's
+default applies). The batch is header + lines (`parentRef`); a line without a product is dropped; afterwards the PDF is attached with `?markAsMain=true`.
+
+**The tools.**
+
+| tool | scope | what it does |
+|---|---|---|
+| `etendo_request_document_extraction_upload` | `etendo:write` | `{spec:"purchase-invoice", name}` → a **single-use upload link not bound to a record**, plus the `stagedDocumentId` the bytes will fill |
+| `etendo_extract_invoice_document` | `etendo:write` | `{spec, staged_document_id, vendor_id?}` → reads the staged PDF **once** and answers the supervised review |
+| `etendo_request_attachment_upload` + `staged_document_id` | `etendo:write` | attaches the staged PDF to the created invoice (`main:true` for the supplier's document) — no link, no second upload |
+
+**Scopes and annotations, and why.** Both new tools are **write**: they exist to create a document from the PDF (a read-only role has nothing to do with them),
+the upload needs write access to the spec exactly as an attachment does, and the extraction spends a **paid external model**. `etendo_extract_invoice_document`
+is annotated **read-only + idempotent + `openWorldHint:true`** (the first tool read-only AND open-world): it changes nothing in the ERP and gives the same review for
+the same document, but it sends the user's PDF to an external model, which clients use to decide how to ask for approval. The link request is *additive*
+(a temporary file and a link; nothing replaced or deleted). Verbs in `ETGO_MCP_USAGE`: `document_extraction_upload`, `document_extraction`. Titles (en/es) in
+`mcp_titles_*.properties`. Both are offered **only for the specs the OCR configuration declares** (below), never named in code.
+
+**Upload and staging.** The link is the attachment link (§4.12.37): 192-bit token, single use, 10 minutes, bound to client/organization/user/**role**/warehouse, at
+most 10 pending per session (the same cap), `PUT /sws/neo/attachment/upload/{token}` with no bearer. A link carries a `Subject.staged(...)` instead of a record:
+at PUT time the spec is re-authorized for **writing** (`NeoAttachmentTarget.requireWriteAccess`: the role tier, the table rule, the 405 of windows with no
+Attachments tab, with no record involved), and the file must be a **PDF** — `.pdf` name (any case), declared size ≤ 10 MB before a byte is read, the policy's
+extension check, and the **magic bytes** (`%PDF`) after copying. A rejected file does not burn the link. The bytes are kept by `NeoStagedDocuments` under
+`${java.io.tmpdir}/etgo-staged/<id>/` for **60 minutes**, bound to the session (client, organization, user) and to the spec; any other session, an unknown id
+and an expired one are the **same `404`**. The file is deleted at expiry (swept by every reservation and lookup), after being attached, and — if older than
+the TTL — at start-up. A reservation whose PDF has not arrived lives only as long as its link (**10 minutes**); a stored file lives **60 minutes from its arrival**. The upload-link answer therefore reports `reservationExpiresAt` (the 10-minute reservation; it carries no `stagedDocumentExpiresAt`), and every extraction answer (review or `nothing_extracted`) reports `stagedDocumentExpiresAt`, the real expiry (upload + 60 minutes). Guards for the disk, **not usage limits** (there is none on extractions): `MAX_PER_SESSION = 50` live documents per session, `MAX_PER_CLIENT = 100` per company, and `MAX_TOTAL = 200` **stored files** for the whole server (reservations hold no disk, so they never block another company). The checks and the insertion run under one lock. A daemon timer (started by `@PostConstruct`, stopped by `@PreDestroy`, one per application, never started by a constructor, and swallowing any failure of a tick) runs the clean-up every 10 minutes (expired documents, plus any directory older than the TTL left on disk); the sweep skips a document that is being read or attached and removes it on the next pass. Every upload also sweeps. The index is in
+memory and single-node like the link store: a restart loses it and the agent uploads again.
+
+**The extraction.** Our **own HTTP client** (`CopilotOcrServiceClient`) to the same copilot service the panel reaches through `/sws/copilot`, with the same two
+calls (`attachFile`, then `executeTool`), the same properties (`copilot.host` / `copilot.port`, legacy spelling included) and the same question and schema, but with
+a **90 s budget in total** (the copilot module's client waits forever). The result is cached on the staged document, empty or not: a retry — or the recomputation
+for a vendor the user chose — does not read the PDF again; two concurrent calls read it once (a per-document lock). If building the review fails after a successful reading, the answer is a clean 500 and the reading stays cached. Attaching the staged PDF takes the same lock without waiting: while an extraction is reading it (or another attach is running) the answer is `409 conflict`, and an attached document cannot be attached twice. A service that does not answer, answers a failure status or an
+unparseable body is **`503 ocr_unavailable`** (an error content, nothing cached); the tool's own `{"error":...}` (HTTP 200), a blank PDF, an unparseable answer
+and a payload empty once sanitized are **`nothing_extracted`** (`status:"blocked"`, 200).
+
+**One configuration, shared with the SPA.** The question, the tool and the strict answer schema live **once**, in `src/com/etendoerp/go/schemaforge/ocr/ocr-config.json`
+(`OcrConfig`), which also **is** the list of specs that support OCR. The SPA no longer carries a copy: `useOcrConfig.js` reads it through `apiFetch` from
+`GET /sws/neo/ocrconfig?docType=<spec>` (`NeoOcrConfigEndpoint`, a pseudo-spec of `NeoPseudoSpecDispatcher`; any authenticated caller — it describes how an invoice is
+read and carries no tenant data), and `ocrDocTypes.js` keeps only the UI side (fields and columns). Measured alternatives: *sourcedata / `MCP_CONFIG`* would need an
+`export.database` round trip and a new reader for a text no tenant customizes; a *generated artifact* shared by the two repos needs a sync step that can lag. A
+classpath resource is versioned with the code that parses the answer. **Packaging (verify after every build).** The file sits next to the class under `src/` because the real deployment (the ant build, `src/build.xml`
+`postsrc.modules`) copies every non-`.java` file of `<module>/src/**` into `WEB-INF/classes`; `etendo-resources/` is a Gradle-only source set
+(`build.gradle`) that the ant build never copies, so a resource there passes the Gradle tests and is missing in Tomcat. Gradle's root `test` task reads `build/classes`, which only that ant copy fills (like the `.hbm.xml` and the message bundles), so run `smartbuild`/`compile.src` before it; the
+module's `goTestUnit` task puts the `src` folders on its classpath and needs no ant run. If the file were missing at runtime, `OcrConfig` logs an
+ERROR at first use and reports `isUnavailable()`: `GET /sws/neo/ocrconfig` answers **500** (not the 404 of "no OCR for this type") and the MCP tools are
+withdrawn from `tools/list`. **Check after smartbuild:** `${CATALINA_HOME}/webapps/etendo/WEB-INF/classes/com/etendoerp/go/schemaforge/ocr/ocr-config.json`
+exists and `GET /sws/neo/ocrconfig?docType=purchase-invoice` answers 200.
+**A new document type** is one entry in that file (id = the spec, `resolver`, `question`,
+`dataKeys`, `schema`), one `OcrLookups` implementation bound by its `resolver` in `OcrLookupsRegistry`, and one entry in the SPA's `ocrDocTypes.js`. The drift guard of the
+SPA's side is `ocrDocTypes.prefill.vitest.js`, which checks every key the SPA reads against that file when the module is checked out next to the repo (skipped, not
+failed, otherwise).
+
+**The answer** (`etendo_extract_invoice_document`):
+
+```json
+{
+  "spec": "purchase-invoice", "stagedDocumentId": "x2Jq…",
+  "status": "needs_decisions",            // blocked | needs_decisions | ready_to_create
+  "readyToCreate": false,
+  "blocking": [],                          // blocked only: {code: receiver_tax_id_mismatch | nothing_extracted, message}
+  "documentData": {                        // EVERYTHING read from the document lives here, and only here
+    "untrusted": true,
+    "issuer": {"name": "…", "taxId": "…", "taxIdLabel": "NIF", "taxIdType": "vat"}, "receiver": {…},
+    "vendor": {"name": "…", "taxId": "…", "address": "…", "postalCode": "…", "city": "…", "country": "…", "email": "…", "phone": "…"},
+    "documentNo": "2024/000123", "invoiceDate": "18/06/2024", "invoiceDateIso": "2024-06-18",
+    "lines": [{"index": 0, "description": "…", "quantity": 2, "unitPrice": 1.5, "taxLabel": "21%", "taxRate": 21,
+               "tax": {"state": "resolved", "tax": {"id": "…", "name": "IVA 21%", "rate": 21}}}]
+  },
+  "pendingDecisions": [
+    {"id": "vendor", "type": "vendor", "status": "suggested|none|selected", "blocking": true,
+     "suggestion": {"id": "…", "name": "…", "matchedBy": "exact|contains"}, "candidates": [{"id": "…", "name": "…"}],
+     "options": ["use_suggestion", "choose_other", "create_new"], "createPrefill": {"untrusted": true, "name": "…", …}},
+    {"id": "vendor_address_missing", "type": "vendor_address", "blocking": true, …},
+    {"id": "duplicate_invoice", "type": "warning", "blocking": false, "invoices": [{"id": "…", "documentNo": "…"}]},
+    {"id": "apply_documentNo", "type": "header_toggle", "field": "orderReference", "value": "…", "default": true, "blocking": false},
+    {"id": "apply_invoiceDate", "type": "header_toggle", "field": "invoiceDate", "value": "…", "sendValue": "2024-06-18", "default": true},
+    {"id": "line_0_product", "type": "product", "lineIndex": 0, "state": "auto_matched|suggested|none", "blocking": false,
+     "match": {"id": "…", "name": "…"}, "candidates": […], "options": ["use_match", "pick", "create", "skip"]},
+    {"id": "line_0_tax", "type": "tax", "lineIndex": 0, "state": "resolved|no_rate|no_tax_at_rate|pending_vendor|unknown", "blocking": false, "tax": {…}}
+  ],
+  "notices": [{"code": "receiver_tax_id_absent|org_tax_id_missing|vendor_address_unknown|duplicate_check_unknown|no_lines", "message": "…"}],
+  "batchTemplate": {"tool": "etendo_batch", "operations": [ {"id": "inv", "spec": "purchase-invoice", "entity": "header", "body": {…}, "optionalBody": {…}},
+                    {"id": "ln0", "entity": "lines", "parentRef": "inv", "body": {"product": "{decision line_0_product}", "invoicedQuantity": 2, "unitPrice": 1.5, "listPrice": 1.5}} ]},
+  "supervision": ["…the rules…"]
+}
+```
+
+`status` is `needs_decisions` while any decision has `blocking:true` (a vendor not yet accepted, an address missing, a line without a certain product) and
+`ready_to_create` otherwise — which still leaves the toggles and the confirmation to the user. While the vendor is only a **suggestion** (no `vendor_id` yet), what was computed for it
+is provisional: the template carries a placeholder for the vendor's address and for each line's tax (never a literal), the resolved tax decisions say `basedOnSuggestedVendor:true`, and the
+`supervision` block says to call again with `vendor_id` after the user chooses. Passing `vendor_id` (the vendor the **user** chose or created)
+recomputes address, duplicates and taxes for that vendor from the cached reading; a vendor that is not an active vendor of the tenant is a `422`.
+
+**Decisions, mapped to the SPA.** `vendor` (+ `vendor_address_missing`) = the review modal's vendor row and its address notice; `duplicate_invoice` = the duplicate
+notice (warn-only; `iEquals` on `orderReference`, status ≠ `VO`, the vendor's invoices of the session's tenant, ≤ 10); `apply_*` = the two toggles (**respected**, unlike the
+SPA, §4.12.9); `line_i_product` = `classifyProductMatch` + the product popup (`skip` because the server rejects a line without a product); `line_i_tax` =
+`findDefaultTax` (`no_rate` is informative — the default applies; `no_tax_at_rate` lists the alternatives of that rate; `pending_vendor` waits for a vendor with an
+address). **Not ported, on purpose:** totals (neither side compares them); creating the contact or the product (the agent does it, with the user's OK, through the
+existing tools); the SPA's modal navigation.
+
+**Supervision and prompt injection.** The text of a PDF is untrusted and can address the agent. What the server does: only keys the schema declares survive, **held to the type
+the schema declares** (a number field keeps only a finite number of sane size or a plain numeric string of at most 30 digits and no exponent — `1e999999999`, `Infinity`, `NaN` and
+a ten-thousand-digit number become null, they are never converted); every
+string is a single line capped at 200 characters with control characters, invisible formatting, variation selectors, private-use and unassigned code points and lone surrogates removed; at most 100 lines; non-object lines dropped; the
+document's text is **never** placed in a `message` or `hint` (those are fixed sentences of this module), only under `documentData` (`untrusted:true`), under the
+vendor `createPrefill` (`untrusted:true`) and as the `value` of a toggle (`valueUntrusted:true`); the `batchTemplate` references `{documentData.lines[0].description}`
+instead of copying it. What it cannot do is make an agent obey: the `supervision` block restates the rules in every answer, the tool descriptions state them, and the
+purchase-invoice agent prompt ends with the procedure — show the detections, ask **every** decision (auto-matched ones too), never create a contact or a product, accept a
+suggestion or apply the number/date without the user's explicit OK, create only after the whole summary is confirmed, then attach the staged PDF. `etendo_batch` is
+not blocked; supervision is a prompt, not a control (declared in §4.12.9).
+
+**Reuse.** Vendor and address: `NeoSelectorService.querySelector` on the invoice header's own selectors (`C_BPartner_ID`, `C_BPartner_Location_ID`, context `isSOTrx=N`,
+`isVendor=Y`), the same call `GET .../header/selectors/{column}` makes; products: `NeoSimSearchEndpoint.searchTerm`, the code behind `/sws/neo/simsearch`; taxes:
+`PurchaseInvoiceLineHandler.resolveOwned`, the rule behind `defaultTax` (extracted from the handler unchanged); the duplicate lookup is one HQL query. Everything that
+names purchase invoices is in `PurchaseInvoiceOcrLookups` (bound by the configuration's `resolver`); the shared review (`schemaforge.ocr`) names no entity, and the tools
+derive "which specs support OCR" from the configuration.
+
+**Agent prompt (applied to the sourcedata, ETP-5715).** The purchase-invoice spec prompt (`ETGO_SF_SPEC.AGENT_PROMPT`, mirrored in
+`schema_forge/agent-prompts/purchase-invoice/spec.md`) gained the procedure above after "Document tools". Sourcedata `ETGO_SF_SPEC.xml` and the DB agreed byte for byte
+before the change (md5 `f9d8f4d1162fde8180df4479c3b149af`); the new value (md5 `0656c59c26f9be10661e96c07ac8ac36`) reaches an instance through `update.database`, or by running the
+ETP-5715 OCR SQL (guarded by the previous md5, idempotent). `agentPrompt` equals `spec.md` in `contract.json` and `contract.mcp.json`.
+
+**Limits and open points.** The staged file is read by the copilot service from a path the service itself created; this module never exposes it. The live extraction was
+not run (the paid model is never called from tests). Known limit: a `vendor_id` recomputation uses the date read from the document for the tax lookup; a user who declines the
+date gets today's taxes only when the invoice is created, so a rate that changed between the two dates can differ (the application has the same shape: it resolves the tax
+before the final date is applied).
+
+**Tests:** `OcrReviewAssemblerTest` (every decision with the application's rules, with fake lookups), `ReceiverTaxIdCheckTest` (the application's own cases, ported),
+`OcrExtractionParserTest`, `OcrSanitizerTest`, `OcrExtractionServiceTest`, `OcrConfigTest`, `CopilotOcrServiceClientTest` (the wire contract, the 90 s budget and every
+failure, against a stub server on loopback — never the real service), `NeoStagedDocumentsTest` (session binding, 60-minute expiry and clean-up), `NeoStagedAttachmentTest`,
+`NeoAttachmentUploadEndpointTest` and `NeoAttachmentUploadTicketsTest` (the staged link: single use, TTL, session, PDF only, size, magic bytes),
+`NeoAttachmentTargetTest` (`requireWriteAccess`), `McpOcrToolsTest` (both tools, the cache, `nothing_extracted`, `ocr_unavailable`, the receiver block, injection),
+`McpAttachmentToolsTest` (the staged attach), `McpToolRouterRouteTest`, `ToolRegistryGenerateToolsTest`, `McpToolAnnotationsTest`, `McpToolTitlesTest`,
+`McpAuthorizationServiceVectorTest`, `McpUsageTenantQaTest`; on the SPA side `useOcrConfig.vitest.jsx`, `OcrInlineUploader.vitest.jsx`, `ocrDocTypes.prefill.vitest.js`, `ocrDocTypes.test.js`.

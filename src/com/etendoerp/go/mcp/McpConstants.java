@@ -89,6 +89,19 @@ final class McpConstants {
   static final String TOOL_NEO_GET_DOCUMENT_PDF = "etendo_get_document_pdf";
   /** Tool name of the document email send, the application's "Enviar" (ETP-5715). */
   static final String TOOL_NEO_SEND_DOCUMENT_EMAIL = "etendo_send_document_email";
+  /** Tool name of the single-use link that stages a PDF for data extraction (ETP-5715). */
+  static final String TOOL_NEO_REQUEST_DOCUMENT_EXTRACTION_UPLOAD =
+      "etendo_request_document_extraction_upload";
+  /** Tool name of the data extraction of a staged supplier-invoice PDF, read-only (ETP-5715). */
+  static final String TOOL_NEO_EXTRACT_INVOICE_DOCUMENT = "etendo_extract_invoice_document";
+  /** Error code: the extraction service could not be used (503, ETP-5715). */
+  static final String ERROR_OCR_UNAVAILABLE = "ocr_unavailable";
+  /** Error code: the staged document exists but its file has not been uploaded yet (409, ETP-5715). */
+  static final String ERROR_NOT_UPLOADED = "not_uploaded";
+  /** HTTP-style status for a request the service rejected before running (ETP-5715). */
+  static final int STATUS_BAD_REQUEST = 400;
+  /** HTTP-style status for a dependency that cannot be reached (ETP-5715). */
+  static final int STATUS_SERVICE_UNAVAILABLE = 503;
   /** Error code: the document has no stored PDF yet (409, ETP-5715). */
   static final String ERROR_NO_PDF = "no_pdf";
   /** Error code: the stored PDF predates the document's last change and is not current (409, ETP-5715). */

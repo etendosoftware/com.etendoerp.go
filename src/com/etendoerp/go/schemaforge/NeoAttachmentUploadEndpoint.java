@@ -112,6 +112,10 @@ public final class NeoAttachmentUploadEndpoint {
     OBContext.setAdminMode(true);
     try {
       bindSession(ticket.getSession());
+      if (ticket.getSubject().isStaged()) {
+        handleStaged(token, tickets, ticket, request, response);
+        return;
+      }
       NeoAttachmentTarget target = authorize(ticket);
       NeoResponse stored = store(ticket, target, request);
       settle(token, tickets, new Settlement(target, ticket, stored, committed), response);
@@ -159,14 +163,45 @@ public final class NeoAttachmentUploadEndpoint {
   private static NeoAttachmentTarget authorize(PendingUpload ticket) {
     SFSpec spec = OBDal.getInstance().get(SFSpec.class, ticket.getSubject().getSpecId());
     SFEntity entity = OBDal.getInstance().get(SFEntity.class, ticket.getSubject().getEntityId());
-    // The spec is judged as findActiveSpecByName judged it when the link was issued: a spec switched
-    // off within the TTL no longer takes uploads. Same answer as a link that never existed.
+    requireLiveSpec(spec, entity);
+    return NeoAttachmentTarget.resolve(spec, entity, ticket.getSubject().getRecordId(), true);
+  }
+
+  /**
+   * The spec is judged as findActiveSpecByName judged it when the link was issued: a spec switched
+   * off within the TTL no longer takes uploads. Same answer as a link that never existed.
+   */
+  private static void requireLiveSpec(SFSpec spec, SFEntity entity) {
     if (spec == null || entity == null || !Boolean.TRUE.equals(spec.isActive())
         || !Boolean.TRUE.equals(spec.isShowInMCP()) || !Boolean.TRUE.equals(entity.isActive())
         || !Boolean.TRUE.equals(entity.isIncluded())) {
       throw new NeoAttachmentTarget.Refused(HttpServletResponse.SC_FORBIDDEN, INVALID_LINK_MESSAGE);
     }
-    return NeoAttachmentTarget.resolve(spec, entity, ticket.getSubject().getRecordId(), true);
+  }
+
+  /**
+   * The PUT of a link whose file is staged for data extraction (ETP-5715): the spec is re-authorized
+   * as for an attachment (write tier, no record), then {@link NeoStagedUpload} checks and keeps the
+   * bytes. A rejected file hands the link back, a stored one spends it.
+   */
+  private static void handleStaged(String token, NeoAttachmentUploadTickets tickets,
+      PendingUpload ticket, HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    SFSpec spec = OBDal.getInstance().get(SFSpec.class, ticket.getSubject().getSpecId());
+    SFEntity entity = OBDal.getInstance().get(SFEntity.class, ticket.getSubject().getEntityId());
+    requireLiveSpec(spec, entity);
+    NeoAttachmentTarget.requireWriteAccess(spec, entity);
+    NeoResponse stored = NeoStagedUpload.store(ticket, request);
+    OBDal.getInstance().rollbackAndClose();
+    if (stored.getHttpStatus() == HttpServletResponse.SC_FORBIDDEN) {
+      // The staged document is gone or not this session's: the link can never work again.
+      tickets.complete(token, null);
+    } else if (stored.getHttpStatus() >= HttpServletResponse.SC_BAD_REQUEST) {
+      tickets.release(token);
+    } else {
+      tickets.complete(token, ticket.getSubject().getStagedDocumentId());
+    }
+    writeJson(response, stored.getHttpStatus(), stored.getBody());
   }
 
   private static NeoResponse store(PendingUpload ticket, NeoAttachmentTarget target,
@@ -181,6 +216,32 @@ public final class NeoAttachmentUploadEndpoint {
   /** Writes the body to a directory of its own, never past the policy's size cap by more than a byte. */
   private static File materialize(HttpServletRequest request, String fileName) throws IOException {
     Path directory = Files.createTempDirectory("etgo-attachment-");
+    try {
+      return copyBody(request, directory, fileName);
+    } catch (IOException | RuntimeException e) {
+      // The store only learns of the file once this method returns, so a copy that fails (client
+      // abort, name too long) must clean up here or the directory is leaked.
+      try {
+        Files.deleteIfExists(directory);
+      } catch (IOException cleanup) {
+        e.addSuppressed(cleanup);
+      }
+      throw e;
+    }
+  }
+
+  /**
+   * Copies the request body to a file of this name in a directory the caller owns, stopping a byte
+   * past the policy's size cap. A copy that fails deletes the file it started.
+   *
+   * @param request   the PUT whose body is the raw file
+   * @param directory where the file is written; the caller creates and removes it
+   * @param fileName  the sanitized file name
+   * @return the file written
+   * @throws IOException when the body cannot be copied
+   */
+  static File copyBody(HttpServletRequest request, Path directory, String fileName)
+      throws IOException {
     File file = new File(directory.toFile(), fileName);
     try (InputStream in = request.getInputStream();
         OutputStream out = Files.newOutputStream(file.toPath())) {
@@ -193,11 +254,8 @@ public final class NeoAttachmentUploadEndpoint {
         read = in.read(buffer);
       }
     } catch (IOException | RuntimeException e) {
-      // The store only learns of the file once this method returns, so a copy that fails (client
-      // abort, name too long) must clean up here or the directory and up to 10 MB are leaked.
       try {
         Files.deleteIfExists(file.toPath());
-        Files.deleteIfExists(directory);
       } catch (IOException cleanup) {
         e.addSuppressed(cleanup);
       }

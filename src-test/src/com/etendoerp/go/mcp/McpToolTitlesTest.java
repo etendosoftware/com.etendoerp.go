@@ -45,7 +45,8 @@ class McpToolTitlesTest {
       "etendo_batch", "etendo_action", "etendo_action_batch", "etendo_widget", "etendo_vector_search", "etendo_upload_image",
       "etendo_request_image_upload", "etendo_get_image_upload", "etendo_request_attachment_upload",
       "etendo_list_attachments", "etendo_delete_attachment", "etendo_get_document_pdf",
-      "etendo_send_document_email", "etendo_generate_amortization_plan", "etendo_feedback", "docs" };
+      "etendo_send_document_email", "etendo_request_document_extraction_upload",
+      "etendo_extract_invoice_document", "etendo_generate_amortization_plan", "etendo_feedback", "docs" };
 
   @Test
   @DisplayName("Fixed tools resolve from the catalog in the user's language")

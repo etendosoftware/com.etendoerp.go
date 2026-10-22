@@ -1080,6 +1080,45 @@ class ToolRegistryGenerateToolsTest {
               "preview")));
     }
 
+    /**
+     * ETP-5715: the two extraction tools are write-tier and are offered only for the specs the OCR
+     * configuration declares (here purchase-invoice), never for any other window.
+     */
+    @Test
+    @DisplayName("the extraction tools follow the write scope and only the specs the OCR configuration declares")
+    void documentExtractionToolsFollowTheWriteScopeAndTheConfiguration() {
+      SFSpec purchaseInvoice = createWindowSpec("purchase-invoice");
+      when(purchaseInvoice.getADWindow()).thenReturn(null);
+      SFSpec salesOrder = createWindowSpec(SPEC_SALES_ORDER);
+      when(salesOrder.getADWindow()).thenReturn(null);
+
+      mockSpecCriteria(List.of(purchaseInvoice, salesOrder));
+      List<String> writeOnly = toolNames(registry.generateTools(scopesOf("neo:write")));
+      List<String> readOnly = toolNames(registry.generateTools(scopesOf("neo:read")));
+      assertTrue(writeOnly.contains(McpConstants.TOOL_NEO_REQUEST_DOCUMENT_EXTRACTION_UPLOAD),
+          writeOnly.toString());
+      assertTrue(writeOnly.contains(McpConstants.TOOL_NEO_EXTRACT_INVOICE_DOCUMENT));
+      assertFalse(readOnly.contains(McpConstants.TOOL_NEO_REQUEST_DOCUMENT_EXTRACTION_UPLOAD),
+          readOnly.toString());
+      assertFalse(readOnly.contains(McpConstants.TOOL_NEO_EXTRACT_INVOICE_DOCUMENT));
+      com.etendoerp.go.mcp.McpToolDefinition extract = registry.generateTools(scopesOf("neo:write"))
+          .stream().filter(t -> McpConstants.TOOL_NEO_EXTRACT_INVOICE_DOCUMENT.equals(t.getName()))
+          .findFirst().orElseThrow();
+      assertEquals(List.of("purchase-invoice"), enumOf(extract, "spec"));
+
+      mockSpecCriteria(List.of(salesOrder));
+      List<String> onlySales = toolNames(registry.generateTools(scopesOf("neo:write")));
+      assertFalse(onlySales.contains(McpConstants.TOOL_NEO_REQUEST_DOCUMENT_EXTRACTION_UPLOAD),
+          onlySales.toString());
+      assertFalse(onlySales.contains(McpConstants.TOOL_NEO_EXTRACT_INVOICE_DOCUMENT));
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<String> enumOf(com.etendoerp.go.mcp.McpToolDefinition tool, String property) {
+      Map<String, Object> properties = (Map<String, Object>) tool.getInputSchema().get("properties");
+      return (List<String>) ((Map<String, Object>) properties.get(property)).get("enum");
+    }
+
     /** ETP-5715: they take the spec from the `spec` argument, so the router authorizes that spec. */
     @Test
     @DisplayName("the attachment tools resolve their spec from the arguments, like the CRUD tools")
@@ -1088,13 +1127,24 @@ class ToolRegistryGenerateToolsTest {
       arguments.put("spec", SPEC_SALES_ORDER);
       for (String tool : List.of(McpConstants.TOOL_NEO_REQUEST_ATTACHMENT_UPLOAD,
           McpConstants.TOOL_NEO_LIST_ATTACHMENTS, McpConstants.TOOL_NEO_DELETE_ATTACHMENT,
-          McpConstants.TOOL_NEO_GET_DOCUMENT_PDF, McpConstants.TOOL_NEO_SEND_DOCUMENT_EMAIL)) {
+          McpConstants.TOOL_NEO_GET_DOCUMENT_PDF, McpConstants.TOOL_NEO_SEND_DOCUMENT_EMAIL,
+          McpConstants.TOOL_NEO_REQUEST_DOCUMENT_EXTRACTION_UPLOAD,
+          McpConstants.TOOL_NEO_EXTRACT_INVOICE_DOCUMENT)) {
         assertTrue(ToolRegistry.isCrudTool(tool), tool);
         assertEquals(SPEC_SALES_ORDER, ToolRegistry.resolveSpecName(tool, arguments), tool);
         assertTrue(ToolRegistry.declaredArgumentNames(tool).orElseThrow().contains("spec"), tool);
       }
       assertTrue(ToolRegistry.declaredArgumentNames(McpConstants.TOOL_NEO_DELETE_ATTACHMENT)
           .orElseThrow().contains("attachment_id"));
+      // ETP-5715: the PDF staged for extraction can be attached through the upload tool, and the
+      // extraction recomputes for the vendor the user chose.
+      assertTrue(ToolRegistry.declaredArgumentNames(McpConstants.TOOL_NEO_REQUEST_ATTACHMENT_UPLOAD)
+          .orElseThrow().containsAll(List.of("name", "main", "staged_document_id")));
+      assertTrue(ToolRegistry.declaredArgumentNames(McpConstants.TOOL_NEO_EXTRACT_INVOICE_DOCUMENT)
+          .orElseThrow().containsAll(List.of("spec", "staged_document_id", "vendor_id")));
+      assertTrue(ToolRegistry.declaredArgumentNames(
+          McpConstants.TOOL_NEO_REQUEST_DOCUMENT_EXTRACTION_UPLOAD).orElseThrow()
+          .containsAll(List.of("spec", "name")));
     }
 
     @Test

@@ -273,6 +273,9 @@ public class McpToolRouter {
             return McpDocumentPdfTool.handle(arguments);
           case McpConstants.TOOL_NEO_SEND_DOCUMENT_EMAIL:
             return McpDocumentEmailTool.handle(arguments);
+          case McpConstants.TOOL_NEO_REQUEST_DOCUMENT_EXTRACTION_UPLOAD:
+          case McpConstants.TOOL_NEO_EXTRACT_INVOICE_DOCUMENT:
+            return McpOcrTools.handle(toolName, arguments);
           case "docs":
             return handleDocs(arguments);
           default:

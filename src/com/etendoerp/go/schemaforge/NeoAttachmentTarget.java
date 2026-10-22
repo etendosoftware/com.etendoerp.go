@@ -58,6 +58,8 @@ public final class NeoAttachmentTarget {
   /** Same text for a missing attachment and for one that belongs to another record. */
   public static final String MSG_ATTACHMENT_NOT_FOUND = NeoAttachmentsHelper.ERR_ATTACHMENT_NOT_FOUND;
 
+  private static final String MSG_NO_ATTACHABLE_RECORD =
+      "This entity has no record that can carry attachments.";
   private static final String METHOD_READ = "GET";
   private static final String METHOD_WRITE = "POST";
 
@@ -118,20 +120,48 @@ public final class NeoAttachmentTarget {
     try {
       Tab tab = entity == null ? null : entity.getADTab();
       if (tab == null || tab.getTable() == null || StringUtils.isBlank(recordId)) {
-        throw new Refused(422, "This entity has no record that can carry attachments.");
+        throw new Refused(422, MSG_NO_ATTACHABLE_RECORD);
       }
-      if (tab.getTabLevel() != null && tab.getTabLevel() > 0) {
-        throw new Refused(422, "Attachments belong to the document itself, not to its lines. "
-            + "Use the document's own entity.");
-      }
-      String unavailable = NeoAttachmentsConfig.refusalFor(entity);
-      if (unavailable != null) {
-        // Declared in MCP_CONFIG, not a secret: a clear refusal, before any role or record lookup.
-        throw new Refused(405, unavailable);
-      }
+      requireAttachable(entity, tab);
       requireRoleAccess(spec, tab.getTable().getId(), write);
       requireVisibleRecord(tab.getTable().getId(), recordId, write);
       return new NeoAttachmentTarget(spec, entity, tab, recordId);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /** The document itself, not a line, and not a type the application gives no Attachments tab. */
+  private static void requireAttachable(SFEntity entity, Tab tab) {
+    if (tab.getTabLevel() != null && tab.getTabLevel() > 0) {
+      throw new Refused(422, "Attachments belong to the document itself, not to its lines. "
+          + "Use the document's own entity.");
+    }
+    String unavailable = NeoAttachmentsConfig.refusalFor(entity);
+    if (unavailable != null) {
+      // Declared in MCP_CONFIG, not a secret: a clear refusal, before any role or record lookup.
+      throw new Refused(405, unavailable);
+    }
+  }
+
+  /**
+   * Checks that the role may write attachments to documents of this spec, without any record in
+   * view: the part of {@link #resolve} that does not depend on one (ETP-5715, staged documents).
+   *
+   * @param spec   the active spec
+   * @param entity the spec's root entity
+   * @throws Refused 405 when the document type has no Attachments tab, 403 when the role lacks the
+   *         write tier, 422 when the entity has no attachable table or is a line
+   */
+  public static void requireWriteAccess(SFSpec spec, SFEntity entity) {
+    OBContext.setAdminMode(true);
+    try {
+      Tab tab = entity == null ? null : entity.getADTab();
+      if (tab == null || tab.getTable() == null) {
+        throw new Refused(422, MSG_NO_ATTACHABLE_RECORD);
+      }
+      requireAttachable(entity, tab);
+      requireRoleAccess(spec, tab.getTable().getId(), true);
     } finally {
       OBContext.restorePreviousMode();
     }

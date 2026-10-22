@@ -359,4 +359,67 @@ class NeoAttachmentTargetTest {
 
     assertNotNull(NeoAttachmentTarget.resolve(spec, entity, RECORD, true));
   }
+
+  // ── write access without a record (staged documents, ETP-5715) ─────────────
+
+  @Test
+  @DisplayName("write access of a spec is checked with no record: role tier and table rule, no DAL read")
+  void writeAccessNeedsNoRecord() {
+    SFEntity entity = entityAtLevel(0L);
+
+    NeoAttachmentTarget.requireWriteAccess(spec, entity);
+
+    accessMock.verify(() -> NeoAccessHelper.hasWindowAccessForSpec(spec, "POST"));
+    authorizerMock.verify(() -> NeoAttachmentAuthorizer.checkWrite(TABLE_ID));
+    verify(dal, never()).get(anyString(), anyString());
+  }
+
+  @Test
+  @DisplayName("a role without the write tier is a 403, also for the staged upload")
+  void writeAccessRefusesAReadOnlyRole() {
+    SFEntity entity = entityAtLevel(0L);
+    accessMock.when(() -> NeoAccessHelper.hasWindowAccessForSpec(spec, "POST")).thenReturn(false);
+
+    assertEquals(403, refusalOf(() -> NeoAttachmentTarget.requireWriteAccess(spec, entity))
+        .getStatus());
+  }
+
+  @Test
+  @DisplayName("the table-level write rule of REST applies to the staged upload too")
+  void writeAccessAppliesTheTableRule() {
+    SFEntity entity = entityAtLevel(0L);
+    authorizerMock.when(() -> NeoAttachmentAuthorizer.checkWrite(TABLE_ID))
+        .thenReturn(NeoResponse.error(403, NeoAttachmentAuthorizer.ACCESS_DENIED));
+
+    assertEquals(403, refusalOf(() -> NeoAttachmentTarget.requireWriteAccess(spec, entity))
+        .getStatus());
+  }
+
+  @Test
+  @DisplayName("a line entity, or an entity without a tab, is not attachable: 422")
+  void writeAccessRefusesLinesAndTablessEntities() {
+    SFEntity lines = entityAtLevel(1L);
+    SFEntity noTab = mock(SFEntity.class);
+
+    assertEquals(422, refusalOf(() -> NeoAttachmentTarget.requireWriteAccess(spec, lines))
+        .getStatus());
+    assertEquals(422, refusalOf(() -> NeoAttachmentTarget.requireWriteAccess(spec, noTab))
+        .getStatus());
+    assertEquals(422, refusalOf(() -> NeoAttachmentTarget.requireWriteAccess(spec, null))
+        .getStatus());
+  }
+
+  @Test
+  @DisplayName("a document type the application gives no Attachments tab is refused 405 before any role check")
+  void writeAccessRefusesAFlaggedDocumentType() {
+    SFEntity entity = entityAtLevel(0L);
+    when(entity.getMCPConfig())
+        .thenReturn("{\"attachments\":{\"enabled\":false,\"reason\":\"no tab in the app\"}}");
+
+    NeoAttachmentTarget.Refused refused = refusalOf(
+        () -> NeoAttachmentTarget.requireWriteAccess(spec, entity));
+
+    assertEquals(405, refused.getStatus());
+    accessMock.verify(() -> NeoAccessHelper.hasWindowAccessForSpec(spec, "POST"), never());
+  }
 }

@@ -401,5 +401,9 @@ public class McpUsageTenantQaTest {
         McpUsageTelemetry.verbFor(McpConstants.TOOL_NEO_GET_DOCUMENT_PDF));
     assertEquals("document_email",
         McpUsageTelemetry.verbFor(McpConstants.TOOL_NEO_SEND_DOCUMENT_EMAIL));
+    assertEquals("document_extraction_upload",
+        McpUsageTelemetry.verbFor(McpConstants.TOOL_NEO_REQUEST_DOCUMENT_EXTRACTION_UPLOAD));
+    assertEquals("document_extraction",
+        McpUsageTelemetry.verbFor(McpConstants.TOOL_NEO_EXTRACT_INVOICE_DOCUMENT));
   }
 }

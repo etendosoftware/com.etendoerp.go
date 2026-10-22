@@ -28,6 +28,9 @@ import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.when;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Clock;
 import java.util.List;
 import java.util.Properties;
 
@@ -37,6 +40,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.mockito.MockedStatic;
 import org.openbravo.base.session.OBPropertiesProvider;
 import org.openbravo.dal.core.OBContext;
@@ -52,6 +56,8 @@ import com.etendoerp.go.schemaforge.NeoAttachmentTarget;
 import com.etendoerp.go.schemaforge.NeoAttachmentUploadTickets;
 import com.etendoerp.go.schemaforge.NeoAttachmentsHelper;
 import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.schemaforge.NeoStagedAttachment;
+import com.etendoerp.go.schemaforge.NeoStagedDocuments;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.email.DocumentDownloadTokenService;
@@ -64,6 +70,7 @@ import com.etendoerp.go.schemaforge.email.DocumentDownloadTokenService;
  *
  * @covers com.etendoerp.go.mcp.McpAttachmentTools
  * @covers com.etendoerp.go.mcp.McpAttachmentToolDefinitions
+ * @covers com.etendoerp.go.mcp.McpStagedAttachment
  */
 @SuppressWarnings("java:S2187")
 class McpAttachmentToolsTest {
@@ -79,6 +86,11 @@ class McpAttachmentToolsTest {
   private MockedStatic<OBContext> contextMock;
   private MockedStatic<McpToolRouterSupport> supportMock;
   private MockedStatic<NeoAttachmentTarget> targetMock;
+  @TempDir
+  Path stagedRoot;
+
+  private MockedStatic<NeoStagedDocuments> stagedMock;
+  private NeoStagedDocuments stagedDocuments;
   private MockedStatic<NeoAttachmentUploadTickets> ticketsMock;
   private MockedStatic<NeoAttachmentsHelper> helperMock;
   private MockedStatic<OBPropertiesProvider> propsMock;
@@ -113,6 +125,9 @@ class McpAttachmentToolsTest {
     ticketsMock = mockStatic(NeoAttachmentUploadTickets.class);
     ticketsMock.when(NeoAttachmentUploadTickets::getInstance).thenReturn(tickets);
     helperMock = mockStatic(NeoAttachmentsHelper.class);
+    stagedDocuments = new NeoStagedDocuments(Clock.systemUTC(), stagedRoot);
+    stagedMock = mockStatic(NeoStagedDocuments.class);
+    stagedMock.when(NeoStagedDocuments::getInstance).thenReturn(stagedDocuments);
     Properties properties = new Properties();
     properties.setProperty("context.url", "http://host:8080/etendo");
     OBPropertiesProvider provider = mock(OBPropertiesProvider.class);
@@ -125,6 +140,7 @@ class McpAttachmentToolsTest {
   void tearDown() {
     System.clearProperty(SECRET_PROP);
     propsMock.close();
+    stagedMock.close();
     helperMock.close();
     ticketsMock.close();
     targetMock.close();
@@ -625,6 +641,208 @@ class McpAttachmentToolsTest {
     }
   }
 
+  // ── etendo_request_attachment_upload with a staged document (ETP-5715) ──────
+
+  @Nested
+  @DisplayName("etendo_request_attachment_upload with staged_document_id")
+  class StagedDocument {
+
+    private final NeoAttachmentUploadTickets.Session session = new NeoAttachmentUploadTickets.Session(
+        CLIENT, ORG, USER, ROLE, "WH1");
+    private MockedStatic<NeoStagedAttachment> attachMock;
+
+    @BeforeEach
+    void attachAnswers() throws Exception {
+      attachMock = mockStatic(NeoStagedAttachment.class);
+      JSONObject stored = new JSONObject().put("name", "factura.pdf").put("message", "uploaded")
+          .put("id", "ATT9").put("isMain", true);
+      attachMock.when(() -> NeoStagedAttachment.attach(any(), any(), anyBoolean()))
+          .thenReturn(NeoResponse.created(stored));
+    }
+
+    @AfterEach
+    void closeAttach() {
+      attachMock.close();
+    }
+
+    private String stagedPdf(String specName) throws Exception {
+      String id = stagedDocuments.reserve(session, specName, "factura.pdf");
+      Path file = stagedDocuments.directoryFor(id).resolve("factura.pdf");
+      Files.writeString(file, "%PDF-1.4");
+      stagedDocuments.markStored(id, file);
+      return id;
+    }
+
+    @Test
+    @DisplayName("attaches the staged PDF to the document right away: no link, no name needed")
+    void attachesWithoutALink() throws Exception {
+      String id = stagedPdf(SPEC);
+
+      JSONObject result = McpAttachmentTools.requestUpload(
+          args("staged_document_id", id, "main", "true"));
+
+      assertEquals(true, result.getBoolean("attached"));
+      assertEquals("ATT9", result.getString("attachmentId"));
+      assertEquals("factura.pdf", result.getString("name"));
+      assertTrue(result.getBoolean("isMain"));
+      assertEquals(SPEC, result.getString("spec"));
+      assertEquals(RECORD, result.getString("id"));
+      assertFalse(result.has("uploadUrl"));
+      assertEquals(0, tickets.size());
+    }
+
+    @Test
+    @DisplayName("the document is authorized for WRITING, the main flag is passed on and defaults to false")
+    void authorizesAndPassesTheMainFlag() throws Exception {
+      String id = stagedPdf(SPEC);
+
+      McpAttachmentTools.requestUpload(args("staged_document_id", id, "main", "true"));
+      attachMock.verify(() -> NeoStagedAttachment.attach(eq(target), any(), eq(true)));
+      String second = stagedPdf(SPEC);
+      McpAttachmentTools.requestUpload(args("staged_document_id", second));
+      attachMock.verify(() -> NeoStagedAttachment.attach(eq(target), any(), eq(false)));
+
+      targetMock.verify(() -> NeoAttachmentTarget.resolve(eq(spec), eq(header), eq(RECORD),
+          eq(true)), org.mockito.Mockito.times(2));
+    }
+
+    @Test
+    @DisplayName("once attached, the staged copy is removed: it has served")
+    void stagedCopyIsRemovedAfterAttaching() throws Exception {
+      String id = stagedPdf(SPEC);
+
+      McpAttachmentTools.requestUpload(args("staged_document_id", id));
+
+      assertTrue(stagedDocuments.find(id, session).isEmpty());
+    }
+
+    @Test
+    @DisplayName("another session's staged document, or an unknown one, is the same 404 and attaches nothing")
+    void foreignOrUnknownStagedDocument() throws Exception {
+      NeoAttachmentUploadTickets.Session other = new NeoAttachmentUploadTickets.Session(CLIENT, ORG,
+          "OTHER", ROLE, null);
+      String theirs = stagedDocuments.reserve(other, SPEC, "factura.pdf");
+
+      JSONObject foreign = McpAttachmentTools.requestUpload(args("staged_document_id", theirs));
+      JSONObject unknown = McpAttachmentTools.requestUpload(args("staged_document_id", "nope"));
+
+      assertEquals(404, foreign.getInt("status"));
+      assertEquals(foreign.getString("detail"), unknown.getString("detail"));
+      attachMock.verifyNoInteractions();
+    }
+
+    @Test
+    @DisplayName("a staged document whose PDF never arrived is a 409 and attaches nothing")
+    void notUploadedYet() throws Exception {
+      String id = stagedDocuments.reserve(session, SPEC, "factura.pdf");
+
+      JSONObject result = McpAttachmentTools.requestUpload(args("staged_document_id", id));
+
+      assertEquals(409, result.getInt("status"));
+      assertEquals("not_uploaded", result.getString("error"));
+      attachMock.verifyNoInteractions();
+    }
+
+    @Test
+    @DisplayName("a document being read (or attached) right now is a 409 and attaching waits for nothing")
+    void busyDocumentIsNotAttached() throws Exception {
+      String id = stagedPdf(SPEC);
+      NeoStagedDocuments.Staged held = stagedDocuments.find(id, session).orElseThrow();
+      java.util.concurrent.CountDownLatch locked = new java.util.concurrent.CountDownLatch(1);
+      java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+      Thread reader = new Thread(() -> {
+        held.getLock().lock();
+        locked.countDown();
+        try {
+          release.await();
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+        } finally {
+          held.getLock().unlock();
+        }
+      });
+      reader.start();
+      locked.await();
+      try {
+        JSONObject result = McpAttachmentTools.requestUpload(args("staged_document_id", id));
+
+        assertEquals(409, result.getInt("status"));
+        assertEquals("conflict", result.getString("error"));
+        attachMock.verifyNoInteractions();
+        assertTrue(stagedDocuments.find(id, session).isPresent(), "the file is still there");
+      } finally {
+        release.countDown();
+        reader.join();
+      }
+    }
+
+    @Test
+    @DisplayName("the same staged document cannot be attached twice: the second call finds nothing")
+    void attachedTwice() throws Exception {
+      String id = stagedPdf(SPEC);
+
+      JSONObject first = McpAttachmentTools.requestUpload(args("staged_document_id", id));
+      JSONObject second = McpAttachmentTools.requestUpload(args("staged_document_id", id));
+
+      assertEquals(true, first.getBoolean("attached"));
+      assertEquals(404, second.getInt("status"));
+      attachMock.verify(() -> NeoStagedAttachment.attach(any(), any(), anyBoolean()),
+          org.mockito.Mockito.times(1));
+    }
+
+    @Test
+    @DisplayName("a document consumed after it was looked up (a concurrent attach won) is a 404")
+    void consumedAfterLookup() throws Exception {
+      String id = stagedPdf(SPEC);
+      stagedDocuments.find(id, session).orElseThrow().markConsumed();
+
+      JSONObject result = McpAttachmentTools.requestUpload(args("staged_document_id", id));
+
+      assertEquals(404, result.getInt("status"));
+      attachMock.verifyNoInteractions();
+    }
+
+    @Test
+    @DisplayName("a PDF staged for another document type is not attached here")
+    void stagedForAnotherSpec() throws Exception {
+      String id = stagedPdf("sales-invoice");
+
+      JSONObject result = McpAttachmentTools.requestUpload(args("staged_document_id", id));
+
+      assertEquals(422, result.getInt("status"));
+      attachMock.verifyNoInteractions();
+      assertTrue(stagedDocuments.find(id, session).isPresent(), "it is kept for the right document");
+    }
+
+    @Test
+    @DisplayName("a failure of the store is returned as it is and the staged PDF is kept for a retry")
+    void storeFailureKeepsTheStagedDocument() throws Exception {
+      String id = stagedPdf(SPEC);
+      attachMock.when(() -> NeoStagedAttachment.attach(any(), any(), anyBoolean()))
+          .thenReturn(NeoResponse.error(400, "File content does not match its .pdf extension"));
+
+      JSONObject result = McpAttachmentTools.requestUpload(args("staged_document_id", id));
+
+      assertEquals(400, result.getInt("status"));
+      assertTrue(result.getString("detail").contains("does not match"));
+      assertTrue(stagedDocuments.find(id, session).isPresent());
+    }
+
+    @Test
+    @DisplayName("a refused document (no write access, not the tenant's) attaches nothing and keeps the staged PDF")
+    void refusedDocument() throws Exception {
+      String id = stagedPdf(SPEC);
+      refuseWith(404, NeoAttachmentTarget.MSG_RECORD_NOT_FOUND);
+
+      JSONObject result = bodyOf(McpAttachmentTools.handle(
+          McpConstants.TOOL_NEO_REQUEST_ATTACHMENT_UPLOAD, args("staged_document_id", id)));
+
+      assertEquals(404, result.getInt("status"));
+      attachMock.verifyNoInteractions();
+      assertTrue(stagedDocuments.find(id, session).isPresent());
+    }
+  }
+
   // ── Definitions ──────────────────────────────────────────────────────────
 
   @Nested
@@ -642,7 +860,7 @@ class McpAttachmentToolsTest {
     }
 
     @Test
-    @DisplayName("read scope gets the list; write scope adds upload and delete; no spec, no tools")
+    @DisplayName("read scope gets the list; write scope adds upload, delete and the document-reading tools; no spec, no tools")
     void toolsFollowTheScopes() {
       List<McpToolDefinition> read = new java.util.ArrayList<>();
       McpAttachmentToolDefinitions.addTo(read, List.of(SPEC), true, false);
@@ -654,8 +872,12 @@ class McpAttachmentToolsTest {
       // ETP-5715: the document PDF tool rides on the read scope, next to the list.
       assertEquals(List.of(McpConstants.TOOL_NEO_LIST_ATTACHMENTS,
           McpConstants.TOOL_NEO_GET_DOCUMENT_PDF), names(read));
+      // ETP-5715: purchase-invoice is declared in the OCR configuration, so the two document-reading
+      // tools ride on the write scope after the attachment ones.
       assertEquals(List.of(McpConstants.TOOL_NEO_REQUEST_ATTACHMENT_UPLOAD,
-          McpConstants.TOOL_NEO_DELETE_ATTACHMENT), names(write));
+          McpConstants.TOOL_NEO_DELETE_ATTACHMENT,
+          McpConstants.TOOL_NEO_REQUEST_DOCUMENT_EXTRACTION_UPLOAD,
+          McpConstants.TOOL_NEO_EXTRACT_INVOICE_DOCUMENT), names(write));
       assertTrue(none.isEmpty());
     }
 
@@ -675,8 +897,9 @@ class McpAttachmentToolsTest {
 
       assertFalse(names(without).contains(McpConstants.TOOL_NEO_SEND_DOCUMENT_EMAIL));
       assertEquals(List.of(McpConstants.TOOL_NEO_REQUEST_ATTACHMENT_UPLOAD,
-          McpConstants.TOOL_NEO_DELETE_ATTACHMENT, McpConstants.TOOL_NEO_SEND_DOCUMENT_EMAIL),
-          names(with));
+          McpConstants.TOOL_NEO_DELETE_ATTACHMENT, McpConstants.TOOL_NEO_SEND_DOCUMENT_EMAIL,
+          McpConstants.TOOL_NEO_REQUEST_DOCUMENT_EXTRACTION_UPLOAD,
+          McpConstants.TOOL_NEO_EXTRACT_INVOICE_DOCUMENT), names(with));
     }
 
     private List<String> names(List<McpToolDefinition> tools) {

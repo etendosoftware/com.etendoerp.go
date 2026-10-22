@@ -442,6 +442,10 @@ final class McpUsageTelemetry {
         return "document_pdf";
       case McpConstants.TOOL_NEO_SEND_DOCUMENT_EMAIL:
         return "document_email";
+      case McpConstants.TOOL_NEO_REQUEST_DOCUMENT_EXTRACTION_UPLOAD:
+        return "document_extraction_upload";
+      case McpConstants.TOOL_NEO_EXTRACT_INVOICE_DOCUMENT:
+        return "document_extraction";
       case "etendo_schema":
         return "schema";
       case "etendo_defaults":

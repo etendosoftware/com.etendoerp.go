@@ -3621,6 +3621,27 @@ class McpToolRouterRouteTest {
     }
 
     @Test
+    @DisplayName("the two extraction tools are dispatched to their handler on a write scope, after the spec check")
+    void documentExtractionToolsAreDispatchedAfterTheChecks() throws Exception {
+      setupSpecLookup(mockSpec());
+      JSONObject sentinel = McpToolRouter.wrapAsTextContent("extracted");
+      try (MockedStatic<McpOcrTools> handler = mockStatic(McpOcrTools.class)) {
+        handler.when(() -> McpOcrTools.handle(anyString(), any())).thenReturn(sentinel);
+
+        for (String tool : List.of(McpConstants.TOOL_NEO_REQUEST_DOCUMENT_EXTRACTION_UPLOAD,
+            McpConstants.TOOL_NEO_EXTRACT_INVOICE_DOCUMENT)) {
+          JSONObject args = new JSONObject().put("spec", SPEC_NAME).put("name", "f.pdf")
+              .put("staged_document_id", "S1");
+          args.remove(McpConstants.TOOL_NEO_EXTRACT_INVOICE_DOCUMENT.equals(tool) ? "name"
+              : "staged_document_id");
+          assertEquals(sentinel, router.route(tool, args, WRITE_SCOPES), tool);
+          handler.verify(() -> McpOcrTools.handle(eq(tool), any()));
+          authMock.verify(() -> McpAuthorizationService.authorizeToolCall(eq(tool), any()));
+        }
+      }
+    }
+
+    @Test
     @DisplayName("the document PDF tool is dispatched to its handler on a read scope, after the spec check")
     void documentPdfIsDispatchedAfterTheChecks() throws Exception {
       setupSpecLookup(mockSpec());

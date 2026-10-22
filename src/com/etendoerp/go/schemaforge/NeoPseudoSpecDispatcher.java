@@ -122,6 +122,12 @@ class NeoPseudoSpecDispatcher {
       case "vectorsearch":
         return dispatchVectorSearch(method, request, response);
 
+      // ETP-5715: the OCR question and answer schema of a document type: GET /sws/neo/ocrconfig
+      //   ?docType=purchase-invoice. The one source the application's upload panel and the MCP
+      //   extraction tools share; see NeoOcrConfigEndpoint.
+      case "ocrconfig":
+        return dispatchOcrConfig(method, request, response);
+
       // ETP-5462: usage events from the UI and the AI BFF: POST /sws/neo/usage
       //   Validates a batch and hands it to UsageEventRecorder, answering 202 without waiting for
       //   the INSERT. Client/org/user/role come from the token, never the body. See
@@ -263,6 +269,17 @@ class NeoPseudoSpecDispatcher {
       return true;
     }
     servlet.writeResponse(response, vectorSearchEndpoint.handle(request));
+    return true;
+  }
+
+  private boolean dispatchOcrConfig(String method, HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    if (!"GET".equals(method)) {
+      servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+          "Ocrconfig endpoint only supports GET");
+      return true;
+    }
+    servlet.writeResponse(response, new NeoOcrConfigEndpoint().handle(request));
     return true;
   }
 

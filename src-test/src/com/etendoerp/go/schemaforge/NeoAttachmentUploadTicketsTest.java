@@ -22,6 +22,8 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -31,6 +33,12 @@ import java.time.ZoneOffset;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.openbravo.dal.core.OBContext;
+import org.openbravo.model.ad.access.Role;
+import org.openbravo.model.ad.access.User;
+import org.openbravo.model.ad.system.Client;
+import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.model.common.enterprise.Warehouse;
 
 import com.etendoerp.go.schemaforge.NeoAttachmentUploadTickets.PendingUpload;
 import com.etendoerp.go.schemaforge.NeoAttachmentUploadTickets.Session;
@@ -209,5 +217,114 @@ class NeoAttachmentUploadTicketsTest {
 
     assertNull(tickets.peek(token).orElseThrow().getAttachmentId());
     assertEquals(Status.COMPLETED, tickets.peek(token).orElseThrow().getStatus());
+  }
+
+  // ── staged-for-extraction links (ETP-5715) ─────────────────────────────────
+
+  private static Subject staged(String fileName) {
+    return Subject.staged("SPEC1", "ENTITY1", fileName, "STAGED1");
+  }
+
+  @Test
+  void aStagedLinkIsBoundToNoRecordAndCarriesTheStagedDocument() {
+    String token = tickets.issue(session(USER), staged("factura.pdf"));
+
+    Subject subject = tickets.peek(token).orElseThrow().getSubject();
+
+    assertTrue(subject.isStaged());
+    assertEquals("STAGED1", subject.getStagedDocumentId());
+    assertNull(subject.getRecordId());
+    assertFalse(subject.isMarkAsMain());
+    assertEquals("SPEC1", subject.getSpecId());
+    assertEquals("ENTITY1", subject.getEntityId());
+    assertEquals("factura.pdf", subject.getFileName());
+  }
+
+  @Test
+  void anAttachmentLinkIsNotStaged() {
+    assertFalse(subject("factura.pdf", false).isStaged());
+    assertNull(subject("factura.pdf", false).getStagedDocumentId());
+  }
+
+  @Test
+  void aStagedFileNameIsReducedToItsLastSegment() {
+    Subject subject = Subject.staged("SPEC1", "ENTITY1", "../../etc/passwd.pdf", "S");
+
+    assertEquals("passwd.pdf", subject.getFileName());
+  }
+
+  @Test
+  void aStagedLinkWorksExactlyOnceAndKeepsTheStagedIdWhenSpent() {
+    String token = tickets.issue(session(USER), staged("factura.pdf"));
+
+    assertTrue(tickets.claim(token).isPresent());
+    assertTrue(tickets.claim(token).isEmpty(), "second claim");
+    tickets.complete(token, "STAGED1");
+
+    assertTrue(tickets.claim(token).isEmpty(), "claim after completion");
+    assertEquals("STAGED1", tickets.peek(token).orElseThrow().getAttachmentId());
+  }
+
+  @Test
+  void aStagedLinkExpiresLikeAnyOther() {
+    String token = tickets.issue(session(USER), staged("factura.pdf"));
+
+    clock.advance(NeoAttachmentUploadTickets.TTL.plusSeconds(1));
+
+    assertTrue(tickets.claim(token).isEmpty());
+    assertTrue(tickets.peek(token).isEmpty());
+  }
+
+  @Test
+  void aStagedLinkCountsInTheSessionsPendingCap() {
+    for (int i = 0; i < NeoAttachmentUploadTickets.MAX_PENDING_PER_SESSION; i++) {
+      tickets.issue(session(USER), staged("a.pdf"));
+    }
+
+    assertThrows(NeoAttachmentUploadTickets.TooManyPendingTicketsException.class,
+        () -> tickets.issue(session(USER), subject("a.pdf", false)));
+    assertTrue(tickets.issue(session("USER2"), staged("a.pdf")).length() > 0);
+  }
+
+  @Test
+  void aRejectedStagedFileHandsTheLinkBack() {
+    String token = tickets.issue(session(USER), staged("factura.pdf"));
+    tickets.claim(token);
+
+    tickets.release(token);
+
+    assertTrue(tickets.claim(token).isPresent());
+  }
+
+  @Test
+  void theSessionOfTheContextInForceIsTheOneTheLinkRunsAs() {
+    Client client = named(Client.class, CLIENT);
+    Organization organization = named(Organization.class, ORG);
+    User user = named(User.class, USER);
+    Role role = named(Role.class, ROLE);
+    Warehouse warehouse = named(Warehouse.class, "WH1");
+    OBContext context = mock(OBContext.class);
+    when(context.getCurrentClient()).thenReturn(client);
+    when(context.getCurrentOrganization()).thenReturn(organization);
+    when(context.getUser()).thenReturn(user);
+    when(context.getRole()).thenReturn(role);
+    when(context.getWarehouse()).thenReturn(warehouse);
+
+    Session session = Session.of(context);
+
+    assertEquals(CLIENT, session.getClientId());
+    assertEquals(ORG, session.getOrganizationId());
+    assertEquals(USER, session.getUserId());
+    assertEquals(ROLE, session.getRoleId());
+    assertEquals("WH1", session.getWarehouseId());
+    when(context.getWarehouse()).thenReturn(null);
+    assertNull(Session.of(context).getWarehouseId());
+  }
+
+  private static <T extends org.openbravo.base.structure.BaseOBObject> T named(Class<T> type,
+      String id) {
+    T entity = mock(type);
+    when(entity.getId()).thenReturn(id);
+    return entity;
   }
 }

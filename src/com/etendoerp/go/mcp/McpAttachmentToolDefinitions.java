@@ -53,7 +53,10 @@ final class McpAttachmentToolDefinitions {
       + "extensions. Works on a document in any status, completed ones included, but not on document types the app gives no Attachments tab. Set main:true to "
       + "make it the document's MAIN attachment — the one used as the supplier's document of a "
       + "purchase invoice; the previous main one is replaced. The URL works exactly once and "
-      + "expires in 10 minutes. Requires write access to the document's window.";
+      + "expires in 10 minutes. To attach the PDF the user already uploaded to create the "
+      + "invoice (" + McpConstants.TOOL_NEO_REQUEST_DOCUMENT_EXTRACTION_UPLOAD + "), pass its "
+      + "staged_document_id instead of name: it is attached right away, with no link and no second "
+      + "upload (use main:true for a supplier invoice). Requires write access to the document's window.";
 
   /** Description of {@link McpConstants#TOOL_NEO_LIST_ATTACHMENTS}. */
   static final String LIST_DESCRIPTION =
@@ -92,6 +95,16 @@ final class McpAttachmentToolDefinitions {
       tools.add(requestAttachmentUpload(specNames));
       tools.add(deleteAttachment(specNames));
       addSendEmail(tools, specNames);
+      addDocumentExtraction(tools, specNames);
+    }
+  }
+
+  /** The document-reading tools, only for the specs the OCR configuration declares (ETP-5715). */
+  private static void addDocumentExtraction(List<McpToolDefinition> tools, List<String> specNames) {
+    List<String> offered = McpOcrToolDefinitions.supportedSpecs(specNames);
+    if (!offered.isEmpty()) {
+      tools.add(McpOcrToolDefinitions.requestUpload(offered));
+      tools.add(McpOcrToolDefinitions.extract(offered));
     }
   }
 
@@ -106,14 +119,18 @@ final class McpAttachmentToolDefinitions {
   static McpToolDefinition requestAttachmentUpload(List<String> specNames) {
     Map<String, Object> props = documentProps(specNames);
     props.put(McpAttachmentTools.PARAM_NAME, stringProp("The file name WITH its extension, e.g. "
-        + "'factura-proveedor.pdf'. The extension decides the type and must be an allowed one. Only letters "
+        + "'factura-proveedor.pdf'. Required unless staged_document_id is given. The extension decides the "
+        + "type and must be an allowed one. Only letters "
         + "(accents are fine), digits, spaces and . _ ( ) - are accepted."));
     props.put(McpAttachmentTools.PARAM_MAIN, booleanProp("Optional, default false. true makes the "
         + "file the document's main attachment (replacing the previous main one) — what the "
         + "supplier's document of a purchase invoice is."));
+    props.put(McpOcrTools.PARAM_STAGED_DOCUMENT_ID, stringProp("Optional. The stagedDocumentId "
+        + "of a PDF already uploaded for extraction: it is attached to this document directly "
+        + "(then name is not needed and no link is returned)."));
     return new McpToolDefinition(McpConstants.TOOL_NEO_REQUEST_ATTACHMENT_UPLOAD,
         REQUEST_UPLOAD_DESCRIPTION, buildObjectSchema(props, List.of(McpConstants.PARAM_SPEC,
-            McpConstants.PARAM_ID, McpAttachmentTools.PARAM_NAME)));
+            McpConstants.PARAM_ID)));
   }
 
   static McpToolDefinition listAttachments(List<String> specNames) {

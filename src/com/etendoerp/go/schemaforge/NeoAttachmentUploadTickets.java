@@ -31,6 +31,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import javax.enterprise.context.ApplicationScoped;
 
 import org.openbravo.base.weld.WeldUtils;
+import org.openbravo.dal.core.OBContext;
 
 /**
  * In-memory store of pending one-shot attachment-upload links, the attachment twin of
@@ -140,6 +141,19 @@ public class NeoAttachmentUploadTickets {
       return warehouseId;
     }
 
+    /**
+     * The session of the OBContext in force: who is asking, in which role and organization.
+     *
+     * @param context the current context
+     * @return the session it describes
+     */
+    public static Session of(OBContext context) {
+      Object warehouse = context.getWarehouse() == null ? null : context.getWarehouse().getId();
+      return new Session((String) context.getCurrentClient().getId(),
+          (String) context.getCurrentOrganization().getId(), (String) context.getUser().getId(),
+          (String) context.getRole().getId(), (String) warehouse);
+    }
+
     boolean sameSessionAs(Session other) {
       return Objects.equals(clientId, other.clientId)
           && Objects.equals(organizationId, other.organizationId)
@@ -147,13 +161,17 @@ public class NeoAttachmentUploadTickets {
     }
   }
 
-  /** What a link is for: one file onto one document. */
+  /**
+   * What a link is for: one file onto one document, or (ETP-5715) one file staged for the
+   * extraction of its data, bound to no record.
+   */
   public static final class Subject {
     private final String specId;
     private final String entityId;
     private final String recordId;
     private final String fileName;
     private final boolean markAsMain;
+    private final String stagedDocumentId;
 
     /**
      * Describes the upload the link authorizes.
@@ -166,11 +184,41 @@ public class NeoAttachmentUploadTickets {
      */
     public Subject(String specId, String entityId, String recordId, String fileName,
         boolean markAsMain) {
+      this(specId, entityId, recordId, fileName, markAsMain, null);
+    }
+
+    private Subject(String specId, String entityId, String recordId, String fileName,
+        boolean markAsMain, String stagedDocumentId) {
       this.specId = specId;
       this.entityId = entityId;
       this.recordId = recordId;
       this.fileName = NeoAttachmentPolicy.sanitizeFileName(fileName);
       this.markAsMain = markAsMain;
+      this.stagedDocumentId = stagedDocumentId;
+    }
+
+    /**
+     * A link whose file is staged for data extraction instead of attached to a document.
+     *
+     * @param specId           id of the {@code ETGO_SF_SPEC} the extraction is for
+     * @param entityId         id of the spec's root entity (its write access is re-checked)
+     * @param fileName         the file name; reduced to its last path segment
+     * @param stagedDocumentId the staged document the bytes will fill
+     * @return the subject
+     */
+    public static Subject staged(String specId, String entityId, String fileName,
+        String stagedDocumentId) {
+      return new Subject(specId, entityId, null, fileName, false, stagedDocumentId);
+    }
+
+    /** Returns whether the file is staged for extraction rather than attached to a record. */
+    public boolean isStaged() {
+      return stagedDocumentId != null;
+    }
+
+    /** Returns the staged document id, {@code null} for an attachment link. */
+    public String getStagedDocumentId() {
+      return stagedDocumentId;
     }
 
     /** Returns the spec id. */

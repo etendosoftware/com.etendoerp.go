@@ -48,6 +48,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.openbravo.dal.core.OBContext;
@@ -67,6 +68,7 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  * the document re-authorized at upload time, single use, and a rejected file not burning the link.
  *
  * @covers com.etendoerp.go.schemaforge.NeoAttachmentUploadEndpoint
+ * @covers com.etendoerp.go.schemaforge.NeoStagedUpload
  */
 @DisplayName("ETP-5715 — NeoAttachmentUploadEndpoint")
 class NeoAttachmentUploadEndpointTest {
@@ -76,6 +78,9 @@ class NeoAttachmentUploadEndpointTest {
   private static final String CLIENT = "CLIENT1";
   private static final String ORG = "ORG1";
   private static final String WAREHOUSE = "WH1";
+
+  @TempDir
+  Path stagedRoot;
 
   private MockedStatic<NeoAttachmentUploadTickets> ticketsMock;
   private MockedStatic<OBContext> contextMock;
@@ -480,5 +485,198 @@ class NeoAttachmentUploadEndpointTest {
     storeMock.verify(() -> NeoAttachmentStore.store(any()), never());
     assertEquals(NeoAttachmentUploadTickets.Status.COMPLETED,
         tickets.peek(token).orElseThrow().getStatus());
+  }
+
+  // ── a link whose file is staged for data extraction (ETP-5715) ─────────────
+
+  private static HttpServletRequest putBytes(String token, byte[] content, long declaredLength)
+      throws IOException {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    when(request.getPathInfo()).thenReturn(NeoAttachmentUploadEndpoint.PATH + token);
+    when(request.getContentLengthLong()).thenReturn(declaredLength);
+    when(request.getInputStream()).thenReturn(streamOf(content));
+    return request;
+  }
+
+  private static final byte[] PDF_BYTES = "%PDF-1.4 body".getBytes(StandardCharsets.US_ASCII);
+
+  /** Runs the body with the staged store resolving to a real one under the temp directory. */
+  private interface StagedScenario {
+    void run(NeoStagedDocuments staged) throws Exception;
+  }
+
+  private void withStaged(StagedScenario scenario) throws Exception {
+    NeoStagedDocuments staged = new NeoStagedDocuments(java.time.Clock.systemUTC(), stagedRoot);
+    try (MockedStatic<NeoStagedDocuments> stagedMock = mockStatic(NeoStagedDocuments.class)) {
+      stagedMock.when(NeoStagedDocuments::getInstance).thenReturn(staged);
+      scenario.run(staged);
+    }
+  }
+
+  private String issueStaged(NeoStagedDocuments staged, String fileName) {
+    Session session = new Session(CLIENT, ORG, USER, ROLE, WAREHOUSE);
+    String stagedId = staged.reserve(session, "purchase-invoice", fileName);
+    return tickets.issue(session, Subject.staged("SPEC1", "ENTITY1", fileName, stagedId));
+  }
+
+  @Test
+  @DisplayName("staged: the PDF is kept for the session, answered 201 with its staged id, nothing is attached")
+  void stagedPdfIsKept() throws Exception {
+    withStaged(staged -> {
+      String token = issueStaged(staged, "factura.pdf");
+      String stagedId = tickets.peek(token).orElseThrow().getSubject().getStagedDocumentId();
+
+      NeoAttachmentUploadEndpoint.handle(putBytes(token, PDF_BYTES, PDF_BYTES.length), response);
+
+      verify(response).setStatus(201);
+      JSONObject answer = new JSONObject(body.toString());
+      assertEquals(stagedId, answer.getString("stagedDocumentId"));
+      assertEquals("factura.pdf", answer.getString("name"));
+      assertEquals(PDF_BYTES.length, answer.getLong("size"));
+      NeoStagedDocuments.Staged kept = staged.find(stagedId,
+          new Session(CLIENT, ORG, USER, ROLE, WAREHOUSE)).orElseThrow();
+      assertTrue(kept.isStored());
+      assertEquals("%PDF-1.4 body", Files.readString(kept.getFile()));
+      storeMock.verify(() -> NeoAttachmentStore.store(any()), never());
+      assertEquals(stagedId, tickets.peek(token).orElseThrow().getAttachmentId());
+      assertEquals(NeoAttachmentUploadTickets.Status.COMPLETED,
+          tickets.peek(token).orElseThrow().getStatus());
+      verify(dal).rollbackAndClose();
+      verify(dal, never()).commitAndClose();
+    });
+  }
+
+  @Test
+  @DisplayName("staged: runs as the session that asked for the link, authorized for WRITING the spec with no record")
+  void stagedRunsAsTheSessionAndChecksWriteAccess() throws Exception {
+    withStaged(staged -> {
+      String token = issueStaged(staged, "factura.pdf");
+
+      NeoAttachmentUploadEndpoint.handle(putBytes(token, PDF_BYTES, PDF_BYTES.length), response);
+
+      secureMock.verify(() -> SecureWebServicesUtils.createContext(USER, ROLE, ORG, WAREHOUSE,
+          CLIENT));
+      contextMock.verify(() -> OBContext.setOBContext(sessionContext));
+      contextMock.verify(() -> OBContext.setOBContext(previousContext));
+      targetMock.verify(() -> NeoAttachmentTarget.requireWriteAccess(any(), any()));
+      targetMock.verify(() -> NeoAttachmentTarget.resolve(any(), any(), any(), anyBoolean()),
+          never());
+    });
+  }
+
+  @Test
+  @DisplayName("staged: the link works once; a second PUT is the generic 403")
+  void stagedLinkIsSingleUse() throws Exception {
+    withStaged(staged -> {
+      String token = issueStaged(staged, "factura.pdf");
+      NeoAttachmentUploadEndpoint.handle(putBytes(token, PDF_BYTES, PDF_BYTES.length), response);
+      verify(response).setStatus(201);
+
+      NeoAttachmentUploadEndpoint.handle(putBytes(token, PDF_BYTES, PDF_BYTES.length), response);
+
+      verify(response).setStatus(403);
+      assertTrue(body.toString().contains(NeoAttachmentUploadEndpoint.INVALID_LINK_MESSAGE));
+    });
+  }
+
+  @Test
+  @DisplayName("staged: content that is not a PDF is refused with the policy's text, kept nowhere, link not burned")
+  void stagedNonPdfContentIsRefused() throws Exception {
+    withStaged(staged -> {
+      String token = issueStaged(staged, "factura.pdf");
+      String stagedId = tickets.peek(token).orElseThrow().getSubject().getStagedDocumentId();
+      byte[] exe = "MZ this is an executable".getBytes(StandardCharsets.US_ASCII);
+
+      NeoAttachmentUploadEndpoint.handle(putBytes(token, exe, exe.length), response);
+
+      verify(response).setStatus(400);
+      assertTrue(body.toString().contains("File content does not match its .pdf extension"),
+          body.toString());
+      assertFalse(staged.find(stagedId, new Session(CLIENT, ORG, USER, ROLE, WAREHOUSE))
+          .orElseThrow().isStored());
+      try (java.util.stream.Stream<Path> files = Files.walk(stagedRoot)) {
+        assertEquals(0, files.filter(Files::isRegularFile).count(), "the rejected file is deleted");
+      }
+      assertTrue(tickets.claim(token).isPresent(), "the same URL accepts the corrected file");
+    });
+  }
+
+  @Test
+  @DisplayName("staged: a declared size over 10 MB is refused before a byte is read, link not burned")
+  void stagedOversizedIsRefused() throws Exception {
+    withStaged(staged -> {
+      String token = issueStaged(staged, "factura.pdf");
+
+      NeoAttachmentUploadEndpoint.handle(putBytes(token, PDF_BYTES, 11L * 1024 * 1024), response);
+
+      verify(response).setStatus(400);
+      assertTrue(body.toString().contains("File exceeds the maximum allowed size of 10 MB"),
+          body.toString());
+      assertTrue(tickets.claim(token).isPresent());
+    });
+  }
+
+  @Test
+  @DisplayName("staged: a file that is not named .pdf is refused: only a PDF can be read")
+  void stagedOnlyPdf() throws Exception {
+    withStaged(staged -> {
+      String token = issueStaged(staged, "factura.docx");
+
+      NeoAttachmentUploadEndpoint.handle(putBytes(token, PDF_BYTES, PDF_BYTES.length), response);
+
+      verify(response).setStatus(400);
+      assertTrue(body.toString().contains("Only a PDF"), body.toString());
+      assertTrue(tickets.claim(token).isPresent());
+    });
+  }
+
+  @Test
+  @DisplayName("staged: a document that expired before the bytes arrived is the generic 403, nothing kept")
+  void stagedDocumentGoneIsForbidden() throws Exception {
+    withStaged(staged -> {
+      String token = issueStaged(staged, "factura.pdf");
+      String stagedId = tickets.peek(token).orElseThrow().getSubject().getStagedDocumentId();
+      staged.discard(stagedId);
+
+      NeoAttachmentUploadEndpoint.handle(putBytes(token, PDF_BYTES, PDF_BYTES.length), response);
+
+      verify(response).setStatus(403);
+      assertTrue(body.toString().contains(NeoAttachmentUploadEndpoint.INVALID_LINK_MESSAGE));
+      assertEquals(NeoAttachmentUploadTickets.Status.COMPLETED,
+          tickets.peek(token).orElseThrow().getStatus(), "a link that can never work is spent");
+      try (java.util.stream.Stream<Path> files = Files.walk(stagedRoot)) {
+        assertEquals(0, files.filter(Files::isRegularFile).count());
+      }
+    });
+  }
+
+  @Test
+  @DisplayName("staged: a role that lost write access since the link was issued is refused and the link is spent")
+  void stagedRoleLostAccess() throws Exception {
+    withStaged(staged -> {
+      String token = issueStaged(staged, "factura.pdf");
+      targetMock.when(() -> NeoAttachmentTarget.requireWriteAccess(any(), any()))
+          .thenThrow(new NeoAttachmentTarget.Refused(403, NeoAttachmentAuthorizer.ACCESS_DENIED));
+
+      NeoAttachmentUploadEndpoint.handle(putBytes(token, PDF_BYTES, PDF_BYTES.length), response);
+
+      verify(response).setStatus(403);
+      assertEquals(NeoAttachmentUploadTickets.Status.COMPLETED,
+          tickets.peek(token).orElseThrow().getStatus());
+    });
+  }
+
+  @Test
+  @DisplayName("staged: a spec switched off after the link was issued answers the generic 403")
+  void stagedSpecSwitchedOff() throws Exception {
+    withStaged(staged -> {
+      String token = issueStaged(staged, "factura.pdf");
+      when(activeSpec.isShowInMCP()).thenReturn(false);
+
+      NeoAttachmentUploadEndpoint.handle(putBytes(token, PDF_BYTES, PDF_BYTES.length), response);
+
+      verify(response).setStatus(403);
+      assertTrue(body.toString().contains(NeoAttachmentUploadEndpoint.INVALID_LINK_MESSAGE));
+    });
   }
 }

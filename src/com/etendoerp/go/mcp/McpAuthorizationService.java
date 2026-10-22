@@ -103,6 +103,10 @@ final class McpAuthorizationService {
       case McpConstants.TOOL_NEO_DELETE_ATTACHMENT:
       // ETP-5715: sending a document by email delivers a real message and is audited as a write.
       case McpConstants.TOOL_NEO_SEND_DOCUMENT_EMAIL:
+      // ETP-5715: staging a PDF and reading it (a paid external model) are steps of the write flow
+      // that creates a document from it; a read-only session has nothing to do with them.
+      case McpConstants.TOOL_NEO_REQUEST_DOCUMENT_EXTRACTION_UPLOAD:
+      case McpConstants.TOOL_NEO_EXTRACT_INVOICE_DOCUMENT:
         return SCOPE_WRITE;
       default:
         return toolName.startsWith(McpConstants.GENERATE_PREFIX)

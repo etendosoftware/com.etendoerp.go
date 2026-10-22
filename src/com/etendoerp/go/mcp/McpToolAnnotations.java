@@ -27,7 +27,8 @@ import org.codehaus.jettison.json.JSONObject;
  * <p>Every tool gets all four hints explicitly. The spec defaults are {@code readOnlyHint=false},
  * <b>{@code destructiveHint=true}</b>, {@code idempotentHint=false}, {@code openWorldHint=true},
  * so annotating only the readers would leave {@code create} reported as destructive.
- * {@code openWorldHint} is {@code false} everywhere: every tool stays inside the ERP.</p>
+ * {@code openWorldHint} is {@code false} everywhere except {@link #OPEN_WORLD}: the tools that reach
+ * outside the ERP (an email to third parties, a document sent to an external AI model).</p>
  *
  * <table>
  *   <caption>Classification (ETP-5639)</caption>
@@ -61,14 +62,19 @@ final class McpToolAnnotations {
       McpConstants.TOOL_NEO_VECTOR_SEARCH,
       McpConstants.TOOL_NEO_GET_IMAGE_UPLOAD,
       McpConstants.TOOL_NEO_LIST_ATTACHMENTS,
-      McpConstants.TOOL_NEO_GET_DOCUMENT_PDF);
+      McpConstants.TOOL_NEO_GET_DOCUMENT_PDF,
+      // ETP-5715: changes nothing in the ERP (the reading is cached on a temporary staged file) and
+      // reading the same document again gives the same review; see OPEN_WORLD for what it reaches.
+      McpConstants.TOOL_NEO_EXTRACT_INVOICE_DOCUMENT);
 
   /** Tools that add something new and never change or remove what exists. */
   static final Set<String> ADDITIVE = Set.of(
       McpConstants.TOOL_NEO_CREATE,
       McpConstants.TOOL_NEO_REQUEST_IMAGE_UPLOAD,
       McpConstants.TOOL_NEO_UPLOAD_IMAGE,
-      McpConstants.TOOL_NEO_FEEDBACK);
+      McpConstants.TOOL_NEO_FEEDBACK,
+      // ETP-5715: stages a temporary file and a link; replaces and deletes nothing.
+      McpConstants.TOOL_NEO_REQUEST_DOCUMENT_EXTRACTION_UPLOAD);
 
   /** The removal tool: destructive, and deleting the same record twice changes nothing more. */
   static final Set<String> DELETE = Set.of(McpConstants.TOOL_NEO_DELETE,
@@ -88,10 +94,13 @@ final class McpToolAnnotations {
 
   /**
    * Tools that reach parties outside the system (ETP-5715): the email send delivers a message to
-   * third parties, which clients use to decide how to ask for approval. The attachment tools hand
-   * links to the user and reach nobody else, so they stay closed-world.
+   * third parties, and the document extraction sends the user's PDF to an external, paid AI model;
+   * clients use the hint to decide how to ask for approval — the extraction is read-only for the ERP
+   * but is not free and is not local. The attachment tools hand links to the user and reach nobody
+   * else, so they stay closed-world.
    */
-  static final Set<String> OPEN_WORLD = Set.of(McpConstants.TOOL_NEO_SEND_DOCUMENT_EMAIL);
+  static final Set<String> OPEN_WORLD = Set.of(McpConstants.TOOL_NEO_SEND_DOCUMENT_EMAIL,
+      McpConstants.TOOL_NEO_EXTRACT_INVOICE_DOCUMENT);
 
   private McpToolAnnotations() {
   }
@@ -105,7 +114,7 @@ final class McpToolAnnotations {
    */
   static JSONObject of(String toolName) throws JSONException {
     if (isReadOnly(toolName)) {
-      return hints(true, false, true, false);
+      return hints(true, false, true, OPEN_WORLD.contains(toolName));
     }
     if (ADDITIVE.contains(toolName)) {
       return hints(false, false, false, false);

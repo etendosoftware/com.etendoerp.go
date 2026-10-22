@@ -54,6 +54,9 @@ import com.etendoerp.webhookevents.services.BaseWebhookService;
  * conventions: {@link NeoServlet} and its collaborators are all Mockito mocks — the dispatcher is
  * the only real object under test — so none of the real {@code NeoServlet} collaborator
  * constructors (several of which touch the DB/DAL) ever run.
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoPseudoSpecDispatcher
+ * @covers com.etendoerp.go.schemaforge.NeoOcrConfigEndpoint
  */
 public class NeoPseudoSpecDispatcherTest {
 
@@ -194,6 +197,33 @@ public class NeoPseudoSpecDispatcherTest {
     verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED),
         eq("Simsearch endpoint only supports GET"));
     verify(simSearchEndpoint, never()).handle(any());
+  }
+
+  // -------------------------------------------------------------------------
+  // ocrconfig (ETP-5715)
+  // -------------------------------------------------------------------------
+
+  @Test
+  public void ocrConfigGetWritesTheConfigurationOfTheDocType() throws Exception {
+    when(request.getParameter("docType")).thenReturn("purchase-invoice");
+
+    boolean handled = dispatcher.handle(pathInfo("ocrconfig"), "GET", request, response);
+
+    assertTrue(handled);
+    ArgumentCaptor<NeoResponse> written = ArgumentCaptor.forClass(NeoResponse.class);
+    verify(servlet).writeResponse(eq(response), written.capture());
+    assertTrue(written.getValue().getHttpStatus() == HttpServletResponse.SC_OK);
+    assertTrue(written.getValue().getBody().getString("question").startsWith("Extract all invoice fields"));
+  }
+
+  @Test
+  public void ocrConfigRejectsNonGetMethod() throws Exception {
+    boolean handled = dispatcher.handle(pathInfo("ocrconfig"), "POST", request, response);
+
+    assertTrue(handled);
+    verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED),
+        eq("Ocrconfig endpoint only supports GET"));
+    verify(servlet, never()).writeResponse(any(), any());
   }
 
   @Test
