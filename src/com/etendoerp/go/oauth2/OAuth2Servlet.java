@@ -633,7 +633,8 @@ public class OAuth2Servlet extends HttpBaseServlet {
           ? PublicApiKeyPolicy.normalizeName(optionalString(body, FIELD_NAME))
           : client.getName();
       boolean wasActive = Boolean.TRUE.equals(client.isActive());
-      boolean active = body.has(FIELD_IS_ACTIVE) ? requireBoolean(body, FIELD_IS_ACTIVE) : wasActive;
+      boolean active = body.has(FIELD_IS_ACTIVE) ? requireStrictBoolean(body, FIELD_IS_ACTIVE)
+          : wasActive;
 
       synchronized (ownerLock(context)) {
         // Reactivating counts against the active-key limit exactly like creating does, and both a
@@ -658,6 +659,11 @@ public class OAuth2Servlet extends HttpBaseServlet {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST, e.getMessage());
     } catch (AuthException e) {
       writeError(response, e.statusCode, ERROR_ACCESS_DENIED, e.getMessage());
+    } catch (MalformedJsonException e) {
+      // Only requireBooleanField throws it here: the body parsed, a field has the wrong type.
+      log.warn("Invalid public API key update request: {}", e.getMessage());
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST,
+          e.getMessage());
     } catch (JSONException e) {
       log.error("Error updating public API key", e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
@@ -789,11 +795,16 @@ public class OAuth2Servlet extends HttpBaseServlet {
     return (String) value;
   }
 
-  /** Returns a JSON boolean field; a string, number or null is a 400, not a coerced value. */
-  private boolean requireBoolean(JSONObject body, String field) {
+  /**
+   * Returns a JSON boolean field; a string, number or null is a 400, not a coerced value
+   * ({@code getBoolean} would accept the string "true"). Same {@link MalformedJsonException}
+   * contract as {@link #requireBooleanField}, so the rejection is a quiet 400 logged at WARN.
+   */
+  private boolean requireStrictBoolean(JSONObject body, String field)
+      throws MalformedJsonException {
     Object value = body.opt(field);
     if (!(value instanceof Boolean)) {
-      throw new PublicApiKeyPolicy.InvalidRequestException(field + " must be a boolean");
+      throw new MalformedJsonException(field + " must be a boolean");
     }
     return (Boolean) value;
   }

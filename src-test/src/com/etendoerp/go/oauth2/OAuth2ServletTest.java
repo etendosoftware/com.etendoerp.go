@@ -3132,7 +3132,7 @@ public class OAuth2ServletTest {
 
   private OAuth2Servlet apiKeyServletOver(PublicApiKeyStore store) {
     EnvironmentRequestAuthenticator authenticator = mock(EnvironmentRequestAuthenticator.class);
-    when(authenticator.authenticate(any(), eq(SurfacePolicy.NEO_DATA))).thenReturn(
+    when(authenticator.authenticate(any(), eq(SurfacePolicy.NEO_DATA), anyString())).thenReturn(
         EnvironmentAuthOutcome.authenticated(AuthScheme.COOKIE, mock(OBContext.class),
             KEY_USER_ID, KEY_ROLE_ID, KEY_CLIENT_ID, KEY_ORG_ID));
     OAuth2Servlet created = new OAuth2Servlet(mock(GoSessionService.class), authenticator);
