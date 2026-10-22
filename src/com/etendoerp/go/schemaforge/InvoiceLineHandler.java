@@ -230,7 +230,14 @@ public class InvoiceLineHandler implements NeoHandler {
    */
   private NeoResponse autoFillExemptionCauseAfterLineSave(NeoContext context) {
     try {
-      OBContext.setAdminMode(true);
+      try {
+        OBContext.setAdminMode(true);
+      } catch (RuntimeException e) {
+        // setAdminMode pushes its stack entry before it can fail (no OBContext on the thread);
+        // the try/finally below is never entered, so pop it here or it leaks onto the thread.
+        OBContext.restorePreviousMode();
+        throw e;
+      }
       try {
         String invoiceId = resolveParentInvoiceIdAfterSave(context);
         if (StringUtils.isBlank(invoiceId) || !shouldAutoFillExemptionCause(invoiceId)) {
