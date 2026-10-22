@@ -24,6 +24,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
@@ -43,6 +44,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -183,9 +185,43 @@ class EtendoGoJwtDalHelperTest {
       verify(account).setPasswordHash("hash123");
       verify(account).setName("Test User");
       verify(account).setSessionToken("session-token-1");
+      verify(account).setOnboardingDraft(null);
       verify(obDal).save(account);
       verify(obDal).flush();
       verify(obDal).commitAndClose();
+    }
+
+    @Test
+    @DisplayName("stores the onboarding draft in the same commit as the account (ETP-5847)")
+    void storesTheOnboardingDraftWithTheAccount() {
+      when(obProvider.get(Account.class)).thenReturn(account);
+      when(obDal.get(Client.class, "0")).thenReturn(client);
+      when(obDal.get(Organization.class, "0")).thenReturn(organization);
+
+      EtendoGoJwtDalHelper.createAccount("user@test.com", "hash123", "Test User", null,
+          "{\"step\":2}");
+
+      InOrder order = inOrder(account, obDal);
+      order.verify(account).setOnboardingDraft("{\"step\":2}");
+      order.verify(obDal).save(account);
+      order.verify(obDal).commitAndClose();
+      verify(account).setSessionToken(null);
+    }
+
+    @Test
+    @DisplayName("applies the caller's extra properties before the one commit (ETP-5847)")
+    void appliesExtraPropertiesBeforeTheCommit() {
+      when(obProvider.get(Account.class)).thenReturn(account);
+      when(obDal.get(Client.class, "0")).thenReturn(client);
+      when(obDal.get(Organization.class, "0")).thenReturn(organization);
+
+      EtendoGoJwtDalHelper.createAccount("user@test.com", null, "Test User", null, null,
+          created -> created.set("signupChannel", "crm"));
+
+      InOrder order = inOrder(account, obDal);
+      order.verify(account).set("signupChannel", "crm");
+      order.verify(obDal).save(account);
+      order.verify(obDal).commitAndClose();
     }
   }
 

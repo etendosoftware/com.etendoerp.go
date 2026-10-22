@@ -59,6 +59,21 @@ final class EtendoGoAuthLinkBuilder {
     return onboardingLinkWithToken(verifyToken, appBaseUrl, "verifyToken");
   }
 
+  /**
+   * ETP-5847: the one-time link that signs a signup API account in, mailed when its environment is
+   * ready. Same {@code /onboarding} route as every other auth link.
+   *
+   * @param loginToken clear login token; the stored side is only its hash
+   * @return absolute link, or null when no public app base URL is configured
+   */
+  static String loginLink(String loginToken) {
+    return loginLink(loginToken, PublicUrlResolver.resolveConfiguredAppBaseUrl());
+  }
+
+  static String loginLink(String loginToken, String appBaseUrl) {
+    return onboardingLinkWithToken(loginToken, appBaseUrl, "loginToken");
+  }
+
   static String resetPasswordLink(String resetToken) {
     return resetPasswordLink(resetToken, PublicUrlResolver.resolveConfiguredAppBaseUrl());
   }

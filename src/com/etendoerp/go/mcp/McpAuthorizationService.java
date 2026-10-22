@@ -82,6 +82,8 @@ final class McpAuthorizationService {
       // B3: read-tier on purpose. Reporting friction writes no business data, and gating it behind
       // etendo:write would silence exactly the read-only sessions most likely to get lost.
       case McpConstants.TOOL_NEO_FEEDBACK:
+      // ETP-5677: reading a job's progress writes nothing; only its owner can see it anyway.
+      case McpConstants.TOOL_NEO_JOB_STATUS:
         return SCOPE_READ;
       case "etendo_create":
       case "etendo_update":
@@ -93,6 +95,8 @@ final class McpAuthorizationService {
       case McpConstants.TOOL_NEO_REQUEST_IMAGE_UPLOAD:
       case McpConstants.TOOL_NEO_UPLOAD_IMAGE:
       case McpConstants.TOOL_NEO_GET_IMAGE_UPLOAD:
+      // ETP-5677: cancelling stops further writes of a job the caller started with etendo_batch.
+      case McpConstants.TOOL_NEO_JOB_CANCEL:
         return SCOPE_WRITE;
       default:
         return toolName.startsWith(McpConstants.GENERATE_PREFIX)

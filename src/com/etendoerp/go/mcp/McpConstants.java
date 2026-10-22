@@ -443,6 +443,10 @@ final class McpConstants {
   static final String TOOL_NEO_DISCOVER = "etendo_discover";
   /** Tool name for the multi-operation write tool. */
   static final String TOOL_NEO_BATCH = "etendo_batch";
+  /** Tool name for reading the status of an asynchronous batch job (ETP-5677). */
+  static final String TOOL_NEO_JOB_STATUS = "etendo_job_status";
+  /** Tool name for cancelling an asynchronous batch job (ETP-5677). */
+  static final String TOOL_NEO_JOB_CANCEL = "etendo_job_cancel";
   /** Tool name for the document action / process tool. */
   static final String TOOL_NEO_ACTION = "etendo_action";
 

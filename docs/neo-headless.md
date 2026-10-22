@@ -1207,6 +1207,62 @@ The `recordId` from the URL path is injected into the process parameters automat
 
 Process access is checked before execution. If the current role lacks access to the process, the request returns `403 Forbidden`.
 
+#### 4.3.7 Asynchronous batch jobs — `async:true`, status polling, cancel (ETP-5677)
+
+A long synchronous batch can commit on the server while its response is lost to an idle timeout in
+front of Tomcat; the client then sees an error for records that exist, and a retry duplicates them. The
+asynchronous mode answers at once and keeps the outcome where the client can read it. The synchronous
+`POST /sws/neo/batch` and `etendo_batch` stay one atomic transaction. The default differs by channel:
+**REST is synchronous unless the body says `"async": true`; MCP is asynchronous unless the arguments say
+`async:false`**, so an agent sending volume never waits on one request. An async job accepts at most
+5000 operations and 2 active jobs per user (4 per tenant); above that, send `async:false` or split.
+
+| | REST | MCP |
+|---|---|---|
+| Start | `POST /sws/neo/batch` with `"async": true` → **202** `{jobId, state:"QUEUED", totalRows, totalOps}` | `etendo_batch` (`async` omitted or `true`) → the same JSON; `async:false` runs the synchronous batch |
+| Status | `GET /sws/neo/batch/jobs/{jobId}` | `etendo_job_status {jobId}` (read scope) |
+| Cancel | `DELETE /sws/neo/batch/jobs/{jobId}` | `etendo_job_cancel {jobId}` (write scope) |
+
+Both channels call `BatchJobService`, which runs every row through the same `BatchService.executeBatch`
+the synchronous request uses (the MCP channel passes its own per-operation preprocessor, exactly as
+its synchronous call does).
+
+**Commit unit: one row.** The worker splits the operations into *rows*: an operation plus everything
+it references through `parentRef` or a `"$ref:<id>"` string anywhere in its body (a product and its
+price, a document and its lines — `BatchRowGrouper`). Each row is its own atomic transaction; a
+rejected row does not stop the others. The status carries, per row, `committed:true` with its
+`operations:[{id,ok,recordId}]`, or `committed:false` with `failedAt` / `error{status,message}` and
+`safeToResend`. A row reported `committed:true` exists. Resend only rows with `committed:false` **and**
+`safeToResend:true` (the batch vouches it was rolled back: `atomic:true`, empty `persisted`); a row with
+`safeToResend:false` (`atomic:false` — a process committed underneath it — or no outcome) may have left
+records, listed in its `persisted`: look them up first.
+
+```
+{ jobId, state, done, channel, totalRows, totalOps, processedRows, committedRows, failedRows,
+  rows:[{index, ids:[opId…], committed, operations? | failedAt?, error?, safeToResend?}], hint?, cancelRequested? }
+```
+
+`state`: `QUEUED` → `RUNNING` → `SUCCEEDED` (every row committed) / `PARTIAL` / `FAILED` (no row
+committed); `CANCELLED` (stopped between rows at the owner's request — rows already committed stay
+committed); `INTERRUPTED` (see below). `done` is `true` for every state except `QUEUED`/`RUNNING`.
+
+**Storage and liveness.** Jobs live in `ETGO_BATCH_JOB` (written by JDBC on its own pooled connection,
+never through the DAL, so progress is visible while a row's transaction is open). The node holding a
+job refreshes its `HEARTBEAT` every 10 s (queued or running); a `QUEUED`/`RUNNING` job whose heartbeat is
+older than 90 s belongs to a dead node and is reported `INTERRUPTED` by whichever node next reads or
+submits — so a load balancer routing a poll to another node never flips a live job. Every state change
+is a conditional update, so a worker cannot overwrite `INTERRUPTED`/`CANCELLED`. The result is flushed
+after every row: after an `INTERRUPTED` job the listed rows are final and the rows not listed may or may
+not exist (look them up before resending). Finished jobs are purged after 24 h (by `FINISHED`; there is no `EXPIRES` column). The worker and heartbeat threads are stopped when `NeoServlet` is destroyed.
+
+**Limits and access.** At most 2 active jobs per user and 4 per client (soft limits: the count and the insert are not one atomic step, so simultaneous submits can overshoot them); over the limit, or with a full
+queue (2 workers, 50 slots), the submit answers **429** with `Retry-After: 5` and creates no job. At most
+5000 operations per job; a malformed payload (empty, duplicate ids, a `parentRef` that is not an earlier
+operation, missing `id`/`spec`/`entity`) answers **400** and never becomes a job. Only the user who
+started a job can read or cancel it (anyone else gets **404**); a finished job cannot be cancelled
+(**409**). The worker runs as the requester (user, role, client, organization, language captured at
+submit) and always releases its context and DAL session.
+
 #### Failure body: `message` + `messageKeys` (ETP-5316)
 
 When the action runs a DB procedure (`CallProcess` -> `ProcessInstance`) and it fails, the `400`
@@ -4244,6 +4300,14 @@ on the virtual column gets the raw value; filter on the stored twin instead.
 uses the raw virtual value on MCP and REST alike, and can disagree with the order of the values
 shown. Filters are aliased on MCP; sorts are not, anywhere.
 
+**Asynchronous mode (ETP-5677).** `async` exists on both channels with the same envelope and the
+same service (§4.3.7); it is declared here because it is the one place where `etendo_batch` is **not**
+all-or-nothing: an async job commits **per row**, and the status reports each row. On MCP it is the
+default (`async:false` opts out); on REST it is opt-in (`async:true`). The synchronous call keeps its
+single-transaction contract on both channels. REST and MCP differ in the async mode only
+by what already differs in the synchronous one (the MCP preprocessor and its failure-envelope rewrite
+inside each row's result).
+
 #### 4.12.10 An excluded field does not exist, on every verb (ETP-5335, IMP-39)
 
 **A field the spec excludes is absent from `etendo_schema`, refused by `etendo_list` as a filter, and
@@ -5575,6 +5639,8 @@ private static final List<String> LOCKED_DIMENSION_TYPES = Arrays.asList("BP", "
 
 **Real-world example — `GeneralLedgerConfigurationHandler` tenant-scoped ids (ETP-5722):** the aggregate `General` `GET`/`POST` runs in admin mode, and it used to resolve request ids with a bare `OBDal.get`, which applies no tenant predicate. So a REST/MCP caller could write another tenant's `C_ValidCombination_ID` into `C_AcctSchema_GL` (`generalAccounts.*`) or `C_AcctSchema_Default` (`defaults.*`). Every request-supplied id now goes through `TenantOwnership.loadOwned`: the combinations, `general.currency`, and `selectedOrgId` (query on `GET`, body or query on `POST`). An id of another tenant answers the same 400 as a missing one (*Accounting combination / Currency / Organization not found: &lt;id&gt;*). Client-0 rows stay accepted. A foreign org used to fail later with a message that revealed the other tenant's ledger id; that no longer happens. Every 400/500 also calls `SessionHandler.rollback()`. Without it, a caught error still committed whatever the body had applied before the throw: a valid `general.name` plus a foreign combination answered 400 and still renamed the ledger. The handler is listed in `TenantIsolationPolicyTest.GUARDED_CLASSES`, so a new bare `OBDal.get` there fails the build.
 
+**Real-world example — `GeneralLedgerBalancingRule` (a balancing switch requires its account, ETP-5724):** on `C_AcctSchema_GL`, `suspenseBalancingUse` → `suspenseBalancing` and `currencyBalancingUse` → `currencyBalancingAcct`: while a switch is on its account is required, because core posting (`AcctSchema`) silently treats "on, no account" as off. The rule is judged on the state the save would leave, so a row that is already broken refuses any save that touches it. Two NEO write paths reach that table and each stores the values differently, so each is checked the way it stores them: the aggregate `General` POST (`GeneralLedgerConfigurationHandler`, which reads switches with `optBoolean`, so `"Y"` is stored as off) checks the entity after its setters ran (`check(AcctSchemaGL)`), rolls the session back and returns the 400; a generic PUT/PATCH on `Cuentas generales` goes through the pre-hook of its `@NeoExtension` customization `handlers/GeneralLedgerAccountsHandler` (after its posting-account guard), which merges the body — unwrapping a `data` envelope, since REST hands the pre-hook the raw body — with the row loaded through `TenantOwnership.loadOwned`, reading the values as core's `JsonToDataConverter` stores them (`"Y"`/`"true"` on; `null`, blank or `{"id": ""}` absent) (`checkUpdate(NeoContext)`). A row the caller cannot read is left to the default path (404). Both answer the existing `MISSING_REQUIRED_FIELDS` 400 (`NeoCrudHandler.buildMissingRequiredFieldsResponse(List, String)`, made package-visible for this) with a descriptive English `message` (*suspenseBalancing is required while suspenseBalancingUse is true*) so an API caller can correct itself; the SPA shows its own translated text. MCP flattens it as usual (`error: validation_error`, `code`/`fields` at top level). POST and DELETE on `Cuentas generales` are refused before any hook by `ETGO_SF_ENTITY.ISPOST`/`ISDELETE = 'N'` (`entities.generalAccounts.methods` in the window's `decisions.json`), so MCP no longer advertises create/delete for it and `/batch` (create-only) answers 405 too: the window cannot load without its single row. Same rule on every NEO channel, so nothing to declare in §4.12.9; Classic is unchanged on purpose. The class is in `TenantIsolationPolicyTest.GUARDED_CLASSES`.
+
 **Real-world example — `ETGO_FDI_DECL_FK` cascade delete (ETP-5393 Bug D, same bug class as ETP-4830 above):** `FiscalDeclCrudHandler#handleDeclDelete` calls `OBDal.getInstance().remove(decl)` to delete a draft `ETGO_Fiscal_Decl` row, without first deleting its `ETGO_Fiscal_Decl_Incident` children. `ETGO_FDI_DECL_FK` (`etgo_fiscal_decl_incident.etgo_fiscal_decl_id → etgo_fiscal_decl.etgo_fiscal_decl_id`) had no `ON DELETE` behavior (`NO ACTION`), so Postgres rejected the delete with a raw FK-violation whenever the declaration had at least one incident row (e.g. after a failed AEAT submission attempt that reverted it to draft) — surfacing to the user as an opaque 500 ("No se pudo eliminar la declaración."). Fixed the identical way: adding `onDelete="cascade"` directly to `ETGO_FDI_DECL_FK` in `src-db/database/model/tables/ETGO_FISCAL_DECL_INCIDENT.xml` (not a raw `ALTER TABLE` against the live DB — that XML is `update.database`'s actual source of truth, so a hand-run `ALTER TABLE` would be silently reverted on the next rebuild). No Java change was needed in `handleDeclDelete` itself: `OBDal.remove` issues the same `DELETE` regardless, and Postgres now cascades it. Verified locally by running `update.database` and confirming `pg_constraint.confdeltype = 'c'` for `etgo_fdi_decl_fk`, then inserting a draft declaration with an incident row and deleting the declaration directly — the incident row is removed automatically.
 
 **Real-world example — `UserRoleAssignmentHandler`'s "Rol" advanced-filter query params (ETP-5188):** the Users window's list `GET` (record id absent) gained a role filter, `buildRoleFilter`, alongside the existing contact-only exclusion `buildContactOnlyExclusion` (ETP-5019) — both are declared as `readPredicates` (ETP-5568; until then they were injected from `handle()` as `_neoWhere`, see below), so they apply to every `user` list read: list, count, paging, `?_distinct=` and MCP `neo_list`. The frontend's generic `criteria=` mechanism cannot express "filter by composed role" at all: it would build a dotted HQL property path through the `aDUserRolesList` one-to-many collection, which is invalid HQL and 500s (confirmed empirically). So the frontend's "Rol" advanced-filter field bypasses `criteria=` entirely for this one field and instead sends three DEDICATED query params on the same `user` list `GET`:
@@ -5809,6 +5875,18 @@ A list response carries one page, so a total drawn next to it covers the loaded 
 - `RPVOID` is excluded everywhere. *Deposited* (`total`, `byMethod`, `byCurrency`) = `RPR, RPPC, RDNC, PPM, PWNC, RPAE`, mirroring `paymentStatuses.js` (`PPM` counts as deposited; `ETGOERR` is pending). *Pending* = every other non-void status; `draftCount` = `pending.count`; `rowCount` = `total.count + pending.count`.
 - `approximate` = a non-zero foreign-currency subtotal was converted. `byCurrency` shows original amounts (never approximate), organization currency first, then amount descending. `byMethod` is sorted by converted amount descending.
 - Cost: one grouped scan per page request over the whole filtered set.
+
+**Document list totals** (`sales-quotation`, `sales-order`, `purchase-order`, `sales-invoice`, `purchase-invoice`; ETP-5757). `response.listTotals`, a sibling of `data`, replaces the client-side footer sum that mixed currencies. `DocumentListTotals` runs one grouped query over the whole filtered set (same filters as the grid, so quotation/order and sales/purchase are separated by the tab where clause, not the page) and folds each column into the organization currency at TODAY's rate (`NeoCurrencyTotals`). Present on every page, also an empty one; a failure is logged and the key omitted; MCP lists do not get it (`NeoListAggregateQuery.of` is `null`).
+
+```json
+{ "orgCurrencyIso":"EUR", "rowCount":18,
+  "columns":{
+    "grandTotalAmount":{"amount":10960.18,"iso":"EUR","approximate":true,"missingRateCurrencies":[]},
+    "outstandingAmount":{"amount":1200.00,"iso":"EUR","approximate":false,"missingRateCurrencies":[]} } }
+```
+
+- `outstandingAmount` exists for invoices only. `approximate` and `missingRateCurrencies` follow the `NeoCurrencyTotals` rule: a non-zero foreign subtotal was converted / a currency without rate is left out and listed.
+- Draft discount compensation: the grid rewrites `grandTotalAmount` (and invoice `outstandingAmount`) of an unprocessed document with `etgoTotalDiscount > 0` and no active discount line to `amount * (1 - pct/100)`. The aggregate applies the same rule per row in HQL, so the footer adds up to the visible rows. Rounding differs slightly: the server uses PostgreSQL `round(numeric, 2)` (half away from zero) per row, the grid uses Java half-up (`NeoHandlerUtils.roundHalfUp`); they can differ by one cent only for negative exact halves or floating-point edge cases.
 
 ## 6. Parent-Child Tab Filtering
 
@@ -6522,6 +6600,38 @@ real effect (the opposite of Balance Sheet): P&L is a period-activity total of p
 year, not a point-in-time snapshot. Both handlers' `orgId` uses ORG-TREE semantics
 (`ad_isorgincluded`), unlike `report-trial-balance`/`report-journal-entries`'s exact-match `orgId`.
 
+**Request ids are scoped to the tenant (ETP-5793).** The report handlers run in admin mode, where a
+bare `OBDal.get` applies no client predicate. So `orgId` (every SQL report and the aging reports),
+`yearId`/`referenceYearId` (balance sheet and P&L) and `glId` (aging) are resolved through
+`TenantOwnership.loadOwned`, and another tenant's id answers exactly like an unknown one:
+`organization_not_resolved` (400), `year_not_resolved` / `reference_year_not_resolved` (422) or
+`accounting_schema_unresolved` (422).
+For the aging reports this closes a real cross-tenant read: `AgingDao_data.xsql` filters only on
+`AD_Org_ID IN (...)`, never on the client, so another tenant's `orgId` used to return that tenant's
+open items. The SQL reports already bind `fa.ad_client_id` to the session client, so for them the
+fix stops the existence leak (an empty report used to confirm that the id existed). `orgId: ""`
+(every organization) and `orgId: "0"` are still accepted. Note that `loadOwned` checks only the
+client for an `Organization`, which is not `OrganizationEnabled`. An org of the caller's own client
+outside the role's org access still resolves; that is unchanged and is not a tenant leak. Pinned by
+`TenantIsolationPolicyTest`, which guards the aging, trial balance, general ledger, journal entries,
+balance sheet and P&L handlers. The fiscal reports (`TaxReportHandler`, `Fiscal303BoxesHandler`)
+are swept separately (ETP-5794). Years, accounting schemas and journals are `OrganizationEnabled`,
+so `loadOwned` also requires their organization to be readable by the role: one of the caller's
+own client in an organization outside the role's access now answers as unknown too.
+
+The same change scopes three other request ids:
+- `GlJournalHeaderHandler`: the journal its PATCH pre-hook loads by URL id to mirror
+  `accountingDate` into `documentDate`, and the `accountingSchema` of a POST body whose currency it
+  injects. Another tenant's journal is never loaded, and another tenant's schema gives no currency.
+- `OrganizationInformationHandler`: the org whose country decides the Spanish tax ID rules. Another
+  tenant's org falls back to the session org.
+
+The generic CRUD path still checks no record ownership before an entity's pre-hook runs. Only the
+ACTION path does (`NeoActionRecordGuard`, ETP-5558). A pre-hook that loads its record by the URL id
+must therefore use `loadOwned` itself. The same gap also affects the default CRUD write itself: a
+foreign-id DELETE was confirmed live, and a PATCH answers 409 for a foreign id vs 500 for an unknown
+one. Tracked as ETP-5880.
+
 Both honour the account's `ShowValueCond` (ETP-5662), like Classic's `AccountTree`: a SUMMARY
 account with `P` (Positive ONLY) shows its balance only when strictly positive, `N` only when
 strictly negative; otherwise it is 0, that 0 is what rolls up to its parent, and every descendant
@@ -6653,6 +6763,17 @@ admin-triggered `UpdateReferenceData` action, neither of which runs on every `up
 execution against every environment (new or existing), which is the one guarantee this seeding
 actually needs. The "Admin"
 (`is_client_admin = 'Y'`) role stays client-level, per tenant, untouched.
+
+**The template matrix exists twice — change both (ETP-5830).** The window grants per template live in
+`TemplateRoleWindowAccess.java` (runtime, read by the access-propagation sweep and the tests) **and** in
+a hand-kept copy inside `src-util/modulescript/.../EnsureSystemRoleTemplatesScript.java` (the seeding
+`ModuleScript`, compiled on its own). Editing only the first is reverted by the next
+`update.database`. After editing both, rebuild with `./gradlew compile.modulescript
+-Dmodule=com.etendoerp.go` and `git add -f` the rebuilt `.class` files under
+`build/classes/com/etendoerp/go/modulescript/` (they are committed). A grant you remove is cleaned off
+existing tenants with no data-fix: `update.database` runs `removeStaleWindowAccess`, then the startup
+sweep re-derives the personal roles. ETP-5830 used this path to drop Smart Scan from all four
+templates (Admin/client-admin keep it through the sidebar exemption).
 
 **The mechanism (`com.etendoerp.go.roles.UserRoleCompositionService`):** each user gets exactly
 ONE personal, non-template, non-admin `AD_Role` (found by reuse or created on first use), which
@@ -7280,7 +7401,35 @@ production templates, and personal roles (tenant clients) never travel at all.
 3. **Composition hook.** `UserRoleCompositionService#assignTemplateRoles` runs the same sweep on
    the personal role after a composition that added or removed an inheritance. Core copies
    inactive template rows too and lets them win by precedence, so without it a soft-deleted grant
-   of one template could hide another template's active grant.
+   of one template could hide another template's active grant. Since ETP-5830 core no longer
+   copies them from a system template at all (see *Inactive template rows are never inherited*
+   below); the hook still realigns copies made before that.
+
+**Inactive template rows are never inherited (ETP-5830).** Core's `AccessTypeInjector#getAccessList`
+reads a template's rows with `setFilterOnActive(false)`, so every composition used to copy the
+soft-deleted rows too. When two or more templates share a soft-deleted grant (the Smart Scan removal
+took it off all four), removing one template makes core recalculate the remaining ones in a single
+flush: each one copies the inactive row again, the second cannot see the first one's pending insert,
+and the flush fails on `ad_window_access_un_key`. Removing a template failed this way whenever two or
+more of the remaining ones shared the soft-deleted row, until the 7-day purge. `ActiveTemplateWindowAccessInjector`, `ActiveTemplateProcessAccessInjector`
+and `ActiveTemplateProcessDefinitionAccessInjector` `@Specializes` core's window, classic-process
+and OBUIAPP-process injectors (the three tables the modulescript soft-deletes) and drop a system
+template's inactive rows from that list (`SystemTemplateAccessRows`). Only the template-side read
+changes: core reads a dependent role's own rows through the same method, and those pass unfiltered,
+so deleting copies on removal works as before. `isInheritable` is deliberately not overridden: core
+also calls it in `propagateUpdatedAccess`, which carries a template row's deactivation to its copies.
+Because the injectors replace core's beans, a composition made from Etendo Classic is covered too.
+Proof: `CompositionSweepIntegrationTest#inactiveRowSharedByTemplatesIsNeverCopiedOnAddOrRemove`.
+
+Scope and limits of the filter:
+- **System templates must not carry `AD_Tab_Access` / `AD_Field_Access`.** Tab and field injectors
+  are not specialized, so a tab row under an inactive window row would still be copied and find no
+  parent window on the personal role (NPE in core's `setParent`). The modulescript writes none; if
+  templates ever get tab/field grants, specialize `TabAccessInjector` the same way.
+- Core's event-handler paths are untouched: reactivating a soft-deleted template row reaches
+  personal roles on the next startup-tick sweep, not through core (there is no copy to update);
+  `propagateDeletedAccess` may still fall back to another template's inactive row, and the sweep
+  corrects it; `propagateNewAccess` would copy a row inserted inactive, which no writer does.
 
 **The sweep rule** (`TemplateAccessPropagationService`): for each personal role and element (window,
 classic process, OBUIAPP process), look at the role's active inheritances of active system templates
@@ -8270,7 +8419,7 @@ The module includes unit tests that run without a backend:
 | `TemplateAccessPropagationServiceIntegrationTest` (ETP-5565) | -- | Real-DB proof (14 tests) of §8d.1's sweep rule, rolled back after each test: every combination after a template removal (narrowed, removed, manual row kept, inactive copy reactivated, a second sweep changes nothing), most-permissive level with highest-`SeqNo` source (also on equal levels), additions inserted unless a manual row exists (an inactive one included), OBUIAPP rows without duplicates and duplicate inherited copies collapsed to the oldest (copies from non-system roles untouched), template deactivation changes the fingerprint, inactive grants do not, roles inheriting a non-system template skipped, stale-copy detection, purge limited to inactive template rows past the grace period, the process-grant diagnostic, owner resolution. |
 | `TemplateRoleAccessStartupTest` (ETP-5565) | -- | Unit test (10 tests, mocked service and store) of the tick: unchanged templates take no lease, an empty sync table sweeps every template's inheritors and stores fingerprints, only changed templates are swept, a fingerprint from a newer `ALGO_VERSION` counts as unchanged, a busy lease skips the tick, a failed chunk keeps the old fingerprints and releases the lease with an error, stale copies are swept without a fingerprint change, purge runs under the lease before the sweep, owners are locked before their chunk, `tickSafely` never throws. |
 | `TemplateRoleSyncStoreIntegrationTest` (ETP-5565) | -- | Real-DB proof (5 tests) of the lease SQL (take once, holder-only renew/release, expired takeover, missing row seeded) and that an older `ALGO_VERSION` never overwrites a newer fingerprint. Restores the real lease row afterwards and skips itself when a live task holds the lease. |
-| `CompositionSweepIntegrationTest` (ETP-5565) | -- | Real-DB proof (1 test) of the composition hook: composing two templates where the higher-`SeqNo` one holds soft-deleted rows ends with the lower one's active grant (sourced from it) instead of core's inactive copy, and with no copy at all of an element no template grants actively. |
+| `CompositionSweepIntegrationTest` (ETP-5565, ETP-5830) | -- | Real-DB proof (2 tests) of the composition hook: composing two templates where the higher-`SeqNo` one holds soft-deleted rows ends with the lower one's active grant (sourced from it) instead of core's inactive copy, and with no copy at all of an element no template grants actively. ETP-5830: three templates sharing one soft-deleted window grant compose and then drop one template without `ad_window_access_un_key`, and no inactive copy is ever made. |
 | `SFAssignUserRolesTest` | -- | Unit test proving the webhook wires parameters/results/errors correctly, with `UserRoleCompositionService` itself intercepted via `mockConstruction` (its real behavior is the integration test's job): access gate (no role / restricted role denied without constructing the service), the happy path (admin composes, parses a whitespace/empty-entry-noisy `TemplateRoleIds` CSV, returns the assignment summary), missing `UserId` rejected before construction, an absent `TemplateRoleIds` parameter resolving to an empty (not `null`) list meaning "revoke all", a domain `OBException` folding into a `success:false` HTTP-200 result rather than the bridge's `error`/500 path, an unexpected `RuntimeException` surfacing as the bridge's `error` field instead, and the REVIEW cycle 1 regression proving the webhook actually forwards its already-resolved `currentRole` through to `assignTemplateRoles`'s 4-arg overload — the exact wiring the tenant-boundary check depends on. **ETP-4830 addition:** a companion regression proves the webhook ALSO resolves the caller's own `AD_User_ID` (via `OBContext.getOBContext().getUser()`, stubbed on the mock context) and forwards it as the 4th argument — the wiring `enforceOwnerProtection` depends on; every pre-existing test in this file leaves `mockContext.getUser()` unstubbed (defaults to `null`), confirming `callerUserId=null` for those and that the owner-protection check stays a no-op unless a real caller identity is resolved. |
 | `SFUserRoleAssignmentsTest` (ETP-4906) | -- | Unit test mirroring `SFAssignUserRolesTest`'s `mockConstruction` convention for §8e's read endpoint: access gate denies with the mode-appropriate empty shape (bulk `{"assignments":{}}` with no `UserId`, single `{"userId":...,"templateRoleIds":[]}` with one) without constructing the service; bulk mode returns every user's assignments keyed by id, scoped to `currentRole.getClient().getId()`; single mode returns one user's ids and proves `currentRole` is forwarded into the boundary-checking overload (mirrors `SFAssignUserRolesTest`'s own forwarding regression); a cross-tenant read attempt and an unknown-user-id `OBException` both fold into the single-mode empty shape rather than the bridge's `error`/500 path; an unexpected `RuntimeException` still surfaces as `error`. |
 | `SFSystemRoleTemplatesTest` (ETP-4906) | -- | Unit test (12 tests) mirroring `SFRolesOverviewTest`'s structure for §8f's endpoint: admin/client-admin access gate (no role, restricted role, System Administrator, client-admin — all resolved without the caller's own client ever appearing in any stub); roles resolved via `OBDal.get(Role.class, id)` against the 4 fixed `SystemRoleTemplates` ids rather than a client-scoped `Role` criteria; response omits `userCount`/`isClientAdmin` entirely; Finance/Sales/Purchasing/Inventory ordering; a template id resolving to `null` or to an inactive `Role` is skipped gracefully rather than erroring; GO-window intersection (native-only windows excluded) and tier resolution (full/read-only), mirroring `SFRolesOverview`'s identical logic; exception handling. **ETP-5402 additions (3 cases, 15 tests total):** every role has an empty `reports` array when no grants exist; a classic `tax-report` grant surfaces as `"full"` on the Finance template ONLY (Sales/Purchasing/Inventory unaffected); an "Informes financieros" pseudo-window grant surfaces all 5 financial-family reports — needed a NEW local keyed-by-role `WindowAccess`/classic-`ProcessAccess` stub helper pair, since this test class had none before (unlike `SFRolesOverviewTest`, which already had one). |

@@ -52,6 +52,7 @@ import org.openbravo.service.json.DefaultJsonDataService;
 import org.openbravo.service.json.JsonConstants;
 
 import com.etendoerp.go.schemaforge.AmortizationPlanService;
+import com.etendoerp.go.schemaforge.BatchJobService;
 import com.etendoerp.go.schemaforge.util.NeoRecordVersion;
 import com.etendoerp.go.schemaforge.BatchService;
 import com.etendoerp.go.schemaforge.NeoActionRecordGuard;
@@ -247,6 +248,12 @@ public class McpToolRouter {
               return wrapAsErrorContent(McpRouterErrorBodies.batchDisabled());
             }
             return handleBatch(arguments);
+          case McpConstants.TOOL_NEO_JOB_STATUS:
+          case McpConstants.TOOL_NEO_JOB_CANCEL:
+            if (!McpConstants.batchToolEnabled()) {
+              return wrapAsErrorContent(McpRouterErrorBodies.batchDisabled());
+            }
+            return McpBatchJobTools.handleBatchJob(toolName, arguments);
           case "etendo_action":
             return handleAction(specName, arguments);
           case McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN:
@@ -1639,6 +1646,11 @@ public class McpToolRouter {
           authorizeSpecAccess(specName, HTTP_METHOD_POST);
         }
       }
+      if (args.optBoolean(BatchJobService.PARAM_ASYNC, true)) {
+        // ETP-5677: the batch becomes a job unless the agent sent async:false; the worker commits
+        // it row by row, so a large volume never waits on one request.
+        return McpBatchJobTools.submitBatchJob(operations, args, this::preprocessBatchOperation);
+      }
       // IMP-15 / ETP-5415: the body transforms that make etendo_batch accept exactly what etendo_create
       // accepts — FK-by-name and legacy-numeric ids, the UoM derivation, the bill-to and
       // line-price injections. They run per operation, from inside the batch loop, because that is
@@ -1660,6 +1672,8 @@ public class McpToolRouter {
     } catch (SecurityException e) {
       log.warn("etendo_batch access denied session={}", McpUsageTelemetry.sessionForLog(), e);
       return wrapAsErrorContent(e.getMessage());
+    } catch (BatchJobService.JobException e) {
+      return wrapAsErrorContent(McpBatchJobTools.jobErrorMessage(e));
     } catch (Exception e) {
       log.error("Error executing etendo_batch session={}", McpUsageTelemetry.sessionForLog(), e);
       return wrapAsErrorContent("Error executing etendo_batch: " + e.getMessage());
