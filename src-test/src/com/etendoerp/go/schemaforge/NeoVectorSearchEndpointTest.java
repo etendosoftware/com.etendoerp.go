@@ -38,7 +38,11 @@ import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 import org.openbravo.model.ad.ui.Window;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-/** Unit coverage for the global vector-search request contract. */
+/**
+ * Unit coverage for the global vector-search request contract.
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoVectorSearchEndpoint
+ */
 public class NeoVectorSearchEndpointTest {
   @Test
   public void sharedWindowMetadataAllowsAuthorizedCallerAfterRestoringMode() throws Exception {
@@ -337,27 +341,55 @@ public class NeoVectorSearchEndpointTest {
 
   /**
    * The bug this pins: {@code OBContext.setAdminMode(true)} used to be called BEFORE the
-   * try/catch in {@code configuredTargetKeys()}, so when it failed — exactly the case here, a
-   * plain unit-test JVM with no live Hibernate session, which is also what tool generation hits
-   * outside of a request — the exception escaped uncaught, took down {@code buildVectorSearchTool}
-   * and with it the entire MCP tool list. No mocking on purpose: the absence of a live session
-   * IS the failure mode under test.
+   * try/catch in {@code configuredTargetKeys()}, so when it failed (no live Hibernate session, as
+   * in tool generation outside a request) the exception escaped uncaught, took down
+   * {@code buildVectorSearchTool} and with it the entire MCP tool list. The failure is driven
+   * explicitly with a mocked {@code setAdminMode} that throws, so the outcome does not depend on
+   * whether an earlier DAL test in the same Gradle worker left a live session behind. The mode
+   * that {@code setAdminMode} pushes before throwing must be popped, or it leaks to the thread.
    */
   @Test
   public void configuredTargetKeysReturnsEmptyOptionalWhenNoLiveSessionExists() {
-    assertFalse(NeoVectorSearchEndpoint.configuredTargetKeys().isPresent());
+    try (MockedStatic<OBDal> dals = mockStatic(OBDal.class);
+        MockedStatic<OBContext> contexts = mockStatic(OBContext.class)) {
+      contexts.when(() -> OBContext.setAdminMode(true))
+          .thenThrow(new IllegalStateException("no live Hibernate session"));
+
+      assertFalse(NeoVectorSearchEndpoint.configuredTargetKeys().isPresent());
+
+      contexts.verify(OBContext::restorePreviousMode);
+      dals.verifyNoInteractions();
+    }
   }
 
   /**
    * {@code authorizedTargetKeys()} must propagate an unreadable catalogue as {@code
    * Optional.empty()}, not collapse it into a present-but-empty (all-denied) list — the two drive
-   * different branches in {@code McpVectorSearchTool.handle}. Same no-mocking rationale as
-   * the test above. The distinction used to be null-vs-empty and is now absent-vs-empty; what must
-   * not change is that there are still two answers.
+   * different branches in {@code McpVectorSearchTool.handle}. The catalogue read is made to fail
+   * explicitly (the criteria {@code list()} throws), so the outcome does not depend on the JVM
+   * state left by other tests. The distinction used to be null-vs-empty and is now
+   * absent-vs-empty; what must not change is that there are still two answers.
    */
   @Test
-  public void authorizedTargetKeysReturnsEmptyOptionalWhenCatalogueCannotBeRead() {
-    assertFalse(NeoVectorSearchEndpoint.authorizedTargetKeys().isPresent());
+  @SuppressWarnings("unchecked")
+  public void authorizedTargetKeysReturnsEmptyOptionalWhenCatalogueCannotBeRead() throws Exception {
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<VectorSearchTarget> catalogCriteria = mock(OBCriteria.class);
+    when(dal.createCriteria(VectorSearchTarget.class)).thenReturn(catalogCriteria);
+    when(catalogCriteria.list()).thenThrow(new IllegalStateException("catalogue unreadable"));
+
+    Class<Object> authorizerClass = targetEntityAuthorizerClass();
+    try (MockedStatic<OBDal> dals = mockStatic(OBDal.class);
+        MockedStatic<OBContext> contexts = mockStatic(OBContext.class);
+        MockedConstruction<Object> construction = mockConstruction(authorizerClass)) {
+      dals.when(OBDal::getInstance).thenReturn(dal);
+
+      assertFalse(NeoVectorSearchEndpoint.authorizedTargetKeys().isPresent());
+
+      assertTrue("no per-key authorization runs over an unreadable catalogue",
+          construction.constructed().isEmpty());
+      contexts.verify(OBContext::restorePreviousMode);
+    }
   }
 
   /**
@@ -383,7 +415,7 @@ public class NeoVectorSearchEndpointTest {
     Class<Object> authorizerClass = targetEntityAuthorizerClass();
     try (MockedStatic<OBDal> dals = mockStatic(OBDal.class);
         // Needed so configuredTargetKeys()'s own setAdminMode/restorePreviousMode succeed as
-        // no-ops instead of hitting the no-live-session failure covered by the tests above.
+        // no-ops instead of depending on whether this JVM holds a live DAL session.
         MockedStatic<OBContext> contexts = mockStatic(OBContext.class);
         MockedConstruction<Object> construction = mockConstruction(authorizerClass,
             (authorizerMock, context) -> {
