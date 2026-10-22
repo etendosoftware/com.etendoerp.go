@@ -62,7 +62,7 @@ class OcrSanitizerTest {
   void cleansCharacters() {
     assertEquals("a b c", OcrSanitizer.text("a\nb\r\tc"));
     assertEquals("ab", OcrSanitizer.text("a​b"));
-    assertEquals("ab", OcrSanitizer.text("a‮b"));
+    assertEquals("ab", OcrSanitizer.text("a\u202Eb"));
     assertEquals("a b", OcrSanitizer.text("a\u0007b"));
     assertEquals("", OcrSanitizer.text(" \n\t "));
   }

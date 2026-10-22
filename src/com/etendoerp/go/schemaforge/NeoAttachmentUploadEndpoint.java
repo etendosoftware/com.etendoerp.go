@@ -24,6 +24,10 @@ import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.FileAttribute;
+import java.nio.file.attribute.PosixFilePermission;
+import java.nio.file.attribute.PosixFilePermissions;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import javax.servlet.http.HttpServletRequest;
@@ -213,9 +217,25 @@ public final class NeoAttachmentUploadEndpoint {
         subject.isMarkAsMain()));
   }
 
+  /**
+   * Creates the directory a staged or uploaded file is written to, readable by its owner only.
+   *
+   * <p>SonarQube java:S5443 (same solution as ETP-4456): explicit owner-only permissions instead of
+   * the platform default. Etendo GO's runtime is Linux-only, so {@link PosixFilePermissions} is safe
+   * to use unconditionally.</p>
+   *
+   * @return the new directory, mode {@code rwx------}
+   * @throws IOException when the directory cannot be created
+   */
+  static Path createOwnerOnlyTempDirectory() throws IOException {
+    FileAttribute<Set<PosixFilePermission>> ownerOnly =
+        PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------"));
+    return Files.createTempDirectory("etgo-attachment-", ownerOnly);
+  }
+
   /** Writes the body to a directory of its own, never past the policy's size cap by more than a byte. */
   private static File materialize(HttpServletRequest request, String fileName) throws IOException {
-    Path directory = Files.createTempDirectory("etgo-attachment-");
+    Path directory = createOwnerOnlyTempDirectory();
     try {
       return copyBody(request, directory, fileName);
     } catch (IOException | RuntimeException e) {

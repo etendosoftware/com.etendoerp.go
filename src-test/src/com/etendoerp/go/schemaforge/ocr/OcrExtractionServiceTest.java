@@ -95,7 +95,7 @@ class OcrExtractionServiceTest {
   @DisplayName("a payload whose only data is control characters is nothing read once sanitized")
   void emptyAfterSanitizing() throws Exception {
     assertNull(extract(new JSONObject().put("answer", new JSONObject()
-        .put("vendor_name", "​‮").put("document_no", "\n\t"))));
+        .put("vendor_name", "​\u202E").put("document_no", "\n\t"))));
   }
 
   @Test

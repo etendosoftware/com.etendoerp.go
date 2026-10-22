@@ -84,7 +84,7 @@ public final class NeoStagedAttachment {
   }
 
   private static File copy(Path source, String name) throws IOException {
-    Path directory = Files.createTempDirectory("etgo-attachment-");
+    Path directory = NeoAttachmentUploadEndpoint.createOwnerOnlyTempDirectory();
     Path target = directory.resolve(name);
     try {
       Files.copy(source, target);
