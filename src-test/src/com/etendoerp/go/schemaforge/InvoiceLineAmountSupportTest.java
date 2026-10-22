@@ -640,4 +640,31 @@ class InvoiceLineAmountSupportTest {
 
     assertAmount("tax-included list", null, json, InvoiceLineAmountSupport.FIELD_UNIT_PRICE);
   }
+
+  /** ETP-5881: the client's listPrice is the price; the price list is not applied to it. */
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("clientListPrice")
+  void setPriceFromPriceListOnCreateUsesTheClientListPrice(String label, String extra,
+      String expectedUnit) throws Exception {
+    JSONObject json = new JSONObject(extra);
+    json.put("product", "P1").put("parentId", "I1");
+    NeoContext ctx = NeoContext.builder().specName("sales-invoice").entityName("lines")
+        .httpMethod("POST").endpointType(NeoEndpointType.CRUD).requestBody(json).build();
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      InvoiceLineAmountSupport.setPriceFromPriceListOnCreate(ctx);
+      dalMock.verifyNoInteractions();
+    }
+    assertAmount(label, expectedUnit, json, InvoiceLineAmountSupport.FIELD_UNIT_PRICE);
+  }
+
+  static Stream<Arguments> clientListPrice() {
+    return Stream.of(
+        Arguments.of("list 20, no discount", "{\"listPrice\":20}", "20"),
+        Arguments.of("list 20, discount 10", "{\"listPrice\":20,\"etgoDiscount\":10}", "18"),
+        Arguments.of("unitPrice 0 counts as not sent", "{\"listPrice\":20,\"unitPrice\":0}",
+            "20"),
+        Arguments.of("the caller's unitPrice wins", "{\"listPrice\":20,\"unitPrice\":15}", "15"),
+        Arguments.of("discount out of range → untouched", "{\"listPrice\":20,\"etgoDiscount\":120}",
+            null));
+  }
 }

@@ -195,7 +195,9 @@ final class InvoiceLineAmountSupport {
     }
     JSONObject body = ctx.getRequestBody();
     try {
-      if (!LinePriceListSupport.hasNoPrice(body, FIELD_UNIT_PRICE)) {
+      if (!LinePriceListSupport.hasNoPrice(body, FIELD_UNIT_PRICE)
+          || LinePriceListSupport.applyClientListPrice(body, FIELD_UNIT_PRICE, FIELD_LIST_PRICE,
+              FIELD_DISCOUNT)) {
         return;
       }
       String productId = body.optString(FIELD_PRODUCT, null);

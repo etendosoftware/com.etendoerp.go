@@ -8759,7 +8759,7 @@ steps below in this order — both customizations call the single entry point
    **`unitPrice` (ETP-5881):** a line sent with no price of its own — `unitPrice` and
    `grossUnitPrice` each absent or 0 — takes the standard price of that same price-list entry as
    `unitPrice` (and the entry's `listPrice` when it has a non-zero one and the body has none), through
-   the shared `LinePriceListSupport`. REST single and REST batch run no product callout at that point
+   the shared `LinePriceListSupport`. A body that carries a non-zero `listPrice` (the one price the public API exposes as writable) and no price gets `unitPrice = listPrice × (1 − discount/100)` instead and the price list is not applied, as the form does when "Precio" is edited (all four line kinds, sales and purchase). REST single and REST batch run no product callout at that point
    (the SPA gets the price from it), so such a line used to persist price 0 and net 0; MCP already had
    the price from `McpLinePriceInjector`, which this does not change, and a non-zero `unitPrice` /
    `grossUnitPrice` in the body is never replaced. Tax-included lists and products with no price in

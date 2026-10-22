@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
@@ -40,6 +41,9 @@ final class LinePriceListSupport {
 
   static final String FIELD_GROSS_UNIT_PRICE = "grossUnitPrice";
 
+  private static final BigDecimal HUNDRED = BigDecimal.valueOf(100);
+  private static final int PRICE_SCALE = 6;
+
   private LinePriceListSupport() {
   }
 
@@ -50,6 +54,33 @@ final class LinePriceListSupport {
   static boolean hasNoPrice(JSONObject body, String unitPriceKey) {
     return body != null && LineAmountSupport.isZero(body.opt(unitPriceKey))
         && LineAmountSupport.isZero(body.opt(FIELD_GROSS_UNIT_PRICE));
+  }
+
+  /**
+   * A body with a non-zero {@code listPrice} and no price of the caller's — the one price the public
+   * API exposes as writable — gets {@code unitPrice = listPrice × (1 − discount / 100)}, 6 decimals,
+   * as the form does when "Precio" is edited. The price list is not consulted: the caller's list
+   * price is the price. A discount outside 0..100 writes nothing (the line's own validation answers
+   * it) and still counts as handled.
+   *
+   * @return {@code true} when the body carries a list price and no price, so the caller must not
+   *         apply the price list
+   */
+  static boolean applyClientListPrice(JSONObject body, String unitPriceKey, String listPriceKey,
+      String discountKey) throws JSONException {
+    if (!hasNoPrice(body, unitPriceKey) || LineAmountSupport.isZero(body.opt(listPriceKey))) {
+      return false;
+    }
+    BigDecimal list = LineAmountSupport.decimal(body.opt(listPriceKey));
+    BigDecimal discount = LineAmountSupport.decimal(body.opt(discountKey));
+    if (discount == null) {
+      discount = BigDecimal.ZERO;
+    }
+    if (discount.signum() >= 0 && discount.compareTo(HUNDRED) <= 0) {
+      body.put(unitPriceKey, list.multiply(HUNDRED.subtract(discount))
+          .divide(HUNDRED, PRICE_SCALE, RoundingMode.HALF_UP));
+    }
+    return true;
   }
 
   /**

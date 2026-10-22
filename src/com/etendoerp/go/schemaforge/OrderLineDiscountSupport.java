@@ -226,6 +226,9 @@ final class OrderLineDiscountSupport {
       return;
     }
     try {
+      // The caller's own list price is the price (ETP-5881): the price list is not applied to it.
+      LinePriceListSupport.applyClientListPrice(body, FIELD_UNIT_PRICE, FIELD_LIST_PRICE,
+          FIELD_DISCOUNT);
       ProductPrice productPrice = resolveProductPrice(body);
       if (productPrice == null) {
         return;
@@ -264,7 +267,8 @@ final class OrderLineDiscountSupport {
     }
     JSONObject body = ctx.getRequestBody();
     try {
-      if (LinePriceListSupport.hasNoPrice(body, FIELD_UNIT_PRICE)) {
+      if (!LinePriceListSupport.applyClientListPrice(body, FIELD_UNIT_PRICE, FIELD_LIST_PRICE,
+          FIELD_DISCOUNT) && LinePriceListSupport.hasNoPrice(body, FIELD_UNIT_PRICE)) {
         LinePriceListSupport.applyCatalogPrice(body, resolveProductPrice(body), FIELD_UNIT_PRICE,
             FIELD_LIST_PRICE);
       }

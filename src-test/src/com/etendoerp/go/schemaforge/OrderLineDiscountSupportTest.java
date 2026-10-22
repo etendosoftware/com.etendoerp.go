@@ -838,4 +838,30 @@ class OrderLineDiscountSupportTest {
     }
     assertAmount("kept", "9", json, OrderLineDiscountSupport.FIELD_UNIT_PRICE);
   }
+
+  static Stream<Arguments> clientListPrice() {
+    return Stream.of(
+        Arguments.of("list 20, no discount", "{\"listPrice\":20}", "20"),
+        Arguments.of("list 20, discount 10", "{\"listPrice\":20,\"discount\":10}", "18"),
+        Arguments.of("unitPrice 0 counts as not sent", "{\"listPrice\":20,\"unitPrice\":0}",
+            "20"),
+        Arguments.of("the caller's unitPrice wins", "{\"listPrice\":20,\"unitPrice\":15}", "15"),
+        Arguments.of("an explicit gross price wins", "{\"listPrice\":20,\"grossUnitPrice\":24}",
+            null));
+  }
+
+  /** ETP-5881: the client's listPrice is the price; the price list is not applied to it. */
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("clientListPrice")
+  void setUnitPriceOnCreateUsesTheClientListPrice(String label, String extra, String expectedUnit)
+      throws Exception {
+    JSONObject json = new JSONObject(extra);
+    json.put("product", "P1").put("parentId", "O1");
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      OrderLineDiscountSupport.setUnitPriceOnCreate(ctx("POST", NeoEndpointType.CRUD, json));
+      dalMock.verifyNoInteractions();
+    }
+    assertAmount(label, expectedUnit, json, OrderLineDiscountSupport.FIELD_UNIT_PRICE);
+    assertAmount(label, "20", json, OrderLineDiscountSupport.FIELD_LIST_PRICE);
+  }
 }
