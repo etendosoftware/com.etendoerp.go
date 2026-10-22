@@ -101,8 +101,10 @@ import com.etendoerp.go.payment.EnvironmentAccessGuard;
 import com.etendoerp.go.payment.SystemContext;
 import com.etendoerp.go.payment.StripeCustomerPortalService;
 import com.etendoerp.go.payment.DemoDataTransferService;
+import com.etendoerp.go.schemaforge.data.BillingResource;
 import com.etendoerp.go.schemaforge.data.CheckoutRequest;
 import com.etendoerp.go.schemaforge.data.Plan;
+import com.etendoerp.go.schemaforge.data.PlanQuota;
 import com.etendoerp.go.schemaforge.data.Subscription;
 import com.etendoerp.go.payment.CheckoutWebhookProcessor;
 import com.etendoerp.go.onboarding.OnboardingAcctdimCentrallyMaintainedService;
@@ -1460,22 +1462,26 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     });
   }
 
-  /** Returns the server-owned offer projection used by the account billing UI. */
+  /**
+   * Returns the server-owned offer projection used by the account billing UI: the plan catalog's
+   * default plan, quoted from the Stripe price checkout charges for it (ETP-5049). No provider
+   * price id — the browser names plans, never prices.
+   */
   private void handleBillingOffers(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
     runWithPlatformAccount(request, response, "billing-offers", account -> {
       try {
         BillingOfferConfiguration.Offer offer =
-            BillingOfferConfiguration.current(stripePriceService);
+            BillingOfferConfiguration.current(planCatalogService, stripePriceService);
         JSONObject result = new JSONObject();
         result.put("code", "productive-tenant");
-        result.put("priceId", offer.getPriceId());
+        result.put(FIELD_PLAN_KEY, offer.getPlanKey());
         result.put("amountMinor", offer.getAmountMinor());
         result.put(FIELD_CURRENCY, offer.getCurrency());
         result.put("interval", offer.getInterval());
         writeResponse(response, HttpServletResponse.SC_OK, result);
       } catch (IllegalStateException | IOException | JSONException e) {
-        log.warn("Could not retrieve configured Stripe billing price", e);
+        log.warn("Could not quote the default plan's Stripe billing price", e);
         writeError(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE,
             "BILLING_OFFER_UNAVAILABLE", "The current price is temporarily unavailable",
             "The current price is temporarily unavailable");
@@ -1570,13 +1576,13 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       StripeCustomerPortalService.SubscriptionDetail live,
       TenantEnvironmentLifecycleService.EnvironmentSnapshot snapshot, String clientId)
       throws JSONException {
-    Instant graceEndsAt = null;
+    // ETP-5049: the one grace rule, shared with the access policy and with the per-environment
+    // graceEndsAt of GET /environments, so the page, the banner and the lockout agree.
+    Instant graceEndsAt = snapshot == null ? null
+        : EnvironmentAccessPolicy.graceEndsAt(snapshot.getSubscriptionStatus(),
+            snapshot.getRenewalDueAt(), tenantEnvironmentLifecycleService::configuration);
     int graceDaysRemaining = 0;
-    if (snapshot != null
-        && snapshot.getSubscriptionStatus() == EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE
-        && snapshot.getRenewalDueAt() != null) {
-      graceEndsAt = snapshot.getRenewalDueAt().plus(tenantEnvironmentLifecycleService
-          .configuration().getRenewalGraceDays(), java.time.temporal.ChronoUnit.DAYS);
+    if (graceEndsAt != null) {
       long remainingSeconds = graceEndsAt.getEpochSecond() - Instant.now().getEpochSecond();
       graceDaysRemaining = remainingSeconds <= 0 ? 0 : (int) ((remainingSeconds + 86399) / 86400);
     }
@@ -1593,7 +1599,58 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     // ETP-5734 — the company the subscription pays for, so "Mis empresas" can put the live
     // renewal date on that company's row. Additive: existing consumers ignore it.
     result.put(FIELD_CLIENT_ID, clientId == null ? JSONObject.NULL : clientId);
+    putSubscriptionPlan(result, clientId);
     return result;
+  }
+
+  /**
+   * ETP-5049 — adds the plan catalog view of the subscription: {@code planKey}, {@code planName}
+   * and {@code planQuotas}, read from the tenant's {@code ETGO_SUBSCRIPTION} row (open, else the
+   * latest closed one — the same row the lifecycle reads) and its plan's quota rows.
+   *
+   * <p>Additive beside {@code plan}, which stays the live Stripe product name. A tenant with no
+   * subscription row (no environment yet, or one still answered by the retired preference) reads
+   * {@code planKey}/{@code planName} JSON null and {@code planQuotas} empty — never {@code "free"},
+   * which would name a plan catalog row that does not exist. With a plan, an empty
+   * {@code planQuotas} means the plan has no quota rows, which is <em>unlimited</em>
+   * ({@code open-and-notable-topics.md} §5.1).
+   */
+  private void putSubscriptionPlan(JSONObject result, String clientId) throws JSONException {
+    Plan plan = clientId == null ? null
+        : subscriptionService.findLatest(clientId).map(Subscription::getPlan).orElse(null);
+    JSONArray quotas = new JSONArray();
+    if (plan != null) {
+      for (PlanQuota quota : planCatalogService.listActiveQuotas(plan)) {
+        quotas.put(buildPlanQuotaJson(quota, plan));
+      }
+    }
+    result.put(FIELD_PLAN_KEY, plan == null ? JSONObject.NULL : plan.getSearchKey());
+    result.put("planName",
+        plan == null ? JSONObject.NULL : StringUtils.defaultString(plan.getName()));
+    result.put("planQuotas", quotas);
+  }
+
+  /**
+   * One included quota, informational only: what the plan includes, not what has been used.
+   * {@code period} is the plan's billing interval, which is the quota's consumption window
+   * ({@code open-and-notable-topics.md} §5.5, §5.8): a quota on a yearly plan is a yearly quota.
+   */
+  private static JSONObject buildPlanQuotaJson(PlanQuota quota, Plan plan) throws JSONException {
+    BillingResource resource = quota.getBillingResource();
+    JSONObject item = new JSONObject();
+    item.put("resourceKey", resource == null ? JSONObject.NULL : resource.getSearchKey());
+    item.put("resourceName", resource == null ? JSONObject.NULL
+        : StringUtils.defaultString(resource.getName()));
+    item.put("unitLabel", resource == null || resource.getUnitLabel() == null ? JSONObject.NULL
+        : resource.getUnitLabel());
+    item.put("includedQty", quota.getIncludedQty() == null ? JSONObject.NULL
+        : quota.getIncludedQty());
+    item.put("enforcementMode", StringUtils.defaultString(quota.getEnforcementMode()));
+    item.put("warningThreshold", quota.getWarningThreshold() == null ? JSONObject.NULL
+        : quota.getWarningThreshold());
+    item.put("period", StringUtils.isBlank(plan.getBillingInterval()) ? JSONObject.NULL
+        : plan.getBillingInterval());
+    return item;
   }
 
   /** Returns one account-scoped purchase projection, with foreign IDs kept indistinguishable. */

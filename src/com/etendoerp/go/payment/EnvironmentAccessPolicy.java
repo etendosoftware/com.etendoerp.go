@@ -15,6 +15,7 @@ package com.etendoerp.go.payment;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.function.Supplier;
 
 /**
  * Provider-neutral access rules for demo and productive environments.
@@ -207,6 +208,33 @@ public final class EnvironmentAccessPolicy {
   }
 
   /**
+   * Returns the instant a past-due subscription's payment grace ends: the renewal due date plus the
+   * configured renewal grace days.
+   *
+   * <p>The one definition of the grace window. {@link #evaluate} decides access on it, and every
+   * response that reports it ({@code GET /sws/go/billing/subscription} and the per-environment
+   * {@code graceEndsAt} of {@code GET /sws/go/environments}) reads it from here, so the instant a
+   * client shows and the instant access is actually cut cannot drift apart.
+   *
+   * <p>The configuration is a supplier and is read only when there is a grace window to compute:
+   * a tenant that is not past due never depends on the grace setting being readable.
+   *
+   * @param subscriptionStatus current subscription state, may be null
+   * @param renewalDueAt the stored renewal due date (the grace anchor), may be null
+   * @param configuration supplies the configured grace period; consulted only for a past-due
+   *     subscription with a renewal due date
+   * @return the grace end, or null unless the subscription is {@link SubscriptionStatus#PAST_DUE}
+   *     and has a renewal due date
+   */
+  public static Instant graceEndsAt(SubscriptionStatus subscriptionStatus, Instant renewalDueAt,
+      Supplier<Configuration> configuration) {
+    if (subscriptionStatus != SubscriptionStatus.PAST_DUE || renewalDueAt == null) {
+      return null;
+    }
+    return renewalDueAt.plus(configuration.get().renewalGraceDays, ChronoUnit.DAYS);
+  }
+
+  /**
    * Evaluates access for a member of the destination company. Membership is intentionally an
    * input independent of subscription ownership, which preserves invited-user access semantics.
    * @param environment environment facts to evaluate
@@ -228,10 +256,7 @@ public final class EnvironmentAccessPolicy {
       if (subscriptionStatus == SubscriptionStatus.CURRENT) {
         return Decision.ALLOWED;
       }
-      if (subscriptionStatus == SubscriptionStatus.PAST_DUE
-          && environment.renewalDueAt != null
-          && now.isBefore(environment.renewalDueAt.plus(configuration.renewalGraceDays,
-              ChronoUnit.DAYS))) {
+      if (isWithinGrace(subscriptionStatus, environment, now, configuration)) {
         return Decision.ALLOWED;
       }
       Instant expiresAt = environment.trialStartedAt.plus(configuration.trialDays, ChronoUnit.DAYS);
@@ -241,12 +266,16 @@ public final class EnvironmentAccessPolicy {
         || subscriptionStatus == SubscriptionStatus.LEGACY_ENTITLEMENT) {
       return Decision.ALLOWED;
     }
-    if (subscriptionStatus == SubscriptionStatus.PAST_DUE
-        && environment.renewalDueAt != null
-        && now.isBefore(environment.renewalDueAt.plus(configuration.renewalGraceDays,
-            ChronoUnit.DAYS))) {
+    if (isWithinGrace(subscriptionStatus, environment, now, configuration)) {
       return Decision.ALLOWED;
     }
     return Decision.SUBSCRIPTION_REQUIRED;
+  }
+
+  private static boolean isWithinGrace(SubscriptionStatus subscriptionStatus,
+      Environment environment, Instant now, Configuration configuration) {
+    Instant graceEndsAt = graceEndsAt(subscriptionStatus, environment.renewalDueAt,
+        () -> configuration);
+    return graceEndsAt != null && now.isBefore(graceEndsAt);
   }
 }

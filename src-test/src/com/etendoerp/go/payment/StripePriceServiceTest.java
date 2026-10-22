@@ -59,12 +59,20 @@ class StripePriceServiceTest {
       configuration.when(CheckoutConfiguration::apiBaseUrl).thenReturn(stripe.baseUrl());
       configuration.when(CheckoutConfiguration::mode).thenReturn("subscription");
 
-      BillingOfferConfiguration.Offer offer = BillingOfferConfiguration.current();
+      // While the legacy fallback is active the offer quotes the configured price (ETP-5049).
+      Plan legacy = mock(Plan.class);
+      when(legacy.getSearchKey()).thenReturn(PlanCatalogService.LEGACY_PLAN_KEY);
+      PlanCatalogService catalog = mock(PlanCatalogService.class);
+      when(catalog.findDefaultPurchasablePlan()).thenReturn(
+          Optional.of(new PlanCatalogService.DefaultPlan(legacy, true)));
+
+      BillingOfferConfiguration.Offer offer =
+          BillingOfferConfiguration.current(catalog, new StripePriceService());
 
       assertEquals("/v1/prices/price_configured", requestPath.get());
       assertEquals("GET", requestMethod.get());
       assertEquals("Bearer sk_test_server_only", authorization.get());
-      assertEquals("price_configured", offer.getPriceId());
+      assertEquals(PlanCatalogService.LEGACY_PLAN_KEY, offer.getPlanKey());
       assertEquals(1000L, offer.getAmountMinor());
       assertEquals("USD", offer.getCurrency());
       assertEquals("year", offer.getInterval());
@@ -159,7 +167,8 @@ class StripePriceServiceTest {
       JSONObject result = checkout.createSession("account-1", "owner@example.test", "Acme",
           "https://app.example.test", "productive-monthly");
 
-      assertEquals("price_retrieved", result.getString("priceId"));
+      // ETP-5049: the provider price id goes to Stripe, never back to the browser.
+      assertFalse(result.has("priceId"));
       assertTrue(stripe.checkoutForm.get().contains("line_items%5B0%5D%5Bprice%5D=price_retrieved"),
           stripe.checkoutForm.get());
       assertFalse(stripe.checkoutForm.get().contains("price_current_config"),

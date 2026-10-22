@@ -471,6 +471,9 @@ class EtendoGoJwtServletBlockedTenantPayPathTest {
     when(price.getCurrency()).thenReturn("EUR");
     when(price.getInterval()).thenReturn("month");
     when(stripePriceService.retrieveConfiguredPrice()).thenReturn(price);
+    // The offer quotes the plan catalog's default plan (ETP-5049): here the legacy fallback.
+    when(planCatalog.findDefaultPurchasablePlan()).thenReturn(Optional.of(
+        new PlanCatalogService.DefaultPlan(mock(Plan.class), true)));
 
     CheckoutRequest purchase = mock(CheckoutRequest.class);
     when(purchase.getRequest()).thenReturn(REQUEST_ID);

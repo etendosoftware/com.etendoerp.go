@@ -53,6 +53,7 @@ import org.openbravo.model.ad.system.Client;
 import com.etendoerp.go.payment.CheckoutRequestStore;
 import com.etendoerp.go.payment.EnvironmentAccessPolicy;
 import com.etendoerp.go.payment.StripeCustomerPortalService;
+import com.etendoerp.go.payment.SubscriptionService;
 import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.data.CheckoutRequest;
@@ -426,6 +427,7 @@ public class EtendoGoJwtServletBillingSubscriptionTest {
     final StripeCustomerPortalService portalService = mock(StripeCustomerPortalService.class);
     final TenantEnvironmentLifecycleService lifecycle =
         mock(TenantEnvironmentLifecycleService.class);
+    final SubscriptionService subscriptionService = mock(SubscriptionService.class);
     final Account account = mock(Account.class);
     final OBDal dal = mock(OBDal.class);
     final StripeCustomerPortalService.SubscriptionDetail live =
@@ -435,6 +437,7 @@ public class EtendoGoJwtServletBillingSubscriptionTest {
       servlet.checkoutRequestStore = requestStore;
       servlet.stripeCustomerPortalService = portalService;
       servlet.tenantEnvironmentLifecycleService = lifecycle;
+      servlet.subscriptionService = subscriptionService;
       when(account.getId()).thenReturn(ACCOUNT_ID);
       when(account.getEmail()).thenReturn(ACCOUNT_EMAIL);
       when(lifecycle.configuration())

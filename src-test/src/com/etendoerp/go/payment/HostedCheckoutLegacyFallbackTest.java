@@ -127,7 +127,7 @@ class HostedCheckoutLegacyFallbackTest {
 
     JSONObject result = createSession(LEGACY_KEY);
 
-    assertEquals(LEGACY_PRICE_ID, result.getString("priceId"));
+    assertFalse(result.has("priceId"));
     assertEquals("subscription", result.getString("mode"));
     String form = sentForm();
     assertTrue(form.contains(PRICE_FIELD + LEGACY_PRICE_ID), form);
@@ -152,7 +152,7 @@ class HostedCheckoutLegacyFallbackTest {
 
     JSONObject result = createSession(planKey);
 
-    assertEquals(LEGACY_PRICE_ID, result.getString("priceId"));
+    assertFalse(result.has("priceId"));
     verify(store).recordRequested(anyString(), any(), any(), any(),
         eq(new CheckoutRequestStore.RequestOptions(null, true, false, false, LEGACY_PRICE_ID)),
         eq(legacy));
@@ -236,7 +236,9 @@ class HostedCheckoutLegacyFallbackTest {
 
     JSONObject result = createSession(LEGACY_KEY);
 
-    assertEquals("price_LEGACY_own", result.getString("priceId"));
+    // The browser never receives the provider price id (ETP-5049); the form carries it to Stripe.
+    assertFalse(result.has("priceId"));
+    assertTrue(sentForm().contains(PRICE_FIELD + "price_LEGACY_own"));
     verify(prices, never()).retrieveConfiguredPrice();
   }
 
@@ -252,7 +254,7 @@ class HostedCheckoutLegacyFallbackTest {
 
     JSONObject result = createSession(PLAN_KEY);
 
-    assertEquals(PLAN_PRICE_ID, result.getString("priceId"));
+    assertFalse(result.has("priceId"));
     // The mode derives from the price interval, not from etendo.go.checkout.mode.
     assertEquals(mode, result.getString("mode"));
     String form = sentForm();
@@ -302,7 +304,7 @@ class HostedCheckoutLegacyFallbackTest {
 
     JSONObject result = service.reopenSession(REQUEST_ID, ACCOUNT_EMAIL, CLIENT_NAME, ORIGIN);
 
-    assertEquals(LEGACY_PRICE_ID, result.getString("priceId"));
+    assertFalse(result.has("priceId"));
     String form = sentForm();
     assertTrue(form.contains(PRICE_FIELD + LEGACY_PRICE_ID), form);
     assertFalse(form.contains(PLAN_PRICE_ID), form);
