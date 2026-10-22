@@ -105,6 +105,42 @@
         <default/>
         <onCreateDefault/>
       </column>
+      <column name="LOGIN_LINK_HASH" primaryKey="false" required="false" type="VARCHAR" size="128" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="LOGIN_LINK_EXPIRES" primaryKey="false" required="false" type="TIMESTAMP" size="7" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="SIGNUP_CHANNEL" primaryKey="false" required="false" type="VARCHAR" size="60" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="SIGNUP_STATUS" primaryKey="false" required="false" type="VARCHAR" size="20" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="SIGNUP_ENVIRONMENT" primaryKey="false" required="false" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="SIGNUP_ERROR" primaryKey="false" required="false" type="VARCHAR" size="2000" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="SIGNUP_SEND_EMAILS" primaryKey="false" required="true" type="CHAR" size="1" autoIncrement="false">
+        <default><![CDATA[N]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="SIGNUP_SOURCE" primaryKey="false" required="false" type="VARCHAR" size="2000" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="TERMS_ACCEPTED_AT" primaryKey="false" required="false" type="TIMESTAMP" size="7" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
       <foreign-key foreignTable="AD_CLIENT" name="ETGO_ACCOUNT_CLI_FK">
         <reference local="AD_CLIENT_ID" foreign="AD_CLIENT_ID"/>
       </foreign-key>
@@ -125,6 +161,8 @@
         <unique-column name="EXTERNAL_SUBJECT"/>
       </unique>
       <check name="ETGO_ACCOUNT_ISACTIVE"><![CDATA[ISACTIVE IN ('Y', 'N')]]></check>
+      <check name="ETGO_ACCOUNT_SIGNUP_EMAILS"><![CDATA[SIGNUP_SEND_EMAILS IN ('Y', 'N')]]></check>
+      <check name="ETGO_ACCOUNT_SIGNUP_STATUS"><![CDATA[SIGNUP_STATUS IN ('provisioning', 'ready', 'failed')]]></check>
       <check name="ETGO_ACCOUNT_STATUS"><![CDATA[STATUS IN ('active', 'pending')]]></check>
     </table>
   </database>
