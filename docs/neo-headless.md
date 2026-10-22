@@ -5153,7 +5153,7 @@ class reads each flag, and what breaks if it is wrong); the user-facing behaviou
 | `httpMethod` | `String` | `GET`, `POST`, `PUT`, `PATCH`, or `DELETE`. |
 | `recordId` | `String` | Record ID from URL (null for list operations). |
 | `requestBody` | `JSONObject` | Parsed request body (null for GET/DELETE). |
-| `queryParams` | `Map<String, String>` | URL query parameters. |
+| `queryParams` | `Map<String, String>` | URL query parameters. Populated on CRUD, on MCP and — since ETP-5680 — on the REST `/defaults` hook context (`NeoSubEndpointDispatcher` forwards the query string); `null` on the other REST sub-endpoint hook contexts (actions, selectors, callouts), so guard it. |
 | `adTab` | `Tab` | Resolved AD_Tab (null for process specs). |
 | `obContext` | `OBContext` | Authenticated user context. |
 | `previousResult` | `NeoResponse` | Mutable. Can be set by the handler for post-processing patterns. |
@@ -5536,7 +5536,9 @@ This is a plain duplicate-key conflict, not the concurrency conflict from §4.3.
 
   **Related documents, both directions.** `linkedShipments` / `linkedReceipts` (invoices) and `linkedInvoices` (goods shipment / receipt) now also read the match table, via `InOutInvoiceLinks.linkedInOutLineIdsSql` / `linkedInvoiceIdsSql`, so a second partial movement shows on both sides. The two pre-existing arms are unchanged — including the movement-side order-line arm, which still over-links an invoice line already linked to another movement (known, left as it was).
 
-  **"How much of this movement line is invoiced" readers, both directions.** Every reader that computes the invoiced quantity of a movement line reads the match table of the movement's direction as well as the column: the Goods Receipt header `invoiceStatus` (`GoodsReceiptHeaderHandler`, fixed to `M_MatchInv` via `InOutInvoiceLinks.matchedQtyPerInOutLineSql(PURCHASE)` — it read `M_MatchSI` before, so a second partial receipt showed *Facturado 0 %*); the pending-to-invoice quantity behind the *¿Registrar factura?* prompt, *Crear Factura* availability and the duplicate-invoice guard (`NeoInvoiceSupport.computePendingQtyPerLine*`, both `includeDrafts` variants); and the line enrichment `orderQuantity` / `invoicedQuantity` shared by Goods Shipment and Goods Receipt lines (`AbstractInOutLineHandler`). The last two serve both directions, so they pick the table per row from `m_inout.issotrx` (`InOutInvoiceLinks.matchedQtyByMovementDirectionExpr` / `matchedSourceInvoiceQtyByMovementDirectionExpr`, a `CASE` over `MatchTable.forSalesTransaction`) — structure, not identity. The column arm and the match arm are combined with `GREATEST`, never added: a completed first movement is linked by both the column and the match row `M_INOUT_POST` writes for it. The line `invoicedQuantity` is also capped at `ABS(MovementQty)`, like the receipt header, since core can over-match a movement line (e.g. *Add from order*). The Goods Shipment header was already reading `M_MatchSI` and is unchanged.
+  **"How much of this movement line is invoiced" readers, both directions.** Every reader that computes the invoiced quantity of a movement line reads the match table of the movement's direction as well as the column: the Goods Receipt header `invoiceStatus` (`GoodsReceiptHeaderHandler`, fixed to `M_MatchInv` via `InOutInvoiceLinks.matchedQtyPerInOutLineSql(MatchTable.PURCHASE, …)` — it read `M_MatchSI` before, so a second partial receipt showed *Facturado 0 %*); the pending-to-invoice quantity behind the *¿Registrar factura?* prompt, *Crear Factura* availability and the duplicate-invoice guard (`NeoInvoiceSupport.computePendingQtyPerLine*`, both `includeDrafts` variants); and the line enrichment `orderQuantity` / `invoicedQuantity` shared by Goods Shipment and Goods Receipt lines (`AbstractInOutLineHandler`). The last two serve both directions, so they pick the table per row from `m_inout.issotrx` (`InOutInvoiceLinks.matchedQtyByMovementDirectionExpr` / `matchedSourceInvoiceQtyByMovementDirectionExpr`, a `CASE` over `MatchTable.forSalesTransaction`) — structure, not identity. The column arm and the match arm are combined with `GREATEST`, never added: a completed first movement is linked by both the column and the match row `M_INOUT_POST` writes for it. The line `invoicedQuantity` is also capped at `ABS(MovementQty)`, like the receipt header, since core can over-match a movement line (e.g. *Add from order*). The Goods Shipment header was already reading `M_MatchSI` and is unchanged.
+
+  **Each aggregate is scoped to the requested movement (ETP-5653).** The `% invoiced` of a header aggregated the whole match/`C_InvoiceLine` table and kept the requested rows only at the outer `WHERE`, which the planner cannot push into an aggregated sub-query — every read walked the instance's entire invoice set. The shipment/receipt header now resolves the requested movement's lines once in a `WITH shipment_lines` / `receipt_lines` CTE and restricts each aggregation arm to that set on its own grouping key (`m_inoutline_id`); `NeoInvoiceSupport`'s `direct_qty` arm does the same with `m_inout_id = ?` (its match arm is already a correlated per-line lookup, ETP-5576, and its order-line arms were already scoped). The filter sits on the `GROUP BY` key, so it keeps or drops whole groups and never changes a sum: results are byte-identical, only the plan changes (index scans via `m_inoutline → c_invoiceline → c_invoice`, no `Seq Scan` on `c_invoice`/`c_invoiceline`). The helper's second argument is that `SELECT m_inoutline_id …` set.
 
   **Concurrency and access.** `lockSource` takes `FOR UPDATE` on the invoice row, then on every order line its lines come from, in `C_OrderLine_ID` order — so two invoices of the same order line serialise on the shared cap, and overlapping lock sets are always acquired in the same sequence (no deadlock between two follow-ups). The order-line lock can still deadlock against a concurrent `M_INOUT_POST` that updates `C_OrderLine` in its own order; PostgreSQL detects the deadlock, aborts one side, and this request then returns the generic 500 — acceptable, the user retries. Before anything runs in admin mode, `FollowUpActionHandler` checks the record with `TenantOwnership.loadOwned` (readable clients and organizations of the role): the router only checks the role's access to the spec's window for the method (`NeoRequestRouter#handleWindowSpecRequest`), not that the record id belongs to the caller's tenant. Another tenant's invoice answers `FOLLOW_UP_SOURCE_NOT_FOUND`, like a missing one. The FAC check that gates the write (`isStandardInvoiceDocType`) fails **closed** on a lookup error, unlike the display-only `resolveSubtype`, which keeps failing open to `FAC`.
 
@@ -6652,6 +6654,17 @@ execution against every environment (new or existing), which is the one guarante
 actually needs. The "Admin"
 (`is_client_admin = 'Y'`) role stays client-level, per tenant, untouched.
 
+**The template matrix exists twice — change both (ETP-5830).** The window grants per template live in
+`TemplateRoleWindowAccess.java` (runtime, read by the access-propagation sweep and the tests) **and** in
+a hand-kept copy inside `src-util/modulescript/.../EnsureSystemRoleTemplatesScript.java` (the seeding
+`ModuleScript`, compiled on its own). Editing only the first is reverted by the next
+`update.database`. After editing both, rebuild with `./gradlew compile.modulescript
+-Dmodule=com.etendoerp.go` and `git add -f` the rebuilt `.class` files under
+`build/classes/com/etendoerp/go/modulescript/` (they are committed). A grant you remove is cleaned off
+existing tenants with no data-fix: `update.database` runs `removeStaleWindowAccess`, then the startup
+sweep re-derives the personal roles. ETP-5830 used this path to drop Smart Scan from all four
+templates (Admin/client-admin keep it through the sidebar exemption).
+
 **The mechanism (`com.etendoerp.go.roles.UserRoleCompositionService`):** each user gets exactly
 ONE personal, non-template, non-admin `AD_Role` (found by reuse or created on first use), which
 inherits — via a real `AD_Role_Inheritance` row per requested template, added through `OBDal`
@@ -7278,7 +7291,35 @@ production templates, and personal roles (tenant clients) never travel at all.
 3. **Composition hook.** `UserRoleCompositionService#assignTemplateRoles` runs the same sweep on
    the personal role after a composition that added or removed an inheritance. Core copies
    inactive template rows too and lets them win by precedence, so without it a soft-deleted grant
-   of one template could hide another template's active grant.
+   of one template could hide another template's active grant. Since ETP-5830 core no longer
+   copies them from a system template at all (see *Inactive template rows are never inherited*
+   below); the hook still realigns copies made before that.
+
+**Inactive template rows are never inherited (ETP-5830).** Core's `AccessTypeInjector#getAccessList`
+reads a template's rows with `setFilterOnActive(false)`, so every composition used to copy the
+soft-deleted rows too. When two or more templates share a soft-deleted grant (the Smart Scan removal
+took it off all four), removing one template makes core recalculate the remaining ones in a single
+flush: each one copies the inactive row again, the second cannot see the first one's pending insert,
+and the flush fails on `ad_window_access_un_key`. Removing a template failed this way whenever two or
+more of the remaining ones shared the soft-deleted row, until the 7-day purge. `ActiveTemplateWindowAccessInjector`, `ActiveTemplateProcessAccessInjector`
+and `ActiveTemplateProcessDefinitionAccessInjector` `@Specializes` core's window, classic-process
+and OBUIAPP-process injectors (the three tables the modulescript soft-deletes) and drop a system
+template's inactive rows from that list (`SystemTemplateAccessRows`). Only the template-side read
+changes: core reads a dependent role's own rows through the same method, and those pass unfiltered,
+so deleting copies on removal works as before. `isInheritable` is deliberately not overridden: core
+also calls it in `propagateUpdatedAccess`, which carries a template row's deactivation to its copies.
+Because the injectors replace core's beans, a composition made from Etendo Classic is covered too.
+Proof: `CompositionSweepIntegrationTest#inactiveRowSharedByTemplatesIsNeverCopiedOnAddOrRemove`.
+
+Scope and limits of the filter:
+- **System templates must not carry `AD_Tab_Access` / `AD_Field_Access`.** Tab and field injectors
+  are not specialized, so a tab row under an inactive window row would still be copied and find no
+  parent window on the personal role (NPE in core's `setParent`). The modulescript writes none; if
+  templates ever get tab/field grants, specialize `TabAccessInjector` the same way.
+- Core's event-handler paths are untouched: reactivating a soft-deleted template row reaches
+  personal roles on the next startup-tick sweep, not through core (there is no copy to update);
+  `propagateDeletedAccess` may still fall back to another template's inactive row, and the sweep
+  corrects it; `propagateNewAccess` would copy a row inserted inactive, which no writer does.
 
 **The sweep rule** (`TemplateAccessPropagationService`): for each personal role and element (window,
 classic process, OBUIAPP process), look at the role's active inheritances of active system templates
@@ -8268,7 +8309,7 @@ The module includes unit tests that run without a backend:
 | `TemplateAccessPropagationServiceIntegrationTest` (ETP-5565) | -- | Real-DB proof (14 tests) of §8d.1's sweep rule, rolled back after each test: every combination after a template removal (narrowed, removed, manual row kept, inactive copy reactivated, a second sweep changes nothing), most-permissive level with highest-`SeqNo` source (also on equal levels), additions inserted unless a manual row exists (an inactive one included), OBUIAPP rows without duplicates and duplicate inherited copies collapsed to the oldest (copies from non-system roles untouched), template deactivation changes the fingerprint, inactive grants do not, roles inheriting a non-system template skipped, stale-copy detection, purge limited to inactive template rows past the grace period, the process-grant diagnostic, owner resolution. |
 | `TemplateRoleAccessStartupTest` (ETP-5565) | -- | Unit test (10 tests, mocked service and store) of the tick: unchanged templates take no lease, an empty sync table sweeps every template's inheritors and stores fingerprints, only changed templates are swept, a fingerprint from a newer `ALGO_VERSION` counts as unchanged, a busy lease skips the tick, a failed chunk keeps the old fingerprints and releases the lease with an error, stale copies are swept without a fingerprint change, purge runs under the lease before the sweep, owners are locked before their chunk, `tickSafely` never throws. |
 | `TemplateRoleSyncStoreIntegrationTest` (ETP-5565) | -- | Real-DB proof (5 tests) of the lease SQL (take once, holder-only renew/release, expired takeover, missing row seeded) and that an older `ALGO_VERSION` never overwrites a newer fingerprint. Restores the real lease row afterwards and skips itself when a live task holds the lease. |
-| `CompositionSweepIntegrationTest` (ETP-5565) | -- | Real-DB proof (1 test) of the composition hook: composing two templates where the higher-`SeqNo` one holds soft-deleted rows ends with the lower one's active grant (sourced from it) instead of core's inactive copy, and with no copy at all of an element no template grants actively. |
+| `CompositionSweepIntegrationTest` (ETP-5565, ETP-5830) | -- | Real-DB proof (2 tests) of the composition hook: composing two templates where the higher-`SeqNo` one holds soft-deleted rows ends with the lower one's active grant (sourced from it) instead of core's inactive copy, and with no copy at all of an element no template grants actively. ETP-5830: three templates sharing one soft-deleted window grant compose and then drop one template without `ad_window_access_un_key`, and no inactive copy is ever made. |
 | `SFAssignUserRolesTest` | -- | Unit test proving the webhook wires parameters/results/errors correctly, with `UserRoleCompositionService` itself intercepted via `mockConstruction` (its real behavior is the integration test's job): access gate (no role / restricted role denied without constructing the service), the happy path (admin composes, parses a whitespace/empty-entry-noisy `TemplateRoleIds` CSV, returns the assignment summary), missing `UserId` rejected before construction, an absent `TemplateRoleIds` parameter resolving to an empty (not `null`) list meaning "revoke all", a domain `OBException` folding into a `success:false` HTTP-200 result rather than the bridge's `error`/500 path, an unexpected `RuntimeException` surfacing as the bridge's `error` field instead, and the REVIEW cycle 1 regression proving the webhook actually forwards its already-resolved `currentRole` through to `assignTemplateRoles`'s 4-arg overload — the exact wiring the tenant-boundary check depends on. **ETP-4830 addition:** a companion regression proves the webhook ALSO resolves the caller's own `AD_User_ID` (via `OBContext.getOBContext().getUser()`, stubbed on the mock context) and forwards it as the 4th argument — the wiring `enforceOwnerProtection` depends on; every pre-existing test in this file leaves `mockContext.getUser()` unstubbed (defaults to `null`), confirming `callerUserId=null` for those and that the owner-protection check stays a no-op unless a real caller identity is resolved. |
 | `SFUserRoleAssignmentsTest` (ETP-4906) | -- | Unit test mirroring `SFAssignUserRolesTest`'s `mockConstruction` convention for §8e's read endpoint: access gate denies with the mode-appropriate empty shape (bulk `{"assignments":{}}` with no `UserId`, single `{"userId":...,"templateRoleIds":[]}` with one) without constructing the service; bulk mode returns every user's assignments keyed by id, scoped to `currentRole.getClient().getId()`; single mode returns one user's ids and proves `currentRole` is forwarded into the boundary-checking overload (mirrors `SFAssignUserRolesTest`'s own forwarding regression); a cross-tenant read attempt and an unknown-user-id `OBException` both fold into the single-mode empty shape rather than the bridge's `error`/500 path; an unexpected `RuntimeException` still surfaces as `error`. |
 | `SFSystemRoleTemplatesTest` (ETP-4906) | -- | Unit test (12 tests) mirroring `SFRolesOverviewTest`'s structure for §8f's endpoint: admin/client-admin access gate (no role, restricted role, System Administrator, client-admin — all resolved without the caller's own client ever appearing in any stub); roles resolved via `OBDal.get(Role.class, id)` against the 4 fixed `SystemRoleTemplates` ids rather than a client-scoped `Role` criteria; response omits `userCount`/`isClientAdmin` entirely; Finance/Sales/Purchasing/Inventory ordering; a template id resolving to `null` or to an inactive `Role` is skipped gracefully rather than erroring; GO-window intersection (native-only windows excluded) and tier resolution (full/read-only), mirroring `SFRolesOverview`'s identical logic; exception handling. **ETP-5402 additions (3 cases, 15 tests total):** every role has an empty `reports` array when no grants exist; a classic `tax-report` grant surfaces as `"full"` on the Finance template ONLY (Sales/Purchasing/Inventory unaffected); an "Informes financieros" pseudo-window grant surfaces all 5 financial-family reports — needed a NEW local keyed-by-role `WindowAccess`/classic-`ProcessAccess` stub helper pair, since this test class had none before (unlike `SFRolesOverviewTest`, which already had one). |
@@ -8735,7 +8776,8 @@ The three QA-reopen rules were checked against the same payloads (`useLineGrossA
   no "edit the unit price": the user edits "Precio" (`listPrice`) and the unit price is derived (`computeUnitPriceForPost`, sent whenever
   `listPrice` is in the payload), so repricing a line with no discount moves the list price with it (created at 50 / list 50, repriced to
   60 → 60 / list 60, not 60 / list 50). A patch that does not re-price never invents a list price, and a line with a discount (stored or
-  sent) keeps the discount rule. **Copied lines (ETP-5713 imports, one-step create from an order or a receipt):** the native line copy
+  sent) keeps the discount rule (on an update with a new `unitPrice` alone, that rule works the list price back — see "New net price on a
+  discounted line (ETP-5703)" in §4.12.31). **Copied lines (ETP-5713 imports, one-step create from an order or a receipt):** the native line copy
   (`CreateInvoiceLinesFromProcess` / `UpdatePricesAndAmounts`) takes the source line's prices exactly, so a source order line whose
   `listPrice` is 0 (the order-side symptom below) gave an invoice line with a price and `listPrice 0`. `InvoiceFromOrderSupport.alignLineListPrices`
   now sets `listPrice = unitPrice` on a copied line with a non-zero price, no list price and no gross price (and, when the line has a discount,
@@ -9477,6 +9519,38 @@ discounted price with no list price (a legacy line) would otherwise be discounte
 edit. Accepted edge case (same as order lines): a caller that deliberately sends `unitPrice == listPrice`
 with a discount gets the discount applied.
 
+**Update without a discount (ETP-5703).** The form's "Precio" is `listPrice` (`PriceList`); `unitPrice` is
+not a form input, and with no discount the SPA always posts `unitPrice = listPrice`
+(`computeUnitPriceForPost`, sent by both the side-panel save and the inline autosave). An MCP / REST
+update must end with the same values, so when the line's final `etgoDiscount` is 0 (or null) and there is
+no non-zero `grossUnitPrice`:
+
+| Patch | Result |
+|---|---|
+| `unitPrice` without `listPrice` | `listPrice = unitPrice` (0 included) |
+| `listPrice` without `unitPrice` | `unitPrice = listPrice` |
+| `etgoDiscount` alone, taken to 0 | `unitPrice` = the stored list price when non-zero (a legacy line with no list price keeps its price) |
+| both prices, or one already equal to the other (every SPA body) | untouched |
+| `unitPrice` equal to the one stored (re-sent, not a re-price — the ETP-5714 rule) | untouched |
+
+QA case CP-B3: 3 × 1.50, VAT 10 %, `etendo_update {unitPrice: 1.25}` → `listPrice 1.25`, net 3.75, gross
+4.13 — what editing Precio stores — instead of `listPrice 1.50` with net 3.75 ("Subtotal sin descuento"
+4.50 against a subtotal of 3.75).
+
+**New net price on a discounted line (ETP-5703).** When the line's final `etgoDiscount` `d` is non-zero
+(0 < d < 100) and there is no non-zero `grossUnitPrice`, a patch carrying `unitPrice` but neither
+`listPrice` nor `etgoDiscount` keeps the discount and the caller's price, and works the list price back:
+`listPrice = unitPrice / (1 − d/100)`, 6 decimals, HALF_UP. List 1.50, 10 %, qty 3, VAT 10 %,
+`etendo_update {unitPrice: 1.25}` → `listPrice 1.388889`, `unitPrice 1.25`, net 3.75, gross 4.13; the UI
+shows Precio 1.39, Subtotal sin descuento 4.17, Descuento 0.42, Subtotal 3.75. Left as before:
+
+- a `unitPrice` within half a cent of the stored `listPrice × (1 − d/100)` — the SPA body, which sends
+  exactly that computed price (same tolerance as `OrderLineDiscountSupport.shouldDeriveDiscountFromPrice`);
+- `unitPrice` equal to the list price (the discount rule above applies the discount to it);
+- `d = 100`: there is nothing to work back from, the list price is kept;
+- a stored list price of 0 (legacy line) or a `unitPrice` of 0;
+- a patch that also carries `listPrice` or `etgoDiscount` (the rules above apply).
+
 **Discount range.** `etgoDiscount` must be within **[0, 100]**. A create (POST) or update (PATCH, PUT) whose
 body carries a discount outside that range is refused **before** anything is derived, with **422**,
 `error.code = invalidLineDiscount`, message `The line discount must be between 0 and 100 (percent).`
@@ -9529,8 +9603,8 @@ so the form, the row quick action and a single-record bulk completion show it in
 
 ##### Edge cases of an update (PATCH / PUT) on a discounted line
 
-- A PATCH carrying only `unitPrice` on a line with a stored discount keeps that price as-is: the
-  caller's price wins and is not re-derived or discounted.
+- A PATCH carrying only `unitPrice` on a line with a stored discount keeps that price as-is (it is not
+  re-derived or discounted) and works the list price back from it (ETP-5703, above).
 - A PATCH carrying only `etgoDiscount` re-derives the price from the stored list price
   (`U = L × (1 − d/100)`), overwriting a price that was chosen by hand.
 - **Known limitation.** When an explicit non-zero `grossUnitPrice` is sent (tax-included price lists), the
