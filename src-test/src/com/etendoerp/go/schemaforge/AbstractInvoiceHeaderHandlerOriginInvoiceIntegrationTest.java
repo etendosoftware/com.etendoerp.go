@@ -85,6 +85,11 @@ public class AbstractInvoiceHeaderHandlerOriginInvoiceIntegrationTest extends OB
       return null;
     }
 
+    @Override
+    protected DocumentCurrencyRate currencyRate() {
+      return new DocumentCurrencyRate(SalesInvoiceHeaderHandler.RATE_TYPE);
+    }
+
     public void callCapture(NeoContext ctx) {
       captureOriginInvoice(ctx);
     }

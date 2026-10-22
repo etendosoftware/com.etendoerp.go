@@ -29,6 +29,8 @@ import java.util.Set;
 import javax.inject.Inject;
 import javax.inject.Named;
 
+import org.openbravo.model.common.invoice.Invoice;
+
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -94,6 +96,22 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
 
   @Inject
   private TotalDiscountService totalDiscountService;
+
+  /**
+   * ETP-5840: the rate is the one valid on the {@code accountingDate} ({@code DateAcct}) — not the
+   * invoice date — shown as "Accounting date". Invoice-family rules in
+   * {@link AbstractInvoiceHeaderHandler#guardExchangeRate}.
+   */
+  static final DocumentCurrencyRate.RateType RATE_TYPE = new DocumentCurrencyRate.RateType(
+      Invoice.ENTITY_NAME, Invoice.PROPERTY_ETGOCURRENCYRATE, Invoice.PROPERTY_ACCOUNTINGDATE,
+      DocumentRateMessages.LABEL_ACCOUNTING_DATE);
+
+  private final DocumentCurrencyRate currencyRate = new DocumentCurrencyRate(RATE_TYPE);
+
+  @Override
+  protected DocumentCurrencyRate currencyRate() {
+    return currencyRate;
+  }
 
   @Inject
   private DocumentPostingService postingService;
@@ -167,7 +185,12 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
     NeoHandlerUtils.mirrorAccountingDateOnCreate(context, "invoiceDate", "accountingDate");
     // ETP-5703: server-side defaults for a write that leaves them out (an agent; the SPA sends both).
     injectPartnerAddressIfMissing(context);
-    currencyRateDefaults.capture(context);
+    // ETP-5840: exchange rate — recalculation on the accounting date, save and completion
+    // validation — before anything with side effects runs.
+    NeoResponse rateRefusal = guardExchangeRate(context);
+    if (rateRefusal != null) {
+      return rateRefusal;
+    }
     captureOriginInvoice(context);
     NeoResponse siiAuthError = captureAndValidateSiiAuthorization(context);
     if (siiAuthError != null) {
@@ -212,8 +235,9 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
   }
 
   /**
-   * Post-callout hook: blocks callout-driven currency updates and appends an exchange-rate
-   * warning when the user directly changes the invoice currency (ETP-4029), and blocks
+   * Post-callout hook: blocks callout-driven currency updates (ETP-4029), returns the exchange rate
+   * recalculated for the accounting date when the currency or that date changes (ETP-5840), and
+   * blocks
    * callout-driven document type updates once the invoice has been saved (ETP-4535). Mirrors
    * {@code AbstractOrderHeaderHandler#afterCallout}.
    */
@@ -236,8 +260,12 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
    */
   @Override
   public NeoResponse afterHandle(NeoContext context) {
-    // ETP-5703: before the rate-document sync, which is a no-op while the rate is null.
-    currencyRateDefaults.apply(context);
+    // ETP-5840: a create whose currency or accounting date only the create cascade derived; before
+    // the rate-document sync, which must see the resolved rate.
+    NeoResponse rateRefusal = currencyRate.afterWrite(context);
+    if (rateRefusal != null) {
+      return rateRefusal;
+    }
     autoCreateOrUpdateConversionRateDocument(context);
     // POST/PUT/PATCH: persist origin invoice relationship after the record is saved.
     // Mirrors PurchaseInvoiceHeaderHandler#afterHandle (ETP-4737) — the manual

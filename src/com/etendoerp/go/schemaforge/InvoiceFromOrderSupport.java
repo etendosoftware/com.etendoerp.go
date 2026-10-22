@@ -28,7 +28,6 @@ import javax.enterprise.context.ApplicationScoped;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.openbravo.dal.service.OBDal;
-import org.openbravo.erpCommon.utility.OBCurrencyUtils;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.invoice.InvoiceLine;
 import org.openbravo.model.common.order.Order;
@@ -312,71 +311,29 @@ public class InvoiceFromOrderSupport {
   }
 
   /**
-   * When the source order has a per-order rate override ({@code EM_ETGO_Currency_Rate}),
-   * creates a {@code C_Conversion_Rate_Document} record for the new invoice so that
-   * {@code InvoiceExchangeRateValidator} finds a document-level rate and allows completion,
-   * and {@code DocInvoice} uses the same rate for accounting journal entries.
+   * Gives an invoice generated from an order its own exchange rate (ETP-5840): recomputed from the
+   * INVOICE's reference date (its accounting date) — never copied from the order, whose rate belongs
+   * to the order date — and mirrored into the invoice's exchange-rates tab
+   * ({@code C_Conversion_Rate_Document}), so the tab reflects the header rate from the start.
    *
-   * <p>No-op when {@code EM_ETGO_Currency_Rate} is null, invoice and org currencies are
-   * the same, or a rate record already exists for this invoice + currency pair.
+   * <p>No rate configured for that date → the rate stays {@code null} and the tab empty; the invoice
+   * is created anyway and its next save is refused until a rate is entered. Org-currency invoices
+   * are left alone. The name is kept for its callers ({@link CreateDraftInvoiceHandler},
+   * {@link CreatePurchaseInvoiceHandler}); {@code order} is only used for logging now.
    *
-   * @param order   the source order carrying the custom exchange rate
-   * @param invoice the newly created draft invoice
+   * @param order   the source order (logging only)
+   * @param invoice the newly created draft invoice, managed by the current session
    */
   public void propagateOrderRateToInvoice(Order order, Invoice invoice) {
-    try {
-      BigDecimal rate = order.getETGOCurrencyRate();
-      if (rate == null) {
-        return;
-      }
-      if (invoice.getCurrency() == null) {
-        return;
-      }
-      String orgId = order.getOrganization().getId();
-      String orgCurrencyId = OBCurrencyUtils.getOrgCurrency(orgId);
-      if (orgCurrencyId == null || orgCurrencyId.equals(invoice.getCurrency().getId())) {
-        return;
-      }
-
-      Connection conn = OBDal.getInstance().getConnection();
-
-      String checkSql =
-          "SELECT 1 FROM c_conversion_rate_document"
-        + " WHERE c_invoice_id = ? AND c_currency_id = ? AND c_currency_id_to = ? LIMIT 1";
-      try (PreparedStatement ps = conn.prepareStatement(checkSql)) {
-        ps.setString(1, invoice.getId());
-        ps.setString(2, invoice.getCurrency().getId());
-        ps.setString(3, orgCurrencyId);
-        try (ResultSet rs = ps.executeQuery()) {
-          if (rs.next()) {
-            return;
-          }
-        }
-      }
-
-      BigDecimal grandTotal = invoice.getGrandTotalAmount();
-
-      // EM_ETGO_Currency_Rate is the org→doc multiplyRate (e.g. EUR→USD = 1.16).
-      // C_Conversion_Rate_Document.rate is the doc→org multiplier: amount_USD × docRate = amount_EUR.
-      BigDecimal docRate = BigDecimal.ONE.divide(rate, 12, RoundingMode.HALF_UP);
-      BigDecimal foreignAmount = (grandTotal != null)
-          ? grandTotal.multiply(docRate).setScale(2, RoundingMode.HALF_UP)
-          : null;
-
-      // Shared with ConversionRateDocumentSync (ETP-4836) — the checkSql above already
-      // guarantees no row exists yet for this invoice+currency pair, so this is always
-      // a plain insert.
-      ConversionRateDocumentSync.insertConversionRateDocument(conn, invoice, orgCurrencyId, docRate, foreignAmount);
-      log.info("[ETP-4027] Created C_Conversion_Rate_Document for invoice {} (docRate={}, eTGORate={})",
-          invoice.getId(), docRate, rate);
-
-      // ETP-4029: also persist the rate on the invoice column so summaries/lists can display it.
-      invoice.setETGOCurrencyRate(rate);
-      OBDal.getInstance().save(invoice);
-    } catch (Exception e) {
-      log.warn("[ETP-4027] propagateOrderRateToInvoice failed for order {} → invoice {}: {}",
-          order.getId(), invoice.getId(), e.getMessage());
+    if (invoice == null) {
+      return;
     }
+    DocumentCurrencyRate.RateType type = Boolean.TRUE.equals(invoice.isSalesTransaction())
+        ? SalesInvoiceHeaderHandler.RATE_TYPE : PurchaseInvoiceHeaderHandler.RATE_TYPE;
+    BigDecimal rate = new DocumentCurrencyRate(type).recompute(invoice);
+    AbstractInvoiceHeaderHandler.autoCreateOrUpdateConversionRateDocument(invoice.getId());
+    log.debug("[ETP-5840] Invoice {} generated from order {} got rate {}", invoice.getId(),
+        order != null ? order.getId() : null, rate);
   }
 
   // ── JDBC helpers ────────────────────────────────────────────────────────────

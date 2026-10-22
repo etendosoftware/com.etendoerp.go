@@ -117,13 +117,6 @@ public abstract class AbstractInvoiceHeaderHandler {
   private String pendingSiiAuthorizationno;
   private boolean siiAuthorizationCaptured;
 
-  // ETP-5703: the exchange-rate default of a write that leaves the rate out. Its per-request state
-  // (why the rate is left to the server, set by capture() in handle() and consumed by apply() in
-  // afterHandle()) lives on this object, owned by THIS handler instance — the same
-  // instance-per-request pattern as above. See InvoiceCurrencyRateDefaults.
-  final InvoiceCurrencyRateDefaults currencyRateDefaults =
-      new InvoiceCurrencyRateDefaults();
-
   // ---------------------------------------------------------------------------
   // Abstract contract
   // ---------------------------------------------------------------------------
@@ -180,6 +173,40 @@ public abstract class AbstractInvoiceHeaderHandler {
    * @return the subclass's injected {@link TotalDiscountService}
    */
   protected abstract TotalDiscountService getTotalDiscountService();
+
+  /**
+   * The concrete handler's own {@link DocumentCurrencyRate} (ETP-5840), built with the invoice's
+   * {@link DocumentCurrencyRate.RateType}: the rate must be valid on the ACCOUNTING date
+   * ({@code DateAcct}), not the invoice date. One instance per handler instance: it carries a
+   * deferral from {@code handle()} to {@code afterHandle()} of the same request.
+   */
+  protected abstract DocumentCurrencyRate currencyRate();
+
+  /**
+   * Exchange-rate rules of an invoice header (ETP-5840), to call from each subclass's
+   * {@code handle()} after the accounting date is mirrored on create and BEFORE anything with side
+   * effects runs (total discount, completion):
+   * <ul>
+   *   <li>publishes the document's rate type for {@code currencyOptions};</li>
+   *   <li>CRUD write → {@link DocumentCurrencyRate#beforeWrite}: recalculates the rate when the
+   *       accounting date or the currency changes and the request sends none, and refuses a
+   *       foreign-currency save without a rate (the completion text when the write completes);</li>
+   *   <li>completion through the {@code documentAction} action → refused when the stored rate is
+   *       empty. {@link InvoiceCompletionRateHook} applies the same rule inside
+   *       {@code ProcessInvoiceUtil} for every other completion path.</li>
+   * </ul>
+   *
+   * @return the refusal, or {@code null} to carry on
+   */
+  protected NeoResponse guardExchangeRate(NeoContext context) {
+    DocumentCurrencyRate rate = currencyRate();
+    context.setAttribute(DocumentCurrencyRate.ATTR_RATE_TYPE, rate.type());
+    boolean completing = InvoiceCalloutHelper.isInvoiceCompleteAction(context);
+    if (NeoEndpointType.CRUD.equals(context.getEndpointType())) {
+      return rate.beforeWrite(context, completing);
+    }
+    return completing ? rate.refuseCompletionWithoutRate(context.getRecordId()) : null;
+  }
 
   // ---------------------------------------------------------------------------
   // Follow-up document: goods shipment / goods receipt for the pending quantities (ETP-5576)
@@ -1007,46 +1034,6 @@ public abstract class AbstractInvoiceHeaderHandler {
     }
   }
 
-  /**
-   * Appends a {@code WARNING} message to the callout response body when the user directly
-   * changes the invoice's {@code currency} field and no {@code C_Conversion_Rate} exists for
-   * (docCurrency → orgCurrency, invoiceDate). Mirrors
-   * {@code AbstractOrderHeaderHandler#checkExchangeRateWarning}.
-   *
-   * <p>ETP-4838: rate availability is resolved by {@link NeoExchangeRateService#hasRate} — the same
-   * lookup {@code GET /sws/neo/validate-exchange-rate} serves the frontend — so the callout warning
-   * and the frontend's own pre-check can never disagree.
-   *
-   * <p>Call from each subclass's {@code afterCallout()} override.
-   *
-   * @param body         the callout response body; messages are appended in-place
-   * @param requestBody  the original callout request payload (carries {@code field}/{@code value})
-   * @param formState    the callout {@code formState}, carries {@code invoiceDate} as fallback
-   * @param triggerField the field that triggered the callout
-   */
-  protected static void checkExchangeRateWarning(JSONObject body, JSONObject requestBody,
-      JSONObject formState, String triggerField) {
-    if (formState == null) {
-      return;
-    }
-    if (!FIELD_CURRENCY.equals(triggerField) && !"currencyid".equals(triggerField)) {
-      return;
-    }
-    String docCurrencyId = requestBody != null ? requestBody.optString(FIELD_VALUE, "") : "";
-    if (docCurrencyId.isEmpty()) {
-      docCurrencyId = formState.optString("currencyid", "");
-    }
-    String invoiceDate = formState.optString("invoiceDate", "");
-    String orgId = OBContext.getOBContext().getCurrentOrganization().getId();
-    String orgCurrencyId = OBCurrencyUtils.getOrgCurrency(orgId);
-    if (!docCurrencyId.isEmpty() && orgCurrencyId != null
-        && !docCurrencyId.equals(orgCurrencyId) && !invoiceDate.isEmpty()
-        && !NeoExchangeRateService.hasRate(orgCurrencyId, docCurrencyId, invoiceDate)) {
-      InvoiceCalloutHelper.appendMessage(body, "WARNING", "noExchangeRateAvailable");
-      log.debug("[ETP-4029] No conversion rate warning added (currency={})", docCurrencyId);
-    }
-  }
-
   // ---------------------------------------------------------------------------
   // Server-side defaults for a write that leaves a field out (ETP-5703)
   // ---------------------------------------------------------------------------
@@ -1094,8 +1081,10 @@ public abstract class AbstractInvoiceHeaderHandler {
   // here invoke it with ("invoiceDate", "accountingDate").
 
   /**
-   * Shared {@code afterCallout} body: blocks callout-driven currency updates and appends an
-   * exchange-rate warning when the user directly changes the invoice currency (ETP-4029); and
+   * Shared {@code afterCallout} body: blocks callout-driven currency updates (ETP-4029); returns
+   * the recalculated exchange rate when the currency or the accounting date changes, including an
+   * accounting date the classic callout copied from a new invoice date (ETP-5840, see
+   * {@link DocumentCurrencyRate#applyToCallout}); and
    * blocks callout-driven document type updates on an already-saved invoice (ETP-4535).
    *
    * <p>Note that {@code accountingDate} is deliberately NOT guarded here — see the comment at the
@@ -1120,8 +1109,10 @@ public abstract class AbstractInvoiceHeaderHandler {
       // DateInvoiced. Independent editing is preserved by restricting the server-side
       // mirror to creation (NeoHandlerUtils#mirrorAccountingDateOnCreate), not by
       // stripping the cascade.
-      checkExchangeRateWarning(fields.body(), fields.requestBody(), fields.formState(), fields.triggerField());
       String recordId = InvoiceCalloutHelper.resolveCalloutRecordId(context, fields.formState());
+      // ETP-5840: the recalculated rate for the accounting date — also when the classic callout
+      // copied a new invoice date into it — returned in updates.eTGOCurrencyRate.
+      currencyRate().applyToCallout(fields, recordId);
       blockCalloutDocTypeUpdateIfLocked(fields.updates(), fields.triggerField(), recordId);
       InvoiceCalloutHelper.applySiiAuthorizationCallout(fields.triggerField(), fields.requestBody(), fields.updates());
       InvoiceCalloutHelper.applyVerifactuInvTypeFromDocType(fields.triggerField(), fields.requestBody(), fields.updates());
@@ -1141,8 +1132,9 @@ public abstract class AbstractInvoiceHeaderHandler {
    * request body — so that {@code foreignAmount} stays in sync as {@code grandTotalAmount}
    * evolves while lines are added/edited after the currency was first set.
    *
-   * <p>No-op when the invoice has no currency or no {@code EM_ETGO_Currency_Rate} override has
-   * been set on the invoice yet. When the invoice currency equals the org currency, any
+   * <p>No-op when the invoice has no currency. When the invoice has no {@code EM_ETGO_Currency_Rate},
+   * its rows are deleted (ETP-5840: the tab always mirrors the saved header rate). When the invoice
+   * currency equals the org currency, any
    * conversion-rate row left over from an earlier foreign-currency state is deleted instead
    * (ETP-4836) — switching back to the org currency must clear the tab, not leave it stale.
    *
@@ -1295,8 +1287,12 @@ public abstract class AbstractInvoiceHeaderHandler {
           return;
         }
         BigDecimal rate = invoice.getETGOCurrencyRate();
-        if (rate == null) {
-          return; // no override set yet
+        if (rate == null || rate.signum() <= 0) {
+          // ETP-5840: the tab reflects the header — a header without a rate (a recalculation found
+          // none, e.g. a document generated for a date with no conversion range) has no row; one
+          // left from an earlier rate is stale and must not survive.
+          ConversionRateDocumentSync.deleteAllForInvoice(invoice.getId(), orgCurrencyId);
+          return;
         }
 
         // EM_ETGO_Currency_Rate is the org→doc multiplyRate (mirrors C_Order semantics).

@@ -24,22 +24,22 @@ import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.erpCommon.utility.OBCurrencyUtils;
-import org.openbravo.erpCommon.utility.OBMessageUtils;
-import org.openbravo.financial.FinancialUtils;
 import org.openbravo.model.common.currency.ConversionRateDoc;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.invoice.Invoice;
 
 /**
- * Checks that an exchange rate exists to convert an invoice's currency to the org's functional
- * currency, used to block completion when none is available (ETP-4030). Invoked from
- * {@link InvoiceCompletionRateHook} to cover the classic backoffice UI completion path.
+ * Decides whether an invoice may be completed with respect to its exchange rate (ETP-4030, aligned
+ * with the order-family rule by ETP-5840): when the invoice currency differs from its
+ * organization's, the invoice must carry its OWN rate — the header {@code EM_ETGO_Currency_Rate},
+ * or (for documents edited in the classic backoffice) a non-zero {@link ConversionRateDoc} row for
+ * the exact pair. The general {@code C_Conversion_Rate} table no longer satisfies the check: the
+ * rate is the document's, fixed on its accounting date when it was saved.
  *
- * <p>The NEO/headless completion path no longer calls this validator: ETP-4027 moves the
- * exchange-rate check to the frontend, triggered when the user changes the document currency.
- *
- * <p>Precedence mirrors core: the document-level rate ({@link ConversionRateDoc}, manual or synced)
- * wins over the general {@code C_Conversion_Rate} spot table.
+ * <p>Invoked from {@link InvoiceCompletionRateHook}, the {@code ProcessInvoiceHook} that
+ * {@code ProcessInvoiceUtil} runs — i.e. on EVERY completion path: the NEO/headless one
+ * ({@code InvoiceCompletionService}, REST and MCP) as well as the classic backoffice. The NEO
+ * header pre-hooks refuse earlier with the same text ({@link DocumentCurrencyRate}).
  */
 public final class InvoiceExchangeRateValidator {
 
@@ -48,15 +48,12 @@ public final class InvoiceExchangeRateValidator {
   }
 
   /**
-   * Checks whether the given invoice can be completed with respect to currency conversion. Returns
-   * a user-facing error message when completion must be blocked — the document currency differs
-   * from the organization currency and no exchange rate is available — or {@code null} when it may
-   * proceed.
+   * Checks whether the given invoice can be completed with respect to its exchange rate.
    *
    * @param invoice the invoice about to be completed
-   * @return a resolved, user-facing error message when completion must be blocked (currencies
-   *         differ and no rate is available), or {@code null} when completion may proceed (same
-   *         currency, no functional currency configured, or a rate exists).
+   * @return the translated refusal ({@code ETGO_ExchangeRateMissingOnComplete}) when the currencies
+   *         differ and the invoice has no rate of its own, or {@code null} when completion may
+   *         proceed (same currency, no functional currency configured, or a document rate exists)
    */
   public static String checkRateForCompletion(Invoice invoice) {
     if (invoice == null) {
@@ -74,11 +71,11 @@ public final class InvoiceExchangeRateValidator {
         return null;
       }
       final Currency to = OBDal.getInstance().get(Currency.class, baseCurrencyId);
-      if (hasDocumentRate(invoice, from, to) || hasGeneralRate(invoice, from, to)) {
+      if (hasDocumentRate(invoice, from, to)) {
         return null;
       }
-      return OBMessageUtils.messageBD("SMFCR_NoRateOnComplete") + " " + from.getISOCode() + " → "
-          + (to != null ? to.getISOCode() : baseCurrencyId);
+      return DocumentCurrencyRate.missingRateOnCompletion(invoice,
+          Invoice.PROPERTY_ETGOCURRENCYRATE);
     } finally {
       OBContext.restorePreviousMode();
     }
@@ -107,14 +104,5 @@ public final class InvoiceExchangeRateValidator {
       }
     }
     return false;
-  }
-
-  /** True if a general {@code C_Conversion_Rate} exists for the invoice date (core lookup). */
-  private static boolean hasGeneralRate(Invoice invoice, Currency from, Currency to) {
-    if (to == null || invoice.getInvoiceDate() == null) {
-      return false;
-    }
-    return FinancialUtils.getConversionRate(invoice.getInvoiceDate(), from, to,
-        invoice.getOrganization(), invoice.getClient()) != null;
   }
 }

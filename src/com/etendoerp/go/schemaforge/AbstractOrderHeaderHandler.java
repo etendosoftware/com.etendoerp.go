@@ -31,6 +31,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Collectors;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
@@ -40,7 +41,6 @@ import org.hibernate.criterion.Restrictions;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
-import org.openbravo.erpCommon.utility.OBCurrencyUtils;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.order.Order;
 import org.openbravo.model.common.order.OrderLine;
@@ -111,6 +111,66 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
    * {@link #applyTotalDiscountBeforeComplete}).
    */
   protected abstract TotalDiscountService getTotalDiscountService();
+
+  /**
+   * The concrete handler's own {@link DocumentCurrencyRate} (ETP-5840), built with the document's
+   * {@link DocumentCurrencyRate.RateType} — the reference date and the name it is shown under are the
+   * entity's, so each subclass declares them. One instance per handler instance: it carries a
+   * deferral from {@code handle()} to {@code afterHandle()} of the same request.
+   */
+  protected abstract DocumentCurrencyRate currencyRate();
+
+  /**
+   * Exchange-rate rules of an order-type header (ETP-5840), to call from each subclass's
+   * {@code handle()} BEFORE anything with side effects runs (total discount, actions):
+   * <ul>
+   *   <li>publishes the document's rate type for {@code currencyOptions};</li>
+   *   <li>CRUD write → {@link DocumentCurrencyRate#beforeWrite}: recalculates the rate when the
+   *       order date or the currency changes and the request sends none, and refuses a
+   *       foreign-currency save without a rate (the completion text when the write completes);</li>
+   *   <li>completion through an action ({@code documentAction} = {@code CO}, or the
+   *       {@code DocAction} button running {@code CO}) → refused when the stored rate is empty.</li>
+   * </ul>
+   * REST single, REST batch and MCP all reach this pre-hook.
+   *
+   * @return the refusal, or {@code null} to carry on
+   */
+  protected NeoResponse guardExchangeRate(NeoContext context) {
+    DocumentCurrencyRate rate = currencyRate();
+    context.setAttribute(DocumentCurrencyRate.ATTR_RATE_TYPE, rate.type());
+    if (NeoEndpointType.CRUD.equals(context.getEndpointType())) {
+      return rate.beforeWrite(context, isCompleteAction(context));
+    }
+    if (completesThroughAction(context)) {
+      return rate.refuseCompletionWithoutRate(context.getRecordId());
+    }
+    return null;
+  }
+
+  /**
+   * Whether an ACTION request completes the order: {@code documentAction} with {@code CO}, or the
+   * {@code DocAction} button whose effective value is {@code CO} (what the quotation's "send to
+   * evaluation" posts with an empty body, and what an agent's {@code etendo_action} runs).
+   */
+  static boolean completesThroughAction(NeoContext context) {
+    if (!NeoEndpointType.ACTION.equals(context.getEndpointType())
+        || StringUtils.isBlank(context.getRecordId())) {
+      return false;
+    }
+    if (isActionDocumentActionComplete(context)) {
+      return true;
+    }
+    if (!DocActionRequestSupport.isDocActionButtonPost(context)) {
+      return false;
+    }
+    try {
+      return DOC_STATUS_COMPLETED.equals(DocActionRequestSupport.effectiveDocAction(context));
+    } catch (Exception e) {
+      log.debug("[ETP-5840] Could not resolve the DocAction of {}: {}", context.getRecordId(),
+          e.getMessage());
+      return false;
+    }
+  }
 
   /**
    * Mirrors the single visible {@code orderDate} field into the hidden {@code accountingDate}
@@ -287,10 +347,11 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
    *       {@code priceList} whose {@code M_PriceList.IsActive = 'N'}, replace it
    *       with the client's first active price list of the correct type and append
    *       a WARNING message.</li>
-   *   <li><b>Exchange rate warning.</b> When the user directly changes
-   *       {@code currency}, check whether a {@code C_Conversion_Rate} row exists
-   *       for (docCurrency → orgCurrency, orderDate). If none exists, append a
-   *       WARNING message so the user can create the rate before confirming.</li>
+   *   <li><b>Exchange rate (ETP-5840).</b> When the user changes the {@code currency} or the
+   *       {@code orderDate}, the recalculated org→document rate for the order date is returned in
+   *       {@code updates.eTGOCurrencyRate} ({@code {"value": null}} when no rate is configured), so
+   *       the form shows it before saving — see {@link DocumentCurrencyRate#applyToCallout}. It
+   *       replaced the untranslated {@code noExchangeRateAvailable} warning.</li>
    * </ol>
    *
    * <p>All mutations are applied directly to the callout response body so they
@@ -313,7 +374,9 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
           && fields.updates().has(FIELD_PRICE_LIST)) {
         applyPriceListFallbackIfNeeded(fields.body(), fields.updates());
       }
-      checkExchangeRateWarning(fields.body(), fields.requestBody(), fields.formState(), fields.triggerField());
+      JSONObject formState = fields.formState();
+      currencyRate().applyToCallout(fields,
+          formState != null ? formState.optString(FIELD_ID, null) : null);
     } catch (Exception e) {
       log.warn("[ETP-4027] afterCallout failed (non-fatal): {}", e.getMessage());
     }
@@ -324,39 +387,6 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
     if (updates != null && updates.has(FIELD_CURRENCY) && !FIELD_CURRENCY.equals(triggerField)) {
       updates.remove(FIELD_CURRENCY);
       log.debug("[ETP-4027] Removed callout-driven currency update (trigger={})", triggerField);
-    }
-  }
-
-  /**
-   * Appends a {@code WARNING} to the callout body when the user directly changes the order's
-   * currency and no rate is available for (orgCurrency → docCurrency, orderDate).
-   *
-   * <p>ETP-4838: rate availability is resolved by {@link NeoExchangeRateService#hasRate} — the same
-   * lookup {@code GET /sws/neo/validate-exchange-rate} serves the frontend — so the callout warning
-   * and the frontend's own pre-check can never disagree.
-   */
-  private static void checkExchangeRateWarning(JSONObject body, JSONObject requestBody,
-      JSONObject formState, String triggerField) {
-    if (formState == null) {
-      return;
-    }
-    if (!FIELD_CURRENCY.equals(triggerField) && !"currencyid".equals(triggerField)) {
-      return;
-    }
-    // Use requestBody.value (the newly selected currency) instead of formState.currency,
-    // which may still carry the previous value when the callout fires.
-    String docCurrencyId = requestBody != null ? requestBody.optString(FIELD_VALUE, "") : "";
-    if (docCurrencyId.isEmpty()) {
-      docCurrencyId = formState.optString("currencyid", "");
-    }
-    String orderDate = formState.optString("orderDate", "");
-    String orgId = OBContext.getOBContext().getCurrentOrganization().getId();
-    String orgCurrencyId = OBCurrencyUtils.getOrgCurrency(orgId);
-    if (!docCurrencyId.isEmpty() && orgCurrencyId != null
-        && !docCurrencyId.equals(orgCurrencyId) && !orderDate.isEmpty()
-        && !NeoExchangeRateService.hasRate(orgCurrencyId, docCurrencyId, orderDate)) {
-      appendMessage(body, "WARNING", "noExchangeRateAvailable");
-      log.debug("[ETP-4027] No conversion rate warning added (currency={})", docCurrencyId);
     }
   }
 
@@ -478,6 +508,11 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
 
   @Override
   public NeoResponse afterHandle(NeoContext context) {
+    // ETP-5840: a create whose currency or order date only the create cascade derived.
+    NeoResponse rateRefusal = currencyRate().afterWrite(context);
+    if (rateRefusal != null) {
+      return rateRefusal;
+    }
     syncLineCurrenciesOnCurrencyPatch(context);
     if (!"GET".equals(context.getHttpMethod())) {
       return null;
