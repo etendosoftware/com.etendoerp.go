@@ -1646,8 +1646,9 @@ public class McpToolRouter {
           authorizeSpecAccess(specName, HTTP_METHOD_POST);
         }
       }
-      if (args.optBoolean(BatchJobService.PARAM_ASYNC, false)) {
-        // ETP-5677: the batch becomes a job; the worker commits it row by row.
+      if (args.optBoolean(BatchJobService.PARAM_ASYNC, true)) {
+        // ETP-5677: the batch becomes a job unless the agent sent async:false; the worker commits
+        // it row by row, so a large volume never waits on one request.
         return McpBatchJobTools.submitBatchJob(operations, args, this::preprocessBatchOperation);
       }
       // IMP-15 / ETP-5415: the body transforms that make etendo_batch accept exactly what etendo_create

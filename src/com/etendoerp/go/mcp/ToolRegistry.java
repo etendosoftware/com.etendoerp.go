@@ -1042,19 +1042,22 @@ public class ToolRegistry {
 
     // ETP-5677: the asynchronous mode, next to the synchronous one.
     props.put(BatchJobService.PARAM_ASYNC, booleanProp(
-        "Optional, default false. true = do not wait: the call returns at once with "
+        "Optional, default TRUE. By default the call does not wait: it returns at once with "
             + "{jobId, state:'QUEUED', totalRows, totalOps} and a background job writes the "
-            + "operations. Use it for long batches (dozens of rows), where a synchronous call can "
-            + "time out although the server keeps writing. Follow it with etendo_job_status. "
-            + "The async job commits ROW BY ROW (a row = an op plus everything it references "
-            + "through parentRef/$ref), not as one atomic unit: a rejected row does not undo the "
-            + "others, and the status reports for every row whether it committed (with its "
-            + "recordIds) or why not. Resend only rows reported committed:false AND "
-            + "safeToResend:true."));
+            + "operations, so any volume is safe (a synchronous call can time out although the "
+            + "server keeps writing). Follow the job with etendo_job_status. The async job commits "
+            + "ROW BY ROW (a row = an op plus everything it references through parentRef/$ref), "
+            + "not as one atomic unit: a rejected row does not undo the others, and the status "
+            + "reports for every row whether it committed (with its recordIds) or why not. Resend "
+            + "only rows reported committed:false AND safeToResend:true. Send async:false to run "
+            + "the whole batch as ONE atomic transaction and wait for its answer: only for small "
+            + "batches that must be all-or-nothing."));
 
     return new McpToolDefinition(
         "etendo_batch",
-        "Run a sequence of cross-spec create operations in order, atomically: a failure rolls "
+        "Run a sequence of cross-spec create operations in order. By default it is asynchronous: it "
+            + "returns a jobId at once and the job commits row by row (see 'async' and "
+            + "etendo_job_status). With async:false it runs atomically instead: a failure rolls "
             + "the whole batch back, so retry the whole batch after fixing the reported operation. "
             + "One exception, and the response states it explicitly: if an operation triggers an "
             + "Etendo process, that process commits internally and cannot be rolled back — the "
@@ -1068,7 +1071,7 @@ public class ToolRegistry {
             + "to substitute the resolved recordId of an earlier op. Typically call "
             + "etendo_list / etendo_selectors first to look up existing records and only "
             + "include create ops for what is genuinely new. "
-            + "Returns {committed:true, operations:[{id,ok:true,recordId}]} on success "
+            + "With async:false it returns {committed:true, operations:[{id,ok:true,recordId}]} on success "
             + "or {committed:false, atomic:true, failedAt:{id,index}, persisted:[], hint, "
             + "error:{status,error,detail,seeAlso}} on failure, where 'error' is a stable code "
             + "(validation_error, not_found, method_not_allowed, server_error) naming what to fix "

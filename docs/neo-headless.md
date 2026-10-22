@@ -1212,11 +1212,14 @@ Process access is checked before execution. If the current role lacks access to 
 A long synchronous batch can commit on the server while its response is lost to an idle timeout in
 front of Tomcat; the client then sees an error for records that exist, and a retry duplicates them. The
 asynchronous mode answers at once and keeps the outcome where the client can read it. The synchronous
-`POST /sws/neo/batch` and `etendo_batch` are unchanged and stay one atomic transaction.
+`POST /sws/neo/batch` and `etendo_batch` stay one atomic transaction. The default differs by channel:
+**REST is synchronous unless the body says `"async": true`; MCP is asynchronous unless the arguments say
+`async:false`**, so an agent sending volume never waits on one request. An async job accepts at most
+5000 operations and 2 active jobs per user (4 per tenant); above that, send `async:false` or split.
 
 | | REST | MCP |
 |---|---|---|
-| Start | `POST /sws/neo/batch` with `"async": true` → **202** `{jobId, state:"QUEUED", totalRows, totalOps}` | `etendo_batch` with `async:true` → the same JSON |
+| Start | `POST /sws/neo/batch` with `"async": true` → **202** `{jobId, state:"QUEUED", totalRows, totalOps}` | `etendo_batch` (`async` omitted or `true`) → the same JSON; `async:false` runs the synchronous batch |
 | Status | `GET /sws/neo/batch/jobs/{jobId}` | `etendo_job_status {jobId}` (read scope) |
 | Cancel | `DELETE /sws/neo/batch/jobs/{jobId}` | `etendo_job_cancel {jobId}` (write scope) |
 
@@ -4297,10 +4300,11 @@ on the virtual column gets the raw value; filter on the stored twin instead.
 uses the raw virtual value on MCP and REST alike, and can disagree with the order of the values
 shown. Filters are aliased on MCP; sorts are not, anywhere.
 
-**Asynchronous mode (ETP-5677).** `async:true` exists on both channels with the same envelope and the
+**Asynchronous mode (ETP-5677).** `async` exists on both channels with the same envelope and the
 same service (§4.3.7); it is declared here because it is the one place where `etendo_batch` is **not**
-all-or-nothing: an async job commits **per row**, and the status reports each row. The synchronous call
-keeps its single-transaction contract on both channels. REST and MCP differ in the async mode only
+all-or-nothing: an async job commits **per row**, and the status reports each row. On MCP it is the
+default (`async:false` opts out); on REST it is opt-in (`async:true`). The synchronous call keeps its
+single-transaction contract on both channels. REST and MCP differ in the async mode only
 by what already differs in the synchronous one (the MCP preprocessor and its failure-envelope rewrite
 inside each row's result).
 

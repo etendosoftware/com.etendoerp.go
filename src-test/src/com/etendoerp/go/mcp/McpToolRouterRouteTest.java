@@ -521,6 +521,7 @@ class McpToolRouterRouteTest {
 
       JSONObject args = new JSONObject();
       args.put("operations", operations);
+      args.put("async", false); // these tests exercise the synchronous, atomic path
       return args;
     }
 
@@ -674,6 +675,58 @@ class McpToolRouterRouteTest {
         org.mockito.Mockito.verify(mockBatch, org.mockito.Mockito.never())
             .executeBatch(any(), any(), org.mockito.ArgumentMatchers.anyBoolean(),
                 org.mockito.ArgumentMatchers.anyBoolean());
+      }
+    }
+
+    /**
+     * Volume is the default: without {@code async} the call is a job, and only an explicit
+     * {@code async:false} runs the atomic, synchronous batch.
+     */
+    @Test
+    @DisplayName("async omitted submits a job; async:false runs the synchronous batch")
+    void asyncIsTheDefaultAndFalseOptsOut() throws Exception {
+      SFSpec spec = mockSpec();
+      supportMock.when(() -> McpToolRouterSupport.findActiveSpecByName(SPEC_NAME)).thenReturn(spec);
+      supportMock.when(() -> McpToolRouterSupport.hasSpecAccess(spec, "W", "POST")).thenReturn(true);
+      com.etendoerp.go.schemaforge.BatchJobService jobs =
+          mock(com.etendoerp.go.schemaforge.BatchJobService.class);
+      when(jobs.submit(any(), any(), eq("mcp"), any()))
+          .thenReturn(new JSONObject().put("jobId", "J1").put("state", "QUEUED"));
+
+      try (MockedStatic<com.etendoerp.go.schemaforge.BatchJobService> jobsMock =
+          mockStatic(com.etendoerp.go.schemaforge.BatchJobService.class);
+          MockedStatic<com.etendoerp.go.schemaforge.BatchJobService.Owner> ownerMock =
+              mockStatic(com.etendoerp.go.schemaforge.BatchJobService.Owner.class);
+          MockedStatic<com.etendoerp.go.schemaforge.BatchService> batchMock =
+              mockStatic(com.etendoerp.go.schemaforge.BatchService.class)) {
+        jobsMock.when(com.etendoerp.go.schemaforge.BatchJobService::getInstance).thenReturn(jobs);
+        ownerMock.when(com.etendoerp.go.schemaforge.BatchJobService.Owner::current)
+            .thenReturn(new com.etendoerp.go.schemaforge.BatchJobService.Owner("U", "R", "C", "O",
+                "en_US", null));
+        com.etendoerp.go.schemaforge.BatchService mockBatch =
+            mock(com.etendoerp.go.schemaforge.BatchService.class);
+        batchMock.when(com.etendoerp.go.schemaforge.BatchService::forBatchOnly)
+            .thenReturn(mockBatch);
+        when(mockBatch.executeBatch(any(), any(), org.mockito.ArgumentMatchers.anyBoolean(),
+            org.mockito.ArgumentMatchers.anyBoolean()))
+            .thenReturn(new JSONObject().put("committed", true));
+
+        JSONObject omitted = asyncArgs();
+        omitted.remove("async");
+        JSONObject defaulted = router.handleBatch(omitted);
+        assertEquals("J1", new JSONObject(textOf(defaulted)).getString("jobId"));
+        verify(jobs).submit(any(), any(), eq("mcp"), any());
+        org.mockito.Mockito.verify(mockBatch, org.mockito.Mockito.never())
+            .executeBatch(any(), any(), org.mockito.ArgumentMatchers.anyBoolean(),
+                org.mockito.ArgumentMatchers.anyBoolean());
+
+        JSONObject optedOut = asyncArgs();
+        optedOut.put("async", false);
+        router.handleBatch(optedOut);
+        org.mockito.Mockito.verify(jobs, org.mockito.Mockito.times(1))
+            .submit(any(), any(), eq("mcp"), any());
+        org.mockito.Mockito.verify(mockBatch).executeBatch(any(),
+            org.mockito.ArgumentMatchers.notNull(), eq(false), eq(false));
       }
     }
 
