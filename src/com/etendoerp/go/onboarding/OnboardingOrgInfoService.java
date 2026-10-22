@@ -71,11 +71,14 @@ public class OnboardingOrgInfoService extends OnboardingContextSupport {
    *                        with {@code streetName} when the structured block was started — already
    *                        enforced by the servlet before this method is called
    * @param buildingName   optional Building Name ({@code EM_OBSEPA_BldgNm})
+   * @param cityName       optional City ({@code C_Location.City}); mandatory together with
+   *                       {@code streetName}/{@code buildingNumber} when the structured block was
+   *                       started — already enforced by the servlet before this method is called
    * @param taxId          optional Tax ID from the onboarding request; left untouched when blank
    */
   public void ensureOrgInfo(String clientId, String orgId, String adminUserId, String adminRoleId,
       String countryIso, String address, String streetName, String buildingNumber,
-      String buildingName, String taxId) {
+      String buildingName, String cityName, String taxId) {
     validateContext(clientId, orgId, adminUserId, adminRoleId);
     OBContext previousContext = captureCurrentContext();
     applyExecutionContext(adminUserId, adminRoleId, clientId, orgId);
@@ -91,7 +94,7 @@ public class OnboardingOrgInfoService extends OnboardingContextSupport {
           throw new OBException("Organization not found for org-info setup: " + orgId);
         }
         ensureOrgInfoLocation(client, org, countryIso, address, streetName, buildingNumber,
-            buildingName, taxId);
+            buildingName, cityName, taxId);
         flushChanges();
       } finally {
         exitAdminMode();
@@ -103,7 +106,7 @@ public class OnboardingOrgInfoService extends OnboardingContextSupport {
 
   protected void ensureOrgInfoLocation(Client client, Organization org, String countryIso,
       String address, String streetName, String buildingNumber, String buildingName,
-      String taxId) {
+      String cityName, String taxId) {
     OrganizationInformation orgInfo = resolveOrgInfo(org);
     if (orgInfo == null) {
       orgInfo = createOrgInfo(client, org);
@@ -118,7 +121,7 @@ public class OnboardingOrgInfoService extends OnboardingContextSupport {
       throw new OBException("No country available to locate onboarding organization");
     }
     Location location = createLocation(client, org, country, address, streetName, buildingNumber,
-        buildingName);
+        buildingName, cityName);
     orgInfo.setLocationAddress(location);
     OBDal.getInstance().save(orgInfo);
   }
@@ -156,7 +159,8 @@ public class OnboardingOrgInfoService extends OnboardingContextSupport {
   }
 
   protected Location createLocation(Client client, Organization org, Country country,
-      String address, String streetName, String buildingNumber, String buildingName) {
+      String address, String streetName, String buildingNumber, String buildingName,
+      String cityName) {
     Location location = OBProvider.getInstance().get(Location.class);
     location.setNewOBObject(true);
     location.setClient(client);
@@ -176,6 +180,12 @@ public class OnboardingOrgInfoService extends OnboardingContextSupport {
       location.setAddressLine2(composed.getAddress2());
     } else if (StringUtils.isNotBlank(address)) {
       location.setAddressLine1(address.trim());
+    }
+    // ETP-5806 — City is independent of the composed address lines above (it is its own
+    // C_Location.City column, not part of Address1/2), so it is set regardless of which branch
+    // populated the address lines.
+    if (StringUtils.isNotBlank(cityName)) {
+      location.setCityName(cityName.trim());
     }
     OBDal.getInstance().save(location);
     return location;

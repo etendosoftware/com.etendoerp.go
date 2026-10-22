@@ -364,12 +364,16 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String FIELD_STREET_NAME = "streetName";
   private static final String FIELD_BUILDING_NUMBER = "buildingNumber";
   private static final String FIELD_BUILDING_NAME = "buildingName";
+  // ETP-5806 — City joins Street/Number as mandatory once the address block is started; see the
+  // mandatoriness rule in parseOnboardingRequest (below) and isAddressBlockStarted/
+  // isCompanyStepValid in the frontend's state.js.
+  private static final String FIELD_CITY_NAME = "city";
   private static final String FIELD_PRODUCTS = "products";
   private static final String FIELD_CONTACTS = "contacts";
   private static final String[] ONBOARDING_DRAFT_FORM_FIELDS = { FIELD_FULL_NAME, "businessType",
       FIELD_CLIENT_NAME, FIELD_CURRENCY, FIELD_LANGUAGE, FIELD_COUNTRY_CODE, "fiscalIdType",
       "fiscalIdValue", FIELD_ADDRESS, FIELD_STREET_NAME, FIELD_BUILDING_NUMBER,
-      FIELD_BUILDING_NAME, "sector", FIELD_INCLUDE_SAMPLE_DATA };
+      FIELD_BUILDING_NAME, FIELD_CITY_NAME, "sector", FIELD_INCLUDE_SAMPLE_DATA };
   private static final String PATH_ONBOARDING_FIRST_STEPS = "/onboarding/first-steps";
   private static final String FIELD_FIRST_STEPS = "firstSteps";
   private static final String FIELD_FIRST_STEPS_VERSION = "v";
@@ -5510,18 +5514,18 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       // Country drives the org's tax resolution; default to Spain (ES) when the form omits it.
       data.countryCode = body.optString(FIELD_COUNTRY_CODE, "ES").trim();
       data.address = body.optString(FIELD_ADDRESS, "").trim();
-      // ETP-5806 — structured address block. Street/Number are mandatory together, but ONLY when
-      // the user actually started filling the address in (the block itself stays fully optional
-      // on this minimalist step, same as the legacy `address` field it replaces); City/Country are
-      // deliberately not asked here — Country is already guaranteed by `countryCode` above, and
-      // City is left for the user to complete later from the Organization popup, which carries the
-      // full Calle/Número/Ciudad/País validation.
+      // ETP-5806 — structured address block. Street/Number/City are mandatory together, but ONLY
+      // when the user actually started filling the address in (the block itself stays fully
+      // optional on this minimalist step, same as the legacy `address` field it replaces);
+      // Country is deliberately not asked here — it is already guaranteed by `countryCode` above.
       data.streetName = body.optString(FIELD_STREET_NAME, "").trim();
       data.buildingNumber = body.optString(FIELD_BUILDING_NUMBER, "").trim();
       data.buildingName = body.optString(FIELD_BUILDING_NAME, "").trim();
+      data.city = body.optString(FIELD_CITY_NAME, "").trim();
       boolean addressBlockStarted = StringUtils.isNotBlank(data.streetName)
           || StringUtils.isNotBlank(data.buildingNumber)
-          || StringUtils.isNotBlank(data.buildingName);
+          || StringUtils.isNotBlank(data.buildingName)
+          || StringUtils.isNotBlank(data.city);
       if (addressBlockStarted) {
         List<String> missing = new ArrayList<>();
         if (StringUtils.isBlank(data.streetName)) {
@@ -5529,6 +5533,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         }
         if (StringUtils.isBlank(data.buildingNumber)) {
           missing.add(FIELD_BUILDING_NUMBER);
+        }
+        if (StringUtils.isBlank(data.city)) {
+          missing.add(FIELD_CITY_NAME);
         }
         if (!missing.isEmpty()) {
           writeError(response, HttpServletResponse.SC_BAD_REQUEST,
@@ -5565,7 +5572,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       OnboardingFieldLimits.LengthViolation violation = OnboardingFieldLimits.firstViolation(
           FIELD_CLIENT_NAME, data.clientName, OnboardingFieldLimits.CLIENT_NAME,
           FIELD_FULL_NAME, data.fullName, OnboardingFieldLimits.FULL_NAME,
-          FIELD_ADDRESS, data.address, OnboardingFieldLimits.ADDRESS);
+          FIELD_ADDRESS, data.address, OnboardingFieldLimits.ADDRESS,
+          FIELD_CITY_NAME, data.city, OnboardingFieldLimits.CITY);
       if (violation != null) {
         writeFieldTooLongError(response, violation);
         return null;
@@ -5856,7 +5864,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     return requestData == null ? null
         : new OnboardingProvisioningChain.OrgInfoInput(requestData.countryCode,
             requestData.address, requestData.streetName, requestData.buildingNumber,
-            requestData.buildingName, requestData.taxId);
+            requestData.buildingName, requestData.city, requestData.taxId);
   }
 
   /** @see OnboardingProvisioningChain#ensureOnboardingDataset */
@@ -6923,6 +6931,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     private String streetName;
     private String buildingNumber;
     private String buildingName;
+    // ETP-5806 — City, mandatory together with streetName/buildingNumber whenever the structured
+    // address block was started (see parseOnboardingRequest).
+    private String city;
     private String fullName;
     // Optional Tax ID from the wizard's "Details to start invoicing" step (ETP-4749).
     // Same JSON key as ONBOARDING_DRAFT_FORM_FIELDS ("fiscalIdValue") for consistency.
