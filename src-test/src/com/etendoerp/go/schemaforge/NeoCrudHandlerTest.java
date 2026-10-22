@@ -2069,6 +2069,159 @@ class NeoCrudHandlerTest {
             "the failing-row dump must not reach the caller");
       }
     }
+
+    /**
+     * A trigger refusal (PL/pgSQL {@code RAISE}, SQLState P0001) on a write is a business rule the
+     * caller can act on: 422 with the translated AD message and its key, not a 500. Core swallows
+     * the exception inside its JSON write service, so the classification depends on NEO's own write
+     * service capturing the throwable before core turns it into prose.
+     */
+    @Test
+    @DisplayName("A trigger refusal captured by the NEO write service answers 422 business_rule")
+    void triggerRefusalOnWriteIsBusinessRule() throws Exception {
+      String translated = "Cannot change business partner or price list if there are lines.";
+      java.sql.SQLException raise = new java.sql.SQLException(
+          "ERROR: @20502@\n  Where: PL/pgSQL function c_order_chk_restrinctions_trg() line 20 at RAISE",
+          "P0001");
+      String coreBody = "{\"response\":{\"status\":-1,\"error\":{\"message\":\"" + translated
+          + "\",\"type\":\"Error\"},\"totalRows\":0}}";
+
+      NeoBatchJsonDataService service;
+      try (MockedStatic<org.openbravo.base.weld.WeldUtils> weld =
+          mockStatic(org.openbravo.base.weld.WeldUtils.class)) {
+        service = new NeoBatchJsonDataService();
+      }
+      org.openbravo.base.provider.OBProvider provider =
+          mock(org.openbravo.base.provider.OBProvider.class);
+      when(provider.get(org.openbravo.service.json.JsonToDataConverter.class))
+          .thenThrow(new org.hibernate.exception.GenericJDBCException(
+              "could not execute statement", raise));
+      org.openbravo.erpCommon.utility.OBError obError = new org.openbravo.erpCommon.utility.OBError();
+      obError.setType("Error");
+      obError.setMessage(translated);
+
+      try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
+          MockedStatic<org.openbravo.base.provider.OBProvider> prov =
+              mockStatic(org.openbravo.base.provider.OBProvider.class);
+          MockedStatic<org.openbravo.service.json.JsonUtils> jsonUtils =
+              mockStatic(org.openbravo.service.json.JsonUtils.class);
+          MockedStatic<org.openbravo.erpCommon.utility.OBMessageUtils> msgMock =
+              Mockito.mockStatic(org.openbravo.erpCommon.utility.OBMessageUtils.class)) {
+        prov.when(org.openbravo.base.provider.OBProvider::getInstance).thenReturn(provider);
+        jsonUtils.when(() -> org.openbravo.service.json.JsonUtils.convertExceptionToJson(any()))
+            .thenReturn(coreBody);
+        msgMock.when(() -> org.openbravo.erpCommon.utility.OBMessageUtils.messageBD(anyString()))
+            .thenAnswer(inv -> inv.getArgument(0));
+        msgMock.when(() -> org.openbravo.erpCommon.utility.OBMessageUtils.translateError(
+            any(), any(), any(), anyString())).thenReturn(obError);
+
+        Map<String, String> params = new HashMap<>();
+        params.put(JsonConstants.ENTITYNAME, "Order");
+        String written = service.update(params, "{\"data\":{\"id\":\"A\"}}");
+        NeoResponse result = invokeCheckResponse(new JSONObject(written), null);
+
+        assertNotNull(result);
+        assertEquals(422, result.getHttpStatus());
+        JSONObject error = result.getBody().getJSONObject("error");
+        assertEquals("business_rule", error.getString("code"));
+        assertEquals(translated, error.getString("message"));
+        assertEquals("20502", error.getJSONArray("messageKeys").getString(0));
+        assertFalse(result.getBody().toString().contains("PL/pgSQL"),
+            "the trigger's location must not reach the caller");
+      }
+    }
+
+    /**
+     * Core reports an id that resolves to no row with an internal template naming the entity class
+     * and the id. The answer must be generic and identical whichever id or entity was sent, so it
+     * cannot tell a caller whether the id exists somewhere else.
+     */
+    @Test
+    @DisplayName("An unknown reference answers a generic 400 unknown_reference, identical per id")
+    void unknownReferenceIsGenericAndIdentical() throws Exception {
+      NeoResponse first = invokeCheckResponse(unknownReferenceBody("BusinessPartner",
+          "4028E6C72959682B01295A070852010D"));
+      NeoResponse second = invokeCheckResponse(unknownReferenceBody("PriceList",
+          "FFFF0000FFFF0000FFFF0000FFFF0000"));
+
+      assertEquals(HttpServletResponse.SC_BAD_REQUEST, first.getHttpStatus());
+      JSONObject error = first.getBody().getJSONObject("error");
+      assertEquals("unknown_reference", error.getString("code"));
+      String body = first.getBody().toString();
+      assertFalse(body.contains("BusinessPartner"), body);
+      assertFalse(body.contains("4028E6C7"), body);
+      assertFalse(body.contains("import set"), body);
+      assertFalse(body.contains("(null)"), body);
+      assertEquals(body, second.getBody().toString(),
+          "a missing id and another one must get byte-identical answers");
+    }
+
+    @Test
+    @DisplayName("A captured server fault uses the sanitized message instead of core's SQL prose")
+    void capturedServerFailureUsesItsSanitizedMessage() throws Exception {
+      String internal = "ERROR: relation internal_invoice_store does not exist; SQL SELECT secret";
+      String sanitized = "The operation could not be completed. Please contact your administrator.";
+      JSONObject classification = new JSONObject().put("status", 500)
+          .put("code", "server_error").put("message", sanitized);
+      JSONObject error = new JSONObject().put("message", internal)
+          .put("neoClassification", classification);
+      JSONObject response = new JSONObject().put(JsonConstants.RESPONSE_RESPONSE,
+          new JSONObject().put(JsonConstants.RESPONSE_STATUS, JsonConstants.RPCREQUEST_STATUS_FAILURE)
+              .put(JsonConstants.RESPONSE_ERROR, error));
+      try (MockedStatic<org.openbravo.erpCommon.utility.OBMessageUtils> messages =
+          mockStatic(org.openbravo.erpCommon.utility.OBMessageUtils.class)) {
+        messages.when(() -> org.openbravo.erpCommon.utility.OBMessageUtils.messageBD(anyString()))
+            .thenAnswer(invocation -> invocation.getArgument(0));
+
+        NeoResponse result = invokeCheckResponse(response);
+
+        assertEquals(500, result.getHttpStatus());
+        assertEquals(sanitized, result.getBody().getJSONObject("error").getString("message"));
+        assertEquals("server_error", result.getBody().getJSONObject("error").getString("code"));
+        assertFalse(result.getBody().toString().contains("internal_invoice_store"));
+        assertFalse(result.getBody().toString().contains("SELECT secret"));
+      }
+    }
+
+    @Test
+    @DisplayName("A captured List-reference fault still gets its accepted values appended (ETP-4996)")
+    void capturedServerFailureKeepsTheListReferenceValues() throws Exception {
+      String sanitized = "The value is not valid, it should be one of the following values: [value]";
+      JSONObject classification = new JSONObject().put("status", 500)
+          .put("code", "server_error").put("message", sanitized);
+      JSONObject response = new JSONObject().put(JsonConstants.RESPONSE_RESPONSE,
+          new JSONObject().put(JsonConstants.RESPONSE_STATUS, JsonConstants.RPCREQUEST_STATUS_FAILURE)
+              .put(JsonConstants.RESPONSE_ERROR, new JSONObject().put("message", sanitized)
+                  .put("neoClassification", classification)));
+      try (MockedStatic<org.openbravo.erpCommon.utility.OBMessageUtils> messages =
+          mockStatic(org.openbravo.erpCommon.utility.OBMessageUtils.class);
+          MockedStatic<com.etendoerp.go.schemaforge.util.NeoListReferenceError> lists =
+              mockStatic(com.etendoerp.go.schemaforge.util.NeoListReferenceError.class)) {
+        messages.when(() -> org.openbravo.erpCommon.utility.OBMessageUtils.messageBD(anyString()))
+            .thenAnswer(invocation -> invocation.getArgument(0));
+        lists.when(() -> com.etendoerp.go.schemaforge.util.NeoListReferenceError.enrich(sanitized))
+            .thenReturn(sanitized + " Accepted values: DR, CO.");
+
+        lists.when(() -> com.etendoerp.go.schemaforge.util.NeoListReferenceError
+            .enrichServerError(org.mockito.ArgumentMatchers.any(NeoResponse.class))).thenCallRealMethod();
+
+        NeoResponse result = invokeCheckResponse(response);
+
+        assertEquals(500, result.getHttpStatus());
+        assertEquals(sanitized + " Accepted values: DR, CO.",
+            result.getBody().getJSONObject("error").getString("message"));
+      }
+    }
+
+    private JSONObject unknownReferenceBody(String entity, String id) throws Exception {
+      JSONObject errors = new JSONObject();
+      errors.put(JsonConstants.ID, "New object " + entity + "(null)  (key: " + id + "_" + entity
+          + ") refered to but not present in the import set");
+      JSONObject inner = new JSONObject();
+      inner.put(JsonConstants.RESPONSE_STATUS, JsonConstants.RPCREQUEST_STATUS_VALIDATION_ERROR);
+      inner.put(JsonConstants.RESPONSE_ERRORS, errors);
+      return new JSONObject().put(JsonConstants.RESPONSE_RESPONSE, inner);
+    }
   }
 
   // -------------------------------------------------------------------------

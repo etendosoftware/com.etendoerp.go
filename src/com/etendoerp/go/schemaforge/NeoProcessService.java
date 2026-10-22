@@ -83,6 +83,7 @@ public class NeoProcessService {
   private static final Logger log = LogManager.getLogger(NeoProcessService.class);
 
   /** UIPattern value for OBUIAPP (Standard) processes. */
+  private static final String PROCESS_NAME_PREFIX = "Process ";
   private static final String UI_PATTERN_STANDARD = "S";
 
   public static final String MESSAGE = "message";
@@ -117,25 +118,25 @@ public class NeoProcessService {
   }
 
   /**
-   * Resolve a human-readable failure message from an exception caught around a
-   * reflective process invocation.
+   * ETP-5782: the answer for a process that threw rather than reporting its failure. Classified
+   * like every other NEO failure — a trigger refusal or an AD-message-keyed refusal raised inside
+   * the process is a 422 with its translated message; a fault stays a 500 whose message is
+   * sanitized (it used to forward the raw message, SQL included) — and rolled back, so nothing the
+   * process wrote before throwing is committed by the request.
    *
-   * <p>Reflection ({@link Method#invoke}) wraps any exception thrown by the invoked
-   * business logic in an {@link InvocationTargetException} whose own
-   * {@code getMessage()} always returns {@code null} -- the real message lives on
-   * {@code getCause()}. Without this unwrap, a bare exception with no message
-   * (e.g. a {@link NullPointerException}) surfaces to the caller as the literal,
-   * undiagnosable string "Process execution failed: null".
+   * <p>Reflection ({@link Method#invoke}) wraps whatever the process threw in an
+   * {@link InvocationTargetException} whose own message is always {@code null}, so it is unwrapped
+   * first: the classification and the message belong to the cause.
    *
-   * @param e the exception caught around the process invocation
-   * @return the cause's message, or its simple class name if the message is null
+   * @param e     the exception thrown by the process
+   * @param where the process, for the log line
+   * @return the error response
    */
-  private static String resolveFailureMessage(Throwable e) {
+  private static NeoResponse processFailure(Exception e, String where) {
     Throwable cause = (e instanceof InvocationTargetException && e.getCause() != null)
         ? e.getCause()
         : e;
-    String msg = cause.getMessage();
-    return msg != null ? msg : cause.getClass().getSimpleName();
+    return NeoErrorResponses.fromException(cause, "POST", where, PROCESS_EXECUTION_FAILED_PREFIX);
   }
 
   /**
@@ -172,9 +173,7 @@ public class NeoProcessService {
       }
 
     } catch (Exception e) {
-      log.error("Error executing process {}", process.getName(), e);
-      result = NeoResponse.error(500,
-          PROCESS_EXECUTION_FAILED_PREFIX + resolveFailureMessage(e));
+      result = processFailure(e, PROCESS_NAME_PREFIX + process.getName());
     }
     // Normalize at the single exit point: every early-return guard clause above
     // (access denied, missing mandatory param, unmet precondition) and every
@@ -570,9 +569,7 @@ public class NeoProcessService {
         OBContext.restorePreviousMode();
       }
     } catch (Exception e) {
-      log.error("Error executing OBUIAPP process {}", obuiappProcess.getName(), e);
-      result = NeoResponse.error(500,
-          PROCESS_EXECUTION_FAILED_PREFIX + resolveFailureMessage(e));
+      result = processFailure(e, "OBUIAPP process " + obuiappProcess.getName());
     }
     return NeoResponse.ensureTopLevelMessage(result);
   }
@@ -603,9 +600,7 @@ public class NeoProcessService {
         OBContext.restorePreviousMode();
       }
     } catch (Exception e) {
-      log.error("Error executing OBUIAPP action handler {}", className, e);
-      result = NeoResponse.error(500,
-          PROCESS_EXECUTION_FAILED_PREFIX + resolveFailureMessage(e));
+      result = processFailure(e, "OBUIAPP action handler " + className);
     }
     return NeoResponse.ensureTopLevelMessage(result);
   }
@@ -945,7 +940,7 @@ public class NeoProcessService {
       result.put(MESSAGE, errorMsg.replaceFirst("@SUCCESS=", ""));
     } else {
       result.put(MESSAGE,
-          "Process " + process.getName() + " executed successfully");
+          PROCESS_NAME_PREFIX + process.getName() + " executed successfully");
     }
     return NeoResponse.ok(result);
   }
@@ -1139,7 +1134,7 @@ public class NeoProcessService {
     } else {
       result.put(STATUS, SUCCESS);
       result.put(MESSAGE,
-          "Process " + process.getName() + " executed successfully");
+          PROCESS_NAME_PREFIX + process.getName() + " executed successfully");
     }
 
     return NeoResponse.ok(result);

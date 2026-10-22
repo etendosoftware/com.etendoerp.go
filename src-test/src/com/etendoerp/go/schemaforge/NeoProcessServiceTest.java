@@ -561,6 +561,54 @@ public class NeoProcessServiceTest {
     assertNull(result);
   }
 
+  // ===================== thrown failures (ETP-5782) =====================
+
+  /** Runs executeObuiappClass with the handler lookup throwing {@code failure}. */
+  private NeoResponse obuiappClassThatThrows(RuntimeException failure, OBDal dal) {
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obdal = mockStatic(OBDal.class);
+        MockedStatic<org.openbravo.base.weld.WeldUtils> weld =
+            mockStatic(org.openbravo.base.weld.WeldUtils.class);
+        MockedStatic<org.openbravo.erpCommon.utility.OBMessageUtils> msg =
+            mockStatic(org.openbravo.erpCommon.utility.OBMessageUtils.class)) {
+      obdal.when(OBDal::getInstance).thenReturn(dal);
+      weld.when(() -> org.openbravo.base.weld.WeldUtils.getInstanceFromStaticBeanManager(any()))
+          .thenThrow(failure);
+      OBError translated = new OBError();
+      translated.setMessage("Cannot change business partner or price list if there are lines.");
+      msg.when(() -> org.openbravo.erpCommon.utility.OBMessageUtils.translateError(any(), any(),
+          any(), anyString())).thenReturn(translated);
+      return NeoProcessService.executeObuiappClass("java.lang.String", "P1", new JSONObject());
+    }
+  }
+
+  @Test
+  public void aKeyedRefusalThrownByAProcessIsA422AndRollsBack() throws Exception {
+    OBDal dal = mock(OBDal.class);
+
+    NeoResponse resp = obuiappClassThatThrows(
+        new org.openbravo.base.exception.OBException("@20502@"), dal);
+
+    assertEquals(422, resp.getHttpStatus());
+    JSONObject error = resp.getBody().getJSONObject("error");
+    assertEquals("business_rule", error.getString("code"));
+    assertEquals("Cannot change business partner or price list if there are lines.",
+        error.getString("message"));
+    org.mockito.Mockito.verify(dal).rollbackAndClose();
+  }
+
+  @Test
+  public void aSqlFaultThrownByAProcessIsA500WithoutSql() throws Exception {
+    NeoResponse resp = obuiappClassThatThrows(new org.hibernate.exception.GenericJDBCException(
+        "could not execute", new java.sql.SQLException(
+            "ERROR: relation \"secret_table\" does not exist", "42P01")), mock(OBDal.class));
+
+    assertEquals(500, resp.getHttpStatus());
+    String message = resp.getBody().getJSONObject("error").getString("message");
+    assertTrue(message, message.startsWith("Process execution failed: "));
+    assertFalse(message, message.contains("secret_table"));
+  }
+
   // ===================== translateClassicResult =====================
 
   @Test
