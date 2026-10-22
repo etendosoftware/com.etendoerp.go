@@ -5639,6 +5639,8 @@ private static final List<String> LOCKED_DIMENSION_TYPES = Arrays.asList("BP", "
 
 **Real-world example — `GeneralLedgerConfigurationHandler` tenant-scoped ids (ETP-5722):** the aggregate `General` `GET`/`POST` runs in admin mode, and it used to resolve request ids with a bare `OBDal.get`, which applies no tenant predicate. So a REST/MCP caller could write another tenant's `C_ValidCombination_ID` into `C_AcctSchema_GL` (`generalAccounts.*`) or `C_AcctSchema_Default` (`defaults.*`). Every request-supplied id now goes through `TenantOwnership.loadOwned`: the combinations, `general.currency`, and `selectedOrgId` (query on `GET`, body or query on `POST`). An id of another tenant answers the same 400 as a missing one (*Accounting combination / Currency / Organization not found: &lt;id&gt;*). Client-0 rows stay accepted. A foreign org used to fail later with a message that revealed the other tenant's ledger id; that no longer happens. Every 400/500 also calls `SessionHandler.rollback()`. Without it, a caught error still committed whatever the body had applied before the throw: a valid `general.name` plus a foreign combination answered 400 and still renamed the ledger. The handler is listed in `TenantIsolationPolicyTest.GUARDED_CLASSES`, so a new bare `OBDal.get` there fails the build.
 
+**Real-world example — `GeneralLedgerBalancingRule` (a balancing switch requires its account, ETP-5724):** on `C_AcctSchema_GL`, `suspenseBalancingUse` → `suspenseBalancing` and `currencyBalancingUse` → `currencyBalancingAcct`: while a switch is on its account is required, because core posting (`AcctSchema`) silently treats "on, no account" as off. The rule is judged on the state the save would leave, so a row that is already broken refuses any save that touches it. Two NEO write paths reach that table and each stores the values differently, so each is checked the way it stores them: the aggregate `General` POST (`GeneralLedgerConfigurationHandler`, which reads switches with `optBoolean`, so `"Y"` is stored as off) checks the entity after its setters ran (`check(AcctSchemaGL)`), rolls the session back and returns the 400; a generic PUT/PATCH on `Cuentas generales` goes through the pre-hook of its `@NeoExtension` customization `handlers/GeneralLedgerAccountsHandler` (after its posting-account guard), which merges the body — unwrapping a `data` envelope, since REST hands the pre-hook the raw body — with the row loaded through `TenantOwnership.loadOwned`, reading the values as core's `JsonToDataConverter` stores them (`"Y"`/`"true"` on; `null`, blank or `{"id": ""}` absent) (`checkUpdate(NeoContext)`). A row the caller cannot read is left to the default path (404). Both answer the existing `MISSING_REQUIRED_FIELDS` 400 (`NeoCrudHandler.buildMissingRequiredFieldsResponse(List, String)`, made package-visible for this) with a descriptive English `message` (*suspenseBalancing is required while suspenseBalancingUse is true*) so an API caller can correct itself; the SPA shows its own translated text. MCP flattens it as usual (`error: validation_error`, `code`/`fields` at top level). POST and DELETE on `Cuentas generales` are refused before any hook by `ETGO_SF_ENTITY.ISPOST`/`ISDELETE = 'N'` (`entities.generalAccounts.methods` in the window's `decisions.json`), so MCP no longer advertises create/delete for it and `/batch` (create-only) answers 405 too: the window cannot load without its single row. Same rule on every NEO channel, so nothing to declare in §4.12.9; Classic is unchanged on purpose. The class is in `TenantIsolationPolicyTest.GUARDED_CLASSES`.
+
 **Real-world example — `ETGO_FDI_DECL_FK` cascade delete (ETP-5393 Bug D, same bug class as ETP-4830 above):** `FiscalDeclCrudHandler#handleDeclDelete` calls `OBDal.getInstance().remove(decl)` to delete a draft `ETGO_Fiscal_Decl` row, without first deleting its `ETGO_Fiscal_Decl_Incident` children. `ETGO_FDI_DECL_FK` (`etgo_fiscal_decl_incident.etgo_fiscal_decl_id → etgo_fiscal_decl.etgo_fiscal_decl_id`) had no `ON DELETE` behavior (`NO ACTION`), so Postgres rejected the delete with a raw FK-violation whenever the declaration had at least one incident row (e.g. after a failed AEAT submission attempt that reverted it to draft) — surfacing to the user as an opaque 500 ("No se pudo eliminar la declaración."). Fixed the identical way: adding `onDelete="cascade"` directly to `ETGO_FDI_DECL_FK` in `src-db/database/model/tables/ETGO_FISCAL_DECL_INCIDENT.xml` (not a raw `ALTER TABLE` against the live DB — that XML is `update.database`'s actual source of truth, so a hand-run `ALTER TABLE` would be silently reverted on the next rebuild). No Java change was needed in `handleDeclDelete` itself: `OBDal.remove` issues the same `DELETE` regardless, and Postgres now cascades it. Verified locally by running `update.database` and confirming `pg_constraint.confdeltype = 'c'` for `etgo_fdi_decl_fk`, then inserting a draft declaration with an incident row and deleting the declaration directly — the incident row is removed automatically.
 
 **Real-world example — `UserRoleAssignmentHandler`'s "Rol" advanced-filter query params (ETP-5188):** the Users window's list `GET` (record id absent) gained a role filter, `buildRoleFilter`, alongside the existing contact-only exclusion `buildContactOnlyExclusion` (ETP-5019) — both are declared as `readPredicates` (ETP-5568; until then they were injected from `handle()` as `_neoWhere`, see below), so they apply to every `user` list read: list, count, paging, `?_distinct=` and MCP `neo_list`. The frontend's generic `criteria=` mechanism cannot express "filter by composed role" at all: it would build a dotted HQL property path through the `aDUserRolesList` one-to-many collection, which is invalid HQL and 500s (confirmed empirically). So the frontend's "Rol" advanced-filter field bypasses `criteria=` entirely for this one field and instead sends three DEDICATED query params on the same `user` list `GET`:
@@ -5873,6 +5875,18 @@ A list response carries one page, so a total drawn next to it covers the loaded 
 - `RPVOID` is excluded everywhere. *Deposited* (`total`, `byMethod`, `byCurrency`) = `RPR, RPPC, RDNC, PPM, PWNC, RPAE`, mirroring `paymentStatuses.js` (`PPM` counts as deposited; `ETGOERR` is pending). *Pending* = every other non-void status; `draftCount` = `pending.count`; `rowCount` = `total.count + pending.count`.
 - `approximate` = a non-zero foreign-currency subtotal was converted. `byCurrency` shows original amounts (never approximate), organization currency first, then amount descending. `byMethod` is sorted by converted amount descending.
 - Cost: one grouped scan per page request over the whole filtered set.
+
+**Document list totals** (`sales-quotation`, `sales-order`, `purchase-order`, `sales-invoice`, `purchase-invoice`; ETP-5757). `response.listTotals`, a sibling of `data`, replaces the client-side footer sum that mixed currencies. `DocumentListTotals` runs one grouped query over the whole filtered set (same filters as the grid, so quotation/order and sales/purchase are separated by the tab where clause, not the page) and folds each column into the organization currency at TODAY's rate (`NeoCurrencyTotals`). Present on every page, also an empty one; a failure is logged and the key omitted; MCP lists do not get it (`NeoListAggregateQuery.of` is `null`).
+
+```json
+{ "orgCurrencyIso":"EUR", "rowCount":18,
+  "columns":{
+    "grandTotalAmount":{"amount":10960.18,"iso":"EUR","approximate":true,"missingRateCurrencies":[]},
+    "outstandingAmount":{"amount":1200.00,"iso":"EUR","approximate":false,"missingRateCurrencies":[]} } }
+```
+
+- `outstandingAmount` exists for invoices only. `approximate` and `missingRateCurrencies` follow the `NeoCurrencyTotals` rule: a non-zero foreign subtotal was converted / a currency without rate is left out and listed.
+- Draft discount compensation: the grid rewrites `grandTotalAmount` (and invoice `outstandingAmount`) of an unprocessed document with `etgoTotalDiscount > 0` and no active discount line to `amount * (1 - pct/100)`. The aggregate applies the same rule per row in HQL, so the footer adds up to the visible rows. Rounding differs slightly: the server uses PostgreSQL `round(numeric, 2)` (half away from zero) per row, the grid uses Java half-up (`NeoHandlerUtils.roundHalfUp`); they can differ by one cent only for negative exact halves or floating-point edge cases.
 
 ## 6. Parent-Child Tab Filtering
 
@@ -6585,6 +6599,38 @@ start through its period end — further narrowed by BOTH `dateFrom` and `dateTo
 real effect (the opposite of Balance Sheet): P&L is a period-activity total of postings within the
 year, not a point-in-time snapshot. Both handlers' `orgId` uses ORG-TREE semantics
 (`ad_isorgincluded`), unlike `report-trial-balance`/`report-journal-entries`'s exact-match `orgId`.
+
+**Request ids are scoped to the tenant (ETP-5793).** The report handlers run in admin mode, where a
+bare `OBDal.get` applies no client predicate. So `orgId` (every SQL report and the aging reports),
+`yearId`/`referenceYearId` (balance sheet and P&L) and `glId` (aging) are resolved through
+`TenantOwnership.loadOwned`, and another tenant's id answers exactly like an unknown one:
+`organization_not_resolved` (400), `year_not_resolved` / `reference_year_not_resolved` (422) or
+`accounting_schema_unresolved` (422).
+For the aging reports this closes a real cross-tenant read: `AgingDao_data.xsql` filters only on
+`AD_Org_ID IN (...)`, never on the client, so another tenant's `orgId` used to return that tenant's
+open items. The SQL reports already bind `fa.ad_client_id` to the session client, so for them the
+fix stops the existence leak (an empty report used to confirm that the id existed). `orgId: ""`
+(every organization) and `orgId: "0"` are still accepted. Note that `loadOwned` checks only the
+client for an `Organization`, which is not `OrganizationEnabled`. An org of the caller's own client
+outside the role's org access still resolves; that is unchanged and is not a tenant leak. Pinned by
+`TenantIsolationPolicyTest`, which guards the aging, trial balance, general ledger, journal entries,
+balance sheet and P&L handlers. The fiscal reports (`TaxReportHandler`, `Fiscal303BoxesHandler`)
+are swept separately (ETP-5794). Years, accounting schemas and journals are `OrganizationEnabled`,
+so `loadOwned` also requires their organization to be readable by the role: one of the caller's
+own client in an organization outside the role's access now answers as unknown too.
+
+The same change scopes three other request ids:
+- `GlJournalHeaderHandler`: the journal its PATCH pre-hook loads by URL id to mirror
+  `accountingDate` into `documentDate`, and the `accountingSchema` of a POST body whose currency it
+  injects. Another tenant's journal is never loaded, and another tenant's schema gives no currency.
+- `OrganizationInformationHandler`: the org whose country decides the Spanish tax ID rules. Another
+  tenant's org falls back to the session org.
+
+The generic CRUD path still checks no record ownership before an entity's pre-hook runs. Only the
+ACTION path does (`NeoActionRecordGuard`, ETP-5558). A pre-hook that loads its record by the URL id
+must therefore use `loadOwned` itself. The same gap also affects the default CRUD write itself: a
+foreign-id DELETE was confirmed live, and a PATCH answers 409 for a foreign id vs 500 for an unknown
+one. Tracked as ETP-5880.
 
 Both honour the account's `ShowValueCond` (ETP-5662), like Classic's `AccountTree`: a SUMMARY
 account with `P` (Positive ONLY) shows its balance only when strictly positive, `N` only when
