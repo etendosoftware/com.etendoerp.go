@@ -796,4 +796,46 @@ class OrderLineDiscountSupportTest {
     assertAmount(label, expectedUnit != null && expectedList != null ? expectedList : null, json,
         OrderLineDiscountSupport.FIELD_LIST_PRICE);
   }
+
+  @org.junit.jupiter.api.Test
+  void setUnitPriceOnCreatePricesAPurchaseLineFromThePurchaseList() throws Exception {
+    JSONObject json = new JSONObject("{\"product\":\"P1\",\"parentId\":\"O1\"}");
+    OBDal dal = mock(OBDal.class);
+    Product product = mock(Product.class);
+    Order order = mock(Order.class);
+    PriceList priceList = mock(PriceList.class);
+    ProductPrice price = mock(ProductPrice.class);
+    Date orderDate = new Date();
+    when(dal.get(Product.class, "P1")).thenReturn(product);
+    when(dal.get(Order.class, "O1")).thenReturn(order);
+    when(order.getOrderDate()).thenReturn(orderDate);
+    when(order.getPriceList()).thenReturn(priceList);
+    when(order.isSalesTransaction()).thenReturn(Boolean.FALSE);
+    when(priceList.isPriceIncludesTax()).thenReturn(Boolean.FALSE);
+    when(price.getListPrice()).thenReturn(new BigDecimal("7"));
+    when(price.getStandardPrice()).thenReturn(new BigDecimal("6"));
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+        MockedStatic<FinancialUtils> financial = mockStatic(FinancialUtils.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      financial.when(() -> FinancialUtils.getProductPrice(eq(product), eq(orderDate),
+          eq(false), eq(priceList), eq(false))).thenReturn(price);
+
+      OrderLineDiscountSupport.setUnitPriceOnCreate(ctx("POST", NeoEndpointType.CRUD, json));
+    }
+
+    assertAmount("purchase", "6", json, OrderLineDiscountSupport.FIELD_UNIT_PRICE);
+    assertAmount("purchase", "7", json, OrderLineDiscountSupport.FIELD_LIST_PRICE);
+  }
+
+  @org.junit.jupiter.api.Test
+  void setUnitPriceOnCreateKeepsTheCallersPrice() throws Exception {
+    JSONObject json = new JSONObject(
+        "{\"product\":\"P1\",\"parentId\":\"O1\",\"unitPrice\":9}");
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      OrderLineDiscountSupport.setUnitPriceOnCreate(ctx("POST", NeoEndpointType.CRUD, json));
+      dalMock.verifyNoInteractions();
+    }
+    assertAmount("kept", "9", json, OrderLineDiscountSupport.FIELD_UNIT_PRICE);
+  }
 }

@@ -249,6 +249,32 @@ final class OrderLineDiscountSupport {
   }
 
   /**
+   * Only the price of {@link #setStandardPriceOnCreate}'s rule, for a line that has no other order
+   * rule: a created line sent without a price takes the unit price (and the catalog list price) of
+   * its product in the parent order's price list (ETP-5881). Used by
+   * {@link PurchaseOrderLineHandler}; the price list and the sales/purchase side come from the
+   * order itself. A price in the body is never replaced. Total: never throws.
+   *
+   * @param ctx the pre-hook context; its request body is mutated in place
+   */
+  static void setUnitPriceOnCreate(NeoContext ctx) {
+    if (ctx == null || !NeoEndpointType.CRUD.equals(ctx.getEndpointType())
+        || !METHOD_POST.equals(ctx.getHttpMethod()) || ctx.getRequestBody() == null) {
+      return;
+    }
+    JSONObject body = ctx.getRequestBody();
+    try {
+      if (LinePriceListSupport.hasNoPrice(body, FIELD_UNIT_PRICE)) {
+        LinePriceListSupport.applyCatalogPrice(body, resolveProductPrice(body), FIELD_UNIT_PRICE,
+            FIELD_LIST_PRICE);
+      }
+    } catch (Exception e) {
+      log.warn("[ORDER-LINE-PRICE] Could not price the line on {} {}: {}", ctx.getSpecName(),
+          ctx.getEntityName(), e.getMessage());
+    }
+  }
+
+  /**
    * The list price the form gives a new line whose product has no list price in the order's price
    * list (CP-8 of ETP-5528): its standard price.
    *
