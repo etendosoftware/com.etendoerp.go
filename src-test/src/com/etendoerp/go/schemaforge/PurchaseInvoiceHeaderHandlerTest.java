@@ -1666,12 +1666,12 @@ public class PurchaseInvoiceHeaderHandlerTest {
 
   @Test
   public void listGetInjectsListTotalsEvenOnAnEmptyPage() throws Exception {
-    PurchaseInvoiceHeaderHandler handler = Mockito.spy(new PurchaseInvoiceHeaderHandler());
+    PurchaseInvoiceHeaderHandler spied = Mockito.spy(new PurchaseInvoiceHeaderHandler());
     Mockito.doReturn(DocumentListTotalsTest.stub(true, Collections.emptyList()))
-        .when(handler).listTotals();
+        .when(spied).listTotals();
     NeoContext ctx = withEmptyPage(listTotalsListCtx());
 
-    NeoResponse result = handler.afterHandle(ctx);
+    NeoResponse result = spied.afterHandle(ctx);
 
     assertNotNull(result);
     JSONObject totals = result.getBody().getJSONObject("response").getJSONObject("listTotals");
@@ -1681,32 +1681,32 @@ public class PurchaseInvoiceHeaderHandlerTest {
 
   @Test
   public void listGetWithoutAggregateQueryLeavesTheEmptyPageUntouched() throws Exception {
-    PurchaseInvoiceHeaderHandler handler = Mockito.spy(new PurchaseInvoiceHeaderHandler());
+    PurchaseInvoiceHeaderHandler spied = Mockito.spy(new PurchaseInvoiceHeaderHandler());
     Mockito.doReturn(DocumentListTotalsTest.stub(true, Collections.emptyList()))
-        .when(handler).listTotals();
+        .when(spied).listTotals();
     NeoContext ctx = withEmptyPage(getCtx());
 
-    assertNull(handler.afterHandle(ctx));
+    assertNull(spied.afterHandle(ctx));
   }
 
   @Test
   public void singleRecordGetDoesNotComputeListTotals() throws Exception {
-    PurchaseInvoiceHeaderHandler handler = Mockito.spy(new PurchaseInvoiceHeaderHandler());
+    PurchaseInvoiceHeaderHandler spied = Mockito.spy(new PurchaseInvoiceHeaderHandler());
     NeoContext ctx = withEmptyPage(NeoContext.builder().httpMethod("GET").endpointType(NeoEndpointType.CRUD).recordId("rec-1").build());
     NeoListAggregateQuery.remember(ctx, Collections.emptyMap());
 
-    handler.afterHandle(ctx);
+    spied.afterHandle(ctx);
 
-    Mockito.verify(handler, Mockito.never()).listTotals();
+    Mockito.verify(spied, Mockito.never()).listTotals();
   }
 
   @Test
   public void failingListTotalsQueryIsSwallowedAndTheEmptyPageStaysUnchanged() throws Exception {
-    PurchaseInvoiceHeaderHandler handler = Mockito.spy(new PurchaseInvoiceHeaderHandler());
-    Mockito.doReturn(DocumentListTotalsTest.failing(true)).when(handler).listTotals();
+    PurchaseInvoiceHeaderHandler spied = Mockito.spy(new PurchaseInvoiceHeaderHandler());
+    Mockito.doReturn(DocumentListTotalsTest.failing(true)).when(spied).listTotals();
     NeoContext ctx = withEmptyPage(listTotalsListCtx());
 
-    assertNull(handler.afterHandle(ctx));
+    assertNull(spied.afterHandle(ctx));
     assertFalse(ctx.getPreviousResult().getBody().getJSONObject("response").has("listTotals"));
   }
 
