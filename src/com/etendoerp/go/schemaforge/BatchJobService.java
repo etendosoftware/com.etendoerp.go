@@ -613,12 +613,22 @@ public final class BatchJobService {
     }
   }
 
-  /** Binds the owner on the worker thread and clears everything the thread may carry afterwards. */
-  private static final class OBContextBinder implements ContextBinder {
+  /**
+   * Binds the owner on the worker thread and clears everything the thread may carry afterwards.
+   * The worker runs in admin mode exactly like {@code NeoServlet.service} does for a synchronous
+   * batch: the NEO services read the {@code ETGO_SF_*} configuration entities, which the caller's
+   * role may not read. Without it every row of an async job is rejected.
+   */
+  static final class OBContextBinder implements ContextBinder {
+    /** Whether this thread pushed an admin mode that {@link #unbind} still has to pop. */
+    private final ThreadLocal<Boolean> adminModeSet = ThreadLocal.withInitial(() -> Boolean.FALSE);
+
     @Override
     public void bind(Owner owner) {
       OBContext.setOBContext(owner.userId(), owner.roleId(), owner.clientId(), owner.orgId(),
           owner.language(), owner.warehouseId());
+      OBContext.setAdminMode();
+      adminModeSet.set(Boolean.TRUE);
     }
 
     @Override
@@ -632,6 +642,16 @@ public final class BatchJobService {
 
     @Override
     public void unbind() {
+      try {
+        // Pop before the context goes: the admin stack belongs to the pooled thread, not to it.
+        if (Boolean.TRUE.equals(adminModeSet.get())) {
+          OBContext.restorePreviousMode();
+        }
+      } catch (RuntimeException e) {
+        log.debug("[BATCH-JOB] could not restore the worker mode: {}", e.getMessage());
+      } finally {
+        adminModeSet.remove();
+      }
       try {
         OBContext.setOBContext((OBContext) null);
         RequestContext.clear();

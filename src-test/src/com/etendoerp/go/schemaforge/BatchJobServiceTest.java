@@ -36,6 +36,9 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Before;
 import org.junit.Test;
+import org.mockito.MockedStatic;
+import org.mockito.Mockito;
+import org.openbravo.dal.core.OBContext;
 
 import com.etendoerp.go.schemaforge.BatchJobService.JobException;
 import com.etendoerp.go.schemaforge.BatchJobService.Owner;
@@ -53,6 +56,46 @@ public class BatchJobServiceTest {
   private static final Owner ALICE = new Owner("U1", "R1", "C1", "O1", "en_US", null);
   private static final Owner BOB = new Owner("U2", "R1", "C1", "O1", "en_US", null);
   private static final Owner EVE = new Owner("U9", "R9", "C2", "O9", "en_US", null);
+
+  /**
+   * The synchronous batch runs in admin mode (NeoServlet.service), because the NEO services read
+   * ETGO_SF_* entities the caller's role cannot. The worker of an async job must do the same, and
+   * leave the pooled thread's admin stack balanced.
+   */
+  @Test
+  public void realBinderRunsTheWorkerInAdminModeAndRestoresItOnUnbind() {
+    BatchJobService.OBContextBinder real = new BatchJobService.OBContextBinder();
+    try (MockedStatic<OBContext> context = Mockito.mockStatic(OBContext.class)) {
+      real.bind(ALICE);
+      context.verify(OBContext::setAdminMode, Mockito.times(1));
+      context.verify(OBContext::restorePreviousMode, Mockito.never());
+
+      real.unbind();
+      context.verify(OBContext::restorePreviousMode, Mockito.times(1));
+
+      // A second unbind on the same thread has nothing of its own to pop.
+      real.unbind();
+      context.verify(OBContext::restorePreviousMode, Mockito.times(1));
+    }
+  }
+
+  @Test
+  public void realBinderThatFailsToBindPopsNoAdminMode() {
+    BatchJobService.OBContextBinder real = new BatchJobService.OBContextBinder();
+    try (MockedStatic<OBContext> context = Mockito.mockStatic(OBContext.class)) {
+      context.when(() -> OBContext.setOBContext("U1", "R1", "C1", "O1", "en_US", null))
+          .thenThrow(new IllegalStateException("cannot bind"));
+      try {
+        real.bind(ALICE);
+        fail("bind must propagate");
+      } catch (IllegalStateException expected) {
+        // the worker's finally still calls unbind
+      }
+      real.unbind();
+      context.verify(OBContext::setAdminMode, Mockito.never());
+      context.verify(OBContext::restorePreviousMode, Mockito.never());
+    }
+  }
 
   private FakeStore store;
   private ManualExecutor executor;
