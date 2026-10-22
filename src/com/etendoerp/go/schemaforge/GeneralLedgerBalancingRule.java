@@ -54,6 +54,7 @@ public final class GeneralLedgerBalancingRule {
   /**
    * Checks the row as it would be stored (aggregate path, after its setters ran).
    *
+   * @param row the general accounts row, with the request's changes already applied
    * @return the 400, or {@code null} when the row is valid
    */
   public static NeoResponse check(AcctSchemaGL row) {
@@ -71,6 +72,7 @@ public final class GeneralLedgerBalancingRule {
    * its key is sent, else the stored one. A row the caller cannot read is left to the default path
    * (its 404).
    *
+   * @param context the hook context of the {@code Cuentas generales} request
    * @return the 400, or {@code null} to continue
    */
   public static NeoResponse checkUpdate(NeoContext context) {
