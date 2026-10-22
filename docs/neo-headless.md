@@ -10242,7 +10242,7 @@ the source, and an idempotent SQL file with `md5` guards brings an existing data
 *Not done here (follow-ups):* the REST guard for `docAction`, the order `linkedDocuments` list, the summary view size,
 status-field curation (five duplicates, `taxableAmount`), the FK text filter errors, the `etendo_action` response-shape
 unification, the tax selector, `serverResolvedCreateFields` for purchase lines, stale totals after `etendo_update` and the
-mandatory-field i18n. The `sales-order` / `purchase-order` windows still have no spec prompt.
+mandatory-field i18n. The `sales-order` / `purchase-order` windows had no spec prompt then; ETP-5715 gave them one (§4.12.39).
 
 #### 4.12.36 `etendo_action_batch`: one action over several documents, one result each (ETP-5715)
 
@@ -10683,11 +10683,16 @@ refusal of what the server would repair.
 overrides (`editableRecipients:false`, a different `maxRecipients`) are frontend decisions the backend never sees: the contract's cap (10) applies.
 Sending a document the SPA's preview would show differently (a stale-but-newer PDF) is the same as `etendo_get_document_pdf` (§4.12.38).
 
-**Agent prompt (proposed, not applied).** *"To send a document by email use etendo_send_document_email. First call it with preview:true and show the
-user the recipient, subject, message and whether the PDF is ready; send only when they agree. Never invent addresses: use the ones the user gives, or the
-contact the preview shows. If it answers 409 no_pdf or pdf_stale, ask the user to open the document in the application (its preview creates the PDF) and try
-again; do not retry blindly. Only an answer with sent:true was sent: a DUPLICATE, THROTTLED or any other answer means the email did NOT go out, and
-you must say so. Purchase invoices cannot be emailed."*
+**Agent prompt (applied to the sourcedata, ETP-5715).** The cross-cutting rules live in the tool descriptions (always visible to the agent); the per-window
+guidance is the spec prompt (`ETGO_SF_SPEC.AGENT_PROMPT`, mirrored in `schema_forge/agent-prompts/<spec>/spec.md`, delivered by `etendo_discover`). Each spec prompt ends
+with a short "Document tools." paragraph that points to the tools instead of repeating their descriptions and states only what is true of that window: the batch
+examples valid there (invoices: complete, or reverse completed ones with RC, reactivating a posted invoice un-posts it first; orders: complete, or void drafts; others:
+complete), whether `main:true` is meant for attachments (only on `purchase-invoice` and `goods-receipt`, whose PDF is the supplier document; on the rendered windows the
+main file is the document's own PDF), supplier vs rendered PDF, and email (none on `purchase-invoice` / `goods-receipt`; on `return-material-receipt` the preview stores
+nothing, so `no_pdf` / `pdf_stale` are solved by sending from the application, and the first send is done there). Applied to `sales-invoice`, `goods-shipment`,
+`return-to-vendor-shipment`, `return-material-receipt`, `purchase-invoice`, `goods-receipt` and, as new spec prompts, `purchase-order` and `sales-order`. `sales-quotation` and
+`return-to-vendor` still have none (their tool descriptions apply). The text is in `ETGO_SF_SPEC.xml`: it reaches an instance through `update.database`, or by running
+the ETP-5715 prompts SQL (guarded by the previous value of each row).
 
 **Tests:** `McpDocumentEmailToolTest` (send with defaults and with edits, every refusal, every non-`SENT` outcome, preview, the derived list, the definition),
 `DefaultDocumentSendEmailContractTest` (`sendDefaults`, and that the defaults sent as edits render the modal's email), `TransactionalEmailServiceTest`

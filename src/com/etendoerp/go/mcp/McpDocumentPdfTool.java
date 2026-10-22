@@ -250,8 +250,11 @@ final class McpDocumentPdfTool {
   }
 
   /** What to do about a draft, for both PDF tools: only one thing is true of it. */
-  static final String DRAFT_HINT = "This document is a draft and a draft never stores a PDF: "
-      + "complete it first, then open its preview in the application and ask again.";
+  static final String DRAFT_HINT_PREFIX = "This document is a draft and a draft never stores a "
+      + "PDF: complete it first, then open its preview in the application and ";
+
+  /** The draft advice of {@code etendo_get_document_pdf}: the retry verb is "ask again". */
+  static final String DRAFT_HINT = DRAFT_HINT_PREFIX + "ask again.";
 
   /**
    * The advice for a document with no PDF, by what is known of its state: a draft gets only the

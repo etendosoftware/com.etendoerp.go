@@ -102,6 +102,21 @@ class NeoDocumentPdfTest {
   }
 
   @Test
+  @DisplayName("the no-PDF factories are distinct: a supplier flag, or the document status (null allowed)")
+  void notStoredFactoriesAreDistinct() {
+    assertEquals(NeoDocumentPdf.Status.MISSING, NeoDocumentPdf.Result.notStored(false).getStatus());
+    assertEquals(NeoDocumentPdf.Status.NO_SUPPLIER_DOCUMENT,
+        NeoDocumentPdf.Result.notStored(true).getStatus());
+    NeoDocumentPdf.Result unknown = NeoDocumentPdf.Result.notStoredInStatus(null);
+    assertEquals(NeoDocumentPdf.Status.MISSING, unknown.getStatus());
+    assertNull(unknown.getDocumentStatus());
+    assertFalse(unknown.isDraft());
+    NeoDocumentPdf.Result draft = NeoDocumentPdf.Result.notStoredInStatus("DR");
+    assertEquals("DR", draft.getDocumentStatus());
+    assertTrue(draft.isDraft());
+  }
+
+  @Test
   @DisplayName("rendered: a main file written after the last edit of the record is served")
   void freshMainIsFound() throws Exception {
     JSONObject cached = main(PREVIEW_NAME, "2026-10-02T10:00:00Z");

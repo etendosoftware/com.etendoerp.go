@@ -117,7 +117,7 @@ public final class NeoDocumentPdf {
     }
 
     /** No stored PDF; {@code supplier} when the entity's PDF is the user's own document. */
-    public static Result missing(boolean supplier) {
+    public static Result notStored(boolean supplier) {
       return new Result(supplier ? Status.NO_SUPPLIER_DOCUMENT : Status.MISSING, null, null, null);
     }
 
@@ -127,7 +127,7 @@ public final class NeoDocumentPdf {
      * @param documentStatus the record's {@code documentStatus}, or {@code null} when the entity
      *        has none or it could not be read
      */
-    public static Result missing(String documentStatus) {
+    public static Result notStoredInStatus(String documentStatus) {
       return new Result(Status.MISSING, null, null, documentStatus);
     }
 
@@ -189,7 +189,7 @@ public final class NeoDocumentPdf {
     if (main == null || StringUtils.isBlank(main.optString(KEY_ID, null))
         || source == Source.SUPPLIER) {
       Result decided = decide(main, source, null, null);
-      return decided.getStatus() == Status.MISSING ? Result.missing(documentStatus(target))
+      return decided.getStatus() == Status.MISSING ? Result.notStoredInStatus(documentStatus(target))
           : decided;
     }
     return decide(main, source, recordUpdated(target), brandingUpdated());
@@ -206,7 +206,7 @@ public final class NeoDocumentPdf {
    */
   static Result decide(JSONObject main, Source source, Date recordUpdated, Date brandingUpdated) {
     if (main == null || StringUtils.isBlank(main.optString(KEY_ID, null))) {
-      return Result.missing(source == Source.SUPPLIER);
+      return Result.notStored(source == Source.SUPPLIER);
     }
     if (source == Source.SUPPLIER) {
       // The user's own document: nothing of ours can outdate it.

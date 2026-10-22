@@ -227,7 +227,7 @@ class McpDocumentPdfToolTest {
     @Test
     @DisplayName("no PDF yet is a 409 no_pdf, apart from the 404 of a missing document")
     void noPdfYetIsAConflict() throws Exception {
-      document("INV1", NeoDocumentPdf.Result.missing(false));
+      document("INV1", NeoDocumentPdf.Result.notStored(false));
 
       JSONObject result = McpDocumentPdfTool.get(args("id", "INV1"));
 
@@ -244,7 +244,7 @@ class McpDocumentPdfToolTest {
     @Test
     @DisplayName("a supplier-document entity with no upload says so, same 409 no_pdf, and tells how to attach it")
     void noSupplierDocument() throws Exception {
-      document("PINV1", NeoDocumentPdf.Result.missing(true));
+      document("PINV1", NeoDocumentPdf.Result.notStored(true));
 
       JSONObject result = McpDocumentPdfTool.get(args("id", "PINV1"));
 
@@ -362,10 +362,10 @@ class McpDocumentPdfToolTest {
     void mixedIdsKeepPerDocumentResults() throws Exception {
       document("OK1", NeoDocumentPdf.Result.found(stored("F1", "OK1.pdf")));
       document("STALE1", NeoDocumentPdf.Result.stale(stored("F2", "STALE1.pdf")));
-      document("NONE1", NeoDocumentPdf.Result.missing(false));
+      document("NONE1", NeoDocumentPdf.Result.notStored(false));
       refuse("FOREIGN1", 404, NeoAttachmentTarget.MSG_RECORD_NOT_FOUND);
       document("OK2", NeoDocumentPdf.Result.found(stored("F3", "OK2.pdf")));
-      document("NOSUP1", NeoDocumentPdf.Result.missing(true));
+      document("NOSUP1", NeoDocumentPdf.Result.notStored(true));
 
       JSONObject result = McpDocumentPdfTool.get(
           argsWithIds("OK1", "STALE1", "NONE1", "FOREIGN1", "OK2", "NOSUP1"));
@@ -393,7 +393,7 @@ class McpDocumentPdfToolTest {
     @DisplayName("an unexpected failure on one document is a per-document 500 and the others still answer")
     void aCrashingDocumentDoesNotLoseTheOthers() throws Exception {
       document("OK1", NeoDocumentPdf.Result.found(stored("F1", "OK1.pdf")));
-      NeoAttachmentTarget boom = document("BOOM", NeoDocumentPdf.Result.missing(false));
+      NeoAttachmentTarget boom = document("BOOM", NeoDocumentPdf.Result.notStored(false));
       pdfMock.when(() -> NeoDocumentPdf.resolve(boom, header))
           .thenThrow(new IllegalStateException("secret internal detail"));
       document("OK2", NeoDocumentPdf.Result.found(stored("F3", "OK2.pdf")));
@@ -416,9 +416,9 @@ class McpDocumentPdfToolTest {
     @Test
     @DisplayName("the no-PDF hint depends on the state: a draft, another status, unknown")
     void noPdfHintDependsOnTheDocumentState() throws Exception {
-      document("D1", NeoDocumentPdf.Result.missing("DR"));
-      document("C1", NeoDocumentPdf.Result.missing("CO"));
-      document("U1", NeoDocumentPdf.Result.missing(false));
+      document("D1", NeoDocumentPdf.Result.notStoredInStatus("DR"));
+      document("C1", NeoDocumentPdf.Result.notStoredInStatus("CO"));
+      document("U1", NeoDocumentPdf.Result.notStored(false));
 
       String draft = McpDocumentPdfTool.get(args("id", "D1")).getString("hint");
       String completed = McpDocumentPdfTool.get(args("id", "C1")).getString("hint");
@@ -436,7 +436,7 @@ class McpDocumentPdfToolTest {
     @Test
     @DisplayName("an unexpected failure logs the exception class only, never its message or stack")
     void aCrashLogsTheClassOnly() throws Exception {
-      NeoAttachmentTarget boom = document("BOOM", NeoDocumentPdf.Result.missing(false));
+      NeoAttachmentTarget boom = document("BOOM", NeoDocumentPdf.Result.notStored(false));
       pdfMock.when(() -> NeoDocumentPdf.resolve(boom, header))
           .thenThrow(new IllegalStateException("secret-address@leak.example"));
 
@@ -477,7 +477,7 @@ class McpDocumentPdfToolTest {
       String[] fifty = new String[50];
       for (int i = 0; i < 50; i++) {
         fifty[i] = "D" + i;
-        document(fifty[i], NeoDocumentPdf.Result.missing(false));
+        document(fifty[i], NeoDocumentPdf.Result.notStored(false));
       }
       JSONObject accepted = McpDocumentPdfTool.get(argsWithIds(fifty));
       assertEquals(50, accepted.getInt("count"));

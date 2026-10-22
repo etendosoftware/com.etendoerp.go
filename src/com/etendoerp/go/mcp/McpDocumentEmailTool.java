@@ -63,6 +63,9 @@ final class McpDocumentEmailTool {
 
   private static final Logger log = LogManager.getLogger(McpDocumentEmailTool.class);
 
+  /** The draft advice of this tool: the same sentence as the PDF tool's, with its own retry verb. */
+  private static final String DRAFT_SEND_HINT = McpDocumentPdfTool.DRAFT_HINT_PREFIX
+      + "ask to send again.";
   private static final String PREVIEW_STORES_NOTHING = "For a window whose preview stores nothing "
       + "(a return receipt) the first send must be done from the application.";
   private static final String KEY_SENT = "sent";
@@ -228,7 +231,7 @@ final class McpDocumentEmailTool {
   private static String missingHint(NeoDocumentPdf.Result pdf) {
     String documentStatus = pdf.getDocumentStatus();
     if (pdf.isDraft()) {
-      return McpDocumentPdfTool.DRAFT_HINT.replace("ask again", "ask to send again");
+      return DRAFT_SEND_HINT;
     }
     String advice = "Open the document's preview in the application so its PDF is stored, then "
         + "ask to send again";
