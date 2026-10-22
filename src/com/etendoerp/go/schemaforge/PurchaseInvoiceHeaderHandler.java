@@ -281,6 +281,10 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
       // GET: enrich response with virtual fields
       JSONArray dataArr = NeoHandlerUtils.extractGetDataArray(context);
       if (dataArr == null) {
+        // ETP-5757: an empty list page still carries the (zeroed) whole-set footer totals.
+        if (injectListTotals(context)) {
+          return NeoResponse.ok(context.getPreviousResult().getBody());
+        }
         // ETP-4783: for PATCH/POST, inject aeatsiiAuthorizationno written by
         // persistSiiAuthorizationno() into the save response so the frontend sees the
         // correct value (the CRUD write response was captured before afterHandle ran).
@@ -306,6 +310,7 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
         SifSubRecordAttachments.enrich(rec, context.getRecordId());
         InvoiceReactivationGuard.enrichReactivationBlock(rec, context.getRecordId());
       }
+      injectListTotals(context); // ETP-5757, last: see AbstractInvoiceHeaderHandler
       return NeoResponse.ok(body);
     } catch (Exception e) {
       log.error("Error enriching purchase invoice", e);

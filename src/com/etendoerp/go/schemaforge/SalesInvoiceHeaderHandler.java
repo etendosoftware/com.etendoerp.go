@@ -262,7 +262,8 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
       JSONObject body = prev.getBody();
       JSONArray dataArr = NeoHandlerUtils.extractGetDataArray(context);
       if (dataArr == null || dataArr.length() == 0) {
-        return null;
+        // ETP-5757: an empty page still carries the (zeroed) whole-set footer totals.
+        return injectListTotals(context) ? NeoResponse.ok(body) : null;
       }
       for (int i = 0; i < dataArr.length(); i++) {
         JSONObject rec = dataArr.getJSONObject(i);
@@ -287,6 +288,7 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
         SifSubRecordAttachments.enrich(rec, context.getRecordId());
         InvoiceReactivationGuard.enrichReactivationBlock(rec, context.getRecordId());
       }
+      injectListTotals(context); // ETP-5757, last: see AbstractInvoiceHeaderHandler
       return NeoResponse.ok(body);
     } catch (Exception e) {
       log.error("Error enriching sales invoice response", e);

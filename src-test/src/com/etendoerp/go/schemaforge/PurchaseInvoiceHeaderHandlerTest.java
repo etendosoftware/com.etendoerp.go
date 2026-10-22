@@ -1649,4 +1649,144 @@ public class PurchaseInvoiceHeaderHandlerTest {
     assertSame(fromOrders, header.handle(orderCtx));
     assertSame(fromReceipts, header.handle(receiptCtx));
   }
+
+  // ── whole-set list totals (ETP-5757) ──────────────────────────────────────
+
+  private static NeoContext listTotalsListCtx() {
+    NeoContext ctx = getCtx();
+    NeoListAggregateQuery.remember(ctx, Collections.emptyMap());
+    return ctx;
+  }
+
+  private static NeoContext withEmptyPage(NeoContext ctx) throws Exception {
+    ctx.setPreviousResult(NeoResponse.ok(new JSONObject().put("response",
+        new JSONObject().put("data", new JSONArray()))));
+    return ctx;
+  }
+
+  @Test
+  public void listGetInjectsListTotalsEvenOnAnEmptyPage() throws Exception {
+    PurchaseInvoiceHeaderHandler handler = Mockito.spy(new PurchaseInvoiceHeaderHandler());
+    Mockito.doReturn(DocumentListTotalsTest.stub(true, Collections.emptyList()))
+        .when(handler).listTotals();
+    NeoContext ctx = withEmptyPage(listTotalsListCtx());
+
+    NeoResponse result = handler.afterHandle(ctx);
+
+    assertNotNull(result);
+    JSONObject totals = result.getBody().getJSONObject("response").getJSONObject("listTotals");
+    assertEquals(0, totals.getInt("rowCount"));
+    assertEquals("EUR", totals.getString("orgCurrencyIso"));
+  }
+
+  @Test
+  public void listGetWithoutAggregateQueryLeavesTheEmptyPageUntouched() throws Exception {
+    PurchaseInvoiceHeaderHandler handler = Mockito.spy(new PurchaseInvoiceHeaderHandler());
+    Mockito.doReturn(DocumentListTotalsTest.stub(true, Collections.emptyList()))
+        .when(handler).listTotals();
+    NeoContext ctx = withEmptyPage(getCtx());
+
+    assertNull(handler.afterHandle(ctx));
+  }
+
+  @Test
+  public void singleRecordGetDoesNotComputeListTotals() throws Exception {
+    PurchaseInvoiceHeaderHandler handler = Mockito.spy(new PurchaseInvoiceHeaderHandler());
+    NeoContext ctx = withEmptyPage(NeoContext.builder().httpMethod("GET").endpointType(NeoEndpointType.CRUD).recordId("rec-1").build());
+    NeoListAggregateQuery.remember(ctx, Collections.emptyMap());
+
+    handler.afterHandle(ctx);
+
+    Mockito.verify(handler, Mockito.never()).listTotals();
+  }
+
+  @Test
+  public void failingListTotalsQueryIsSwallowedAndTheEmptyPageStaysUnchanged() throws Exception {
+    PurchaseInvoiceHeaderHandler handler = Mockito.spy(new PurchaseInvoiceHeaderHandler());
+    Mockito.doReturn(DocumentListTotalsTest.failing(true)).when(handler).listTotals();
+    NeoContext ctx = withEmptyPage(listTotalsListCtx());
+
+    assertNull(handler.afterHandle(ctx));
+    assertFalse(ctx.getPreviousResult().getBody().getJSONObject("response").has("listTotals"));
+  }
+
+  @Test
+  public void listGetWithRowsAddsListTotalsAndStillPostProcessesTheRows() throws Exception {
+    PurchaseInvoiceHeaderHandler spied = Mockito.spy(handler);
+    Mockito.doReturn(DocumentListTotalsTest.stub(true, Collections.emptyList()))
+        .when(spied).listTotals();
+    NeoContext ctx = listTotalsListCtx();
+    ctx.setPreviousResult(NeoResponse.ok(new JSONObject().put("response", new JSONObject()
+        .put("data", new JSONArray().put(invoiceRecord(false, 10.0, 200.0, 200.0))))));
+
+    NeoResponse result = stubbingFollowUpLookups(() -> spied.afterHandle(ctx));
+
+    JSONObject response = result.getBody().getJSONObject("response");
+    JSONObject row = response.getJSONArray("data").getJSONObject(0);
+    assertEquals(180.0, row.getDouble("grandTotalAmount"), 0.005);
+    assertEquals("FAC", row.getString("apInvoiceSubtype"));
+    assertEquals(0, response.getJSONObject("listTotals").getInt("rowCount"));
+  }
+
+  @Test
+  public void failingListTotalsQueryWithRowsKeepsTheRowsAndOmitsListTotals() throws Exception {
+    PurchaseInvoiceHeaderHandler spied = Mockito.spy(handler);
+    Mockito.doReturn(DocumentListTotalsTest.failing(true)).when(spied).listTotals();
+    NeoContext ctx = listTotalsListCtx();
+    ctx.setPreviousResult(NeoResponse.ok(new JSONObject().put("response", new JSONObject()
+        .put("data", new JSONArray().put(invoiceRecord(false, 10.0, 200.0, 200.0))))));
+
+    NeoResponse result = stubbingFollowUpLookups(() -> spied.afterHandle(ctx));
+
+    JSONObject response = result.getBody().getJSONObject("response");
+    assertEquals(180.0, response.getJSONArray("data").getJSONObject(0).getDouble("grandTotalAmount"),
+        0.005);
+    assertFalse(response.has("listTotals"));
+  }
+
+  /**
+   * A non-GET response (here an action POST that captured an SII authorization number) skips the
+   * list totals and still reaches the authorization-number injection untouched.
+   */
+  @Test
+  public void nonGetRequestSkipsListTotalsAndStillInjectsTheAuthorizationNumber() throws Exception {
+    PurchaseInvoiceHeaderHandler spied = Mockito.spy(handler);
+    java.lang.reflect.Field captured = AbstractInvoiceHeaderHandler.class
+        .getDeclaredField("siiAuthorizationCaptured");
+    captured.setAccessible(true);
+    captured.set(spied, true);
+    java.lang.reflect.Field pending = AbstractInvoiceHeaderHandler.class
+        .getDeclaredField("pendingSiiAuthorizationno");
+    pending.setAccessible(true);
+    pending.set(spied, "AUTH-1");
+    NeoContext ctx = NeoContext.builder().httpMethod("POST").build();
+    NeoListAggregateQuery.remember(ctx, Collections.emptyMap());
+    ctx.setPreviousResult(NeoResponse.ok(new JSONObject().put("response", new JSONObject()
+        .put("data", new JSONArray().put(new JSONObject().put("id", "pinv-1"))))));
+
+    NeoResponse result = spied.afterHandle(ctx);
+
+    JSONObject response = result.getBody().getJSONObject("response");
+    assertEquals("AUTH-1",
+        response.getJSONArray("data").getJSONObject(0).getString("aeatsiiAuthorizationno"));
+    assertFalse(response.has("listTotals"));
+    Mockito.verify(spied, Mockito.never()).listTotals();
+  }
+
+  /** Runs {@code call} with OBDal stubbed so the per-page follow-up batch query finds nothing. */
+  private static <T> T stubbingFollowUpLookups(java.util.concurrent.Callable<T> call)
+      throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(false);
+      return call.call();
+    }
+  }
 }
