@@ -6,6 +6,7 @@
 package com.etendoerp.go.payment.reconcile;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -15,6 +16,7 @@ import static org.mockito.ArgumentMatchers.startsWith;
 import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockingDetails;
 import static org.mockito.Mockito.mockStatic;
@@ -36,6 +38,7 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.mockito.MockedStatic;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
@@ -59,7 +62,8 @@ import com.etendoerp.go.schemaforge.email.InternalAlertService;
 
 /**
  * Specs for {@link BillingReconciliationService}: the checkout phases (recovery, provisioning
- * repair, no-session-id review), the stuck-event sweep, the dry run and the idempotent re-run.
+ * repair, no-session-id review), the stuck-event sweep and its count of events still awaiting
+ * review, the dry run and the idempotent re-run.
  * Phase 4 (subscriptions) is {@link SubscriptionReconciler}'s and is mocked here; its own specs
  * live in {@code SubscriptionReconcilerTest}.
  *
@@ -88,6 +92,8 @@ public class BillingReconciliationServiceTest {
   private final List<String> candidateQueries = new ArrayList<>();
   /** Checkout requests a single-request lookup (the stuck-event sweep) finds, by id. */
   private final java.util.Map<String, CheckoutRequest> requestsById = new java.util.HashMap<>();
+  /** When set, the stuck-event page query throws it: the sweep phase fails. */
+  private RuntimeException staleQueryFailure;
 
   private StripeApiClient stripe;
   private CheckoutRequestStore checkoutStore;
@@ -155,6 +161,9 @@ public class BillingReconciliationServiceTest {
                 && ReviewQueue.EVENT_TYPE.equals(invocation.getArgument(1)))
             .count());
     when(eventStore.findStaleReceived(any(), any(), any(), anyInt(), anyInt())).thenAnswer(call -> {
+      if (staleQueryFailure != null) {
+        throw staleQueryFailure;
+      }
       java.util.Collection<?> types = call.getArgument(1, java.util.Collection.class);
       int offset = call.getArgument(3, Integer.class);
       int max = call.getArgument(4, Integer.class);
@@ -248,6 +257,28 @@ public class BillingReconciliationServiceTest {
     verify(provisioning, never()).provision(anyString(), any());
     verify(eventStore, never()).markIgnored(anyString(), anyString());
     verifyNoRows();
+  }
+
+  /**
+   * Stuck events still {@code RECEIVED} under a review row, as the database would count them:
+   * those parked before the run, plus the review rows this run writes (the store mock accepts
+   * every write, and a dry run writes none).
+   */
+  private void awaitingInTheStore(int parkedBefore) {
+    when(eventStore.countReceivedUnderReview(BillingReconciliationService.STALE_REVIEW_ID_PREFIX))
+        .thenAnswer(call -> parkedBefore + (int) mockingDetails(eventStore).getInvocations()
+            .stream()
+            .filter(invocation -> "recordReconciliation".equals(invocation.getMethod().getName())
+                && invocation.getArgument(0, String.class)
+                    .startsWith(BillingReconciliationService.STALE_REVIEW_ID_PREFIX))
+            .count());
+  }
+
+  /** A stuck payment event whose request is CREATING: no re-read can vouch for it, so parked. */
+  private void aStuckEventToPark() {
+    knownRequest("req-creating", "CREATING");
+    staleEvents.add(new BillingEventStore.StaleEvent("evt_creating",
+        "checkout.session.completed", "req-creating"));
   }
 
   private List<String> warnings() {
@@ -1227,6 +1258,144 @@ public class BillingReconciliationServiceTest {
     verify(eventStore, never()).markIgnored(anyString(), anyString());
     assertEquals(0, result.get(Counter.STALE_EVENTS_SWEPT));
     assertEquals(0, result.get(Counter.STALE_EVENTS_PARKED));
+  }
+
+  // ── Stuck events still awaiting review ─────────────────────────────────────────────────
+
+  /** One stuck event never reads as two: parked in this run, it is not also awaiting. */
+  @Test
+  public void anEventParkedInThisRunIsCountedAsParkedAndNotAlsoAsAwaiting() {
+    aStuckEventToPark();
+    awaitingInTheStore(0);
+
+    ReconciliationResult result = run(false);
+
+    assertEquals(1, result.get(Counter.STALE_EVENTS_PARKED));
+    assertEquals(0, result.get(Counter.STALE_EVENTS_AWAITING));
+    InOrder order = inOrder(eventStore);
+    order.verify(eventStore).findStaleReceived(any(), any(), any(), anyInt(), anyInt());
+    order.verify(eventStore).countReceivedUnderReview(
+        BillingReconciliationService.STALE_REVIEW_ID_PREFIX);
+  }
+
+  /** The sweep leaves a parked event out, so only the count keeps it in later summaries. */
+  @Test
+  public void anEventParkedByAnEarlierRunIsCountedAsAwaitingOnEveryRun() {
+    awaitingInTheStore(1);
+
+    ReconciliationResult first = run(false);
+    ReconciliationResult second = run(false);
+
+    for (ReconciliationResult result : List.of(first, second)) {
+      assertEquals(0, result.get(Counter.STALE_EVENTS_PARKED));
+      assertEquals(1, result.get(Counter.STALE_EVENTS_AWAITING));
+      assertTrue(result.toString(), result.toString().endsWith(
+          "1 stuck provider event still awaiting review. Everything is consistent; nothing was "
+              + "changed."));
+    }
+    verifyNoRows();
+  }
+
+  @Test
+  public void anEarlierParkedEventAndOneParkedNowAreOneOfEach() {
+    aStuckEventToPark();
+    awaitingInTheStore(1);
+
+    ReconciliationResult result = run(false);
+
+    assertEquals(1, result.get(Counter.STALE_EVENTS_PARKED));
+    assertEquals(1, result.get(Counter.STALE_EVENTS_AWAITING));
+  }
+
+  /** A dry run writes no review row, so nothing it would park is subtracted from the count. */
+  @Test
+  public void aDryRunSubtractsNothingFromTheAwaitingCount() {
+    aStuckEventToPark();
+    awaitingInTheStore(1);
+
+    ReconciliationResult result = run(true);
+
+    verifyNoRows();
+    assertEquals(1, result.get(Counter.STALE_EVENTS_PARKED));
+    assertEquals(1, result.get(Counter.STALE_EVENTS_AWAITING));
+  }
+
+  /** Only rows actually written are subtracted: one that already existed was not this run's. */
+  @Test
+  public void aReviewRowThatAlreadyExistedIsNotSubtracted() {
+    aStuckEventToPark();
+    when(eventStore.recordReconciliation(
+        startsWith(BillingReconciliationService.STALE_REVIEW_ID_PREFIX), anyString(), any(),
+        anyString(), any(), any())).thenReturn(false);
+    when(eventStore.countReceivedUnderReview(BillingReconciliationService.STALE_REVIEW_ID_PREFIX))
+        .thenReturn(1);
+
+    ReconciliationResult result = run(false);
+
+    assertEquals(1, result.get(Counter.STALE_EVENTS_PARKED));
+    assertEquals(1, result.get(Counter.STALE_EVENTS_AWAITING));
+  }
+
+  /** Nothing is swept when no family was re-read in full, but the count is still taken. */
+  @Test
+  public void theAwaitingCountIsTakenWhenNoEventTypeCanBeSwept() {
+    doAnswer(call -> {
+      ReconciliationResult running = call.getArgument(0, ReconciliationResult.class);
+      running.markIncomplete(ReconciliationResult.Phase.CHECKOUT_RECOVERY, "provider reads failed");
+      running.markIncomplete(ReconciliationResult.Phase.SUBSCRIPTIONS, "breaker");
+      return null;
+    }).when(subscriptions).run(any(), any());
+    awaitingInTheStore(2);
+
+    ReconciliationResult result = run(false);
+
+    verify(eventStore, never()).findStaleReceived(any(), any(), any(), anyInt(), anyInt());
+    assertEquals(2, result.get(Counter.STALE_EVENTS_AWAITING));
+  }
+
+  @Test
+  public void theAwaitingCountIsTakenWhenTheSweepThrows() {
+    staleQueryFailure = new IllegalStateException("db gone");
+    awaitingInTheStore(1);
+
+    ReconciliationResult result = run(false);
+
+    assertEquals(List.of("stuck events failed: IllegalStateException"), result.getErrors());
+    assertEquals(1, result.get(Counter.STALE_EVENTS_AWAITING));
+  }
+
+  /** A failing count is one more error; what the run did and read stands. */
+  @Test
+  public void aFailingAwaitingCountIsAnErrorAndChangesNothingElse() {
+    aStuckEventToPark();
+    when(eventStore.countReceivedUnderReview(anyString()))
+        .thenThrow(new IllegalStateException("db gone"));
+
+    ReconciliationResult result = run(false);
+
+    assertEquals(List.of("stuck-event reviews failed: IllegalStateException"),
+        result.getErrors());
+    assertTrue(result.hasFailures());
+    assertEquals(1, result.get(Counter.STALE_EVENTS_PARKED));
+    assertEquals(0, result.get(Counter.STALE_EVENTS_AWAITING));
+    for (ReconciliationResult.Phase phase : ReconciliationResult.Phase.values()) {
+      assertTrue(phase.name(), result.isComplete(phase));
+    }
+  }
+
+  /** The review row tells the operator the resolution that clears the count: a resend. */
+  @Test
+  public void theStuckEventReviewRowSaysToIgnoreOrResendTheOriginalEvent() {
+    aStuckEventToPark();
+
+    run(false);
+
+    ArgumentCaptor<String> reason = ArgumentCaptor.forClass(String.class);
+    verify(eventStore).recordReconciliation(eq("reconcile:stale-event-review:evt_creating"),
+        eq("reconciliation.stale-event-review"), eq("req-creating"),
+        eq(BillingEventStore.RESULT_FAILED), reason.capture(), any());
+    assertTrue(reason.getValue(), reason.getValue().contains("to FAILED and resend it"));
+    assertFalse(reason.getValue(), reason.getValue().contains("replay it"));
   }
 
   // ── Dry run ──────────────────────────────────────────────────────────────────────────────

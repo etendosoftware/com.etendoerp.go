@@ -294,6 +294,48 @@ public class ReconciliationResultTest {
     assertEquals("add() accumulates and ignores zero", 3, result.get(Counter.AWAITING_REVIEW));
   }
 
+  // ── Stuck events still awaiting review (ETP-5048) ─────────────────────────────────────────
+
+  @Test
+  public void stuckEventsAwaitingReviewReadInTheSingularAndPluralInBothKindsOfRun() {
+    for (boolean dryRun : new boolean[] { false, true }) {
+      assertEquals("1 stuck provider event still awaiting review",
+          Counter.STALE_EVENTS_AWAITING.describe(1, dryRun));
+      assertEquals("2 stuck provider events still awaiting review",
+          Counter.STALE_EVENTS_AWAITING.describe(2, dryRun));
+    }
+  }
+
+  @Test
+  public void stuckEventsAwaitingReviewAreListedRightAfterTheOnesParkedInThisRun() {
+    ReconciliationResult result = new ReconciliationResult(false);
+    result.add(Counter.STALE_EVENTS_AWAITING, 2);
+    result.increment(Counter.STALE_EVENTS_PARKED);
+    result.increment(Counter.PROVIDER_ERRORS);
+
+    assertEquals(Counter.STALE_EVENTS_PARKED.ordinal() + 1,
+        Counter.STALE_EVENTS_AWAITING.ordinal());
+    assertTrue(result.toString(), result.toString().contains("1 stuck provider event needing "
+        + "review, 2 stuck provider events still awaiting review, 1 provider read that failed"));
+  }
+
+  /** What earlier runs parked is not a write of this run: on its own the run is consistent. */
+  @Test
+  public void stuckEventsAwaitingReviewAreNoRepairAndLeaveARunConsistent() {
+    ReconciliationResult result = new ReconciliationResult(false);
+    result.add(Counter.STALE_EVENTS_AWAITING, 3);
+
+    assertEquals(0, result.repairs());
+    assertFalse(result.hasFailures());
+    assertEquals("Run " + result.getRunId() + ": 3 stuck provider events still awaiting review. "
+        + "Everything is consistent; nothing was changed.", result.toString());
+
+    ReconciliationResult dry = new ReconciliationResult(true);
+    dry.add(Counter.STALE_EVENTS_AWAITING, 1);
+    assertEquals("Dry run " + dry.getRunId() + ": 1 stuck provider event still awaiting review. "
+        + "Everything is consistent; nothing was changed.", dry.toString());
+  }
+
   @Test
   public void whatARunReReadIsRemembered() {
     ReconciliationResult result = new ReconciliationResult(false);

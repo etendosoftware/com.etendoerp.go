@@ -71,6 +71,7 @@ public final class ReconciliationResult {
         "would supersede %d stuck provider {event|events}"),
     STALE_EVENTS_PARKED("%d stuck provider {event|events} needing review",
         "would park %d stuck provider {event|events} for review"),
+    STALE_EVENTS_AWAITING("%d stuck provider {event|events} still awaiting review", null),
     PROVIDER_ERRORS("%d provider {read|reads} that failed", null);
 
     private final String label;
@@ -346,7 +347,8 @@ public final class ReconciliationResult {
   }
 
   /**
-   * Counts the writes (repairs plus alert rows) the run made or, in a dry run, would make.
+   * Counts the writes (repairs plus alert rows) the run made or, in a dry run, would make. The
+   * "still awaiting review" counts are not writes: they report what earlier runs parked.
    *
    * @return the number of writes
    */

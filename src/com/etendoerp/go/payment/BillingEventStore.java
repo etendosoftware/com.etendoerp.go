@@ -105,6 +105,13 @@ public class BillingEventStore implements CheckoutWebhookProcessor.EventStore {
   /** ETP-5048 — the rows of one type the billing reconciliation wrote. */
   private static final String RECONCILIATION_ROWS =
       "as be where be.provider = :provider and be.eventType = :eventType";
+  /**
+   * HQL condition, on a billing event aliased {@code be}: a row {@code <prefix><event id>} exists,
+   * the review row the billing reconciliation wrote for that event. Binds {@code :reviewPrefix}.
+   */
+  private static final String UNDER_REVIEW = "exists (select 1 from " + BillingEvent.ENTITY_NAME
+      + " rv where rv.event = concat(:reviewPrefix, be.event))";
+  private static final String PARAM_REVIEW_PREFIX = "reviewPrefix";
   private static final String PARAM_PROVIDER = "provider";
   private static final String PARAM_EVENT_TYPE = "eventType";
   private static final String PARAM_REQUEST_ID = "requestId";
@@ -271,8 +278,7 @@ public class BillingEventStore implements CheckoutWebhookProcessor.EventStore {
         where.append(" and be.eventType in (:types)");
       }
       if (reviewIdPrefix != null) {
-        where.append(" and not exists (select 1 from ").append(BillingEvent.ENTITY_NAME)
-            .append(" rv where rv.event = concat(:reviewPrefix, be.event))");
+        where.append(" and not ").append(UNDER_REVIEW);
       }
       OBQuery<BillingEvent> query = OBDal.getInstance().createQuery(BillingEvent.class,
               where.append(" order by be.receivedAt asc").toString())
@@ -287,7 +293,7 @@ public class BillingEventStore implements CheckoutWebhookProcessor.EventStore {
         query.setNamedParameter("types", types);
       }
       if (reviewIdPrefix != null) {
-        query.setNamedParameter("reviewPrefix", reviewIdPrefix);
+        query.setNamedParameter(PARAM_REVIEW_PREFIX, reviewIdPrefix);
       }
       List<StaleEvent> stale = new ArrayList<>();
       for (BillingEvent event : query.list()) {
@@ -296,6 +302,33 @@ public class BillingEventStore implements CheckoutWebhookProcessor.EventStore {
       }
       return stale;
     });
+  }
+
+  /**
+   * ETP-5048 — how many provider events are still {@code RECEIVED} although a review row
+   * {@code <prefix><event id>} exists for them: the stuck events the billing reconciliation parked
+   * that nobody has resolved yet. {@link #findStaleReceived} leaves exactly these out.
+   *
+   * <p>Open is read off the original event, not the review row: an operator resolves a parked event
+   * by moving the original row out of {@code RECEIVED} ({@code IGNORED}, or {@code FAILED} and a
+   * resend), and may leave the review row as it is. So the count clears itself.
+   *
+   * @param reviewIdPrefix the review rows' id prefix; blank counts nothing
+   * @return the count
+   */
+  public int countReceivedUnderReview(String reviewIdPrefix) {
+    if (StringUtils.isBlank(reviewIdPrefix)) {
+      return 0;
+    }
+    return runAsSystem(() -> OBDal.getInstance().createQuery(BillingEvent.class,
+            "as be where be.eventResult = :received and be.provider = :provider and "
+                + UNDER_REVIEW)
+        .setNamedParameter("received", RESULT_RECEIVED)
+        .setNamedParameter(PARAM_PROVIDER, PROVIDER_STRIPE)
+        .setNamedParameter(PARAM_REVIEW_PREFIX, reviewIdPrefix)
+        .setFilterOnReadableClients(false)
+        .setFilterOnReadableOrganization(false)
+        .count());
   }
 
   /**

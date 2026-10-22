@@ -88,8 +88,10 @@ import com.etendoerp.go.schemaforge.data.Account;
  * deterministic {@code recordReconciliation} row and its duplicate answer, {@code exists}, the
  * {@code touchReconciliation} upsert of its back-off marker, the open-review queries
  * ({@code hasOpenReconciliation}, the two counts, {@code latestReconciliationSummary}) and the
- * {@code findStaleReceived} page query behind the stuck-event sweep. Their fixtures use an event
- * type unique to the test, so rows the environment already holds never change a count.
+ * {@code findStaleReceived} page query behind the stuck-event sweep, and
+ * {@code countReceivedUnderReview}, the stuck events parked for review still awaiting it. Their
+ * fixtures use an event type or a review prefix unique to the test, so rows the environment
+ * already holds never change a count.
  *
  * @covers com.etendoerp.go.payment.BillingEventStore
  */
@@ -1254,6 +1256,97 @@ public class BillingEventStoreIntegrationTest extends OBBaseTest {
     assertEquals(free, page.get(0).eventId());
     assertEquals("Without the prefix both are returned", 2, ours(store.findStaleReceived(future,
         List.of(type), null, 0, 10_000)).size());
+  }
+
+  /**
+   * A review prefix unique to the test: the count reads the whole table, so only review rows
+   * under this prefix can reach it. Still inside {@link #EVENT_MARKER}, so cleanup removes them.
+   */
+  private static String uniqueReviewPrefix() {
+    return EVENT_MARKER + "rv" + UUID.randomUUID().toString().replace("-", "") + ":";
+  }
+
+  /** Records the reconciler's review row {@code <prefix><eventId>}, left FAILED (open). */
+  private void parkForReview(String reviewPrefix, String eventId) {
+    assertTrue(store.recordReconciliation(reviewPrefix + eventId, "reconciliation.x", null,
+        FAILED, "parked", null));
+  }
+
+  /** A stuck Stripe event with a review row is one awaiting review; the sweep leaves it out. */
+  @Test
+  public void testCountReceivedUnderReviewCountsAStripeEventStillReceivedWithAReviewRow() {
+    String reviewPrefix = uniqueReviewPrefix();
+    String type = "etp5045it.e." + UUID.randomUUID();
+    String parked = newEventId();
+    String free = newEventId();
+    assertTrue(store.claim(parked, type, null, null));
+    assertTrue(store.claim(free, type, null, null));
+    parkForReview(reviewPrefix, parked);
+
+    assertEquals("Only the event with a review row", 1,
+        store.countReceivedUnderReview(reviewPrefix));
+    assertEquals("The sweep still leaves the reviewed event out", List.of(free),
+        ids(ours(store.findStaleReceived(new Date(System.currentTimeMillis() + 60_000L),
+            List.of(type), reviewPrefix, 0, 10_000))));
+  }
+
+  /**
+   * Resolved is read off the original event: once it leaves {@code RECEIVED} the count clears,
+   * even though the review row is still {@code FAILED}.
+   */
+  @Test
+  public void testCountReceivedUnderReviewClearsOnceTheOriginalLeavesReceived() {
+    String reviewPrefix = uniqueReviewPrefix();
+    String ignored = newEventId();
+    String failed = newEventId();
+    String applied = newEventId();
+    for (String eventId : List.of(ignored, failed, applied)) {
+      assertTrue(store.claim(eventId, COMPLETED, null, null));
+      parkForReview(reviewPrefix, eventId);
+    }
+    assertEquals(3, store.countReceivedUnderReview(reviewPrefix));
+
+    store.markIgnored(ignored, "Resolved by the operator");
+    assertEquals(2, store.countReceivedUnderReview(reviewPrefix));
+    store.markFailed(failed, "Resent from the Stripe dashboard");
+    assertEquals(1, store.countReceivedUnderReview(reviewPrefix));
+    store.markApplied(applied);
+    assertEquals(0, store.countReceivedUnderReview(reviewPrefix));
+
+    for (String eventId : List.of(ignored, failed, applied)) {
+      assertEquals("The review row is left as it is", FAILED, rawResult(reviewPrefix + eventId));
+    }
+  }
+
+  @Test
+  public void testCountReceivedUnderReviewIgnoresUnreviewedAndNonProviderRows() {
+    String reviewPrefix = uniqueReviewPrefix();
+    // RECEIVED, but no review row.
+    assertTrue(store.claim(newEventId(), COMPLETED, null, null));
+    // A review row, but over a reconciler row, which is never a provider event.
+    String reconcilerRow = newEventId();
+    assertTrue(store.recordReconciliation(reconcilerRow, "reconciliation.x", null, RECEIVED,
+        null, null));
+    parkForReview(reviewPrefix, reconcilerRow);
+    // Reviewed, but under another prefix.
+    String reviewedElsewhere = newEventId();
+    assertTrue(store.claim(reviewedElsewhere, COMPLETED, null, null));
+    parkForReview(uniqueReviewPrefix(), reviewedElsewhere);
+
+    assertEquals(0, store.countReceivedUnderReview(reviewPrefix));
+  }
+
+  /**
+   * With an empty prefix every event would be its own review row, so every RECEIVED event would
+   * count; a blank prefix counts nothing instead.
+   */
+  @Test
+  public void testCountReceivedUnderReviewWithABlankPrefixCountsNothing() {
+    assertTrue(store.claim(newEventId(), COMPLETED, null, null));
+
+    assertEquals(0, store.countReceivedUnderReview(null));
+    assertEquals(0, store.countReceivedUnderReview(""));
+    assertEquals(0, store.countReceivedUnderReview("   "));
   }
 
   @Test

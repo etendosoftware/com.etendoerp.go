@@ -202,6 +202,14 @@ checkout and subscription rows, and its audit rows are ordinary billing events.
       internal alert): it names no request, the provider contradicts it, its subscription was not
       read, or D leaves the status to the webhook (`past_due`, `unpaid`, `incomplete`). A payment
       event whose request phase A has not reached yet is left for a later run.
+    - **A parked event stays counted until it is resolved** (Martin, 2026-10-22). The sweep leaves
+      it out, so every later run reports it as "N stuck provider events still awaiting review"
+      (`STALE_EVENTS_AWAITING`) for as long as its review row exists **and** the original event is
+      still `RECEIVED`. Open is read off the original event, not the review row: the operator
+      resolves it by moving the original row out of `RECEIVED` (§8), and the count clears itself
+      whatever happens to the review row. An event parked in the same run is counted as parked
+      only, never also as awaiting. The count is taken on every run, also when no family could be
+      swept.
 13. **Tags and counts** — every preference-route branch carries `ETP-5046-TRANSITIONAL-FALLBACK` and
     has its own count in the run summary.
 14. **Non-retryable failures** — a provisioning failure whose code is deterministic
@@ -236,7 +244,7 @@ The phases run in this order, each with its own transactions:
 | B | Provisioning repair | `PAID` rows older than the paid grace (`PAID_AT`, else the creation); `PROVISIONING` rows whose lease is stale or whose failure is retryable; without a created client, or a `PAID` re-subscription; not parked, not backing off | none for a new purchase; `GET /v1/subscriptions/{id}` for a re-subscription | `PaidProvisioningService` under the `claimForProvisioning` lease, or `PaidReactivationService` (decision 15). A non-retryable failure, a unique violation, an attempt that cannot start (unknown currency, missing account, not the owner, demo source refused, not confirmed paid), or an exhausted attempt budget (`max.provisioning.attempts`, §7) → needs review, once, in the same run, whether the failure was recorded earlier or met by this run's attempt (then alerted once, by the review). |
 | C | No-session-id review | `CREATING` rows older than the abandoned window, not parked | none | parked for review once; the run then counts as awaiting the open reviews earlier runs parked (one parked in this run is counted as a new review only) |
 | D | Subscriptions (local → provider) | open active rows with a Stripe subscription id; preference-route tenants, latest purchase only (decision 9) | `GET /v1/subscriptions?status=all&expand[]=data.latest_invoice` paginated, then `GET /v1/subscriptions/{id}` for every local id the list did not return, up to the batch size | the status mapping of decision 7, applied through `SubscriptionLifecycleApplier` + `TenantEnvironmentLifecycleService.applySubscriptionEvent` on the provider's clock (decision 16), after the no-op diff. Missing price/amount/currency on an open row (the R37 adoption step, register §2.4) is filled from the subscription's first item price, only where NULL. |
-| E | Stale `RECEIVED` sweep | Stripe events of the families whose phases completed, `RECEIVED` older than the threshold, not parked | none | per decision 12: superseded (`IGNORED`), parked for review, or left. |
+| E | Stale `RECEIVED` sweep | Stripe events of the families whose phases completed, `RECEIVED` older than the threshold, not parked | none | per decision 12: superseded (`IGNORED`), parked for review, or left. Then, on every run, the stuck events earlier runs parked that are still `RECEIVED` are counted as awaiting review (one parked in this run is counted as parked only) |
 
 **A run that could not check everything fails** (review W3, 2026-10-21). A failed provider read,
 an incomplete list sweep, capped direct reads, an item error or a tripped breaker make the run
@@ -371,7 +379,7 @@ Billing-event ids are deterministic:
 | needs review (non-retryable or unique-violation failure, an attempt that cannot start, not confirmed paid, no session id, attempts exhausted) | `reconcile:needs-review:<requestId>`, then `…:<requestId>:2`, … after a release | `FAILED` while open; `IGNORED` once released |
 | re-subscription applied | `reconcile:reactivation-applied:<requestId>` | `APPLIED` |
 | back-off after a failed item | `reconcile:retry-later:<requestId>` (one row, refreshed) | `FAILED` |
-| stuck event parked for review | `reconcile:stale-event-review:<eventId>` | `FAILED` |
+| stuck event parked for review | `reconcile:stale-event-review:<eventId>` | `FAILED`; open while the original event is still `RECEIVED` |
 | breaker tripped | `reconcile:breaker-tripped:<yyyy-MM-dd>` | `IGNORED` |
 | scheduled run while the flag is off | `reconcile:schedule-flag-off:<yyyy-MM-dd>` | `IGNORED` |
 | checkout expired | `reconcile:checkout-expired:<requestId>` | `APPLIED` |
@@ -505,9 +513,36 @@ least 1; a share outside 0…1 falls back to 0.25. The back-off after a failed i
     ```
 - **A row backing off** (`reconcile:retry-later:<request>`) is retried by itself after 6 h; to retry
   sooner, delete that row.
-- **A parked stuck event** (`reconcile:stale-event-review:<event>`): check the event in the Stripe
-  dashboard, then set the original event row to `IGNORED` (or let Stripe redeliver it) and delete or
-  ignore the review row.
+- **A parked stuck event** (`reconcile:stale-event-review:<event>`, the original event's id after
+  the prefix): check the event in the Stripe dashboard, then resolve the **original** event row,
+  which is still `RECEIVED`. Letting Stripe redeliver it does nothing: the claim re-opens only a
+  `FAILED` row, so a delivery of a `RECEIVED` one is counted as a duplicate (`DUPLICATE_COUNT`)
+  and never processed.
+  - To drop it (its effect is already in place, or must not happen):
+
+    ```sql
+    update etgo_billing_event
+       set event_result = 'IGNORED',
+           failure_reason = 'Resolved by <who>: <why>', updated = now()
+     where event_id = '<evt_…>' and event_result = 'RECEIVED';
+    ```
+  - To replay it, first make it re-claimable, then resend the event from the Stripe dashboard
+    (the event's page, or the webhook endpoint's delivery list): the next delivery re-claims
+    the `FAILED` row and processes it as a fresh claim.
+
+    ```sql
+    update etgo_billing_event set event_result = 'FAILED', updated = now()
+     where event_id = '<evt_…>' and event_result = 'RECEIVED';
+    ```
+
+    Resend right after the update. A `FAILED` row is not a stuck event, so no run sweeps,
+    parks or counts it again; until a delivery re-claims it, it only waits.
+
+  The review row needs no action. Once the original event is no longer `RECEIVED`, the run summary
+  stops counting it as "still awaiting review"; the review row stays as history. Do not delete it
+  while the original event is still `RECEIVED`: without it the event is no longer excluded, so the
+  next run sweeps it, parks it again and sends a second internal alert. Deleting it after the
+  original event is resolved is harmless.
 
 ## 9. Known limitations
 

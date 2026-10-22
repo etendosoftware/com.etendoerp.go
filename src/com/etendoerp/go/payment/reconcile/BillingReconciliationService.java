@@ -76,7 +76,8 @@ import com.etendoerp.go.schemaforge.email.InternalAlertService;
  *       replayed, but only when this run re-read the state it could have moved: its family's
  *       phases completed without an error, a failed read or a cap, and its own request or
  *       subscription was among what they read. A stuck event the run cannot vouch for is parked
- *       for review, once; one whose phase was incomplete is left for a later run. Alert-only
+ *       for review, once, and counted as awaiting review on every later run while it is still
+ *       {@code RECEIVED}; one whose phase was incomplete is left for a later run. Alert-only
  *       types (a dispute) are never swept.</li>
  * </ol>
  *
@@ -168,6 +169,8 @@ public class BillingReconciliationService {
   /** Where review alerts go; package-visible so tests can substitute it. */
   InternalAlertService internalAlerts = new InternalAlertService();
   private ReviewQueue reviews;
+  /** Stuck-event review rows this run wrote; reset by every run, as {@link #reviews} is. */
+  private int staleReviewsWritten;
 
   /** Production wiring. */
   public BillingReconciliationService() {
@@ -206,6 +209,7 @@ public class BillingReconciliationService {
     ReconciliationResult result = new ReconciliationResult(dryRun);
     ReconciliationAudit audit = new ReconciliationAudit(eventStore, dryRun, internalAlerts);
     reviews = new ReviewQueue(eventStore);
+    staleReviewsWritten = 0;
     Map<String, CheckoutRow> recovered = new HashMap<>();
     runPhase(Phase.CHECKOUT_RECOVERY.label(), Phase.CHECKOUT_RECOVERY, result,
         () -> recoverCheckouts(result, audit, recovered));
@@ -216,6 +220,8 @@ public class BillingReconciliationService {
     runPhase(Phase.SUBSCRIPTIONS.label(), Phase.SUBSCRIPTIONS, result,
         () -> subscriptions.run(result, audit));
     runPhase("stuck events", null, result, () -> sweepStaleEvents(result, audit));
+    // Its own step, after the sweep and whatever the sweep could do: a DB fact on every run.
+    runPhase("stuck-event reviews", null, result, () -> countStaleEventsAwaiting(result));
     return result;
   }
 
@@ -733,7 +739,9 @@ public class BillingReconciliationService {
     if (audit.write(STALE_REVIEW_ID_PREFIX + event.eventId(), KIND_STALE_EVENT_REVIEW,
         event.requestId(), BillingEventStore.RESULT_FAILED, "Stuck provider event " + type
             + " could not be vouched for by a re-read of the provider; review it in the Stripe "
-            + "dashboard and set it to IGNORED or replay it", summary("event", event.eventId()))) {
+            + "dashboard and set the original event to IGNORED, or to FAILED and resend it",
+        summary("event", event.eventId()))) {
+      staleReviewsWritten++;
       audit.internalAlert("billing-reconcile-stale-event", event.eventId(), KIND_STALE_EVENT_REVIEW,
           null);
     }
@@ -743,6 +751,21 @@ public class BillingReconciliationService {
     result.item("event " + event.eventId(), null, "park stuck " + type + " for review",
         "no re-read could vouch for it");
     return true;
+  }
+
+  /**
+   * Counts the stuck events parked by earlier runs that nobody has resolved yet: a review row
+   * exists and the original event is still {@code RECEIVED}. The sweep leaves them out, so without
+   * this a parked event would show in the summary of one run only. An event this run parked is
+   * already counted as parked, so it is left out here: one stuck event normally never reads as
+   * two. Only rows actually written are subtracted, so a dry run subtracts nothing. The exception
+   * is a review row that already existed ({@code audit.write} returned false, which only a race
+   * with an unlocked concurrent run produces): that event is counted as both parked and awaiting,
+   * as {@link ReviewQueue#countAwaiting} does for purchases.
+   */
+  private void countStaleEventsAwaiting(ReconciliationResult result) {
+    result.add(Counter.STALE_EVENTS_AWAITING, Math.max(0,
+        eventStore.countReceivedUnderReview(STALE_REVIEW_ID_PREFIX) - staleReviewsWritten));
   }
 
   /**
