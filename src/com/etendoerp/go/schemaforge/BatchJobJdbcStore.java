@@ -1,14 +1,13 @@
 /*
  * *************************************************************************
  * The contents of this file are subject to the Etendo License
- * (the "License"), you may not use this file except in compliance with
- * the License.
+ * (the "License"); you may not use this file except in compliance
+ * with the License.
  * You may obtain a copy of the License at
  * https://github.com/etendosoftware/etendo_core/blob/main/legal/Etendo_license.txt
  * Software distributed under the License is distributed on an
- * "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
- * implied. See the License for the specific language governing rights
- * and limitations under the License.
+ * "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or implied.
+ * See the License for the specific language governing rights and limitations under the License.
  * All portions are Copyright © 2021–2026 FUTIT SERVICES, S.L
  * All Rights Reserved.
  * Contributor(s): Futit Services S.L.
@@ -35,6 +34,11 @@ import org.openbravo.database.ExternalConnectionPool;
  * returns it in a try-with-resources: the job table is deliberately <i>not</i> written through the
  * DAL, so a progress write is visible to a status poll while a row's DAL transaction is still open
  * and can never join (or be rolled back with) it.</p>
+ *
+ * <p>Each step owns exactly one try-with-resources — the connection in {@link #run(Work)}, the
+ * statement in {@link #execute(String, Binder)} and {@link #query(String, Binder, RowReader)}, the
+ * result set in {@link #readFirstRow(PreparedStatement, RowReader)} — so no try block is ever
+ * nested inside another.</p>
  */
 final class BatchJobJdbcStore implements BatchJobStore {
 
@@ -91,65 +95,31 @@ final class BatchJobJdbcStore implements BatchJobStore {
 
   @Override
   public void insert(JobRecord job) {
-    run(c -> {
-      try (PreparedStatement s = c.prepareStatement(INSERT_SQL)) {
-        int i = 1;
-        s.setString(i++, job.id);
-        s.setString(i++, job.clientId);
-        s.setString(i++, job.orgId);
-        s.setString(i++, job.userId);
-        s.setString(i++, job.userId);
-        s.setString(i++, job.channel);
-        s.setString(i++, job.userId);
-        s.setString(i++, job.roleId);
-        s.setInt(i++, job.totalRows);
-        s.setInt(i++, job.totalOps);
-        s.setString(i, NODE_ID);
-        return s.executeUpdate();
-      }
+    execute(INSERT_SQL, statement -> {
+      int i = 1;
+      statement.setString(i++, job.id);
+      statement.setString(i++, job.clientId);
+      statement.setString(i++, job.orgId);
+      statement.setString(i++, job.userId);
+      statement.setString(i++, job.userId);
+      statement.setString(i++, job.channel);
+      statement.setString(i++, job.userId);
+      statement.setString(i++, job.roleId);
+      statement.setInt(i++, job.totalRows);
+      statement.setInt(i++, job.totalOps);
+      statement.setString(i, NODE_ID);
     });
   }
 
   @Override
   public JobRecord find(String jobId) {
-    return run(c -> {
-      try (PreparedStatement s = c.prepareStatement(SELECT_SQL)) {
-        s.setString(1, jobId);
-        try (ResultSet rs = s.executeQuery()) {
-          if (!rs.next()) {
-            return null;
-          }
-          JobRecord job = new JobRecord();
-          job.id = rs.getString(1);
-          job.clientId = rs.getString(2);
-          job.orgId = rs.getString(3);
-          job.userId = rs.getString(4);
-          job.roleId = rs.getString(5);
-          job.channel = rs.getString(6);
-          job.state = BatchJobState.valueOf(rs.getString(7));
-          job.totalRows = rs.getInt(8);
-          job.totalOps = rs.getInt(9);
-          job.processedRows = rs.getInt(10);
-          job.cancelRequested = "Y".equals(rs.getString(11));
-          job.result = rs.getString(12);
-          return job;
-        }
-      }
-    });
+    return query(SELECT_SQL, statement -> statement.setString(1, jobId), BatchJobJdbcStore::readJob);
   }
 
   @Override
   public Control readControl(String jobId) {
-    return run(c -> {
-      try (PreparedStatement s = c.prepareStatement(CONTROL_SQL)) {
-        s.setString(1, jobId);
-        try (ResultSet rs = s.executeQuery()) {
-          return rs.next()
-              ? new Control(BatchJobState.valueOf(rs.getString(1)), "Y".equals(rs.getString(2)))
-              : null;
-        }
-      }
-    });
+    return query(CONTROL_SQL, statement -> statement.setString(1, jobId),
+        rs -> new Control(BatchJobState.valueOf(rs.getString(1)), "Y".equals(rs.getString(2))));
   }
 
   @Override
@@ -169,13 +139,10 @@ final class BatchJobJdbcStore implements BatchJobStore {
 
   @Override
   public boolean flush(String jobId, int processedRows, String result) {
-    return run(c -> {
-      try (PreparedStatement s = c.prepareStatement(FLUSH_SQL)) {
-        s.setInt(1, processedRows);
-        s.setString(2, result);
-        s.setString(3, jobId);
-        return s.executeUpdate();
-      }
+    return execute(FLUSH_SQL, statement -> {
+      statement.setInt(1, processedRows);
+      statement.setString(2, result);
+      statement.setString(3, jobId);
     }) > 0;
   }
 
@@ -194,18 +161,15 @@ final class BatchJobJdbcStore implements BatchJobStore {
       sql.append(i == 0 ? "?" : ", ?");
     }
     sql.append(')');
-    return run(c -> {
-      try (PreparedStatement s = c.prepareStatement(sql.toString())) {
-        int i = 1;
-        s.setString(i++, to.name());
-        if (result != null) {
-          s.setString(i++, result);
-        }
-        s.setString(i++, jobId);
-        for (BatchJobState state : from) {
-          s.setString(i++, state.name());
-        }
-        return s.executeUpdate();
+    return execute(sql.toString(), statement -> {
+      int i = 1;
+      statement.setString(i++, to.name());
+      if (result != null) {
+        statement.setString(i++, result);
+      }
+      statement.setString(i++, jobId);
+      for (BatchJobState state : from) {
+        statement.setString(i++, state.name());
       }
     }) > 0;
   }
@@ -227,35 +191,22 @@ final class BatchJobJdbcStore implements BatchJobStore {
       sql.append(i == 0 ? "?" : ", ?");
     }
     sql.append(')');
-    run(c -> {
-      try (PreparedStatement s = c.prepareStatement(sql.toString())) {
-        int i = 1;
-        for (String id : jobIds) {
-          s.setString(i++, id);
-        }
-        return s.executeUpdate();
+    execute(sql.toString(), statement -> {
+      int i = 1;
+      for (String id : jobIds) {
+        statement.setString(i++, id);
       }
     });
   }
 
   @Override
   public int sweepStale(int staleSeconds) {
-    return run(c -> {
-      try (PreparedStatement s = c.prepareStatement(SWEEP_SQL)) {
-        s.setInt(1, staleSeconds);
-        return s.executeUpdate();
-      }
-    });
+    return execute(SWEEP_SQL, statement -> statement.setInt(1, staleSeconds));
   }
 
   @Override
   public int purgeFinished(int retentionHours) {
-    return run(c -> {
-      try (PreparedStatement s = c.prepareStatement(PURGE_SQL)) {
-        s.setInt(1, retentionHours);
-        return s.executeUpdate();
-      }
-    });
+    return execute(PURGE_SQL, statement -> statement.setInt(1, retentionHours));
   }
 
   @Override
@@ -263,32 +214,83 @@ final class BatchJobJdbcStore implements BatchJobStore {
     update(DELETE_SQL, jobId);
   }
 
+  /** Reads the job row of {@link #SELECT_SQL}. */
+  private static JobRecord readJob(ResultSet rs) throws SQLException {
+    JobRecord job = new JobRecord();
+    job.id = rs.getString(1);
+    job.clientId = rs.getString(2);
+    job.orgId = rs.getString(3);
+    job.userId = rs.getString(4);
+    job.roleId = rs.getString(5);
+    job.channel = rs.getString(6);
+    job.state = BatchJobState.valueOf(rs.getString(7));
+    job.totalRows = rs.getInt(8);
+    job.totalOps = rs.getInt(9);
+    job.processedRows = rs.getInt(10);
+    job.cancelRequested = "Y".equals(rs.getString(11));
+    job.result = rs.getString(12);
+    return job;
+  }
+
+  /** Runs a statement that binds a single id. */
   private int update(String sql, String id) {
-    return run(c -> {
-      try (PreparedStatement s = c.prepareStatement(sql)) {
-        s.setString(1, id);
-        return s.executeUpdate();
+    return execute(sql, statement -> statement.setString(1, id));
+  }
+
+  /** Runs a statement with its parameters bound and returns the number of affected rows. */
+  private static int execute(String sql, Binder binder) {
+    return run(connection -> {
+      try (PreparedStatement statement = connection.prepareStatement(sql)) {
+        binder.bind(statement);
+        return statement.executeUpdate();
       }
     });
   }
 
-  private int count(String sql, String... params) {
-    return run(c -> {
-      try (PreparedStatement s = c.prepareStatement(sql)) {
-        for (int i = 0; i < params.length; i++) {
-          s.setString(i + 1, params[i]);
-        }
-        try (ResultSet rs = s.executeQuery()) {
-          return rs.next() ? rs.getInt(1) : 0;
-        }
+  /** Runs a query and maps its first row, or null when the query answers no row. */
+  private static <T> T query(String sql, Binder binder, RowReader<T> reader) {
+    return run(connection -> {
+      try (PreparedStatement statement = connection.prepareStatement(sql)) {
+        binder.bind(statement);
+        return readFirstRow(statement, reader);
       }
     });
+  }
+
+  /** Reads the first row of an executed query; the result set lives with its own try block. */
+  private static <T> T readFirstRow(PreparedStatement statement, RowReader<T> reader)
+      throws SQLException {
+    try (ResultSet rs = statement.executeQuery()) {
+      return rs.next() ? reader.read(rs) : null;
+    }
+  }
+
+  /** Counts the rows of a query; a query that answers no row counts zero. */
+  private int count(String sql, String... params) {
+    Integer value = query(sql, statement -> {
+      for (int i = 0; i < params.length; i++) {
+        statement.setString(i + 1, params[i]);
+      }
+    }, rs -> rs.getInt(1));
+    return value == null ? 0 : value;
   }
 
   /** A JDBC step that may throw {@link SQLException}. */
   @FunctionalInterface
   private interface Work<T> {
     T apply(Connection connection) throws SQLException;
+  }
+
+  /** Binds the parameters of a statement. */
+  @FunctionalInterface
+  private interface Binder {
+    void bind(PreparedStatement statement) throws SQLException;
+  }
+
+  /** Maps one row of a result set. */
+  @FunctionalInterface
+  private interface RowReader<T> {
+    T read(ResultSet rs) throws SQLException;
   }
 
   /** Runs one step on its own autocommit pooled connection. */
