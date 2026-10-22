@@ -77,8 +77,9 @@ import com.etendoerp.go.schemaforge.util.PostingAccountGuard;
  *   <li><b>GET list</b> (`/general-ledger-configuration/General?...`) and returns exactly one
  *       aggregate row in `response.data[0]`.</li>
  *   <li><b>POST list</b> (`/general-ledger-configuration/General?...`) and persists the backed
- *       sections (`general`, `defaults`, `dimensions`) in one transaction, then returns the
- *       refreshed aggregate row.</li>
+ *       sections (`general`, `defaults`, `dimensions`, `generalAccounts`) in one transaction, then
+ *       returns the refreshed aggregate row. A balancing switch left on without its account is
+ *       refused with the {@code MISSING_REQUIRED_FIELDS} 400 ({@link GeneralLedgerBalancingRule}).</li>
  * </ul>
  */
 @Named("generalLedgerConfigurationHandler")
@@ -246,6 +247,13 @@ public class GeneralLedgerConfigurationHandler implements NeoHandler {
     }
     if (generalAccounts != null) {
       applyGeneralAccountsChanges(state, generalAccounts);
+    }
+
+    NeoResponse refusal = GeneralLedgerBalancingRule.check(state.generalAccounts);
+    if (refusal != null) {
+      // The setters above already changed managed entities: drop them before the request commits.
+      SessionHandler.getInstance().rollback();
+      return refusal;
     }
 
     OBDal.getInstance().save(state.organization);

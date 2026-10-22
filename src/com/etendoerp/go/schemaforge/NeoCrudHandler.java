@@ -389,15 +389,23 @@ class NeoCrudHandler {
    * }</pre>
    */
   private NeoResponse buildMissingRequiredFieldsResponse(MissingRequiredFieldsException e) {
+    return buildMissingRequiredFieldsResponse(e.getFields(), "Missing required fields");
+  }
+
+  /**
+   * Same body, with a caller-chosen {@code message} (ETP-5724: a conditional requirement names its
+   * condition, so an API caller can fix the call itself).
+   */
+  static NeoResponse buildMissingRequiredFieldsResponse(List<String> fields, String message) {
     try {
       JSONArray fieldsArr = new JSONArray();
-      for (String f : e.getFields()) {
+      for (String f : fields) {
         fieldsArr.put(f);
       }
       JSONObject errorObj = new JSONObject();
       errorObj.put("code", MissingRequiredFieldsException.ERROR_CODE);
       errorObj.put(KEY_STATUS, HttpServletResponse.SC_BAD_REQUEST);
-      errorObj.put(KEY_MESSAGE, "Missing required fields");
+      errorObj.put(KEY_MESSAGE, message);
       errorObj.put("fields", fieldsArr);
       JSONObject body = new JSONObject();
       body.put(KEY_ERROR, errorObj);
