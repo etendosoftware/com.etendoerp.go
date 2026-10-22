@@ -1992,36 +1992,78 @@ public class AbstractInvoiceHeaderHandlerTest {
     }
   }
 
+  /**
+   * Table-driven (ETP-5840): an empty header rate (null or zero) never writes a rate row; it deletes
+   * the invoice's rows only when the caller itself left the rate empty ({@code rateCleared}) — a
+   * line save or a write that did not touch the rate keeps them ("no override set yet").
+   */
   @Test
-  public void autoCreateOrUpdate_nullRateOverride_noop() {
-    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
-         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
-         MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class)) {
-      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
-      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+  public void autoCreateOrUpdate_emptyRate_deletesRowsOnlyWhenCleared() {
+    Object[][] cases = {
+        { "null rate, not cleared", null, false, false },
+        { "null rate, cleared", null, true, true },
+        { "zero rate, cleared", BigDecimal.ZERO, true, true },
+    };
+    for (Object[] c : cases) {
+      String name = (String) c[0];
+      try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+           MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+           MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class);
+           MockedStatic<ConversionRateDocumentSync> syncMock =
+               Mockito.mockStatic(ConversionRateDocumentSync.class)) {
+        OBDal dal = mock(OBDal.class);
+        dalMock.when(OBDal::getInstance).thenReturn(dal);
+        Invoice invoice = mock(Invoice.class);
+        Currency currency = mock(Currency.class);
+        Organization org = mock(Organization.class);
+        when(dal.get(Invoice.class, "inv-no-rate")).thenReturn(invoice);
+        when(invoice.getId()).thenReturn("inv-no-rate");
+        when(invoice.getCurrency()).thenReturn(currency);
+        when(currency.getId()).thenReturn("usd-id");
+        when(invoice.getOrganization()).thenReturn(org);
+        when(org.getId()).thenReturn("org-1");
+        when(invoice.getETGOCurrencyRate()).thenReturn((BigDecimal) c[1]);
+        curMock.when(() -> OBCurrencyUtils.getOrgCurrency("org-1")).thenReturn("eur-id");
+        when(dal.getSession()).thenReturn(mock(org.hibernate.Session.class));
 
-      OBDal dal = mock(OBDal.class);
-      dalMock.when(OBDal::getInstance).thenReturn(dal);
+        AbstractInvoiceHeaderHandler.autoCreateOrUpdateConversionRateDocument("inv-no-rate",
+            (Boolean) c[2]);
 
-      Invoice invoice = mock(Invoice.class);
-      Currency currency = mock(Currency.class);
-      Organization org = mock(Organization.class);
-      when(dal.get(Invoice.class, "inv-no-rate")).thenReturn(invoice);
-      when(invoice.getCurrency()).thenReturn(currency);
-      when(currency.getId()).thenReturn("usd-id");
-      when(invoice.getOrganization()).thenReturn(org);
-      when(org.getId()).thenReturn("org-1");
-      when(invoice.getETGOCurrencyRate()).thenReturn(null);
-
-      curMock.when(() -> OBCurrencyUtils.getOrgCurrency("org-1")).thenReturn("eur-id");
-
-      org.hibernate.Session session = mock(org.hibernate.Session.class);
-      when(dal.getSession()).thenReturn(session);
-
-      callAutoCreateOrUpdate("inv-no-rate");
-
-      Mockito.verify(dal, Mockito.never()).getConnection();
+        try {
+          syncMock.verify(() -> ConversionRateDocumentSync.deleteAllForInvoice("inv-no-rate",
+              "eur-id"), Mockito.times((Boolean) c[3] ? 1 : 0));
+          Mockito.verify(dal, Mockito.never()).getConnection();
+        } catch (AssertionError e) {
+          throw new AssertionError(name, e);
+        }
+      }
     }
+  }
+
+  /**
+   * Table-driven (ETP-5840): a header CRUD write "left the rate empty" only when its body carries
+   * {@code eTGOCurrencyRate} without a positive value (null, zero, blank — sent by the caller or
+   * written by the pre-hook's recalculation). A body without the key, a positive rate, a non-CRUD
+   * request or no body never counts.
+   */
+  @Test
+  public void headerWriteClearedRate_onlyWhenTheBodyCarriesAnEmptyRate() throws Exception {
+    Object[][] cases = {
+        { "null rate", NeoEndpointType.CRUD, new JSONObject().put("eTGOCurrencyRate", JSONObject.NULL), true },
+        { "zero rate", NeoEndpointType.CRUD, new JSONObject().put("eTGOCurrencyRate", "0"), true },
+        { "blank rate", NeoEndpointType.CRUD, new JSONObject().put("eTGOCurrencyRate", ""), true },
+        { "positive rate", NeoEndpointType.CRUD, new JSONObject().put("eTGOCurrencyRate", "1.16"), false },
+        { "rate not in body", NeoEndpointType.CRUD, new JSONObject().put("description", "x"), false },
+        { "no body", NeoEndpointType.CRUD, null, false },
+        { "action request", NeoEndpointType.ACTION, new JSONObject().put("eTGOCurrencyRate", JSONObject.NULL), false },
+    };
+    for (Object[] c : cases) {
+      NeoContext ctx = NeoContext.builder().httpMethod("PATCH")
+          .endpointType((NeoEndpointType) c[1]).recordId("inv-1")
+          .requestBody((JSONObject) c[2]).build();
+      assertEquals((String) c[0], c[3], AbstractInvoiceHeaderHandler.headerWriteClearedRate(ctx));
+    }
+    assertFalse("null context", AbstractInvoiceHeaderHandler.headerWriteClearedRate(null));
   }
 
   /**

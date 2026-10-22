@@ -27,13 +27,16 @@ import static org.mockito.Mockito.verify;
 
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
+import org.mockito.MockedStatic;
+import org.mockito.Mockito;
 
 /**
  * Unit tests for the static helpers in AbstractOrderHeaderHandler:
  * {@code applyTotalDiscountBeforeComplete} and {@code syncTotalDiscountOnDocAction}.
  *
  * Tests verify which combinations of endpoint type, HTTP method, field name, and
- * request body cause TotalDiscountService.recalculate() to fire — and which do not.
+ * request body cause TotalDiscountService.recalculate() to fire — and which do not — and, for
+ * the exchange-rate guard (ETP-5840), which ACTION requests complete the order.
  *
  * @covers com.etendoerp.go.schemaforge.AbstractOrderHeaderHandler
  */
@@ -523,4 +526,58 @@ public class AbstractOrderHeaderHandlerTest {
       throw new RuntimeException(e);
     }
   }
+
+  // ── completesThroughAction (ETP-5840: which actions must carry an exchange rate) ──
+
+  /**
+   * Table-driven: an ACTION completes the order — so a foreign order without a rate is refused —
+   * when it is {@code documentAction} asking for {@code CO} (root or {@code fieldValues}), or the
+   * {@code DocAction} button whose EFFECTIVE value is {@code CO} (an empty body runs the stored
+   * value, as the quotation's "send to evaluation" posts it). Another value, a resolution failure, a
+   * GET, a CRUD request or a request without a record never counts.
+   */
+  @Test
+  public void testCompletesThroughAction_table() throws Exception {
+    Object[][] cases = {
+        // name, endpoint, method, field, recordId, body, effective DocAction ("THROW": fails)
+        { "documentAction root CO", NeoEndpointType.ACTION, "POST", "documentAction", ORDER_ID,
+            "{\"docAction\":\"CO\"}", null, true },
+        { "documentAction fieldValues CO", NeoEndpointType.ACTION, "POST", "documentAction",
+            ORDER_ID, "{\"fieldValues\":{\"documentAction\":\"CO\"}}", null, true },
+        { "documentAction other value", NeoEndpointType.ACTION, "POST", "documentAction",
+            ORDER_ID, "{\"docAction\":\"VO\"}", null, false },
+        { "DocAction button effective CO", NeoEndpointType.ACTION, "POST", "DocAction", ORDER_ID,
+            "{}", "CO", true },
+        { "DocAction button effective RE", NeoEndpointType.ACTION, "POST", "DocAction", ORDER_ID,
+            "{}", "RE", false },
+        { "DocAction resolution fails", NeoEndpointType.ACTION, "POST", "DocAction", ORDER_ID,
+            "{}", "THROW", false },
+        { "DocAction GET", NeoEndpointType.ACTION, "GET", "DocAction", ORDER_ID, "{}", "CO",
+            false },
+        { "no record", NeoEndpointType.ACTION, "POST", "documentAction", "",
+            "{\"docAction\":\"CO\"}", null, false },
+        { "CRUD write", NeoEndpointType.CRUD, "PATCH", null, ORDER_ID,
+            "{\"documentAction\":\"CO\"}", null, false },
+    };
+    for (Object[] c : cases) {
+      NeoContext ctx = NeoContext.builder().endpointType((NeoEndpointType) c[1])
+          .httpMethod((String) c[2]).fieldName((String) c[3]).recordId((String) c[4])
+          .requestBody(new JSONObject((String) c[5])).build();
+      try (MockedStatic<DocActionRequestSupport> docAction =
+               Mockito.mockStatic(DocActionRequestSupport.class)) {
+        docAction.when(() -> DocActionRequestSupport.isDocActionButtonPost(ctx))
+            .thenCallRealMethod();
+        if ("THROW".equals(c[6])) {
+          docAction.when(() -> DocActionRequestSupport.effectiveDocAction(ctx))
+              .thenThrow(new IllegalStateException("no tab"));
+        } else {
+          docAction.when(() -> DocActionRequestSupport.effectiveDocAction(ctx))
+              .thenReturn((String) c[6]);
+        }
+
+        assertEquals((String) c[0], c[7], AbstractOrderHeaderHandler.completesThroughAction(ctx));
+      }
+    }
+  }
 }
+
