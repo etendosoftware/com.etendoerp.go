@@ -25,10 +25,20 @@ import org.junit.Test;
 /**
  * Covers the mailed auth links. Every case uses the explicit-base-URL overload so the assertions do
  * not depend on whether the machine running the suite happens to have the app base URL configured.
+ *
+ * @covers com.etendoerp.go.rest.EtendoGoAuthLinkBuilder
  */
 public class EtendoGoAuthLinkBuilderTest {
 
   private static final String BASE_URL = "https://app.example.test";
+
+  @Test
+  public void loginLinkLandsOnTheOnboardingRouteWithItsOwnParameter() {
+    // ETP-5847: the signup API's one-time login link; the app reads `loginToken` off this route.
+    assertEquals("https://app.example.test/onboarding?loginToken=a%2Bb",
+        EtendoGoAuthLinkBuilder.loginLink("a+b", BASE_URL));
+    assertNull(EtendoGoAuthLinkBuilder.loginLink("a+b", null));
+  }
 
   @Test
   public void verifyEmailLinkAppendsTheTokenToTheOnboardingRoute() {

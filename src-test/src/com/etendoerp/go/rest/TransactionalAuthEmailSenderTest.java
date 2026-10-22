@@ -19,6 +19,8 @@ package com.etendoerp.go.rest;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotEquals;
+import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -43,6 +45,8 @@ import com.etendoerp.go.schemaforge.email.TransactionalEmailService;
 
 /**
  * Tests server-side auth transactional email command construction.
+ *
+ * @covers com.etendoerp.go.rest.TransactionalAuthEmailSender
  */
 public class TransactionalAuthEmailSenderTest {
 
@@ -145,6 +149,48 @@ public class TransactionalAuthEmailSenderTest {
 
     assertBaseCommand(command, "client-1");
     assertEquals("es_ES", command.getString(EmailContractCommandSupport.FIELD_LANGUAGE));
+  }
+
+  @Test
+  public void sendEnvironmentReadyCarriesAGivenLinkInsteadOfTheDashboard() throws Exception {
+    // ETP-5847: a signup API account has no password, so its ready mail carries the one-time
+    // login link; the dashboard would ask for a password it does not have.
+    System.setProperty(PublicUrlResolver.APP_BASE_URL_PROPERTY, "https://app.example.test");
+    TransactionalEmailService emailService = mock(TransactionalEmailService.class);
+    TransactionalAuthEmailSender sender = new TransactionalAuthEmailSender(emailService);
+    Account account = account("account-1");
+
+    JSONObject command = sendAndCaptureCommand(emailService,
+        () -> sender.sendEnvironmentReady(account, "client-1", "es_ES",
+            "https://app.example.test/onboarding?loginToken=t"),
+        "environment-ready");
+
+    assertEquals("https://app.example.test/onboarding?loginToken=t",
+        command.getString(EmailContractCommandSupport.FIELD_LINK));
+    assertEquals("es_ES", command.getString(EmailContractCommandSupport.FIELD_LANGUAGE));
+  }
+
+  @Test
+  public void eachLoginLinkIsAMailOfItsOwn() throws Exception {
+    // ETP-5847: keyed on the client alone, a second link was answered DUPLICATE and never sent,
+    // while it had already replaced the link in the inbox.
+    Account account = account("account-1");
+    JSONObject first = sendLoginLinkMail(account, "https://app.example.test/onboarding?loginToken=a");
+    JSONObject second = sendLoginLinkMail(account,
+        "https://app.example.test/onboarding?loginToken=b");
+
+    String firstId = first.getString(EmailContractCommandSupport.FIELD_RECORD_ID);
+    assertTrue(firstId.startsWith("client-1:"));
+    assertNotEquals(firstId, second.getString(EmailContractCommandSupport.FIELD_RECORD_ID));
+    assertFalse("the token never reaches the send log", firstId.contains("loginToken"));
+  }
+
+  private static JSONObject sendLoginLinkMail(Account account, String link) throws Exception {
+    TransactionalEmailService emailService = mock(TransactionalEmailService.class);
+    TransactionalAuthEmailSender sender = new TransactionalAuthEmailSender(emailService);
+    return sendAndCaptureCommand(emailService,
+        () -> sender.sendEnvironmentReady(account, "client-1", "es_ES", link),
+        "environment-ready");
   }
 
   @Test

@@ -32,6 +32,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
@@ -65,6 +66,8 @@ import org.openbravo.model.common.enterprise.Warehouse;
  * NeoDefaultsSqlHelper) so no live database is required. Mocks are opened in
  * {@link #setUp()} and closed in reverse order in {@link #tearDown()} to guarantee
  * correct isolation when the full suite runs.</p>
+ *
+ * @covers com.etendoerp.go.schemaforge.CalloutRequestBuilder
  */
 public class CalloutRequestBuilderTest {
 
@@ -981,6 +984,165 @@ public class CalloutRequestBuilderTest {
 
     assertNotNull(params.get("inpcBpartnerId_LOC"));
     assertEquals("LOC-VAL", params.get("inpcBpartnerId_LOC")[0]);
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // ETP-5658 — per-tab standard properties and the current-record key param
+  // ─────────────────────────────────────────────────────────────────────
+  //
+  // The classic UI sends inpTableId / inpkeyColumnId / inpKeyName / keyColumnName / keyProperty
+  // with every callout request (ob-view-tab.js.ftl). Core callouts read them:
+  // SL_AdvPayment_Document and SimpleCallout.addDocumentNo derive the document-number table name
+  // from inpkeyColumnId (and fail when it is missing), and SL_IsDefault needs inpTableId,
+  // inpkeyColumnId and inpKeyName plus the current record id in the param named by inpKeyName.
+
+  /** Stubs the DAL entity of {@code tableId} with a single id property (the classic key property). */
+  private void stubKeyProperty(String tableId, String columnName, String propertyName) {
+    Entity entity = mock(Entity.class);
+    Property keyProperty = mock(Property.class);
+    when(keyProperty.getColumnName()).thenReturn(columnName);
+    when(keyProperty.getName()).thenReturn(propertyName);
+    when(entity.getIdProperties()).thenReturn(Collections.singletonList(keyProperty));
+    when(modelProvider.getEntityByTableId(tableId)).thenReturn(entity);
+  }
+
+  /** Wires a level-1 child tab under a level-0 parent whose table is C_Order (key inpcOrderId). */
+  private Tab wireChildTabWithParent() {
+    Tab parentTab = mockTab("parent", 10L, 0L);
+    Tab childTab = mockTab("child", 20L, 1L);
+    Window window = mock(Window.class);
+    when(childTab.getWindow()).thenReturn(window);
+    when(window.getADTabList()).thenReturn(new ArrayList<>(Arrays.asList(parentTab, childTab)));
+
+    Table parentTable = mock(Table.class);
+    when(parentTab.getTable()).thenReturn(parentTable);
+    when(parentTable.getDBTableName()).thenReturn("C_Order");
+    when(dal.get(Tab.class, "parent")).thenReturn(parentTab);
+    return childTab;
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void buildRequestParams_addsTabStandardProperties() throws Exception {
+    Tab tab = tabWithTable("FIN_PAYMENT");
+    Window window = mock(Window.class);
+    when(tab.getWindow()).thenReturn(window);
+    when(window.getId()).thenReturn("WIN-001");
+    when(tab.getId()).thenReturn("TAB-001");
+    when(tab.getTabLevel()).thenReturn(0L);
+    when(window.isSalesTransaction()).thenReturn(false);
+    stubKeyProperty("FIN_PAYMENT", "FIN_Payment_ID", "payment");
+
+    Map<String, String[]> params = CalloutRequestBuilder.buildRequestParams(
+        tab, "VAL", new JSONObject(), "inpfield", null);
+
+    assertEquals("FIN_PAYMENT", params.get("inpTableId")[0]);
+    assertEquals("FIN_Payment_ID", params.get("inpkeyColumnId")[0]);
+    assertEquals("inpfinPaymentId", params.get("inpKeyName")[0]);
+    assertEquals("FIN_Payment_ID", params.get("keyColumnName")[0]);
+    assertEquals("payment", params.get("keyProperty")[0]);
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void buildRequestParams_existingHeaderRecordFillsKeyParamFromId() throws Exception {
+    Tab tab = tabWithTable("FIN_PAYMENT");
+    Window window = mock(Window.class);
+    when(tab.getWindow()).thenReturn(window);
+    when(window.getId()).thenReturn("WIN-001");
+    when(tab.getId()).thenReturn("TAB-001");
+    when(tab.getTabLevel()).thenReturn(0L);
+    when(window.isSalesTransaction()).thenReturn(false);
+    stubKeyProperty("FIN_PAYMENT", "FIN_Payment_ID", "payment");
+
+    JSONObject formState = new JSONObject();
+    formState.put("id", "PAY-001");
+
+    Map<String, String[]> params = CalloutRequestBuilder.buildRequestParams(
+        tab, "VAL", formState, "inpfield", null);
+
+    assertEquals("the existing record id must feed the param named by inpKeyName",
+        "PAY-001", params.get("inpfinPaymentId")[0]);
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void buildRequestParams_keyParamsOmittedWhenKeyPropertyUnresolvable() throws Exception {
+    // tabWithTable leaves ModelProvider with no entity for the table (datasource-based tab).
+    Tab tab = tabWithTable("C_ORDER");
+    when(tab.getId()).thenReturn("TAB-001");
+    when(tab.getTabLevel()).thenReturn(0L);
+
+    Map<String, String[]> params = CalloutRequestBuilder.buildRequestParams(
+        tab, "VAL", new JSONObject(), "inpfield", null);
+
+    assertEquals("C_ORDER", params.get("inpTableId")[0]);
+    assertNull(params.get("inpkeyColumnId"));
+    assertNull(params.get("inpKeyName"));
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void buildRequestParams_clientSuppliedStandardPropertyIsNotOverwritten() throws Exception {
+    Tab tab = tabWithTable("FIN_PAYMENT");
+    Window window = mock(Window.class);
+    when(tab.getWindow()).thenReturn(window);
+    when(window.getId()).thenReturn("WIN-001");
+    when(tab.getId()).thenReturn("TAB-001");
+    when(tab.getTabLevel()).thenReturn(0L);
+    when(window.isSalesTransaction()).thenReturn(false);
+    stubKeyProperty("FIN_PAYMENT", "FIN_Payment_ID", "payment");
+
+    JSONObject formState = new JSONObject();
+    formState.put("inpkeyColumnId", "CLIENT_KEY_COL");
+
+    Map<String, String[]> params = CalloutRequestBuilder.buildRequestParams(
+        tab, "VAL", formState, "inpfield", null);
+
+    assertEquals("a client-supplied value must survive the standard-property pass",
+        "CLIENT_KEY_COL", params.get("inpkeyColumnId")[0]);
+    assertEquals("FIN_PAYMENT", params.get("inpTableId")[0]);
+  }
+
+  @Test
+  public void injectCurrentRecordKey_childTabInjectsItsOwnIdWhenParentKeyDiffers() throws Exception {
+    Tab childTab = wireChildTabWithParent();
+
+    Map<String, String[]> params = new HashMap<>();
+    params.put("inpcOrderId", new String[]{ "ORDER-1" });
+    JSONObject formState = new JSONObject();
+    formState.put("id", "LINE-1");
+
+    CalloutRequestBuilder.injectCurrentRecordKey(childTab, formState, "inpcOrderlineId", params);
+
+    assertEquals("LINE-1", params.get("inpcOrderlineId")[0]);
+  }
+
+  @Test
+  public void injectCurrentRecordKey_childTabSkipsWhenFormStateIdIsTheParentId() throws Exception {
+    // A new child row carries the header id in formState.id: it must not become the child key.
+    Tab childTab = wireChildTabWithParent();
+
+    Map<String, String[]> params = new HashMap<>();
+    params.put("inpcOrderId", new String[]{ "ORDER-1" });
+    JSONObject formState = new JSONObject();
+    formState.put("id", "ORDER-1");
+
+    CalloutRequestBuilder.injectCurrentRecordKey(childTab, formState, "inpcOrderlineId", params);
+
+    assertNull(params.get("inpcOrderlineId"));
+  }
+
+  @Test
+  public void injectCurrentRecordKey_existingValueIsNotOverwritten() throws Exception {
+    Map<String, String[]> params = new HashMap<>();
+    params.put("inpfinPaymentId", new String[]{ "CLIENT-1" });
+    JSONObject formState = new JSONObject();
+    formState.put("id", "FROM-ID");
+
+    CalloutRequestBuilder.injectCurrentRecordKey(null, formState, "inpfinPaymentId", params);
+
+    assertEquals("CLIENT-1", params.get("inpfinPaymentId")[0]);
   }
 
   // ─────────────────────────────────────────────────────────────────────
