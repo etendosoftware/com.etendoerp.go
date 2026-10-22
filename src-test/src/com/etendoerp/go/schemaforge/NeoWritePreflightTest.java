@@ -215,7 +215,7 @@ public class NeoWritePreflightTest {
         .equals(checked.get(1).getString("priceActual")));
   }
 
-  /** A refusal is answered as the default write step answers core's own: a 400 with its message. */
+  /** A refusal is answered as the default write step answers core's own: the 400 unknown_reference envelope. */
   @Test
   public void testARefusalBecomesTheDefaultStepsValidationError() throws Exception {
     ownership.when(() -> NeoReferenceOwnership.refuseUnownedReferences(any(), any(), any()))
@@ -230,8 +230,9 @@ public class NeoWritePreflightTest {
 
     assertNotNull(response);
     assertEquals(400, response.getHttpStatus());
-    String message = response.getBody().getJSONObject("error").getString("message");
-    assertTrue(message, message.contains("refered to but not present in the import set"));
+    JSONObject error = response.getBody().getJSONObject("error");
+    assertEquals(NeoErrorClassifier.CODE_UNKNOWN_REFERENCE, error.getString("code"));
+    assertEquals(NeoErrorClassifier.MSG_UNKNOWN_REFERENCE, error.getString("message"));
   }
   @Test
   public void deleteMustRejectAnUnknownTargetBeforeDispatch() {

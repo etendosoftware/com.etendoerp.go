@@ -98,7 +98,6 @@ public class NeoReferenceOwnershipIntegrationTest extends WeldBaseTest {
   /** Spain, shared reference data. */
   private static final String COUNTRY_SPAIN_ID = "106";
   private static final String MARKER = "NeoReferenceOwnershipIntegrationTest";
-  private static final String UNKNOWN_REFERENCE = "refered to but not present in the import set";
   private static final String SALES_ORDER = "sales-order";
   private static final String LINES = "lines";
   private static final String CONTACTS = "contacts";
@@ -195,8 +194,8 @@ public class NeoReferenceOwnershipIntegrationTest extends WeldBaseTest {
         .put(FIELD_PARENT_ID, missingId).put(FIELD_PRODUCT, TEST_PRODUCT_ID), null);
 
     assertEquals(missing.getHttpStatus(), foreign.getHttpStatus());
-    assertEquals(missing.getBody().toString(),
-        foreign.getBody().toString().replace(foreignOrderId, missingId));
+    // The unknown_reference envelope names no id, so the two bodies are byte-identical as sent.
+    assertEquals(missing.getBody().toString(), foreign.getBody().toString());
   }
 
   // ── a customization that persists on its own ───────────────────────────────
@@ -420,8 +419,9 @@ public class NeoReferenceOwnershipIntegrationTest extends WeldBaseTest {
     assertNotNull(response);
     assertEquals(response.getBody().toString(), HttpServletResponse.SC_BAD_REQUEST,
         response.getHttpStatus());
-    String message = response.getBody().getJSONObject("error").getString("message");
-    assertTrue(message, message.contains(UNKNOWN_REFERENCE));
+    JSONObject error = response.getBody().getJSONObject("error");
+    assertEquals(NeoErrorClassifier.CODE_UNKNOWN_REFERENCE, error.getString("code"));
+    assertEquals(NeoErrorClassifier.MSG_UNKNOWN_REFERENCE, error.getString("message"));
   }
 
   private static <T extends BaseOBObject> String firstIdOfClient(Class<T> type, String clientId) {
