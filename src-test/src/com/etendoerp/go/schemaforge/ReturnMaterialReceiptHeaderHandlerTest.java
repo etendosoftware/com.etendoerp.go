@@ -258,6 +258,11 @@ public class ReturnMaterialReceiptHeaderHandlerTest {
         assertNull("completion is the native process", result);
         continue;
       }
+      if ("post".equals(action) || "unpost".equals(action)) {
+        // ETP-5714: served by DocumentPostingService, which handle() consults first; it is not
+        // injected here, so handle() falls through exactly as for any action the entity leaves out.
+        continue;
+      }
       assertNotNull(action + " is dispatched by handle()", result);
       assertEquals(action, HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
     }
@@ -1878,6 +1883,20 @@ public class ReturnMaterialReceiptHeaderHandlerTest {
       NeoResponse result = handler.afterHandle(ctx);
 
       assertNull(result);
+    }
+  }
+
+  /**
+   * ETP-5714: the keys ReturnMaterialReceiptHeaderHandler's afterHandle adds to a GET record are declared, so an MCP
+   * {@code fields:[…]} projection does not report them in {@code unknownFields} while the same
+   * response carries them.
+   */
+  @org.junit.jupiter.api.Test
+  @org.junit.jupiter.api.DisplayName("customer return: enriched response keys are declared")
+  void enrichedKeysAreDeclaredReturnMaterialReceiptHeaderHandler() {
+    java.util.Set<String> declared = new ReturnMaterialReceiptHeaderHandler().responseEnrichedFields();
+    for (String key : java.util.List.of("sourceShipments", "sourceShipmentDocNo", "returnInvoices", "hasReturnInvoice", "linesCount", "invoiceStatus")) {
+      org.junit.jupiter.api.Assertions.assertTrue(declared.contains(key), key + " in " + declared);
     }
   }
 }

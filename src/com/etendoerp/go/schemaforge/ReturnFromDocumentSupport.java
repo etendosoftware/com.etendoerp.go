@@ -274,6 +274,7 @@ final class ReturnFromDocumentSupport {
                 + "returnable. Omit to return everything still returnable."),
         NeoActionContract.Param.optional(PARAM_REASON, NeoActionContract.TYPE_STRING,
             "Why the goods go back; kept as the description of the return."))
-        .withIdDescription("The id of the completed " + sourceNoun + " to return goods from.");
+        .withIdDescription("The id of the completed " + sourceNoun + " to return goods from.")
+        .availableWhen(DocumentAvailability.WHEN_COMPLETED);
   }
 }

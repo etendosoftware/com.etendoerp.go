@@ -353,7 +353,7 @@ import org.openbravo.model.ad.ui.Window;
  * <p><b>A seventh trigger - the ADD-path fix (rounds 1-2) had its own blind spot: core cannot
  * always SEE a pre-existing, already-correct row before it propagates.</b> Live-confirmed
  * BLOCKER (ETP-4906, Task B6, 7th round, 2026-08-17), found via {@code
- * UserRoleCompositionServiceOverlapReverificationTest}. Both ADD-side triggers ({@code
+ * UserRoleCompositionServiceOverlapReverificationIntegrationTest}. Both ADD-side triggers ({@code
  * guardNewInheritance}, {@code guardDependentsOf}) originally skipped deleting a dependent's row
  * whenever it was ALREADY sourced from the SAME template that just propagated, reasoning that
  * core's own {@code handleAccess}/{@code isPrecedent} would independently reach {@code

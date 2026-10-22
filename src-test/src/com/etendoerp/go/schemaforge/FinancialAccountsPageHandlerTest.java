@@ -876,6 +876,71 @@ public class FinancialAccountsPageHandlerTest {
   }
 
   /**
+   * ETP-5089: a connected account whose active connection is stale serialises
+   * {@code bankConnectionStale=true} while {@code bankReconnectable} stays {@code false}. The two
+   * must never be conflated: the SPA reads {@code bankReconnectable} as "deactivated, can be
+   * revived" and uses it to block transfers and to swap the connected actions out, which would be
+   * wrong for an account that is still linked and paying.
+   *
+   * @throws Exception
+   *     if the JSON traversal fails
+   */
+  @Test
+  public void testBuildAccountsArrayEmitsBankConnectionStaleApartFromReconnectable() throws Exception {
+    AccountRow stale = account("acc-1", "BBVA Bank", "B", new BigDecimal("100.00"), "EUR");
+    stale.bankConnected = true;
+    stale.bankConnectionStale = true;
+    AccountRow healthy = account("acc-2", "Santander", "B", new BigDecimal("0.00"), "EUR");
+    healthy.bankConnected = true;
+
+    JSONArray arr = handler.buildAccountsArray(Arrays.asList(stale, healthy), Collections.emptySet());
+
+    assertTrue("stale connection serialises bankConnectionStale=true",
+        arr.getJSONObject(0).getBoolean("bankConnectionStale"));
+    assertFalse("a stale connection is NOT reconnectable in the deactivated sense",
+        arr.getJSONObject(0).getBoolean("bankReconnectable"));
+    assertFalse("healthy connection serialises bankConnectionStale=false",
+        arr.getJSONObject(1).getBoolean("bankConnectionStale"));
+  }
+
+  /**
+   * ETP-5089: pins the staleness rule inside {@code ACCOUNTS_SQL}. It has to match
+   * {@code SaltEdgeAccountLinkHelper.isConnectionStale} and the Classic header's Reconnect logic:
+   * the account's ACTIVE connection (same Salt Edge account, status {@code AC}) with a failure that
+   * is newer than its last success, or a failure and no success at all. Appended as column 26,
+   * after the last sync date, because {@code loadAccounts} reads every column by position.
+   *
+   * @throws Exception
+   *     if the mocked JDBC chain fails
+   */
+  @Test
+  public void testAccountsSqlCarriesTheStaleConnectionRuleAsLastColumn() throws Exception {
+    Connection conn = mock(Connection.class);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+    when(conn.createArrayOf(eq("varchar"), any())).thenReturn(mock(Array.class));
+    when(ps.executeQuery()).thenReturn(rs);
+    when(rs.next()).thenReturn(false);
+
+    loadAccountsWithGoLanguage(conn);
+
+    org.mockito.ArgumentCaptor<String> sql = org.mockito.ArgumentCaptor.forClass(String.class);
+    verify(conn).prepareStatement(sql.capture());
+    String normalized = sql.getValue().replaceAll("\\s+", " ");
+    assertTrue("restricts to the active connection of the linked Salt Edge account",
+        normalized.contains("sc.salt_edge_account_id = fa.em_psd2_salt_edge_account_id")
+            && normalized.contains("sc.connection_status = 'AC'"));
+    assertTrue("stale = a failure newer than the last success, or no success at all",
+        normalized.contains("sc.last_fail_at IS NOT NULL")
+            && normalized.contains("sc.last_success_at IS NULL "
+            + "OR sc.last_fail_at > sc.last_success_at"));
+    assertTrue("appended after the last sync date, so existing positions do not shift",
+        normalized.indexOf("fa.em_psd2_last_sync_date,") < normalized.indexOf("EXISTS (SELECT 1 FROM "
+            + "psd2_finacc_connection sc"));
+  }
+
+  /**
    * Verifies that {@code loadAccounts()} maps column 11 ({@code em_psd2_connection_status}) to the
    * {@code bankConnected} flag: {@code 'CO'} (connected) → true, any other value → false.
    *
@@ -1235,6 +1300,9 @@ public class FinancialAccountsPageHandlerTest {
     when(rs.getString(23)).thenReturn("BBVAESMM", null);
     // Column 25 (em_psd2_last_sync_date): first row synced once, second never (SQL NULL).
     when(rs.getTimestamp(25)).thenReturn(java.sql.Timestamp.from(SYNC_OLD), null);
+    // Column 26 (ETP-5089, the EXISTS over psd2_finacc_connection): the first row's active
+    // connection is stale, the second's is not.
+    when(rs.getBoolean(26)).thenReturn(true, false);
 
     List<AccountRow> rows = loadAccountsWithGoLanguage(conn);
 
@@ -1256,6 +1324,7 @@ public class FinancialAccountsPageHandlerTest {
     assertEquals("first row maps column 23 into swiftCode", "BBVAESMM", first.swiftCode);
     assertEquals("first row maps column 25 into lastSyncDate", SYNC_OLD,
         first.lastSyncDate.toInstant());
+    assertTrue("first row maps column 26 into bankConnectionStale", first.bankConnectionStale);
 
     AccountRow second = rows.get(1);
     assertEquals("acc-2", second.id);
@@ -1269,6 +1338,7 @@ public class FinancialAccountsPageHandlerTest {
     assertEquals("a null column 23 becomes \"\", never the literal \"null\"",
         "", second.swiftCode);
     assertNull("a null column 25 leaves lastSyncDate null (never synced)", second.lastSyncDate);
+    assertFalse("a false column 26 leaves bankConnectionStale false", second.bankConnectionStale);
 
     verify(ps).setString(1, GO_LANGUAGE);
     verify(ps).setString(2, CLIENT_ID);
@@ -1333,8 +1403,10 @@ public class FinancialAccountsPageHandlerTest {
         sql.contains("LEFT JOIN c_country_trl ctryt ON ctryt.c_country_id = ctry.c_country_id"));
     int languagePlaceholder = sql.indexOf("ctryt.ad_language = ?");
     assertTrue("filters the translation row by a bound ad_language", languagePlaceholder >= 0);
+    // Anchored on the OUTER filter: the select list also carries an EXISTS subquery (ETP-5089)
+    // with a WHERE of its own, which a bare " WHERE " search would hit first.
     assertTrue("the language join sits before the WHERE clause",
-        languagePlaceholder < sql.indexOf(" WHERE "));
+        languagePlaceholder < sql.indexOf(" WHERE fa.ad_client_id = ?"));
     assertEquals("the ad_language '?' is the first placeholder of the statement",
         languagePlaceholder + "ctryt.ad_language = ".length(), sql.indexOf('?'));
 

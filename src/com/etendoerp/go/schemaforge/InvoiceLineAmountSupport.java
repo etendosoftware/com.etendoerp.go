@@ -79,6 +79,32 @@ import org.openbravo.model.common.invoice.InvoiceLine;
  * a caller that deliberately sends {@code unitPrice == listPrice} together with a discount gets the
  * discount applied.
  *
+ * <p><b>The price is the list price.</b> A line with a price, no discount and no list price gets
+ * {@code listPrice = unitPrice} ({@link #alignListPriceWithPrice}): the grid's "Precio" column is
+ * {@code listPrice}, and the form stores the price the user typed there. "No list price" is absent
+ * or 0 (an explicit {@code listPrice: 0} counts as absent); a non-zero list price the caller sent or
+ * the defaults cascade resolved is never overwritten.
+ *
+ * <p><b>An update without a discount</b> (ETP-5703, "work as the UI does"). The form's "Precio" is
+ * {@code listPrice}; {@code unitPrice} is not a form input, and with no discount the SPA always
+ * posts {@code unitPrice = listPrice}. So when the line's final discount is 0 (or null) and there is
+ * no non-zero {@code grossUnitPrice}, a patch that carries only one of the two prices sets the other
+ * to it: {@code unitPrice} alone → {@code listPrice = unitPrice} (MCP {@code {unitPrice: 1.25}} on
+ * 3 × 1.50 now stores list 1.25, net 3.75, as editing Precio does); {@code listPrice} alone →
+ * {@code unitPrice = listPrice}; {@code etgoDiscount} alone, taken to 0 → {@code unitPrice} = the
+ * stored non-zero list price. A patch that sends both prices, or one already equal to the other —
+ * every SPA body — is left alone, and so is a {@code unitPrice} equal to the one stored (re-sending
+ * the same price is not a re-price, as in the rule above).
+ *
+ * <p><b>A new net price on a discounted line</b> (ETP-5703). With a final discount {@code d}
+ * (0 &lt; d &lt; 100) and a patch carrying {@code unitPrice} but neither {@code listPrice} nor
+ * {@code etgoDiscount}, a price that is not (within half a cent) what the stored list price and
+ * discount already give keeps the discount and the caller's price, and the list price is worked
+ * back: {@code listPrice = unitPrice / (1 − d/100)}, 6 decimals (list 1.50, 10 %,
+ * {@code unitPrice 1.25} → list 1.388889, net of 3 units 3.75). The SPA body (exactly the computed
+ * price), a 100 % discount, a line with no list price and a price equal to the list price are left
+ * as before.
+ *
  * <p><b>The amounts.</b> {@link NeoCommercialLinePolicy#injectCommercialAmounts} over the line's
  * final quantity, price, gross price and tax, rounded to the invoice currency's standard precision
  * ({@link NeoCurrencyPrecision}, ETP-5703). {@code lineNetAmount} needs no tax; {@code grossAmount} is written only when the line
@@ -111,6 +137,8 @@ final class InvoiceLineAmountSupport {
   private static final String METHOD_PATCH = "PATCH";
   private static final String METHOD_PUT = "PUT";
   private static final BigDecimal HUNDRED = BigDecimal.valueOf(100);
+  /** Absorbs the SPA's {@code toFixed(6)} float rounding of a computed price. */
+  private static final BigDecimal HALF_CENT = new BigDecimal("0.005");
 
   /** The inputs {@link NeoCommercialLinePolicy#injectCommercialAmounts} reads for an invoice line. */
   private static final List<String> AMOUNT_INPUTS = Arrays.asList(FIELD_INVOICED_QTY,
@@ -231,8 +259,9 @@ final class InvoiceLineAmountSupport {
     }
     try {
       IntSupplier scale = NeoCurrencyPrecision.forWrite(ctx.getAdTab(), body, null);
+      alignListPriceWithPrice(body, body, true, null);
       JSONObject undiscounted = amountsOf(amountInputs(body), scale);
-      boolean discounted = applyDiscount(body, body, true);
+      boolean discounted = applyDiscount(body, body, true, null);
       JSONObject derived = amountsOf(amountInputs(body), scale);
       zeroGrossFollowsZeroNet(derived);
       boolean withGross = hasTax(body);
@@ -280,8 +309,10 @@ final class InvoiceLineAmountSupport {
       }
       IntSupplier scale = NeoCurrencyPrecision.forWrite(ctx.getAdTab(), body, ctx.getRecordId());
       JSONObject sent = new JSONObject(body.toString());
+      BigDecimal storedUnit = LineAmountSupport.decimal(state.opt(FIELD_UNIT_PRICE));
       overlay(state, body);
-      if (applyDiscount(body, state, false)) {
+      alignListPriceWithPrice(body, state, false, storedUnit);
+      if (applyDiscount(body, state, false, storedUnit)) {
         state.put(FIELD_UNIT_PRICE, body.get(FIELD_UNIT_PRICE));
       }
       JSONObject derived = amountsOf(amountInputs(state), scale);
@@ -301,23 +332,31 @@ final class InvoiceLineAmountSupport {
   /**
    * The discount rule of the class javadoc: rewrites {@code unitPrice} in {@code patch} (and, on a
    * create that had no list price, {@code listPrice}) when the line's discount is not reflected in
-   * its price yet.
+   * its price yet. On an update of a line without a discount it aligns the two prices instead
+   * ({@link #alignUndiscountedPrice}).
    *
    * @param patch  the request body; mutated in place
    * @param state  the line as it will be stored — {@code patch} itself on a create, the stored line
    *               overlaid with the patch on an update
    * @param create whether this is a create
+   * @param storedUnit the price the line had before the patch ({@code null} on a create or when it
+   *               had none)
    * @return {@code true} when {@code unitPrice} was rewritten
    */
-  static boolean applyDiscount(JSONObject patch, JSONObject state, boolean create)
-      throws JSONException {
-    BigDecimal discount = LineAmountSupport.decimal(state.opt(FIELD_DISCOUNT));
-    if (discount == null || discount.signum() == 0
-        || !LineAmountSupport.isZero(state.opt(FIELD_GROSS_UNIT_PRICE))) {
+  static boolean applyDiscount(JSONObject patch, JSONObject state, boolean create,
+      BigDecimal storedUnit) throws JSONException {
+    if (!LineAmountSupport.isZero(state.opt(FIELD_GROSS_UNIT_PRICE))) {
       return false;
+    }
+    BigDecimal discount = LineAmountSupport.decimal(state.opt(FIELD_DISCOUNT));
+    if (discount == null || discount.signum() == 0) {
+      return !create && alignUndiscountedPrice(patch, state, storedUnit);
     }
     BigDecimal list = nonZero(state.opt(FIELD_LIST_PRICE));
     BigDecimal unit = nonZero(state.opt(FIELD_UNIT_PRICE));
+    if (!create && backDeriveListPrice(patch, state, discount, list, unit)) {
+      return false;
+    }
     BigDecimal base = create ? createBase(patch, list, unit) : updateBase(patch, list, unit);
     if (base == null) {
       return false;
@@ -325,6 +364,142 @@ final class InvoiceLineAmountSupport {
     BigDecimal factor = HUNDRED.subtract(discount);
     patch.put(FIELD_UNIT_PRICE, base.multiply(factor).divide(HUNDRED, PRICE_SCALE,
         RoundingMode.HALF_UP));
+    return true;
+  }
+
+  /**
+   * The update rule of a line without a discount (ETP-5703): the form's "Precio" is
+   * {@code listPrice}, and with no discount the SPA always posts {@code unitPrice = listPrice}
+   * ({@code computeUnitPriceForPost}), so the two are the same price. A patch that sends only one
+   * of them sets the other to it:
+   * <ul>
+   *   <li>{@code unitPrice} without {@code listPrice} → {@code listPrice = unitPrice} (0 included,
+   *       as the form saves a Precio of 0);</li>
+   *   <li>{@code listPrice} without {@code unitPrice} → {@code unitPrice = listPrice};</li>
+   *   <li>{@code etgoDiscount} alone (taken to 0) → {@code unitPrice} = the stored non-zero list
+   *       price; a legacy line with no list price keeps its price.</li>
+   * </ul>
+   * A patch that sends both, or one already equal to the other (every SPA body), is left alone; so
+   * is a {@code unitPrice} equal to {@code storedUnit} — re-sending the same price is not a
+   * re-price, the rule of {@link #alignListPriceWithPrice} (a legacy line with list 100 / price 90
+   * keeps its list price on {@code {unitPrice: 90}}).
+   *
+   * @param storedUnit the price the line had before the patch, or {@code null}
+   * @return {@code true} when {@code unitPrice} was rewritten
+   */
+  private static boolean alignUndiscountedPrice(JSONObject patch, JSONObject state,
+      BigDecimal storedUnit) throws JSONException {
+    boolean sentUnit = patch.has(FIELD_UNIT_PRICE) && !patch.isNull(FIELD_UNIT_PRICE);
+    boolean sentList = patch.has(FIELD_LIST_PRICE) && !patch.isNull(FIELD_LIST_PRICE);
+    BigDecimal unit = LineAmountSupport.decimal(state.opt(FIELD_UNIT_PRICE));
+    if (sentUnit && !sentList) {
+      if (unit != null && !sameValue(unit, storedUnit)
+          && !sameValue(unit, state.opt(FIELD_LIST_PRICE))) {
+        patch.put(FIELD_LIST_PRICE, unit);
+        state.put(FIELD_LIST_PRICE, unit);
+      }
+      return false;
+    }
+    if (sentUnit || !(sentList || patch.has(FIELD_DISCOUNT))) {
+      return false;
+    }
+    BigDecimal list = sentList ? LineAmountSupport.decimal(state.opt(FIELD_LIST_PRICE))
+        : nonZero(state.opt(FIELD_LIST_PRICE));
+    if (list == null || sameValue(list, state.opt(FIELD_UNIT_PRICE))) {
+      return false;
+    }
+    patch.put(FIELD_UNIT_PRICE, list);
+    return true;
+  }
+
+  /**
+   * The update rule of a line WITH a discount whose patch sends a new net price (ETP-5703): a
+   * {@code unitPrice} with no {@code listPrice} and no {@code etgoDiscount} key keeps the discount
+   * and the caller's price, and the list price is worked back from them:
+   * {@code listPrice = unitPrice / (1 − d/100)}, rounded to {@value #PRICE_SCALE} decimals
+   * (list 1.50, 10 %, {@code unitPrice 1.25} → list 1.388889, net of 3 units 3.75).
+   *
+   * <p>Left alone (as before): a price within half a cent of what the stored list price and
+   * discount already give — the SPA's body, which sends exactly that computed price (the tolerance
+   * of {@code OrderLineDiscountSupport.shouldDeriveDiscountFromPrice}); a price equal to the list
+   * price (the discount rule applies it); a 100 % discount (nothing to work back from); a line with
+   * no list price, or a price of 0.
+   *
+   * @return {@code true} when {@code listPrice} was back-derived
+   */
+  private static boolean backDeriveListPrice(JSONObject patch, JSONObject state,
+      BigDecimal discount, BigDecimal list, BigDecimal unit) throws JSONException {
+    boolean sentUnit = patch.has(FIELD_UNIT_PRICE) && !patch.isNull(FIELD_UNIT_PRICE);
+    if (!sentUnit || patch.has(FIELD_LIST_PRICE) || patch.has(FIELD_DISCOUNT) || list == null
+        || unit == null || unit.compareTo(list) == 0 || discount.compareTo(HUNDRED) >= 0) {
+      return false;
+    }
+    BigDecimal factor = HUNDRED.subtract(discount);
+    BigDecimal current = list.multiply(factor).divide(HUNDRED, PRICE_SCALE, RoundingMode.HALF_UP);
+    if (unit.subtract(current).abs().compareTo(HALF_CENT) < 0) {
+      return false;
+    }
+    BigDecimal derived = unit.multiply(HUNDRED).divide(factor, PRICE_SCALE, RoundingMode.HALF_UP);
+    patch.put(FIELD_LIST_PRICE, derived);
+    state.put(FIELD_LIST_PRICE, derived);
+    return true;
+  }
+
+  private static boolean sameValue(BigDecimal value, Object other) {
+    BigDecimal decimal = LineAmountSupport.decimal(other);
+    return decimal != null && decimal.compareTo(value) == 0;
+  }
+
+  /**
+   * The price is the list price when the line has no list price and no discount (ETP-5710
+   * follow-up): sets {@code listPrice = unitPrice} in {@code patch}.
+   *
+   * <p>The grid's "Precio" column is {@code listPrice}, and the form edits it and derives
+   * {@code unitPrice} from it, so a form-created line at 50 stores {@code listPrice 50}. An agent
+   * that sent only {@code unitPrice 50} left {@code listPrice 0} — {@code McpLinePriceInjector}
+   * abstains when the price is not the product's standard one — so the amounts were right (100 /
+   * 121.00) and the grid showed 0,00. A list price the caller sent, or one the defaults cascade
+   * resolved (non-zero), is never overwritten, and a line with a discount follows the discount rule
+   * ({@link #applyDiscount}) instead. An explicit gross price leaves the line alone, as the
+   * discount rule does. "No list price" means <b>absent or 0</b>: an explicit {@code listPrice: 0}
+   * is read as absent (a list price of 0 is never a price the form would store for a priced line)
+   * and is replaced by the price.
+   *
+   * <p>On an <b>update</b> it only applies when the patch itself carries a non-null
+   * {@code unitPrice} that DIFFERS from the stored one and no non-zero {@code listPrice}: re-sending
+   * the same price changes nothing (a legacy or copied line with list 100 / price 90 keeps its list
+   * price on {@code {unitPrice:90}}, as the form only touches it when "Precio" is edited). The form
+   * has no "edit the unit price" —
+   * the user edits "Precio" ({@code listPrice}) and the unit price is derived from it — so repricing
+   * a line with no discount moves the list price with it, whatever list price it had stored (a line
+   * created at 50 / list 50 and repriced to 60 ends at 60 / list 60). A patch that does not
+   * re-price the line never invents a list price, and a line with a discount (stored or sent) keeps
+   * the discount rule above. Lines already stored with {@code listPrice 0} are not repaired by
+   * this; they change only when their price is edited.
+   *
+   * @param patch  the request body; mutated in place
+   * @param state  the line as it will be stored ({@code patch} itself on a create); also receives
+   *               the list price when it is written
+   * @param create whether this is a create
+   * @param storedUnit the price the line had before the patch ({@code null} on a create or when it
+   *               had none): on an update the price must DIFFER from it to count as a re-price
+   * @return {@code true} when {@code listPrice} was written
+   */
+  static boolean alignListPriceWithPrice(JSONObject patch, JSONObject state, boolean create,
+      BigDecimal storedUnit) throws JSONException {
+    // Same rule as InvoiceFromOrderSupport#derivedListPrice, there over a typed copied line.
+    BigDecimal unit = nonZero(state.opt(FIELD_UNIT_PRICE));
+    BigDecimal discount = LineAmountSupport.decimal(state.opt(FIELD_DISCOUNT));
+    BigDecimal sent = LineAmountSupport.decimal(patch.opt(FIELD_UNIT_PRICE));
+    boolean rePriced = create
+        || (sent != null && (storedUnit == null || sent.compareTo(storedUnit) != 0));
+    if (unit == null || !rePriced || nonZero(patch.opt(FIELD_LIST_PRICE)) != null
+        || (discount != null && discount.signum() != 0)
+        || !LineAmountSupport.isZero(state.opt(FIELD_GROSS_UNIT_PRICE))) {
+      return false;
+    }
+    patch.put(FIELD_LIST_PRICE, unit);
+    state.put(FIELD_LIST_PRICE, unit);
     return true;
   }
 

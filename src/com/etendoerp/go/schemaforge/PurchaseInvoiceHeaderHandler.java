@@ -42,6 +42,7 @@ import org.openbravo.model.common.enterprise.DocumentType;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import com.etendoerp.go.schemaforge.handlers.DocumentPostingService;
 import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
+import org.openbravo.base.structure.BaseOBObject;
 
 /**
  * NeoHandler for the Purchase Invoice header entity.
@@ -145,6 +146,15 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
   @Override
   protected Set<String> completedEditableHeaderFields() {
     return CompletedInvoiceWriteFence.purchaseHeaderEditableWhenCompleted();
+  }
+
+  /**
+   * {@inheritDoc} Reactivate is ruled out for an invoice {@link InvoiceReactivationGuard} would
+   * refuse to reactivate (ETP-5714).
+   */
+  @Override
+  public Map<String, String> unavailableActions(BaseOBObject subject) {
+    return InvoiceDocumentAvailability.unavailable(subject);
   }
 
   /** The PIS actions: served to the SPA, never to an agent (ETP-5558). */
@@ -271,6 +281,10 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
       // GET: enrich response with virtual fields
       JSONArray dataArr = NeoHandlerUtils.extractGetDataArray(context);
       if (dataArr == null) {
+        // ETP-5757: an empty list page still carries the (zeroed) whole-set footer totals.
+        if (DocumentListTotals.injectInto(context, true)) {
+          return NeoResponse.ok(context.getPreviousResult().getBody());
+        }
         // ETP-4783: for PATCH/POST, inject aeatsiiAuthorizationno written by
         // persistSiiAuthorizationno() into the save response so the frontend sees the
         // correct value (the CRUD write response was captured before afterHandle ran).
@@ -296,6 +310,7 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
         SifSubRecordAttachments.enrich(rec, context.getRecordId());
         InvoiceReactivationGuard.enrichReactivationBlock(rec, context.getRecordId());
       }
+      DocumentListTotals.injectInto(context, true); // ETP-5757, last: see AbstractInvoiceHeaderHandler
       return NeoResponse.ok(body);
     } catch (Exception e) {
       log.error("Error enriching purchase invoice", e);

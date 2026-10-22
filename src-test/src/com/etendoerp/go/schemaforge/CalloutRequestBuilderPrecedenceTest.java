@@ -29,6 +29,7 @@ import static org.mockito.Mockito.when;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -84,6 +85,8 @@ import com.etendoerp.go.schemaforge.util.NeoSessionVarsCache;
  * <p>{@link #parentRecordWinsOverChildColumnDefault()} and
  * {@link #parentWarehouseWinsOverChildColumnDefault()} are the two that fail if the order is
  * reverted.</p>
+ *
+ * @covers com.etendoerp.go.schemaforge.CalloutRequestBuilder
  */
 public class CalloutRequestBuilderPrecedenceTest {
 
@@ -455,5 +458,23 @@ public class CalloutRequestBuilderPrecedenceTest {
     assertEquals(DEFAULT_PREFIX + COL_CHILD_ONLY, param(params, INP_CHILD_ONLY));
     // session
     assertEquals("SESSION-WH", param(params, INP_WAREHOUSE));
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // client body — also wins over the injected current-record key id (ETP-5658)
+  // ─────────────────────────────────────────────────────────────────────
+
+  @Test
+  public void clientBodyKeyParamWinsOverTheInjectedRecordId() throws Exception {
+    // The form already carries a value for the param named by inpKeyName: the builder must not
+    // overwrite it with formState.id. The guard runs before any tab lookup, so no tab is needed.
+    Map<String, String[]> params = new HashMap<>();
+    params.put("inpfinPaymentId", new String[]{ "CLIENT-BODY-1" });
+    JSONObject formState = new JSONObject();
+    formState.put("id", "RECORD-ID");
+
+    CalloutRequestBuilder.injectCurrentRecordKey(null, formState, "inpfinPaymentId", params);
+
+    assertEquals("CLIENT-BODY-1", param(params, "inpfinPaymentId"));
   }
 }

@@ -47,6 +47,7 @@ import com.etendoerp.psd2.bank.integration.utils.BankIntegrationConstants;
 import com.etendoerp.psd2.bank.integration.utils.BankIntegrationUtils;
 import com.etendoerp.psd2.bank.integration.utils.SaltEdgeAccountLinkHelper;
 import com.etendoerp.psd2.bank.integration.utils.SaltEdgeConnectionBuilder;
+import com.etendoerp.psd2.bank.integration.utils.SaltEdgeConnectionHelper;
 import com.etendoerp.psd2.bank.integration.utils.SaltEdgeAccountLinkHelper.LinkAccountData;
 import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
@@ -147,6 +148,11 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
   private static final String KEY_CODE = "code";
   private static final String KEY_PROVIDERS = "providers";
   private static final String KEY_RECONNECTABLE = "reconnectable";
+  // ETP-5089. Still connected, but the active connection stopped refreshing. Its own flag, never
+  // folded into KEY_RECONNECTABLE: that one means "deactivated, can be revived" and the SPA uses it
+  // to block transfers and to swap the connected actions out, none of which applies here.
+  private static final String KEY_STALE = "stale";
+  private static final String KEY_STALE_MESSAGE = "staleMessage";
   // ETP-5179. Diagnosis of an empty `accounts` list, as a machine-readable CODE rather than an
   // English sentence. The obvious alternative — an AD_Message from
   // com.etendoerp.psd2.bank.integration — cannot be used: those rows ship with istranslated='N',
@@ -281,6 +287,14 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
       data.put("scopes", connection.getFetchScopes());
       data.put("consentExpiresAt", FinancialAccountBankConnectionSupport.formatInstant(expiresAt));
       data.put("daysUntilExpires", FinancialAccountBankConnectionSupport.daysUntil(expiresAt));
+      // Same rule as Classic (SaltEdgeAccountLinkHelper.isConnectionStale): Salt Edge still says
+      // active, but its last failed fetch is newer than its last success. The bank's own message
+      // travels only when there is one, so the SPA can say why instead of a generic notice.
+      boolean stale = SaltEdgeAccountLinkHelper.isConnectionStale(connection);
+      data.put(KEY_STALE, stale);
+      if (stale && StringUtils.isNotBlank(connection.getLastFailMessage())) {
+        data.put(KEY_STALE_MESSAGE, connection.getLastFailMessage());
+      }
       // Inside this block on purpose: without an active connection the account cannot sync at
       // all — fetchAccountTransactions throws PSD2_NoActiveConnectionForAccount long before the
       // interval check runs — so there is nothing to advise about and the SPA shows no notice.
@@ -685,6 +699,10 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
         ? SaltEdgeAccountLinkHelper.resolveConsentExpiresAt(details, apiKey)
         : null;
     SaltEdgeAccountLinkHelper.syncAllConnectionsForSaltEdgeId(connectionId, "AC", consentExpiresAt);
+    // Same as Classic: a successful reconnect does not by itself clear the staleness left by the
+    // failure that prompted it, so refresh the fetch health now instead of waiting for the next
+    // sync (ETP-5089). Null-safe and never throws, so it cannot fail the reconnect.
+    SaltEdgeConnectionHelper.syncConnectionHealthFromDetails(connectionId, details);
     JSONObject data = new JSONObject();
     data.put("connected", true);
     data.put("consentExpiresAt", FinancialAccountBankConnectionSupport.formatInstant(consentExpiresAt));
