@@ -1779,4 +1779,190 @@ public class ProductDefaultsHandlerTest {
       verify(dal, never()).createCriteria(Costing.class);
     }
   }
+  // ── ETP-5680: tax category follows the product type ──────────────────────
+
+  private static ProductDefaultsHandler handlerWithTypeTaxCategories(String servicesId,
+      String goodsId) {
+    ProductDefaultsHandler handler = handlerResolving(
+        UOM_CLIENT_DEFAULT, UOM_SYSTEM_DEFAULT, TAX_CLIENT_DEFAULT, "tax-system-default");
+    doReturn(servicesId).when(handler).queryTaxCategoryIdByName(
+        ProductDefaultsHandler.TAX_CATEGORY_NAME_SERVICE, CLIENT1);
+    doReturn(goodsId).when(handler).queryTaxCategoryIdByName(
+        ProductDefaultsHandler.TAX_CATEGORY_NAME_GOODS, CLIENT1);
+    doReturn(null).when(handler).queryTaxCategoryIdByName(anyString(), org.mockito.ArgumentMatchers.eq(SYSTEM_CLIENT_ID));
+    return handler;
+  }
+
+  @Test
+  public void testTaxCategoryNameForTypeMapsServiceAndEveryOtherType() {
+    assertEquals("IVA Normal Servicios", ProductDefaultsHandler.taxCategoryNameForType("S"));
+    assertEquals("IVA Normal", ProductDefaultsHandler.taxCategoryNameForType("I"));
+    assertEquals("IVA Normal", ProductDefaultsHandler.taxCategoryNameForType("R"));
+    assertEquals("IVA Normal", ProductDefaultsHandler.taxCategoryNameForType("E"));
+    assertNull(ProductDefaultsHandler.taxCategoryNameForType(null));
+    assertNull(ProductDefaultsHandler.taxCategoryNameForType(" "));
+  }
+
+  @Test
+  public void testCreateFillsMissingTaxCategoryFromProductType() throws Exception {
+    ProductDefaultsHandler handler = handlerWithTypeTaxCategories("tax-services", "tax-goods");
+
+    JSONObject service = new JSONObject().put("productType", "S");
+    handler.handle(postCtx(service, obContextWithClient(CLIENT1)));
+    assertEquals("tax-services", service.getString("taxCategory"));
+
+    JSONObject item = new JSONObject().put("productType", "I");
+    handler.handle(postCtx(item, obContextWithClient(CLIENT1)));
+    assertEquals("tax-goods", item.getString("taxCategory"));
+  }
+
+  @Test
+  public void testCreateKeepsExplicitTaxCategoryAndFallsBackToIsDefault() throws Exception {
+    ProductDefaultsHandler handler = handlerWithTypeTaxCategories("tax-services", "tax-goods");
+
+    JSONObject explicit = new JSONObject().put("productType", "S").put("taxCategory", "mine");
+    handler.handle(postCtx(explicit, obContextWithClient(CLIENT1)));
+    assertEquals("mine", explicit.getString("taxCategory"));
+
+    // No productType in the body: legacy IsDefault fallback.
+    JSONObject noType = new JSONObject();
+    handler.handle(postCtx(noType, obContextWithClient(CLIENT1)));
+    assertEquals(TAX_CLIENT_DEFAULT, noType.getString("taxCategory"));
+  }
+
+  @Test
+  public void testCreateFallsBackToIsDefaultWhenTenantLacksTheNamedCategory() throws Exception {
+    ProductDefaultsHandler handler = handlerWithTypeTaxCategories(null, null);
+
+    JSONObject body = new JSONObject().put("productType", "S");
+    handler.handle(postCtx(body, obContextWithClient(CLIENT1)));
+    assertEquals(TAX_CLIENT_DEFAULT, body.getString("taxCategory"));
+  }
+
+  @Test
+  public void testPatchNeverRecalculatesTaxCategory() throws Exception {
+    ProductDefaultsHandler handler = handlerWithTypeTaxCategories("tax-services", "tax-goods");
+
+    JSONObject body = new JSONObject().put("productType", "S");
+    NeoContext ctx = NeoContext.builder()
+        .specName("product").entityName("product")
+        .httpMethod("PATCH").endpointType(NeoEndpointType.CRUD)
+        .requestBody(body).obContext(obContextWithClient(CLIENT1)).build();
+    handler.handle(ctx);
+    assertFalse(body.has("taxCategory"));
+  }
+
+  @Test
+  public void testDefaultsExposesTypeTaxCategoryOnlyWhenTypeSentAndNameExists() throws Exception {
+    ProductDefaultsHandler handler = handlerWithTypeTaxCategories("tax-services", null);
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(any(Class.class), anyString())).thenReturn(null);
+
+      NeoContext withType = NeoContext.builder()
+          .specName("product").entityName("product")
+          .httpMethod("GET").endpointType(NeoEndpointType.DEFAULTS)
+          .queryParams(Map.of("productType", "S"))
+          .obContext(obContextWithClient(CLIENT1))
+          .previousResult(NeoResponse.ok(new JSONObject().put("defaults", new JSONObject())))
+          .build();
+      JSONObject d = handler.afterHandle(withType).getBody().getJSONObject("defaults");
+      assertEquals("tax-services", d.getString("typeTaxCategory"));
+      assertEquals(TAX_CLIENT_DEFAULT, d.getString("taxCategory"));
+
+      // Name missing for this type (goods) -> key absent, UI leaves the field untouched.
+      NeoContext missing = NeoContext.builder()
+          .specName("product").entityName("product")
+          .httpMethod("GET").endpointType(NeoEndpointType.DEFAULTS)
+          .queryParams(Map.of("productType", "I"))
+          .obContext(obContextWithClient(CLIENT1))
+          .previousResult(NeoResponse.ok(new JSONObject().put("defaults", new JSONObject())))
+          .build();
+      JSONObject d2 = handler.afterHandle(missing).getBody().getJSONObject("defaults");
+      assertFalse(d2.has("typeTaxCategory"));
+
+      // No productType parameter -> key absent.
+      JSONObject d3 = handler.afterHandle(defaultsCtx(obContextWithClient(CLIENT1),
+          NeoResponse.ok(new JSONObject().put("defaults", new JSONObject()))))
+          .getBody().getJSONObject("defaults");
+      assertFalse(d3.has("typeTaxCategory"));
+    }
+  }
+
+  @Test
+  public void testDefaultsReadsProductTypeFromServletRequestWhenContextHasNoQueryMap()
+      throws Exception {
+    // Fallback guard: a hook context built without a query map (not the REST /defaults path any
+    // more) still gets the type from the servlet request.
+    ProductDefaultsHandler handler = handlerWithTypeTaxCategories("tax-services", "tax-goods");
+    javax.servlet.http.HttpServletRequest req = mock(javax.servlet.http.HttpServletRequest.class);
+    when(req.getParameter("productType")).thenReturn("S");
+    org.openbravo.client.kernel.RequestContext rc =
+        mock(org.openbravo.client.kernel.RequestContext.class);
+    when(rc.getRequest()).thenReturn(req);
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<org.openbravo.client.kernel.RequestContext> rcMock =
+            Mockito.mockStatic(org.openbravo.client.kernel.RequestContext.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(any(Class.class), anyString())).thenReturn(null);
+      rcMock.when(org.openbravo.client.kernel.RequestContext::get).thenReturn(rc);
+
+      NeoResponse result = handler.afterHandle(defaultsCtx(obContextWithClient(CLIENT1),
+          NeoResponse.ok(new JSONObject().put("defaults", new JSONObject()))));
+      assertEquals("tax-services",
+          result.getBody().getJSONObject("defaults").getString("typeTaxCategory"));
+    }
+  }
+
+  @Test
+  public void testNewFormDefaultsStartAnItemOnItsTypeTaxCategory() throws Exception {
+    // Sequence: new form opens (no productType param, payload defaults to Item) -> the user
+    // changes the type (param sent as a query param, as NeoSubEndpointDispatcher now forwards it).
+    ProductDefaultsHandler handler = handlerWithTypeTaxCategories("tax-services", "tax-goods");
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(any(Class.class), anyString())).thenReturn(null);
+
+      JSONObject initial = handler.afterHandle(defaultsCtx(obContextWithClient(CLIENT1),
+          NeoResponse.ok(new JSONObject().put("defaults",
+              new JSONObject().put("productType", "I").put("taxCategory", "generic-first")))))
+          .getBody().getJSONObject("defaults");
+      assertEquals("tax-goods", initial.getString("taxCategory"));
+      assertFalse(initial.has("typeTaxCategory"));
+
+      NeoContext changed = NeoContext.builder()
+          .specName("product").entityName("product")
+          .httpMethod("GET").endpointType(NeoEndpointType.DEFAULTS)
+          .queryParams(Map.of("productType", "S"))
+          .obContext(obContextWithClient(CLIENT1))
+          .previousResult(NeoResponse.ok(new JSONObject().put("defaults",
+              new JSONObject().put("productType", "I"))))
+          .build();
+      JSONObject afterChange = handler.afterHandle(changed).getBody().getJSONObject("defaults");
+      assertEquals("tax-services", afterChange.getString("typeTaxCategory"));
+    }
+  }
+
+  @Test
+  public void testNewFormKeepsIsDefaultTaxCategoryWhenTenantLacksTheNamedCategory()
+      throws Exception {
+    ProductDefaultsHandler handler = handlerWithTypeTaxCategories(null, null);
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(any(Class.class), anyString())).thenReturn(null);
+
+      JSONObject initial = handler.afterHandle(defaultsCtx(obContextWithClient(CLIENT1),
+          NeoResponse.ok(new JSONObject().put("defaults", new JSONObject().put("productType", "I")))))
+          .getBody().getJSONObject("defaults");
+      assertEquals(TAX_CLIENT_DEFAULT, initial.getString("taxCategory"));
+    }
+  }
 }
