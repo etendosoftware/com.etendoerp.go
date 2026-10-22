@@ -6534,6 +6534,38 @@ real effect (the opposite of Balance Sheet): P&L is a period-activity total of p
 year, not a point-in-time snapshot. Both handlers' `orgId` uses ORG-TREE semantics
 (`ad_isorgincluded`), unlike `report-trial-balance`/`report-journal-entries`'s exact-match `orgId`.
 
+**Request ids are scoped to the tenant (ETP-5793).** The report handlers run in admin mode, where a
+bare `OBDal.get` applies no client predicate. So `orgId` (every SQL report and the aging reports),
+`yearId`/`referenceYearId` (balance sheet and P&L) and `glId` (aging) are resolved through
+`TenantOwnership.loadOwned`, and another tenant's id answers exactly like an unknown one:
+`organization_not_resolved` (400), `year_not_resolved` / `reference_year_not_resolved` (422) or
+`accounting_schema_unresolved` (422).
+For the aging reports this closes a real cross-tenant read: `AgingDao_data.xsql` filters only on
+`AD_Org_ID IN (...)`, never on the client, so another tenant's `orgId` used to return that tenant's
+open items. The SQL reports already bind `fa.ad_client_id` to the session client, so for them the
+fix stops the existence leak (an empty report used to confirm that the id existed). `orgId: ""`
+(every organization) and `orgId: "0"` are still accepted. Note that `loadOwned` checks only the
+client for an `Organization`, which is not `OrganizationEnabled`. An org of the caller's own client
+outside the role's org access still resolves; that is unchanged and is not a tenant leak. Pinned by
+`TenantIsolationPolicyTest`, which guards the aging, trial balance, general ledger, journal entries,
+balance sheet and P&L handlers. The fiscal reports (`TaxReportHandler`, `Fiscal303BoxesHandler`)
+are swept separately (ETP-5794). Years, accounting schemas and journals are `OrganizationEnabled`,
+so `loadOwned` also requires their organization to be readable by the role: one of the caller's
+own client in an organization outside the role's access now answers as unknown too.
+
+The same change scopes three other request ids:
+- `GlJournalHeaderHandler`: the journal its PATCH pre-hook loads by URL id to mirror
+  `accountingDate` into `documentDate`, and the `accountingSchema` of a POST body whose currency it
+  injects. Another tenant's journal is never loaded, and another tenant's schema gives no currency.
+- `OrganizationInformationHandler`: the org whose country decides the Spanish tax ID rules. Another
+  tenant's org falls back to the session org.
+
+The generic CRUD path still checks no record ownership before an entity's pre-hook runs. Only the
+ACTION path does (`NeoActionRecordGuard`, ETP-5558). A pre-hook that loads its record by the URL id
+must therefore use `loadOwned` itself. The same gap also affects the default CRUD write itself: a
+foreign-id DELETE was confirmed live, and a PATCH answers 409 for a foreign id vs 500 for an unknown
+one. Tracked as ETP-5880.
+
 Both honour the account's `ShowValueCond` (ETP-5662), like Classic's `AccountTree`: a SUMMARY
 account with `P` (Positive ONLY) shows its balance only when strictly positive, `N` only when
 strictly negative; otherwise it is 0, that 0 is what rolls up to its parent, and every descendant

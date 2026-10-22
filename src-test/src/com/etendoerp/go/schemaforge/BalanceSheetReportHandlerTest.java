@@ -518,6 +518,9 @@ class BalanceSheetReportHandlerTest {
 
     OBContext obContext = mock(OBContext.class);
     when(obContext.getCurrentClient()).thenReturn(client);
+    // ETP-5793: the org is resolved through TenantOwnership, which checks the readable clients.
+    when(org.getClient()).thenReturn(client);
+    when(obContext.getReadableClients()).thenReturn(new String[] { "sessionClientId1" });
     when(obContext.getCurrentOrganization()).thenReturn(org);
     contextMock.when(OBContext::getOBContext).thenReturn(obContext);
 
@@ -535,6 +538,7 @@ class BalanceSheetReportHandlerTest {
     }
 
     Year year = mock(Year.class);
+    when(year.getClient()).thenReturn(client);
 
     OBDal dal = mock(OBDal.class);
     when(dal.getSession()).thenReturn(session);
