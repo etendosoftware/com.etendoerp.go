@@ -2338,7 +2338,7 @@ class McpToolRouterRouteTest {
   @DisplayName("route — etendo_action")
   class ActionTests {
 
-    private static final Set<String> ACTION_SCOPES = Set.of("neo:write");
+    private static final Set<String> ACTION_SCOPES = Set.of("neo:process");
     private static final String RECORD_ID = "record-001";
     private static final String ACTION_NAME = "Processed";
     /**

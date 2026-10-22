@@ -67,7 +67,10 @@ through a later list or update request. Rotation invalidates the previous secret
 
 The `client_credentials` grant returns an opaque token. `/sws/neo/*` accepts it through
 `NeoAuthenticator`'s existing `OAuth2Filter.validateToken` fallback, so the resolved identity,
-expiry, revocation, and `etendo:read`/`etendo:write` checks (with their deprecated `neo:` aliases)
-remain server-side. End-to-end consumption
+expiry, revocation, and the scope checks (with their deprecated `neo:` aliases) remain server-side:
+`etendo:read` for `GET`/`HEAD`, `etendo:write` for other writes, and `etendo:process` — not
+`etendo:write` — for an action route (`.../{id}/action/{name}`: complete, void, close a document)
+and for a process spec (ETP-5783; see `neo-headless.md` §4.1.1). A key without the needed scope gets
+`403` with `WWW-Authenticate: Bearer error="insufficient_scope"`, not `401`. End-to-end consumption
 still requires a healthy local Etendo deployment and tenant/user fixtures; unit tests alone do not
 claim that flow.

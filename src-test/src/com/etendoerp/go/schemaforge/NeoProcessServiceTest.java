@@ -177,6 +177,105 @@ public class NeoProcessServiceTest {
     }
   }
 
+  // ===================== DocAction procedure: idempotency and refusal (ETP-5783) =====================
+
+  private static Process docActionProcedure() {
+    Process process = mock(Process.class);
+    when(process.getId()).thenReturn("proc-1");
+    when(process.getName()).thenReturn("Post");
+    when(process.getUIPattern()).thenReturn(null);
+    when(process.getJavaClassName()).thenReturn(null);
+    when(process.getProcedure()).thenReturn("C_Order_Post");
+    when(process.getADProcessParameterList()).thenReturn(Collections.emptyList());
+    when(process.getADModelImplementationList()).thenReturn(Collections.emptyList());
+    return process;
+  }
+
+  private static JSONObject docActionParams(String action) throws Exception {
+    return new JSONObject().put("recordId", "rec-1").put("inpTabId", "tab-1")
+        .put("docAction", action);
+  }
+
+  /** A document already in the requested status answers 200 alreadyApplied; the procedure never runs. */
+  @Test
+  public void executeProcessAnAlreadyAppliedDocActionNeverCallsTheProcedure() throws Exception {
+    NeoResponse applied = NeoResponse.ok(new JSONObject().put("status", "success")
+        .put("alreadyApplied", true));
+    try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class);
+         MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<NeoProcessPreconditionService> preconditions =
+             mockStatic(NeoProcessPreconditionService.class);
+         MockedStatic<DocActionIdempotency> idempotency = mockStatic(DocActionIdempotency.class);
+         MockedStatic<org.openbravo.service.db.CallProcess> callProcess =
+             mockStatic(org.openbravo.service.db.CallProcess.class)) {
+      accessMock.when(() -> NeoAccessHelper.hasProcessAccess("proc-1")).thenReturn(true);
+      idempotency.when(() -> DocActionIdempotency.alreadyApplied("tab-1", "rec-1", "CO"))
+          .thenReturn(applied);
+
+      NeoResponse resp = NeoProcessService.executeProcess(docActionProcedure(),
+          docActionParams("CO"));
+
+      assertEquals(200, resp.getHttpStatus());
+      assertTrue(resp.getBody().getBoolean("alreadyApplied"));
+      callProcess.verifyNoInteractions();
+    }
+  }
+
+  /** Any other status runs the procedure exactly as before, and its refusal is a 422 business_rule. */
+  @Test
+  public void executeProcessARefusedDocActionIs422BusinessRule() throws Exception {
+    org.openbravo.model.ad.process.ProcessInstance pInstance =
+        mock(org.openbravo.model.ad.process.ProcessInstance.class);
+    when(pInstance.getResult()).thenReturn(0L);
+    when(pInstance.getErrorMsg()).thenReturn("@ERROR=Document has no lines");
+    org.hibernate.Session session = mock(org.hibernate.Session.class);
+    OBDal dal = mock(OBDal.class);
+    when(dal.getSession()).thenReturn(session);
+    org.openbravo.service.db.CallProcess cp = mock(org.openbravo.service.db.CallProcess.class);
+    when(cp.call(any(Process.class), anyString(), any())).thenReturn(pInstance);
+
+    try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class);
+         MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<NeoProcessPreconditionService> preconditions =
+             mockStatic(NeoProcessPreconditionService.class);
+         MockedStatic<DocActionIdempotency> idempotency = mockStatic(DocActionIdempotency.class);
+         MockedStatic<DocActionResolution> resolution = mockStatic(DocActionResolution.class);
+         MockedStatic<org.openbravo.service.db.CallProcess> callProcess =
+             mockStatic(org.openbravo.service.db.CallProcess.class)) {
+      accessMock.when(() -> NeoAccessHelper.hasProcessAccess("proc-1")).thenReturn(true);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      callProcess.when(org.openbravo.service.db.CallProcess::getInstance).thenReturn(cp);
+      resolution.when(() -> DocActionResolution.requestedDocAction(any())).thenReturn("CO");
+      // The refusal re-read runs for real: no record to re-read, so the 422 stands.
+      idempotency.when(() -> DocActionIdempotency.orAlreadyApplied(any(), any(), any(), any()))
+          .thenCallRealMethod();
+
+      NeoResponse resp = NeoProcessService.executeProcess(docActionProcedure(),
+          docActionParams("CO"));
+
+      assertEquals(422, resp.getHttpStatus());
+      assertEquals("Document has no lines", resp.getBody().getString("message"));
+      assertEquals("business_rule", resp.getBody().getJSONObject("error").getString("code"));
+    }
+  }
+
+  /** A malformed request (no record id) is still a 400, not a business rule. */
+  @Test
+  public void executeProcessADocActionWithoutARecordIdStaysA400() throws Exception {
+    try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class);
+         MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<NeoProcessPreconditionService> preconditions =
+             mockStatic(NeoProcessPreconditionService.class)) {
+      accessMock.when(() -> NeoAccessHelper.hasProcessAccess("proc-1")).thenReturn(true);
+
+      NeoResponse resp = NeoProcessService.executeProcess(docActionProcedure(),
+          new JSONObject().put("docAction", "CO"));
+
+      assertEquals(400, resp.getHttpStatus());
+    }
+  }
+
   // ===================== listActions =====================
 
   @Test

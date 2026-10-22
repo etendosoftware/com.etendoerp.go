@@ -863,11 +863,15 @@ public class NeoProcessService {
 
       // For DocAction processes: set the action on the document before calling
       String docAction = DocActionResolution.requestedDocAction(params);
-      if (docAction != null) {
-        String tabId = params.optString(INP_TAB_ID, null);
-        if (tabId != null) {
-          setDocAction(tabId, recordId, docAction);
+      String tabId = params.optString(INP_TAB_ID, null);
+      boolean docActionOnRecord = docAction != null && tabId != null;
+      if (docActionOnRecord) {
+        // ETP-5783 — a document already in the status this action leads to has nothing to run.
+        NeoResponse alreadyApplied = DocActionIdempotency.alreadyApplied(tabId, recordId, docAction);
+        if (alreadyApplied != null) {
+          return alreadyApplied;
         }
+        setDocAction(tabId, recordId, docAction);
       }
 
       // Build parameters map for CallProcess (excludes internal context keys)
@@ -892,7 +896,12 @@ public class NeoProcessService {
       // Refresh to get the result written by the procedure
       OBDal.getInstance().getSession().refresh(pInstance);
 
-      return translatePInstanceResult(pInstance, process);
+      NeoResponse result = translatePInstanceResult(pInstance, process);
+      // ETP-5783 — a concurrent request may have reached the target status first, which made this
+      // run refuse it; re-read the status once and report that as the success it is.
+      return docActionOnRecord
+          ? DocActionIdempotency.orAlreadyApplied(result, tabId, recordId, docAction)
+          : result;
     }
   }
 
@@ -936,7 +945,7 @@ public class NeoProcessService {
       if (!messageKeys.isEmpty()) {
         result.put(MESSAGE_KEYS, new JSONArray(messageKeys));
       }
-      return new NeoResponse(400, result);
+      return DocActionRefusal.businessRule(result);
     }
 
     // Success
