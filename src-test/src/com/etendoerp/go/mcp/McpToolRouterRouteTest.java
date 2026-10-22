@@ -1851,6 +1851,76 @@ class McpToolRouterRouteTest {
     }
 
     /**
+     * ETP-5714: the tool description used to give 'Header' as the entity example while the catalogue
+     * spells it 'header', so the first call of an agent that followed it failed. A miss on the
+     * entity is retried ONCE with the spelling the spec uses, and the argument itself is rewritten
+     * so every later consumer sees the canonical name.
+     */
+    @Test
+    @DisplayName("an entity typed with other capitals is routed as the spec spells it")
+    void entityTypedWithOtherCapitalsIsRetriedCanonically() throws Exception {
+      SFSpec spec = mockSpec();
+      setupSpecLookup(spec);
+      supportMock.when(() -> McpToolRouterSupport.resolveIncludedEntityOrExplain(
+          any(SFSpec.class), anyString())).thenCallRealMethod();
+      supportMock.when(() -> McpToolRouterSupport.findIncludedEntity(anyString(), anyString()))
+          .thenThrow(McpRoutingException.entityNotFound("x", SPEC_NAME, List.of("header")));
+      JSONObject args = new JSONObject().put("spec", SPEC_NAME).put("entity", "Header");
+
+      try (MockedStatic<McpEntityNames> names = mockStatic(McpEntityNames.class)) {
+        names.when(() -> McpEntityNames.canonicalName(SPEC_NAME, "Header")).thenReturn("header");
+
+        JSONObject result = router.route("etendo_list", args, READ_SCOPES);
+
+        assertTrue(result.getBoolean("isError"));
+      }
+      assertEquals("header", args.getString("entity"), "the argument is rewritten, not just shadowed");
+      supportMock.verify(() -> McpToolRouterSupport.findIncludedEntity(anyString(),
+          org.mockito.ArgumentMatchers.eq("Header")));
+      supportMock.verify(() -> McpToolRouterSupport.findIncludedEntity(anyString(),
+          org.mockito.ArgumentMatchers.eq("header")));
+    }
+
+    @Test
+    @DisplayName("an entity no capitalisation explains is NOT retried and keeps the typed name")
+    void unknownEntityIsNotRetried() throws Exception {
+      SFSpec spec = mockSpec();
+      setupSpecLookup(spec);
+      supportMock.when(() -> McpToolRouterSupport.resolveIncludedEntityOrExplain(
+          any(SFSpec.class), anyString())).thenCallRealMethod();
+      supportMock.when(() -> McpToolRouterSupport.findIncludedEntity(anyString(), anyString()))
+          .thenThrow(McpRoutingException.entityNotFound("Nope", SPEC_NAME, List.of("header")));
+      JSONObject args = new JSONObject().put("spec", SPEC_NAME).put("entity", "Nope");
+
+      try (MockedStatic<McpEntityNames> names = mockStatic(McpEntityNames.class)) {
+        JSONObject result = router.route("etendo_list", args, READ_SCOPES);
+
+        assertEquals(404, new JSONObject(contentText(result)).getInt("status"));
+        names.verify(() -> McpEntityNames.canonicalName(SPEC_NAME, "Nope"));
+      }
+      assertEquals("Nope", args.getString("entity"));
+      supportMock.verify(() -> McpToolRouterSupport.findIncludedEntity(anyString(), anyString()),
+          org.mockito.Mockito.times(1));
+    }
+
+    @Test
+    @DisplayName("a missing spec is not an entity miss: no canonical lookup happens")
+    void missingSpecIsNotRetried() throws Exception {
+      supportMock.when(() -> McpToolRouterSupport.hasSpecAccess(any(), anyString()))
+          .thenReturn(true);
+      supportMock.when(() -> McpToolRouterSupport.hasSpecAccess(any(), anyString(), anyString()))
+          .thenReturn(true);
+      supportMock.when(() -> McpToolRouterSupport.findActiveSpecByName(anyString()))
+          .thenThrow(McpRoutingException.specNotFound(SPEC_NAME));
+
+      try (MockedStatic<McpEntityNames> names = mockStatic(McpEntityNames.class)) {
+        router.route("etendo_list", buildCrudArgs(), READ_SCOPES);
+
+        names.verifyNoInteractions();
+      }
+    }
+
+    /**
      * An entity with neither a tab nor a handler is unserviceable, and ETP-5405 made the router
      * say so as a routing failure instead of a server fault.
      *

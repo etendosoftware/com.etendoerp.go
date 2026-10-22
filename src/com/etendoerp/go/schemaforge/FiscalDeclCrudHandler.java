@@ -235,8 +235,8 @@ class FiscalDeclCrudHandler {
   static final String SUSTITUTIVA_KEY    = "sustitutiva";
   private static final String SUBMISSION_METHOD_KEY = "submissionMethod";
   private static final String SUBMITTED_SNAPSHOT_KEY = "submittedSnapshot";
-  private static final String CODE_KEY          = "code";
-  private static final String MESSAGE_KEY       = "message";
+  static final String CODE_KEY          = "code";
+  static final String MESSAGE_KEY       = "message";
   private static final String SEVERITY_KEY      = "severity";
   private static final String MISSING_ID_PARAM  = "Missing param: id";
   private static final String DECL_NOT_FOUND_PREFIX = "Declaration not found: ";
@@ -272,6 +272,8 @@ class FiscalDeclCrudHandler {
   final FiscalDeclReactivationSupport reactivationSupport;
   /** See {@link #correctiveConsistencySupport}'s own javadoc for the extraction rationale. */
   final FiscalDeclManualDataValidationSupport manualDataValidationSupport;
+  /** The per-model single-ordinary rule (ETP-5716); same extraction rationale. */
+  final FiscalDeclSingleOrdinarySupport singleOrdinarySupport;
 
   FiscalDeclCrudHandler(NeoServlet servlet) {
     this.servlet = servlet;
@@ -279,6 +281,7 @@ class FiscalDeclCrudHandler {
     this.correctiveConsistencySupport = new FiscalDeclCorrectiveConsistencySupport(this);
     this.reactivationSupport = new FiscalDeclReactivationSupport(this, correctiveConsistencySupport);
     this.manualDataValidationSupport = new FiscalDeclManualDataValidationSupport(this);
+    this.singleOrdinarySupport = new FiscalDeclSingleOrdinarySupport(this);
   }
 
   void handleDeclarations(String method, HttpServletRequest request,
@@ -335,6 +338,10 @@ class FiscalDeclCrudHandler {
     // exists — a non-draft (ready/submitted/...) existing declaration is the intended
     // corrective/rectificativa case (ETP-5187) and must keep working exactly as before, via
     // resolveNextDeclSeq below, untouched by this check.
+    if (singleOrdinarySupport.rejectDuplicateOrdinary(clientId, orgId, model, year, period,
+        requestedDeclType, response)) {
+      return;
+    }
     if (hasDraftDeclaration(clientId, orgId, model, year, period)) {
       servlet.sendError(response, HttpServletResponse.SC_CONFLICT,
           "A draft declaration already exists for this period — complete or delete it before "
@@ -803,27 +810,28 @@ class FiscalDeclCrudHandler {
     if (decl == null) {
       return;
     }
-    JSONArray arr = new JSONArray();
-    for (BaseOBObject inc : queryIncidents(id)) {
-      JSONObject o = new JSONObject();
-      o.put(CODE_KEY,     asString(inc.get(PROPERTY_INCIDENT_CODE)));
-      o.put(MESSAGE_KEY,  asString(inc.get(PROPERTY_INCIDENT_MESSAGE)));
-      o.put(SEVERITY_KEY, resolveSeverity(inc));
-      arr.put(o);
-    }
     JSONObject out = new JSONObject();
-    out.put("data", arr);
+    out.put("data", incidentsJson(id));
     response.getWriter().write(out.toString());
   }
 
   /**
-   * Reads the persisted {@code severity} value, defaulting to {@link #SEVERITY_BLOCK} for any row
-   * that predates this column (blank/null) — preserves the pre-ETP-4456 behavior for old rows
-   * rather than surfacing an empty string to the frontend.
+   * The persisted incidents of {@code declId} in the read shape of {@link #handleIncidents}:
+   * {@code [{code, message, severity[, params][, action]}]}. A structured message
+   * ({@link FiscalDeclIncidentMessages#structuredMessage}) is unfolded: {@code message} is its
+   * text and its {@code params}/{@code action} are returned alongside; a plain message (an AEAT answer) is
+   * returned as-is.
    */
-  private static String resolveSeverity(BaseOBObject inc) {
-    String severity = asString(inc.get(PROPERTY_INCIDENT_SEVERITY));
-    return StringUtils.isNotBlank(severity) ? severity : SEVERITY_BLOCK;
+  JSONArray incidentsJson(String declId) throws JSONException {
+    JSONArray arr = new JSONArray();
+    for (BaseOBObject inc : queryIncidents(declId)) {
+      JSONObject o = new JSONObject();
+      o.put(CODE_KEY,     asString(inc.get(PROPERTY_INCIDENT_CODE)));
+      FiscalDeclIncidentMessages.putMessageFields(o, asString(inc.get(PROPERTY_INCIDENT_MESSAGE)));
+      o.put(SEVERITY_KEY, FiscalDeclIncidentMessages.resolveSeverity(inc));
+      arr.put(o);
+    }
+    return arr;
   }
 
   /** All {@code ETGO_Fiscal_Decl_Incident} rows for {@code declId}, oldest first. */
@@ -882,8 +890,59 @@ class FiscalDeclCrudHandler {
     for (BaseOBObject inc : queryIncidents(declId)) {
       OBDal.getInstance().remove(inc);
     }
-    insertIncidents(decl, errors, SEVERITY_BLOCK);
-    insertIncidents(decl, warnings, SEVERITY_WARN);
+    insertIncidents(decl, errors, SEVERITY_BLOCK, "");
+    insertIncidents(decl, warnings, SEVERITY_WARN, "");
+  }
+
+  /**
+   * Code prefix of the incidents a model stores from an AEAT answer when it must tell them apart
+   * from its own rule incidents (ETP-5716, Modelo 390): {@code "AEAT-" + <AEAT code>}. Such rows
+   * are informative — they never block a new filing attempt (the retry is what fixes them); only
+   * the model's own blocking rules do. Modelo 303 does not use it (its AEAT incidents keep the raw
+   * AEAT code, and nothing gates its filing on stored incidents).
+   */
+  static final String AEAT_INCIDENT_CODE_PREFIX = "AEAT-";
+
+  /**
+   * Replaces ONLY the AEAT-origin incidents ({@link #AEAT_INCIDENT_CODE_PREFIX}) of {@code decl}
+   * with {@code errors} ({@link #SEVERITY_BLOCK}) and {@code warnings} ({@link #SEVERITY_WARN}),
+   * coded {@code AEAT-<code>} — the model's own rule incidents are kept. Called on every AEAT
+   * attempt (validation and production), so a clean answer leaves no AEAT incident. Does not
+   * commit (same single-transaction contract as {@link #replaceIncidentsNoCommit}).
+   */
+  void replaceAeatIncidentsNoCommit(BaseOBObject decl, List<String> errors, List<String> warnings) {
+    String declId = String.valueOf(decl.getId());
+    for (BaseOBObject inc : queryIncidents(declId)) {
+      if (asString(inc.get(PROPERTY_INCIDENT_CODE)).startsWith(AEAT_INCIDENT_CODE_PREFIX)) {
+        OBDal.getInstance().remove(inc);
+      }
+    }
+    insertIncidents(decl, errors, SEVERITY_BLOCK, AEAT_INCIDENT_CODE_PREFIX);
+    insertIncidents(decl, warnings, SEVERITY_WARN, AEAT_INCIDENT_CODE_PREFIX);
+  }
+
+  /**
+   * One incident a model computes itself: code, severity and its
+   * {@link FiscalDeclIncidentMessages#structuredMessage}.
+   */
+  record RuleIncidentRow(String code, String severity, String message) {
+  }
+
+  /**
+   * Replaces the incidents a model computes itself (every row whose code is NOT
+   * {@link #AEAT_INCIDENT_CODE_PREFIX}) with {@code rows} — the mirror of
+   * {@link #replaceAeatIncidentsNoCommit}: the last AEAT answer is kept. Does not commit.
+   */
+  void replaceRuleIncidentsNoCommit(BaseOBObject decl, List<RuleIncidentRow> rows) {
+    String declId = String.valueOf(decl.getId());
+    for (BaseOBObject inc : queryIncidents(declId)) {
+      if (!asString(inc.get(PROPERTY_INCIDENT_CODE)).startsWith(AEAT_INCIDENT_CODE_PREFIX)) {
+        OBDal.getInstance().remove(inc);
+      }
+    }
+    for (RuleIncidentRow row : rows) {
+      insertIncident(decl, row.code(), row.message(), row.severity());
+    }
   }
 
   /**
@@ -893,20 +952,25 @@ class FiscalDeclCrudHandler {
    * (the caller is responsible for the delete step), so calling it twice with different severities
    * accumulates rather than replaces.
    */
-  private void insertIncidents(BaseOBObject decl, List<String> rawEntries, String severity) {
+  private void insertIncidents(BaseOBObject decl, List<String> rawEntries, String severity,
+      String codePrefix) {
     for (String raw : new LinkedHashSet<>(rawEntries)) {
       String[] parsed = splitAeatError(raw);
-      BaseOBObject inc = (BaseOBObject) OBProvider.getInstance().get(ENTITY_FISCAL_DECL_INCIDENT);
-      inc.set(PROPERTY_CLIENT, OBContext.getOBContext().getCurrentClient());
-      inc.set(PROPERTY_ORGANIZATION, OBContext.getOBContext().getCurrentOrganization());
-      inc.set(PROPERTY_CREATED_BY, OBContext.getOBContext().getUser());
-      inc.set(PROPERTY_UPDATED_BY, OBContext.getOBContext().getUser());
-      inc.set(PROPERTY_INCIDENT_DECL, decl);
-      inc.set(PROPERTY_INCIDENT_CODE, parsed[0]);
-      inc.set(PROPERTY_INCIDENT_MESSAGE, parsed[1]);
-      inc.set(PROPERTY_INCIDENT_SEVERITY, severity);
-      OBDal.getInstance().save(inc);
+      insertIncident(decl, codePrefix + parsed[0], parsed[1], severity);
     }
+  }
+
+  private void insertIncident(BaseOBObject decl, String code, String message, String severity) {
+    BaseOBObject inc = (BaseOBObject) OBProvider.getInstance().get(ENTITY_FISCAL_DECL_INCIDENT);
+    inc.set(PROPERTY_CLIENT, OBContext.getOBContext().getCurrentClient());
+    inc.set(PROPERTY_ORGANIZATION, OBContext.getOBContext().getCurrentOrganization());
+    inc.set(PROPERTY_CREATED_BY, OBContext.getOBContext().getUser());
+    inc.set(PROPERTY_UPDATED_BY, OBContext.getOBContext().getUser());
+    inc.set(PROPERTY_INCIDENT_DECL, decl);
+    inc.set(PROPERTY_INCIDENT_CODE, code);
+    inc.set(PROPERTY_INCIDENT_MESSAGE, message);
+    inc.set(PROPERTY_INCIDENT_SEVERITY, severity);
+    OBDal.getInstance().save(inc);
   }
 
   /**

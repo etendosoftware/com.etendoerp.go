@@ -67,6 +67,7 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * </ul>
  *
  * @covers com.etendoerp.go.schemaforge.GoodsReceiptHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.InOutInvoiceLinks
  */
 public class GoodsReceiptHeaderHandlerTest {
 
@@ -940,6 +941,33 @@ public class GoodsReceiptHeaderHandlerTest {
     }
   }
 
+  // ── ETP-5653: invoiceStatus must be scoped to the requested receipt's lines ──
+
+  /**
+   * The built invoiceStatus SQL must resolve the requested receipt's lines once (in a CTE) and
+   * restrict each of its three aggregation arms — the {@code M_MatchInv} arm, {@code direct_qty}
+   * and {@code ol_qty} — to that set, while keeping a single placeholder for the receipt filter.
+   * Invoked directly via reflection: the builder is a pure string builder.
+   */
+  @Test
+  public void buildInvoiceStatusSql_scopesEveryArmToTheRequestedReceiptLines() throws Exception {
+    Method m = GoodsReceiptHeaderHandler.class.getDeclaredMethod(
+        "buildInvoiceStatusSql", String.class);
+    m.setAccessible(true);
+    String sql = (String) m.invoke(null, "iol.m_inout_id = ?");
+
+    String cte = "IN (SELECT m_inoutline_id FROM receipt_lines)";
+    assertTrue("the requested lines must be resolved once in a CTE",
+        sql.startsWith("WITH receipt_lines AS ("));
+    assertTrue("the M_MatchInv arm must be scoped", sql.contains("AND mt.m_inoutline_id " + cte));
+    assertTrue("the direct arm must be scoped", sql.contains("AND il2.m_inoutline_id " + cte));
+    assertTrue("the order-line arm must be scoped", sql.contains("AND iol2.m_inoutline_id " + cte));
+    assertTrue("the outer filter must use the CTE set",
+        sql.contains("WHERE iol.m_inoutline_id " + cte));
+    assertEquals("the receipt filter must be bound exactly once (in the CTE)",
+        sql.indexOf("iol.m_inout_id = ?"), sql.lastIndexOf("iol.m_inout_id = ?"));
+  }
+
   // ── declared action contracts (ETP-5709) ──────────────────────────────────
 
   @Test
@@ -948,7 +976,8 @@ public class GoodsReceiptHeaderHandlerTest {
         new GoodsReceiptHeaderHandler().actionContracts();
 
     assertEquals(java.util.List.of("documentAction", "availableOrders", "availableOrderLines",
-            "importOrderLines", "createPurchaseInvoice", "createPurchaseReturn", "cloneRecord"),
+            "importOrderLines", "createPurchaseInvoice", "createPurchaseReturn", "cloneRecord", "post",
+            "unpost"),
         java.util.List.copyOf(contracts.keySet()));
     NeoActionContract invoice = contracts.get("createPurchaseInvoice");
     assertEquals("POST", invoice.getHttpMethod());
@@ -1125,5 +1154,19 @@ public class GoodsReceiptHeaderHandlerTest {
 
     assertNull(handler.handle(ctx));
     verify(delegate).handle(ctx);
+  }
+
+  /**
+   * ETP-5714: the keys GoodsReceiptHeaderHandler's afterHandle adds to a GET record are declared, so an MCP
+   * {@code fields:[…]} projection does not report them in {@code unknownFields} while the same
+   * response carries them.
+   */
+  @org.junit.jupiter.api.Test
+  @org.junit.jupiter.api.DisplayName("goods receipt: enriched response keys are declared")
+  void enrichedKeysAreDeclaredGoodsReceiptHeaderHandler() {
+    java.util.Set<String> declared = new GoodsReceiptHeaderHandler().responseEnrichedFields();
+    for (String key : java.util.List.of("invoiceStatus", "returnStatus", "linkedInvoices", "linkedReturns", "linkedOrders")) {
+      org.junit.jupiter.api.Assertions.assertTrue(declared.contains(key), key + " in " + declared);
+    }
   }
 }

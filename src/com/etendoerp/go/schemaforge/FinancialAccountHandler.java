@@ -154,6 +154,9 @@ public class FinancialAccountHandler implements NeoHandler {
   private static final String FIELD_LAST_SYNC_DATE = "lastSyncDate";
   /** Soft-disconnected but still linked to Salt Edge — drives the "Reconectar" action. */
   private static final String FIELD_BANK_RECONNECTABLE = "bankReconnectable";
+  /** Still connected, but the active connection stopped refreshing (ETP-5089) — drives the stale
+   *  warning and the "Reconectar" action on a connected account. Not the same as reconnectable. */
+  private static final String FIELD_BANK_CONNECTION_STALE = "bankConnectionStale";
   /** {@code PSD2_Provider.Logo_Url} of the connected provider; blank when there is none. Also the
    *  transient create-body key (ETP-5521) carrying the logo of the Salt Edge provider picked in the
    *  offline bank picker — see {@link FinancialAccountProviderEnricher}. */
@@ -627,6 +630,7 @@ public class FinancialAccountHandler implements NeoHandler {
         ? FinancialAccountBankConnectionSupport.formatInstant(row.lastSyncDate)
         : JSONObject.NULL);
     rec.put(FIELD_BANK_RECONNECTABLE, row.bankReconnectable);
+    rec.put(FIELD_BANK_CONNECTION_STALE, row.bankConnectionStale);
     rec.put(FIELD_PROVIDER_LOGO_URL, row.providerLogoUrl);
     rec.put(FIELD_BANK_CONNECTION_PENDING, row.bankConnectionPending);
     rec.put(FIELD_CURRENCY_ISO, row.currency.iso);

@@ -118,25 +118,6 @@ jobs:
             fi
           done
 
-      # SubscriptionBackfillIdempotencyIntegrationTest executes the shipped data-fix SQL, which lives
-      # in etendo_schema_forge; without it the class skips all of its tests. Jenkins clones the whole
-      # repo into etendo_core/schema_forge; this checks out only the data-fix SQL folder, at the same
-      # place. Branch as in Jenkins: the PR's branch when schema_forge has it, otherwise the base.
-      - name: Checkout the schema_forge data-fix SQL
-        if: github.event_name != 'push'
-        env:
-          BASE_BRANCH: ${{ github.base_ref || 'develop' }}
-        run: |
-          url=https://github.com/etendosoftware/etendo_schema_forge.git
-          branch="$BASE_BRANCH"
-          case "$MODULE_BRANCH" in
-            develop|main|hotfix/*|mergeblock/*) ;;
-            *) git ls-remote --exit-code --heads "$url" "$MODULE_BRANCH" >/dev/null && branch="$MODULE_BRANCH" ;;
-          esac
-          git clone -q --depth 1 --filter=blob:none --sparse --branch "$branch" "$url" etendo_core/schema_forge
-          git -C etendo_core/schema_forge sparse-checkout set cli/src/data-fixes/sql
-          echo "etendo_schema_forge: $branch ($(ls etendo_core/schema_forge/cli/src/data-fixes/sql | wc -l) files)"
-
       # The Gradle cache keys on the build files of the core and the cloned modules, so it runs after
       # the checkouts. Without it prepareConfig spends ~3.5 min downloading dependencies.
       - uses: actions/setup-java@v4

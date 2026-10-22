@@ -1035,6 +1035,39 @@ public class GoodsShipmentHeaderHandlerTest {
     }
   }
 
+  // ── ETP-5653: invoiceStatus must be scoped to the requested shipment's lines ──
+  //
+  // Every aggregation arm of buildInvoiceStatusSql() groups by m_inoutline_id, so restricting
+  // each arm to the requested shipment's lines keeps or drops whole groups and never changes a
+  // sum — but it lets the planner read only those lines instead of aggregating every invoice in
+  // the instance. The private builder is invoked directly via reflection: it is a pure string
+  // builder, which isolates the scope clause from the surrounding afterHandle() mock chain.
+
+  /**
+   * The built invoiceStatus SQL must resolve the requested shipment's lines once (in a CTE) and
+   * restrict each of its three aggregation arms — {@code msi_qty}, {@code direct_qty},
+   * {@code ol_qty} — to that set, while keeping a single placeholder for the shipment filter
+   * (the CTE carries it; the outer clause uses the CTE set instead).
+   */
+  @Test
+  public void buildInvoiceStatusSql_scopesEveryArmToTheRequestedShipmentLines() throws Exception {
+    Method m = GoodsShipmentHeaderHandler.class.getDeclaredMethod(
+        "buildInvoiceStatusSql", String.class);
+    m.setAccessible(true);
+    String sql = (String) m.invoke(null, "iol.m_inout_id = ?");
+
+    String cte = "IN (SELECT m_inoutline_id FROM shipment_lines)";
+    assertTrue("the requested lines must be resolved once in a CTE",
+        sql.startsWith("WITH shipment_lines AS ("));
+    assertTrue("the match arm must be scoped", sql.contains("AND msi.m_inoutline_id " + cte));
+    assertTrue("the direct arm must be scoped", sql.contains("AND il2.m_inoutline_id " + cte));
+    assertTrue("the order-line arm must be scoped", sql.contains("AND iol2.m_inoutline_id " + cte));
+    assertTrue("the outer filter must use the CTE set",
+        sql.contains("WHERE iol.m_inoutline_id " + cte));
+    assertEquals("the shipment filter must be bound exactly once (in the CTE)",
+        sql.indexOf("iol.m_inout_id = ?"), sql.lastIndexOf("iol.m_inout_id = ?"));
+  }
+
   // ── declared action contracts (ETP-5709) ──────────────────────────────────
 
   @Test
@@ -1043,7 +1076,7 @@ public class GoodsShipmentHeaderHandlerTest {
         new GoodsShipmentHeaderHandler().actionContracts();
 
     assertEquals(java.util.List.of("documentAction", "availableOrders", "availableOrderLines",
-            "importOrderLines", "createDraftInvoice", "createReturn", "cloneRecord"),
+            "importOrderLines", "createDraftInvoice", "createReturn", "cloneRecord", "post", "unpost"),
         java.util.List.copyOf(contracts.keySet()));
     assertEquals("POST", contracts.get("cloneRecord").getHttpMethod());
     assertNull(com.etendoerp.go.schemaforge.util.NeoActionContract.validate(contracts, "cloneRecord", new JSONObject()));
@@ -1204,5 +1237,19 @@ public class GoodsShipmentHeaderHandlerTest {
     when(delegate.handle(ctx)).thenReturn(expected);
 
     assertSame(expected, handler.handle(ctx));
+  }
+
+  /**
+   * ETP-5714: the keys GoodsShipmentHeaderHandler's afterHandle adds to a GET record are declared, so an MCP
+   * {@code fields:[…]} projection does not report them in {@code unknownFields} while the same
+   * response carries them.
+   */
+  @org.junit.jupiter.api.Test
+  @org.junit.jupiter.api.DisplayName("goods shipment: enriched response keys are declared")
+  void enrichedKeysAreDeclaredGoodsShipmentHeaderHandler() {
+    java.util.Set<String> declared = new GoodsShipmentHeaderHandler().responseEnrichedFields();
+    for (String key : java.util.List.of("invoiceStatus", "linkedOrders", "linkedInvoices", "returnReceipts", "canCreateReturn")) {
+      org.junit.jupiter.api.Assertions.assertTrue(declared.contains(key), key + " in " + declared);
+    }
   }
 }

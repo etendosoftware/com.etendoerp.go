@@ -621,12 +621,12 @@ public class ProductCostingHandler implements NeoHandler {
   /**
    * Resolves the owning product for a {@code /defaults} request.
    *
-   * <p>Two transports, two places to look. {@code NeoHookDispatcher#buildHookContext} does not
-   * copy query parameters onto the context it builds for a REST {@code /defaults} hook, so there
-   * the product has to come from the servlet request (the approach
-   * {@code InvoiceExchangeRateHandler#readParentIdFromRequest} takes). {@code McpHookExecutor},
-   * on the other hand, does populate {@code queryParams} and has no servlet request behind it —
-   * so checking the context first and the request second is the only form that works on both.
+   * <p>Two transports, two places to look. {@code NeoSubEndpointDispatcher} now copies the query
+   * string onto the context it builds for a REST {@code /defaults} hook (ETP-5680), and
+   * {@code McpHookExecutor} has always populated {@code queryParams}; so the context is checked
+   * first. The servlet request ({@code InvoiceExchangeRateHandler#readParentIdFromRequest} takes
+   * the same approach) stays as the second look, for any path that still builds a hook context
+   * without the query map.
    *
    * @param context the {@code /defaults} context
    * @return the parent product id, or {@code null} when neither transport carries one
