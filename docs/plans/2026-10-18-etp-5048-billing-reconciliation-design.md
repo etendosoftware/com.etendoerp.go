@@ -5,6 +5,8 @@
 → ETP-5047 (the subscription model and environment access) → **ETP-5048**.
 **Governing PRD:** `schema_forge/docs/plans/2026-08-27-recurring-billing-and-resource-limits-prd.md`
 §9.3 and §10.
+**Operator reference** (configuring, scheduling, alerts, procedures):
+[`../billing-reconciliation.md`](../billing-reconciliation.md).
 
 ## 1. Goal
 
@@ -206,7 +208,7 @@ checkout and subscription rows, and its audit rows are ordinary billing events.
       it out, so every later run reports it as "N stuck provider events still awaiting review"
       (`STALE_EVENTS_AWAITING`) for as long as its review row exists **and** the original event is
       still `RECEIVED`. Open is read off the original event, not the review row: the operator
-      resolves it by moving the original row out of `RECEIVED` (§8), and the count clears itself
+      resolves it by moving the original row out of `RECEIVED` (`billing-reconciliation.md` §7.3), and the count clears itself
       whatever happens to the review row. An event parked in the same run is counted as parked
       only, never also as awaiting. The count is taken on every run, also when no family could be
       swept.
@@ -241,7 +243,7 @@ The phases run in this order, each with its own transactions:
 | # | Phase | Candidates | Provider read | Repair |
 |---|---|---|---|---|
 | A | Checkout recovery (provider → local) | `CREATED` rows with a session id, older than the paid grace, not backing off | `GET /v1/checkout/sessions/{id}` | `complete` + `paid`/`no_payment_required` → `recordPaid`, then provision (or apply the re-subscription) in B. `expired`, past the abandoned window → `EXPIRED`. `open` → nothing. A failed read → back-off. |
-| B | Provisioning repair | `PAID` rows older than the paid grace (`PAID_AT`, else the creation); `PROVISIONING` rows whose lease is stale or whose failure is retryable; without a created client, or a `PAID` re-subscription; not parked, not backing off | none for a new purchase; `GET /v1/subscriptions/{id}` for a re-subscription | `PaidProvisioningService` under the `claimForProvisioning` lease, or `PaidReactivationService` (decision 15). A non-retryable failure, a unique violation, an attempt that cannot start (unknown currency, missing account, not the owner, demo source refused, not confirmed paid), or an exhausted attempt budget (`max.provisioning.attempts`, §7) → needs review, once, in the same run, whether the failure was recorded earlier or met by this run's attempt (then alerted once, by the review). |
+| B | Provisioning repair | `PAID` rows older than the paid grace (`PAID_AT`, else the creation); `PROVISIONING` rows whose lease is stale or whose failure is retryable; without a created client, or a `PAID` re-subscription; not parked, not backing off | none for a new purchase; `GET /v1/subscriptions/{id}` for a re-subscription | `PaidProvisioningService` under the `claimForProvisioning` lease, or `PaidReactivationService` (decision 15). A non-retryable failure, a unique violation, an attempt that cannot start (unknown currency, missing account, not the owner, demo source refused, not confirmed paid), or an exhausted attempt budget (`max.provisioning.attempts`, `billing-reconciliation.md` §4) → needs review, once, in the same run, whether the failure was recorded earlier or met by this run's attempt (then alerted once, by the review). |
 | C | No-session-id review | `CREATING` rows older than the abandoned window, not parked | none | parked for review once; the run then counts as awaiting the open reviews earlier runs parked (one parked in this run is counted as a new review only) |
 | D | Subscriptions (local → provider) | open active rows with a Stripe subscription id; preference-route tenants, latest purchase only (decision 9) | `GET /v1/subscriptions?status=all&expand[]=data.latest_invoice` paginated, then `GET /v1/subscriptions/{id}` for every local id the list did not return, up to the batch size | the status mapping of decision 7, applied through `SubscriptionLifecycleApplier` + `TenantEnvironmentLifecycleService.applySubscriptionEvent` on the provider's clock (decision 16), after the no-op diff. Missing price/amount/currency on an open row (the R37 adoption step, register §2.4) is filled from the subscription's first item price, only where NULL. |
 | E | Stale `RECEIVED` sweep | Stripe events of the families whose phases completed, `RECEIVED` older than the threshold, not parked | none | per decision 12: superseded (`IGNORED`), parked for review, or left. Then, on every run, the stuck events earlier runs parked that are still `RECEIVED` are counted as awaiting review (one parked in this run is counted as parked only) |
@@ -357,7 +359,7 @@ treats every id it did not see as unknown, never as absent.
 - `payment/PausedSubscriptionAlert` raises the once-per-pause-episode review alert for `paused`,
   shared by the webhook and the job, and ends the open episodes (`paused` and paused collection)
   a subscription has left.
-- `ReconciliationSettings` holds the properties of §7.
+- `ReconciliationSettings` holds the properties of `billing-reconciliation.md` §4.
 - `ReconciliationResult` holds the counts and the summary.
 - `ReconciliationAudit` writes the billing-event rows and the `[BILLING-RECONCILE]` lines, and
   sends the internal review alerts (review S5): one per new review, per parked stuck event, one
@@ -365,7 +367,7 @@ treats every id it did not see as unknown, never as absent.
   (sent from `BillingReconciliationProcess`). Each is sent only by the call that wrote its row. A
   dry run writes no row and sends no internal alert.
 - `ReviewQueue` parks purchases for review, keeps them out of the batches, counts the open ones,
-  and restores the attempt budget of a released one (§8).
+  and restores the attempt budget of a released one (`billing-reconciliation.md` §7.1).
 - `payment/StripeEventTypes` holds the event-type lists the webhook acts on and the sweep reads.
 - `ReconciliationRunLock` keeps one run at a time (§5).
 
@@ -421,128 +423,16 @@ request, ends as an ERROR without doing work while the flag is off (decision 11)
 
 ## 7. Configuration
 
-| Property / env | Default | Meaning |
-|---|---|---|
-| `etendo.go.flags.billing-reconciliation-schedule` / `ETGO_FLAG_BILLING_RECONCILIATION_SCHEDULE` (or ConfigCat) | off | The schedule is planted at startup only when on; a run of it does work only when on |
-| `etendo.go.billing.reconcile.interval.minutes` / `ETGO_BILLING_RECONCILE_INTERVAL_MINUTES` | 60 | Interval of the planted request (read when it is first planted) |
-| `etendo.go.billing.reconcile.batch.size` / `ETGO_BILLING_RECONCILE_BATCH_SIZE` | 50 | Rows per phase per run |
-| `etendo.go.billing.reconcile.abandoned.hours` / `ETGO_BILLING_RECONCILE_ABANDONED_HOURS` | 48 (minimum 48) | Age before a checkout counts as abandoned |
-| `etendo.go.billing.reconcile.paid.grace.minutes` / `ETGO_BILLING_RECONCILE_PAID_GRACE_MINUTES` | 15 | Age before a paid row is provisioned by the server (the browser normally does it) |
-| `etendo.go.billing.reconcile.received.stale.minutes` / `ETGO_BILLING_RECONCILE_RECEIVED_STALE_MINUTES` | 60 | Age before a `RECEIVED` event counts as stuck |
-| `etendo.go.billing.reconcile.absent.max.share` / `ETGO_BILLING_RECONCILE_ABSENT_MAX_SHARE` | 0.25 | Breaker threshold |
-| `etendo.go.billing.reconcile.max.provisioning.attempts` / `ETGO_BILLING_RECONCILE_MAX_PROVISIONING_ATTEMPTS` | 5 | Provisioning attempts after which a purchase is parked for review (`ATTEMPTS_EXHAUSTED`) instead of retried |
-
-A malformed value falls back to its default, and every value is clamped (`ReconciliationSettings`):
-the interval to at least 5 minutes, the batch size and the paid grace to at least 1, the stale
-threshold to at least 5 minutes, the abandoned window to at least 48 h, the attempt budget to at
-least 1; a share outside 0…1 falls back to 0.25. The back-off after a failed item is fixed at 6 h
-(`BillingReconciliationService.RETRY_BACKOFF_MINUTES`).
+Moved to the operator reference, [`../billing-reconciliation.md`](../billing-reconciliation.md) §4
+(every property, environment variable, default and clamp, the provisioning lease, and the fixed 6 h
+back-off). The schedule flag is documented in `feature-flags-and-tenant-upgrade.md` §1.
 
 ## 8. Operating it
 
-- **Run by hand:** Classic, System Administrator, menu **Billing Reconciliation**. Tick *Dry run*
-  for a first look. The popup shows the summary and one line per affected item; a scheduled or
-  Process Request run shows the same lines in Process Monitor. Only one run at a time: a second
-  one says a reconciliation is already running and does nothing.
-- **Release: a fresh environment needs a full build before the menu works** (found in manual
-  testing on 2026-10-21). The **Billing Reconciliation** menu entry opens its popup through the
-  `ActionButtonJava_Responser` servlet that WAD generates into `srcAD`. A class-mode smartbuild
-  compiles the Java but does not run WAD, so that servlet is not regenerated and the popup answers
-  "You do not have sufficient privileges" even for System Administrator. On a fresh local
-  environment run `./gradlew compile.complete`, then a smartbuild to deploy. A normal deploy runs
-  WAD and needs nothing extra.
-- **Go-live:** turn the `billing-reconciliation-schedule` flag on and create the production Process
-  Request **together**. A request firing with the flag off ends as an ERROR every hour in Process
-  Monitor (and alerts once a day); a flag on with no request does nothing at all.
-- **Process Groups are not gated:** a run fired as part of a Process Group has no process-request
-  id of its own, so it is not recognised as a scheduled run and the flag does not gate it.
-- **Database timeouts end the run lock:** the lock lives in an open transaction on its own
-  connection that is idle for the whole run. A server-side `idle_in_transaction_session_timeout`
-  shorter than a run would end that session, and with it the lock, silently and mid-run. Keep the
-  setting off (the PostgreSQL default) or longer than a run for the Etendo database user.
-- **A failed run** shows HTML lines in the popup; the exception, the log and Process Monitor get
-  the same content as plain text.
-- **Read what changed:** the **Billing Event** window (filter `Provider = reconciler`) and the
-  **Checkout Request → Billing Event** tab. The **Subscriptions** window shows corrected status and
-  end dates. Scheduled runs are in **Process Monitor**.
-- **Schedule it in production:** production is never restarted, so the startup hook never runs
-  there. Turn the flag on (ConfigCat or the property), then in the Process Request window create a
-  request for **Billing Reconciliation**, client System, timing *Schedule*, every 60 minutes, as for
-  Demo Trial Notices. A scheduled run while the flag is off does nothing and ends as an ERROR in
-  Process Monitor (and alerts once a day): turn the flag on, or unschedule the request.
-- **Switch the schedule on elsewhere:** in an environment that restarts, set the flag and restart;
-  the startup plants the request. An unscheduled request is never planted again by the startup.
-- **Alerts:** grep `[BILLING-RECONCILE]` (and `[BILLING-ALERT]` for a pause the webhook saw).
-  Provisioning repairs also send the internal `environment-provisioning` alert. A new review sends
-  `billing-reconcile-needs-review`, a parked stuck event `billing-reconcile-stale-event`, a tripped
-  breaker `billing-reconcile-breaker-tripped` (once a day), a paused subscription
-  `subscription-paused-review` (once per pause episode, from the job or the webhook), and a
-  scheduled request firing while the `billing-reconciliation-schedule` flag is off
-  `billing-reconcile-schedule-flag-off` (once a day: no reconciliation is happening; turn the flag
-  on or unschedule the request). Paused collection is a WARN and a billing-event row only.
-- **Release a parked purchase** (after the cause is fixed). A parked purchase is left out of every
-  batch until its open `reconciliation.needs-review` row is released:
-
-  ```sql
-  update etgo_billing_event
-     set event_result = 'IGNORED',
-         failure_reason = 'Released by <who>: <what was fixed>'
-   where provider = 'reconciler' and event_type = 'reconciliation.needs-review'
-     and request_id = '<request id>' and event_result = 'FAILED';
-  ```
-
-  The next run picks the purchase up again. Per code:
-  - `ATTEMPTS_EXHAUSTED` — the released purchase gets the full attempt budget again, counted from
-    the attempts recorded on the released row.
-  - a non-retryable failure or `DETERMINISTIC_FAILURE` (a unique violation) — the claim refuses a
-    request whose recorded failure is deterministic, so also clear it:
-    `update etgo_checkout_request set failure_reason = null where request_id = '<request id>';`
-    Otherwise the next run parks it again (a new row, `…:2`) and alerts once more.
-  - an attempt that could not start (`ACCOUNT_MISSING`, `UNKNOWN_CURRENCY`,
-    `BILLING_OWNER_REQUIRED`, `DEMO_SELECTION_REQUIRED`, `NOT_PAID`) — no attempt was claimed, so
-    nothing else needs clearing: fix the cause, release the row, and the next run tries again.
-  - `NO_SESSION_ID` — releasing it is pointless: the row stays `CREATING`, so the next run parks
-    it again. Close it instead, once Stripe confirms no payment was taken for that account and
-    time (search the Stripe dashboard by the account email): set it to `EXPIRED`, then release the
-    review row as above.
-
-    ```sql
-    update etgo_checkout_request
-       set checkout_status = 'EXPIRED', expired_at = now(), updated = now()
-     where request_id = '<request id>' and checkout_status = 'CREATING';
-    ```
-- **A row backing off** (`reconcile:retry-later:<request>`) is retried by itself after 6 h; to retry
-  sooner, delete that row.
-- **A parked stuck event** (`reconcile:stale-event-review:<event>`, the original event's id after
-  the prefix): check the event in the Stripe dashboard, then resolve the **original** event row,
-  which is still `RECEIVED`. Letting Stripe redeliver it does nothing: the claim re-opens only a
-  `FAILED` row, so a delivery of a `RECEIVED` one is counted as a duplicate (`DUPLICATE_COUNT`)
-  and never processed.
-  - To drop it (its effect is already in place, or must not happen):
-
-    ```sql
-    update etgo_billing_event
-       set event_result = 'IGNORED',
-           failure_reason = 'Resolved by <who>: <why>', updated = now()
-     where event_id = '<evt_…>' and event_result = 'RECEIVED';
-    ```
-  - To replay it, first make it re-claimable, then resend the event from the Stripe dashboard
-    (the event's page, or the webhook endpoint's delivery list): the next delivery re-claims
-    the `FAILED` row and processes it as a fresh claim.
-
-    ```sql
-    update etgo_billing_event set event_result = 'FAILED', updated = now()
-     where event_id = '<evt_…>' and event_result = 'RECEIVED';
-    ```
-
-    Resend right after the update. A `FAILED` row is not a stuck event, so no run sweeps,
-    parks or counts it again; until a delivery re-claims it, it only waits.
-
-  The review row needs no action. Once the original event is no longer `RECEIVED`, the run summary
-  stops counting it as "still awaiting review"; the review row stays as history. Do not delete it
-  while the original event is still `RECEIVED`: without it the event is no longer excluded, so the
-  next run sweeps it, parks it again and sends a second internal alert. Deleting it after the
-  original event is resolved is harmless.
+Moved to the operator reference, [`../billing-reconciliation.md`](../billing-reconciliation.md):
+running it from Classic and the full-build note for its popup (§2), scheduling and go-live (§3),
+alerts and their recipients (§5), reading what it did (§6), and the procedures for a parked
+purchase, a request backing off and a parked stuck event (§7).
 
 ## 9. Known limitations
 

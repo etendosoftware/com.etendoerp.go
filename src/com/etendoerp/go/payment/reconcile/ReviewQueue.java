@@ -26,10 +26,11 @@ import com.etendoerp.go.schemaforge.data.BillingEvent;
  * rows behind them. The run still reports how many wait ({@link #countAwaiting}).
  *
  * <p><b>Release.</b> Once the cause is fixed, an operator sets the open row to {@code IGNORED}
- * (design §8). The next run picks the purchase up again. A parking for exhausted attempts records
- * the attempt count it was parked at, and a released purchase gets the full attempt budget again
- * from there ({@link #attemptsBaseline}); a second parking writes a new row
- * ({@code reconcile:needs-review:<request>:2}, …), so the history stays.
+ * ({@code docs/billing-reconciliation.md} §7.1). The next run picks the purchase up again. A
+ * parking for exhausted attempts records the attempt count it was parked at, and a released
+ * purchase gets the full attempt budget again from there ({@link #attemptsBaseline}); a second
+ * parking writes a new row ({@code reconcile:needs-review:<request>:2}, …), so the history
+ * stays.
  */
 final class ReviewQueue {
 

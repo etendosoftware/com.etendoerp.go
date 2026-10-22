@@ -43,9 +43,9 @@ import com.etendoerp.go.schemaforge.data.CheckoutRequest;
 
 /**
  * Real-database specs for {@link ReviewQueue}: parking a purchase for review, and the W1 release
- * procedure of design §8 — an operator sets the review row to {@code IGNORED} and the purchase is
- * a candidate of the reconciliation's batches again, with its attempt budget counted from where it
- * was parked.
+ * procedure of {@code docs/billing-reconciliation.md} §7.1 — an operator sets the review row to
+ * {@code IGNORED} and the purchase is a candidate of the reconciliation's batches again, with its
+ * attempt budget counted from where it was parked.
  *
  * <p>The mocked {@code BillingReconciliationServiceTest} only sees the {@link ReviewQueue#NOT_PARKED}
  * HQL as text. Whether it really leaves a parked request out, and lets a released one back in, is

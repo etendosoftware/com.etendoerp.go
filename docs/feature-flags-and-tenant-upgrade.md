@@ -422,7 +422,9 @@ Whether the billing reconciliation (`ETGO_BillingReconciliation`) runs on a sche
 
 Environment level, evaluated with an empty context; read on every scheduled run, so turning it off
 (ConfigCat, live within one poll) stops the scheduled work without a restart. Its callers are
-`BillingReconciliationScheduleStartup` and `BillingReconciliationProcess`. Design of record:
+`BillingReconciliationScheduleStartup` and `BillingReconciliationProcess`. Operating the
+reconciliation (scheduling, settings, alerts, procedures):
+[`billing-reconciliation.md`](billing-reconciliation.md). Design of record:
 [`plans/2026-10-18-etp-5048-billing-reconciliation-design.md`](plans/2026-10-18-etp-5048-billing-reconciliation-design.md).
 
 ## 2. The onboarding paywall

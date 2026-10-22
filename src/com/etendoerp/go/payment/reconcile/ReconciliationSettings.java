@@ -16,7 +16,7 @@ import com.etendoerp.go.common.GoRuntimeProperties;
  * configuration (JVM property, {@code Openbravo.properties}, environment variable). Every value
  * has a safe default; a malformed value falls back to it.
  *
- * <p>See {@code docs/plans/2026-10-18-etp-5048-billing-reconciliation-design.md} §7.
+ * <p>See {@code docs/billing-reconciliation.md} §4.
  */
 public final class ReconciliationSettings {
 

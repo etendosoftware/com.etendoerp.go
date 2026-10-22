@@ -19,9 +19,9 @@ import org.mockito.MockedStatic;
 import com.etendoerp.go.common.GoRuntimeProperties;
 
 /**
- * Specs for {@link ReconciliationSettings}: the defaults of design §7 and the floors that keep a
- * misconfiguration from making the reconciliation unsafe — above all the 48 h minimum of the
- * abandoned window, enforced even when a lower value is configured.
+ * Specs for {@link ReconciliationSettings}: the defaults of {@code docs/billing-reconciliation.md}
+ * §4 and the floors that keep a misconfiguration from making the reconciliation unsafe — above
+ * all the 48 h minimum of the abandoned window, enforced even when a lower value is configured.
  *
  * @covers com.etendoerp.go.payment.reconcile.ReconciliationSettings
  */

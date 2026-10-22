@@ -152,8 +152,9 @@ ERROR path with its once-a-day alert in `BillingReconciliationProcess` (`isSched
 `timingOf`, `alertFlagOffOncePerDay`), their tests
 (`BillingReconciliationScheduleStartupTest`, the gate cases of `BillingReconciliationProcessTest`)
 and their documentation (design `plans/2026-10-18-etp-5048-billing-reconciliation-design.md`
-decision 11 and §8, the flag section of `feature-flags-and-tenant-upgrade.md`). The menu entry, the
-process and Process Request scheduling are unaffected either way.
+decision 11, `billing-reconciliation.md` §3, the flag section of
+`feature-flags-and-tenant-upgrade.md`). The menu entry, the process and Process Request scheduling
+are unaffected either way.
 
 ---
 
@@ -385,7 +386,7 @@ open no row, and the lifecycle webhooks keep the `ETGO_SubscriptionStatus`/`DueA
 ### 🟠 2.10 Billing reconciliation go-live: the flag and the Process Request go together (ETP-5048)
 
 **Ticket:** ETP-5048. Production is never restarted, so the reconciliation is scheduled by hand
-there (design `plans/2026-10-18-etp-5048-billing-reconciliation-design.md` §8).
+there (`billing-reconciliation.md` §3).
 
 Turn the `billing-reconciliation-schedule` flag on **and** create the production Process Request
 (**Billing Reconciliation**, client System, timing *Schedule*, hourly) in the same step. A request
@@ -395,7 +396,8 @@ nothing at all. Whether the flag is needed is open: §1.8.
 
 On a fresh local environment the menu popup answers "You do not have sufficient privileges" until a
 full build has run (`./gradlew compile.complete`, then a smartbuild): a class-mode smartbuild does
-not regenerate the WAD servlet the popup goes through. A normal deploy runs WAD. Design §8.
+not regenerate the WAD servlet the popup goes through. A normal deploy runs WAD. See
+`billing-reconciliation.md` §2.
 
 ---
 

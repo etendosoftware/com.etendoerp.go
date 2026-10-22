@@ -1167,8 +1167,9 @@ public class BillingEventStoreIntegrationTest extends OBBaseTest {
   }
 
   /**
-   * The W1 release procedure (design §8): an operator sets the review row to {@code IGNORED} and
-   * the purchase is no longer held. The count follows, and the released row stays as history.
+   * The W1 release procedure ({@code docs/billing-reconciliation.md} §7.1): an operator sets the
+   * review row to {@code IGNORED} and the purchase is no longer held. The count follows, and the
+   * released row stays as history.
    */
   @Test
   public void testSettingAReviewRowToIgnoredReleasesIt() {
