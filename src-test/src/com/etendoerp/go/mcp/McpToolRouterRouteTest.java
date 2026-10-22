@@ -789,7 +789,7 @@ class McpToolRouterRouteTest {
         jobsMock.when(com.etendoerp.go.schemaforge.BatchJobService::getInstance).thenReturn(jobs);
         ownerMock.when(com.etendoerp.go.schemaforge.BatchJobService.Owner::current).thenReturn(owner);
 
-        JSONObject result = router.handleBatchJob("etendo_job_status",
+        JSONObject result = McpBatchJobTools.handleBatchJob("etendo_job_status",
             new JSONObject().put("jobId", "J1"));
 
         assertFalse(result.has("isError"));
@@ -815,8 +815,8 @@ class McpToolRouterRouteTest {
         jobsMock.when(com.etendoerp.go.schemaforge.BatchJobService::getInstance).thenReturn(jobs);
         ownerMock.when(com.etendoerp.go.schemaforge.BatchJobService.Owner::current).thenReturn(owner);
 
-        JSONObject mine = router.handleBatchJob("etendo_job_cancel", new JSONObject().put("jobId", "MINE"));
-        JSONObject theirs = router.handleBatchJob("etendo_job_cancel", new JSONObject().put("jobId", "THEIRS"));
+        JSONObject mine = McpBatchJobTools.handleBatchJob("etendo_job_cancel", new JSONObject().put("jobId", "MINE"));
+        JSONObject theirs = McpBatchJobTools.handleBatchJob("etendo_job_cancel", new JSONObject().put("jobId", "THEIRS"));
 
         assertEquals("CANCELLED", new JSONObject(textOf(mine)).getString("state"));
         assertTrue(theirs.getBoolean("isError"));
@@ -827,7 +827,7 @@ class McpToolRouterRouteTest {
     @Test
     @DisplayName("a job tool without a jobId is refused")
     void jobToolsRequireAJobId() throws Exception {
-      JSONObject result = router.handleBatchJob("etendo_job_status", new JSONObject());
+      JSONObject result = McpBatchJobTools.handleBatchJob("etendo_job_status", new JSONObject());
       assertTrue(result.getBoolean("isError"));
       assertTrue(textOf(result).contains("jobId is required"));
     }

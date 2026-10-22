@@ -33,6 +33,7 @@ import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -104,7 +105,8 @@ public final class BatchJobService {
    */
   static final String KEY_SAFE_TO_RESEND = "safeToResend";
 
-  private static volatile BatchJobService instance;
+  /** The one production instance of the service; {@code null} until the first use. */
+  private static final AtomicReference<BatchJobService> INSTANCE = new AtomicReference<>();
 
   /** The authenticated principal a job runs as, captured on the request thread. */
   public record Owner(String userId, String roleId, String clientId, String orgId,
@@ -128,10 +130,14 @@ public final class BatchJobService {
     }
   }
 
-  /** Runs ONE row's operations as an atomic batch and returns the {@code executeBatch} envelope. */
+  /**
+   * Runs ONE row's operations as an atomic batch and returns the {@code executeBatch} envelope.
+   */
   @FunctionalInterface
   public interface RowRunner {
     /**
+     * Runs one row's operations as an atomic batch.
+     *
      * @param rowOps the operations of one row, in request order
      * @return the batch envelope ({@code committed}, {@code operations} / {@code failedAt}, …)
      * @throws JSONException on an unexpected serialisation failure; it becomes that row's error
@@ -141,11 +147,17 @@ public final class BatchJobService {
 
   /** Puts the owner's identity on the worker thread and removes it again. */
   interface ContextBinder {
+    /**
+     * Binds the owner's identity to the current thread.
+     *
+     * @param owner the principal the job runs as
+     */
     void bind(Owner owner);
 
     /** Discards whatever DAL transaction the thread still holds. Must never throw. */
     void rollback();
 
+    /** Removes the owner's identity from the current thread. Must never throw. */
     void unbind();
   }
 
@@ -156,6 +168,8 @@ public final class BatchJobService {
     private final Integer retryAfter;
 
     /**
+     * Builds a refusal.
+     *
      * @param status     HTTP status to answer with
      * @param message    what to tell the caller
      * @param retryAfter seconds to wait before retrying (429), or {@code null}
@@ -198,17 +212,13 @@ public final class BatchJobService {
 
   /** @return the production service (JDBC store, two worker threads, heartbeat timer) */
   public static BatchJobService getInstance() {
-    BatchJobService local = instance;
+    BatchJobService local = INSTANCE.get();
     if (local == null) {
-      synchronized (BatchJobService.class) {
-        local = instance;
-        if (local == null) {
-          local = new BatchJobService(new BatchJobJdbcStore(), buildExecutor(),
-              Executors.newSingleThreadScheduledExecutor(daemonFactory("batch-job-heartbeat")),
-              new OBContextBinder());
-          instance = local;
-        }
-      }
+      BatchJobService created = new BatchJobService(new BatchJobJdbcStore(), buildExecutor(),
+          Executors.newSingleThreadScheduledExecutor(daemonFactory("batch-job-heartbeat")),
+          new OBContextBinder());
+      // The first caller wins; a loser reads the winner's instance and drops its own.
+      local = INSTANCE.compareAndSet(null, created) ? created : INSTANCE.get();
     }
     return local;
   }
@@ -328,6 +338,8 @@ public final class BatchJobService {
   // ── status / cancel ───────────────────────────────────────────────────────
 
   /**
+   * Reads the progress and the per-row results of a job.
+   *
    * @param owner the caller; only the job's own user and client can read it
    * @param jobId the id returned by {@link #submit}
    * @return the job as seen by its owner: state, progress and the per-row results so far
@@ -404,11 +416,7 @@ public final class BatchJobService {
    * reported {@code INTERRUPTED} by the next node that reads them.
    */
   public static void shutdownInstance() {
-    BatchJobService local;
-    synchronized (BatchJobService.class) {
-      local = instance;
-      instance = null;
-    }
+    BatchJobService local = INSTANCE.getAndSet(null);
     if (local != null) {
       local.shutdown();
     }

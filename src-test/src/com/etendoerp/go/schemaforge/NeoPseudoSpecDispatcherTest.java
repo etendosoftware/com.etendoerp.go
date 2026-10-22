@@ -123,7 +123,7 @@ public class NeoPseudoSpecDispatcherTest {
     verify(batchService, never()).handle(any(), any());
   }
 
-  // ETP-5677: GET/DELETE /sws/neo/batch/jobs/{id}
+  // ETP-5677 — the job endpoints of the batch path (read and cancel a job by its id).
 
   private static NeoServlet.NeoPathInfo jobPath(String id) {
     return new NeoServlet.NeoPathInfo("batch", "jobs", id);

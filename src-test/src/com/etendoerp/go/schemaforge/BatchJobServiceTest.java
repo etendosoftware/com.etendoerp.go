@@ -703,6 +703,7 @@ public class BatchJobServiceTest {
 
     @Override
     public void shutdown() {
+      // The fake executor has no pool to stop: the tests assert on its queue, not on threads.
     }
 
     @Override

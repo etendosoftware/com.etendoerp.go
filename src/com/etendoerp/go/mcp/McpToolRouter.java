@@ -253,7 +253,7 @@ public class McpToolRouter {
             if (!McpConstants.batchToolEnabled()) {
               return wrapAsErrorContent(McpRouterErrorBodies.batchDisabled());
             }
-            return handleBatchJob(toolName, arguments);
+            return McpBatchJobTools.handleBatchJob(toolName, arguments);
           case "etendo_action":
             return handleAction(specName, arguments);
           case McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN:
@@ -1671,7 +1671,7 @@ public class McpToolRouter {
       log.warn("etendo_batch access denied session={}", McpUsageTelemetry.sessionForLog(), e);
       return wrapAsErrorContent(e.getMessage());
     } catch (BatchJobService.JobException e) {
-      return wrapAsErrorContent(jobErrorMessage(e));
+      return wrapAsErrorContent(McpBatchJobTools.jobErrorMessage(e));
     } catch (Exception e) {
       log.error("Error executing etendo_batch session={}", McpUsageTelemetry.sessionForLog(), e);
       return wrapAsErrorContent("Error executing etendo_batch: " + e.getMessage());
@@ -1685,53 +1685,7 @@ public class McpToolRouter {
    * exactly the context {@link #routeCall} gives the synchronous tool.
    */
   private JSONObject submitBatchJob(JSONArray operations, JSONObject args) throws JSONException {
-    boolean onlyReturnIds = args.optBoolean(BatchService.PARAM_ONLY_RETURN_IDS, false);
-    boolean skipCallouts = args.optBoolean(BatchService.PARAM_SKIP_REDUNDANT_CALLOUTS, false);
-    BatchService batchService = BatchService.forBatchOnly();
-    return wrapAsTextContent(BatchJobService.getInstance().submit(BatchJobService.Owner.current(),
-        operations, "mcp", rowOps -> runMcpBatchRow(batchService, rowOps, onlyReturnIds,
-            skipCallouts)));
-  }
-
-  /** One row of an async MCP batch, shaped exactly like the synchronous call's outcome. */
-  private JSONObject runMcpBatchRow(BatchService batchService, JSONArray rowOps,
-      boolean onlyReturnIds, boolean skipCallouts) throws JSONException {
-    OBContext.setAdminMode();
-    try {
-      JSONObject result = batchService.executeBatch(rowOps, this::preprocessBatchOperation,
-          onlyReturnIds, skipCallouts);
-      if (!result.optBoolean("committed", false)) {
-        McpBatchEnvelope.toMcpBatchFailure(result);
-      }
-      return result;
-    } finally {
-      OBContext.restorePreviousMode();
-    }
-  }
-
-  /** {@code etendo_job_status} / {@code etendo_job_cancel} (ETP-5677). */
-  JSONObject handleBatchJob(String toolName, JSONObject args) {
-    String jobId = args == null ? null : args.optString("jobId", null);
-    if (StringUtils.isBlank(jobId)) {
-      return wrapAsErrorContent("jobId is required");
-    }
-    try {
-      BatchJobService.Owner owner = BatchJobService.Owner.current();
-      JSONObject job = McpConstants.TOOL_NEO_JOB_CANCEL.equals(toolName)
-          ? BatchJobService.getInstance().cancel(owner, jobId)
-          : BatchJobService.getInstance().status(owner, jobId);
-      return wrapAsTextContent(job);
-    } catch (BatchJobService.JobException e) {
-      return wrapAsErrorContent(jobErrorMessage(e));
-    } catch (Exception e) {
-      log.error("Error executing {} session={}", toolName, McpUsageTelemetry.sessionForLog(), e);
-      return wrapAsErrorContent("Error executing " + toolName + ": " + e.getMessage());
-    }
-  }
-
-  private static String jobErrorMessage(BatchJobService.JobException e) {
-    return e.getRetryAfter() == null ? e.getMessage()
-        : e.getMessage() + " (retry after " + e.getRetryAfter() + " s)";
+    return McpBatchJobTools.submitBatchJob(operations, args, this::preprocessBatchOperation);
   }
 
   /**

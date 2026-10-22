@@ -46,10 +46,19 @@ interface BatchJobStore {
     String result;
   }
 
-  /** Inserts a new {@code QUEUED} job with a fresh heartbeat. */
+  /**
+   * Inserts a new {@code QUEUED} job with a fresh heartbeat.
+   *
+   * @param job the job to store; its id, owner and counters are read from it
+   */
   void insert(JobRecord job);
 
-  /** @return the job, or {@code null} when it does not exist (or was purged) */
+  /**
+   * Reads one stored job.
+   *
+   * @param jobId the id of the job to read
+   * @return the job, or {@code null} when it does not exist (or was purged)
+   */
   JobRecord find(String jobId);
 
   /** What a worker re-reads before each row: still running, cancel asked? */
@@ -63,21 +72,46 @@ interface BatchJobStore {
     }
   }
 
-  /** @return the state and cancel flag of the job, or {@code null} when it no longer exists */
+  /**
+   * Reads what a worker re-reads before each row: is the job still running, was a cancel asked?
+   *
+   * @param jobId the id of the job to read
+   * @return the state and cancel flag of the job, or {@code null} when it no longer exists
+   */
   Control readControl(String jobId);
 
-  /** @return QUEUED + RUNNING jobs of one user in one client */
+  /**
+   * Counts the jobs of one user that are still queued or running.
+   *
+   * @param clientId the tenant the jobs belong to
+   * @param userId   the user whose jobs are counted
+   * @return QUEUED + RUNNING jobs of one user in one client
+   */
   int countActiveForUser(String clientId, String userId);
 
-  /** @return QUEUED + RUNNING jobs of one client */
+  /**
+   * Counts the jobs of one tenant that are still queued or running.
+   *
+   * @param clientId the tenant whose jobs are counted
+   * @return QUEUED + RUNNING jobs of one client
+   */
   int countActiveForClient(String clientId);
 
-  /** Conditional {@code QUEUED → RUNNING}; {@code false} when it was no longer queued. */
+  /**
+   * Claims a job for this node.
+   *
+   * @param jobId the id of the job to claim
+   * @return {@code true} when the conditional {@code QUEUED → RUNNING} update applied, {@code false}
+   *         when the job was no longer queued (cancelled or swept meanwhile)
+   */
   boolean claim(String jobId);
 
   /**
    * Records progress of a RUNNING job (processed row count, full per-row result, heartbeat).
    *
+   * @param jobId         the id of the running job
+   * @param processedRows how many rows are done
+   * @param result        the per-row results as JSON
    * @return {@code false} when the job is no longer RUNNING, which tells the worker to stop
    */
   boolean flush(String jobId, int processedRows, String result);
@@ -85,29 +119,51 @@ interface BatchJobStore {
   /**
    * Conditional move to {@code to} from any of {@code from}.
    *
+   * @param jobId  the id of the job to move
+   * @param to     the state to move to
+   * @param from   the states the move is allowed from
    * @param result the per-row result to store, or {@code null} to leave it untouched
    * @return {@code true} when the update applied
    */
   boolean transition(String jobId, BatchJobState to, Collection<BatchJobState> from,
       String result);
 
-  /** Sets the cancel flag of a non-terminal job; {@code false} when the job is terminal/missing. */
+  /**
+   * Sets the cancel flag of a non-terminal job.
+   *
+   * @param jobId the id of the job to cancel
+   * @return {@code false} when the job is terminal/missing
+   */
   boolean requestCancel(String jobId);
 
-  /** Refreshes the heartbeat of the given QUEUED/RUNNING jobs. */
+  /**
+   * Refreshes the heartbeat of the given QUEUED/RUNNING jobs.
+   *
+   * @param jobIds the ids of the jobs this node holds
+   */
   void heartbeat(Collection<String> jobIds);
 
   /**
    * Moves every QUEUED/RUNNING job whose heartbeat is older than {@code staleSeconds} (measured by
    * the database clock, so nodes with skewed clocks agree) to {@code INTERRUPTED}.
    *
+   * @param staleSeconds how long a job may go without a heartbeat
    * @return how many jobs were interrupted
    */
   int sweepStale(int staleSeconds);
 
-  /** Deletes finished jobs older than {@code retentionHours}. */
+  /**
+   * Deletes the finished jobs that are older than the retention.
+   *
+   * @param retentionHours how long a finished job is kept
+   * @return how many jobs were deleted
+   */
   int purgeFinished(int retentionHours);
 
-  /** Deletes a job row (used when the executor refused it right after the insert). */
+  /**
+   * Deletes a job row (used when the executor refused it right after the insert).
+   *
+   * @param jobId the id of the job to delete
+   */
   void delete(String jobId);
 }
