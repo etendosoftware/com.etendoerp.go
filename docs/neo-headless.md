@@ -6654,6 +6654,17 @@ execution against every environment (new or existing), which is the one guarante
 actually needs. The "Admin"
 (`is_client_admin = 'Y'`) role stays client-level, per tenant, untouched.
 
+**The template matrix exists twice — change both (ETP-5830).** The window grants per template live in
+`TemplateRoleWindowAccess.java` (runtime, read by the access-propagation sweep and the tests) **and** in
+a hand-kept copy inside `src-util/modulescript/.../EnsureSystemRoleTemplatesScript.java` (the seeding
+`ModuleScript`, compiled on its own). Editing only the first is reverted by the next
+`update.database`. After editing both, rebuild with `./gradlew compile.modulescript
+-Dmodule=com.etendoerp.go` and `git add -f` the rebuilt `.class` files under
+`build/classes/com/etendoerp/go/modulescript/` (they are committed). A grant you remove is cleaned off
+existing tenants with no data-fix: `update.database` runs `removeStaleWindowAccess`, then the startup
+sweep re-derives the personal roles. ETP-5830 used this path to drop Smart Scan from all four
+templates (Admin/client-admin keep it through the sidebar exemption).
+
 **The mechanism (`com.etendoerp.go.roles.UserRoleCompositionService`):** each user gets exactly
 ONE personal, non-template, non-admin `AD_Role` (found by reuse or created on first use), which
 inherits — via a real `AD_Role_Inheritance` row per requested template, added through `OBDal`
@@ -7280,7 +7291,35 @@ production templates, and personal roles (tenant clients) never travel at all.
 3. **Composition hook.** `UserRoleCompositionService#assignTemplateRoles` runs the same sweep on
    the personal role after a composition that added or removed an inheritance. Core copies
    inactive template rows too and lets them win by precedence, so without it a soft-deleted grant
-   of one template could hide another template's active grant.
+   of one template could hide another template's active grant. Since ETP-5830 core no longer
+   copies them from a system template at all (see *Inactive template rows are never inherited*
+   below); the hook still realigns copies made before that.
+
+**Inactive template rows are never inherited (ETP-5830).** Core's `AccessTypeInjector#getAccessList`
+reads a template's rows with `setFilterOnActive(false)`, so every composition used to copy the
+soft-deleted rows too. When two or more templates share a soft-deleted grant (the Smart Scan removal
+took it off all four), removing one template makes core recalculate the remaining ones in a single
+flush: each one copies the inactive row again, the second cannot see the first one's pending insert,
+and the flush fails on `ad_window_access_un_key`. Removing a template failed this way whenever two or
+more of the remaining ones shared the soft-deleted row, until the 7-day purge. `ActiveTemplateWindowAccessInjector`, `ActiveTemplateProcessAccessInjector`
+and `ActiveTemplateProcessDefinitionAccessInjector` `@Specializes` core's window, classic-process
+and OBUIAPP-process injectors (the three tables the modulescript soft-deletes) and drop a system
+template's inactive rows from that list (`SystemTemplateAccessRows`). Only the template-side read
+changes: core reads a dependent role's own rows through the same method, and those pass unfiltered,
+so deleting copies on removal works as before. `isInheritable` is deliberately not overridden: core
+also calls it in `propagateUpdatedAccess`, which carries a template row's deactivation to its copies.
+Because the injectors replace core's beans, a composition made from Etendo Classic is covered too.
+Proof: `CompositionSweepIntegrationTest#inactiveRowSharedByTemplatesIsNeverCopiedOnAddOrRemove`.
+
+Scope and limits of the filter:
+- **System templates must not carry `AD_Tab_Access` / `AD_Field_Access`.** Tab and field injectors
+  are not specialized, so a tab row under an inactive window row would still be copied and find no
+  parent window on the personal role (NPE in core's `setParent`). The modulescript writes none; if
+  templates ever get tab/field grants, specialize `TabAccessInjector` the same way.
+- Core's event-handler paths are untouched: reactivating a soft-deleted template row reaches
+  personal roles on the next startup-tick sweep, not through core (there is no copy to update);
+  `propagateDeletedAccess` may still fall back to another template's inactive row, and the sweep
+  corrects it; `propagateNewAccess` would copy a row inserted inactive, which no writer does.
 
 **The sweep rule** (`TemplateAccessPropagationService`): for each personal role and element (window,
 classic process, OBUIAPP process), look at the role's active inheritances of active system templates
@@ -8270,7 +8309,7 @@ The module includes unit tests that run without a backend:
 | `TemplateAccessPropagationServiceIntegrationTest` (ETP-5565) | -- | Real-DB proof (14 tests) of §8d.1's sweep rule, rolled back after each test: every combination after a template removal (narrowed, removed, manual row kept, inactive copy reactivated, a second sweep changes nothing), most-permissive level with highest-`SeqNo` source (also on equal levels), additions inserted unless a manual row exists (an inactive one included), OBUIAPP rows without duplicates and duplicate inherited copies collapsed to the oldest (copies from non-system roles untouched), template deactivation changes the fingerprint, inactive grants do not, roles inheriting a non-system template skipped, stale-copy detection, purge limited to inactive template rows past the grace period, the process-grant diagnostic, owner resolution. |
 | `TemplateRoleAccessStartupTest` (ETP-5565) | -- | Unit test (10 tests, mocked service and store) of the tick: unchanged templates take no lease, an empty sync table sweeps every template's inheritors and stores fingerprints, only changed templates are swept, a fingerprint from a newer `ALGO_VERSION` counts as unchanged, a busy lease skips the tick, a failed chunk keeps the old fingerprints and releases the lease with an error, stale copies are swept without a fingerprint change, purge runs under the lease before the sweep, owners are locked before their chunk, `tickSafely` never throws. |
 | `TemplateRoleSyncStoreIntegrationTest` (ETP-5565) | -- | Real-DB proof (5 tests) of the lease SQL (take once, holder-only renew/release, expired takeover, missing row seeded) and that an older `ALGO_VERSION` never overwrites a newer fingerprint. Restores the real lease row afterwards and skips itself when a live task holds the lease. |
-| `CompositionSweepIntegrationTest` (ETP-5565) | -- | Real-DB proof (1 test) of the composition hook: composing two templates where the higher-`SeqNo` one holds soft-deleted rows ends with the lower one's active grant (sourced from it) instead of core's inactive copy, and with no copy at all of an element no template grants actively. |
+| `CompositionSweepIntegrationTest` (ETP-5565, ETP-5830) | -- | Real-DB proof (2 tests) of the composition hook: composing two templates where the higher-`SeqNo` one holds soft-deleted rows ends with the lower one's active grant (sourced from it) instead of core's inactive copy, and with no copy at all of an element no template grants actively. ETP-5830: three templates sharing one soft-deleted window grant compose and then drop one template without `ad_window_access_un_key`, and no inactive copy is ever made. |
 | `SFAssignUserRolesTest` | -- | Unit test proving the webhook wires parameters/results/errors correctly, with `UserRoleCompositionService` itself intercepted via `mockConstruction` (its real behavior is the integration test's job): access gate (no role / restricted role denied without constructing the service), the happy path (admin composes, parses a whitespace/empty-entry-noisy `TemplateRoleIds` CSV, returns the assignment summary), missing `UserId` rejected before construction, an absent `TemplateRoleIds` parameter resolving to an empty (not `null`) list meaning "revoke all", a domain `OBException` folding into a `success:false` HTTP-200 result rather than the bridge's `error`/500 path, an unexpected `RuntimeException` surfacing as the bridge's `error` field instead, and the REVIEW cycle 1 regression proving the webhook actually forwards its already-resolved `currentRole` through to `assignTemplateRoles`'s 4-arg overload — the exact wiring the tenant-boundary check depends on. **ETP-4830 addition:** a companion regression proves the webhook ALSO resolves the caller's own `AD_User_ID` (via `OBContext.getOBContext().getUser()`, stubbed on the mock context) and forwards it as the 4th argument — the wiring `enforceOwnerProtection` depends on; every pre-existing test in this file leaves `mockContext.getUser()` unstubbed (defaults to `null`), confirming `callerUserId=null` for those and that the owner-protection check stays a no-op unless a real caller identity is resolved. |
 | `SFUserRoleAssignmentsTest` (ETP-4906) | -- | Unit test mirroring `SFAssignUserRolesTest`'s `mockConstruction` convention for §8e's read endpoint: access gate denies with the mode-appropriate empty shape (bulk `{"assignments":{}}` with no `UserId`, single `{"userId":...,"templateRoleIds":[]}` with one) without constructing the service; bulk mode returns every user's assignments keyed by id, scoped to `currentRole.getClient().getId()`; single mode returns one user's ids and proves `currentRole` is forwarded into the boundary-checking overload (mirrors `SFAssignUserRolesTest`'s own forwarding regression); a cross-tenant read attempt and an unknown-user-id `OBException` both fold into the single-mode empty shape rather than the bridge's `error`/500 path; an unexpected `RuntimeException` still surfaces as `error`. |
 | `SFSystemRoleTemplatesTest` (ETP-4906) | -- | Unit test (12 tests) mirroring `SFRolesOverviewTest`'s structure for §8f's endpoint: admin/client-admin access gate (no role, restricted role, System Administrator, client-admin — all resolved without the caller's own client ever appearing in any stub); roles resolved via `OBDal.get(Role.class, id)` against the 4 fixed `SystemRoleTemplates` ids rather than a client-scoped `Role` criteria; response omits `userCount`/`isClientAdmin` entirely; Finance/Sales/Purchasing/Inventory ordering; a template id resolving to `null` or to an inactive `Role` is skipped gracefully rather than erroring; GO-window intersection (native-only windows excluded) and tier resolution (full/read-only), mirroring `SFRolesOverview`'s identical logic; exception handling. **ETP-5402 additions (3 cases, 15 tests total):** every role has an empty `reports` array when no grants exist; a classic `tax-report` grant surfaces as `"full"` on the Finance template ONLY (Sales/Purchasing/Inventory unaffected); an "Informes financieros" pseudo-window grant surfaces all 5 financial-family reports — needed a NEW local keyed-by-role `WindowAccess`/classic-`ProcessAccess` stub helper pair, since this test class had none before (unlike `SFRolesOverviewTest`, which already had one). |
