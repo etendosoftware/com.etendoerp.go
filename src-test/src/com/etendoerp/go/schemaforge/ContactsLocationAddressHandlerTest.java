@@ -31,6 +31,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import org.openbravo.module.bptaxidkey.ViesService;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -78,6 +79,11 @@ import org.openbravo.dal.service.OBQuery;
  * null BP, successful creation), handleUpdate (null bpLoc, null geoLoc, successful
  * update), afterHandle (non-GET, enrich single record, enrich list display names),
  * and static helper methods (nullIfEmpty, boolField, str, joinNonNull, buildDisplayName).
+ * Also the ETP-5806 structured-address rules on every create/update body passed through this
+ * file's fixtures: mandatory streetName/buildingNumber/cityName/country, and address-line
+ * recomposition over any raw addressLine1 (including one a legacy record already carried).
+ *
+ * @covers com.etendoerp.go.schemaforge.ContactsLocationAddressHandler
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -231,7 +237,8 @@ class ContactsLocationAddressHandlerTest {
 
     JSONObject body = new JSONObject();
     body.put("name", "Test Address");
-    body.put("addressLine1", "123 Main St");
+    body.put("streetName", "Gran Via");
+    body.put("buildingNumber", "45");
     body.put("cityName", "Springfield");
     body.put("country", "ES");
 
@@ -250,6 +257,56 @@ class ContactsLocationAddressHandlerTest {
     assertEquals("bp-loc-id", resultRecord.getString("id"));
     assertEquals("geo-loc-id", resultRecord.getString("locationAddress"));
     verify(geoLoc).setCountry(country);
+  }
+
+  /**
+   * ETP-5806 — Mode B (building a new C_Location from raw fields) requires streetName,
+   * buildingNumber and cityName alongside the pre-existing country check. A body missing them
+   * is a clean 400, not a downstream NOT NULL violation at flush.
+   */
+  @Test
+  void testHandleCreateMissingStructuredAddressFieldsReturns400() throws Exception {
+    Map<String, String> params = new HashMap<>();
+    params.put("parentId", "bp-123");
+
+    JSONObject body = new JSONObject();
+    body.put("country", "ES");
+    // streetName, buildingNumber and cityName intentionally omitted
+
+    NeoContext ctx = buildContext("POST", null, body, params);
+    NeoResponse response = handler.handle(ctx);
+
+    assertNotNull(response);
+    assertEquals(400, response.getHttpStatus());
+    verify(obDal, never()).save(any());
+  }
+
+  /**
+   * ETP-5806 follow-up (the production 500 bug): a structured-address field longer than its DB
+   * column (EM_OBSEPA_StrtNm/BldgNb/BldgNm) is rejected with a clean 400 before the write is
+   * attempted, instead of reaching {@code OBDal.flush()} as a raw data-truncation SQL exception
+   * surfaced to the caller as an opaque 500.
+   */
+  @Test
+  void testHandleCreateFieldExceedingMaxLengthReturns400NotRawSqlException() throws Exception {
+    Map<String, String> params = new HashMap<>();
+    params.put("parentId", "bp-123");
+
+    JSONObject body = new JSONObject();
+    body.put("streetName", "Gran Via");
+    body.put("buildingNumber", "45");
+    body.put("cityName", "Madrid");
+    body.put("country", "ES");
+    // EM_OBSEPA_BldgNm is VARCHAR(35) — 36 chars overflows it.
+    body.put("buildingName", "A".repeat(36));
+
+    NeoContext ctx = buildContext("POST", null, body, params);
+    NeoResponse response = handler.handle(ctx);
+
+    assertNotNull(response);
+    assertEquals(400, response.getHttpStatus());
+    verify(obDal, never()).save(any());
+    verify(obDal, never()).flush();
   }
 
   // ── handleUpdate ────────────────────────────────────────────────────────
@@ -305,6 +362,12 @@ class ContactsLocationAddressHandlerTest {
 
     JSONObject body = new JSONObject();
     body.put("name", "Updated Name");
+    body.put("streetName", "Calle Mayor");
+    body.put("buildingNumber", "7");
+    body.put("cityName", "Toledo");
+    body.put("country", "ES");
+    // ETP-5806 — a non-blank streetName always recomputes Address1/Address2, so this raw
+    // addressLine1 (as a legacy record might already carry) must be ignored, not stored verbatim.
     body.put("addressLine1", "456 Oak Ave");
     body.put("shipToAddress", "Y");
     body.put("invoiceToAddress", "N");
@@ -318,6 +381,10 @@ class ContactsLocationAddressHandlerTest {
     JSONArray data = response.getBody().getJSONObject("response").getJSONArray("data");
     assertEquals(1, data.length());
     assertEquals("bpl-id", data.getJSONObject(0).getString("id"));
+    // ETP-5806 — streetName non-blank always recomputes the lines; the raw "456 Oak Ave" the
+    // caller also sent (as a legacy free-text Address1 might already hold) is never stored as-is.
+    verify(geoLoc).setAddressLine1("Calle Mayor, 7");
+    verify(geoLoc, never()).setAddressLine1("456 Oak Ave");
   }
 
   /**
@@ -351,6 +418,9 @@ class ContactsLocationAddressHandlerTest {
         .thenReturn(bpLoc);
 
     JSONObject body = new JSONObject();
+    body.put("streetName", "Gran Via");
+    body.put("buildingNumber", "45");
+    body.put("cityName", "Madrid");
     body.put("country", "country-id");
     body.put("region", "region-id");
 
@@ -382,6 +452,10 @@ class ContactsLocationAddressHandlerTest {
         .thenReturn(bpLoc);
 
     JSONObject body = new JSONObject();
+    body.put("streetName", "Gran Via");
+    body.put("buildingNumber", "45");
+    body.put("cityName", "Madrid");
+    body.put("country", "ES");
     body.put("region", "");
 
     NeoContext ctx = buildContext("PUT", "bpl-id", body, null);
@@ -390,6 +464,59 @@ class ContactsLocationAddressHandlerTest {
     assertNotNull(response);
     assertEquals(200, response.getHttpStatus());
     verify(geoLoc).setRegion(null);
+  }
+
+  /**
+   * ETP-5806 — the update path applies the same mandatory rule as create: an update always
+   * resends the full address, so a body missing streetName/buildingNumber/cityName (with the
+   * record carrying no country of its own to fall back to) is a clean 400.
+   */
+  @Test
+  void testHandleUpdateMissingStructuredAddressFieldsReturns400() throws Exception {
+    Location geoLoc = mock(Location.class);
+    org.openbravo.model.common.businesspartner.Location bpLoc =
+        mock(org.openbravo.model.common.businesspartner.Location.class);
+    when(bpLoc.getLocationAddress()).thenReturn(geoLoc);
+    when(obDal.get(org.openbravo.model.common.businesspartner.Location.class, "bpl-id"))
+        .thenReturn(bpLoc);
+
+    JSONObject body = new JSONObject();
+    body.put("streetName", "Gran Via");
+    // buildingNumber, cityName and country intentionally omitted, and geoLoc has none either
+
+    NeoContext ctx = buildContext("PUT", "bpl-id", body, null);
+    NeoResponse response = handler.handle(ctx);
+
+    assertNotNull(response);
+    assertEquals(400, response.getHttpStatus());
+    verify(obDal, never()).flush();
+  }
+
+  /**
+   * ETP-5806 follow-up (the production 500 bug) on the update path: an oversized structured
+   * field is rejected with 400 before {@code OBDal.flush()}.
+   */
+  @Test
+  void testHandleUpdateFieldExceedingMaxLengthReturns400() throws Exception {
+    Location geoLoc = mock(Location.class);
+    org.openbravo.model.common.businesspartner.Location bpLoc =
+        mock(org.openbravo.model.common.businesspartner.Location.class);
+    when(bpLoc.getLocationAddress()).thenReturn(geoLoc);
+    when(obDal.get(org.openbravo.model.common.businesspartner.Location.class, "bpl-id"))
+        .thenReturn(bpLoc);
+
+    JSONObject body = new JSONObject();
+    body.put("streetName", "Gran Via");
+    body.put("buildingNumber", "A".repeat(17)); // EM_OBSEPA_BldgNb is VARCHAR(16)
+    body.put("cityName", "Madrid");
+    body.put("country", "ES");
+
+    NeoContext ctx = buildContext("PUT", "bpl-id", body, null);
+    NeoResponse response = handler.handle(ctx);
+
+    assertNotNull(response);
+    assertEquals(400, response.getHttpStatus());
+    verify(obDal, never()).flush();
   }
 
   // ── handle() exception path ─────────────────────────────────────────────
@@ -1048,6 +1175,9 @@ class ContactsLocationAddressHandlerTest {
 
     JSONObject body = new JSONObject();
     body.put("name", "Test");
+    body.put("streetName", "Gran Via");
+    body.put("buildingNumber", "45");
+    body.put("cityName", "Madrid");
     body.put("country", "ES");
 
     NeoContext ctx = buildContext("POST", null, body, params);
@@ -1112,6 +1242,9 @@ class ContactsLocationAddressHandlerTest {
 
     JSONObject body = new JSONObject();
     body.put("name", "Test");
+    body.put("streetName", "Gran Via");
+    body.put("buildingNumber", "45");
+    body.put("cityName", "Madrid");
     body.put("country", "US-COUNTRY-ID");
 
     NeoContext ctx = buildContext("POST", null, body, params);
@@ -1184,6 +1317,9 @@ class ContactsLocationAddressHandlerTest {
 
     JSONObject body = new JSONObject();
     body.put("name", "Test");
+    body.put("streetName", "Gran Via");
+    body.put("buildingNumber", "45");
+    body.put("cityName", "Madrid");
     body.put("country", "FR-COUNTRY-ID");
 
     NeoContext ctx = buildContext("POST", null, body, params);
@@ -1286,6 +1422,9 @@ class ContactsLocationAddressHandlerTest {
 
       JSONObject body = new JSONObject();
       body.put("name", "Test");
+      body.put("streetName", "Gran Via");
+      body.put("buildingNumber", "45");
+      body.put("cityName", "Madrid");
       body.put("country", "FR-COUNTRY-ID");
 
       NeoContext ctx = buildContext("POST", null, body, params);
@@ -1332,6 +1471,9 @@ class ContactsLocationAddressHandlerTest {
     when(obDal.getConnection()).thenReturn(connMock);
 
     JSONObject body = new JSONObject();
+    body.put("streetName", "Gran Via");
+    body.put("buildingNumber", "45");
+    body.put("cityName", "Madrid");
     body.put("country", "FR-COUNTRY-ID");
 
     NeoContext ctx = buildContext("PUT", "bpl-id", body, null);
@@ -1361,9 +1503,16 @@ class ContactsLocationAddressHandlerTest {
     return country;
   }
 
-  /** A minimal create body: just the country, the one field the create path requires. */
+  /**
+   * A minimal create body carrying every field Mode B now requires (ETP-5806: streetName,
+   * buildingNumber, cityName and country are mandatory together), so any create test using this
+   * helper exercises the path past validation rather than being rejected with 400.
+   */
   private JSONObject createBodyWithCountry(String countryId) throws Exception {
     JSONObject body = new JSONObject();
+    body.put("streetName", "Gran Via");
+    body.put("buildingNumber", "45");
+    body.put("cityName", "Madrid");
     body.put("country", countryId);
     return body;
   }

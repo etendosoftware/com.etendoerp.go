@@ -1710,6 +1710,110 @@ public class EtendoGoJwtServletCoverageTest {
     assertTrue(new JSONObject(resp.body()).toString().contains("Unknown currency"));
   }
 
+  /**
+   * ETP-5806 — the structured address block (streetName/buildingNumber/city) is optional on the
+   * minimalist onboarding step, but once the user starts filling it in, all three become
+   * mandatory together — same rule as the Contacts/Warehouse address popups.
+   */
+  @Test
+  public void onboardingPartiallyStartedAddressBlockReturnsBadRequest() throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = jsonRequest("/onboarding",
+        "{\"clientName\":\"Acme\",\"streetName\":\"Gran Via\"}");
+    when(req.getHeader("Authorization")).thenReturn("Bearer valid-token");
+
+    try (var ctxMock = mockStatic(OBContext.class);
+         var dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      stubAuthenticatedAccount(dalMock);
+
+      servlet.doPost(req, resp.response);
+    }
+
+    assertEquals(400, resp.status);
+    String body = new JSONObject(resp.body()).toString();
+    assertTrue(body, body.contains("buildingNumber"));
+    assertTrue(body, body.contains("city"));
+  }
+
+  /**
+   * The counterweight: an entirely empty address block (the pre-ETP-5806 shape, or a caller that
+   * never asks about addresses at all) must NOT be rejected — it is optional. Proven by letting
+   * the request fail at the UNRELATED currency check instead, which is only reached once the
+   * address validation has already passed.
+   */
+  @Test
+  public void onboardingEmptyAddressBlockIsAcceptedByValidation() throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = jsonRequest("/onboarding",
+        "{\"clientName\":\"Acme\",\"currency\":\"XYZ\"}");
+    when(req.getHeader("Authorization")).thenReturn("Bearer valid-token");
+
+    try (var ctxMock = mockStatic(OBContext.class);
+         var dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      stubAuthenticatedAccount(dalMock);
+      dalMock.when(() -> EtendoGoJwtDalHelper.findCurrencyByIsoCode("XYZ")).thenReturn(null);
+
+      servlet.doPost(req, resp.response);
+    }
+
+    assertEquals(400, resp.status);
+    assertTrue(new JSONObject(resp.body()).toString().contains("Unknown currency"));
+  }
+
+  /**
+   * ETP-5806 follow-up (the production 500 bug class): a structured field longer than its DB
+   * column is rejected with a clean 400 naming it, via the same
+   * {@code StructuredAddressComposer#fieldsExceedingMaxLength} check the Contacts/Warehouse
+   * handlers use — never a downstream data-truncation failure mid-provisioning.
+   */
+  @Test
+  public void onboardingOversizedStructuredAddressFieldReturnsBadRequest() throws Exception {
+    ResponseCapture resp = mockResponse();
+    String tooLongStreetName = "A".repeat(71); // EM_OBSEPA_StrtNm is VARCHAR(70)
+    HttpServletRequest req = jsonRequest("/onboarding",
+        "{\"clientName\":\"Acme\",\"streetName\":\"" + tooLongStreetName
+            + "\",\"buildingNumber\":\"1\",\"city\":\"Madrid\"}");
+    when(req.getHeader("Authorization")).thenReturn("Bearer valid-token");
+
+    try (var ctxMock = mockStatic(OBContext.class);
+         var dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      stubAuthenticatedAccount(dalMock);
+
+      servlet.doPost(req, resp.response);
+    }
+
+    assertEquals(400, resp.status);
+    assertTrue(new JSONObject(resp.body()).toString().contains("streetName"));
+  }
+
+  /**
+   * City is validated through {@code OnboardingFieldLimits.CITY} (it is not one of the 3
+   * structured SEPA fields {@code StructuredAddressComposer} covers), and reported through the
+   * machine-readable {@code FIELD_TOO_LONG} envelope rather than a plain message string.
+   */
+  @Test
+  public void onboardingCityExceedingFieldLimitReturnsFieldTooLong() throws Exception {
+    ResponseCapture resp = mockResponse();
+    String tooLongCity = "A".repeat(61); // OnboardingFieldLimits.CITY is 60
+    HttpServletRequest req = jsonRequest("/onboarding",
+        "{\"clientName\":\"Acme\",\"streetName\":\"Gran Via\",\"buildingNumber\":\"1\",\"city\":\""
+            + tooLongCity + "\"}");
+    when(req.getHeader("Authorization")).thenReturn("Bearer valid-token");
+
+    try (var ctxMock = mockStatic(OBContext.class);
+         var dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      stubAuthenticatedAccount(dalMock);
+
+      servlet.doPost(req, resp.response);
+    }
+
+    assertEquals(400, resp.status);
+    JSONObject error = new JSONObject(resp.body()).getJSONObject("error");
+    assertEquals("FIELD_TOO_LONG", error.getString("code"));
+    assertEquals("city", error.getString("field"));
+    assertEquals(60, error.getInt("max"));
+  }
+
   @Test
   public void onboardingExistingClientOwnedByAnotherAccountStreamsFailure() throws Exception {
     ResponseCapture resp = mockResponse();

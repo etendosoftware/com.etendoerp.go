@@ -336,6 +336,36 @@ class McpSchemaFieldBuilderTest {
           entity, "Bad_Col");
       assertEquals("Bad_Col", result);
     }
+
+    /**
+     * ETP-5806 naming unification: the 3 structured SEPA columns publish the name every handler
+     * agrees on in its own JSON ({@code streetName}/{@code buildingNumber}/{@code buildingName}),
+     * never the raw Hibernate property codegen produced for the column
+     * ({@code oBSEPAStreetName}/...). Checked BEFORE the DAL lookup — a non-null entity whose
+     * {@code getPropertyByColumnName} would answer something else must still be overridden.
+     */
+    @Test
+    void structuredAddressColumnIsOverriddenBeforeTheDalLookup() throws Exception {
+      org.openbravo.base.model.Entity entity = mock(org.openbravo.base.model.Entity.class);
+      Property rawProp = mock(Property.class);
+      when(rawProp.getName()).thenReturn("oBSEPAStreetName");
+      when(entity.getPropertyByColumnName("EM_OBSEPA_StrtNm")).thenReturn(rawProp);
+
+      String result = (String) invokeStatic("resolvePropertyName",
+          new Class<?>[]{ org.openbravo.base.model.Entity.class, String.class },
+          entity, "EM_OBSEPA_StrtNm");
+
+      assertEquals("streetName", result);
+    }
+
+    @Test
+    void structuredAddressColumnIsOverriddenEvenWithANullEntity() throws Exception {
+      String result = (String) invokeStatic("resolvePropertyName",
+          new Class<?>[]{ org.openbravo.base.model.Entity.class, String.class },
+          null, "EM_OBSEPA_BldgNb");
+
+      assertEquals("buildingNumber", result);
+    }
   }
 
   // ─── addDefaultExpression ───────────────────────────────────────────

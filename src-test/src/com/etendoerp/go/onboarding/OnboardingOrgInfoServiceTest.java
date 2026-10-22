@@ -23,6 +23,7 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
@@ -442,6 +443,91 @@ public class OnboardingOrgInfoServiceTest {
 
     verify(location, never()).setAddressLine1(anyString());
     verify(dal).save(location);
+  }
+
+  /**
+   * ETP-5806 — the structured fields take priority over the legacy free-text {@code address}
+   * whenever {@code streetName} is non-blank: the composed Address1/Address2 and the 3 structured
+   * SEPA columns are set, and the raw legacy address is never touched.
+   */
+  @Test
+  public void testCreateLocationStructuredFieldsTakePriorityOverLegacyAddress() {
+    OnboardingOrgInfoService service = new OnboardingOrgInfoService();
+    Client client = mock(Client.class);
+    Organization org = mock(Organization.class);
+    Country country = mock(Country.class);
+
+    OBProvider provider = mock(OBProvider.class);
+    Location location = mock(Location.class);
+    when(provider.get(Location.class)).thenReturn(location);
+    OBDal dal = mock(OBDal.class);
+
+    try (MockedStatic<OBProvider> obProvider = mockStatic(OBProvider.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obProvider.when(OBProvider::getInstance).thenReturn(provider);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      service.createLocation(client, org, country, "Legacy free text — must be ignored",
+          "Gran Via", "45", "Torre A", "Madrid");
+    }
+
+    verify(location).setOBSEPAStreetName("Gran Via");
+    verify(location).setOBSEPABuildingNumber("45");
+    verify(location).setOBSEPABuildingName("Torre A");
+    verify(location).setAddressLine1("Gran Via, 45 - Torre A");
+    verify(location, never()).setAddressLine2(anyString());
+    verify(location).setCityName("Madrid");
+    verify(location, never()).setAddressLine1("Legacy free text — must be ignored");
+    verify(dal).save(location);
+  }
+
+  /**
+   * City is independent of which branch populated the address lines: it must be set even when
+   * nothing else about the address block was provided.
+   */
+  @Test
+  public void testCreateLocationSetsCityNameEvenWithoutAnyAddress() {
+    OnboardingOrgInfoService service = new OnboardingOrgInfoService();
+    Client client = mock(Client.class);
+    Organization org = mock(Organization.class);
+    Country country = mock(Country.class);
+
+    OBProvider provider = mock(OBProvider.class);
+    Location location = mock(Location.class);
+    when(provider.get(Location.class)).thenReturn(location);
+    OBDal dal = mock(OBDal.class);
+
+    try (MockedStatic<OBProvider> obProvider = mockStatic(OBProvider.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obProvider.when(OBProvider::getInstance).thenReturn(provider);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      service.createLocation(client, org, country, null, null, null, null, "Sevilla");
+    }
+
+    verify(location).setCityName("Sevilla");
+    verify(location, never()).setAddressLine1(anyString());
+  }
+
+  @Test
+  public void testCreateLocationTrimsBlankBuildingNumberAndNameToNull() {
+    OnboardingOrgInfoService service = new OnboardingOrgInfoService();
+    Client client = mock(Client.class);
+    Organization org = mock(Organization.class);
+    Country country = mock(Country.class);
+
+    OBProvider provider = mock(OBProvider.class);
+    Location location = mock(Location.class);
+    when(provider.get(Location.class)).thenReturn(location);
+    OBDal dal = mock(OBDal.class);
+
+    try (MockedStatic<OBProvider> obProvider = mockStatic(OBProvider.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obProvider.when(OBProvider::getInstance).thenReturn(provider);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      service.createLocation(client, org, country, null, "Gran Via", "  ", "   ", "Madrid");
+    }
+
+    verify(location).setOBSEPABuildingNumber(isNull());
+    verify(location).setOBSEPABuildingName(isNull());
   }
 
   // ---------------------------------------------------------------------------

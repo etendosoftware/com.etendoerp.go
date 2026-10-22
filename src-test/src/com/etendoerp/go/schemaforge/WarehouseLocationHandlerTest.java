@@ -57,7 +57,11 @@ import org.openbravo.model.common.geography.Region;
  * {@code NeoSelectorService} can serve selectors — the ETP-4526 regression),
  * unmatched CRUD combos (405), handleCreate, handleUpdate, handleGetById, and the
  * private field-mapping/display-name helpers exercised indirectly through those
- * three public-facing flows.
+ * three public-facing flows. Also the ETP-5806 structured-address rules: mandatory
+ * streetName/buildingNumber/cityName/country, the oversized-field 400 (the former raw-SQL 500),
+ * and address-line recomposition over any raw addressLine1/addressLine2 the body also sends.
+ *
+ * @covers com.etendoerp.go.schemaforge.WarehouseLocationHandler
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -224,6 +228,11 @@ class WarehouseLocationHandlerTest {
     when(geoLoc.getRegion()).thenReturn(region);
 
     JSONObject body = new JSONObject();
+    // ETP-5806 — streetName/buildingNumber are now mandatory; once present, applyGeoLocFields
+    // computes addressLine1/addressLine2 from them and ignores any raw value also sent.
+    body.put("streetName", "Gran Via");
+    body.put("buildingNumber", "45");
+    body.put("buildingName", "Torre A");
     body.put("addressLine1", "123 Main St");
     body.put("addressLine2", "Apt 4");
     body.put("cityName", "Springfield");
@@ -239,8 +248,13 @@ class WarehouseLocationHandlerTest {
     verify(geoLoc).setClient(client);
     verify(geoLoc).setOrganization(organization);
     verify(geoLoc).setActive(Boolean.TRUE);
-    verify(geoLoc).setAddressLine1("123 Main St");
-    verify(geoLoc).setAddressLine2("Apt 4");
+    verify(geoLoc).setOBSEPAStreetName("Gran Via");
+    verify(geoLoc).setOBSEPABuildingNumber("45");
+    verify(geoLoc).setOBSEPABuildingName("Torre A");
+    // ETP-5806 — composed from street+number+name, NOT the raw addressLine1/addressLine2 sent.
+    verify(geoLoc).setAddressLine1("Gran Via, 45 - Torre A");
+    verify(geoLoc).setAddressLine2(isNull());
+    verify(geoLoc, never()).setAddressLine1("123 Main St");
     verify(geoLoc).setCityName("Springfield");
     verify(geoLoc).setPostalCode("62704");
     verify(geoLoc).setCountry(country);
@@ -272,6 +286,9 @@ class WarehouseLocationHandlerTest {
     when(obDal.get(Country.class, "missing-country")).thenReturn(null);
 
     JSONObject body = new JSONObject();
+    body.put("streetName", "Gran Via");
+    body.put("buildingNumber", "45");
+    body.put("cityName", "Madrid");
     body.put("country", "missing-country");
 
     NeoResponse r = handler.handle(buildContext("POST", null, body));
@@ -290,7 +307,13 @@ class WarehouseLocationHandlerTest {
     when(geoLoc.getId()).thenReturn("geo-3");
     when(obProvider.get(Location.class)).thenReturn(geoLoc);
 
-    NeoResponse r = handler.handle(buildContext("POST", null, new JSONObject()));
+    JSONObject body = new JSONObject();
+    body.put("streetName", "Gran Via");
+    body.put("buildingNumber", "45");
+    body.put("cityName", "Madrid");
+    body.put("country", "country-x");
+
+    NeoResponse r = handler.handle(buildContext("POST", null, body));
 
     assertEquals(201, r.getHttpStatus());
     verify(geoLoc, never()).setRegion(any());
@@ -307,6 +330,10 @@ class WarehouseLocationHandlerTest {
     when(obProvider.get(Location.class)).thenReturn(geoLoc);
 
     JSONObject body = new JSONObject();
+    body.put("streetName", "Gran Via");
+    body.put("buildingNumber", "45");
+    body.put("cityName", "Madrid");
+    body.put("country", "country-x");
     body.put("region", "");
 
     NeoResponse r = handler.handle(buildContext("POST", null, body));
@@ -316,28 +343,73 @@ class WarehouseLocationHandlerTest {
   }
 
   /**
-   * Exercises every branch of {@code nullIfEmpty} in one pass: an absent key,
-   * an empty string, the literal {@code "null"}, and a real value.
+   * ETP-5806 — missing a mandatory field (streetName/buildingNumber/cityName/country) is a
+   * clean 400, not a downstream NOT NULL violation at flush.
    */
   @Test
-  void testCreateNullIfEmptyVariants() throws Exception {
+  void testCreateMissingMandatoryFieldsReturns400() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("streetName", "Gran Via");
+    // buildingNumber, cityName and country intentionally omitted
+
+    NeoResponse r = handler.handle(buildContext("POST", null, body));
+
+    assertNotNull(r);
+    assertEquals(400, r.getHttpStatus());
+    verify(obDal, never()).save(any());
+  }
+
+  /**
+   * ETP-5806 follow-up (the production 500 bug): a structured-address field longer than its DB
+   * column must be rejected with a clean 400 before the write is attempted, never reach
+   * {@code OBDal.flush()} as a raw data-truncation SQL exception.
+   */
+  @Test
+  void testCreateFieldExceedingMaxLengthReturns400NotRawSqlException() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("streetName", "Gran Via");
+    body.put("buildingNumber", "45");
+    body.put("cityName", "Madrid");
+    body.put("country", "country-x");
+    // EM_OBSEPA_BldgNm is VARCHAR(35) — 36 chars overflows it.
+    body.put("buildingName", "A".repeat(36));
+
+    NeoResponse r = handler.handle(buildContext("POST", null, body));
+
+    assertNotNull(r);
+    assertEquals(400, r.getHttpStatus());
+    verify(obDal, never()).save(any());
+    verify(obDal, never()).flush();
+  }
+
+  /**
+   * Once streetName is mandatory, applyGeoLocFields always takes the composed-address branch;
+   * any raw addressLine1/addressLine2 the body also sends is ignored in favor of the composed
+   * value. Also exercises the remaining nullIfEmpty variant (literal {@code "null"}) via
+   * postalCode, the one field left unaffected by the new mandatory rule.
+   */
+  @Test
+  void testCreateIgnoresRawAddressLinesWhenStreetNamePresent() throws Exception {
     Location geoLoc = mock(Location.class);
     when(geoLoc.getId()).thenReturn("geo-5");
     when(obProvider.get(Location.class)).thenReturn(geoLoc);
 
     JSONObject body = new JSONObject();
-    // addressLine1 intentionally absent
-    body.put("addressLine2", "");
-    body.put("cityName", "null");
-    body.put("postalCode", "123 Main");
+    body.put("streetName", "Gran Via");
+    body.put("buildingNumber", "45");
+    body.put("cityName", "Madrid");
+    body.put("country", "country-x");
+    body.put("addressLine1", "RAW LINE — SHOULD BE IGNORED");
+    body.put("addressLine2", "RAW LINE 2 — SHOULD BE IGNORED");
+    body.put("postalCode", "null");
 
     NeoResponse r = handler.handle(buildContext("POST", null, body));
 
     assertEquals(201, r.getHttpStatus());
-    verify(geoLoc).setAddressLine1(isNull());
+    verify(geoLoc).setAddressLine1("Gran Via, 45");
     verify(geoLoc).setAddressLine2(isNull());
-    verify(geoLoc).setCityName(isNull());
-    verify(geoLoc).setPostalCode("123 Main");
+    verify(geoLoc, never()).setAddressLine1("RAW LINE — SHOULD BE IGNORED");
+    verify(geoLoc).setPostalCode(isNull());
   }
 
   /**
@@ -345,10 +417,16 @@ class WarehouseLocationHandlerTest {
    * and surface as HTTP 500, never leak a stack trace to the caller.
    */
   @Test
-  void testCreateExceptionRollsBackAndReturns500() {
+  void testCreateExceptionRollsBackAndReturns500() throws Exception {
     when(obProvider.get(Location.class)).thenThrow(new RuntimeException("DB exploded"));
 
-    NeoResponse r = handler.handle(buildContext("POST", null, new JSONObject()));
+    JSONObject body = new JSONObject();
+    body.put("streetName", "Gran Via");
+    body.put("buildingNumber", "45");
+    body.put("cityName", "Madrid");
+    body.put("country", "country-x");
+
+    NeoResponse r = handler.handle(buildContext("POST", null, body));
 
     assertNotNull(r);
     assertEquals(500, r.getHttpStatus());
@@ -369,13 +447,21 @@ class WarehouseLocationHandlerTest {
     when(obDal.get(Location.class, "geo-upd")).thenReturn(geoLoc);
 
     JSONObject body = new JSONObject();
+    body.put("streetName", "Calle Mayor");
+    body.put("buildingNumber", "7");
+    body.put("cityName", "Toledo");
+    body.put("country", "country-upd");
+    // ETP-5806 — a legacy record may already carry a free-text Address1; a non-blank streetName
+    // on the update always recomputes it, so this raw value must be ignored regardless of
+    // whatever addressLine1 geoLoc already had before this update.
     body.put("addressLine1", "456 Oak Ave");
 
     NeoResponse r = handler.handle(buildContext("PUT", "geo-upd", body));
 
     assertNotNull(r);
     assertEquals(200, r.getHttpStatus());
-    verify(geoLoc).setAddressLine1("456 Oak Ave");
+    verify(geoLoc).setAddressLine1("Calle Mayor, 7");
+    verify(geoLoc, never()).setAddressLine1("456 Oak Ave");
     verify(obDal, never()).save(any());
     verify(obDal).flush();
 
@@ -419,6 +505,9 @@ class WarehouseLocationHandlerTest {
     when(obDal.get(Region.class, "region-id")).thenReturn(region);
 
     JSONObject body = new JSONObject();
+    body.put("streetName", "Paseo del Prado");
+    body.put("buildingNumber", "12");
+    body.put("cityName", "Madrid");
     body.put("country", "country-id");
     body.put("region", "region-id");
 
@@ -439,12 +528,60 @@ class WarehouseLocationHandlerTest {
     when(obDal.get(Location.class, "geo-upd-3")).thenReturn(geoLoc);
 
     JSONObject body = new JSONObject();
+    body.put("streetName", "Calle Alcala");
+    body.put("buildingNumber", "20");
+    body.put("cityName", "Madrid");
+    body.put("country", "country-any");
     body.put("region", "");
 
     NeoResponse r = handler.handle(buildContext("PUT", "geo-upd-3", body));
 
     assertEquals(200, r.getHttpStatus());
     verify(geoLoc).setRegion(isNull());
+  }
+
+  /**
+   * ETP-5806 — an update that omits the body's mandatory fields falls back to the existing
+   * record's own country, but streetName/buildingNumber/cityName have no such fallback (the
+   * update always resends the full address): a body missing them is rejected with 400.
+   */
+  @Test
+  void testUpdateMissingMandatoryFieldsReturns400() throws Exception {
+    Location geoLoc = mock(Location.class);
+    when(obDal.get(Location.class, "geo-upd-4")).thenReturn(geoLoc);
+
+    JSONObject body = new JSONObject();
+    body.put("streetName", "Calle Alcala");
+    // buildingNumber, cityName and country intentionally omitted, and geoLoc has none either
+
+    NeoResponse r = handler.handle(buildContext("PUT", "geo-upd-4", body));
+
+    assertNotNull(r);
+    assertEquals(400, r.getHttpStatus());
+    verify(obDal, never()).flush();
+  }
+
+  /**
+   * ETP-5806 follow-up (the production 500 bug) on the update path: an oversized structured
+   * field is rejected with 400 before {@code OBDal.flush()}, never surfaces as a raw SQL
+   * data-truncation exception.
+   */
+  @Test
+  void testUpdateFieldExceedingMaxLengthReturns400() throws Exception {
+    Location geoLoc = mock(Location.class);
+    when(obDal.get(Location.class, "geo-upd-5")).thenReturn(geoLoc);
+
+    JSONObject body = new JSONObject();
+    body.put("streetName", "Calle Alcala");
+    body.put("buildingNumber", "A".repeat(17)); // EM_OBSEPA_BldgNb is VARCHAR(16)
+    body.put("cityName", "Madrid");
+    body.put("country", "country-any");
+
+    NeoResponse r = handler.handle(buildContext("PUT", "geo-upd-5", body));
+
+    assertNotNull(r);
+    assertEquals(400, r.getHttpStatus());
+    verify(obDal, never()).flush();
   }
 
   // ── handleGetById ─────────────────────────────────────────────────────────
