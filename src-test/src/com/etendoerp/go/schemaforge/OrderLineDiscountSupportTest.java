@@ -746,4 +746,54 @@ class OrderLineDiscountSupportTest {
   static Stream<String> priceUpdateMethods() {
     return Stream.of("PATCH", "PUT");
   }
+
+  // ── ETP-5881: a line sent without a price takes the price list's, on every channel ──
+
+  static Stream<Arguments> createWithoutPrice() {
+    return Stream.of(
+        Arguments.of("REST: only product, quantity and parent → catalog price",
+            "{\"product\":\"P1\",\"parentId\":\"O1\",\"orderedQuantity\":2}", "12", "12", "12"),
+        Arguments.of("unitPrice 0 counts as not sent",
+            "{\"product\":\"P1\",\"parentId\":\"O1\",\"unitPrice\":0}", "12", "12", "12"),
+        Arguments.of("the caller's price wins (list price left as sent)",
+            "{\"product\":\"P1\",\"parentId\":\"O1\",\"unitPrice\":9}", "9", null, "12"),
+        Arguments.of("an explicit gross price wins",
+            "{\"product\":\"P1\",\"parentId\":\"O1\",\"grossUnitPrice\":14}", null, null,
+            "12"));
+  }
+
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("createWithoutPrice")
+  void setStandardPriceOnCreatePricesALineSentWithoutPrice(String label, String body,
+      String expectedUnit, String expectedList, String expectedStd) throws Exception {
+    JSONObject json = new JSONObject(body);
+    OBDal dal = mock(OBDal.class);
+    Product product = mock(Product.class);
+    Order order = mock(Order.class);
+    PriceList priceList = mock(PriceList.class);
+    ProductPrice price = mock(ProductPrice.class);
+    Date orderDate = new Date();
+    when(dal.get(Product.class, "P1")).thenReturn(product);
+    when(dal.get(Order.class, "O1")).thenReturn(order);
+    when(order.getOrderDate()).thenReturn(orderDate);
+    when(order.getPriceList()).thenReturn(priceList);
+    when(order.isSalesTransaction()).thenReturn(Boolean.TRUE);
+    when(priceList.isPriceIncludesTax()).thenReturn(Boolean.FALSE);
+    when(price.getListPrice()).thenReturn(new BigDecimal("12"));
+    when(price.getStandardPrice()).thenReturn(new BigDecimal("12"));
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+        MockedStatic<FinancialUtils> financial = mockStatic(FinancialUtils.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      financial.when(() -> FinancialUtils.getProductPrice(eq(product), eq(orderDate),
+          anyBoolean(), eq(priceList), eq(false))).thenReturn(price);
+
+      OrderLineDiscountSupport.setStandardPriceOnCreate(ctx("POST", NeoEndpointType.CRUD, json));
+    }
+
+    assertAmount(label, expectedUnit, json, OrderLineDiscountSupport.FIELD_UNIT_PRICE);
+    assertAmount(label, expectedStd, json, OrderLineDiscountSupport.FIELD_STANDARD_PRICE);
+    assertAmount(label, expectedUnit != null && expectedList != null ? expectedList : null, json,
+        OrderLineDiscountSupport.FIELD_LIST_PRICE);
+  }
 }

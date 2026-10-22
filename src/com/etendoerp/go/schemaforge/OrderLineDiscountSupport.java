@@ -195,6 +195,12 @@ final class OrderLineDiscountSupport {
    * {@code PriceStd 0} — or, with an explicit {@code unitPrice}, the price the defaults cascade
    * copied from it ({@code SL_Order_Amt} on {@code unitPrice} publishes {@code inppricestd}).
    *
+   * <p><b>A line sent without a price</b> (ETP-5881) also gets {@code unitPrice} (and the catalog
+   * {@code listPrice}, when the product has one) from that same price-list entry
+   * ({@link LinePriceListSupport}), on every channel: REST single and batch run no product callout
+   * for it, and {@code McpLinePriceInjector} only covers MCP. A non-zero price in the body is never
+   * replaced.
+   *
    * <p><b>Why overwriting is safe.</b> {@code standardPrice} is published read-only
    * ({@code ETGO_SF_FIELD.IsReadOnly = Y}, visibility {@code system}) on both sales-order/lines and
    * sales-quotation/quotationLine, so it is never a value the caller chose: MCP refuses it, and the
@@ -224,6 +230,9 @@ final class OrderLineDiscountSupport {
       if (productPrice == null) {
         return;
       }
+      // A line sent without a price takes the price list's (ETP-5881); a price the caller sent stays.
+      LinePriceListSupport.applyCatalogPrice(body, productPrice, FIELD_UNIT_PRICE,
+          FIELD_LIST_PRICE);
       BigDecimal standardPrice = productPrice.getStandardPrice();
       if (standardPrice != null) {
         body.put(FIELD_STANDARD_PRICE, standardPrice);

@@ -29,7 +29,11 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.financial.FinancialUtils;
+import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.invoice.InvoiceLine;
+import org.openbravo.model.common.plm.Product;
+import org.openbravo.model.pricing.pricelist.ProductPrice;
 
 /**
  * Price and amount derivation of a written invoice line, for the customizations that call it
@@ -115,6 +119,9 @@ final class InvoiceLineAmountSupport {
 
   private static final Logger log = LogManager.getLogger(InvoiceLineAmountSupport.class);
 
+  static final String FIELD_PRODUCT = "product";
+  static final String FIELD_PARENT_ID = "parentId";
+  static final String FIELD_INVOICE = "invoice";
   static final String FIELD_INVOICED_QTY = InvoiceLine.PROPERTY_INVOICEDQUANTITY;
   static final String FIELD_UNIT_PRICE = InvoiceLine.PROPERTY_UNITPRICE;
   static final String FIELD_LIST_PRICE = InvoiceLine.PROPERTY_LISTPRICE;
@@ -168,6 +175,51 @@ final class InvoiceLineAmountSupport {
     deriveAmountsOnCreate(ctx);
     deriveAmountsOnUpdate(ctx);
     return null;
+  }
+
+  /**
+   * A created line sent without a price takes its product's price in the parent invoice's price
+   * list at the invoice date (ETP-5881), the call core makes for a line
+   * ({@link FinancialUtils#getProductPrice}) — what the SPA gets from the product callout and REST
+   * never ran. A price in the body is never replaced ({@link LinePriceListSupport}). Abstains when
+   * the product or invoice cannot be read, the invoice has no price list or its list includes tax
+   * (deriving the net side is the callout's job), or the product has no price there. Total: never
+   * throws.
+   *
+   * @param ctx the pre-hook context; its request body is mutated in place
+   */
+  static void setPriceFromPriceListOnCreate(NeoContext ctx) {
+    if (ctx == null || !NeoEndpointType.CRUD.equals(ctx.getEndpointType())
+        || !METHOD_POST.equals(ctx.getHttpMethod()) || ctx.getRequestBody() == null) {
+      return;
+    }
+    JSONObject body = ctx.getRequestBody();
+    try {
+      if (!LinePriceListSupport.hasNoPrice(body, FIELD_UNIT_PRICE)) {
+        return;
+      }
+      String productId = body.optString(FIELD_PRODUCT, null);
+      String invoiceId = body.optString(FIELD_PARENT_ID, null);
+      if (StringUtils.isBlank(invoiceId) || "null".equals(invoiceId)) {
+        invoiceId = body.optString(FIELD_INVOICE, null);
+      }
+      if (StringUtils.isBlank(productId) || StringUtils.isBlank(invoiceId)) {
+        return;
+      }
+      Product product = OBDal.getInstance().get(Product.class, productId);
+      Invoice invoice = OBDal.getInstance().get(Invoice.class, invoiceId);
+      if (product == null || invoice == null || invoice.getInvoiceDate() == null
+          || invoice.getPriceList() == null
+          || Boolean.TRUE.equals(invoice.getPriceList().isPriceIncludesTax())) {
+        return;
+      }
+      ProductPrice catalog = FinancialUtils.getProductPrice(product, invoice.getInvoiceDate(),
+          Boolean.TRUE.equals(invoice.isSalesTransaction()), invoice.getPriceList(), false);
+      LinePriceListSupport.applyCatalogPrice(body, catalog, FIELD_UNIT_PRICE, FIELD_LIST_PRICE);
+    } catch (Exception e) {
+      log.warn("[INVOICE-LINE-PRICE] Could not price the line on {} {}: {}", ctx.getSpecName(),
+          ctx.getEntityName(), e.getMessage());
+    }
   }
 
   /**
