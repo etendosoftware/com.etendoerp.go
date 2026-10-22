@@ -250,6 +250,8 @@ final class SubscriptionReconciler {
     if (!audit.isDryRun()) {
       // A pause alerts once per episode: an episode the provider shows has ended is closed here,
       // so the next pause alerts again (PausedSubscriptionAlert#endResolved).
+      // Must run before every "return true": BillingReconciliationService#subscriptionEventVerdict
+      // supersedes a stuck resumed event on the strength of it.
       pausedAlert.endResolved(candidate.subscriptionId, subscription);
     }
     String status = subscription.optString(FIELD_STATUS, "");
