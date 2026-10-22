@@ -1647,7 +1647,8 @@ public class McpToolRouter {
         }
       }
       if (args.optBoolean(BatchJobService.PARAM_ASYNC, false)) {
-        return submitBatchJob(operations, args);
+        // ETP-5677: the batch becomes a job; the worker commits it row by row.
+        return McpBatchJobTools.submitBatchJob(operations, args, this::preprocessBatchOperation);
       }
       // IMP-15 / ETP-5415: the body transforms that make etendo_batch accept exactly what etendo_create
       // accepts — FK-by-name and legacy-numeric ids, the UoM derivation, the bill-to and
@@ -1676,16 +1677,6 @@ public class McpToolRouter {
       log.error("Error executing etendo_batch session={}", McpUsageTelemetry.sessionForLog(), e);
       return wrapAsErrorContent("Error executing etendo_batch: " + e.getMessage());
     }
-  }
-
-  /**
-   * {@code etendo_batch} with {@code async:true} (ETP-5677): records the batch as a job and answers
-   * with its id. The worker runs every row through the same {@code executeBatch} and the same MCP
-   * body transforms the synchronous call uses, as admin-mode DAL work under the caller's identity —
-   * exactly the context {@link #routeCall} gives the synchronous tool.
-   */
-  private JSONObject submitBatchJob(JSONArray operations, JSONObject args) throws JSONException {
-    return McpBatchJobTools.submitBatchJob(operations, args, this::preprocessBatchOperation);
   }
 
   /**
