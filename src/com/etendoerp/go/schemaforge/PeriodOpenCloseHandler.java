@@ -21,8 +21,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
-import javax.inject.Named;
-
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.openbravo.base.provider.OBProvider;
@@ -49,15 +47,12 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  *   <li>Returns the translated process result.</li>
  * </ol>
  *
- * <p><b>Binding.</b> Resolved by {@link NeoExtension} on every channel, ahead of the row's
- * {@code Java_Qualifier}. The {@code periodControl} ETGO_SF_ENTITY row still carries
- * {@code period-openclose}, on purpose: several readers look the qualifier up directly instead of
- * going through {@code NeoExtensionDispatcher}, and they keep resolving this same class (its own
- * {@code @Named} is that qualifier), so those surfaces behave exactly as before. See
+ * <p><b>Binding.</b> {@link NeoExtension} only (ETP-5588): the ETGO_SF_ENTITY row carries no
+ * {@code Java_Qualifier} and the class no {@code @Named}. Every surface — REST single and batch,
+ * MCP, callout, actions, field filter — reaches it through the annotation. See
  * {@code neo-headless.md} §5.3.a.
  */
 @NeoExtension(spec = "open-close-period-control", entity = "periodControl")
-@Named("period-openclose")
 public class PeriodOpenCloseHandler extends AbstractPeriodOpenCloseHandler {
 
   private static final Logger log = LogManager.getLogger(PeriodOpenCloseHandler.class);

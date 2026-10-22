@@ -45,6 +45,7 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.selector.policy.NeoSelectorPolicy;
 import com.etendoerp.go.schemaforge.util.NeoErrorSanitizer;
+import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
 import com.etendoerp.go.schemaforge.util.NeoListReferenceError;
 
 /**
@@ -78,7 +79,7 @@ final class McpWriteRequestSupport {
     if (tab == null) {
       // ETP-5405: a routing failure, not a server fault — see McpRoutingException.entityHasNoTab.
       throw McpRoutingException.entityHasNoTab(entityName,
-          McpHookExecutor.resolveEntityHandler(sfEntity) != null);
+          NeoHandlerLookup.forEntity(sfEntity) != null);
     }
     return tab;
   }

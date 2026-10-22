@@ -26,6 +26,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -281,25 +282,36 @@ public class NeoDocumentDownloadServiceTest {
   }
 
   /**
-   * Verifies that a spec absent from {@code WINDOW_ATTACHMENT_TABLE} resolves
-   * to 404 without ever attempting a table lookup.
+   * ETP-5588: the attachment table comes from the spec's own metadata (its included entity on a
+   * level-0 tab), not a per-window map. A spec with no such header entity resolves to 404 without
+   * ever looking for an attachment.
    */
   @Test
-  public void handleReturnsNotFoundWhenSpecIsNotMapped() throws Exception {
+  @SuppressWarnings({ "rawtypes", "unchecked" })
+  public void handleReturnsNotFoundWhenSpecHasNoHeaderEntity() throws Exception {
     HttpServletResponse response = mock(HttpServletResponse.class);
     StringWriter sink = stubWriter(response);
     Claims claims = stubClaims("unknown-window", "REC1", "CLIENT1");
+    OBDal dal = mock(OBDal.class);
+    Session session = mock(Session.class);
+    NativeQuery headerQuery = mock(NativeQuery.class);
+    when(dal.getSession()).thenReturn(session);
+    when(session.createNativeQuery(argThat(sql -> sql != null && sql.contains("etgo_sf_entity"))))
+        .thenReturn(headerQuery);
+    when(headerQuery.setParameter(anyString(), any())).thenReturn(headerQuery);
+    when(headerQuery.list()).thenReturn(Collections.emptyList());
 
     try (MockedStatic<DocumentDownloadTokenService> tokenMock =
         Mockito.mockStatic(DocumentDownloadTokenService.class);
         MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
       tokenMock.when(() -> DocumentDownloadTokenService.validate(TOKEN)).thenReturn(Optional.of(claims));
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
 
       NeoDocumentDownloadService.handle(TOKEN, response);
-
-      obDalMock.verifyNoInteractions();
     }
 
+    verify(headerQuery).setParameter("spec", "unknown-window");
+    verify(session, never()).createNativeQuery(argThat(sql -> sql != null && sql.contains("C_File")));
     verify(response).setStatus(HttpServletResponse.SC_NOT_FOUND);
     assertEquals("Document file not found", sink.toString());
   }

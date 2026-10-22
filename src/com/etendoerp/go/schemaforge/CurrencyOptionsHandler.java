@@ -144,10 +144,19 @@ public class CurrencyOptionsHandler implements NeoHandler {
           obCtx.getCurrentClient().getId(),
           LocalDate.now());
     }
-    String specName = context.getSpecName();
-    return specName != null && specName.contains("invoice")
+    return isInvoiceTab(context)
         ? resolveInvoiceContext(recordId)
         : resolveOrderContext(recordId);
+  }
+
+  /**
+   * Whether the request is about an invoice, read from the record's table rather than from the
+   * spec name: this delegate is shared by the invoice and order header customizations, and must
+   * not know which windows exist.
+   */
+  private static boolean isInvoiceTab(NeoContext context) {
+    return context.getAdTab() != null && context.getAdTab().getTable() != null
+        && Invoice.TABLE_NAME.equalsIgnoreCase(context.getAdTab().getTable().getDBTableName());
   }
 
   private RequestContext resolveInvoiceContext(String recordId) {

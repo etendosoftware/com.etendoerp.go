@@ -24,7 +24,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.util.Map;
+import java.util.List;
 import java.util.Optional;
 
 import javax.servlet.http.HttpServletResponse;
@@ -35,6 +35,7 @@ import org.apache.logging.log4j.Logger;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.base.session.OBPropertiesProvider;
 import org.openbravo.client.application.attachment.AttachImplementation;
+import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.utility.Attachment;
 
 import com.etendoerp.go.schemaforge.email.DocumentDownloadTokenService;
@@ -55,24 +56,19 @@ final class NeoDocumentDownloadService {
   private static final String ERR_INVALID_FILE = "Stored document file is invalid";
   private static final String PROP_ATTACH_PATH = "attach.path";
 
-  private static final String TABLE_C_INVOICE = "C_Invoice";
-  private static final String TABLE_C_ORDER = "C_Order";
-  private static final String TABLE_M_INOUT = "M_InOut";
-
-  // ETP-4315 — physical Attachment table (C_File) per window spec, mirroring
-  // the frontend's WINDOW_ATTACHMENT_TABLE (documentEmailSend.js). A link for a
-  // spec not listed here (or for a record whose "main" attachment was since
-  // replaced) resolves to 404 rather than falling back to the retired
-  // legacy preview-file cache (retired, ETP-4315 Phase 9).
-  private static final Map<String, String> WINDOW_ATTACHMENT_TABLE = Map.of(
-      "sales-invoice", TABLE_C_INVOICE,
-      "purchase-invoice", TABLE_C_INVOICE,
-      "sales-order", TABLE_C_ORDER,
-      "purchase-order", TABLE_C_ORDER,
-      "sales-quotation", TABLE_C_ORDER,
-      "goods-shipment", TABLE_M_INOUT,
-      "return-to-vendor-shipment", TABLE_M_INOUT,
-      "return-material-receipt", TABLE_M_INOUT);
+  // ETP-4315 — the attachment (C_File) is bound to the table of the spec's header: its included
+  // entity on a level-0 tab, first by SeqNo (ETP-5588: read from the spec's own metadata instead
+  // of a per-window map, so no window is named here). A spec without one, or a record whose
+  // "main" attachment was since replaced, resolves to 404 rather than falling back to the
+  // retired legacy preview-file cache (retired, ETP-4315 Phase 9). Native SQL for the same reason
+  // as the attachment lookup: this endpoint runs without a session, so no client filter applies.
+  private static final String HEADER_TABLE_SQL =
+      "SELECT tb.ad_table_id FROM etgo_sf_spec s"
+          + " JOIN etgo_sf_entity e ON e.etgo_sf_spec_id = s.etgo_sf_spec_id"
+          + " JOIN ad_tab tb ON tb.ad_tab_id = e.ad_tab_id"
+          + " WHERE LOWER(s.name) = LOWER(:spec) AND s.isactive = 'Y' AND e.isactive = 'Y'"
+          + " AND e.isincluded = 'Y' AND tb.tablevel = 0"
+          + " ORDER BY e.seqno LIMIT 1";
 
   private NeoDocumentDownloadService() {
   }
@@ -223,17 +219,16 @@ final class NeoDocumentDownloadService {
   /**
    * Resolves the attachment currently marked as "main" for the token's
    * (specName, recordId) — the same file the sidebar/preview would show —
-   * or {@code null} if the spec is unmapped, the table is unknown, no
-   * attachment is currently marked (e.g. it was replaced since the link was
-   * sent), or the resolved attachment does not belong to the token's client.
+   * or {@code null} if the spec has no header entity, no attachment is
+   * currently marked (e.g. it was replaced since the link was sent), or the
+   * resolved attachment does not belong to the token's client.
    */
   private static Attachment resolveMainAttachment(Claims validated) {
-    String tableName = WINDOW_ATTACHMENT_TABLE.get(validated.getSpecName());
-    if (tableName == null) {
-      return null;
-    }
     try {
-      String tableId = NeoAttachmentsHelper.resolveTableId(tableName);
+      String tableId = resolveHeaderTableId(validated.getSpecName());
+      if (tableId == null) {
+        return null;
+      }
       Attachment attachment = NeoAttachmentsHelper.findMainAttachment(tableId, validated.getRecordId());
       if (attachment == null || attachment.getClient() == null
           || !attachment.getClient().getId().equals(validated.getClientId())) {
@@ -241,10 +236,22 @@ final class NeoDocumentDownloadService {
       }
       return attachment;
     } catch (OBException e) {
-      log.warn("Could not resolve attachment table '{}' for spec={}: {}",
-          tableName, validated.getSpecName(), e.getMessage());
+      log.warn("Could not resolve the attachment table for spec={}: {}",
+          validated.getSpecName(), e.getMessage());
       return null;
     }
+  }
+
+  /** The AD_Table id of the spec's header entity, or {@code null} when it has none. */
+  private static String resolveHeaderTableId(String specName) {
+    if (StringUtils.isBlank(specName)) {
+      return null;
+    }
+    List<?> rows = OBDal.getInstance().getSession()
+        .createNativeQuery(HEADER_TABLE_SQL)
+        .setParameter("spec", specName)
+        .list();
+    return rows.isEmpty() ? null : (String) rows.get(0);
   }
 
   private static String contentDisposition(String fileName) {

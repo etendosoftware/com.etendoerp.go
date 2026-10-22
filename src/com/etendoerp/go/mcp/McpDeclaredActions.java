@@ -45,7 +45,6 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
-import com.etendoerp.go.schemaforge.util.NeoExtensionIndex;
 import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
 
 /**
@@ -78,7 +77,7 @@ final class McpDeclaredActions {
    *         customization declares none or cannot be resolved
    */
   static Map<String, NeoActionContract> of(SFEntity entity) {
-    NeoHandler customization = customizationOf(entity);
+    NeoHandler customization = NeoHandlerLookup.forEntityQuietly(entity);
     Map<String, NeoActionContract> declared = declaredBy(customization);
     if (declared.isEmpty()) {
       return declared;
@@ -106,7 +105,7 @@ final class McpDeclaredActions {
    * @return {@code action → reason}; empty when none or when the customization cannot be resolved
    */
   static Map<String, String> unavailableFor(SFEntity entity, BaseOBObject subject) {
-    NeoHandler handler = customizationOf(entity);
+    NeoHandler handler = NeoHandlerLookup.forEntityQuietly(entity);
     if (handler == null) {
       return Collections.emptyMap();
     }
@@ -191,7 +190,7 @@ final class McpDeclaredActions {
     if (config.isUnusable()) {
       throw McpRoutingException.actionHidden(specName, entityName, action, config.getReason());
     }
-    NeoHandler customization = customizationOf(entity);
+    NeoHandler customization = NeoHandlerLookup.forEntityQuietly(entity);
     Map<String, NeoActionContract> declared = declaredBy(customization);
     Set<String> excluded = excludedBy(customization, entity);
     Column button = declared.containsKey(action) ? null : buttonOf(entity, action);
@@ -310,7 +309,7 @@ final class McpDeclaredActions {
    *         the customization could not say (fails closed)
    */
   static Set<String> excludedOf(SFEntity entity) {
-    return excludedBy(customizationOf(entity), entity);
+    return excludedBy(NeoHandlerLookup.forEntityQuietly(entity), entity);
   }
 
   /**
@@ -410,24 +409,6 @@ final class McpDeclaredActions {
       }
     }
     return names;
-  }
-
-  /** Annotation first, qualifier second — the order {@code NeoExtensionDispatcher} resolves in. */
-  private static NeoHandler customizationOf(SFEntity entity) {
-    if (entity == null) {
-      return null;
-    }
-    SFSpec spec = entity.getETGOSFSpec();
-    try {
-      NeoHandler annotated = NeoExtensionIndex.resolve(spec == null ? null : spec.getName(),
-          entity.getName(), entity.getJavaQualifier());
-      if (annotated != null) {
-        return annotated;
-      }
-    } catch (RuntimeException e) {
-      log.debug("@NeoExtension lookup failed for {}: {}", entity.getName(), e.getMessage());
-    }
-    return NeoHandlerLookup.byQualifierQuietly(entity.getJavaQualifier());
   }
 
   /** Looked up quietly: a failing customization must not break discovery for the entity. */

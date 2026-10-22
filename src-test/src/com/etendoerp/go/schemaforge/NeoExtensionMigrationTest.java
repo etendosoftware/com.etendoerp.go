@@ -18,9 +18,12 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.same;
@@ -50,6 +53,8 @@ import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.MockedStatic;
 import org.openbravo.base.weld.WeldUtils;
 
+import com.etendoerp.go.schemaforge.data.SFEntity;
+import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.handlers.PaymentInReactivateHandler;
 import com.etendoerp.go.schemaforge.handlers.PaymentOutReactivateHandler;
 import com.etendoerp.go.schemaforge.handlers.ReactivatePaymentHandler;
@@ -59,17 +64,13 @@ import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
 /**
  * The handlers migrated to {@link NeoExtension} by ETP-5588: the financial-account, sales-invoice,
  * purchase-invoice and period-control headers, and the payment Reactivate/Confirm/Remove handler
- * split into one binding per entity. What can regress is the binding itself (a wrong
- * {@code (spec, entity)} pair, a lost {@code @Named} the direct qualifier readers rely on, or a
- * stray {@code @Named} on a payment split that would make {@code payment-reactivate} ambiguous) and
- * the resolution path — the annotation must win on REST single, REST batch and MCP, ahead of the
- * qualifier fallback.
+ * split into one binding per entity. Their rows carry no {@code Java_Qualifier} and the classes no
+ * {@code @Named}, so the annotation is the only binding. What can regress is the binding itself (a
+ * wrong {@code (spec, entity)} pair, a {@code @Named} creeping back) and the resolution: every
+ * channel and every entity-level reader must find the class with no qualifier to fall back on.
  *
  * <p>{@link NeoExtensionIndex} is exercised for real: only {@link WeldUtils}'s bean manager is
- * mocked, so the index is built from the handlers' own annotations exactly as in production. The
- * two qualifier resolvers are stubbed to a sentinel only in the dispatcher case, so that a
- * resolution pointing at the qualifier instead of the annotation fails visibly rather than passing
- * on a coincidence.
+ * mocked, so the index is built from the handlers' own annotations exactly as in production.
  *
  * @covers com.etendoerp.go.schemaforge.FinancialAccountHandler
  * @covers com.etendoerp.go.schemaforge.SalesInvoiceHeaderHandler
@@ -77,35 +78,22 @@ import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
  * @covers com.etendoerp.go.schemaforge.PeriodOpenCloseHandler
  * @covers com.etendoerp.go.schemaforge.handlers.PaymentInReactivateHandler
  * @covers com.etendoerp.go.schemaforge.handlers.PaymentOutReactivateHandler
+ * @covers com.etendoerp.go.schemaforge.util.NeoHandlerLookup
  */
-@DisplayName("ETP-5588 — migrated handlers resolve through @NeoExtension on every channel")
+@DisplayName("ETP-5588 — migrated handlers resolve through @NeoExtension alone")
 class NeoExtensionMigrationTest {
 
-  /**
-   * One {@code (spec, entity)} binding: the class that carries it, the pair, the row's
-   * {@code Java_Qualifier} (kept as the fallback), and whether the class must also carry a
-   * {@code @Named} equal to it. {@code false} for the payment split, whose two subclasses
-   * deliberately carry no {@code @Named} (the base owns {@code payment-reactivate}).
-   */
-  private record Binding(Class<? extends NeoHandler> type, String spec, String entity,
-      String qualifier, boolean carriesNamed) {
+  /** One {@code (spec, entity)} binding: the class that carries it and the pair. */
+  private record Binding(Class<? extends NeoHandler> type, String spec, String entity) {
   }
 
-  private static final Binding FINANCIAL_ACCOUNT = new Binding(FinancialAccountHandler.class,
-      "financial-account", "account", "financialAccountHeaderHandler", true);
-  private static final Binding SALES_INVOICE = new Binding(SalesInvoiceHeaderHandler.class,
-      "sales-invoice", "header", "salesInvoiceHeaderHandler", true);
-  private static final Binding PURCHASE_INVOICE = new Binding(PurchaseInvoiceHeaderHandler.class,
-      "purchase-invoice", "header", "purchaseInvoiceHeaderHandler", true);
-  private static final Binding PERIOD_CONTROL = new Binding(PeriodOpenCloseHandler.class,
-      "open-close-period-control", "periodControl", "period-openclose", true);
-  private static final Binding PAYMENT_IN = new Binding(PaymentInReactivateHandler.class,
-      "payment-in", "finPayment", "payment-reactivate", false);
-  private static final Binding PAYMENT_OUT = new Binding(PaymentOutReactivateHandler.class,
-      "payment-out", "header", "payment-reactivate", false);
-
-  private static final Binding[] MIGRATED = { FINANCIAL_ACCOUNT, SALES_INVOICE, PURCHASE_INVOICE,
-      PERIOD_CONTROL, PAYMENT_IN, PAYMENT_OUT };
+  private static final Binding[] MIGRATED = {
+      new Binding(FinancialAccountHandler.class, "financial-account", "account"),
+      new Binding(SalesInvoiceHeaderHandler.class, "sales-invoice", "header"),
+      new Binding(PurchaseInvoiceHeaderHandler.class, "purchase-invoice", "header"),
+      new Binding(PeriodOpenCloseHandler.class, "open-close-period-control", "periodControl"),
+      new Binding(PaymentInReactivateHandler.class, "payment-in", "finPayment"),
+      new Binding(PaymentOutReactivateHandler.class, "payment-out", "header") };
 
   /** The bean classes to deploy in the mocked CDI container, one per migrated binding. */
   private static final List<Class<? extends NeoHandler>> MIGRATED_TYPES = Stream.of(MIGRATED)
@@ -128,85 +116,112 @@ class NeoExtensionMigrationTest {
 
   @ParameterizedTest(name = "{0}")
   @MethodSource("bindings")
-  void bindingIsTheAnnotationAndKeepsTheQualifierItNeeds(Binding binding) {
+  void bindingIsTheAnnotationAlone(Binding binding) {
     NeoExtension annotation = binding.type().getAnnotation(NeoExtension.class);
 
     assertNotNull(annotation, binding.type().getSimpleName() + " must be bound by @NeoExtension");
     assertEquals(binding.spec(), annotation.spec(), "spec must match the ETGO_SF_SPEC row");
     assertEquals(binding.entity(), annotation.entity(), "entity must match the ETGO_SF_ENTITY row");
-
-    Named named = binding.type().getAnnotation(Named.class);
-    if (binding.carriesNamed()) {
-      assertNotNull(named, binding.type().getSimpleName()
-          + " must keep the @Named the direct qualifier readers resolve");
-      assertEquals(binding.qualifier(), named.value(),
-          "the @Named and the row's Java_Qualifier must be the same name, or every resolution logs "
-              + "a disagreement");
-    } else {
-      assertNull(named, binding.type().getSimpleName()
-          + " must not carry @Named: a second bean named " + binding.qualifier()
-          + " would make that name ambiguous");
-    }
+    assertNull(binding.type().getAnnotation(Named.class), binding.type().getSimpleName()
+        + " must not carry @Named: the qualifier binding is retired for this pair");
   }
 
+  /**
+   * The acceptance criterion in one assertion: with no qualifier at all, the annotation is found on
+   * REST single, REST batch and MCP. {@link NeoExtensionDispatcher#resolveOnly} resolves without
+   * invoking, so no handler's {@code handle} runs and the test stays a pure routing check.
+   */
   @ParameterizedTest(name = "{0}")
   @MethodSource("bindings")
-  void indexResolvesEveryMigratedPair(Binding binding) {
+  void dispatcherResolvesTheAnnotationOnEveryChannelWithoutAQualifier(Binding binding) {
     BeanManager bm = mock(BeanManager.class);
     Map<Class<?>, NeoHandler> deployed = deploy(bm, MIGRATED_TYPES);
 
     try (MockedStatic<WeldUtils> weld = mockStatic(WeldUtils.class)) {
       weld.when(WeldUtils::getStaticInstanceBeanManager).thenReturn(bm);
 
-      assertSame(deployed.get(binding.type()),
-          NeoExtensionIndex.resolve(binding.spec(), binding.entity(), binding.qualifier()),
-          binding.spec() + "/" + binding.entity() + " must resolve by annotation");
-
-      assertNull(NeoExtensionIndex.resolve("no-such-spec", "no-such-entity", null),
-          "a pair nothing claims must miss, so the caller falls back to the qualifier");
-    }
-  }
-
-  /**
-   * The acceptance criterion in one assertion: the annotation wins on REST single, REST batch and
-   * MCP. {@link NeoExtensionDispatcher#resolveOnly} resolves without invoking, so no handler's
-   * {@code handle} runs and the test stays a pure routing check. Both qualifier resolvers answer a
-   * sentinel, so a result that is not the annotated instance means the annotation branch was
-   * skipped — the divergence that produces no error anywhere and is the whole reason the dispatcher
-   * exists.
-   */
-  @ParameterizedTest(name = "{0}")
-  @MethodSource("bindings")
-  void dispatcherResolvesTheAnnotationOnEveryChannel(Binding binding) {
-    BeanManager bm = mock(BeanManager.class);
-    Map<Class<?>, NeoHandler> deployed = deploy(bm, MIGRATED_TYPES);
-    NeoHandler viaQualifier = mock(NeoHandler.class);
-
-    try (MockedStatic<WeldUtils> weld = mockStatic(WeldUtils.class);
-        MockedStatic<NeoServletSupport> rest = mockStatic(NeoServletSupport.class);
-        MockedStatic<NeoHandlerLookup> mcp = mockStatic(NeoHandlerLookup.class)) {
-      weld.when(WeldUtils::getStaticInstanceBeanManager).thenReturn(bm);
-      rest.when(() -> NeoServletSupport.lookupHandler(binding.qualifier())).thenReturn(viaQualifier);
-      mcp.when(() -> NeoHandlerLookup.byQualifier(binding.qualifier())).thenReturn(viaQualifier);
-
       for (NeoExtensionChannel channel : NeoExtensionChannel.values()) {
-        NeoHandler resolved = NeoExtensionDispatcher.resolveOnly(request(binding, channel));
+        NeoHandler resolved = NeoExtensionDispatcher.resolveOnly(NeoExtensionRequest.builder()
+            .specName(binding.spec())
+            .entityName(binding.entity())
+            .surface(NeoExtensionSurface.READ)
+            .channel(channel)
+            .build());
 
-        assertSame(deployed.get(binding.type()), resolved, binding.spec() + "/" + binding.entity()
-            + " must resolve by annotation on " + channel + ", not through the qualifier fallback");
+        assertSame(deployed.get(binding.type()), resolved,
+            binding.spec() + "/" + binding.entity() + " must resolve by annotation on " + channel);
       }
     }
   }
 
-  /** A request for the entity, on one channel, with the surface fixed so no context is needed. */
-  private static NeoExtensionRequest request(Binding binding, NeoExtensionChannel channel) {
-    return NeoExtensionRequest.builder()
-        .qualifier(binding.qualifier())
-        .specName(binding.spec())
-        .entityName(binding.entity())
-        .surface(NeoExtensionSurface.READ)
-        .channel(channel)
-        .build();
+  /**
+   * The readers that do not dispatch a hook — the MCP read post-hook, the REST {@code afterCallout},
+   * the action contracts, {@code protectedCreateCalloutFields}, the field filter's read-only
+   * exemption, the report path — all go through {@link NeoHandlerLookup}. Before ETP-5588 they read
+   * {@code Java_Qualifier} directly, so clearing it switched the customization off on those
+   * surfaces; this is the assertion that it no longer does.
+   */
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("bindings")
+  void entityLevelReadersFindTheAnnotationWithoutAQualifier(Binding binding) {
+    BeanManager bm = mock(BeanManager.class);
+    Map<Class<?>, NeoHandler> deployed = deploy(bm, MIGRATED_TYPES);
+    SFEntity entity = entity(binding.spec(), binding.entity(), null);
+
+    try (MockedStatic<WeldUtils> weld = mockStatic(WeldUtils.class)) {
+      weld.when(WeldUtils::getStaticInstanceBeanManager).thenReturn(bm);
+
+      NeoHandler expected = deployed.get(binding.type());
+      assertSame(expected, NeoHandlerLookup.forEntity(entity));
+      assertSame(expected, NeoHandlerLookup.forEntityQuietly(entity));
+      assertSame(expected, NeoHandlerLookup.forEntity(entity,
+          q -> fail("no qualifier to fall back on, got " + q)));
+      assertTrue(NeoHandlerLookup.hasCustomization(entity),
+          "an annotated entity is customized even without a qualifier");
+    }
+  }
+
+  @Test
+  @DisplayName("an entity no class claims falls back to its qualifier, and without one has nothing")
+  void unclaimedEntityFallsBackToTheQualifier() {
+    BeanManager bm = mock(BeanManager.class);
+    deploy(bm, MIGRATED_TYPES);
+    NeoHandler legacy = mock(NeoHandler.class);
+
+    try (MockedStatic<WeldUtils> weld = mockStatic(WeldUtils.class)) {
+      weld.when(WeldUtils::getStaticInstanceBeanManager).thenReturn(bm);
+
+      SFEntity qualified = entity("contacts", "businessPartner", "businessPartnerHandler");
+      assertSame(legacy, NeoHandlerLookup.forEntity(qualified,
+          q -> "businessPartnerHandler".equals(q) ? legacy : null));
+      assertTrue(NeoHandlerLookup.hasCustomization(qualified));
+
+      SFEntity plain = entity("contacts", "contact", null);
+      assertNull(NeoHandlerLookup.forEntity(plain, q -> fail("a blank qualifier is never resolved")));
+      assertFalse(NeoHandlerLookup.hasCustomization(plain));
+    }
+  }
+
+  /**
+   * The payment base stays unannotated and unnamed: it holds the behaviour, and the binding lives in
+   * its two subclasses. Annotating it would duplicate the pair they already claim; naming it would
+   * reintroduce a qualifier binding nothing uses.
+   */
+  @Test
+  @DisplayName("the shared payment base binds nothing itself")
+  void theSharedPaymentBaseBindsNothingItself() {
+    assertNull(ReactivatePaymentHandler.class.getAnnotation(NeoExtension.class));
+    assertNull(ReactivatePaymentHandler.class.getAnnotation(Named.class));
+  }
+
+  private static SFEntity entity(String specName, String entityName, String qualifier) {
+    SFSpec spec = mock(SFSpec.class);
+    when(spec.getName()).thenReturn(specName);
+    SFEntity entity = mock(SFEntity.class);
+    when(entity.getETGOSFSpec()).thenReturn(spec);
+    when(entity.getName()).thenReturn(entityName);
+    when(entity.getJavaQualifier()).thenReturn(qualifier);
+    return entity;
   }
 
   /**
@@ -233,17 +248,5 @@ class NeoExtensionMigrationTest {
 
     when(bm.getBeans(NeoHandler.class, WeldUtils.ANY_LITERAL)).thenReturn(beans);
     return instances;
-  }
-
-  /**
-   * The payment base stays unannotated, exactly as in production: it holds the behaviour and the
-   * {@code payment-reactivate} qualifier the direct readers resolve, and never becomes an index
-   * entry itself. Annotating it would duplicate the pair the two subclasses already claim.
-   */
-  @Test
-  @DisplayName("the shared payment base is not itself an index entry")
-  void theSharedPaymentBaseIsNotItselfAnIndexEntry() {
-    assertNull(ReactivatePaymentHandler.class.getAnnotation(NeoExtension.class),
-        "the base holds the behaviour and the qualifier; the binding lives in its subclasses");
   }
 }

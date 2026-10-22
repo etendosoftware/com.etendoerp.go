@@ -26,7 +26,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-import javax.inject.Named;
 import javax.servlet.http.HttpServletResponse;
 
 import org.apache.commons.lang3.StringUtils;
@@ -88,15 +87,12 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * {"active": false}} runs the same open-reconciliations guard the old DELETE-based
  * archive used to run (see {@link #validateAndEnrichUpdate}).
  *
- * <p><b>Binding.</b> Resolved by {@link NeoExtension} on every channel, ahead of the row's
- * {@code Java_Qualifier}. The row still carries {@code financialAccountHeaderHandler}, on purpose:
- * several readers look the qualifier up directly instead of going through
- * {@code NeoExtensionDispatcher}, and they keep resolving this same class (its own {@code @Named}
- * is that qualifier), so those surfaces behave exactly as before. See {@code neo-headless.md}
- * §5.3.a.
+ * <p><b>Binding.</b> {@link NeoExtension} only (ETP-5588): the ETGO_SF_ENTITY row carries no
+ * {@code Java_Qualifier} and the class no {@code @Named}. Every surface — REST single and batch,
+ * MCP, callout, actions, field filter — reaches it through the annotation. See
+ * {@code neo-headless.md} §5.3.a.
  */
 @NeoExtension(spec = "financial-account", entity = "account")
-@Named("financialAccountHeaderHandler")
 public class FinancialAccountHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(FinancialAccountHandler.class);

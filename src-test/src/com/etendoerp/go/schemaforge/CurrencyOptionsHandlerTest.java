@@ -382,4 +382,34 @@ public class CurrencyOptionsHandlerTest {
     CurrencyOptionsHandler handler = new CurrencyOptionsHandler();
     assertNull(handler.afterHandle(null));
   }
+
+  // ---------------------------------------------------------------
+  // isInvoiceTab (ETP-5588): the document type comes from the record's table, never the spec name
+  // ---------------------------------------------------------------
+
+  private static boolean invokeIsInvoiceTab(String specName, String tableName) throws Exception {
+    org.openbravo.model.ad.ui.Tab tab = null;
+    if (tableName != null) {
+      org.openbravo.model.ad.datamodel.Table table = mock(org.openbravo.model.ad.datamodel.Table.class);
+      when(table.getDBTableName()).thenReturn(tableName);
+      tab = mock(org.openbravo.model.ad.ui.Tab.class);
+      when(tab.getTable()).thenReturn(table);
+    }
+    NeoContext context = NeoContext.builder().specName(specName).adTab(tab).build();
+    Method m = CurrencyOptionsHandler.class.getDeclaredMethod("isInvoiceTab", NeoContext.class);
+    m.setAccessible(true);
+    return (boolean) m.invoke(null, context);
+  }
+
+  @Test
+  public void testInvoiceIsRecognisedByItsTableWhateverTheSpecIsCalled() throws Exception {
+    assertTrue(invokeIsInvoiceTab("sales-invoice", "C_Invoice"));
+    assertTrue(invokeIsInvoiceTab("any-window", "c_invoice"));
+  }
+
+  @Test
+  public void testOrderOrMissingTabIsNotAnInvoiceEvenWithAnInvoiceSpecName() throws Exception {
+    org.junit.Assert.assertFalse(invokeIsInvoiceTab("purchase-order", "C_Order"));
+    org.junit.Assert.assertFalse(invokeIsInvoiceTab("sales-invoice", null));
+  }
 }

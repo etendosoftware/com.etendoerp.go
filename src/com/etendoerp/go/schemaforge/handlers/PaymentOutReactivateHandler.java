@@ -26,11 +26,9 @@ import com.etendoerp.go.schemaforge.NeoExtension;
  * <p>The behaviour lives in {@link ReactivatePaymentHandler}; this class only binds it to the entity
  * through {@link NeoExtension}. It is a second class because the annotation is not repeatable and
  * {@link ReactivatePaymentHandler} serves two entities — the same shape
- * {@code SalesOrderLineHandler}/{@code SalesQuotationLineHandler} use. No {@code @Named}: the base's
- * {@code payment-reactivate} name is not inherited, and a second bean carrying it would make the
- * name ambiguous. The row keeps {@code JAVA_QUALIFIER = 'payment-reactivate'} so the readers that
- * resolve the qualifier directly keep reaching {@link ReactivatePaymentHandler} unchanged; see
- * {@code neo-headless.md} §5.3.a.
+ * {@code SalesOrderLineHandler}/{@code SalesQuotationLineHandler} use. The annotation is the only
+ * binding: the row carries no {@code Java_Qualifier} and no class carries {@code @Named}
+ * (ETP-5588); see {@code neo-headless.md} §5.3.a.
  */
 @NeoExtension(spec = "payment-out", entity = "header")
 public class PaymentOutReactivateHandler extends ReactivatePaymentHandler {

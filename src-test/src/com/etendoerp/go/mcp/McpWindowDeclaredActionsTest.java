@@ -113,7 +113,7 @@ class McpWindowDeclaredActionsTest {
     McpConfigCache.invalidateAll();
     handler = mock(NeoHandler.class);
     indexMock = mockStatic(NeoExtensionIndex.class);
-    lookupMock = mockStatic(NeoHandlerLookup.class);
+    lookupMock = mockStatic(NeoHandlerLookup.class, org.mockito.Mockito.CALLS_REAL_METHODS);
     lookupMock.when(() -> NeoHandlerLookup.byQualifierQuietly(anyString())).thenReturn(handler);
     when(handler.actionContracts()).thenReturn(contracts());
     // The AD buttons etendo_action can fire, as NeoButtonActionHelper.findButtonColumn resolves them:
