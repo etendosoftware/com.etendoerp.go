@@ -48,12 +48,20 @@ public interface OcrLookups {
       this.name = name;
     }
 
-    /** Returns the id. */
+    /**
+     * Returns the partner id.
+     *
+     * @return the partner id
+     */
     public String id() {
       return id;
     }
 
-    /** Returns the name. */
+    /**
+     * Returns the partner name.
+     *
+     * @return the partner name
+     */
     public String name() {
       return name;
     }
@@ -78,12 +86,20 @@ public interface OcrLookups {
       this.locationId = locationId;
     }
 
-    /** Returns the state. */
+    /**
+     * Returns the address state.
+     *
+     * @return {@code PRESENT}, {@code MISSING}, or {@code UNKNOWN} when it could not be asked
+     */
     public AddressState state() {
       return state;
     }
 
-    /** Returns the location id. */
+    /**
+     * Returns the location id.
+     *
+     * @return the first address' location id, {@code null} unless {@code PRESENT}
+     */
     public String locationId() {
       return locationId;
     }
@@ -105,12 +121,20 @@ public interface OcrLookups {
       this.documentNo = documentNo;
     }
 
-    /** Returns the id. */
+    /**
+     * Returns the document id.
+     *
+     * @return the id of the existing document
+     */
     public String id() {
       return id;
     }
 
-    /** Returns the document number. */
+    /**
+     * Returns the document number.
+     *
+     * @return the document's own number, may be {@code null}
+     */
     public String documentNo() {
       return documentNo;
     }
@@ -132,12 +156,20 @@ public interface OcrLookups {
       this.documents = documents;
     }
 
-    /** Returns whether the lookup could be made. */
+    /**
+     * Returns whether the lookup could be made.
+     *
+     * @return {@code false} when the lookup failed and the result is unknown
+     */
     public boolean known() {
       return known;
     }
 
-    /** Returns the documents found. */
+    /**
+     * Returns the documents found.
+     *
+     * @return the existing documents with the same supplier number
+     */
     public List<Duplicate> documents() {
       return documents;
     }
@@ -162,17 +194,29 @@ public interface OcrLookups {
       this.similarity = similarity;
     }
 
-    /** Returns the id. */
+    /**
+     * Returns the product id.
+     *
+     * @return the product id
+     */
     public String id() {
       return id;
     }
 
-    /** Returns the name. */
+    /**
+     * Returns the product name.
+     *
+     * @return the product name
+     */
     public String name() {
       return name;
     }
 
-    /** Returns the similarity. */
+    /**
+     * Returns the similarity.
+     *
+     * @return the similarity as the search reports it, may be {@code null}
+     */
     public String similarity() {
       return similarity;
     }
@@ -197,17 +241,29 @@ public interface OcrLookups {
       this.rate = rate;
     }
 
-    /** Returns the id. */
+    /**
+     * Returns the tax id.
+     *
+     * @return the tax id
+     */
     public String id() {
       return id;
     }
 
-    /** Returns the name. */
+    /**
+     * Returns the tax name.
+     *
+     * @return the tax name
+     */
     public String name() {
       return name;
     }
 
-    /** Returns the rate. */
+    /**
+     * Returns the tax rate.
+     *
+     * @return the rate in percent, may be {@code null}
+     */
     public BigDecimal rate() {
       return rate;
     }
@@ -232,17 +288,29 @@ public interface OcrLookups {
       this.candidates = candidates;
     }
 
-    /** Returns whether the lookup could be made. */
+    /**
+     * Returns whether the lookup could be made.
+     *
+     * @return {@code false} when the lookup failed and the answer is unknown
+     */
     public boolean known() {
       return known;
     }
 
-    /** Returns the chosen tax. */
+    /**
+     * Returns the chosen tax.
+     *
+     * @return the tax to default to, {@code null} when no tax has the rate
+     */
     public Tax chosen() {
       return chosen;
     }
 
-    /** Returns the alternatives. */
+    /**
+     * Returns the alternative taxes.
+     *
+     * @return the other taxes of the same rate
+     */
     public List<Tax> candidates() {
       return candidates;
     }

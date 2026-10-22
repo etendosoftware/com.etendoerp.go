@@ -56,7 +56,7 @@ public final class DocumentDownloadTokenService {
   private static final String HMAC_ALGORITHM = "HmacSHA256";
   private static final String TOKEN_VERSION = "v1";
   /** Path, inside the NEO servlet, the signed download links point to; the token follows. */
-  public static final String DOWNLOAD_PATH = "/document-download/";
+  public static final String DOWNLOAD_PATH = "/document-download/"; // NOSONAR java:S1075 - route path, not a deployment URL
   /** Contract name carried by the tokens of {@link #createAttachmentToken}. */
   static final String ATTACHMENT_CONTRACT = "mcp-attachment";
 

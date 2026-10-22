@@ -101,7 +101,10 @@ public final class OcrSanitizer {
     }
     if (value instanceof Number) {
       Number number = OcrJson.boundedNumber(value);
-      return number == null ? JSONObject.NULL : (textual ? text(((java.math.BigDecimal) number).toPlainString()) : number);
+      if (number == null) {
+        return JSONObject.NULL;
+      }
+      return textual ? text(((java.math.BigDecimal) number).toPlainString()) : number;
     }
     return JSONObject.NULL;
   }
@@ -165,7 +168,8 @@ public final class OcrSanitizer {
    */
   public static String text(String raw) {
     StringBuilder cleaned = new StringBuilder(Math.min(raw.length(), MAX_TEXT_LENGTH + 1));
-    for (int i = 0; i < raw.length() && cleaned.length() <= MAX_TEXT_LENGTH; ) {
+    int i = 0;
+    while (i < raw.length() && cleaned.length() <= MAX_TEXT_LENGTH) {
       int codePoint = raw.codePointAt(i);
       i += Character.charCount(codePoint);
       if (isBlankLike(codePoint)) {

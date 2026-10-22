@@ -865,19 +865,19 @@ class McpActionBatchTest {
     declaredMock.when(() -> McpDeclaredActions.unpostsBeforeReactivation(any())).thenReturn(true);
     declaredMock.when(() -> McpDeclaredActions.customizationNameOf(any(), anyString()))
         .thenReturn("documentAction");
-    Entity dal = mock(Entity.class);
-    when(dal.getName()).thenReturn(INVOICE);
+    Entity dalEntity = mock(Entity.class);
+    when(dalEntity.getName()).thenReturn(INVOICE);
     Property posted = mock(Property.class);
     when(posted.getName()).thenReturn("posted");
     ModelProvider provider = mock(ModelProvider.class);
-    when(provider.getEntityByTableId("table-1")).thenReturn(dal);
+    when(provider.getEntityByTableId("table-1")).thenReturn(dalEntity);
     try (MockedStatic<ModelProvider> models = mockStatic(ModelProvider.class)) {
       models.when(ModelProvider::getInstance).thenReturn(provider);
 
-      when(dal.getPropertyByColumnName("Posted", false)).thenReturn(posted);
+      when(dalEntity.getPropertyByColumnName("Posted", false)).thenReturn(posted);
       assertNotNull(McpActionBatchUnpost.forCall(entity, ACTION, reactivationParameters("RE")));
 
-      when(dal.getPropertyByColumnName("Posted", false)).thenReturn(null);
+      when(dalEntity.getPropertyByColumnName("Posted", false)).thenReturn(null);
       assertNull(McpActionBatchUnpost.forCall(entity, ACTION, reactivationParameters("RE")));
     }
   }

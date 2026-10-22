@@ -106,7 +106,9 @@ final class McpActionBatch {
      * @return the MCP tool-result content of that document
      * @throws Exception whatever the single-document path throws
      */
-    JSONObject run(String specName, JSONObject args) throws Exception;
+    // The runner is the router's handleAction, which propagates the checked
+    // exceptions NeoButtonActionHelper declares; the batch turns each into the document's error
+    JSONObject run(String specName, JSONObject args) throws Exception; // NOSONAR java:S112
   }
 
   /**

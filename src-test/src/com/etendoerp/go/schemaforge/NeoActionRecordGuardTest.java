@@ -277,7 +277,7 @@ class NeoActionRecordGuardTest {
     return column;
   }
 
-  private SFEntity entityWithButton(String dbColumnName) {
+  private SFEntity entityWithButton() {
     SFEntity entity = paymentEntity();
     when(entity.getId()).thenReturn("entity-1");
     return entity;
@@ -293,7 +293,7 @@ class NeoActionRecordGuardTest {
           .thenReturn(btn);
 
       assertRecordNotFound(NeoActionRecordGuard.refusalForMissingDocument(
-          entityWithButton("DocAction"), RECORD, "documentAction"));
+          entityWithButton(), RECORD, "documentAction"));
     }
   }
 
@@ -307,7 +307,7 @@ class NeoActionRecordGuardTest {
           .thenReturn(btn);
 
       assertNull(NeoActionRecordGuard.refusalForMissingDocument(
-          entityWithButton("Processed"), RECORD, "Processed"));
+          entityWithButton(), RECORD, "Processed"));
     }
   }
 
@@ -318,7 +318,7 @@ class NeoActionRecordGuardTest {
     try (MockedStatic<NeoButtonActionHelper> helper = mockStatic(NeoButtonActionHelper.class)) {
       helper.when(() -> NeoButtonActionHelper.findButtonColumn(anyString(), anyString()))
           .thenReturn(null);
-      SFEntity entity = entityWithButton("x");
+      SFEntity entity = entityWithButton();
 
       assertNull(NeoActionRecordGuard.refusalForMissingDocument(entity, RECORD, "unpost"));
       assertNull(NeoActionRecordGuard.refusalForMissingDocument(null, RECORD, "documentAction"));
@@ -337,7 +337,7 @@ class NeoActionRecordGuardTest {
           .thenReturn(btn);
 
       assertNull(NeoActionRecordGuard.refusalForMissingDocument(
-          entityWithButton("DocAction"), RECORD, "documentAction"));
+          entityWithButton(), RECORD, "documentAction"));
     }
   }
 
@@ -348,7 +348,7 @@ class NeoActionRecordGuardTest {
     try (MockedStatic<NeoButtonActionHelper> helper = mockStatic(NeoButtonActionHelper.class)) {
       helper.when(() -> NeoButtonActionHelper.findButtonColumn(anyString(), anyString()))
           .thenReturn(btn);
-      SFEntity entity = entityWithButton("DocAction");
+      SFEntity entity = entityWithButton();
 
       payment(OTHER_CLIENT, OWN_ORG);
       // the foreign row exists, so the missing-document check does not claim it; refusalFor does
@@ -377,7 +377,7 @@ class NeoActionRecordGuardTest {
           .thenReturn(btn);
 
       assertNull(NeoActionRecordGuard.refusalForMissingDocument(
-          entityWithButton("DocAction"), RECORD, "documentAction"));
+          entityWithButton(), RECORD, "documentAction"));
       contextMock.verify(OBContext::restorePreviousMode);
     }
   }

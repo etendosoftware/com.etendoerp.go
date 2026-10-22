@@ -106,17 +106,33 @@ public final class NeoDocumentPdf {
       this.documentStatus = documentStatus;
     }
 
-    /** A servable PDF; {@code file} is the attachment metadata the attachments endpoint gives. */
+    /**
+     * A servable PDF.
+     *
+     * @param file the attachment metadata the attachments endpoint gives
+     * @return a result with status {@code FOUND}
+     */
     public static Result found(JSONObject file) {
       return new Result(Status.FOUND, file, null, null);
     }
 
-    /** A stored PDF that is out of date; {@code file} is kept so the caller can name it. */
+    /**
+     * A stored PDF that is out of date.
+     *
+     * @param file the attachment metadata, kept so the caller can name the stale file
+     * @return a result with status {@code STALE}
+     */
     public static Result stale(JSONObject file) {
       return new Result(Status.STALE, file, null, null);
     }
 
-    /** No stored PDF; {@code supplier} when the entity's PDF is the user's own document. */
+    /**
+     * No stored PDF.
+     *
+     * @param supplier {@code true} when the entity's PDF is the user's own document (the
+     *        supplier's), so the caller cannot generate it
+     * @return a result with status {@code NO_SUPPLIER_DOCUMENT} or {@code MISSING}
+     */
     public static Result notStored(boolean supplier) {
       return new Result(supplier ? Status.NO_SUPPLIER_DOCUMENT : Status.MISSING, null, null, null);
     }
@@ -126,12 +142,18 @@ public final class NeoDocumentPdf {
      *
      * @param documentStatus the record's {@code documentStatus}, or {@code null} when the entity
      *        has none or it could not be read
+     * @return a result with status {@code MISSING} that carries the document status
      */
     public static Result notStoredInStatus(String documentStatus) {
       return new Result(Status.MISSING, null, null, documentStatus);
     }
 
-    /** The lookup failed with this message. */
+    /**
+     * The lookup failed.
+     *
+     * @param message why the lookup failed
+     * @return a result with status {@code FAILED}
+     */
     public static Result failed(String message) {
       return new Result(Status.FAILED, null, message, null);
     }

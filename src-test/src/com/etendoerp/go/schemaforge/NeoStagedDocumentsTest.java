@@ -32,6 +32,8 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.LockSupport;
 import java.util.stream.Stream;
 
 import org.codehaus.jettison.json.JSONException;
@@ -340,8 +342,13 @@ class NeoStagedDocumentsTest {
   }
 
   private static void awaitTimers(long expected) throws InterruptedException {
-    for (int i = 0; i < 100 && timers() != expected; i++) {
-      Thread.sleep(20);
+    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+    while (timers() != expected && System.nanoTime() < deadline) {
+      Thread.yield();
+      LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(20));
+      if (Thread.interrupted()) {
+        throw new InterruptedException();
+      }
     }
   }
 

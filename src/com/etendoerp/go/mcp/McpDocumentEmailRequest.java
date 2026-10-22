@@ -62,7 +62,7 @@ final class McpDocumentEmailRequest {
    */
   static final String DEFAULT_LANGUAGE = "es_ES";
   /** The locales the application ships ({@code tools/app-shell/src/locales}); the copy exists in the first two. */
-  static final List<String> SUPPORTED_LANGUAGES = List.of("es_ES", "en_US", "es_AR");
+  static final List<String> SUPPORTED_LANGUAGES = List.of(DEFAULT_LANGUAGE, "en_US", "es_AR");
   /** Argument: {@code true} shows what would be sent and sends nothing. */
   static final String PARAM_PREVIEW = "preview";
 

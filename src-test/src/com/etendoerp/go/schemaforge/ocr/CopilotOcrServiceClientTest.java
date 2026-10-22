@@ -29,6 +29,8 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
 import java.util.Properties;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 import org.codehaus.jettison.json.JSONException;
@@ -66,6 +68,8 @@ class CopilotOcrServiceClientTest {
   private volatile int toolStatus = 200;
   private volatile String toolAnswer = "{\"answer\":\"{\\\"vendor_name\\\":\\\"ACME\\\"}\"}";
   private volatile long toolDelayMillis;
+  /** Released on tear-down so a held tool call never outlives its test. */
+  private final CountDownLatch toolRelease = new CountDownLatch(1);
   private OcrDocType type;
   private Path pdf;
 
@@ -80,7 +84,7 @@ class CopilotOcrServiceClientTest {
     });
     server.createContext("/executeTool", exchange -> {
       toolBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
-      sleep(toolDelayMillis);
+      holdTool(toolDelayMillis);
       reply(exchange, toolStatus, toolAnswer);
     });
     server.start();
@@ -92,6 +96,7 @@ class CopilotOcrServiceClientTest {
 
   @AfterEach
   void tearDown() {
+    toolRelease.countDown();
     server.stop(0);
   }
 
@@ -103,9 +108,10 @@ class CopilotOcrServiceClientTest {
     exchange.close();
   }
 
-  private static void sleep(long millis) {
+  /** Holds the tool call for up to {@code millis}, or until the test releases it. */
+  private void holdTool(long millis) {
     try {
-      Thread.sleep(millis);
+      toolRelease.await(millis, TimeUnit.MILLISECONDS);
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
     }

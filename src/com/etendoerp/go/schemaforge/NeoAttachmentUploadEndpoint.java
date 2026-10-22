@@ -67,7 +67,7 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
 public final class NeoAttachmentUploadEndpoint {
 
   /** Path (inside the NEO servlet) the link points to; the token follows. */
-  public static final String PATH = "/attachment/upload/";
+  public static final String PATH = "/attachment/upload/"; // NOSONAR java:S1075 - route path, not a deployment URL
 
   /** One answer for unknown, used and expired links, so a token cannot be probed. */
   static final String INVALID_LINK_MESSAGE = "This upload link is not valid, has already been used, "

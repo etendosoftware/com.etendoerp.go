@@ -82,6 +82,18 @@ public final class OcrConfig {
 
     private Holder() {
     }
+
+    private static OcrConfig loadPackaged() {
+      try {
+        return load(OcrConfig.class, RESOURCE);
+      } catch (IOException | JSONException | RuntimeException e) {
+        log.error("OCR configuration {} is NOT available ({}): the document-reading tools are "
+            + "withdrawn and /sws/neo/ocrconfig answers 500. It must be in WEB-INF/classes next to "
+            + "OcrConfig.class; rebuild the module (smartbuild/compile).", RESOURCE,
+            e.getClass().getSimpleName());
+        return new OcrConfig(new LinkedHashMap<>(), true);
+      }
+    }
   }
 
   /**
@@ -91,18 +103,6 @@ public final class OcrConfig {
    */
   public static OcrConfig get() {
     return Holder.INSTANCE;
-  }
-
-  private static OcrConfig loadPackaged() {
-    try {
-      return load(OcrConfig.class, RESOURCE);
-    } catch (IOException | JSONException | RuntimeException e) {
-      log.error("OCR configuration {} is NOT available ({}): the document-reading tools are "
-          + "withdrawn and /sws/neo/ocrconfig answers 500. It must be in WEB-INF/classes next to "
-          + "OcrConfig.class; rebuild the module (smartbuild/compile).", RESOURCE,
-          e.getClass().getSimpleName());
-      return new OcrConfig(new LinkedHashMap<>(), true);
-    }
   }
 
   /**

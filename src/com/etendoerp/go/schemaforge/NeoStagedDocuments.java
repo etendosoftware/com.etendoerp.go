@@ -34,6 +34,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.stream.Stream;
 
@@ -193,7 +194,7 @@ public class NeoStagedDocuments {
     private final String specName;
     private final String fileName;
     private final Instant createdAt;
-    private volatile Path file;
+    private final AtomicReference<Path> file = new AtomicReference<>();
     private volatile Instant storedAt;
     private volatile String extraction;
     private volatile boolean nothingExtracted;
@@ -255,12 +256,12 @@ public class NeoStagedDocuments {
 
     /** Returns whether the bytes have arrived. */
     public boolean isStored() {
-      return file != null;
+      return file.get() != null;
     }
 
     /** Returns the file holding the bytes, {@code null} until they arrive. */
     public Path getFile() {
-      return file;
+      return file.get();
     }
 
     /**
@@ -280,7 +281,11 @@ public class NeoStagedDocuments {
       return nothingExtracted;
     }
 
-    /** Returns whether an extraction result, empty or not, is cached. */
+    /**
+     * Tells whether an extraction result, empty or not, is cached.
+     *
+     * @return {@code true} when an extraction or an empty-extraction marker is cached
+     */
     public boolean hasExtractionResult() {
       return extraction != null || nothingExtracted;
     }
@@ -404,7 +409,7 @@ public class NeoStagedDocuments {
         delete(root.resolve(id));
         return false;
       }
-      staged.file = file;
+      staged.file.set(file);
       staged.storedAt = clock.instant();
     }
     sweep(clock.instant());

@@ -52,7 +52,11 @@ public final class ReceiverTaxIdCheck {
       this.code = code;
     }
 
-    /** Returns the wire code. */
+    /**
+     * Returns the wire code.
+     *
+     * @return the code this status is reported under
+     */
     public String code() {
       return code;
     }
