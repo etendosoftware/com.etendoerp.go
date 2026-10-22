@@ -345,6 +345,34 @@ class ProfitLossReportHandlerTest {
     }
   }
 
+  /** ETP-5793: the comparison year gets the same tenant check as the main one. */
+  @Test
+  @DisplayName("POST with another tenant's referenceYearId answers exactly like an unknown one")
+  void postWithForeignReferenceYearAnswersLikeUnknown() throws Exception {
+    try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class);
+         MockedStatic<OBContext> contextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(true);
+      stubHappyPathObContextAndDal(contextMock, obDalMock, Collections.emptyList());
+      Client otherClient = mock(Client.class);
+      when(otherClient.getId()).thenReturn("otherClientId");
+      Year foreignYear = mock(Year.class);
+      when(foreignYear.getClient()).thenReturn(otherClient);
+      OBDal dal = OBDal.getInstance();
+      when(dal.get(Year.class, "foreignYear1")).thenReturn(foreignYear);
+
+      NeoResponse foreign = handler.handle(context("POST", new JSONObject().put("yearId", "year1")
+          .put("compareTo", true).put("referenceYearId", "foreignYear1")));
+      NeoResponse unknown = handler.handle(context("POST", new JSONObject().put("yearId", "year1")
+          .put("compareTo", true).put("referenceYearId", "unknownYear1")));
+
+      assertEquals(422, foreign.getHttpStatus());
+      assertEquals("reference_year_not_resolved", foreign.getBody().getString("error"));
+      assertEquals(unknown.getBody().toString().replace("unknownYear1", "foreignYear1"),
+          foreign.getBody().toString());
+    }
+  }
+
   /**
    * ETP-5793: another tenant's org answers exactly like an unknown one
    * ({@code AbstractSqlReportHandler#validateOrgId}, shared by every SQL report).
