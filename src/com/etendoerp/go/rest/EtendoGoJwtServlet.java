@@ -24,7 +24,6 @@ import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
@@ -100,6 +99,7 @@ import com.etendoerp.go.payment.StripeCustomerPortalService;
 import com.etendoerp.go.payment.DemoDataTransferService;
 import com.etendoerp.go.schemaforge.data.CheckoutRequest;
 import com.etendoerp.go.schemaforge.data.Plan;
+import com.etendoerp.go.schemaforge.data.Subscription;
 import com.etendoerp.go.payment.CheckoutWebhookProcessor;
 import com.etendoerp.go.onboarding.OnboardingAcctdimCentrallyMaintainedService;
 import com.etendoerp.go.onboarding.OnboardingAdminIdentityService;
@@ -189,6 +189,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String UTF_8 = "UTF-8";
   private static final String FIELD_EMAIL = "email";
   private static final String FIELD_CLIENT_NAME = "clientName";
+  private static final String FIELD_FISCAL_ID_VALUE = "fiscalIdValue";
   private static final String FIELD_DEMO_CLIENT_ID = "demoClientId";
   private static final String FIELD_CLIENT_ID = "clientId";
   private static final String FIELD_ENVIRONMENT = "environment";
@@ -226,6 +227,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String VALUE_NO_STORE = "no-store";
   private static final String HEADER_SET_COOKIE = "Set-Cookie";
   private static final String PATH_SESSION = "/session";
+  /** ETP-5847 — signs in with the one-time login link the signup API mails. */
+  private static final String PATH_SESSION_LINK = "/session/link";
+  private static final String AUTH_METHOD_LINK = "link";
+  private static final String CODE_LOGIN_LINK_INVALID = "LOGIN_LINK_INVALID";
+  private static final String LOGIN_LINK_INVALID_MESSAGE =
+      "This login link is invalid, already used or expired";
   private static final String ERROR_UNKNOWN_ENDPOINT = "Unknown endpoint: ";
   private static final String FIELD_PAYMENT_TOKEN = "paymentToken";
   private static final String FIELD_PLAN_KEY = "planKey";
@@ -234,6 +241,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       "The selected plan is no longer available. Reload the page to see the current plans.";
   private static final String CHECKOUT_NOT_CONFIGURED = "CHECKOUT_NOT_CONFIGURED";
   private static final String CHECKOUT_NOT_CONFIGURED_MESSAGE = "Checkout is not configured";
+  private static final String MISSING_TOKEN_MESSAGE = "Missing required field: token";
   private static final String FIELD_INCLUDE_SAMPLE_DATA = "includeSampleData";
   private static final String FIELD_ACCOUNT_EMAIL = "accountEmail";
   private static final String FIELD_CURRENCY = "currency";
@@ -247,6 +255,13 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       "You already have a productive environment with this name. Choose a different name.";
   private static final String RESERVED_CLIENT_NAME_MESSAGE =
       "This company name is reserved. Choose a different name.";
+  /** ETP-5742 — refusals of {@code POST /billing/reactivation}. */
+  private static final String CODE_REACTIVATION_OWNER_REQUIRED = "REACTIVATION_OWNER_REQUIRED";
+  private static final String REACTIVATION_OWNER_MESSAGE =
+      "Only the owner of this environment can reactivate its subscription";
+  private static final String CODE_REACTIVATION_NOT_AVAILABLE = "REACTIVATION_NOT_AVAILABLE";
+  private static final String REACTIVATION_NOT_AVAILABLE_MESSAGE =
+      "This environment has no canceled subscription to reactivate";
   private static final String FIELD_ERROR = "error";
   private static final String ERROR_PAYMENT_REQUIRED = "payment_required";
   // javax.servlet.http.HttpServletResponse predates RFC 7231 and has no 402 constant.
@@ -307,10 +322,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   // ETP-5258 — stable code so the reset screen translates the dead-link case by code instead of
   // showing the English text above, which is a developer-facing fallback only.
   private static final String CODE_PASSWORD_RESET_INVALID = "PASSWORD_RESET_INVALID";
-  // 24h, not the 30 minutes a password reset gets. A reset is a deliberate act the user performs
-  // and immediately waits on; a registration confirmation is often opened the next morning, and an
-  // expired link there means a dead end in the middle of signup.
-  private static final long EMAIL_VERIFICATION_TTL_SECONDS = 24 * 60 * 60L;
   private static final String EMAIL_NOT_VERIFIED_MESSAGE =
       "Confirm your email address before creating an environment.";
   private static final String EMAIL_VERIFY_INVALID_MESSAGE =
@@ -321,7 +332,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String PATH_VERIFY_EMAIL_RESEND = "/verify-email/resend";
   private static final String FIELD_EMAIL_VERIFIED = "emailVerified";
   private static final String FIELD_EMAIL_VERIFICATION_PENDING = "emailVerificationPending";
-  private static final String CONTRACT_NEW_ACCOUNT = "new-account";
   private static final String SSO_PREFIX = "/sso/";
   private static final String PATH_ONBOARDING_DRAFT = "/onboarding/draft";
   /** ETP-5734 — opt-in query parameter of {@code GET /environments}. */
@@ -352,7 +362,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String FIELD_CONTACTS = "contacts";
   private static final String[] ONBOARDING_DRAFT_FORM_FIELDS = { FIELD_FULL_NAME, "businessType",
       FIELD_CLIENT_NAME, FIELD_CURRENCY, FIELD_LANGUAGE, FIELD_COUNTRY_CODE, "fiscalIdType",
-      "fiscalIdValue", FIELD_ADDRESS, "sector", FIELD_INCLUDE_SAMPLE_DATA };
+      FIELD_FISCAL_ID_VALUE, FIELD_ADDRESS, "sector", FIELD_INCLUDE_SAMPLE_DATA };
   private static final String PATH_ONBOARDING_FIRST_STEPS = "/onboarding/first-steps";
   private static final String FIELD_FIRST_STEPS = "firstSteps";
   private static final String FIELD_FIRST_STEPS_VERSION = "v";
@@ -441,6 +451,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   StripeCustomerPortalService stripeCustomerPortalService = new StripeCustomerPortalService();
   CompanyInvitationService companyInvitationService;
   private final TransactionalAuthEmailSender authEmailSender;
+  private final AccountRegistrationService accountRegistration;
   com.etendoerp.go.schemaforge.email.InternalAlertService internalAlertService =
       new com.etendoerp.go.schemaforge.email.InternalAlertService();
   private final EtendoGoSsoProviderRegistry ssoProviderRegistry;
@@ -483,6 +494,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     this.goSessionService = goSessionService;
     this.stripePriceService = stripePriceService;
     this.companyInvitationService = new CompanyInvitationService(authEmailSender);
+    this.accountRegistration = new AccountRegistrationService(authEmailSender);
   }
 
   // --- HTTP method dispatchers ---
@@ -642,6 +654,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleSessionCreate(request, response);
     } else if (isPath(path, "/session/environment")) {
       handleSessionEnvironment(request, response);
+    } else if (isPath(path, PATH_SESSION_LINK)) {
+      handleSessionLink(request, response);
     } else if (isPath(path, "/session/refresh")) {
       handleSessionRefresh(request, response);
     } else if (path != null && path.startsWith("/session/sso/")) {
@@ -727,6 +741,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleBillingPurchaseCreate(request, response);
     } else if (isPath(path, "/billing/subscription/portal")) {
       handleBillingPortal(request, response);
+    } else if (isPath(path, "/billing/reactivation")) {
+      handleSubscriptionReactivation(request, response);
     } else if (isPath(path, "/demo-data-transfer/retry")) {
       handleDemoDataTransferRetry(request, response);
     } else if (isPath(path, PATH_CALENDAR_REVIEW + "/confirm")) {
@@ -976,15 +992,39 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     });
   }
 
-  /** Caller provides the admin context. Case and surrounding blanks are ignored. */
+  /**
+   * Caller provides the admin context. Case and surrounding blanks are ignored.
+   *
+   * <p>ETP-5742 — a canceled productive environment still holds its name: its closed subscription
+   * row makes the plan read {@code free}, so the plan alone let a purchase under that name through
+   * to a new environment that the company-name constraint then refuses, after the payment. The
+   * lifecycle type is asked too; the way back into that environment is re-subscribing it, not
+   * buying it again.
+   */
   private boolean ownsProductiveNamed(String clientName, String accountEmail) {
     for (String clientId : EtendoGoJwtSupport.findClientIdsByName(clientName)) {
       if (EtendoGoJwtDalHelper.clientBelongsToAccountEmail(clientId, accountEmail)
-          && TenantPlanService.PLAN_PRODUCTIVE.equals(tenantPlanService.resolvePlan(clientId))) {
+          && (TenantPlanService.PLAN_PRODUCTIVE.equals(tenantPlanService.resolvePlan(clientId))
+              || hasProductiveLifecycle(clientId))) {
         return true;
       }
     }
     return false;
+  }
+
+  /**
+   * Whether the lifecycle snapshot says productive. Deliberately {@code resolve}, not
+   * {@link TenantEnvironmentLifecycleService#isProductiveEnvironment}: that one fails closed (an
+   * unreadable tenant counts as productive, the safe answer for a purchase source), while a name
+   * check must fail open — onboarding repeats it after the payment, and a lookup error there would
+   * refuse a paid environment as a non-retryable name collision. {@code resolve} answers null on
+   * an error.
+   */
+  private boolean hasProductiveLifecycle(String clientId) {
+    TenantEnvironmentLifecycleService.EnvironmentSnapshot snapshot =
+        tenantEnvironmentLifecycleService.resolve(clientId);
+    return snapshot != null
+        && snapshot.getType() == EnvironmentAccessPolicy.EnvironmentType.PRODUCTIVE;
   }
 
   /**
@@ -1015,7 +1055,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     String planKey = StringUtils.trimToNull(body.optString(FIELD_PLAN_KEY, ""));
     // Billing redirects are server-owned. Never trust a browser-supplied Origin as a return URL.
     final String origin = PublicUrlResolver.resolveConfiguredAppBaseUrl();
-    try {
+    writeStartedCheckout(response, accountBillingPurchase, () -> {
       // The source, transfer choice, plan and Stripe Price are persisted on the purchase row, and
       // the flag-gated transfer selection is recorded before the provider is contacted.
       JSONObject result = hostedCheckoutService.createSession(account.getId(), account.getEmail(),
@@ -1024,7 +1064,29 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
               requestId -> recordDemoDataTransferSelection(body, requestId, selection)));
       addDemoDataTransferSelectionBestEffort(result, result.optString(FIELD_REQUEST_ID, ""),
           selection.demoClientId);
-      writeResponse(response, HttpServletResponse.SC_CREATED, result);
+      return result;
+    });
+  }
+
+  /** Starts a provider checkout session; see {@link #writeStartedCheckout}. */
+  @FunctionalInterface
+  private interface CheckoutStart {
+    JSONObject start() throws IOException, JSONException;
+  }
+
+  /**
+   * Answers a started checkout with {@code 201}, translating each failure mode into the response
+   * the checkout contract promises. Shared by the new-environment purchase and the ETP-5742
+   * re-subscription, so both refuse an unavailable plan, an unconfigured checkout and a provider
+   * error the same way.
+   *
+   * @param accountBillingPurchase whether the caller is the account billing boundary, which words
+   *     a provider error as a billing purchase rather than a checkout session
+   */
+  private void writeStartedCheckout(HttpServletResponse response, boolean accountBillingPurchase,
+      CheckoutStart start) throws IOException {
+    try {
+      writeResponse(response, HttpServletResponse.SC_CREATED, start.start());
     } catch (PlanNotAvailableException e) {
       // Logged with the key, answered without it: the caller learns that this key is not usable
       // and nothing about the rest of the plan catalog. The message carries the key already
@@ -1095,6 +1157,123 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       createHostedCheckoutSession(response, account, body, clientName, selection,
           true);
     });
+  }
+
+  /**
+   * POST /sws/go/billing/reactivation — ETP-5742: re-subscribes the session's own environment
+   * after its subscription was canceled, instead of buying a new one.
+   *
+   * <p>The environment is the session's, never a request field, and it must be:
+   * <ul>
+   *   <li><b>owned by the account</b> ({@code clientOwnedByAccountEmail}, ETP-5743): an invited
+   *       member is refused {@code 403 REACTIVATION_OWNER_REQUIRED} — paying for someone else's
+   *       environment is the owner's decision;</li>
+   *   <li><b>a productive environment whose subscription is canceled</b>
+   *       ({@code EXPIRED} in the lifecycle snapshot, whether it reads from a closed
+   *       {@code ETGO_SUBSCRIPTION} row or from the preference projection); anything else is
+   *       {@code 409 REACTIVATION_NOT_AVAILABLE}. A payment that failed ({@code PAST_DUE}) is
+   *       fixed in the Customer Portal, not by a second subscription.</li>
+   * </ul>
+   *
+   * <p>Answers like a purchase: {@code 201} with {@code requestId} and {@code checkoutUrl}. A
+   * re-subscription of the same environment still open is reopened ({@code 200}); one already paid
+   * and waiting for the payment webhook answers {@code 200 {"requestId", "status": "paid"}}. The
+   * request names the environment as its {@code CREATED_CLIENT_ID} from the start, which is what
+   * the payment webhook applies the purchase to ({@link #applyReactivationIfPending}) and what
+   * routes the new subscription's lifecycle events. Same plan as the canceled subscription when
+   * it had one, otherwise the legacy price fallback, exactly as a purchase naming no plan.
+   */
+  private void handleSubscriptionReactivation(HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    runWithAuthenticatedContext(request, response, "subscription-reactivation", authenticated -> {
+      Account account = authenticated.account;
+      String clientId = currentSessionClientId(request, response, authenticated);
+      if (clientId == null) return;
+      if (StringUtils.isBlank(clientId) || ZERO_ID.equals(clientId)) {
+        writeError(response, HttpServletResponse.SC_CONFLICT, CODE_REACTIVATION_NOT_AVAILABLE,
+            REACTIVATION_NOT_AVAILABLE_MESSAGE, REACTIVATION_NOT_AVAILABLE_MESSAGE);
+        return;
+      }
+      if (!isOwnedClient(clientId, account.getEmail())) {
+        writeError(response, HttpServletResponse.SC_FORBIDDEN, CODE_REACTIVATION_OWNER_REQUIRED,
+            REACTIVATION_OWNER_MESSAGE, REACTIVATION_OWNER_MESSAGE);
+        return;
+      }
+      if (!isCanceledProductive(clientId)) {
+        writeError(response, HttpServletResponse.SC_CONFLICT, CODE_REACTIVATION_NOT_AVAILABLE,
+            REACTIVATION_NOT_AVAILABLE_MESSAGE, REACTIVATION_NOT_AVAILABLE_MESSAGE);
+        return;
+      }
+      CheckoutRequest active = checkoutRequestStore.findActiveReactivation(account.getId(),
+          account.getEmail(), clientId);
+      if (active != null) {
+        handleExistingReactivation(response, account, active);
+        return;
+      }
+      ReactivationTarget target = SystemContext.call("the re-subscription target",
+          () -> reactivationTarget(clientId));
+      // Billing redirects are server-owned. Never trust a browser-supplied Origin as a return URL.
+      final String origin = PublicUrlResolver.resolveConfiguredAppBaseUrl();
+      writeStartedCheckout(response, true, () -> hostedCheckoutService.createSession(
+          account.getId(), account.getEmail(), target.clientName, origin, target.planKey,
+          HostedCheckoutService.SessionOptions.reactivating(clientId)));
+    });
+  }
+
+  /** The environment name and the plan a re-subscription is bought under. */
+  private static final class ReactivationTarget {
+    private final String clientName;
+    private final String planKey;
+
+    private ReactivationTarget(String clientName, String planKey) {
+      this.clientName = clientName;
+      this.planKey = planKey;
+    }
+  }
+
+  /**
+   * Caller provides the system context. The plan is the canceled subscription's when the tenant
+   * has a row; a tenant with none (the preference projection) names no plan, which asks for the
+   * legacy price fallback like any purchase that names none.
+   */
+  private ReactivationTarget reactivationTarget(String clientId) {
+    Client client = OBDal.getInstance().get(Client.class, clientId);
+    String planKey = subscriptionService.findLatest(clientId)
+        .map(Subscription::getPlan)
+        .map(Plan::getSearchKey)
+        .orElse(null);
+    return new ReactivationTarget(client == null ? "" : client.getName(), planKey);
+  }
+
+  /**
+   * Whether the environment is productive and its subscription canceled: the lifecycle snapshot,
+   * so a closed {@code ETGO_SUBSCRIPTION} row and the {@code ETGO_SubscriptionStatus} preference
+   * answer alike. Fails closed: an unreadable lifecycle is not offered a re-subscription.
+   */
+  private boolean isCanceledProductive(String clientId) {
+    return SystemContext.call("the re-subscription eligibility check", () -> {
+      TenantEnvironmentLifecycleService.EnvironmentSnapshot snapshot =
+          tenantEnvironmentLifecycleService.resolve(clientId);
+      return snapshot != null
+          && snapshot.getType() == EnvironmentAccessPolicy.EnvironmentType.PRODUCTIVE
+          && snapshot.getSubscriptionStatus() == EnvironmentAccessPolicy.SubscriptionStatus.EXPIRED;
+    });
+  }
+
+  /**
+   * A second click or a second tab: an unpaid re-subscription is reopened like any unpaid purchase
+   * ({@link #handleExistingBillingPurchase}); a paid one is only waiting for its webhook.
+   */
+  private void handleExistingReactivation(HttpServletResponse response, Account account,
+      CheckoutRequest active) throws IOException, JSONException {
+    if ("PAID".equals(active.getCheckoutRequestStatus())) {
+      JSONObject result = new JSONObject();
+      result.put(FIELD_REQUEST_ID, active.getRequest());
+      result.put(FIELD_STATUS, "paid");
+      writeResponse(response, HttpServletResponse.SC_OK, result);
+      return;
+    }
+    handleExistingBillingPurchase(response, account, active);
   }
 
   private void handleActiveBillingPurchase(HttpServletResponse response, Account account,
@@ -1592,8 +1771,62 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       billingEventStore.markIgnored(eventId, "unknown checkout request");
       return;
     }
+    applyReactivationIfPending(requestId, event);
     billingEventStore.markApplied(eventId);
     log.info("Checkout webhook event '{}' ({}) applied", eventId, type);
+  }
+
+  /**
+   * ETP-5742 — applies a paid re-subscription to the canceled environment it names, here in the
+   * payment webhook: unlike a new purchase there is nothing for onboarding to provision, and the
+   * customer is waiting on the blocked screen, not on the upgrade page.
+   *
+   * <p>The payment is recorded exactly as a paid upgrade records it
+   * ({@link #applyPaidUpgradeSideEffects}), so both data shapes take the same path they would on a
+   * purchase:
+   * <ul>
+   *   <li><b>a tenant with a subscription row</b> (closed, since its subscription was canceled) —
+   *       a fresh row is opened for the new Stripe subscription next to the closed one, and the
+   *       period is then read from the provider ({@link #fillSubscriptionPeriodBestEffort}), as
+   *       after an onboarding;</li>
+   *   <li><b>a tenant with no row</b> while the subscription model is off — the plan marker and
+   *       {@code ETGO_SubscriptionStatus = CURRENT} are written, and the event watermark is moved
+   *       to this payment, so a late event of the canceled subscription can no longer expire the
+   *       tenant again.</li>
+   * </ul>
+   *
+   * <p>The request is then closed as {@code PROVISIONED}, which commits the writes above with it:
+   * a failure before that rolls them back with the event, the webhook answers 500 and the provider
+   * redelivers, and the request is still {@code PAID} for the retry. Opening the row is idempotent
+   * for an already open, active one.
+   */
+  private void applyReactivationIfPending(String requestId, JSONObject event) {
+    CheckoutRequest reactivation = checkoutRequestStore.findPaidReactivation(requestId);
+    if (reactivation == null) {
+      return;
+    }
+    String clientId = reactivation.getCreatedClient().getId();
+    SystemContext.run("a subscription re-subscription",
+        () -> applyReactivation(reactivation, clientId,
+            SubscriptionLifecycleApplier.eventCreatedAt(event)));
+    fillSubscriptionPeriodBestEffort(clientId);
+  }
+
+  private void applyReactivation(CheckoutRequest reactivation, String clientId,
+      Instant paidAt) {
+    String requestId = reactivation.getRequest();
+    // Decided before the payment is recorded, the way recordPaymentAsSubscription decides it: once
+    // a row is opened below, the tenant has one.
+    boolean preferenceRoute = !subscriptionModelSwitch.isOn()
+        && !subscriptionService.hasAnySubscription(clientId);
+    applyPaidUpgradeSideEffects(clientId, EtendoGoJwtSupport.findStarOrgId(clientId),
+        reactivation.getClientName(), reactivation.getAccountEmail(), requestId);
+    if (preferenceRoute) {
+      // ETP-5046-TRANSITIONAL-FALLBACK — the preference route keeps its own watermark.
+      tenantEnvironmentLifecycleService.recordSubscriptionEventAt(clientId, paidAt);
+    }
+    checkoutRequestStore.recordProvisioned(requestId, clientId);
+    log.info("Re-subscription '{}' applied to environment {}", requestId, clientId);
   }
 
   /**
@@ -2337,7 +2570,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       verifyToken = body.getString(FIELD_TOKEN).trim();
     } catch (JSONException e) {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_INVALID_REQUEST,
-          "Missing required field: token", "Missing required field: token");
+          MISSING_TOKEN_MESSAGE, MISSING_TOKEN_MESSAGE);
       return;
     }
     if (verifyToken.isEmpty()) {
@@ -3846,12 +4079,13 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * <p><b>Trade-off, accepted (decided 2026-10-14, recorded in register §2.9).</b> Answering
    * {@code false} on a failed lookup means that a tenant which DID have a row would get its payment
    * recorded only in the marker — invisible behind that row. Since ETP-5047 a tenant whose only row
-   * is closed reads as canceled, so such a tenant would stay canceled while it pays. The case is
-   * reachable in principle only: letting a canceled tenant re-subscribe its own environment was
-   * decided on 2026-10-14 (Martin Taal), but that flow is ETP-5742 and does not exist yet. Today
-   * every checkout provisions a new environment, and since ETP-5047 a canceled productive tenant is
-   * no longer a demo source either, so no current purchase reaches a tenant with a closed row. The
-   * acceptance does not depend on that: it fails closed in practice. On PostgreSQL a failed SQL
+   * is closed reads as canceled, so such a tenant would stay canceled while it pays. A new purchase
+   * never reaches a tenant with a closed row (it provisions a new environment, and since ETP-5047 a
+   * canceled productive tenant is no longer a demo source). The ETP-5742 re-subscription does, and
+   * it does not rely on this lookup: {@code applyReactivation} asks
+   * {@link SubscriptionService#hasAnySubscription} itself, unguarded, before recording the payment,
+   * so a failing lookup fails the payment webhook (which the provider redelivers) instead of
+   * reaching the marker path. The acceptance holds anyway: it fails closed in practice. On PostgreSQL a failed SQL
    * statement aborts the transaction, so the onboarding writes that follow fail too and the upgrade
    * fails instead of being recorded in the marker. Only a failure other than a failed SQL statement
    * (a mapping or hydration error after the statement ran, for instance) could reach the marker
@@ -4248,6 +4482,25 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     if (preparation == null) {
       return;
     }
+    // Set up NDJSON streaming
+    response.setStatus(HttpServletResponse.SC_OK);
+    response.setContentType("application/x-ndjson");
+    response.setCharacterEncoding(UTF_8);
+    response.setHeader(HEADER_CONTENT_TYPE_OPTIONS, VALUE_NOSNIFF);
+    runOnboarding(preparation, new OnboardingStreamWriter(response.getWriter()));
+  }
+
+  /**
+   * Runs a prepared onboarding to its end, writing its progress to {@code writer}: the app's
+   * NDJSON stream, or a log sink for an environment the signup API creates (ETP-5847).
+   *
+   * @param writer remembers the result line a failing step writes, so the catch below neither
+   *     duplicates it nor records a generic reason in place of the real one
+   * @return the client id of the environment created, or {@code null} when it was not (the
+   *     failure is already rolled back and recorded, and its reason is on {@code writer})
+   */
+  private String runOnboarding(OnboardingPreparation preparation,
+      OnboardingStreamWriter writer) {
     String accountEmail = preparation.accountEmail;
     boolean paidUpgrade = preparation.paidUpgrade;
 
@@ -4259,15 +4512,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     String failureReason = null;
     String failureCode = null;
     ProvisioningAlertAttempt alertAttempt = new ProvisioningAlertAttempt(paidUpgrade);
-
-    // Set up NDJSON streaming
-    response.setStatus(HttpServletResponse.SC_OK);
-    response.setContentType("application/x-ndjson");
-    response.setCharacterEncoding(UTF_8);
-    response.setHeader(HEADER_CONTENT_TYPE_OPTIONS, VALUE_NOSNIFF);
-    // Remembers the result line a failing step writes, so the catch below neither duplicates it
-    // nor records a generic reason in place of the real one.
-    OnboardingStreamWriter writer = new OnboardingStreamWriter(response.getWriter());
 
     // Generate a random password for the admin user
     String adminPassword = UUID.randomUUID().toString().substring(0, 12);
@@ -4308,6 +4552,61 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       writer.flush();
       warnWhenOnboardingStreamWasLost(writer, accountEmail);
     }
+    return provisioningCompleted ? alertAttempt.clientId : null;
+  }
+
+  /** Outcome of {@link #provisionSignupEnvironment}: the client created, or why there is none. */
+  record SignupProvisioningResult(String clientId, String failure) {
+    boolean created() {
+      return clientId != null;
+    }
+  }
+
+  /**
+   * ETP-5847 — creates the demo environment of an account the signup API registered, with no
+   * HTTP request behind it: the same pipeline as {@code POST /onboarding}, fed from the company
+   * data the signup stored as the account's onboarding draft. The ready mail is left to the
+   * signup API ({@link SignupAccountService}), which decides whether to send it and with which
+   * link.
+   *
+   * <p>Only a free demo: an account that the paywall would charge, or refuses, is not provisioned.
+   *
+   * @param form the onboarding draft's form, with the keys {@code POST /onboarding} takes
+   * @param progress where the steps are written; nobody is streaming them, it is a log sink
+   */
+  SignupProvisioningResult provisionSignupEnvironment(String accountId, String accountEmail,
+      String accountName, JSONObject form, OnboardingStreamWriter progress) {
+    OnboardingRequestData onboardingRequest = new OnboardingRequestData();
+    onboardingRequest.clientName = form.optString(FIELD_CLIENT_NAME, "").trim();
+    onboardingRequest.currencyIso = form.optString(FIELD_CURRENCY, "EUR").trim();
+    onboardingRequest.language = form.optString(FIELD_LANGUAGE, "en_US").trim();
+    onboardingRequest.countryCode = form.optString(FIELD_COUNTRY_CODE, "ES").trim();
+    onboardingRequest.address = "";
+    onboardingRequest.taxId = form.optString(FIELD_FISCAL_ID_VALUE, "").trim();
+    onboardingRequest.paymentToken = "";
+    onboardingRequest.upgradeAction = "create-productive";
+    onboardingRequest.includeSampleData = form.optBoolean(FIELD_INCLUDE_SAMPLE_DATA, false);
+    onboardingRequest.fullName = EtendoGoJwtSupport.resolveOwnerDisplayName(
+        form.optString(FIELD_FULL_NAME, ""), accountName, accountEmail);
+    onboardingRequest.skipEnvironmentReadyMail = true;
+
+    String currencyId = findCurrencyId(onboardingRequest.currencyIso);
+    if (currencyId == null) {
+      return new SignupProvisioningResult(null,
+          "Unknown currency: " + onboardingRequest.currencyIso);
+    }
+    TenantPaywallService.Outcome paywall =
+        evaluatePaywall(accountId, accountEmail, onboardingRequest);
+    if (paywall.getDecision().isBlocked() || paywall.isProductive()) {
+      return new SignupProvisioningResult(null,
+          "The account cannot create a free demo environment");
+    }
+    String clientId = runOnboarding(new OnboardingPreparation(accountId, accountEmail,
+        onboardingRequest, currencyId, false, null), progress);
+    return clientId != null
+        ? new SignupProvisioningResult(clientId, null)
+        : new SignupProvisioningResult(null,
+            StringUtils.defaultIfBlank(progress.getResultMessage(), "Onboarding failed"));
   }
 
   /**
@@ -4951,6 +5250,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
     Account account = findAccountForCommittedOnboarding(accountId, accountEmail);
     clearOnboardingDraftBestEffort(account);
+    if (onboardingRequest.skipEnvironmentReadyMail) {
+      return;
+    }
     String normalizedLanguage = StringUtils.trimToNull(onboardingRequest.language);
     sendAuthEmailBestEffort("environment-ready",
         () -> authEmailSender.sendEnvironmentReady(account, clientId, normalizedLanguage));
@@ -5279,7 +5581,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       data.fullName = body.optString(FIELD_FULL_NAME, "").trim();
       // Tax ID (ETP-4749): optional in the wizard, so a blank value here is expected and
       // must not fail the request — wireOrgInfo() only persists it when non-blank.
-      data.taxId = body.optString("fiscalIdValue", "").trim();
+      data.taxId = body.optString(FIELD_FISCAL_ID_VALUE, "").trim();
       data.paymentToken = body.optString(FIELD_PAYMENT_TOKEN, "").trim();
       data.upgradeAction = body.optString("upgradeAction", "create-productive").trim();
       // ETP-5426: opt-in, off unless the form explicitly sends true.
@@ -5352,18 +5654,23 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
   private String resolveCurrencyId(String currencyIso, HttpServletResponse response)
       throws IOException {
+    String currencyId = findCurrencyId(currencyIso);
+    if (currencyId == null) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, "Unknown currency: " + currencyIso);
+    }
+    return currencyId;
+  }
+
+  /** The currency's id, or {@code null} when no currency has that ISO code. */
+  private String findCurrencyId(String currencyIso) {
     OBContext.setOBContext("0", "0", "0", "0");
     OBContext.setAdminMode(true);
     try {
       var currency = EtendoGoJwtDalHelper.findCurrencyByIsoCode(currencyIso);
-      if (currency != null) {
-        return currency.getId();
-      }
+      return currency == null ? null : currency.getId();
     } finally {
       OBContext.restorePreviousMode();
     }
-    writeError(response, HttpServletResponse.SC_BAD_REQUEST, "Unknown currency: " + currencyIso);
-    return null;
   }
 
   private VariablesSecureApp prepareAdminContext(PrintWriter writer, String language) {
@@ -5741,95 +6048,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
-   * ETP-4798: issues a fresh email-verification token and mails the link out, used both at
-   * registration ({@code welcome} true, the link rides inside the welcome mail) and on an explicit
-   * re-send ({@code welcome} false, its own {@code verify-email} message).
-   *
-   * <p><strong>Fails open only when there was nothing to fall back to.</strong> Issuing a token
-   * overwrites whatever was pending, so the previous state is captured first and put back when the
-   * mail does not go out. That distinction is the whole point: on a first issue at {@code /register}
-   * there is no previous token, so a failed send leaves the account reading as "nothing pending" and
-   * {@link #rejectWhenEmailNotVerified} lets it through — a misconfigured provider or an unset
-   * {@code etendo.go.app.baseUrl} must not silently lock every new signup out of creating an
-   * environment. On a re-send there IS a previous token, and restoring it keeps the account gated
-   * and keeps the link already sitting in the user's inbox working. Clearing it there instead
-   * would hand anyone a way to switch the gate off simply by pressing "resend" until the
-   * per-recipient throttle refuses the send. Same capture/restore pair
-   * {@link #storeResetTokenAndSendEmail} uses for the reset token.
-   *
-   * @param welcome true to fold the link into the {@code new-account} welcome mail, false to send
-   *     the standalone {@code verify-email} reminder
+   * ETP-4798: issues a fresh email-verification token and mails the link out. The logic lives in
+   * {@link AccountRegistrationService#issueEmailVerification} (ETP-5847), shared with the public
+   * signup API; this delegate keeps every call site here unchanged.
    */
   private void issueEmailVerification(Account account, String language, boolean welcome) {
-    EmailVerificationDalHelper.EmailVerifyTokenState previousTokenState =
-        EmailVerificationDalHelper.captureEmailVerifyToken(account);
-    boolean tokenStored = false;
-    try {
-      String verifyToken = generateSecureUrlToken();
-      String verifyTokenHash = hashAuthToken(verifyToken);
-      String verifyLink = EtendoGoAuthLinkBuilder.verifyEmailLink(verifyToken);
-      if (verifyLink == null) {
-        log.warn("Email verification skipped because the public app base URL "
-            + "({}) is not configured", PublicUrlResolver.APP_BASE_URL_PROPERTY);
-        if (welcome) {
-          sendAuthEmailBestEffort(CONTRACT_NEW_ACCOUNT,
-              () -> authEmailSender.sendNewAccount(account, language));
-        }
-        return;
-      }
-
-      // ETP-5003 — the same expiry the token is stored with is handed to the email, so the copy
-      // states the window the server actually grants instead of repeating a constant.
-      Date verifyExpiresAt = Date.from(Instant.now().plusSeconds(EMAIL_VERIFICATION_TTL_SECONDS));
-      EmailVerificationDalHelper.storeEmailVerifyToken(account, verifyTokenHash, verifyExpiresAt);
-      tokenStored = true;
-
-      boolean emailSent = welcome
-          ? authEmailSender.sendNewAccount(account, language, verifyLink, verifyExpiresAt)
-          : authEmailSender.sendVerifyEmail(account, verifyTokenHash, verifyLink, language,
-              verifyExpiresAt);
-      if (emailSent) {
-        return;
-      }
-    } catch (RuntimeException e) {
-      // Swallowed on purpose, and this is the whole reason the method owns its own try: it runs
-      // AFTER the account transaction has already committed. Letting the exception escape would
-      // reach handleRegister's catch, roll back nothing that matters, and answer "registration
-      // failed" for an account that exists — leaving the user unable to retry (the address is now
-      // taken) and unable to log in to the account they just created.
-      log.warn("Email verification could not be issued", e);
-    }
-    if (tokenStored) {
-      revertUnusableEmailVerifyToken(account, previousTokenState);
-    }
-  }
-
-  /**
-   * Undoes a token re-issue whose mail never went out, putting back whatever the account held
-   * before it.
-   *
-   * <p>When a confirmation was already pending, the previous token comes back: the account stays
-   * gated and the link already in the user's inbox keeps working. When nothing was pending this
-   * restores to "no token", leaving the account ungated rather than blocked behind a link nobody
-   * can click.
-   */
-  private void revertUnusableEmailVerifyToken(Account account,
-      EmailVerificationDalHelper.EmailVerifyTokenState previousTokenState) {
-    boolean hadPendingToken = previousTokenState != null && previousTokenState.hasToken();
-    try {
-      EmailVerificationDalHelper.restoreEmailVerifyToken(account, previousTokenState);
-    } catch (RuntimeException e) {
-      log.error("Could not revert the unusable email verification token; this account may be gated "
-          + "out of creating an environment with no deliverable confirmation link", e);
-      return;
-    }
-    if (hadPendingToken) {
-      log.warn("Email verification re-send could not be delivered; the previously issued token was "
-          + "restored, so the account stays gated and its earlier link still works");
-    } else {
-      log.warn("Email verification token dropped because its mail could not be sent — "
-          + "the account is left ungated rather than locked out");
-    }
+    accountRegistration.issueEmailVerification(account, language, welcome);
   }
 
   /**
@@ -5878,20 +6102,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
   /** Cryptographically random, URL-safe token for a mailed one-shot link (reset, verification). */
   private String generateSecureUrlToken() {
-    byte[] token = new byte[32];
-    new SecureRandom().nextBytes(token);
-    return Base64.getUrlEncoder().withoutPadding().encodeToString(token);
+    return AccountRegistrationService.generateSecureUrlToken();
   }
 
   /** SHA-256 of a mailed token. Only the digest is ever persisted. */
   private String hashAuthToken(String token) {
-    try {
-      MessageDigest md = MessageDigest.getInstance(HASH_ALGORITHM);
-      byte[] digest = md.digest(token.getBytes(StandardCharsets.UTF_8));
-      return Base64.getEncoder().encodeToString(digest);
-    } catch (NoSuchAlgorithmException e) {
-      throw new IllegalStateException("SHA-256 not available", e);
-    }
+    return AccountRegistrationService.hashAuthToken(token);
   }
 
   // --- HTTP utilities ---
@@ -5952,6 +6168,74 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     } catch (JSONException e) {
       log.error("JSON error building password reset request response", e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+    }
+  }
+
+  /**
+   * POST /sws/go/session/link
+   * Body: { "token": "..." }
+   *
+   * <p>ETP-5847 — signs in with the one-time login link the signup API mails when an account's
+   * environment is ready, so a passwordless account gets in without a password. It spends the
+   * link (it works once), confirms the address (the mail reached its owner) and opens a cookie
+   * session exactly like {@code POST /session}. The body adds {@code environment.userId}: the
+   * account's user in the environment the signup created, which the app enters next with
+   * {@code POST /session/environment}, so every rule of entering an environment stays in one
+   * place.
+   *
+   * <p>Only this POST spends the link. The page the mail links to asks for a click first, so a
+   * mail scanner that opens the URL spends nothing.
+   */
+  private void handleSessionLink(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    JSONObject body;
+    try {
+      body = readJsonBody(request);
+    } catch (JSONException e) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, INVALID_JSON_BODY);
+      return;
+    }
+    String token = body.optString(FIELD_TOKEN, "").trim();
+    if (token.isEmpty()) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_INVALID_REQUEST,
+          MISSING_TOKEN_MESSAGE, MISSING_TOKEN_MESSAGE);
+      return;
+    }
+    try {
+      OBContext.setOBContext("0", "0", "0", "0");
+      OBContext.setAdminMode(true);
+      Account account = SignupAccountDalHelper.findAccountByLoginLinkHash(hashAuthToken(token),
+          new Date());
+      if (account == null) {
+        writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_LOGIN_LINK_INVALID,
+            LOGIN_LINK_INVALID_MESSAGE, LOGIN_LINK_INVALID_MESSAGE);
+        return;
+      }
+      String accountId = account.getId();
+      SignupAccountDalHelper.consumeLoginLink(account, new Date());
+      Account consumed = EtendoGoJwtDalHelper.findActiveAccountById(accountId);
+      String environmentUserId = SignupAccountDalHelper.environmentUserId(consumed);
+      IssuedGoSession issued = goSessionService.create(accountId, AUTH_METHOD_LINK,
+          request.getHeader(HEADER_USER_AGENT), null);
+      setSessionCookies(response, issued);
+      response.setHeader(HEADER_CACHE_CONTROL, VALUE_NO_STORE);
+      response.setHeader(HEADER_CONTENT_TYPE_OPTIONS, VALUE_NOSNIFF);
+      JSONObject result = new JSONObject();
+      result.put(FIELD_STATUS, STATUS_SUCCESS);
+      result.put(FIELD_ACCOUNT, buildAccountJson(consumed));
+      result.put(FIELD_CSRF_TOKEN, issued.getCsrfToken());
+      result.put(FIELD_ENVIRONMENT, new JSONObject().put(FIELD_USER_ID,
+          environmentUserId == null ? JSONObject.NULL : environmentUserId));
+      writeResponse(response, HttpServletResponse.SC_OK, result);
+    } catch (RuntimeException e) {
+      EtendoGoDalHelper.rollbackDalChanges("login link", e, log);
+      log.error("Login link sign-in failed", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, SERVER_ERROR);
+    } catch (JSONException e) {
+      log.error("JSON error building the login link response", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+    } finally {
+      OBContext.restorePreviousMode();
     }
   }
 
@@ -6661,6 +6945,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     // ETP-5426: the signup form's "include sample data" opt-in. Honoured only when
     // OnboardingSampleDataService.isEligible accepts the request.
     private boolean includeSampleData;
+    // ETP-5847: set for an environment the signup API creates, which mails its own ready message
+    // (with a login link, or none at all when the caller turned mails off).
+    private boolean skipEnvironmentReadyMail;
   }
 
 }

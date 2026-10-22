@@ -271,7 +271,8 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
       JSONObject body = prev.getBody();
       JSONArray dataArr = NeoHandlerUtils.extractGetDataArray(context);
       if (dataArr == null || dataArr.length() == 0) {
-        return null;
+        // ETP-5757: an empty page still carries the (zeroed) whole-set footer totals.
+        return DocumentListTotals.injectInto(context, true) ? NeoResponse.ok(body) : null;
       }
       for (int i = 0; i < dataArr.length(); i++) {
         JSONObject rec = dataArr.getJSONObject(i);
@@ -296,6 +297,7 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
         SifSubRecordAttachments.enrich(rec, context.getRecordId());
         InvoiceReactivationGuard.enrichReactivationBlock(rec, context.getRecordId());
       }
+      DocumentListTotals.injectInto(context, true); // ETP-5757, last: see AbstractInvoiceHeaderHandler
       return NeoResponse.ok(body);
     } catch (Exception e) {
       log.error("Error enriching sales invoice response", e);
@@ -311,6 +313,9 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
    * {@inheritDoc} AR: {@code EM_Etsg_Isrectificative = 'Y'} (ETP-4737 unified "Factura
    * Rectificativa") → RECTIFICATIVA; legacy fallback for pre-existing invoices — ARC (Credit
    * Memo) or ARI_RM (Return Material Sales Invoice) → RECTIFICATIVA; otherwise FAC.
+   *
+   * <p>{@code ETGO_GET_DELIVERY_STATUS} mirrors this rule in SQL to answer {@code NULL} for a
+   * sales rectificative (ETP-5706): keep both in sync.
    */
   @Override
   protected String classifyDocType(DocumentType dt) {

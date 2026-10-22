@@ -6,10 +6,12 @@
 package com.etendoerp.go.payment;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
@@ -140,6 +142,30 @@ class HostedCheckoutSessionPlanTest {
     // buyer actually saw rather than whatever the plan catalog holds by the time provisioning runs.
     verify(checkoutRequestStore).recordRequested(anyString(), any(), any(), any(), any(),
         any(Plan.class));
+  }
+
+  @Test
+  void aReSubscriptionNamesItsTenantOnTheRequestAndReturnsToIt() throws Exception {
+    // ETP-5742: the request names the canceled tenant from the start — the payment webhook applies
+    // the purchase to it, and its lifecycle events find it — and carries no demo source.
+    Plan plan = planWith(PRICE_ID);
+    when(planCatalogService.findPurchasablePlan(PLAN_KEY)).thenReturn(Optional.of(plan));
+    when(planCatalogService.hasProviderPrice(plan)).thenReturn(true);
+    givenTheProviderAccepts();
+
+    service.createSession(ACCOUNT_ID, ACCOUNT_EMAIL, CLIENT_NAME, ORIGIN, PLAN_KEY,
+        HostedCheckoutService.SessionOptions.reactivating("CANCELED-TENANT"));
+
+    ArgumentCaptor<CheckoutRequestStore.RequestOptions> options =
+        ArgumentCaptor.forClass(CheckoutRequestStore.RequestOptions.class);
+    verify(checkoutRequestStore).recordRequested(anyString(), eq(ACCOUNT_ID), eq(ACCOUNT_EMAIL),
+        eq(CLIENT_NAME), options.capture(), eq(plan));
+    assertEquals("CANCELED-TENANT", options.getValue().getReactivatedClientId());
+    assertNull(options.getValue().getDemoClientId());
+    assertEquals(PRICE_ID, options.getValue().getStripePriceId());
+    ArgumentCaptor<String> form = ArgumentCaptor.forClass(String.class);
+    verify(stripeApiClient).postForm(anyString(), form.capture(), anyString());
+    assertTrue(form.getValue().contains("%2Fdashboard%3Freactivation%3Dsuccess"), form.getValue());
   }
 
   @Test

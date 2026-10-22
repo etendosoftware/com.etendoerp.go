@@ -392,8 +392,9 @@ public class TemplateAccessPropagationService {
    * UserRoleCompositionService#assignTemplateRoles} after the last flush of a composition that
    * added or removed an inheritance. Core's own propagation copies a template's inactive rows too
    * and lets them win by precedence, so without this a template grant soft-deleted by {@code
-   * EnsureSystemRoleTemplatesScript} could hide another template's active grant. The caller
-   * already holds the user's write lock.
+   * EnsureSystemRoleTemplatesScript} could hide another template's active grant. Since ETP-5830
+   * core no longer copies them from a system template ({@link SystemTemplateAccessRows}); the
+   * sweep still realigns copies made before that. The caller already holds the user's write lock.
    *
    * <p>The sweep is native SQL, so afterwards the session's copies of the role's access rows are
    * stale (some were even deleted). When the sweep changed anything they are evicted, together
@@ -560,9 +561,9 @@ public class TemplateAccessPropagationService {
    * Hard-deletes the system templates' inactive access rows last updated more than {@code
    * graceDays} days ago. {@code EnsureSystemRoleTemplatesScript} soft-deletes removed grants so
    * the removal reaches production through the deploy delta; once that is done, an inactive
-   * template row only does harm, because core's composition copies inactive rows too and lets
-   * them win by precedence. This runs on the live database only, so the delta never sees it (the
-   * next build's clone starts without the row and the script does not recreate it).
+   * template row only does harm (core's composition copied inactive rows too until ETP-5830, see
+   * {@link SystemTemplateAccessRows}). This runs on the live database only, so the delta never
+   * sees it (the next build's clone starts without the row and the script does not recreate it).
    *
    * @param graceDays the purge grace period
    * @return rows deleted

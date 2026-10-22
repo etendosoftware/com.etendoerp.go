@@ -304,6 +304,39 @@ public class InitialEmailContractsTest {
   }
 
   @Test
+  public void environmentReadyCarriesTheLoginLinkOfASignupAccount() throws Exception {
+    // ETP-5847: the account has no password, so the dashboard button would end at the login.
+    String link = "https://app.example.test/onboarding?loginToken=abc";
+
+    JSONObject data = sendEnvironmentReadyWithLink(link);
+
+    assertEquals(link, data.getString("link"));
+    assertTrue(data.getString("body").contains(link));
+  }
+
+  @Test
+  public void environmentReadyIgnoresAnyOtherGivenLink() throws Exception {
+    for (String link : List.of("https://evil.example.test/onboarding?loginToken=abc",
+        "https://app.example.test/settings", "https://app.example.test/onboarding?loginToken=")) {
+      assertEquals(link, "https://app.example.test/dashboard",
+          sendEnvironmentReadyWithLink(link).getString("link"));
+    }
+  }
+
+  private JSONObject sendEnvironmentReadyWithLink(String link) throws Exception {
+    System.setProperty(PublicUrlResolver.APP_BASE_URL_PROPERTY, "https://app.example.test");
+    FakeProviderAdapter adapter = new FakeProviderAdapter();
+    TransactionalEmailService service = service(adapter);
+    JSONObject command = baseCommand();
+    command.put(EmailContractCommandSupport.FIELD_ACCOUNT_ID, "account-1");
+    command.put(EmailContractCommandSupport.FIELD_RECORD_ID, "client-1");
+    command.put(EmailContractCommandSupport.FIELD_LINK, link);
+
+    assertSent(service.send("environment-ready", command));
+    return adapter.getLastRequest().getData();
+  }
+
+  @Test
   public void environmentReadyRejectsMissingConfiguredAppBaseUrl() throws Exception {
     System.setProperty(PublicUrlResolver.APP_BASE_URL_PROPERTY, "/");
     System.setProperty("etgo.app.url", "/");

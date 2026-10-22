@@ -295,9 +295,13 @@ public class GlJournalHeaderHandler implements NeoHandler {
     }
   }
 
-  /** Package-private seam for unit tests. */
+  /**
+   * The journal, or null when the id is unknown or another tenant's (ETP-5793): the id is the URL's
+   * record id, and the CRUD path checks no ownership before this pre-hook runs. Package-private
+   * seam for unit tests.
+   */
   GLJournal loadJournal(String journalId) {
-    return OBDal.getInstance().get(GLJournal.class, journalId);
+    return TenantOwnership.loadOwned(GLJournal.class, journalId);
   }
 
   /** The session accounting schema ({@code $C_AcctSchema_ID}), or null when absent. */
@@ -309,7 +313,8 @@ public class GlJournalHeaderHandler implements NeoHandler {
 
   /**
    * {@code {currencyId, isoCode}} of the given accounting schema, or an empty array when the id is
-   * blank, the schema does not exist or has no currency. Package-private seam for unit tests.
+   * blank, the schema does not exist, is another tenant's (ETP-5793: the id may come from the POST
+   * body) or has no currency. Package-private seam for unit tests.
    */
   String[] resolveSchemaCurrency(String acctSchemaId) {
     if (acctSchemaId == null || acctSchemaId.isEmpty()) {
@@ -317,7 +322,7 @@ public class GlJournalHeaderHandler implements NeoHandler {
     }
     OBContext.setAdminMode(true);
     try {
-      AcctSchema schema = OBDal.getInstance().get(AcctSchema.class, acctSchemaId);
+      AcctSchema schema = TenantOwnership.loadOwned(AcctSchema.class, acctSchemaId);
       Currency currency = schema != null ? schema.getCurrency() : null;
       return currency != null ? new String[] { currency.getId(), currency.getISOCode() } : new String[0];
     } finally {
@@ -419,6 +424,7 @@ public class GlJournalHeaderHandler implements NeoHandler {
       params.put(PARAM_GL_JOURNAL_ID, journalId);
       bundle.setParams(params);
       new FIN_AddPaymentFromJournal().execute(bundle);
+      // tenant-ok: constant AD_Process id, a system dictionary record with no tenant
       Process process = OBDal.getInstance().get(Process.class, COMPLETE_PROCESS_ID);
       if (process == null) {
         log.error("[GL-JOURNAL] Process record {} not found", COMPLETE_PROCESS_ID);

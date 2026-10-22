@@ -1116,4 +1116,156 @@ public class SalesOrderHeaderHandlerTest {
       org.junit.jupiter.api.Assertions.assertTrue(declared.contains(key), key + " in " + declared);
     }
   }
+
+  // ── whole-set list totals (ETP-5757) ──────────────────────────────────────
+
+  private static NeoContext listTotalsListCtx() {
+    NeoContext ctx = listCtx();
+    NeoListAggregateQuery.remember(ctx, Collections.emptyMap());
+    return ctx;
+  }
+
+  /** Stubs {@code DocumentListTotals.create} for one document kind; everything else stays real. */
+  private static MockedStatic<DocumentListTotals> stubbedTotals(boolean invoices,
+      DocumentListTotals totals) {
+    MockedStatic<DocumentListTotals> mocked = Mockito.mockStatic(DocumentListTotals.class,
+        Mockito.CALLS_REAL_METHODS);
+    mocked.when(() -> DocumentListTotals.create(invoices)).thenReturn(totals);
+    return mocked;
+  }
+
+  private static NeoContext withEmptyPage(NeoContext ctx) throws Exception {
+    ctx.setPreviousResult(NeoResponse.ok(new JSONObject().put("response",
+        new JSONObject().put("data", new JSONArray()))));
+    return ctx;
+  }
+
+  @Test
+  public void listGetInjectsListTotalsEvenOnAnEmptyPage() throws Exception {
+    SalesOrderHeaderHandler handler = new SalesOrderHeaderHandler();
+    try (MockedStatic<DocumentListTotals> totalsMock = stubbedTotals(false,
+            DocumentListTotalsTest.stub(false, Collections.emptyList()))) {
+      NeoContext ctx = withEmptyPage(listTotalsListCtx());
+
+      NeoResponse result = handler.afterHandle(ctx);
+
+      assertNotNull(result);
+      JSONObject totals = result.getBody().getJSONObject("response").getJSONObject("listTotals");
+      assertEquals(0, totals.getInt("rowCount"));
+      assertEquals("EUR", totals.getString("orgCurrencyIso"));
+    }
+  }
+
+  @Test
+  public void listGetWithoutAggregateQueryLeavesTheEmptyPageUntouched() throws Exception {
+    SalesOrderHeaderHandler handler = new SalesOrderHeaderHandler();
+    try (MockedStatic<DocumentListTotals> totalsMock = stubbedTotals(false,
+            DocumentListTotalsTest.stub(false, Collections.emptyList()))) {
+      NeoContext ctx = withEmptyPage(listCtx());
+
+      assertNull(handler.afterHandle(ctx));
+    }
+  }
+
+  @Test
+  public void singleRecordGetDoesNotComputeListTotals() throws Exception {
+    try (MockedStatic<DocumentListTotals> totalsMock = Mockito.mockStatic(DocumentListTotals.class,
+            Mockito.CALLS_REAL_METHODS)) {
+      SalesOrderHeaderHandler handler = new SalesOrderHeaderHandler();
+      NeoContext ctx = withEmptyPage(getCtxWithId("rec-1"));
+      NeoListAggregateQuery.remember(ctx, Collections.emptyMap());
+
+      handler.afterHandle(ctx);
+
+      totalsMock.verify(() -> DocumentListTotals.create(Mockito.anyBoolean()),
+          Mockito.never());
+    }
+  }
+
+  @Test
+  public void failingListTotalsQueryIsSwallowedAndTheEmptyPageStaysUnchanged() throws Exception {
+    SalesOrderHeaderHandler handler = new SalesOrderHeaderHandler();
+    try (MockedStatic<DocumentListTotals> totalsMock = stubbedTotals(false,
+            DocumentListTotalsTest.failing(false))) {
+      NeoContext ctx = withEmptyPage(listTotalsListCtx());
+
+      assertNull(handler.afterHandle(ctx));
+      assertFalse(ctx.getPreviousResult().getBody().getJSONObject("response").has("listTotals"));
+    }
+  }
+
+  @Test
+  public void listGetWithRowsAddsListTotalsAndStillPostProcessesTheRows() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      stubNoLinkedDocuments(obDalMock);
+      SalesOrderHeaderHandler handler = new SalesOrderHeaderHandler();
+      try (MockedStatic<DocumentListTotals> totalsMock = stubbedTotals(false,
+              DocumentListTotalsTest.stub(false, Collections.emptyList()))) {
+        NeoContext ctx = listTotalsListCtx();
+        ctx.setPreviousResult(NeoResponse.ok(listBody("order-1")));
+
+        NeoResponse result = handler.afterHandle(ctx);
+
+        JSONObject response = result.getBody().getJSONObject("response");
+        assertFalse(response.getJSONArray("data").getJSONObject(0).getBoolean("hasLinkedDocuments"));
+        assertEquals(0, response.getJSONObject("listTotals").getInt("rowCount"));
+      }
+    }
+  }
+
+  @Test
+  public void failingListTotalsQueryWithRowsKeepsTheRowsAndOmitsListTotals() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      stubNoLinkedDocuments(obDalMock);
+      SalesOrderHeaderHandler handler = new SalesOrderHeaderHandler();
+      try (MockedStatic<DocumentListTotals> totalsMock = stubbedTotals(false,
+              DocumentListTotalsTest.failing(false))) {
+        NeoContext ctx = listTotalsListCtx();
+        ctx.setPreviousResult(NeoResponse.ok(listBody("order-1")));
+
+        NeoResponse result = handler.afterHandle(ctx);
+
+        JSONObject response = result.getBody().getJSONObject("response");
+        assertFalse(response.getJSONArray("data").getJSONObject(0).getBoolean("hasLinkedDocuments"));
+        assertFalse(response.has("listTotals"));
+      }
+    }
+  }
+
+  @Test
+  public void singleRecordGetWithRowsDoesNotComputeListTotals() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      stubNoLinkedDocuments(obDalMock);
+      try (MockedStatic<DocumentListTotals> totalsMock = Mockito.mockStatic(DocumentListTotals.class,
+              Mockito.CALLS_REAL_METHODS)) {
+        SalesOrderHeaderHandler handler = new SalesOrderHeaderHandler();
+        NeoContext ctx = ctxWithPreviousResult("order-1", singleRecordBody("order-1"));
+        NeoListAggregateQuery.remember(ctx, Collections.emptyMap());
+
+        NeoResponse result = handler.afterHandle(ctx);
+
+        assertFalse(result.getBody().getJSONObject("response").has("listTotals"));
+        totalsMock.verify(() -> DocumentListTotals.create(Mockito.anyBoolean()),
+            Mockito.never());
+      }
+    }
+  }
+
+  @Test
+  public void nonGetRequestDoesNotComputeListTotals() throws Exception {
+    for (String method : new String[] { "POST", "PATCH" }) {
+      try (MockedStatic<DocumentListTotals> totalsMock = Mockito.mockStatic(DocumentListTotals.class,
+              Mockito.CALLS_REAL_METHODS)) {
+        SalesOrderHeaderHandler handler = new SalesOrderHeaderHandler();
+        NeoContext ctx = withEmptyPage(NeoContext.builder().httpMethod(method)
+            .endpointType(NeoEndpointType.ACTION).build());
+        NeoListAggregateQuery.remember(ctx, Collections.emptyMap());
+
+        assertNull(method, handler.afterHandle(ctx));
+
+        totalsMock.verify(() -> DocumentListTotals.create(Mockito.anyBoolean()),
+            Mockito.never());
+      }
+    }
+  }
 }

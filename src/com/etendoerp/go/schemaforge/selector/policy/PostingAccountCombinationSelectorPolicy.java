@@ -40,7 +40,8 @@ import com.etendoerp.go.schemaforge.util.PostingAccountCombinations;
  * thing they have in common, and the rule is about the entity, not about any one window.
  *
  * <p>Scope: this filters the selector LISTS (UI and MCP alike). A write that sends a summary
- * combination id directly is not rejected here — that guard is ETP-5693.
+ * combination id directly is refused by
+ * {@link com.etendoerp.go.schemaforge.util.PostingAccountGuard} (ETP-5693).
  *
  * <p>Deliberately NOT applied to {@link ElementValue} selectors: the chart of accounts "parent
  * account" field must list summary accounts, since a parent is a heading.

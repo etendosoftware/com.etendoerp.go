@@ -40,5 +40,5 @@ com.etendoerp.go.schemaforge.selector.policy.AddressVirtualSelectorPolicyTest
 com.etendoerp.go.schemaforge.util.NeoAddressHelperTest
 
 # --- integración (BD) (1)
-com.etendoerp.go.schemaforge.BusinessPartnerHandlerDbTest
+com.etendoerp.go.schemaforge.BusinessPartnerHandlerChildDataSqlIntegrationTest
 

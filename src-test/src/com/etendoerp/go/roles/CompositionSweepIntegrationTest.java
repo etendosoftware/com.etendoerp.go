@@ -19,7 +19,9 @@ package com.etendoerp.go.roles;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertTrue;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
@@ -37,16 +39,22 @@ import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.ad.ui.Window;
 import org.openbravo.model.common.enterprise.Organization;
 
+import com.etendoerp.go.roles.overlap.TemplateRemovalTracker;
+
 /**
  * ETP-5565 — the composition hook ({@code
- * TemplateAccessPropagationService#realignAfterComposition}) end to end: core's real propagation
- * copies a template's INACTIVE rows too and lets them win by precedence, the hook's native-SQL
- * sweep corrects the personal role in the same request, and the evicted session state then serves
- * the swept rows and flushes cleanly.
+ * TemplateAccessPropagationService#realignAfterComposition}) end to end: the personal role ends
+ * aligned to the templates' ACTIVE grants in the same request, and the evicted session state then
+ * serves the swept rows and flushes cleanly. Core's real propagation copied a template's INACTIVE
+ * rows too and let them win by precedence; since ETP-5830 it never copies them from a system
+ * template ({@code SystemTemplateAccessRows}), and these tests hold the end state either way.
  *
  * <p>{@code WeldBaseTest}, not plain {@code OBBaseTest}: core's propagation only runs with the CDI
  * interceptor installed (see {@code UserRoleCompositionServiceIntegrationTest}). Nothing is
  * committed.</p>
+ *
+ * @covers com.etendoerp.go.roles.TemplateAccessPropagationService
+ * @covers com.etendoerp.go.roles.SystemTemplateAccessRows
  */
 public class CompositionSweepIntegrationTest extends WeldBaseTest {
 
@@ -110,6 +118,65 @@ public class CompositionSweepIntegrationTest extends WeldBaseTest {
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /**
+   * ETP-5830 — three templates soft-delete the same window X (one grant removed from all of them,
+   * as the Smart Scan removal did). Removing one template makes core recalculate the two left in
+   * a single flush: each copied X again, the second could not see the first one's pending insert,
+   * and the flush hit {@code ad_window_access_un_key}. An inactive system-template row must never
+   * be copied, on add or on remove.
+   */
+  @Test
+  public void inactiveRowSharedByTemplatesIsNeverCopiedOnAddOrRemove() {
+    setTestUserContext();
+    OBContext.setAdminMode(true);
+    try {
+      List<Window> windows = windows();
+      Window w = windows.get(0);
+      Window x = windows.get(1);
+      List<String> templateIds = new ArrayList<>();
+      OBContext.setAdminMode();
+      try {
+        for (int i = 0; i < 3; i++) {
+          Role template = template();
+          grant(template, w, true);
+          grant(template, x, false);
+          templateIds.add(template.getId());
+        }
+        OBDal.getInstance().flush();
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+      UserRoleCompositionService service = new UserRoleCompositionService();
+
+      String personalId = inFreshRequest(service, templateIds).personalRoleId;
+      Role personal = OBDal.getInstance().get(Role.class, personalId);
+      assertEquals("No copy of X after adding them", 0, rows(personal, x).size());
+      assertEquals("One row for W", 1, rows(personal, w).size());
+
+      inFreshRequest(service, templateIds.subList(0, 2));
+      personal = OBDal.getInstance().get(Role.class, personalId);
+      assertEquals("No copy of X after removing one", 0, rows(personal, x).size());
+      List<WindowAccess> wRows = rows(personal, w);
+      assertEquals("W still granted by the remaining templates", 1, wRows.size());
+      assertTrue(templateIds.subList(0, 2).contains(wRows.get(0).getInheritedFrom().getId()));
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /** One call in a fresh session, as a separate webhook request would be. */
+  private static UserRoleCompositionService.AssignmentResult inFreshRequest(
+      UserRoleCompositionService service, List<String> templates) {
+    OBDal.getInstance().flush();
+    OBDal.getInstance().getSession().clear();
+    UserRoleCompositionService.AssignmentResult result = service.assignTemplateRoles(TEST_USER_ID,
+        templates);
+    OBDal.getInstance().flush();
+    OBDal.getInstance().getSession().clear();
+    TemplateRemovalTracker.clear();
+    return result;
   }
 
   @SuppressWarnings("unchecked")

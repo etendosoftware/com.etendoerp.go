@@ -76,6 +76,8 @@ import com.etendoerp.go.common.SpanishTaxIdValidator;
  *
  * <p>Tests that touch the database use {@code mockStatic(OBDal.class)} to provide a
  * mock JDBC {@link Connection} and avoid requiring a live Etendo environment.
+ *
+ * @covers com.etendoerp.go.schemaforge.BusinessPartnerHandler
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -1749,8 +1751,9 @@ class BusinessPartnerHandlerTest {
       // Read off the handler's own constants, never re-spelled here: a mock that declares its
       // own column names asserts the test's idea of the schema instead of the code's. That is
       // how `postcode` (the column C_Location does not have) passed this test while the real
-      // export silently produced blank address columns — see BusinessPartnerHandlerDbTest, which
-      // covers the half a mock structurally cannot: whether the names match the database.
+      // export silently produced blank address columns — see
+      // BusinessPartnerHandlerChildDataSqlIntegrationTest, which covers the half a mock
+      // structurally cannot: whether the names match the database.
       String[] cols = isLocation
           ? BusinessPartnerHandler.LOCATION_COLUMNS
           : BusinessPartnerHandler.CONTACT_COLUMNS;
