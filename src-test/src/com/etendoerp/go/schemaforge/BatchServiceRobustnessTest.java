@@ -476,6 +476,8 @@ public class BatchServiceRobustnessTest {
     OBDal obDal = mock(OBDal.class);
     try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
          MockedStatic<NeoServletSupport> support = mockStatic(NeoServletSupport.class);
+         MockedStatic<NeoAccessHelper> access = allowSpecAccess();
+         MockedStatic<NeoAccountingAccessPolicy> acct = allowAccountingEntities();
          MockedStatic<NeoWritePreflight> preflight = mockStatic(NeoWritePreflight.class)) {
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
       stubEntityResolution(support, obDal);
