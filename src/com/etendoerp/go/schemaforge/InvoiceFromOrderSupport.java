@@ -331,7 +331,7 @@ public class InvoiceFromOrderSupport {
     DocumentCurrencyRate.RateType type = Boolean.TRUE.equals(invoice.isSalesTransaction())
         ? SalesInvoiceHeaderHandler.RATE_TYPE : PurchaseInvoiceHeaderHandler.RATE_TYPE;
     BigDecimal rate = new DocumentCurrencyRate(type).recompute(invoice);
-    AbstractInvoiceHeaderHandler.autoCreateOrUpdateConversionRateDocument(invoice.getId());
+    AbstractInvoiceHeaderHandler.autoCreateOrUpdateConversionRateDocument(invoice.getId(), true);
     log.debug("[ETP-5840] Invoice {} generated from order {} got rate {}", invoice.getId(),
         order != null ? order.getId() : null, rate);
   }

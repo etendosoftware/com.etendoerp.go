@@ -4174,15 +4174,15 @@ the reverse rate), rounded HALF_UP to 12 decimals.
 | **Recalculated** when the reference date or the currency changes, replacing a manual rate; no range → `null` | callout: `updates.eTGOCurrencyRate = {"value": rate\|null}` on a trigger of `currency`, the reference date, or a cascade that wrote the reference date (an invoice date copied into the accounting date); save: the pre-hook writes it into the body | UI callout; REST single/batch and MCP writes |
 | **Manual rate honoured**: a write that changes the date/currency AND sends a positive `eTGOCurrencyRate` keeps it; without one, the rate is recalculated; a write that changes neither keeps the stored rate; an explicit `null`/`0` clears it | `DocumentCurrencyRate.beforeWrite` | all |
 | **Save refused** (422, nothing saved) when the currency is not the organization's and the resulting rate is empty | `beforeWrite`; a create whose currency or reference date only the create cascade derives is checked by `afterWrite` | all (see the §4.12.9 row for REST single creates) |
-| **Completion refused** (422) when the stored rate is empty | orders/quotations: `guardExchangeRate` (`documentAction` = `CO` by CRUD or action, the `DocAction` button running `CO`, quotation `Convertquotation`); invoices: the header pre-hook plus `InvoiceCompletionRateHook` → `InvoiceExchangeRateValidator` inside `ProcessInvoiceUtil` (also the classic backoffice). The general `C_Conversion_Rate` table no longer satisfies the invoice check: the document needs its own rate (header column, or a non-zero `C_Conversion_Rate_Document` row for the pair) | all |
+| **Completion refused** (422) when the stored rate is empty | orders/quotations: `guardExchangeRate` (`documentAction` = `CO` by CRUD or action, the `DocAction` button running `CO`, quotation `Convertquotation`); invoices: the header pre-hook (strict: the document's own rate is required) plus `InvoiceCompletionRateHook` → `InvoiceExchangeRateValidator` inside `ProcessInvoiceUtil`, which also serves the classic backoffice and therefore stays lenient: the document's own rate (header column, or a non-zero `C_Conversion_Rate_Document` row for the pair) OR a general `C_Conversion_Rate` on the **accounting** date for the invoice's org and client (classic invoices never fill the header column; classic is out of scope). Only its message changed to the ETGO one | all |
 | **Generated documents recompute** — quotation → order (`SalesQuotationHeaderHandler.recomputeConvertedOrderRate`, after the reactivation to Draft: the order is dated today) and order → invoice (`InvoiceFromOrderSupport.propagateOrderRateToInvoice`, on the invoice's accounting date). Never copied; no range → `null` and the next save is refused | `DocumentCurrencyRate.recompute` | the actions on every channel |
-| **Exchange-rates tab mirrors the header** — `autoCreateOrUpdateConversionRateDocument` now deletes the `C_Conversion_Rate_Document` rows when the header rate is `null` (it used to leave a stale row); posted invoices are still skipped | `AbstractInvoiceHeaderHandler` | all |
+| **Exchange-rates tab mirrors the header** — `autoCreateOrUpdateConversionRateDocument` deletes the `C_Conversion_Rate_Document` rows when the header rate is `null` AND the current header write left it so (body carries `eTGOCurrencyRate` without a positive value — sent by the caller or written by the recalculation) or the generation flow just recomputed it to `null`. A line save (`InvoiceLineHandler`) or a write that does not touch the rate never deletes; posted invoices are still skipped | `AbstractInvoiceHeaderHandler` | all |
 | Org-currency documents and processed documents are never recalculated nor refused | — | — |
 
 **`currencyOptions`** (`CurrencyOptionsHandler`): `GET …/{id|new}/action/currencyOptions?date=yyyy-MM-dd`
-(an MCP call may pass `date` in the action body; an invalid one is a 400). `date` is the reference
+(an MCP call may pass `date` in the action body; an invalid one is a 400, `CurrencyOptionsHandler.InvalidDateParameterException`). `date` is the reference
 date for new AND saved records; without it, the saved document's reference date (today for a new
-one). Returns the organization currency first (`rate: 1`), then **every** active currency of the
+one). For a new record the optional `organization` parameter is honoured only when it is one of the role's readable organizations (`OBContext.getReadableOrganizations()`), else the session organization. Returns the organization currency first (`rate: 1`), then **every** active currency of the
 client or system by ISO code, `rate: null` when none is configured for the date, each with
 `isOrgCurrency`. The header customization publishes its `RateType` on the context
 (`DocumentCurrencyRate.ATTR_RATE_TYPE`) — the handler no longer guesses the document from the spec
@@ -4194,7 +4194,7 @@ name. The ACTION sub-endpoint now passes the query string to the hooks
 Save: `messageKeys: ["ETGO_ExchangeRateMissingOnSave", <ETGO_RateRefDate*>]`, `messageParams:
 {orgCurrency, documentCurrency, date: "yyyy-MM-dd", dateField: "orderDate"|"accountingDate",
 referenceDate: <ETGO_RateRefDate*>}`. Completion: `messageKeys: ["ETGO_ExchangeRateMissingOnComplete"]`,
-`messageParams: {orgCurrency, documentCurrency}`. The text never names a property or a key.
+`messageParams: {orgCurrency, documentCurrency}`. The date in the prose is `dd/MM/yyyy` in every language (the story's acceptance text). The text never names a property or a key.
 
 **Where the text comes from (scoped to these messages only).** `com.etendoerp.go` is not a
 translation module, so `export.database` never exports its `AD_MESSAGE_TRL` (see the ETP-5175 note in

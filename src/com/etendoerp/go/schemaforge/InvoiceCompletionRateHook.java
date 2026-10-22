@@ -25,12 +25,13 @@ import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.openbravo.model.common.invoice.Invoice;
 
 /**
- * Blocks the completion of a foreign-currency invoice that has no exchange rate of its own, for
+ * Blocks the completion of a foreign-currency invoice for which no exchange rate is available (its
+ * own, or a general one on its accounting date — see {@link InvoiceExchangeRateValidator}), for
  * every completion that runs through {@code ProcessInvoiceUtil}: the NEO/headless one
  * ({@code InvoiceCompletionService}, so REST, batch and MCP) and the classic backoffice. Delegates
  * to {@link InvoiceExchangeRateValidator}; the refusal is the translated
  * {@code ETGO_ExchangeRateMissingOnComplete} (ETP-5840). The invoice header pre-hooks refuse the
- * NEO completions earlier with the same text, before the total-discount line is recalculated.
+ * NEO completions earlier, with the same text and the stricter rule (the document's own rate).
  */
 @ApplicationScoped
 public class InvoiceCompletionRateHook implements ProcessInvoiceHook {

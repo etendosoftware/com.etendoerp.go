@@ -18,6 +18,9 @@
 package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneId;
 
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
@@ -29,17 +32,19 @@ import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.invoice.Invoice;
 
 /**
- * Decides whether an invoice may be completed with respect to its exchange rate (ETP-4030, aligned
- * with the order-family rule by ETP-5840): when the invoice currency differs from its
- * organization's, the invoice must carry its OWN rate — the header {@code EM_ETGO_Currency_Rate},
- * or (for documents edited in the classic backoffice) a non-zero {@link ConversionRateDoc} row for
- * the exact pair. The general {@code C_Conversion_Rate} table no longer satisfies the check: the
- * rate is the document's, fixed on its accounting date when it was saved.
+ * Decides whether an invoice may be completed with respect to its exchange rate (ETP-4030; message
+ * and reference date aligned by ETP-5840): when the invoice currency differs from its
+ * organization's, a rate must be available — the invoice's own (the header
+ * {@code EM_ETGO_Currency_Rate}, or a non-zero {@link ConversionRateDoc} row for the exact pair),
+ * else a general {@code C_Conversion_Rate} valid on the invoice's ACCOUNTING date for its
+ * organization and client.
  *
  * <p>Invoked from {@link InvoiceCompletionRateHook}, the {@code ProcessInvoiceHook} that
- * {@code ProcessInvoiceUtil} runs — i.e. on EVERY completion path: the NEO/headless one
- * ({@code InvoiceCompletionService}, REST and MCP) as well as the classic backoffice. The NEO
- * header pre-hooks refuse earlier with the same text ({@link DocumentCurrencyRate}).
+ * {@code ProcessInvoiceUtil} runs on every completion path, the classic backoffice included. The
+ * general-rate fallback is kept on purpose: a classic invoice never fills
+ * {@code EM_ETGO_Currency_Rate}, and classic is out of the ETP-5840 scope. The stricter rule — the
+ * document must carry its own rate — is enforced on the NEO paths (REST, batch, MCP) by the invoice
+ * header pre-hooks ({@link DocumentCurrencyRate}), which run before this hook.
  */
 public final class InvoiceExchangeRateValidator {
 
@@ -52,8 +57,9 @@ public final class InvoiceExchangeRateValidator {
    *
    * @param invoice the invoice about to be completed
    * @return the translated refusal ({@code ETGO_ExchangeRateMissingOnComplete}) when the currencies
-   *         differ and the invoice has no rate of its own, or {@code null} when completion may
-   *         proceed (same currency, no functional currency configured, or a document rate exists)
+   *         differ and no rate is available, or {@code null} when completion may proceed (same
+   *         currency, no functional currency configured, a document rate, or a general rate on the
+   *         accounting date)
    */
   public static String checkRateForCompletion(Invoice invoice) {
     if (invoice == null) {
@@ -71,7 +77,7 @@ public final class InvoiceExchangeRateValidator {
         return null;
       }
       final Currency to = OBDal.getInstance().get(Currency.class, baseCurrencyId);
-      if (hasDocumentRate(invoice, from, to)) {
+      if (hasDocumentRate(invoice, from, to) || hasGeneralRate(invoice, from, to)) {
         return null;
       }
       return DocumentCurrencyRate.missingRateOnCompletion(invoice,
@@ -104,5 +110,20 @@ public final class InvoiceExchangeRateValidator {
       }
     }
     return false;
+  }
+
+  /**
+   * True if a general {@code C_Conversion_Rate} exists for {@code from → to} on the invoice's
+   * accounting date (ETP-5840: the reference date of an invoice; the invoice date before), scoped to
+   * the invoice's organization and client — direct, then the inverse of the reverse rate.
+   */
+  private static boolean hasGeneralRate(Invoice invoice, Currency from, Currency to) {
+    if (to == null || invoice.getAccountingDate() == null || invoice.getClient() == null) {
+      return false;
+    }
+    LocalDate date = Instant.ofEpochMilli(invoice.getAccountingDate().getTime())
+        .atZone(ZoneId.systemDefault()).toLocalDate();
+    return DocumentCurrencyRate.lookupRate(to.getId(), from.getId(), date,
+        invoice.getOrganization().getId(), invoice.getClient().getId()) != null;
   }
 }

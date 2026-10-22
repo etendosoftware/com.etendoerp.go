@@ -1133,7 +1133,8 @@ public abstract class AbstractInvoiceHeaderHandler {
    * evolves while lines are added/edited after the currency was first set.
    *
    * <p>No-op when the invoice has no currency. When the invoice has no {@code EM_ETGO_Currency_Rate},
-   * its rows are deleted (ETP-5840: the tab always mirrors the saved header rate). When the invoice
+   * its rows are deleted only when this header write left the rate empty
+   * ({@link #headerWriteClearedRate}, ETP-5840); otherwise nothing is done. When the invoice
    * currency equals the org currency, any
    * conversion-rate row left over from an earlier foreign-currency state is deleted instead
    * (ETP-4836) — switching back to the org currency must clear the tab, not leave it stale.
@@ -1163,7 +1164,24 @@ public abstract class AbstractInvoiceHeaderHandler {
       return;
     }
     String invoiceId = InvoiceCalloutHelper.resolveInvoiceIdFromContext(context);
-    autoCreateOrUpdateConversionRateDocument(invoiceId);
+    autoCreateOrUpdateConversionRateDocument(invoiceId, headerWriteClearedRate(context));
+  }
+
+  /**
+   * Whether this header CRUD write left the rate empty on purpose (ETP-5840): its body carries
+   * {@code eTGOCurrencyRate} without a positive value — sent so by the caller, or written so by the
+   * pre-hook's recalculation ({@link DocumentCurrencyRate#beforeWrite}). Only then may the
+   * rate-document sync delete the invoice's rows; a write that does not touch the rate, and a line
+   * save, never do.
+   */
+  static boolean headerWriteClearedRate(NeoContext context) {
+    if (context == null || !NeoEndpointType.CRUD.equals(context.getEndpointType())
+        || context.getRequestBody() == null) {
+      return false;
+    }
+    JSONObject body = context.getRequestBody();
+    return body.has(Invoice.PROPERTY_ETGOCURRENCYRATE)
+        && DocumentCurrencyRate.parseRate(body.opt(Invoice.PROPERTY_ETGOCURRENCYRATE)) == null;
   }
 
   /**
@@ -1243,8 +1261,23 @@ public abstract class AbstractInvoiceHeaderHandler {
    *
    * @param invoiceId the invoice's primary key, already resolved by the caller; no-op if blank
    */
-  @SuppressWarnings("java:S2077")
   protected static void autoCreateOrUpdateConversionRateDocument(String invoiceId) {
+    autoCreateOrUpdateConversionRateDocument(invoiceId, false);
+  }
+
+  /**
+   * {@link #autoCreateOrUpdateConversionRateDocument(String)}, deciding what a null header rate
+   * means (ETP-5840): with {@code rateCleared} — the current header write, or the generation flow
+   * that just recomputed the rate, left it null — the invoice's rate rows are deleted so the tab
+   * mirrors the header; otherwise (a line save, a write that did not touch the rate) a null rate
+   * leaves the rows alone, as before.
+   *
+   * @param invoiceId   the invoice's primary key; no-op if blank
+   * @param rateCleared whether the caller itself left the header rate null
+   */
+  @SuppressWarnings("java:S2077")
+  protected static void autoCreateOrUpdateConversionRateDocument(String invoiceId,
+      boolean rateCleared) {
     if (StringUtils.isBlank(invoiceId)) {
       return;
     }
@@ -1288,10 +1321,13 @@ public abstract class AbstractInvoiceHeaderHandler {
         }
         BigDecimal rate = invoice.getETGOCurrencyRate();
         if (rate == null || rate.signum() <= 0) {
-          // ETP-5840: the tab reflects the header — a header without a rate (a recalculation found
-          // none, e.g. a document generated for a date with no conversion range) has no row; one
-          // left from an earlier rate is stale and must not survive.
-          ConversionRateDocumentSync.deleteAllForInvoice(invoice.getId(), orgCurrencyId);
+          // ETP-5840: when THIS write (or generation flow) left the header rate empty, the tab
+          // follows it — a row from an earlier rate is stale and must not survive. Never from a
+          // line save or a write that did not touch the rate: there a null rate means "no override
+          // set yet", as before.
+          if (rateCleared) {
+            ConversionRateDocumentSync.deleteAllForInvoice(invoice.getId(), orgCurrencyId);
+          }
           return;
         }
 

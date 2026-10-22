@@ -72,7 +72,7 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  *   <li><b>Client</b>: the document's own client — never the session client — plus the system
  *       client. Prevents cross-client rate leakage.</li>
  *   <li><b>Org</b>: {@code IN (document org, '0')}; a new record uses the {@code organization}
- *       parameter when given, else the session organization.</li>
+ *       parameter when the role can read it, else the session organization.</li>
  * </ul>
  */
 @Named("currencyOptionsHandler")
@@ -131,7 +131,7 @@ public class CurrencyOptionsHandler implements NeoHandler {
 
     } catch (RecordNotFoundException e) {
       return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, e.getMessage());
-    } catch (IllegalArgumentException e) {
+    } catch (InvalidDateParameterException e) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
     } catch (Exception e) {
       log.error("[ETP-4027] currencyOptions failed for record {}: {}", recordId, e.getMessage(), e);
@@ -149,14 +149,20 @@ public class CurrencyOptionsHandler implements NeoHandler {
     }
   }
 
+  /** The caller's {@code date} parameter is not a {@code yyyy-MM-dd} date: answered as 400. */
+  static final class InvalidDateParameterException extends RuntimeException {
+    InvalidDateParameterException(String raw) {
+      super("Invalid 'date' parameter, expected yyyy-MM-dd: " + raw);
+    }
+  }
+
   private RequestContext resolveRequestContext(NeoContext context, String recordId, boolean isNew) {
     LocalDate requested = requestedDate(context);
     OBContext obCtx = OBContext.getOBContext();
     DocumentCurrencyRate.RateType type =
         (DocumentCurrencyRate.RateType) context.getAttribute(DocumentCurrencyRate.ATTR_RATE_TYPE);
     if (isNew || type == null) {
-      String orgId = StringUtils.defaultIfBlank(param(context, PARAM_ORGANIZATION),
-          obCtx.getCurrentOrganization().getId());
+      String orgId = readableOrganization(param(context, PARAM_ORGANIZATION), obCtx);
       return new RequestContext(orgId, obCtx.getCurrentClient().getId(),
           requested != null ? requested : LocalDate.now());
     }
@@ -181,9 +187,23 @@ public class CurrencyOptionsHandler implements NeoHandler {
     }
     LocalDate date = DocumentCurrencyRate.parseDate(raw);
     if (date == null) {
-      throw new IllegalArgumentException("Invalid 'date' parameter, expected yyyy-MM-dd: " + raw);
+      throw new InvalidDateParameterException(raw);
     }
     return date;
+  }
+
+  /**
+   * The {@code organization} parameter when the role can read that organization, otherwise the
+   * session organization — a caller must not scope the rates by an organization it cannot see.
+   */
+  private static String readableOrganization(String requested, OBContext obCtx) {
+    String sessionOrg = obCtx.getCurrentOrganization().getId();
+    if (StringUtils.isBlank(requested)) {
+      return sessionOrg;
+    }
+    String[] readable = obCtx.getReadableOrganizations();
+    return readable != null && java.util.Arrays.asList(readable).contains(requested) ? requested
+        : sessionOrg;
   }
 
   /** A parameter from the query string (REST) or the action body (MCP). */

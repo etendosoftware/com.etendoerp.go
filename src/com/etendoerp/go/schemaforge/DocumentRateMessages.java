@@ -22,8 +22,6 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
-import java.time.format.FormatStyle;
-import java.util.Locale;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -107,19 +105,11 @@ final class DocumentRateMessages {
   }
 
   /**
-   * The date as the language writes it: {@code dd/MM/yyyy} for Spanish, the locale's medium form
-   * otherwise (never an ambiguous all-numeric form for English).
+   * The date as the story's acceptance text writes it, {@code dd/MM/yyyy}, for every language
+   * (ETP-5840). {@code language} is kept for callers; it does not change the format.
    */
   static String formatDate(LocalDate date, String language) {
-    if (date == null) {
-      return "";
-    }
-    if (NeoHints.isSpanish(language)) {
-      return date.format(DateTimeFormatter.ofPattern("dd/MM/yyyy"));
-    }
-    Locale locale = StringUtils.isBlank(language) ? Locale.ENGLISH
-        : Locale.forLanguageTag(language.replace('_', '-'));
-    return date.format(DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM).withLocale(locale));
+    return date == null ? "" : date.format(DateTimeFormatter.ofPattern("dd/MM/yyyy"));
   }
 
   /** The save-refusal text, in the request language. */
