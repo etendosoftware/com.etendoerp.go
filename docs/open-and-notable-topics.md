@@ -1245,8 +1245,10 @@ below assume it (item 1's 503 is decided per enforcement flag).
 
 ### 🟡 4.15 Paid provisioning is only half extracted from `EtendoGoJwtServlet` (ETP-5048)
 
-**Ticket:** accepted by Martin on 2026-10-18 as a narrower extraction; to be finished by ETP-5396 or a
-later refactor (no ticket of its own). Related ETP-5048.
+**Ticket:** accepted by Martin on 2026-10-18 as a narrower extraction; to be finished by
+[ETP-5892](https://etendoproject.atlassian.net/browse/ETP-5892) "Extract onboarding steps and webhook
+application from EtendoGoJwtServlet" (created 2026-10-23 in epic ETP-3504), which must be coordinated
+with ETP-5396. Related ETP-5048.
 
 ETP-5048 needed to provision a paid purchase with no browser attached (the billing reconciliation),
 and the decision was to pull the paid provisioning path out of the servlet into a service that takes
@@ -1259,7 +1261,21 @@ an `OnboardingProgressSink`. What shipped is narrower:
 - **Why:** about 60 servlet tests drive those methods directly or spy on them on the servlet
   (`EtendoGoJwtServletOnboardingDatasetTest`, `…CoverageTest`, `…HeartbeatTest`,
   `…DemoDataTransferTest`, among others). Moving them would rewrite those tests in a change whose
-  goal is reconciliation, with no change in behaviour to show for it.
+  goal is reconciliation, with no change in behaviour to show for it. This reason covers only the
+  provisioning steps that existed before ETP-5048.
+- **New ETP-5048 code that was placed in the servlet, not deferred:**
+  - `provisionPaidPurchase` and its two private helpers `serverSideAddress` and `serverSideTaxId`.
+    `provisionPaidPurchase` calls the private servlet methods `findCurrencyId`,
+    `isPaidOnboardingNotOwned`, `evaluatePaywall`, `restorePaidSelection` and `claimPaid`.
+  - The webhook paused/resumed glue, `raisePausedSubscriptionAlert` and `endResolvedPauseEpisodes`.
+    They use the servlet's stores (`billingEventStore`, `checkoutRequestStore`) and its
+    `internalAlertService`, and `raisePausedSubscriptionAlert` also calls the private
+    `resolveLifecycleTarget`. The logic itself lives in `payment/PausedSubscriptionAlert`.
+
+  Moving these alone was considered on 2026-10-23 and not done. It would only relocate the
+  coupling: those private methods would be widened to package-private, and `PaidProvisioningService`
+  would still instantiate a servlet. ETP-5892 rewrites them on top of the extracted onboarding
+  service anyway.
 - **What moved:** the transport-independent run, `EtendoGoJwtServlet.runOnboarding`, which is the
   try/catch/finally that used to sit inside `handleOnboarding` (rollback, outcome record, alert).
   Also the request-free part of the paid preparation, split into small cores the HTTP path now calls
@@ -1277,13 +1293,19 @@ an `OnboardingProgressSink`. What shipped is narrower:
   `CheckoutRequestStore.claimForProvisioning`), and any work record, checkpoint or retry budget
   (ETP-5396 §3.3).
 
-**To finish it** (ETP-5396 or a later refactor):
+**To finish it** (ETP-5892). The servlet is about 7,200 lines. Since ETP-5847, `runOnboarding` has a
+second caller besides the HTTP path and `provisionPaidPurchase`: `provisionSignupEnvironment`
+(passwordless signup).
 1. Move the step methods into an onboarding service that takes an `OnboardingProgressSink` instead
    of a `PrintWriter`, migrating the spying tests to that service.
 2. Have the servlet build an `NdjsonOnboardingProgressSink` and call it.
 3. `PaidProvisioningService` then stops instantiating a servlet, and `NdjsonSinkWriter` can be
    deleted.
-4. The same for `PaidReactivationService` (ETP-5048 review B2): it is a facade that calls the
+4. Move the Stripe webhook event application (`applyCheckoutEvent`, `applyCheckoutPaid`,
+   `applySubscriptionLifecycle`, `applyAlertOnlyEvent`, `resolveLifecycleTarget`,
+   `raisePausedSubscriptionAlert`, `endResolvedPauseEpisodes`) into a service in
+   `com.etendoerp.go.payment`, next to `CheckoutWebhookProcessor`.
+5. The same for `PaidReactivationService` (ETP-5048 review B2): it is a facade that calls the
    webhook's `applyReactivationIfPending` on a fresh servlet instance, so the lost-webhook repair of a
    re-subscription and the webhook share one fenced path. Move that method (with
    `applyPaidUpgradeSideEffects`) into a service both call.
