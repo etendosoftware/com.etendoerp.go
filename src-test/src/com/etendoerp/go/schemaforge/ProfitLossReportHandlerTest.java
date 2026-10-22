@@ -58,6 +58,8 @@ import com.etendoerp.go.schemaforge.util.NeoReportParam;
  * roll-up/formula rules are covered by {@code AccountReportTreeTest}, not here).
  *
  * @covers com.etendoerp.go.schemaforge.ProfitLossReportHandler
+ * @covers com.etendoerp.go.schemaforge.AbstractAccountTreeReportHandler
+ * @covers com.etendoerp.go.schemaforge.AbstractSqlReportHandler
  */
 class ProfitLossReportHandlerTest {
 

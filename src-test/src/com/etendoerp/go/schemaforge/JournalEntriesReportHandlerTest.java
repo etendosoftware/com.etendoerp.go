@@ -62,6 +62,9 @@ import com.etendoerp.go.schemaforge.util.NeoReportParam;
  * artifacts/report-journal-entries/report-contract.json}'s {@code sql.query} plus
  * {@link JournalEntriesGrouping} (whose own nesting/truncation rules are covered by
  * {@code JournalEntriesGroupingTest}, not here).
+ *
+ * @covers com.etendoerp.go.schemaforge.JournalEntriesReportHandler
+ * @covers com.etendoerp.go.schemaforge.AbstractSqlReportHandler
  */
 class JournalEntriesReportHandlerTest {
 

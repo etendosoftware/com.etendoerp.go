@@ -58,6 +58,8 @@ import org.junit.jupiter.api.Test;
  *
  * <p>Adding a class to {@link #GUARDED_CLASSES} is how the rule grows; do not remove one to make a
  * failure go away.
+ *
+ * @covers com.etendoerp.go.schemaforge.TenantOwnership
  */
 @DisplayName("Tenant isolation policy — financial account and accounting areas")
 class TenantIsolationPolicyTest {

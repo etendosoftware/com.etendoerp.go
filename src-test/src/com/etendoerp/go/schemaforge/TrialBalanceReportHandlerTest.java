@@ -56,6 +56,9 @@ import com.etendoerp.go.schemaforge.util.ReportAccessCatalog;
  * {@code artifacts/report-trial-balance/report-contract.json}'s {@code sql.query} plus
  * {@link TrialBalanceFolding} (whose own folding rules are covered by
  * {@code TrialBalanceFoldingTest}, not here).
+ *
+ * @covers com.etendoerp.go.schemaforge.TrialBalanceReportHandler
+ * @covers com.etendoerp.go.schemaforge.AbstractSqlReportHandler
  */
 class TrialBalanceReportHandlerTest {
 

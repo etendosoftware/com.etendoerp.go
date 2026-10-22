@@ -57,6 +57,9 @@ import com.etendoerp.go.schemaforge.util.NeoReportParam;
  * artifacts/report-general-ledger/report-contract.json}'s {@code sql.query}/{@code
  * sql.openingQuery} plus {@link GeneralLedgerGrouping} (whose own nesting/opening/running-balance
  * rules are covered by {@code GeneralLedgerGroupingTest}, not here).
+ *
+ * @covers com.etendoerp.go.schemaforge.GeneralLedgerReportHandler
+ * @covers com.etendoerp.go.schemaforge.AbstractSqlReportHandler
  */
 class GeneralLedgerReportHandlerTest {
 

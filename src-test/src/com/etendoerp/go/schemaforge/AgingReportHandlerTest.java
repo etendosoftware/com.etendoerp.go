@@ -537,7 +537,11 @@ class AgingReportHandlerTest {
       OBDal dal = mock(OBDal.class);
       Organization ownOrg = mock(Organization.class);
       ownedBy(ownOrg, "own-client");
+      // A complete, currency-bearing schema: only the tenant check can reject it.
+      Currency foreignCurrency = mock(Currency.class);
       AcctSchema foreignSchema = mock(AcctSchema.class);
+      when(foreignSchema.getId()).thenReturn("foreign-schema");
+      when(foreignSchema.getCurrency()).thenReturn(foreignCurrency);
       ownedBy(foreignSchema, "other-client");
       try (MockedStatic<NeoAccessHelper> accessMock = mockAccessGranted();
            MockedStatic<FIN_Utility> paymentStatusMock = mockStatic(FIN_Utility.class);
@@ -562,6 +566,42 @@ class AgingReportHandlerTest {
         assertEquals("accounting_schema_unresolved", foreign.getBody().getString("error"));
         assertEquals(unknown.getBody().toString(), foreign.getBody().toString());
         assertTrue(daoConstruction.constructed().isEmpty());
+      }
+    }
+
+    /**
+     * ETP-5793: the system organization "0" belongs to client "0", which every role can read, so it
+     * still passes the tenant check (here it stops later, at the unresolved schema — not at 400).
+     */
+    @Test
+    @DisplayName("The system organization 0 still passes the tenant check")
+    void systemOrganizationPassesTheTenantCheck() throws Exception {
+      OBDal dal = mock(OBDal.class);
+      Organization systemOrg = mock(Organization.class);
+      ownedBy(systemOrg, "0");
+      @SuppressWarnings("unchecked")
+      OBQuery<AcctSchema> schemaQuery = mock(OBQuery.class);
+      try (MockedStatic<NeoAccessHelper> accessMock = mockAccessGranted();
+           MockedStatic<FIN_Utility> paymentStatusMock = mockStatic(FIN_Utility.class);
+           MockedStatic<OBContext> contextMock = mockOwnTenantContext();
+           MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+           MockedConstruction<OrganizationStructureProvider> orgProviderConstruction =
+               mockConstruction(OrganizationStructureProvider.class, (provider, ignored) ->
+                   when(provider.getChildTree("0", true)).thenReturn(Collections.singleton("0")));
+           MockedConstruction<AgingDao> daoConstruction = mockConstruction(AgingDao.class)) {
+        paymentStatusMock.when(FIN_Utility::getListPaymentConfirmed)
+            .thenReturn(Collections.singletonList("RPR"));
+        obDalMock.when(OBDal::getInstance).thenReturn(dal);
+        when(dal.get(Organization.class, "0")).thenReturn(systemOrg);
+        when(dal.createQuery(eq(AcctSchema.class), anyString())).thenReturn(schemaQuery);
+        when(schemaQuery.setNamedParameter(anyString(), anyString())).thenReturn(schemaQuery);
+        when(schemaQuery.setMaxResult(1)).thenReturn(schemaQuery);
+        when(schemaQuery.uniqueResult()).thenReturn(null);
+
+        NeoResponse result = handler.handle(agingRequest("0", null));
+
+        assertEquals(422, result.getHttpStatus());
+        assertEquals("accounting_schema_unresolved", result.getBody().getString("error"));
       }
     }
 
