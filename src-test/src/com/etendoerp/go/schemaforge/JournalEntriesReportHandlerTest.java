@@ -274,6 +274,9 @@ class JournalEntriesReportHandlerTest {
 
     OBContext obContext = mock(OBContext.class);
     when(obContext.getCurrentClient()).thenReturn(client);
+    // ETP-5793: the org is resolved through TenantOwnership, which checks the readable clients.
+    when(org.getClient()).thenReturn(client);
+    when(obContext.getReadableClients()).thenReturn(new String[] { "sessionClientId1" });
     when(obContext.getCurrentOrganization()).thenReturn(org);
     when(obContext.getLanguage()).thenReturn(language);
 
@@ -362,6 +365,9 @@ class JournalEntriesReportHandlerTest {
 
     OBContext obContext = mock(OBContext.class);
     when(obContext.getCurrentClient()).thenReturn(client);
+    // ETP-5793: the org is resolved through TenantOwnership, which checks the readable clients.
+    when(org.getClient()).thenReturn(client);
+    when(obContext.getReadableClients()).thenReturn(new String[] { "sessionClientId1" });
     when(obContext.getCurrentOrganization()).thenReturn(org);
     when(obContext.getLanguage()).thenReturn(language);
 
