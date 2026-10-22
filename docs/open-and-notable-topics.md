@@ -33,7 +33,7 @@ rule; their history is in git.
 
 ## 1. Decisions still owed
 
-*Moved to §6 on 2026-09-28: §1.1. On 2026-10-14: §1.3.*
+*Moved to §6 on 2026-09-28: §1.1. On 2026-10-14: §1.3. On 2026-10-23: §1.5.*
 
 ### 🔴 1.2 The billing period is per subscription, not per price
 
@@ -948,7 +948,7 @@ header as well.
 
 ## 4. Known issues
 
-*Fixed on arrival and recorded in §6 on 2026-10-14: §4.14.*
+*Fixed on arrival and recorded in §6 on 2026-10-14: §4.14. Moved to §6 on 2026-10-23: §4.8.*
 
 ### 🟡 4.4 The at-sign guard is over-tested (ETP-5050)
 
@@ -1294,7 +1294,8 @@ lookup joined into the candidate query, and the list sweep resumed from where th
 
 ## 5. Handed forward to later tickets
 
-*Moved to §6 on 2026-09-28: §5.7, §5.10, §5.12; §5.15 was decided on arrival and sits there too.*
+*Moved to §6 on 2026-09-28: §5.7, §5.10, §5.12; §5.15 was decided on arrival and sits there too.
+On 2026-10-23: §5.14.*
 
 ### 🟠 5.1 ETP-5051: "no quota row" means UNLIMITED
 
@@ -1565,7 +1566,7 @@ same branches.
 ### ✅ 1.5 ETP-5049: which two cards, and where does each card's `price_id` come from?
 
 **Ticket:** owner ETP-5049 (§5.14) — backend slice 1 (`com.etendoerp.go`), frontend slice 2
-(schema_forge `16cb23c33`, `2bdff6c43`).
+(schema_forge `feature/ETP-5049`).
 
 **Status:** decided 2026-10-23 (Martin Taal)
 
@@ -1604,7 +1605,7 @@ checkout still charges it. Before the removal the consumers were checked: no cod
 `schema_forge` (`tools/app-shell/src`, `e2e`) or `schema_forge_core/packages` reads `priceId` from
 these responses — the only matches are tests asserting that `priceId` is *absent* from request
 bodies — and the SPA's one offers consumer (`getBillingOffer` in `lib/upgrade/api.js`) was already
-removed by the ETP-5049 frontend slice (schema_forge `16cb23c33`).
+removed by the ETP-5049 frontend slice (schema_forge `feature/ETP-5049`).
 
 **Follow-up:** no ticket. `schema_forge/docs/stripe-local-testing.md` still shows `"priceId"` in an
 example checkout answer and calls it "a known leftover"; it is updated with the ETP-5049 frontend
@@ -1742,7 +1743,7 @@ the report to ETP-5050 and should be updated to the script.
 
 ### ✅ 5.14 ETP-5049: the upgrade page's Plan step does not show the plan catalog
 
-**Ticket:** owner ETP-5049 (fixed: schema_forge `16cb23c33`, `2bdff6c43`; backend slice 1 in
+**Ticket:** owner ETP-5049 (fixed: frontend in schema_forge `feature/ETP-5049`, backend slice 1 in
 `com.etendoerp.go`). Introduced by the ETP-5046 develop merge, which combined two independent
 designs of the same page.
 

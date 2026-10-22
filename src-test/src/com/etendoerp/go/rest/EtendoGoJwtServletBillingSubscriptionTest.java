@@ -282,9 +282,9 @@ public class EtendoGoJwtServletBillingSubscriptionTest {
     Plan plan = plan("productive-yearly", "Productive yearly", "year");
     givenSubscriptionPlan(fixture, plan);
     // listActiveQuotas orders by resource search key; the response keeps that order.
-    PlanQuota documents = quota(resource("documents", "Documents", "documents"), 500L, "hard",
+    PlanQuota documents = quota(resource("documents", "Documents", "documents"), 500L, "block",
         400L);
-    PlanQuota storage = quota(resource("storage", "Storage", null), 10L, "soft", null);
+    PlanQuota storage = quota(resource("storage", "Storage", null), 10L, "warn", null);
     PlanQuota users = quota(resource("users", "Users", "users"), 3L, "off", 2L);
     when(fixture.planCatalog.listActiveQuotas(plan)).thenReturn(List.of(documents, storage, users));
 
@@ -299,7 +299,7 @@ public class EtendoGoJwtServletBillingSubscriptionTest {
     assertEquals("Documents", first.getString("resourceName"));
     assertEquals("documents", first.getString("unitLabel"));
     assertEquals(500L, first.getLong("includedQty"));
-    assertEquals("hard", first.getString("enforcementMode"));
+    assertEquals("block", first.getString("enforcementMode"));
     assertEquals(400L, first.getLong("warningThreshold"));
     // The plan's billing interval is the quota's consumption window.
     assertEquals("year", first.getString("period"));
@@ -321,7 +321,7 @@ public class EtendoGoJwtServletBillingSubscriptionTest {
     Fixture fixture = subscribedFixture(null);
     Plan plan = plan("legacy-productive", "Productive (legacy)", " ");
     givenSubscriptionPlan(fixture, plan);
-    PlanQuota users = quota(resource("users", "Users", "users"), 3L, "hard", null);
+    PlanQuota users = quota(resource("users", "Users", "users"), 3L, "block", null);
     when(fixture.planCatalog.listActiveQuotas(plan)).thenReturn(List.of(users));
 
     JSONObject quota = get(fixture, VALID_TOKEN).json().getJSONArray("planQuotas")

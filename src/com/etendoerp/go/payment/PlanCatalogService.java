@@ -171,6 +171,12 @@ public class PlanCatalogService {
    * <em>list</em>, not of a blank key.) Both branches go through the same predicates checkout
    * decides on, so the offer can never quote a plan checkout would refuse.
    *
+   * <p><b>It matches the first {@code GET /sws/go/plans} entry only while that plan can be
+   * quoted.</b> {@code /plans} leaves out a plan it cannot quote — the grandfathered plan when
+   * Stripe cannot price the configured legacy id, a catalog row with no display price or currency —
+   * and lists the next one. The offer does not skip ahead: it quotes this plan live from Stripe and
+   * answers {@code 503 BILLING_OFFER_UNAVAILABLE} when Stripe cannot price it.
+   *
    * @return the default plan and whether it is sold through the legacy fallback price; empty when
    *     nothing is for sale
    */

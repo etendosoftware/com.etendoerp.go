@@ -58,6 +58,8 @@ import com.etendoerp.go.schemaforge.data.Plan;
  *   <li>a reopened checkout re-deciding its price from the current catalog instead of the price
  *       stored on the request.</li>
  * </ul>
+ *
+ * @covers com.etendoerp.go.payment.HostedCheckoutService
  */
 class HostedCheckoutLegacyFallbackTest {
 

@@ -116,6 +116,8 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  * 402 — and lock a blocked customer out of paying.
  *
  * <p>No database: the DAL helpers and the services are mocked; nothing is written.
+ *
+ * @covers com.etendoerp.go.rest.EtendoGoJwtServlet
  */
 class EtendoGoJwtServletBlockedTenantPayPathTest {
 

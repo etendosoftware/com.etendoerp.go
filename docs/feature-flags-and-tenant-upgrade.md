@@ -559,7 +559,11 @@ it:
   page selects by default) at its own `PROVIDER_PRICE_ID`.
 
 Both branches use the predicates checkout decides on, so the offer never quotes a plan checkout
-would refuse. Amount, currency, and recurring interval come from the chargeable price itself:
+would refuse. The default matches the first `/plans` entry **only while that plan can be quoted**:
+`/plans` leaves out a plan it cannot quote (the grandfathered plan when Stripe cannot price the
+configured legacy id, a catalog row with no display price or currency) and lists the next one,
+whereas the offer does not skip ahead — it quotes the default plan live from Stripe and answers 503
+when Stripe cannot price it. Amount, currency, and recurring interval come from the chargeable price itself:
 
 ```json
 { "code": "productive-tenant", "planKey": "productive-monthly",
