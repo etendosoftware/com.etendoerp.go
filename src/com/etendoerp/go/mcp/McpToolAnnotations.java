@@ -59,7 +59,8 @@ final class McpToolAnnotations {
       McpConstants.TOOL_DOCS,
       McpConstants.TOOL_NEO_WIDGET,
       McpConstants.TOOL_NEO_VECTOR_SEARCH,
-      McpConstants.TOOL_NEO_GET_IMAGE_UPLOAD);
+      McpConstants.TOOL_NEO_GET_IMAGE_UPLOAD,
+      McpConstants.TOOL_NEO_JOB_STATUS);
 
   /** Tools that add something new and never change or remove what exists. */
   static final Set<String> ADDITIVE = Set.of(
@@ -75,6 +76,7 @@ final class McpToolAnnotations {
   static final Set<String> MODIFYING = Set.of(
       McpConstants.TOOL_NEO_UPDATE,
       McpConstants.TOOL_NEO_BATCH,
+      McpConstants.TOOL_NEO_JOB_CANCEL,
       McpConstants.TOOL_NEO_ACTION,
       McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN);
 

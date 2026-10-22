@@ -42,12 +42,12 @@ class McpToolAnnotationsTest {
       "etendo_create", "etendo_update", "etendo_delete", "etendo_selectors", "etendo_defaults", "etendo_schema",
       "etendo_batch", "etendo_action", "etendo_widget", "etendo_vector_search", "etendo_upload_image",
       "etendo_request_image_upload", "etendo_get_image_upload", "etendo_generate_amortization_plan",
-      "etendo_feedback", "docs");
+      "etendo_feedback", "docs", "etendo_job_status", "etendo_job_cancel");
 
   @Test
   void readOnlySetIsPinned() {
     assertEquals(Set.of("etendo_list", "etendo_get", "etendo_schema", "etendo_discover", "etendo_selectors",
-        "etendo_defaults", "docs", "etendo_widget", "etendo_vector_search", "etendo_get_image_upload"),
+        "etendo_defaults", "docs", "etendo_widget", "etendo_vector_search", "etendo_get_image_upload", "etendo_job_status"),
         McpToolAnnotations.READ_ONLY);
   }
 
@@ -77,6 +77,8 @@ class McpToolAnnotationsTest {
     assertHints("etendo_delete", false, true, true);
     assertHints("etendo_update", false, true, false);
     assertHints("etendo_batch", false, true, false);
+    assertHints("etendo_job_status", true, false, true);
+    assertHints("etendo_job_cancel", false, true, false);
     assertHints("etendo_generate_amortization_plan", false, true, false);
     assertHints("complete_order", false, true, false);
   }
