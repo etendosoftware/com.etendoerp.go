@@ -1101,6 +1101,9 @@ public class BillingReconciliationServiceTest {
         "{\"subscription\":\"sub_other\"}"));
     staleEvents.add(new BillingEventStore.StaleEvent("evt_due", "invoice.payment_failed", null,
         "{\"subscription\":\"sub_due\"}"));
+    // A stuck resumed event is in the family too (it ends a pause episode, as the re-read does).
+    staleEvents.add(new BillingEventStore.StaleEvent("evt_resumed",
+        "customer.subscription.resumed", null, "{\"id\":\"sub_1\"}"));
     doAnswer(call -> {
       ReconciliationResult running = call.getArgument(0, ReconciliationResult.class);
       running.noteSubscriptionReread("sub_1", "active");
@@ -1111,6 +1114,7 @@ public class BillingReconciliationServiceTest {
     ReconciliationResult result = run(false);
 
     verify(eventStore).markIgnored(eq("evt_read"), anyString());
+    verify(eventStore).markIgnored(eq("evt_resumed"), anyString());
     verify(eventStore, never()).markIgnored(eq("evt_unread"), anyString());
     verify(eventStore, never()).markIgnored(eq("evt_due"), anyString());
     // Not re-read, or past_due (left to the webhook): parked for a person, once.
@@ -1119,7 +1123,7 @@ public class BillingReconciliationServiceTest {
         any(), any());
     verify(eventStore).recordReconciliation(eq("reconcile:stale-event-review:evt_due"),
         anyString(), any(), anyString(), any(), any());
-    assertEquals(1, result.get(Counter.STALE_EVENTS_SWEPT));
+    assertEquals(2, result.get(Counter.STALE_EVENTS_SWEPT));
     assertEquals(2, result.get(Counter.STALE_EVENTS_PARKED));
   }
 

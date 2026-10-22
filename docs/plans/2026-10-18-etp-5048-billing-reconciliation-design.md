@@ -183,9 +183,10 @@ checkout and subscription rows, and its audit rows are ordinary billing events.
     - **Per family, per phase.** Payment events (`checkout.session.completed`,
       `checkout.session.async_payment_succeeded`) are swept only when phases A and B completed;
       subscription events (`invoice.paid`, `invoice.payment_failed`,
-      `customer.subscription.updated`, `.deleted`, `.paused`) only when phase D completed. A stuck
-      `customer.subscription.resumed` is not in either list and stays `RECEIVED` (harmless: the
-      reconciliation's own re-read ends the pause episode it would have ended). A phase is
+      `customer.subscription.updated`, `.deleted`, `.paused`, `.resumed`) only when phase D
+      completed. A stuck `customer.subscription.resumed` is superseded like the others once its
+      subscription was re-read: that re-read ends the pause episode the event would have ended
+      (Martin, 2026-10-22; it used to stay `RECEIVED` for ever). A phase is
       incomplete when it threw, recorded an error, met a failed provider read, a stopped list
       sweep, capped direct reads, or a tripped breaker. Alert-only types
       (`charge.dispute.created`) are never swept. The type lists are `StripeEventTypes`, shared

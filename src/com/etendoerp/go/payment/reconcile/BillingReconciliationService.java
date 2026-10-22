@@ -689,6 +689,8 @@ public class BillingReconciliationService {
     if (result.isComplete(Phase.SUBSCRIPTIONS)) {
       types.addAll(StripeEventTypes.SUBSCRIPTION_LIFECYCLE);
       types.add(StripeEventTypes.SUBSCRIPTION_PAUSED);
+      // Ends a pause episode; the re-read of its subscription did the same, so it is superseded.
+      types.add(StripeEventTypes.SUBSCRIPTION_RESUMED);
     }
     return types;
   }
