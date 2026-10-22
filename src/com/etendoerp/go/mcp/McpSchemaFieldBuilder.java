@@ -827,6 +827,15 @@ final class McpSchemaFieldBuilder {
   }
 
   private static String resolvePropertyName(Entity dalEntity, String dbColName) {
+    // ETP-5806 naming unification: a handful of columns are published under a name chosen by the
+    // handler that actually reads/writes them, not the raw DAL property name codegen produced for
+    // the column (e.g. EM_OBSEPA_StrtNm -> oBSEPAStreetName). Checked before the DAL lookup, since
+    // it applies the same way whether dbColName belongs to the entity's own table or to a wrapper's
+    // backing table (buildVirtualFieldsArray's callers).
+    String override = NeoSelectorPolicy.publishedNameOverride(dbColName);
+    if (override != null) {
+      return override;
+    }
     if (dalEntity == null) {
       return dbColName;
     }

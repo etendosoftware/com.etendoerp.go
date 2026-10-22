@@ -125,7 +125,46 @@ public final class AddressVirtualSelectorPolicy {
    */
   private static final String OWN_SERVER_RESOLVED_COLUMN = "C_Location_ID";
 
+  /**
+   * ETP-5806 naming unification — the published {@code etendo_schema} field name for a structured
+   * SEPA address column, keyed by DB column name (upper-cased).
+   *
+   * <p><b>Why this map exists instead of a conditional on the caller's side.</b>
+   * {@code McpSchemaFieldBuilder#resolvePropertyName} otherwise reports the raw DAL property name
+   * generated for {@code EM_OBSEPA_StrtNm}/{@code BldgNb}/{@code BldgNm} —
+   * {@code oBSEPAStreetName}/{@code oBSEPABuildingNumber}/{@code oBSEPABuildingName} — because that
+   * is literally the Hibernate property Openbravo's codegen produced for the column, unrelated to
+   * what any handler actually calls the field in its own payload. Every handler that reads/writes
+   * these 3 columns ({@code ContactsLocationAddressHandler}, {@code WarehouseLocationHandler},
+   * {@code BpLocationHandler}) already agrees on {@code streetName}/{@code buildingNumber}/
+   * {@code buildingName} in its own JSON — only the generic schema-discovery path (this class's
+   * {@link #resolveVirtualColumns} for a wrapper entity, or the direct {@code bpLocation} table
+   * walk in {@code McpSchemaFieldBuilder#buildSchemaFieldsArray}) still showed the raw name,
+   * because {@code resolvePropertyName} has no way to know a handler renamed it downstream.
+   *
+   * <p>This is a structural lookup (keyed by column, consulted identically for any entity that
+   * happens to carry one of these 3 columns — direct or virtual), not a branch on a spec or table
+   * name, matching the existing {@code VIRTUAL_FIELD_PROMPTS} per-column data map in
+   * {@code McpSchemaFieldBuilder}. Extend this map, never add a per-entity {@code if}, if another
+   * EM_-prefixed column ever needs the same treatment.
+   */
+  private static final Map<String, String> PUBLISHED_NAME_OVERRIDES = Map.of(
+      "EM_OBSEPA_STRTNM", "streetName",
+      "EM_OBSEPA_BLDGNB", "buildingNumber",
+      "EM_OBSEPA_BLDGNM", "buildingName");
+
   private AddressVirtualSelectorPolicy() {
+  }
+
+  /**
+   * The {@code etendo_schema} field name a caller should see for the given DB column, when it
+   * differs from the raw DAL property name — see {@link #PUBLISHED_NAME_OVERRIDES}.
+   *
+   * @param dbColumnName AD column DB name (any case)
+   * @return the published name override, or {@code null} when the column has none
+   */
+  public static String publishedNameOverride(String dbColumnName) {
+    return dbColumnName == null ? null : PUBLISHED_NAME_OVERRIDES.get(dbColumnName.toUpperCase());
   }
 
   /**
