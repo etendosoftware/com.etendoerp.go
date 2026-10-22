@@ -267,6 +267,9 @@ grandfathered plan's own name (with an empty description, see above); and
 the charged price while the fallback is active, a different price once a priced plan has retired it,
 and a `503 BILLING_OFFER_UNAVAILABLE` once the property is removed. The upgrade page quotes the plan
 catalog and falls back to the offer only while that lookup is in flight or has failed.
+*Since ETP-5049 the offer quotes the plan catalog's default plan instead (the legacy plan at the
+configured price while the fallback is active, else the first purchasable plan), so this cost is
+gone — see `feature-flags-and-tenant-upgrade.md` §2, *The billing offer*.*
 
 ### 6.2 Going live — operator checklist
 

@@ -79,25 +79,6 @@ the two-hour cadence of §5.15. **To confirm:** whether per-resource-day transac
 concern, or whether isolation per client is wanted for another reason — today a resource-day that
 fails, fails for every tenant in it.
 
-### 🔴 1.5 ETP-5049: which two cards, and where does each card's `price_id` come from?
-
-**Ticket:** owner ETP-5049 (§5.14).
-
-**To raise with:** Sebastián Barrozo
-
-The 2026-09-28 decision (§5.14) is two cards, each configured with a Stripe `price_id`, prices read
-from Stripe. Still open:
-
-- **Which two.** Today's Plan step has one real card (`upgrade-plan-productive`, static name and
-  tagline) and two `SkeletonPlanCard` placeholders (`upgrade-plan-coming-soon-1/-2`).
-- **Where each `price_id` lives.** If it is the catalog plan's `ETGO_PLAN.PROVIDER_PRICE_ID`, the
-  card selects a `planKey` and ETP-5046's checkout stays as is: `HostedCheckoutService` takes a
-  `planKey`, never a price, and the browser never receives a provider price id (§4.8). If it is
-  configured outside the catalog, checkout bypasses it — the checkout request records no plan
-  (§4.6), the subscription opens on none — and the browser holds Stripe price ids.
-- **The Payment step.** Whether it keeps its second chooser (`PlanSelector`: `upgrade-plan-single`
-  / `upgrade-plan-choice`) or shows the plan chosen on the Plan step.
-
 ### 🔴 1.6 One-time cutover now (Phase F early) — proposed, not decided
 
 **Ticket:** no ticket (Phase F, §3.2).
@@ -162,23 +143,25 @@ are unaffected either way.
 
 ### 🟠 2.1 What the legacy price fallback costs
 
-**Ticket:** owner ETP-5049 (the offer endpoint) and ETP-5053 (moving fallback buyers to a real
-plan); ETP-5051 is where the uncapped buyers start to matter. Related ETP-5046, whose develop merge
-introduced the fallback.
+**Ticket:** owner ETP-5053 (moving fallback buyers to a real plan); ETP-5051 is where the uncapped
+buyers start to matter. Related ETP-5046, whose develop merge introduced the fallback, and ETP-5049,
+which solved the offer endpoint (below).
 
 How the fallback works — the one predicate, the self-retirement on the first priced plan, the
 reload edge case — is the design doc's §6.1; the operator procedure is its §6.2. This section keeps
 only what is still open.
 
-- **`GET /sws/go/billing/offers` quotes the legacy price, never the plan catalog → ETP-5049.**
-  `BillingOfferConfiguration` derives the offer from `etendo.go.checkout.price.id`
-  (`retrieveConfiguredPrice()`). While the fallback is active that is the charged price. Once a
-  priced plan retires the fallback, the offer keeps quoting the legacy price — a different amount
-  from what checkout charges — and once the property is removed it answers
-  `503 BILLING_OFFER_UNAVAILABLE`. The upgrade page quotes the catalog and reads the offer only
-  while that lookup is in flight or has failed, so it is barely exposed; any other consumer of the
-  offer is not. ETP-5049 (plan selection in the customer UI) should point the offer at the catalog
-  or retire it. The same endpoint also leaks the Stripe price id (§4.8).
+- ✅ **`GET /sws/go/billing/offers` quotes the legacy price, never the plan catalog — solved in
+  ETP-5049.** The offer now quotes the plan catalog's default plan
+  (`PlanCatalogService#findDefaultPurchasablePlan`): the grandfathered plan at the configured legacy
+  price while the fallback is active — what a checkout naming no plan charges — and otherwise the
+  first purchasable plan at its own provider price, the plan the upgrade page selects by default.
+  Offer and charge share the fallback predicate, so they no longer disagree after the cutover, and
+  removing the legacy property no longer turns the offer into a 503 once a priced plan exists. The
+  response names the quoted `planKey` and no longer carries the price id (§4.8). Reference:
+  `feature-flags-and-tenant-upgrade.md` §2, *The billing offer*. Since the ETP-5049 frontend slice
+  the upgrade page no longer calls the offer at all (it quotes the catalog, §5.14); the endpoint is
+  kept server-side, and removing it is a separate decision.
 - **Fallback buyers are uncapped and stuck on `legacy-productive` → ETP-5053, felt in ETP-5051.**
   A buyer who pays through the fallback lands on `legacy-productive`, which has zero quota rows and
   is therefore unlimited (§5.1). That costs nothing today and becomes real the moment ETP-5051
@@ -1077,23 +1060,6 @@ verdict as unknown rather than inherit an unearned pass.
 carry them would make it harder to review, not safer. They want their own ticket — and the fix is
 mechanical once the pattern is recognised, which is the entire reason this section exists.
 
-### 🟡 4.8 `priceId` still reaches the browser on two develop paths
-
-**Ticket:** related develop ETP-5463 and the ETP-5046 review (W3); no ticket owns it — ETP-5049 is the natural home if it touches the account billing UI.
-
-The plan catalog and the checkout request never carry a provider price id (`buildPlanJson`,
-`api.js`: "the server never sends a provider price id"). Two develop-owned responses still do:
-
-- `HostedCheckoutService.buildResult` / `createProviderSession` put `priceId` into the
-  `POST /sws/go/checkout/sessions` and `POST /sws/go/billing/purchases` answers (develop's
-  ETP-5463 shape, kept by the merge);
-- `GET /sws/go/billing/offers` returns `offer.getPriceId()`.
-
-Neither is exploitable in the sense that matters — checkout has no request field for a price, so a
-client cannot choose one — but both contradict the documented rule and hand a caller the account's
-Stripe price ids. Dropping them needs a check that no develop consumer (account billing UI) reads
-the field. Raised in the ETP-5046 review (W3); left out of scope of the merge.
-
 ### 🟡 4.9 No short-TTL cache on Stripe price lookups
 
 **Ticket:** related ETP-5046 review (S1); no ticket — performance follow-up, needs its own.
@@ -1522,41 +1488,6 @@ Nothing rejects either shape: `ETGO_SUB_DATES_CHK` only checks `END_DATE >= STAR
 
 Option 1 is the default unless product asks for scheduled upgrades.
 
-### 🟠 5.14 ETP-5049: the upgrade page's Plan step does not show the plan catalog
-
-**Ticket:** owner ETP-5049 (plan selection in the customer UI). Introduced by the ETP-5046 develop
-merge, which combined two independent designs of the same page.
-
-**To raise with:** Sebastián Barrozo — which two cards and where their price ids come from (§1.5).
-
-`UpgradePage.jsx` (schema_forge) is a three-step checkout — **Plan → Add-ons → Payment** — from
-develop (ETP-5396). Its **Plan** step is a fixed layout, not a view of the catalog:
-
-- one `PlanCard` (`upgrade-plan-productive`) whose name and tagline are the static translations
-  `upgradePlanProductiveName` / `upgradePlanProductiveTagline` ("Productivo" / "Un segundo entorno
-  para trabajar de verdad"), whatever the catalog holds;
-- two `SkeletonPlanCard` placeholders (`upgrade-plan-coming-soon-1/-2`).
-
-Only the **price** on that card comes from the catalog (`formatPlanPrice` of the selected plan, or
-of the first one). ETP-5046's catalog chooser, `PlanSelector` (`upgrade-plan-single` for one plan,
-`upgrade-plan-choice` for several), renders only on the **Payment** step. Consequences:
-
-- a catalog plan's name and description are first visible two steps after the buyer "chose" it;
-- with several plans, the "Productivo" card quotes whichever plan is selected, or the first one,
-  under a name that belongs to none of them;
-- while the catalog price equals the legacy fallback price, the Plan step looks identical before
-  and after the cutover (§2.1), which reads as "the new plan does not show" during testing.
-
-Found in the ETP-5046 manual happy path test.
-
-**Decided (Sebastián Barrozo, 2026-09-28): not a catalog view in the initial version.** The Plan
-step keeps **two cards**, each configured with a Stripe `price_id`, with prices retrieved directly
-from Stripe. Custom plans come later, through a commercial agreement; marketing defines the third
-tier and its requirements before it is added. That sets aside the shape this topic proposed before
-(one card per catalog plan, built from `GET /sws/go/plans`). Still open, and the consequences above
-stand until ETP-5049 lands: which two cards, where each card's `price_id` comes from, and whether
-the Payment step keeps its second `PlanSelector` — §1.5.
-
 ---
 
 ## 6. Clarified and solved
@@ -1630,6 +1561,54 @@ of when that flag ends (a placeholder TTL in `flags-registry.json`). Production 
 switch-on procedure after the deploy: read the would-be refusals, check them against the
 subscription rows, then switch on one tenant, then everyone. The parked fixes of §4.13 are on the
 same branches.
+
+### ✅ 1.5 ETP-5049: which two cards, and where does each card's `price_id` come from?
+
+**Ticket:** owner ETP-5049 (§5.14) — backend slice 1 (`com.etendoerp.go`), frontend slice 2
+(schema_forge `16cb23c33`, `2bdff6c43`).
+
+**Status:** decided 2026-10-23 (Martin Taal)
+
+**Decision: the Plan step is a view of the plan catalog.** The three open points resolve as:
+
+- **Which cards:** whatever `ETGO_PLAN` lists — one card per plan of `GET /sws/go/plans`, with the
+  catalog's name, description and price. No fixed number of cards.
+- **Where the `price_id` lives:** in `ETGO_PLAN.PROVIDER_PRICE_ID`, resolved server-side from the
+  `planKey` the card selects (`HostedCheckoutService`). The browser never receives a provider price
+  id (§4.8).
+- **The Payment step:** a read-only summary of the chosen plan (`upgrade-plan-summary`); the second
+  chooser (`PlanSelector`) is gone.
+
+This meets the 2026-09-28 decision — cards each configured with a Stripe `price_id`, the price read
+from Stripe — through the catalog: each plan row carries its price id, and
+`PlanPriceDerivationHandler` derives the displayed price from Stripe when the plan is saved. The catalog view **supersedes the
+"two fixed cards" shape** of that decision; how many cards show is now an operator decision made in
+the **Plans** window, not a code change.
+
+**Follow-up:** no ticket. Marketing's third tier and custom plans (§5.14) are new `ETGO_PLAN` rows,
+not code. `GET /sws/go/billing/offers` is kept server-side (catalog-derived since ETP-5049, §2.1)
+but has no frontend caller any more; removing it is a separate decision.
+
+### ✅ 4.8 `priceId` still reaches the browser on two develop paths
+
+**Ticket:** owner ETP-5049 (fixed); related develop ETP-5463 and the ETP-5046 review (W3).
+
+**Status:** fixed 2026-10-23 in ETP-5049 (slice 1, backend).
+
+**Decision: no browser-facing response carries a provider price id.** `HostedCheckoutService`
+no longer puts `priceId` in the `POST /sws/go/checkout/sessions` and `POST /sws/go/billing/purchases`
+answers (`createProviderSession`, and `buildResult` on a reopened open session), and
+`GET /sws/go/billing/offers` returns the quoted `planKey` instead of the price id. The charged price
+id stays server-side: it is still stored on the checkout request (`STRIPE_PRICE_ID`), and a reopened
+checkout still charges it. Before the removal the consumers were checked: no code in
+`schema_forge` (`tools/app-shell/src`, `e2e`) or `schema_forge_core/packages` reads `priceId` from
+these responses — the only matches are tests asserting that `priceId` is *absent* from request
+bodies — and the SPA's one offers consumer (`getBillingOffer` in `lib/upgrade/api.js`) was already
+removed by the ETP-5049 frontend slice (schema_forge `16cb23c33`).
+
+**Follow-up:** no ticket. `schema_forge/docs/stripe-local-testing.md` still shows `"priceId"` in an
+example checkout answer and calls it "a known leftover"; it is updated with the ETP-5049 frontend
+slice.
 
 ### ✅ 4.14 A canceled productive tenant passed for a free demo as a purchase source
 
@@ -1760,6 +1739,32 @@ as out of scope.
 and on the period it reports (§5.5, §5.10). PRD §14
 (`schema_forge/docs/plans/2026-08-27-recurring-billing-and-resource-limits-prd.md`) still assigns
 the report to ETP-5050 and should be updated to the script.
+
+### ✅ 5.14 ETP-5049: the upgrade page's Plan step does not show the plan catalog
+
+**Ticket:** owner ETP-5049 (fixed: schema_forge `16cb23c33`, `2bdff6c43`; backend slice 1 in
+`com.etendoerp.go`). Introduced by the ETP-5046 develop merge, which combined two independent
+designs of the same page.
+
+**Status:** decided 2026-10-23 (Martin Taal) — the open points are §1.5, decided the same day.
+
+**Decision: the Plan step (step 1 of `UpgradePage.jsx`) shows the catalog.** One selectable card per
+`GET /sws/go/plans` plan, with name, description and price from the catalog; the static
+`upgrade-plan-productive` card (`upgradePlanProductiveName` / `upgradePlanProductiveTagline`) and
+the `SkeletonPlanCard` placeholders (`upgrade-plan-coming-soon-1/-2`) are removed. The Payment step
+shows the chosen plan read-only (`upgrade-plan-summary`) with no second chooser, and checkout sends
+that plan's `planKey`. The consequences listed before are gone: a plan's name is visible on the step
+where it is chosen, several plans each get their own card, and the Plan step after the cutover shows
+the catalog plan rather than the same static card. The SPA no longer calls
+`GET /sws/go/billing/offers`; the catalog is its only quote.
+
+The 2026-09-28 decision (Sebastián Barrozo) kept two fixed cards, each configured with a Stripe
+`price_id` and its price read from Stripe. The catalog view meets that through `ETGO_PLAN`
+(`PROVIDER_PRICE_ID`, price derived from Stripe) and supersedes its "two fixed cards" shape (§1.5).
+
+**Follow-up:** no ticket. Custom plans through a commercial agreement and marketing's third tier
+become catalog rows when they are defined. Whether to retire the now caller-less
+`GET /sws/go/billing/offers` is a separate decision (§2.1).
 
 ### ✅ 5.15 The resource-limit check reads stored usage; usage is recomputed on one two-hour cadence
 

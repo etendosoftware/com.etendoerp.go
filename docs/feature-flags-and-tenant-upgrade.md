@@ -549,11 +549,77 @@ scoped to the authenticated account and expose only the local purchase status, e
 and safe provisioning reference. They do not expose Stripe customer/session identifiers or create
 a second payment ledger.
 
-`GET /sws/go/billing/offers` retrieves the Stripe Price identified by the same
-`CheckoutConfiguration.priceId()` used by hosted checkout. Amount, currency, and recurring interval
-therefore come from the chargeable price itself. The endpoint returns 503 when Stripe cannot be
-reached or the configured price is missing, inactive, or has an unsupported shape; it never shows an
-independent configured price as a fallback.
+**The billing offer (ETP-5049).** `GET /sws/go/billing/offers` quotes the plan catalog's default
+plan (`PlanCatalogService#findDefaultPurchasablePlan`), from the Stripe Price checkout charges for
+it:
+
+- while the legacy price fallback is active, the grandfathered `legacy-productive` plan at the
+  configured `CheckoutConfiguration.priceId()` — exactly what a checkout that names no plan charges;
+- otherwise the first purchasable plan of `GET /sws/go/plans` (cheapest first, the plan the upgrade
+  page selects by default) at its own `PROVIDER_PRICE_ID`.
+
+Both branches use the predicates checkout decides on, so the offer never quotes a plan checkout
+would refuse. Amount, currency, and recurring interval come from the chargeable price itself:
+
+```json
+{ "code": "productive-tenant", "planKey": "productive-monthly",
+  "amountMinor": 2900, "currency": "EUR", "interval": "month" }
+```
+
+`planKey` (added in ETP-5049) is the key a checkout for the quoted plan names. The response carries
+no provider price id (removed in ETP-5049; nothing read it). The endpoint returns
+`503 BILLING_OFFER_UNAVAILABLE` when nothing is for sale, when Stripe cannot be reached, or when the
+price is missing, inactive, or has an unsupported shape; it never shows an independent configured
+price as a fallback. Before ETP-5049 the offer always quoted `CheckoutConfiguration.priceId()`, so
+after the cutover it disagreed with the charged price (`open-and-notable-topics.md` §2.1).
+
+> **No frontend caller.** Since the ETP-5049 frontend slice the upgrade page quotes the plan catalog
+> (`GET /sws/go/plans`) only and no longer calls this endpoint (`getBillingOffer` was removed from
+> `lib/upgrade/api.js`). The endpoint is kept server-side for any other billing consumer; removing it
+> is a separate decision.
+
+**No browser-facing response carries a provider price id.** The `POST /sws/go/checkout/sessions`
+and `POST /sws/go/billing/purchases` answers (`requestId`, `checkoutUrl`, `mode`, plus the selection
+fields each endpoint adds) no longer carry the `priceId` they had until ETP-5049
+(`open-and-notable-topics.md` §4.8). The charged price id stays on the checkout request row.
+
+**The subscription page (`GET /sws/go/billing/subscription`).** Besides the live Stripe detail
+(`plan`, `amountMinor`, `currency`, `status`, `renewalAt`, `cancelAtPeriodEnd`), the stored grace
+state (`graceEndsAt`, `graceDaysRemaining`) and `clientId`, the answer carries the plan catalog view
+of the subscription (ETP-5049, additive):
+
+```json
+{
+  "hasSubscription": true,
+  "plan": "Etendo GO Productive", "amountMinor": 2900, "currency": "EUR", "status": "active",
+  "renewalAt": "2026-11-23T00:00:00Z", "cancelAtPeriodEnd": false,
+  "graceEndsAt": null, "graceDaysRemaining": 0, "clientId": "4B1E…",
+  "planKey": "productive-monthly",
+  "planName": "Productive",
+  "planQuotas": [
+    { "resourceKey": "POSTED_SALES_INVOICES", "resourceName": "POSTED_SALES_INVOICES",
+      "unitLabel": "Inv", "includedQty": 500, "enforcementMode": "warn", "warningThreshold": 80,
+      "period": "month" }
+  ]
+}
+```
+
+- **`planKey` / `planName`** come from the tenant's `ETGO_SUBSCRIPTION` row (open, else the latest
+  closed one — `SubscriptionService#findLatest`, the row the lifecycle reads) and its `ETGO_PLAN`.
+  `plan` stays the live Stripe product name. Both are JSON null when the tenant has no subscription
+  row — no environment yet, or a tenant still answered by the retired `ETGO_TenantPlan` preference —
+  never `"free"`, which would name a catalog row that does not exist.
+- **`planQuotas`** lists the plan's active `ETGO_PLAN_QUOTA` rows, ordered by resource key. It is
+  informational — what the plan includes, not what has been used. `resourceKey`, `resourceName` and
+  `unitLabel` come from `ETGO_BILLING_RESOURCE`; `includedQty`, `enforcementMode`
+  (`warn`/`block`/`off`) and `warningThreshold` (percent, may be null) from the quota row; `period`
+  is the plan's billing interval (`month`/`year`, null when the plan has none), which is the quota's
+  consumption window (`open-and-notable-topics.md` §5.5, §5.8). It is empty when there is no plan
+  **and** when the plan has no quota rows — with a `planKey`, empty means **unlimited** (§5.1).
+- **`graceEndsAt`** is computed by `EnvironmentAccessPolicy.graceEndsAt`: the stored renewal due
+  date plus `etendo.go.billing.grace.days`, for a `PAST_DUE` subscription only. The access policy
+  and the per-environment `graceEndsAt` of `GET /sws/go/environments` use the same method, so the
+  page, the banner and the lockout cannot drift apart.
 
 `POST /sws/go/billing/purchases` also checks the durable request table for an active purchase with
 the same account and environment name. A duplicate submission returns the existing purchase only
@@ -1277,6 +1343,12 @@ The `GET /sws/go/environments` response gained two additive fields:
   badges as *Demo* / *Productivo*. This field is the user-visible end of the whole chain: when
   ETP-4966 was reported as "I paid and it still says Demo", this is the value that was wrong.
 - **`accountEmail`** (top level) is the account identity described in §1.
+- **`graceEndsAt`** (per environment, with the other lifecycle fields — `subscriptionStatus`,
+  `renewalDueAt`, the trial fields — so absent when the tenant has no lifecycle metadata) is the
+  ISO instant a `PAST_DUE` subscription's payment grace ends, JSON null for any other status
+  (ETP-5049). It is `EnvironmentAccessPolicy.graceEndsAt`, the rule the access policy locks the
+  tenant out on and `GET /sws/go/billing/subscription` reports, so an in-app grace banner needs no
+  copy of `etendo.go.billing.grace.days`.
 - **`accessState`** (per environment, when the tenant has lifecycle metadata) is the
   `EnvironmentAccessPolicy.Decision` name. Since ETP-5047 it is the decision **actually enforced**
   (`EnvironmentAccessGuard.enforcedDecision`): with the kill switch on for that tenant a refusal
