@@ -105,9 +105,7 @@ public class BpLocationHandler implements NeoHandler {
     }
     String method = context.getHttpMethod();
     String recordId = context.getRecordId();
-    boolean isCreate = METHOD_POST.equals(method) && recordId == null;
-    boolean isUpdate = METHOD_PUT.equals(method) && recordId != null;
-    if (!isCreate && !isUpdate) {
+    if (!isCreateOrUpdate(method, recordId)) {
       return null;
     }
     JSONObject body = context.getRequestBody();
@@ -115,11 +113,29 @@ public class BpLocationHandler implements NeoHandler {
       return null;
     }
 
+    boolean isUpdate = METHOD_PUT.equals(method) && recordId != null;
     Location existing = isUpdate ? loadExisting(recordId) : null;
     if (isUpdate && existing == null) {
       return NeoResponse.error(404, "Location not found: " + recordId);
     }
 
+    return prepareStructuredAddress(body, existing);
+  }
+
+  private static boolean isCreateOrUpdate(String method, String recordId) {
+    boolean isCreate = METHOD_POST.equals(method) && recordId == null;
+    boolean isUpdate = METHOD_PUT.equals(method) && recordId != null;
+    return isCreate || isUpdate;
+  }
+
+  /**
+   * Resolves the effective structured-address fields (body value, or {@code existing}'s own value
+   * when the body omits the key), validates them, and — when valid — stashes the result on
+   * {@link #pendingStreetName} and its siblings for {@link #afterHandle} to persist.
+   *
+   * @return the error response when validation fails; {@code null} when the request may proceed
+   */
+  private NeoResponse prepareStructuredAddress(JSONObject body, Location existing) {
     String streetName = effective(body, FIELD_STREET_NAME,
         existing != null ? existing.getOBSEPAStreetName() : null);
     String buildingNumber = effective(body, FIELD_BUILDING_NUMBER,
@@ -131,17 +147,10 @@ public class BpLocationHandler implements NeoHandler {
     String countryId = effective(body, FIELD_COUNTRY,
         existing != null && existing.getCountry() != null ? existing.getCountry().getId() : null);
 
-    // ETP-5806 — same product decision as Contacts/Warehouse: Street, Number, City and Country
-    // are mandatory together in Etendo Go (stricter than Classic's optional SEPA fields).
-    List<String> missing = StructuredAddressComposer.missingMandatoryFields(
-        streetName, buildingNumber, cityName, countryId);
-    if (!missing.isEmpty()) {
-      return NeoResponse.error(400, "Missing required field(s): " + String.join(", ", missing));
-    }
-    List<String> tooLong = StructuredAddressComposer.fieldsExceedingMaxLength(
-        streetName, buildingNumber, buildingName);
-    if (!tooLong.isEmpty()) {
-      return NeoResponse.error(400, "Field(s) exceed maximum length: " + String.join(", ", tooLong));
+    NeoResponse validationError = validateStructuredAddress(
+        streetName, buildingNumber, buildingName, cityName, countryId);
+    if (validationError != null) {
+      return validationError;
     }
 
     ComposedAddress composed = StructuredAddressComposer.composeAddressLines(
@@ -156,6 +165,25 @@ public class BpLocationHandler implements NeoHandler {
     // Let generic CRUD continue to own id generation, client/org, active flag, country/region/
     // city/postal. Whatever raw addressLine1/addressLine2 the body also carries is harmless here:
     // afterHandle() below overwrites both with the composed value once the base record exists.
+    return null;
+  }
+
+  /**
+   * ETP-5806 — same product decision as Contacts/Warehouse: Street, Number, City and Country
+   * are mandatory together in Etendo Go (stricter than Classic's optional SEPA fields).
+   */
+  private static NeoResponse validateStructuredAddress(String streetName, String buildingNumber,
+      String buildingName, String cityName, String countryId) {
+    List<String> missing = StructuredAddressComposer.missingMandatoryFields(
+        streetName, buildingNumber, cityName, countryId);
+    if (!missing.isEmpty()) {
+      return NeoResponse.error(400, "Missing required field(s): " + String.join(", ", missing));
+    }
+    List<String> tooLong = StructuredAddressComposer.fieldsExceedingMaxLength(
+        streetName, buildingNumber, buildingName);
+    if (!tooLong.isEmpty()) {
+      return NeoResponse.error(400, "Field(s) exceed maximum length: " + String.join(", ", tooLong));
+    }
     return null;
   }
 
@@ -205,8 +233,8 @@ public class BpLocationHandler implements NeoHandler {
     if (dataArr.length() == 0) {
       return;
     }
-    JSONObject record = dataArr.getJSONObject(0);
-    String id = record.optString("id", null);
+    JSONObject recordJson = dataArr.getJSONObject(0);
+    String id = recordJson.optString("id", null);
     if (id == null) {
       return;
     }
@@ -226,11 +254,11 @@ public class BpLocationHandler implements NeoHandler {
     } finally {
       OBContext.restorePreviousMode();
     }
-    record.put(FIELD_STREET_NAME, orNull(pendingStreetName));
-    record.put(FIELD_BUILDING_NUMBER, orNull(pendingBuildingNumber));
-    record.put(FIELD_BUILDING_NAME, orNull(pendingBuildingName));
-    record.put(FIELD_ADDRESS_LINE_1, orNull(pendingAddress1));
-    record.put(FIELD_ADDRESS_LINE_2, orNull(pendingAddress2));
+    recordJson.put(FIELD_STREET_NAME, orNull(pendingStreetName));
+    recordJson.put(FIELD_BUILDING_NUMBER, orNull(pendingBuildingNumber));
+    recordJson.put(FIELD_BUILDING_NAME, orNull(pendingBuildingName));
+    recordJson.put(FIELD_ADDRESS_LINE_1, orNull(pendingAddress1));
+    recordJson.put(FIELD_ADDRESS_LINE_2, orNull(pendingAddress2));
   }
 
   /**
@@ -244,25 +272,29 @@ public class BpLocationHandler implements NeoHandler {
     OBContext.setAdminMode(true);
     try {
       for (int i = 0; i < dataArr.length(); i++) {
-        JSONObject record = dataArr.optJSONObject(i);
-        if (record == null) {
-          continue;
+        JSONObject recordJson = dataArr.optJSONObject(i);
+        if (recordJson != null) {
+          enrichRecord(recordJson);
         }
-        String id = record.optString("id", null);
-        if (id == null) {
-          continue;
-        }
-        Location geoLoc = OBDal.getInstance().get(Location.class, id);
-        if (geoLoc == null) {
-          continue;
-        }
-        record.put(FIELD_STREET_NAME, orNull(geoLoc.getOBSEPAStreetName()));
-        record.put(FIELD_BUILDING_NUMBER, orNull(geoLoc.getOBSEPABuildingNumber()));
-        record.put(FIELD_BUILDING_NAME, orNull(geoLoc.getOBSEPABuildingName()));
       }
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /** Enriches a single GET row with the 3 structured fields; a no-op when they cannot resolve. */
+  private void enrichRecord(JSONObject recordJson) throws Exception {
+    String id = recordJson.optString("id", null);
+    if (id == null) {
+      return;
+    }
+    Location geoLoc = OBDal.getInstance().get(Location.class, id);
+    if (geoLoc == null) {
+      return;
+    }
+    recordJson.put(FIELD_STREET_NAME, orNull(geoLoc.getOBSEPAStreetName()));
+    recordJson.put(FIELD_BUILDING_NUMBER, orNull(geoLoc.getOBSEPABuildingNumber()));
+    recordJson.put(FIELD_BUILDING_NAME, orNull(geoLoc.getOBSEPABuildingName()));
   }
 
   private Location loadExisting(String recordId) {

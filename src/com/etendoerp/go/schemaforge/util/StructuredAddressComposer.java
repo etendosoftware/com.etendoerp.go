@@ -118,6 +118,10 @@ public final class StructuredAddressComposer {
    * Country are mandatory in Etendo Go, stricter than Classic's optional SEPA fields) that are
    * missing from the given values.
    *
+   * @param streetName     Street Name ({@code EM_OBSEPA_StrtNm}), may be {@code null}/blank
+   * @param buildingNumber Building Number ({@code EM_OBSEPA_BldgNb}), may be {@code null}/blank
+   * @param cityName       City Name, may be {@code null}/blank
+   * @param countryId      Country id, may be {@code null}/blank
    * @return the missing field names (payload keys), in a stable order; empty when none are missing
    */
   public static List<String> missingMandatoryFields(String streetName, String buildingNumber,
@@ -143,6 +147,9 @@ public final class StructuredAddressComposer {
    * constants' doc comment above for why this check exists. A blank/{@code null} value is never
    * "too long" regardless of length (that is {@link #missingMandatoryFields}'s concern).
    *
+   * @param streetName     Street Name ({@code EM_OBSEPA_StrtNm}), may be {@code null}/blank
+   * @param buildingNumber Building Number ({@code EM_OBSEPA_BldgNb}), may be {@code null}/blank
+   * @param buildingName   Building Name ({@code EM_OBSEPA_BldgNm}), may be {@code null}/blank
    * @return the offending field names (payload keys), in a stable order; empty when none are too long
    */
   public static List<String> fieldsExceedingMaxLength(String streetName, String buildingNumber,

@@ -77,6 +77,7 @@ public class WarehouseLocationHandler implements NeoHandler {
   private static final String FIELD_STREET_NAME = "streetName";
   private static final String FIELD_BUILDING_NUMBER = "buildingNumber";
   private static final String FIELD_BUILDING_NAME = "buildingName";
+  private static final String FIELD_CITY_NAME = "cityName";
 
   @Override
   public NeoResponse handle(NeoContext ctx) {
@@ -150,12 +151,8 @@ public class WarehouseLocationHandler implements NeoHandler {
       if (geoLoc == null) {
         return NeoResponse.error(404, "Location not found: " + locId);
       }
-      // ETP-5806 — country falls back to the existing record's own country when the body omits
-      // it, matching applyGeoLocFields' set-if-provided semantics for that one field.
       String bodyCountryId = nullIfEmpty(body.optString(FIELD_COUNTRY, null));
-      String effectiveCountryId = bodyCountryId != null
-          ? bodyCountryId
-          : (geoLoc.getCountry() != null ? geoLoc.getCountry().getId() : null);
+      String effectiveCountryId = resolveEffectiveCountryId(bodyCountryId, geoLoc);
       NeoResponse rejected = rejectIncompleteAddressPayload(body, effectiveCountryId);
       if (rejected != null) {
         return rejected;
@@ -167,6 +164,16 @@ public class WarehouseLocationHandler implements NeoHandler {
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /**
+   * ETP-5806 — country falls back to the existing record's own country when the body omits it.
+   */
+  private static String resolveEffectiveCountryId(String bodyCountryId, Location geoLoc) {
+    if (bodyCountryId != null) {
+      return bodyCountryId;
+    }
+    return geoLoc.getCountry() != null ? geoLoc.getCountry().getId() : null;
   }
 
   // ------------------------------------------------------------------ get by id
@@ -196,7 +203,7 @@ public class WarehouseLocationHandler implements NeoHandler {
     List<String> missing = StructuredAddressComposer.missingMandatoryFields(
         nullIfEmpty(body.optString(FIELD_STREET_NAME, null)),
         nullIfEmpty(body.optString(FIELD_BUILDING_NUMBER, null)),
-        nullIfEmpty(body.optString("cityName", null)),
+        nullIfEmpty(body.optString(FIELD_CITY_NAME, null)),
         countryId);
     if (!missing.isEmpty()) {
       return NeoResponse.error(400, "Missing required field(s): " + String.join(", ", missing));
@@ -224,8 +231,8 @@ public class WarehouseLocationHandler implements NeoHandler {
     geoLoc.setOBSEPABuildingNumber(buildingNumber);
     geoLoc.setOBSEPABuildingName(buildingName);
 
-    // ETP-5806 — same compute-only-when-street-present rule as ContactsLocationAddressHandler;
-    // see the comment there for the Classic-parity rationale.
+    // ETP-5806 — same compute-only-when-street-present rule as ContactsLocationAddressHandler.
+    // See the comment there for the Classic-parity rationale.
     if (streetName != null) {
       ComposedAddress composed =
           StructuredAddressComposer.composeAddressLines(streetName, buildingNumber, buildingName);
@@ -235,7 +242,7 @@ public class WarehouseLocationHandler implements NeoHandler {
       geoLoc.setAddressLine1(nullIfEmpty(body.optString("addressLine1", null)));
       geoLoc.setAddressLine2(nullIfEmpty(body.optString("addressLine2", null)));
     }
-    geoLoc.setCityName(nullIfEmpty(body.optString("cityName", null)));
+    geoLoc.setCityName(nullIfEmpty(body.optString(FIELD_CITY_NAME, null)));
     geoLoc.setPostalCode(nullIfEmpty(body.optString("postalCode", null)));
 
     String countryId = nullIfEmpty(body.optString(FIELD_COUNTRY, null));
@@ -258,7 +265,7 @@ public class WarehouseLocationHandler implements NeoHandler {
     json.put("name", buildDisplayName(geoLoc));
     json.put("addressLine1", orNull(geoLoc.getAddressLine1()));
     json.put("addressLine2", orNull(geoLoc.getAddressLine2()));
-    json.put("cityName", orNull(geoLoc.getCityName()));
+    json.put(FIELD_CITY_NAME, orNull(geoLoc.getCityName()));
     json.put("postalCode", orNull(geoLoc.getPostalCode()));
     // ETP-5806 — structured SEPA address fields, so the modal can pre-populate them.
     json.put(FIELD_STREET_NAME, orNull(geoLoc.getOBSEPAStreetName()));

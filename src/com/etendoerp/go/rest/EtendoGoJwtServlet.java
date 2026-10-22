@@ -5589,8 +5589,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       data.countryCode = body.optString(FIELD_COUNTRY_CODE, "ES").trim();
       data.address = body.optString(FIELD_ADDRESS, "").trim();
       // ETP-5806 — structured address block. Street/Number/City are mandatory together, but ONLY
-      // when the user actually started filling the address in (the block itself stays fully
-      // optional on this minimalist step, same as the legacy `address` field it replaces);
+      // when the user actually started filling the address in. The block itself stays fully
+      // optional on this minimalist step, same as the legacy `address` field it replaces.
       // Country is deliberately not asked here — it is already guaranteed by `countryCode` above.
       data.streetName = body.optString(FIELD_STREET_NAME, "").trim();
       data.buildingNumber = body.optString(FIELD_BUILDING_NUMBER, "").trim();

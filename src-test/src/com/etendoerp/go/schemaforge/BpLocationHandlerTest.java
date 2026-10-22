@@ -307,11 +307,11 @@ class BpLocationHandlerTest {
       verify(saved).setAddressLine1("Gran Via, 45 - Torre A");
       verify(obDal).flush();
 
-      JSONObject record = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
-      assertEquals("Gran Via", record.getString("streetName"));
-      assertEquals("45", record.getString("buildingNumber"));
-      assertEquals("Torre A", record.getString("buildingName"));
-      assertEquals("Gran Via, 45 - Torre A", record.getString("addressLine1"));
+      JSONObject recordJson = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertEquals("Gran Via", recordJson.getString("streetName"));
+      assertEquals("45", recordJson.getString("buildingNumber"));
+      assertEquals("Torre A", recordJson.getString("buildingName"));
+      assertEquals("Gran Via, 45 - Torre A", recordJson.getString("addressLine1"));
     }
 
     @Test
@@ -356,10 +356,10 @@ class BpLocationHandlerTest {
       NeoResponse result = handler.afterHandle(ctx);
 
       assertNotNull(result);
-      JSONObject record = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
-      assertEquals("Gran Via", record.getString("streetName"));
-      assertEquals("45", record.getString("buildingNumber"));
-      assertEquals(JSONObject.NULL, record.get("buildingName"));
+      JSONObject recordJson = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertEquals("Gran Via", recordJson.getString("streetName"));
+      assertEquals("45", recordJson.getString("buildingNumber"));
+      assertEquals(JSONObject.NULL, recordJson.get("buildingName"));
     }
   }
 
@@ -377,10 +377,10 @@ class BpLocationHandlerTest {
   }
 
   private NeoResponse wrapRecord(String id) throws Exception {
-    JSONObject record = new JSONObject();
-    record.put("id", id);
+    JSONObject recordJson = new JSONObject();
+    recordJson.put("id", id);
     JSONArray dataArr = new JSONArray();
-    dataArr.put(record);
+    dataArr.put(recordJson);
     JSONObject responseData = new JSONObject();
     responseData.put("status", 0);
     responseData.put("data", dataArr);
