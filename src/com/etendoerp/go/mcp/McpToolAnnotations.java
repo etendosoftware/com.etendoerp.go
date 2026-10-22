@@ -82,7 +82,16 @@ final class McpToolAnnotations {
       McpConstants.TOOL_NEO_ACTION_BATCH,
       // ETP-5715: not additive — main:true replaces (deletes) the document's previous main file.
       McpConstants.TOOL_NEO_REQUEST_ATTACHMENT_UPLOAD,
+      // ETP-5715: delivers a real email and records it; sending twice is two emails (or a refusal).
+      McpConstants.TOOL_NEO_SEND_DOCUMENT_EMAIL,
       McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN);
+
+  /**
+   * Tools that reach parties outside the system (ETP-5715): the email send delivers a message to
+   * third parties, which clients use to decide how to ask for approval. The attachment tools hand
+   * links to the user and reach nobody else, so they stay closed-world.
+   */
+  static final Set<String> OPEN_WORLD = Set.of(McpConstants.TOOL_NEO_SEND_DOCUMENT_EMAIL);
 
   private McpToolAnnotations() {
   }
@@ -96,12 +105,12 @@ final class McpToolAnnotations {
    */
   static JSONObject of(String toolName) throws JSONException {
     if (isReadOnly(toolName)) {
-      return hints(true, false, true);
+      return hints(true, false, true, false);
     }
     if (ADDITIVE.contains(toolName)) {
-      return hints(false, false, false);
+      return hints(false, false, false, false);
     }
-    return hints(false, true, DELETE.contains(toolName));
+    return hints(false, true, DELETE.contains(toolName), OPEN_WORLD.contains(toolName));
   }
 
   static boolean isReadOnly(String toolName) {
@@ -109,13 +118,13 @@ final class McpToolAnnotations {
         || toolName.startsWith(McpConstants.GENERATE_PREFIX));
   }
 
-  private static JSONObject hints(boolean readOnly, boolean destructive, boolean idempotent)
-      throws JSONException {
+  private static JSONObject hints(boolean readOnly, boolean destructive, boolean idempotent,
+      boolean openWorld) throws JSONException {
     JSONObject annotations = new JSONObject();
     annotations.put("readOnlyHint", readOnly);
     annotations.put("destructiveHint", destructive);
     annotations.put("idempotentHint", idempotent);
-    annotations.put("openWorldHint", false);
+    annotations.put("openWorldHint", openWorld);
     return annotations;
   }
 }

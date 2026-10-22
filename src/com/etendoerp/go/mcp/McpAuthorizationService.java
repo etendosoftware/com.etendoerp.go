@@ -101,6 +101,8 @@ final class McpAuthorizationService {
       // ETP-5715: uploading and deleting a document's attachments change business data.
       case McpConstants.TOOL_NEO_REQUEST_ATTACHMENT_UPLOAD:
       case McpConstants.TOOL_NEO_DELETE_ATTACHMENT:
+      // ETP-5715: sending a document by email delivers a real message and is audited as a write.
+      case McpConstants.TOOL_NEO_SEND_DOCUMENT_EMAIL:
         return SCOPE_WRITE;
       default:
         return toolName.startsWith(McpConstants.GENERATE_PREFIX)

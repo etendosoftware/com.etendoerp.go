@@ -124,6 +124,23 @@ public class InitialEmailContractsTest {
     assertFalse(registry.find("support-custom-email").isPresent());
   }
 
+  @Test
+  public void registryListsEveryContractItsProvidersGive() {
+    DefaultEmailContractRegistry registry = DefaultEmailContractRegistry.create(
+        fixtureProviders());
+
+    List<String> names = new ArrayList<>();
+    for (EmailContract contract : registry.contracts()) {
+      names.add(contract.getName());
+    }
+
+    assertTrue(names.toString(), names.containsAll(Arrays.asList("reset-password",
+        "sales-invoice-send", "sales-order-send", "sales-quotation-send")));
+    assertEquals(names.size(), new java.util.HashSet<>(names).size());
+    assertTrue("an empty registry lists nothing", EmailContractRegistry.empty().contracts()
+        .isEmpty());
+  }
+
   // ── ETP-5069: the readable-history gate, contract by contract ───────────────
 
   @Test

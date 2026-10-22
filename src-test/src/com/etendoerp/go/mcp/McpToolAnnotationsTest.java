@@ -43,7 +43,7 @@ class McpToolAnnotationsTest {
       "etendo_batch", "etendo_action", "etendo_action_batch", "etendo_widget", "etendo_vector_search", "etendo_upload_image",
       "etendo_request_image_upload", "etendo_get_image_upload", "etendo_request_attachment_upload",
       "etendo_list_attachments", "etendo_delete_attachment", "etendo_get_document_pdf",
-      "etendo_generate_amortization_plan", "etendo_feedback", "docs");
+      "etendo_send_document_email", "etendo_generate_amortization_plan", "etendo_feedback", "docs");
 
   @Test
   void readOnlySetIsPinned() {
@@ -86,6 +86,9 @@ class McpToolAnnotationsTest {
     assertHints("etendo_list_attachments", true, false, true);
     // ETP-5715: the PDF of a document is a read of the stored file, never a render.
     assertHints("etendo_get_document_pdf", true, false, true);
+    // ETP-5715: sending an email is neither read-only nor idempotent: a second call is a second
+    // email (or a DUPLICATE refusal), and what was delivered cannot be taken back.
+    assertHints("etendo_send_document_email", false, true, false);
     assertHints("etendo_request_attachment_upload", false, true, false);
     assertHints("etendo_delete_attachment", false, true, true);
     assertHints("complete_order", false, true, false);
@@ -110,6 +113,9 @@ class McpToolAnnotationsTest {
     assertEquals(readOnly, hints.getBoolean("readOnlyHint"), tool);
     assertEquals(destructive, hints.getBoolean("destructiveHint"), tool);
     assertEquals(idempotent, hints.getBoolean("idempotentHint"), tool);
-    assertFalse(hints.getBoolean("openWorldHint"), tool);
+    // Only the tool that reaches third parties is open-world (ETP-5715): the attachment tools hand
+    // links to the user and reach nobody else.
+    assertEquals("etendo_send_document_email".equals(tool), hints.getBoolean("openWorldHint"),
+        tool);
   }
 }

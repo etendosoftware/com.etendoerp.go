@@ -659,6 +659,26 @@ class McpAttachmentToolsTest {
       assertTrue(none.isEmpty());
     }
 
+    @Test
+    @DisplayName("the email send joins the write scope only when some addressable spec has a send contract")
+    void emailSendIsOfferedOnlyWithAContract() {
+      List<McpToolDefinition> without = new java.util.ArrayList<>();
+      List<McpToolDefinition> with = new java.util.ArrayList<>();
+      try (MockedStatic<McpDocumentEmailContracts> contracts =
+          mockStatic(McpDocumentEmailContracts.class, org.mockito.Mockito.CALLS_REAL_METHODS)) {
+        contracts.when(() -> McpDocumentEmailContracts.supportedSpecs(any())).thenReturn(List.of());
+        McpAttachmentToolDefinitions.addTo(without, List.of(SPEC), false, true);
+        contracts.when(() -> McpDocumentEmailContracts.supportedSpecs(any()))
+            .thenReturn(List.of(SPEC));
+        McpAttachmentToolDefinitions.addTo(with, List.of(SPEC), false, true);
+      }
+
+      assertFalse(names(without).contains(McpConstants.TOOL_NEO_SEND_DOCUMENT_EMAIL));
+      assertEquals(List.of(McpConstants.TOOL_NEO_REQUEST_ATTACHMENT_UPLOAD,
+          McpConstants.TOOL_NEO_DELETE_ATTACHMENT, McpConstants.TOOL_NEO_SEND_DOCUMENT_EMAIL),
+          names(with));
+    }
+
     private List<String> names(List<McpToolDefinition> tools) {
       return tools.stream().map(McpToolDefinition::getName).collect(java.util.stream.Collectors.toList());
     }

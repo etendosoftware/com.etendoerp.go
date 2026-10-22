@@ -440,6 +440,8 @@ final class McpUsageTelemetry {
         return "attachment_delete";
       case McpConstants.TOOL_NEO_GET_DOCUMENT_PDF:
         return "document_pdf";
+      case McpConstants.TOOL_NEO_SEND_DOCUMENT_EMAIL:
+        return "document_email";
       case "etendo_schema":
         return "schema";
       case "etendo_defaults":

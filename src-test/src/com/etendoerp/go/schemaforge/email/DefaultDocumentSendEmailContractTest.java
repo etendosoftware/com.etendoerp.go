@@ -328,6 +328,69 @@ public class DefaultDocumentSendEmailContractTest {
     assertNull(contract("company-invitation").getSpecName());
   }
 
+  // ── ETP-5715: the prefill the send modal shows, composed by the server ──────
+
+  @Test
+  public void sendDefaultsAreTheSubjectAndMessageTheSendModalPrefills() {
+    EmailSendDefaults defaults = contract(CONTRACT_NAME).sendDefaults(RECORD_ID, "es_ES")
+        .orElseThrow(() -> new AssertionError("document not resolved"));
+
+    assertEquals("Documento #doc-1 — Cliente", defaults.getSubject());
+    assertEquals("Hola, **Cliente**:\n\nLe enviamos su Documento **doc-1**.",
+        defaults.getMessage());
+    assertEquals(RECIPIENT_EMAIL, defaults.getBaseRecipient());
+    assertEquals(10, defaults.getMaxRecipients());
+  }
+
+  @Test
+  public void sendDefaultsFollowTheRequestedLanguage() {
+    EmailSendDefaults defaults = contract(CONTRACT_NAME).sendDefaults(RECORD_ID, "en_US")
+        .orElseThrow(() -> new AssertionError("document not resolved"));
+
+    assertEquals("Hello **Cliente**,\n\nPlease find your Documento **doc-1** below.",
+        defaults.getMessage());
+  }
+
+  @Test
+  public void sendDefaultsWithoutRecipientNameDropTheGreetingAndTheSubjectSuffix() {
+    DefaultDocumentSendEmailContract anonymous = new DefaultDocumentSendEmailContract(
+        CONTRACT_NAME, "Documento", recordId -> Optional.of(new EmailDocumentRecord(null,
+            "not-an-address", RECORD_ID, DOCUMENT_NUMBER, null, DOWNLOAD_LINK, "client-1")));
+
+    EmailSendDefaults defaults = anonymous.sendDefaults(RECORD_ID, "es_ES").orElseThrow(
+        () -> new AssertionError("document not resolved"));
+
+    assertEquals("Documento #doc-1", defaults.getSubject());
+    assertEquals("Le enviamos su Documento **doc-1**.", defaults.getMessage());
+    assertNull("an invalid contact address is not a base recipient", defaults.getBaseRecipient());
+  }
+
+  @Test
+  public void sendDefaultsOfAnUnknownDocumentAreEmpty() {
+    DefaultDocumentSendEmailContract none = new DefaultDocumentSendEmailContract(CONTRACT_NAME,
+        "Documento", recordId -> Optional.empty());
+
+    assertFalse(none.sendDefaults("missing", "es_ES").isPresent());
+  }
+
+  @Test
+  public void sendingTheDefaultsAsEditsRendersTheEmailTheModalWouldSend() throws Exception {
+    EmailSendDefaults defaults = contract(CONTRACT_NAME).sendDefaults(RECORD_ID, "es_ES")
+        .orElseThrow(() -> new AssertionError("document not resolved"));
+    JSONObject commandBody = new JSONObject();
+    commandBody.put("recordId", RECORD_ID);
+    commandBody.put("messageEdits", new JSONObject().put("subject", defaults.getSubject())
+        .put("message", defaults.getMessage()));
+
+    EmailProviderRequest request = resolveRequest(commandBody);
+
+    assertEquals("Documento #doc-1 — Cliente", request.getData().getString("subject"));
+    String body = request.getData().getString("body");
+    assertTrue(body, body.contains("Hola, <strong>Cliente</strong>:<br><br>Le enviamos su "
+        + "Documento <strong>doc-1</strong>."));
+    assertTrue(body, body.contains(DOWNLOAD_LINK));
+  }
+
   private static DefaultDocumentSendEmailContract contract(String contractName) {
     return new DefaultDocumentSendEmailContract(contractName, "Documento",
         recordId -> Optional.of(new EmailDocumentRecord("Cliente", RECIPIENT_EMAIL, RECORD_ID,

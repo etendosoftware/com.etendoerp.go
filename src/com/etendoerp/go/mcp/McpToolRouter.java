@@ -271,6 +271,8 @@ public class McpToolRouter {
             return McpAttachmentTools.handle(toolName, arguments);
           case McpConstants.TOOL_NEO_GET_DOCUMENT_PDF:
             return McpDocumentPdfTool.handle(arguments);
+          case McpConstants.TOOL_NEO_SEND_DOCUMENT_EMAIL:
+            return McpDocumentEmailTool.handle(arguments);
           case "docs":
             return handleDocs(arguments);
           default:

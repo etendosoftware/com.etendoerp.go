@@ -17,7 +17,10 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
@@ -25,6 +28,7 @@ import static org.mockito.Mockito.when;
 
 import java.time.Instant;
 import java.util.Date;
+import java.util.List;
 
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.AfterEach;
@@ -34,9 +38,13 @@ import org.junit.jupiter.api.Test;
 import org.mockito.MockedStatic;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
+import org.openbravo.base.model.Property;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.datamodel.Column;
+import org.openbravo.model.ad.datamodel.Table;
+import org.openbravo.model.ad.domain.Reference;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
 
@@ -230,6 +238,111 @@ class NeoDocumentPdfTest {
       assertEquals(NeoDocumentPdf.Status.MISSING,
           NeoDocumentPdf.resolve(target, entityWith(null)).getStatus());
     }
+  }
+
+  /** A column with the given AD reference value (the list the status column points at). */
+  private static Column statusColumn(String dbName, String referenceValueId, boolean active) {
+    Column column = mock(Column.class);
+    when(column.getDBColumnName()).thenReturn(dbName);
+    when(column.isActive()).thenReturn(active);
+    Reference list = mock(Reference.class);
+    when(list.getId()).thenReturn(referenceValueId);
+    when(column.getReferenceSearchKey()).thenReturn(referenceValueId == null ? null : list);
+    return column;
+  }
+
+  /**
+   * Resolves a document with no main attachment whose table has the given columns; the record holds
+   * {@code value} under the DAL property named {@code propertyName}.
+   */
+  private static NeoDocumentPdf.Result resolveMissing(List<Column> columns, String propertyName,
+      Object value) {
+    NeoAttachmentTarget target = mock(NeoAttachmentTarget.class);
+    when(target.getTableName()).thenReturn("C_Order");
+    when(target.getTableId()).thenReturn("TABLE1");
+    when(target.getRecordId()).thenReturn(RECORD);
+    OBDal dal = mock(OBDal.class);
+    ModelProvider model = mock(ModelProvider.class);
+    Entity dalEntity = mock(Entity.class);
+    when(dalEntity.getName()).thenReturn("Order");
+    when(model.getEntityByTableId("TABLE1")).thenReturn(dalEntity);
+    Table table = mock(Table.class);
+    when(table.getADColumnList()).thenReturn(columns);
+    when(dal.get(Table.class, "TABLE1")).thenReturn(table);
+    Property property = mock(Property.class);
+    when(property.getName()).thenReturn(propertyName);
+    for (Column column : columns) {
+      when(dalEntity.getPropertyByColumnName(column.getDBColumnName())).thenReturn(property);
+    }
+    BaseOBObject row = mock(BaseOBObject.class);
+    when(row.get(propertyName)).thenReturn(value);
+    when(dal.get("Order", RECORD)).thenReturn(row);
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+        MockedStatic<ModelProvider> modelMock = mockStatic(ModelProvider.class);
+        MockedStatic<OBContext> contextMock = mockStatic(OBContext.class);
+        MockedStatic<NeoAttachmentsHelper> helperMock = mockStatic(NeoAttachmentsHelper.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      modelMock.when(ModelProvider::getInstance).thenReturn(model);
+      helperMock.when(() -> NeoAttachmentsHelper.handleGetMain("C_Order", RECORD))
+          .thenReturn(NeoResponse.ok(new JSONObject()));
+      NeoDocumentPdf.Result result = NeoDocumentPdf.resolve(target, entityWith(null));
+      contextMock.verify(() -> OBContext.setAdminMode(true), atLeastOnce());
+      contextMock.verify(OBContext::restorePreviousMode, atLeastOnce());
+      return result;
+    }
+  }
+
+  @Test
+  @DisplayName("a missing PDF carries the status of the column that uses the Document Status reference")
+  void missingPdfCarriesTheDocumentStatus() {
+    List<Column> columns = List.of(statusColumn("DocStatus", "131", true),
+        statusColumn("Name", null, true));
+
+    NeoDocumentPdf.Result draft = resolveMissing(columns, "documentStatus", "DR");
+    NeoDocumentPdf.Result booked = resolveMissing(columns, "documentStatus", "CO");
+
+    assertEquals(NeoDocumentPdf.Status.MISSING, draft.getStatus());
+    assertEquals("DR", draft.getDocumentStatus());
+    assertTrue(draft.isDraft());
+    assertEquals("CO", booked.getDocumentStatus());
+    assertFalse(booked.isDraft());
+  }
+
+  @Test
+  @DisplayName("the name of the status property is irrelevant: the reference identifies it")
+  void thePropertyNameIsIrrelevant() {
+    NeoDocumentPdf.Result result = resolveMissing(
+        List.of(statusColumn("Estado_Doc", "131", true)), "somethingElse", "DR");
+
+    assertTrue(result.isDraft());
+  }
+
+  @Test
+  @DisplayName("the Order Document Status list is a document status reference too")
+  void orderStatusListCounts() {
+    NeoDocumentPdf.Result result = resolveMissing(
+        List.of(statusColumn("DocStatus", "FF80818130217A350130218D802B0011", true)),
+        "documentStatus", "DR");
+
+    assertTrue(result.isDraft());
+  }
+
+  @Test
+  @DisplayName("no such column, two of them, an inactive one or a failing read leave the status unknown")
+  void ambiguousOrAbsentStatusIsUnknown() {
+    assertNull(resolveMissing(List.of(statusColumn("Name", null, true),
+        statusColumn("Other", "999", true)), "documentStatus", "DR").getDocumentStatus(),
+        "no column with the reference");
+    assertNull(resolveMissing(List.of(statusColumn("A", "131", true),
+        statusColumn("B", "131", true)), "documentStatus", "DR").getDocumentStatus(),
+        "two columns: ambiguous");
+    assertNull(resolveMissing(List.of(statusColumn("DocStatus", "131", false)),
+        "documentStatus", "DR").getDocumentStatus(), "an inactive column is ignored");
+    assertNull(resolveMissing(List.of(statusColumn("DocStatus", "131", true)),
+        "documentStatus", null).getDocumentStatus(), "no value");
+    Column failing = statusColumn("DocStatus", "131", true);
+    when(failing.getReferenceSearchKey()).thenThrow(new IllegalStateException("x"));
+    assertNull(resolveMissing(List.of(failing), "documentStatus", "DR").getDocumentStatus());
   }
 
   @Test

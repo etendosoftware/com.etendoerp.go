@@ -202,7 +202,7 @@ final class McpDocumentPdfTool {
     } catch (RuntimeException e) {
       // One document must never take the others' answers down with it. Only the exception class is
       // logged: its message may carry record data, and the agent gets a generic 500.
-      log.error("etendo_get_document_pdf failed for one document: {}", e.getClass().getName(), e);
+      log.error("etendo_get_document_pdf failed for one document: {}", e.getClass().getName());
       return error(McpConstants.STATUS_SERVER_ERROR, McpConstants.ERROR_SERVER,
           "The PDF of this document could not be looked up.",
           "Retry; if it persists, report it with etendo_feedback.");
@@ -211,9 +211,21 @@ final class McpDocumentPdfTool {
 
   private static JSONObject verdict(NeoAttachmentTarget target, NeoDocumentPdf.Result result)
       throws JSONException {
+    JSONObject problem = unavailable(result);
+    return problem != null ? problem : found(target, result.getFile());
+  }
+
+  /**
+   * The 409 (or 500) answer for a stored-file decision that is not {@code FOUND}.
+   *
+   * @param result the decision of {@link NeoDocumentPdf#resolve}
+   * @return the error envelope, or {@code null} when the PDF is there and current
+   * @throws JSONException when a body cannot be built
+   */
+  static JSONObject unavailable(NeoDocumentPdf.Result result) throws JSONException {
     switch (result.getStatus()) {
       case FOUND:
-        return found(target, result.getFile());
+        return null;
       case STALE:
         return error(McpConstants.STATUS_CONFLICT, McpConstants.ERROR_PDF_STALE,
             "The stored PDF of this document is out of date: the document, or the company data it "
@@ -223,11 +235,7 @@ final class McpDocumentPdfTool {
                 + "window whose preview stores nothing) so the PDF is regenerated, then ask again.");
       case MISSING:
         return error(McpConstants.STATUS_CONFLICT, McpConstants.ERROR_NO_PDF,
-            "This document has no PDF yet.",
-            "Open the document's preview in the application, or send the document by email, and ask "
-                + "again (a draft never stores a PDF: complete it first). Which of the two stores one "
-                + "depends on the window: a return receipt's preview stores nothing, only sending it "
-                + "does. This tool does not generate PDFs.");
+            "This document has no PDF yet.", missingHint(result));
       case NO_SUPPLIER_DOCUMENT:
         return error(McpConstants.STATUS_CONFLICT, McpConstants.ERROR_NO_PDF,
             "This document has no supplier document attached.",
@@ -239,6 +247,28 @@ final class McpDocumentPdfTool {
             StringUtils.defaultIfBlank(result.getMessage(), "The stored PDF could not be looked up."),
             "Retry; if it persists, report it with etendo_feedback.");
     }
+  }
+
+  /** What to do about a draft, for both PDF tools: only one thing is true of it. */
+  static final String DRAFT_HINT = "This document is a draft and a draft never stores a PDF: "
+      + "complete it first, then open its preview in the application and ask again.";
+
+  /**
+   * The advice for a document with no PDF, by what is known of its state: a draft gets only the
+   * draft sentence; a document of a known other status gets the preview advice; an unknown status
+   * (no {@code documentStatus} property) keeps the generic text, which is true either way.
+   */
+  private static String missingHint(NeoDocumentPdf.Result result) {
+    String documentStatus = result.getDocumentStatus();
+    if (result.isDraft()) {
+      return DRAFT_HINT;
+    }
+    String advice = "Open the document's preview in the application, or send the document by "
+        + "email, and ask again";
+    String tail = ". Which of the two stores one depends on the window: a return receipt's "
+        + "preview stores nothing, only sending it does. This tool does not generate PDFs.";
+    return documentStatus == null
+        ? advice + " (a draft never stores a PDF: complete it first)" + tail : advice + tail;
   }
 
   private static JSONObject found(NeoAttachmentTarget target, JSONObject stored)

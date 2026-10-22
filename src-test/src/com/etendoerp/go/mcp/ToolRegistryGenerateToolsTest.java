@@ -1054,6 +1054,32 @@ class ToolRegistryGenerateToolsTest {
           .orElseThrow().containsAll(List.of("spec", "id", "ids", "entity")));
     }
 
+    /** ETP-5715: the email send is a write, offered only for specs that have a send contract. */
+    @Test
+    @DisplayName("the email send follows the write scope and declares to, cc, subject, message, preview")
+    void sendDocumentEmailFollowsTheWriteScope() {
+      SFSpec salesOrder = createWindowSpec(SPEC_SALES_ORDER);
+      when(salesOrder.getADWindow()).thenReturn(null);
+      mockSpecCriteria(List.of(salesOrder));
+
+      try (MockedStatic<McpDocumentEmailContracts> contracts =
+          mockStatic(McpDocumentEmailContracts.class, org.mockito.Mockito.CALLS_REAL_METHODS)) {
+        contracts.when(() -> McpDocumentEmailContracts.supportedSpecs(any()))
+            .thenReturn(List.of(SPEC_SALES_ORDER));
+
+        List<String> writeOnly = toolNames(registry.generateTools(scopesOf("neo:write")));
+        List<String> readOnly = toolNames(registry.generateTools(scopesOf("neo:read")));
+
+        assertTrue(writeOnly.contains(McpConstants.TOOL_NEO_SEND_DOCUMENT_EMAIL),
+            writeOnly.toString());
+        assertFalse(readOnly.contains(McpConstants.TOOL_NEO_SEND_DOCUMENT_EMAIL),
+            readOnly.toString());
+      }
+      assertTrue(ToolRegistry.declaredArgumentNames(McpConstants.TOOL_NEO_SEND_DOCUMENT_EMAIL)
+          .orElseThrow().containsAll(List.of("spec", "id", "to", "cc", "subject", "message",
+              "preview")));
+    }
+
     /** ETP-5715: they take the spec from the `spec` argument, so the router authorizes that spec. */
     @Test
     @DisplayName("the attachment tools resolve their spec from the arguments, like the CRUD tools")
@@ -1062,7 +1088,7 @@ class ToolRegistryGenerateToolsTest {
       arguments.put("spec", SPEC_SALES_ORDER);
       for (String tool : List.of(McpConstants.TOOL_NEO_REQUEST_ATTACHMENT_UPLOAD,
           McpConstants.TOOL_NEO_LIST_ATTACHMENTS, McpConstants.TOOL_NEO_DELETE_ATTACHMENT,
-          McpConstants.TOOL_NEO_GET_DOCUMENT_PDF)) {
+          McpConstants.TOOL_NEO_GET_DOCUMENT_PDF, McpConstants.TOOL_NEO_SEND_DOCUMENT_EMAIL)) {
         assertTrue(ToolRegistry.isCrudTool(tool), tool);
         assertEquals(SPEC_SALES_ORDER, ToolRegistry.resolveSpecName(tool, arguments), tool);
         assertTrue(ToolRegistry.declaredArgumentNames(tool).orElseThrow().contains("spec"), tool);

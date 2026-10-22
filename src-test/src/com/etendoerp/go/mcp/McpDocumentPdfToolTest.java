@@ -414,6 +414,42 @@ class McpDocumentPdfToolTest {
     }
 
     @Test
+    @DisplayName("the no-PDF hint depends on the state: a draft, another status, unknown")
+    void noPdfHintDependsOnTheDocumentState() throws Exception {
+      document("D1", NeoDocumentPdf.Result.missing("DR"));
+      document("C1", NeoDocumentPdf.Result.missing("CO"));
+      document("U1", NeoDocumentPdf.Result.missing(false));
+
+      String draft = McpDocumentPdfTool.get(args("id", "D1")).getString("hint");
+      String completed = McpDocumentPdfTool.get(args("id", "C1")).getString("hint");
+      String unknown = McpDocumentPdfTool.get(args("id", "U1")).getString("hint");
+
+      assertEquals("This document is a draft and a draft never stores a PDF: complete it first, "
+          + "then open its preview in the application and ask again.", draft);
+      assertTrue(completed.startsWith("Open the document's preview in the application, or send "
+          + "the document by email, and ask again."), completed);
+      assertFalse(completed.contains("draft"), completed);
+      assertTrue(completed.contains("a return receipt's preview stores nothing"), completed);
+      assertTrue(unknown.contains("(a draft never stores a PDF: complete it first)"), unknown);
+    }
+
+    @Test
+    @DisplayName("an unexpected failure logs the exception class only, never its message or stack")
+    void aCrashLogsTheClassOnly() throws Exception {
+      NeoAttachmentTarget boom = document("BOOM", NeoDocumentPdf.Result.missing(false));
+      pdfMock.when(() -> NeoDocumentPdf.resolve(boom, header))
+          .thenThrow(new IllegalStateException("secret-address@leak.example"));
+
+      try (LogCapture log = new LogCapture(McpDocumentPdfTool.class)) {
+        McpDocumentPdfTool.get(args("id", "BOOM"));
+
+        assertFalse(log.events().isEmpty());
+        assertFalse(log.everything().contains("leak.example"), log.everything());
+        assertFalse(log.anyThrown(), "the throwable (message, stack) must not be logged");
+      }
+    }
+
+    @Test
     @DisplayName("every document is authorized on its own, for reading")
     void everyDocumentIsAuthorized() throws Exception {
       document("A", NeoDocumentPdf.Result.found(stored("F1", "A.pdf")));

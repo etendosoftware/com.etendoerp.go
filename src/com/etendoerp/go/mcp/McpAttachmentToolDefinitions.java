@@ -91,6 +91,15 @@ final class McpAttachmentToolDefinitions {
     if (canWrite) {
       tools.add(requestAttachmentUpload(specNames));
       tools.add(deleteAttachment(specNames));
+      addSendEmail(tools, specNames);
+    }
+  }
+
+  /** The email send, only when some addressable document has a send contract (ETP-5715). */
+  private static void addSendEmail(List<McpToolDefinition> tools, List<String> specNames) {
+    List<String> offered = McpDocumentEmailContracts.supportedSpecs(specNames);
+    if (!offered.isEmpty()) {
+      tools.add(McpDocumentEmailToolDefinition.definition(offered));
     }
   }
 

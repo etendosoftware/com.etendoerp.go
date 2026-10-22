@@ -73,6 +73,17 @@ class McpAuthorizationServiceVectorTest {
         McpConstants.TOOL_NEO_GET_DOCUMENT_PDF, Set.of("etendo:process")));
   }
 
+  /** ETP-5715: sending a document by email delivers a real message, so it needs the write scope. */
+  @Test
+  void sendDocumentEmailToolIsWriteTier() {
+    McpAuthorizationService.authorizeToolCall(McpConstants.TOOL_NEO_SEND_DOCUMENT_EMAIL,
+        Set.of("etendo:write"));
+    assertThrows(OBSecurityException.class, () -> McpAuthorizationService.authorizeToolCall(
+        McpConstants.TOOL_NEO_SEND_DOCUMENT_EMAIL, Set.of("etendo:read")));
+    assertThrows(OBSecurityException.class, () -> McpAuthorizationService.authorizeToolCall(
+        McpConstants.TOOL_NEO_SEND_DOCUMENT_EMAIL, Set.of("etendo:process")));
+  }
+
   /** ETP-5715: a read-only session may list a document's attachments; changing them needs write. */
   @Test
   void attachmentToolsAreSplitBetweenReadAndWrite() {

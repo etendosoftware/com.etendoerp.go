@@ -87,6 +87,8 @@ final class McpConstants {
   static final String TOOL_NEO_DELETE_ATTACHMENT = "etendo_delete_attachment";
   /** Tool name of the read-only fetch of the PDF the application stored for a document (ETP-5715). */
   static final String TOOL_NEO_GET_DOCUMENT_PDF = "etendo_get_document_pdf";
+  /** Tool name of the document email send, the application's "Enviar" (ETP-5715). */
+  static final String TOOL_NEO_SEND_DOCUMENT_EMAIL = "etendo_send_document_email";
   /** Error code: the document has no stored PDF yet (409, ETP-5715). */
   static final String ERROR_NO_PDF = "no_pdf";
   /** Error code: the stored PDF predates the document's last change and is not current (409, ETP-5715). */

@@ -902,6 +902,29 @@ class McpToolRouterRouteTest {
     }
 
     @Test
+    @DisplayName("etendo_send_document_email refuses a wrong-case or unknown key before any send")
+    void sendDocumentEmailRejectsUnknownKeysBeforeSending() throws Exception {
+      stubCatalog();
+      try (MockedStatic<McpDocumentEmailTool> handler = mockStatic(McpDocumentEmailTool.class)) {
+        for (String key : List.of("Preview", "recipient", "bcc")) {
+          JSONObject args = new JSONObject();
+          args.put("spec", SPEC_NAME);
+          args.put("id", "REC1");
+          args.put("to", new org.codehaus.jettison.json.JSONArray(List.of("a@b.example")));
+          args.put(key, true);
+
+          JSONObject result = router.route(McpConstants.TOOL_NEO_SEND_DOCUMENT_EMAIL, args,
+              WRITE_SCOPES);
+
+          assertTrue(result.getBoolean("isError"), result.toString());
+          assertEquals("unknown_argument", bodyOf(result).getString("error"), key);
+          assertEquals(key, bodyOf(result).getString("field"));
+        }
+        handler.verify(() -> McpDocumentEmailTool.handle(any()), org.mockito.Mockito.never());
+      }
+    }
+
+    @Test
     @DisplayName("ETP-5669: etendo_action refuses a top-level docAction and points at 'parameters'")
     void actionRejectsTopLevelDocAction() throws Exception {
       stubCatalog();
@@ -3578,6 +3601,23 @@ class McpToolRouterRouteTest {
       }
       supportMock.verify(() -> McpToolRouterSupport.hasSpecAccess(any(), anyString(), eq("GET")),
           org.mockito.Mockito.times(3));
+    }
+
+    @Test
+    @DisplayName("the email send is dispatched to its handler on a write scope, after the spec check")
+    void sendDocumentEmailIsDispatchedAfterTheChecks() throws Exception {
+      setupSpecLookup(mockSpec());
+      JSONObject sentinel = McpToolRouter.wrapAsTextContent("emailed");
+      try (MockedStatic<McpDocumentEmailTool> handler = mockStatic(McpDocumentEmailTool.class)) {
+        handler.when(() -> McpDocumentEmailTool.handle(any())).thenReturn(sentinel);
+
+        assertEquals(sentinel, router.route(McpConstants.TOOL_NEO_SEND_DOCUMENT_EMAIL,
+            attachmentArgs(), WRITE_SCOPES));
+
+        handler.verify(() -> McpDocumentEmailTool.handle(any()));
+        authMock.verify(() -> McpAuthorizationService
+            .authorizeToolCall(eq(McpConstants.TOOL_NEO_SEND_DOCUMENT_EMAIL), any()));
+      }
     }
 
     @Test

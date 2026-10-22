@@ -21,6 +21,7 @@ import java.time.Instant;
 import java.time.format.DateTimeParseException;
 import java.time.temporal.ChronoUnit;
 import java.util.Date;
+import java.util.Set;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -28,9 +29,13 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
+import org.openbravo.base.model.Property;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.datamodel.Column;
+import org.openbravo.model.ad.datamodel.Table;
+import org.openbravo.model.ad.domain.Reference;
 import org.openbravo.model.ad.utility.Image;
 
 import com.etendoerp.go.common.CompanyLogoResolver;
@@ -63,6 +68,15 @@ public final class NeoDocumentPdf {
   private static final Logger log = LogManager.getLogger(NeoDocumentPdf.class);
 
   private static final String KEY_ID = "id";
+  /** The AD_Ref_List value {@code DR} (Draft) of the document status lists. */
+  public static final String DRAFT_STATUS = "DR";
+  /**
+   * AD_Reference ids of the document status lists: {@code 131} (All_Document Status: invoices,
+   * receipts and shipments, journals...) and the Order_Document Status list the order windows use
+   * ({@code FF80818130217A350130218D802B0011}). Both carry {@code DR} as their draft value.
+   */
+  static final Set<String> DOCUMENT_STATUS_REFERENCES =
+      Set.of("131", "FF80818130217A350130218D802B0011");
 
   /** What the stored file is worth as the document's PDF. */
   public enum Status {
@@ -83,31 +97,43 @@ public final class NeoDocumentPdf {
     private final Status status;
     private final JSONObject file;
     private final String message;
+    private final String documentStatus;
 
-    private Result(Status status, JSONObject file, String message) {
+    private Result(Status status, JSONObject file, String message, String documentStatus) {
       this.status = status;
       this.file = file;
       this.message = message;
+      this.documentStatus = documentStatus;
     }
 
     /** A servable PDF; {@code file} is the attachment metadata the attachments endpoint gives. */
     public static Result found(JSONObject file) {
-      return new Result(Status.FOUND, file, null);
+      return new Result(Status.FOUND, file, null, null);
     }
 
     /** A stored PDF that is out of date; {@code file} is kept so the caller can name it. */
     public static Result stale(JSONObject file) {
-      return new Result(Status.STALE, file, null);
+      return new Result(Status.STALE, file, null, null);
     }
 
     /** No stored PDF; {@code supplier} when the entity's PDF is the user's own document. */
     public static Result missing(boolean supplier) {
-      return new Result(supplier ? Status.NO_SUPPLIER_DOCUMENT : Status.MISSING, null, null);
+      return new Result(supplier ? Status.NO_SUPPLIER_DOCUMENT : Status.MISSING, null, null, null);
+    }
+
+    /**
+     * No stored PDF, with the document's status when it could be read.
+     *
+     * @param documentStatus the record's {@code documentStatus}, or {@code null} when the entity
+     *        has none or it could not be read
+     */
+    public static Result missing(String documentStatus) {
+      return new Result(Status.MISSING, null, null, documentStatus);
     }
 
     /** The lookup failed with this message. */
     public static Result failed(String message) {
-      return new Result(Status.FAILED, null, message);
+      return new Result(Status.FAILED, null, message, null);
     }
 
     /** Returns the status. */
@@ -118,6 +144,19 @@ public final class NeoDocumentPdf {
     /** Returns the attachment metadata (id, name, size, dataType, updatedAt, ...), or null. */
     public JSONObject getFile() {
       return file;
+    }
+
+    /**
+     * Returns the document's status for a {@code MISSING} result (e.g. {@code DR}), or null when
+     * unknown: a caller words the "no PDF" advice differently for a draft, which never has one.
+     */
+    public String getDocumentStatus() {
+      return documentStatus;
+    }
+
+    /** Whether the document is a draft: its status is the draft value of the status list. */
+    public boolean isDraft() {
+      return DRAFT_STATUS.equals(documentStatus);
     }
 
     /** Returns the failure message, or null. */
@@ -149,7 +188,9 @@ public final class NeoDocumentPdf {
     Source source = NeoPdfSourceConfig.sourceOf(entity);
     if (main == null || StringUtils.isBlank(main.optString(KEY_ID, null))
         || source == Source.SUPPLIER) {
-      return decide(main, source, null, null);
+      Result decided = decide(main, source, null, null);
+      return decided.getStatus() == Status.MISSING ? Result.missing(documentStatus(target))
+          : decided;
     }
     return decide(main, source, recordUpdated(target), brandingUpdated());
   }
@@ -207,6 +248,55 @@ public final class NeoDocumentPdf {
   private static boolean isOlder(Instant writtenAt, Date reference) {
     return reference != null
         && writtenAt.isBefore(reference.toInstant().truncatedTo(ChronoUnit.SECONDS));
+  }
+
+  /**
+   * The record's document status, or null when the entity has no single status column or it cannot
+   * be read. Read only to word the advice for a missing PDF.
+   *
+   * <p>Structural: the status column is the one whose AD column points at a document status list
+   * ({@link #DOCUMENT_STATUS_REFERENCES}), whatever the column or the DAL property is called; none or
+   * more than one is unknown, never a guess.</p>
+   */
+  private static String documentStatus(NeoAttachmentTarget target) {
+    try {
+      OBContext.setAdminMode(true);
+      try {
+        Table table = OBDal.getInstance().get(Table.class, target.getTableId());
+        Column statusColumn = table == null ? null : singleStatusColumn(table);
+        Entity dalEntity = statusColumn == null ? null
+            : ModelProvider.getInstance().getEntityByTableId(target.getTableId());
+        if (dalEntity == null) {
+          return null;
+        }
+        Property property = dalEntity.getPropertyByColumnName(statusColumn.getDBColumnName());
+        Object row = OBDal.getInstance().get(dalEntity.getName(), target.getRecordId());
+        Object value = row instanceof BaseOBObject && property != null
+            ? ((BaseOBObject) row).get(property.getName()) : null;
+        return value == null ? null : String.valueOf(value);
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (RuntimeException e) {
+      log.debug("Document status unavailable for the PDF advice: {}", e.getClass().getName());
+      return null;
+    }
+  }
+
+  /** The table's only active column that uses a document status list, or null. */
+  private static Column singleStatusColumn(Table table) {
+    Column found = null;
+    for (Column column : table.getADColumnList()) {
+      Reference list = Boolean.TRUE.equals(column.isActive())
+          ? column.getReferenceSearchKey() : null;
+      if (list != null && DOCUMENT_STATUS_REFERENCES.contains(list.getId())) {
+        if (found != null) {
+          return null;
+        }
+        found = column;
+      }
+    }
+    return found;
   }
 
   /** The record's {@code updated}, or null when it cannot be read. */

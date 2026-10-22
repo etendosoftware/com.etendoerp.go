@@ -3805,6 +3805,9 @@ not: `etendo_create` does not run it in shared code, so it is in the table below
 | the uploaded document of a purchase invoice or goods receipt as its "PDF" (ETP-5715) | those windows pass no `recordUpdated`: their main attachment is the counterparty's own file, never judged stale | declared per entity: `MCP_CONFIG.pdf.source:"supplier"` returns the main file as is, never stale, and answers `409 no_pdf` "This document has no supplier document attached." when there is none (§4.12.38) | the main-attachment flag marks both kinds of file; the SPA tells them apart by window (a frontend decision), so the backend must be told. **Rule: a window whose preview shows an uploaded document instead of a rendered one MUST declare `pdf.source:"supplier"`**; `McpConfigSourcedataTest.supplierPdfEntitiesAreDeclared` is the drift guard |
 | a legacy customer file as the PDF of a return material receipt (ETP-5715) | since ETP-5124 the preview renders fresh and never reads the stored file, so a customer file marked main by the retired ETP-4408 upload is invisible there | the window is `rendered`: its main file is returned as "the PDF" when newer than the record, `pdf_stale` when older | the main-attachment flag cannot tell a legacy upload from an emailed copy; declared so it is not mistaken for a bug. The fix is a data check that no such files remain (D18), not code |
 | attachment download (ETP-5715) | `GET /sws/neo/attachments/file/{id}` with a bearer token, no parent check | a signed link (`/sws/neo/document-download/{token}`, the email link's token plus an attachment-id claim), valid **10 minutes**, bound to the record, the client and the attachment | the agent never receives bytes; the email links (7 days, main attachment only) are unchanged |
+| sending a document by email (ETP-5715) | `POST /sws/neo/email-contracts/{window}-send` from the send modal, which first renders the document in the browser and stores that PDF as the record's main attachment, then posts the command | `etendo_send_document_email` posts **the same command** to the **same `TransactionalEmailService`** (same contract checks, throttles, idempotency, suppression, audit rows) but **cannot render**: it refuses with `409 no_pdf` / `pdf_stale` (the `etendo_get_document_pdf` answers) before sending when the record has no current stored PDF (§4.12.39) | the email's "Descargar documento" link serves the record's main attachment when clicked; the server does NOT check it exists (the application guarantees it by caching first), so a send without a PDF would deliver a link that answers 404. The MCP has no render, so the gate is the only safe equivalent |
+| a `DUPLICATE` email (ETP-5715) | the modal shows the duplicate as a **success** toast ("<document> ya fue enviado") and closes | reported as an **error envelope**, `409 email_duplicate`, `sent:false`, "Not sent: an identical email was already sent at <time>" (`previousSentAt`, new additive field of the `DUPLICATE` answer) | nothing is delivered on a duplicate; an agent that read it as success would tell the user a mail is on its way. Every non-`SENT` status (`DUPLICATE`, `THROTTLED`, `SUPPRESSED`, `NO_RECIPIENT`, `PROVIDER_FAILED`, `VALIDATION_FAILED`, `UNAUTHORIZED`) is `sent:false` with the server's status in `emailStatus` |
+| email subject, recipients and message from an agent (ETP-5715) | an operator types them; the server repairs a subject's CR/LF silently and validates an address with a permissive regex | **refused, never repaired**: CR/LF/control characters in an address or the subject, a malformed address (`a..b`, leading/trailing dot, `-` labels, more than 254 characters), more than the contract's recipient cap (10) between `to` and `cc`, a subject over 200 or a message over 5000 characters; no rejected value is echoed back | an agent's text is not an operator's keystrokes; the refusal happens before anything reaches the send path, which re-validates as before (§4.12.39) |
 
 This is a **declared** list, not an unknown one: the point is that the next person to touch either
 path can see what is deliberately unequal. Closing a row means adding the step to
@@ -10588,3 +10591,105 @@ unchanged data is served. A document that was changed by raw SQL does not move `
 **Tests:** `NeoDocumentPdfTest` (the decision and its inputs), `NeoPdfSourceConfigTest` (the section), `McpDocumentPdfToolTest` (answers, errors, bulk, definition), `McpEntityConfigTest` and `McpConfigSourcedataTest` (registration, validation, the declared set), plus the wiring in
 `McpToolRouterRouteTest`, `ToolRegistryGenerateToolsTest`, `McpToolAnnotationsTest`, `McpToolTitlesTest`, `McpAuthorizationServiceVectorTest`,
 `McpUsageTenantQaTest`, `McpAttachmentToolsTest`.
+
+#### 4.12.39 Sending a document by email: `etendo_send_document_email` (ETP-5715)
+
+One write-scope MCP tool, piece B2 of ETP-5715 stage 2: "send purchase order X to the supplier". It behaves **exactly like the SPA's "Enviar"**
+because it goes through the **same server path**, never a parallel one. Reuses piece A (§4.12.37, `NeoAttachmentTarget`) and piece B1
+(§4.12.38, `NeoDocumentPdf`). OCR is out of scope.
+
+**What the SPA does (measured, `tools/app-shell`: `SendDocumentModal`, `documentEmailSend.js`, `recipientEdits.js`).**
+`POST /sws/neo/email-contracts/{window}-send` with `{version:"v1", recordId, intent:"send-document", language, messageEdits:{subject, message}}`,
+plus `recipientEdits:{to:{add,remove}, cc:{add}}` **only when the operator changed the lists** (an untouched send carries the client
+`idempotencyKey` instead, which the server ignores and replaces with its own). `messageEdits` **always travels**, edited or not
+(ETP-5003): what is on screen is what is sent. The prefilled **To** is the business partner's contact (`etgoEmail`); the prefilled **subject** and
+**message** are composed client-side with the same copy as the module's message catalog (`document.subject.withRecipient`, `document.greeting`,
+`document.body`; the drift guard is `defaultCopyInSync.test.js`): `Pedido de Compra #1000008 — Proveedor Mayorista` and
+`Hola, **Proveedor Mayorista**:` + blank line + `Le enviamos su Pedido de Compra **1000008**.` Before posting it renders the document in the
+browser and stores the PDF as the record's main attachment (`cacheDocumentPreviewFile`). The result is shown by status: `SENT` and `DUPLICATE`
+as a success toast (the duplicate says "ya fue enviado"), `THROTTLED` with the retry seconds, the rest as errors.
+
+**What the server does** (`TransactionalEmailService`, unchanged): forbidden provider fields, contract lookup, `authorize` (write tier on the
+document's window, `canWriteSpec`; the document must resolve), recipient resolution (`recipientEdits` over the contact; `to` required; at most
+**10** recipients between `to` and `cc`), `messageEdits` validation (subject ≤ 200 with CR/LF stripped, message ≤ 5000, escaped, `**bold**`
+rendered, newlines to `<br>`), suppression list, kill switch, idempotency (`{contract}:{tenant}:{record}:send:v1:{recipientSetHash}[:{contentHash}]`,
+answered `DUPLICATE` when an identical email was already `SENT`), the throttles per hour (**tenant 100, user 50, record 3, recipient 20, domain 200**;
+each configurable), the provider call and the audit rows (`ETGO_EMAIL_SAFETY`, and the readable `etgo_email_send_log`). **The send does not
+require or check the main attachment**: the email carries a signed link (`DocumentDownloadTokenService.createDownloadLink`) that serves the record's
+main attachment **when the recipient clicks it**; with none, the click answers `404 Document file not found`.
+
+**Which documents.** Derived, no list in shared code: `McpDocumentEmailContracts` reads the registered contracts
+(`EmailContractRegistry#contracts()`, new, default empty) and keeps the document-send ones (`DefaultDocumentSendEmailContract`), whose
+`getSpecName()` is the spec. Registered today: `sales-invoice`, `sales-order`, `sales-quotation`, `purchase-order`, `return-to-vendor`,
+`goods-shipment`, `return-material-receipt`, `return-to-vendor-shipment`. `return-to-vendor` is registered but **not offered** (its spec has `showInMcp=N`, so it cannot be addressed), and the "documents that can be sent" hint leaves it out. **A purchase invoice is not offered**: it has no contract, and the SPA
+declares `sendDocument.allowEmail:false` for it (`goods-receipt` and `goods-movements`: `enabled:false`). The tool's `spec` enum is that list
+intersected with the specs the caller can address, and the tool is not published at all when the intersection is empty.
+
+**Tool.** `etendo_send_document_email({spec, id, to[], cc[]?, subject?, message?, preview?, entity?})`, scope `etendo:write`,
+annotations modifying/non-idempotent (`McpToolAnnotations.MODIFYING`), titles en/es, telemetry verb `document_email`. Everything runs in new
+small classes (`McpDocumentEmailTool`, `McpDocumentEmailRequest`, `McpDocumentEmailCommand`, `McpDocumentEmailOutcome`,
+`McpDocumentEmailContracts`, `McpDocumentEmailToolDefinition`); `McpToolRouter` and `ToolRegistry` gained only case labels.
+
+- **Defaults.** If `subject` / `message` are omitted the tool sends the prefill; if given, theirs. The prefill comes from the contract itself
+  (`DefaultDocumentSendEmailContract#sendDefaults`, new: it composes subject and message from the same catalog entries the modal mirrors, plus the
+  contact address and the recipient cap), so there is no third copy of the sentence. The language is `es_ES` unless the caller passes `language` (see below).
+- **`preview` fails closed.** Absent means send, so a present `preview` must be exactly a JSON boolean; "yes", `1`, `"true"`, `null`, an object are `422 validation_error` with `sent:false`, nothing sent (`JSONObject#optBoolean` would have read them as `false` and sent a real email).
+- **Preview.** `preview:true` runs the same authorization and returns `{preview, defaults:{to, subject, message}, language, limits, pdf:{ready, file|error},
+  readyToSend}` and sends nothing. Chosen over a read-only companion tool because the send is the only caller that needs it (one more tool is one more
+  name for the agent to confuse, and the preview needs the same document, tier and PDF checks), at the cost that a read-only session cannot
+  preview — which cannot send either. The description tells the agent to preview first and send only after the user agrees.
+- **Recipients.** `to` is required (free addresses, several); `cc` is optional. They are turned into `recipientEdits` exactly as `buildRecipientEdits`
+  does: the contact is *removed* when the caller does not list it, so the final `to` is what the caller asked for. An address in both lists stays in
+  `to`, as in the modal.
+- **Argument validation (refusals, `422 validation_error`, `sent:false`, nothing echoed).** Address: 254 characters, no control character or
+  line break (checked **before** trimming, so a trailing NUL or newline cannot be trimmed into validity), the server's own pattern
+  (`EmailContractCommandSupport#isValidEmail`) plus no `..`, no leading/trailing dot in the local part (≤ 64), no `-`-edged domain label. Subject:
+  one line, no control characters or NEL/U+2028/U+2029, ≤ 200. Message: plain text, control characters other than CR/LF/TAB refused, ≤ 5000;
+  **it is never HTML**: it is passed to the contract's `messageEdits`, which escapes it and renders `**bold**`, so `<script>` arrives inert.
+  Total recipients ≤ the contract cap (read from `sendDefaults`, 10 today).
+- **Authorization.** The router's scope and per-spec access, then `NeoAttachmentTarget.resolve(..., write=true)`: write tier on the window, the record
+  must exist and belong to a client and readable organization (the same `404 not_found` for missing and foreign, `403 forbidden` for a role without write,
+  `405` for a window with no Attachments tab), then the contract's own `authorize` inside the send path. A document the contract cannot resolve
+  (e.g. a sales order id passed as `purchase-order`) is the same `404`.
+- **The PDF gate wording.** The 409 status and codes are `etendo_get_document_pdf`'s; the hint is the email tool's own ("open the document's preview in the application so its PDF is stored (or refreshed), then ask to send again"), because that tool's "or send it by email" is circular here. The closing sentence (a window whose preview stores nothing, a return receipt, needs its first send done from the application) is generic and true for every window: no declared property tells the backend which windows those are, and a spec literal is not allowed in shared code.
+- **The no-PDF hint depends on the document's state** (both PDF tools; `NeoDocumentPdf.Result#getDocumentStatus` / `isDraft`, read only for a MISSING PDF, after the document's authorization, in admin mode with the previous mode restored). The status is read **structurally**: the entity's status property is the one whose AD column uses a *document status* list as its reference value (`AD_Reference` `131` All_Document Status — invoices, receipts, shipments — and `FF80818130217A350130218D802B0011` Order_Document Status — the order windows; the order windows use their own list, so `131` alone would have left them without the draft advice). The column and the DAL property may be called anything. Draft is `DR`, the `AD_Ref_List` value of both lists. No column, more than one, an inactive one, no value or any failure leaves the status unknown and the hint generic. A draft gets only "This document is a draft and a draft never stores a PDF: complete it first, then open its preview in the application and ask again."; a document with another status gets the preview advice without the draft remark; unknown keeps the generic text.
+- **Explicit `null` arguments.** An explicit `null` for `subject`, `message` or `language` is `422`, like `preview` (omit the argument instead); `to`/`cc` `null` is still read as omitted.
+- **The PDF gate.** After authorization and before sending, `NeoDocumentPdf` decides: found and current continues; missing is `409 no_pdf`, stale is
+  `409 pdf_stale`, with the answers and hints `etendo_get_document_pdf` gives (open the document's preview in the application, or send it from there),
+  plus `sent:false`. A return material receipt's preview stores nothing (D18), so it can only be sent from the application first.
+- **Outcomes.** Only `SENT` is `{sent:true, status:"SENT", spec, id, to, cc, detail, hint}`. Everything else is an error envelope with `sent:false` and
+  `emailStatus`: `DUPLICATE` `409 email_duplicate` ("Not sent: an identical email was already sent at <ISO time>", `previousSentAt`);
+  `THROTTLED` `429 email_throttled` (`retryAfterSeconds`, `throttleScope`); `SUPPRESSED` `403 email_suppressed`; `NO_RECIPIENT` `422 email_no_recipient`;
+  `UNAUTHORIZED` `403 forbidden`; `VALIDATION_FAILED` the server's status (`404 not_found` or `validation_error`, with `reasonCode` when it has one);
+  `PROVIDER_FAILED` `502 email_provider_failed`; an unreadable answer or an exception `500 server_error` with `sent:false` and the hint to check the
+  document's email history before retrying (the provider call is the last step, so the outcome after an exception is unknown, never "not sent").
+  The exception class is logged, never its message or any address (S5145).
+- **`previousSentAt`** is a new additive field of the `DUPLICATE` answer of `TransactionalEmailService` (the audit row's creation time, ISO-8601).
+  The send modal reads `status` only.
+
+**Declared differences** are in §4.12.9: the PDF gate (the SPA renders and caches first), `DUPLICATE` as an error (the SPA toasts a success) and the
+refusal of what the server would repair.
+
+- **Annotations.** `openWorldHint:true` (destructive true, idempotent false) for this tool only: it emails third parties. The attachment tools reach nobody else and stay closed-world.
+- **Logging.** An unexpected failure logs the exception class only, no throwable (its message or stack could carry an address); the PDF tool does the same.
+- **Registry.** Built once per call path (`McpDocumentEmailContracts#registry()`, passed on), never cached across requests (CDI beans, hot reload); an empty `supportedSpecs` builds none; an empty registry is logged once at warn level and the tool fails closed.
+- **Subject and message** also refuse C1 controls and bidi embedding/override/isolate characters. The preview omits the optional extra paragraph some contracts add (`resolveAdditionalParagraphHtml`, the portal link on sales invoices): it is protected and needs the send command.
+- **Language (measured).** The modal posts `language` = its UI locale, which lives only in the browser (`localStorage` key `schema-forge-locale`, default `es_ES`, `useLocaleState`; locales shipped: `es_ES`, `en_US`, `es_AR`). The user's AD language and the business partner's are never consulted, and the contract uses only `command.language` (the module's catalog exists in `es_ES` and `en_US`; anything else falls back to Spanish). The MCP therefore defaults to **`es_ES`**, the modal's default, and accepts an optional `language` in those three values (`422` otherwise); the preview shows the language it will use. (Before this change the tool used the AD language, so an `en_US` user got English copy the SPA would not have sent.)
+- **Duplicate addresses.** The server dedupes across channels (`to` wins over `cc`) and the modal does the same silently; the MCP keeps that and reports every dropped address (repeated in a list, or a cc already in `to`) as `removedDuplicates`, with a sentence in the hint.
+
+**Known risk, possible follow-up (not in this piece).** Recipients are free, as in the SPA, so an agent could be steered into mailing a document to an address the user never named; the preview-first instruction is a prompt, not a control. Recipient restrictions or an explicit confirmation step are a product decision, deferred for parity with the SPA.
+
+**Not covered.** The language of the copy is the user's, not the recipient's (the SPA uses the operator's locale too). `window.sendDocument`
+overrides (`editableRecipients:false`, a different `maxRecipients`) are frontend decisions the backend never sees: the contract's cap (10) applies.
+Sending a document the SPA's preview would show differently (a stale-but-newer PDF) is the same as `etendo_get_document_pdf` (§4.12.38).
+
+**Agent prompt (proposed, not applied).** *"To send a document by email use etendo_send_document_email. First call it with preview:true and show the
+user the recipient, subject, message and whether the PDF is ready; send only when they agree. Never invent addresses: use the ones the user gives, or the
+contact the preview shows. If it answers 409 no_pdf or pdf_stale, ask the user to open the document in the application (its preview creates the PDF) and try
+again; do not retry blindly. Only an answer with sent:true was sent: a DUPLICATE, THROTTLED or any other answer means the email did NOT go out, and
+you must say so. Purchase invoices cannot be emailed."*
+
+**Tests:** `McpDocumentEmailToolTest` (send with defaults and with edits, every refusal, every non-`SENT` outcome, preview, the derived list, the definition),
+`DefaultDocumentSendEmailContractTest` (`sendDefaults`, and that the defaults sent as edits render the modal's email), `TransactionalEmailServiceTest`
+(`previousSentAt`), `InitialEmailContractsTest` (`contracts()`), `McpToolRouterRouteTest`, `ToolRegistryGenerateToolsTest`, `McpToolAnnotationsTest`,
+`McpToolTitlesTest`, `McpAuthorizationServiceVectorTest`, `McpUsageTenantQaTest`, `McpAttachmentToolsTest`.
