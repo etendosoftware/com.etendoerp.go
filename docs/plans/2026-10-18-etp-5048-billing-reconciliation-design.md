@@ -184,9 +184,12 @@ checkout and subscription rows, and its audit rows are ordinary billing events.
       `checkout.session.async_payment_succeeded`) are swept only when phases A and B completed;
       subscription events (`invoice.paid`, `invoice.payment_failed`,
       `customer.subscription.updated`, `.deleted`, `.paused`, `.resumed`) only when phase D
-      completed. A stuck `customer.subscription.resumed` is superseded like the others once its
-      subscription was re-read: that re-read ends the pause episode the event would have ended
-      (Martin, 2026-10-22; it used to stay `RECEIVED` for ever). A phase is
+      completed. A stuck `customer.subscription.resumed` is decided by whether the re-read ended
+      the pause episode it would have ended (Martin, 2026-10-22; it used to stay `RECEIVED` for
+      ever): re-read and no longer `paused` (`active`, `past_due`, …), the re-read ended the
+      episode and the event is superseded; re-read and `paused` again (paused, resumed with the
+      webhook stuck, paused again), the episode stays open and the event is parked for review;
+      not re-read, it is parked as any other. A phase is
       incomplete when it threw, recorded an error, met a failed provider read, a stopped list
       sweep, capped direct reads, or a tripped breaker. Alert-only types
       (`charge.dispute.created`) are never swept. The type lists are `StripeEventTypes`, shared

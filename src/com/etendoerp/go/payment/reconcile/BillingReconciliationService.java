@@ -126,9 +126,10 @@ public class BillingReconciliationService {
       ReconciliationAudit.eventId(KIND_STALE_EVENT_REVIEW) + ":";
   /** At most this many pages of stuck events per run, so events left for later cannot loop. */
   private static final int STALE_EVENT_PAGES = 10;
+  private static final String STATUS_SUBSCRIPTION_PAUSED = "paused";
   /** The provider statuses phase 4 applies or alerts on; the rest it leaves to the webhook. */
   private static final List<String> STATUSES_PHASE_4_APPLIES = List.of("active", "trialing",
-      "canceled", "incomplete_expired", "paused");
+      "canceled", "incomplete_expired", STATUS_SUBSCRIPTION_PAUSED);
   private static final long MILLIS_PER_MINUTE = 60_000L;
   /**
    * How long a request whose item failed (a provider read, an exception) is left out of the
@@ -780,14 +781,27 @@ public class BillingReconciliationService {
    * status is one phase 4 applies (or alerts on); it is parked when the status is one phase 4
    * leaves to the webhook ({@code past_due}, {@code unpaid}, {@code incomplete}), or when the
    * subscription was not read at all (no locally active row names it).
+   *
+   * <p>A stuck {@code customer.subscription.resumed} only ends a pause episode, so it is decided
+   * by whether this run's re-read ended it: a re-read that found the subscription no longer
+   * {@code paused} (whatever else it is) ended the episode, and the event is superseded; one that
+   * found it paused again (paused, resumed with the webhook stuck, paused again) left the episode
+   * open, and the event is parked for a person rather than marked as re-read.
    */
   private static StaleVerdict subscriptionEventVerdict(BillingEventStore.StaleEvent event,
       ReconciliationResult result) {
     String subscriptionId = subscriptionIdOf(event);
     String status = subscriptionId == null ? null
         : result.rereadSubscriptionStatus(subscriptionId);
-    return status != null && STATUSES_PHASE_4_APPLIES.contains(status)
-        ? StaleVerdict.SUPERSEDE : StaleVerdict.REVIEW;
+    if (status == null) {
+      return StaleVerdict.REVIEW;
+    }
+    if (StripeEventTypes.SUBSCRIPTION_RESUMED.equals(event.eventType())) {
+      return STATUS_SUBSCRIPTION_PAUSED.equals(status) ? StaleVerdict.REVIEW
+          : StaleVerdict.SUPERSEDE;
+    }
+    return STATUSES_PHASE_4_APPLIES.contains(status) ? StaleVerdict.SUPERSEDE
+        : StaleVerdict.REVIEW;
   }
 
   private static String subscriptionIdOf(BillingEventStore.StaleEvent event) {

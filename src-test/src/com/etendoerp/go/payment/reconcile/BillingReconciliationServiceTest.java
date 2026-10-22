@@ -1127,6 +1127,40 @@ public class BillingReconciliationServiceTest {
     assertEquals(2, result.get(Counter.STALE_EVENTS_PARKED));
   }
 
+  /**
+   * A stuck resumed event only ends a pause episode, so it is superseded only when the re-read
+   * ended it: no longer paused, whatever else it is. Paused again means the episode is still open,
+   * so it is parked; not re-read, it is never superseded.
+   */
+  @Test
+  public void aStuckResumedEventIsSupersededOnlyWhenTheReReadEndedThePause() {
+    staleEvents.add(new BillingEventStore.StaleEvent("evt_res_paused",
+        "customer.subscription.resumed", null, "{\"id\":\"sub_paused\"}"));
+    staleEvents.add(new BillingEventStore.StaleEvent("evt_res_unread",
+        "customer.subscription.resumed", null, "{\"id\":\"sub_unread\"}"));
+    staleEvents.add(new BillingEventStore.StaleEvent("evt_res_due",
+        "customer.subscription.resumed", null, "{\"id\":\"sub_due\"}"));
+    doAnswer(call -> {
+      ReconciliationResult running = call.getArgument(0, ReconciliationResult.class);
+      running.noteSubscriptionReread("sub_paused", "paused");
+      running.noteSubscriptionReread("sub_due", "past_due");
+      return null;
+    }).when(subscriptions).run(any(), any());
+
+    ReconciliationResult result = run(false);
+
+    verify(eventStore, never()).markIgnored(eq("evt_res_paused"), anyString());
+    verify(eventStore).recordReconciliation(eq("reconcile:stale-event-review:evt_res_paused"),
+        eq("reconciliation.stale-event-review"), any(), eq(BillingEventStore.RESULT_FAILED),
+        any(), any());
+    verify(eventStore, never()).markIgnored(eq("evt_res_unread"), anyString());
+    // past_due is left to the webhook for the other types, but it is no pause: the re-read ended
+    // the episode, so parking it would only raise a noise alert.
+    verify(eventStore).markIgnored(eq("evt_res_due"), anyString());
+    assertEquals(1, result.get(Counter.STALE_EVENTS_SWEPT));
+    assertEquals(2, result.get(Counter.STALE_EVENTS_PARKED));
+  }
+
   /** W2: a phase-1 provider error means payments were not all re-read; none is superseded. */
   @Test
   public void aPaymentEventIsNotSupersededWhenCheckoutRecoveryCouldNotReadTheProvider()
