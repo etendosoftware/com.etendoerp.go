@@ -5596,32 +5596,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       data.buildingNumber = body.optString(FIELD_BUILDING_NUMBER, "").trim();
       data.buildingName = body.optString(FIELD_BUILDING_NAME, "").trim();
       data.city = body.optString(FIELD_CITY_NAME, "").trim();
-      boolean addressBlockStarted = StringUtils.isNotBlank(data.streetName)
-          || StringUtils.isNotBlank(data.buildingNumber)
-          || StringUtils.isNotBlank(data.buildingName)
-          || StringUtils.isNotBlank(data.city);
-      if (addressBlockStarted) {
-        List<String> missing = new ArrayList<>();
-        if (StringUtils.isBlank(data.streetName)) {
-          missing.add(FIELD_STREET_NAME);
-        }
-        if (StringUtils.isBlank(data.buildingNumber)) {
-          missing.add(FIELD_BUILDING_NUMBER);
-        }
-        if (StringUtils.isBlank(data.city)) {
-          missing.add(FIELD_CITY_NAME);
-        }
-        if (!missing.isEmpty()) {
-          writeError(response, HttpServletResponse.SC_BAD_REQUEST,
-              "Missing required field(s): " + String.join(", ", missing));
-          return null;
-        }
+      if (!validateStructuredAddressBlock(data, response)) {
+        return null;
       }
-      List<String> tooLong = StructuredAddressComposer.fieldsExceedingMaxLength(data.streetName,
-          data.buildingNumber, data.buildingName);
-      if (!tooLong.isEmpty()) {
-        writeError(response, HttpServletResponse.SC_BAD_REQUEST,
-            "Field(s) exceed maximum length: " + String.join(", ", tooLong));
+      if (!validateStructuredAddressLength(data, response)) {
         return null;
       }
       // Full name of the person onboarding. Optional in the payload; it becomes the display
@@ -5663,6 +5641,59 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST, message);
       return null;
     }
+  }
+
+  /**
+   * ETP-5806 — Street/Number/City are mandatory together, but ONLY once the user actually
+   * started filling the structured address block in (building name does not gate this, since
+   * it is optional even once the block is started). Extracted out of
+   * {@link #parseOnboardingRequest} to keep its cognitive complexity in check.
+   *
+   * @return {@code true} to continue; {@code false} once an error response has been written
+   */
+  private boolean validateStructuredAddressBlock(OnboardingRequestData data,
+      HttpServletResponse response) throws IOException {
+    boolean addressBlockStarted = StringUtils.isNotBlank(data.streetName)
+        || StringUtils.isNotBlank(data.buildingNumber)
+        || StringUtils.isNotBlank(data.buildingName)
+        || StringUtils.isNotBlank(data.city);
+    if (!addressBlockStarted) {
+      return true;
+    }
+    List<String> missing = new ArrayList<>();
+    if (StringUtils.isBlank(data.streetName)) {
+      missing.add(FIELD_STREET_NAME);
+    }
+    if (StringUtils.isBlank(data.buildingNumber)) {
+      missing.add(FIELD_BUILDING_NUMBER);
+    }
+    if (StringUtils.isBlank(data.city)) {
+      missing.add(FIELD_CITY_NAME);
+    }
+    if (missing.isEmpty()) {
+      return true;
+    }
+    writeError(response, HttpServletResponse.SC_BAD_REQUEST,
+        "Missing required field(s): " + String.join(", ", missing));
+    return false;
+  }
+
+  /**
+   * ETP-5806 — enforces the structured address block's max column lengths. Extracted out of
+   * {@link #parseOnboardingRequest} to keep its cognitive complexity in check.
+   *
+   * @return {@code true} to continue; {@code false} once an error response has been written
+   */
+  private boolean validateStructuredAddressLength(OnboardingRequestData data,
+      HttpServletResponse response) throws IOException {
+    List<String> tooLong = StructuredAddressComposer.fieldsExceedingMaxLength(data.streetName,
+        data.buildingNumber, data.buildingName);
+    if (tooLong.isEmpty()) {
+      return true;
+    }
+    writeError(response, HttpServletResponse.SC_BAD_REQUEST,
+        "Field(s) exceed maximum length: " + String.join(", ", tooLong));
+    return false;
   }
 
   /**
