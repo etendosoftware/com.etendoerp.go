@@ -21,6 +21,8 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 
 import java.util.Arrays;
 import java.util.Collections;
@@ -28,6 +30,7 @@ import java.util.List;
 
 import org.junit.Test;
 import org.mockito.MockedStatic;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
 
 /**
@@ -262,5 +265,20 @@ public class NeoMessageTranslatorTest {
   public void translateDbMessagePassesBlankThrough() {
     assertNull(NeoMessageTranslator.translateDbMessage(null));
     assertEquals(" ", NeoMessageTranslator.translateDbMessage(" "));
+  }
+
+  /**
+   * {@code setAdminMode} pushes its stack entry before it can fail, so a lookup whose
+   * {@code setAdminMode} throws must still pop it: the entry would otherwise leak onto the thread.
+   */
+  @Test
+  public void messageTextsPopsTheAdminModeEntryWhenSettingItFails() {
+    try (MockedStatic<OBContext> context = mockStatic(OBContext.class)) {
+      context.when(() -> OBContext.setAdminMode(true)).thenThrow(new IllegalStateException("no DAL"));
+
+      assertTrue(NeoMessageTranslator.messageTexts("ZzNoSuchMessageKey").isEmpty());
+
+      context.verify(OBContext::restorePreviousMode, times(1));
+    }
   }
 }
