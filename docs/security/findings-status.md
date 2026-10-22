@@ -78,7 +78,7 @@ Collected with read-only requests on 2026-07-30.
 | HSTS `includeSubDomains; preload` is already live without a repository inventory or rollback record | ETP-4574 owner |
 | The attachment matrix is automated only to the depth mocks allow; per-scenario role/org separation (S2–S5), S8 and the client-supplied-parent cases (S7) need seeded `OBBaseTest` fixtures, and the black-box confirmation needs provisioned low-privilege accounts | ETP-4570 owner plus staging administrator |
 | Serialized telemetry envelopes were not captured with authenticated staging traffic | ETP-4577/4578 owner plus Security/Privacy |
-| Blanket admin mode may expose built-in operations beyond attachments | Follow-up security audit required |
+| Blanket admin mode may expose built-in operations beyond attachments. Confirmed 2026-10-22 on the generic CRUD write path (cross-tenant DELETE), see threat model TM-05 | ETP-5880 (generic CRUD record guard); handler sweeps ETP-5793 (done), ETP-5794 |
 
 ## ADR review outcome
 

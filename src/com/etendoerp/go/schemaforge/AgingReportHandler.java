@@ -394,8 +394,10 @@ public class AgingReportHandler implements NeoHandler {
       BucketConfig buckets  = resolveBuckets(body);
       String bPartnerId     = buildBpInClause(body.optString(PARAM_BP_ID, ""));
       String orgId          = resolveOrgId(body);
+      // ETP-5793: the aging SQL filters by organization only, never by client, so another tenant's
+      // org must answer exactly like an unknown one.
       if (orgId == null || orgId.isEmpty()
-          || OBDal.getInstance().get(Organization.class, orgId) == null) {
+          || TenantOwnership.loadOwned(Organization.class, orgId) == null) {
         return buildActionableError(400, "organization_not_resolved",
             "Could not resolve organization context for the aging report.",
             "Pass a valid orgId (a C_Organization id readable by your role), or omit it to use "
@@ -501,7 +503,7 @@ public class AgingReportHandler implements NeoHandler {
       OBContext.setAdminMode(true);
       AcctSchema schema = accSchemaId.isEmpty()
           ? resolveAcctSchemaForOrg(orgId)
-          : OBDal.getInstance().get(AcctSchema.class, accSchemaId);
+          : TenantOwnership.loadOwned(AcctSchema.class, accSchemaId);
       if (schema != null) {
         accSchemaId = schema.getId();
         currency = schema.getCurrency();
@@ -538,7 +540,7 @@ public class AgingReportHandler implements NeoHandler {
    * @return the resolved schema, or {@code null} when neither path found one
    */
   private AcctSchema resolveAcctSchemaForOrg(String orgId) {
-    Organization org = OBDal.getInstance().get(Organization.class, orgId);
+    Organization org = TenantOwnership.loadOwned(Organization.class, orgId);
     AcctSchema ledger = org != null ? org.getGeneralLedger() : null;
     if (ledger != null && ledger.getCurrency() != null) {
       return ledger;

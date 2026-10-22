@@ -25,6 +25,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Consumer;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -222,7 +223,32 @@ final class EtendoGoJwtDalHelper {
   }
 
   static Account createAccount(String email, String passwordHash, String name, String sessionToken) {
+    return createAccount(email, passwordHash, name, sessionToken, null);
+  }
+
+  /**
+   * Same as {@link #createAccount(String, String, String, String)}, also storing the onboarding
+   * draft in the same commit (ETP-5847: the signup API carries the company data the app's wizard
+   * would otherwise ask for).
+   */
+  static Account createAccount(String email, String passwordHash, String name, String sessionToken,
+      String onboardingDraft) {
+    return createAccount(email, passwordHash, name, sessionToken, onboardingDraft, null);
+  }
+
+  /**
+   * Same, letting the caller set further properties before the one commit, so an account is
+   * never visible half-built.
+   *
+   * @param extraProperties applied to the new account before it is saved; may be {@code null}
+   */
+  static Account createAccount(String email, String passwordHash, String name, String sessionToken,
+      String onboardingDraft, Consumer<Account> extraProperties) {
     Account account = OBProvider.getInstance().get(Account.class);
+    account.setOnboardingDraft(onboardingDraft);
+    if (extraProperties != null) {
+      extraProperties.accept(account);
+    }
     account.setClient(OBDal.getInstance().get(Client.class, ZERO_ID));
     account.setOrganization(OBDal.getInstance().get(Organization.class, ZERO_ID));
     account.setEmail(email);

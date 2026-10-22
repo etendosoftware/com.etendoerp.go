@@ -17,15 +17,26 @@
 
 package com.etendoerp.go.schemaforge.handlers;
 
+import com.etendoerp.go.schemaforge.GeneralLedgerBalancingRule;
+import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoExtension;
+import com.etendoerp.go.schemaforge.NeoResponse;
 
 /**
  * ETP-5693: customization of the {@code Cuentas generales} entity in the General Ledger Configuration window — accounting
  * combinations must be posting accounts of the row's ledger, and that ledger cannot change on
- * update. See {@link AbstractAccountingSchemaAutoFillHandler}.
+ * update. See {@link AbstractAccountingSchemaAutoFillHandler}. ETP-5724: a balancing switch that is
+ * on requires its account ({@link GeneralLedgerBalancingRule}).
  */
+// The entity is decisions.json -> entities.generalAccounts.name: renaming it there silently unbinds this.
 @NeoExtension(spec = "general-ledger-configuration", entity = "Cuentas generales")
 public class GeneralLedgerAccountsHandler extends AbstractAccountingSchemaAutoFillHandler {
+
+  @Override
+  public NeoResponse handle(NeoContext context) {
+    NeoResponse refusal = super.handle(context);
+    return refusal != null ? refusal : GeneralLedgerBalancingRule.checkUpdate(context);
+  }
 
   @Override
   protected String describeContext() {

@@ -33,6 +33,14 @@
         <default/>
         <onCreateDefault/>
       </column>
+      <index name="EM_ETGO_BP_CREDITUSED" unique="false">
+        <index-column name="SO_CREDITUSED"/>
+        <index-column name="C_BPARTNER_ID"/>
+      </index>
+      <index name="EM_ETGO_BP_CREDITLIMIT" unique="false">
+        <index-column name="SO_CREDITLIMIT"/>
+        <index-column name="C_BPARTNER_ID"/>
+      </index>
       <check name="EM_ETGO_ISPERSON_CHK"><![CDATA[EM_ETGO_ISPERSON IN ('Y', 'N')]]></check>
     </table>
   </database>
