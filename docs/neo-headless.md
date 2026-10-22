@@ -6550,7 +6550,9 @@ The same change scopes three other request ids:
 
 The generic CRUD path still checks no record ownership before an entity's pre-hook runs. Only the
 ACTION path does (`NeoActionRecordGuard`, ETP-5558). A pre-hook that loads its record by the URL id
-must therefore use `loadOwned` itself.
+must therefore use `loadOwned` itself. The same gap also affects the default CRUD write itself: a
+foreign-id DELETE was confirmed live, and a PATCH answers 409 for a foreign id vs 500 for an unknown
+one. Tracked as ETP-5880.
 
 Both honour the account's `ShowValueCond` (ETP-5662), like Classic's `AccountTree`: a SUMMARY
 account with `P` (Positive ONLY) shows its balance only when strictly positive, `N` only when
