@@ -135,20 +135,6 @@ public final class NeoReadPredicates {
   }
 
   /**
-   * Appends the REST read predicate, parenthesised, to a predicate list that will be joined with
-   * {@code and} (the REST {@code ?_distinct=} value fetch). A blank predicate adds nothing.
-   *
-   * @param predicates the predicate list being built
-   * @param context    the REST read context
-   */
-  static void addRestTo(List<String> predicates, NeoContext context) {
-    String readPredicate = resolve(context, NeoExtensionChannel.REST_SINGLE);
-    if (StringUtils.isNotBlank(readPredicate)) {
-      predicates.add("(" + readPredicate + ")");
-    }
-  }
-
-  /**
    * ANDs a parenthesised {@code predicate} onto {@code where} in place; a blank predicate is a
    * no-op. Unlike {@link #and}, the clause built so far is not re-parenthesised.
    *

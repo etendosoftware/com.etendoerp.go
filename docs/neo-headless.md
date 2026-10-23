@@ -5802,7 +5802,7 @@ Each string is a complete HQL boolean expression over the alias `e`. `NeoReadPre
 | Read | Applied | Where |
 |---|---|---|
 | REST list `GET /sws/neo/{spec}/{entity}` (and its `totalRows`, paging, `export=csv\|xlsx`) | yes | `NeoCrudHandler#buildDalParams` → `applyWhereClause`, after the tab where and the parent filter |
-| REST `GET …?_distinct=<field>` (the filter-value picker) | yes | `NeoCrudHandler#handleDistinctFetch` |
+| REST `GET …?_distinct=<field>` (the filter-value picker) | yes | `NeoCrudHandler#handleDistinctFetch` → `buildDistinctFilterParams` (re-applied even when the request carries `id`) |
 | MCP `etendo_list` | yes | `McpToolRouter#handleList`, after the filters and the tab where |
 | Read by id (REST `GET …/{id}`, REST `GET …?id=<id>`, MCP `etendo_get`) | **no** | core's `DefaultJsonDataService.fetch` resolves an id with its own `id = :bobId` query and ignores the where clause |
 | A read the handler serves itself from `handle()` | no | the handler owns that query |
@@ -5888,6 +5888,12 @@ A list response carries one page, so a total drawn next to it covers the loaded 
 
 - **Handover.** `NeoCrudHandler.handleDefault`, on a list GET (no record id), calls `NeoListAggregateQuery.remember(context, params)` with the params the list query was built from (sort and `_targetRecordId` removed). It is skipped for `_distinct` (FK dropdown) and `_summary` (grid summary) requests, so those pay nothing and `of(context)` is `null`. The customization's `afterHandle` gets it back with `NeoListAggregateQuery.of(context)` and calls `groupBy(select, groupBy)`. The state lives in a `NeoContext` attribute, so it never leaves the request.
 - **Same filters as the grid.** The query service is built by core's own `createSetQueryService` (criteria, tab where clause, `readPredicates`, org filter), and the `OBQuery` carries the same readable org/client/active flags as `DataEntityQueryService.count()`. The row alias is `e`.
+- **`_distinct` value fetch (ETP-5561).** `GET …?_distinct=<field>` (REST single) runs `NeoListAggregateQuery#distinctValues` over the same filtered set as the list: tab where, parent filter, `readPredicates` AND the grid `criteria` (date range, subset tab, advanced and column filters). A filter dropdown therefore offers only values present in the current view; the caller omits the filtered field's own condition so its alternatives stay listed. Parameters:
+  - `_distinct=<property>`: scalar or to-one property; FKs project through `.id` and return `{id, _identifier}`.
+  - `_distinctSearch=<text>`: case-insensitive contains match on the value (or on the FK target's identifier), ANDed with the filters.
+  - `_startRow/_endRow`: page window, capped at 200 values per page; one extra row is read to compute `hasMore`.
+  - `criteria`: same format as the list; passes through `isCriteriaWithinLimits`. An old client that sends none gets the unfiltered values as before.
+  - `_distinct`, `_distinctSearch`, `_sortBy`, `_orderBy` and `id` are stripped before core builds the query (`_distinct` would flip core into FK sub-entity mode, sort adds joins, `id` makes core read one record). Because `id` turns the request into a read by id for `NeoReadPredicates.forRestListGet`, `buildDistinctFilterParams` resolves the `REST_SINGLE` read predicate explicitly in that case: sending `&id=` never widens the values offered. Results are ordered ascending and exclude null values.
 - **Channels.** REST single and REST batch only. MCP lists never go through `handleDefault`, so `of(context)` is `null` there and their responses do not grow.
 - **Constants only.** `select` and `groupBy` are concatenated into the HQL: pass server-side constants, never request-derived text. Query timeout uses the `grid` profile.
 - The helper names no entity; each customization owns its own select (payments: `PaymentListSummary`).
@@ -8710,8 +8716,9 @@ does. Entities exposed to MCP whose tab clause carries a parent placeholder (`wa
 entities, the `sii-monitor` entities) resolve it from the parent, which for `sii-monitor`'s
 `@AD_Org_ID@` means the parent's organization, as REST always did.
 
-Not covered: `NeoCrudHandler.addTabWherePredicate` (the `_distinct` read) still carries its own copy
-of the same rule.
+Since ETP-5561 the `_distinct` read no longer carries its own copy of the rule: it builds its filtered
+set through `NeoCrudHandler#buildDalParams`, i.e. through `NeoParentTabFilterResolver` like the list
+(`addTabWherePredicate` was removed).
 
 #### 4.12.20 Commercial line prices and amounts match the form (ETP-5528)
 
