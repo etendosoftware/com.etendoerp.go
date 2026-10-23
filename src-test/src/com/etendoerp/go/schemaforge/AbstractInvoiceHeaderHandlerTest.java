@@ -3570,6 +3570,69 @@ public class AbstractInvoiceHeaderHandlerTest {
     }
   }
 
+  /**
+   * ETP-5710 repro: MCP etendo_create runs the mandatory pre-check before the pre-hook, so the
+   * partner-address default has to be reachable through the generic hook the MCP path calls.
+   */
+  @Test
+  public void resolveServerCreateFields_singleBillToLocation_fillsPartnerAddress() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      Location only = mock(Location.class);
+      when(only.getId()).thenReturn("loc-1");
+      locationCriteria(dal, Collections.singletonList(only));
+      JSONObject body = new JSONObject().put("businessPartner", "bp-1");
+
+      handler.resolveServerCreateFields(createContext(body));
+
+      assertEquals("loc-1", body.getString("partnerAddress"));
+    }
+  }
+
+  /** Several bill-to locations: the hook abstains, so the pre-check still reports the field. */
+  @Test
+  public void resolveServerCreateFields_twoBillToLocations_leavesFieldMissing() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      Location first = mock(Location.class);
+      Location second = mock(Location.class);
+      locationCriteria(dal, java.util.Arrays.asList(first, second));
+      JSONObject body = new JSONObject().put("businessPartner", "bp-1");
+
+      handler.resolveServerCreateFields(createContext(body));
+
+      assertFalse(body.has("partnerAddress"));
+    }
+  }
+
+  /** A caller-sent address wins and the hook is idempotent (second run changes nothing). */
+  @Test
+  public void resolveServerCreateFields_callerAddress_keptAndIdempotent() throws Exception {
+    JSONObject body = new JSONObject().put("businessPartner", "bp-1")
+        .put("partnerAddress", "loc-caller");
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      handler.resolveServerCreateFields(createContext(body));
+      handler.resolveServerCreateFields(createContext(body));
+
+      assertEquals("loc-caller", body.getString("partnerAddress"));
+      dalMock.verifyNoInteractions();
+    }
+  }
+
+  /**
+   * partnerAddress must NOT be declared server-resolved: etendo_schema would demote it to optional
+   * while the default abstains with several addresses and the field is still required.
+   */
+  @Test
+  public void serverResolvedCreateFields_doesNotDeclarePartnerAddress() {
+    assertFalse(new SalesInvoiceHeaderHandler().serverResolvedCreateFields()
+        .contains("partnerAddress"));
+    assertFalse(new PurchaseInvoiceHeaderHandler().serverResolvedCreateFields()
+        .contains("partnerAddress"));
+  }
+
   /** The stubs of an invoice in {@code docCurrency} (org currency EUR) holding {@code stored}. */
   private static Invoice foreignInvoice(OBDal dal, String docCurrency, BigDecimal stored) {
     Invoice invoice = mock(Invoice.class);

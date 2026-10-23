@@ -3765,8 +3765,14 @@ keys.
 It abstains, leaving the body untouched, when the entity has no bill-to column, the column is not
 mandatory there (`C_Project.BillTo_ID` is optional and is deliberately not touched), the body
 already carries a value, the business partner is unknown or still a `$ref:` placeholder, or the
-partner exposes no usable location. The lookup runs in the caller's own DAL scope — no admin mode —
-so a location the role cannot read never becomes the invoicing address of a document it writes.
+partner exposes no usable location. The MCP call itself runs under `OBContext.setAdminMode()`, which
+skips only the entity access check: the lookup's `OBCriteria` keeps its readable-client and
+readable-organization filters on, so a location the role cannot read — another tenant's, when the
+caller sends a foreign `businessPartner` id — never becomes the invoicing address of a document it
+writes (the lookup returns nothing and the default abstains). Do not disable those filters
+(`setFilterOnReadableClients(false)` / `setFilterOnReadableOrganization(false)`) in these lookups;
+`PartnerLocationDefaults` (the invoice, sales order and quotation header defaults) follows the same
+rule.
 
 **Where it runs.** Both MCP write verbs, and both live since ETP-5415: `etendo_create` in
 `handleCreate` before the mandatory check, and each `etendo_batch` operation in
@@ -3848,6 +3854,7 @@ not: `etendo_create` does not run it in shared code, so it is in the table below
 
 | step | in `etendo_create` | in `etendo_batch` | consequence |
 |---|---|---|---|
+| header defaults filled only by a customization pre-hook (ETP-5703, ETP-5710) — `partnerAddress` of the **sales order, sales quotation** and goods receipt headers | filled when the partner has exactly one matching location | **not filled**: `validateMandatoryFields` runs before the pre-hook and answers the `missingFields` 422 | the **invoice** headers (sales and purchase) no longer diverge: they implement `NeoHandler#resolveServerCreateFields`, run before the pre-check. The other headers have not adopted the hook yet — a follow-up, one `resolveServerCreateFields` override each calling their existing default |
 | `NeoCommercialLinePolicy.injectCommercialAmounts` | **no** in shared code — only from the customizations of sales order, sales quotation, sales invoice and purchase invoice lines (ETP-5528, ETP-5710, §4.12.20, §4.12.31) | yes | `etendo_batch` runs it in `NeoCrudHandler.executePostCreate`; `etendo_create` never reaches that method — it is a separate pipeline. Since ETP-5528, sales order and sales quotation lines get the amounts on every create from their own customizations (`OrderLineDiscountSupport.deriveAmountsOnCreate`), and so do sales and purchase invoice lines (`SalesInvoiceLineHandler` / `PurchaseInvoiceLineHandler` → `InvoiceLineAmountSupport.deriveAmountsOnCreate`; purchase since ETP-5710). Every other entity is as on `develop`: a generic commercial line persists `lineGrossAmount = 0` on a net price list, and purchase order lines still do not get it (measured 2026-09-30: purchase order line gross 0; the purchase invoice line 0 / 0 of that measurement is fixed by ETP-5710). Declared, not fixed in shared code. (`grossUnitPrice` still persists as 0 on both verbs — a separate, undiagnosed defect, not a divergence) |
 | `buildInvalidDatesError` | yes | **no** | no explicit 422 for an unreadable or ambiguous date (ETP-4793 / IMP-24). Type coercion itself does run on the shared path (`executePostCreate` → `coerceTypes`), so the value is not silently mangled — the agent just gets a less precise failure |
 | the `warehouse` default | *Almacén Secundario* | *Almacén Principal* | observed with an identical body, 2026-09-28. Not yet diagnosed: it may be a genuine divergence in the defaults chain or a session dependency. Recorded here so it is not rediscovered as new |
@@ -4176,15 +4183,17 @@ behaviour is unchanged. Channels as noted per field:
   and no address, the customization pre-hook (`injectPartnerAddressIfMissing`) sets the partner's
   active bill-to location **when it has exactly one**. With none or several it abstains: the invoicing
   address is the caller's choice when there is one to make. Read in the caller's DAL scope.
-  **Declared channel divergence:** this fills the address on **REST single** and on **REST
-  `/batch` / MCP `etendo_batch`** (`handleWithHooks` runs the pre-hook before the create). On **MCP
-  `etendo_create`** it does not: `McpToolRouter.handleCreate` runs its mandatory pre-check
-  (`validateMandatoryFields`) **before** the customization pre-hook, by design (ETP-5535, see
-  `NeoHandler#serverResolvedCreateFields`), so an invoice header created there without
-  `partnerAddress` still answers the precise `missingFields` 422 naming it, even when the partner has
-  a single bill-to location. The agent sends the address (one `etendo_selectors` call) or uses
-  `etendo_batch`. Running the pre-hook before that check is a platform decision, pending and outside
-  ETP-5703.
+  Since ETP-5710 it fills the address on **every channel**, MCP `etendo_create` included. That
+  channel's mandatory pre-check (`validateMandatoryFields`) runs **before** the customization
+  pre-hook (ETP-5535), so the invoice handlers also implement the generic
+  `NeoHandler#resolveServerCreateFields` hook (same `injectPartnerAddressIfMissing` rule, no new
+  logic), which `McpHookExecutor.resolveServerCreateFields` calls from `handleCreate` right before
+  that check. With several (or no) bill-to locations the default abstains and the precise
+  `missingFields` 422 naming `partnerAddress` (with the `etendo_selectors` hint) stands; a value the
+  agent sends always wins. `partnerAddress` is deliberately **not** declared in
+  `serverResolvedCreateFields()`: that would make `etendo_schema(view:"create")` list it as optional
+  while the default can abstain and the field is still required. The sales-order / quotation /
+  goods-receipt headers below do **not** have the hook yet and still diverge (§4.12.9).
 - **Sales order and sales quotation headers** (`SalesOrderHeaderHandler`,
   `SalesQuotationHeaderHandler`; not the purchase order) — the same create default for
   `partnerAddress`, with the location flag the column's own AD validation rule requires:
@@ -9098,6 +9107,14 @@ wrapper fields. A new generic extension point lets the customization say so:
   extension point: declare only fields the create cascade derives — a field filled only by the
   customization's own `handle()` would still be refused on `etendo_create`. (`etendo_batch` and REST run
   no such pre-check.)
+- `NeoHandler#resolveServerCreateFields(NeoContext)` (ETP-5710) — the way out for that last case:
+  a no-op default the MCP create path calls on the resolved customization (`@NeoExtension` first,
+  `Java_Qualifier` second) right **before** the mandatory pre-check, with a CRUD `POST` context
+  carrying the live body. Contract: idempotent, never overwrites a caller value, never throws for
+  missing data (abstain and let the pre-check report the field). REST single and batch do not call
+  it — their pre-hook already runs before the create — so a customization usually implements it by
+  delegating to the same helper its `handle()` uses. First user: the invoice headers'
+  `partnerAddress` default.
 - `SalesQuotationLineHandler` and `SalesOrderLineHandler` both declare
   `OrderLineDiscountSupport.SERVER_RESOLVED_CREATE_FIELDS` = `tax`, `lineNetAmount` (ETP-5528, QA
   observation: the create view listed `lineNetAmount` as required although every create without it

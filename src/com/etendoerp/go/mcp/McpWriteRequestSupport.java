@@ -438,12 +438,13 @@ final class McpWriteRequestSupport {
     }
     try {
       body.put("supersededDefaults", superseded);
-      body.put("supersededDefaultsHint", "For each field listed, the value you sent was kept and a "
-          + "callout had resolved a different one from this record's own context (the business "
-          + "partner's configuration, for one). That is correct if the value was chosen "
-          + "deliberately. If you copied it from etendo_defaults, it was a generic default resolved "
-          + "before this record had a business partner: omit that field and let the server resolve "
-          + "it, or send the value under \"callout\" instead.");
+      body.put("supersededDefaultsHint", "For each field listed, the value you sent was kept; "
+          + "\"callout\" is only what a callout would have set from this record's own context. "
+          + "You can ignore it when the callout value is 0 or empty, or when the field is governed "
+          + "by another rule. If you copied the value from "
+          + "etendo_defaults and it differs from a meaningful callout value, it was a generic "
+          + "default resolved before this record had its context: send the callout value instead, "
+          + "or confirm the one you sent was deliberate.");
     } catch (JSONException ignored) {
       // Same reasoning as reportUnknownFields: the record is written and correct as far as the
       // caller asked; losing a diagnostic must never turn a successful create into a failure.
