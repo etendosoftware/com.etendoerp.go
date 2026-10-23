@@ -586,8 +586,8 @@ public class NeoListAggregateQueryIntegrationTest extends WeldBaseTest {
   /** AD_TAB_ID of the System Administrator "Role" tab: its where is {@code e.client.id = @#ad_client_id@}. */
   private static final String ROLE_TAB = "119";
 
-  /** Runs the handler's {@code ?_distinct=<field>} fetch and returns the offered {@code id}s. */
-  private static Set<String> handlerDistinctIds(String tabId, String entityName, String field,
+  /** Runs the handler's {@code ?_distinct=<field>} fetch and returns its response, unchecked. */
+  private static NeoResponse handlerDistinctResponse(String tabId, String entityName, String field,
       Map<String, String> extraQueryParams) throws Exception {
     Tab tab = OBDal.getInstance().get(Tab.class, tabId);
     assumeTrue("skipped: tab " + tabId + " is not in this database", tab != null);
@@ -607,23 +607,32 @@ public class NeoListAggregateQueryIntegrationTest extends WeldBaseTest {
     Method fetch = handlerClass.getDeclaredMethod("handleDistinctFetch", Tab.class, Map.class,
         NeoContext.class);
     fetch.setAccessible(true);
-    NeoResponse response;
     // The servlet runs the handler in admin mode (the tab's table name is not directly readable).
     OBContext.setAdminMode(true);
     try {
-      response = (NeoResponse) fetch.invoke(handler, tab, query, ctx);
+      return (NeoResponse) fetch.invoke(handler, tab, query, ctx);
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
 
+  /** The {@code response.data[].id}s of a successful distinct fetch, in the order offered. */
+  private static List<String> offeredIds(NeoResponse response) throws Exception {
     assertEquals("the fetch must succeed, body: " + response.getBody(), 200,
         response.getHttpStatus());
     JSONArray data = response.getBody().getJSONObject("response").getJSONArray("data");
-    Set<String> ids = new TreeSet<>();
+    List<String> ids = new ArrayList<>();
     for (int i = 0; i < data.length(); i++) {
       ids.add(data.getJSONObject(i).getString("id"));
     }
     return ids;
+  }
+
+  /** Runs the handler's {@code ?_distinct=<field>} fetch and returns the offered {@code id}s. */
+  private static Set<String> handlerDistinctIds(String tabId, String entityName, String field,
+      Map<String, String> extraQueryParams) throws Exception {
+    return new TreeSet<>(offeredIds(handlerDistinctResponse(tabId, entityName, field,
+        extraQueryParams)));
   }
 
   @Test
@@ -691,5 +700,215 @@ public class NeoListAggregateQueryIntegrationTest extends WeldBaseTest {
       assertFalse("a value the predicate excludes was offered: " + excluded,
           offered.contains(excluded));
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // The grid criteria as the real list sends it (a JSON ARRAY of criteria) through the handler:
+  // dot-path / $ fields over a foreign key, an OR block, and boolean Y/N values.
+  // -------------------------------------------------------------------------
+
+  private static String array(String... items) throws Exception {
+    JSONArray arr = new JSONArray();
+    for (String i : items) {
+      arr.put(new JSONObject(i));
+    }
+    return arr.toString();
+  }
+
+  private static String boolCriterion(String field, String operator, Object value)
+      throws Exception {
+    return new JSONObject().put("fieldName", field).put("operator", operator).put("value", value)
+        .toString();
+  }
+
+  /** Statuses the handler offers for {@code criteria} over the payment-in tab. */
+  private static List<String> handlerStatuses(String criteria) throws Exception {
+    return offeredIds(handlerDistinctResponse(PAYMENT_IN_TAB, "finPayment", "status",
+        Map.of("criteria", criteria)));
+  }
+
+  @Test
+  public void anOrBlockOverForeignKeyDotPathsComposesWithBooleanDotPathCriteria() throws Exception {
+    List<FIN_Payment> all = readableReceiptsOrSkip();
+    assumeTrue("skipped: the receipts need a status to exclude and one to keep",
+        statusesOf(all).size() >= 2);
+    String excluded = all.get(all.size() - 1).getStatus();
+
+    // The "Factura rectificativa" shape: boolean FK dot-path equals/notEqual AND an OR block of two
+    // dot-path conditions (one boolean, one string). The three paths force the joins.
+    String orBlock = new JSONObject().put("_constructor", "AdvancedCriteria")
+        .put("operator", "or").put("criteria", new JSONArray()
+            .put(new JSONObject(boolCriterion("businessPartner$customer", "equals", false)))
+            .put(new JSONObject(boolCriterion("documentType$documentCategory", "equals", "ARR"))))
+        .toString();
+    String criteria = array(boolCriterion("businessPartner$customer", "equals", true), orBlock,
+        boolCriterion("status", "notEqual", excluded));
+
+    Set<String> expected = new TreeSet<>();
+    for (FIN_Payment p : all) {
+      boolean customer = Boolean.TRUE.equals(p.getBusinessPartner().isCustomer());
+      boolean category = p.getDocumentType() != null
+          && "ARR".equals(p.getDocumentType().getDocumentCategory());
+      if (customer && (!customer || category) && !excluded.equals(p.getStatus())) {
+        expected.add(p.getStatus());
+      }
+    }
+
+    assertEquals(new ArrayList<>(expected), handlerStatuses(criteria));
+  }
+
+  @Test
+  public void anOrBlockWhoseBranchesMatchNothingOffersNoValues() throws Exception {
+    readableReceiptsOrSkip();
+    String orBlock = new JSONObject().put("_constructor", "AdvancedCriteria")
+        .put("operator", "or").put("criteria", new JSONArray()
+            .put(new JSONObject(boolCriterion("businessPartner$customer", "notEqual", true)))
+            .put(new JSONObject(boolCriterion("documentType$documentCategory", "equals", "NOPE"))))
+        .toString();
+
+    // Every receipt's partner is a customer and no document category is NOPE.
+    List<FIN_Payment> matching = new ArrayList<>();
+    for (FIN_Payment p : receipts()) {
+      if (!Boolean.TRUE.equals(p.getBusinessPartner().isCustomer())
+          || "NOPE".equals(p.getDocumentType().getDocumentCategory())) {
+        matching.add(p);
+      }
+    }
+    assumeTrue("skipped: the receipts hold a non-customer partner, so the OR would match",
+        matching.isEmpty());
+
+    assertTrue(handlerStatuses(array(orBlock)).isEmpty());
+  }
+
+  /** The distinct {@code processed} labels of the receipts whose flag equals {@code flag}. */
+  private static List<String> processedLabels(List<FIN_Payment> all, boolean flag) {
+    Set<String> out = new TreeSet<>();
+    for (FIN_Payment p : all) {
+      if (Boolean.TRUE.equals(p.isProcessed()) == flag) {
+        out.add(String.valueOf(flag));
+      }
+    }
+    return new ArrayList<>(out);
+  }
+
+  @Test
+  public void booleanYAndNCriteriaBehaveLikeTrueAndFalseThroughTheHandler() throws Exception {
+    List<FIN_Payment> all = readableReceiptsOrSkip();
+
+    // _distinct of the boolean itself, narrowed by a criterion on the same boolean. Core would read
+    // "Y" as Boolean.valueOf("Y") == false, so a missing normalization inverts these results.
+    for (Object[] c : new Object[][] { { "Y", true }, { "N", false } }) {
+      List<String> viaYn = offeredIds(handlerDistinctResponse(PAYMENT_IN_TAB, "finPayment",
+          "processed", Map.of("criteria", array(boolCriterion("processed", "equals", c[0])))));
+      List<String> viaBoolean = offeredIds(handlerDistinctResponse(PAYMENT_IN_TAB, "finPayment",
+          "processed", Map.of("criteria", array(boolCriterion("processed", "equals", c[1])))));
+
+      assertEquals("Y/N must act as true/false for " + c[0], viaBoolean, viaYn);
+      assertEquals(processedLabels(all, (Boolean) c[1]), viaYn);
+    }
+
+    // The same Y/N on another boolean narrows the statuses like the true/false does.
+    for (Object[] c : new Object[][] { { "Y", true }, { "N", false } }) {
+      Set<String> expected = new TreeSet<>();
+      for (FIN_Payment p : all) {
+        if (Boolean.TRUE.equals(p.isProcessed()) == (Boolean) c[1]) {
+          expected.add(p.getStatus());
+        }
+      }
+      assertEquals(new ArrayList<>(expected), offeredIds(handlerDistinctResponse(PAYMENT_IN_TAB,
+          "finPayment", "status", Map.of("criteria", array(boolCriterion("processed", "equals",
+              c[0]))))));
+    }
+  }
+
+  @Test
+  public void distinctSearchOverABooleanRunsTheCastAndNarrowsTheOfferedValues() throws Exception {
+    List<FIN_Payment> all = readableReceiptsOrSkip();
+    List<String> unfiltered = offeredIds(handlerDistinctResponse(PAYMENT_IN_TAB, "finPayment",
+        "processed", Map.of()));
+    assertEquals(processedLabels(all, true).size() + processedLabels(all, false).size(),
+        unfiltered.size());
+
+    // The search predicate is LOWER(CAST(e.processed AS string)) LIKE :search. The cast must run
+    // on a boolean column (a 200, never a 500) and only ever narrow what is offered.
+    for (String search : new String[] { "y", "n", "true", "zzz-no-such-label" }) {
+      List<String> offered = offeredIds(handlerDistinctResponse(PAYMENT_IN_TAB, "finPayment",
+          "processed", Map.of("_distinctSearch", search)));
+      assertTrue("search '" + search + "' must offer a subset of " + unfiltered,
+          unfiltered.containsAll(offered));
+    }
+    assertTrue(offeredIds(handlerDistinctResponse(PAYMENT_IN_TAB, "finPayment", "processed",
+        Map.of("_distinctSearch", "zzz-no-such-label"))).isEmpty());
+  }
+
+  // -------------------------------------------------------------------------
+  // Child tab: parentId + a tab where holding a parent token
+  // -------------------------------------------------------------------------
+
+  /** AD_TAB_ID of the Business Partner window's "Partner Orders" child tab. */
+  private static final String PARTNER_ORDERS_TAB = "551";
+
+  @Test
+  public void aChildTabDistinctFetchIsRestrictedToTheParentThroughTheTabWhere() throws Exception {
+    OBContext.setAdminMode(true);
+    Map<String, Set<String>> statusesByPartner = new HashMap<>();
+    Set<String> allStatuses = new TreeSet<>();
+    try {
+      List<?> rows = OBDal.getInstance().getSession().createQuery(
+          "select e.businessPartner.id, e.documentStatus from Order e").list();
+      for (Object row : rows) {
+        Object[] r = (Object[]) row;
+        statusesByPartner.computeIfAbsent((String) r[0], k -> new TreeSet<>()).add((String) r[1]);
+        allStatuses.add((String) r[1]);
+      }
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+    String partner = null;
+    for (Map.Entry<String, Set<String>> e : statusesByPartner.entrySet()) {
+      if (e.getValue().size() < allStatuses.size()) {
+        partner = e.getKey();
+        break;
+      }
+    }
+    assumeTrue("skipped: needs a partner whose orders carry fewer statuses than the whole table, "
+        + "or the parent restriction would be indistinguishable from none", partner != null);
+
+    Set<String> offered = handlerDistinctIds(PARTNER_ORDERS_TAB, "order", "documentStatus",
+        Map.of("parentId", partner));
+
+    assertEquals(statusesByPartner.get(partner), offered);
+  }
+
+  // -------------------------------------------------------------------------
+  // Page size
+  // -------------------------------------------------------------------------
+
+  @Test
+  public void aRowWindowAboveTheCapIsCappedAndReportsMoreValues() throws Exception {
+    OBContext.setAdminMode(true);
+    long distinctDocumentNos;
+    try {
+      distinctDocumentNos = ((Number) OBDal.getInstance().getSession().createQuery(
+          "select count(distinct e.documentNo) from Order e where e.salesTransaction=true"
+              + " and e.transactionDocument.return=false"
+              + " and e.transactionDocument.sOSubType not like 'OB'").uniqueResult()).longValue();
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+    assumeTrue("skipped: needs more than 200 distinct sales order numbers to prove the cap, found "
+        + distinctDocumentNos, distinctDocumentNos > 200);
+
+    Map<String, String> window = new HashMap<>();
+    window.put(JsonConstants.STARTROW_PARAMETER, "0");
+    window.put(JsonConstants.ENDROW_PARAMETER, "999");
+    NeoResponse response = handlerDistinctResponse("186", "order", "documentNo", window);
+
+    List<String> ids = offeredIds(response);
+    JSONObject payload = response.getBody().getJSONObject("response");
+    assertEquals("a 1000-row window is capped at 200", 200, ids.size());
+    assertEquals(199, payload.getInt("endRow"));
+    assertTrue("more values exist beyond the capped page", payload.getBoolean("hasMore"));
+    assertEquals("no duplicates", 200, new LinkedHashSet<>(ids).size());
   }
 }

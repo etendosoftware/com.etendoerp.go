@@ -668,6 +668,64 @@ class NeoCrudHandlerTest {
       verify(servlet, never()).writeResponse(any(), any());
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = { "{\"x\":[", "[[", "{\"a\":[}", "[{\"f\":1/*x*/}]" })
+    @DisplayName("Sends 400 for a malformed criteria on a _distinct request, before the distinct fetch")
+    void malformedCriteriaOnADistinctRequestSends400(String criteria) throws Exception {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getId()).thenReturn("SPEC-1");
+
+      SFEntity entity = createMockEntity(true, false, false, false, false, false);
+      when(entity.getADTab()).thenReturn(mock(Tab.class));
+      when(servlet.findEntity("SPEC-1", "orders")).thenReturn(entity);
+      Map<String, String> params = new HashMap<>();
+      params.put("_distinct", "status");
+      params.put("criteria", criteria);
+      when(servlet.extractQueryParams(any())).thenReturn(params);
+
+      NeoServlet.NeoPathInfo pathInfo = new NeoServlet.NeoPathInfo(
+          "testSpec", "orders", null);
+      HttpServletResponse response = mock(HttpServletResponse.class);
+
+      try (MockedStatic<NeoListAggregateQuery> agg =
+          Mockito.mockStatic(NeoListAggregateQuery.class)) {
+        handler.handleWindowEntityCrud(spec, pathInfo, "GET",
+            mock(HttpServletRequest.class), response);
+
+        agg.verifyNoInteractions();
+      }
+
+      verify(servlet).sendError(response, HttpServletResponse.SC_BAD_REQUEST,
+          "Invalid criteria: malformed JSON");
+      verify(servlet, never()).writeResponse(any(), any());
+    }
+
+    @Test
+    @DisplayName("Sends 400 for a too deeply nested criteria on a _distinct request")
+    void tooDeeplyNestedCriteriaOnADistinctRequestSends400() throws Exception {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getId()).thenReturn("SPEC-1");
+
+      SFEntity entity = createMockEntity(true, false, false, false, false, false);
+      when(entity.getADTab()).thenReturn(mock(Tab.class));
+      when(servlet.findEntity("SPEC-1", "orders")).thenReturn(entity);
+      Map<String, String> params = new HashMap<>();
+      params.put("_distinct", "status");
+      params.put("criteria", "[".repeat(65) + "]".repeat(65));
+      when(servlet.extractQueryParams(any())).thenReturn(params);
+
+      NeoServlet.NeoPathInfo pathInfo = new NeoServlet.NeoPathInfo(
+          "testSpec", "orders", null);
+      HttpServletResponse response = mock(HttpServletResponse.class);
+
+      handler.handleWindowEntityCrud(spec, pathInfo, "GET",
+          mock(HttpServletRequest.class), response);
+
+      verify(servlet).sendError(response, HttpServletResponse.SC_BAD_REQUEST,
+          "Invalid criteria: malformed JSON");
+      verify(servlet, never()).writeResponse(any(), any());
+    }
+
     @Test
     @DisplayName("A well-formed criteria reaches the handler")
     void wellFormedCriteriaIsDispatched() throws Exception {
