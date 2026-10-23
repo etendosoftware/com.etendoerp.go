@@ -5,7 +5,7 @@ name: Unit Test Classification
 # under any other name would run there and fail with a DAL stack trace that reads like broken
 # infrastructure. scripts/check-unit-test-classification.sh turns that into an explicit error
 # naming the class and its rename. The same job unit-tests the scripts and hook libraries the
-# pre-push relies on.
+# pre-push relies on, and scripts/back-merge-main.sh.
 
 on:
   pull_request:
@@ -17,6 +17,8 @@ on:
       - 'scripts/check-diff-coverage.py'
       - 'scripts/test_check_diff_coverage.py'
       - 'scripts/test_git_conventions.py'
+      - 'scripts/back-merge-main.sh'
+      - 'scripts/test_back_merge_main.py'
       - '.githooks/lib/git-conventions.sh'
       - '.github/workflows/unit-test-classification.yml'
 
