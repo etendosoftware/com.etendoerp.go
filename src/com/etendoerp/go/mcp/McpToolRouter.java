@@ -1067,7 +1067,7 @@ public class McpToolRouter {
     // caller is editing: core reads it, compares it, and then overwrites the column with its own
     // stamp on save. Keeping it out of the caller's field map is what makes that distinction
     // visible in the tool schema.
-    filteredBody.put(McpConstants.PARAM_UPDATED, updated);
+    filteredBody.put(McpConstants.PARAM_UPDATED, NeoRecordVersion.forCore(updated));
 
     // Wrap for DefaultJsonDataService with record ID
     String wrappedBody = McpToolRouterSupport.wrapForSmartclient(filteredBody, dalEntityName, recordId, log);

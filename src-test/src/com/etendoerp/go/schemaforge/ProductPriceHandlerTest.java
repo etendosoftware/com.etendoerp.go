@@ -74,6 +74,7 @@ import org.openbravo.model.pricing.pricelist.ProductPrice;
 import org.openbravo.service.json.JsonUtils;
 
 import com.etendoerp.go.schemaforge.util.NeoDateFormat;
+import com.etendoerp.go.schemaforge.util.NeoRecordVersion;
 
 /**
  * Unit tests for {@link ProductPriceHandler}.
@@ -107,7 +108,7 @@ class ProductPriceHandlerTest {
    * CI.
    */
   private static final Pattern AUDIT_TOKEN_SHAPE = Pattern
-      .compile("^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}[+-]\\d{2}:\\d{2}$");
+      .compile("^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}[+-]\\d{2}:\\d{2}$");
 
   private ProductPriceHandler handler;
 
@@ -1593,7 +1594,7 @@ class ProductPriceHandlerTest {
    * @throws Exception when the token is unparseable, which is itself a failure of the contract
    */
   private static Date readBackAsCoreDoes(String token) throws Exception {
-    String repaired = JsonUtils.convertFromXSDToJavaFormat(token);
+    String repaired = JsonUtils.convertFromXSDToJavaFormat(NeoRecordVersion.forCore(token));
     return new Timestamp(JsonUtils.createDateTimeFormat().parse(repaired).getTime());
   }
 
@@ -1741,7 +1742,8 @@ class ProductPriceHandlerTest {
     // unrepaired token asserted half the pipeline, and only passed while the emitter was skipping
     // convertToCorrectXSDFormat.
     assertEquals(expectedInstant,
-        JsonUtils.createDateTimeFormat().parse(JsonUtils.convertFromXSDToJavaFormat(emitted)),
+        JsonUtils.createDateTimeFormat()
+            .parse(JsonUtils.convertFromXSDToJavaFormat(NeoRecordVersion.forCore(emitted))),
         "the token must round-trip through core's own reader to the same instant");
   }
 }

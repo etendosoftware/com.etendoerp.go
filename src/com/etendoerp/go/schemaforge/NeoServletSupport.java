@@ -142,7 +142,10 @@ class NeoServletSupport {
         if (StringUtils.isNotBlank(javaQualifier)) {
           log.warn("No handler found for qualifier '{}', falling back to default", javaQualifier);
         }
-        return defaultStep.apply(context);
+        NeoResponse result = defaultStep.apply(context);
+        // Core serialises `updated` to the second; the refresh re-stamps it with milliseconds.
+        NeoAuditTokenRefresh.refreshInResponse(context, result);
+        return result;
       }
 
       NeoResponse preResult = preDispatch.response();

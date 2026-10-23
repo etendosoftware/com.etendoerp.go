@@ -24,10 +24,14 @@ import java.text.SimpleDateFormat;
 import java.util.Calendar;
 import java.util.Date;
 import java.util.TimeZone;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONException;
+import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.base.structure.Traceable;
 import org.openbravo.dal.service.OBDal;
@@ -104,6 +108,9 @@ public final class NeoRecordVersion {
 
   private static final Logger log = LogManager.getLogger(NeoRecordVersion.class);
 
+  /** The fractional seconds of a token, right after its {@code HH:mm:ss}. */
+  private static final Pattern FRACTION = Pattern.compile("(T\\d{2}:\\d{2}:\\d{2})\\.(\\d+)");
+
   private NeoRecordVersion() {
     // utility class — no instances
   }
@@ -169,7 +176,12 @@ public final class NeoRecordVersion {
     if (clientUpdated == null) {
       return false;
     }
-    boolean stale = !equalToTheSecond(clientUpdated, storedUpdated);
+    // A token with milliseconds is the one NeoDateFormat.toAuditToken emits: compared to the
+    // millisecond, so two writes inside the same second still conflict. A token without them
+    // (an older client, a path still serialised by core) keeps core's to-the-second tolerance.
+    boolean stale = fractionMillis(clientValue) >= 0
+        ? clientUpdated.getTime() != storedUpdated.getTime()
+        : !equalToTheSecond(clientUpdated, storedUpdated);
     logVerdict(stale, dalEntityName, recordId, clientValue, clientUpdated, storedUpdated,
         requestPath);
     return stale;
@@ -254,7 +266,7 @@ public final class NeoRecordVersion {
    */
   private static Date parseClientValue(String clientValue, String dalEntityName, String recordId,
       String requestPath) {
-    String repaired = repairedForCompare(clientValue);
+    String repaired = repairedForCompare(forCore(clientValue));
     if (!hasZoneOffset(clientValue)) {
       log.error("Client `updated` carries no zone offset — {}, entity '{}', record '{}', raw '{}',"
           + " repaired '{}', server timezone '{}'. This is NOT refused and NOT skipped: core's XSD"
@@ -266,7 +278,8 @@ public final class NeoRecordVersion {
           dalEntityName, recordId, clientValue, repaired, TimeZone.getDefault().getID());
     }
     try {
-      return new Timestamp(JsonUtils.createDateTimeFormat().parse(repaired).getTime());
+      return new Timestamp(JsonUtils.createDateTimeFormat().parse(repaired).getTime()
+          + Math.max(fractionMillis(clientValue), 0));
     } catch (ParseException | RuntimeException e) {
       log.error("Concurrency check DID NOT RUN (guard: unparseable client `updated`) — {}, raw"
           + " '{}', repaired '{}': {}. The write proceeds unchecked, so a genuine conflict here is"
@@ -462,5 +475,49 @@ public final class NeoRecordVersion {
     b.setTime(second);
     b.set(Calendar.MILLISECOND, 0);
     return a.getTimeInMillis() == b.getTimeInMillis();
+  }
+
+  /**
+   * The token as core's own stale check can read it: without fractional seconds. Core parses
+   * {@code updated} with {@code JsonUtils.createDateTimeFormat()}, which has no milliseconds and
+   * fails the whole write on them, so every write path hands core this form once NEO's own
+   * check is done.
+   *
+   * @param token the {@code updated} value the client sent; may be {@code null}
+   * @return the same token without its fraction, or the input unchanged when it has none
+   */
+  public static String forCore(String token) {
+    return token == null ? null : FRACTION.matcher(token).replaceFirst("$1");
+  }
+
+  /**
+   * Rewrites the token at {@code key} of a write body to {@link #forCore(String)}, in place.
+   *
+   * @param body the write body core will read; may be {@code null}
+   * @param key  the token's property name
+   */
+  public static void forCore(JSONObject body, String key) {
+    String token = body == null || body.isNull(key) ? null : body.optString(key, null);
+    if (token == null) {
+      return;
+    }
+    try {
+      body.put(key, forCore(token));
+    } catch (JSONException e) {
+      // put of a non-null string under a non-null key cannot fail
+      throw new IllegalStateException(e);
+    }
+  }
+
+  /**
+   * The milliseconds a token carries after its seconds ({@code .5} is 500, extra digits are
+   * dropped), or {@code -1} when it carries none.
+   */
+  private static int fractionMillis(String token) {
+    Matcher matcher = token == null ? null : FRACTION.matcher(token);
+    if (matcher == null || !matcher.find()) {
+      return -1;
+    }
+    return Integer.parseInt(StringUtils.rightPad(StringUtils.left(matcher.group(2), 3), 3, '0'));
   }
 }

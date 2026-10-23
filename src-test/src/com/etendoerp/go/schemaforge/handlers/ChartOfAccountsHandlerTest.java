@@ -69,6 +69,7 @@ import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.util.NeoDateFormat;
+import com.etendoerp.go.schemaforge.util.NeoRecordVersion;
 
 /**
  * Unit tests for {@link ChartOfAccountsHandler}.
@@ -1472,7 +1473,7 @@ public class ChartOfAccountsHandlerTest {
    * machine's {@code -0300} would only move the failure to CI.
    */
   private static final Pattern AUDIT_TOKEN_SHAPE = Pattern
-      .compile("^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}[+-]\\d{2}:\\d{2}$");
+      .compile("^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}[+-]\\d{2}:\\d{2}$");
 
   /**
    * Asserts that {@code emitted} is a valid {@code updated} concurrency token for the
@@ -1506,7 +1507,8 @@ public class ChartOfAccountsHandlerTest {
     // convertToCorrectXSDFormat.
     assertEquals("the token must round-trip through core's own reader to the same instant",
         expectedInstant,
-        JsonUtils.createDateTimeFormat().parse(JsonUtils.convertFromXSDToJavaFormat(emitted)));
+        JsonUtils.createDateTimeFormat()
+            .parse(JsonUtils.convertFromXSDToJavaFormat(NeoRecordVersion.forCore(emitted))));
   }
 
   private static Object[] rowWith(Object issummary, Object isactive) {

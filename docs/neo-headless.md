@@ -742,10 +742,15 @@ Both use the flat `status`/`error`/`detail`/`hint`/`seeAlso` error envelope (sam
 same entity, and the two need opposite remedies. The MCP surface documents the same contract to
 agent callers (`McpConstants.ERROR_STALE_RECORD`, `ToolRegistry`'s tool descriptions).
 
-The comparison (`NeoRecordVersion.isStale`) deliberately mirrors core's own optimistic-locking
-check (`JsonToDataConverter#areDatesEqual`, millisecond-insensitive — Postgres keeps microseconds
-on the column while the wire value is formatted to the second) rather than reinventing the
-tolerance. Core's check exists already but is silently skipped whenever the request omits the
+The comparison (`NeoRecordVersion.isStale`) depends on the precision of the token the caller
+echoes. NEO emits `updated` with milliseconds (`NeoDateFormat.toAuditToken`, e.g.
+`2026-10-22T16:54:16.581-03:00`) on every CRUD write response and on the `GET` of one record
+(`NeoAuditTokenRefresh` re-stamps what core serialises to the second). A token with milliseconds
+is compared to the millisecond, so two writes inside the same second still conflict; the public
+API's `ETag` is that same token. A token without them (a list row, an older client) keeps core's
+own tolerance (`JsonToDataConverter#areDatesEqual`, millisecond-insensitive). Core's reader cannot
+parse fractional seconds, so after NEO's check every write path hands core the token without them
+(`NeoRecordVersion.forCore`); core's own check then runs to the second, as before. Core's check exists already but is silently skipped whenever the request omits the
 `updated` key entirely — which every write used to do, because `NeoFieldFilter#filterWriteRequest`
 stripped `updated` from every outgoing write before this existed. It answers `false` ("not stale")
 for anything it cannot evaluate (blank token, non-`Traceable` entity, unparseable value), which lets

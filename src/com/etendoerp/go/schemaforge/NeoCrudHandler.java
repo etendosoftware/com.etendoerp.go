@@ -720,6 +720,7 @@ class NeoCrudHandler {
     String route = NeoRecordVersion.routeOf(context.getHttpMethod(), context.getSpecName(),
         context.getEntityName(), context.getRecordId());
     if (!NeoRecordVersion.isStale(dalEntityName, context.getRecordId(), clientValue, route)) {
+      NeoRecordVersion.forCore(body, FIELD_UPDATED);
       return null;
     }
     NeoWriteRefusalLog.staleRecord(context, clientValue);
