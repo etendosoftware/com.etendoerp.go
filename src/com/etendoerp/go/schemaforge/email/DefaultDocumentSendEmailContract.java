@@ -283,6 +283,37 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
     return 10;
   }
 
+  /**
+   * The subject and message the send modal prefills for a document, composed from this contract's
+   * own catalog (ETP-5715).
+   *
+   * <p>The modal composes the same two texts client-side and posts them back as
+   * {@code messageEdits}; {@code defaultCopyInSync.test.js} keeps both ends saying the same thing.
+   * A caller that cannot render the modal (the MCP) asks here instead, so it never keeps a third
+   * copy. The message is the greeting, a blank line and the body sentence, as plain text with
+   * {@code **bold**} markers: it travels as {@code messageEdits}, which escapes it and renders the
+   * markers, so nothing in it is HTML.</p>
+   *
+   * @param recordId the document id
+   * @param language the language of the copy, such as {@code es_ES}; blank falls back to Spanish
+   * @return the defaults, or empty when the document cannot be resolved
+   */
+  public Optional<EmailSendDefaults> sendDefaults(String recordId, String language) {
+    return documentResolver.resolve(recordId).map(document -> new EmailSendDefaults(
+        buildSubject(document, language), buildDefaultMessage(document, language),
+        EmailContractCommandSupport.isValidEmail(document.getRecipientEmail())
+            ? document.getRecipientEmail().trim() : null,
+        maxRecipientsTotal()));
+  }
+
+  private String buildDefaultMessage(EmailDocumentRecord document, String language) {
+    String body = EmailMessages.get("document.body", language, documentTypeLabel(language),
+        document.getDocumentNumber());
+    String recipientName = StringUtils.trimToNull(document.getRecipientName());
+    return recipientName == null ? body
+        : EmailMessages.get("document.greeting", language, recipientName) + "\n\n" + body;
+  }
+
   @Override
   public EmailRecipientResolution resolveRecipient(EmailContractCommand command) {
     Optional<EmailDocumentRecord> document = resolveDocument(command);

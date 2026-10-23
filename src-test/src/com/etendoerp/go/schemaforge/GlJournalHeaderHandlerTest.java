@@ -39,6 +39,12 @@ import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.client.kernel.RequestContext;
+import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.system.Client;
+import org.openbravo.model.common.currency.Currency;
+import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
+import org.openbravo.model.financialmgmt.gl.GLJournal;
 
 /**
  * Unit tests for {@link GlJournalHeaderHandler}.
@@ -51,6 +57,8 @@ import org.openbravo.client.kernel.RequestContext;
  *   <li>Early-exit in {@code runDocumentAction()} when the record id is absent (400).</li>
  *   <li>ETP-5611: {@code inpdocaction} set on the request for CO and RE; date mirror; schema
  *       currency on POST and DEFAULTS.</li>
+ *   <li>ETP-5793: another tenant's journal (PATCH date mirror) and accounting schema (currency) are
+ *       treated as unknown.</li>
  * </ul>
  *
  * @covers com.etendoerp.go.schemaforge.GlJournalHeaderHandler
@@ -571,6 +579,90 @@ public class GlJournalHeaderHandlerTest {
     body.put("accountingDate", "2026-09-30");
     h.handle(patchContext("GL-1", body));
     verify(j, never()).setDocumentDate(any());
+  }
+
+  // ETP-5793: the real loadJournal / resolveSchemaCurrency, not the seams, decide the tenant.
+
+  private static Client client(String id) {
+    Client c = mock(Client.class);
+    when(c.getId()).thenReturn(id);
+    return c;
+  }
+
+  /** An OBContext whose role reads client {@code OWN} only (plus the system client). */
+  private static OBContext ownTenantContext() {
+    OBContext ctx = mock(OBContext.class);
+    when(ctx.getReadableClients()).thenReturn(new String[] { "OWN", "0" });
+    when(ctx.getReadableOrganizations()).thenReturn(new String[] { "0" });
+    return ctx;
+  }
+
+  private static GLJournal draftJournalOf(String clientId) {
+    GLJournal j = journal(false);
+    Client c = client(clientId);
+    when(j.getClient()).thenReturn(c);
+    return j;
+  }
+
+  @Test
+  public void patchNeverTouchesAnotherTenantsJournal() throws Exception {
+    GLJournal foreign = draftJournalOf("OTHER");
+    OBDal dal = mock(OBDal.class);
+    when(dal.get(GLJournal.class, "GL-F")).thenReturn(foreign);
+    OBContext ctx = ownTenantContext();
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      ctxMock.when(OBContext::getOBContext).thenReturn(ctx);
+      JSONObject body = new JSONObject();
+      body.put("accountingDate", "2026-09-30");
+      assertNull(new GlJournalHeaderHandler().handle(patchContext("GL-F", body)));
+    }
+    verify(foreign, never()).setDocumentDate(any());
+  }
+
+  @Test
+  public void patchStillWritesTheOwnTenantsJournal() throws Exception {
+    GLJournal own = draftJournalOf("OWN");
+    OBDal dal = mock(OBDal.class);
+    when(dal.get(GLJournal.class, "GL-1")).thenReturn(own);
+    OBContext ctx = ownTenantContext();
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      ctxMock.when(OBContext::getOBContext).thenReturn(ctx);
+      JSONObject body = new JSONObject();
+      body.put("accountingDate", "2026-09-30");
+      new GlJournalHeaderHandler().handle(patchContext("GL-1", body));
+    }
+    verify(own).setDocumentDate(new java.text.SimpleDateFormat("yyyy-MM-dd").parse("2026-09-30"));
+  }
+
+  @Test
+  public void anotherTenantsSchemaYieldsNoCurrency() {
+    Currency eur = mock(Currency.class);
+    when(eur.getId()).thenReturn("EUR-ID");
+    when(eur.getISOCode()).thenReturn("EUR");
+    AcctSchema own = mock(AcctSchema.class);
+    Client ownClient = client("OWN");
+    when(own.getClient()).thenReturn(ownClient);
+    when(own.getCurrency()).thenReturn(eur);
+    AcctSchema foreign = mock(AcctSchema.class);
+    Client otherClient = client("OTHER");
+    when(foreign.getClient()).thenReturn(otherClient);
+    when(foreign.getCurrency()).thenReturn(eur);
+    OBDal dal = mock(OBDal.class);
+    when(dal.get(AcctSchema.class, "SCHEMA-OWN")).thenReturn(own);
+    when(dal.get(AcctSchema.class, "SCHEMA-FOREIGN")).thenReturn(foreign);
+    OBContext ctx = ownTenantContext();
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      ctxMock.when(OBContext::getOBContext).thenReturn(ctx);
+      GlJournalHeaderHandler h = new GlJournalHeaderHandler();
+      assertEquals(0, h.resolveSchemaCurrency("SCHEMA-FOREIGN").length);
+      assertEquals("EUR-ID", h.resolveSchemaCurrency("SCHEMA-OWN")[0]);
+    }
   }
 
   @Test

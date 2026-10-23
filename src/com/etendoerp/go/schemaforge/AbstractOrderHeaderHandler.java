@@ -528,20 +528,24 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
         return null;
       }
       JSONArray dataArr = responseWrapper.optJSONArray("data");
-      if (dataArr == null || dataArr.length() == 0) {
-        return null;
+      boolean changed = false;
+      if (dataArr != null && dataArr.length() > 0) {
+        for (int i = 0; i < dataArr.length(); i++) {
+          applyTotalDiscountToRecord(dataArr.getJSONObject(i));
+        }
+        if (context.getRecordId() != null) {
+          dataArr.getJSONObject(0).put("hasLinkedDocuments", checkLinkedDocuments(context.getRecordId()));
+        } else {
+          annotateListWithLinkedDocuments(dataArr);
+        }
+        annotatePendingDocuments(dataArr);
+        applyCorrectedStatusPercentages(dataArr);
+        changed = true;
       }
-      for (int i = 0; i < dataArr.length(); i++) {
-        applyTotalDiscountToRecord(dataArr.getJSONObject(i));
-      }
-      if (context.getRecordId() != null) {
-        dataArr.getJSONObject(0).put("hasLinkedDocuments", checkLinkedDocuments(context.getRecordId()));
-      } else {
-        annotateListWithLinkedDocuments(dataArr);
-      }
-      annotatePendingDocuments(dataArr);
-      applyCorrectedStatusPercentages(dataArr);
-      return NeoResponse.ok(body);
+      // ETP-5757: whole-set footer totals, also for an empty page. Last on purpose: a failed
+      // grouped query aborts the PG transaction, so nothing may query after it.
+      changed |= DocumentListTotals.injectInto(context, false);
+      return changed ? NeoResponse.ok(body) : null;
     } catch (Exception e) {
       log.error("Error post-processing order header GET response (id={})", context.getRecordId(), e);
       return null;

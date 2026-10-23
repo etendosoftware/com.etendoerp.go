@@ -412,6 +412,24 @@ final class McpDeclaredActions {
     return names;
   }
 
+  /**
+   * Whether the entity's customization un-posts a posted record before reactivating it
+   * ({@link NeoHandler#unpostBeforeReactivate}); quiet, a customization that throws opts out.
+   *
+   * @param entity the SchemaForge entity
+   * @return {@code true} only when the customization opts in
+   */
+  static boolean unpostsBeforeReactivation(SFEntity entity) {
+    NeoHandler handler = customizationOf(entity);
+    try {
+      return handler != null && handler.unpostBeforeReactivate();
+    } catch (RuntimeException e) {
+      log.warn("Could not read unpostBeforeReactivate of {}: {}", handler.getClass().getName(),
+          e.getMessage());
+      return false;
+    }
+  }
+
   /** Annotation first, qualifier second — the order {@code NeoExtensionDispatcher} resolves in. */
   private static NeoHandler customizationOf(SFEntity entity) {
     if (entity == null) {

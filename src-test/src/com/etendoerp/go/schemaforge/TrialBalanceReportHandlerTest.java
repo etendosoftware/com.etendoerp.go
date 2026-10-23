@@ -56,6 +56,9 @@ import com.etendoerp.go.schemaforge.util.ReportAccessCatalog;
  * {@code artifacts/report-trial-balance/report-contract.json}'s {@code sql.query} plus
  * {@link TrialBalanceFolding} (whose own folding rules are covered by
  * {@code TrialBalanceFoldingTest}, not here).
+ *
+ * @covers com.etendoerp.go.schemaforge.TrialBalanceReportHandler
+ * @covers com.etendoerp.go.schemaforge.AbstractSqlReportHandler
  */
 class TrialBalanceReportHandlerTest {
 
@@ -242,6 +245,9 @@ class TrialBalanceReportHandlerTest {
 
     OBContext obContext = mock(OBContext.class);
     when(obContext.getCurrentClient()).thenReturn(client);
+    // ETP-5793: the org is resolved through TenantOwnership, which checks the readable clients.
+    when(org.getClient()).thenReturn(client);
+    when(obContext.getReadableClients()).thenReturn(new String[] { "sessionClientId1" });
     when(obContext.getCurrentOrganization()).thenReturn(org);
 
     Session session = mock(Session.class);
