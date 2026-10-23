@@ -46,6 +46,8 @@ public final class UsageQueryComposer {
   public static final String PARAM_DAY_END = "dayEnd";
   /** Named parameter for the tenant, used only by the per-tenant form. */
   public static final String PARAM_CLIENT_ID = "clientId";
+  /** Named parameter for the row id, used only by {@link #composeRowMatch}. */
+  public static final String PARAM_RECORD_ID = "recordId";
 
   private static final String ALIAS_OUTER = "outer_";
   private static final String AND = " and ";
@@ -79,7 +81,8 @@ public final class UsageQueryComposer {
 
   /**
    * Counts one day for a single tenant. Used by the single-tenant backfill and by the
-   * save-time validation probe.
+   * save-time validation probe, and (ETP-5051) by the live quota count, which binds the whole
+   * period as the range rather than a single day.
    *
    * @param entityName the entity to count rows of
    * @param dateProperty the date property that places a row on a day
@@ -96,6 +99,30 @@ public final class UsageQueryComposer {
         .append(" from ").append(entityName).append(' ').append(ALIAS_OUTER)
         .append(" where ").append(ALIAS_OUTER).append(".client.id = :").append(PARAM_CLIENT_ID)
         .append(AND).append(dayBounds(dateProperty));
+    appendRestriction(hql, entityName, restriction);
+    return hql.toString();
+  }
+
+  /**
+   * ETP-5051 — tests whether one row belongs to a declarative resource, and names its tenant. The
+   * NEO write check runs it on a row it has just inserted, inside the same transaction, to decide
+   * whether the row consumes the resource at all.
+   *
+   * <p>No date bound: the question is "is this the kind of row the resource counts", not "does it
+   * fall in a period". The restriction is composed by the same {@link #appendRestriction} as the
+   * counts, so the containment guarantee covers this query too.
+   *
+   * @param entityName the entity the row belongs to
+   * @param restriction optional HQL fragment narrowing the rows; validated before use
+   * @return HQL selecting the row's {@code client.id} when it matches, nothing otherwise; bind
+   *     {@link #PARAM_RECORD_ID}
+   */
+  public static String composeRowMatch(String entityName, String restriction) {
+    requireIdentifier(entityName, "entityName");
+    StringBuilder hql = new StringBuilder(256);
+    hql.append("select ").append(ALIAS_OUTER).append(".client.id")
+        .append(" from ").append(entityName).append(' ').append(ALIAS_OUTER)
+        .append(" where ").append(ALIAS_OUTER).append(".id = :").append(PARAM_RECORD_ID);
     appendRestriction(hql, entityName, restriction);
     return hql.toString();
   }
