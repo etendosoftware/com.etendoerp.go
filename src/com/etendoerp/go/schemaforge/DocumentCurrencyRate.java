@@ -30,6 +30,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
@@ -169,55 +170,84 @@ final class DocumentCurrencyRate {
    */
   void applyToCallout(NeoHandlerUtils.CalloutFields fields, String recordId) {
     try {
-      if (fields == null || fields.body() == null) {
-        return;
-      }
-      String trigger = fields.triggerField();
-      JSONObject updates = fields.updates();
-      boolean currencyTrigger = PROP_CURRENCY.equals(trigger) || "currencyid".equals(trigger);
-      boolean dateTrigger = type.referenceDateProperty().equals(trigger);
-      boolean dateCascaded = updates != null && updates.has(type.referenceDateProperty());
-      if (!currencyTrigger && !dateTrigger && !dateCascaded) {
-        return;
-      }
-      JSONObject form = fields.formState() != null ? fields.formState() : new JSONObject();
-      Object triggered = fields.requestBody() != null ? fields.requestBody().opt(KEY_VALUE) : null;
-
-      String currencyId = currencyTrigger ? idOf(triggered) : null;
-      if (currencyId == null) {
-        currencyId = firstId(form.opt(PROP_CURRENCY), form.opt("currencyid"));
-      }
-      LocalDate date;
-      if (dateTrigger) {
-        date = parseDate(triggered);
-      } else if (dateCascaded) {
-        date = parseDate(updates.opt(type.referenceDateProperty()));
-      } else {
-        date = parseDate(form.opt(type.referenceDateProperty()));
-      }
-      BaseOBObject stored = load(recordId);
-      String orgId = firstId(form.opt(PROP_ORGANIZATION), idOf(stored, PROP_ORGANIZATION),
-          sessionOrgId());
-      String clientId = firstId(idOf(stored, PROP_CLIENT), sessionClientId());
-      RateInputs inputs = new RateInputs(orgId, clientId, currencyId, date);
-      if (!inputs.complete()) {
-        return;
-      }
-      String orgCurrencyId = OBCurrencyUtils.getOrgCurrency(orgId);
-      if (orgCurrencyId == null || orgCurrencyId.equals(currencyId)) {
-        return;
-      }
-      BigDecimal rate = lookupRate(orgCurrencyId, currencyId, date, orgId, clientId);
-      if (updates == null) {
-        updates = new JSONObject();
-        fields.body().put(KEY_UPDATES, updates);
-      }
-      updates.put(type.rateProperty(),
-          new JSONObject().put(KEY_VALUE, rate != null ? rate : JSONObject.NULL));
+      recalculateIntoCallout(fields, recordId);
     } catch (Exception e) {
       log.warn("[ETP-5840] Could not recalculate the exchange rate in the callout: {}",
           e.getMessage());
     }
+  }
+
+  /** The body of {@link #applyToCallout}, which only adds the never-throw guarantee. */
+  private void recalculateIntoCallout(NeoHandlerUtils.CalloutFields fields, String recordId)
+      throws JSONException {
+    if (fields == null || fields.body() == null) {
+      return;
+    }
+    String trigger = fields.triggerField();
+    JSONObject updates = fields.updates();
+    boolean currencyTrigger = PROP_CURRENCY.equals(trigger) || "currencyid".equals(trigger);
+    boolean dateTrigger = type.referenceDateProperty().equals(trigger);
+    boolean dateCascaded = updates != null && updates.has(type.referenceDateProperty());
+    if (!currencyTrigger && !dateTrigger && !dateCascaded) {
+      return;
+    }
+    JSONObject form = fields.formState() != null ? fields.formState() : new JSONObject();
+    Object triggered = fields.requestBody() != null ? fields.requestBody().opt(KEY_VALUE) : null;
+
+    String currencyId = calloutCurrencyId(currencyTrigger, triggered, form);
+    LocalDate date = calloutReferenceDate(dateTrigger, dateCascaded, triggered, updates, form);
+    BaseOBObject stored = load(recordId);
+    String orgId = firstId(form.opt(PROP_ORGANIZATION), idOf(stored, PROP_ORGANIZATION),
+        sessionOrgId());
+    String clientId = firstId(idOf(stored, PROP_CLIENT), sessionClientId());
+    RateInputs inputs = new RateInputs(orgId, clientId, currencyId, date);
+    if (!inputs.complete()) {
+      return;
+    }
+    String orgCurrencyId = OBCurrencyUtils.getOrgCurrency(orgId);
+    if (orgCurrencyId == null || orgCurrencyId.equals(currencyId)) {
+      return;
+    }
+    putRateInCalloutUpdates(fields, updates,
+        lookupRate(orgCurrencyId, currencyId, date, orgId, clientId));
+  }
+
+  /**
+   * The currency the callout decides on: the value just picked when the currency triggered it,
+   * else the form's currency.
+   */
+  private static String calloutCurrencyId(boolean currencyTrigger, Object triggered,
+      JSONObject form) {
+    String currencyId = currencyTrigger ? idOf(triggered) : null;
+    return currencyId != null ? currencyId
+        : firstId(form.opt(PROP_CURRENCY), form.opt("currencyid"));
+  }
+
+  /**
+   * The reference date the callout decides on: the value just entered when the date triggered it,
+   * else the one the callout cascade wrote into {@code updates}, else the form's.
+   */
+  private LocalDate calloutReferenceDate(boolean dateTrigger, boolean dateCascaded,
+      Object triggered, JSONObject updates, JSONObject form) {
+    if (dateTrigger) {
+      return parseDate(triggered);
+    }
+    if (dateCascaded) {
+      return parseDate(updates.opt(type.referenceDateProperty()));
+    }
+    return parseDate(form.opt(type.referenceDateProperty()));
+  }
+
+  /** Writes {@code {"value": rate|null}} under the rate property, creating {@code updates}. */
+  private void putRateInCalloutUpdates(NeoHandlerUtils.CalloutFields fields, JSONObject updates,
+      BigDecimal rate) throws JSONException {
+    JSONObject target = updates;
+    if (target == null) {
+      target = new JSONObject();
+      fields.body().put(KEY_UPDATES, target);
+    }
+    target.put(type.rateProperty(),
+        new JSONObject().put(KEY_VALUE, rate != null ? rate : JSONObject.NULL));
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -254,55 +284,73 @@ final class DocumentCurrencyRate {
       return null;
     }
     try {
-      JSONObject body = context.getRequestBody();
-      boolean create = StringUtils.isBlank(context.getRecordId());
-      BaseOBObject stored = create ? null : load(context.getRecordId());
-      if (!create && (stored == null || isProcessed(stored))) {
-        return null;
-      }
-      String bodyCurrency = idOf(body.opt(PROP_CURRENCY));
-      LocalDate bodyDate = parseDate(body.opt(type.referenceDateProperty()));
-      String currencyId = firstId(bodyCurrency, idOf(stored, PROP_CURRENCY));
-      LocalDate date = bodyDate != null ? bodyDate : dateOf(stored);
-      String orgId = firstId(idOf(body.opt(PROP_ORGANIZATION)), idOf(stored, PROP_ORGANIZATION),
-          create ? sessionOrgId() : null);
-      String clientId = firstId(idOf(stored, PROP_CLIENT), sessionClientId());
-      RateInputs inputs = new RateInputs(orgId, clientId, currencyId, date);
-      if (!inputs.complete()) {
-        deferredCreate = create;
-        return null;
-      }
-      String orgCurrencyId = OBCurrencyUtils.getOrgCurrency(orgId);
-      if (orgCurrencyId == null || orgCurrencyId.equals(currencyId)) {
-        return null;
-      }
-      boolean sendsRate = body.has(type.rateProperty());
-      BigDecimal sentRate = sendsRate ? parseRate(body.opt(type.rateProperty())) : null;
-      boolean changed = create || !currencyId.equals(idOf(stored, PROP_CURRENCY))
-          || !date.equals(dateOf(stored));
-      BigDecimal finalRate;
-      if (sentRate != null) {
-        finalRate = sentRate;
-      } else if (changed) {
-        finalRate = lookupRate(orgCurrencyId, currencyId, date, orgId, clientId);
-        body.put(type.rateProperty(), finalRate != null ? finalRate : JSONObject.NULL);
-      } else if (sendsRate) {
-        finalRate = null; // the caller cleared the rate
-      } else {
-        finalRate = (BigDecimal) stored.get(type.rateProperty());
-      }
-      if (finalRate != null && finalRate.signum() > 0) {
-        return null;
-      }
-      return completing
-          ? DocumentRateMessages.missingOnComplete(isoCode(orgCurrencyId), isoCode(currencyId))
-          : DocumentRateMessages.missingOnSave(isoCode(orgCurrencyId), isoCode(currencyId), date,
-              type.referenceDateLabelKey(), type.referenceDateProperty());
+      return evaluateWrite(context, completing);
     } catch (Exception e) {
       log.warn("[ETP-5840] Could not evaluate the exchange rate of {} {}: {}", type.entityName(),
           context.getRecordId(), e.getMessage());
       return null;
     }
+  }
+
+  /** The decision of {@link #beforeWrite} for a CRUD write with a body. */
+  private NeoResponse evaluateWrite(NeoContext context, boolean completing)
+      throws JSONException {
+    JSONObject body = context.getRequestBody();
+    boolean create = StringUtils.isBlank(context.getRecordId());
+    BaseOBObject stored = create ? null : load(context.getRecordId());
+    if (!create && (stored == null || isProcessed(stored))) {
+      return null;
+    }
+    String bodyCurrency = idOf(body.opt(PROP_CURRENCY));
+    LocalDate bodyDate = parseDate(body.opt(type.referenceDateProperty()));
+    String currencyId = firstId(bodyCurrency, idOf(stored, PROP_CURRENCY));
+    LocalDate date = bodyDate != null ? bodyDate : dateOf(stored);
+    String orgId = firstId(idOf(body.opt(PROP_ORGANIZATION)), idOf(stored, PROP_ORGANIZATION),
+        create ? sessionOrgId() : null);
+    String clientId = firstId(idOf(stored, PROP_CLIENT), sessionClientId());
+    RateInputs inputs = new RateInputs(orgId, clientId, currencyId, date);
+    if (!inputs.complete()) {
+      deferredCreate = create;
+      return null;
+    }
+    String orgCurrencyId = OBCurrencyUtils.getOrgCurrency(orgId);
+    if (orgCurrencyId == null || orgCurrencyId.equals(currencyId)) {
+      return null;
+    }
+    boolean changed = create || !currencyId.equals(idOf(stored, PROP_CURRENCY))
+        || !date.equals(dateOf(stored));
+    BigDecimal finalRate = rateToSave(body, stored, changed, inputs, orgCurrencyId);
+    if (finalRate != null && finalRate.signum() > 0) {
+      return null;
+    }
+    return completing
+        ? DocumentRateMessages.missingOnComplete(isoCode(orgCurrencyId), isoCode(currencyId))
+        : DocumentRateMessages.missingOnSave(isoCode(orgCurrencyId), isoCode(currencyId), date,
+            type.referenceDateLabelKey(), type.referenceDateProperty());
+  }
+
+  /**
+   * The rate the write will save: the positive rate the body sends; else, when the currency or the
+   * reference date changes, the recalculated one (also written into the body, {@code null} when
+   * none); else {@code null} when the body clears it; else the stored rate.
+   */
+  private BigDecimal rateToSave(JSONObject body, BaseOBObject stored, boolean changed,
+      RateInputs inputs, String orgCurrencyId) throws JSONException {
+    boolean sendsRate = body.has(type.rateProperty());
+    BigDecimal sentRate = sendsRate ? parseRate(body.opt(type.rateProperty())) : null;
+    if (sentRate != null) {
+      return sentRate;
+    }
+    if (changed) {
+      BigDecimal recalculated = lookupRate(orgCurrencyId, inputs.currencyId(),
+          inputs.referenceDate(), inputs.orgId(), inputs.clientId());
+      body.put(type.rateProperty(), recalculated != null ? recalculated : JSONObject.NULL);
+      return recalculated;
+    }
+    if (sendsRate) {
+      return null; // the caller cleared the rate
+    }
+    return (BigDecimal) stored.get(type.rateProperty());
   }
 
   /**

@@ -174,7 +174,7 @@ public class CurrencyOptionsHandler implements NeoHandler {
     if (date == null) {
       date = new DocumentCurrencyRate(type).dateOf(doc);
     }
-    String orgId = ((BaseOBObject) doc.get("organization")).getId().toString();
+    String orgId = ((BaseOBObject) doc.get(PARAM_ORGANIZATION)).getId().toString();
     String clientId = ((BaseOBObject) doc.get("client")).getId().toString();
     return new RequestContext(orgId, clientId, date != null ? date : LocalDate.now());
   }

@@ -130,15 +130,12 @@ public class DocumentRateMessagesTest {
     });
   }
 
-  /** {@code dd/MM/yyyy} whatever the language; an absent date is empty. */
+  /** {@code dd/MM/yyyy} (the format takes no language); an absent date is empty. */
   @Test
   public void formatDateIsDayMonthYearInEveryLanguage() {
     LocalDate date = LocalDate.of(2026, 3, 31);
-    for (String language : new String[] { "es_ES", "en_US", null }) {
-      assertEquals(String.valueOf(language), "31/03/2026",
-          DocumentRateMessages.formatDate(date, language));
-    }
-    assertEquals("", DocumentRateMessages.formatDate(null, "es_ES"));
+    assertEquals("31/03/2026", DocumentRateMessages.formatDate(date));
+    assertEquals("", DocumentRateMessages.formatDate(null));
   }
 
   /**

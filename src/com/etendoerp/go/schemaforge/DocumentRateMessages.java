@@ -106,9 +106,9 @@ final class DocumentRateMessages {
 
   /**
    * The date as the story's acceptance text writes it, {@code dd/MM/yyyy}, for every language
-   * (ETP-5840). {@code language} is kept for callers; it does not change the format.
+   * (ETP-5840).
    */
-  static String formatDate(LocalDate date, String language) {
+  static String formatDate(LocalDate date) {
     return date == null ? "" : date.format(DateTimeFormatter.ofPattern("dd/MM/yyyy"));
   }
 
@@ -116,7 +116,7 @@ final class DocumentRateMessages {
   static String missingOnSaveText(String orgIso, String docIso, LocalDate date,
       String referenceDateLabelKey) {
     String language = NeoLanguage.currentCode();
-    return text(MSG_MISSING_ON_SAVE, language, orgIso, docIso, formatDate(date, language),
+    return text(MSG_MISSING_ON_SAVE, language, orgIso, docIso, formatDate(date),
         text(referenceDateLabelKey, language));
   }
 
