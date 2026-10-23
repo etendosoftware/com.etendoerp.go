@@ -105,6 +105,36 @@ public class NeoListAggregateQueryTest {
   }
 
   @Test
+  public void forParamsCopiesTheMapDefensivelyAndKeepsItUnmodifiable() {
+    Map<String, String> source = params();
+    NeoListAggregateQuery q = NeoListAggregateQuery.forParams(source);
+
+    source.put("criteria", "changed");
+    source.remove("_startRow");
+
+    Map<String, String> filter = q.filterParams();
+    assertEquals("{}", filter.get("criteria"));
+    assertEquals("0", filter.get("_startRow"));
+    assertEquals(params(), filter);
+    try {
+      filter.put("k", "v");
+      fail("the params of a forParams query must be unmodifiable");
+    } catch (UnsupportedOperationException expected) {
+      // expected
+    }
+  }
+
+  @Test
+  public void forParamsLeavesStrippingToTheCaller() {
+    // Unlike remember(), forParams trusts the caller: the distinct fetch strips _distinct, sort
+    // and id itself before the query service is created.
+    NeoListAggregateQuery q = NeoListAggregateQuery.forParams(params());
+
+    assertEquals("x", q.filterParams().get("_distinct"));
+    assertEquals("name", q.filterParams().get("_sortBy"));
+  }
+
+  @Test
   public void rememberDoesNotMutateTheCallersParams() {
     Map<String, String> source = params();
     NeoListAggregateQuery.remember(ctx(), source);
