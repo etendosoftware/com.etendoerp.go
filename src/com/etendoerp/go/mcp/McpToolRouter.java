@@ -59,6 +59,7 @@ import com.etendoerp.go.schemaforge.NeoActionRecordGuard;
 import com.etendoerp.go.schemaforge.NeoCommercialLinePolicy;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
+import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
 import com.etendoerp.go.schemaforge.util.NeoLanguage;
 import com.etendoerp.go.schemaforge.util.NeoReportContract;
 import com.etendoerp.go.schemaforge.NeoContext;
@@ -2048,10 +2049,10 @@ public class McpToolRouter {
   private JSONObject handleReport(String specName, JSONObject args) throws Exception {
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
 
-    // First included entity declaring a NEO report handler qualifier, or null.
+    // First included entity that is customized (@NeoExtension or Java_Qualifier), or null.
     SFEntity reportEntity = null;
     for (SFEntity entity : McpToolRouterSupport.listIncludedEntities(spec.getId())) {
-      if (StringUtils.isNotBlank(entity.getJavaQualifier())) {
+      if (NeoHandlerLookup.hasCustomization(entity)) {
         reportEntity = entity;
         break;
       }
@@ -2081,7 +2082,8 @@ public class McpToolRouter {
     // contract is not a report generator: it gets the not-configured answer rather than a POST
     // it can only reject.
     Optional<NeoReportContract> contract = NeoReportCallability.contractOf(handler,
-        reportEntity.getJavaQualifier());
+        StringUtils.defaultIfBlank(reportEntity.getJavaQualifier(),
+            handler.getClass().getSimpleName()));
     if (contract.isEmpty()) {
       return wrapAsTextContent(
           NeoReportCallability.buildNotConfiguredResponse(specName));

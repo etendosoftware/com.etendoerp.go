@@ -251,7 +251,7 @@ final class McpHookExecutor {
     // the REST paths use. The two are not equivalent (see NeoExtensionDispatcher); keeping the
     // channel's own resolver is what makes this step a routing change and not a resolution change.
     NeoExtensionResult result = NeoExtensionDispatcher.dispatch(request
-        .post(resolveEntityHandler(sfEntity))
+        .post(NeoHandlerLookup.forEntity(sfEntity))
         .withPreviousResult(NeoResponse.ok(responseJson)));
     NeoResponse response = result.response();
     if (response == null) {
@@ -264,20 +264,6 @@ final class McpHookExecutor {
     }
     return new ReadHookOutcome(
         response.getBody() != null ? response.getBody() : responseJson, null);
-  }
-
-  /**
-   * Resolve the {@link NeoHandler} registered for the entity's Java_Qualifier.
-   *
-   * <p>Delegates to {@link NeoHandlerLookup}, where the CDI lookup was moved (ETP-4793 / IMP-19)
-   * so {@code schemaforge} code — the report-callability gate — can ask a handler what it
-   * supports without depending on this package.</p>
-   *
-   * @return the matching handler, or {@code null} when the entity declares no
-   *         qualifier or no matching {@code @Named} handler is deployed
-   */
-  static NeoHandler resolveEntityHandler(SFEntity sfEntity) {
-    return NeoHandlerLookup.byQualifier(sfEntity.getJavaQualifier());
   }
 
   /**
