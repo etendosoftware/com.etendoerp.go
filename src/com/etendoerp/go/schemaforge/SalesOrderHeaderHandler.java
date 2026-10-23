@@ -75,6 +75,21 @@ public class SalesOrderHeaderHandler extends AbstractOrderHeaderHandler {
   private TotalDiscountService totalDiscountService;
 
   /**
+   * ETP-5840: the rate is the one valid on the {@code orderDate} ({@code DateOrdered}), shown as
+   * "Order date". Order-family rules in {@link DocumentRateGuards#guardOrderHeader}.
+   */
+  static final DocumentCurrencyRate.RateType RATE_TYPE = new DocumentCurrencyRate.RateType(
+      Order.ENTITY_NAME, Order.PROPERTY_ETGOCURRENCYRATE, Order.PROPERTY_ORDERDATE,
+      DocumentRateMessages.LABEL_ORDER_DATE);
+
+  private final DocumentCurrencyRate currencyRate = new DocumentCurrencyRate(RATE_TYPE);
+
+  @Override
+  protected DocumentCurrencyRate currencyRate() {
+    return currencyRate;
+  }
+
+  /**
    * The actions this header serves through its delegates, declared for agents (ETP-5709):
    * {@code createShipment}, {@code createDraftInvoice} and {@code cloneRecord}. Published by the
    * MCP next to the AD buttons; REST and the SPA do not read it.
@@ -127,6 +142,12 @@ public class SalesOrderHeaderHandler extends AbstractOrderHeaderHandler {
         Location.PROPERTY_SHIPTOADDRESS, Order.PROPERTY_INVOICEADDRESS,
         Location.PROPERTY_INVOICETOADDRESS);
     AbstractOrderHeaderHandler.mirrorAccountingDate(context);
+    // ETP-5840: exchange rate — recalculation, save and completion validation — before anything
+    // with side effects runs.
+    NeoResponse rateRefusal = DocumentRateGuards.guardOrderHeader(context, currencyRate);
+    if (rateRefusal != null) {
+      return rateRefusal;
+    }
     AbstractOrderHeaderHandler.applyTotalDiscountBeforeComplete(context, totalDiscountService, false);
     return NeoHeaderActionRouter.dispatch(
         context,
