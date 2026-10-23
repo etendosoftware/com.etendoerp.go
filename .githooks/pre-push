@@ -19,7 +19,8 @@ PUSH_REFS=""
 # ----------------------------------------------------------------------------
 # Hooks-Verified: every commit being pushed must carry a valid trailer, proving
 # the pre-commit hooks were installed and ran for that exact tree.
-# Set HOOKS_VERIFY_SKIP=1 to bypass (e.g. when pushing imported/legacy history).
+# HOOKS_VERIFY_SKIP=1 exists only for maintenance pushes of imported history; CI's verify
+# check applies regardless.
 # ----------------------------------------------------------------------------
 if [ "$HOOKS_VERIFY_SKIP" != "1" ]; then
   . "$SCRIPT_DIR/lib/hooks-proof.sh"
@@ -48,10 +49,10 @@ if [ "$HOOKS_VERIFY_SKIP" != "1" ]; then
       printf '     %s  %s\n' "$(git rev-parse --short "$sha")" "$(git log -1 --format=%s "$sha")"
     done
     echo ""
-    echo "   The git hooks were not active when those commits were made."
+    echo "   They were made without the git hooks, or changed after them (an amend with"
+    echo "   --no-verify, a rebase that resolved a conflict). CI's verify check refuses them too."
     echo "   Fix: git config core.hooksPath .githooks   (see .githooks/README.md)"
     echo "        git rebase --exec 'git commit --amend --no-edit' <base>"
-    echo "   Bypass (discouraged): HOOKS_VERIFY_SKIP=1 git push"
     exit 1
   fi
   echo "✔ Hooks-Verified trailer present on all pushed commits."
@@ -68,7 +69,7 @@ rm -f "$HANDOFF_FILE"
 cd "$MODULE_DIR"
 if [ -n "$(git status --porcelain)" ]; then
   echo "❌ ERROR: You have uncommitted or untracked changes in the module repository."
-  echo "   Please commit or stash them before pushing, or use 'git push --no-verify' to bypass."
+  echo "   Commit or stash them before pushing: the checks below must see what you push."
   echo "   Uncommitted files:"
   git status --porcelain
   exit 1
@@ -532,7 +533,7 @@ if [ "${#FAILED_STEPS[@]}" -gt 0 ]; then
   done
   echo ""
   echo "   Fix everything listed, then re-push (each is re-checked together —"
-  echo "   no need to push once per problem). Bypass with 'git push --no-verify'."
+  echo "   no need to push once per problem)."
   echo "=========================================="
   exit 1
 fi
