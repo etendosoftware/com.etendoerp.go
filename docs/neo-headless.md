@@ -9611,7 +9611,7 @@ guard in a shared service):
 |---|---|
 | purchase invoice line customization | `PurchaseInvoiceLineHandler` — `@NeoExtension(spec = "purchase-invoice", entity = "lines")`, extends `InvoiceLineHandler`, no `@Named` |
 | sales invoice line customization (since ETP-5528; now also discount + update) | `SalesInvoiceLineHandler` |
-| price + amounts, create and update | `InvoiceLineAmountSupport.deriveAmountsOnWrite` (shared by both) |
+| price + amounts (net, gross, `taxableAmount`), create and update | `InvoiceLineAmountSupport.deriveAmountsOnWrite` (shared by both) |
 | completion guard | `InvoiceCompletionLineGuard`, called first by `PurchaseInvoiceHeaderHandler` and `SalesInvoiceHeaderHandler` |
 
 **Precedence between the annotation and the row's qualifier.** The row `purchase-invoice/lines` keeps
@@ -9709,6 +9709,16 @@ left alone. The shared policy leaves `grossAmount` indeterminate when the net is
 `InvoiceLineAmountSupport` sets the gross to 0 whenever the net derives to exactly 0 and no explicit gross
 price exists (100 % discount, free line, quantity edited to 0). Measured live before the fix (purchase
 invoice 10000081, Agua 1 × 10, 100 %): `priceactual 0` but `linenetamt 10`, header total 12.10.
+**`taxableAmount` (`TaxBaseAmt`, ETP-5710 point 2).** Only the core UI callout `SL_Invoice_Amt` filled it,
+before the discount, so a line written through REST/MCP kept 0 or a stale quantity x price (purchase
+invoice 10000123, Cerveza 10 x 25 at 100 %: net 0, taxableAmount 250). `InvoiceLineAmountSupport` now
+sets it to the line's final `lineNetAmount` (the core semantics, `UpdateTax.updateTaxableAmount`),
+rounded to the currency precision, in the invoice-line customizations' pre-hook only. On **create** it
+always overwrites the body's value (a derived 0 is written too; a return line keeps its sign). On
+**update** it is written whenever the net is re-derived, unless the patch itself sends `taxableAmount`
+(the caller's value wins, as for the other amounts). It always equals the net that is stored: a `lineNetAmount` the caller sent (create or update) is followed, not the derived one. Nothing downstream reads the line value (taxes,
+303/349 and posting use `C_InvoiceTax`); it feeds the line grid/form. No channel divergence. Legacy rows
+are not rewritten.
 On update the amounts of the **final** line are recomputed whenever the patch carries `invoicedQuantity`,
 `unitPrice`, `listPrice`, `etgoDiscount`, `grossUnitPrice` or `tax`; an amount the patch itself carries is
 kept. Worked numbers: 10 × 25 at 2 %, IVA 21 % → `unitPrice 24.50`, net 245.00, gross 296.45; quantity
