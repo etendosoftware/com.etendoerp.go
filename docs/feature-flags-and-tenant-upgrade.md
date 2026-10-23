@@ -269,9 +269,12 @@ never evaluates it. Locally: `etendo.go.flags.environment-access-enforcement-off
 
 It is an incident switch (a wrong status after a provider outage, a bad deploy), not a way to give a
 tenant free access. No key exists in the web client's `flag-keys.js`, and none must be added: the
-SPA follows the 402 it is given. The 402 body and the entry points are described in
-`open-and-notable-topics.md` §3.8 (the row lifecycle behind the decision in §3.7); the registry entry
-is `environment-access-enforcement-kill-switch` in `schema_forge/flags-registry.json`.
+SPA follows the 402 it is given. The 402 body and the entry points are in *Operating
+environment-access enforcement* below and in `neo-headless.md` §4.1; keep the body's `message`
+unchanged for at least one release after a backend change, since an older SPA still parses it
+(`environmentAccessGate.js` reads `error.decision` first). The row lifecycle behind the decision is
+`open-and-notable-topics.md` §3.7; the registry entry is `environment-access-enforcement-kill-switch`
+in `schema_forge/flags-registry.json`.
 
 ### Operating environment-access enforcement (ETP-5047) — deploy, switch off, support
 
