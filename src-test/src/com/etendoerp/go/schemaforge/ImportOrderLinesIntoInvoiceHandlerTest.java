@@ -67,6 +67,7 @@ import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.invoice.InvoiceLine;
 import org.openbravo.model.common.order.Order;
 import org.openbravo.model.common.order.OrderLine;
+import org.openbravo.model.common.plm.Product;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
 
@@ -222,6 +223,8 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
               : new BigDecimal(entry.getString("orderedQuantity"));
           InvoiceLine created = invoiceLine("il-" + target.getInvoiceLineList().size(),
               source.getProduct(), qty.toPlainString());
+          // Active, as a real new line: so a check run after creation would count it.
+          when(created.isActive()).thenReturn(true);
           when(created.getSalesOrderLine()).thenReturn(source);
           java.util.concurrent.atomic.AtomicReference<ShipmentInOutLine> link =
               new java.util.concurrent.atomic.AtomicReference<>(entry.has("shipmentInOutLine")
@@ -837,25 +840,68 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
     assertFalse(mixed.has("salesOrder"));
   }
 
+  /**
+   * The header's total discount takes the order's positive % only when, before this import, the
+   * invoice had that same %, or had no % and no lines (the total-discount line and inactive lines
+   * do not count; a line without product does). Otherwise the header is kept and the import still
+   * goes through. The lines this import creates (active, with product) never count: the first row
+   * imports onto an empty invoice and still carries the %.
+   */
   @Test
-  public void importOrderLines_carriesThePositiveOrderDiscount_onlyWhenTheInvoiceHasNone()
+  public void importOrderLines_carriesTheOrderDiscount_onlyWithoutPriorLinesOrWithTheSamePercent()
       throws Exception {
+    Product sal = product("p9", "Sal", false);
+    InvoiceLine productLine = existingLine("pre-product", sal, true);
+    Product discountProduct = product(TotalDiscountService.DISCOUNT_PRODUCT_ID, "Descuento",
+        false);
+    InvoiceLine discountLine = existingLine("pre-discount", discountProduct, true);
+    Product te = product("p10", "Té", false);
+    InvoiceLine inactiveLine = existingLine("pre-inactive", te, false);
+    InvoiceLine noProductLine = existingLine("pre-no-product", null, true);
+    InvoiceLine sameRateLine = existingLine("pre-same", sal, true);
+
+    assertDiscountCarried("empty invoice, no %: the lines of this import do not count",
+        "10", null, true);
+    assertDiscountCarried("a product line already there, no %", "10", null, false, productLine);
+    assertDiscountCarried("only the total-discount line, no %", "10", null, true, discountLine);
+    assertDiscountCarried("only an inactive line, no %", "10", null, true, inactiveLine);
+    assertDiscountCarried("a line without product, no %", "10", null, false, noProductLine);
+    assertDiscountCarried("the same %, with lines", "10", "10", true, sameRateLine);
+    assertDiscountCarried("another %", "10", "5", false);
+    assertDiscountCarried("order at 0 %", "0", null, false);
+    assertDiscountCarried("order without %", null, null, false);
+  }
+
+  /** A line the draft invoice already holds before the import. */
+  private static InvoiceLine existingLine(String id, Product product, boolean active) {
+    InvoiceLine line = invoiceLine(id, product, "1");
+    when(line.isActive()).thenReturn(active);
+    return line;
+  }
+
+  /** Imports the whole order onto the scenario's invoice and checks the header's total discount. */
+  private void assertDiscountCarried(String label, String orderPct, String invoicePct,
+      boolean carried, InvoiceLine... existing) throws Exception {
     Probe probe = scenario();
-    when(probe.order.getEtgoTotalDiscount()).thenReturn(bd("10"));
-    when(probe.invoice.getEtgoTotalDiscount()).thenReturn(null);
-    run(probe, "importOrderLines", "{\"orderId\":\"o1\"}");
-    verify(probe.invoice).setEtgoTotalDiscount(bd("10"));
+    BigDecimal orderDiscount = orderPct == null ? null : bd(orderPct);
+    BigDecimal invoiceDiscount = invoicePct == null ? null : bd(invoicePct);
+    when(probe.order.getEtgoTotalDiscount()).thenReturn(orderDiscount);
+    when(probe.invoice.getEtgoTotalDiscount()).thenReturn(invoiceDiscount);
+    probe.invoice.getInvoiceLineList().addAll(List.of(existing));
 
-    probe = scenario();
-    when(probe.order.getEtgoTotalDiscount()).thenReturn(bd("10"));
-    when(probe.invoice.getEtgoTotalDiscount()).thenReturn(bd("5"));
-    run(probe, "importOrderLines", "{\"orderId\":\"o1\"}");
-    verify(probe.invoice, never()).setEtgoTotalDiscount(any());
+    NeoResponse response = run(probe, "importOrderLines", "{\"orderId\":\"o1\"}");
 
-    probe = scenario();
-    when(probe.order.getEtgoTotalDiscount()).thenReturn(BigDecimal.ZERO);
-    run(probe, "importOrderLines", "{\"orderId\":\"o1\"}");
-    verify(probe.invoice, never()).setEtgoTotalDiscount(any());
+    assertEquals(label + ": the import goes through", 2,
+        data(response).getInt("importedCount"));
+    try {
+      if (carried) {
+        verify(probe.invoice).setEtgoTotalDiscount(orderDiscount);
+      } else {
+        verify(probe.invoice, never()).setEtgoTotalDiscount(any());
+      }
+    } catch (AssertionError e) {
+      throw new AssertionError(label, e);
+    }
   }
 
   // ── what the native process produced ──────────────────────────────────────
