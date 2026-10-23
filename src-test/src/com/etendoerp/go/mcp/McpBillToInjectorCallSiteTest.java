@@ -53,6 +53,7 @@ import org.junit.jupiter.api.Test;
  *
  * @covers com.etendoerp.go.mcp.McpBillToInjector
  * @covers com.etendoerp.go.mcp.McpToolRouter
+ * @covers com.etendoerp.go.mcp.McpHookExecutor
  */
 @DisplayName("ETP-5335 — every MCP write path derives the bill-to, in the right order")
 class McpBillToInjectorCallSiteTest {
@@ -106,19 +107,19 @@ class McpBillToInjectorCallSiteTest {
     int injector = indexOfOrFail(body, INJECTOR_CALL, "handleCreate",
         "McpBillToInjector.injectIfMissing(...)");
     int forward = indexOfOrFail(body,
-        Pattern.compile("forwardFallbackDefaults\\s*\\("), "handleCreate",
-        "forwardFallbackDefaults(ctx, hookCtx)");
+        Pattern.compile("McpHookExecutor\\s*\\.\\s*forwardFallbackDefaults\\s*\\("), "handleCreate",
+        "McpHookExecutor.forwardFallbackDefaults(ctx, hookCtx)");
     int dispatch = indexOfOrFail(body,
         Pattern.compile("NeoExtensionDispatcher\\s*\\.\\s*dispatch\\s*\\("), "handleCreate",
         "NeoExtensionDispatcher.dispatch(customizationRequest)");
 
     assertTrue(injector < forward,
         "handleCreate forwards the placeholders before the injectors ran. Move the"
-            + " forwardFallbackDefaults call after them.");
+            + " McpHookExecutor.forwardFallbackDefaults call after them.");
     assertTrue(forward < dispatch,
         "handleCreate dispatches the pre-hook before forwarding the placeholders, so the entity"
-            + " cannot tell a placeholder from a chosen value. Move forwardFallbackDefaults before"
-            + " NeoExtensionDispatcher.dispatch.");
+            + " cannot tell a placeholder from a chosen value. Move"
+            + " McpHookExecutor.forwardFallbackDefaults before NeoExtensionDispatcher.dispatch.");
   }
 
   @Test

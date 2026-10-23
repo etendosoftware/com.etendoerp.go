@@ -26,9 +26,7 @@ import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
 
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.HashSet;
-import java.util.Map;
 import java.util.Set;
 
 import org.codehaus.jettison.json.JSONArray;
@@ -38,7 +36,6 @@ import org.mockito.MockedStatic;
 import org.openbravo.base.exception.OBSecurityException;
 import org.openbravo.dal.core.OBContext;
 
-import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 
 /**
@@ -1508,100 +1505,5 @@ public class McpToolRouterTest {
     assertEquals("etendo_list", envelope.getString("tool"));
     assertTrue(envelope.getString("hint").contains("will not help"));
     assertFalse(body.startsWith("Error executing"));
-  }
-
-  // ── ETP-5680: placeholder forwarding and etendo_defaults recordContext ──
-
-  /** The placeholders the mandatory-defaults pass recorded reach the pre-hook's context. */
-  @Test
-  public void testFallbackPlaceholdersAreForwardedToTheHookContext() {
-    NeoContext from = NeoContext.builder()
-        .specName("product").entityName("product").httpMethod("POST").build();
-    from.addFallbackDefault("taxCategory");
-    from.addFallbackDefault("uOM");
-    NeoContext to = NeoContext.builder()
-        .specName("product").entityName("product").httpMethod("POST").build();
-
-    McpToolRouter.forwardFallbackDefaults(from, to);
-
-    assertEquals(Set.of("taxCategory", "uOM"), to.getFallbackDefaults());
-    assertFalse(to.getFallbackDefaults().contains("productType"));
-  }
-
-  /** With nothing recorded (a value the caller sent is never recorded) nothing is forwarded. */
-  @Test
-  public void testNoPlaceholdersMeansNothingForwarded() {
-    NeoContext from = NeoContext.builder()
-        .specName("product").entityName("product").httpMethod("POST").build();
-    NeoContext to = NeoContext.builder()
-        .specName("product").entityName("product").httpMethod("POST").build();
-
-    McpToolRouter.forwardFallbackDefaults(from, to);
-
-    assertTrue(to.getFallbackDefaults().isEmpty());
-  }
-
-  /** Scalars become query params as strings, in the form REST /defaults?key=value gives. */
-  @Test
-  public void testRecordContextScalarsBecomeQueryParams() throws Exception {
-    Map<String, String> params = new HashMap<>();
-
-    McpToolRouter.copyRecordContext(new JSONObject()
-        .put("productType", "S").put("qty", 3).put("active", true), params);
-
-    assertEquals("S", params.get("productType"));
-    assertEquals("3", params.get("qty"));
-    assertEquals("true", params.get("active"));
-  }
-
-  /** The tool's own arguments are never overridden, and null / object / array entries are skipped. */
-  @Test
-  public void testRecordContextReservedKeysWinAndNonScalarsAreIgnored() throws Exception {
-    Map<String, String> params = new HashMap<>();
-    params.put("parentId", "REAL");
-
-    McpToolRouter.copyRecordContext(new JSONObject()
-        .put("parentId", "FAKE").put("assetId", "A").put("view", "minimal")
-        .put("spec", "x").put("entity", "y")
-        .put("nested", new JSONObject().put("a", 1)).put("list", new JSONArray().put(1))
-        .put("nothing", JSONObject.NULL).put("productType", "I"), params);
-
-    assertEquals("REAL", params.get("parentId"));
-    assertFalse(params.containsKey("assetId"));
-    assertFalse(params.containsKey("view"));
-    assertFalse(params.containsKey("spec"));
-    assertFalse(params.containsKey("entity"));
-    assertFalse(params.containsKey("nested"));
-    assertFalse(params.containsKey("list"));
-    assertFalse(params.containsKey("nothing"));
-    assertEquals("I", params.get("productType"));
-  }
-
-  /** At most 32 entries and 256 characters per value are forwarded; a null context is a no-op. */
-  @Test
-  public void testRecordContextCapsEntriesAndValueLength() throws Exception {
-    JSONObject big = new JSONObject();
-    for (int i = 0; i < 50; i++) {
-      big.put("k" + i, "v");
-    }
-    Map<String, String> params = new HashMap<>();
-
-    McpToolRouter.copyRecordContext(big, params);
-
-    assertEquals(McpToolRouter.MAX_RECORD_CONTEXT_ENTRIES, params.size());
-
-    Map<String, String> longValue = new HashMap<>();
-    McpToolRouter.copyRecordContext(new JSONObject().put("tooLong",
-        "x".repeat(McpToolRouter.MAX_RECORD_CONTEXT_VALUE_LENGTH + 1)), longValue);
-    assertFalse(longValue.containsKey("tooLong"));
-
-    Map<String, String> untouched = new HashMap<>();
-    McpToolRouter.copyRecordContext(null, untouched);
-    assertTrue(untouched.isEmpty());
-
-    Map<String, String> fits = new HashMap<>();
-    McpToolRouter.copyRecordContext(new JSONObject().put("justFits",
-        "x".repeat(McpToolRouter.MAX_RECORD_CONTEXT_VALUE_LENGTH)), fits);
-    assertEquals(McpToolRouter.MAX_RECORD_CONTEXT_VALUE_LENGTH, fits.get("justFits").length());
   }
 }

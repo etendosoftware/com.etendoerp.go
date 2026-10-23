@@ -341,7 +341,7 @@ protected from the callout cascade, a placeholder document type is now re-applie
 by `DocTypeResolver`.
 
 **Placeholders and the entity's pre-hook (ETP-5680).** On `etendo_create` the defaults pass runs
-*before* the entity's pre-hook, on a different `NeoContext`; `McpToolRouter#forwardFallbackDefaults`
+*before* the entity's pre-hook, on a different `NeoContext`; `McpHookExecutor#forwardFallbackDefaults`
 copies the recorded placeholder keys onto the pre-hook's context, so a customization can tell a
 placeholder from a value the caller sent (a caller's value is never recorded) and replace only the
 former. REST and `etendo_batch` run the pre-hook first, so there is nothing to forward there. The
