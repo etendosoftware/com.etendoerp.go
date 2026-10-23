@@ -95,6 +95,8 @@ public class ProductDefaultsHandler implements NeoHandler {
   private static final String FIELD_TAX_CATEGORY = "taxCategory";
   private static final String FIELD_PRODUCT_CATEGORY = "productCategory";
   private static final String FIELD_PRODUCT_TYPE = "productType";
+  /** Suffix of the display-value companion key of a reference field in a payload. */
+  private static final String IDENTIFIER_SUFFIX = "$_identifier";
   private static final String FIELD_STOCKED = "stocked";
   private static final String FIELD_RETURNABLE = "returnable";
   // ETP-4943 (Service) / ETP-5091 (Expense, Resource) — none of these product types have a
@@ -722,7 +724,7 @@ public class ProductDefaultsHandler implements NeoHandler {
     boolean typeRequested = requested != null && PRODUCT_TYPES.contains(requested);
     if (typeRequested) {
       defaults.put(FIELD_PRODUCT_TYPE, requested);
-      defaults.remove(FIELD_PRODUCT_TYPE + "$_identifier");
+      defaults.remove(FIELD_PRODUCT_TYPE + IDENTIFIER_SUFFIX);
     }
     String productType = typeRequested ? requested
         : StringUtils.trimToNull(defaults.optString(FIELD_PRODUCT_TYPE, null));
@@ -745,7 +747,7 @@ public class ProductDefaultsHandler implements NeoHandler {
       throws JSONException {
     defaults.put(key, id);
     if (identifier != null) {
-      defaults.put(key + "$_identifier", identifier);
+      defaults.put(key + IDENTIFIER_SUFFIX, identifier);
     }
   }
 
@@ -824,7 +826,7 @@ public class ProductDefaultsHandler implements NeoHandler {
     defaults.put(propertyName, defaultId);
     BaseOBObject obj = OBDal.getInstance().get(entityClass, defaultId);
     if (obj != null) {
-      defaults.put(propertyName + "$_identifier", obj.getIdentifier());
+      defaults.put(propertyName + IDENTIFIER_SUFFIX, obj.getIdentifier());
     }
   }
 
