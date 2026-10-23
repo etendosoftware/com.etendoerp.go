@@ -42,6 +42,7 @@ import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.common.GoAccountResolver;
+import com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag;
 import com.etendoerp.go.payment.EnvironmentAccessGuard;
 import com.etendoerp.go.payment.EnvironmentAccessPolicy;
 import com.etendoerp.go.payment.EnvironmentPlanCache;
@@ -91,6 +92,7 @@ final class EtendoGoJwtDalHelper {
   private static final String FIELD_SUBSCRIPTION_STATUS = "subscriptionStatus";
   private static final String FIELD_RENEWAL_DUE_AT = "renewalDueAt";
   private static final String FIELD_GRACE_ENDS_AT = "graceEndsAt";
+  private static final String FIELD_ACCESS_ENFORCED = "accessEnforced";
   private static final String FIELD_RELATIONSHIP = "relationship";
   private static final String FIELD_OWNED_BY_ACCOUNT = "ownedByAccount";
   private static final String PROPERTY_PASSWORD_CHANGED = Account.PROPERTY_PASSWORDCHANGED;
@@ -795,6 +797,12 @@ final class EtendoGoJwtDalHelper {
     if (access != null) {
       env.put(FIELD_ACCESS_STATE, access.name());
     }
+    // ETP-5051 (§4.17): whether a refusal would be enforced for this tenant — false while the
+    // environment-access kill switch is on for it. Independent of today's decision: during payment
+    // grace accessState reads ALLOWED either way, and the grace banner reads this to drop its
+    // "will be blocked on <date>" promise when no block would follow.
+    env.put(FIELD_ACCESS_ENFORCED,
+        !EnvironmentAccessEnforcementFlag.isEnforcementSwitchedOff(client.getId()));
     // ETP-5548: a demo that already originated a productive environment is not offered as the
     // source of another purchase; the picker reads this to leave it out.
     env.put(FIELD_ASSOCIATED_WITH_PRODUCTIVE,

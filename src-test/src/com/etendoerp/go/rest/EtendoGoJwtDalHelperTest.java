@@ -24,10 +24,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -923,7 +925,7 @@ class EtendoGoJwtDalHelperTest {
     }
 
     @Test
-    @DisplayName("all twelve fields are populated")
+    @DisplayName("all thirteen fields are populated")
     void allTwelveFieldsPopulated() throws Exception {
       when(client.getId()).thenReturn("C-2");
       when(client.getName()).thenReturn("Client Two");
@@ -937,9 +939,9 @@ class EtendoGoJwtDalHelperTest {
           EnvironmentPlanCache.empty());
 
       // Seven original fields, the plan badge (ETP-4686), the plan key (ETP-5046), the
-      // relationship marker, the ownership flag (ETP-5743) and the demo-association flag
-      // (ETP-5548). Lifecycle fields are conditional and absent here.
-      assertEquals(12, result.length());
+      // relationship marker, the ownership flag (ETP-5743), the demo-association flag
+      // (ETP-5548) and accessEnforced (ETP-5051). Lifecycle fields are conditional and absent here.
+      assertEquals(13, result.length());
       // graceEndsAt (ETP-5049) travels with the lifecycle fields: absent without lifecycle.
       assertFalse(result.has("graceEndsAt"), result.toString());
     }
@@ -1130,13 +1132,18 @@ class EtendoGoJwtDalHelperTest {
             .isEnforcementSwitchedOff(clientId)).thenReturn(switchedOff);
         JSONObject result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, null,
             environmentUser);
+        // atLeastOnce: accessState consults the switch for a refusal, and accessEnforced
+        // (ETP-5051) reads it for every environment.
         flag.verify(() -> com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag
-            .isEnforcementSwitchedOff(clientId));
+            .isEnforcementSwitchedOff(clientId), atLeastOnce());
         return result;
       }
     }
 
-    /** Every key but accessState must be the same fact whatever the switch says. */
+    /**
+     * Every key but accessState must be the same fact whatever the switch says; accessEnforced
+     * (ETP-5051) is the switch itself, so it differs by design.
+     */
     private void assertOnlyAccessStateDiffers(JSONObject enforced, JSONObject switchedOff)
         throws Exception {
       java.util.Set<String> enforcedKeys = new java.util.TreeSet<>();
@@ -1145,7 +1152,7 @@ class EtendoGoJwtDalHelperTest {
       switchedOff.keys().forEachRemaining(key -> switchedKeys.add((String) key));
       assertEquals(enforcedKeys, switchedKeys);
       for (String key : enforcedKeys) {
-        if (!"accessState".equals(key)) {
+        if (!"accessState".equals(key) && !"accessEnforced".equals(key)) {
           assertEquals(String.valueOf(enforced.get(key)), String.valueOf(switchedOff.get(key)),
               key);
         }
@@ -1312,8 +1319,9 @@ class EtendoGoJwtDalHelperTest {
       try (MockedStatic<com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag> flag =
           mockStatic(com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag.class)) {
         result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, null, environmentUser);
-        // No refusal to switch off: the flag is never read.
-        flag.verifyNoInteractions();
+        // No refusal to switch off: the flag is read once, for accessEnforced (ETP-5051) only.
+        flag.verify(() -> com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag
+            .isEnforcementSwitchedOff(clientId), times(1));
       }
 
       assertFalse(result.has("accessState"), result.toString());
