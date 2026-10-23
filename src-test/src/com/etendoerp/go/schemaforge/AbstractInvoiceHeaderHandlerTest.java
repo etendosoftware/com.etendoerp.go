@@ -138,6 +138,10 @@ public class AbstractInvoiceHeaderHandlerTest {
       enrichOriginInvoice(rec, id);
     }
 
+    public void callEnrichRectifyingInvoices(JSONObject rec, String id) throws Exception {
+      enrichRectifyingInvoices(rec, id);
+    }
+
     public void callEnrichInvoiceSubtype(JSONObject rec, String key) throws Exception {
       enrichInvoiceSubtype(rec, key);
     }
@@ -934,6 +938,84 @@ public class AbstractInvoiceHeaderHandlerTest {
 
       handler.callEnrichOriginInvoice(rec, "inv-sql-err");
       // no exception thrown, rec unchanged
+      assertEquals(0, rec.length());
+    }
+  }
+
+  // ── enrichRectifyingInvoices (ETP-5745 CP-12) ───────────────────────────────
+
+  /**
+   * Mirror of {@code enrichOriginInvoice}, reading {@code C_Invoice_Reverse} in the opposite
+   * direction: the rectificativa(s) that rectify THIS invoice, not what this invoice rectifies.
+   * Before this method existed, the ORIGINAL invoice's detail GET carried no field a frontend
+   * source could read to show its own rectifications (CP-12: the "Rectificaciones" tab and the
+   * "Documentos relacionados" card both showed empty for the original).
+   */
+  @Test
+  public void enrichRectifyingInvoices_rowsFound_setsArray() throws Exception {
+    JSONObject rec = new JSONObject();
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(any())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(true, true, false);
+      when(rs.getString(1)).thenReturn("rect-a", "rect-b");
+      when(rs.getString(2)).thenReturn("FVR-A", "FVR-B");
+
+      handler.callEnrichRectifyingInvoices(rec, "inv-original");
+
+      JSONArray rectifying = rec.getJSONArray("rectifyingInvoices");
+      assertEquals(2, rectifying.length());
+      assertEquals("rect-a", rectifying.getJSONObject(0).getString("id"));
+      assertEquals("FVR-A", rectifying.getJSONObject(0).getString("documentNo"));
+      assertEquals("rect-b", rectifying.getJSONObject(1).getString("id"));
+      assertEquals("FVR-B", rectifying.getJSONObject(1).getString("documentNo"));
+    }
+  }
+
+  @Test
+  public void enrichRectifyingInvoices_noRowFound_setsEmptyArray() throws Exception {
+    JSONObject rec = new JSONObject();
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(any())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(false);
+
+      handler.callEnrichRectifyingInvoices(rec, "inv-no-rectifications");
+
+      assertEquals(0, rec.getJSONArray("rectifyingInvoices").length());
+    }
+  }
+
+  @Test
+  public void enrichRectifyingInvoices_sqlException_silentlyIgnored() throws Exception {
+    JSONObject rec = new JSONObject();
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(any())).thenThrow(new RuntimeException("SQL error"));
+
+      handler.callEnrichRectifyingInvoices(rec, "inv-sql-err");
+      // no exception thrown, rec unchanged (no partial/garbage field written)
       assertEquals(0, rec.length());
     }
   }

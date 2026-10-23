@@ -288,6 +288,7 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
         JSONObject rec = dataArr.getJSONObject(0);
         enrichSourceInvoice(rec, context.getRecordId());
         enrichOriginInvoice(rec, context.getRecordId());
+        enrichRectifyingInvoices(rec, context.getRecordId());
         enrichDocTypeLocked(rec);
         enrichIsRectificative(rec);
         enrichTbaiConfigActive(rec);

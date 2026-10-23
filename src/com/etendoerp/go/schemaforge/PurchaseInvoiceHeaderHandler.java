@@ -312,6 +312,7 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
         JSONObject rec = dataArr.getJSONObject(0);
         enrichLinkedReceipts(rec, context.getRecordId());
         enrichOriginInvoice(rec, context.getRecordId());
+        enrichRectifyingInvoices(rec, context.getRecordId());
         enrichDocTypeLocked(rec);
         enrichIsRectificative(rec);
         enrichHasRectifications(rec, context.getRecordId());
