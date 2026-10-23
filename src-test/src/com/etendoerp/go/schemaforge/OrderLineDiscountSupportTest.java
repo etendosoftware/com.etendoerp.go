@@ -829,6 +829,40 @@ class OrderLineDiscountSupportTest {
     assertAmount("purchase", "6", json, OrderLineDiscountSupport.FIELD_STANDARD_PRICE);
   }
 
+  /** A 100% discount on the client's list price is a price of 0, not a missing price. */
+  @org.junit.jupiter.api.Test
+  void setStandardPriceOnCreateKeepsAFullDiscountAtZero() throws Exception {
+    JSONObject json = new JSONObject(
+        "{\"product\":\"P1\",\"parentId\":\"O1\",\"listPrice\":20,\"discount\":100}");
+    OBDal dal = mock(OBDal.class);
+    Product product = mock(Product.class);
+    Order order = mock(Order.class);
+    PriceList priceList = mock(PriceList.class);
+    ProductPrice price = mock(ProductPrice.class);
+    Date orderDate = new Date();
+    when(dal.get(Product.class, "P1")).thenReturn(product);
+    when(dal.get(Order.class, "O1")).thenReturn(order);
+    when(order.getOrderDate()).thenReturn(orderDate);
+    when(order.getPriceList()).thenReturn(priceList);
+    when(order.isSalesTransaction()).thenReturn(Boolean.TRUE);
+    when(priceList.isPriceIncludesTax()).thenReturn(Boolean.FALSE);
+    when(price.getListPrice()).thenReturn(new BigDecimal("15"));
+    when(price.getStandardPrice()).thenReturn(new BigDecimal("12"));
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+        MockedStatic<FinancialUtils> financial = mockStatic(FinancialUtils.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      financial.when(() -> FinancialUtils.getProductPrice(eq(product), eq(orderDate),
+          eq(true), eq(priceList), eq(false))).thenReturn(price);
+
+      OrderLineDiscountSupport.setStandardPriceOnCreate(ctx("POST", NeoEndpointType.CRUD, json));
+    }
+
+    assertAmount("full discount", "0", json, OrderLineDiscountSupport.FIELD_UNIT_PRICE);
+    assertAmount("full discount", "20", json, OrderLineDiscountSupport.FIELD_LIST_PRICE);
+    assertAmount("full discount", "12", json, OrderLineDiscountSupport.FIELD_STANDARD_PRICE);
+  }
+
   @org.junit.jupiter.api.Test
   void setStandardPriceOnCreateKeepsTheCallersPrice() throws Exception {
     JSONObject json = new JSONObject(

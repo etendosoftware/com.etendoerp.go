@@ -227,15 +227,19 @@ final class OrderLineDiscountSupport {
     }
     try {
       // The caller's own list price is the price (ETP-5881): the price list is not applied to it.
-      LinePriceListSupport.applyClientListPrice(body, FIELD_UNIT_PRICE, FIELD_LIST_PRICE,
-          FIELD_DISCOUNT);
+      boolean clientPriced = LinePriceListSupport.applyClientListPrice(body, FIELD_UNIT_PRICE,
+          FIELD_LIST_PRICE, FIELD_DISCOUNT);
       ProductPrice productPrice = resolveProductPrice(body);
       if (productPrice == null) {
         return;
       }
       // A line sent without a price takes the price list's (ETP-5881); a price the caller sent stays.
-      LinePriceListSupport.applyCatalogPrice(body, productPrice, FIELD_UNIT_PRICE,
-          FIELD_LIST_PRICE);
+      // Not after the client's own list price: a 100% discount leaves a unit price of 0, which
+      // would otherwise read as "no price" and be replaced by the catalog's.
+      if (!clientPriced) {
+        LinePriceListSupport.applyCatalogPrice(body, productPrice, FIELD_UNIT_PRICE,
+            FIELD_LIST_PRICE);
+      }
       BigDecimal standardPrice = productPrice.getStandardPrice();
       if (standardPrice != null) {
         body.put(FIELD_STANDARD_PRICE, standardPrice);
