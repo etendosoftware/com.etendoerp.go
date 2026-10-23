@@ -9221,14 +9221,17 @@ malformed protocol messages, not tool input, so they are outside SEP-1303; mappi
 clients can decide which calls to confirm with the user. All four are explicit on every tool: the
 spec defaults (`readOnlyHint=false`, **`destructiveHint=true`**, `idempotentHint=false`,
 `openWorldHint=true`) would otherwise report `etendo_create` as destructive. `openWorldHint` is `false`
-everywhere — every tool stays inside the ERP.
+everywhere except two tools that reach parties outside the system (ETP-5715): `etendo_send_document_email`
+(delivers a message to third parties) and `etendo_extract_invoice_document` (sends the user's PDF to an
+external, paid AI model; it is read-only for the ERP but is neither free nor local). The attachment tools
+hand links to the user and reach nobody else, so they stay closed-world.
 
 | Tools | `readOnlyHint` | `destructiveHint` | `idempotentHint` |
 |---|---|---|---|
-| `etendo_list`, `etendo_get`, `etendo_schema`, `etendo_discover`, `etendo_selectors`, `etendo_defaults`, `docs`, `etendo_widget`, `etendo_vector_search`, `etendo_get_image_upload`, every `generate_*` report | true | false | true |
-| `etendo_create`, `etendo_request_image_upload`, `etendo_upload_image`, `etendo_feedback` | false | false | false |
-| `etendo_delete` | false | true | true |
-| `etendo_update`, `etendo_batch`, `etendo_action`, `etendo_action_batch`, `etendo_generate_amortization_plan`, every process tool (`complete_order` …) | false | true (conservative) | false |
+| `etendo_list`, `etendo_get`, `etendo_schema`, `etendo_discover`, `etendo_selectors`, `etendo_defaults`, `docs`, `etendo_widget`, `etendo_vector_search`, `etendo_get_image_upload`, `etendo_list_attachments`, `etendo_get_document_pdf`, `etendo_extract_invoice_document`, `etendo_job_status`, every `generate_*` report | true | false | true |
+| `etendo_create`, `etendo_request_image_upload`, `etendo_upload_image`, `etendo_feedback`, `etendo_request_document_extraction_upload` | false | false | false |
+| `etendo_delete`, `etendo_delete_attachment` | false | true | true |
+| `etendo_update`, `etendo_batch`, `etendo_job_cancel`, `etendo_action`, `etendo_action_batch`, `etendo_request_attachment_upload` (`main:true` replaces the previous main file), `etendo_send_document_email` (two calls are two emails), `etendo_generate_amortization_plan`, every process tool (`complete_order` …) | false | true (conservative) | false |
 
 Fixed in code (`McpToolAnnotations`), with **no `MCP_CONFIG` override**: annotations are per tool,
 and the shared `etendo_update` / `etendo_batch` / `etendo_action` serve every entity, so a per-entity setting
