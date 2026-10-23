@@ -22,6 +22,8 @@ import java.util.Iterator;
 import java.util.Map;
 
 import org.apache.commons.lang3.StringUtils;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
@@ -50,6 +52,8 @@ import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
  * REST API or from an AI agent via MCP.
  */
 final class McpHookExecutor {
+
+  private static final Logger log = LogManager.getLogger(McpHookExecutor.class);
 
   /** {@code 202 Accepted}: the handler queued the request; for DELETE, not yet deleted. */
   private static final int HTTP_ACCEPTED = 202;
@@ -278,6 +282,33 @@ final class McpHookExecutor {
    */
   static NeoHandler resolveEntityHandler(SFEntity sfEntity) {
     return NeoHandlerLookup.byQualifier(sfEntity.getJavaQualifier());
+  }
+
+  /**
+   * ETP-5710: runs the entity customization's {@link NeoHandler#resolveServerCreateFields} on an MCP
+   * create body, before the mandatory pre-check (which precedes the pre-hook on this channel).
+   * Resolved like the later dispatch ({@code @NeoExtension} first, {@code Java_Qualifier} second);
+   * a no-op for an entity without the override. Total: a failure leaves the body untouched, so the
+   * pre-check reports whatever is still missing.
+   */
+  static void resolveServerCreateFields(String specName, String entityName, Tab adTab,
+      SFEntity sfEntity, JSONObject body) {
+    try {
+      NeoHandler customization = NeoExtensionDispatcher.resolveOnly(NeoExtensionRequest.builder()
+          .qualifier(sfEntity.getJavaQualifier())
+          .specName(specName)
+          .entityName(entityName)
+          .surface(NeoExtensionSurface.CREATE)
+          .channel(NeoExtensionChannel.MCP)
+          .build());
+      if (customization != null) {
+        customization.resolveServerCreateFields(
+            buildHookContext(specName, entityName, "POST", null, body, adTab, sfEntity));
+      }
+    } catch (Exception e) {
+      log.debug("[ETP-5710] Server create defaults skipped for {}/{}: {}", specName, entityName,
+          e.getMessage());
+    }
   }
 
   /**

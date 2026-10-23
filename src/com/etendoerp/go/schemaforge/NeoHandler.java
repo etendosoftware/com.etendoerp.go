@@ -216,6 +216,28 @@ public interface NeoHandler {
   }
 
   /**
+   * Fills create-body defaults that this customization can derive from the body alone, on the
+   * channels whose mandatory-field pre-check runs <b>before</b> the pre-hook (ETP-5710).
+   *
+   * <p>MCP {@code etendo_create} validates mandatory fields before it dispatches the pre-hook
+   * ({@link #handle}), so a default that only {@code handle()} fills is refused there with a 422
+   * the REST channels never produce. The MCP create path therefore calls this method on the
+   * resolved customization right before that pre-check. The default is a no-op, so an entity that
+   * does not override it behaves exactly as before.</p>
+   *
+   * <p>Contract: <b>idempotent</b> (the same logic may also run later from {@code handle()}),
+   * <b>never overwrites</b> a value the caller sent, and <b>never throws</b> for missing data —
+   * when the value cannot be established it abstains and leaves the body untouched, so the
+   * pre-check still reports the field. The body is {@link NeoContext#getRequestBody()}, mutated
+   * in place.</p>
+   *
+   * @param context a CRUD {@code POST} create context carrying the live request body
+   */
+  default void resolveServerCreateFields(NeoContext context) {
+    // no-op by default
+  }
+
+  /**
    * Declares the create-body directives this customization reads and removes in its pre-hook,
    * each with a one-line description for an agent (ETP-5676).
    *

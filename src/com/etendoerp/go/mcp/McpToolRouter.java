@@ -852,6 +852,11 @@ public class McpToolRouter {
     // McpBillToInjector for why this compensation lives in the MCP layer.
     McpBillToInjector.injectIfMissing(filteredBody, adTab, dalEntity, log);
 
+    // ETP-5710: the entity's customization may derive create defaults from the body (e.g. the
+    // invoice partner address) — they must exist before the mandatory check below, which runs
+    // ahead of its pre-hook. A no-op for entities that do not override the hook.
+    McpHookExecutor.resolveServerCreateFields(specName, entityName, adTab, sfEntity, filteredBody);
+
     // Fix FK sentinel values: "0" is a UI-level sentinel (means "not yet set") that can't
     // go through the DAL as an entity reference. Replace with a real value from the body
     // when possible (e.g. documentType="0" -> copy from transactionDocument); keep it when "0" is

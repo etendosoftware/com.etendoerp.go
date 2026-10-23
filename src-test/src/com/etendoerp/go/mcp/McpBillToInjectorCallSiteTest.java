@@ -122,6 +122,25 @@ class McpBillToInjectorCallSiteTest {
             + " McpHookExecutor.forwardFallbackDefaults before NeoExtensionDispatcher.dispatch.");
   }
 
+  /**
+   * ETP-5710: the entity customization's create defaults (the invoice partner address) must run
+   * before the mandatory pre-check on etendo_create, which precedes the pre-hook.
+   */
+  @Test
+  @DisplayName("etendo_create resolves the customization's create defaults before the mandatory check")
+  void createPathResolvesServerCreateFieldsBeforeMandatoryCheck() {
+    String body = routerMethod("handleCreate");
+    int hook = indexOfOrFail(body,
+        Pattern.compile("McpHookExecutor\\s*\\.\\s*resolveServerCreateFields\\s*\\("),
+        "handleCreate", "McpHookExecutor.resolveServerCreateFields(...)");
+    int mandatoryCheck = indexOfOrFail(body, MANDATORY_CHECK, "handleCreate",
+        "McpWriteRequestSupport.validateMandatoryFields(...)");
+
+    assertTrue(hook < mandatoryCheck,
+        "handleCreate resolves the customization's create defaults after validateMandatoryFields,"
+            + " so a defaultable field (invoice partnerAddress) is refused first — ETP-5710.");
+  }
+
   @Test
   @DisplayName("etendo_batch derives the bill-to too, after its own FK resolution")
   void batchPathDerivesBillTo() {

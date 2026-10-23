@@ -554,4 +554,85 @@ class InvoiceLineAmountSupportTest {
       assertAmount(label, unitPrice, json, InvoiceLineAmountSupport.FIELD_UNIT_PRICE);
     }
   }
+
+  // ── ETP-5710 point 2: taxableAmount (TaxBaseAmt) is the final net, after the discount ──
+
+  static Stream<Arguments> taxableOnCreate() {
+    return Stream.of(
+        // label, body, expected taxableAmount
+        Arguments.of("discount 2 % → 245, not the stale 250",
+            "{\"invoicedQuantity\":10,\"unitPrice\":25,\"etgoDiscount\":2" + TAX
+                + ",\"taxableAmount\":250}", "245"),
+        Arguments.of("absent → derived", "{\"invoicedQuantity\":10,\"unitPrice\":18" + TAX + "}",
+            "180"),
+        Arguments.of("stale 0 → derived", "{\"invoicedQuantity\":10,\"unitPrice\":18" + TAX
+            + ",\"taxableAmount\":0}", "180"),
+        Arguments.of("100 % discount → 0 is written, not the undiscounted 250",
+            "{\"invoicedQuantity\":10,\"unitPrice\":25,\"etgoDiscount\":100" + TAX
+                + ",\"taxableAmount\":250}", "0"),
+        Arguments.of("price 0 → 0", "{\"invoicedQuantity\":10,\"unitPrice\":0" + TAX
+            + ",\"taxableAmount\":250}", "0"),
+        Arguments.of("the caller's own net is followed", "{\"invoicedQuantity\":10,\"unitPrice\":18"
+            + TAX + ",\"lineNetAmount\":150}", "150"),
+        Arguments.of("price 0 with a surviving body net → equals that stored net",
+            "{\"invoicedQuantity\":10,\"unitPrice\":0" + TAX + ",\"lineNetAmount\":99}", "99"),
+        Arguments.of("return line keeps its sign", "{\"invoicedQuantity\":-10,\"unitPrice\":18"
+            + TAX + "}", "-180"));
+  }
+
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("taxableOnCreate")
+  void taxableAmountIsTheFinalNetOnCreate(String label, String body, String expected)
+      throws Exception {
+    for (String spec : new String[] {"sales-invoice", "purchase-invoice"}) {
+      JSONObject json = new JSONObject(body);
+      NeoContext ctx = NeoContext.builder().specName(spec).entityName("lines")
+          .httpMethod("POST").endpointType(NeoEndpointType.CRUD).requestBody(json).build();
+
+      try (MockedStatic<OBDal> dal = LineAmountTestSupport.taxRate(21.0)) {
+        InvoiceLineAmountSupport.deriveAmountsOnCreate(ctx);
+      }
+
+      assertAmount(label + " / " + spec, expected, json,
+          InvoiceLineAmountSupport.FIELD_TAXABLE_AMOUNT);
+    }
+  }
+
+  static Stream<Arguments> taxableOnUpdate() {
+    return Stream.of(
+        // label, patch, expected taxableAmount (null: not written)
+        Arguments.of("quantity only → 490", "{\"invoicedQuantity\":20}", "490"),
+        Arguments.of("discount only → 225", "{\"etgoDiscount\":10}", "225"),
+        Arguments.of("price only (list) → 294", "{\"listPrice\":30}", "294"),
+        Arguments.of("100 % discount → 0", "{\"etgoDiscount\":100}", "0"),
+        Arguments.of("the caller's own net is followed", "{\"invoicedQuantity\":20,\"lineNetAmount\":480}",
+            "480"),
+        Arguments.of("an explicit taxableAmount is the caller's",
+            "{\"invoicedQuantity\":20,\"taxableAmount\":123}", "123"),
+        Arguments.of("nothing the amounts depend on changes → untouched",
+            "{\"project\":\"P1\"}", null));
+  }
+
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("taxableOnUpdate")
+  void taxableAmountFollowsTheNetOnUpdate(String label, String patch, String expected)
+      throws Exception {
+    for (String spec : new String[] {"sales-invoice", "purchase-invoice"}) {
+      JSONObject json = new JSONObject(patch);
+      NeoContext ctx = NeoContext.builder().specName(spec).entityName("lines")
+          .httpMethod("PATCH").endpointType(NeoEndpointType.CRUD)
+          .recordId(LineAmountTestSupport.STORED_LINE_ID).requestBody(json).build();
+
+      try (MockedStatic<OBDal> dal = LineAmountTestSupport.taxRate(21.0, storedLine())) {
+        InvoiceLineAmountSupport.deriveAmountsOnUpdate(ctx);
+      }
+
+      if (expected == null) {
+        assertFalse(json.has(InvoiceLineAmountSupport.FIELD_TAXABLE_AMOUNT), label);
+      } else {
+        assertAmount(label + " / " + spec, expected, json,
+            InvoiceLineAmountSupport.FIELD_TAXABLE_AMOUNT);
+      }
+    }
+  }
 }
