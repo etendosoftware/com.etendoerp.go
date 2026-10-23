@@ -893,6 +893,11 @@ public class McpToolRouter {
     // short-circuits, null proceeds to generic persistence, and the handler may have mutated the
     // body in place. The other five MCP hook sites are deliberately left alone in this step.
     NeoContext hookCtx = McpHookExecutor.buildHookContext(specName, entityName, HTTP_METHOD_POST, null, filteredBody, adTab, sfEntity);
+    // ETP-5680: the mandatory-defaults pass above filled some keys with a fallback placeholder
+    // (the first combo option, ...). The hook context is a new one, so without this copy the
+    // customization could not tell a placeholder from a value the caller chose, and the REST path
+    // (where the pre-hook runs before any placeholder exists) and this one would disagree.
+    forwardFallbackDefaults(ctx, hookCtx);
     NeoExtensionRequest customizationRequest = NeoExtensionRequest.builder()
         .qualifier(sfEntity.getJavaQualifier())
         .specName(specName)
@@ -1241,6 +1246,55 @@ public class McpToolRouter {
     return McpHookExecutor.neoResponseToMcpResult(response);
   }
 
+  /**
+   * Copies the body keys the mandatory-defaults pass filled with a fallback placeholder from the
+   * context that pass ran with onto the context handed to the entity's pre-hook. Structural only:
+   * it names no field and no entity, and a key the caller sent is never in the set.
+   */
+  static void forwardFallbackDefaults(NeoContext from, NeoContext to) {
+    from.getFallbackDefaults().forEach(to::addFallbackDefault);
+  }
+
+  /** Most {@code recordContext} entries {@code etendo_defaults} forwards to the hooks. */
+  static final int MAX_RECORD_CONTEXT_ENTRIES = 32;
+  /** Longest {@code recordContext} value, in characters, {@code etendo_defaults} forwards. */
+  static final int MAX_RECORD_CONTEXT_VALUE_LENGTH = 256;
+  /** Query-param names {@code recordContext} can never override: the tool's own arguments. */
+  private static final Set<String> RESERVED_DEFAULTS_PARAMS = Set.of(
+      McpConstants.PARAM_PARENT_ID, McpConstants.PARAM_ASSET_ID, McpDefaultsView.PARAM_VIEW,
+      McpConstants.PARAM_SPEC, McpConstants.PARAM_ENTITY);
+
+  /**
+   * ETP-5680: copies the scalar entries of {@code etendo_defaults}' {@code recordContext} (the
+   * current values of the record being drafted, e.g. its type) into the query params the
+   * {@code DEFAULTS} hooks read through {@code NeoContext#getQueryParams()}, as the REST
+   * {@code /defaults?key=value} form does. The tool's own arguments always win; nulls, objects and
+   * arrays are ignored; at most {@link #MAX_RECORD_CONTEXT_ENTRIES} entries of at most
+   * {@link #MAX_RECORD_CONTEXT_VALUE_LENGTH} characters are taken. The generic defaults resolver
+   * does not read query params, so only a customization that asks for a key sees it.
+   */
+  static void copyRecordContext(JSONObject recordContext, Map<String, String> queryParams) {
+    if (recordContext == null) {
+      return;
+    }
+    int copied = 0;
+    Iterator<?> keys = recordContext.keys();
+    while (keys.hasNext() && copied < MAX_RECORD_CONTEXT_ENTRIES) {
+      String key = String.valueOf(keys.next());
+      Object value = recordContext.opt(key);
+      boolean scalar = value instanceof String || value instanceof Number
+          || value instanceof Boolean;
+      if (!scalar || RESERVED_DEFAULTS_PARAMS.contains(key)) {
+        continue;
+      }
+      String text = String.valueOf(value);
+      if (text.length() <= MAX_RECORD_CONTEXT_VALUE_LENGTH && !queryParams.containsKey(key)) {
+        queryParams.put(key, text);
+        copied++;
+      }
+    }
+  }
+
   // ── etendo_defaults ──────────────────────────────────────────────────────
 
   /**
@@ -1263,6 +1317,7 @@ public class McpToolRouter {
     if (assetId != null) {
       queryParams.put(McpConstants.PARAM_ASSET_ID, assetId);
     }
+    copyRecordContext(args.optJSONObject(McpConstants.PARAM_RECORD_CONTEXT), queryParams);
 
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
     SFEntity sfEntity = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, entityName);

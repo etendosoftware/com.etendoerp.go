@@ -110,9 +110,14 @@ public class ProductDefaultsHandler implements NeoHandler {
   /** Query parameter of {@code /product/defaults} carrying the product type to resolve for. */
   static final String PARAM_PRODUCT_TYPE = "productType";
   /**
+   * The product types a request may ask for. Hardcoded: it mirrors the AD list reference of
+   * {@code M_Product.ProductType} and must be updated if that list gains values.
+   */
+  private static final Set<String> PRODUCT_TYPES = Set.of("I", "S", "E", "R", "O");
+  /**
    * Key added to the {@code /defaults} payload when {@link #PARAM_PRODUCT_TYPE} is sent: the id
-   * (plus {@code $_identifier}) of the type's tax category, present ONLY when the tenant has it.
-   * Distinct from {@code taxCategory} (the IsDefault fallback) so the UI can tell "no match".
+   * (plus {@code $_identifier}) of the type's tax category. Repeats {@code taxCategory} when the
+   * requested type's named category exists; its absence is the UI's no-match signal.
    */
   static final String DEFAULT_KEY_TYPE_TAX_CATEGORY = "typeTaxCategory";
   private static final String FIELD_TOTAL_ROWS = "totalRows";
@@ -177,8 +182,8 @@ public class ProductDefaultsHandler implements NeoHandler {
     if (isCreate) {
       try {
         String clientId = resolveClientId(context);
-        injectIfMissing(body, FIELD_UOM, UOM.class, clientId);
-        injectTaxCategoryIfMissing(body, clientId);
+        injectIfMissing(body, FIELD_UOM, UOM.class, clientId, context);
+        injectTaxCategoryIfMissing(body, clientId, context);
       } catch (Exception e) {
         log.error("product pre-hook: failed to inject uOM/taxCategory default", e);
       }
@@ -632,12 +637,27 @@ public class ProductDefaultsHandler implements NeoHandler {
   }
 
   /**
+   * Whether {@code body[key]} still needs a value from this handler: it is blank, or it holds a
+   * fallback placeholder the mandatory-defaults pass wrote (ETP-5680, MCP create — the pass runs
+   * before this pre-hook there, and the router forwards the placeholder keys on the context). A
+   * value the caller sent is never a placeholder, so an explicit selection keeps winning.
+   */
+  private static boolean isMissing(JSONObject body, String key, NeoContext context) {
+    if (!body.has(key) || StringUtils.isBlank(body.optString(key, null))) {
+      return true;
+    }
+    return context != null && context.getFallbackDefaults().contains(key);
+  }
+
+  /**
    * Injects the resolved default id into {@code body[propertyName]} only when the caller did not
-   * already provide a value for it — an explicit user selection always wins.
+   * already provide a value for it — an explicit user selection always wins. A fallback
+   * placeholder counts as not provided and is replaced; with no default to offer it is kept.
    */
   private void injectIfMissing(JSONObject body, String propertyName,
-      Class<? extends BaseOBObject> entityClass, String clientId) throws JSONException {
-    if (body.has(propertyName) && StringUtils.isNotBlank(body.optString(propertyName, null))) {
+      Class<? extends BaseOBObject> entityClass, String clientId, NeoContext context)
+      throws JSONException {
+    if (!isMissing(body, propertyName, context)) {
       return;
     }
     String defaultId = resolveDefaultId(entityClass, clientId);
@@ -663,8 +683,9 @@ public class ProductDefaultsHandler implements NeoHandler {
    * when the body has no type or the tenant lacks the named category. Create only — a PATCH never
    * recalculates the category.
    */
-  private void injectTaxCategoryIfMissing(JSONObject body, String clientId) throws JSONException {
-    if (body.has(FIELD_TAX_CATEGORY) && StringUtils.isNotBlank(body.optString(FIELD_TAX_CATEGORY, null))) {
+  private void injectTaxCategoryIfMissing(JSONObject body, String clientId, NeoContext context)
+      throws JSONException {
+    if (!isMissing(body, FIELD_TAX_CATEGORY, context)) {
       return;
     }
     String typeId = resolveTaxCategoryIdForType(body.optString(FIELD_PRODUCT_TYPE, null), clientId);
@@ -672,37 +693,59 @@ public class ProductDefaultsHandler implements NeoHandler {
       body.put(FIELD_TAX_CATEGORY, typeId);
       return;
     }
-    injectIfMissing(body, FIELD_TAX_CATEGORY, TaxCategory.class, clientId);
+    injectIfMissing(body, FIELD_TAX_CATEGORY, TaxCategory.class, clientId, context);
   }
 
   /**
-   * ETP-5680: makes the {@code /defaults} payload carry the tax category that matches the type.
+   * ETP-5680: makes the {@code /defaults} payload consistent with the product type.
    *
    * <ul>
-   *   <li>With a {@code productType} request parameter (the form re-asking after the user changed
-   *       the type): adds {@link #DEFAULT_KEY_TYPE_TAX_CATEGORY} (+ {@code $_identifier}) when the
-   *       tenant has the named category; the payload is left alone otherwise, which is the UI's
-   *       signal to keep the field as it is.</li>
+   *   <li>With a valid {@code productType} request parameter (the form, or an agent's
+   *       {@code recordContext}, asking for a given type): {@code defaults.productType} becomes the
+   *       requested type, and when the tenant has the type's named category {@code taxCategory}
+   *       (+ {@code $_identifier}) becomes it too, with {@link #DEFAULT_KEY_TYPE_TAX_CATEGORY}
+   *       carrying the same id for the UI. Without that category {@code taxCategory} is left as it
+   *       is and no {@code typeTaxCategory} is added (the UI's "no match" signal).
+   *       {@code productType} is a List reference, so the generic resolver adds no
+   *       {@code productType$_identifier}; one found is removed rather than left stale.</li>
    *   <li>Without it (a new form opening): the type is the one the payload itself defaults to
    *       ({@code defaults.productType}, Item), and {@code taxCategory} is overwritten with that
    *       type's category, so a new Item starts as "IVA Normal" rather than as whatever row is
    *       flagged IsDefault. A tenant without the named category keeps the IsDefault value.</li>
    * </ul>
+   * A copy of {@code taxCategory} from these defaults into a create is therefore always the
+   * category of the type the same payload reports.
    */
   private void injectTypeTaxCategory(JSONObject defaults, NeoContext context, String clientId)
       throws JSONException {
     String requested = requestedProductType(context);
-    String productType = requested != null ? requested
+    boolean typeRequested = requested != null && PRODUCT_TYPES.contains(requested);
+    if (typeRequested) {
+      defaults.put(FIELD_PRODUCT_TYPE, requested);
+      defaults.remove(FIELD_PRODUCT_TYPE + "$_identifier");
+    }
+    String productType = typeRequested ? requested
         : StringUtils.trimToNull(defaults.optString(FIELD_PRODUCT_TYPE, null));
     String id = resolveTaxCategoryIdForType(productType, clientId);
     if (id == null) {
       return;
     }
-    String key = requested != null ? DEFAULT_KEY_TYPE_TAX_CATEGORY : FIELD_TAX_CATEGORY;
-    defaults.put(key, id);
+    String identifier = null;
     BaseOBObject obj = OBDal.getInstance().get(TaxCategory.class, id);
     if (obj != null) {
-      defaults.put(key + "$_identifier", obj.getIdentifier());
+      identifier = obj.getIdentifier();
+    }
+    putCategory(defaults, FIELD_TAX_CATEGORY, id, identifier);
+    if (typeRequested) {
+      putCategory(defaults, DEFAULT_KEY_TYPE_TAX_CATEGORY, id, identifier);
+    }
+  }
+
+  private static void putCategory(JSONObject defaults, String key, String id, String identifier)
+      throws JSONException {
+    defaults.put(key, id);
+    if (identifier != null) {
+      defaults.put(key + "$_identifier", identifier);
     }
   }
 
