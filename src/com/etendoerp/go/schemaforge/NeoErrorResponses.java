@@ -348,4 +348,60 @@ public final class NeoErrorResponses {
           c.messageKeys().isEmpty() ? "" : " " + c.messageKeys());
     }
   }
+
+  /**
+   * ETP-5783 — a document process refused by the document's own rules is a {@code 422
+   * business_rule} (ETP-5782 envelope), not a 400: the request was well formed, the document's
+   * state is what the caller has to fix. The flat {@code status}/{@code message}/{@code
+   * messageKeys} the SPA has always read stay at the top level next to the nested {@code error}.
+   *
+   * @param flat        the flat failure body ({@code status}, translated {@code message})
+   * @param messageKeys the AD message keys the raw message carried; may be empty
+   * @return the 422 response
+   * @throws JSONException if the body cannot be written
+   */
+  static NeoResponse businessRuleRefusal(JSONObject flat, List<String> messageKeys)
+      throws JSONException {
+    String message = flat.optString(NeoProcessService.MESSAGE);
+    NeoResponse response = toResponse(NeoErrorClassifier.STATUS_UNPROCESSABLE,
+        NeoErrorClassifier.CODE_BUSINESS_RULE, message, messageKeys);
+    JSONObject body = response.getBody();
+    body.put(NeoProcessService.STATUS, NeoProcessService.ERROR);
+    body.put(NeoProcessService.MESSAGE, message);
+    if (flat.has(NeoProcessService.MESSAGE_KEYS)) {
+      body.put(NeoProcessService.MESSAGE_KEYS, flat.get(NeoProcessService.MESSAGE_KEYS));
+    }
+    return response;
+  }
+
+  /**
+   * ETP-5073 / DOC-04: the structured 409 returned when core's optimistic-locking check fails —
+   * somebody else saved this record between our read and our write.
+   *
+   * <p>A distinguishable code matters more than usual here:
+   * {@code NeoCrudHandler.checkJsonServiceResponse} already answers 409 for a duplicate-key
+   * conflict, and the two need opposite remedies (change your data vs. re-read and reapply). The client keys the reload-and-reapply offer required by
+   * the ticket's first acceptance criterion off {@code error == "stale_record"}, never off status
+   * alone.
+   *
+   * @param translated core's already-translated conflict message, kept as {@code message} so a
+   *                   human reading the response still gets Etendo's own wording
+   */
+  static NeoResponse staleRecord(String translated) {
+    try {
+      JSONObject errorObj = new JSONObject();
+      errorObj.put(KEY_STATUS, HttpServletResponse.SC_CONFLICT);
+      errorObj.put(KEY_ERROR, "stale_record");
+      errorObj.put(KEY_MESSAGE, translated);
+      errorObj.put(NeoCrudHandler.KEY_DETAIL, "This record was modified by someone else after you"
+          + " read it. Your write was refused so their change is not lost.");
+      errorObj.put(KEY_HINT, "Re-read the record to get the current values and the fresh '"
+          + NeoCrudHandler.FIELD_UPDATED + "', reapply your changes on top of it, then retry.");
+      errorObj.put(NeoCrudHandler.KEY_SEE_ALSO, "docs(topic:\"updating records\")");
+      return NeoResponse.error(HttpServletResponse.SC_CONFLICT, errorObj);
+    } catch (Exception fallback) {
+      log.warn("Could not build stale_record body: {}", fallback.getMessage());
+      return NeoResponse.error(HttpServletResponse.SC_CONFLICT, translated);
+    }
+  }
 }

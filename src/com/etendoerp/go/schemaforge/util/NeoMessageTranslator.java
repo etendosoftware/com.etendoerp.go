@@ -202,16 +202,7 @@ public final class NeoMessageTranslator {
 
   private static List<String> loadMessageTexts(String key) {
     try {
-      try {
-        OBContext.setAdminMode(true);
-      } catch (RuntimeException e) {
-        // setAdminMode pushes its stack entry BEFORE it can fail (it creates the admin context
-        // when the thread has none), and the try/finally below is not entered: without this the
-        // entry stays on the thread for good and every later request or test on it runs in
-        // admin mode.
-        OBContext.restorePreviousMode();
-        throw e;
-      }
+      NeoAdminMode.enter();
       try {
         List<String> texts = new ArrayList<>(OBDal.getInstance().getSession()
             .createQuery("select m.messageText from ADMessage m where m.searchKey = :key",

@@ -940,7 +940,7 @@ public class NeoProcessService {
       if (!messageKeys.isEmpty()) {
         result.put(MESSAGE_KEYS, new JSONArray(messageKeys));
       }
-      return businessRuleRefusal(result, messageKeys);
+      return NeoErrorResponses.businessRuleRefusal(result, messageKeys);
     }
 
     // Success
@@ -954,29 +954,6 @@ public class NeoProcessService {
     return NeoResponse.ok(result);
   }
 
-  /**
-   * ETP-5783 — a document process refused by the document's own rules is a {@code 422
-   * business_rule} (ETP-5782 envelope), not a 400: the request was well formed, the document's
-   * state is what the caller has to fix. The flat {@code status}/{@code message}/{@code
-   * messageKeys} the SPA has always read stay at the top level next to the nested {@code error}.
-   *
-   * @param flat        the flat failure body ({@code status}, translated {@code message})
-   * @param messageKeys the AD message keys the raw message carried; may be empty
-   * @return the 422 response
-   * @throws JSONException if the body cannot be written
-   */
-  private static NeoResponse businessRuleRefusal(JSONObject flat, List<String> messageKeys)
-      throws JSONException {
-    NeoResponse response = NeoErrorResponses.toResponse(NeoErrorClassifier.STATUS_UNPROCESSABLE,
-        NeoErrorClassifier.CODE_BUSINESS_RULE, flat.optString(MESSAGE), messageKeys);
-    JSONObject body = response.getBody();
-    body.put(STATUS, ERROR);
-    body.put(MESSAGE, flat.optString(MESSAGE));
-    if (flat.has(MESSAGE_KEYS)) {
-      body.put(MESSAGE_KEYS, flat.get(MESSAGE_KEYS));
-    }
-    return response;
-  }
 
   private static final class RequestContextScope implements AutoCloseable {
     private final VariablesSecureApp previous;

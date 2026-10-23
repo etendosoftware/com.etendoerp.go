@@ -102,7 +102,7 @@ class NeoCrudHandler {
    * name the client sends, the name the filter would look up and the name the DAL persists are
    * all the same string.
    */
-  private static final String FIELD_UPDATED = "updated";
+  static final String FIELD_UPDATED = "updated";
   private static final String MSG_BODY_REQUIRED = "Request body is required";
 
   /**
@@ -723,7 +723,7 @@ class NeoCrudHandler {
       return null;
     }
     NeoWriteRefusalLog.staleRecord(context, clientValue);
-    return buildStaleRecordResponse(STALE_RECORD_MESSAGE);
+    return NeoErrorResponses.staleRecord(STALE_RECORD_MESSAGE);
   }
 
   /**
@@ -779,36 +779,6 @@ class NeoCrudHandler {
     }
   }
 
-  /**
-   * ETP-5073 / DOC-04: the structured 409 returned when core's optimistic-locking check fails —
-   * somebody else saved this record between our read and our write.
-   *
-   * <p>A distinguishable code matters more than usual here: {@link #checkJsonServiceResponse}
-   * already answers 409 for a duplicate-key conflict, and the two need opposite remedies (change
-   * your data vs. re-read and reapply). The client keys the reload-and-reapply offer required by
-   * the ticket's first acceptance criterion off {@code error == "stale_record"}, never off status
-   * alone.
-   *
-   * @param translated core's already-translated conflict message, kept as {@code message} so a
-   *                   human reading the response still gets Etendo's own wording
-   */
-  private NeoResponse buildStaleRecordResponse(String translated) {
-    try {
-      JSONObject errorObj = new JSONObject();
-      errorObj.put(KEY_STATUS, HttpServletResponse.SC_CONFLICT);
-      errorObj.put(KEY_ERROR, "stale_record");
-      errorObj.put(KEY_MESSAGE, translated);
-      errorObj.put(KEY_DETAIL, "This record was modified by someone else after you read it. Your"
-          + " write was refused so their change is not lost.");
-      errorObj.put(KEY_HINT, "Re-read the record to get the current values and the fresh '"
-          + FIELD_UPDATED + "', reapply your changes on top of it, then retry.");
-      errorObj.put(KEY_SEE_ALSO, "docs(topic:\"updating records\")");
-      return NeoResponse.error(HttpServletResponse.SC_CONFLICT, errorObj);
-    } catch (Exception fallback) {
-      log.warn("Could not build stale_record body: {}", fallback.getMessage());
-      return NeoResponse.error(HttpServletResponse.SC_CONFLICT, translated);
-    }
-  }
 
   /**
    * Validates the response for error/validation-error status codes.
@@ -845,7 +815,7 @@ class NeoCrudHandler {
       // core skips translation and its bare message code survives intact. Only the untranslated
       // message is worth inspecting, for that same reason.
       if (NeoErrorSanitizer.isStaleRecordMessage(errMsg)) {
-        return buildStaleRecordResponse(translated);
+        return NeoErrorResponses.staleRecord(translated);
       }
       // ETP-4793 / IMP-17: a not-null violation means the caller omitted a value the table
       // requires — their request to fix, so it is a 400 naming the field, never a 500. It reaches
