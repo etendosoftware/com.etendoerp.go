@@ -17,6 +17,8 @@
 
 package com.etendoerp.go.schemaforge.email;
 
+import java.util.Collection;
+import java.util.Collections;
 import java.util.Optional;
 
 /**
@@ -32,6 +34,16 @@ public interface EmailContractRegistry {
    * @return matching contract when it is registered
    */
   Optional<EmailContract> find(String contractName);
+
+  /**
+   * Lists every registered contract, so a caller can derive which documents a deployment can send
+   * from what is registered instead of keeping a second list (ETP-5715).
+   *
+   * @return the registered contracts; empty for a registry that cannot enumerate them
+   */
+  default Collection<EmailContract> contracts() {
+    return Collections.emptyList();
+  }
 
   /**
    * Creates an empty registry for deployments without registered contracts.

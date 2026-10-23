@@ -293,7 +293,12 @@ public class ToolRegistry {
         tools.add(buildJobCancelTool());
       }
       tools.add(buildActionTool(ToolRegistryActionSpecs.withActionSpecs(accessibleWindowSpecs, actionReportSpecs)));
+      tools.add(McpActionBatch.definition(
+          ToolRegistryActionSpecs.withActionSpecs(accessibleWindowSpecs, actionReportSpecs)));
     }
+    // ETP-5715: the attachment tools — list on the read scope, upload and delete on the write scope.
+    McpAttachmentToolDefinitions.addTo(tools, accessibleWindowSpecs, permissions.canRead,
+        permissions.canWrite);
   }
 
   // ── Amortization plan tool ─────────────────────────────────────────────
@@ -375,6 +380,7 @@ public class ToolRegistry {
       case McpConstants.TOOL_NEO_SCHEMA:
       case "etendo_batch":
       case "etendo_action":
+      case McpConstants.TOOL_NEO_ACTION_BATCH:
       case McpConstants.TOOL_NEO_WIDGET:
       case McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN:
       // ETP-5184: listed here so resolveSpecName does not derive a spec name from the tool name.
@@ -383,6 +389,14 @@ public class ToolRegistry {
       case McpConstants.TOOL_NEO_REQUEST_IMAGE_UPLOAD:
       case McpConstants.TOOL_NEO_UPLOAD_IMAGE:
       case McpConstants.TOOL_NEO_GET_IMAGE_UPLOAD:
+      // ETP-5715: these address a spec by the `spec` argument like every CRUD tool.
+      case McpConstants.TOOL_NEO_REQUEST_ATTACHMENT_UPLOAD:
+      case McpConstants.TOOL_NEO_LIST_ATTACHMENTS:
+      case McpConstants.TOOL_NEO_DELETE_ATTACHMENT:
+      case McpConstants.TOOL_NEO_GET_DOCUMENT_PDF:
+      case McpConstants.TOOL_NEO_SEND_DOCUMENT_EMAIL:
+      case McpConstants.TOOL_NEO_REQUEST_DOCUMENT_EXTRACTION_UPLOAD:
+      case McpConstants.TOOL_NEO_EXTRACT_INVOICE_DOCUMENT:
       // ETP-5677: they address a job, not a spec.
       case McpConstants.TOOL_NEO_JOB_STATUS:
       case McpConstants.TOOL_NEO_JOB_CANCEL:
@@ -695,6 +709,21 @@ public class ToolRegistry {
       // ETP-5669: a top-level docAction was silently ignored and the call fell through to the
       // generic executor; the action's own parameters belong under 'parameters'.
       case McpConstants.TOOL_NEO_ACTION: definition = registry.buildActionTool(List.of()); break;
+      case McpConstants.TOOL_NEO_ACTION_BATCH: definition = McpActionBatch.definition(List.of()); break;
+      case McpConstants.TOOL_NEO_REQUEST_ATTACHMENT_UPLOAD:
+        definition = McpAttachmentToolDefinitions.requestAttachmentUpload(List.of()); break;
+      case McpConstants.TOOL_NEO_LIST_ATTACHMENTS:
+        definition = McpAttachmentToolDefinitions.listAttachments(List.of()); break;
+      case McpConstants.TOOL_NEO_DELETE_ATTACHMENT:
+        definition = McpAttachmentToolDefinitions.deleteAttachment(List.of()); break;
+      case McpConstants.TOOL_NEO_GET_DOCUMENT_PDF:
+        definition = McpDocumentPdfToolDefinition.definition(List.of()); break;
+      case McpConstants.TOOL_NEO_SEND_DOCUMENT_EMAIL:
+        definition = McpDocumentEmailToolDefinition.definition(List.of()); break;
+      case McpConstants.TOOL_NEO_REQUEST_DOCUMENT_EXTRACTION_UPLOAD:
+        definition = McpOcrToolDefinitions.requestUpload(List.of()); break;
+      case McpConstants.TOOL_NEO_EXTRACT_INVOICE_DOCUMENT:
+        definition = McpOcrToolDefinitions.extract(List.of()); break;
       default: return Optional.empty();
     }
     Object props = definition.getInputSchema().get(McpConstants.KEY_PROPERTIES);
@@ -1205,6 +1234,10 @@ public class ToolRegistry {
             + "Which values are legal depends on the record's current state (e.g. "
             + "documentStatus): read the field's 'agentPrompt' for the document's workflow "
             + "rules, and etendo_get the record first if unsure. "
+            + "Reactivating (docAction 'RE') a POSTED document whose entity declares an unpost action "
+            + "(the invoices) un-posts it first, as the app does, and the answer then also carries "
+            + "steps:['unpost','documentAction']; if the reactivation fails after that, the un-post "
+            + "stays done ('partial' says so). "
             + "Returns {processResult: success|error|warning, processMessage: ...}. "
             + "Handler-served actions are listed by etendo_schema view:\"actions\" with a JSON "
             + "Schema for 'parameters' and an 'idDescription' saying what 'id' is; they return "
