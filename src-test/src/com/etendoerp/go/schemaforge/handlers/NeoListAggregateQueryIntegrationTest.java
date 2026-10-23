@@ -579,7 +579,7 @@ public class NeoListAggregateQueryIntegrationTest extends WeldBaseTest {
 
   // -------------------------------------------------------------------------
   // The handler's own path: NeoCrudHandler#handleDistinctFetch builds its params through
-  // buildDistinctFilterParams and runs them as real HQL. NeoCrudHandler is package-private and in
+  // NeoDistinctFetchSupport#toDistinctFilterParams and runs them as real HQL. NeoCrudHandler is package-private and in
   // another package, so it is driven by reflection, as NeoCrudHandlerTest does.
   // -------------------------------------------------------------------------
 

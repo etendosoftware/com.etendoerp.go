@@ -1192,7 +1192,7 @@ class NeoCrudHandler {
     }
   }
 
-  private static final String DISTINCT_SEARCH_PARAM = "_distinctSearch";
+  private static final String DISTINCT_SEARCH_PARAM = NeoDistinctFetchSupport.DISTINCT_SEARCH_PARAM;
   private static final int DISTINCT_DEFAULT_PAGE_SIZE = 50;
   private static final int DISTINCT_MAX_PAGE_SIZE = 200;
 
@@ -1265,8 +1265,8 @@ class NeoCrudHandler {
       // silently offering the values of the rows it was meant to exclude.
       // ETP-5561: the filtered set is the list's own — same params, same where clause — so the
       // tab, the parent filter, the read predicates AND the grid `criteria` all narrow the values.
-      Map<String, String> params = buildDistinctFilterParams(context, adTab, dalEntityName,
-          startRow, pageSize);
+      Map<String, String> params = NeoDistinctFetchSupport.toDistinctFilterParams(
+          buildDalParams(context, adTab, dalEntityName), context, startRow, pageSize);
 
       Map<String, Object> searchParams = searchPredicate == null ? null
           : Map.of("search", "%" + search.toLowerCase() + "%");
@@ -1292,41 +1292,6 @@ class NeoCrudHandler {
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "Failed to compute distinct values");
     }
-  }
-
-  /**
-   * The list params a {@code ?_distinct=} fetch filters by (ETP-5561): exactly what the list GET
-   * feeds core ({@link #buildDalParams}), minus everything that would change what core builds.
-   *
-   * <p>{@code _distinct} would flip core into its FK sub-entity mode, {@code _sortBy}/{@code _orderBy}
-   * would add joins to a SELECT DISTINCT, {@code _distinctSearch} is not a core param, and
-   * {@code id} would make core read one record. All are removed here, BEFORE the query service is
-   * created. The row window is forced to the page (core throws {@code OBJSON_NoPagedFetch}
-   * without one); the query itself pages through {@code first/max}.
-   *
-   * <p>A request that carried {@code id} is a read-by-id to {@link NeoReadPredicates#forRestListGet},
-   * which then returns no predicate. The fetch is a list read whatever the client sent, so the
-   * customization's read predicate is resolved here for that case: dropping {@code id} must never
-   * be a way to widen the set of values offered.
-   */
-  private Map<String, String> buildDistinctFilterParams(NeoContext context, Tab adTab,
-      String dalEntityName, int startRow, int pageSize) {
-    Map<String, String> params = buildDalParams(context, adTab, dalEntityName);
-    if (context.isReadById()) {
-      String readPredicate = NeoReadPredicates.resolve(context, NeoExtensionChannel.REST_SINGLE);
-      if (StringUtils.isNotBlank(readPredicate)) {
-        params.put(JsonConstants.WHERE_AND_FILTER_CLAUSE, NeoReadPredicates.and(
-            params.get(JsonConstants.WHERE_AND_FILTER_CLAUSE), readPredicate));
-      }
-    }
-    params.remove(JsonConstants.DISTINCT_PARAMETER);
-    params.remove(DISTINCT_SEARCH_PARAM);
-    params.remove(JsonConstants.SORTBY_PARAMETER);
-    params.remove(JsonConstants.ORDERBY_PARAMETER);
-    params.remove(JsonConstants.ID);
-    params.put(JsonConstants.STARTROW_PARAMETER, String.valueOf(startRow));
-    params.put(JsonConstants.ENDROW_PARAMETER, String.valueOf(startRow + pageSize - 1));
-    return params;
   }
 
   /**
