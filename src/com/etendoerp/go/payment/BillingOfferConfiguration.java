@@ -58,19 +58,38 @@ public final class BillingOfferConfiguration {
       this.interval = interval;
     }
 
-    /** @return the plan catalog key of the quoted plan, the key a checkout for it names */
+    /**
+     * Returns the plan catalog key of the quoted plan.
+     *
+     * @return the key a checkout for the quoted plan names
+     */
     public String getPlanKey() {
       return planKey;
     }
 
+    /**
+     * Returns the quoted amount in the currency's minor units.
+     *
+     * @return the amount as Stripe reports it, e.g. 2900 for 29.00 EUR
+     */
     public long getAmountMinor() {
       return amountMinor;
     }
 
+    /**
+     * Returns the quoted currency.
+     *
+     * @return the ISO 4217 currency code, upper case
+     */
     public String getCurrency() {
       return currency;
     }
 
+    /**
+     * Returns the quoted billing interval.
+     *
+     * @return the Stripe price interval ({@code month}, {@code year}, ...) or {@code once}
+     */
     public String getInterval() {
       return interval;
     }

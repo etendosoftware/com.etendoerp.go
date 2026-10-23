@@ -259,17 +259,30 @@ public class PlanCatalogService {
     private final Plan plan;
     private final boolean legacyFallback;
 
+    /**
+     * Pairs the chosen plan with the price source checkout charges it at.
+     *
+     * @param plan the plan catalog row chosen as the default, never null
+     * @param legacyFallback true when the plan is sold through the legacy price fallback, at the
+     *     configured {@link CheckoutConfiguration#priceId()}; false when at its own provider price
+     */
     public DefaultPlan(Plan plan, boolean legacyFallback) {
       this.plan = plan;
       this.legacyFallback = legacyFallback;
     }
 
-    /** @return the plan catalog row, never null */
+    /**
+     * Returns the plan catalog row chosen as the default.
+     *
+     * @return the plan catalog row, never null
+     */
     public Plan plan() {
       return plan;
     }
 
     /**
+     * Returns whether the plan is priced through the legacy price fallback.
+     *
      * @return true when the plan is sold at the configured legacy price
      *     ({@link CheckoutConfiguration#priceId()}), false when at its own provider price
      */
