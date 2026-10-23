@@ -921,7 +921,7 @@ context client is not `0`:
 
 The rule is structural (a default may never point at another tenant's row) and names no entity.
 A window can still pin the exact value with a client-scoped `defaultExpr` in its `decisions.json`
-(`simple-g-l-journal` does, for a deterministic order and no cross-tenant scan).
+(`manual-journals` does, for a deterministic order and no cross-tenant scan).
 
 **A row limit in the default defeats the guard.** `ORDER BY … LIMIT 1` on an unscoped query hands
 the guard a single row, usually another tenant's, so the outcome is "zero rows" instead of the
@@ -10418,7 +10418,7 @@ curated surface") and an invocation answered a bare `404 Action not found`, beca
 reason that names `post` / `unpost`, on all six headers (`MCP_CONFIG.actions.hidden` + `reasons.etblkpBulkposting`); the round-2 precheck
 answers the reason (405) by field name, column name and any spelling. The orders do not have the column. The round 1 `markInvokable`
 fix only touches buttons a declared contract describes, so it did not re-enable anything. *Not covered here (same column, other
-tables):* `sii-monitor` (C_Invoice lists), `goods-movements`, `physical-inventory`, `internal-consumption`, `simple-g-l-journal`,
+tables):* `sii-monitor` (C_Invoice lists), `goods-movements`, `physical-inventory`, `internal-consumption`, `manual-journals`,
 `amortization`, the bank-statement / reconciliation specs and `matched-purchase-invoices` list it too; they have no MCP_CONFIG yet.
 
 ##### Review notes (declared divergences and limits)

@@ -95,7 +95,7 @@ class TemplateRoleWindowAccessTest {
   }
 
   @Test
-  void financeHasThirtyThreeGrantsIncludingTheResolvedSimpleGlJournal() {
+  void financeHasThirtyThreeGrantsIncludingTheResolvedManualJournals() {
     List<WindowGrant> finance = TemplateRoleWindowAccess.byRoleId()
         .get(SystemRoleTemplates.FINANCE_ROLE_ID);
     assertEquals(33, finance.size(),
