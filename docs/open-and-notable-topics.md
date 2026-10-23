@@ -18,7 +18,7 @@ ETP-5051/5053.
 **To raise with:** a topic whose answer must come from a named person carries a `**To raise
 with:**` line under its ticket line. Most 🔴 decisions were answered by Sebastián Barrozo
 (product/tech lead) in a chat with Martin Taal on 2026-09-28; the points that chat left open, or
-opened, are §1.2–§1.7.
+opened, and that are still owed are §1.2 and §1.4 (§1.6 and §1.7 were removed, see §1).
 
 **A settled topic moves to §6, it is not deleted.** Once a topic is decided or fixed it moves to
 §6 "Clarified and solved" and **keeps its original number and heading text**, so a citation such
@@ -30,13 +30,19 @@ drift from the code. **Section numbers are stable**: other documents cite them (
 a moved topic leaves a gap in its old section rather than shifting its neighbours, and a new topic
 takes the next free number of the section it belongs to — a topic decided on arrival too (§5.15
 sits in §6 under its §5 number). A gap with no §6 entry (§3.1, §3.9 and §5.11 among them) is a
-topic deleted on or before 2026-09-28 under the earlier rule; its history is in git.
+topic deleted on or before 2026-09-28 under the earlier rule, or one removed or moved later and
+named in its section's note (§1.6, §1.7, §1.9); its history is in git.
 
 ---
 
 ## 1. Decisions still owed
 
 *Moved to §6 on 2026-09-28: §1.1. On 2026-10-14: §1.3. On 2026-10-23: §1.5.*
+*Removed on 2026-10-23 (Martin Taal): §1.6 "One-time cutover now (Phase F early)" — both rollouts
+are supported, gradual (client by client) and one-time, so there is no decision to make; §1.7
+"`END_DATE` meaning" — covered by §5.13.*
+*Moved to §5 on 2026-10-23: §1.9 "Retire `GET /sws/go/billing/offers`?" — decided (retire it), now
+§5.16 (ETP-5900).*
 
 ### 🔴 1.2 The billing period is per subscription, not per price
 
@@ -62,6 +68,22 @@ a period. **To decide:** the rule for it — e.g. a period computed locally from
 quota at all (true today, while `legacy-productive` has no quota rows, §5.1), or moving the tenant
 onto a real Stripe subscription (a plan change, ETP-5053) before any quota applies to it.
 
+**Sub-question (raised by Martin Taal, 2026-10-23): anchor every subscription to calendar
+months?** A customer who subscribes on the 15th would first pay a prorated partial month, then be
+billed on the 1st of every month.
+
+- **How, in Stripe.** Checkout in subscription mode accepts `subscription_data.billing_cycle_anchor`
+  (a timestamp, e.g. the next 1st) and `subscription_data.proration_behavior` (`create_prorations`
+  charges the partial first period, `none` makes it free). Verify both against Stripe's current API
+  reference when implementing. Existing subscriptions would need their anchor reset through a
+  subscription update.
+- **Why it matters.** One uniform period for every tenant simplifies per-period usage and quotas
+  (§5.5, ETP-5051) and reporting, and gives the no-Stripe-subscription case above a natural answer:
+  the calendar month.
+- **Open sub-points:** whether a yearly plan is anchored to the 1st of the month or to 1 January;
+  which time zone defines "the 1st" (UTC or the tenant's); and how the proration line reads on the
+  first invoice.
+
 ### 🔴 1.4 Per-client transactions versus today's per-resource-day transactions
 
 **Ticket:** related ETP-5050 (the usage job) and the scheduling follow-up of §5.15 (no ticket).
@@ -81,27 +103,6 @@ save-time validation probe), so per-client transactions are possible, at that co
 the two-hour cadence of §5.15. **To confirm:** whether per-resource-day transactions satisfy the
 concern, or whether isolation per client is wanted for another reason — today a resource-day that
 fails, fails for every tenant in it.
-
-### 🔴 1.6 One-time cutover now (Phase F early) — proposed, not decided
-
-**Ticket:** no ticket (Phase F, §3.2).
-
-**To raise with:** Sebastián Barrozo
-
-Sebastián proposed (2026-09-28): there are no real customers yet, only demos, and one or two real
-subscriptions are expected in the coming weeks, so make a one-time cutover now — migrate the state
-worth keeping, switch to `ETGO_SUBSCRIPTION`, remove the preference fallback — after confirming
-there are no live subscriptions to adopt (§2.4). Martin raised that this means moving the code to
-production quickly; Sebastián's answer was the off-by-default feature-flag rollout of §1.3 —
-decided on 2026-10-14, though ETP-5047 itself still ships enforcement on. **Still to decide.**
-Prerequisites, from §3.2, on every environment: R37 has run after R42, the `ETGO_TenantPlan` marker
-count reaches 0, and the fallback WARN no longer appears. The cutover deletes §3.2's list, and with it the watermark preference of
-§3.7.
-
-### 1.7 `END_DATE` meaning — not discussed on 2026-09-28
-
-Pointer only, no status of its own: the decision is §5.13 (🔴, owner ETP-5053, to raise with
-Sebastián Barrozo), counted there once.
 
 ### 🔴 1.8 Is the `billing-reconciliation-schedule` flag overkill? — decide later (ETP-5048)
 
@@ -137,23 +138,6 @@ decision 11, `billing-reconciliation.md` §3, the flag section of
 `feature-flags-and-tenant-upgrade.md`). The menu entry, the process and Process Request scheduling
 are unaffected either way.
 
-### 🔴 1.9 Retire `GET /sws/go/billing/offers`?
-
-**Ticket:** related ETP-5049; no ticket of its own.
-
-**To raise with / decides:** Martin
-
-Since the ETP-5049 frontend slice the SPA no longer calls the offer endpoint: the upgrade page
-quotes the plan catalog (`GET /sws/go/plans`, §5.14), and the SPA's one consumer
-(`getBillingOffer`) was removed (§4.8). The endpoint is still served, catalog-derived since ETP-5049
-(`PlanCatalogService#findDefaultPurchasablePlan`, `feature-flags-and-tenant-upgrade.md` §2, *The
-billing offer*). §1.5, §2.1 and §5.14 each defer its removal to "a separate decision"; this is it.
-
-**Options:** keep it as a server-side quote (for a caller outside the SPA, if one is wanted), or
-remove the route, its handler and their tests, and the *billing offer* section of
-`feature-flags-and-tenant-upgrade.md`. Before removing, check that no other client (a script, a
-support tool, an older SPA still deployed) calls it.
-
 ---
 
 ## 2. Deployment — constraints that are not visible in the code
@@ -168,8 +152,8 @@ How the fallback works — the one predicate, the self-retirement on the first p
 reload edge case — is the design doc's §6.1; the operator procedure is its §6.2. This section keeps
 only what is still open. (Solved in ETP-5049: `GET /sws/go/billing/offers` used to quote the legacy
 price whatever the catalog said; it now quotes the catalog's default plan through the same fallback
-predicate as the charge — `feature-flags-and-tenant-upgrade.md` §2, *The billing offer*. Whether to
-retire the now caller-less endpoint is §1.9.)
+predicate as the charge — `feature-flags-and-tenant-upgrade.md` §2, *The billing offer*. The now
+caller-less endpoint is to be retired: §5.16, ETP-5900.)
 
 - **Fallback buyers are uncapped and stuck on `legacy-productive` → ETP-5053, felt in ETP-5051.**
   A buyer who pays through the fallback lands on `legacy-productive`, which has zero quota rows and
@@ -1413,7 +1397,7 @@ schema_forge checkout is absent.
 ## 5. Handed forward to later tickets
 
 *Moved to §6 on 2026-09-28: §5.7, §5.10, §5.12; §5.15 was decided on arrival and sits there too.
-On 2026-10-23: §5.14, §5.5.*
+On 2026-10-23: §5.14, §5.5. Moved in from §1 on 2026-10-23: §1.9, now §5.16.*
 
 ### 🟠 5.1 ETP-5051: "no quota row" means UNLIMITED
 
@@ -1529,7 +1513,7 @@ and moved to §6, with the resource-limit check of §5.15.*
 **Ticket:** owner ETP-5053 (the `END_DATE` guard or meaning change). Closing the row on cancel was
 settled in ETP-5047 (§3.7).
 
-**To raise with:** Sebastián Barrozo — not discussed on 2026-09-28 (§1.7).
+**To raise with:** Sebastián Barrozo — not discussed on 2026-09-28.
 
 **What it means today.** `END_DATE` is past tense: the moment this row stopped being the tenant's
 current row. Its writers: a cancellation (ETP-5047 — Stripe's `ended_at`, else `canceled_at`, else
@@ -1603,6 +1587,18 @@ Nothing rejects either shape: `ETGO_SUB_DATES_CHK` only checks `END_DATE >= STAR
    the PRD does not have).
 
 Option 1 is the default unless product asks for scheduled upgrades.
+
+### 🟠 5.16 Retire `GET /sws/go/billing/offers` — decided, owed to ETP-5900
+
+**Ticket:** owner [ETP-5900](https://etendoproject.atlassian.net/browse/ETP-5900). Related ETP-5049.
+Was §1.9 (decided 2026-10-23, Martin Taal: retire it).
+
+Since the ETP-5049 frontend slice the SPA no longer calls the endpoint — the upgrade page quotes
+the plan catalog (§5.14) — so it has no caller left (§1.5, §2.1, §4.8). **Scope:** remove the
+route and `handleBillingOffers` in `EtendoGoJwtServlet`, `BillingOfferConfiguration`, and
+`PlanCatalogService#findDefaultPurchasablePlan` with its `DefaultPlan` if nothing else uses them
+afterwards, plus their tests and docs (`feature-flags-and-tenant-upgrade.md` §2, *The billing
+offer*); the path then answers 404.
 
 ---
 
@@ -1703,7 +1699,7 @@ the **Plans** window, not a code change.
 
 **Follow-up:** no ticket. Marketing's third tier and custom plans (§5.14) are new `ETGO_PLAN` rows,
 not code. `GET /sws/go/billing/offers` is kept server-side (catalog-derived since ETP-5049, §2.1)
-but has no frontend caller any more; removing it is a separate decision (§1.9).
+but has no frontend caller any more; retiring it was decided on 2026-10-23 (§5.16, ETP-5900).
 
 ### ✅ 4.8 `priceId` still reaches the browser on two develop paths
 
@@ -1903,8 +1899,8 @@ The 2026-09-28 decision (Sebastián Barrozo) kept two fixed cards, each configur
 (`PROVIDER_PRICE_ID`, price derived from Stripe) and supersedes its "two fixed cards" shape (§1.5).
 
 **Follow-up:** no ticket. Custom plans through a commercial agreement and marketing's third tier
-become catalog rows when they are defined. Whether to retire the now caller-less
-`GET /sws/go/billing/offers` is a separate decision (§1.9).
+become catalog rows when they are defined. The now caller-less `GET /sws/go/billing/offers` is to
+be retired (decided 2026-10-23, §5.16, ETP-5900).
 
 ### ✅ 5.15 The resource-limit check reads stored usage; usage is recomputed on one two-hour cadence
 
