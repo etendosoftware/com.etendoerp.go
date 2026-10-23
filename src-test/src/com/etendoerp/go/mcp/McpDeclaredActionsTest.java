@@ -338,7 +338,8 @@ class McpDeclaredActionsTest {
     void unpostBeforeReactivateIsOptIn() {
       SFEntity entity = recEntity();
       try (org.mockito.MockedStatic<com.etendoerp.go.schemaforge.util.NeoHandlerLookup> lookup =
-          Mockito.mockStatic(com.etendoerp.go.schemaforge.util.NeoHandlerLookup.class)) {
+          Mockito.mockStatic(com.etendoerp.go.schemaforge.util.NeoHandlerLookup.class,
+              Mockito.CALLS_REAL_METHODS)) {
         com.etendoerp.go.schemaforge.NeoHandler plain = context -> null;
         com.etendoerp.go.schemaforge.NeoHandler optsIn = new com.etendoerp.go.schemaforge.NeoHandler() {
           @Override
