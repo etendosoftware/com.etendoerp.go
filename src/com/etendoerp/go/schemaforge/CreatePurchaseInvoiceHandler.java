@@ -261,6 +261,12 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
         // the full rationale. The id is captured before the call because ProcessInvoiceUtil commits
         // and closes the session, leaving `invoice` detached.
         String invoiceId = invoice.getId();
+        // ETP-5840: an invoice generated from an order or quotation got its rate recomputed for its
+        // own accounting date; a foreign-currency one without a rate is refused before completing,
+        // and the generation rolled back (catch below) — nothing is left behind.
+        if (!SPEC_GOODS_RECEIPT.equals(specName)) {
+          DocumentCurrencyRate.requireRateForCompletion(invoice, Invoice.PROPERTY_ETGOCURRENCYRATE);
+        }
         InvoiceCompletionService.completeInvoiceOrThrow(invoiceId, context.getObContext());
         Invoice completed = OBDal.getInstance().get(Invoice.class, invoiceId);
 
@@ -280,6 +286,10 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
       } finally {
         OBContext.restorePreviousMode();
       }
+    } catch (DocumentCurrencyRate.MissingRateException e) {
+      OBDal.getInstance().rollbackAndClose();
+      log.warn("Refused to generate invoice from {}: {}", recordId, e.getMessage());
+      return e.toResponse();
     } catch (OBException e) {
       log.warn("Error creating purchase invoice from order {}: {}", recordId, e.getMessage());
       return errorResponse(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());

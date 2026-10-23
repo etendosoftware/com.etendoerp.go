@@ -416,6 +416,52 @@ final class DocumentCurrencyRate {
   }
 
   /**
+   * Refusal of a generation flow that creates a document and completes it in one step (ETP-5840):
+   * thrown BEFORE the completion runs, so the caller rolls the whole generation back and answers
+   * {@link #toResponse()} — the same translated 422, {@code messageKeys} and {@code messageParams}
+   * as {@link #refuseCompletionWithoutRate}.
+   */
+  static final class MissingRateException extends org.openbravo.base.exception.OBException {
+    private static final long serialVersionUID = 1L;
+    private final String orgIso;
+    private final String docIso;
+
+    MissingRateException(String message, String orgIso, String docIso) {
+      super(message);
+      this.orgIso = orgIso;
+      this.docIso = docIso;
+    }
+
+    /** The 422 completion refusal to answer with. */
+    NeoResponse toResponse() {
+      return DocumentRateMessages.missingOnComplete(orgIso, docIso);
+    }
+  }
+
+  /**
+   * Throws {@link MissingRateException} when {@code doc} is in a currency other than its
+   * organization's and {@code rateProperty} is empty. For the create-and-complete generation flows,
+   * to call after the generated document got its rate ({@link #recompute}) and before completing it.
+   *
+   * @param doc          the generated document
+   * @param rateProperty the property holding its rate
+   */
+  static void requireRateForCompletion(BaseOBObject doc, String rateProperty) {
+    String message = missingRateOnCompletion(doc, rateProperty);
+    if (message == null) {
+      return;
+    }
+    OBContext.setAdminMode(true);
+    try {
+      String orgCurrencyId = OBCurrencyUtils.getOrgCurrency(idOf(doc, PROP_ORGANIZATION));
+      throw new MissingRateException(message, isoCode(orgCurrencyId),
+          isoCode(idOf(doc, PROP_CURRENCY)));
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
    * The completion-refusal text for {@code doc} when its currency is not its organization's and
    * {@code rateProperty} is empty, else {@code null}. Shared by the NEO pre-hooks and the invoice
    * {@code ProcessInvoiceHook} (classic completion path).
