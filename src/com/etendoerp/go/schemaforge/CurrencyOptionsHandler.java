@@ -158,25 +158,48 @@ public class CurrencyOptionsHandler implements NeoHandler {
 
   private RequestContext resolveRequestContext(NeoContext context, String recordId, boolean isNew) {
     LocalDate requested = requestedDate(context);
+    if (!isNew) {
+      return savedDocumentContext(context, recordId, requested);
+    }
     OBContext obCtx = OBContext.getOBContext();
+    String orgId = readableOrganization(param(context, PARAM_ORGANIZATION), obCtx);
+    String clientId = obCtx != null && obCtx.getCurrentClient() != null
+        ? obCtx.getCurrentClient().getId() : null;
+    return new RequestContext(orgId, clientId, requested != null ? requested : LocalDate.now());
+  }
+
+  /**
+   * The context of a saved document: looked up first — a missing one is a 404 — through the rate
+   * type its header customization published; without one (a caller that reaches this handler
+   * directly), through the entity of the context's tab, dated by the {@code date} parameter or
+   * today. With neither, the document cannot be resolved: 404.
+   */
+  private RequestContext savedDocumentContext(NeoContext context, String recordId,
+      LocalDate requested) {
     DocumentCurrencyRate.RateType type =
         (DocumentCurrencyRate.RateType) context.getAttribute(DocumentCurrencyRate.ATTR_RATE_TYPE);
-    if (isNew || type == null) {
-      String orgId = readableOrganization(param(context, PARAM_ORGANIZATION), obCtx);
-      return new RequestContext(orgId, obCtx.getCurrentClient().getId(),
-          requested != null ? requested : LocalDate.now());
-    }
-    BaseOBObject doc = (BaseOBObject) OBDal.getInstance().get(type.entityName(), recordId);
+    String entityName = type != null ? type.entityName() : tabEntityName(context);
+    BaseOBObject doc = entityName != null
+        ? (BaseOBObject) OBDal.getInstance().get(entityName, recordId) : null;
     if (doc == null) {
-      throw new RecordNotFoundException(type.entityName() + " not found: " + recordId);
+      throw new RecordNotFoundException("Document not found: " + recordId);
     }
     LocalDate date = requested;
-    if (date == null) {
+    if (date == null && type != null) {
       date = new DocumentCurrencyRate(type).dateOf(doc);
     }
     String orgId = ((BaseOBObject) doc.get(PARAM_ORGANIZATION)).getId().toString();
     String clientId = ((BaseOBObject) doc.get("client")).getId().toString();
     return new RequestContext(orgId, clientId, date != null ? date : LocalDate.now());
+  }
+
+  /** The DAL entity of the context's tab, or {@code null} when the context carries none. */
+  private static String tabEntityName(NeoContext context) {
+    org.openbravo.model.ad.ui.Tab tab = context.getAdTab();
+    if (tab == null && context.getSfEntity() != null) {
+      tab = context.getSfEntity().getADTab();
+    }
+    return tab != null && tab.getTable() != null ? tab.getTable().getName() : null;
   }
 
   /** The {@code date} parameter, or {@code null}; an unparseable one is the caller's error. */
@@ -195,9 +218,15 @@ public class CurrencyOptionsHandler implements NeoHandler {
   /**
    * The {@code organization} parameter when the role can read that organization, otherwise the
    * session organization — a caller must not scope the rates by an organization it cannot see.
+   * Total: without a session, or without a readable list, it never throws and never honours the
+   * parameter.
    */
   private static String readableOrganization(String requested, OBContext obCtx) {
-    String sessionOrg = obCtx.getCurrentOrganization().getId();
+    if (obCtx == null) {
+      return null; // no session: no organization to fall back to, and none to trust
+    }
+    String sessionOrg = obCtx.getCurrentOrganization() != null
+        ? obCtx.getCurrentOrganization().getId() : null;
     if (StringUtils.isBlank(requested)) {
       return sessionOrg;
     }

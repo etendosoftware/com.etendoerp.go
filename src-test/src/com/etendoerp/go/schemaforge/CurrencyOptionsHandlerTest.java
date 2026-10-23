@@ -462,8 +462,8 @@ public class CurrencyOptionsHandlerTest {
   }
 
   /**
-   * Table-driven: the organization, client and date the rates are scoped by. A new record (or a
-   * header that published no rate type) uses the {@code organization} parameter only when the role
+   * Table-driven: the organization, client and date the rates are scoped by. A new record uses the
+   * {@code organization} parameter only when the role
    * can read it, else the session's, and the {@code date} parameter (query string or, from MCP, the
    * action body) else today. A saved document uses ITS organization and client and the reference
    * date its customization declares ({@code accountingDate} for an invoice), unless {@code date}
@@ -499,8 +499,6 @@ public class CurrencyOptionsHandlerTest {
             "doc-org", "doc-client", "2026-02-28" },
         { "saved invoice, date param wins", "inv-1", Map.of("date", "2026-05-05"), null,
             invoiceType, "doc-org", "doc-client", "2026-05-05" },
-        { "saved record without a rate type is scoped like a new one", "inv-1", null, null, null,
-            SESSION_ORG, SESSION_CLIENT, today },
     };
     for (Object[] c : cases) {
       String name = (String) c[0];
@@ -529,6 +527,11 @@ public class CurrencyOptionsHandlerTest {
     HandleRun missing = new HandleRun();
     assertEquals(404, missing.handle(currencyOptions("inv-404", null, null,
         SalesInvoiceHeaderHandler.RATE_TYPE)).getHttpStatus());
+
+    // A saved id with neither a rate type nor a tab cannot be resolved: 404, never scoped like a
+    // new record (the record is looked up before any organization is considered).
+    HandleRun untyped = new HandleRun();
+    assertEquals(404, untyped.handle(currencyOptions("inv-1", null, null, null)).getHttpStatus());
   }
 
   // ---------------------------------------------------------------
