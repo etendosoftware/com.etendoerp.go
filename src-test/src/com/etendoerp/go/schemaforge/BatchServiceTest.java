@@ -594,4 +594,126 @@ public class BatchServiceTest {
       dal.verifyNoInteractions();
     }
   }
+
+  // ── ETP-5677: async mode and job endpoints ───────────────────────────────
+
+  private static BatchJobService.Owner owner() {
+    return new BatchJobService.Owner("U", "R", "C", "O", "en_US", null);
+  }
+
+  /** async:true records a job and answers 202 with its id; nothing runs on the request thread. */
+  @Test
+  public void handleAsyncSubmitsAJobAndAnswers202WithoutRunningTheBatch() throws Exception {
+    NeoServlet servlet = mock(NeoServlet.class);
+    BatchService service = spy(new BatchService(servlet));
+    BatchJobService jobs = mock(BatchJobService.class);
+    JSONObject accepted = new JSONObject().put("jobId", "J1").put("state", "QUEUED");
+    when(jobs.submit(any(), any(), eq("rest"), any())).thenReturn(accepted);
+    HttpServletResponse response = mock(HttpServletResponse.class);
+
+    try (MockedStatic<NeoRequestBodyParser> parser = mockStatic(NeoRequestBodyParser.class);
+         MockedStatic<BatchJobService> jobStatic = mockStatic(BatchJobService.class);
+         MockedStatic<BatchJobService.Owner> ownerStatic = mockStatic(BatchJobService.Owner.class)) {
+      parser.when(() -> NeoRequestBodyParser.readRequestBody(any())).thenReturn(
+          "{\"async\":true,\"_onlyReturnIds\":true,\"operations\":[{\"id\":\"a\"}]}");
+      jobStatic.when(BatchJobService::getInstance).thenReturn(jobs);
+      ownerStatic.when(BatchJobService.Owner::current).thenReturn(owner());
+
+      service.handle(mock(HttpServletRequest.class), response);
+
+      org.mockito.ArgumentCaptor<BatchJobService.RowRunner> runner =
+          org.mockito.ArgumentCaptor.forClass(BatchJobService.RowRunner.class);
+      verify(jobs).submit(any(), any(), eq("rest"), runner.capture());
+      org.mockito.ArgumentCaptor<NeoResponse> written =
+          org.mockito.ArgumentCaptor.forClass(NeoResponse.class);
+      verify(servlet).writeResponse(eq(response), written.capture());
+      assertEquals(HttpServletResponse.SC_ACCEPTED, written.getValue().getHttpStatus());
+      assertEquals("J1", written.getValue().getBody().getString("jobId"));
+      verify(service, never()).executeBatch(any(), any(), anyBoolean(), anyBoolean());
+
+      // The worker's runner is the very same executeBatch, carrying the request's options.
+      JSONObject committed = new JSONObject().put("committed", true);
+      doReturn(committed).when(service).executeBatch(any(), isNull(), anyBoolean(), anyBoolean());
+      assertSame(committed, runner.getValue().run(new JSONArray()));
+      verify(service).executeBatch(any(), isNull(), eq(true), eq(false));
+    }
+  }
+
+  /** A refused submit answers its own status, with the back-off hint as a Retry-After header. */
+  @Test
+  public void handleAsyncRefusalCarriesTheRetryAfterHeader() throws Exception {
+    NeoServlet servlet = mock(NeoServlet.class);
+    BatchService service = new BatchService(servlet);
+    BatchJobService jobs = mock(BatchJobService.class);
+    when(jobs.submit(any(), any(), any(), any()))
+        .thenThrow(new BatchJobService.JobException(429, "Too many", 5));
+    HttpServletResponse response = mock(HttpServletResponse.class);
+
+    try (MockedStatic<NeoRequestBodyParser> parser = mockStatic(NeoRequestBodyParser.class);
+         MockedStatic<BatchJobService> jobStatic = mockStatic(BatchJobService.class);
+         MockedStatic<BatchJobService.Owner> ownerStatic = mockStatic(BatchJobService.Owner.class)) {
+      parser.when(() -> NeoRequestBodyParser.readRequestBody(any()))
+          .thenReturn("{\"async\":true,\"operations\":[{\"id\":\"a\"}]}");
+      jobStatic.when(BatchJobService::getInstance).thenReturn(jobs);
+      ownerStatic.when(BatchJobService.Owner::current).thenReturn(owner());
+
+      service.handle(mock(HttpServletRequest.class), response);
+
+      org.mockito.ArgumentCaptor<NeoResponse> written =
+          org.mockito.ArgumentCaptor.forClass(NeoResponse.class);
+      verify(servlet).writeResponse(eq(response), written.capture());
+      assertEquals(429, written.getValue().getHttpStatus());
+      assertEquals("5", written.getValue().getHeaders().get("Retry-After"));
+    }
+  }
+
+  /** The synchronous request is untouched when async is absent or false. */
+  @Test
+  public void handleWithoutAsyncNeverTouchesTheJobService() throws Exception {
+    NeoServlet servlet = mock(NeoServlet.class);
+    BatchService service = spy(new BatchService(servlet));
+    doReturn(new JSONObject().put("committed", true)).when(service)
+        .executeBatch(any(), isNull(), anyBoolean(), anyBoolean());
+
+    try (MockedStatic<NeoRequestBodyParser> parser = mockStatic(NeoRequestBodyParser.class);
+         MockedStatic<BatchJobService> jobStatic = mockStatic(BatchJobService.class)) {
+      parser.when(() -> NeoRequestBodyParser.readRequestBody(any()))
+          .thenReturn("{\"async\":false,\"operations\":[{\"id\":\"a\"}]}");
+
+      service.handle(mock(HttpServletRequest.class), mock(HttpServletResponse.class));
+
+      verify(service).executeBatch(any(), isNull(), eq(false), eq(false));
+      jobStatic.verifyNoInteractions();
+    }
+  }
+
+  /** GET reads and DELETE cancels the caller's job; a stranger's job is a 404. */
+  @Test
+  public void handleJobDispatchesStatusAndCancelAndMapsRefusals() throws Exception {
+    NeoServlet servlet = mock(NeoServlet.class);
+    BatchService service = new BatchService(servlet);
+    BatchJobService jobs = mock(BatchJobService.class);
+    BatchJobService.Owner me = owner();
+    when(jobs.status(me, "J1")).thenReturn(new JSONObject().put("state", "RUNNING"));
+    when(jobs.cancel(me, "J1")).thenReturn(new JSONObject().put("state", "CANCELLED"));
+    when(jobs.status(me, "NOPE")).thenThrow(new BatchJobService.JobException(404, "Job not found", null));
+    HttpServletResponse response = mock(HttpServletResponse.class);
+
+    try (MockedStatic<BatchJobService> jobStatic = mockStatic(BatchJobService.class);
+         MockedStatic<BatchJobService.Owner> ownerStatic = mockStatic(BatchJobService.Owner.class)) {
+      jobStatic.when(BatchJobService::getInstance).thenReturn(jobs);
+      ownerStatic.when(BatchJobService.Owner::current).thenReturn(me);
+
+      service.handleJob("GET", "J1", response);
+      service.handleJob("DELETE", "J1", response);
+      service.handleJob("GET", "NOPE", response);
+
+      org.mockito.ArgumentCaptor<NeoResponse> written =
+          org.mockito.ArgumentCaptor.forClass(NeoResponse.class);
+      verify(servlet, times(3)).writeResponse(eq(response), written.capture());
+      assertEquals("RUNNING", written.getAllValues().get(0).getBody().getString("state"));
+      assertEquals("CANCELLED", written.getAllValues().get(1).getBody().getString("state"));
+      assertEquals(404, written.getAllValues().get(2).getHttpStatus());
+    }
+  }
 }

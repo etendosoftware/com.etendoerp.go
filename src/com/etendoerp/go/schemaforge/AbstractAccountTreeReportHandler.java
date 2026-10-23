@@ -305,12 +305,13 @@ abstract class AbstractAccountTreeReportHandler extends AbstractSqlReportHandler
 
   private static NeoResponse validateYearsResolved(String yearId, boolean compareTo,
       String referenceYearId) {
-    if (OBDal.getInstance().get(Year.class, yearId) == null) {
+    // ETP-5793: another tenant's year answers like an unknown one.
+    if (TenantOwnership.loadOwned(Year.class, yearId) == null) {
       return actionableError(422, "year_not_resolved",
           "Could not resolve year " + yearId + ".",
           "Pass a valid C_Year id readable by your role.");
     }
-    if (compareTo && OBDal.getInstance().get(Year.class, referenceYearId) == null) {
+    if (compareTo && TenantOwnership.loadOwned(Year.class, referenceYearId) == null) {
       return actionableError(422, "reference_year_not_resolved",
           "Could not resolve comparison year " + referenceYearId + ".",
           "Pass a valid C_Year id readable by your role, or set compareTo to false.");

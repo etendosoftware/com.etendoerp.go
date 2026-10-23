@@ -226,4 +226,51 @@ public class PurchaseInvoiceLineHandlerTest {
       assertEquals(0, data.getJSONArray("candidates").length());
     }
   }
+
+  // ── resolveOwned: the lookup defaultTax serves, shared with the OCR review (ETP-5715) ──────────
+
+  @Test
+  public void resolveOwnedIsNullForAForeignAddressOrProductAndResolvesNothing() {
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<NeoActionRecordGuard> guard = mockStatic(NeoActionRecordGuard.class);
+        MockedStatic<DefaultTaxResolver> resolver = mockStatic(DefaultTaxResolver.class)) {
+      guard.when(() -> NeoActionRecordGuard.loadOwned(eq(Location.class), eq("FOREIGN")))
+          .thenReturn(null);
+      guard.when(() -> NeoActionRecordGuard.loadOwned(eq(Location.class), eq("ADDR")))
+          .thenReturn(mock(Location.class));
+      guard.when(() -> NeoActionRecordGuard.loadOwned(eq(Product.class), eq("FOREIGN")))
+          .thenReturn(null);
+
+      assertNull(PurchaseInvoiceLineHandler.resolveOwned("FOREIGN", null, new Date(), null));
+      assertNull(PurchaseInvoiceLineHandler.resolveOwned("ADDR", "FOREIGN", new Date(), null));
+
+      resolver.verifyNoInteractions();
+    }
+  }
+
+  @Test
+  public void resolveOwnedResolvesAsAPurchaseDocumentWithTheSessionOrgAndClient() {
+    Organization org = mock(Organization.class);
+    when(org.getId()).thenReturn("ORG1");
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn("CLI1");
+    OBContext session = mock(OBContext.class);
+    when(session.getCurrentOrganization()).thenReturn(org);
+    when(session.getCurrentClient()).thenReturn(client);
+    Result expected = new Result(null, DefaultTaxResolver.SOURCE_NO_MATCH, Collections.emptyList());
+    Date date = new Date();
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<NeoActionRecordGuard> guard = mockStatic(NeoActionRecordGuard.class);
+        MockedStatic<DefaultTaxResolver> resolver = mockStatic(DefaultTaxResolver.class)) {
+      obc.when(OBContext::getOBContext).thenReturn(session);
+      guard.when(() -> NeoActionRecordGuard.loadOwned(eq(Location.class), eq("ADDR")))
+          .thenReturn(mock(Location.class));
+      resolver.when(() -> DefaultTaxResolver.resolve("ORG1", "CLI1", "ADDR", date,
+          new BigDecimal("7"), null, false)).thenReturn(expected);
+
+      assertEquals(expected, PurchaseInvoiceLineHandler.resolveOwned("ADDR", null, date,
+          new BigDecimal("7")));
+    }
+  }
 }
