@@ -10574,17 +10574,29 @@ invoice, read from `C_Invoice_Reverse` in the opposite direction. Before this fi
 invoice's own "Rectificaciones" tab and "Documentos relacionados" card always rendered empty — only a
 rectificativa could show anything, via `originInvoices`.
 
-**ETP-5745 (5th fix) — `SiiSendHandler` remaps two drifted classic field names in validation
-messages.** `SIIUtils.invoicePreviousValidations` (classic `org.openbravo.module.sii`, untouched by
-this fix) names a field by its CLASSIC label in three of its fixed pre-send validation sentences.
-Two of those labels have since drifted from their current Etendo GO label: "Referencia del
-proveedor" to "Nº Documento Proveedor" (`genericLabels.receivedDocumentnoOrderReference`), and "Clave
-tipo factura" to "Tipo factura" (`sifDataTabs.field.invoiceType`); "Descripción SII" has not drifted
-and is left alone. `SiiSendHandler.remapDriftedFieldLabels` runs right after
+**ETP-5745 (5th fix) — `SiiSendHandler` replaces two drifted classic validation sentences with a
+bilingual GO sentence.** `SIIUtils.invoicePreviousValidations` (classic `org.openbravo.module.sii`,
+untouched by this fix — always emits Spanish regardless of the GO session's locale) names a field
+by its CLASSIC label in three of its fixed pre-send validation sentences. Two of those labels have
+since drifted from their current Etendo GO label: "Referencia del proveedor" (purchase-only) and
+"Clave tipo factura" — verified against `tools/app-shell/src/windows/custom/purchase-invoice
+/index.jsx`'s `LABEL_OVERRIDES` and the shared `SifTab.jsx` label respectively, NOT the first
+(wrong) guess `genericLabels.receivedDocumentnoOrderReference`, a Fiscal Monitor key. "Descripción
+SII" has not drifted and is left alone. `SiiSendHandler.remapDriftedFieldLabels` runs right after
 `normalizeErrorShape`/`ensureTopLevelMessage`, on both the `MultiEnvioFactura` and the
-`MultiInvoiceSIIModification` (registry-error resend) paths, and does a plain literal substring
-replace on the top-level `message` — any message it does not recognize passes through byte for byte.
-Same handler on every channel, so no divergence to declare here.
+`MultiInvoiceSIIModification` (registry-error resend) paths. Detection still matches the classic
+Spanish sentence (correct, since classic never localizes it), but the match now replaces the WHOLE
+`message` — not a substring — with a sentence built from the `NeoHints` catalog
+(`messages/neo_hints_{es,en}.properties`, the same hand-authored-bilingual-text mechanism
+`FinancialAccountBankConnectionSupport` already uses), resolved via `NeoLanguage.currentCode()` (the
+GO locale `NeoAuthenticator` applies from `Accept-Language`). Deliberately NOT this module's own
+`ETGO_*` `AD_Message` catalog: those are stable identity tokens the SPA re-translates client-side,
+and their `AD_Message_Trl` rows are mechanically copied from the English base rather than
+hand-translated — `SifSendingModal.jsx` (the only consumer here) reads `response.message` directly
+with no SPA-side translation step, so resolving an untranslated AD_Message server-side would have
+rendered English regardless of locale. Any message that does not match one of the two known
+sentences passes through byte for byte, unchanged. Same handler on every channel, so no divergence
+to declare here.
 **MCP path only:** the hook is in `McpToolRouter.route` (`etendo_action` case), not in `handleAction` or `NeoButtonActionHelper`, so the REST action endpoint and the SPA (which
 un-posts on its own and then posts `documentAction RE` to `/sws/neo`) never reach it: a double un-post is impossible. A single call leaves the final commit of the
 reactivation to the request, as every `etendo_action` does; the un-post is committed on its own before it.

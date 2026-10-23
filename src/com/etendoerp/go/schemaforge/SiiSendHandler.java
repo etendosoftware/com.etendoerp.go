@@ -27,6 +27,8 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.invoice.Invoice;
 
+import com.etendoerp.go.schemaforge.util.NeoLanguage;
+
 /**
  * NeoHandler delegate for the legacy SII button on Sales Invoice.
  *
@@ -138,51 +140,65 @@ public class SiiSendHandler extends AbstractLegacyInvoiceActionHandler {
   }
 
   /**
-   * Classic field name → its current Etendo GO label, for the two fixed sentences of
-   * {@code SIIUtils.invoicePreviousValidations} (org.openbravo.module.sii, classic SII module —
-   * NOT touched by this fix: its text is correct for Classic's own UI, and other classic callers
-   * may depend on the exact wording) whose GO label has drifted from the classic one
-   * (ETP-5745). Checked against both sides' label catalogs — the third fixed-field sentence in
-   * that same validation block, "Descripción SII", is NOT remapped: GO's label for
+   * Classic fixed sentence → its {@code NeoHints} catalog key, for the two of the three fixed
+   * sentences of {@code SIIUtils.invoicePreviousValidations} (org.openbravo.module.sii, classic
+   * SII module — NOT touched by this fix: its text is correct for Classic's own UI, and other
+   * classic callers may depend on the exact wording) whose named field has a current GO label
+   * that differs from the classic one (ETP-5745). The third fixed-field sentence in that same
+   * validation block, "Descripción SII", is NOT remapped: GO's label for
    * {@code aeatsiiDescripcionSii} ({@code tools/app-shell/src/locales/es_ES.json} →
-   * {@code sifDataTabs.field.siiDescription}) is the identical string.
+   * {@code sifDataTabs.field.siiDescription}) is the identical string, so the classic Spanish
+   * sentence is already correct as-is.
    *
-   * <p><b>Why these are literal strings, not a lookup against the frontend catalog:</b> the GO
-   * label only exists in the SPA's bundled locale JSON (a separate repo, a separate deployment
-   * unit from this module) — there is no runtime-shared label source between the two. Keep this
-   * map's values byte-for-byte equal to their cited source; a tester/reviewer can grep that
-   * source on a rename and update both sides together.
+   * <p><b>ETP-5745 bilingual correction.</b> The first version of this fix did a plain substring
+   * swap of the field NAME inside the classic (always-Spanish) sentence, leaving the REST of the
+   * sentence in Spanish even for an English-locale GO session. Detection of which classic
+   * sentence arrived is UNCHANGED (classic always emits Spanish regardless of locale, so matching
+   * against the Spanish text is still correct) — but once matched, the ENTIRE message is now
+   * replaced with a GO-authored sentence in the request's resolved language, via the same
+   * {@code NeoHints} catalog (see {@code messages/neo_hints_es.properties} /
+   * {@code neo_hints_en.properties}) {@link FinancialAccountBankConnectionSupport} already uses
+   * for hand-authored bilingual backend text, resolved with
+   * {@link com.etendoerp.go.schemaforge.util.NeoLanguage#currentCode()} — the GO locale
+   * {@code NeoAuthenticator} already applied to this request from its {@code Accept-Language}
+   * header (independent of, and more reliable than, {@code AD_User.AD_Language}: the SPA's
+   * language switcher is purely client-side and never writes that field back).
    *
-   * <p><b>"Referencia del proveedor" (verified live, ETP-5745 correction):</b> the first version
-   * of this fix pulled {@code genericLabels.receivedDocumentnoOrderReference} ("Nº Documento
-   * Proveedor") — WRONG, that key belongs to the Fiscal Monitor's "received" table column, a
-   * different screen. The purchase-invoice window's own {@code POReference} override is the
-   * actual source of truth for what renders on screen in THIS window
-   * ({@code tools/app-shell/src/windows/custom/purchase-invoice/index.jsx}'s {@code
-   * LABEL_OVERRIDES}, mirroring {@code artifacts/purchase-invoice/decisions.json →
-   * window.labelOverrides}): {@code "Nº documento"} (es_ES) / {@code "Document No."} (en_US).
-   * Confirmed by a live send: filling the field labelled "Nº documento" (not "Nº Documento
-   * Proveedor" — zero accessibility-tree matches for that string anywhere in this window) made
-   * the SII send succeed.
+   * <p><b>Why not {@code AD_Message}/{@code AD_Message_Trl}:</b> this module's own {@code ETGO_*}
+   * AD_Message catalog (e.g. {@code ETGO_InsufficientStockLine}) exists as STABLE IDENTITY TOKENS
+   * the SPA re-translates client-side via {@code backendErrors.js} — their {@code AD_Message_Trl}
+   * rows are mechanically copied from the English base, never hand-translated, so resolving one
+   * server-side would render English regardless of locale. That route only works for callers that
+   * read {@code messageKeys} and translate client-side; {@code SifSendingModal.jsx} (the only
+   * consumer of this handler's response) reads {@code response.message} directly and has no such
+   * step, so the replacement text must already be correct when it leaves this handler.
+   *
+   * <p>Keep the GO field-label citations in the {@code NeoHints} catalog comments byte-for-byte
+   * equal to their source (the "Referencia del proveedor" case was wrong once already — see
+   * {@code docs/generated-custom-windows/purchase-invoice.md} for the verified source and the two
+   * guesses it supersedes); a tester/reviewer can grep that source on a rename and update both
+   * sides together.
    */
-  private static final Map<String, String> DRIFTED_CLASSIC_FIELD_LABELS = Map.of(
-      // tools/app-shell/src/locales/es_ES.json → sifDataTabs.field.invoiceType (shared SifTab.jsx
-      // label, not window-specific — verified it renders this literal text in the SIF tab).
-      "Clave tipo factura", "Tipo factura",
-      // tools/app-shell/src/windows/custom/purchase-invoice/index.jsx → LABEL_OVERRIDES.es_ES.POReference
-      "Referencia del proveedor", "Nº documento"
+  private static final Map<String, String> DRIFTED_CLASSIC_SENTENCES = Map.of(
+      // GO label: sifDataTabs.field.invoiceType ("Tipo factura" / "Invoice type") — SifTab.jsx,
+      // shared by sales and purchase, not window-specific.
+      "La factura debe contener información en el campo Clave tipo factura.", "siiMissingInvoiceType",
+      // GO label: purchase-invoice/index.jsx LABEL_OVERRIDES.POReference ("Nº documento" /
+      // "Document No.") — verified live; see the class javadoc above.
+      "La factura de compra debe contener información en el campo Referencia del proveedor.",
+          "siiMissingDocumentNo"
   );
 
   /**
-   * Replaces a classic field name inside the response's top-level {@code message} with its
-   * current Etendo GO label, for the fixed set of {@link #DRIFTED_CLASSIC_FIELD_LABELS}
+   * Replaces the response's top-level {@code message} with a full GO-authored sentence, in the
+   * request's resolved language, for the fixed set of {@link #DRIFTED_CLASSIC_SENTENCES} classic
    * sentences only (ETP-5745). Any other message — a different validation, an AEAT SOAP error,
    * the generic exception-wrapper text — passes through completely untouched: this is a targeted
    * fix for a known, fixed set of sentences, not a general classic-message translator.
    *
    * @param response the response {@link #normalizeErrorShape} already ran on (so a top-level
    *     {@code message} is present whenever the body carried one at all)
-   * @return {@code response}, with its body's {@code message} remapped in place when it matched
+   * @return {@code response}, with its body's {@code message} replaced in place when it matched
    */
   static NeoResponse remapDriftedFieldLabels(NeoResponse response) {
     if (response == null || response.getBody() == null) {
@@ -193,15 +209,15 @@ public class SiiSendHandler extends AbstractLegacyInvoiceActionHandler {
     if (message == null) {
       return response;
     }
-    String remapped = message;
-    for (Map.Entry<String, String> entry : DRIFTED_CLASSIC_FIELD_LABELS.entrySet()) {
-      remapped = remapped.replace(entry.getKey(), entry.getValue());
-    }
-    if (!remapped.equals(message)) {
-      try {
-        body.put("message", remapped);
-      } catch (JSONException ignored) {
-        // Best-effort: leave the original (classic-labeled) message rather than fail the request.
+    for (Map.Entry<String, String> entry : DRIFTED_CLASSIC_SENTENCES.entrySet()) {
+      if (message.contains(entry.getKey())) {
+        String replacement = NeoHints.text(entry.getValue(), NeoLanguage.currentCode());
+        try {
+          body.put("message", replacement);
+        } catch (JSONException ignored) {
+          // Best-effort: leave the original (classic-only) message rather than fail the request.
+        }
+        break;
       }
     }
     return response;

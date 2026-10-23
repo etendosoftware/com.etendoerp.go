@@ -35,6 +35,8 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.invoice.Invoice;
 
+import com.etendoerp.go.schemaforge.util.NeoLanguage;
+
 /**
  * Unit tests for {@link SiiSendHandler}.
  *
@@ -142,45 +144,78 @@ public class SiiSendHandlerTest {
     assertNull(SiiSendHandler.normalizeErrorShape(null));
   }
 
-  // ── remapDriftedFieldLabels — ETP-5745 (5th fix) ────────────────────────────
+  // ── remapDriftedFieldLabels — ETP-5745 (5th fix, bilingual full-sentence correction) ────────
   //
   // SIIUtils.invoicePreviousValidations (classic org.openbravo.module.sii) names a field by its
-  // CLASSIC label in three of its fixed sentences. Two of those labels have drifted from their
-  // current Etendo GO label ("Referencia del proveedor" → "Nº documento" — verified live, see
-  // the field's javadoc for why "Nº Documento Proveedor" was wrong — "Clave tipo factura" →
-  // "Tipo factura"); the third ("Descripción SII") has not. The classic module itself is never
-  // touched — only the message this handler returns to the GO SPA.
+  // CLASSIC label, in Spanish always, in three of its fixed sentences. Two of those labels have
+  // drifted from their current Etendo GO label ("Referencia del proveedor" → "Nº documento" —
+  // verified live — "Clave tipo factura" → "Tipo factura"); the third ("Descripción SII") has
+  // not. Detection still matches the classic SPANISH text (classic never localizes it), but once
+  // matched the WHOLE message is now replaced by a GO-authored sentence resolved in the
+  // request's language via NeoHints/NeoLanguage, not a substring swap on the classic text — a
+  // Spanish-only sentence with just the field name fixed is not a bilingual fix.
 
-  @Test
-  public void remapsPurchaseVendorReferenceLabelToTheGoFieldName() throws JSONException {
-    NeoResponse response = NeoResponse.error(400,
-        "La factura de compra debe contener información en el campo Referencia del proveedor. ");
-
-    NeoResponse result = SiiSendHandler.remapDriftedFieldLabels(SiiSendHandler.normalizeErrorShape(response));
-
-    String message = result.getBody().getString("message");
-    assertTrue(message.contains("Nº documento"));
-    assertFalse(message.contains("Referencia del proveedor"));
+  private static NeoResponse remapWithLanguage(String rawMessage, String languageCode) throws JSONException {
+    NeoResponse response = NeoResponse.error(400, rawMessage);
+    try (MockedStatic<NeoLanguage> lang = Mockito.mockStatic(NeoLanguage.class)) {
+      lang.when(NeoLanguage::currentCode).thenReturn(languageCode);
+      return SiiSendHandler.remapDriftedFieldLabels(SiiSendHandler.normalizeErrorShape(response));
+    }
   }
 
   @Test
-  public void remapsInvoiceTypeKeyLabelToTheGoFieldName() throws JSONException {
-    NeoResponse response = NeoResponse.error(400,
-        "La factura debe contener información en el campo Clave tipo factura. ");
+  public void purchaseVendorReferenceSentenceBecomesTheFullEsFlagSentence() throws JSONException {
+    NeoResponse result = remapWithLanguage(
+        "La factura de compra debe contener información en el campo Referencia del proveedor. ",
+        "es_ES");
 
-    NeoResponse result = SiiSendHandler.remapDriftedFieldLabels(SiiSendHandler.normalizeErrorShape(response));
+    assertEquals("La factura de compra debe contener información en el campo Nº documento.",
+        result.getBody().getString("message"));
+  }
 
-    String message = result.getBody().getString("message");
-    assertTrue(message.contains("Tipo factura"));
-    assertFalse(message.contains("Clave tipo factura"));
+  @Test
+  public void purchaseVendorReferenceSentenceBecomesTheFullEnglishSentence() throws JSONException {
+    NeoResponse result = remapWithLanguage(
+        "La factura de compra debe contener información en el campo Referencia del proveedor. ",
+        "en_US");
+
+    assertEquals("The purchase invoice must contain information in the Document No. field.",
+        result.getBody().getString("message"));
+  }
+
+  @Test
+  public void invoiceTypeKeySentenceBecomesTheFullEsFlagSentence() throws JSONException {
+    NeoResponse result = remapWithLanguage(
+        "La factura debe contener información en el campo Clave tipo factura. ", "es_ES");
+
+    assertEquals("La factura debe contener información en el campo Tipo factura.",
+        result.getBody().getString("message"));
+  }
+
+  @Test
+  public void invoiceTypeKeySentenceBecomesTheFullEnglishSentence() throws JSONException {
+    NeoResponse result = remapWithLanguage(
+        "La factura debe contener información en el campo Clave tipo factura. ", "en_US");
+
+    assertEquals("The invoice must contain information in the Invoice type field.",
+        result.getBody().getString("message"));
+  }
+
+  /** No resolvable language (no live OBContext, e.g. in these unit tests) falls back to English. */
+  @Test
+  public void aMatchedSentenceFallsBackToEnglishWithNoResolvableLanguage() throws JSONException {
+    NeoResponse result = remapWithLanguage(
+        "La factura debe contener información en el campo Clave tipo factura. ", null);
+
+    assertEquals("The invoice must contain information in the Invoice type field.",
+        result.getBody().getString("message"));
   }
 
   @Test
   public void leavesTheSiiDescriptionMessageUntouched_labelDidNotDrift() throws JSONException {
     String original = "La factura debe contener información en el campo Descripción SII. ";
-    NeoResponse response = NeoResponse.error(400, original);
 
-    NeoResponse result = SiiSendHandler.remapDriftedFieldLabels(SiiSendHandler.normalizeErrorShape(response));
+    NeoResponse result = remapWithLanguage(original, "es_ES");
 
     assertEquals(original, result.getBody().getString("message"));
   }
@@ -188,9 +223,8 @@ public class SiiSendHandlerTest {
   @Test
   public void leavesAnUnrecognizedMessageCompletelyUntouched() throws JSONException {
     String original = "MultiEnvioFactura: SOAP fault from AEAT";
-    NeoResponse response = NeoResponse.error(500, original);
 
-    NeoResponse result = SiiSendHandler.remapDriftedFieldLabels(SiiSendHandler.normalizeErrorShape(response));
+    NeoResponse result = remapWithLanguage(original, "es_ES");
 
     assertEquals(original, result.getBody().getString("message"));
   }
