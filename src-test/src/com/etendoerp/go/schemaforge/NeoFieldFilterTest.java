@@ -908,7 +908,7 @@ class NeoFieldFilterTest {
 
     /**
      * Reproduces the exact ETP-4917 scenario: a legacy callout (e.g. {@code SL_JournalLineAmt}
-     * on {@code simple-g-l-journal}'s line entity) echoes back both the field the user is
+     * on {@code manual-journals}'s line entity) echoes back both the field the user is
      * editing ({@code foreignCurrencyDebit}) AND the derived accounted-amount columns whose DAL
      * property names happen to literally be {@code debit}/{@code credit} — read-only, no
      * default, no handler, so {@code filterCreateRequest} would reject them with a 422 if the

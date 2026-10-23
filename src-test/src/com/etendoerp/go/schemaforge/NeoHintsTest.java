@@ -26,16 +26,15 @@ import org.junit.Test;
 
 /**
  * Unit tests for {@link NeoHints}: where a hint lands in a write response per channel, and which
- * catalog its text comes from. The hint text of a real caller (the missing exchange rate in es_ES
- * and en_US) is asserted in {@code AbstractInvoiceHeaderHandlerTest}; this pins the bundle choice
- * for the other languages and the envelope itself.
+ * catalog its text comes from. This pins the bundle choice per language (with the ETP-5840 exchange
+ * rate message as the sample key) and the envelope itself.
  *
  * @covers com.etendoerp.go.schemaforge.NeoHints
  */
 public class NeoHintsTest {
 
-  private static final String KEY = "exchangeRateMissing";
-  private static final String EN_PREFIX = "No exchange rate from EUR to USD";
+  private static final String KEY = "ETGO_ExchangeRateMissingOnSave";
+  private static final String EN_PREFIX = "There is no exchange rate from EUR to USD";
   private static final String ES_PREFIX = "No hay tipo de cambio de EUR a USD";
 
   private static JSONObject coreResponse() throws Exception {
@@ -80,7 +79,7 @@ public class NeoHintsTest {
    */
   @Test
   public void textPicksTheBundleByLanguage() {
-    Object[] args = { "EUR", "USD", "14/10/2026" };
+    Object[] args = { "EUR", "USD", "14/10/2026", "Fecha contable" };
 
     assertTrue(NeoHints.text(KEY, "es_AR", args).startsWith(ES_PREFIX));
     assertTrue(NeoHints.text(KEY, "en_US", args).startsWith(EN_PREFIX));

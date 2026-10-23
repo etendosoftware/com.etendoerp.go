@@ -87,7 +87,7 @@ class AccountingPostingCustomizationsTest {
             "Valores por defecto"),
         Arguments.of(GeneralLedgerAccountsHandler.class, "general-ledger-configuration",
             "Cuentas generales"),
-        Arguments.of(GLJournalLineHandler.class, "simple-g-l-journal", "gLJournalLine"));
+        Arguments.of(GLJournalLineHandler.class, "manual-journals", "gLJournalLine"));
   }
 
   private MockedStatic<WeldUtils> weld;
