@@ -25,8 +25,9 @@ import java.util.Optional;
  * The {@code ETGO_HUBSPOT_OUTBOX} table, plus the facts the sync reads to detect the events no
  * business code reports: a first entry into the demo, a payment, an expired trial.
  *
- * <p>An account has at most one row per event type (unique index), so detecting or reporting an
- * event twice never sends it twice.
+ * <p>A row is unique per account, event type and event key (unique index), so detecting or
+ * reporting an event twice never sends it twice. The demo events happen once per account and use
+ * {@link #ONCE}; the billing events are keyed by the Stripe invoice, event or subscription.
  */
 interface HubSpotOutboxStore {
 
@@ -36,6 +37,22 @@ interface HubSpotOutboxStore {
   String DEMO_ENTERED = "DEMO_ENTERED";
   String PAID = "PAID";
   String DEMO_EXPIRED = "DEMO_EXPIRED";
+
+  /** Billing events, from the Stripe webhook; each lands on the deal of its environment. */
+  String PAYMENT = "PAYMENT";
+  String PAYMENT_FAILED = "PAYMENT_FAILED";
+  String CANCEL_REQUESTED = "CANCEL_REQUESTED";
+  String CANCEL_REVERTED = "CANCEL_REVERTED";
+  String CANCELED = "CANCELED";
+
+  /**
+   * Not an event: which deal a productive environment's billing events land on, recorded
+   * {@code SENT} with the deal's id once the sync has decided it.
+   */
+  String PRODUCTIVE_DEAL = "PRODUCTIVE_DEAL";
+
+  /** The key of an event that happens at most once per account. */
+  String ONCE = "-";
 
   String STATUS_PENDING = "PENDING";
   String STATUS_SENT = "SENT";
@@ -53,6 +70,59 @@ interface HubSpotOutboxStore {
    * @return whether a row was added
    */
   boolean enqueue(String accountId, String eventType, String environmentId, String payload);
+
+  /**
+   * Finds where a subscription's billing events land.
+   *
+   * @param subscriptionId the Stripe subscription
+   * @return the productive environment it pays for, or empty while none is provisioned
+   */
+  Optional<SubscriptionEnvironment> findSubscriptionEnvironment(String subscriptionId);
+
+  /**
+   * Records the environment a billing event turned out to be about.
+   *
+   * @param id            the row's id
+   * @param environmentId the environment's {@code AD_Client_ID}
+   */
+  void assignEnvironment(String id, String environmentId);
+
+  /**
+   * Tells whether an environment already reported a newer billing event, which a late one must
+   * not overwrite: Stripe does not deliver in order.
+   *
+   * @param accountId     the account
+   * @param environmentId the environment
+   * @param occurredAt    when the event being sent happened at Stripe
+   * @return whether a billing event that happened later was already sent
+   */
+  boolean hasNewerBillingEvent(String accountId, String environmentId, Instant occurredAt);
+
+  /**
+   * Finds the deal of a productive environment.
+   *
+   * @param accountId     the account
+   * @param environmentId the environment
+   * @return the deal, or empty while it is not decided
+   */
+  Optional<EnvironmentDeal> findEnvironmentDeal(String accountId, String environmentId);
+
+  /**
+   * Counts the productive environments of an account that already have a deal.
+   *
+   * @param accountId the account
+   * @return how many
+   */
+  int countEnvironmentDeals(String accountId);
+
+  /**
+   * Records the deal of a productive environment.
+   *
+   * @param accountId     the account
+   * @param environmentId the environment
+   * @param deal          its deal
+   */
+  void recordEnvironmentDeal(String accountId, String environmentId, EnvironmentDeal deal);
 
   /**
    * Lists the demos whose events the sync still detects.
@@ -164,6 +234,26 @@ interface HubSpotOutboxStore {
   }
 
   /**
+   * The productive environment a Stripe subscription pays for.
+   *
+   * @param environmentId its {@code AD_Client_ID}
+   * @param name          the name it was bought with
+   * @param planKey       the {@code ETGO_PLAN.VALUE} bought, or {@code null}
+   */
+  record SubscriptionEnvironment(String environmentId, String name, String planKey) {
+  }
+
+  /**
+   * The deal of a productive environment.
+   *
+   * @param dealId the HubSpot deal
+   * @param owned  whether the sync created it, and so moves its stage; a deal marketing created
+   *               only gets its properties written
+   */
+  record EnvironmentDeal(String dealId, boolean owned) {
+  }
+
+  /**
    * A row waiting to be sent, with the account it is about.
    *
    * @param id            the row's id
@@ -175,8 +265,10 @@ interface HubSpotOutboxStore {
    * @param nextAttemptAt when it may be sent, or {@code null} for now
    * @param email         the account's address
    * @param name          the account's name
+   * @param occurredAt    when the event happened at Stripe, or {@code null} for the demo events
    */
   record PendingEvent(String id, String accountId, String eventType, String environmentId,
-      String payload, int attemptCount, Instant nextAttemptAt, String email, String name) {
+      String payload, int attemptCount, Instant nextAttemptAt, String email, String name,
+      Instant occurredAt) {
   }
 }

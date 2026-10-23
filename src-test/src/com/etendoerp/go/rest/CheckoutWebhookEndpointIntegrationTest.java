@@ -338,6 +338,31 @@ public class CheckoutWebhookEndpointIntegrationTest extends OBBaseTest {
   }
 
   /**
+   * ETP-5847 — a paid invoice of an Etendo purchase is recorded for HubSpot in the event's own
+   * transaction, before the subscription is even resolved: the first payment usually arrives
+   * before its environment exists. A redelivery records nothing more.
+   */
+  @Test
+  public void testAPaidInvoiceOfAPurchaseIsRecordedForHubSpotOnce() throws Exception {
+    String email = newEmail("hubspot");
+    String requestId = createRequest(email);
+    String invoiceEvent = newEventId();
+    String invoice = "{\"id\":\"" + invoiceEvent + "\",\"type\":\"" + INVOICE_PAID + "\","
+        + "\"created\":1792000000,\"data\":{\"object\":{\"id\":\"in_" + invoiceEvent + "\","
+        + "\"amount_paid\":2200,\"currency\":\"eur\",\"parent\":{\"subscription_details\":{"
+        + "\"subscription\":\"sub_" + requestId + "\",\"metadata\":{\"request_id\":\""
+        + requestId + "\"}}}}}}";
+
+    assertEquals(200, deliver(invoice).status);
+    assertEquals("a duplicate delivery is acknowledged without a second claim", 200,
+        deliver(invoice).status);
+
+    assertEquals("PAYMENT", hubSpotEvent(email, "EVENT_TYPE"));
+    assertEquals("in_" + invoiceEvent, hubSpotEvent(email, "EVENT_KEY"));
+    assertEquals("1", hubSpotEvent(email, "COUNT(*) OVER ()"));
+  }
+
+  /**
    * ETP-5443 — {@code invoice.paid} is now a subscription-lifecycle type ({@code
    * SUBSCRIPTION_EVENT_TYPES}), so it is evaluated by {@code applySubscriptionLifecycle} rather
    * than falling straight into "unhandled event type". An invoice whose subscription and customer
@@ -1060,6 +1085,14 @@ public class CheckoutWebhookEndpointIntegrationTest extends OBBaseTest {
     return EVENT_MARKER + UUID.randomUUID().toString().replace("-", "");
   }
 
+  private static String hubSpotEvent(String email, String column) {
+    Object value = OBDal.getInstance().getSession().createNativeQuery("SELECT " + column
+        + " FROM ETGO_HUBSPOT_OUTBOX o JOIN ETGO_ACCOUNT a ON a.ETGO_ACCOUNT_ID = o.ETGO_ACCOUNT_ID"
+        + " WHERE a.EMAIL = :email").setParameter("email", email).setMaxResults(1)
+        .getSingleResult();
+    return value == null ? null : value.toString();
+  }
+
   private String newEmail(String label) {
     return REQUEST_MARKER + label + "-" + UUID.randomUUID().toString().replace("-", "")
         + "@example.test";
@@ -1230,6 +1263,14 @@ public class CheckoutWebhookEndpointIntegrationTest extends OBBaseTest {
         deleteTenantRows.setParameter("tenantMarker", TENANT_MARKER + "%");
         deleteTenantRows.executeUpdate();
       }
+
+      // The webhook reports billing events to HubSpot, so an account may have outbox rows.
+      NativeQuery deleteHubSpotEvents = OBDal.getInstance()
+          .getSession()
+          .createNativeQuery("DELETE FROM ETGO_HUBSPOT_OUTBOX WHERE ETGO_ACCOUNT_ID IN"
+              + " (SELECT ETGO_ACCOUNT_ID FROM ETGO_ACCOUNT WHERE EMAIL LIKE :marker)");
+      deleteHubSpotEvents.setParameter("marker", REQUEST_MARKER + "%");
+      deleteHubSpotEvents.executeUpdate();
 
       NativeQuery deleteAccounts = OBDal.getInstance()
           .getSession()
