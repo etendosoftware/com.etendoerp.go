@@ -33,7 +33,8 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 /**
- * Source-reading guardrail for tenant isolation in the financial-account area (ETP-4950).
+ * Source-reading guardrail for tenant isolation in the financial-account area (ETP-4950) and the
+ * accounting surface around it (ETP-5722, ETP-5793).
  *
  * <p><b>Why a structural test and not only behavioural ones.</b> The bug this pins down was not one
  * defect, it was the same defect twenty-one times: an id arriving in a query parameter or a request
@@ -57,8 +58,10 @@ import org.junit.jupiter.api.Test;
  *
  * <p>Adding a class to {@link #GUARDED_CLASSES} is how the rule grows; do not remove one to make a
  * failure go away.
+ *
+ * @covers com.etendoerp.go.schemaforge.TenantOwnership
  */
-@DisplayName("Tenant isolation policy — financial account area")
+@DisplayName("Tenant isolation policy — financial account and accounting areas")
 class TenantIsolationPolicyTest {
 
   private static final String SOURCE_ROOT = "src/com/etendoerp/go/schemaforge";
@@ -70,12 +73,19 @@ class TenantIsolationPolicyTest {
    * The classes that serve the financial-account surface: bank reconciliation, account movements,
    * bank statements, cash close, the account's own configuration tabs and the payment registration
    * they delegate to. Plus the general ledger configuration, which writes accounting combinations
-   * into the ledger setup (ETP-5722).
+   * into the ledger setup (ETP-5722). Plus the accounting reports (aging, trial balance, general
+   * ledger, journal entries, profit and loss, balance sheet), the G/L journal header and the
+   * organization information tab (ETP-5793).
    */
   private static final List<String> GUARDED_CLASSES = Arrays.asList(
+      "AbstractAccountTreeReportHandler.java",
+      "AbstractSqlReportHandler.java",
       "AccountingDimensionsSupport.java",
       "AddPaymentService.java",
+      "AgingPayableReportHandler.java",
+      "AgingReportHandler.java",
       "AutoMatchSupport.java",
+      "BalanceSheetReportHandler.java",
       "BankStatementsHandler.java",
       "CandidatesSupport.java",
       "CashCloseHandler.java",
@@ -85,13 +95,20 @@ class TenantIsolationPolicyTest {
       "FinancialAccountHandler.java",
       "FinancialAccountTransactionsHandler.java",
       "FinancialAccountTransactionsSupport.java",
+      "GeneralLedgerBalancingRule.java",
       "GeneralLedgerConfigurationHandler.java",
+      "GeneralLedgerReportHandler.java",
+      "GlJournalHeaderHandler.java",
+      "JournalEntriesReportHandler.java",
       "NearMatchSupport.java",
+      "ProfitLossReportHandler.java",
       "ReconciliationDifferenceSupport.java",
       "ReconciliationFlowSupport.java",
       "ReconciliationHandler.java",
       "ReconciliationHandlerSupport.java",
-      "ReconciliationWriteoffSupport.java");
+      "ReconciliationWriteoffSupport.java",
+      "TrialBalanceReportHandler.java",
+      "handlers/OrganizationInformationHandler.java");
 
   /** Resolves a guarded class, whether the tests run from the module root or the workspace root. */
   private static Path sourceOf(String fileName) {

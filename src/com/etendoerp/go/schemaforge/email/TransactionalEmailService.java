@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge.email;
 
 import java.io.IOException;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -60,6 +61,7 @@ public class TransactionalEmailService {
       "Email contract did not resolve a recipient";
   private static final String FIELD_DUPLICATE = "duplicate";
   private static final String FIELD_PROVIDER_STATUS = "providerStatus";
+  private static final String FIELD_PREVIOUS_SENT_AT = "previousSentAt";
   private static final String FIELD_RETRY_AFTER_SECONDS = "retryAfterSeconds";
   private static final String MESSAGE_DUPLICATE =
       "Duplicate email request suppressed by idempotency key";
@@ -597,6 +599,10 @@ public class TransactionalEmailService {
       extra.put(FIELD_RETRY_AFTER_SECONDS, JSONObject.NULL);
       extra.put(FIELD_PROVIDER_STATUS, prior.getProviderStatus() == null ? JSONObject.NULL
           : prior.getProviderStatus());
+      // ETP-5715: when the equivalent email went out, so a caller can tell the user instead of only
+      // saying "duplicate". Additive: the send modal reads status and ignores the rest.
+      extra.put(FIELD_PREVIOUS_SENT_AT, Instant.ofEpochMilli(prior.getCreatedAtMillis())
+          .toString());
       return extra;
     } catch (JSONException e) {
       log.debug("Could not build duplicate email response metadata: {}", e.getMessage(), e);

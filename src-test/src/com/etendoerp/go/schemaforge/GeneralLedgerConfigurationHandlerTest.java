@@ -79,9 +79,11 @@ import org.openbravo.model.financialmgmt.calendar.Calendar;
  *   <li>a mandatory dimension cannot be deactivated</li>
  *   <li>tenant isolation: foreign combination / currency / org ids answer "not found", and every
  *   error rolls the session back (ETP-5722)</li>
+ *   <li>a balancing switch left on without its account is refused and rolled back (ETP-5724)</li>
  * </ul>
  *
  * @covers com.etendoerp.go.schemaforge.GeneralLedgerConfigurationHandler
+ * @covers com.etendoerp.go.schemaforge.GeneralLedgerBalancingRule
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -1380,5 +1382,92 @@ class GeneralLedgerConfigurationHandlerTest {
         new JSONObject().put("general", new JSONObject().put("currency", "cur-eur"))));
     assertEquals(200, accepted.getHttpStatus());
     verify(schema).setCurrency(eur);
+  }
+
+  // ── balancing switch requires its account (ETP-5724) ────────────────────────
+  // generalAccounts is a mock: get() stubs stand for the row as the setters leave it.
+
+  private NeoResponse postGeneralAccounts(JSONObject generalAccountsBody) throws Exception {
+    return handler.handle(postCtx(ORG_ID, new JSONObject().put("generalAccounts", generalAccountsBody)));
+  }
+
+  @Test
+  @DisplayName("ETP-5724: suspense switch on without its account answers MISSING_REQUIRED_FIELDS and rolls back")
+  void suspenseOnWithoutAccountRejected() throws Exception {
+    wireOrgWithLedger();
+    wireLoadCriteria(Collections.emptyList());
+    when(generalAccounts.get(AcctSchemaGL.PROPERTY_SUSPENSEBALANCINGUSE)).thenReturn(true);
+
+    NeoResponse response = postGeneralAccounts(new JSONObject().put("suspenseBalancingUse", true));
+
+    assertEquals(400, response.getHttpStatus());
+    JSONObject error = response.getBody().getJSONObject("error");
+    assertEquals("MISSING_REQUIRED_FIELDS", error.getString("code"));
+    assertEquals("suspenseBalancing", error.getJSONArray("fields").getString(0));
+    assertEquals(1, error.getJSONArray("fields").length());
+    assertEquals("suspenseBalancing is required while suspenseBalancingUse is true", error.getString("message"));
+    verify(generalAccounts).setSuspenseBalancingUse(true);
+    verify(sessionHandler).rollback();
+    verify(obDal, never()).save(any());
+    verify(obDal, never()).flush();
+  }
+
+  @Test
+  @DisplayName("ETP-5724: currency switch on without its account is rejected on currencyBalancingAcct")
+  void currencyOnWithoutAccountRejected() throws Exception {
+    wireOrgWithLedger();
+    wireLoadCriteria(Collections.emptyList());
+    when(generalAccounts.get(AcctSchemaGL.PROPERTY_CURRENCYBALANCINGUSE)).thenReturn(true);
+
+    NeoResponse response = postGeneralAccounts(new JSONObject().put("currencyBalancingAcct", JSONObject.NULL));
+
+    assertEquals(400, response.getHttpStatus());
+    assertEquals("currencyBalancingAcct", response.getBody().getJSONObject("error")
+        .getJSONArray("fields").getString(0));
+    verify(sessionHandler).rollback();
+  }
+
+  @Test
+  @DisplayName("ETP-5724: a broken stored row blocks a save that touches only 'general'")
+  void brokenStoredRowBlocksUnrelatedSave() throws Exception {
+    wireOrgWithLedger();
+    wireLoadCriteria(Collections.emptyList());
+    when(generalAccounts.get(AcctSchemaGL.PROPERTY_SUSPENSEBALANCINGUSE)).thenReturn(true);
+
+    NeoResponse response = handler.handle(postCtx(ORG_ID,
+        new JSONObject().put("general", new JSONObject().put("name", "Renamed"))));
+
+    assertEquals(400, response.getHttpStatus());
+    verify(sessionHandler).rollback();
+    verify(obDal, never()).flush();
+  }
+
+  @Test
+  @DisplayName("ETP-5724: suspenseBalancingUse \"Y\" is stored as off by optBoolean, so it saves")
+  void stringYIsStoredOffAndSaves() throws Exception {
+    wireOrgWithLedger();
+    wireLoadCriteria(Collections.emptyList());
+
+    NeoResponse response = postGeneralAccounts(new JSONObject().put("suspenseBalancingUse", "Y"));
+
+    assertEquals(200, response.getHttpStatus());
+    verify(generalAccounts).setSuspenseBalancingUse(false);
+  }
+
+  @Test
+  @DisplayName("ETP-5724: switch on with its account, or switch off without one, saves")
+  void validPairsSave() throws Exception {
+    wireOrgWithLedger();
+    wireLoadCriteria(Collections.emptyList());
+    when(generalAccounts.get(AcctSchemaGL.PROPERTY_SUSPENSEBALANCINGUSE)).thenReturn(true);
+    when(generalAccounts.get(AcctSchemaGL.PROPERTY_SUSPENSEBALANCING))
+        .thenReturn(mock(AccountingCombination.class));
+    when(generalAccounts.get(AcctSchemaGL.PROPERTY_CURRENCYBALANCINGUSE)).thenReturn(false);
+
+    NeoResponse response = postGeneralAccounts(new JSONObject().put("suspenseBalancingUse", true));
+
+    assertEquals(200, response.getHttpStatus());
+    verify(obDal).flush();
+    verify(sessionHandler, never()).rollback();
   }
 }

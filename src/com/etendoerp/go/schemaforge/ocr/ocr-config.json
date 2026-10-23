@@ -1,0 +1,256 @@
+{
+  "docTypes": [
+    {
+      "id": "purchase-invoice",
+      "toolName": "SimpleOcrTool",
+      "resolver": "purchase-invoice",
+      "question": "Extract all invoice fields: vendor name, vendor tax id, vendor address (street, postal code, city, country), vendor email and phone, document number, invoice date, line items (description, quantity, unit price). Return strict JSON.",
+      "dataKeys": [
+        "vendor_name",
+        "tax_id",
+        "document_no",
+        "invoice_date"
+      ],
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "vendor_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tax_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "document_no": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "invoice_date": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "issuer": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Name of the issuer, as printed. Null if not printed."
+              },
+              "tax_id_raw": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Tax identifier of the ISSUER only, exactly as printed (keep prefix, letters, digits; do not reformat). Null if not printed."
+              },
+              "tax_id_label": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The exact label text printed with the id (e.g. 'NIF', 'CIF', 'VAT ID', 'CUIT'). Null if none."
+              },
+              "tax_id_type": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Kind of the issuer's tax identifier, as best as can be told from its format and label. Informational only. Null if there is no id.",
+                "enum": [
+                  "vat",
+                  "national_tax_id",
+                  "company_registration",
+                  "personal_id",
+                  "unknown",
+                  null
+                ]
+              }
+            },
+            "required": [
+              "name",
+              "tax_id_raw",
+              "tax_id_label",
+              "tax_id_type"
+            ],
+            "description": "The party that issued the invoice (seller/supplier): usually the letterhead, logo or sender block. NOT the customer."
+          },
+          "receiver": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Name of the receiver, as printed. Null if not printed."
+              },
+              "tax_id_raw": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Tax identifier of the RECEIVER only, exactly as printed (keep any country prefix, letters and digits; do not reformat, do not invent). It may appear far from the receiver's name, for example in a table row like 'Cliente | NIF'; use any label or row that is explicitly attached to the customer. NEVER copy the issuer's tax id here. If the only id printed for the receiver is a personal id (DNI, passport, SSN) set tax_id_type='personal_id'. If no receiver tax id is printed, return null; do not guess."
+              },
+              "tax_id_label": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The exact label text printed with the id (e.g. 'NIF', 'CIF', 'VAT ID', 'CUIT'). Null if none."
+              },
+              "tax_id_type": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Kind of the receiver's tax identifier, as best as can be told from its format and label. Informational only. Null if there is no id.",
+                "enum": [
+                  "vat",
+                  "national_tax_id",
+                  "company_registration",
+                  "personal_id",
+                  "unknown",
+                  null
+                ]
+              }
+            },
+            "required": [
+              "name",
+              "tax_id_raw",
+              "tax_id_label",
+              "tax_id_type"
+            ],
+            "description": "The party being invoiced: the buyer/customer who owes payment (labels such as Bill to, Sold to, Customer, Cliente, Client, Destinatario, Kunde, Rechnungsempfänger). It is NOT the issuer/seller (the party that emits the invoice, usually with the logo or letterhead) and NOT the Ship to / delivery address, unless Ship to is the only buyer shown. Labels may be absent: infer roles from document structure (issuer = letterhead / sender block; receiver = the other party block). Return null if the receiver is not identifiable."
+          },
+          "vendor_address": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Street address of the party issuing the invoice (the supplier): street name and number only. Exclude postal code, city and country. Null if not printed."
+          },
+          "vendor_postal_code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Postal code of the issuing party address, exactly as printed. Null if not printed."
+          },
+          "vendor_city": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "City or town of the issuing party address. Null if not printed."
+          },
+          "vendor_country": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Country of the issuing party address, as printed (e.g. 'España'). Null if not printed — do not infer it from the currency or language."
+          },
+          "vendor_email": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Email address of the issuing party. Null if not printed."
+          },
+          "vendor_phone": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Telephone number of the issuing party. Null if not printed."
+          },
+          "line_items": {
+            "type": "array",
+            "description": "Line items, in the order they appear on the document. Empty array if none.",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "description": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "quantity": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "unit_price": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "tax_label": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "tax_rate": {
+                  "type": [
+                    "number",
+                    "null"
+                  ],
+                  "description": "Numeric tax percentage on this line if printed (e.g., 21.0 for '21%' or 'IVA 21%'). Null if only a textual label is shown or no tax info is present."
+                }
+              },
+              "required": [
+                "description",
+                "quantity",
+                "unit_price",
+                "tax_label",
+                "tax_rate"
+              ],
+              "title": "LineItem"
+            }
+          }
+        },
+        "required": [
+          "vendor_name",
+          "tax_id",
+          "document_no",
+          "invoice_date",
+          "issuer",
+          "receiver",
+          "vendor_address",
+          "vendor_postal_code",
+          "vendor_city",
+          "vendor_country",
+          "vendor_email",
+          "vendor_phone",
+          "line_items"
+        ]
+      }
+    }
+  ]
+}

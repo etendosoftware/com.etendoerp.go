@@ -145,6 +145,15 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
     return InvoiceDocumentAvailability.unavailable(subject);
   }
 
+  /**
+   * {@inheritDoc} The invoice windows un-post a posted invoice before reactivating it
+   * ({@code preUnpost: true} in the SPA), so the MCP does too (ETP-5715).
+   */
+  @Override
+  public boolean unpostBeforeReactivate() {
+    return true;
+  }
+
   /** The PIS actions: served to the SPA, never to an agent (ETP-5558). */
   @Override
   public Set<String> agentExcludedActions() {
@@ -262,7 +271,8 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
       JSONObject body = prev.getBody();
       JSONArray dataArr = NeoHandlerUtils.extractGetDataArray(context);
       if (dataArr == null || dataArr.length() == 0) {
-        return null;
+        // ETP-5757: an empty page still carries the (zeroed) whole-set footer totals.
+        return DocumentListTotals.injectInto(context, true) ? NeoResponse.ok(body) : null;
       }
       for (int i = 0; i < dataArr.length(); i++) {
         JSONObject rec = dataArr.getJSONObject(i);
@@ -287,6 +297,7 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
         SifSubRecordAttachments.enrich(rec, context.getRecordId());
         InvoiceReactivationGuard.enrichReactivationBlock(rec, context.getRecordId());
       }
+      DocumentListTotals.injectInto(context, true); // ETP-5757, last: see AbstractInvoiceHeaderHandler
       return NeoResponse.ok(body);
     } catch (Exception e) {
       log.error("Error enriching sales invoice response", e);

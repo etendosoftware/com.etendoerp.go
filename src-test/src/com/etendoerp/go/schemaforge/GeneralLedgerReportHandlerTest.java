@@ -57,6 +57,9 @@ import com.etendoerp.go.schemaforge.util.NeoReportParam;
  * artifacts/report-general-ledger/report-contract.json}'s {@code sql.query}/{@code
  * sql.openingQuery} plus {@link GeneralLedgerGrouping} (whose own nesting/opening/running-balance
  * rules are covered by {@code GeneralLedgerGroupingTest}, not here).
+ *
+ * @covers com.etendoerp.go.schemaforge.GeneralLedgerReportHandler
+ * @covers com.etendoerp.go.schemaforge.AbstractSqlReportHandler
  */
 class GeneralLedgerReportHandlerTest {
 
@@ -331,6 +334,9 @@ class GeneralLedgerReportHandlerTest {
 
     OBContext obContext = mock(OBContext.class);
     when(obContext.getCurrentClient()).thenReturn(client);
+    // ETP-5793: the org is resolved through TenantOwnership, which checks the readable clients.
+    when(org.getClient()).thenReturn(client);
+    when(obContext.getReadableClients()).thenReturn(new String[] { "sessionClientId1" });
     when(obContext.getCurrentOrganization()).thenReturn(org);
 
     Session session = mock(Session.class);
