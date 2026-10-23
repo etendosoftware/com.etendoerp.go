@@ -71,6 +71,7 @@ import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.common.BoundedJsonParserTest;
 import com.etendoerp.go.common.PublicUrlResolver;
+import com.etendoerp.go.hubspot.HubSpotOutbox;
 import com.etendoerp.go.payment.EnvironmentPlanCache;
 import com.etendoerp.go.payment.CheckoutRequestStore;
 import com.etendoerp.go.payment.HostedCheckoutService;
@@ -337,7 +338,8 @@ public class EtendoGoJwtServletTest {
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
          MockedStatic<EtendoGoAuthLinkBuilder> linkMock = mockStatic(EtendoGoAuthLinkBuilder.class);
          MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class);
-         MockedStatic<EmailVerificationDalHelper> verifyMock = mockStatic(EmailVerificationDalHelper.class)) {
+         MockedStatic<EmailVerificationDalHelper> verifyMock = mockStatic(EmailVerificationDalHelper.class);
+         MockedStatic<HubSpotOutbox> hubSpot = mockStatic(HubSpotOutbox.class)) {
       linkMock.when(() -> EtendoGoAuthLinkBuilder.verifyEmailLink(anyString()))
           .thenReturn(VERIFY_LINK);
       dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail("new@test.com"))
@@ -351,6 +353,8 @@ public class EtendoGoJwtServletTest {
       // The token is stored before the mail goes out, so a click can be honoured.
       verifyMock.verify(() -> EmailVerificationDalHelper.storeEmailVerifyToken(
           eq(account), anyString(), any(Date.class)));
+      // ETP-5847: the new account is reported to HubSpot.
+      hubSpot.verify(() -> HubSpotOutbox.accountCreated(account));
     }
 
     assertEquals(201, resp.status);
@@ -648,7 +652,8 @@ public class EtendoGoJwtServletTest {
     when(account.getName()).thenReturn("Google User");
 
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class);
+         MockedStatic<HubSpotOutbox> hubSpot = mockStatic(HubSpotOutbox.class)) {
       dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountBySsoIdentity(
           "google", "google-sub")).thenReturn(null);
       dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail("user@gmail.com"))
@@ -658,6 +663,9 @@ public class EtendoGoJwtServletTest {
           anyString(), any(Date.class))).thenReturn(account);
 
       ssoServlet.doPost(req, resp.response);
+
+      // ETP-5847: an account born from SSO is reported to HubSpot like a registered one.
+      hubSpot.verify(() -> HubSpotOutbox.accountCreated(account));
     }
 
     assertEquals(200, resp.status);

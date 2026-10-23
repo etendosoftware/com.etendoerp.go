@@ -79,6 +79,10 @@ final class McpAuthorizationService {
       case "docs":
       case McpConstants.TOOL_NEO_WIDGET:
       case McpConstants.TOOL_NEO_VECTOR_SEARCH:
+      // ETP-5715: listing a document's attachments is a read, so a read-only session can verify.
+      case McpConstants.TOOL_NEO_LIST_ATTACHMENTS:
+      // ETP-5715: the stored PDF of a document is read-only too.
+      case McpConstants.TOOL_NEO_GET_DOCUMENT_PDF:
       // B3: read-tier on purpose. Reporting friction writes no business data, and gating it behind
       // etendo:write would silence exactly the read-only sessions most likely to get lost.
       case McpConstants.TOOL_NEO_FEEDBACK:
@@ -89,12 +93,22 @@ final class McpAuthorizationService {
       case "etendo_update":
       case "etendo_delete":
       case "etendo_action":
+      case McpConstants.TOOL_NEO_ACTION_BATCH:
       // ETP-5184: all three image-upload tools are write-tier. The two upload tools create an
       // AD_Image row; the status lookup is bundled with them deliberately — it is a step of the
       // write flow and has nothing to offer a read-only session.
       case McpConstants.TOOL_NEO_REQUEST_IMAGE_UPLOAD:
       case McpConstants.TOOL_NEO_UPLOAD_IMAGE:
       case McpConstants.TOOL_NEO_GET_IMAGE_UPLOAD:
+      // ETP-5715: uploading and deleting a document's attachments change business data.
+      case McpConstants.TOOL_NEO_REQUEST_ATTACHMENT_UPLOAD:
+      case McpConstants.TOOL_NEO_DELETE_ATTACHMENT:
+      // ETP-5715: sending a document by email delivers a real message and is audited as a write.
+      case McpConstants.TOOL_NEO_SEND_DOCUMENT_EMAIL:
+      // ETP-5715: staging a PDF and reading it (a paid external model) are steps of the write flow
+      // that creates a document from it; a read-only session has nothing to do with them.
+      case McpConstants.TOOL_NEO_REQUEST_DOCUMENT_EXTRACTION_UPLOAD:
+      case McpConstants.TOOL_NEO_EXTRACT_INVOICE_DOCUMENT:
       // ETP-5677: cancelling stops further writes of a job the caller started with etendo_batch.
       case McpConstants.TOOL_NEO_JOB_CANCEL:
         return SCOPE_WRITE;

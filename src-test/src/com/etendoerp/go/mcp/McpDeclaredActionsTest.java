@@ -331,6 +331,40 @@ class McpDeclaredActionsTest {
         assertTrue(McpDeclaredActions.unavailableFor(entity, subject).isEmpty());
       }
     }
+
+    @Test
+    @DisplayName("ETP-5715: only a customization that opts in un-posts before a reactivation")
+    void unpostBeforeReactivateIsOptIn() {
+      SFEntity entity = recEntity();
+      try (org.mockito.MockedStatic<com.etendoerp.go.schemaforge.util.NeoHandlerLookup> lookup =
+          Mockito.mockStatic(com.etendoerp.go.schemaforge.util.NeoHandlerLookup.class)) {
+        com.etendoerp.go.schemaforge.NeoHandler plain = context -> null;
+        com.etendoerp.go.schemaforge.NeoHandler optsIn = new com.etendoerp.go.schemaforge.NeoHandler() {
+          @Override
+          public com.etendoerp.go.schemaforge.NeoResponse handle(
+              com.etendoerp.go.schemaforge.NeoContext context) {
+            return null;
+          }
+
+          @Override
+          public boolean unpostBeforeReactivate() {
+            return true;
+          }
+        };
+        lookup.when(() -> com.etendoerp.go.schemaforge.util.NeoHandlerLookup
+            .byQualifierQuietly(QUALIFIER)).thenReturn(plain);
+        assertFalse(McpDeclaredActions.unpostsBeforeReactivation(entity));
+
+        lookup.when(() -> com.etendoerp.go.schemaforge.util.NeoHandlerLookup
+            .byQualifierQuietly(QUALIFIER)).thenReturn(optsIn);
+        assertTrue(McpDeclaredActions.unpostsBeforeReactivation(entity));
+
+        lookup.when(() -> com.etendoerp.go.schemaforge.util.NeoHandlerLookup
+            .byQualifierQuietly(QUALIFIER)).thenReturn(null);
+        assertFalse(McpDeclaredActions.unpostsBeforeReactivation(entity));
+        assertFalse(McpDeclaredActions.unpostsBeforeReactivation(null));
+      }
+    }
   }
 
   // ── etendo_discover ───────────────────────────────────────────────────────

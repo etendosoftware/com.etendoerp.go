@@ -17,12 +17,18 @@
 
 package com.etendoerp.go.schemaforge;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+import java.lang.reflect.Field;
+import java.util.Map;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -30,11 +36,15 @@ import javax.servlet.http.HttpServletResponse;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
+import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 
 /**
  * Unit tests for {@link NeoSubEndpointDispatcher}.
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoSubEndpointDispatcher
  */
 class NeoSubEndpointDispatcherTest {
 
@@ -138,5 +148,32 @@ class NeoSubEndpointDispatcherTest {
     assertTrue(handled);
     verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED),
         contains("Actions support GET (list) and POST (execute)"));
+  }
+
+  @Test
+  @DisplayName("Action hands the request's query string to the hooks (e.g. currencyOptions?date=)")
+  void actionPassesQueryParamsToTheHooks() throws Exception {
+    SFSpec spec = mock(SFSpec.class);
+    when(spec.getId()).thenReturn("spec-id");
+    NeoServlet.NeoPathInfo pathInfo = new NeoServlet.NeoPathInfo(
+        "spec", "entity", "id", false, null, true, "currencyOptions");
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    HttpServletResponse response = mock(HttpServletResponse.class);
+    when(servlet.findEntity("spec-id", "entity")).thenReturn(mock(SFEntity.class));
+    Map<String, String> query = Map.of("date", "2026-03-31");
+    when(servlet.extractQueryParams(request)).thenReturn(query);
+    NeoHookDispatcher hooks = mock(NeoHookDispatcher.class);
+    Field hookField = NeoServlet.class.getDeclaredField("hookDispatcher");
+    hookField.setAccessible(true);
+    hookField.set(servlet, hooks);
+
+    boolean handled = dispatcher.handleWindowSubEndpoint(spec, pathInfo, "GET", request, response);
+
+    assertTrue(handled);
+    ArgumentCaptor<NeoSubEndpointDispatcher.HookedSubEndpointRequest> call =
+        ArgumentCaptor.forClass(NeoSubEndpointDispatcher.HookedSubEndpointRequest.class);
+    verify(hooks).dispatchWithHooks(call.capture());
+    assertEquals(NeoEndpointType.ACTION, call.getValue().endpointType);
+    assertSame(query, call.getValue().queryParams);
   }
 }

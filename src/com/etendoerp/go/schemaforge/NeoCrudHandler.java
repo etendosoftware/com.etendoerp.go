@@ -41,10 +41,8 @@ import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
 import org.openbravo.base.secureApp.VariablesSecureApp;
-import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
-import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
@@ -200,8 +198,9 @@ class NeoCrudHandler {
     // paginated set of distinct values for the given scalar field, so UI
     // filter selectors can show all possible options without loading the
     // entire dataset or inventing them client-side. Runs through the same
-    // tab-where + parent-filter + readable-client/org filtering as the
-    // standard list fetch, just with a different projection — and, since
+    // criteria + tab-where + parent-filter + readable-client/org filtering as
+    // the standard list fetch (so the options follow the filtered view), just
+    // with a different projection — and, since
     // ETP-5009, through the same customization read predicates
     // (NeoHandler#readPredicates), so it never offers a value only rows the
     // list hides carry. The pre/post hooks still do not run for it.
@@ -1193,13 +1192,14 @@ class NeoCrudHandler {
     }
   }
 
+  private static final String DISTINCT_SEARCH_PARAM = NeoDistinctFetchSupport.DISTINCT_SEARCH_PARAM;
   private static final int DISTINCT_DEFAULT_PAGE_SIZE = 50;
   private static final int DISTINCT_MAX_PAGE_SIZE = 200;
 
   /**
    * Handles a {@code ?_distinct=<field>} list GET: returns the paginated set of
    * distinct values of a single scalar property, reusing the same tab where
-   * clause and parent filter as the standard list fetch. {@link OBQuery}
+   * clause and parent filter as the standard list fetch. The query
    * automatically applies readable-client/organization/active filters from the
    * current {@link OBContext}.
    *
@@ -1207,8 +1207,11 @@ class NeoCrudHandler {
    * exactly as the list GET does, so the values offered are the values of the rows the list
    * can actually return — not those of rows a customization excludes from it.
    *
-   * @param context the request context, from which the customization is resolved; may be
-   *                {@code null}, in which case no read predicate is applied
+   * <p>ETP-5561: the grid {@code criteria} (date range, subset tab, advanced and column
+   * filters) now narrows the values too, so a dropdown offers only values present in the current
+   * view. The caller drops the filtered field's own condition to keep its alternatives listed.
+   *
+   * @param context the request context, from which the params and the customization are resolved
    */
   private NeoResponse handleDistinctFetch(Tab adTab, Map<String, String> queryParams,
       NeoContext context) {
@@ -1244,15 +1247,9 @@ class NeoCrudHandler {
     int requestedSize = (endRow >= startRow) ? (endRow - startRow + 1) : DISTINCT_DEFAULT_PAGE_SIZE;
     int pageSize = Math.max(1, Math.min(requestedSize, DISTINCT_MAX_PAGE_SIZE));
 
-    String parentId = queryParams.get(PARAM_PARENT_ID);
-    String search = queryParams.get("_distinctSearch");
-
-    // Build the same where clause used by the list GET (tab HQL where with
-    // @token@ substitution + parent filter for child tabs). Prefixed with
-    // "as e" so OBQuery picks up the alias for its own client/org filters.
-    String searchPredicate = NeoDistinctFetchSupport.buildDistinctSearchPredicate(prop, resolvedProperty, search);
-    List<String> predicates = NeoDistinctFetchSupport.buildDistinctPredicates(adTab,
-        resolvedProperty, parentId, searchPredicate);
+    String search = queryParams.get(DISTINCT_SEARCH_PARAM);
+    String searchPredicate = NeoDistinctFetchSupport.buildDistinctSearchPredicate(prop,
+        resolvedProperty, search);
 
     // For to-one associations (FK properties), project through the identifier
     // column (".id") instead of the bare association path, and reuse the exact
@@ -1266,21 +1263,16 @@ class NeoCrudHandler {
     try {
       // Inside the try: a customization whose predicate throws fails the fetch (500) instead of
       // silently offering the values of the rows it was meant to exclude.
-      NeoReadPredicates.addRestTo(predicates, context);
-      StringBuilder where = new StringBuilder(" as e where ")
-          .append(String.join(HQL_AND_OPERATOR, predicates))
-          .append(" order by ").append(projection).append(" asc");
+      // ETP-5561: the filtered set is the list's own — same params, same where clause — so the
+      // tab, the parent filter, the read predicates AND the grid `criteria` all narrow the values.
+      Map<String, String> params = NeoDistinctFetchSupport.toDistinctFilterParams(
+          buildDalParams(context, adTab, dalEntityName), context, startRow, pageSize);
 
-      OBQuery<BaseOBObject> obQuery = OBDal.getInstance()
-          .createQuery(dalEntityName, where.toString());
-      obQuery.setSelectClause("DISTINCT " + projection);
-      if (searchPredicate != null) {
-        obQuery.setNamedParameter("search", "%" + search.toLowerCase() + "%");
-      }
-      obQuery.setFirstResult(startRow);
-      obQuery.setMaxResult(pageSize + 1); // fetch one extra to detect hasMore
-
-      List<Object> results = obQuery.createQuery(Object.class).list();
+      Map<String, Object> searchParams = searchPredicate == null ? null
+          : Map.of("search", "%" + search.toLowerCase() + "%");
+      // fetch one extra row to detect hasMore
+      List<Object> results = NeoListAggregateQuery.forParams(params)
+          .distinctValues(projection, searchPredicate, searchParams, startRow, pageSize + 1);
       boolean hasMore = results.size() > pageSize;
       List<Object> page = hasMore ? new ArrayList<>(results.subList(0, pageSize)) : results;
 

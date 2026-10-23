@@ -42,9 +42,12 @@ class McpToolTitlesTest {
 
   private static final String[] FIXED_TOOLS = { "etendo_discover", "etendo_list", "etendo_get",
       "etendo_create", "etendo_update", "etendo_delete", "etendo_selectors", "etendo_defaults", "etendo_schema",
-      "etendo_batch", "etendo_action", "etendo_widget", "etendo_vector_search", "etendo_upload_image",
-      "etendo_request_image_upload", "etendo_get_image_upload", "etendo_generate_amortization_plan",
-      "etendo_feedback", "docs", "etendo_job_status", "etendo_job_cancel" };
+      "etendo_batch", "etendo_action", "etendo_action_batch", "etendo_widget", "etendo_vector_search", "etendo_upload_image",
+      "etendo_request_image_upload", "etendo_get_image_upload", "etendo_request_attachment_upload",
+      "etendo_list_attachments", "etendo_delete_attachment", "etendo_get_document_pdf",
+      "etendo_send_document_email", "etendo_request_document_extraction_upload",
+      "etendo_extract_invoice_document", "etendo_generate_amortization_plan", "etendo_feedback", "docs",
+      "etendo_job_status", "etendo_job_cancel" };
 
   @Test
   @DisplayName("Fixed tools resolve from the catalog in the user's language")

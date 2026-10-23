@@ -349,6 +349,26 @@ public class TransactionalEmailServiceTest {
   }
 
   @Test
+  public void duplicateAnswerSaysWhenTheEarlierSendHappened() throws Exception {
+    FakeProviderAdapter adapter = new FakeProviderAdapter(true,
+        new EmailProviderResponse(202, "{\"id\":\"provider-id\"}"));
+    TransactionalEmailService service = service(new FixtureContract(), adapter,
+        new InMemoryEmailSafetyStore());
+    JSONObject command = new JSONObject();
+    command.put(EmailContractCommandSupport.FIELD_RECORD_ID, "ABC123");
+    command.put(EmailContractCommandSupport.FIELD_IDEMPOTENCY_KEY, "fixture:ABC123:v1");
+    long before = System.currentTimeMillis();
+
+    JSONObject first = responseData(service.send("fixture-contract", command));
+    JSONObject duplicate = responseData(service.send("fixture-contract", command));
+
+    assertFalse("a first send has no earlier send to report", first.has("previousSentAt"));
+    long previous = java.time.Instant.parse(duplicate.getString("previousSentAt")).toEpochMilli();
+    assertTrue("the earlier send happened during this test", previous >= before - 1000
+        && previous <= System.currentTimeMillis() + 1000);
+  }
+
+  @Test
   public void suppressesConcurrentDuplicateBeforeSecondProviderSend() throws Exception {
     FakeProviderAdapter adapter = new FakeProviderAdapter(true,
         new EmailProviderResponse(202, "{\"id\":\"provider-id\"}")).withDelayMillis(150);

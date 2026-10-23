@@ -73,6 +73,7 @@ import com.etendoerp.go.common.EtendoGoCorsServlet;
 import com.etendoerp.go.common.JwtAuthUtils;
 import com.etendoerp.go.common.ProtocolErrorAdapters;
 import com.etendoerp.go.common.PublicUrlResolver;
+import com.etendoerp.go.hubspot.HubSpotOutbox;
 import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.payment.TenantPaywallService;
 import com.etendoerp.go.payment.TenantPlanService;
@@ -2274,6 +2275,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       String legacySessionToken = generateToken();
       Account account = EtendoGoJwtDalHelper.createAccount(email, passwordHash, name,
           legacySessionToken);
+      // createAccount committed the account; this commit carries only its HubSpot event.
+      HubSpotOutbox.accountCreated(account);
+      EtendoGoDalHelper.commitDalChanges("HubSpot account event", log);
       String normalizedLanguage = StringUtils.trimToNull(language);
       // ETP-4798: the session token below still comes back, so the user keeps filling in the
       // onboarding form and their draft keeps saving. What the unconfirmed address blocks is the
@@ -2445,9 +2449,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
     Date loginAt = new Date();
     if (account == null) {
-      return EtendoGoJwtDalHelper.createSsoAccount(assertion.getEmail(), assertion.getName(),
-          assertion.getProvider(), assertion.getSubject(), assertion.getEmail(), sessionToken,
-          loginAt);
+      Account created = EtendoGoJwtDalHelper.createSsoAccount(assertion.getEmail(),
+          assertion.getName(), assertion.getProvider(), assertion.getSubject(),
+          assertion.getEmail(), sessionToken, loginAt);
+      HubSpotOutbox.accountCreated(created);
+      EtendoGoDalHelper.commitDalChanges("HubSpot account event", log);
+      return created;
     }
     EtendoGoJwtDalHelper.updateSsoSession(account, assertion.getEmail(), sessionToken, loginAt);
     return account;
@@ -5011,6 +5018,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
           preparation.accountEmail, request.paymentToken);
     } else if (!tenantEnvironmentLifecycleService.markDemoReady(clientId, Instant.now())) {
       throw new IllegalStateException("Could not initialize demo trial lifecycle");
+    } else {
+      // In the onboarding transaction, so the deal exists in HubSpot exactly when the demo does.
+      HubSpotOutbox.demoReady(preparation.accountEmail, clientId, request.clientName,
+          request.countryCode);
     }
     // ETP-5577: in the onboarding transaction, so the markers exist exactly when the tenant does.
     onboardingInitialPeriodStateService.markPending(clientId, orgId, adminContext.adminUserId,
