@@ -57,7 +57,7 @@ class TemplateRoleWindowAccessTest {
   private static final String WINDOW_SALES_ORDER = "143";
   private static final String WINDOW_PAYMENT_OUT = "6F8F913FA60F4CBD93DC1D3AA696E76E";
   private static final String WINDOW_PRODUCT_CATEGORY = "144";
-  private static final String WINDOW_SIMPLE_GL_JOURNAL = "B917E8A7B0864ACEA9D941E3B7494E53";
+  private static final String WINDOW_MANUAL_JOURNALS = "B917E8A7B0864ACEA9D941E3B7494E53";
   private static final String WINDOW_CLASSIC_GL_JOURNAL = "132";
   private static final String WINDOW_WAREHOUSE = "139";
   private static final String WINDOW_MATCHED_PURCHASE_INVOICES = "107";
@@ -95,7 +95,7 @@ class TemplateRoleWindowAccessTest {
   }
 
   @Test
-  void financeHasThirtyThreeGrantsIncludingTheResolvedSimpleGlJournal() {
+  void financeHasThirtyThreeGrantsIncludingTheResolvedManualJournals() {
     List<WindowGrant> finance = TemplateRoleWindowAccess.byRoleId()
         .get(SystemRoleTemplates.FINANCE_ROLE_ID);
     assertEquals(33, finance.size(),
@@ -107,7 +107,7 @@ class TemplateRoleWindowAccessTest {
             + "pass (Informes financieros, Escaneo inteligente), and 1 more from a still-later "
             + "pass (Informes de inventario), minus Escaneo inteligente again (ETP-5830)");
 
-    WindowGrant glJournalGrant = grantFor(finance, WINDOW_SIMPLE_GL_JOURNAL);
+    WindowGrant glJournalGrant = grantFor(finance, WINDOW_MANUAL_JOURNALS);
     assertNotNull(glJournalGrant,
         "Asientos manuales must resolve to Simple G/L Journal (ETP-4878 decision 2)");
     assertFalse(glJournalGrant.isReadOnly(), "Financiero has full (✓) access to Asientos manuales");

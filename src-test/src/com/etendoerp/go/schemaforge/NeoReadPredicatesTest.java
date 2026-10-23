@@ -27,7 +27,6 @@ import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.when;
 
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
@@ -456,40 +455,6 @@ class NeoReadPredicatesTest {
       dispatcher.when(() -> NeoExtensionDispatcher.resolveOnly(any())).thenReturn(null);
 
       assertNull(NeoReadPredicates.forRestListGet(context(QUALIFIER)));
-    }
-  }
-
-  // ---- addRestTo ----
-
-  @Test
-  @DisplayName("addRestTo — The resolved predicate is added parenthesised")
-  void addRestToAddsWrappedPredicate() {
-    NeoHandler customization = declaring(List.of("e.a = 1", "e.b = 2"));
-    try (MockedStatic<NeoExtensionDispatcher> dispatcher =
-             mockStatic(NeoExtensionDispatcher.class)) {
-      dispatcher.when(() -> NeoExtensionDispatcher.resolveOnly(any()))
-          .thenReturn(customization);
-      List<String> predicates = new ArrayList<>(List.of("e.existing = true"));
-
-      NeoReadPredicates.addRestTo(predicates, context(QUALIFIER));
-
-      assertEquals(List.of("e.existing = true", "((e.a = 1) and (e.b = 2))"), predicates);
-    }
-  }
-
-  @Test
-  @DisplayName("addRestTo — Nothing is added when no predicate is declared")
-  void addRestToAddsNothingWhenNone() {
-    NeoHandler customization = declaring(Collections.emptyList());
-    try (MockedStatic<NeoExtensionDispatcher> dispatcher =
-             mockStatic(NeoExtensionDispatcher.class)) {
-      dispatcher.when(() -> NeoExtensionDispatcher.resolveOnly(any()))
-          .thenReturn(customization);
-      List<String> predicates = new ArrayList<>(List.of("e.existing = true"));
-
-      NeoReadPredicates.addRestTo(predicates, context(QUALIFIER));
-
-      assertEquals(List.of("e.existing = true"), predicates);
     }
   }
 

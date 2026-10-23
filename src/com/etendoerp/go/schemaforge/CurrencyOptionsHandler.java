@@ -27,45 +27,52 @@ import java.util.Map;
 import javax.inject.Named;
 import javax.servlet.http.HttpServletResponse;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBCurrencyUtils;
-import org.openbravo.model.common.invoice.Invoice;
-import org.openbravo.model.common.order.Order;
 
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 
 /**
- * Returns the set of currencies that have a defined conversion to/from the order's org currency,
- * scoped to the order's own client and org, for the order's date period.
+ * Lists the currencies a document header can be switched to, each with its org→document rate for
+ * the document's reference date (ETP-4027; reshaped by ETP-5840).
  *
- * <p>Exposed as an ACTION on sales-order, purchase-order, sales-invoice and purchase-invoice
- * header entities:
- * <pre>GET /sws/neo/sales-order/header/{orderId}/action/currencyOptions</pre>
- * <pre>GET /sws/neo/purchase-order/header/{orderId}/action/currencyOptions</pre>
- * <pre>GET /sws/neo/sales-invoice/header/{invoiceId}/action/currencyOptions</pre>
- * <pre>GET /sws/neo/purchase-invoice/header/{invoiceId}/action/currencyOptions</pre>
+ * <p>Exposed as an ACTION on the sales-quotation, sales-order, purchase-order, sales-invoice and
+ * purchase-invoice header entities:
+ * <pre>GET /sws/neo/{spec}/{entity}/{id|new}/action/currencyOptions[?date=yyyy-MM-dd]</pre>
  *
- * <p>Response:
+ * <p>Response ({@code response.data}):
  * <pre>[
- *   { "id": "&lt;C_Currency_ID&gt;", "isoCode": "USD", "rate": 1.1523 },
- *   { "id": "&lt;C_Currency_ID&gt;", "isoCode": "EUR", "rate": 0.9200 }
+ *   { "id": "&lt;C_Currency_ID&gt;", "isoCode": "EUR", "rate": 1.0,    "isOrgCurrency": true },
+ *   { "id": "&lt;C_Currency_ID&gt;", "isoCode": "USD", "rate": 1.1523, "isOrgCurrency": false },
+ *   { "id": "&lt;C_Currency_ID&gt;", "isoCode": "GBP", "rate": null,   "isOrgCurrency": false }
  * ]</pre>
+ * The organization currency comes first with {@code rate = 1}; then EVERY active currency of the
+ * client (or system), by ISO code — a currency without a rate for the date is listed with
+ * {@code rate: null} (ETP-5840; before, it was left out and could not be picked at all).
  *
- * <p>The org currency itself is always included with {@code rate = 1.0}.
- * Currencies without a rate for the order's date period are excluded.
+ * <p><b>Reference date.</b> The {@code date} parameter when present (query string; an MCP call may
+ * pass it in the action body) — for a new record and for a saved one alike, so the form can ask for
+ * the date it is editing before saving. Without it: the saved document's reference date (the one its
+ * customization declares — {@code DateOrdered} for orders and quotations, {@code DateAcct} for
+ * invoices), or today for a new record.
+ *
+ * <p><b>Which document.</b> The header customization that routes the action here publishes its
+ * {@link DocumentCurrencyRate.RateType} on the context ({@link DocumentCurrencyRate#ATTR_RATE_TYPE});
+ * this handler never decides it from the spec or entity name.
  *
  * <p>Filtering policy:
  * <ul>
- *   <li><b>Client</b>: {@code order.getClient().getId()} — never the session client.
- *       Prevents cross-client rate leakage (e.g. rates created by the admin user
- *       under a different client context).</li>
- *   <li><b>Org</b>: {@code IN (order.getOrganization().getId(), '0')} — includes
- *       shared/global rates (org '*') as standard Etendo pattern.</li>
+ *   <li><b>Client</b>: the document's own client — never the session client — plus the system
+ *       client. Prevents cross-client rate leakage.</li>
+ *   <li><b>Org</b>: {@code IN (document org, '0')}; a new record uses the {@code organization}
+ *       parameter when the role can read it, else the session organization.</li>
  * </ul>
  */
 @Named("currencyOptionsHandler")
@@ -73,6 +80,9 @@ public class CurrencyOptionsHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(CurrencyOptionsHandler.class);
   private static final String ACTION_NAME = "currencyOptions";
+  private static final String PARAM_DATE = "date";
+  private static final String PARAM_ORGANIZATION = "organization";
+  private static final String KEY_RATE = "rate";
 
   /**
    * The contract a document header that routes {@code currencyOptions} here publishes for agents
@@ -80,10 +90,12 @@ public class CurrencyOptionsHandler implements NeoHandler {
    * contract says so, and the MCP calls it that way.
    */
   static final NeoActionContract CONTRACT = NeoActionContract.read(ACTION_NAME,
-      "Lists the currencies that have a conversion rate to or from the organization currency for "
-          + "this document's date: [{id, isoCode, rate}]. The organization currency is always "
-          + "included with rate 1. Use it to find registerPayment's conversionRate when the "
-          + "account currency differs from the invoice currency.")
+      "Lists every currency this document can use with its conversion rate from the organization "
+          + "currency on the document's reference date: [{id, isoCode, rate, isOrgCurrency}]. "
+          + "rate is null when no rate is configured for that date; the organization currency has "
+          + "rate 1. Optional 'date' (yyyy-MM-dd) asks for another date. Use it to find "
+          + "registerPayment's conversionRate when the account currency differs from the invoice "
+          + "currency.")
       .withIdDescription("the id of the document whose date and organization scope the rates")
       .withHttpMethod("GET");
 
@@ -119,6 +131,8 @@ public class CurrencyOptionsHandler implements NeoHandler {
 
     } catch (RecordNotFoundException e) {
       return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, e.getMessage());
+    } catch (InvalidDateParameterException e) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
     } catch (Exception e) {
       log.error("[ETP-4027] currencyOptions failed for record {}: {}", recordId, e.getMessage(), e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
@@ -135,55 +149,100 @@ public class CurrencyOptionsHandler implements NeoHandler {
     }
   }
 
-  private RequestContext resolveRequestContext(NeoContext context, String recordId, boolean isNew) {
-    if (isNew) {
-      // New record: fall back to session context (org/client not yet bound to a document)
-      OBContext obCtx = OBContext.getOBContext();
-      return new RequestContext(
-          obCtx.getCurrentOrganization().getId(),
-          obCtx.getCurrentClient().getId(),
-          LocalDate.now());
+  /** The caller's {@code date} parameter is not a {@code yyyy-MM-dd} date: answered as 400. */
+  static final class InvalidDateParameterException extends RuntimeException {
+    InvalidDateParameterException(String raw) {
+      super("Invalid 'date' parameter, expected yyyy-MM-dd: " + raw);
     }
-    return isInvoiceTab(context)
-        ? resolveInvoiceContext(recordId)
-        : resolveOrderContext(recordId);
+  }
+
+  private RequestContext resolveRequestContext(NeoContext context, String recordId, boolean isNew) {
+    LocalDate requested = requestedDate(context);
+    if (!isNew) {
+      return savedDocumentContext(context, recordId, requested);
+    }
+    OBContext obCtx = OBContext.getOBContext();
+    String orgId = readableOrganization(param(context, PARAM_ORGANIZATION), obCtx);
+    String clientId = obCtx != null && obCtx.getCurrentClient() != null
+        ? obCtx.getCurrentClient().getId() : null;
+    return new RequestContext(orgId, clientId, requested != null ? requested : LocalDate.now());
   }
 
   /**
-   * Whether the request is about an invoice, read from the record's table rather than from the
-   * spec name: this delegate is shared by the invoice and order header customizations, and must
-   * not know which windows exist.
+   * The context of a saved document: looked up first — a missing one is a 404 — through the rate
+   * type its header customization published; without one (a caller that reaches this handler
+   * directly), through the entity of the context's tab, dated by the {@code date} parameter or
+   * today. With neither, the document cannot be resolved: 404.
    */
-  private static boolean isInvoiceTab(NeoContext context) {
-    return context.getAdTab() != null && context.getAdTab().getTable() != null
-        && Invoice.TABLE_NAME.equalsIgnoreCase(context.getAdTab().getTable().getDBTableName());
-  }
-
-  private RequestContext resolveInvoiceContext(String recordId) {
-    Invoice invoice = OBDal.getInstance().get(Invoice.class, recordId);
-    if (invoice == null) {
-      throw new RecordNotFoundException("Invoice not found: " + recordId);
+  private RequestContext savedDocumentContext(NeoContext context, String recordId,
+      LocalDate requested) {
+    DocumentCurrencyRate.RateType type =
+        (DocumentCurrencyRate.RateType) context.getAttribute(DocumentCurrencyRate.ATTR_RATE_TYPE);
+    String entityName = type != null ? type.entityName() : tabEntityName(context);
+    BaseOBObject doc = entityName != null
+        ? (BaseOBObject) OBDal.getInstance().get(entityName, recordId) : null;
+    if (doc == null) {
+      throw new RecordNotFoundException("Document not found: " + recordId);
     }
-    LocalDate orderDate = invoice.getInvoiceDate() != null
-        ? toLocalDate(invoice.getInvoiceDate())
-        : LocalDate.now();
-    return new RequestContext(invoice.getOrganization().getId(), invoice.getClient().getId(), orderDate);
-  }
-
-  private RequestContext resolveOrderContext(String recordId) {
-    Order order = OBDal.getInstance().get(Order.class, recordId);
-    if (order == null) {
-      throw new RecordNotFoundException("Order not found: " + recordId);
+    LocalDate date = requested;
+    if (date == null && type != null) {
+      date = new DocumentCurrencyRate(type).dateOf(doc);
     }
-    LocalDate orderDate = order.getOrderDate() != null
-        ? toLocalDate(order.getOrderDate())
-        : LocalDate.now();
-    return new RequestContext(order.getOrganization().getId(), order.getClient().getId(), orderDate);
+    String orgId = ((BaseOBObject) doc.get(PARAM_ORGANIZATION)).getId().toString();
+    String clientId = ((BaseOBObject) doc.get("client")).getId().toString();
+    return new RequestContext(orgId, clientId, date != null ? date : LocalDate.now());
   }
 
-  private static LocalDate toLocalDate(java.util.Date date) {
-    return java.time.Instant.ofEpochMilli(date.getTime())
-        .atZone(java.time.ZoneId.systemDefault()).toLocalDate();
+  /** The DAL entity of the context's tab, or {@code null} when the context carries none. */
+  private static String tabEntityName(NeoContext context) {
+    org.openbravo.model.ad.ui.Tab tab = context.getAdTab();
+    if (tab == null && context.getSfEntity() != null) {
+      tab = context.getSfEntity().getADTab();
+    }
+    return tab != null && tab.getTable() != null ? tab.getTable().getName() : null;
+  }
+
+  /** The {@code date} parameter, or {@code null}; an unparseable one is the caller's error. */
+  private static LocalDate requestedDate(NeoContext context) {
+    String raw = param(context, PARAM_DATE);
+    if (StringUtils.isBlank(raw)) {
+      return null;
+    }
+    LocalDate date = DocumentCurrencyRate.parseDate(raw);
+    if (date == null) {
+      throw new InvalidDateParameterException(raw);
+    }
+    return date;
+  }
+
+  /**
+   * The {@code organization} parameter when the role can read that organization, otherwise the
+   * session organization — a caller must not scope the rates by an organization it cannot see.
+   * Total: without a session, or without a readable list, it never throws and never honours the
+   * parameter.
+   */
+  private static String readableOrganization(String requested, OBContext obCtx) {
+    if (obCtx == null) {
+      return null; // no session: no organization to fall back to, and none to trust
+    }
+    String sessionOrg = obCtx.getCurrentOrganization() != null
+        ? obCtx.getCurrentOrganization().getId() : null;
+    if (StringUtils.isBlank(requested)) {
+      return sessionOrg;
+    }
+    String[] readable = obCtx.getReadableOrganizations();
+    return readable != null && java.util.Arrays.asList(readable).contains(requested) ? requested
+        : sessionOrg;
+  }
+
+  /** A parameter from the query string (REST) or the action body (MCP). */
+  private static String param(NeoContext context, String name) {
+    Map<String, String> query = context.getQueryParams();
+    String value = query != null ? query.get(name) : null;
+    if (StringUtils.isBlank(value) && context.getRequestBody() != null) {
+      value = context.getRequestBody().optString(name, null);
+    }
+    return StringUtils.trimToNull(value);
   }
 
   @Override
@@ -192,11 +251,11 @@ public class CurrencyOptionsHandler implements NeoHandler {
   }
 
   /**
-   * Queries {@code C_Conversion_Rate} for all currencies reachable from {@code orgCurrencyId}
-   * (direct and inverse directions), filtered by client and org, valid on {@code orderDate}.
-   * The org currency itself is prepended with rate 1.0.
+   * Builds the option list: the org currency first ({@code rate = 1}, {@code isOrgCurrency: true}),
+   * then every active currency of the client or the system by ISO code, with the rate
+   * {@code C_Conversion_Rate} gives for {@code orderDate} (direct, else the inverse of the reverse
+   * rate), or {@code rate: null} when there is none.
    */
-  // placeholders are bound via PreparedStatement — no injection risk
   @SuppressWarnings("java:S2077")
   private JSONArray buildCurrencyOptions(
       String orgCurrencyId, String orgId, String clientId, LocalDate orderDate) throws Exception {
@@ -212,22 +271,42 @@ public class CurrencyOptionsHandler implements NeoHandler {
     JSONObject orgEntry = new JSONObject();
     orgEntry.put("id", orgCurrencyId);
     orgEntry.put("isoCode", orgIsoCode != null ? orgIsoCode : orgCurrencyId);
-    orgEntry.put("rate", 1.0);
+    orgEntry.put(KEY_RATE, 1.0);
+    orgEntry.put("isOrgCurrency", true);
     arr.put(orgEntry);
 
-    for (Map.Entry<String, double[]> e : rateMap.entrySet()) {
-      String cid = e.getKey();
-      if (cid.equals(orgCurrencyId)) continue; // already added above
-      double[] data = e.getValue();
-      String isoCode = resolveIsoCode(conn, cid);
+    for (Map.Entry<String, String> currency : selectableCurrencies(conn, clientId).entrySet()) {
+      String cid = currency.getKey();
+      if (cid.equals(orgCurrencyId)) {
+        continue; // already added above
+      }
+      double[] data = rateMap.get(cid);
       JSONObject item = new JSONObject();
       item.put("id", cid);
-      item.put("isoCode", isoCode != null ? isoCode : cid);
-      item.put("rate", data[0]);
+      item.put("isoCode", currency.getValue() != null ? currency.getValue() : cid);
+      item.put(KEY_RATE, data != null ? data[0] : JSONObject.NULL);
+      item.put("isOrgCurrency", false);
       arr.put(item);
     }
 
     return arr;
+  }
+
+  /** Every active currency of the system or of {@code clientId}: id → ISO code, by ISO code. */
+  private Map<String, String> selectableCurrencies(Connection conn, String clientId)
+      throws java.sql.SQLException {
+    Map<String, String> currencies = new LinkedHashMap<>();
+    try (PreparedStatement ps = conn.prepareStatement(
+        "SELECT c_currency_id, iso_code FROM c_currency"
+      + " WHERE isactive = 'Y' AND ad_client_id IN ('0', ?) ORDER BY iso_code")) {
+      ps.setString(1, clientId);
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          currencies.put(rs.getString(1), rs.getString(2));
+        }
+      }
+    }
+    return currencies;
   }
 
   private Map<String, double[]> queryDirectRates(Connection conn, String orgCurrencyId,
@@ -247,7 +326,10 @@ public class CurrencyOptionsHandler implements NeoHandler {
       + " AND c.isactive = 'Y'"
       + " AND cr.validfrom <= ?"
       + " AND (cr.validto IS NULL OR cr.validto >= ?)"
-      + " ORDER BY c.iso_code, cr.ad_client_id ASC";
+      // Last row per currency wins: the client's own over the system's, then the latest validfrom —
+      // the precedence NeoExchangeRateService#queryRate applies (ETP-5840: the list and the saved
+      // rate must agree).
+      + " ORDER BY c.iso_code, cr.ad_client_id ASC, cr.validfrom ASC";
     try (PreparedStatement ps = conn.prepareStatement(sql)) {
       ps.setString(1, orgCurrencyId);
       ps.setString(2, clientId);
@@ -280,7 +362,7 @@ public class CurrencyOptionsHandler implements NeoHandler {
       + " AND c.isactive = 'Y'"
       + " AND cr.validfrom <= ?"
       + " AND (cr.validto IS NULL OR cr.validto >= ?)"
-      + " ORDER BY c.iso_code, cr.ad_client_id ASC";
+      + " ORDER BY c.iso_code, cr.ad_client_id ASC, cr.validfrom ASC";
     try (PreparedStatement ps = conn.prepareStatement(sql)) {
       ps.setString(1, orgCurrencyId);
       ps.setString(2, clientId);

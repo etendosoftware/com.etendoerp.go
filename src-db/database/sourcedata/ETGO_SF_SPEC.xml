@@ -623,11 +623,12 @@
 <!--A663F1D570E54E918F1B25C1F22C047E-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
 <!--A663F1D570E54E918F1B25C1F22C047E-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
 <!--A663F1D570E54E918F1B25C1F22C047E-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
-<!--A663F1D570E54E918F1B25C1F22C047E-->  <NAME><![CDATA[simple-g-l-journal]]></NAME>
+<!--A663F1D570E54E918F1B25C1F22C047E-->  <NAME><![CDATA[manual-journals]]></NAME>
 <!--A663F1D570E54E918F1B25C1F22C047E-->  <AD_WINDOW_ID><![CDATA[B917E8A7B0864ACEA9D941E3B7494E53]]></AD_WINDOW_ID>
 <!--A663F1D570E54E918F1B25C1F22C047E-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
 <!--A663F1D570E54E918F1B25C1F22C047E-->  <POPULATE><![CDATA[N]]></POPULATE>
 <!--A663F1D570E54E918F1B25C1F22C047E-->  <SPEC_TYPE><![CDATA[W]]></SPEC_TYPE>
+<!--A663F1D570E54E918F1B25C1F22C047E-->  <AGENT_PROMPT><![CDATA[Manual journals (G/L journal entries, "Asientos Manuales"): double-entry journals posted to the ledger. This spec was named `simple-g-l-journal` until ETP-5720; that name no longer exists. Entity `gLJournal` is the journal header, `gLJournalLine` its lines. To record a journal: (1) etendo_create on `gLJournal` (ledger, currency, document type and date are defaulted; etendo_schema with view:"create" is the authority on what a create needs); (2) etendo_create on `gLJournalLine` once per line, with parentId = the journal id, an `accountingCombination` that is a posting account of the journal's ledger (summary accounts are rejected) and either `foreignCurrencyDebit` or `foreignCurrencyCredit`; (3) etendo_action `documentAction` with parameters {docAction:"CO"} completes it, which requires total debit = total credit > 0; (4) etendo_action `post` posts it to the ledger. A completed journal that is not posted can be reactivated with docAction "RE"; a posted one must be unposted first (etendo_action `unpost`).]]></AGENT_PROMPT>
 <!--A663F1D570E54E918F1B25C1F22C047E-->  <SHOWINMCP><![CDATA[Y]]></SHOWINMCP>
 <!--A663F1D570E54E918F1B25C1F22C047E--></ETGO_SF_SPEC>
 
