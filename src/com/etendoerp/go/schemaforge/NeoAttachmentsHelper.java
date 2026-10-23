@@ -26,7 +26,6 @@ import java.nio.file.Files;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.Date;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
@@ -270,7 +269,7 @@ public final class NeoAttachmentsHelper {
    * previously-marked attachment for that same (table, record) first — always
    * exactly one "main" attachment per record, sidebar and preview never diverge.
    */
-  private static void markAsMain(Attachment attachment) {
+  static void markAsMain(Attachment attachment) {
     String tableId = attachment.getTable().getId();
     String recordId = attachment.getRecord();
     Attachment previous = findMainAttachment(tableId, recordId);
@@ -345,72 +344,20 @@ public final class NeoAttachmentsHelper {
       return NeoResponse.error(400, "Expected multipart/form-data");
     }
 
-    File tempFile = null;
     try {
       Part filePart = request.getPart(MULTIPART_FILE_PART);
       if (filePart == null) {
         return NeoResponse.error(400, "Missing 'file' part");
       }
-
-      // ETP-5038: the size/type policy is enforced HERE, not only in the dropzone — the
-      // browser is not the only caller and the part's Content-Type is chosen by whoever
-      // is calling. Cheap checks (declared size, extension) run before a single byte is
-      // written to disk; the magic-byte check needs the materialized file and runs below.
-      String submittedName = resolveFileName(filePart);
-      String rejection = NeoAttachmentPolicy.validateMetadata(submittedName, filePart.getSize());
-      if (rejection != null) {
-        return NeoResponse.error(400, rejection);
-      }
-
-      String tableId = resolveTableId(tableName);
-      String tabId = resolveTabId(tableId, request.getParameter("tabId"));
-      if (tabId == null) {
-        return NeoResponse.error(400,
-            "Could not resolve a standard tab for table '" + tableName + "'");
-      }
-
-      // ETP-5309: an unsaved record (the SPA's literal id "new") used to reach the core,
-      // whose OBSecurityException came back as a raw 500. Answer a clean 404 instead.
-      if (!recordExists(tableId, recordId)) {
-        return NeoResponse.error(404, "Record '" + recordId + "' does not exist in table '"
-            + tableName + "'. Save it before attaching files.");
-      }
-
-      String orgId = OBContext.getOBContext().getCurrentOrganization().getId();
-
-      tempFile = materializeTempFile(filePart);
-
-      rejection = NeoAttachmentPolicy.validateContent(submittedName, tempFile);
-      if (rejection != null) {
-        return NeoResponse.error(400, rejection);
-      }
-
-      AttachImplementationManager aim = getAttachManager();
-      aim.upload(new HashMap<>(), tabId, recordId, orgId, tempFile);
-
-      JSONObject body = new JSONObject();
-      body.put("name", tempFile.getName());
-      body.put("message", "uploaded");
-
-      if (markAsMain) {
-        Attachment uploaded = findLatestUploadedAttachment(tableId, recordId, tempFile.getName());
-        if (uploaded != null) {
-          markAsMain(uploaded);
-          body.put("id", uploaded.getId());
-          body.put("isMain", true);
-        }
-      }
-      return NeoResponse.created(body);
-    } catch (OBException e) {
-      OBDal.getInstance().rollbackAndClose();
-      log.warn("Attachment upload failed for {}/{}: {}", tableName, recordId, e.getMessage());
-      return NeoResponse.error(500, e.getMessage());
+      // ETP-5715: everything after the part is in hand lives in NeoAttachmentStore, shared with
+      // the MCP upload link — one policy, one storage path, one main-document replacement.
+      return NeoAttachmentStore.store(new NeoAttachmentUpload(tableName, recordId,
+          request.getParameter("tabId"), resolveFileName(filePart), filePart.getSize(),
+          fileName -> materializeTempFile(filePart), markAsMain));
     } catch (Exception e) {
       OBDal.getInstance().rollbackAndClose();
       log.error("Attachment upload failed for {}/{}", tableName, recordId, e);
       return NeoResponse.error(500, "Internal error uploading attachment");
-    } finally {
-      cleanupTempFile(tempFile);
     }
   }
 
@@ -672,7 +619,7 @@ public final class NeoAttachmentsHelper {
    * used right after {@link AttachImplementationManager#upload} to identify the
    * row that call just created, since it has no return value of its own.
    */
-  private static Attachment findLatestUploadedAttachment(String tableId, String recordId,
+  static Attachment findLatestUploadedAttachment(String tableId, String recordId,
       String fileName) {
     OBCriteria<Attachment> criteria = OBDal.getInstance().createCriteria(Attachment.class);
     criteria.add(Restrictions.eq(Attachment.PROPERTY_TABLE + ".id", tableId));
@@ -793,12 +740,19 @@ public final class NeoAttachmentsHelper {
     return tempFile;
   }
 
-  private static void cleanupTempFile(File tempFile) {
+  static void cleanupTempFile(File tempFile) {
     if (tempFile == null) {
       return;
     }
     try {
       Files.deleteIfExists(tempFile.toPath());
+      // ETP-5715: the upload link materializes the bytes in a directory of its own so two uploads
+      // of the same file name cannot overwrite each other; that directory goes with the file. The
+      // multipart path writes straight into the system temp dir, which is never removed.
+      File parent = tempFile.getParentFile();
+      if (parent != null && !parent.equals(new File(System.getProperty("java.io.tmpdir")))) {
+        Files.deleteIfExists(parent.toPath());
+      }
     } catch (IOException e) {
       log.warn("Could not delete temporary upload file: {}", tempFile.getAbsolutePath(), e);
     }
@@ -833,12 +787,7 @@ public final class NeoAttachmentsHelper {
    * path traversal when materializing the temporary file.
    */
   private static String sanitizeFileName(String name) {
-    String trimmed = name.trim();
-    int sep = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'));
-    if (sep >= 0) {
-      trimmed = trimmed.substring(sep + 1);
-    }
-    return trimmed.isEmpty() ? "attachment" : trimmed;
+    return NeoAttachmentPolicy.sanitizeFileName(name);
   }
 
   /**

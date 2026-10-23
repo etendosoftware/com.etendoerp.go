@@ -233,4 +233,56 @@ public class NeoSimSearchEndpointTest {
           () -> SimSearch.handleSimSearch("Sparta", "Country", 1, "30"), times(1));
     }
   }
+
+  // ── searchTerm: ONE term, shared with the OCR review (ETP-5715) ─────────────────────────────
+
+  @Test
+  public void searchTermRemovesQuotesAndAsksSimSearchForThatTerm() throws Exception {
+    JSONObject answer = mock(JSONObject.class);
+    WSResult result = mock(WSResult.class);
+    when(result.getJSONResponse()).thenReturn(answer);
+
+    try (MockedStatic<SimSearch> simSearchMock = mockStatic(SimSearch.class)) {
+      simSearchMock
+          .when(() -> SimSearch.handleSimSearch(anyString(), anyString(), anyInt(), anyString()))
+          .thenReturn(result);
+
+      JSONObject found = NeoSimSearchEndpoint.searchTerm("Product", "Tornillo 'M8'", 3, "50");
+
+      assertEquals(answer, found);
+      simSearchMock.verify(() -> SimSearch.handleSimSearch("Tornillo M8", "Product", 3, "50"),
+          times(1));
+    }
+  }
+
+  @Test
+  public void searchTermOfABlankTermIsNullAndSearchesNothing() throws Exception {
+    try (MockedStatic<SimSearch> simSearchMock = mockStatic(SimSearch.class)) {
+      assertEquals(null, NeoSimSearchEndpoint.searchTerm("Product", "  ", 3, "50"));
+      assertEquals(null, NeoSimSearchEndpoint.searchTerm("Product", "''", 3, "50"));
+
+      simSearchMock.verifyNoInteractions();
+    }
+  }
+
+  @Test
+  public void searchTermRewritesATranslatedTermToTheBaseNameLikeTheEndpointDoes() throws Exception {
+    WSResult result = mock(WSResult.class);
+    when(result.getJSONResponse()).thenReturn(mock(JSONObject.class));
+
+    try (MockedStatic<SimSearch> simSearchMock = mockStatic(SimSearch.class);
+        MockedStatic<NeoLanguage> language = mockStatic(NeoLanguage.class);
+        MockedStatic<NeoTrl> trl = mockStatic(NeoTrl.class)) {
+      language.when(NeoLanguage::currentCode).thenReturn("es_ES");
+      trl.when(() -> NeoTrl.baseNameForTranslation("Product", "Tornillo", "es_ES"))
+          .thenReturn("Screw");
+      simSearchMock
+          .when(() -> SimSearch.handleSimSearch(anyString(), anyString(), anyInt(), anyString()))
+          .thenReturn(result);
+
+      NeoSimSearchEndpoint.searchTerm("Product", "Tornillo", 3, "50");
+
+      simSearchMock.verify(() -> SimSearch.handleSimSearch("Screw", "Product", 3, "50"), times(1));
+    }
+  }
 }

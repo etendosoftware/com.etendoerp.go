@@ -110,7 +110,7 @@ class NeoPseudoSpecDispatcher {
       //   the React UI (composite-document ingest) and external agents (MCP).
       //   Find-or-create logic stays with the caller — no per-window server code.
       case "batch":
-        return dispatchBatch(method, request, response);
+        return dispatchBatch(pathInfo, method, request, response);
 
       // Global similarity-search endpoint: GET /sws/neo/simsearch
       //   Same trigram matching as the "SimSearch" webhook, reached through NEO's own
@@ -121,6 +121,12 @@ class NeoPseudoSpecDispatcher {
 
       case "vectorsearch":
         return dispatchVectorSearch(method, request, response);
+
+      // ETP-5715: the OCR question and answer schema of a document type: GET /sws/neo/ocrconfig
+      //   ?docType=purchase-invoice. The one source the application's upload panel and the MCP
+      //   extraction tools share; see NeoOcrConfigEndpoint.
+      case "ocrconfig":
+        return dispatchOcrConfig(method, request, response);
 
       // ETP-5462: usage events from the UI and the AI BFF: POST /sws/neo/usage
       //   Validates a batch and hands it to UsageEventRecorder, answering 202 without waiting for
@@ -233,8 +239,18 @@ class NeoPseudoSpecDispatcher {
     }
   }
 
-  private boolean dispatchBatch(String method, HttpServletRequest request,
-      HttpServletResponse response) throws IOException {
+  private boolean dispatchBatch(NeoServlet.NeoPathInfo pathInfo, String method,
+      HttpServletRequest request, HttpServletResponse response) throws IOException {
+    // ETP-5677: /sws/neo/batch/jobs/{id} — status (GET) and cancel (DELETE) of an async batch job.
+    if ("jobs".equals(pathInfo.entityName)) {
+      if (pathInfo.recordId == null || !("GET".equals(method) || "DELETE".equals(method))) {
+        servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+            "Batch jobs support GET /batch/jobs/{id} and DELETE /batch/jobs/{id}");
+        return true;
+      }
+      batchService.handleJob(method, pathInfo.recordId, response);
+      return true;
+    }
     if (!"POST".equals(method)) {
       servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
           "Batch endpoint only supports POST");
@@ -263,6 +279,17 @@ class NeoPseudoSpecDispatcher {
       return true;
     }
     servlet.writeResponse(response, vectorSearchEndpoint.handle(request));
+    return true;
+  }
+
+  private boolean dispatchOcrConfig(String method, HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    if (!"GET".equals(method)) {
+      servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+          "Ocrconfig endpoint only supports GET");
+      return true;
+    }
+    servlet.writeResponse(response, new NeoOcrConfigEndpoint().handle(request));
     return true;
   }
 
