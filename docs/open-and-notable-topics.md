@@ -799,7 +799,8 @@ release** — an SPA older than the backend still parses it.
   anything else, unset or unreadable keeps enforcing); when on, the would-be denial is logged at
   INFO and allowed, and the environment list reports `accessState` as `ALLOWED` for that tenant.
   See `feature-flags-and-tenant-upgrade.md` §1 — including "Operating environment-access
-  enforcement": deploy order, switching it off, and what support sees for a blocked tenant.
+  enforcement": deploy order, switching it off, and what support sees for a blocked tenant. The
+  SPA cannot see the switch, so a tenant in grace is still told it will be blocked (§4.17).
 - **A new tenant servlet must authenticate through the shared pipeline under a commercially gated
   policy** (`NEO_API` / `NEO_DATA` — `NeoAuthenticator`, `JwtAuthUtils.authenticateOrFail`,
   `NeoServletSupport.authenticate`) to inherit the check; one that builds its own `OBContext` from a
@@ -1292,6 +1293,36 @@ reports itself incomplete (so its subscription events are never swept). Fine at 
 **Fix when an account nears them:** a paged candidate cursor that rotates across runs, the checkout
 lookup joined into the candidate query, and the list sweep resumed from where the last run stopped.
 
+### 🟡 4.17 The grace banner promises a block the kill switch will not carry out (ETP-5049)
+
+**Ticket:** accepted as a known limitation (Martin Taal, 2026-10-23); no ticket. Related ETP-5049
+(the banner) and ETP-5047 (the kill switch, §3.8).
+
+During a `PAST_DUE` subscription's payment grace the SPA shows the failed-payment banner
+(`BillingStatusBanner`, schema_forge `docs/generated-custom-windows/app-shell-functional-flows.md`
+§3.2a): *"Your last payment failed. This environment will be blocked on {date}"*, the date being
+the per-environment `graceEndsAt` of `GET /sws/go/environments`. With the kill switch
+`environment-access-enforcement-off` on for that tenant (or globally) the environment is **not**
+blocked on that date, yet the banner says it will be:
+
+- **Why the SPA cannot tell.** The banner decides on `subscriptionStatus` and `graceEndsAt`, which
+  report the facts whatever the switch says. `accessState` is the only field that reflects the
+  switch (`EnvironmentAccessGuard.enforcedDecision`), and during grace it reads `ALLOWED` either
+  way: inside the grace window the policy allows, and the switch is consulted **only for a
+  denial**. No field of the environments payload says whether a future refusal would be enforced.
+- **What the customer sees.** Until `graceEndsAt`, the banner with its date. After it, nothing: the
+  banner hides itself once `graceEndsAt` is past (it expects the blocked screen to take over), and
+  the switch keeps `accessState` at `ALLOWED`, so no blocked screen comes either. The tenant keeps
+  working with no in-app sign that the payment is still owed.
+
+**Accepted** because the switch is a rare incident lever (§3.8, `feature-flags-and-tenant-upgrade.md`
+"Operating environment-access enforcement"), not a way to grant access, and the part of the
+warning that matters — the last payment failed — stays true. An operator who switches enforcement
+off for a tenant in grace should expect that tenant to see the date, and tell support. **If it is
+ever fixed:** an additive per-environment field such as `accessEnforced` (the switch evaluated for
+the tenant, independent of today's decision) on `GET /sws/go/environments`, which the banner would
+read to drop the date, or the sentence, when enforcement is off. Not planned.
+
 ## 5. Handed forward to later tickets
 
 *Moved to §6 on 2026-09-28: §5.7, §5.10, §5.12; §5.15 was decided on arrival and sits there too.
@@ -1607,9 +1638,8 @@ these responses — the only matches are tests asserting that `priceId` is *abse
 bodies — and the SPA's one offers consumer (`getBillingOffer` in `lib/upgrade/api.js`) was already
 removed by the ETP-5049 frontend slice (schema_forge `feature/ETP-5049`).
 
-**Follow-up:** no ticket. `schema_forge/docs/stripe-local-testing.md` still shows `"priceId"` in an
-example checkout answer and calls it "a known leftover"; it is updated with the ETP-5049 frontend
-slice.
+**Follow-up:** none. `schema_forge/docs/stripe-local-testing.md` showed `"priceId"` in its example
+checkout answer and called it "a known leftover"; the ETP-5049 frontend slice removed both.
 
 ### ✅ 4.14 A canceled productive tenant passed for a free demo as a purchase source
 

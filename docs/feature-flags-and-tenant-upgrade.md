@@ -306,6 +306,13 @@ point> would have refused tenant <id> (<DECISION>) and allowed it` at INFO, and
 `GET /sws/go/environments` reports that tenant's `accessState` as `ALLOWED`. Undo by removing the
 rule/property (or setting `false`). Anything that is not a clean `true` keeps enforcing.
 
+**The customer is not told.** A tenant in payment grace keeps seeing the in-app failed-payment
+banner (ETP-5049) announcing that the environment *will be blocked on* its `graceEndsAt`, even
+with the switch on for it; once that date passes the banner disappears and the environment keeps
+working with no in-app warning at all. The SPA cannot see the switch: during grace `accessState`
+reads `ALLOWED` either way. Accepted known limitation — tell support when you switch a tenant in
+grace off; details and the possible fix in `open-and-notable-topics.md` §4.17.
+
 **What support sees for a blocked tenant.**
 
 - **The customer**, after entering the environment (entry is never refused), gets the blocked
@@ -623,7 +630,13 @@ of the subscription (ETP-5049, additive):
 - **`graceEndsAt`** is computed by `EnvironmentAccessPolicy.graceEndsAt`: the stored renewal due
   date plus `etendo.go.billing.grace.days`, for a `PAST_DUE` subscription only. The access policy
   and the per-environment `graceEndsAt` of `GET /sws/go/environments` use the same method, so the
-  page, the banner and the lockout cannot drift apart.
+  page, the banner and the lockout cannot drift apart — except that the kill switch can cancel the
+  lockout without the page or the banner knowing (`open-and-notable-topics.md` §4.17).
+
+> **No UI consumer yet for `planKey`, `planName` and `planQuotas`.** ETP-5049 ships them in this
+> response only. The `/account` Subscription section (`SubscriptionSection`, schema_forge) still
+> shows `plan` (the live Stripe product name), the amount, the renewal and the grace state; showing
+> the catalog plan name and the included quotas there was moved to ETP-5051.
 
 `POST /sws/go/billing/purchases` also checks the durable request table for an active purchase with
 the same account and environment name. A duplicate submission returns the existing purchase only
@@ -1352,7 +1365,9 @@ The `GET /sws/go/environments` response gained two additive fields:
   ISO instant a `PAST_DUE` subscription's payment grace ends, JSON null for any other status
   (ETP-5049). It is `EnvironmentAccessPolicy.graceEndsAt`, the rule the access policy locks the
   tenant out on and `GET /sws/go/billing/subscription` reports, so an in-app grace banner needs no
-  copy of `etendo.go.billing.grace.days`.
+  copy of `etendo.go.billing.grace.days`. It is the policy's date, not a promise: with the kill
+  switch on for the tenant nothing is locked at that instant, and no field here says so
+  (`open-and-notable-topics.md` §4.17).
 - **`accessState`** (per environment, when the tenant has lifecycle metadata) is the
   `EnvironmentAccessPolicy.Decision` name. Since ETP-5047 it is the decision **actually enforced**
   (`EnvironmentAccessGuard.enforcedDecision`): with the kill switch on for that tenant a refusal
