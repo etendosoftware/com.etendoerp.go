@@ -150,14 +150,27 @@ public class SiiSendHandler extends AbstractLegacyInvoiceActionHandler {
    * <p><b>Why these are literal strings, not a lookup against the frontend catalog:</b> the GO
    * label only exists in the SPA's bundled locale JSON (a separate repo, a separate deployment
    * unit from this module) — there is no runtime-shared label source between the two. Keep this
-   * map's values byte-for-byte equal to their cited locale key; a tester/reviewer can grep the
-   * locale key on a rename and update both sides together.
+   * map's values byte-for-byte equal to their cited source; a tester/reviewer can grep that
+   * source on a rename and update both sides together.
+   *
+   * <p><b>"Referencia del proveedor" (verified live, ETP-5745 correction):</b> the first version
+   * of this fix pulled {@code genericLabels.receivedDocumentnoOrderReference} ("Nº Documento
+   * Proveedor") — WRONG, that key belongs to the Fiscal Monitor's "received" table column, a
+   * different screen. The purchase-invoice window's own {@code POReference} override is the
+   * actual source of truth for what renders on screen in THIS window
+   * ({@code tools/app-shell/src/windows/custom/purchase-invoice/index.jsx}'s {@code
+   * LABEL_OVERRIDES}, mirroring {@code artifacts/purchase-invoice/decisions.json →
+   * window.labelOverrides}): {@code "Nº documento"} (es_ES) / {@code "Document No."} (en_US).
+   * Confirmed by a live send: filling the field labelled "Nº documento" (not "Nº Documento
+   * Proveedor" — zero accessibility-tree matches for that string anywhere in this window) made
+   * the SII send succeed.
    */
   private static final Map<String, String> DRIFTED_CLASSIC_FIELD_LABELS = Map.of(
-      // tools/app-shell/src/locales/es_ES.json → sifDataTabs.field.invoiceType
+      // tools/app-shell/src/locales/es_ES.json → sifDataTabs.field.invoiceType (shared SifTab.jsx
+      // label, not window-specific — verified it renders this literal text in the SIF tab).
       "Clave tipo factura", "Tipo factura",
-      // tools/app-shell/src/locales/es_ES.json → receivedDocumentnoOrderReference
-      "Referencia del proveedor", "Nº Documento Proveedor"
+      // tools/app-shell/src/windows/custom/purchase-invoice/index.jsx → LABEL_OVERRIDES.es_ES.POReference
+      "Referencia del proveedor", "Nº documento"
   );
 
   /**

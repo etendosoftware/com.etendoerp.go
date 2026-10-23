@@ -146,9 +146,10 @@ public class SiiSendHandlerTest {
   //
   // SIIUtils.invoicePreviousValidations (classic org.openbravo.module.sii) names a field by its
   // CLASSIC label in three of its fixed sentences. Two of those labels have drifted from their
-  // current Etendo GO label ("Referencia del proveedor" → "Nº Documento Proveedor",
-  // "Clave tipo factura" → "Tipo factura"); the third ("Descripción SII") has not. The classic
-  // module itself is never touched — only the message this handler returns to the GO SPA.
+  // current Etendo GO label ("Referencia del proveedor" → "Nº documento" — verified live, see
+  // the field's javadoc for why "Nº Documento Proveedor" was wrong — "Clave tipo factura" →
+  // "Tipo factura"); the third ("Descripción SII") has not. The classic module itself is never
+  // touched — only the message this handler returns to the GO SPA.
 
   @Test
   public void remapsPurchaseVendorReferenceLabelToTheGoFieldName() throws JSONException {
@@ -158,7 +159,7 @@ public class SiiSendHandlerTest {
     NeoResponse result = SiiSendHandler.remapDriftedFieldLabels(SiiSendHandler.normalizeErrorShape(response));
 
     String message = result.getBody().getString("message");
-    assertTrue(message.contains("Nº Documento Proveedor"));
+    assertTrue(message.contains("Nº documento"));
     assertFalse(message.contains("Referencia del proveedor"));
   }
 
