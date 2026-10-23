@@ -1,0 +1,250 @@
+/*
+ * *************************************************************************
+ * The contents of this file are subject to the Etendo License
+ * (the "License"), you may not use this file except in compliance with
+ * the License.
+ * You may obtain a copy of the License at
+ * https://github.com/etendosoftware/etendo_core/blob/main/legal/Etendo_license.txt
+ * Software distributed under the License is distributed on an
+ * "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing rights
+ * and limitations under the License.
+ * All portions are Copyright (C) 2021-2026 FUTIT SERVICES, S.L
+ * All Rights Reserved.
+ * Contributor(s): Futit Services S.L.
+ * *************************************************************************
+ */
+
+package com.etendoerp.go.schemaforge;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+
+import javax.servlet.http.HttpServletResponse;
+
+import org.apache.commons.lang3.StringUtils;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
+import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.service.json.DefaultJsonDataService;
+import org.openbravo.service.json.JsonConstants;
+
+import com.etendoerp.go.usage.quota.QuotaEvaluation;
+import com.etendoerp.go.usage.quota.QuotaItemJson;
+import com.etendoerp.go.usage.quota.QuotaWriteGuard;
+
+/**
+ * ETP-5051 — wraps one NEO create with the plan-quota check: after the insert, inside the same
+ * transaction, the created row is tested by {@link QuotaWriteGuard}; a DENY rolls the create back
+ * and answers 403 {@code QUOTA_EXCEEDED} (contract §3).
+ *
+ * <p><b>Every create channel goes through it:</b> REST single and REST batch reach it in
+ * {@code NeoCrudHandler}'s POST branch, and MCP {@code etendo_create}, which writes through its own
+ * pipeline in {@code McpToolRouter#handleCreate}, calls it there. MCP {@code etendo_batch} and the
+ * MCP batch jobs go through {@code BatchService} and so through {@code NeoCrudHandler}.
+ *
+ * <p><b>Who ends the transaction.</b> Core's {@link DefaultJsonDataService#add} commits on its own,
+ * which would leave nothing to roll back. So when this create must be checked and no batch owns the
+ * transaction, the create runs through the deferred-commit service (the one a batch uses, IMP-23)
+ * and this gate ends the transaction itself: commit when the row may stand, roll back when it is
+ * refused or the write failed. Inside a batch it never commits: a refusal fails the operation and
+ * the batch rolls everything back. A create that is not checked — every entity no active
+ * {@code block} quota counts — is untouched: same service, same commit, no query.
+ *
+ * <p><b>Fails open.</b> An error while checking is logged and the create stands; a broken quota
+ * configuration must not stop every create of an entity.
+ *
+ * <p>Structural only: the decision is driven by catalog data, never by an entity or spec name.
+ */
+public final class NeoQuotaWriteGate {
+
+  private static final Logger log = LogManager.getLogger(NeoQuotaWriteGate.class);
+
+  /** HTTP status of a quota refusal. */
+  public static final int STATUS = HttpServletResponse.SC_FORBIDDEN;
+  /** Machine-readable code of a quota refusal; the SPA keys its own message off it. */
+  public static final String CODE = "QUOTA_EXCEEDED";
+
+  private static final String KEY_ERROR = "error";
+  private static final String KEY_MESSAGE = "message";
+  private static final String KEY_STATUS = "status";
+  private static final String KEY_CODE = "code";
+  private static final String KEY_QUOTA = "quota";
+
+  private NeoQuotaWriteGate() {
+  }
+
+  /**
+   * Starts one create of {@code dalEntityName}, deciding whether it is checked and who ends its
+   * transaction.
+   *
+   * @param dalEntityName the DAL entity name of the created row
+   * @return the create's gate; call {@link Create#finish} with the add result, and
+   *     {@link Create#close} in a finally
+   */
+  public static Create begin(String dalEntityName) {
+    return begin(dalEntityName, QuotaWriteGuard.getDefault(),
+        BatchService.isCallerOwnedTransaction());
+  }
+
+  static Create begin(String dalEntityName, QuotaWriteGuard guard, boolean batchOwnsTransaction) {
+    boolean checked;
+    try {
+      checked = guard.appliesTo(dalEntityName);
+    } catch (RuntimeException e) {
+      log.error("[QUOTA] Could not decide whether creates of {} are quota-checked; not checking",
+          dalEntityName, e);
+      checked = false;
+    }
+    return new Create(dalEntityName, guard, checked, checked && !batchOwnsTransaction);
+  }
+
+  /**
+   * The contract §3 refusal: 403 with {@code error.message}, {@code error.status},
+   * {@code error.code = QUOTA_EXCEEDED} and {@code error.quota} (a {@code QuotaItem}).
+   *
+   * @param refusal the DENY evaluation
+   * @return the response
+   */
+  public static NeoResponse refusalResponse(QuotaEvaluation refusal) {
+    String message = QuotaItemJson.refusalMessage(refusal);
+    try {
+      JSONObject error = new JSONObject();
+      error.put(KEY_MESSAGE, message);
+      error.put(KEY_STATUS, STATUS);
+      error.put(KEY_CODE, CODE);
+      error.put(KEY_QUOTA, QuotaItemJson.of(refusal));
+      return NeoResponse.error(STATUS, new JSONObject().put(KEY_ERROR, error));
+    } catch (JSONException e) {
+      return NeoResponse.error(STATUS, message);
+    }
+  }
+
+  /** One create under the gate. Not thread-safe; it lives for one request. */
+  public static final class Create implements AutoCloseable {
+
+    private final String dalEntityName;
+    private final QuotaWriteGuard guard;
+    private final boolean checked;
+    private final boolean ownsTransaction;
+    private boolean ended;
+
+    private Create(String dalEntityName, QuotaWriteGuard guard, boolean checked,
+        boolean ownsTransaction) {
+      this.dalEntityName = dalEntityName;
+      this.guard = guard;
+      this.checked = checked;
+      this.ownsTransaction = ownsTransaction;
+    }
+
+    /** @return whether this create is quota-checked */
+    public boolean isChecked() {
+      return checked;
+    }
+
+    /** @return whether this gate ends the transaction (checked, and no batch owns it) */
+    public boolean ownsTransaction() {
+      return ownsTransaction;
+    }
+
+    /**
+     * The service the create must run through.
+     *
+     * @param current the service the caller would use otherwise
+     * @return the deferred-commit service when this gate owns the transaction, else
+     *     {@code current}
+     */
+    public DefaultJsonDataService jsonService(DefaultJsonDataService current) {
+      return ownsTransaction ? NeoBatchJsonDataService.deferredCommitInstance() : current;
+    }
+
+    /**
+     * Checks the created rows and ends the transaction when this gate owns it.
+     *
+     * @param addResult the JSON string {@code add} returned
+     * @return the 403 refusal, or null when the caller carries on as before (the create stands,
+     *     or it failed and the caller reports that failure as it always did)
+     */
+    public NeoResponse finish(String addResult) {
+      if (!checked) {
+        return null;
+      }
+      List<String> createdIds = createdIds(addResult);
+      if (createdIds == null) {
+        rollbackIfOwned();
+        return null;
+      }
+      Optional<QuotaEvaluation> refusal = check(createdIds);
+      if (refusal.isPresent()) {
+        rollbackIfOwned();
+        log.info("[QUOTA] Refused a create of {}: {}", dalEntityName, refusal.get());
+        return refusalResponse(refusal.get());
+      }
+      if (ownsTransaction) {
+        ended = true;
+        OBDal.getInstance().commitAndClose();
+      }
+      return null;
+    }
+
+    /** Rolls back a transaction this gate owns and never ended (the create threw). */
+    @Override
+    public void close() {
+      rollbackIfOwned();
+    }
+
+    private Optional<QuotaEvaluation> check(List<String> createdIds) {
+      try {
+        return guard.refusalFor(dalEntityName, createdIds);
+      } catch (RuntimeException e) {
+        log.error("[QUOTA] The quota check of a create of {} failed; the create stands",
+            dalEntityName, e);
+        return Optional.empty();
+      }
+    }
+
+    private void rollbackIfOwned() {
+      if (ownsTransaction && !ended) {
+        ended = true;
+        OBDal.getInstance().rollbackAndClose();
+      }
+    }
+  }
+
+  /**
+   * The ids of the rows an {@code add} created, or null when it did not succeed.
+   *
+   * @param addResult the JSON string {@code add} returned
+   * @return the ids, possibly empty; null on a failed or unreadable result
+   */
+  static List<String> createdIds(String addResult) {
+    if (StringUtils.isBlank(addResult)) {
+      return null;
+    }
+    try {
+      JSONObject response = new JSONObject(addResult).optJSONObject(JsonConstants.RESPONSE_RESPONSE);
+      if (response == null || response.optInt(JsonConstants.RESPONSE_STATUS,
+          JsonConstants.RPCREQUEST_STATUS_FAILURE) != JsonConstants.RPCREQUEST_STATUS_SUCCESS) {
+        return null;
+      }
+      List<String> ids = new ArrayList<>();
+      JSONArray data = response.optJSONArray(JsonConstants.RESPONSE_DATA);
+      if (data != null) {
+        for (int i = 0; i < data.length(); i++) {
+          JSONObject row = data.optJSONObject(i);
+          String id = row == null ? null : row.optString(JsonConstants.ID, null);
+          if (StringUtils.isNotBlank(id)) {
+            ids.add(id);
+          }
+        }
+      }
+      return ids;
+    } catch (JSONException e) {
+      return null;
+    }
+  }
+}

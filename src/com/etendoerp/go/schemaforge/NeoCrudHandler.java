@@ -577,7 +577,17 @@ class NeoCrudHandler {
         if (earlyError != null) {
           return earlyError;
         }
-        result = executePostCreate(context, adTab, dalEntityName, fieldFilter, jsonService, params);
+        // ETP-5051: the plan-quota check runs after the insert, in the same transaction. The gate
+        // decides from catalog data alone whether this entity is checked; when it is not, the
+        // create runs exactly as before (same service, same commit, no query).
+        try (NeoQuotaWriteGate.Create quota = NeoQuotaWriteGate.begin(dalEntityName)) {
+          result = executePostCreate(context, adTab, dalEntityName, fieldFilter,
+              quota.jsonService(jsonService), params);
+          NeoResponse quotaRefusal = quota.finish(result);
+          if (quotaRefusal != null) {
+            return quotaRefusal;
+          }
+        }
         break;
       }
       case "PUT":
