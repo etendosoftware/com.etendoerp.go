@@ -383,7 +383,7 @@ public class JournalEntriesReportHandler extends AbstractSqlReportHandler {
           + "WHEN UPPER(adt.tablename) = 'M_MATCHINV' THEN 'matched-purchase-invoices' "
           + "WHEN UPPER(adt.tablename) = 'A_AMORTIZATION' THEN 'amortization' "
           + "WHEN UPPER(adt.tablename) = 'FIN_FINACC_TRANSACTION' THEN 'financial-account' "
-          + "WHEN UPPER(adt.tablename) = 'GL_JOURNAL' THEN 'simple-g-l-journal' "
+          + "WHEN UPPER(adt.tablename) = 'GL_JOURNAL' THEN 'manual-journals' "
           + "WHEN UPPER(adt.tablename) = 'FIN_PAYMENT' THEN "
           + "  CASE WHEN dt.issotrx = 'Y' THEN 'payment-in' ELSE 'payment-out' END "
           + "WHEN UPPER(adt.tablename) = 'FIN_RECONCILIATION' THEN 'financial-account' "
