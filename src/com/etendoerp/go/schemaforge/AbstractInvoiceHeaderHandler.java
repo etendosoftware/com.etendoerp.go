@@ -81,6 +81,15 @@ public abstract class AbstractInvoiceHeaderHandler {
   // output as the first linked origin) — see captureOriginInvoice/persistOriginInvoice/
   // enrichOriginInvoice below.
   protected static final String FIELD_ORIGIN_INVOICES      = "originInvoices";
+  /**
+   * The reverse of {@link #FIELD_ORIGIN_INVOICES}: the rectificativa(s) that rectify THIS
+   * invoice (ETP-5745 CP-12). {@code C_Invoice_Reverse} is read in the opposite direction here
+   * ({@code reversed_c_invoice_id = invoiceId}, same join {@link InvoiceReactivationGuard} uses
+   * for its own guard query) — without it, the "Rectificaciones" tab and the "Documentos
+   * relacionados" card had no way to show, from the ORIGINAL invoice, which document(s) rectify
+   * it: {@link #enrichOriginInvoice} only ever answers "what does THIS invoice rectify".
+   */
+  protected static final String FIELD_RECTIFYING_INVOICES  = "rectifyingInvoices";
   protected static final String FIELD_TRANSACTION_DOCUMENT = "transactionDocument";
   private static final String FIELD_CURRENCY = "currency";
   /** {@code C_BPartner_Location_ID}: the invoicing address. */
@@ -705,6 +714,42 @@ public abstract class AbstractInvoiceHeaderHandler {
   }
 
   /**
+   * Injects {@code rectifyingInvoices} (a JSON array of {@code {id, documentNo}}, one entry per
+   * rectificativa that rectifies THIS invoice) into the record, by querying
+   * {@code C_Invoice_Reverse} for ALL active links where this invoice is the REVERSED one
+   * (ETP-5745 CP-12) — the mirror image of {@link #enrichOriginInvoice}, which reads the same
+   * table in the opposite direction.
+   *
+   * @param rec
+   *     the invoice record JSON object; modified in-place
+   * @param invoiceId
+   *     the primary key of the invoice being enriched
+   * @throws Exception
+   *     if a JSON or DB operation fails
+   */
+  @SuppressWarnings("java:S2077")
+  protected void enrichRectifyingInvoices(JSONObject rec, String invoiceId) throws Exception {
+    String sql =
+        "SELECT inv.c_invoice_id, inv.documentno "
+        + "FROM c_invoice_reverse r "
+        + "JOIN c_invoice inv ON inv.c_invoice_id = r.c_invoice_id "
+        + "WHERE r.reversed_c_invoice_id = ? AND r.isactive = 'Y' "
+        + "ORDER BY inv.documentno";
+    try (PreparedStatement ps = OBDal.getInstance().getConnection().prepareStatement(sql)) {
+      ps.setString(1, invoiceId);
+      try (ResultSet rs = ps.executeQuery()) {
+        JSONArray rectifying = new JSONArray();
+        while (rs.next()) {
+          rectifying.put(new JSONObject().put("id", rs.getString(1)).put("documentNo", rs.getString(2)));
+        }
+        rec.put(FIELD_RECTIFYING_INVOICES, rectifying);
+      }
+    } catch (Exception e) {
+      log.warn("Could not enrich rectifying invoices for {}: {}", invoiceId, e.getMessage());
+    }
+  }
+
+  /**
    * Injects the invoice subtype virtual field ({@link #getInvoiceSubtypeKey()}) into the record
    * by resolving the current {@code transactionDocument} value via {@link #resolveSubtype(String)}.
    *
@@ -901,6 +946,13 @@ public abstract class AbstractInvoiceHeaderHandler {
   protected static NeoResponse completeInvoiceIfNeeded(NeoContext context) {
     if (!InvoiceCalloutHelper.isInvoiceCompleteAction(context)) {
       return null;
+    }
+    // ETP-5745 CP-9: refuse completing a rectificativa that would push the total rectified
+    // against its origin past the origin's own total. Checked here, before the real process
+    // runs, mirroring where validateLineQtyBeforeComplete used to sit.
+    NeoResponse rectificationBlock = RectificationTotalGuard.checkCompletion(context);
+    if (rectificationBlock != null) {
+      return rectificationBlock;
     }
     return InvoiceCompletionService.completeInvoice(context.getRecordId(), context.getObContext());
   }
