@@ -150,7 +150,7 @@ public class EtendoGoJwtServletTenantPoolTest {
     assertTrue(ndjson.contains("\"step\":\"warehouseAddress\""));
     verify(dataset, never()).importDataset(anyString(), anyString());
     verify(orgInfo).ensureOrgInfo("POOLED-CLIENT", "ORG-1", "ADMIN-USER", "ADMIN-ROLE", "ES",
-        "Calle Mayor 1", "");
+        "Calle Mayor 1", "", "", "", "", "");
     verify(warehouse).alignDefaultWarehouseAddress("POOLED-CLIENT", "ORG-1", "ADMIN-USER",
         "ADMIN-ROLE");
     verify(lifecycle).markDemoReady(eq("POOLED-CLIENT"), any(Instant.class));

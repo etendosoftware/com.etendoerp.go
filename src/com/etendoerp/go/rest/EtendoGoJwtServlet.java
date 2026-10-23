@@ -97,6 +97,7 @@ import com.etendoerp.go.payment.EnvironmentAccessGuard;
 import com.etendoerp.go.payment.SystemContext;
 import com.etendoerp.go.payment.StripeCustomerPortalService;
 import com.etendoerp.go.payment.DemoDataTransferService;
+import com.etendoerp.go.schemaforge.util.StructuredAddressComposer;
 import com.etendoerp.go.schemaforge.data.CheckoutRequest;
 import com.etendoerp.go.schemaforge.data.Plan;
 import com.etendoerp.go.schemaforge.data.Subscription;
@@ -358,11 +359,23 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final int ONBOARDING_DRAFT_MAX_LENGTH = 4000;
   private static final String FIELD_FULL_NAME = "fullName";
   private static final String FIELD_ADDRESS = "address";
+  // ETP-5806 — the onboarding company step's address block, replacing the single free-text
+  // `address` field with the same Street/Number/Building Name breakdown used by every other
+  // address popup. `FIELD_ADDRESS` is kept (see parseOnboardingRequest) as a legacy fallback for
+  // any caller still sending plain text (e.g. an MCP/API client not yet updated).
+  private static final String FIELD_STREET_NAME = "streetName";
+  private static final String FIELD_BUILDING_NUMBER = "buildingNumber";
+  private static final String FIELD_BUILDING_NAME = "buildingName";
+  // ETP-5806 — City joins Street/Number as mandatory once the address block is started; see the
+  // mandatoriness rule in parseOnboardingRequest (below) and isAddressBlockStarted/
+  // isCompanyStepValid in the frontend's state.js.
+  private static final String FIELD_CITY_NAME = "city";
   private static final String FIELD_PRODUCTS = "products";
   private static final String FIELD_CONTACTS = "contacts";
   private static final String[] ONBOARDING_DRAFT_FORM_FIELDS = { FIELD_FULL_NAME, "businessType",
       FIELD_CLIENT_NAME, FIELD_CURRENCY, FIELD_LANGUAGE, FIELD_COUNTRY_CODE, "fiscalIdType",
-      FIELD_FISCAL_ID_VALUE, FIELD_ADDRESS, "sector", FIELD_INCLUDE_SAMPLE_DATA };
+      FIELD_FISCAL_ID_VALUE, FIELD_ADDRESS, FIELD_STREET_NAME, FIELD_BUILDING_NUMBER,
+      FIELD_BUILDING_NAME, FIELD_CITY_NAME, "sector", FIELD_INCLUDE_SAMPLE_DATA };
   private static final String PATH_ONBOARDING_FIRST_STEPS = "/onboarding/first-steps";
   private static final String FIELD_FIRST_STEPS = "firstSteps";
   private static final String FIELD_FIRST_STEPS_VERSION = "v";
@@ -5575,6 +5588,20 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       // Country drives the org's tax resolution; default to Spain (ES) when the form omits it.
       data.countryCode = body.optString(FIELD_COUNTRY_CODE, "ES").trim();
       data.address = body.optString(FIELD_ADDRESS, "").trim();
+      // ETP-5806 — structured address block. Street/Number/City are mandatory together, but ONLY
+      // when the user actually started filling the address in. The block itself stays fully
+      // optional on this minimalist step, same as the legacy `address` field it replaces.
+      // Country is deliberately not asked here — it is already guaranteed by `countryCode` above.
+      data.streetName = body.optString(FIELD_STREET_NAME, "").trim();
+      data.buildingNumber = body.optString(FIELD_BUILDING_NUMBER, "").trim();
+      data.buildingName = body.optString(FIELD_BUILDING_NAME, "").trim();
+      data.city = body.optString(FIELD_CITY_NAME, "").trim();
+      if (!validateStructuredAddressBlock(data, response)) {
+        return null;
+      }
+      if (!validateStructuredAddressLength(data, response)) {
+        return null;
+      }
       // Full name of the person onboarding. Optional in the payload; it becomes the display
       // name of the client admin user. When blank, prepareOnboarding falls back to the account's
       // name, then its email (ETP-5689).
@@ -5597,7 +5624,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       OnboardingFieldLimits.LengthViolation violation = OnboardingFieldLimits.firstViolation(
           FIELD_CLIENT_NAME, data.clientName, OnboardingFieldLimits.CLIENT_NAME,
           FIELD_FULL_NAME, data.fullName, OnboardingFieldLimits.FULL_NAME,
-          FIELD_ADDRESS, data.address, OnboardingFieldLimits.ADDRESS);
+          FIELD_ADDRESS, data.address, OnboardingFieldLimits.ADDRESS,
+          FIELD_CITY_NAME, data.city, OnboardingFieldLimits.CITY);
       if (violation != null) {
         writeFieldTooLongError(response, violation);
         return null;
@@ -5613,6 +5641,59 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST, message);
       return null;
     }
+  }
+
+  /**
+   * ETP-5806 — Street/Number/City are mandatory together, but ONLY once the user actually
+   * started filling the structured address block in (building name does not gate this, since
+   * it is optional even once the block is started). Extracted out of
+   * {@link #parseOnboardingRequest} to keep its cognitive complexity in check.
+   *
+   * @return {@code true} to continue; {@code false} once an error response has been written
+   */
+  private boolean validateStructuredAddressBlock(OnboardingRequestData data,
+      HttpServletResponse response) throws IOException {
+    boolean addressBlockStarted = StringUtils.isNotBlank(data.streetName)
+        || StringUtils.isNotBlank(data.buildingNumber)
+        || StringUtils.isNotBlank(data.buildingName)
+        || StringUtils.isNotBlank(data.city);
+    if (!addressBlockStarted) {
+      return true;
+    }
+    List<String> missing = new ArrayList<>();
+    if (StringUtils.isBlank(data.streetName)) {
+      missing.add(FIELD_STREET_NAME);
+    }
+    if (StringUtils.isBlank(data.buildingNumber)) {
+      missing.add(FIELD_BUILDING_NUMBER);
+    }
+    if (StringUtils.isBlank(data.city)) {
+      missing.add(FIELD_CITY_NAME);
+    }
+    if (missing.isEmpty()) {
+      return true;
+    }
+    writeError(response, HttpServletResponse.SC_BAD_REQUEST,
+        "Missing required field(s): " + String.join(", ", missing));
+    return false;
+  }
+
+  /**
+   * ETP-5806 — enforces the structured address block's max column lengths. Extracted out of
+   * {@link #parseOnboardingRequest} to keep its cognitive complexity in check.
+   *
+   * @return {@code true} to continue; {@code false} once an error response has been written
+   */
+  private boolean validateStructuredAddressLength(OnboardingRequestData data,
+      HttpServletResponse response) throws IOException {
+    List<String> tooLong = StructuredAddressComposer.fieldsExceedingMaxLength(data.streetName,
+        data.buildingNumber, data.buildingName);
+    if (tooLong.isEmpty()) {
+      return true;
+    }
+    writeError(response, HttpServletResponse.SC_BAD_REQUEST,
+        "Field(s) exceed maximum length: " + String.join(", ", tooLong));
+    return false;
   }
 
   /**
@@ -5892,7 +5973,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       OnboardingRequestData requestData) {
     return requestData == null ? null
         : new OnboardingProvisioningChain.OrgInfoInput(requestData.countryCode,
-            requestData.address, requestData.taxId);
+            requestData.address, requestData.streetName, requestData.buildingNumber,
+            requestData.buildingName, requestData.city, requestData.taxId);
   }
 
   /** @see OnboardingProvisioningChain#ensureOnboardingDataset */
@@ -6931,6 +7013,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     private String language;
     private String countryCode;
     private String address;
+    // ETP-5806 — structured address fields; non-blank only when the user filled in the
+    // onboarding company step's address block.
+    private String streetName;
+    private String buildingNumber;
+    private String buildingName;
+    // ETP-5806 — City, mandatory together with streetName/buildingNumber whenever the structured
+    // address block was started (see parseOnboardingRequest).
+    private String city;
     private String fullName;
     // Optional Tax ID from the wizard's "Details to start invoicing" step (ETP-4749).
     // Same JSON key as ONBOARDING_DRAFT_FORM_FIELDS ("fiscalIdValue") for consistency.

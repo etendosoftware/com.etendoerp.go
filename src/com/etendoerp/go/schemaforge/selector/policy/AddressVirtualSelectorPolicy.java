@@ -33,6 +33,7 @@ import org.hibernate.criterion.Restrictions;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Column;
+import org.openbravo.model.common.geography.Location;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
 
@@ -68,6 +69,15 @@ public final class AddressVirtualSelectorPolicy {
   private static final String BPARTNER_LOCATION_TABLE = "C_BPartner_Location";
   private static final String LOCATION_ADDRESS_ENTITY = "locationAddress";
 
+  /**
+   * ETP-5806 — the DAL property name of a single-FK pointer to {@code C_Location}, as declared on
+   * both {@code AD_OrgInfo} ({@code OrganizationInformation#PROPERTY_LOCATIONADDRESS}) and
+   * {@code M_Warehouse} ({@code Warehouse#PROPERTY_LOCATIONADDRESS}). Checking the property's name
+   * and target table is structural (same AD metadata shape on every entity that has it), not an
+   * identity check on a spec or table name.
+   */
+  private static final String LOCATION_POINTER_PROPERTY = "locationAddress";
+
   private static final String COLUMN_COUNTRY = "C_Country_ID";
   private static final String COLUMN_REGION = "C_Region_ID";
 
@@ -86,9 +96,16 @@ public final class AddressVirtualSelectorPolicy {
    * <p>{@code regionName} sits next to {@code region} on purpose: they are the same answer for two
    * kinds of country, and the handler keeps them mutually exclusive. See
    * {@code ContactsLocationAddressHandler#assignRegion}.
+   *
+   * <p>ETP-5806 added the 3 structured SEPA address columns ({@code EM_OBSEPA_StrtNm/BldgNb/BldgNm},
+   * from {@code org.openbravo.sepa.iso20022}). Same bug class as the rest of this list (ETP-5368):
+   * without them here, {@code etendo_schema}/{@code etendo_selectors} would never advertise
+   * {@code streetName}/{@code buildingNumber}/{@code buildingName} even though both handlers accept
+   * and persist them.
    */
   private static final Set<String> VIRTUAL_COLUMNS = new LinkedHashSet<>(List.of(
-      "Address1", "Address2", "City", "Postal", COLUMN_COUNTRY, COLUMN_REGION, "RegionName"));
+      "Address1", "Address2", "City", "Postal", COLUMN_COUNTRY, COLUMN_REGION, "RegionName",
+      "EM_OBSEPA_StrtNm", "EM_OBSEPA_BldgNb", "EM_OBSEPA_BldgNm"));
 
   /**
    * The wrapper's OWN column that the handler resolves instead of the caller (ETP-5368).
@@ -108,7 +125,46 @@ public final class AddressVirtualSelectorPolicy {
    */
   private static final String OWN_SERVER_RESOLVED_COLUMN = "C_Location_ID";
 
+  /**
+   * ETP-5806 naming unification — the published {@code etendo_schema} field name for a structured
+   * SEPA address column, keyed by DB column name (upper-cased).
+   *
+   * <p><b>Why this map exists instead of a conditional on the caller's side.</b>
+   * {@code McpSchemaFieldBuilder#resolvePropertyName} otherwise reports the raw DAL property name
+   * generated for {@code EM_OBSEPA_StrtNm}/{@code BldgNb}/{@code BldgNm} —
+   * {@code oBSEPAStreetName}/{@code oBSEPABuildingNumber}/{@code oBSEPABuildingName} — because that
+   * is literally the Hibernate property Openbravo's codegen produced for the column, unrelated to
+   * what any handler actually calls the field in its own payload. Every handler that reads/writes
+   * these 3 columns ({@code ContactsLocationAddressHandler}, {@code WarehouseLocationHandler},
+   * {@code BpLocationHandler}) already agrees on {@code streetName}/{@code buildingNumber}/
+   * {@code buildingName} in its own JSON — only the generic schema-discovery path (this class's
+   * {@link #resolveVirtualColumns} for a wrapper entity, or the direct {@code bpLocation} table
+   * walk in {@code McpSchemaFieldBuilder#buildSchemaFieldsArray}) still showed the raw name,
+   * because {@code resolvePropertyName} has no way to know a handler renamed it downstream.
+   *
+   * <p>This is a structural lookup (keyed by column, consulted identically for any entity that
+   * happens to carry one of these 3 columns — direct or virtual), not a branch on a spec or table
+   * name, matching the existing {@code VIRTUAL_FIELD_PROMPTS} per-column data map in
+   * {@code McpSchemaFieldBuilder}. Extend this map, never add a per-entity {@code if}, if another
+   * EM_-prefixed column ever needs the same treatment.
+   */
+  private static final Map<String, String> PUBLISHED_NAME_OVERRIDES = Map.of(
+      "EM_OBSEPA_STRTNM", "streetName",
+      "EM_OBSEPA_BLDGNB", "buildingNumber",
+      "EM_OBSEPA_BLDGNM", "buildingName");
+
   private AddressVirtualSelectorPolicy() {
+  }
+
+  /**
+   * The {@code etendo_schema} field name a caller should see for the given DB column, when it
+   * differs from the raw DAL property name — see {@link #PUBLISHED_NAME_OVERRIDES}.
+   *
+   * @param dbColumnName AD column DB name (any case)
+   * @return the published name override, or {@code null} when the column has none
+   */
+  public static String publishedNameOverride(String dbColumnName) {
+    return dbColumnName == null ? null : PUBLISHED_NAME_OVERRIDES.get(dbColumnName.toUpperCase());
   }
 
   /**
@@ -138,6 +194,15 @@ public final class AddressVirtualSelectorPolicy {
    * Whether the given Schema Forge entity is an address wrapper — one whose caller-facing address
    * fields live in {@code C_Location} rather than in its own table.
    *
+   * <p>ETP-5806 added a third, purely structural path: an entity whose own table carries an
+   * <em>optional</em> {@code locationAddress} FK to {@code C_Location} (e.g. {@code organization}'s
+   * {@code information} entity, backed by {@code AD_OrgInfo}). This is deliberately narrower than
+   * "has a {@code locationAddress} property" alone — {@code M_Warehouse} declares the exact same
+   * property name and target table, but its FK is {@code NOT NULL} (the warehouse cannot exist
+   * without a location, so it is the owner of a mandatory address, not a thin wrapper around an
+   * optional one) and is already served by its own tab-less {@code warehouse/location} entity. See
+   * the ETP-5806 handoff notes for this collision — flagged, not silently resolved.
+   *
    * @param entity source Schema Forge entity; may be {@code null}
    * @return {@code true} when the wrapper policy applies to this entity
    */
@@ -149,8 +214,32 @@ public final class AddressVirtualSelectorPolicy {
     String tableName = tab != null && tab.getTable() != null
         ? tab.getTable().getDBTableName()
         : null;
-    return BPARTNER_LOCATION_TABLE.equalsIgnoreCase(tableName)
-        || LOCATION_ADDRESS_ENTITY.equals(entity.getName());
+    if (BPARTNER_LOCATION_TABLE.equalsIgnoreCase(tableName)
+        || LOCATION_ADDRESS_ENTITY.equals(entity.getName())) {
+      return true;
+    }
+    return hasOptionalLocationPointer(tableName);
+  }
+
+  /**
+   * Structural check (ETP-5806): {@code tableName}'s DAL entity declares a {@code locationAddress}
+   * property whose target is {@code C_Location} and whose FK column is NOT mandatory. Names no
+   * spec or table — it asks the same "does this entity have this shape" question for any table.
+   */
+  private static boolean hasOptionalLocationPointer(String tableName) {
+    if (StringUtils.isBlank(tableName)) {
+      return false;
+    }
+    Entity dalEntity = ModelProvider.getInstance().getEntityByTableName(tableName);
+    if (dalEntity == null) {
+      return false;
+    }
+    Property property = dalEntity.getProperty(LOCATION_POINTER_PROPERTY, false);
+    if (property == null || property.isPrimitive() || property.getTargetEntity() == null) {
+      return false;
+    }
+    return Location.ENTITY_NAME.equals(property.getTargetEntity().getName())
+        && !property.isMandatory();
   }
 
   /**

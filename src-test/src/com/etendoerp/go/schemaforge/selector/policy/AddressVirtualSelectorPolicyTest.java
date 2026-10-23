@@ -155,6 +155,73 @@ public class AddressVirtualSelectorPolicyTest {
     assertFalse(AddressVirtualSelectorPolicy.isAddressWrapper(null));
   }
 
+  /**
+   * ETP-5806 — a structural third path: an entity whose own table carries an OPTIONAL
+   * {@code locationAddress} FK to {@code C_Location} (e.g. {@code AD_OrgInfo}) is a wrapper too,
+   * even though it is neither {@code C_BPartner_Location} nor named {@code locationAddress}.
+   */
+  @Test
+  public void entityWithOptionalLocationPointerIsAnAddressWrapper() {
+    Property property = mock(Property.class);
+    when(property.isPrimitive()).thenReturn(false);
+    Entity locationTargetEntity = mock(Entity.class);
+    when(locationTargetEntity.getName()).thenReturn(org.openbravo.model.common.geography.Location.ENTITY_NAME);
+    when(property.getTargetEntity()).thenReturn(locationTargetEntity);
+    when(property.isMandatory()).thenReturn(false);
+    Entity dalEntity = mock(Entity.class);
+    when(dalEntity.getProperty("locationAddress", false)).thenReturn(property);
+    ModelProvider modelProvider = mock(ModelProvider.class);
+    when(modelProvider.getEntityByTableName("AD_OrgInfo")).thenReturn(dalEntity);
+
+    try (MockedStatic<ModelProvider> models = mockStatic(ModelProvider.class)) {
+      models.when(ModelProvider::getInstance).thenReturn(modelProvider);
+
+      assertTrue(AddressVirtualSelectorPolicy.isAddressWrapper(entityOnTable("AD_OrgInfo")));
+    }
+  }
+
+  /**
+   * ETP-5806 — the near-collision this ticket flagged rather than silently resolved:
+   * {@code M_Warehouse} declares the exact same {@code locationAddress} property name and target
+   * table as the optional-pointer case above, but its FK is NOT NULL (the warehouse cannot exist
+   * without a location). It is the owner of a mandatory address, already served by its own
+   * tab-less {@code warehouse/location} entity — not a thin wrapper — so it must NOT be reported
+   * as an address wrapper.
+   */
+  @Test
+  public void mandatoryLocationPointerIsNotAnAddressWrapper() {
+    Property property = mock(Property.class);
+    when(property.isPrimitive()).thenReturn(false);
+    Entity locationTargetEntity = mock(Entity.class);
+    when(locationTargetEntity.getName()).thenReturn(org.openbravo.model.common.geography.Location.ENTITY_NAME);
+    when(property.getTargetEntity()).thenReturn(locationTargetEntity);
+    when(property.isMandatory()).thenReturn(true);
+    Entity dalEntity = mock(Entity.class);
+    when(dalEntity.getProperty("locationAddress", false)).thenReturn(property);
+    ModelProvider modelProvider = mock(ModelProvider.class);
+    when(modelProvider.getEntityByTableName("M_Warehouse")).thenReturn(dalEntity);
+
+    try (MockedStatic<ModelProvider> models = mockStatic(ModelProvider.class)) {
+      models.when(ModelProvider::getInstance).thenReturn(modelProvider);
+
+      assertFalse(AddressVirtualSelectorPolicy.isAddressWrapper(entityOnTable("M_Warehouse")));
+    }
+  }
+
+  @Test
+  public void entityWithNoLocationPointerPropertyIsNotAnAddressWrapper() {
+    Entity dalEntity = mock(Entity.class);
+    when(dalEntity.getProperty("locationAddress", false)).thenReturn(null);
+    ModelProvider modelProvider = mock(ModelProvider.class);
+    when(modelProvider.getEntityByTableName("C_Order")).thenReturn(dalEntity);
+
+    try (MockedStatic<ModelProvider> models = mockStatic(ModelProvider.class)) {
+      models.when(ModelProvider::getInstance).thenReturn(modelProvider);
+
+      assertFalse(AddressVirtualSelectorPolicy.isAddressWrapper(entityOnTable("C_Order")));
+    }
+  }
+
   // ── resolveVirtualSelectorColumn ──────────────────────────────────────
 
   @Test
@@ -229,6 +296,28 @@ public class AddressVirtualSelectorPolicyTest {
     assertEquals(0, AddressVirtualSelectorPolicy.resolveVirtualColumns(null).size());
   }
 
+  /**
+   * ETP-5806 — the 3 structured SEPA columns are declared in {@code VIRTUAL_COLUMNS}, so a
+   * wrapper's schema walk resolves them exactly like the pre-existing address columns.
+   */
+  @Test
+  public void wrapperExposesTheStructuredAddressColumns() {
+    Map<String, String> columns = new LinkedHashMap<>();
+    columns.put("EM_OBSEPA_StrtNm", "oBSEPAStreetName");
+    columns.put("EM_OBSEPA_BldgNb", "oBSEPABuildingNumber");
+    columns.put("EM_OBSEPA_BldgNm", "oBSEPABuildingName");
+
+    try (MockedStatic<OBDal> dal = mockStatic(OBDal.class);
+         MockedStatic<ModelProvider> models = mockStatic(ModelProvider.class)) {
+      stubLocationColumns(dal, models, columns);
+
+      List<Column> resolved = AddressVirtualSelectorPolicy.resolveVirtualColumns(
+          entityOnTable(WRAPPER_TABLE));
+
+      assertEquals(3, resolved.size());
+    }
+  }
+
   // ── serverResolvedFieldNames ──────────────────────────────────────────
 
   @Test
@@ -298,6 +387,35 @@ public class AddressVirtualSelectorPolicyTest {
       assertTrue(AddressVirtualSelectorPolicy.serverResolvedFieldNames(
           entityOnTable("C_BPartner_Location")).isEmpty());
     }
+  }
+
+  // ── publishedNameOverride ─────────────────────────────────────────────
+
+  /**
+   * ETP-5806 naming unification — the 3 structured SEPA columns must publish the names every
+   * handler agrees on in its own JSON, not the raw Hibernate property Openbravo's codegen
+   * produced for them.
+   */
+  @Test
+  public void structuredAddressColumnsPublishTheirUnifiedFieldNames() {
+    assertEquals("streetName", AddressVirtualSelectorPolicy.publishedNameOverride("EM_OBSEPA_StrtNm"));
+    assertEquals("buildingNumber", AddressVirtualSelectorPolicy.publishedNameOverride("EM_OBSEPA_BldgNb"));
+    assertEquals("buildingName", AddressVirtualSelectorPolicy.publishedNameOverride("EM_OBSEPA_BldgNm"));
+  }
+
+  @Test
+  public void publishedNameOverrideIsCaseInsensitiveOnTheDbColumnName() {
+    assertEquals("streetName", AddressVirtualSelectorPolicy.publishedNameOverride("em_obsepa_strtnm"));
+  }
+
+  @Test
+  public void unmappedColumnHasNoPublishedNameOverride() {
+    assertNull(AddressVirtualSelectorPolicy.publishedNameOverride("C_Region_ID"));
+  }
+
+  @Test
+  public void nullColumnNameHasNoPublishedNameOverride() {
+    assertNull(AddressVirtualSelectorPolicy.publishedNameOverride(null));
   }
 
   @Test

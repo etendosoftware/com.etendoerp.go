@@ -17,6 +17,8 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.util.List;
+
 import javax.inject.Named;
 
 import org.apache.logging.log4j.LogManager;
@@ -30,6 +32,9 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.geography.Country;
 import org.openbravo.model.common.geography.Location;
 import org.openbravo.model.common.geography.Region;
+
+import com.etendoerp.go.schemaforge.util.StructuredAddressComposer;
+import com.etendoerp.go.schemaforge.util.StructuredAddressComposer.ComposedAddress;
 
 /**
  * NeoHandler for the tab-less {@code location} entity in the {@code warehouse} spec.
@@ -51,10 +56,13 @@ import org.openbravo.model.common.geography.Region;
  * POST, PUT and GET-by-id. Any other method returns 405.
  *
  * <p>Registered via {@code JAVA_QUALIFIER = 'warehouseLocationHandler'} on the ETGO_SF_ENTITY
- * record for {@code location} in the {@code warehouse} spec. Uses {@code @Named} only (never a
- * normal CDI scope), so handler discovery via {@code @Named} on the concrete class works.
+ * record for {@code location} in the {@code warehouse} spec, and (ETP-5806) also via
+ * {@link NeoExtension}, resolved first. Both bindings name this class, so
+ * {@code NeoExtensionIndex.warnOnQualifierDisagreement} never fires for it. Uses {@code @Named}
+ * (never a normal CDI scope), so handler discovery via {@code @Named} on the concrete class works.
  */
 @Named("warehouseLocationHandler")
+@NeoExtension(spec = "warehouse", entity = "location")
 public class WarehouseLocationHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(WarehouseLocationHandler.class);
@@ -62,6 +70,14 @@ public class WarehouseLocationHandler implements NeoHandler {
   private static final String FIELD_REGION = "region";
   private static final String FIELD_RESPONSE = "response";
   private static final String FIELD_DATA = "data";
+  /**
+   * ETP-5806 — structured SEPA address fields, backed by {@code org.openbravo.sepa.iso20022}'s
+   * typed {@code Location} getters/setters (see {@link #applyGeoLocFields}).
+   */
+  private static final String FIELD_STREET_NAME = "streetName";
+  private static final String FIELD_BUILDING_NUMBER = "buildingNumber";
+  private static final String FIELD_BUILDING_NAME = "buildingName";
+  private static final String FIELD_CITY_NAME = "cityName";
 
   @Override
   public NeoResponse handle(NeoContext ctx) {
@@ -100,6 +116,11 @@ public class WarehouseLocationHandler implements NeoHandler {
     JSONObject body = ctx.getRequestBody();
     OBContext obCtx = ctx.getObContext();
 
+    NeoResponse rejected = rejectIncompleteAddressPayload(body, nullIfEmpty(body.optString(FIELD_COUNTRY, null)));
+    if (rejected != null) {
+      return rejected;
+    }
+
     OBContext.setAdminMode(true);
     try {
       Location geoLoc = OBProvider.getInstance().get(Location.class);
@@ -130,6 +151,12 @@ public class WarehouseLocationHandler implements NeoHandler {
       if (geoLoc == null) {
         return NeoResponse.error(404, "Location not found: " + locId);
       }
+      String bodyCountryId = nullIfEmpty(body.optString(FIELD_COUNTRY, null));
+      String effectiveCountryId = resolveEffectiveCountryId(bodyCountryId, geoLoc);
+      NeoResponse rejected = rejectIncompleteAddressPayload(body, effectiveCountryId);
+      if (rejected != null) {
+        return rejected;
+      }
       applyGeoLocFields(body, geoLoc);
       OBDal.getInstance().flush();
 
@@ -137,6 +164,16 @@ public class WarehouseLocationHandler implements NeoHandler {
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /**
+   * ETP-5806 — country falls back to the existing record's own country when the body omits it.
+   */
+  private static String resolveEffectiveCountryId(String bodyCountryId, Location geoLoc) {
+    if (bodyCountryId != null) {
+      return bodyCountryId;
+    }
+    return geoLoc.getCountry() != null ? geoLoc.getCountry().getId() : null;
   }
 
   // ------------------------------------------------------------------ get by id
@@ -154,12 +191,58 @@ public class WarehouseLocationHandler implements NeoHandler {
     }
   }
 
+  // ------------------------------------------------------------------ validation
+
+  /**
+   * ETP-5806 — Street, Number, City and Country are mandatory for the Warehouse location, the
+   * same product decision as {@code ContactsLocationAddressHandler} (Etendo Go is stricter than
+   * Classic, where the 3 SEPA fields are optional). This entity is tab-less and has no "reuse an
+   * existing C_Location" mode, so the check applies unconditionally on both create and update.
+   */
+  private static NeoResponse rejectIncompleteAddressPayload(JSONObject body, String countryId) {
+    List<String> missing = StructuredAddressComposer.missingMandatoryFields(
+        nullIfEmpty(body.optString(FIELD_STREET_NAME, null)),
+        nullIfEmpty(body.optString(FIELD_BUILDING_NUMBER, null)),
+        nullIfEmpty(body.optString(FIELD_CITY_NAME, null)),
+        countryId);
+    if (!missing.isEmpty()) {
+      return NeoResponse.error(400, "Missing required field(s): " + String.join(", ", missing));
+    }
+    // ETP-5806 follow-up — see StructuredAddressComposer#fieldsExceedingMaxLength: without this,
+    // a value longer than the DB column (EM_OBSEPA_StrtNm/BldgNb/BldgNm) reached OBDal.flush() as
+    // a raw data-truncation SQL exception, surfaced as an opaque 500 on both create and update.
+    List<String> tooLong = StructuredAddressComposer.fieldsExceedingMaxLength(
+        nullIfEmpty(body.optString(FIELD_STREET_NAME, null)),
+        nullIfEmpty(body.optString(FIELD_BUILDING_NUMBER, null)),
+        nullIfEmpty(body.optString(FIELD_BUILDING_NAME, null)));
+    if (!tooLong.isEmpty()) {
+      return NeoResponse.error(400, "Field(s) exceed maximum length: " + String.join(", ", tooLong));
+    }
+    return null;
+  }
+
   // ------------------------------------------------------------------ field mapping
 
   private static void applyGeoLocFields(JSONObject body, Location geoLoc) {
-    geoLoc.setAddressLine1(nullIfEmpty(body.optString("addressLine1", null)));
-    geoLoc.setAddressLine2(nullIfEmpty(body.optString("addressLine2", null)));
-    geoLoc.setCityName(nullIfEmpty(body.optString("cityName", null)));
+    String streetName = nullIfEmpty(body.optString(FIELD_STREET_NAME, null));
+    String buildingNumber = nullIfEmpty(body.optString(FIELD_BUILDING_NUMBER, null));
+    String buildingName = nullIfEmpty(body.optString(FIELD_BUILDING_NAME, null));
+    geoLoc.setOBSEPAStreetName(streetName);
+    geoLoc.setOBSEPABuildingNumber(buildingNumber);
+    geoLoc.setOBSEPABuildingName(buildingName);
+
+    // ETP-5806 — same compute-only-when-street-present rule as ContactsLocationAddressHandler.
+    // See the comment there for the Classic-parity rationale.
+    if (streetName != null) {
+      ComposedAddress composed =
+          StructuredAddressComposer.composeAddressLines(streetName, buildingNumber, buildingName);
+      geoLoc.setAddressLine1(composed.getAddress1());
+      geoLoc.setAddressLine2(composed.getAddress2());
+    } else {
+      geoLoc.setAddressLine1(nullIfEmpty(body.optString("addressLine1", null)));
+      geoLoc.setAddressLine2(nullIfEmpty(body.optString("addressLine2", null)));
+    }
+    geoLoc.setCityName(nullIfEmpty(body.optString(FIELD_CITY_NAME, null)));
     geoLoc.setPostalCode(nullIfEmpty(body.optString("postalCode", null)));
 
     String countryId = nullIfEmpty(body.optString(FIELD_COUNTRY, null));
@@ -182,8 +265,12 @@ public class WarehouseLocationHandler implements NeoHandler {
     json.put("name", buildDisplayName(geoLoc));
     json.put("addressLine1", orNull(geoLoc.getAddressLine1()));
     json.put("addressLine2", orNull(geoLoc.getAddressLine2()));
-    json.put("cityName", orNull(geoLoc.getCityName()));
+    json.put(FIELD_CITY_NAME, orNull(geoLoc.getCityName()));
     json.put("postalCode", orNull(geoLoc.getPostalCode()));
+    // ETP-5806 — structured SEPA address fields, so the modal can pre-populate them.
+    json.put(FIELD_STREET_NAME, orNull(geoLoc.getOBSEPAStreetName()));
+    json.put(FIELD_BUILDING_NUMBER, orNull(geoLoc.getOBSEPABuildingNumber()));
+    json.put(FIELD_BUILDING_NAME, orNull(geoLoc.getOBSEPABuildingName()));
     if (geoLoc.getCountry() != null) {
       json.put(FIELD_COUNTRY, geoLoc.getCountry().getId());
       // ETP-5022: getIdentifier(), NOT getName(). getName() is the plain Hibernate getter —
