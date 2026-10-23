@@ -4369,8 +4369,9 @@ behaviour is unchanged. Channels as noted per field:
   a single bill-to location. The agent sends the address (one `etendo_selectors` call) or uses
   `etendo_batch`. Running the pre-hook before that check is a platform decision, pending and outside
   ETP-5703.
-- **Sales order and sales quotation headers** (`SalesOrderHeaderHandler`,
-  `SalesQuotationHeaderHandler`; not the purchase order) — the same create default for
+- **Sales order, sales quotation and purchase order headers** (`SalesOrderHeaderHandler`,
+  `SalesQuotationHeaderHandler`, and since ETP-5881 `PurchaseOrderHeaderHandler`, which left a
+  public API create without the vendor's address) — the same create default for
   `partnerAddress`, with the location flag the column's own AD validation rule requires:
   `C_Order.C_BPartner_Location_ID` uses "C_BPartner Location - Ship To" (`IsShipTo='Y'`), the invoice
   uses "… - Bill To" (`IsBillTo='Y'`). Only when that fills `partnerAddress` is `invoiceAddress`
