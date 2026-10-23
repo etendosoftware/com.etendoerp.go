@@ -5916,6 +5916,77 @@ A list response carries one page, so a total drawn next to it covers the loaded 
 - `outstandingAmount` exists for invoices only. `approximate` and `missingRateCurrencies` follow the `NeoCurrencyTotals` rule: a non-zero foreign subtotal was converted / a currency without rate is left out and listed.
 - Draft discount compensation: the grid rewrites `grandTotalAmount` (and invoice `outstandingAmount`) of an unprocessed document with `etgoTotalDiscount > 0` and no active discount line to `amount * (1 - pct/100)`. The aggregate applies the same rule per row in HQL, so the footer adds up to the visible rows. Rounding differs slightly: the server uses PostgreSQL `round(numeric, 2)` (half away from zero) per row, the grid uses Java half-up (`NeoHandlerUtils.roundHalfUp`); they can differ by one cent only for negative exact halves or floating-point edge cases.
 
+#### 5.3.5 Payment terms — days validation, duplicates and days-only create (`PaymentTermHandler`, ETP-5826)
+
+`handlers/PaymentTermHandler`, bound with `@NeoExtension(spec = "payment-term", entity = "header")`
+(no `Java_Qualifier`). A CRUD pre-hook on `C_PaymentTerm` writes (POST / PUT / PATCH), so it runs
+identically on REST single, REST batch and MCP — no channel divergence. It exists because every
+payment-term selector in the SPA offers "+ Crear condición de pago", which creates a term from a
+number of days alone.
+
+| Rule | When | Answer |
+|---|---|---|
+| `overduePaymentDaysRule` (`NetDays`) is required and a whole number: a JSON integer, an integral decimal (`12.0`) or a digit string (`"12"`) — normalized to a number in the body. `7.5`, `"7,5"`, `"abc"`, `"50% 30 / 50% 60"` are refused | create; update when the key is sent (an explicit `null` is refused) | 400, `ETGO_PaymentTermDaysInvalid`, code `payment_term_days_invalid` |
+| the days are within 0–365 | create; update only when the days change (a legacy out-of-range term stays editable) | 400, `ETGO_PaymentTermDaysOutOfRange`, code `payment_term_days_out_of_range` |
+| no other **simple** term in the same client has the same days | create; update only when the days, `offsetMonthDue` or `fixedDueDate` change; only when the term being written is itself simple | 409, `ETGO_PaymentTermDaysDuplicate`, code `payment_term_days_duplicate` |
+| no other term of the same client has exactly this `name` (case-sensitive, untrimmed — the `C_PAYMENTTERM_NAME` unique constraint on `AD_Client_ID, AD_Org_ID, Name`) in the organization the record is saved in, active or not | create (after the name is derived); update only when the name changes. Runs after the days rules | 409, `ETGO_PaymentTermNameDuplicate`, code `payment_term_name_duplicate`, `fields: ["name"]` |
+
+A **simple** term has no `C_PaymentTermLine` rows, `IsDueFixed = 'N'` and `FixMonthOffset` 0 or
+null; it is matched in **any organization, active or inactive**, of the same client, excluding the
+record being updated. This is the same definition the tenant data-fix R52
+(`payment-terms-extended`) uses to decide which seeded terms are missing — keep the two in step.
+
+On **create** the hook fills what the days-only form does not send (any value the caller sends is
+kept): `name` = `"N Días"` (`"1 Día"`), `searchKey` = `"ND"` (`"12D"`), `offsetMonthDue` = 0 and
+`nextBusinessDay` = true — the shape of the seeded terms. Zero days follows the seeded `Inmediato`
+(`"Inmediato"`, `"I"`, `nextBusinessDay` = false). `nextBusinessDay` is an editable field of the
+spec precisely so the injected value is persisted (a discarded field would be dropped by the field
+filter, and the DAL default is `false`).
+
+Every refusal has the `CompletedInvoiceWriteFence` shape, plus a top-level `message`
+(`NeoResponse.ensureTopLevelMessage`). The keys are plain strings, not `AD_MESSAGE` records
+(ETP-5692 decision): the text is English and the SPA translates by key.
+
+```json
+HTTP 409
+{
+  "error": {
+    "status": 409,
+    "code": "payment_term_days_duplicate",
+    "message": "A payment term for 30 days already exists: '30 Días' (30D, id 1A2B…).",
+    "fields": ["overduePaymentDaysRule"],
+    "messageKeys": ["ETGO_PaymentTermDaysDuplicate"],
+    "messageParams": { "days": 30, "paymentTermId": "1A2B…", "paymentTermName": "30 Días",
+                       "paymentTermSearchKey": "30D", "paymentTermActive": true },
+    "hint": "Reuse the existing payment term: set paymentTerms to '1A2B…' on the document instead of creating a new term."
+  },
+  "message": "A payment term for 30 days already exists: '30 Días' (30D, id 1A2B…)."
+}
+```
+
+An inactive match says `already exists but is inactive` and its `hint` asks to reactivate it. The
+400s carry `messageParams` `{ field, min, max, value }`.
+
+**Name clash (QA BUG-1).** The days rule only looks at simple terms, so a term with a month offset,
+a fixed due date or lines that is *named* `"22 Días"` let a days-only create of 22 through, and the
+insert then failed on `C_PAYMENTTERM_NAME` as an HTTP 500 carrying raw SQL. The name rule turns
+that into a keyed 409: `messageParams` `{ paymentTermName, paymentTermId, paymentTermActive }`,
+message `A payment term named '22 Días' already exists in this organization (id …).` (plus
+` (inactive)` when it is), and a `hint` to choose another name or rename the existing term.
+
+The organization compared is the one the record will really get. A caller-sent `organization` is
+never it — `NeoServerOwnedFields` strips it from every write after the pre-hook — so an update uses
+the stored organization and a create resolves the default by running the same
+`NeoMandatoryDefaultsService` pass the generic create runs on every channel, on a scratch copy of
+the body (server-owned fields stripped, no callout cascade). When that cannot be resolved (no AD
+tab in the context) the name rule is skipped and the database constraint stays the backstop.
+
+A days-only create is `POST /sws/neo/payment-term/header` with `{"overduePaymentDaysRule": 12}`;
+the created record (with the derived `name`) is in `response.data[0]`.
+
+Access is the window's: writing needs `AD_Window_Access.IsReadWrite = 'Y'` on window 141 (Payment
+Term) — a role that may edit invoices but holds 141 read-only gets the standard 403.
+
 ## 6. Parent-Child Tab Filtering
 
 When an entity maps to a child tab (`tabLevel > 0`), the servlet automatically filters records by the parent record. The caller provides the parent record ID via the `parentId` query parameter:
