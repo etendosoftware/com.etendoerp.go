@@ -845,7 +845,9 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
    * invoice had that same %, or had no % and no lines (the total-discount line and inactive lines
    * do not count; a line without product does). Otherwise the header is kept and the import still
    * goes through. The lines this import creates (active, with product) never count: the first row
-   * imports onto an empty invoice and still carries the %.
+   * imports onto an empty invoice and still carries the %. The rows run on the purchase scenario
+   * (purchase order into purchase invoice); the rule does not depend on the direction, so one sales
+   * row proves the % reaches a sales invoice by the same rule.
    */
   @Test
   public void importOrderLines_carriesTheOrderDiscount_onlyWithoutPriorLinesOrWithTheSamePercent()
@@ -870,6 +872,7 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
     assertDiscountCarried("another %", "10", "5", false);
     assertDiscountCarried("order at 0 %", "0", null, false);
     assertDiscountCarried("order without %", null, null, false);
+    assertDiscountCarried("sales: empty invoice, no %", true, "10", null, true);
   }
 
   /** A line the draft invoice already holds before the import. */
@@ -882,7 +885,15 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
   /** Imports the whole order onto the scenario's invoice and checks the header's total discount. */
   private void assertDiscountCarried(String label, String orderPct, String invoicePct,
       boolean carried, InvoiceLine... existing) throws Exception {
+    assertDiscountCarried(label, false, orderPct, invoicePct, carried, existing);
+  }
+
+  /** The same check, with the order and the invoice both sales ({@code sales}) or purchase. */
+  private void assertDiscountCarried(String label, boolean sales, String orderPct,
+      String invoicePct, boolean carried, InvoiceLine... existing) throws Exception {
     Probe probe = scenario();
+    when(probe.invoice.isSalesTransaction()).thenReturn(sales);
+    when(probe.order.isSalesTransaction()).thenReturn(sales);
     BigDecimal orderDiscount = orderPct == null ? null : bd(orderPct);
     BigDecimal invoiceDiscount = invoicePct == null ? null : bd(invoicePct);
     when(probe.order.getEtgoTotalDiscount()).thenReturn(orderDiscount);
