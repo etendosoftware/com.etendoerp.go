@@ -19,6 +19,9 @@ on:
       - 'scripts/test_git_conventions.py'
       - '.githooks/lib/git-conventions.sh'
       - '.github/workflows/unit-test-classification.yml'
+      - '.githooks/post-rewrite'
+      - '.githooks/lib/hooks-proof.sh'
+      - 'scripts/test_post_rewrite.py'
 
 jobs:
   unit-test-classification:

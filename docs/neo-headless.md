@@ -3765,8 +3765,14 @@ keys.
 It abstains, leaving the body untouched, when the entity has no bill-to column, the column is not
 mandatory there (`C_Project.BillTo_ID` is optional and is deliberately not touched), the body
 already carries a value, the business partner is unknown or still a `$ref:` placeholder, or the
-partner exposes no usable location. The lookup runs in the caller's own DAL scope — no admin mode —
-so a location the role cannot read never becomes the invoicing address of a document it writes.
+partner exposes no usable location. The MCP call itself runs under `OBContext.setAdminMode()`, which
+skips only the entity access check: the lookup's `OBCriteria` keeps its readable-client and
+readable-organization filters on, so a location the role cannot read — another tenant's, when the
+caller sends a foreign `businessPartner` id — never becomes the invoicing address of a document it
+writes (the lookup returns nothing and the default abstains). Do not disable those filters
+(`setFilterOnReadableClients(false)` / `setFilterOnReadableOrganization(false)`) in these lookups;
+`PartnerLocationDefaults` (the invoice, sales order and quotation header defaults) follows the same
+rule.
 
 **Where it runs.** Both MCP write verbs, and both live since ETP-5415: `etendo_create` in
 `handleCreate` before the mandatory check, and each `etendo_batch` operation in
@@ -3848,6 +3854,7 @@ not: `etendo_create` does not run it in shared code, so it is in the table below
 
 | step | in `etendo_create` | in `etendo_batch` | consequence |
 |---|---|---|---|
+| header defaults filled only by a customization pre-hook (ETP-5703, ETP-5710) — `partnerAddress` of the **sales order, sales quotation** and goods receipt headers | filled when the partner has exactly one matching location | **not filled**: `validateMandatoryFields` runs before the pre-hook and answers the `missingFields` 422 | the **invoice** headers (sales and purchase) no longer diverge: they implement `NeoHandler#resolveServerCreateFields`, run before the pre-check. The other headers have not adopted the hook yet — a follow-up, one `resolveServerCreateFields` override each calling their existing default |
 | `NeoCommercialLinePolicy.injectCommercialAmounts` | **no** in shared code — only from the customizations of sales order, sales quotation, sales invoice and purchase invoice lines (ETP-5528, ETP-5710, §4.12.20, §4.12.31) | yes | `etendo_batch` runs it in `NeoCrudHandler.executePostCreate`; `etendo_create` never reaches that method — it is a separate pipeline. Since ETP-5528, sales order and sales quotation lines get the amounts on every create from their own customizations (`OrderLineDiscountSupport.deriveAmountsOnCreate`), and so do sales and purchase invoice lines (`SalesInvoiceLineHandler` / `PurchaseInvoiceLineHandler` → `InvoiceLineAmountSupport.deriveAmountsOnCreate`; purchase since ETP-5710). Every other entity is as on `develop`: a generic commercial line persists `lineGrossAmount = 0` on a net price list, and purchase order lines still do not get it (measured 2026-09-30: purchase order line gross 0; the purchase invoice line 0 / 0 of that measurement is fixed by ETP-5710). Declared, not fixed in shared code. (`grossUnitPrice` still persists as 0 on both verbs — a separate, undiagnosed defect, not a divergence) |
 | `buildInvalidDatesError` | yes | **no** | no explicit 422 for an unreadable or ambiguous date (ETP-4793 / IMP-24). Type coercion itself does run on the shared path (`executePostCreate` → `coerceTypes`), so the value is not silently mangled — the agent just gets a less precise failure |
 | the `warehouse` default | *Almacén Secundario* | *Almacén Principal* | observed with an identical body, 2026-09-28. Not yet diagnosed: it may be a genuine divergence in the defaults chain or a session dependency. Recorded here so it is not rediscovered as new |
@@ -4174,18 +4181,21 @@ applies only when the request does not carry the field (absent, null, blank or `
 behaviour is unchanged. Channels as noted per field:
 
 - **`partnerAddress`** (`C_BPartner_Location_ID`, mandatory) — on a create with a `businessPartner`
-  and no address, the customization pre-hook (`injectPartnerAddressIfMissing`) sets the partner's
-  active bill-to location **when it has exactly one**. With none or several it abstains: the invoicing
+  and no address, the customization pre-hook (`resolveServerCreateFields`, which `handle()` of the
+  purchase and sales invoice headers also runs) sets the partner's active bill-to location **when it
+  has exactly one**. With none or several it abstains: the invoicing
   address is the caller's choice when there is one to make. Read in the caller's DAL scope.
-  **Declared channel divergence:** this fills the address on **REST single** and on **REST
-  `/batch` / MCP `etendo_batch`** (`handleWithHooks` runs the pre-hook before the create). On **MCP
-  `etendo_create`** it does not: `McpToolRouter.handleCreate` runs its mandatory pre-check
-  (`validateMandatoryFields`) **before** the customization pre-hook, by design (ETP-5535, see
-  `NeoHandler#serverResolvedCreateFields`), so an invoice header created there without
-  `partnerAddress` still answers the precise `missingFields` 422 naming it, even when the partner has
-  a single bill-to location. The agent sends the address (one `etendo_selectors` call) or uses
-  `etendo_batch`. Running the pre-hook before that check is a platform decision, pending and outside
-  ETP-5703.
+  Since ETP-5710 it fills the address on **every channel**, MCP `etendo_create` included. That
+  channel's mandatory pre-check (`validateMandatoryFields`) runs **before** the customization
+  pre-hook (ETP-5535), so the invoice handlers also implement the generic
+  `NeoHandler#resolveServerCreateFields` hook (the same rule, no new logic: `handle()` calls that
+  same method), which `McpHookExecutor.resolveServerCreateFields` calls from `handleCreate` right
+  before that check. With several (or no) bill-to locations the default abstains and the precise
+  `missingFields` 422 naming `partnerAddress` (with the `etendo_selectors` hint) stands; a value the
+  agent sends always wins. `partnerAddress` is deliberately **not** declared in
+  `serverResolvedCreateFields()`: that would make `etendo_schema(view:"create")` list it as optional
+  while the default can abstain and the field is still required. The sales-order / quotation /
+  goods-receipt headers below do **not** have the hook yet and still diverge (§4.12.9).
 - **Sales order and sales quotation headers** (`SalesOrderHeaderHandler`,
   `SalesQuotationHeaderHandler`; not the purchase order) — the same create default for
   `partnerAddress`, with the location flag the column's own AD validation rule requires:
@@ -9213,6 +9223,14 @@ wrapper fields. A new generic extension point lets the customization say so:
   extension point: declare only fields the create cascade derives — a field filled only by the
   customization's own `handle()` would still be refused on `etendo_create`. (`etendo_batch` and REST run
   no such pre-check.)
+- `NeoHandler#resolveServerCreateFields(NeoContext)` (ETP-5710) — the way out for that last case:
+  a no-op default the MCP create path calls on the resolved customization (`@NeoExtension` first,
+  `Java_Qualifier` second) right **before** the mandatory pre-check, with a CRUD `POST` context
+  carrying the live body. Contract: idempotent, never overwrites a caller value, never throws for
+  missing data (abstain and let the pre-check report the field). REST single and batch do not call
+  it — their pre-hook already runs before the create — so a customization usually implements it by
+  delegating to the same helper its `handle()` uses. First user: the invoice headers'
+  `partnerAddress` default.
 - `SalesQuotationLineHandler` and `SalesOrderLineHandler` both declare
   `OrderLineDiscountSupport.SERVER_RESOLVED_CREATE_FIELDS` = `tax`, `lineNetAmount` (ETP-5528, QA
   observation: the create view listed `lineNetAmount` as required although every create without it
@@ -9726,7 +9744,7 @@ guard in a shared service):
 |---|---|
 | purchase invoice line customization | `PurchaseInvoiceLineHandler` — `@NeoExtension(spec = "purchase-invoice", entity = "lines")`, extends `InvoiceLineHandler`, no `@Named` |
 | sales invoice line customization (since ETP-5528; now also discount + update) | `SalesInvoiceLineHandler` |
-| price + amounts, create and update | `InvoiceLineAmountSupport.deriveAmountsOnWrite` (shared by both) |
+| price + amounts (net, gross, `taxableAmount`), create and update | `InvoiceLineAmountSupport.deriveAmountsOnWrite` (shared by both) |
 | completion guard | `InvoiceCompletionLineGuard`, called first by `PurchaseInvoiceHeaderHandler` and `SalesInvoiceHeaderHandler` |
 
 **Precedence between the annotation and the row's qualifier.** The row `purchase-invoice/lines` keeps
@@ -9824,6 +9842,16 @@ left alone. The shared policy leaves `grossAmount` indeterminate when the net is
 `InvoiceLineAmountSupport` sets the gross to 0 whenever the net derives to exactly 0 and no explicit gross
 price exists (100 % discount, free line, quantity edited to 0). Measured live before the fix (purchase
 invoice 10000081, Agua 1 × 10, 100 %): `priceactual 0` but `linenetamt 10`, header total 12.10.
+**`taxableAmount` (`TaxBaseAmt`, ETP-5710 point 2).** Only the core UI callout `SL_Invoice_Amt` filled it,
+before the discount, so a line written through REST/MCP kept 0 or a stale quantity x price (purchase
+invoice 10000123, Cerveza 10 x 25 at 100 %: net 0, taxableAmount 250). `InvoiceLineAmountSupport` now
+sets it to the line's final `lineNetAmount` (the core semantics, `UpdateTax.updateTaxableAmount`),
+rounded to the currency precision, in the invoice-line customizations' pre-hook only. On **create** it
+always overwrites the body's value (a derived 0 is written too; a return line keeps its sign). On
+**update** it is written whenever the net is re-derived, unless the patch itself sends `taxableAmount`
+(the caller's value wins, as for the other amounts). It always equals the net that is stored: a `lineNetAmount` the caller sent (create or update) is followed, not the derived one. Nothing downstream reads the line value (taxes,
+303/349 and posting use `C_InvoiceTax`); it feeds the line grid/form. No channel divergence. Legacy rows
+are not rewritten.
 On update the amounts of the **final** line are recomputed whenever the patch carries `invoicedQuantity`,
 `unitPrice`, `listPrice`, `etgoDiscount`, `grossUnitPrice` or `tax`; an amount the patch itself carries is
 kept. Worked numbers: 10 × 25 at 2 %, IVA 21 % → `unitPrice 24.50`, net 245.00, gross 296.45; quantity
