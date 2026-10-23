@@ -121,58 +121,6 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
   protected abstract DocumentCurrencyRate currencyRate();
 
   /**
-   * Exchange-rate rules of an order-type header (ETP-5840), to call from each subclass's
-   * {@code handle()} BEFORE anything with side effects runs (total discount, actions):
-   * <ul>
-   *   <li>publishes the document's rate type for {@code currencyOptions};</li>
-   *   <li>CRUD write → {@link DocumentCurrencyRate#beforeWrite}: recalculates the rate when the
-   *       order date or the currency changes and the request sends none, and refuses a
-   *       foreign-currency save without a rate (the completion text when the write completes);</li>
-   *   <li>completion through an action ({@code documentAction} = {@code CO}, or the
-   *       {@code DocAction} button running {@code CO}) → refused when the stored rate is empty.</li>
-   * </ul>
-   * REST single, REST batch and MCP all reach this pre-hook.
-   *
-   * @return the refusal, or {@code null} to carry on
-   */
-  protected NeoResponse guardExchangeRate(NeoContext context) {
-    DocumentCurrencyRate rate = currencyRate();
-    context.setAttribute(DocumentCurrencyRate.ATTR_RATE_TYPE, rate.type());
-    if (NeoEndpointType.CRUD.equals(context.getEndpointType())) {
-      return rate.beforeWrite(context, isCompleteAction(context));
-    }
-    if (completesThroughAction(context)) {
-      return rate.refuseCompletionWithoutRate(context.getRecordId());
-    }
-    return null;
-  }
-
-  /**
-   * Whether an ACTION request completes the order: {@code documentAction} with {@code CO}, or the
-   * {@code DocAction} button whose effective value is {@code CO} (what the quotation's "send to
-   * evaluation" posts with an empty body, and what an agent's {@code etendo_action} runs).
-   */
-  static boolean completesThroughAction(NeoContext context) {
-    if (!NeoEndpointType.ACTION.equals(context.getEndpointType())
-        || StringUtils.isBlank(context.getRecordId())) {
-      return false;
-    }
-    if (isActionDocumentActionComplete(context)) {
-      return true;
-    }
-    if (!DocActionRequestSupport.isDocActionButtonPost(context)) {
-      return false;
-    }
-    try {
-      return DOC_STATUS_COMPLETED.equals(DocActionRequestSupport.effectiveDocAction(context));
-    } catch (Exception e) {
-      log.debug("[ETP-5840] Could not resolve the DocAction of {}: {}", context.getRecordId(),
-          e.getMessage());
-      return false;
-    }
-  }
-
-  /**
    * Mirrors the single visible {@code orderDate} field into the hidden {@code accountingDate}
    * field on the request body, unconditionally, before the default CRUD path persists it
    * (ETP-4531 — unified date). The user never sees or edits accountingDate directly; whatever
@@ -238,7 +186,8 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
     }
   }
 
-  private static boolean isCompleteAction(NeoContext context) {
+  /** Package-private: also read by {@link DocumentRateGuards} (ETP-5840). */
+  static boolean isCompleteAction(NeoContext context) {
     if (NeoEndpointType.CRUD.equals(context.getEndpointType())) {
       return isCrudComplete(context);
     }
@@ -255,7 +204,8 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
     return body != null && "CO".equals(body.optString(FIELD_DOCUMENT_ACTION, ""));
   }
 
-  private static boolean isActionDocumentActionComplete(NeoContext context) {
+  /** Package-private: also read by {@link DocumentRateGuards} (ETP-5840). */
+  static boolean isActionDocumentActionComplete(NeoContext context) {
     if (!FIELD_DOCUMENT_ACTION.equals(context.getFieldName())) {
       return false;
     }

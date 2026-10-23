@@ -174,41 +174,6 @@ public abstract class AbstractInvoiceHeaderHandler {
    */
   protected abstract TotalDiscountService getTotalDiscountService();
 
-  /**
-   * The concrete handler's own {@link DocumentCurrencyRate} (ETP-5840), built with the invoice's
-   * {@link DocumentCurrencyRate.RateType}: the rate must be valid on the ACCOUNTING date
-   * ({@code DateAcct}), not the invoice date. One instance per handler instance: it carries a
-   * deferral from {@code handle()} to {@code afterHandle()} of the same request.
-   */
-  protected abstract DocumentCurrencyRate currencyRate();
-
-  /**
-   * Exchange-rate rules of an invoice header (ETP-5840), to call from each subclass's
-   * {@code handle()} after the accounting date is mirrored on create and BEFORE anything with side
-   * effects runs (total discount, completion):
-   * <ul>
-   *   <li>publishes the document's rate type for {@code currencyOptions};</li>
-   *   <li>CRUD write → {@link DocumentCurrencyRate#beforeWrite}: recalculates the rate when the
-   *       accounting date or the currency changes and the request sends none, and refuses a
-   *       foreign-currency save without a rate (the completion text when the write completes);</li>
-   *   <li>completion through the {@code documentAction} action → refused when the stored rate is
-   *       empty. This strict rule is the GO channels' only: {@link InvoiceCompletionRateHook}, which
-   *       {@code ProcessInvoiceUtil} also runs (classic backoffice included), keeps its pre-ETP-5840
-   *       behaviour (any rate on the invoice date, {@code SMFCR_NoRateOnComplete}).</li>
-   * </ul>
-   *
-   * @return the refusal, or {@code null} to carry on
-   */
-  protected NeoResponse guardExchangeRate(NeoContext context) {
-    DocumentCurrencyRate rate = currencyRate();
-    context.setAttribute(DocumentCurrencyRate.ATTR_RATE_TYPE, rate.type());
-    boolean completing = InvoiceCalloutHelper.isInvoiceCompleteAction(context);
-    if (NeoEndpointType.CRUD.equals(context.getEndpointType())) {
-      return rate.beforeWrite(context, completing);
-    }
-    return completing ? rate.refuseCompletionWithoutRate(context.getRecordId()) : null;
-  }
-
   // ---------------------------------------------------------------------------
   // Follow-up document: goods shipment / goods receipt for the pending quantities (ETP-5576)
   // ---------------------------------------------------------------------------
@@ -1095,7 +1060,8 @@ public abstract class AbstractInvoiceHeaderHandler {
    * <p>Identical for both {@link PurchaseInvoiceHeaderHandler} and {@link SalesInvoiceHeaderHandler}
    * — each subclass's {@code afterCallout()} override should just delegate here.
    */
-  protected NeoResponse handleInvoiceAfterCallout(NeoContext context) {
+  protected NeoResponse handleInvoiceAfterCallout(NeoContext context,
+      DocumentCurrencyRate currencyRate) {
     try {
       NeoHandlerUtils.CalloutFields fields = NeoHandlerUtils.extractCalloutFields(context);
       if (fields == null) {
@@ -1113,7 +1079,7 @@ public abstract class AbstractInvoiceHeaderHandler {
       String recordId = InvoiceCalloutHelper.resolveCalloutRecordId(context, fields.formState());
       // ETP-5840: the recalculated rate for the accounting date — also when the classic callout
       // copied a new invoice date into it — returned in updates.eTGOCurrencyRate.
-      currencyRate().applyToCallout(fields, recordId);
+      currencyRate.applyToCallout(fields, recordId);
       blockCalloutDocTypeUpdateIfLocked(fields.updates(), fields.triggerField(), recordId);
       InvoiceCalloutHelper.applySiiAuthorizationCallout(fields.triggerField(), fields.requestBody(), fields.updates());
       InvoiceCalloutHelper.applyVerifactuInvTypeFromDocType(fields.triggerField(), fields.requestBody(), fields.updates());
@@ -1135,7 +1101,7 @@ public abstract class AbstractInvoiceHeaderHandler {
    *
    * <p>No-op when the invoice has no currency. When the invoice has no {@code EM_ETGO_Currency_Rate},
    * its rows are deleted only when this header write left the rate empty
-   * ({@link #headerWriteClearedRate}, ETP-5840); otherwise nothing is done. When the invoice
+   * ({@link DocumentRateGuards#invoiceHeaderWriteClearedRate}, ETP-5840); otherwise nothing is done. When the invoice
    * currency equals the org currency, any
    * conversion-rate row left over from an earlier foreign-currency state is deleted instead
    * (ETP-4836) — switching back to the org currency must clear the tab, not leave it stale.
@@ -1165,24 +1131,8 @@ public abstract class AbstractInvoiceHeaderHandler {
       return;
     }
     String invoiceId = InvoiceCalloutHelper.resolveInvoiceIdFromContext(context);
-    autoCreateOrUpdateConversionRateDocument(invoiceId, headerWriteClearedRate(context));
-  }
-
-  /**
-   * Whether this header CRUD write left the rate empty on purpose (ETP-5840): its body carries
-   * {@code eTGOCurrencyRate} without a positive value — sent so by the caller, or written so by the
-   * pre-hook's recalculation ({@link DocumentCurrencyRate#beforeWrite}). Only then may the
-   * rate-document sync delete the invoice's rows; a write that does not touch the rate, and a line
-   * save, never do.
-   */
-  static boolean headerWriteClearedRate(NeoContext context) {
-    if (context == null || !NeoEndpointType.CRUD.equals(context.getEndpointType())
-        || context.getRequestBody() == null) {
-      return false;
-    }
-    JSONObject body = context.getRequestBody();
-    return body.has(Invoice.PROPERTY_ETGOCURRENCYRATE)
-        && DocumentCurrencyRate.parseRate(body.opt(Invoice.PROPERTY_ETGOCURRENCYRATE)) == null;
+    autoCreateOrUpdateConversionRateDocument(invoiceId,
+        DocumentRateGuards.invoiceHeaderWriteClearedRate(context));
   }
 
   /**

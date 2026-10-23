@@ -39,6 +39,7 @@ import org.mockito.Mockito;
  * the exchange-rate guard (ETP-5840), which ACTION requests complete the order.
  *
  * @covers com.etendoerp.go.schemaforge.AbstractOrderHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.DocumentRateGuards
  */
 public class AbstractOrderHeaderHandlerTest {
 
@@ -527,7 +528,7 @@ public class AbstractOrderHeaderHandlerTest {
     }
   }
 
-  // ── completesThroughAction (ETP-5840: which actions must carry an exchange rate) ──
+  // ── DocumentRateGuards.orderCompletesThroughAction (ETP-5840: which actions must carry an exchange rate) ──
 
   /**
    * Table-driven: an ACTION completes the order — so a foreign order without a rate is refused —
@@ -575,7 +576,7 @@ public class AbstractOrderHeaderHandlerTest {
               .thenReturn((String) c[6]);
         }
 
-        assertEquals((String) c[0], c[7], AbstractOrderHeaderHandler.completesThroughAction(ctx));
+        assertEquals((String) c[0], c[7], DocumentRateGuards.orderCompletesThroughAction(ctx));
       }
     }
   }

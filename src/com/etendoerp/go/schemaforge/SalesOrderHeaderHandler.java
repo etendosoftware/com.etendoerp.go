@@ -76,7 +76,7 @@ public class SalesOrderHeaderHandler extends AbstractOrderHeaderHandler {
 
   /**
    * ETP-5840: the rate is the one valid on the {@code orderDate} ({@code DateOrdered}), shown as
-   * "Order date". Order-family rules in {@link AbstractOrderHeaderHandler#guardExchangeRate}.
+   * "Order date". Order-family rules in {@link DocumentRateGuards#guardOrderHeader}.
    */
   static final DocumentCurrencyRate.RateType RATE_TYPE = new DocumentCurrencyRate.RateType(
       Order.ENTITY_NAME, Order.PROPERTY_ETGOCURRENCYRATE, Order.PROPERTY_ORDERDATE,
@@ -144,7 +144,7 @@ public class SalesOrderHeaderHandler extends AbstractOrderHeaderHandler {
     AbstractOrderHeaderHandler.mirrorAccountingDate(context);
     // ETP-5840: exchange rate — recalculation, save and completion validation — before anything
     // with side effects runs.
-    NeoResponse rateRefusal = guardExchangeRate(context);
+    NeoResponse rateRefusal = DocumentRateGuards.guardOrderHeader(context, currencyRate);
     if (rateRefusal != null) {
       return rateRefusal;
     }

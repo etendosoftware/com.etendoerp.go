@@ -34,6 +34,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
@@ -239,50 +240,7 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     try {
       OBContext.setAdminMode(true);
       try {
-        Invoice invoice;
-        if (SPEC_GOODS_RECEIPT.equals(specName)) {
-          JSONObject body = context.getRequestBody();
-          List<String> receiptIds = parseReceiptIds(body, recordId);
-          // A caller that sends no receiptIds (every existing single-receipt caller) falls
-          // back to [recordId] via parseReceiptIds, so this always resolves to the ORIGINAL,
-          // untouched createFromReceipt path — zero behaviour change for it.
-          invoice = receiptIds.size() == 1
-              ? createFromReceipt(receiptIds.get(0), body)
-              : createFromReceipts(receiptIds, body);
-        } else {
-          invoice = createFromOrder(recordId);
-        }
-        OBDal.getInstance().flush();
-        // Refresh to pick up trigger-generated documentNo and totals set by CreateInvoiceLinesFromProcess.
-        OBDal.getInstance().getSession().refresh(invoice);
-        ensureDocumentNo(invoice);
-
-        // ETP-5381: create and confirm atomically — see CreateDraftInvoiceHandler.handleCreate for
-        // the full rationale. The id is captured before the call because ProcessInvoiceUtil commits
-        // and closes the session, leaving `invoice` detached.
-        String invoiceId = invoice.getId();
-        // ETP-5840: an invoice generated from an order or quotation got its rate recomputed for its
-        // own accounting date; a foreign-currency one without a rate is refused before completing,
-        // and the generation rolled back (catch below) — nothing is left behind.
-        if (!SPEC_GOODS_RECEIPT.equals(specName)) {
-          DocumentCurrencyRate.requireRateForCompletion(invoice, Invoice.PROPERTY_ETGOCURRENCYRATE);
-        }
-        InvoiceCompletionService.completeInvoiceOrThrow(invoiceId, context.getObContext());
-        Invoice completed = OBDal.getInstance().get(Invoice.class, invoiceId);
-
-        JSONObject data = new JSONObject();
-        data.put("id", invoiceId);
-        data.put("documentNo", completed.getDocumentNo());
-        // Not sent before this ticket; the frontend needs it to render the resulting status.
-        data.put("documentStatus", completed.getDocumentStatus());
-
-        JSONObject responseData = new JSONObject();
-        responseData.put("data", data);
-
-        JSONObject wrapper = new JSONObject();
-        wrapper.put(KEY_RESPONSE, responseData);
-
-        return NeoResponse.created(wrapper);
+        return createAndCompleteInvoice(context, specName, recordId);
       } finally {
         OBContext.restorePreviousMode();
       }
@@ -298,6 +256,60 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "An internal error occurred while creating the purchase invoice");
     }
+  }
+
+  /**
+   * Creates the invoice from the receipt(s) or the purchase order and completes it in one step
+   * (ETP-5381). Runs inside {@link #handle}'s admin-mode block, whose catches turn the exceptions
+   * into responses: a {@link DocumentCurrencyRate.MissingRateException} (ETP-5840, order route
+   * only) rolls the whole generation back and answers the 422 completion refusal.
+   */
+  private NeoResponse createAndCompleteInvoice(NeoContext context, String specName,
+      String recordId) throws JSONException {
+    Invoice invoice;
+    if (SPEC_GOODS_RECEIPT.equals(specName)) {
+      JSONObject body = context.getRequestBody();
+      List<String> receiptIds = parseReceiptIds(body, recordId);
+      // A caller that sends no receiptIds (every existing single-receipt caller) falls
+      // back to [recordId] via parseReceiptIds, so this always resolves to the ORIGINAL,
+      // untouched createFromReceipt path — zero behaviour change for it.
+      invoice = receiptIds.size() == 1
+          ? createFromReceipt(receiptIds.get(0), body)
+          : createFromReceipts(receiptIds, body);
+    } else {
+      invoice = createFromOrder(recordId);
+    }
+    OBDal.getInstance().flush();
+    // Refresh to pick up trigger-generated documentNo and totals set by CreateInvoiceLinesFromProcess.
+    OBDal.getInstance().getSession().refresh(invoice);
+    ensureDocumentNo(invoice);
+
+    // ETP-5381: create and confirm atomically — see CreateDraftInvoiceHandler.handleCreate for
+    // the full rationale. The id is captured before the call because ProcessInvoiceUtil commits
+    // and closes the session, leaving `invoice` detached.
+    String invoiceId = invoice.getId();
+    // ETP-5840: an invoice generated from an order or quotation got its rate recomputed for its
+    // own accounting date; a foreign-currency one without a rate is refused before completing,
+    // and the generation rolled back (catch below) — nothing is left behind.
+    if (!SPEC_GOODS_RECEIPT.equals(specName)) {
+      DocumentCurrencyRate.requireRateForCompletion(invoice, Invoice.PROPERTY_ETGOCURRENCYRATE);
+    }
+    InvoiceCompletionService.completeInvoiceOrThrow(invoiceId, context.getObContext());
+    Invoice completed = OBDal.getInstance().get(Invoice.class, invoiceId);
+
+    JSONObject data = new JSONObject();
+    data.put("id", invoiceId);
+    data.put("documentNo", completed.getDocumentNo());
+    // Not sent before this ticket; the frontend needs it to render the resulting status.
+    data.put("documentStatus", completed.getDocumentStatus());
+
+    JSONObject responseData = new JSONObject();
+    responseData.put("data", data);
+
+    JSONObject wrapper = new JSONObject();
+    wrapper.put(KEY_RESPONSE, responseData);
+
+    return NeoResponse.created(wrapper);
   }
 
   /**

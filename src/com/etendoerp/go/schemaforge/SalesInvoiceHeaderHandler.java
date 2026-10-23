@@ -100,7 +100,7 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
   /**
    * ETP-5840: the rate is the one valid on the {@code accountingDate} ({@code DateAcct}) — not the
    * invoice date — shown as "Accounting date". Invoice-family rules in
-   * {@link AbstractInvoiceHeaderHandler#guardExchangeRate}.
+   * {@link DocumentRateGuards#guardInvoiceHeader}.
    */
   static final DocumentCurrencyRate.RateType RATE_TYPE = new DocumentCurrencyRate.RateType(
       Invoice.ENTITY_NAME, Invoice.PROPERTY_ETGOCURRENCYRATE, Invoice.PROPERTY_ACCOUNTINGDATE,
@@ -108,10 +108,6 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
 
   private final DocumentCurrencyRate currencyRate = new DocumentCurrencyRate(RATE_TYPE);
 
-  @Override
-  protected DocumentCurrencyRate currencyRate() {
-    return currencyRate;
-  }
 
   @Inject
   private DocumentPostingService postingService;
@@ -196,7 +192,7 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
     injectPartnerAddressIfMissing(context);
     // ETP-5840: exchange rate — recalculation on the accounting date, save and completion
     // validation — before anything with side effects runs.
-    NeoResponse rateRefusal = guardExchangeRate(context);
+    NeoResponse rateRefusal = DocumentRateGuards.guardInvoiceHeader(context, currencyRate);
     if (rateRefusal != null) {
       return rateRefusal;
     }
@@ -252,7 +248,7 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
    */
   @Override
   public NeoResponse afterCallout(NeoContext context) {
-    return handleInvoiceAfterCallout(context);
+    return handleInvoiceAfterCallout(context, currencyRate);
   }
 
   /**

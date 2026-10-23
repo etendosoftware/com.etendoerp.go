@@ -82,6 +82,7 @@ import org.openbravo.model.common.invoice.ReversedInvoice;
  * </ul>
  *
  * @covers com.etendoerp.go.schemaforge.AbstractInvoiceHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.DocumentRateGuards
  */
 public class AbstractInvoiceHeaderHandlerTest {
 
@@ -109,11 +110,6 @@ public class AbstractInvoiceHeaderHandlerTest {
     protected TotalDiscountService getTotalDiscountService() {
       // Not exercised by this test file — applyTotalDiscountToRecord() null-guards on this.
       return null;
-    }
-
-    @Override
-    protected DocumentCurrencyRate currencyRate() {
-      return new DocumentCurrencyRate(SalesInvoiceHeaderHandler.RATE_TYPE);
     }
 
     public NeoResponse callValidateDocTypeLock(NeoContext ctx) {
@@ -151,7 +147,8 @@ public class AbstractInvoiceHeaderHandlerTest {
     }
 
     public NeoResponse callHandleInvoiceAfterCallout(NeoContext ctx) {
-      return handleInvoiceAfterCallout(ctx);
+      return handleInvoiceAfterCallout(ctx,
+          new DocumentCurrencyRate(SalesInvoiceHeaderHandler.RATE_TYPE));
     }
 
     public void callEnrichIsRectificative(JSONObject rec) throws Exception {
@@ -2061,9 +2058,9 @@ public class AbstractInvoiceHeaderHandlerTest {
       NeoContext ctx = NeoContext.builder().httpMethod("PATCH")
           .endpointType((NeoEndpointType) c[1]).recordId("inv-1")
           .requestBody((JSONObject) c[2]).build();
-      assertEquals((String) c[0], c[3], AbstractInvoiceHeaderHandler.headerWriteClearedRate(ctx));
+      assertEquals((String) c[0], c[3], DocumentRateGuards.invoiceHeaderWriteClearedRate(ctx));
     }
-    assertFalse("null context", AbstractInvoiceHeaderHandler.headerWriteClearedRate(null));
+    assertFalse("null context", DocumentRateGuards.invoiceHeaderWriteClearedRate(null));
   }
 
   /**
