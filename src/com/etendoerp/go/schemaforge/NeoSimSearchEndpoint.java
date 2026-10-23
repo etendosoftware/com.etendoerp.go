@@ -83,23 +83,47 @@ class NeoSimSearchEndpoint {
       JSONArray itemsArray = BoundedJsonParser.parseArray(itemsJson);
       JSONObject results = new JSONObject();
       for (int i = 0; i < itemsArray.length(); i++) {
-        String searchTerm = itemsArray.getString(i).replace("'", "");
-        if (StringUtils.isBlank(searchTerm)) {
-          continue;
+        JSONObject found = searchTerm(entityName, itemsArray.getString(i), qtyResults,
+            minSimPercent);
+        if (found != null) {
+          results.put(ITEM_LABEL_PREFIX + i, found);
         }
-        String baseTerm = toBaseLanguageTerm(entityName, searchTerm);
-        WSResult result = SimSearch.handleSimSearch(baseTerm, entityName, qtyResults, minSimPercent);
-        results.put(ITEM_LABEL_PREFIX + i, result.getJSONResponse());
       }
       return NeoResponse.ok(results);
     } catch (JSONException e) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Invalid items JSON array: " + e.getMessage());
     } catch (ClassNotFoundException e) {
       return NeoResponse.error(422, "Entity not found: " + entityName);
-    } catch (Exception e) {
+    } catch (RuntimeException e) {
       log.error("Error processing simsearch request", e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
     }
+  }
+
+  /**
+   * The similarity search of ONE term, exactly as {@link #handle} runs it per item: quotes are
+   * removed, the term is rewritten to its base-language name and handed to {@link SimSearch}.
+   * Shared with the OCR review (ETP-5715), which searches the products of a scanned invoice the way
+   * the application's own review does.
+   *
+   * @param entityName the DAL entity to search ({@code Product}, {@code BusinessPartner}...)
+   * @param rawTerm the text to look for
+   * @param qtyResults most candidates to return
+   * @param minSimPercent minimum similarity, as the webhook takes it
+   * @return the WSResult-shaped answer ({@code data: [{id, name, similarity_percent}]}), or
+   *     {@code null} when the term is blank
+   * @throws JSONException when the answer cannot be built
+   * @throws ClassNotFoundException when the entity is unknown
+   */
+  static JSONObject searchTerm(String entityName, String rawTerm, int qtyResults,
+      String minSimPercent) throws JSONException, ClassNotFoundException {
+    String searchTerm = rawTerm.replace("'", "");
+    if (StringUtils.isBlank(searchTerm)) {
+      return null;
+    }
+    String baseTerm = toBaseLanguageTerm(entityName, searchTerm);
+    WSResult result = SimSearch.handleSimSearch(baseTerm, entityName, qtyResults, minSimPercent);
+    return result.getJSONResponse();
   }
 
   /**

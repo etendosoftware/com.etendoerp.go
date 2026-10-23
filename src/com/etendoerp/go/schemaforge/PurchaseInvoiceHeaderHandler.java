@@ -157,6 +157,15 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
     return InvoiceDocumentAvailability.unavailable(subject);
   }
 
+  /**
+   * {@inheritDoc} The invoice windows un-post a posted invoice before reactivating it
+   * ({@code preUnpost: true} in the SPA), so the MCP does too (ETP-5715).
+   */
+  @Override
+  public boolean unpostBeforeReactivate() {
+    return true;
+  }
+
   /** The PIS actions: served to the SPA, never to an agent (ETP-5558). */
   @Override
   public Set<String> agentExcludedActions() {
