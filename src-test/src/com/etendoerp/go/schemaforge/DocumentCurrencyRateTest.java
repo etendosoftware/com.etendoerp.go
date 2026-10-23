@@ -376,6 +376,41 @@ public class DocumentCurrencyRateTest {
   }
 
   /**
+   * The create-and-complete generation flows: {@code requireRateForCompletion} throws exactly when
+   * {@code missingRateOnCompletion} yields a refusal (foreign currency, empty rate), and the exception
+   * answers the same 422 completion refusal; a positive rate or the org currency pass silently.
+   */
+  @Test
+  public void requireRateForCompletionThrowsOnlyForAForeignDocumentWithoutRate() throws Exception {
+    Object[][] passing = {
+        { "own positive rate", "usd", new BigDecimal("1.10") },
+        { "org currency", "eur", null },
+    };
+    for (Object[] c : passing) {
+      Order doc = storedDoc(ORDER_TYPE, (String) c[1], "2026-03-01", (BigDecimal) c[2], false);
+      DocumentCurrencyRate.requireRateForCompletion(doc, RATE);
+      assertNull((String) c[0], DocumentCurrencyRate.missingRateOnCompletion(doc, RATE));
+    }
+
+    Order foreign = storedDoc(ORDER_TYPE, "usd", "2026-03-01", null, false);
+    DocumentCurrencyRate.MissingRateException thrown = null;
+    try {
+      DocumentCurrencyRate.requireRateForCompletion(foreign, RATE);
+    } catch (DocumentCurrencyRate.MissingRateException e) {
+      thrown = e;
+    }
+    assertNotNull("a foreign document without rate must be refused", thrown);
+    assertEquals(DocumentCurrencyRate.missingRateOnCompletion(foreign, RATE), thrown.getMessage());
+    NeoResponse response = thrown.toResponse();
+    assertEquals(422, response.getHttpStatus());
+    JSONObject error = response.getBody().getJSONObject("error");
+    assertEquals(DocumentRateMessages.CODE_MISSING_ON_COMPLETE, error.getString("code"));
+    JSONObject params = error.getJSONObject(NeoProcessService.MESSAGE_PARAMS);
+    assertEquals("eur", params.getString("orgCurrency"));
+    assertEquals("usd", params.getString("documentCurrency"));
+  }
+
+  /**
    * A batch create whose currency is a {@code $ref:} to an earlier operation does not know its
    * currency yet: it is deferred to the post-hook, not refused nor recalculated with a bogus id.
    */
