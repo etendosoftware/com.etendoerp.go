@@ -124,25 +124,33 @@ are unaffected either way.
 
 ## 2. Deployment — constraints that are not visible in the code
 
-### 🟠 2.1 What the legacy price fallback costs
+### 🟠 2.1 Fallback buyers are unlimited and stuck on `legacy-productive`
 
-**Ticket:** owner ETP-5053 (moving fallback buyers to a real plan); ETP-5051 is where the uncapped
-buyers start to matter. Related ETP-5046, whose develop merge introduced the fallback, and ETP-5049
-(the offer endpoint, see below).
+**Ticket:** owner ETP-5053 (moving them to a real plan); felt in ETP-5051 (quotas). Related
+ETP-5046, whose develop merge introduced the fallback.
 
-How the fallback works — the one predicate, the self-retirement on the first priced plan, the
-reload edge case — is the design doc's §6.1; the operator procedure is its §6.2. This section keeps
-only what is still open. (Solved in ETP-5049: `GET /sws/go/billing/offers` used to quote the legacy
-price whatever the catalog said; it now quotes the catalog's default plan through the same fallback
-predicate as the charge — `feature-flags-and-tenant-upgrade.md` §2, *The billing offer*. The now
-caller-less endpoint is to be retired: §5.16, ETP-5900.)
+- **Who.** Customers who bought through the legacy price fallback land on the grandfathered
+  `legacy-productive` plan.
+- **Unlimited.** That plan has no quota rows, so they have no limits (§5.1).
+- **Harmless today, real from ETP-5051.** Nothing enforces quotas yet. Once ETP-5051 does, these
+  are the only customers it cannot limit.
+- **The fix is a plan change, not a quota.** Adding quotas to `legacy-productive` is not the fix;
+  moving these customers to a real catalog plan is. That is a plan change, which only ETP-5053
+  provides. Until then they stay on `legacy-productive`.
+- **How many depends on the environment.** New fallback buyers appear only while no active catalog
+  plan carries a provider price (`PlanCatalogService` fallback predicate). In production the
+  fallback is the selling path until the first priced plan is created, so everyone who buys before
+  then joins this group.
+- **What their subscription row records.** At purchase, the charged price id but no amount or
+  currency, because the plan has none (design doc §7). Since ETP-5048 the billing reconciliation
+  fills a missing price id, amount and currency on an open row from the subscription's Stripe price,
+  once, audited as a `reconcile:subscription-price:<sub>` billing event
+  (`SubscriptionReconciler.fillMissingPrice`, §2.4). Until the reconciliation has run on an
+  environment such rows stay without an amount; a fractional-cent price leaves the amount empty
+  even then (§4.11).
 
-- **Fallback buyers are uncapped and stuck on `legacy-productive` → ETP-5053, felt in ETP-5051.**
-  A buyer who pays through the fallback lands on `legacy-productive`, which has zero quota rows and
-  is therefore unlimited (§5.1). That costs nothing today and becomes real the moment ETP-5051
-  enforces quotas. The fix is not a quota on the grandfathered plan but moving these tenants to a
-  real plan — a plan change, which only ETP-5053 provides. Their subscription row snapshots
-  the charged price id but no amount or currency, since the plan has none (design doc §7).
+How the fallback works: design doc §6.1; the operator procedure: its §6.2. The offers endpoint
+that used to quote the legacy price was fixed in ETP-5049 and is now to be retired (§5.16, ETP-5900).
 
 ### 🟠 2.3 Run the backfill AFTER the deploy, never before — and only as part of the switch
 
