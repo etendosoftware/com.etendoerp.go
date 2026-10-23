@@ -122,6 +122,40 @@ count reaches 0, and the fallback WARN no longer appears. The cutover deletes §
 
 The one 🔴 decision the 2026-09-28 answers did not touch. Options and default: §5.13.
 
+### 🟡 1.8 Is the `billing-reconciliation-schedule` flag overkill? — decide later (ETP-5048)
+
+**Ticket:** related ETP-5048; no ticket of its own. **Status:** open, **decide later** — safe to
+revisit after the first production weeks.
+
+**To raise with / decides:** Martin
+
+The flag is a second switch on top of one production already has. Production is never restarted,
+so there the reconciliation is scheduled by hand in the Process Request window, and unscheduling
+that request already stops it. On top of that, the flag:
+
+- gates every scheduled run (timing *Schedule*, whoever created the request);
+- turns a scheduled run into an ERROR in Process Monitor while it is off, and sends one internal
+  alert per UTC day for it (`billing-reconcile-schedule-flag-off`, a
+  `reconcile:schedule-flag-off:<yyyy-MM-dd>` row; approved 2026-10-21);
+- drives `BillingReconciliationScheduleStartup`, which plants the request on environments that do
+  restart.
+
+**Options:**
+
+1. **Keep it as a master kill switch** — stop every scheduled reconciliation from ConfigCat (or the
+   property) without touching Process Request, on every environment at once.
+2. **Drop it, and the startup hook** — rely on Process Request alone, as Demo Trial Notices does.
+
+**What removing it deletes:** the `FLAG_BILLING_RECONCILIATION_SCHEDULE` flag, the startup hook
+(`BillingReconciliationScheduleStartup` and its fixed request id), the in-run gate and the flag-off
+ERROR path with its once-a-day alert in `BillingReconciliationProcess` (`isScheduledRun`,
+`timingOf`, `alertFlagOffOncePerDay`), their tests
+(`BillingReconciliationScheduleStartupTest`, the gate cases of `BillingReconciliationProcessTest`)
+and their documentation (design `plans/2026-10-18-etp-5048-billing-reconciliation-design.md`
+decision 11, `billing-reconciliation.md` §3, the flag section of
+`feature-flags-and-tenant-upgrade.md`). The menu entry, the process and Process Request scheduling
+are unaffected either way.
+
 ---
 
 ## 2. Deployment — constraints that are not visible in the code
@@ -198,8 +232,7 @@ production checkout has gone live, those rows describe real payers, and the adop
 read each one's subscription from Stripe and record its price, amount and currency. That is
 ETP-5048's local-to-provider reconciliation (PRD §9.3: read the real Stripe state of every locally
 active subscription and correct it locally), which fills the missing price on its first run;
-`StripeApiClient` makes the read cheap. Until ETP-5048 lands such rows stay priceless — harmless
-for access, which reads `STATUS` alone, and visible only in billing records and quota snapshots.
+`StripeApiClient` makes the read cheap. **Delivered in ETP-5048:** the reconciliation's local-to-provider phase fills `PROVIDER_PRICE_ID`, `SNAPSHOT_AMOUNT` and `SNAPSHOT_CURRENCY` from the subscription's first item price on every open row where they are NULL, once, audited as a `reconcile:subscription-price:<sub>` billing event (`plans/2026-10-18-etp-5048-billing-reconciliation-design.md` §5). Until it has run on an environment such rows stay priceless — harmless for access, which reads `STATUS` alone, and visible only in billing records and quota snapshots.
 
 ### 🟠 2.5 `./gradlew test` needs JDK 17, not the default 21
 
@@ -349,6 +382,22 @@ open no row, and the lifecycle webhooks keep the `ETGO_SubscriptionStatus`/`DueA
   `update.database`, silently switching an environment back; the operator's row has no module.
 - **Residual after the switch:** R42 re-inserts the `ETGO_TenantPlan` marker for tenants that first
   reach it after the switch — its own topic, §3.13 (interim workaround and proper fix there).
+
+### 🟠 2.10 Billing reconciliation go-live: the flag and the Process Request go together (ETP-5048)
+
+**Ticket:** ETP-5048. Production is never restarted, so the reconciliation is scheduled by hand
+there (`billing-reconciliation.md` §3).
+
+Turn the `billing-reconciliation-schedule` flag on **and** create the production Process Request
+(**Billing Reconciliation**, client System, timing *Schedule*, hourly) in the same step. A request
+firing while the flag is off does no work and ends as an ERROR in Process Monitor every hour, plus
+one internal alert a day (`billing-reconcile-schedule-flag-off`); a flag on with no request does
+nothing at all. Whether the flag is needed is open: §1.8.
+
+On a fresh local environment the menu popup answers "You do not have sufficient privileges" until a
+full build has run (`./gradlew compile.complete`, then a smartbuild): a class-mode smartbuild does
+not regenerate the WAD servlet the popup goes through. A normal deploy runs WAD. See
+`billing-reconciliation.md` §2.
 
 ---
 
@@ -596,6 +645,24 @@ calling user, whose role can read neither `AD_Preference` nor `ETGO_SUBSCRIPTION
   falls through to the preference fallback nor to `LEGACY_ENTITLEMENT`. Onboarding a canceled
   tenant again would run `forceTestModeForFreeTenant` on it, routing its SII / TicketBAI /
   VeriFactu submissions to the test endpoints — a compliance stake, not a config nit.
+- **`incomplete_expired` closes the row too (ETP-5048, Martin 2026-10-20).** A subscription whose
+  first payment never completed is terminal at Stripe; `SubscriptionLifecycleApplier` maps it like
+  `canceled` (`EXPIRED`, row closed at `ended_at`), on the webhook and in the billing
+  reconciliation alike.
+- **`paused` is alert-only, on every path (ETP-5048, Martin 2026-10-20).** A
+  `customer.subscription.updated` carrying `paused`, the dedicated `customer.subscription.paused`
+  event, and the billing reconciliation all leave the status, the grace anchor and access untouched
+  and raise **one review alert per pause episode** (`PausedSubscriptionAlert`: an open
+  `reconcile:subscription-paused:<sub>` billing-event row, a WARN, an internal alert; once per
+  episode decided by Martin on 2026-10-21, it was once per subscription). The episode ends when a
+  path sees the subscription not paused — the webhook on `customer.subscription.updated` /
+  `.deleted` and on `customer.subscription.resumed` (handled only for this), the reconciliation on
+  every re-read — which renames the open row to `<id>:ended:<millis>`, so the next pause alerts
+  again. Paused collection (`reconcile:pause-collection:<sub>`, raised by the reconciliation only,
+  a WARN and the row without an internal alert) has the same episodes, ended when
+  `pause_collection` is cleared. Our checkout sets no trial, so `paused` means a trial or a pause was configured in
+  Stripe by hand, and a paused subscription can be resumed — closing the row would make that
+  impossible, since a closed row is never reopened.
 - **The row, not the marker, makes a tenant productive (ETP-5047 review, B1).**
   `TenantEnvironmentLifecycleService.resolve` checks for any active subscription row (open or
   closed — `findLatest` ignores an inactive one) **first** and takes the productive path when
@@ -1175,6 +1242,89 @@ below assume it (item 1's 503 is decided per enforcement flag).
 | 10 | Two readers of the 402 decision: core `apiFetch` reads only the message text; schema_forge's `readEnvironmentAccessDecision` (`d18c484d9`) reads `error.decision` first. | Same answer while the backend keeps both in sync; they drift if it stops. | **ETP-5047** | core: the reader moves into `app-shell-core` (`d57298c06`); the schema_forge side waits for a core release. |
 | 11 | **Unverified.** Purchase-source ownership is `EtendoGoJwtDalHelper.clientBelongsToAccountEmail`: any active user of the environment whose email or username is the account email (or an `email+suffix` variant). That matches a member **invited** into another owner's environment, not only its owner. | An invited member might name another owner's demo as `demoClientId`, so a purchase would associate, copy and revoke a demo the buyer does not own — against FR-08 of `schema_forge/docs/plans/etp-5396-demo-to-pro-prd.md`. | `develop` (predates ETP-5046/5047) | None — **ETP-5743** "Restrict the purchase demo source to the account owner". |
 | 12 | A canceled tenant cannot re-subscribe its own environment: every checkout provisions a new one, and since ETP-5047 a canceled productive tenant is not a demo source either (§4.14). The flow was decided on 2026-10-14 (Martin Taal; §2.9, §3.7). The same-name check `ownsProductiveNamed` (pre-checkout and onboarding) asks `resolvePlan`, which reads a canceled tenant as `free`, so its name does not count as taken. | A canceled customer who wants to come back gets a second environment, and may give it the canceled one's company name. | **ETP-5047** (it closes the row on cancel, so a canceled tenant reads `free`; the missing flow itself predates it) | **Fixed by ETP-5742**: the owner re-subscribes the canceled environment from its blocked screen (`POST /sws/go/billing/reactivation`, applied by the payment webhook), and `ownsProductiveNamed` also counts a productive lifecycle type, so the name stays taken (`feature-flags-and-tenant-upgrade.md` §3). |
+
+### 🟡 4.15 Paid provisioning is only half extracted from `EtendoGoJwtServlet` (ETP-5048)
+
+**Ticket:** accepted by Martin on 2026-10-18 as a narrower extraction; to be finished by
+[ETP-5892](https://etendoproject.atlassian.net/browse/ETP-5892) "Extract onboarding steps and webhook
+application from EtendoGoJwtServlet" (created 2026-10-23 in epic ETP-3504), which must be coordinated
+with ETP-5396. Related ETP-5048.
+
+ETP-5048 needed to provision a paid purchase with no browser attached (the billing reconciliation),
+and the decision was to pull the paid provisioning path out of the servlet into a service that takes
+an `OnboardingProgressSink`. What shipped is narrower:
+
+- **Still in `EtendoGoJwtServlet`:** every provisioning step — tenant selection (pooled or classic),
+  client and organization creation, dataset, metadata (`applyPaidUpgradeSideEffects`), the commit,
+  and the post-commit steps (`completeCommittedOnboarding`, the period fill, sample data, costing).
+  They still take a `PrintWriter`, shared by the free and the paid path.
+- **Why:** about 60 servlet tests drive those methods directly or spy on them on the servlet
+  (`EtendoGoJwtServletOnboardingDatasetTest`, `…CoverageTest`, `…HeartbeatTest`,
+  `…DemoDataTransferTest`, among others). Moving them would rewrite those tests in a change whose
+  goal is reconciliation, with no change in behaviour to show for it. This reason covers only the
+  provisioning steps that existed before ETP-5048.
+- **New ETP-5048 code that was placed in the servlet, not deferred:**
+  - `provisionPaidPurchase` and its two private helpers `serverSideAddress` and `serverSideTaxId`.
+    `provisionPaidPurchase` calls the private servlet methods `findCurrencyId`,
+    `isPaidOnboardingNotOwned`, `evaluatePaywall`, `restorePaidSelection` and `claimPaid`.
+  - The webhook paused/resumed glue, `raisePausedSubscriptionAlert` and `endResolvedPauseEpisodes`.
+    They use the servlet's stores (`billingEventStore`, `checkoutRequestStore`) and its
+    `internalAlertService`, and `raisePausedSubscriptionAlert` also calls the private
+    `resolveLifecycleTarget`. The logic itself lives in `payment/PausedSubscriptionAlert`.
+
+  Moving these alone was considered on 2026-10-23 and not done. It would only relocate the
+  coupling: those private methods would be widened to package-private, and `PaidProvisioningService`
+  would still instantiate a servlet. ETP-5892 rewrites them on top of the extracted onboarding
+  service anyway.
+- **What moved:** the transport-independent run, `EtendoGoJwtServlet.runOnboarding`, which is the
+  try/catch/finally that used to sit inside `handleOnboarding` (rollback, outcome record, alert).
+  Also the request-free part of the paid preparation, split into small cores the HTTP path now calls
+  too: `restorePaidSelection`, `claimPaid`, `isPaidOnboardingNotOwned`, `findCurrencyId`.
+- **What `PaidProvisioningService` owns:**
+  - resolving the inputs from the checkout row (`LANGUAGE`/`CURRENCY`/`COUNTRY`, then the account's
+    `ONBOARDING_DRAFT`, then `en_US`/`EUR`/`ES`);
+  - restoring the caller's `OBContext`;
+  - classifying the result (`PROVISIONED`, `FAILED`, `NEEDS_REVIEW`, `NOT_CLAIMED`, `NOT_PAID`).
+
+  It calls `EtendoGoJwtServlet.provisionPaidPurchase` on a fresh servlet instance, which runs the
+  same preparation and `runOnboarding` over an `OnboardingStreamWriter` backed by
+  `NdjsonSinkWriter`. That writer replays the NDJSON lines onto the sink.
+- **What it does not own:** the steps themselves, the NDJSON format, the fenced claim (still
+  `CheckoutRequestStore.claimForProvisioning`), and any work record, checkpoint or retry budget
+  (ETP-5396 §3.3).
+
+**To finish it** (ETP-5892). The servlet is about 7,200 lines. Since ETP-5847, `runOnboarding` has a
+second caller besides the HTTP path and `provisionPaidPurchase`: `provisionSignupEnvironment`
+(passwordless signup).
+1. Move the step methods into an onboarding service that takes an `OnboardingProgressSink` instead
+   of a `PrintWriter`, migrating the spying tests to that service.
+2. Have the servlet build an `NdjsonOnboardingProgressSink` and call it.
+3. `PaidProvisioningService` then stops instantiating a servlet, and `NdjsonSinkWriter` can be
+   deleted.
+4. Move the Stripe webhook event application (`applyCheckoutEvent`, `applyCheckoutPaid`,
+   `applySubscriptionLifecycle`, `applyAlertOnlyEvent`, `resolveLifecycleTarget`,
+   `raisePausedSubscriptionAlert`, `endResolvedPauseEpisodes`) into a service in
+   `com.etendoerp.go.payment`, next to `CheckoutWebhookProcessor`.
+5. The same for `PaidReactivationService` (ETP-5048 review B2): it is a facade that calls the
+   webhook's `applyReactivationIfPending` on a fresh servlet instance, so the lost-webhook repair of a
+   re-subscription and the webhook share one fenced path. Move that method (with
+   `applyPaidUpgradeSideEffects`) into a service both call.
+
+### 🟡 4.16 Billing reconciliation phase D does not scale to very large accounts (ETP-5048)
+
+**Ticket:** accepted by the coordinator for Martin on 2026-10-21 (review S2), not fixed; no ticket.
+Related ETP-5048, design `docs/plans/2026-10-18-etp-5048-billing-reconciliation-design.md` §9.
+
+The subscriptions phase reads every locally active subscription on every run:
+
+- one query per candidate row to find its checkout request (N+1);
+- the `/v1/subscriptions` list sweep stops at 100 pages (10 000 subscriptions);
+- the direct reads of ids the sweep did not return are capped at the batch size, in a fixed order.
+
+On an account past those sizes the same tail is read, or left unread, on every run, and the run
+reports itself incomplete (so its subscription events are never swept). Fine at today's volumes.
+**Fix when an account nears them:** a paged candidate cursor that rotates across runs, the checkout
+lookup joined into the candidate query, and the list sweep resumed from where the last run stopped.
 
 ## 5. Handed forward to later tickets
 
