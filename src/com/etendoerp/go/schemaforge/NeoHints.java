@@ -81,6 +81,21 @@ final class NeoHints {
     return new MessageFormat(pattern, locale).format(args);
   }
 
+  /**
+   * The catalog text of {@code key} in exactly {@code language}'s bundle, with {@code args}
+   * substituted, or {@code null} when that bundle lacks the key — no English fallback, so a caller
+   * with its own fallback (the {@code AD_MESSAGE} base text, ETP-5840 {@link DocumentRateMessages})
+   * can tell "not in the catalog" apart from a translation.
+   */
+  static String catalogText(String key, String language, Object... args) {
+    if (StringUtils.isBlank(language)) {
+      return null;
+    }
+    Locale locale = Locale.forLanguageTag(language.replace('_', '-'));
+    String pattern = read(key, locale);
+    return pattern == null ? null : new MessageFormat(pattern, locale).format(args);
+  }
+
   private static String read(String key, Locale locale) {
     try {
       return ResourceBundle.getBundle(BUNDLE, new Locale(locale.getLanguage()), NO_HOST_FALLBACK)

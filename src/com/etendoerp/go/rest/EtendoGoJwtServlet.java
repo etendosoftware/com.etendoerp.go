@@ -84,6 +84,9 @@ import com.etendoerp.go.payment.BillingOfferConfiguration;
 import com.etendoerp.go.payment.StripeCurrencyScale;
 import com.etendoerp.go.payment.StripePriceService;
 import com.etendoerp.go.payment.CheckoutRequestStore;
+import com.etendoerp.go.payment.CheckoutRequestWrites;
+import com.etendoerp.go.payment.PausedSubscriptionAlert;
+import com.etendoerp.go.payment.StripeEventTypes;
 import com.etendoerp.go.payment.ProvisioningFailureReason;
 import com.etendoerp.go.payment.EnvironmentPlanCache;
 import com.etendoerp.go.payment.PlanCatalogService;
@@ -117,6 +120,8 @@ import com.etendoerp.go.onboarding.OnboardingPeriodControlService;
 import com.etendoerp.go.onboarding.OnboardingCostingScheduleService;
 import com.etendoerp.go.onboarding.OnboardingWarehouseAddressService;
 import com.etendoerp.go.onboarding.NdjsonOnboardingProgressSink;
+import com.etendoerp.go.onboarding.NdjsonSinkWriter;
+import com.etendoerp.go.onboarding.OnboardingProgressSink;
 import com.etendoerp.go.onboarding.OnboardingStreamWriter;
 import com.etendoerp.go.common.SpanishTaxIdValidator;
 import com.etendoerp.go.onboarding.OnboardingCompanyDataService;
@@ -236,6 +241,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       "This login link is invalid, already used or expired";
   private static final String ERROR_UNKNOWN_ENDPOINT = "Unknown endpoint: ";
   private static final String FIELD_PAYMENT_TOKEN = "paymentToken";
+  /** Default {@code upgradeAction} of an onboarding: create a new environment. */
+  private static final String UPGRADE_ACTION_CREATE_PRODUCTIVE = "create-productive";
   private static final String FIELD_PLAN_KEY = "planKey";
   private static final String CODE_PLAN_NOT_AVAILABLE = "PLAN_NOT_AVAILABLE";
   private static final String PLAN_NOT_AVAILABLE_MESSAGE =
@@ -335,23 +342,31 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String FIELD_EMAIL_VERIFICATION_PENDING = "emailVerificationPending";
   private static final String SSO_PREFIX = "/sso/";
   private static final String PATH_ONBOARDING_DRAFT = "/onboarding/draft";
+  static final String CODE_DEMO_SELECTION_REQUIRED = "DEMO_SELECTION_REQUIRED";
   /** ETP-5734 — opt-in query parameter of {@code GET /environments}. */
   private static final String PARAM_DETAILS = "details";
   /** Maximum accepted age of a Stripe-Signature timestamp, per the provider's guidance. */
   private static final long CHECKOUT_WEBHOOK_TOLERANCE_SECONDS = 300;
   /** The event types that confirm a hosted-checkout payment; every other type is ignored. */
-  private static final List<String> CHECKOUT_PAID_EVENT_TYPES = List.of(
-      "checkout.session.completed", "checkout.session.async_payment_succeeded");
-  private static final List<String> SUBSCRIPTION_EVENT_TYPES = List.of(
-      "invoice.payment_failed", "invoice.paid", "customer.subscription.updated",
-      "customer.subscription.deleted");
+  private static final List<String> CHECKOUT_PAID_EVENT_TYPES = StripeEventTypes.CHECKOUT_PAID;
+  private static final List<String> SUBSCRIPTION_EVENT_TYPES =
+      StripeEventTypes.SUBSCRIPTION_LIFECYCLE;
   /**
    * ETP-5047 — events that raise an operator alert and change nothing. A dispute is a chargeback
    * the provider is already arbitrating: blocking the tenant on it would punish a customer before
    * the outcome is known, and a lost dispute reaches the subscription through the ordinary
    * lifecycle events anyway.
    */
-  private static final List<String> ALERT_ONLY_EVENT_TYPES = List.of("charge.dispute.created");
+  private static final List<String> ALERT_ONLY_EVENT_TYPES = StripeEventTypes.ALERT_ONLY;
+  /**
+   * ETP-5048 — Stripe's dedicated event for a subscription that entered status {@code paused}.
+   * Alert-only, like a {@code customer.subscription.updated} carrying that status: see
+   * {@link PausedSubscriptionAlert}. {@code customer.subscription.resumed} only ends the pause
+   * episode (so the next pause alerts again): a pause never changed anything to undo.
+   */
+  private static final String SUBSCRIPTION_PAUSED_EVENT = StripeEventTypes.SUBSCRIPTION_PAUSED;
+  /** The stable prefix of the webhook's operator alerts (ETP-5048, aligned with the reconciler). */
+  static final String BILLING_ALERT_PREFIX = "[BILLING-ALERT]";
   private static final String FIELD_DRAFT = "draft";
   private static final String FIELD_DRAFT_STEP = "step";
   private static final String FIELD_DRAFT_FORM = "form";
@@ -440,6 +455,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   CheckoutRequestStore checkoutRequestStore = new CheckoutRequestStore();
   DemoDataTransferService demoDataTransferService = new DemoDataTransferService();
   BillingEventStore billingEventStore = new BillingEventStore();
+  /** ETP-5048 — records the onboarding inputs of a purchase; package-visible for tests. */
+  CheckoutRequestWrites checkoutRequestWrites = new CheckoutRequestWrites();
   CheckoutWebhookProcessor checkoutWebhookProcessor =
       new CheckoutWebhookProcessor(billingEventStore, CHECKOUT_WEBHOOK_TOLERANCE_SECONDS);
   SubscriptionLifecycleApplier subscriptionLifecycleApplier = new SubscriptionLifecycleApplier();
@@ -1058,11 +1075,19 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     final String origin = PublicUrlResolver.resolveConfiguredAppBaseUrl();
     writeStartedCheckout(response, accountBillingPurchase, () -> {
       // The source, transfer choice, plan and Stripe Price are persisted on the purchase row, and
-      // the flag-gated transfer selection is recorded before the provider is contacted.
+      // the flag-gated transfer selection and the onboarding inputs (ETP-5048) are recorded before
+      // the provider is contacted.
       JSONObject result = hostedCheckoutService.createSession(account.getId(), account.getEmail(),
           clientName, origin, planKey, new HostedCheckoutService.SessionOptions(
               selection.demoClientId, selection.transferProducts, selection.transferContacts,
-              requestId -> recordDemoDataTransferSelection(body, requestId, selection)));
+              requestId -> {
+                // ETP-5048 — what a server-side provisioning needs if the browser never comes
+                // back; best effort, it never fails the purchase.
+                checkoutRequestWrites.recordOnboardingInputs(requestId,
+                    body.optString(FIELD_LANGUAGE, ""), body.optString(FIELD_CURRENCY, ""),
+                    body.optString(FIELD_COUNTRY_CODE, ""));
+                recordDemoDataTransferSelection(body, requestId, selection);
+              }));
       addDemoDataTransferSelectionBestEffort(result, result.optString(FIELD_REQUEST_ID, ""),
           selection.demoClientId);
       return result;
@@ -1718,7 +1743,55 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       applyAlertOnlyEvent(eventId, type, event);
       return;
     }
+    if (SUBSCRIPTION_PAUSED_EVENT.equals(type)) {
+      SystemContext.run("a paused subscription event", () -> {
+        raisePausedSubscriptionAlert(type, event);
+        billingEventStore.markApplied(eventId);
+      });
+      return;
+    }
+    if (StripeEventTypes.SUBSCRIPTION_RESUMED.equals(type)) {
+      SystemContext.run("a resumed subscription event", () -> {
+        endResolvedPauseEpisodes(type, event);
+        billingEventStore.markApplied(eventId);
+      });
+      return;
+    }
     billingEventStore.markIgnored(eventId, "unhandled event type");
+  }
+
+  /**
+   * ETP-5048 — raises the review alert of a paused subscription, once per pause episode whatever
+   * path noticed it first (a later pause, after a resume was seen, alerts again). Changes no
+   * subscription status, grace anchor or access decision.
+   */
+  private void raisePausedSubscriptionAlert(String type, JSONObject event) {
+    JSONObject data = event.optJSONObject("data");
+    JSONObject object = data == null ? null : data.optJSONObject(STRIPE_EVENT_OBJECT);
+    String subscriptionId = SubscriptionLifecycleApplier.subscriptionIdOf(type, object);
+    TenantEnvironmentLifecycleService.LifecycleTarget target =
+        resolveLifecycleTarget(subscriptionId, object);
+    CheckoutRequest purchase = checkoutRequestStore.findByStripeSubscription(subscriptionId);
+    new PausedSubscriptionAlert(billingEventStore, internalAlertService).raiseOnce(
+        BILLING_ALERT_PREFIX, subscriptionId, target == null ? null : target.clientId(),
+        purchase == null ? null : purchase.getRequest(), "webhook");
+  }
+
+  /**
+   * ETP-5048 — ends the pause episodes a subscription event shows are over (status no longer
+   * {@code paused}, {@code pause_collection} cleared), so the next pause alerts again. Commits on
+   * its own, before the event's own writes. Changes no subscription state.
+   *
+   * <p>Best effort: a failed rename is a WARN and the event goes on, so it never fails the
+   * lifecycle event (and never makes Stripe redeliver it in a loop). An event delivered out of
+   * order (an older "active" after a newer pause) may end an episode early; the worst case is one
+   * duplicate alert on the same pause later, never a missed one.
+   */
+  private void endResolvedPauseEpisodes(String type, JSONObject event) {
+    JSONObject data = event.optJSONObject("data");
+    JSONObject object = data == null ? null : data.optJSONObject(STRIPE_EVENT_OBJECT);
+    new PausedSubscriptionAlert(billingEventStore, internalAlertService).endResolvedBestEffort(
+        SubscriptionLifecycleApplier.subscriptionIdOf(type, object), object);
   }
 
   /**
@@ -1730,7 +1803,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private void applyAlertOnlyEvent(String eventId, String type, JSONObject event) {
     JSONObject data = event.optJSONObject("data");
     JSONObject object = data == null ? null : data.optJSONObject(STRIPE_EVENT_OBJECT);
-    log.warn("Billing alert: Stripe event '{}' ({}) — dispute {} on charge {} (payment intent {}),"
+    log.warn(BILLING_ALERT_PREFIX + " Stripe event '{}' ({}) — dispute {} on charge {} (payment "
+        + "intent {}),"
         + " amount {} {}, reason '{}'. No access change was made; review it in the Stripe"
         + " dashboard.", eventId, type, optProviderText(object, "id"),
         optProviderText(object, "charge"), optProviderText(object, "payment_intent"),
@@ -1775,7 +1849,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       billingEventStore.markIgnored(eventId, "unknown checkout request");
       return;
     }
-    applyReactivationIfPending(requestId, event);
+    applyReactivationIfPending(requestId, SubscriptionLifecycleApplier.eventCreatedAt(event));
     billingEventStore.markApplied(eventId);
     log.info("Checkout webhook event '{}' ({}) applied", eventId, type);
   }
@@ -1803,17 +1877,29 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * a failure before that rolls them back with the event, the webhook answers 500 and the provider
    * redelivers, and the request is still {@code PAID} for the retry. Opening the row is idempotent
    * for an already open, active one.
+   *
+   * <p><b>One path, two callers (ETP-5048).</b> The billing reconciliation applies a
+   * re-subscription whose payment webhook was lost through this same method, via
+   * {@link PaidReactivationService}. Two callers on one request are fenced by
+   * {@link CheckoutRequestStore#findPaidReactivation}, which locks the request row and re-reads
+   * it: the second waits for the first to commit, then finds it {@code PROVISIONED} and does
+   * nothing.
+   *
+   * @param requestId the paid request
+   * @param paidAt the provider instant of the payment, the preference route's new watermark; null
+   *     leaves the watermark as it is
+   * @return whether this call applied a re-subscription
    */
-  private void applyReactivationIfPending(String requestId, JSONObject event) {
+  boolean applyReactivationIfPending(String requestId, Instant paidAt) {
     CheckoutRequest reactivation = checkoutRequestStore.findPaidReactivation(requestId);
     if (reactivation == null) {
-      return;
+      return false;
     }
     String clientId = reactivation.getCreatedClient().getId();
     SystemContext.run("a subscription re-subscription",
-        () -> applyReactivation(reactivation, clientId,
-            SubscriptionLifecycleApplier.eventCreatedAt(event)));
+        () -> applyReactivation(reactivation, clientId, paidAt));
     fillSubscriptionPeriodBestEffort(clientId);
+    return true;
   }
 
   private void applyReactivation(CheckoutRequest reactivation, String clientId,
@@ -1869,8 +1955,15 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   private void applySubscriptionLifecycleAsSystem(String eventId, String type, JSONObject event) {
+    if (type.startsWith(SubscriptionLifecycleApplier.SUBSCRIPTION_EVENT_PREFIX)) {
+      // ETP-5048 — a pause alerts once per episode: one this update shows has ended is closed.
+      endResolvedPauseEpisodes(type, event);
+    }
     SubscriptionEventOutcome screened = subscriptionLifecycleApplier.evaluate(type, event);
     if (screened.isIgnored()) {
+      if (SubscriptionLifecycleApplier.REASON_PAUSED.equals(screened.reason())) {
+        raisePausedSubscriptionAlert(type, event);
+      }
       billingEventStore.markIgnored(eventId, screened.reason());
       return;
     }
@@ -4492,25 +4585,46 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     if (preparation == null) {
       return;
     }
+
     // Set up NDJSON streaming
     response.setStatus(HttpServletResponse.SC_OK);
     response.setContentType("application/x-ndjson");
     response.setCharacterEncoding(UTF_8);
     response.setHeader(HEADER_CONTENT_TYPE_OPTIONS, VALUE_NOSNIFF);
-    runOnboarding(preparation, new OnboardingStreamWriter(response.getWriter()));
+    // Remembers the result line a failing step writes, so the run neither duplicates it nor
+    // records a generic reason in place of the real one.
+    OnboardingStreamWriter writer = new OnboardingStreamWriter(response.getWriter());
+
+    // Keepalive: a background thread emits a blank NDJSON line on a fixed cadence so the
+    // gap between bytes never exceeds the CloudFront/proxy inter-byte timeout while a slow
+    // step runs. The frontend skips empty lines (processLines), so this needs no UI change.
+    ScheduledExecutorService heartbeat = startOnboardingHeartbeat(writer);
+
+    // Stop the keepalive before the final flush so no heartbeat races the result line.
+    runOnboarding(preparation, writer, heartbeat::shutdownNow);
   }
 
   /**
-   * Runs a prepared onboarding to its end, writing its progress to {@code writer}: the app's
-   * NDJSON stream, or a log sink for an environment the signup API creates (ETP-5847).
+   * Runs one prepared onboarding to its end over {@code writer} and records how it ended. This is
+   * the transport-independent part of {@code POST /sws/go/onboarding}: the HTTP path calls it with
+   * the response stream, and {@link PaidProvisioningService} (ETP-5048) calls it for a paid
+   * purchase with no browser attached, with a writer that feeds an
+   * {@link OnboardingProgressSink}; {@link #provisionSignupEnvironment} (ETP-5847) calls it for an
+   * environment the signup API creates, with a log sink.
    *
-   * @param writer remembers the result line a failing step writes, so the catch below neither
-   *     duplicates it nor records a generic reason in place of the real one
+   * <p>Provisioning has many graceful exits that write a result line and answer {@code false}
+   * rather than throw; they are promoted to the same exception path as thrown failures, so the
+   * transaction is rolled back before the failure diagnostic (which commits on its own) is written.
+   *
+   * @param preparation the validated request, already claimed when it is a paid one
+   * @param writer the NDJSON stream; its first result line is the one kept
+   * @param beforeFinalFlush runs after the outcome is recorded and before the final flush (the
+   *     HTTP path stops its keepalive here); never null
    * @return the client id of the environment created, or {@code null} when it was not (the
    *     failure is already rolled back and recorded, and its reason is on {@code writer})
    */
-  private String runOnboarding(OnboardingPreparation preparation,
-      OnboardingStreamWriter writer) {
+  String runOnboarding(OnboardingPreparation preparation, OnboardingStreamWriter writer,
+      Runnable beforeFinalFlush) {
     String accountEmail = preparation.accountEmail;
     boolean paidUpgrade = preparation.paidUpgrade;
 
@@ -4525,11 +4639,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
     // Generate a random password for the admin user
     String adminPassword = UUID.randomUUID().toString().substring(0, 12);
-
-    // Keepalive: a background thread emits a blank NDJSON line on a fixed cadence so the
-    // gap between bytes never exceeds the CloudFront/proxy inter-byte timeout while a slow
-    // step runs. The frontend skips empty lines (processLines), so this needs no UI change.
-    ScheduledExecutorService heartbeat = startOnboardingHeartbeat(writer);
 
     try {
       provisioningCompleted = executeOnboardingProvisioning(writer, preparation, adminPassword, alertAttempt);
@@ -4556,13 +4665,118 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     } finally {
       recordOnboardingOutcome(new OnboardingOutcome(provisioningCompleted, rollbackConfirmed,
           failureReason, failureCode), preparation, alertAttempt);
-      // Stop the keepalive before the final flush so no heartbeat races the result line.
-      heartbeat.shutdownNow();
+      beforeFinalFlush.run();
       OBContext.restorePreviousMode();
       writer.flush();
       warnWhenOnboardingStreamWasLost(writer, accountEmail);
     }
     return provisioningCompleted ? alertAttempt.clientId : null;
+  }
+
+  /**
+   * ETP-5048 — provisions a paid purchase with no browser attached, for
+   * {@link PaidProvisioningService}.
+   *
+   * <p>The preparation is the HTTP path's, minus what only a request has: the account and the
+   * inputs come from the checkout row instead of a session and a body, and a refusal is returned
+   * instead of written. Then the same fenced claim and the same {@link #runOnboarding}. The email
+   * verification gate is not repeated: the purchase it guards has already been paid.
+   *
+   * @param input what the browser would have sent, resolved from the checkout row
+   * @param sink receives the run's progress and result lines
+   * @return how the attempt ended
+   */
+  PaidProvisioningService.Outcome provisionPaidPurchase(PaidProvisioningService.PaidInput input,
+      OnboardingProgressSink sink) {
+    OnboardingRequestData data = new OnboardingRequestData();
+    data.clientName = input.clientName();
+    data.currencyIso = input.currencyIso();
+    data.language = input.language();
+    data.countryCode = input.countryCode();
+    data.address = serverSideAddress(input);
+    data.fullName = EtendoGoJwtSupport.resolveOwnerDisplayName(input.fullName(),
+        input.accountName(), input.accountEmail());
+    data.taxId = serverSideTaxId(input);
+    data.paymentToken = input.requestId();
+    data.upgradeAction = UPGRADE_ACTION_CREATE_PRODUCTIVE;
+    data.includeSampleData = false;
+    String accountId = input.accountId();
+    String accountEmail = input.accountEmail();
+
+    String currencyId = findCurrencyId(data.currencyIso);
+    if (currencyId == null) {
+      return PaidProvisioningService.Outcome.of(PaidProvisioningService.Status.NEEDS_REVIEW,
+          "UNKNOWN_CURRENCY", "No currency with ISO code " + data.currencyIso);
+    }
+    if (isPaidOnboardingNotOwned(accountEmail)) {
+      return PaidProvisioningService.Outcome.of(PaidProvisioningService.Status.NEEDS_REVIEW,
+          BILLING_OWNER_REQUIRED, BILLING_OWNER_MESSAGE);
+    }
+    TenantPaywallService.Outcome paywall = evaluatePaywall(accountId, accountEmail, data);
+    if (paywall.getDecision().isBlocked() || !paywall.isProductive()) {
+      return PaidProvisioningService.Outcome.of(PaidProvisioningService.Status.NOT_PAID, null,
+          "The paywall does not confirm this purchase as paid");
+    }
+    String selectionRefusal = restorePaidSelection(data, accountId, accountEmail);
+    if (selectionRefusal != null) {
+      return PaidProvisioningService.Outcome.of(PaidProvisioningService.Status.NEEDS_REVIEW,
+          CODE_DEMO_SELECTION_REQUIRED, selectionRefusal);
+    }
+    Long attempt = claimPaid(data.paymentToken, accountId, accountEmail);
+    if (attempt == null) {
+      return PaidProvisioningService.Outcome.of(PaidProvisioningService.Status.NOT_CLAIMED, null,
+          "Purchase is " + checkoutRequestStore.deriveProvisioningStatus(
+              checkoutRequestStore.find(data.paymentToken, accountId, accountEmail)));
+    }
+    OnboardingPreparation preparation = new OnboardingPreparation(accountId, accountEmail, data,
+        currencyId, true, attempt);
+    OnboardingStreamWriter writer = new OnboardingStreamWriter(
+        new PrintWriter(new NdjsonSinkWriter(sink)));
+    boolean completed = runOnboarding(preparation, writer, () -> { }) != null;
+    if (completed) {
+      return new PaidProvisioningService.Outcome(PaidProvisioningService.Status.PROVISIONED, null,
+          "Environment created", attempt);
+    }
+    return new PaidProvisioningService.Outcome(PaidProvisioningService.Status.FAILED,
+        StringUtils.defaultIfBlank(writer.getResultCode(),
+            ProvisioningFailureReason.CODE_PROVISIONING_FAILED),
+        StringUtils.left(StringUtils.normalizeSpace(writer.getResultMessage()), 200), attempt);
+  }
+
+  /**
+   * ETP-5048 — the company address of a server-side provisioning: the draft's, under the limit
+   * the HTTP path enforces. Too long a value is dropped, not truncated: the owner fixes it in the
+   * Organization window, while a provisioning that fails over it helps nobody.
+   */
+  private static String serverSideAddress(PaidProvisioningService.PaidInput input) {
+    String address = StringUtils.trimToEmpty(input.address());
+    if (OnboardingFieldLimits.exceeds(address, OnboardingFieldLimits.ADDRESS)) {
+      log.warn("Server-side provisioning of {}: the draft address exceeds {} characters and is "
+          + "left out", input.requestId(), OnboardingFieldLimits.ADDRESS);
+      return "";
+    }
+    return address;
+  }
+
+  /**
+   * ETP-5048 — the fiscal identifier of a server-side provisioning: the draft's, when it passes
+   * the check the HTTP path runs before streaming ({@link #validateOnboardingTaxId}). A value that
+   * fails it is left out rather than failing the provisioning; the owner sets it later.
+   */
+  private static String serverSideTaxId(PaidProvisioningService.PaidInput input) {
+    String taxId = StringUtils.trimToEmpty(input.taxId());
+    if (taxId.isEmpty()
+        || !SpanishTaxIdValidator.SPAIN_COUNTRY_CODE.equalsIgnoreCase(input.countryCode())) {
+      return taxId;
+    }
+    SpanishTaxIdValidator.Result check = SpanishTaxIdValidator.validate(taxId);
+    if (check == SpanishTaxIdValidator.Result.BAD_FORMAT
+        || check == SpanishTaxIdValidator.Result.BAD_CHECK_DIGIT) {
+      log.warn("Server-side provisioning of {}: the draft fiscal identifier is not valid ({}) "
+          + "and is left out", input.requestId(), check);
+      return "";
+    }
+    return taxId;
   }
 
   /** Outcome of {@link #provisionSignupEnvironment}: the client created, or why there is none. */
@@ -4594,7 +4808,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     onboardingRequest.address = "";
     onboardingRequest.taxId = form.optString(FIELD_FISCAL_ID_VALUE, "").trim();
     onboardingRequest.paymentToken = "";
-    onboardingRequest.upgradeAction = "create-productive";
+    onboardingRequest.upgradeAction = UPGRADE_ACTION_CREATE_PRODUCTIVE;
     onboardingRequest.includeSampleData = form.optBoolean(FIELD_INCLUDE_SAMPLE_DATA, false);
     onboardingRequest.fullName = EtendoGoJwtSupport.resolveOwnerDisplayName(
         form.optString(FIELD_FULL_NAME, ""), accountName, accountEmail);
@@ -4612,7 +4826,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
           "The account cannot create a free demo environment");
     }
     String clientId = runOnboarding(new OnboardingPreparation(accountId, accountEmail,
-        onboardingRequest, currencyId, false, null), progress);
+        onboardingRequest, currencyId, false, null), progress, () -> { });
     return clientId != null
         ? new SignupProvisioningResult(clientId, null)
         : new SignupProvisioningResult(null,
@@ -5077,13 +5291,30 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
   private boolean restorePaidOnboardingSelection(OnboardingRequestData onboardingRequest,
       String accountId, String accountEmail, HttpServletResponse response) throws IOException {
+    String refusal = restorePaidSelection(onboardingRequest, accountId, accountEmail);
+    if (refusal != null) {
+      writeError(response, HttpServletResponse.SC_CONFLICT, CODE_DEMO_SELECTION_REQUIRED, refusal,
+          refusal);
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Restores the demo source a paid purchase recorded onto {@code onboardingRequest}, or clears it
+   * when the purchase recorded none or its source can no longer be one.
+   *
+   * @return null when the setup may continue, otherwise why the recorded demo cannot be used
+   */
+  private String restorePaidSelection(OnboardingRequestData onboardingRequest,
+      String accountId, String accountEmail) {
     boolean selectionRecorded = checkoutRequestStore.hasRecordedDemoSelection(
         onboardingRequest.paymentToken, accountId, accountEmail);
     if (!selectionRecorded) {
       // Legacy paid requests never saved a source or transfer intent. Resume them as a new
       // productive environment without inferring a demo or copying/revoking any tenant.
       onboardingRequest.demoClientId = null;
-      return true;
+      return null;
     }
 
     String persistedDemoClientId = checkoutRequestStore.findDemoClientId(
@@ -5095,7 +5326,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       log.info("Demo {} already originated a productive environment; the paid setup continues "
           + "without a source", persistedDemoClientId);
       onboardingRequest.demoClientId = null;
-      return true;
+      return null;
     }
     if (StringUtils.isNotBlank(persistedDemoClientId)
         && isProductiveEnvironment(persistedDemoClientId)) {
@@ -5106,18 +5337,16 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
           + "environment, or its type could not be read); the paid setup continues without a "
           + "source", persistedDemoClientId);
       onboardingRequest.demoClientId = null;
-      return true;
+      return null;
     }
     Set<String> currentFreeDemoClientIds = findFreeDemoClientIdsForAccount(accountEmail);
     try {
       onboardingRequest.demoClientId = resolvePaidDemoClientId(true, persistedDemoClientId,
           currentFreeDemoClientIds);
     } catch (IllegalArgumentException e) {
-      writeError(response, HttpServletResponse.SC_CONFLICT, "DEMO_SELECTION_REQUIRED",
-          e.getMessage(), e.getMessage());
-      return false;
+      return e.getMessage();
     }
-    return true;
+    return null;
   }
 
   /** Resolves a paid purchase's fixed demo source, or null for a legacy purchase without one. */
@@ -5171,17 +5400,29 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     if (!paidUpgrade) {
       return null;
     }
-    if (checkoutRequestStore.claimForProvisioning(onboardingRequest.paymentToken, accountId,
-        accountEmail)) {
-      Long attempt = checkoutRequestStore.findProvisioningAttempt(onboardingRequest.paymentToken,
-          accountId, accountEmail);
-      // A successful conditional update always has a persisted attempt. Keep the success path
-      // recoverable even if a legacy database omits that value.
-      return attempt == null ? 0L : attempt;
+    Long attempt = claimPaid(onboardingRequest.paymentToken, accountId, accountEmail);
+    if (attempt != null) {
+      return attempt;
     }
     writeClaimRefusal(response, checkoutRequestStore.find(onboardingRequest.paymentToken,
         accountId, accountEmail));
     return null;
+  }
+
+  /**
+   * The fenced claim of a paid request: of two concurrent callers exactly one gets an attempt.
+   *
+   * @return the attempt token now holding the request, or null when it could not be claimed
+   */
+  private Long claimPaid(String paymentToken, String accountId, String accountEmail) {
+    if (!checkoutRequestStore.claimForProvisioning(paymentToken, accountId, accountEmail)) {
+      return null;
+    }
+    Long attempt = checkoutRequestStore.findProvisioningAttempt(paymentToken, accountId,
+        accountEmail);
+    // A successful conditional update always has a persisted attempt. Keep the success path
+    // recoverable even if a legacy database omits that value.
+    return attempt == null ? 0L : attempt;
   }
 
   /**
@@ -5374,6 +5615,16 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     if (StringUtils.isBlank(onboardingRequest.paymentToken)) {
       return false;
     }
+    if (isPaidOnboardingNotOwned(accountEmail)) {
+      writeError(response, HttpServletResponse.SC_FORBIDDEN, BILLING_OWNER_REQUIRED,
+          BILLING_OWNER_MESSAGE, BILLING_OWNER_MESSAGE);
+      return true;
+    }
+    return false;
+  }
+
+  /** An account that already owns environments must be a server-marked owner to pay for more. */
+  private boolean isPaidOnboardingNotOwned(String accountEmail) {
     OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
     OBContext.setAdminMode(true);
     boolean hasEnvironments;
@@ -5384,12 +5635,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     } finally {
       OBContext.restorePreviousMode();
     }
-    if (hasEnvironments && !billingOwner) {
-      writeError(response, HttpServletResponse.SC_FORBIDDEN, BILLING_OWNER_REQUIRED,
-          BILLING_OWNER_MESSAGE, BILLING_OWNER_MESSAGE);
-      return true;
-    }
-    return false;
+    return hasEnvironments && !billingOwner;
   }
 
   /**
@@ -5597,7 +5843,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       // must not fail the request — wireOrgInfo() only persists it when non-blank.
       data.taxId = body.optString(FIELD_FISCAL_ID_VALUE, "").trim();
       data.paymentToken = body.optString(FIELD_PAYMENT_TOKEN, "").trim();
-      data.upgradeAction = body.optString("upgradeAction", "create-productive").trim();
+      data.upgradeAction = body.optString("upgradeAction", UPGRADE_ACTION_CREATE_PRODUCTIVE).trim();
       // ETP-5426: opt-in, off unless the form explicitly sends true.
       data.includeSampleData = body.optBoolean(FIELD_INCLUDE_SAMPLE_DATA, false);
       if ("convert-demo".equalsIgnoreCase(data.upgradeAction)) {
@@ -5669,13 +5915,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private String resolveCurrencyId(String currencyIso, HttpServletResponse response)
       throws IOException {
     String currencyId = findCurrencyId(currencyIso);
-    if (currencyId == null) {
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST, "Unknown currency: " + currencyIso);
+    if (currencyId != null) {
+      return currencyId;
     }
-    return currencyId;
+    writeError(response, HttpServletResponse.SC_BAD_REQUEST, "Unknown currency: " + currencyIso);
+    return null;
   }
 
-  /** The currency's id, or {@code null} when no currency has that ISO code. */
+  /** @return the id of the currency with this ISO code, or null when there is none */
   private String findCurrencyId(String currencyIso) {
     OBContext.setOBContext("0", "0", "0", "0");
     OBContext.setAdminMode(true);
@@ -6919,7 +7166,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     private ProvisioningAlertAttempt(boolean paid) { this.paid = paid; }
   }
 
-  private static final class OnboardingPreparation {
+  static final class OnboardingPreparation {
     private final String accountId;
     private final String accountEmail;
     private final OnboardingRequestData request;

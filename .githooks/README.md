@@ -23,6 +23,7 @@ git config --get core.hooksPath     # debe imprimir: .githooks
 |------|--------|----------|
 | `pre-commit` | antes de crear el commit | Chequeos rápidos (marcadores de conflicto) y **registra la prueba** de que los hooks corrieron |
 | `commit-msg` | con el mensaje ya final | Valida el formato del mensaje que exige Git Police (`Feature ETP-1234: …`, `Issue #42: …` con el ticket en el cuerpo, primera línea de hasta 80 caracteres) y agrega el trailer `Hooks-Verified` |
+| `post-rewrite` | después de un `--amend` o un `rebase` | Revisa los commits reescritos y **avisa** si alguno quedó con el trailer `Hooks-Verified` vencido, con el comando para volver a sellarlo. No bloquea |
 | `pre-push` | antes del push | Corre XML check + Sonar (issues, modo branch) + JUnit sin base + Sonar (gate, modo PR) + cobertura de las líneas cambiadas y **verifica el trailer** de cada commit que se sube |
 
 ### Pasos de `pre-push`
@@ -61,11 +62,14 @@ La **huella se deriva del árbol (tree) del commit**, no es un texto fijo. Por e
 
 - No se puede copiar de otro commit (el árbol es distinto → no valida).
 - Si hacés `--amend` cambiando contenido, se vuelve a sellar con la huella nueva.
+- Un `rebase` no vuelve a sellar. Si al resolver un conflicto cambia el diff de un commit, su sello
+  queda vencido; `post-rewrite` te lo avisa en ese momento. Un rebase sin conflictos conserva el sello.
 - Los **merge commits** no lo llevan (no los produce un `pre-commit`) y no se exigen.
 
 ## Si el push te rechaza commits
 
-Significa que esos commits se crearon **sin los hooks activos**. Para arreglarlo:
+Significa que esos commits se crearon **sin los hooks activos**, o que se modificaron después:
+un `--amend` con `--no-verify`, o un `rebase` que resolvió un conflicto. Para arreglarlo:
 
 ```bash
 git config core.hooksPath .githooks                        # activar hooks
@@ -73,11 +77,8 @@ git rebase --exec 'git commit --amend --no-edit' <base>    # re-sellar tus commi
 git push --force-with-lease                                # solo en tu rama
 ```
 
-Bypass de emergencia (desaconsejado, y el CI igual lo va a marcar):
-
-```bash
-HOOKS_VERIFY_SKIP=1 git push
-```
+No hay atajo: lo que el pre-push frena es lo que hay que arreglar, y el check `verify` del PR
+rechaza igual esos commits.
 
 ## Por qué existe esto
 

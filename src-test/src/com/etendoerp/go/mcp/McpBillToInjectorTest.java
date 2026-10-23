@@ -62,6 +62,8 @@ import org.openbravo.model.common.businesspartner.Location;
  * {@code catch (Exception)}, so "the body was left untouched" is never on its own evidence that
  * the intended guard fired — each abstain test therefore also asserts how far into the DAL the
  * injector got (no {@code OBDal} contact at all, or no criteria query).</p>
+ *
+ * @covers com.etendoerp.go.mcp.McpBillToInjector
  */
 @DisplayName("ETP-5335 — McpBillToInjector derives the bill-to or abstains")
 class McpBillToInjectorTest {
@@ -523,6 +525,22 @@ class McpBillToInjectorTest {
         context.verify(() -> org.openbravo.dal.core.OBContext.setAdminMode(
             org.mockito.ArgumentMatchers.anyBoolean()), never());
       }
+    }
+
+    @Test
+    @DisplayName("keeps the client/organization READ filters on, so a foreign partner yields nothing")
+    void tenantReadFiltersStayOn() {
+      // MCP runs under setAdminMode(), which skips only the entity access check; these OBCriteria
+      // filters are what keeps another tenant's location out of the body.
+      JSONObject body = body(PARTNER, PARTNER_ID);
+      partnerBillToLocation(PARTNER_BILL_TO_ID);
+
+      McpBillToInjector.injectIfMissing(body, orderTab(), orderEntity(), log);
+
+      verify(criteria, org.mockito.Mockito.atLeastOnce()).uniqueResult(); // the query ran
+      verify(criteria, never()).setFilterOnReadableClients(false);
+      verify(criteria, never()).setFilterOnReadableOrganization(false);
+      verify(criteria, never()).setFilterOnActive(false);
     }
 
     @Test

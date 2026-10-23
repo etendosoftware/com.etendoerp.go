@@ -1069,6 +1069,98 @@ public class SalesOrderHeaderHandlerTest {
     }
   }
 
+  // ── partner-location lookups keep the tenant READ filters on ───────────────
+
+  /** A Location criteria that answers {@code locations} and records every filter toggle. */
+  @SuppressWarnings("unchecked")
+  private static OBCriteria<Location> stubFilteredCriteria(OBDal dal, List<Location> locations) {
+    OBCriteria<Location> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(Location.class)).thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.addOrderBy(anyString(), anyBoolean())).thenReturn(criteria);
+    when(criteria.setMaxResults(anyInt())).thenReturn(criteria);
+    when(criteria.list()).thenReturn(locations);
+    return criteria;
+  }
+
+  /**
+   * MCP runs these lookups under {@code OBContext.setAdminMode()}, which skips only the entity
+   * access check. The OBCriteria client/organization READ filters are what keeps another tenant's
+   * location out of the body when a caller sends a foreign businessPartner id, so no lookup may
+   * switch them off.
+   */
+  private static void assertTenantFiltersNeverDisabled(OBCriteria<Location> criteria) {
+    Mockito.verify(criteria, Mockito.never()).setFilterOnReadableClients(false);
+    Mockito.verify(criteria, Mockito.never()).setFilterOnReadableOrganization(false);
+    Mockito.verify(criteria, Mockito.never()).setFilterOnActive(false);
+  }
+
+  @Test
+  public void partnerLocationLookupsNeverDisableTheTenantReadFilters() throws Exception {
+    Location only = mock(Location.class);
+    when(only.getId()).thenReturn("loc-1");
+    try (MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      OBCriteria<Location> criteria = stubFilteredCriteria(dal, Collections.singletonList(only));
+
+      assertEquals("loc-1",
+          PartnerLocationDefaults.findSingleLocation("bp-1", Location.PROPERTY_SHIPTOADDRESS));
+      assertEquals("loc-1",
+          PartnerLocationDefaults.findOldestLocation("bp-1", Location.PROPERTY_INVOICETOADDRESS));
+
+      Mockito.verify(criteria, Mockito.times(2)).list(); // both lookups really ran
+      assertTenantFiltersNeverDisabled(criteria);
+    }
+  }
+
+  @Test
+  public void fillIfMissingAndShipToBillToKeepTheTenantReadFiltersOn() throws Exception {
+    Location shipTo = mock(Location.class);
+    when(shipTo.getId()).thenReturn("ship-1");
+    when(shipTo.get(Location.PROPERTY_INVOICETOADDRESS)).thenReturn(Boolean.FALSE);
+    try (MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      OBCriteria<Location> criteria = stubFilteredCriteria(dal, Collections.singletonList(shipTo));
+      when(dal.get(Location.class, "ship-1")).thenReturn(shipTo);
+      JSONObject body = new JSONObject().put("businessPartner", "bp-1");
+
+      PartnerLocationDefaults.fillShipToAndBillTo(createCtx(body), "partnerAddress",
+          Location.PROPERTY_SHIPTOADDRESS, "invoiceAddress", Location.PROPERTY_INVOICETOADDRESS);
+
+      assertEquals("ship-1", body.getString("partnerAddress"));
+      assertEquals("ship-1", body.getString("invoiceAddress"));
+      assertTenantFiltersNeverDisabled(criteria);
+    }
+  }
+
+  /**
+   * A foreign tenant's partner id: the filtered query returns no row, so nothing is written to the
+   * body (no partnerAddress, no invoiceAddress) and no fallback lookup bypasses the filter.
+   */
+  @Test
+  public void foreignPartnerWithNoVisibleLocationLeavesTheBodyUntouched() throws Exception {
+    try (MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      OBCriteria<Location> criteria = stubFilteredCriteria(dal, Collections.emptyList());
+      JSONObject body = new JSONObject().put("businessPartner", "bp-foreign");
+
+      assertFalse(PartnerLocationDefaults.fillIfMissing(createCtx(body), "partnerAddress",
+          Location.PROPERTY_SHIPTOADDRESS));
+      PartnerLocationDefaults.fillShipToAndBillTo(createCtx(body), "partnerAddress",
+          Location.PROPERTY_SHIPTOADDRESS, "invoiceAddress", Location.PROPERTY_INVOICETOADDRESS);
+
+      assertFalse(body.has("partnerAddress"));
+      assertFalse(body.has("invoiceAddress"));
+      assertEquals(1, body.length());
+      Mockito.verify(criteria, Mockito.atLeastOnce()).list(); // it did query, and found nothing
+      Mockito.verify(dal, Mockito.never()).get(Mockito.eq(Location.class), anyString());
+      assertTenantFiltersNeverDisabled(criteria);
+    }
+  }
+
   // ── declared action contracts (ETP-5709) ──────────────────────────────────
 
   @Test
@@ -1114,6 +1206,158 @@ public class SalesOrderHeaderHandlerTest {
     java.util.Set<String> declared = new SalesOrderHeaderHandler().responseEnrichedFields();
     for (String key : java.util.List.of("hasLinkedDocuments", "needsPrimaryDoc", "needsInvoiceDoc")) {
       org.junit.jupiter.api.Assertions.assertTrue(declared.contains(key), key + " in " + declared);
+    }
+  }
+
+  // ── whole-set list totals (ETP-5757) ──────────────────────────────────────
+
+  private static NeoContext listTotalsListCtx() {
+    NeoContext ctx = listCtx();
+    NeoListAggregateQuery.remember(ctx, Collections.emptyMap());
+    return ctx;
+  }
+
+  /** Stubs {@code DocumentListTotals.create} for one document kind; everything else stays real. */
+  private static MockedStatic<DocumentListTotals> stubbedTotals(boolean invoices,
+      DocumentListTotals totals) {
+    MockedStatic<DocumentListTotals> mocked = Mockito.mockStatic(DocumentListTotals.class,
+        Mockito.CALLS_REAL_METHODS);
+    mocked.when(() -> DocumentListTotals.create(invoices)).thenReturn(totals);
+    return mocked;
+  }
+
+  private static NeoContext withEmptyPage(NeoContext ctx) throws Exception {
+    ctx.setPreviousResult(NeoResponse.ok(new JSONObject().put("response",
+        new JSONObject().put("data", new JSONArray()))));
+    return ctx;
+  }
+
+  @Test
+  public void listGetInjectsListTotalsEvenOnAnEmptyPage() throws Exception {
+    SalesOrderHeaderHandler handler = new SalesOrderHeaderHandler();
+    try (MockedStatic<DocumentListTotals> totalsMock = stubbedTotals(false,
+            DocumentListTotalsTest.stub(false, Collections.emptyList()))) {
+      NeoContext ctx = withEmptyPage(listTotalsListCtx());
+
+      NeoResponse result = handler.afterHandle(ctx);
+
+      assertNotNull(result);
+      JSONObject totals = result.getBody().getJSONObject("response").getJSONObject("listTotals");
+      assertEquals(0, totals.getInt("rowCount"));
+      assertEquals("EUR", totals.getString("orgCurrencyIso"));
+    }
+  }
+
+  @Test
+  public void listGetWithoutAggregateQueryLeavesTheEmptyPageUntouched() throws Exception {
+    SalesOrderHeaderHandler handler = new SalesOrderHeaderHandler();
+    try (MockedStatic<DocumentListTotals> totalsMock = stubbedTotals(false,
+            DocumentListTotalsTest.stub(false, Collections.emptyList()))) {
+      NeoContext ctx = withEmptyPage(listCtx());
+
+      assertNull(handler.afterHandle(ctx));
+    }
+  }
+
+  @Test
+  public void singleRecordGetDoesNotComputeListTotals() throws Exception {
+    try (MockedStatic<DocumentListTotals> totalsMock = Mockito.mockStatic(DocumentListTotals.class,
+            Mockito.CALLS_REAL_METHODS)) {
+      SalesOrderHeaderHandler handler = new SalesOrderHeaderHandler();
+      NeoContext ctx = withEmptyPage(getCtxWithId("rec-1"));
+      NeoListAggregateQuery.remember(ctx, Collections.emptyMap());
+
+      handler.afterHandle(ctx);
+
+      totalsMock.verify(() -> DocumentListTotals.create(Mockito.anyBoolean()),
+          Mockito.never());
+    }
+  }
+
+  @Test
+  public void failingListTotalsQueryIsSwallowedAndTheEmptyPageStaysUnchanged() throws Exception {
+    SalesOrderHeaderHandler handler = new SalesOrderHeaderHandler();
+    try (MockedStatic<DocumentListTotals> totalsMock = stubbedTotals(false,
+            DocumentListTotalsTest.failing(false))) {
+      NeoContext ctx = withEmptyPage(listTotalsListCtx());
+
+      assertNull(handler.afterHandle(ctx));
+      assertFalse(ctx.getPreviousResult().getBody().getJSONObject("response").has("listTotals"));
+    }
+  }
+
+  @Test
+  public void listGetWithRowsAddsListTotalsAndStillPostProcessesTheRows() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      stubNoLinkedDocuments(obDalMock);
+      SalesOrderHeaderHandler handler = new SalesOrderHeaderHandler();
+      try (MockedStatic<DocumentListTotals> totalsMock = stubbedTotals(false,
+              DocumentListTotalsTest.stub(false, Collections.emptyList()))) {
+        NeoContext ctx = listTotalsListCtx();
+        ctx.setPreviousResult(NeoResponse.ok(listBody("order-1")));
+
+        NeoResponse result = handler.afterHandle(ctx);
+
+        JSONObject response = result.getBody().getJSONObject("response");
+        assertFalse(response.getJSONArray("data").getJSONObject(0).getBoolean("hasLinkedDocuments"));
+        assertEquals(0, response.getJSONObject("listTotals").getInt("rowCount"));
+      }
+    }
+  }
+
+  @Test
+  public void failingListTotalsQueryWithRowsKeepsTheRowsAndOmitsListTotals() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      stubNoLinkedDocuments(obDalMock);
+      SalesOrderHeaderHandler handler = new SalesOrderHeaderHandler();
+      try (MockedStatic<DocumentListTotals> totalsMock = stubbedTotals(false,
+              DocumentListTotalsTest.failing(false))) {
+        NeoContext ctx = listTotalsListCtx();
+        ctx.setPreviousResult(NeoResponse.ok(listBody("order-1")));
+
+        NeoResponse result = handler.afterHandle(ctx);
+
+        JSONObject response = result.getBody().getJSONObject("response");
+        assertFalse(response.getJSONArray("data").getJSONObject(0).getBoolean("hasLinkedDocuments"));
+        assertFalse(response.has("listTotals"));
+      }
+    }
+  }
+
+  @Test
+  public void singleRecordGetWithRowsDoesNotComputeListTotals() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      stubNoLinkedDocuments(obDalMock);
+      try (MockedStatic<DocumentListTotals> totalsMock = Mockito.mockStatic(DocumentListTotals.class,
+              Mockito.CALLS_REAL_METHODS)) {
+        SalesOrderHeaderHandler handler = new SalesOrderHeaderHandler();
+        NeoContext ctx = ctxWithPreviousResult("order-1", singleRecordBody("order-1"));
+        NeoListAggregateQuery.remember(ctx, Collections.emptyMap());
+
+        NeoResponse result = handler.afterHandle(ctx);
+
+        assertFalse(result.getBody().getJSONObject("response").has("listTotals"));
+        totalsMock.verify(() -> DocumentListTotals.create(Mockito.anyBoolean()),
+            Mockito.never());
+      }
+    }
+  }
+
+  @Test
+  public void nonGetRequestDoesNotComputeListTotals() throws Exception {
+    for (String method : new String[] { "POST", "PATCH" }) {
+      try (MockedStatic<DocumentListTotals> totalsMock = Mockito.mockStatic(DocumentListTotals.class,
+              Mockito.CALLS_REAL_METHODS)) {
+        SalesOrderHeaderHandler handler = new SalesOrderHeaderHandler();
+        NeoContext ctx = withEmptyPage(NeoContext.builder().httpMethod(method)
+            .endpointType(NeoEndpointType.ACTION).build());
+        NeoListAggregateQuery.remember(ctx, Collections.emptyMap());
+
+        assertNull(method, handler.afterHandle(ctx));
+
+        totalsMock.verify(() -> DocumentListTotals.create(Mockito.anyBoolean()),
+            Mockito.never());
+      }
     }
   }
 }

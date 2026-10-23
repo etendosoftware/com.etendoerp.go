@@ -72,6 +72,7 @@ Declare every flag's key as a constant on `GoFeatureFlags` and add its row here.
 | `onboarding-tenant-pool` | `etendo.go.flags.onboarding-tenant-pool` | `ETGO_FLAG_ONBOARDING_TENANT_POOL` | absent ⇒ **`false`** |
 | `mcp-modern-era-disabled` | `etendo.go.flags.mcp-modern-era-disabled` | `ETGO_FLAG_MCP_MODERN_ERA_DISABLED` | absent ⇒ **`false`** (dual-era on) |
 | `batch-callout-skip-disabled` | `etendo.go.flags.batch-callout-skip-disabled` | `ETGO_FLAG_BATCH_CALLOUT_SKIP_DISABLED` | absent ⇒ **`false`** (opt-in skip honoured) |
+| `billing-reconciliation-schedule` | `etendo.go.flags.billing-reconciliation-schedule` | `ETGO_FLAG_BILLING_RECONCILIATION_SCHEDULE` | absent ⇒ **`false`** (no schedule is planted) |
 | *(pattern for a new flag)* | `etendo.go.flags.<key>` | `ETGO_FLAG_<KEY>` | absent ⇒ **`false`** |
 
 `bp-portal-link` (ETP-5267) decides whether a `sales-invoice-send` email carries a link to the
@@ -400,6 +401,31 @@ To flip it: set it to `true` in ConfigCat (live within one 60 s poll). The local
 `ETGO_FLAG_BATCH_CALLOUT_SKIP_DISABLED=true`, plus a Tomcat restart) is read **only where no
 ConfigCat SDK key is configured**: `GoFeatureFlags#createProvider()` installs one provider, ConfigCat
 when `etendo.go.configcat.sdkKey` resolves, `PropertiesFeatureProvider` otherwise, never both.
+
+### `billing-reconciliation-schedule` (ETP-5048) — backend-only, strictly off by default
+
+Whether the billing reconciliation (`ETGO_BillingReconciliation`) runs on a schedule.
+
+- **Production schedules it by hand.** Production is updated by delta and never restarted, so no
+  startup hook runs there: turn the flag on and create a Process Request for **Billing
+  Reconciliation** (client System, timing *Schedule*, hourly), like Demo Trial Notices.
+- **Environments that restart:** while the flag is off, `BillingReconciliationScheduleStartup`
+  plants no process request; turning it on takes effect at the next restart (hourly by default,
+  `etendo.go.billing.reconcile.interval.minutes`). A fixed request an operator unscheduled is left
+  as it is, never planted again.
+- **The flag gates every scheduled run** (timing *Schedule*), the planted one or one an
+  administrator created. While it is off such a run does no work and ends as an **ERROR** in
+  Process Monitor, saying to turn the flag on or unschedule the request; the first such run of each
+  UTC day also sends one internal alert (`billing-reconcile-schedule-flag-off`).
+- A run started from the Classic menu **Billing Reconciliation**, or a Process Request run
+  immediately or later once, is never gated.
+
+Environment level, evaluated with an empty context; read on every scheduled run, so turning it off
+(ConfigCat, live within one poll) stops the scheduled work without a restart. Its callers are
+`BillingReconciliationScheduleStartup` and `BillingReconciliationProcess`. Operating the
+reconciliation (scheduling, settings, alerts, procedures):
+[`billing-reconciliation.md`](billing-reconciliation.md). Design of record:
+[`plans/2026-10-18-etp-5048-billing-reconciliation-design.md`](plans/2026-10-18-etp-5048-billing-reconciliation-design.md).
 
 ## 2. The onboarding paywall
 
@@ -766,6 +792,7 @@ fixed `failureReason` describing that code:
 | `provisioning_failed` | The last attempt recorded a diagnostic failure | `true`, unless its `failureCode` is non-retryable |
 | `stalled` | The provisioning lease expired without a diagnostic failure | `true` |
 | `provisioned` | The request is terminal and carries its created client id | `false` |
+| `expired` | ETP-5048: the billing reconciliation closed the request after the provider confirmed its session expired unpaid (`CHECKOUT_STATUS = EXPIRED`); a new purchase starts a new request | `false` |
 
 **Failure codes (ETP-5548).** The raw cause of a failed attempt (exception text, internal ids,
 SQL) stays in `ETGO_CHECKOUT_REQUEST.FAILURE_REASON` for operations and is never returned. The row
@@ -981,6 +1008,10 @@ environment again, with its data. It is not a purchase of a new one.
   - **a tenant with no row** (switch OFF) — the `ETGO_TenantPlan` marker and
     `ETGO_SubscriptionStatus = CURRENT` are written, and `ETGO_SubscriptionEventAt` moves to the
     payment, so a late event of the canceled subscription is stale.
+- **A lost payment webhook is repaired by the billing reconciliation** (ETP-5048): it records the
+  payment from Stripe and applies the re-subscription through the same method, via
+  `PaidReactivationService`. `CheckoutRequestStore.findPaidReactivation` locks and re-reads the
+  request, so the webhook and the reconciliation apply it once.
 
   A failure rolls back with the event: the webhook answers 500, Stripe redelivers, and the request
   is still `PAID` for the retry. The new subscription's own lifecycle events find the tenant

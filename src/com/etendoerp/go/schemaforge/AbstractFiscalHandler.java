@@ -18,10 +18,15 @@ package com.etendoerp.go.schemaforge;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Set;
+import java.util.TreeSet;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -211,6 +216,16 @@ abstract class AbstractFiscalHandler {
   }
 
   /**
+   * Whether this model allows a single ORDINARY declaration per exercise / period (ETP-5716):
+   * a second ordinary one is answered {@code 409 DUPLICATE_ORDINARY} by
+   * {@link FiscalDeclCrudHandler}. Default {@code false} (303/349: the rectificativa flow
+   * re-files an ordinary); the Modelo 390 handler overrides it.
+   */
+  protected boolean allowsSingleOrdinary() {
+    return false;
+  }
+
+  /**
    * Computes, from the CURRENT invoice data, the exact JSON payload this model's read endpoint
    * returns ({@code /fiscal303/boxes}, {@code /fiscal349/operators}) for a declaration that is
    * not served from a snapshot. {@link #computeSubmittedSnapshot} derives the snapshot from it.
@@ -241,11 +256,22 @@ abstract class AbstractFiscalHandler {
    */
   @SuppressWarnings("java:S112")
   protected JSONObject snapshotOrCompute(String orgId, int year, String period) throws Exception {
-    String clientId = OBContext.getOBContext().getCurrentClient().getId();
-    // Lookup on the org the declaration is stored with; the compute keeps the effective org.
-    JSONObject snapshot = declHandler().snapshots.findLatestSubmittedSnapshot(clientId, declarationOrgId(),
-        getDeclModel(), year, period);
+    JSONObject snapshot = findSubmittedSnapshot(year, period);
     return snapshot != null ? snapshot : computeLivePayload(orgId, year, period);
+  }
+
+  /**
+   * The persisted submission snapshot of the latest declaration for this model's natural key, or
+   * {@code null} when that declaration is not submitted or has none (see
+   * {@link #snapshotOrCompute}). Split out so a model whose live payload takes request inputs
+   * ({@link Fiscal390BoxesHandler}) can serve the frozen figures without going through
+   * {@link #computeLivePayload}. Looked up on the org the declaration is stored with
+   * ({@link #declarationOrgId}).
+   */
+  protected JSONObject findSubmittedSnapshot(int year, String period) {
+    String clientId = OBContext.getOBContext().getCurrentClient().getId();
+    return declHandler().snapshots.findLatestSubmittedSnapshot(clientId, declarationOrgId(),
+        getDeclModel(), year, period);
   }
 
   /**
@@ -267,8 +293,14 @@ abstract class AbstractFiscalHandler {
           ? owner.computeSubmittedSnapshot(owner.resolveEffectiveOrg(), year, period)
           : null;
     };
+    // Per-model "single ordinary" rule, resolved through the same per-model map (ETP-5716).
+    java.util.function.Predicate<String> singleOrdinary = model -> {
+      AbstractFiscalHandler owner = byModel.get(model);
+      return owner != null && owner.allowsSingleOrdinary();
+    };
     for (AbstractFiscalHandler h : handlers) {
       h.declHandler().snapshots.setProvider(provider);
+      h.declHandler().singleOrdinarySupport.setSingleOrdinaryModel(singleOrdinary);
     }
   }
 
@@ -322,14 +354,52 @@ abstract class AbstractFiscalHandler {
     try {
       String orgId = resolveEffectiveOrg();
       dispatch(entityName, orgId, year, period, request, response);
-    } catch (FiscalHandlerException e) {
+    } catch (Exception e) {
+      sendDispatchFailure(response, e, entityName);
+    }
+  }
+
+  /**
+   * Answers a failed {@code dispatch()}: the structured 422 of an incomplete fiscal year, the
+   * user message of a {@link FiscalHandlerException}, or the generic 500 text otherwise.
+   */
+  private void sendDispatchFailure(HttpServletResponse response, Exception e, String entityName)
+      throws IOException {
+    if (sendIncompleteFiscalYear(response, e, entityName)) {
+      return;
+    }
+    if (e instanceof FiscalHandlerException) {
       log.error("Error in /" + getModelKey() + "/" + entityName, e);
       servlet.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, userMessage(e));
-    } catch (Exception e) {
-      log.error("Unexpected error in /" + getModelKey() + "/" + entityName, e);
-      servlet.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          GENERIC_ERROR_MESSAGE);
+      return;
     }
+    log.error("Unexpected error in /" + getModelKey() + "/" + entityName, e);
+    servlet.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+        GENERIC_ERROR_MESSAGE);
+  }
+
+  /**
+   * Answers an {@link IncompleteFiscalYearException} anywhere in {@code e}'s cause chain with the
+   * structured {@code 422 INCOMPLETE_FISCAL_YEAR} (year + missing months, no organization id in
+   * the text), so the client can explain it and point to the fiscal calendar. The full English
+   * message stays in the log.
+   *
+   * @return {@code true} when the answer was written
+   */
+  boolean sendIncompleteFiscalYear(HttpServletResponse response, Throwable e, String entityName)
+      throws IOException {
+    IncompleteFiscalYearException incomplete = IncompleteFiscalYearException.find(e);
+    if (incomplete == null) {
+      return false;
+    }
+    log.warn("/" + getModelKey() + "/" + entityName + ": " + incomplete.getMessage());
+    try {
+      servlet.writeResponse(response,
+          NeoResponse.error(IncompleteFiscalYearException.HTTP_STATUS, incomplete.toErrorBody()));
+    } catch (org.codehaus.jettison.json.JSONException jsonEx) {
+      servlet.sendError(response, IncompleteFiscalYearException.HTTP_STATUS, incomplete.userText());
+    }
+    return true;
   }
 
   /**
@@ -606,11 +676,108 @@ abstract class AbstractFiscalHandler {
     return list.isEmpty() ? null : list.get(0);
   }
 
+  /**
+   * A {@code TaxReport} picked by {@link #findLatestTaxReport}: the row itself, its search key and
+   * the layout year parsed from that key. {@link #isFallback} tells whether the layout belongs to
+   * an earlier exercise than the one being declared.
+   */
+  static final class ResolvedTaxReport {
+    final TaxReport report;
+    final String searchKey;
+    final int layoutYear;
+    final int requestedYear;
+
+    ResolvedTaxReport(TaxReport report, String searchKey, int layoutYear, int requestedYear) {
+      this.report = report;
+      this.searchKey = searchKey;
+      this.layoutYear = layoutYear;
+      this.requestedYear = requestedYear;
+    }
+
+    boolean isFallback() {
+      return layoutYear != requestedYear;
+    }
+  }
+
+  /**
+   * Year-fallback {@code TaxReport} lookup (ETP-5716): the report of {@code year} when one
+   * exists, otherwise the one of the latest earlier year. Candidates are the ACTIVE rows of org
+   * {@code orgId} or org {@code "0"} whose search key matches {@code searchKeyLike} (SQL LIKE,
+   * a coarse pre-filter) and then {@code yearPattern}, whose group 1 must capture the 4-digit
+   * layout year. See {@link #pickLatestTaxReport} for the selection rule. Only Modelo 390 uses
+   * it: 303/349 keep their exact-key {@link #findTaxReport} lookups.
+   *
+   * @return the resolved report, or {@code null} when no candidate qualifies
+   */
+  protected ResolvedTaxReport findLatestTaxReport(String orgId, String searchKeyLike,
+      Pattern yearPattern, int year) {
+    OBCriteria<TaxReport> crit = OBDal.getInstance().createCriteria(TaxReport.class);
+    crit.add(Restrictions.in(TaxReport.PROPERTY_ORGANIZATION + ".id", Arrays.asList(orgId, "0")));
+    crit.add(Restrictions.like(TaxReport.PROPERTY_SEARCHKEY, searchKeyLike));
+    crit.add(Restrictions.eq(TaxReport.PROPERTY_ACTIVE, true));
+    return pickLatestTaxReport(crit.list(), yearPattern, year, orgId);
+  }
+
+  /**
+   * Selection rule of {@link #findLatestTaxReport}, free of any database access:
+   * <ol>
+   *   <li>inactive rows and search keys not fully matching {@code yearPattern} are ignored — so
+   *       an inactive or oddly-named row can never shadow a valid one;</li>
+   *   <li>rows whose layout year is after {@code year} are ignored (the DECLARED exercise decides,
+   *       never today's date);</li>
+   *   <li>the highest remaining layout year wins;</li>
+   *   <li>on a tie, the row of {@code orgId} wins over the org {@code "0"} one.</li>
+   * </ol>
+   *
+   * @return the winner, or {@code null} when nothing qualifies
+   */
+  static ResolvedTaxReport pickLatestTaxReport(List<TaxReport> candidates, Pattern yearPattern,
+      int year, String orgId) {
+    TaxReport best = null;
+    int bestYear = Integer.MIN_VALUE;
+    boolean bestIsOrgRow = false;
+    for (TaxReport candidate : candidates) {
+      Matcher m = Boolean.TRUE.equals(candidate.isActive()) && candidate.getSearchKey() != null
+          ? yearPattern.matcher(candidate.getSearchKey()) : null;
+      if (m == null || !m.matches() || Integer.parseInt(m.group(1)) > year) {
+        continue;
+      }
+      int layoutYear = Integer.parseInt(m.group(1));
+      boolean isOrgRow = candidate.getOrganization() != null
+          && orgId.equals(candidate.getOrganization().getId());
+      if (layoutYear > bestYear || (layoutYear == bestYear && isOrgRow && !bestIsOrgRow)) {
+        best = candidate;
+        bestYear = layoutYear;
+        bestIsOrgRow = isOrgRow;
+      }
+    }
+    return best == null ? null
+        : new ResolvedTaxReport(best, best.getSearchKey(), bestYear, year);
+  }
+
+  /**
+   * The period code of an ANNUAL declaration (Modelo 390, AEAT period {@code 0A}):
+   * {@link #resolvePeriods} maps it to periods 1-12 of the fiscal year.
+   */
+  static final String ANNUAL_PERIOD = "0A";
+
+  private static final int MONTHS_PER_YEAR = 12;
+
+  /**
+   * Resolves the calendar periods a declaration period code covers: {@code Tn} is quarter n
+   * (months 3n-2..3n), {@value #ANNUAL_PERIOD} is the whole fiscal year (months 1-12, and fails
+   * when any of them is missing — see {@link #requireFullYear}), anything else is a single month
+   * number.
+   */
   @SuppressWarnings("unchecked")
   protected List<Period> resolvePeriods(String orgId, int year, String periodCode) {
     int monthFrom;
     int monthTo;
-    if (periodCode.startsWith("T")) {
+    boolean annual = ANNUAL_PERIOD.equals(periodCode);
+    if (annual) {
+      monthFrom = 1;
+      monthTo   = MONTHS_PER_YEAR;
+    } else if (periodCode.startsWith("T")) {
       int q = Integer.parseInt(periodCode.substring(1));
       monthFrom = (q - 1) * 3 + 1;
       monthTo   = q * 3;
@@ -618,7 +785,7 @@ abstract class AbstractFiscalHandler {
       monthFrom = Integer.parseInt(periodCode);
       monthTo   = monthFrom;
     }
-    return OBDal.getInstance().getSession()
+    List<Period> periods = OBDal.getInstance().getSession()
         .createQuery(
             "from FinancialMgmtPeriod p "
             + "where p.organization.id = :orgId "
@@ -631,5 +798,35 @@ abstract class AbstractFiscalHandler {
         .setParameter("from",  (long) monthFrom)
         .setParameter("to",    (long) monthTo)
         .list();
+    if (annual) {
+      requireFullYear(periods, orgId, year);
+    }
+    return periods;
+  }
+
+  /**
+   * An annual declaration over an incomplete calendar would silently under-report, so a fiscal
+   * year that does not have exactly one period per month 1-12 is rejected, naming the missing
+   * months.
+   *
+   * @throws IncompleteFiscalYearException when any month 1-12 has no period — answered by
+   *     {@link #handle} as the structured {@code 422 INCOMPLETE_FISCAL_YEAR}
+   */
+  static void requireFullYear(List<Period> periods, String orgId, int year) {
+    Set<Long> present = new TreeSet<>();
+    for (Period p : periods) {
+      if (p.getPeriodNo() != null) {
+        present.add(p.getPeriodNo());
+      }
+    }
+    List<Long> missing = new ArrayList<>();
+    for (long month = 1; month <= MONTHS_PER_YEAR; month++) {
+      if (!present.contains(month)) {
+        missing.add(month);
+      }
+    }
+    if (!missing.isEmpty()) {
+      throw new IncompleteFiscalYearException(orgId, year, missing);
+    }
   }
 }

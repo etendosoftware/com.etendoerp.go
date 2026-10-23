@@ -33,6 +33,7 @@ import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.base.structure.BaseOBObject;
+import org.openbravo.client.kernel.RequestContext;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
@@ -99,6 +100,21 @@ public class ProductDefaultsHandler implements NeoHandler {
   // ETP-4943 (Service) / ETP-5091 (Expense, Resource) — none of these product types have a
   // physical existence in inventory.
   private static final Set<String> NON_STOCKABLE_PRODUCT_TYPES = Set.of("S", "E", "R");
+  /**
+   * ETP-5680: tax category the Product window pairs with each product type, matched by
+   * {@code C_TaxCategory.Name} inside the tenant (the names the Spanish accounting package seeds).
+   * A name the tenant does not have resolves to nothing and the caller keeps its own value.
+   */
+  static final String TAX_CATEGORY_NAME_SERVICE = "IVA Normal Servicios";
+  static final String TAX_CATEGORY_NAME_GOODS = "IVA Normal";
+  /** Query parameter of {@code /product/defaults} carrying the product type to resolve for. */
+  static final String PARAM_PRODUCT_TYPE = "productType";
+  /**
+   * Key added to the {@code /defaults} payload when {@link #PARAM_PRODUCT_TYPE} is sent: the id
+   * (plus {@code $_identifier}) of the type's tax category, present ONLY when the tenant has it.
+   * Distinct from {@code taxCategory} (the IsDefault fallback) so the UI can tell "no match".
+   */
+  static final String DEFAULT_KEY_TYPE_TAX_CATEGORY = "typeTaxCategory";
   private static final String FIELD_TOTAL_ROWS = "totalRows";
   private static final String FIELD_END_ROW = "endRow";
   private static final String SYSTEM_CLIENT_ID = "0";
@@ -162,7 +178,7 @@ public class ProductDefaultsHandler implements NeoHandler {
       try {
         String clientId = resolveClientId(context);
         injectIfMissing(body, FIELD_UOM, UOM.class, clientId);
-        injectIfMissing(body, FIELD_TAX_CATEGORY, TaxCategory.class, clientId);
+        injectTaxCategoryIfMissing(body, clientId);
       } catch (Exception e) {
         log.error("product pre-hook: failed to inject uOM/taxCategory default", e);
       }
@@ -512,6 +528,7 @@ public class ProductDefaultsHandler implements NeoHandler {
       }
       overwriteDefault(defaults, FIELD_UOM, UOM.class, clientId);
       overwriteDefault(defaults, FIELD_TAX_CATEGORY, TaxCategory.class, clientId);
+      injectTypeTaxCategory(defaults, context, clientId);
       return NeoResponse.ok(body);
     } catch (Exception e) {
       log.error("product afterHandle: failed to inject uOM/taxCategory default", e);
@@ -626,6 +643,126 @@ public class ProductDefaultsHandler implements NeoHandler {
     String defaultId = resolveDefaultId(entityClass, clientId);
     if (defaultId != null) {
       body.put(propertyName, defaultId);
+    }
+  }
+
+  /**
+   * ETP-5680: tax category name for a product type — Service pairs with the services rate, every
+   * other type (Item, Resource, Expense) with the general one. {@code null} for a blank type.
+   */
+  static String taxCategoryNameForType(String productType) {
+    if (StringUtils.isBlank(productType)) {
+      return null;
+    }
+    return "S".equals(productType.trim()) ? TAX_CATEGORY_NAME_SERVICE : TAX_CATEGORY_NAME_GOODS;
+  }
+
+  /**
+   * ETP-5680: create-time fill of {@code taxCategory}. An explicit value always wins; otherwise the
+   * category matching the body's {@code productType} by name, falling back to the IsDefault row
+   * when the body has no type or the tenant lacks the named category. Create only — a PATCH never
+   * recalculates the category.
+   */
+  private void injectTaxCategoryIfMissing(JSONObject body, String clientId) throws JSONException {
+    if (body.has(FIELD_TAX_CATEGORY) && StringUtils.isNotBlank(body.optString(FIELD_TAX_CATEGORY, null))) {
+      return;
+    }
+    String typeId = resolveTaxCategoryIdForType(body.optString(FIELD_PRODUCT_TYPE, null), clientId);
+    if (typeId != null) {
+      body.put(FIELD_TAX_CATEGORY, typeId);
+      return;
+    }
+    injectIfMissing(body, FIELD_TAX_CATEGORY, TaxCategory.class, clientId);
+  }
+
+  /**
+   * ETP-5680: makes the {@code /defaults} payload carry the tax category that matches the type.
+   *
+   * <ul>
+   *   <li>With a {@code productType} request parameter (the form re-asking after the user changed
+   *       the type): adds {@link #DEFAULT_KEY_TYPE_TAX_CATEGORY} (+ {@code $_identifier}) when the
+   *       tenant has the named category; the payload is left alone otherwise, which is the UI's
+   *       signal to keep the field as it is.</li>
+   *   <li>Without it (a new form opening): the type is the one the payload itself defaults to
+   *       ({@code defaults.productType}, Item), and {@code taxCategory} is overwritten with that
+   *       type's category, so a new Item starts as "IVA Normal" rather than as whatever row is
+   *       flagged IsDefault. A tenant without the named category keeps the IsDefault value.</li>
+   * </ul>
+   */
+  private void injectTypeTaxCategory(JSONObject defaults, NeoContext context, String clientId)
+      throws JSONException {
+    String requested = requestedProductType(context);
+    String productType = requested != null ? requested
+        : StringUtils.trimToNull(defaults.optString(FIELD_PRODUCT_TYPE, null));
+    String id = resolveTaxCategoryIdForType(productType, clientId);
+    if (id == null) {
+      return;
+    }
+    String key = requested != null ? DEFAULT_KEY_TYPE_TAX_CATEGORY : FIELD_TAX_CATEGORY;
+    defaults.put(key, id);
+    BaseOBObject obj = OBDal.getInstance().get(TaxCategory.class, id);
+    if (obj != null) {
+      defaults.put(key + "$_identifier", obj.getIdentifier());
+    }
+  }
+
+  /**
+   * The {@code productType} query parameter of a {@code /defaults} call. Read from the hook
+   * context's query map, which {@code NeoSubEndpointDispatcher} now fills from the request; the
+   * servlet request is only a last-resort fallback, because on the live REST path
+   * {@code RequestContext.get().getRequest()} did not carry the parameter.
+   */
+  static String requestedProductType(NeoContext context) {
+    Map<String, String> params = context.getQueryParams();
+    String fromContext = params != null ? StringUtils.trimToNull(params.get(PARAM_PRODUCT_TYPE)) : null;
+    if (fromContext != null) {
+      return fromContext;
+    }
+    try {
+      if (RequestContext.get() == null || RequestContext.get().getRequest() == null) {
+        return null;
+      }
+      return StringUtils.trimToNull(
+          RequestContext.get().getRequest().getParameter(PARAM_PRODUCT_TYPE));
+    } catch (Exception e) {
+      return null;
+    }
+  }
+
+  /**
+   * ETP-5680: id of the tax category named for {@code productType} in the client (then the System
+   * client), or {@code null} when the type is blank or no such active category exists.
+   */
+  String resolveTaxCategoryIdForType(String productType, String clientId) {
+    String name = taxCategoryNameForType(productType);
+    if (name == null) {
+      return null;
+    }
+    if (StringUtils.isNotBlank(clientId)) {
+      String own = queryTaxCategoryIdByName(name, clientId);
+      if (own != null) {
+        return own;
+      }
+    }
+    return queryTaxCategoryIdByName(name, SYSTEM_CLIENT_ID);
+  }
+
+  String queryTaxCategoryIdByName(String name, String clientId) {
+    try {
+      OBContext.setAdminMode(true);
+      OBCriteria<TaxCategory> crit = OBDal.getInstance().createCriteria(TaxCategory.class);
+      crit.add(Restrictions.eq("client.id", clientId));
+      crit.add(Restrictions.eq(TaxCategory.PROPERTY_NAME, name));
+      crit.add(Restrictions.eq("active", true));
+      crit.setMaxResults(1);
+      TaxCategory found = (TaxCategory) crit.uniqueResult();
+      return found != null ? found.getId() : null;
+    } catch (Exception e) {
+      log.debug("Could not resolve tax category '{}' / client {}: {}", name, clientId,
+          e.getMessage());
+      return null;
+    } finally {
+      OBContext.restorePreviousMode();
     }
   }
 

@@ -1954,6 +1954,88 @@ public class CreatePurchaseInvoiceHandlerTest {
   }
 
   /**
+   * ETP-5840, table-driven: an invoice generated from a purchase order in a foreign currency
+   * WITHOUT a rate is refused before completing — 422 {@code exchange_rate_missing_on_complete} with
+   * its identity, the generation rolled back, the completion never run. With a rate it completes as
+   * before; the goods-receipt route is not checked. The organization currency is {@code eur}.
+   */
+  @Test
+  public void handleCreate_foreignInvoiceWithoutRate_isRefusedAndRolledBack() throws Exception {
+    Object[][] cases = {
+        // name, spec, rate, expected status
+        { "purchase order, no rate", "purchase-order", null, 422 },
+        { "purchase order, with rate", "purchase-order", new BigDecimal("1.1"), 201 },
+        { "goods receipt is not checked", "goods-receipt", null, 201 },
+    };
+    for (Object[] c : cases) {
+      String name = (String) c[0];
+      try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+          MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+          MockedStatic<org.openbravo.erpCommon.utility.OBCurrencyUtils> currencies =
+              Mockito.mockStatic(org.openbravo.erpCommon.utility.OBCurrencyUtils.class)) {
+        obContextMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+        obContextMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+        OBDal dal = mock(OBDal.class);
+        obDalMock.when(OBDal::getInstance).thenReturn(dal);
+        when(dal.getSession()).thenReturn(mock(Session.class));
+        currencies.when(() -> org.openbravo.erpCommon.utility.OBCurrencyUtils.getOrgCurrency("org-1"))
+            .thenReturn("eur");
+
+        Organization org = mock(Organization.class);
+        when(org.getId()).thenReturn("org-1");
+        Currency usd = mock(Currency.class);
+        when(usd.getId()).thenReturn("usd");
+        Invoice created = mock(Invoice.class);
+        when(created.getId()).thenReturn("ap-inv-fx");
+        when(created.get(Invoice.PROPERTY_ORGANIZATION)).thenReturn(org);
+        when(created.get(Invoice.PROPERTY_CURRENCY)).thenReturn(usd);
+        when(created.get(Invoice.PROPERTY_ETGOCURRENCYRATE)).thenReturn((BigDecimal) c[2]);
+        Invoice completed = mock(Invoice.class);
+        when(completed.getDocumentNo()).thenReturn("AP-FX-1");
+        when(completed.getDocumentStatus()).thenReturn("CO");
+        when(dal.get(eq(Invoice.class), eq("ap-inv-fx"))).thenReturn(completed);
+
+        CreatePurchaseInvoiceHandler handler;
+        if ("goods-receipt".equals(c[1])) {
+          RoutingHandler routing = new RoutingHandler();
+          routing.invoiceToReturn = created;
+          handler = routing;
+        } else {
+          CompletingHandler completing = new CompletingHandler();
+          completing.createdInvoice = created;
+          handler = completing;
+        }
+
+        try (CompletionMocks completion = new CompletionMocks(dal, completionSuccess())) {
+          NeoResponse response = handler.handle(NeoContext.builder()
+              .endpointType(NeoEndpointType.ACTION).httpMethod("POST")
+              .fieldName("createPurchaseInvoice").specName((String) c[1]).recordId("src-1")
+              .build());
+
+          assertEquals(name, c[3], response.getHttpStatus());
+          if ((Integer) c[3] == 422) {
+            JSONObject error = response.getBody().getJSONObject("error");
+            assertEquals(name, DocumentRateMessages.CODE_MISSING_ON_COMPLETE,
+                error.getString("code"));
+            assertEquals(name, DocumentRateMessages.MSG_MISSING_ON_COMPLETE,
+                error.getJSONArray(NeoProcessService.MESSAGE_KEYS).getString(0));
+            JSONObject params = error.getJSONObject(NeoProcessService.MESSAGE_PARAMS);
+            assertEquals(name, "eur", params.getString("orgCurrency"));
+            assertEquals(name, "usd", params.getString("documentCurrency"));
+            verify(dal).rollbackAndClose();
+            verify(completion.processInvoiceUtil, never()).process(any(), any(), any(), any(),
+                any(), any(), any());
+          } else {
+            verify(dal, never()).rollbackAndClose();
+            verify(completion.processInvoiceUtil, times(1)).process(
+                eq("ap-inv-fx"), eq("CO"), eq(""), eq(""), eq(""), any(), any());
+          }
+        }
+      }
+    }
+  }
+
+  /**
    * Shared mock graph for the collaborators {@code createFromReceipt} reaches after the quantity
    * map is resolved: the line-link native query, the current user, the invoice instance produced
    * by {@code OBProvider}, and the CDI-managed line-creation process.

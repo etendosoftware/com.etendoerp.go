@@ -24,6 +24,7 @@ import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -42,6 +43,8 @@ import org.openbravo.model.ad.ui.Tab;
 
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
+import com.etendoerp.go.schemaforge.NeoExtensionDispatcher;
+import com.etendoerp.go.schemaforge.NeoExtensionRequest;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.data.SFEntity;
@@ -663,5 +666,58 @@ public class McpHookExecutorTest {
       assertEquals(adTab, ctx.getAdTab());
       assertEquals(sfEntity, ctx.getSfEntity());
     }
+  }
+
+  // ── resolveServerCreateFields (ETP-5710) ──────────────────────────────
+
+  @Test
+  public void testResolveServerCreateFieldsCallsCustomizationWithLiveBody() throws Exception {
+    NeoHandler customization = mock(NeoHandler.class);
+    SFEntity sfEntity = mock(SFEntity.class);
+    JSONObject body = new JSONObject().put("businessPartner", "bp-1");
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+        MockedStatic<NeoExtensionDispatcher> dispatcher = mockStatic(NeoExtensionDispatcher.class)) {
+      obContextMock.when(OBContext::getOBContext).thenReturn(null);
+      dispatcher.when(() -> NeoExtensionDispatcher.resolveOnly(any(NeoExtensionRequest.class)))
+          .thenReturn(customization);
+
+      McpHookExecutor.resolveServerCreateFields("sales-invoice", "header", null, sfEntity, body);
+
+      verify(customization).resolveServerCreateFields(argThat(ctx ->
+          ctx.getRequestBody() == body && "POST".equals(ctx.getHttpMethod())
+              && ctx.getRecordId() == null && ctx.getEndpointType() == NeoEndpointType.CRUD));
+    }
+  }
+
+  @Test
+  public void testResolveServerCreateFieldsWithoutCustomizationOrOnFailureLeavesBody()
+      throws Exception {
+    SFEntity sfEntity = mock(SFEntity.class);
+    JSONObject body = new JSONObject().put("a", "b");
+
+    try (MockedStatic<NeoExtensionDispatcher> dispatcher = mockStatic(NeoExtensionDispatcher.class)) {
+      dispatcher.when(() -> NeoExtensionDispatcher.resolveOnly(any(NeoExtensionRequest.class)))
+          .thenReturn(null);
+      McpHookExecutor.resolveServerCreateFields("s", "e", null, sfEntity, body);
+
+      dispatcher.when(() -> NeoExtensionDispatcher.resolveOnly(any(NeoExtensionRequest.class)))
+          .thenThrow(new IllegalStateException("boom"));
+      McpHookExecutor.resolveServerCreateFields("s", "e", null, sfEntity, body);
+    }
+    assertEquals(1, body.length());
+  }
+
+  @Test
+  public void testNeoHandlerDefaultResolveServerCreateFieldsIsNoOp() throws Exception {
+    NeoHandler plain = new NeoHandler() {
+      @Override
+      public NeoResponse handle(NeoContext context) {
+        return null;
+      }
+    };
+    JSONObject body = new JSONObject().put("a", "b");
+    plain.resolveServerCreateFields(NeoContext.builder().requestBody(body).build());
+    assertEquals(1, body.length());
   }
 }
