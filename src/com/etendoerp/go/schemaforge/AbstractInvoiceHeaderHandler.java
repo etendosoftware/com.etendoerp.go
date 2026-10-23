@@ -192,8 +192,9 @@ public abstract class AbstractInvoiceHeaderHandler {
    *       accounting date or the currency changes and the request sends none, and refuses a
    *       foreign-currency save without a rate (the completion text when the write completes);</li>
    *   <li>completion through the {@code documentAction} action → refused when the stored rate is
-   *       empty. {@link InvoiceCompletionRateHook} applies the same rule inside
-   *       {@code ProcessInvoiceUtil} for every other completion path.</li>
+   *       empty. This strict rule is the GO channels' only: {@link InvoiceCompletionRateHook}, which
+   *       {@code ProcessInvoiceUtil} also runs (classic backoffice included), keeps its pre-ETP-5840
+   *       behaviour (any rate on the invoice date, {@code SMFCR_NoRateOnComplete}).</li>
    * </ul>
    *
    * @return the refusal, or {@code null} to carry on

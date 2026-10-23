@@ -463,8 +463,9 @@ final class DocumentCurrencyRate {
 
   /**
    * The completion-refusal text for {@code doc} when its currency is not its organization's and
-   * {@code rateProperty} is empty, else {@code null}. Shared by the NEO pre-hooks and the invoice
-   * {@code ProcessInvoiceHook} (classic completion path).
+   * {@code rateProperty} is empty, else {@code null}. Used by the GO completion checks only
+   * ({@link #refuseCompletionWithoutRate}, {@link #requireRateForCompletion}); the classic
+   * {@code InvoiceCompletionRateHook} keeps its own, unchanged rule.
    */
   static String missingRateOnCompletion(BaseOBObject doc, String rateProperty) {
     if (doc == null) {

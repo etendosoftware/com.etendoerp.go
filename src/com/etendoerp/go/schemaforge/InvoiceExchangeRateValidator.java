@@ -18,33 +18,28 @@
 package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
-import java.time.Instant;
-import java.time.LocalDate;
-import java.time.ZoneId;
 
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.erpCommon.utility.OBCurrencyUtils;
+import org.openbravo.erpCommon.utility.OBMessageUtils;
+import org.openbravo.financial.FinancialUtils;
 import org.openbravo.model.common.currency.ConversionRateDoc;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.invoice.Invoice;
 
 /**
- * Decides whether an invoice may be completed with respect to its exchange rate (ETP-4030; message
- * and reference date aligned by ETP-5840): when the invoice currency differs from its
- * organization's, a rate must be available — the invoice's own (the header
- * {@code EM_ETGO_Currency_Rate}, or a non-zero {@link ConversionRateDoc} row for the exact pair),
- * else a general {@code C_Conversion_Rate} valid on the invoice's ACCOUNTING date for its
- * organization and client.
+ * Checks that an exchange rate exists to convert an invoice's currency to the org's functional
+ * currency, used to block completion when none is available (ETP-4030). Invoked from
+ * {@link InvoiceCompletionRateHook} to cover the classic backoffice UI completion path.
  *
- * <p>Invoked from {@link InvoiceCompletionRateHook}, the {@code ProcessInvoiceHook} that
- * {@code ProcessInvoiceUtil} runs on every completion path, the classic backoffice included. The
- * general-rate fallback is kept on purpose: a classic invoice never fills
- * {@code EM_ETGO_Currency_Rate}, and classic is out of the ETP-5840 scope. The stricter rule — the
- * document must carry its own rate — is enforced on the NEO paths (REST, batch, MCP) by the invoice
- * header pre-hooks ({@link DocumentCurrencyRate}), which run before this hook.
+ * <p>The NEO/headless completion path no longer calls this validator: ETP-4027 moves the
+ * exchange-rate check to the frontend, triggered when the user changes the document currency.
+ *
+ * <p>Precedence mirrors core: the document-level rate ({@link ConversionRateDoc}, manual or synced)
+ * wins over the general {@code C_Conversion_Rate} spot table.
  */
 public final class InvoiceExchangeRateValidator {
 
@@ -53,13 +48,15 @@ public final class InvoiceExchangeRateValidator {
   }
 
   /**
-   * Checks whether the given invoice can be completed with respect to its exchange rate.
+   * Checks whether the given invoice can be completed with respect to currency conversion. Returns
+   * a user-facing error message when completion must be blocked — the document currency differs
+   * from the organization currency and no exchange rate is available — or {@code null} when it may
+   * proceed.
    *
    * @param invoice the invoice about to be completed
-   * @return the translated refusal ({@code ETGO_ExchangeRateMissingOnComplete}) when the currencies
-   *         differ and no rate is available, or {@code null} when completion may proceed (same
-   *         currency, no functional currency configured, a document rate, or a general rate on the
-   *         accounting date)
+   * @return a resolved, user-facing error message when completion must be blocked (currencies
+   *         differ and no rate is available), or {@code null} when completion may proceed (same
+   *         currency, no functional currency configured, or a rate exists).
    */
   public static String checkRateForCompletion(Invoice invoice) {
     if (invoice == null) {
@@ -80,8 +77,8 @@ public final class InvoiceExchangeRateValidator {
       if (hasDocumentRate(invoice, from, to) || hasGeneralRate(invoice, from, to)) {
         return null;
       }
-      return DocumentCurrencyRate.missingRateOnCompletion(invoice,
-          Invoice.PROPERTY_ETGOCURRENCYRATE);
+      return OBMessageUtils.messageBD("SMFCR_NoRateOnComplete") + " " + from.getISOCode() + " → "
+          + (to != null ? to.getISOCode() : baseCurrencyId);
     } finally {
       OBContext.restorePreviousMode();
     }
@@ -112,18 +109,12 @@ public final class InvoiceExchangeRateValidator {
     return false;
   }
 
-  /**
-   * True if a general {@code C_Conversion_Rate} exists for {@code from → to} on the invoice's
-   * accounting date (ETP-5840: the reference date of an invoice; the invoice date before), scoped to
-   * the invoice's organization and client — direct, then the inverse of the reverse rate.
-   */
+  /** True if a general {@code C_Conversion_Rate} exists for the invoice date (core lookup). */
   private static boolean hasGeneralRate(Invoice invoice, Currency from, Currency to) {
-    if (to == null || invoice.getAccountingDate() == null || invoice.getClient() == null) {
+    if (to == null || invoice.getInvoiceDate() == null) {
       return false;
     }
-    LocalDate date = Instant.ofEpochMilli(invoice.getAccountingDate().getTime())
-        .atZone(ZoneId.systemDefault()).toLocalDate();
-    return DocumentCurrencyRate.lookupRate(to.getId(), from.getId(), date,
-        invoice.getOrganization().getId(), invoice.getClient().getId()) != null;
+    return FinancialUtils.getConversionRate(invoice.getInvoiceDate(), from, to,
+        invoice.getOrganization(), invoice.getClient()) != null;
   }
 }
