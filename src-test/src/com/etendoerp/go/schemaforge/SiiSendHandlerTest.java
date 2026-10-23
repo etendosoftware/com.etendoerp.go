@@ -142,6 +142,63 @@ public class SiiSendHandlerTest {
     assertNull(SiiSendHandler.normalizeErrorShape(null));
   }
 
+  // ── remapDriftedFieldLabels — ETP-5745 (5th fix) ────────────────────────────
+  //
+  // SIIUtils.invoicePreviousValidations (classic org.openbravo.module.sii) names a field by its
+  // CLASSIC label in three of its fixed sentences. Two of those labels have drifted from their
+  // current Etendo GO label ("Referencia del proveedor" → "Nº Documento Proveedor",
+  // "Clave tipo factura" → "Tipo factura"); the third ("Descripción SII") has not. The classic
+  // module itself is never touched — only the message this handler returns to the GO SPA.
+
+  @Test
+  public void remapsPurchaseVendorReferenceLabelToTheGoFieldName() throws JSONException {
+    NeoResponse response = NeoResponse.error(400,
+        "La factura de compra debe contener información en el campo Referencia del proveedor. ");
+
+    NeoResponse result = SiiSendHandler.remapDriftedFieldLabels(SiiSendHandler.normalizeErrorShape(response));
+
+    String message = result.getBody().getString("message");
+    assertTrue(message.contains("Nº Documento Proveedor"));
+    assertFalse(message.contains("Referencia del proveedor"));
+  }
+
+  @Test
+  public void remapsInvoiceTypeKeyLabelToTheGoFieldName() throws JSONException {
+    NeoResponse response = NeoResponse.error(400,
+        "La factura debe contener información en el campo Clave tipo factura. ");
+
+    NeoResponse result = SiiSendHandler.remapDriftedFieldLabels(SiiSendHandler.normalizeErrorShape(response));
+
+    String message = result.getBody().getString("message");
+    assertTrue(message.contains("Tipo factura"));
+    assertFalse(message.contains("Clave tipo factura"));
+  }
+
+  @Test
+  public void leavesTheSiiDescriptionMessageUntouched_labelDidNotDrift() throws JSONException {
+    String original = "La factura debe contener información en el campo Descripción SII. ";
+    NeoResponse response = NeoResponse.error(400, original);
+
+    NeoResponse result = SiiSendHandler.remapDriftedFieldLabels(SiiSendHandler.normalizeErrorShape(response));
+
+    assertEquals(original, result.getBody().getString("message"));
+  }
+
+  @Test
+  public void leavesAnUnrecognizedMessageCompletelyUntouched() throws JSONException {
+    String original = "MultiEnvioFactura: SOAP fault from AEAT";
+    NeoResponse response = NeoResponse.error(500, original);
+
+    NeoResponse result = SiiSendHandler.remapDriftedFieldLabels(SiiSendHandler.normalizeErrorShape(response));
+
+    assertEquals(original, result.getBody().getString("message"));
+  }
+
+  @Test
+  public void remapToleratesANullResponse() {
+    assertNull(SiiSendHandler.remapDriftedFieldLabels(null));
+  }
+
   // ── executeAction() routing — ETP-5272 ─────────────────────────────────────
   //
   // executeAction routes to MultiInvoiceSIIModification (registry-error resend, A1)

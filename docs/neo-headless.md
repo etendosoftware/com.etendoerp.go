@@ -10533,6 +10533,44 @@ declared-contract check, the invoice's completed-and-posted gate). **A foreign i
 A document's result carries `steps:["unpost","documentAction"]` when the step ran (`steps:["unpost"]` if it failed); a document that
 did not need it has no `steps` key. In a single `etendo_action` the same keys are **added to the action's own answer**, only when the step ran
 (`processResult`/`processMessage` and every other key are unchanged); every other call, `docAction` or entity answers byte for byte as before.
+
+**ETP-5745 CP-9 — `InvoiceReactivationGuard` names EVERY accepted fiscal system, not just the first.**
+`messageParams.fiscalSystem` on the `ETGO_InvoiceReactivateFiscalRectified` refusal used to report only
+the first fiscal system an if/else-if chain matched (SII, then Verifactu, then TicketBAI), so an invoice
+accepted by BOTH SII and TicketBAI at once was reported as SII-only. It is now a comma-joined list of
+every accepted system (e.g. `"SII, TicketBAI"`); `rectificativas` is unchanged. Same code path on every
+channel, so no divergence to declare here.
+
+**ETP-5745 CP-9 — `RectificationTotalGuard` caps a rectificativa's total against its origin.** New guard,
+wired from `AbstractInvoiceHeaderHandler#completeInvoiceIfNeeded` right before the real completion runs
+(the same spot `validateLineQtyBeforeComplete` used to occupy). Completing (`documentAction=CO`) a
+rectificativa is refused with a 422 (`messageKeys:["ETGO_InvoiceRectificationExceedsOriginal"]`,
+`messageParams:{originInvoiceId, originTotal, rectifiedTotal}`) when the sum of `ABS(GrandTotal)` of every
+COMPLETED rectificativa against the same origin — including the one about to complete — would exceed the
+origin's own `ABS(GrandTotal)`. Fails open on any read error, mirroring `InvoiceReactivationGuard`. Applies
+identically to sales and purchase invoices (shared `C_Invoice`/`C_Invoice_Reverse` tables, no spec/table
+name in the guard itself) and on every channel (`completeInvoiceIfNeeded` runs before `handle()` dispatches
+to the channel-specific response building), so no divergence to declare here either.
+
+**ETP-5745 CP-12 — `rectifyingInvoices`, the mirror of `originInvoices`.** The detail GET of an invoice
+already carried `originInvoices` (what THIS invoice rectifies). It now also carries `rectifyingInvoices`
+(`AbstractInvoiceHeaderHandler#enrichRectifyingInvoices`, wired next to `enrichOriginInvoice` in both
+`SalesInvoiceHeaderHandler` and `PurchaseInvoiceHeaderHandler`): the rectificativa(s) that rectify THIS
+invoice, read from `C_Invoice_Reverse` in the opposite direction. Before this field existed, the ORIGINAL
+invoice's own "Rectificaciones" tab and "Documentos relacionados" card always rendered empty — only a
+rectificativa could show anything, via `originInvoices`.
+
+**ETP-5745 (5th fix) — `SiiSendHandler` remaps two drifted classic field names in validation
+messages.** `SIIUtils.invoicePreviousValidations` (classic `org.openbravo.module.sii`, untouched by
+this fix) names a field by its CLASSIC label in three of its fixed pre-send validation sentences.
+Two of those labels have since drifted from their current Etendo GO label: "Referencia del
+proveedor" to "Nº Documento Proveedor" (`genericLabels.receivedDocumentnoOrderReference`), and "Clave
+tipo factura" to "Tipo factura" (`sifDataTabs.field.invoiceType`); "Descripción SII" has not drifted
+and is left alone. `SiiSendHandler.remapDriftedFieldLabels` runs right after
+`normalizeErrorShape`/`ensureTopLevelMessage`, on both the `MultiEnvioFactura` and the
+`MultiInvoiceSIIModification` (registry-error resend) paths, and does a plain literal substring
+replace on the top-level `message` — any message it does not recognize passes through byte for byte.
+Same handler on every channel, so no divergence to declare here.
 **MCP path only:** the hook is in `McpToolRouter.route` (`etendo_action` case), not in `handleAction` or `NeoButtonActionHelper`, so the REST action endpoint and the SPA (which
 un-posts on its own and then posts `documentAction RE` to `/sws/neo`) never reach it: a double un-post is impossible. A single call leaves the final commit of the
 reactivation to the request, as every `etendo_action` does; the un-post is committed on its own before it.

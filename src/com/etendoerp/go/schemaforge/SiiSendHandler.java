@@ -17,6 +17,8 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.util.Map;
+
 import javax.inject.Named;
 
 import org.codehaus.jettison.json.JSONArray;
@@ -66,7 +68,7 @@ public class SiiSendHandler extends AbstractLegacyInvoiceActionHandler {
 
     NeoResponse response = NeoProcessService.executeObuiappClass(PROCESS_CLASS, PROCESS_ID,
         buildInvoiceSendParams(recordId, invoice));
-    return normalizeErrorShape(response);
+    return remapDriftedFieldLabels(normalizeErrorShape(response));
   }
 
   /**
@@ -80,7 +82,7 @@ public class SiiSendHandler extends AbstractLegacyInvoiceActionHandler {
       throws Exception {
     NeoResponse response = NeoProcessService.executeObuiappClass(MODIFICATION_PROCESS_CLASS,
         MODIFICATION_PROCESS_ID, buildInvoiceSendParams(recordId, invoice));
-    return normalizeErrorShape(response);
+    return remapDriftedFieldLabels(normalizeErrorShape(response));
   }
 
   /**
@@ -133,6 +135,63 @@ public class SiiSendHandler extends AbstractLegacyInvoiceActionHandler {
    */
   static NeoResponse normalizeErrorShape(NeoResponse response) {
     return NeoResponse.ensureTopLevelMessage(response);
+  }
+
+  /**
+   * Classic field name → its current Etendo GO label, for the two fixed sentences of
+   * {@code SIIUtils.invoicePreviousValidations} (org.openbravo.module.sii, classic SII module —
+   * NOT touched by this fix: its text is correct for Classic's own UI, and other classic callers
+   * may depend on the exact wording) whose GO label has drifted from the classic one
+   * (ETP-5745). Checked against both sides' label catalogs — the third fixed-field sentence in
+   * that same validation block, "Descripción SII", is NOT remapped: GO's label for
+   * {@code aeatsiiDescripcionSii} ({@code tools/app-shell/src/locales/es_ES.json} →
+   * {@code sifDataTabs.field.siiDescription}) is the identical string.
+   *
+   * <p><b>Why these are literal strings, not a lookup against the frontend catalog:</b> the GO
+   * label only exists in the SPA's bundled locale JSON (a separate repo, a separate deployment
+   * unit from this module) — there is no runtime-shared label source between the two. Keep this
+   * map's values byte-for-byte equal to their cited locale key; a tester/reviewer can grep the
+   * locale key on a rename and update both sides together.
+   */
+  private static final Map<String, String> DRIFTED_CLASSIC_FIELD_LABELS = Map.of(
+      // tools/app-shell/src/locales/es_ES.json → sifDataTabs.field.invoiceType
+      "Clave tipo factura", "Tipo factura",
+      // tools/app-shell/src/locales/es_ES.json → receivedDocumentnoOrderReference
+      "Referencia del proveedor", "Nº Documento Proveedor"
+  );
+
+  /**
+   * Replaces a classic field name inside the response's top-level {@code message} with its
+   * current Etendo GO label, for the fixed set of {@link #DRIFTED_CLASSIC_FIELD_LABELS}
+   * sentences only (ETP-5745). Any other message — a different validation, an AEAT SOAP error,
+   * the generic exception-wrapper text — passes through completely untouched: this is a targeted
+   * fix for a known, fixed set of sentences, not a general classic-message translator.
+   *
+   * @param response the response {@link #normalizeErrorShape} already ran on (so a top-level
+   *     {@code message} is present whenever the body carried one at all)
+   * @return {@code response}, with its body's {@code message} remapped in place when it matched
+   */
+  static NeoResponse remapDriftedFieldLabels(NeoResponse response) {
+    if (response == null || response.getBody() == null) {
+      return response;
+    }
+    JSONObject body = response.getBody();
+    String message = body.optString("message", null);
+    if (message == null) {
+      return response;
+    }
+    String remapped = message;
+    for (Map.Entry<String, String> entry : DRIFTED_CLASSIC_FIELD_LABELS.entrySet()) {
+      remapped = remapped.replace(entry.getKey(), entry.getValue());
+    }
+    if (!remapped.equals(message)) {
+      try {
+        body.put("message", remapped);
+      } catch (JSONException ignored) {
+        // Best-effort: leave the original (classic-labeled) message rather than fail the request.
+      }
+    }
+    return response;
   }
 
   @Override
