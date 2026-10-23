@@ -17,8 +17,9 @@ ETP-5051/5053.
 
 **To raise with:** a topic whose answer must come from a named person carries a `**To raise
 with:**` line under its ticket line. Most 🔴 decisions were answered by Sebastián Barrozo
-(product/tech lead) in a chat with Martin Taal on 2026-09-28; the points that chat left open, or
-opened, and that are still owed are §1.2 and §1.4 (§1.6 and §1.7 were removed, see §1).
+(product/tech lead) in a chat with Martin Taal on 2026-09-28. Of the points that chat left open, or
+opened, only §1.2 is still owed: §1.4 was decided and moved to §5, and §1.6 and §1.7 were removed
+(see §1).
 
 **A settled topic moves to §6, it is not deleted.** Once a topic is decided or fixed it moves to
 §6 "Clarified and solved" and **keeps its original number and heading text**, so a citation such
@@ -31,7 +32,7 @@ a moved topic leaves a gap in its old section rather than shifting its neighbour
 takes the next free number of the section it belongs to — a topic decided on arrival too (§5.15
 sits in §6 under its §5 number). A gap with no §6 entry (§3.1, §3.9 and §5.11 among them) is a
 topic deleted on or before 2026-09-28 under the earlier rule, or one removed or moved later and
-named in its section's note (§1.6, §1.7, §1.9); its history is in git.
+named in its section's note (§1.4, §1.6, §1.7, §1.9); its history is in git.
 
 ---
 
@@ -42,7 +43,8 @@ named in its section's note (§1.6, §1.7, §1.9); its history is in git.
 are supported, gradual (client by client) and one-time, so there is no decision to make; §1.7
 "`END_DATE` meaning" — covered by §5.13.*
 *Moved to §5 on 2026-10-23: §1.9 "Retire `GET /sws/go/billing/offers`?" — decided (retire it), now
-§5.16 (ETP-5900).*
+§5.16 (ETP-5900); §1.4 "Per-client transactions versus today's per-resource-day transactions" —
+decided (one write transaction per tenant), now §5.17 (ETP-5905).*
 
 ### 🔴 1.2 The billing period is per subscription, not per price
 
@@ -83,26 +85,6 @@ billed on the 1st of every month.
 - **Open sub-points:** whether a yearly plan is anchored to the 1st of the month or to 1 January;
   which time zone defines "the 1st" (UTC or the tenant's); and how the proration line reads on the
   first invoice.
-
-### 🔴 1.4 Per-client transactions versus today's per-resource-day transactions
-
-**Ticket:** related ETP-5050 (the usage job) and the scheduling follow-up of §5.15 (no ticket).
-
-**To raise with:** Sebastián Barrozo
-
-Sebastián asked for the scheduled usage job to run a separate transaction per client, so the whole
-run need not be atomic (§5.15). The run already is not atomic:
-`UsageAggregationService.aggregateResourceDay` commits each resource-day on its own
-(`commitAndClose`, `rollbackAndClose` on failure; `UsageRunLedger` writes the run log once at the
-end so a failure survives its rollback), so a failing resource or day loses only itself. But each
-of those transactions counts **every tenant at once**: `DeclarativeHqlCounter` runs one query per
-day grouped by client, on purpose — per tenant it would be *tenants × resources × days* queries per
-run, "tens of thousands of round trips nightly" with a few hundred tenants (its javadoc). A
-per-tenant query form exists (`UsageQueryComposer`, used by the single-tenant backfill and the
-save-time validation probe), so per-client transactions are possible, at that cost multiplied by
-the two-hour cadence of §5.15. **To confirm:** whether per-resource-day transactions satisfy the
-concern, or whether isolation per client is wanted for another reason — today a resource-day that
-fails, fails for every tenant in it.
 
 ### 🔴 1.8 Is the `billing-reconciliation-schedule` flag overkill? — decide later (ETP-5048)
 
@@ -1397,7 +1379,7 @@ schema_forge checkout is absent.
 ## 5. Handed forward to later tickets
 
 *Moved to §6 on 2026-09-28: §5.7, §5.10, §5.12; §5.15 was decided on arrival and sits there too.
-On 2026-10-23: §5.14, §5.5. Moved in from §1 on 2026-10-23: §1.9, now §5.16.*
+On 2026-10-23: §5.14, §5.5. Moved in from §1 on 2026-10-23: §1.9, now §5.16; §1.4, now §5.17.*
 
 ### 🟠 5.1 ETP-5051: "no quota row" means UNLIMITED
 
@@ -1599,6 +1581,33 @@ route and `handleBillingOffers` in `EtendoGoJwtServlet`, `BillingOfferConfigurat
 `PlanCatalogService#findDefaultPurchasablePlan` with its `DefaultPlan` if nothing else uses them
 afterwards, plus their tests and docs (`feature-flags-and-tenant-upgrade.md` §2, *The billing
 offer*); the path then answers 404.
+
+### 🟠 5.17 One write transaction per tenant for the usage job — decided, owed to ETP-5905
+
+**Ticket:** owner [ETP-5905](https://etendoproject.atlassian.net/browse/ETP-5905). Related ETP-5050
+(the usage job) and §5.15. Was §1.4 (decided 2026-10-23, Martin Taal).
+
+Sebastián asked for the scheduled usage job to run a separate transaction per client, so the whole
+run need not be atomic (§5.15). Today the run is not atomic, but it is not per client either:
+`UsageAggregationService.aggregateResourceDay` commits each resource-day on its own
+(`commitAndClose`, `rollbackAndClose` on failure; `UsageRunLedger` writes the run log once at the
+end so a failure survives its rollback), and each of those transactions counts **every tenant at
+once**. `DeclarativeHqlCounter` runs one query per day grouped by client, on purpose — per tenant it
+would be *tenants × resources × days* queries per run, "tens of thousands of round trips nightly"
+with a few hundred tenants (its javadoc). A per-tenant query form exists (`UsageQueryComposer`,
+used by the single-tenant backfill and the save-time validation probe), but counting with it would
+pay that cost on the two-hour cadence of §5.15.
+
+**Decision: count grouped, write per tenant.**
+
+- **Counting stays as it is:** the grouped queries, one per resource × day, with the results
+  collected in memory.
+- **Writing becomes one transaction per tenant:** each tenant's rows for the whole computation
+  period in one transaction, including `zeroOutTenantsThatNoLongerCount`, the settled/final-day
+  rules and the tenant's settling window.
+- **Consequences:** the same query count as today; a write failure loses only that tenant's period,
+  which the next run retries; commits become one per tenant instead of one per resource-day. A
+  failing counting query still fails for every tenant — inherent to a grouped query.
 
 ---
 
@@ -1920,7 +1929,7 @@ scheduling.
   proposed that some resources recompute more often than daily; Sebastián chose one cadence for
   all, to keep the design simple.
 - **One scheduled job, with a separate transaction per client**, so the whole run need not be
-  atomic (§1.4).
+  atomic (§5.17).
 - **A warning is logged when calculations fall behind the configured cadence**, to spot volume
   problems early.
 
@@ -1935,7 +1944,8 @@ scheduling.
 - **There is no lag warning.** `ETGO_USAGE_RUN_LOG` (`RUN_ID`, `DATE_FROM`/`DATE_TO`,
   `STARTED_AT`/`FINISHED_AT`, `STATUS`, written by `UsageRunLedger` at the end of each run) holds
   what it needs.
-- **Per-client transactions conflict with the grouped all-tenant query** — §1.4.
+- **Per-client transactions next to the grouped all-tenant query** — resolved by writing per
+  tenant while still counting grouped: §5.17 (ETP-5905).
 
 ---
 
