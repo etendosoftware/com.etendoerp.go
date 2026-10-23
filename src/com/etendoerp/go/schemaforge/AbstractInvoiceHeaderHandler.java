@@ -1091,6 +1091,8 @@ public abstract class AbstractInvoiceHeaderHandler {
    * would demote the field to optional in {@code etendo_schema}, yet with several bill-to
    * locations the default abstains and the field must still be reported missing. Overrides
    * {@code NeoHandler#resolveServerCreateFields} in the concrete invoice handlers.
+   *
+   * @param context the create request context; its request body is mutated in place
    */
   public void resolveServerCreateFields(NeoContext context) {
     injectPartnerAddressIfMissing(context);
