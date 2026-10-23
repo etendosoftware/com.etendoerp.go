@@ -798,7 +798,7 @@ class OrderLineDiscountSupportTest {
   }
 
   @org.junit.jupiter.api.Test
-  void setUnitPriceOnCreatePricesAPurchaseLineFromThePurchaseList() throws Exception {
+  void setStandardPriceOnCreatePricesAPurchaseLineFromThePurchaseList() throws Exception {
     JSONObject json = new JSONObject("{\"product\":\"P1\",\"parentId\":\"O1\"}");
     OBDal dal = mock(OBDal.class);
     Product product = mock(Product.class);
@@ -821,20 +821,21 @@ class OrderLineDiscountSupportTest {
       financial.when(() -> FinancialUtils.getProductPrice(eq(product), eq(orderDate),
           eq(false), eq(priceList), eq(false))).thenReturn(price);
 
-      OrderLineDiscountSupport.setUnitPriceOnCreate(ctx("POST", NeoEndpointType.CRUD, json));
+      OrderLineDiscountSupport.setStandardPriceOnCreate(ctx("POST", NeoEndpointType.CRUD, json));
     }
 
     assertAmount("purchase", "6", json, OrderLineDiscountSupport.FIELD_UNIT_PRICE);
     assertAmount("purchase", "7", json, OrderLineDiscountSupport.FIELD_LIST_PRICE);
+    assertAmount("purchase", "6", json, OrderLineDiscountSupport.FIELD_STANDARD_PRICE);
   }
 
   @org.junit.jupiter.api.Test
-  void setUnitPriceOnCreateKeepsTheCallersPrice() throws Exception {
+  void setStandardPriceOnCreateKeepsTheCallersPrice() throws Exception {
     JSONObject json = new JSONObject(
         "{\"product\":\"P1\",\"parentId\":\"O1\",\"unitPrice\":9}");
     try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-      OrderLineDiscountSupport.setUnitPriceOnCreate(ctx("POST", NeoEndpointType.CRUD, json));
-      dalMock.verifyNoInteractions();
+      dalMock.when(OBDal::getInstance).thenReturn(mock(OBDal.class));
+      OrderLineDiscountSupport.setStandardPriceOnCreate(ctx("POST", NeoEndpointType.CRUD, json));
     }
     assertAmount("kept", "9", json, OrderLineDiscountSupport.FIELD_UNIT_PRICE);
   }
@@ -853,13 +854,13 @@ class OrderLineDiscountSupportTest {
   /** ETP-5881: the client's listPrice is the price; the price list is not applied to it. */
   @ParameterizedTest(name = "{0}")
   @MethodSource("clientListPrice")
-  void setUnitPriceOnCreateUsesTheClientListPrice(String label, String extra, String expectedUnit)
+  void setStandardPriceOnCreateUsesTheClientListPrice(String label, String extra, String expectedUnit)
       throws Exception {
     JSONObject json = new JSONObject(extra);
     json.put("product", "P1").put("parentId", "O1");
     try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-      OrderLineDiscountSupport.setUnitPriceOnCreate(ctx("POST", NeoEndpointType.CRUD, json));
-      dalMock.verifyNoInteractions();
+      dalMock.when(OBDal::getInstance).thenReturn(mock(OBDal.class));
+      OrderLineDiscountSupport.setStandardPriceOnCreate(ctx("POST", NeoEndpointType.CRUD, json));
     }
     assertAmount(label, expectedUnit, json, OrderLineDiscountSupport.FIELD_UNIT_PRICE);
     assertAmount(label, "20", json, OrderLineDiscountSupport.FIELD_LIST_PRICE);

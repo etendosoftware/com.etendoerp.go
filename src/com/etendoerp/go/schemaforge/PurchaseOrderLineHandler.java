@@ -19,9 +19,11 @@ package com.etendoerp.go.schemaforge;
 
 /**
  * Customization of purchase-order/lines (ETP-5881): everything {@link OrderLineHandler} does, plus
- * the price of a line created without one, taken from the order's (purchase) price list
- * ({@link OrderLineDiscountSupport#setUnitPriceOnCreate}). The sales order rules (discount,
- * amounts) are not applied: purchase lines were on the plain parent on purpose.
+ * the prices of a created line from the order's (purchase) price list
+ * ({@link OrderLineDiscountSupport#setStandardPriceOnCreate}): the unit price when the line was
+ * sent without one, and always the standard price, as the form's {@code SL_Order_Product} does.
+ * The other sales order rules (discount, amounts) are not applied: purchase lines were on the
+ * plain parent on purpose.
  *
  * <p><b>Binding.</b> Resolved by {@link NeoExtension} on every channel, ahead of the row's
  * {@code Java_Qualifier}, which stays {@code orderLineHandler} for the readers that look it up
@@ -38,7 +40,7 @@ public class PurchaseOrderLineHandler extends OrderLineHandler {
     if (response != null) {
       return response;
     }
-    OrderLineDiscountSupport.setUnitPriceOnCreate(context);
+    OrderLineDiscountSupport.setStandardPriceOnCreate(context);
     return null;
   }
 }

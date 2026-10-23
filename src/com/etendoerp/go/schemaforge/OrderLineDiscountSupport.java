@@ -54,8 +54,8 @@ import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
  * — its {@code orderedQuantity}, its {@code salesOrder} parent, its {@code standardPrice}, the core
  * {@code SL_Order_Amt} callout on its {@code discount} column. That is why it is reached only from
  * the two customizations that call it (ETP-5415 T12), never from a shared write path: no entity is
- * selected here by a property-name guard. Purchase-order lines stay on the plain
- * {@link OrderLineHandler} and never get here. {@code McpLinePriceInjector} stays what it was — a
+ * selected here by a property-name guard. Purchase-order lines get only
+ * {@link #setStandardPriceOnCreate}, from {@link PurchaseOrderLineHandler}. {@code McpLinePriceInjector} stays what it was — a
  * shared MCP compensation for every commercial line, tolerated until migration M4; nothing here
  * changes it or depends on its internals, only on the value it leaves in {@code unitPrice}.
  *
@@ -251,32 +251,6 @@ final class OrderLineDiscountSupport {
     }
   }
 
-  /**
-   * Only the price of {@link #setStandardPriceOnCreate}'s rule, for a line that has no other order
-   * rule: a created line sent without a price takes the unit price (and the catalog list price) of
-   * its product in the parent order's price list (ETP-5881). Used by
-   * {@link PurchaseOrderLineHandler}; the price list and the sales/purchase side come from the
-   * order itself. A price in the body is never replaced. Total: never throws.
-   *
-   * @param ctx the pre-hook context; its request body is mutated in place
-   */
-  static void setUnitPriceOnCreate(NeoContext ctx) {
-    if (ctx == null || !NeoEndpointType.CRUD.equals(ctx.getEndpointType())
-        || !METHOD_POST.equals(ctx.getHttpMethod()) || ctx.getRequestBody() == null) {
-      return;
-    }
-    JSONObject body = ctx.getRequestBody();
-    try {
-      if (!LinePriceListSupport.applyClientListPrice(body, FIELD_UNIT_PRICE, FIELD_LIST_PRICE,
-          FIELD_DISCOUNT) && LinePriceListSupport.hasNoPrice(body, FIELD_UNIT_PRICE)) {
-        LinePriceListSupport.applyCatalogPrice(body, resolveProductPrice(body), FIELD_UNIT_PRICE,
-            FIELD_LIST_PRICE);
-      }
-    } catch (Exception e) {
-      log.warn("[ORDER-LINE-PRICE] Could not price the line on {} {}: {}", ctx.getSpecName(),
-          ctx.getEntityName(), e.getMessage());
-    }
-  }
 
   /**
    * The list price the form gives a new line whose product has no list price in the order's price
