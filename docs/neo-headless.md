@@ -1207,6 +1207,62 @@ The `recordId` from the URL path is injected into the process parameters automat
 
 Process access is checked before execution. If the current role lacks access to the process, the request returns `403 Forbidden`.
 
+#### 4.3.7 Asynchronous batch jobs — `async:true`, status polling, cancel (ETP-5677)
+
+A long synchronous batch can commit on the server while its response is lost to an idle timeout in
+front of Tomcat; the client then sees an error for records that exist, and a retry duplicates them. The
+asynchronous mode answers at once and keeps the outcome where the client can read it. The synchronous
+`POST /sws/neo/batch` and `etendo_batch` stay one atomic transaction. The default differs by channel:
+**REST is synchronous unless the body says `"async": true`; MCP is asynchronous unless the arguments say
+`async:false`**, so an agent sending volume never waits on one request. An async job accepts at most
+5000 operations and 2 active jobs per user (4 per tenant); above that, send `async:false` or split.
+
+| | REST | MCP |
+|---|---|---|
+| Start | `POST /sws/neo/batch` with `"async": true` → **202** `{jobId, state:"QUEUED", totalRows, totalOps}` | `etendo_batch` (`async` omitted or `true`) → the same JSON; `async:false` runs the synchronous batch |
+| Status | `GET /sws/neo/batch/jobs/{jobId}` | `etendo_job_status {jobId}` (read scope) |
+| Cancel | `DELETE /sws/neo/batch/jobs/{jobId}` | `etendo_job_cancel {jobId}` (write scope) |
+
+Both channels call `BatchJobService`, which runs every row through the same `BatchService.executeBatch`
+the synchronous request uses (the MCP channel passes its own per-operation preprocessor, exactly as
+its synchronous call does).
+
+**Commit unit: one row.** The worker splits the operations into *rows*: an operation plus everything
+it references through `parentRef` or a `"$ref:<id>"` string anywhere in its body (a product and its
+price, a document and its lines — `BatchRowGrouper`). Each row is its own atomic transaction; a
+rejected row does not stop the others. The status carries, per row, `committed:true` with its
+`operations:[{id,ok,recordId}]`, or `committed:false` with `failedAt` / `error{status,message}` and
+`safeToResend`. A row reported `committed:true` exists. Resend only rows with `committed:false` **and**
+`safeToResend:true` (the batch vouches it was rolled back: `atomic:true`, empty `persisted`); a row with
+`safeToResend:false` (`atomic:false` — a process committed underneath it — or no outcome) may have left
+records, listed in its `persisted`: look them up first.
+
+```
+{ jobId, state, done, channel, totalRows, totalOps, processedRows, committedRows, failedRows,
+  rows:[{index, ids:[opId…], committed, operations? | failedAt?, error?, safeToResend?}], hint?, cancelRequested? }
+```
+
+`state`: `QUEUED` → `RUNNING` → `SUCCEEDED` (every row committed) / `PARTIAL` / `FAILED` (no row
+committed); `CANCELLED` (stopped between rows at the owner's request — rows already committed stay
+committed); `INTERRUPTED` (see below). `done` is `true` for every state except `QUEUED`/`RUNNING`.
+
+**Storage and liveness.** Jobs live in `ETGO_BATCH_JOB` (written by JDBC on its own pooled connection,
+never through the DAL, so progress is visible while a row's transaction is open). The node holding a
+job refreshes its `HEARTBEAT` every 10 s (queued or running); a `QUEUED`/`RUNNING` job whose heartbeat is
+older than 90 s belongs to a dead node and is reported `INTERRUPTED` by whichever node next reads or
+submits — so a load balancer routing a poll to another node never flips a live job. Every state change
+is a conditional update, so a worker cannot overwrite `INTERRUPTED`/`CANCELLED`. The result is flushed
+after every row: after an `INTERRUPTED` job the listed rows are final and the rows not listed may or may
+not exist (look them up before resending). Finished jobs are purged after 24 h (by `FINISHED`; there is no `EXPIRES` column). The worker and heartbeat threads are stopped when `NeoServlet` is destroyed.
+
+**Limits and access.** At most 2 active jobs per user and 4 per client (soft limits: the count and the insert are not one atomic step, so simultaneous submits can overshoot them); over the limit, or with a full
+queue (2 workers, 50 slots), the submit answers **429** with `Retry-After: 5` and creates no job. At most
+5000 operations per job; a malformed payload (empty, duplicate ids, a `parentRef` that is not an earlier
+operation, missing `id`/`spec`/`entity`) answers **400** and never becomes a job. Only the user who
+started a job can read or cancel it (anyone else gets **404**); a finished job cannot be cancelled
+(**409**). The worker runs as the requester (user, role, client, organization, language captured at
+submit) and always releases its context and DAL session.
+
 #### Failure body: `message` + `messageKeys` (ETP-5316)
 
 When the action runs a DB procedure (`CallProcess` -> `ProcessInstance`) and it fails, the `400`
@@ -4266,6 +4322,14 @@ on the virtual column gets the raw value; filter on the stored twin instead.
 uses the raw virtual value on MCP and REST alike, and can disagree with the order of the values
 shown. Filters are aliased on MCP; sorts are not, anywhere.
 
+**Asynchronous mode (ETP-5677).** `async` exists on both channels with the same envelope and the
+same service (§4.3.7); it is declared here because it is the one place where `etendo_batch` is **not**
+all-or-nothing: an async job commits **per row**, and the status reports each row. On MCP it is the
+default (`async:false` opts out); on REST it is opt-in (`async:true`). The synchronous call keeps its
+single-transaction contract on both channels. REST and MCP differ in the async mode only
+by what already differs in the synchronous one (the MCP preprocessor and its failure-envelope rewrite
+inside each row's result).
+
 #### 4.12.10 An excluded field does not exist, on every verb (ETP-5335, IMP-39)
 
 **A field the spec excludes is absent from `etendo_schema`, refused by `etendo_list` as a filter, and
@@ -5596,6 +5660,8 @@ private static final List<String> LOCKED_DIMENSION_TYPES = Arrays.asList("BP", "
   **The stored `IsActive`/`IsMandatory` values are NOT retroactively corrected by this code change** — a client whose BP/PR rows were already `IsActive='N'`/`IsMandatory='N'` before ETP-4879 stays that way at the DB level; this handler only stops future edits through this one screen. The companion corrective data-fix `R37-acctdim-bp-pr-locked-active` (`cli/src/data-fixes/sql/20260917T120000Z__R37-acctdim-bp-pr-locked-active.sql` in `etendo_schema_forge`, gap K2) forces both flags to `'Y'` fleet-wide; the GOClient sampledata seed (`referencedata/sampledata/GOClient/C_ACCTSCHEMA_ELEMENT.xml`) was corrected in the same change so a newly onboarded tenant is born correct. See `etendo_schema_forge`'s `docs/etendo-ad/onboarding-gaps.md` §K2 for the full DB-state investigation and safety analysis.
 
 **Real-world example — `GeneralLedgerConfigurationHandler` tenant-scoped ids (ETP-5722):** the aggregate `General` `GET`/`POST` runs in admin mode, and it used to resolve request ids with a bare `OBDal.get`, which applies no tenant predicate. So a REST/MCP caller could write another tenant's `C_ValidCombination_ID` into `C_AcctSchema_GL` (`generalAccounts.*`) or `C_AcctSchema_Default` (`defaults.*`). Every request-supplied id now goes through `TenantOwnership.loadOwned`: the combinations, `general.currency`, and `selectedOrgId` (query on `GET`, body or query on `POST`). An id of another tenant answers the same 400 as a missing one (*Accounting combination / Currency / Organization not found: &lt;id&gt;*). Client-0 rows stay accepted. A foreign org used to fail later with a message that revealed the other tenant's ledger id; that no longer happens. Every 400/500 also calls `SessionHandler.rollback()`. Without it, a caught error still committed whatever the body had applied before the throw: a valid `general.name` plus a foreign combination answered 400 and still renamed the ledger. The handler is listed in `TenantIsolationPolicyTest.GUARDED_CLASSES`, so a new bare `OBDal.get` there fails the build.
+
+**Real-world example — `GeneralLedgerBalancingRule` (a balancing switch requires its account, ETP-5724):** on `C_AcctSchema_GL`, `suspenseBalancingUse` → `suspenseBalancing` and `currencyBalancingUse` → `currencyBalancingAcct`: while a switch is on its account is required, because core posting (`AcctSchema`) silently treats "on, no account" as off. The rule is judged on the state the save would leave, so a row that is already broken refuses any save that touches it. Two NEO write paths reach that table and each stores the values differently, so each is checked the way it stores them: the aggregate `General` POST (`GeneralLedgerConfigurationHandler`, which reads switches with `optBoolean`, so `"Y"` is stored as off) checks the entity after its setters ran (`check(AcctSchemaGL)`), rolls the session back and returns the 400; a generic PUT/PATCH on `Cuentas generales` goes through the pre-hook of its `@NeoExtension` customization `handlers/GeneralLedgerAccountsHandler` (after its posting-account guard), which merges the body — unwrapping a `data` envelope, since REST hands the pre-hook the raw body — with the row loaded through `TenantOwnership.loadOwned`, reading the values as core's `JsonToDataConverter` stores them (`"Y"`/`"true"` on; `null`, blank or `{"id": ""}` absent) (`checkUpdate(NeoContext)`). A row the caller cannot read is left to the default path (404). Both answer the existing `MISSING_REQUIRED_FIELDS` 400 (`NeoCrudHandler.buildMissingRequiredFieldsResponse(List, String)`, made package-visible for this) with a descriptive English `message` (*suspenseBalancing is required while suspenseBalancingUse is true*) so an API caller can correct itself; the SPA shows its own translated text. MCP flattens it as usual (`error: validation_error`, `code`/`fields` at top level). POST and DELETE on `Cuentas generales` are refused before any hook by `ETGO_SF_ENTITY.ISPOST`/`ISDELETE = 'N'` (`entities.generalAccounts.methods` in the window's `decisions.json`), so MCP no longer advertises create/delete for it and `/batch` (create-only) answers 405 too: the window cannot load without its single row. Same rule on every NEO channel, so nothing to declare in §4.12.9; Classic is unchanged on purpose. The class is in `TenantIsolationPolicyTest.GUARDED_CLASSES`.
 
 **Real-world example — `ETGO_FDI_DECL_FK` cascade delete (ETP-5393 Bug D, same bug class as ETP-4830 above):** `FiscalDeclCrudHandler#handleDeclDelete` calls `OBDal.getInstance().remove(decl)` to delete a draft `ETGO_Fiscal_Decl` row, without first deleting its `ETGO_Fiscal_Decl_Incident` children. `ETGO_FDI_DECL_FK` (`etgo_fiscal_decl_incident.etgo_fiscal_decl_id → etgo_fiscal_decl.etgo_fiscal_decl_id`) had no `ON DELETE` behavior (`NO ACTION`), so Postgres rejected the delete with a raw FK-violation whenever the declaration had at least one incident row (e.g. after a failed AEAT submission attempt that reverted it to draft) — surfacing to the user as an opaque 500 ("No se pudo eliminar la declaración."). Fixed the identical way: adding `onDelete="cascade"` directly to `ETGO_FDI_DECL_FK` in `src-db/database/model/tables/ETGO_FISCAL_DECL_INCIDENT.xml` (not a raw `ALTER TABLE` against the live DB — that XML is `update.database`'s actual source of truth, so a hand-run `ALTER TABLE` would be silently reverted on the next rebuild). No Java change was needed in `handleDeclDelete` itself: `OBDal.remove` issues the same `DELETE` regardless, and Postgres now cascades it. Verified locally by running `update.database` and confirming `pg_constraint.confdeltype = 'c'` for `etgo_fdi_decl_fk`, then inserting a draft declaration with an incident row and deleting the declaration directly — the incident row is removed automatically.
 

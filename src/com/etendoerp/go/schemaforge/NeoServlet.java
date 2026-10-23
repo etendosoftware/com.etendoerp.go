@@ -105,6 +105,12 @@ public class NeoServlet extends HttpBaseServlet {
     } catch (Exception e) {
       log.debug("Could not stop the usage event writer on servlet destroy.", e);
     }
+    try {
+      // ETP-5677: the batch job workers and their heartbeat are daemon threads of this webapp.
+      BatchJobService.shutdownInstance();
+    } catch (RuntimeException e) {
+      log.debug("Could not stop the batch job threads on servlet destroy.", e);
+    }
     super.destroy();
   }
 

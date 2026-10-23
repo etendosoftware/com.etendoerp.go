@@ -110,7 +110,7 @@ class NeoPseudoSpecDispatcher {
       //   the React UI (composite-document ingest) and external agents (MCP).
       //   Find-or-create logic stays with the caller — no per-window server code.
       case "batch":
-        return dispatchBatch(method, request, response);
+        return dispatchBatch(pathInfo, method, request, response);
 
       // Global similarity-search endpoint: GET /sws/neo/simsearch
       //   Same trigram matching as the "SimSearch" webhook, reached through NEO's own
@@ -239,8 +239,18 @@ class NeoPseudoSpecDispatcher {
     }
   }
 
-  private boolean dispatchBatch(String method, HttpServletRequest request,
-      HttpServletResponse response) throws IOException {
+  private boolean dispatchBatch(NeoServlet.NeoPathInfo pathInfo, String method,
+      HttpServletRequest request, HttpServletResponse response) throws IOException {
+    // ETP-5677: /sws/neo/batch/jobs/{id} — status (GET) and cancel (DELETE) of an async batch job.
+    if ("jobs".equals(pathInfo.entityName)) {
+      if (pathInfo.recordId == null || !("GET".equals(method) || "DELETE".equals(method))) {
+        servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+            "Batch jobs support GET /batch/jobs/{id} and DELETE /batch/jobs/{id}");
+        return true;
+      }
+      batchService.handleJob(method, pathInfo.recordId, response);
+      return true;
+    }
     if (!"POST".equals(method)) {
       servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
           "Batch endpoint only supports POST");

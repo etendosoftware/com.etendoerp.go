@@ -95,6 +95,7 @@ class TenantIsolationPolicyTest {
       "FinancialAccountHandler.java",
       "FinancialAccountTransactionsHandler.java",
       "FinancialAccountTransactionsSupport.java",
+      "GeneralLedgerBalancingRule.java",
       "GeneralLedgerConfigurationHandler.java",
       "GeneralLedgerReportHandler.java",
       "GlJournalHeaderHandler.java",

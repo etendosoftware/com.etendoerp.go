@@ -65,7 +65,8 @@ final class McpToolAnnotations {
       McpConstants.TOOL_NEO_GET_DOCUMENT_PDF,
       // ETP-5715: changes nothing in the ERP (the reading is cached on a temporary staged file) and
       // reading the same document again gives the same review; see OPEN_WORLD for what it reaches.
-      McpConstants.TOOL_NEO_EXTRACT_INVOICE_DOCUMENT);
+      McpConstants.TOOL_NEO_EXTRACT_INVOICE_DOCUMENT,
+      McpConstants.TOOL_NEO_JOB_STATUS);
 
   /** Tools that add something new and never change or remove what exists. */
   static final Set<String> ADDITIVE = Set.of(
@@ -84,6 +85,7 @@ final class McpToolAnnotations {
   static final Set<String> MODIFYING = Set.of(
       McpConstants.TOOL_NEO_UPDATE,
       McpConstants.TOOL_NEO_BATCH,
+      McpConstants.TOOL_NEO_JOB_CANCEL,
       McpConstants.TOOL_NEO_ACTION,
       McpConstants.TOOL_NEO_ACTION_BATCH,
       // ETP-5715: not additive — main:true replaces (deletes) the document's previous main file.
