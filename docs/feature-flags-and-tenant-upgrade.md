@@ -73,6 +73,7 @@ Declare every flag's key as a constant on `GoFeatureFlags` and add its row here.
 | `mcp-modern-era-disabled` | `etendo.go.flags.mcp-modern-era-disabled` | `ETGO_FLAG_MCP_MODERN_ERA_DISABLED` | absent ⇒ **`false`** (dual-era on) |
 | `batch-callout-skip-disabled` | `etendo.go.flags.batch-callout-skip-disabled` | `ETGO_FLAG_BATCH_CALLOUT_SKIP_DISABLED` | absent ⇒ **`false`** (opt-in skip honoured) |
 | `billing-reconciliation-schedule` | `etendo.go.flags.billing-reconciliation-schedule` | `ETGO_FLAG_BILLING_RECONCILIATION_SCHEDULE` | absent ⇒ **`false`** (no schedule is planted) |
+| `usage-aggregation-schedule` | `etendo.go.flags.usage-aggregation-schedule` | `ETGO_FLAG_USAGE_AGGREGATION_SCHEDULE` | absent ⇒ **`false`** (no schedule is planted) |
 | *(pattern for a new flag)* | `etendo.go.flags.<key>` | `ETGO_FLAG_<KEY>` | absent ⇒ **`false`** |
 
 `bp-portal-link` (ETP-5267) decides whether a `sales-invoice-send` email carries a link to the
@@ -248,7 +249,7 @@ A positively phrased "enforcement enabled" flag would do the opposite — a miss
 open every blocked tenant — so do not flip the polarity.
 
 Evaluated in exactly one place, `EnvironmentAccessEnforcementFlag.isEnforcementSwitchedOff(clientId)`,
-called only by `EnvironmentAccessGuard` — the one check every tenant entry point shares: the bind
+called by `EnvironmentAccessGuard` — the one check every tenant entry point shares — and, report-only, by the environments list (`accessEnforced`, ETP-5051). The guard serves the bind
 step of the shared auth pipeline (`EnvironmentRequestAuthenticator`, ETP-5455) for every surface
 whose `SurfacePolicy` requires commercial access (`NEO_API`: NEO; `NEO_DATA`: favorites, fiscal test
 mode, report selectors, the OAuth2 API-key endpoints), the `/sws/go` endpoints that act on the
@@ -259,7 +260,11 @@ which is informational and backend-only (the SPA's blocked screen is driven by t
 the blocked customer reaches the pay path. The context is
 account-less and carries the tenant as the `clientId` attribute, so a ConfigCat rule can switch
 enforcement off for one tenant or for all. It is consulted **only for a denial**: an allowed request
-never evaluates it. Locally: `etendo.go.flags.environment-access-enforcement-off=true` /
+never evaluates it. The one exception is a report, never a refusal: since ETP-5051 every environment
+of `GET /sws/go/environments` carries `accessEnforced`, the switch evaluated for that tenant whatever
+today's decision is (`false` while the switch is on for it), so the grace banner can drop its "will
+be blocked on <date>" promise when no block would follow (`open-and-notable-topics.md` §4.17).
+Locally: `etendo.go.flags.environment-access-enforcement-off=true` /
 `ETGO_FLAG_ENVIRONMENT_ACCESS_ENFORCEMENT_OFF=true`.
 
 | Flag | A tenant whose decision is `DEMO_TRIAL_EXPIRED` / `SUBSCRIPTION_REQUIRED` |
@@ -436,6 +441,37 @@ Environment level, evaluated with an empty context; read on every scheduled run,
 reconciliation (scheduling, settings, alerts, procedures):
 [`billing-reconciliation.md`](billing-reconciliation.md). Design of record:
 [`plans/2026-10-18-etp-5048-billing-reconciliation-design.md`](plans/2026-10-18-etp-5048-billing-reconciliation-design.md).
+
+### `usage-aggregation-schedule` (ETP-5051) — backend-only, strictly off by default
+
+Whether the usage aggregation (`ETGO_UsageAggregation`, menu **Billing Resource Usage
+Aggregation**) runs on a schedule (`open-and-notable-topics.md` §5.15). The same shape as
+`billing-reconciliation-schedule` above:
+
+- **Production schedules it by hand.** Turn the flag on and create a Process Request for **Billing
+  Resource Usage Aggregation** (client System, timing *Schedule*, every two hours) in the same step.
+  A request firing while the flag is off does no work; a flag on with no request does nothing.
+- **Environments that restart:** while the flag is off, `UsageAggregationScheduleStartup` plants no
+  process request; turning it on takes effect at the next restart. The interval is
+  `etendo.go.usage.schedule.interval.minutes` / `ETGO_USAGE_SCHEDULE_INTERVAL_MINUTES` (default
+  **120**, at least 15), read when the request is first planted. A fixed request an operator
+  unscheduled is left as it is, never planted again.
+- **The flag gates every scheduled run** (timing *Schedule*), the planted one or one an
+  administrator created. While it is off such a run does no work and ends as an **ERROR** in
+  Process Monitor, saying to turn the flag on or unschedule the request. Unlike the reconciliation
+  it sends no internal alert.
+- A run started from the Classic menu, or a Process Request run immediately or later once, is never
+  gated.
+- **Lag warning.** A `[USAGE-LAG]` WARN (at most one an hour) is logged when the last successful
+  run in `ETGO_USAGE_RUN_LOG` finished more than twice the cadence ago, or never: at the start of
+  each scheduled run, and whenever a plan quota reads the stored aggregate. A run that counted
+  nothing for any tenant writes no run-log row, so an installation with no usage at all reads as
+  "never ran".
+
+Each run still writes one transaction per resource-day; one transaction per tenant is ETP-5905
+(§5.17). Environment level, evaluated with an empty context; read on every scheduled run, so
+turning it off (ConfigCat, live within one poll) stops the scheduled work without a restart. Its
+callers are `UsageAggregationScheduleStartup` and `UsageAggregationProcess`.
 
 ## 2. The onboarding paywall
 

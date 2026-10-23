@@ -5033,6 +5033,48 @@ Recording is the last statement of the success path, after the response is writt
 throws; the INSERT happens on the recorder's writer thread, so a slow or locked
 `ETGO_USAGE_EVENT` does not slow a login.
 
+### 4.16 Plan quota refusal on create (ETP-5051)
+
+A create can be refused because the tenant is over a plan quota in mode `block`
+(`ETGO_PLAN_QUOTA`, `open-and-notable-topics.md` §5.1–§5.9):
+
+```json
+HTTP 403
+{ "error": { "message": "Quota exceeded: Posted sales invoices (100/100 Inv)",
+             "status": 403,
+             "code": "QUOTA_EXCEEDED",
+             "quota": { "resourceKey": "...", "resourceName": "...", "unitLabel": "...",
+                        "includedQty": 100, "enforcementMode": "block", "warningThreshold": 80,
+                        "period": "month", "consumptionSource": "live", "consumed": 100,
+                        "verdict": "DENY", "periodStart": "...", "periodEnd": "..." } } }
+```
+
+Clients key off `error.code === "QUOTA_EXCEEDED"`, never off the status or the message: it is
+neither the 402 of the commercial access check (§4.1) nor a permission error.
+
+- **Where it runs.** `NeoQuotaWriteGate`, after the insert and before the commit, on every create
+  channel: REST single and `/sws/neo/batch` in `NeoCrudHandler`'s POST branch, MCP `etendo_create`
+  in `McpToolRouter#handleCreate`, and MCP `etendo_batch` and the batch jobs through `BatchService`.
+  Inside a batch the refusal fails the operation (`failedAt`, the body above under
+  `error.detail`) and the batch rolls back as a unit; on MCP the same body arrives flattened
+  (`code`, `quota`, `detail`). A customization whose `handle()` creates the row itself and
+  short-circuits the default create is not checked; nor are rows created by processes.
+- **What it checks.** Structural, driven by catalog data: the declarative billing resources whose
+  `COUNTED_ENTITY` is the created entity and that some active `block` quota names (an in-memory
+  index rebuilt at most once a minute, so a quota change applies within a minute, no restart). The
+  new row is tested against each resource's HQL restriction (`UsageQueryComposer.composeRowMatch`),
+  then `QuotaEvaluator` decides for the row's tenant: a live count includes the new row (refused
+  when it went over), the stored aggregate is lagged (refused when one more would go over).
+- **What it does not see.** A resource that grows through a state change rather than a create —
+  `POSTED_SALES_INVOICES` grows on posting, and the invoice is created unposted — never matches at
+  create time and is never refused here. Accepted; such a quota is reported on entering the
+  environment (`POST /sws/go/session/environment`, `quotas`) and on the account page.
+- **Cost.** An entity no active `block` quota counts costs a map lookup: same service, same commit,
+  no query. When a create is checked and no batch owns the transaction, it runs through the
+  deferred-commit service a batch uses (IMP-23) and the gate commits or rolls back itself.
+- **Fails open.** An error while checking is logged (`[QUOTA]`) and the create stands.
+- **Write warnings** (a WARN verdict on a create) are not returned on this path.
+
 ## 5. Configuration
 
 ### 5.1 Creating a Spec
