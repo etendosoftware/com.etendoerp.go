@@ -96,9 +96,13 @@ class NeoSubEndpointDispatcher {
           "Entity not found in spec: " + pathInfo.entityName);
       return true;
     }
+    // ETP-5840: like the defaults sub-endpoint (ETP-5680), the hooks see the query string, so a
+    // GET action such as currencyOptions can take an input (`date`) without reading the servlet
+    // request. Structural: every action gets it; one that reads nothing is unaffected.
     return handleHookedSubEndpoint(new HookedSubEndpointRequest(spec, pathInfo.entityName,
         NeoEndpointType.ACTION, pathInfo.actionName, method, actionParams,
-        () -> servlet.buttonHandler.handleButtonAction(pathInfo, method, request, actionEntity)), response);
+        () -> servlet.buttonHandler.handleButtonAction(pathInfo, method, request, actionEntity))
+        .withQueryParams(servlet.extractQueryParams(request)), response);
   }
 
   private boolean handleEvaluateDisplaySubEndpoint(SFSpec spec, NeoPathInfo pathInfo, String method,
