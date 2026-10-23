@@ -5,7 +5,10 @@ from the code, the traps that would otherwise be rediscovered the hard way, and 
 since, with the implementation work each one still leaves.
 
 **Scope:** the whole billing development — ETP-5045 (durable checkout state), ETP-5050 (usage
-measurement), ETP-5046 (Subscription Plan Catalog + subscriptions), and what they hand to ETP-5047/5048/5051/5053.
+measurement), ETP-5046 (Subscription Plan Catalog + subscriptions), ETP-5047 (environment-access
+enforcement and the lifecycle on the subscription row), ETP-5048 (billing reconciliation),
+ETP-5049 (the plan catalog on the upgrade page and `/billing/subscription`), and what they hand to
+ETP-5051/5053.
 
 **Status key:** 🔴 decision owed · 🟠 constraint to respect · 🟡 known issue, worked around ·
 ✅ clarified or solved — the decision is taken; implementation may still be owed (§6)
@@ -26,14 +29,19 @@ original analysis as a reader still needs; the full history stays in git, the on
 drift from the code. **Section numbers are stable**: other documents cite them (`§3.7`, `§4.8`), so
 a moved topic leaves a gap in its old section rather than shifting its neighbours, and a new topic
 takes the next free number of the section it belongs to — a topic decided on arrival too (§5.15
-sits in §6 under its §5 number). Gaps older than 2026-09-28 are topics deleted under the earlier
-rule; their history is in git.
+sits in §6 under its §5 number). A gap with no §6 entry (§3.1, §3.9 and §5.11 among them) is a
+topic deleted on or before 2026-09-28 under the earlier rule; its history is in git.
 
 ---
 
 ## 1. Decisions still owed
 
 *Moved to §6 on 2026-09-28: §1.1. On 2026-10-14: §1.3. On 2026-10-23: §1.5.*
+
+> **To confirm (Martin): has R37 run on a shared environment?** §5.13 says the R37 integration
+> test was removed "once R37 had been applied in production" (`66f7489c6`, 2026-10-21), while
+> §1.6, §2.4, §2.9 and §3.11 read as if R37 has not yet run on any shared environment. Only one can
+> be true; those entries are left as written until the answer is in.
 
 ### 🔴 1.2 The billing period is per subscription, not per price
 
@@ -95,18 +103,15 @@ Prerequisites, from §3.2, on every environment: R37 has run after R42, the `ETG
 count reaches 0, and the fallback WARN no longer appears. The cutover deletes §3.2's list, and with it the watermark preference of
 §3.7.
 
-### 🔴 1.7 `END_DATE` meaning — not discussed on 2026-09-28
+### 1.7 `END_DATE` meaning — not discussed on 2026-09-28
 
-**Ticket:** owner ETP-5053.
+Pointer only, no status of its own: the decision is §5.13 (🔴, owner ETP-5053, to raise with
+Sebastián Barrozo), counted there once.
 
-**To raise with:** Sebastián Barrozo
+### 🔴 1.8 Is the `billing-reconciliation-schedule` flag overkill? — decide later (ETP-5048)
 
-The one 🔴 decision the 2026-09-28 answers did not touch. Options and default: §5.13.
-
-### 🟡 1.8 Is the `billing-reconciliation-schedule` flag overkill? — decide later (ETP-5048)
-
-**Ticket:** related ETP-5048; no ticket of its own. **Status:** open, **decide later** — safe to
-revisit after the first production weeks.
+**Ticket:** related ETP-5048; no ticket of its own. **Status:** decision owed, **deferred** — safe
+to revisit after the first production weeks.
 
 **To raise with / decides:** Martin
 
@@ -137,6 +142,23 @@ decision 11, `billing-reconciliation.md` §3, the flag section of
 `feature-flags-and-tenant-upgrade.md`). The menu entry, the process and Process Request scheduling
 are unaffected either way.
 
+### 🔴 1.9 Retire `GET /sws/go/billing/offers`?
+
+**Ticket:** related ETP-5049; no ticket of its own.
+
+**To raise with / decides:** Martin
+
+Since the ETP-5049 frontend slice the SPA no longer calls the offer endpoint: the upgrade page
+quotes the plan catalog (`GET /sws/go/plans`, §5.14), and the SPA's one consumer
+(`getBillingOffer`) was removed (§4.8). The endpoint is still served, catalog-derived since ETP-5049
+(`PlanCatalogService#findDefaultPurchasablePlan`, `feature-flags-and-tenant-upgrade.md` §2, *The
+billing offer*). §1.5, §2.1 and §5.14 each defer its removal to "a separate decision"; this is it.
+
+**Options:** keep it as a server-side quote (for a caller outside the SPA, if one is wanted), or
+remove the route, its handler and their tests, and the *billing offer* section of
+`feature-flags-and-tenant-upgrade.md`. Before removing, check that no other client (a script, a
+support tool, an older SPA still deployed) calls it.
+
 ---
 
 ## 2. Deployment — constraints that are not visible in the code
@@ -144,24 +166,16 @@ are unaffected either way.
 ### 🟠 2.1 What the legacy price fallback costs
 
 **Ticket:** owner ETP-5053 (moving fallback buyers to a real plan); ETP-5051 is where the uncapped
-buyers start to matter. Related ETP-5046, whose develop merge introduced the fallback, and ETP-5049,
-which solved the offer endpoint (below).
+buyers start to matter. Related ETP-5046, whose develop merge introduced the fallback, and ETP-5049
+(the offer endpoint, see below).
 
 How the fallback works — the one predicate, the self-retirement on the first priced plan, the
 reload edge case — is the design doc's §6.1; the operator procedure is its §6.2. This section keeps
-only what is still open.
+only what is still open. (Solved in ETP-5049: `GET /sws/go/billing/offers` used to quote the legacy
+price whatever the catalog said; it now quotes the catalog's default plan through the same fallback
+predicate as the charge — `feature-flags-and-tenant-upgrade.md` §2, *The billing offer*. Whether to
+retire the now caller-less endpoint is §1.9.)
 
-- ✅ **`GET /sws/go/billing/offers` quotes the legacy price, never the plan catalog — solved in
-  ETP-5049.** The offer now quotes the plan catalog's default plan
-  (`PlanCatalogService#findDefaultPurchasablePlan`): the grandfathered plan at the configured legacy
-  price while the fallback is active — what a checkout naming no plan charges — and otherwise the
-  first purchasable plan at its own provider price, the plan the upgrade page selects by default.
-  Offer and charge share the fallback predicate, so they no longer disagree after the cutover, and
-  removing the legacy property no longer turns the offer into a 503 once a priced plan exists. The
-  response names the quoted `planKey` and no longer carries the price id (§4.8). Reference:
-  `feature-flags-and-tenant-upgrade.md` §2, *The billing offer*. Since the ETP-5049 frontend slice
-  the upgrade page no longer calls the offer at all (it quotes the catalog, §5.14); the endpoint is
-  kept server-side, and removing it is a separate decision.
 - **Fallback buyers are uncapped and stuck on `legacy-productive` → ETP-5053, felt in ETP-5051.**
   A buyer who pays through the fallback lands on `legacy-productive`, which has zero quota rows and
   is therefore unlimited (§5.1). That costs nothing today and becomes real the moment ETP-5051
@@ -219,34 +233,48 @@ active subscription and correct it locally), which fills the missing price on it
 
 ### 🟠 2.5 `./gradlew test` needs JDK 17, not the default 21
 
-**Ticket:** no ticket — local build environment; confirming the CI JDK is a separate check.
+**Ticket:** no ticket — local build environment.
 
 `build.gradle` targets Java 17; core's bundled Groovy/ASM cannot read Java 21 bytecode.
 `:compileTestGroovy` dies with `Unsupported class file major version 65` while compiling core's
 own Spock specs — so **no test runs at all**, and the failure looks unrelated to whatever you
-changed. `export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64`. **Confirm what CI uses** before
-trusting a green local run.
+changed. `export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64`. CI already runs on JDK 17
+(`.github/workflows/mini-pipeline.yml`, `actions/setup-java` with `java-version: '17'`); the trap is
+local only, where the default JDK is still 21.
 
 ### 🟠 2.6 Gradle reports `UP-TO-DATE` and runs nothing
 
 **Ticket:** no ticket — build-tooling behaviour, applies to every ticket.
 
 A re-run after an unrelated change silently executes zero tests while printing `BUILD SUCCESSFUL`.
-Delete `build/test-results/{test,goIsolatedDalTest}` and pass `--rerun`, then read the task outcome
-lines — not just the build result. This produced a false "verified" claim once during ETP-5046.
+Delete `build/test-results/{test,goIsolatedDalTest,goTestUnit}` and pass `--rerun`, then read the
+task outcome lines — not just the build result. `goTestUnit` (ETP-5695, `build.gradle`) is the
+database-free half of the suite and keeps its own results directory like the other two. This
+produced a false "verified" claim once during ETP-5046.
 
 ### 🟠 2.7 `Hooks-Verified` seals do NOT survive a rebase, despite claiming to
 
-**Ticket:** no ticket — a bug in the git-hooks seal (`.githooks`); needs its own ticket.
+**Ticket:** owner [ETP-5898](https://etendoproject.atlassian.net/browse/ETP-5898) — a bug in the
+git-hooks seal (`.githooks`). schema_forge carries the same hook code
+(`.githooks/commit-msg`, `.githooks/lib/hooks-proof.sh`) and the same bug.
 
-The trailer carries two fingerprints: one over the commit's tree, and — in `v2` — one over its
-patch-id, so that *"a rebase/cherry-pick that replays the SAME diff onto another base keeps a valid
-seal"*. In practice the patch-id half is broken for most existing commits.
+The trailer carries two fingerprints: one over the commit's tree (fp1), and — in `v2` — one over
+its patch-id (fp2), so that *"a rebase/cherry-pick that replays the SAME diff onto another base
+keeps a valid seal"*. In practice fp2 is wrong for many existing commits.
 
-Observed while merging the ETP-5045 fix through the chain: **four ETP-5050 commits carry the
-identical fp2, `f99dd62f8d62`.** A patch-id fingerprint must be unique per diff; these were sealed
-from a proof file whose patch-id was not refreshed between commits. Only the two newest ETP-5050
-commits have correct values.
+**Cause.** `.githooks/commit-msg` computes fp2 as `hooks_fingerprint` of `hooks_patchid_staged`,
+which is `git diff --cached | git patch-id --stable` — the index against **HEAD**. During
+`git commit --amend` HEAD is still the commit being amended, so that diff is only the amend delta,
+not the commit's diff against its parent: **empty for a message-only amend** (fp2 is then the
+fingerprint of the empty value, identical for every such commit on one hooks version) and partial
+for an amend that changes files. The verifier recomputes the patch-id from the commit against its
+first parent (`hooks_patchid_of_commit`), so the two differ. The same script already handles the amend
+for the `Checks:` list — it diffs the index against the merge-base, with an "AMEND-SAFE" comment —
+but not for fp2. Amend is the likely cause; it is not proven commit by commit.
+
+**Scale** (all refs of this repo, 2026-10-23): **286 commits** carry `f99dd62f8d62`, the empty-value
+fp2 of hooks version `731f5aff`; on the current version `dfaa09a4` four commits carry its
+empty-value fp2 `36620d89e685`, the latest on 2026-10-22 (`6727f6400`, `e50aaef29`).
 
 The consequence is invisible until someone rebases, because while the tree fingerprint matches the
 fallback is never exercised. A rebase of `feature/ETP-5050` left **26 of 28 commits unverified**,
@@ -296,8 +324,10 @@ rows), ETP-5051/5053 (quotas and plan changes need a row), §3.2 (Phase F).
 
 Whether a **new** paid purchase opens an `ETGO_SUBSCRIPTION` row is decided per environment by one
 database-stored switch: the System-level list preference **`ETGO_SubscriptionModel`**, answered by
-`SubscriptionModelSwitch#isOn` (no cache, no restart). It has two readers: the paid upgrade, once per
-purchase, and `TenantPlanPreferenceFallback`, once per resolution or batch it serves, only to pick
+`SubscriptionModelSwitch#isOn` (no cache, no restart). It has three readers: the paid upgrade, once
+per purchase; the **ETP-5742** re-subscription (`EtendoGoJwtServlet.applyReactivation`), once per
+applied re-subscription, to decide whether the payment also keeps the preference route's own
+watermark; and `TenantPlanPreferenceFallback`, once per resolution or batch it serves, only to pick
 its DEBUG/WARN log level — while OFF that is one extra `AD_Preference` query per fallback resolution
 of a rowless tenant, still uncached. Only `Y` on an active row at `AD_CLIENT_ID = '0'` with no
 narrower visibility means ON; absent, any other value, a tenant-scoped row or a failed read mean
@@ -412,8 +442,8 @@ branch does: it deletes the marker of **every tenant that has any subscription r
 closed (design doc §8). The end condition below is therefore reached only once R37 has run *after*
 R42 for every tenant — which the runner's chain-current gate on the opt-in R37 guarantees for the
 tenants present at the switch (§3.6); a marker that reappears after R37 means either a tenant that
-first reached R42 after the switch (§3.13) or someone forced R42 by hand. §3.13's proper fix is
-therefore a precondition of Phase F.
+first reached R42 after the switch (§3.13) or someone forced R42 by hand. §3.13's proper fix
+(ETP-5897) is therefore a precondition of Phase F.
 
 **Trigger** — on every environment, first that it has switched (§2.9: the System preference
 `ETGO_SubscriptionModel = Y` exists), then both of these (design doc §8.1):
@@ -434,7 +464,7 @@ of the sentence, whose wording changed in ETP-5047. The DEBUG line logged while 
 shares the prefix, but a switched environment no longer emits it.
 
 **What Phase F deletes** — every site carrying the grep marker `ETP-5046-TRANSITIONAL-FALLBACK`
-(6 source files, 5 test files as of 2026-09-28):
+(8 source files, 7 test files as of 2026-10-23):
 
 - `TenantPlanPreferenceFallback`, and its use in `TenantPlanService.resolvePlan`;
 - `TenantPlanService.markProductive`, `retireProductivePreference` and `PREFERENCE_ATTRIBUTE`, with
@@ -449,7 +479,18 @@ shares the prefix, but a switched environment no longer emits it.
   asymmetry of §3.5;
 - the `ETGO_EnvironmentType` read in `TenantEnvironmentLifecycleService.resolve`, which since
   ETP-5047 happens only for a tenant with no row — its last reader, so the marker itself retires
-  with it.
+  with it;
+- the **ETP-5048 billing reconciliation's preference route**: in `SubscriptionReconciler`, the
+  candidates for provisioned purchases whose tenant has no active row (class javadoc and the
+  candidate query), `resolveTarget`'s `targetForTenant` branch, and the
+  `PREFERENCE_ROUTE_CHECKED` / `PREFERENCE_ROUTE_CORRECTED` counts, with those two counters in
+  `ReconciliationResult`;
+- the **ETP-5742 re-subscription's preference route**: in `EtendoGoJwtServlet.applyReactivation`,
+  the `preferenceRoute` decision and its `recordSubscriptionEventAt` watermark write.
+
+Both ETP-5048 and ETP-5742 sites are **correct today**, not leftovers: a tenant with no
+subscription row has only the preferences, so the reconciliation must correct them and the
+re-subscription must keep their watermark until Phase F removes the route altogether.
 
 **In the same cleanup, fold `EnvironmentPlanCache` into the environment list (ETP-5047).** Replace
 it with a local `Map<String, PlanView>` built in `EtendoGoJwtServlet.handleEnvironments` from
@@ -895,10 +936,11 @@ so move a row only after confirming the role behind it belongs to a tenant. Not 
 dev DB has no OAuth2 clients or tokens. Move this topic to §6 once both checks have run on every
 shared environment.
 
-### 🟡 3.13 R42 re-inserts the `ETGO_TenantPlan` marker next to a subscription row after the switch
+### 🟠 3.13 R42 re-inserts the `ETGO_TenantPlan` marker next to a subscription row after the switch
 
-**Ticket:** no ticket — needs its own (fix before Phase F). Related ETP-5046 (opt-in R37, the
-switch of §2.9), ETP-5548 (R42).
+**Ticket:** owner [ETP-5897](https://etendoproject.atlassian.net/browse/ETP-5897) — must land
+before Phase F, which it blocks (§3.2). Related ETP-5046 (opt-in R37, the switch of §2.9), ETP-5548
+(R42).
 **To raise with:** Martin Taal.
 
 **What R42 does.** Develop's `20260929T190000Z__R42-paid-provisioning-commercial-metadata.sql`
@@ -922,7 +964,7 @@ R42 had already run for them (§3.6).
 - **Access and plan: unaffected.** `resolvePlan`, the access policy and the lifecycle webhooks
   answer from the tenant's row; the marker is never consulted for a tenant that has one.
 - **The switch verification breaks.** The "active `ETGO_TenantPlan='PRODUCTIVE'` markers = 0" check
-  of design doc §6.2 / §2.9 goes back above 0 after the next full data-fix run, and so does §3.2's
+  (the design doc's §6.2 checklist, repeated in this file's §2.9) goes back above 0 after the next full data-fix run, and so does §3.2's
   Phase F count — the end condition can never be reached while R42 keeps doing this.
 - **The marker's meaning gets muddied.** After the switch a marker is supposed to mean "a tenant the
   backfill has not reached" or "a purchase whose row could not be opened". An R42 marker next to a
@@ -937,8 +979,8 @@ make data-fixes FIX=R37-tenant-subscription-backfill CLIENT=<id> DRY_RUN=1
 make data-fixes FIX=R37-tenant-subscription-backfill CLIENT=<id>
 ```
 
-The tenants to treat are exactly the ones the §6.2 verification query reports with a marker and an
-`ETGO_SUBSCRIPTION` row.
+The tenants to treat are exactly the ones the marker check of the switch verification (the design
+doc's §6.2, this file's §2.9) reports with a marker and an `ETGO_SUBSCRIPTION` row.
 
 **Proper fix.** A subscription-aware successor of R42 — same restoration, but no marker for a tenant
 that has any `etgo_subscription` row — plus retiring R42 in `retired.json` (`supersededBy` the
@@ -949,16 +991,18 @@ header as well.
 
 ## 4. Known issues
 
-*Fixed on arrival and recorded in §6 on 2026-10-14: §4.14. Moved to §6 on 2026-10-23: §4.8.*
+*Fixed on arrival and recorded in §6 on 2026-10-14: §4.14. Moved to §6 on 2026-10-23: §4.8.
+Marked resolved inside their open topic on 2026-10-23: §4.13 items 11 and 12.*
 
 ### 🟡 4.4 The at-sign guard is over-tested (ETP-5050)
 
-**Ticket:** owner ETP-5050.
+**Ticket:** no ticket — its former owner ETP-5050 is merged, so nothing owns the trim now.
 
 `UsageMessages.atSafe` replaces `@` with `(at)` in any value interpolated into a user-facing
 message, because `OBMessageUtils` treats `@token@` as a substitution and an unescaped at-sign in a
 billing resource catalog search key, an HQL fragment or a Hibernate/CDI exception message can blank the message. The
-guard is sound and has 22 call sites.
+guard is sound and has ~26 call sites (2026-10-23; ETP-5048's `BillingReconciliationProcess`
+added five).
 
 The **production surface is one line**:
 
@@ -989,7 +1033,7 @@ Two **do** earn their place and should survive any trim:
   message about a failure into a second, more confusing failure.
 
 The call-site assertions are legitimate in principle (a guard nobody calls is not a guard, and
-there are 22 call sites) but over-applied at sixteen; three or four spot checks carry the same
+there are ~26 call sites) but over-applied at sixteen; three or four spot checks carry the same
 information.
 
 **Suggested shape:** ~4 unit cases plus 3–4 call-site spot checks, down from ~30. Low risk, no
@@ -1012,11 +1056,16 @@ fixtures — and the parameter currently accepts the one thing it exists to prev
 change that dropped the plan on the way in would write a row that is indistinguishable from a legacy
 one, and the subscription would open not knowing what was bought.
 
-**Suggested fix:** `Objects.requireNonNull(plan, ...)` and give the fixtures a real `Plan`.
+One caller of a plan-less overload is not a test: `DevProvisioningFailureFixtureService.create`
+(`rest/`, shipped in `src/` but enabled only in a `local` runtime) records its E2E failure fixture
+through the four-argument `recordRequested`, so it reaches the null plan too.
+
+**Suggested fix:** `Objects.requireNonNull(plan, ...)` and give the fixtures a real `Plan` — the
+test fixtures and `DevProvisioningFailureFixtureService` alike, or the local fixture breaks.
 `GrandfatheredSubscriptionIntegrationTest` already creates one, so the pattern exists. Not done
 during the ETP-5045 merge because changing a method contract mid-merge is the wrong moment.
 
-### 🟠 4.7 The rest of the `OBContext` survey — one real, one false alarm, one unread
+### 🟡 4.7 The rest of the `OBContext` survey — one real, one false alarm, one unread
 
 **Ticket:** no ticket — needs its own, as stated below.
 
@@ -1034,24 +1083,24 @@ line below is the result of reading the code, not of counting matches.
 | `payment/TenantPlanService` | ✅ `retireProductivePreference` deletes its client-0 rows through `SystemContext` since 2026-09-27, for the same reason; its flush stays in the caller's context |
 | `rest/TransactionalAuthEmailSender` | ✅ captures and restores |
 | `rest/CompanyInvitationService` | ❌ **real, unfixed** — see below |
-| `roles/RoleInheritanceReconciliationService` | ⚪ **false positive** — its only `setOBContext` match is prose in a comment (line 358) describing a *caller* that runs as system; there is no call |
-| `rest/EtendoGoJwtServlet` | ❓ **unaudited** — 28 raw system installs (recounted 2026-10-05); routed through `payment/SystemContext`: the lifecycle webhook, and the two ETP-5548 checks develop brought in (`isProductiveNameTakenByAccount`, `isAssociatedDemo`). Note the checkout paths still run in system context after the name check: `requireBillingOwner` → `hasOwnedEnvironment` installs it first, raw |
+| `roles/RoleInheritanceReconciliationService` | ⚪ **false positive** — its only `setOBContext` match is prose in a comment (line 431) describing a *caller* that runs as system; there is no call |
+| `rest/EtendoGoJwtServlet` | ❓ **unaudited** — 30 raw system installs (`OBContext.setOBContext(ZERO_ID, …)`, recounted 2026-10-23); ten sites now go through `payment/SystemContext` (among them the lifecycle webhook, the re-subscription, the paused/resumed events and the ETP-5548 checks `isProductiveNameTakenByAccount` and `isAssociatedDemo`). Note the checkout paths still run in system context after the name check: `requireBillingOwner` → `hasOwnedEnvironment` installs it first, raw |
 
 **`CompanyInvitationService` — the real one.** Two sites, both `restorePreviousMode()`-only:
 
-- `resolveInvitation(...)` — installs at **509**, unwinds at **554** (line numbers as of 2026-09-28)
-- `withAdminMode(...)` — installs at **758**, unwinds at **763**
+- `resolveInvitation(...)` — installs at **536**, unwinds at **581** (line numbers as of 2026-10-23)
+- `withAdminMode(...)` — installs at **785**, unwinds at **790**
 
 It is the cheapest of the three to fix, because `withAdminMode` is *already* the `runAsSystem`
-shape — a wrapper every accept path funnels through (`acceptExistingAccountInAdminMode` at 576,
-`registerAndAcceptInAdminMode` at 664). It simply never captures. `resolveInvitation` is the only
+shape — a wrapper every accept path funnels through (`acceptExistingAccountInAdminMode` at 606,
+`registerAndAcceptInAdminMode` at 694). It simply never captures. `resolveInvitation` is the only
 method opening the context inline, so routing it through `withAdminMode` would collapse the class
 to one context site and fix both at once. The case to care about is
 `registerAndAcceptInAdminMode`, which creates a user and accepts an invitation: anything continuing
 on that thread afterwards runs as system. That is the shape of the hazard; no exploit has been
 traced.
 
-**`EtendoGoJwtServlet` — deliberately left as a question.** 28 raw installs next to three sites
+**`EtendoGoJwtServlet` — deliberately left as a question.** 30 raw installs next to ten sites
 routed through `SystemContext` is not evidence of 28 leaks, and it is not evidence of none either.
 A heuristic once marked it "OK" on the strength of a single capture/restore site; nobody has read
 the raw ones. Whoever picks this up should treat the
@@ -1095,8 +1144,9 @@ Until ETP-5118 merges: do not commit an `ETARC_VECTOR_SOURCE.xml` export that dr
 **Ticket:** related ETP-5046 (`58ea090d`); no ticket — needs its own.
 
 ETP-5046 (`58ea090d`) put the Stripe transport behind `StripeApiClient` /
-`HttpUrlConnectionStripeApiClient`, but only `HostedCheckoutService` and
-`PlanPriceDerivationHandler` use it. `StripePriceService` (the price lookup of every checkout and of
+`HttpUrlConnectionStripeApiClient`. `HostedCheckoutService` and `PlanPriceDerivationHandler` use
+it, and so, since ETP-5047/5048, do `SubscriptionReconciler`, `BillingReconciliationService`,
+`StripeListPager` and `StripeSubscriptionPeriodReader`. `StripePriceService` (the price lookup of every checkout and of
 `GET /sws/go/plans`) and `StripeCustomerPortalService` still open their own `HttpURLConnection`.
 Nothing blocks the migration; it was simply left out of scope.
 
@@ -1110,7 +1160,14 @@ That leaves the same Stripe price parsed twice, and the two parsers disagree:
 | One-time (non-recurring) price | refused (`ETGO_PlanPriceNotRecurring`) | accepted — becomes `payment` mode |
 
 The first three rows are the dangerous ones: a plan saves cleanly, is listed as purchasable, and the
-buyer's checkout then fails on it. The old transport also turns every failure into a generic
+buyer's checkout then fails on it.
+
+**A third reader since ETP-5048.** The reconciliation's price fill (§2.4) reads the subscription's
+first item price through its own `SubscriptionReconciler.ProviderPrice`, which takes the amount
+from `unit_amount` only. For a fractional-minor-unit price (`unit_amount` null) it fills
+`PROVIDER_PRICE_ID` and `SNAPSHOT_CURRENCY` but leaves `SNAPSHOT_AMOUNT` NULL — and, the price id
+and currency now being set, never revisits the row — while plan save would have read
+`unit_amount_decimal`. One shared parser fixes this reader too. The old transport also turns every failure into a generic
 `IOException`, so on the checkout path "that price does not exist" (a completed 4xx) and "Stripe
 was unreachable" are indistinguishable — the split `StripeResponse` / `StripeTransportException`
 exists to prevent exactly that.
@@ -1124,7 +1181,7 @@ of static `CheckoutConfiguration` mocks. Found after the ETP-5046 develop merge;
 
 **Ticket:** no ticket — the trim is parked (§4.13); related ETP-5047, ETP-5455.
 
-`schemaforge/NeoAuthenticatorEnvironmentAccessTest` (572 lines, 16 tests) was written for ETP-5443,
+`schemaforge/NeoAuthenticatorEnvironmentAccessTest` (~594 lines, 17 tests as of 2026-10-23) was written for ETP-5443,
 when NEO had three separate auth paths — the cookie session (`applySessionContext`), the legacy
 Bearer JWT (`authenticateJwt`) and the OAuth2 client-credentials token
 (`authenticateOAuth2Token`) — each running its own access check (`enforceEnvironmentAccess`), so
@@ -1152,7 +1209,7 @@ Two things are **not covered anywhere else** and must survive any trim:
   `decision`) and never the plain-text `sendError`. That is the one decision `NeoAuthenticator`
   itself makes on top of the pipeline outcome.
 
-**Suggested shape:** ~4 tests, ~150–200 lines, down from 572:
+**Suggested shape:** ~4 tests, ~150–200 lines, down from ~594:
 
 1. A blocked tenant gets the structured 402 through `writeResponse`, never `sendError` —
    parameterized over the two refusal decisions (optionally also over the three schemes, which
@@ -1177,14 +1234,15 @@ A trim along these lines is parked, unpushed, on the local branch `parked/ETP-50
 
 ### 🟡 4.13 Existing issues found while developing ETP-5047 — not fixed in ETP-5047
 
-**Ticket:** items 1–10: no ticket — candidates for one follow-up ticket; item 11: ETP-5743; item
-12: ETP-5742 (both linked to ETP-5047). Related ETP-5047.
+**Ticket:** items 1–10: no ticket — candidates for one follow-up ticket; items 11 and 12:
+**resolved** (ETP-5743 and ETP-5742, both linked to ETP-5047). Related ETP-5047.
 
 Found during ETP-5047's development, review and QA, then taken out of its scope by Martin on
-2026-10-14. The **Since** column says where each one comes from, checked against `develop` (go
-`3b4afe5a9`, sf `995a2cf9f`) and the ETP-5047 base (go `fa7668ff7`, sf `59b286c2b`): `develop` =
-already there today, not caused by ETP-5047; **ETP-5047** = arrives with ETP-5047's own changes —
-the part to weigh when deciding whether an item blocks the ETP-5047 deploy. Fixes for most are
+2026-10-14. The topic stays open for items 1–10. The **Since** column says where each one comes
+from, checked against `develop` (go `3b4afe5a9`, sf `995a2cf9f`) and the ETP-5047 base (go
+`fa7668ff7`, sf `59b286c2b`): `develop` = was already there before ETP-5047; **ETP-5047** = arrived
+with ETP-5047's own changes. ETP-5047 is merged to `main`, so the column no longer decides a deploy;
+it says only where the bug came from. Fixes for most are
 built, reviewed and QA'd but **parked, unpushed, on local branches only** — a reader on another
 machine cannot see them; they are the starting point for whichever ticket picks this up:
 
@@ -1197,7 +1255,7 @@ below assume it (item 1's 503 is decided per enforcement flag).
 
 | # | What happens | Impact | Since | Parked fix |
 |---|---|---|---|---|
-| 1 | NEO answers **401** when the commercial access check itself throws (e.g. a DB error): the exception reaches `EnvironmentRequestAuthenticator.refusedFor`. MCP answers 503 there since ETP-5047. | The SPA reads the 401 as an expired session and logs the user out. | `develop` | go: 503 `ENVIRONMENT_UNVERIFIED` in the guard's shared body, decided per enforcement flag (`8818b02b0`, `a77f783c9`). |
+| 1 | When the commercial access check itself throws (e.g. a DB error) NEO answers **500** `CONTEXT_UNAVAILABLE`: the guard runs in the bind step, and since ETP-5489 (`03a71370c`) an exception there goes to `EnvironmentRequestAuthenticator.contextUnavailableFor`, no longer to `refusedFor` (it used to answer **401**, which the SPA read as an expired session and logged the user out). MCP answers 503 there since ETP-5047. | The logout is gone. What remains: a generic 500 rather than a retryable 503 that says the access could not be verified, and a different status from MCP for the same failure. | `develop` (the 401; the 500 since ETP-5489) | go: 503 `ENVIRONMENT_UNVERIFIED` in the guard's shared body, decided per enforcement flag (`8818b02b0`, `a77f783c9`) — written against the 401 and predating ETP-5489, so it needs a rebase onto `contextUnavailableFor`. |
 | 2 | A SQL-level error inside `TenantEnvironmentLifecycleService.evaluateAccess` aborts the request's PostgreSQL transaction. | Later DAL work and the end-of-request commit fail (500s); on `POST /session/environment` the rotated session can be lost → logout. | Transaction abort: `develop`. Session loss: **ETP-5047** (that endpoint evaluates access only since `enforcedDecision` / `accessDecision`). | go: a savepoint around the evaluation and a DB-backed integration test (`3f64f1219`); a WARN when no savepoint can be taken (`ca1dc71cc`). |
 | 3 | Error bodies differ by door. **402:** the Copilot bridge answers a flat `{"error": "<message>"}` and the OAuth2 API-key endpoints their own envelope (`access_denied`), not the shared structured body. **503** (unresolved tenant — `EffectiveClientResolver` — and MCP's failed check): NEO answers `{error: {message, status}}`, MCP and the Copilot bridge a flat `{"error": "<message>"}`, OAuth2 `access_denied`. | Clients need one reader per door; on OAuth2 a retryable 503 looks like a denial. | 402 shapes: `develop`. Every 503: **ETP-5047**. | go: shared 402/503 body on the Copilot bridge (`e8d5d8ed8`), `temporarily_unavailable` for the OAuth2 503 (`959689518`); sf: the readers accept both shapes. |
 | 4 | SPA: a 5xx or network failure on `windowaccessmap` shows "your role has no access"; session restore on a 5xx shows a blank screen. | Wrong copy for a temporary failure; a blank app with no way out. | `develop` | sf: `AccessUnreachableScreen` (retry / log out) and `SessionBootingScreen`. |
@@ -1207,8 +1265,8 @@ below assume it (item 1's 503 is decided per enforcement flag).
 | 8 | SPA does not recognise the OAuth2 API-key 402 envelope (`error: access_denied` + `error_description`) as an environment block; the message is untranslated. | Low: another request's 402 normally blocks the app first. | `develop` | None. |
 | 9 | A brief access-map failure during a background refresh replaces the whole app. | Unsaved form input is lost. Core behaviour. | `develop` | None — needs an `app-shell-core` change: keep the previous access map on a background refresh. |
 | 10 | Two readers of the 402 decision: core `apiFetch` reads only the message text; schema_forge's `readEnvironmentAccessDecision` (`d18c484d9`) reads `error.decision` first. | Same answer while the backend keeps both in sync; they drift if it stops. | **ETP-5047** | core: the reader moves into `app-shell-core` (`d57298c06`); the schema_forge side waits for a core release. |
-| 11 | **Unverified.** Purchase-source ownership is `EtendoGoJwtDalHelper.clientBelongsToAccountEmail`: any active user of the environment whose email or username is the account email (or an `email+suffix` variant). That matches a member **invited** into another owner's environment, not only its owner. | An invited member might name another owner's demo as `demoClientId`, so a purchase would associate, copy and revoke a demo the buyer does not own — against FR-08 of `schema_forge/docs/plans/etp-5396-demo-to-pro-prd.md`. | `develop` (predates ETP-5046/5047) | None — **ETP-5743** "Restrict the purchase demo source to the account owner". |
-| 12 | A canceled tenant cannot re-subscribe its own environment: every checkout provisions a new one, and since ETP-5047 a canceled productive tenant is not a demo source either (§4.14). The flow was decided on 2026-10-14 (Martin Taal; §2.9, §3.7). The same-name check `ownsProductiveNamed` (pre-checkout and onboarding) asks `resolvePlan`, which reads a canceled tenant as `free`, so its name does not count as taken. | A canceled customer who wants to come back gets a second environment, and may give it the canceled one's company name. | **ETP-5047** (it closes the row on cancel, so a canceled tenant reads `free`; the missing flow itself predates it) | **Fixed by ETP-5742**: the owner re-subscribes the canceled environment from its blocked screen (`POST /sws/go/billing/reactivation`, applied by the payment webhook), and `ownsProductiveNamed` also counts a productive lifecycle type, so the name stays taken (`feature-flags-and-tenant-upgrade.md` §3). |
+| 11 | ✅ **Resolved.** Purchase-source ownership was `EtendoGoJwtDalHelper.clientBelongsToAccountEmail`: any active user of the environment whose email or username is the account email (or an `email+suffix` variant). That matches a member **invited** into another owner's environment, not only its owner. | An invited member might name another owner's demo as `demoClientId`, so a purchase would associate, copy and revoke a demo the buyer does not own — against FR-08 of `schema_forge/docs/plans/etp-5396-demo-to-pro-prd.md`. | `develop` (predates ETP-5046/5047) | **Fixed by ETP-5743** (`d4eb9e739`): the purchase-source checks (`isOwnedClient`, `isOwnedFreeDemoClient` in `EtendoGoJwtServlet`) ask `EtendoGoJwtDalHelper.clientOwnedByAccountEmail`, which requires the account's user to be the flagged owner. A tenant created before the owner flag (ETP-4830) has no owner recorded and keeps the old account-match rule until a backfill assigns one. |
+| 12 | ✅ **Resolved.** A canceled tenant could not re-subscribe its own environment: every checkout provisions a new one, and since ETP-5047 a canceled productive tenant is not a demo source either (§4.14). The flow was decided on 2026-10-14 (Martin Taal; §2.9, §3.7). The same-name check `ownsProductiveNamed` (pre-checkout and onboarding) asks `resolvePlan`, which reads a canceled tenant as `free`, so its name does not count as taken. | A canceled customer who wants to come back gets a second environment, and may give it the canceled one's company name. | **ETP-5047** (it closes the row on cancel, so a canceled tenant reads `free`; the missing flow itself predates it) | **Fixed by ETP-5742**: the owner re-subscribes the canceled environment from its blocked screen (`POST /sws/go/billing/reactivation`, applied by the payment webhook), and `ownsProductiveNamed` also counts a productive lifecycle type, so the name stays taken (`feature-flags-and-tenant-upgrade.md` §3). |
 
 ### 🟡 4.15 Paid provisioning is only half extracted from `EtendoGoJwtServlet` (ETP-5048)
 
@@ -1326,7 +1384,7 @@ read to drop the date, or the sentence, when enforcement is off. Not planned.
 ## 5. Handed forward to later tickets
 
 *Moved to §6 on 2026-09-28: §5.7, §5.10, §5.12; §5.15 was decided on arrival and sits there too.
-On 2026-10-23: §5.14.*
+On 2026-10-23: §5.14, §5.5.*
 
 ### 🟠 5.1 ETP-5051: "no quota row" means UNLIMITED
 
@@ -1341,7 +1399,15 @@ at zero. `PlanQuotaSchemaInvariantTest` guards the schema side (mutation-tested)
 guard the evaluator except this paragraph.** `ETGO_PLAN_QUOTA` is also the only new table with
 `ISDELETEABLE='Y'`, because deleting the last quota row is how an operator restores unlimited.
 
-The rest of the quota definition ETP-5051 inherits is in §5.5–§5.9 (§5.7 decided, now in §6).
+**ETP-5049 is already a reader, and it reads only active rows.** `GET /sws/go/billing/subscription`
+sends the tenant's plan quotas as `planQuotas`, read by `PlanCatalogService.listActiveQuotas`
+(`ETGO_PLAN_QUOTA.ISACTIVE = 'Y'` only); an empty list with a plan means unlimited. So an
+**inactive** quota row already means "no quota" — unlimited — on that endpoint. ETP-5051's evaluator
+must read it the same way, or the Subscription page and the enforcement disagree about the same
+resource.
+
+The rest of the quota definition ETP-5051 inherits is in §5.5–§5.9 (§5.5 and §5.7 decided, now
+in §6).
 Usage per subscription (§5.10, §5.12) and the resource-limit check with its freshness (§5.15) were
 decided on 2026-09-28 and are in §6; none of their follow-up work has a ticket yet.
 
@@ -1351,26 +1417,6 @@ decided on 2026-09-28 and are in §6; none of their follow-up work has a ticket 
 
 Facts checked against the DDL, `SubscriptionService` and the PRD on 2026-09-24; the ETP-5051 scope
 is quoted from its Jira text as read that day.
-
-### 🟠 5.5 Consumption window = the subscription billing period — decided, filled from ETP-5047 on
-
-**Ticket:** owner ETP-5051 (reads the period); ETP-5047 populates it.
-
-**Decided, not open.** There is deliberately no period column on `ETGO_PLAN_QUOTA`. The PRD fixes
-the window (§4 decisions table, "Consumption window: the **subscription billing period**, never the
-calendar month"; restated in the invariants table), and ETP-5051 reads it from
-`ETGO_SUBSCRIPTION.CURRENT_PERIOD_START` / `CURRENT_PERIOD_END`. An upgrade does not reset it — the
-Stripe anchor is preserved (PRD §8, ETP-5053).
-
-**What ETP-5051 must know:** since ETP-5047 `CURRENT_PERIOD_START/END` hold **Stripe's billing
-period and nothing else** — the grace anchor moved to `GRACE_ANCHOR` (§3.7). `openSubscription`
-writes neither column; a paid onboarding reads the period from Stripe once it is open (§3.7, the
-`CURRENT_PERIOD_START/END` writer list), and every later `customer.subscription.updated` or
-`invoice.paid` keeps it current. A new row is therefore periodless only when that read failed (one
-WARN, `Could not read the billing period of Stripe subscription …`) or it names no Stripe
-subscription — then until its first period-bearing event. Rows written before ETP-5047 may still
-carry the old grace anchor in `CURRENT_PERIOD_END` with `CURRENT_PERIOD_START` NULL (read that
-shape as "no period"). §5.9 covers the periodless cases.
 
 ### 🔴 5.6 Stock versus flow aggregation over the period — owned by nobody
 
@@ -1404,6 +1450,10 @@ any average would not.
 design, surprising to an operator. **Must be stated** in the operator docs and in the **Plans** /
 **Quotas** window help when ETP-5051 makes quotas live. (Annual intervals are also listed as
 deferred in PRD §16, yet the schema already accepts them.)
+
+The backend already says it: since ETP-5049 each entry of `planQuotas` on
+`GET /sws/go/billing/subscription` carries `period`, the plan's billing interval (§5.1). No SPA
+screen reads it yet; the ETP-5051 quota display should show it next to the included quantity.
 
 ### 🔴 5.9 A subscription with no current period needs a defined answer
 
@@ -1454,8 +1504,12 @@ settled in ETP-5047 (§3.7).
 
 **What it means today.** `END_DATE` is past tense: the moment this row stopped being the tenant's
 current row. Its writers: a cancellation (ETP-5047 — Stripe's `ended_at`, else `canceled_at`, else
-now; never before `START_DATE`), `openSubscription` closing a stale canceled row before a
-re-subscription (ETP-5047, now), and a plan change (ETP-5053), which sets it to *now* and inserts
+now; never before `START_DATE`), the **ETP-5048 billing reconciliation**, which closes a row it
+finds terminal at the provider (status read through `SubscriptionLifecycleApplier`) or absent there
+(behind its circuit breaker), through the webhook's own write path —
+`TenantEnvironmentLifecycleService.applySubscriptionEvent`, then
+`SubscriptionService.applyLifecycleOutcome`, same closing rule — `openSubscription` closing a stale canceled row before a re-subscription
+(ETP-5047, now), and a plan change (ETP-5053), which sets it to *now* and inserts
 the successor in the same transaction. `openSubscription` sets a new row's `END_DATE` to null and
 the R37 backfill always writes null.
 
@@ -1619,7 +1673,7 @@ the **Plans** window, not a code change.
 
 **Follow-up:** no ticket. Marketing's third tier and custom plans (§5.14) are new `ETGO_PLAN` rows,
 not code. `GET /sws/go/billing/offers` is kept server-side (catalog-derived since ETP-5049, §2.1)
-but has no frontend caller any more; removing it is a separate decision.
+but has no frontend caller any more; removing it is a separate decision (§1.9).
 
 ### ✅ 4.8 `priceId` still reaches the browser on two develop paths
 
@@ -1696,8 +1750,33 @@ PostgreSQL transaction, so the request fails and stays retryable; only a failure
 SQL statement reaches the edge, and its worst outcome is a clean environment, never the association
 of the wrong tenant.
 
-**Follow-up:** none for this fix. Letting that tenant re-subscribe its own environment instead is
-ETP-5742, and restricting the source to the account owner is ETP-5743 (§4.13).
+**Follow-up:** none. The two related tickets are done too: ETP-5742 lets that tenant re-subscribe
+its own environment instead, and ETP-5743 (`d4eb9e739`) restricts the source to the account owner
+(§4.13, items 12 and 11).
+
+### ✅ 5.5 Consumption window = the subscription billing period — decided, filled from ETP-5047 on
+
+**Ticket:** owner ETP-5051 (reads the period); ETP-5047 populates it (delivered).
+
+**Status:** decided by the PRD (§4 decisions table); moved here on 2026-10-23, it was never open.
+
+**Decision: the consumption window is the subscription billing period, never the calendar
+month.** There is deliberately no period column on `ETGO_PLAN_QUOTA`; ETP-5051 reads the window
+from `ETGO_SUBSCRIPTION.CURRENT_PERIOD_START` / `CURRENT_PERIOD_END`. An upgrade does not reset it —
+the Stripe anchor is preserved (PRD §8, ETP-5053).
+
+**What ETP-5051 must know:** since ETP-5047 `CURRENT_PERIOD_START/END` hold **Stripe's billing
+period and nothing else** — the grace anchor moved to `GRACE_ANCHOR` (§3.7). `openSubscription`
+writes neither column; a paid onboarding reads the period from Stripe once it is open (§3.7, the
+`CURRENT_PERIOD_START/END` writer list), and every later `customer.subscription.updated` or
+`invoice.paid` keeps it current. A new row is therefore periodless only when that read failed (one
+WARN, `Could not read the billing period of Stripe subscription …`) or it names no Stripe
+subscription — then until its first period-bearing event. Rows written before ETP-5047 may still
+carry the old grace anchor in `CURRENT_PERIOD_END` with `CURRENT_PERIOD_START` NULL (read that
+shape as "no period"). §5.9 covers the periodless cases.
+
+**Follow-up:** ETP-5051 — read the period from those two columns, and give a periodless row the
+answer §5.9 still owes.
 
 ### ✅ 5.7 `ETGO_PLAN_QUOTA.CONSUMPTION_SOURCE` means something else in ETP-5051
 
@@ -1795,7 +1874,7 @@ The 2026-09-28 decision (Sebastián Barrozo) kept two fixed cards, each configur
 
 **Follow-up:** no ticket. Custom plans through a commercial agreement and marketing's third tier
 become catalog rows when they are defined. Whether to retire the now caller-less
-`GET /sws/go/billing/offers` is a separate decision (§2.1).
+`GET /sws/go/billing/offers` is a separate decision (§1.9).
 
 ### ✅ 5.15 The resource-limit check reads stored usage; usage is recomputed on one two-hour cadence
 
