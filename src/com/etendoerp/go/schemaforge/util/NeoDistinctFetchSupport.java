@@ -75,6 +75,17 @@ public final class NeoDistinctFetchSupport {
    *
    * @param params
    *     the list params already built for the request; mutated and returned
+   * @param context
+   *     the request context; tells whether the request is a read-by-id and resolves the
+   *     customization read predicate for it
+   * @param startRow
+   *     the first row of the requested page, forced into the {@code _startRow} param
+   * @param pageSize
+   *     the number of rows of the requested page; the {@code _endRow} param is
+   *     {@code startRow + pageSize - 1}
+   * @return the same {@code params} map, ready to build the core query service: without the
+   *     params that would change what core builds, with the read predicate re-applied for a
+   *     read-by-id request and with the row window forced to the page
    */
   public static Map<String, String> toDistinctFilterParams(Map<String, String> params,
       NeoContext context, int startRow, int pageSize) {
