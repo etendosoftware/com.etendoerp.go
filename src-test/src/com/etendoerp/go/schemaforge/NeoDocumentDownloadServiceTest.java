@@ -690,6 +690,123 @@ public class NeoDocumentDownloadServiceTest {
     assertEquals(ERR_INVALID_FILE, sink.toString());
   }
 
+  // ── ETP-5715: the MCP's attachment links serve ONE named attachment ──────────────────────
+
+  private static Claims stubAttachmentClaims(String recordId, String clientId, String attachmentId) {
+    Claims claims = stubClaims("purchase-invoice", recordId, clientId);
+    when(claims.getAttachmentId()).thenReturn(attachmentId);
+    return claims;
+  }
+
+  /**
+   * An attachment token carries the attachment id: the file served is exactly that one — not the
+   * record's main attachment — and the main lookup is never consulted.
+   */
+  @Test
+  public void attachmentTokenStreamsExactlyTheNamedAttachment() throws Exception {
+    HttpServletResponse response = mock(HttpServletResponse.class);
+    ServletOutputStream sos = mock(ServletOutputStream.class);
+    when(response.getOutputStream()).thenReturn(sos);
+    Claims claims = stubAttachmentClaims("REC1", "CLIENT1", "ATT2");
+    OBDal dal = mock(OBDal.class);
+    Attachment named = stubAttachment("ATT2", "orden.pdf", "application/pdf", "CLIENT1");
+    stubStorageLayout(named, NESTED_PATH, "TABLE1", "REC1");
+    when(dal.get(Attachment.class, "ATT2")).thenReturn(named);
+    File attachRoot = tempFolder.newFolder("attachments");
+    writeStoredFile(attachRoot, NESTED_PATH, "orden.pdf", FILE_BYTES);
+
+    runHandle(response, claims, dal, stubAttachRoot(attachRoot.getAbsolutePath()),
+        mock(AttachImplementationManager.class));
+
+    verify(response).setStatus(HttpServletResponse.SC_OK);
+    ArgumentCaptor<byte[]> bodyCaptor = ArgumentCaptor.forClass(byte[].class);
+    verify(sos).write(bodyCaptor.capture());
+    assertArrayEquals(FILE_BYTES, bodyCaptor.getValue());
+    verify(dal, Mockito.never()).getSession();
+  }
+
+  /** An attachment that belongs to ANOTHER record than the one the token signs is a 404. */
+  @Test
+  public void attachmentTokenOfAnotherRecordIsNotFound() throws Exception {
+    HttpServletResponse response = mock(HttpServletResponse.class);
+    StringWriter sink = stubWriter(response);
+    Claims claims = stubAttachmentClaims("REC1", "CLIENT1", "ATT2");
+    OBDal dal = mock(OBDal.class);
+    Attachment foreign = stubAttachment("ATT2", "orden.pdf", "application/pdf", "CLIENT1");
+    when(foreign.getRecord()).thenReturn("REC-OTHER");
+    when(dal.get(Attachment.class, "ATT2")).thenReturn(foreign);
+
+    runHandle(response, claims, dal, null, null);
+
+    verify(response).setStatus(HttpServletResponse.SC_NOT_FOUND);
+    assertEquals("Document file not found", sink.toString());
+  }
+
+  /** An attachment of another client than the signed one is a 404, as for the main attachment. */
+  @Test
+  public void attachmentTokenOfAnotherClientIsNotFound() throws Exception {
+    HttpServletResponse response = mock(HttpServletResponse.class);
+    StringWriter sink = stubWriter(response);
+    Claims claims = stubAttachmentClaims("REC1", "CLIENT1", "ATT2");
+    OBDal dal = mock(OBDal.class);
+    Attachment foreign = stubAttachment("ATT2", "orden.pdf", "application/pdf", "OTHER_CLIENT");
+    when(foreign.getRecord()).thenReturn("REC1");
+    when(dal.get(Attachment.class, "ATT2")).thenReturn(foreign);
+
+    runHandle(response, claims, dal, null, null);
+
+    verify(response).setStatus(HttpServletResponse.SC_NOT_FOUND);
+    assertEquals("Document file not found", sink.toString());
+  }
+
+  /** A link to an attachment that was deleted since it was issued is a 404, not a server error. */
+  @Test
+  public void attachmentTokenOfADeletedAttachmentIsNotFound() throws Exception {
+    HttpServletResponse response = mock(HttpServletResponse.class);
+    StringWriter sink = stubWriter(response);
+    Claims claims = stubAttachmentClaims("REC1", "CLIENT1", "GONE");
+    OBDal dal = mock(OBDal.class);
+    when(dal.get(Attachment.class, "GONE")).thenReturn(null);
+
+    runHandle(response, claims, dal, null, null);
+
+    verify(response).setStatus(HttpServletResponse.SC_NOT_FOUND);
+    assertEquals("Document file not found", sink.toString());
+  }
+
+  /**
+   * The attachment token is the SAME signed token as the email links (no second scheme): it
+   * round-trips through {@code validate}, carries the attachment id, expires, and a forged payload
+   * is rejected.
+   */
+  @Test
+  public void attachmentTokenIsTheSameSignedTokenWithOneExtraClaim() {
+    String property = DocumentDownloadTokenService.PROP_TOKEN_SECRET;
+    System.setProperty(property, "unit-test-secret");
+    try {
+      String token = DocumentDownloadTokenService
+          .createAttachmentToken("purchase-order", "REC1", "CLIENT1", "ATT9", 600).orElseThrow();
+      Claims claims = DocumentDownloadTokenService.validate(token).orElseThrow();
+      assertEquals("ATT9", claims.getAttachmentId());
+      assertEquals("REC1", claims.getRecordId());
+      assertEquals("CLIENT1", claims.getClientId());
+      assertEquals("purchase-order", claims.getSpecName());
+
+      String forged = token.substring(0, token.indexOf('.')) + ".AAAA";
+      assertFalse(DocumentDownloadTokenService.validate(forged).isPresent());
+      assertFalse(DocumentDownloadTokenService.validate(token + "x").isPresent());
+
+      String expired = DocumentDownloadTokenService
+          .createAttachmentToken("purchase-order", "REC1", "CLIENT1", "ATT9", -10).orElseThrow();
+      assertFalse(DocumentDownloadTokenService.validate(expired).isPresent());
+
+      assertFalse(DocumentDownloadTokenService
+          .createAttachmentToken("purchase-order", "REC1", "CLIENT1", " ", 600).isPresent());
+    } finally {
+      System.clearProperty(property);
+    }
+  }
+
   /**
    * Verifies unsafe filename characters (path separators, quotes, wildcards)
    * are replaced rather than left to leak into the HTTP header.

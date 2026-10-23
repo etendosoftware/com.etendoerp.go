@@ -55,6 +55,10 @@ public final class DocumentDownloadTokenService {
   private static final Logger log = LogManager.getLogger(DocumentDownloadTokenService.class);
   private static final String HMAC_ALGORITHM = "HmacSHA256";
   private static final String TOKEN_VERSION = "v1";
+  /** Path, inside the NEO servlet, the signed download links point to; the token follows. */
+  public static final String DOWNLOAD_PATH = "/document-download/"; // NOSONAR java:S1075 - route path, not a deployment URL
+  /** Contract name carried by the tokens of {@link #createAttachmentToken}. */
+  static final String ATTACHMENT_CONTRACT = "mcp-attachment";
 
   private DocumentDownloadTokenService() {
   }
@@ -80,6 +84,36 @@ public final class DocumentDownloadTokenService {
     String token = createToken(contractName, specName, recordId, clientId, idempotencyKey,
         currentTimeSeconds() + tokenTtlSeconds(), secret);
     return Optional.of(StringUtils.removeEnd(baseUrl, "/") + "/" + token);
+  }
+
+  /**
+   * Builds the token of a short-lived link to ONE specific attachment of a record (ETP-5715) — the
+   * MCP's download link. It is the same signed token as the email links, with one extra claim, the
+   * attachment id, so no second scheme exists: {@link #validate} reads both, and the endpoint serves
+   * the main attachment when the claim is absent and exactly that attachment when it is present.
+   *
+   * @param specName     NEO document spec name
+   * @param recordId     id of the record the attachment belongs to
+   * @param clientId     client that owns the record; the endpoint refuses an attachment of another
+   * @param attachmentId the {@code C_File_ID} the link serves
+   * @param ttlSeconds   how long the link stays valid
+   * @return the signed token (not a URL), or empty when the signing secret is not configured or an
+   *         argument is blank
+   */
+  public static Optional<String> createAttachmentToken(String specName, String recordId,
+      String clientId, String attachmentId, long ttlSeconds) {
+    String secret = readConfig(PROP_TOKEN_SECRET, ENV_TOKEN_SECRET);
+    if (StringUtils.isAnyBlank(secret, specName, recordId, clientId, attachmentId)) {
+      return Optional.empty();
+    }
+    try {
+      JSONObject payload = payloadOf(ATTACHMENT_CONTRACT, specName, recordId, clientId,
+          attachmentId, currentTimeSeconds() + ttlSeconds);
+      payload.put("att", attachmentId);
+      return Optional.of(seal(payload, secret));
+    } catch (JSONException e) {
+      throw new OBException("Could not build attachment download token", e);
+    }
   }
 
   /**
@@ -126,19 +160,29 @@ public final class DocumentDownloadTokenService {
   private static String createToken(String contractName, String specName, String recordId,
       String clientId, String idempotencyKey, long expiresAtSeconds, String secret) {
     try {
-      JSONObject payload = new JSONObject();
-      payload.put("v", TOKEN_VERSION);
-      payload.put("contract", contractName);
-      payload.put("spec", specName);
-      payload.put("record", recordId);
-      payload.put("client", clientId);
-      payload.put("send", idempotencyKey);
-      payload.put("exp", expiresAtSeconds);
-      String payloadPart = base64Url(payload.toString().getBytes(StandardCharsets.UTF_8));
-      return payloadPart + "." + sign(payloadPart, secret);
+      return seal(payloadOf(contractName, specName, recordId, clientId, idempotencyKey,
+          expiresAtSeconds), secret);
     } catch (JSONException e) {
       throw new OBException("Could not build document download token", e);
     }
+  }
+
+  private static JSONObject payloadOf(String contractName, String specName, String recordId,
+      String clientId, String idempotencyKey, long expiresAtSeconds) throws JSONException {
+    JSONObject payload = new JSONObject();
+    payload.put("v", TOKEN_VERSION);
+    payload.put("contract", contractName);
+    payload.put("spec", specName);
+    payload.put("record", recordId);
+    payload.put("client", clientId);
+    payload.put("send", idempotencyKey);
+    payload.put("exp", expiresAtSeconds);
+    return payload;
+  }
+
+  private static String seal(JSONObject payload, String secret) {
+    String payloadPart = base64Url(payload.toString().getBytes(StandardCharsets.UTF_8));
+    return payloadPart + "." + sign(payloadPart, secret);
   }
 
   static String readConfig(String propertyName, String envName) {
@@ -219,9 +263,10 @@ public final class DocumentDownloadTokenService {
     private final String clientId;
     private final String idempotencyKey;
     private final long expiresAtSeconds;
+    private final String attachmentId;
 
     private Claims(String version, String contractName, String specName, String recordId,
-        String clientId, String idempotencyKey, long expiresAtSeconds) {
+        String clientId, String idempotencyKey, long expiresAtSeconds, String attachmentId) {
       this.version = version;
       this.contractName = contractName;
       this.specName = specName;
@@ -229,6 +274,7 @@ public final class DocumentDownloadTokenService {
       this.clientId = clientId;
       this.idempotencyKey = idempotencyKey;
       this.expiresAtSeconds = expiresAtSeconds;
+      this.attachmentId = attachmentId;
     }
 
     private static Claims from(JSONObject payload) {
@@ -239,7 +285,8 @@ public final class DocumentDownloadTokenService {
           StringUtils.trimToNull(payload.optString("record")),
           StringUtils.trimToNull(payload.optString("client")),
           StringUtils.trimToNull(payload.optString("send")),
-          payload.optLong("exp", 0L));
+          payload.optLong("exp", 0L),
+          StringUtils.trimToNull(payload.optString("att")));
     }
 
     public String getContractName() {
@@ -268,6 +315,16 @@ public final class DocumentDownloadTokenService {
 
     public long getExpiresAtSeconds() {
       return expiresAtSeconds;
+    }
+
+    /**
+     * The attachment a link serves.
+     *
+     * @return the {@code C_File_ID} of an attachment link (ETP-5715), or {@code null} for the email
+     *         links, which serve the record's main attachment
+     */
+    public String getAttachmentId() {
+      return attachmentId;
     }
   }
 }

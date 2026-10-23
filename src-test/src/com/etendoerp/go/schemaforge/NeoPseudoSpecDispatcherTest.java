@@ -54,6 +54,9 @@ import com.etendoerp.webhookevents.services.BaseWebhookService;
  * conventions: {@link NeoServlet} and its collaborators are all Mockito mocks — the dispatcher is
  * the only real object under test — so none of the real {@code NeoServlet} collaborator
  * constructors (several of which touch the DB/DAL) ever run.
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoPseudoSpecDispatcher
+ * @covers com.etendoerp.go.schemaforge.NeoOcrConfigEndpoint
  */
 public class NeoPseudoSpecDispatcherTest {
 
@@ -121,6 +124,32 @@ public class NeoPseudoSpecDispatcherTest {
     verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED),
         eq("Batch endpoint only supports POST"));
     verify(batchService, never()).handle(any(), any());
+  }
+
+  // ETP-5677 — the job endpoints of the batch path (read and cancel a job by its id).
+
+  private static NeoServlet.NeoPathInfo jobPath(String id) {
+    return new NeoServlet.NeoPathInfo("batch", "jobs", id);
+  }
+
+  @Test
+  public void batchJobsGetAndDeleteDelegateToHandleJob() throws Exception {
+    assertTrue(dispatcher.handle(jobPath("J1"), "GET", request, response));
+    assertTrue(dispatcher.handle(jobPath("J1"), "DELETE", request, response));
+
+    verify(batchService).handleJob("GET", "J1", response);
+    verify(batchService).handleJob("DELETE", "J1", response);
+    verify(batchService, never()).handle(any(), any());
+  }
+
+  @Test
+  public void batchJobsRejectOtherMethodsAndAMissingId() throws Exception {
+    assertTrue(dispatcher.handle(jobPath("J1"), "POST", request, response));
+    assertTrue(dispatcher.handle(jobPath(null), "GET", request, response));
+
+    verify(servlet, org.mockito.Mockito.times(2)).sendError(eq(response),
+        eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED), org.mockito.ArgumentMatchers.startsWith("Batch jobs support"));
+    verify(batchService, never()).handleJob(any(), any(), any());
   }
 
   // -------------------------------------------------------------------------
@@ -194,6 +223,33 @@ public class NeoPseudoSpecDispatcherTest {
     verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED),
         eq("Simsearch endpoint only supports GET"));
     verify(simSearchEndpoint, never()).handle(any());
+  }
+
+  // -------------------------------------------------------------------------
+  // ocrconfig (ETP-5715)
+  // -------------------------------------------------------------------------
+
+  @Test
+  public void ocrConfigGetWritesTheConfigurationOfTheDocType() throws Exception {
+    when(request.getParameter("docType")).thenReturn("purchase-invoice");
+
+    boolean handled = dispatcher.handle(pathInfo("ocrconfig"), "GET", request, response);
+
+    assertTrue(handled);
+    ArgumentCaptor<NeoResponse> written = ArgumentCaptor.forClass(NeoResponse.class);
+    verify(servlet).writeResponse(eq(response), written.capture());
+    assertTrue(written.getValue().getHttpStatus() == HttpServletResponse.SC_OK);
+    assertTrue(written.getValue().getBody().getString("question").startsWith("Extract all invoice fields"));
+  }
+
+  @Test
+  public void ocrConfigRejectsNonGetMethod() throws Exception {
+    boolean handled = dispatcher.handle(pathInfo("ocrconfig"), "POST", request, response);
+
+    assertTrue(handled);
+    verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED),
+        eq("Ocrconfig endpoint only supports GET"));
+    verify(servlet, never()).writeResponse(any(), any());
   }
 
   @Test

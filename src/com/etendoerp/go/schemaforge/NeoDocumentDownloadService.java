@@ -80,7 +80,7 @@ final class NeoDocumentDownloadService {
       return;
     }
     Claims validated = claims.get();
-    Attachment attachment = resolveMainAttachment(validated);
+    Attachment attachment = resolveAttachment(validated);
     if (attachment == null) {
       writePlainError(response, HttpServletResponse.SC_NOT_FOUND, "Document file not found");
       return;
@@ -214,6 +214,34 @@ final class NeoDocumentDownloadService {
     } catch (IOException e) {
       log.warn("Could not delete temporary attachment directory {}: {}", parent, e.getMessage());
     }
+  }
+
+  /**
+   * The attachment a validated token serves: the one it names when it carries an attachment id
+   * (the MCP's download link, ETP-5715), otherwise the record's main attachment (the email links).
+   */
+  private static Attachment resolveAttachment(Claims validated) {
+    if (validated.getAttachmentId() == null) {
+      return resolveMainAttachment(validated);
+    }
+    return resolveNamedAttachment(validated);
+  }
+
+  /**
+   * Resolves the exact attachment an attachment token names, or {@code null} when it no longer
+   * exists, belongs to another record than the one signed, or to another client than the signed one
+   * (the same client check as {@link #resolveMainAttachment}, since this lookup is not filtered by
+   * client either). The signature already proves the id was authorized when the link was issued;
+   * this makes a deleted or foreign attachment answer the same 404 as an unknown one.
+   */
+  private static Attachment resolveNamedAttachment(Claims validated) {
+    Attachment attachment = OBDal.getInstance().get(Attachment.class, validated.getAttachmentId());
+    if (attachment == null || attachment.getClient() == null
+        || !attachment.getClient().getId().equals(validated.getClientId())
+        || !StringUtils.equals(attachment.getRecord(), validated.getRecordId())) {
+      return null;
+    }
+    return attachment;
   }
 
   /**

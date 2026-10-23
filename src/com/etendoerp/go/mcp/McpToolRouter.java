@@ -52,6 +52,7 @@ import org.openbravo.service.json.DefaultJsonDataService;
 import org.openbravo.service.json.JsonConstants;
 
 import com.etendoerp.go.schemaforge.AmortizationPlanService;
+import com.etendoerp.go.schemaforge.BatchJobService;
 import com.etendoerp.go.schemaforge.util.NeoRecordVersion;
 import com.etendoerp.go.schemaforge.BatchService;
 import com.etendoerp.go.schemaforge.NeoActionRecordGuard;
@@ -248,8 +249,16 @@ public class McpToolRouter {
               return wrapAsErrorContent(McpRouterErrorBodies.batchDisabled());
             }
             return handleBatch(arguments);
+          case McpConstants.TOOL_NEO_JOB_STATUS:
+          case McpConstants.TOOL_NEO_JOB_CANCEL:
+            if (!McpConstants.batchToolEnabled()) {
+              return wrapAsErrorContent(McpRouterErrorBodies.batchDisabled());
+            }
+            return McpBatchJobTools.handleBatchJob(toolName, arguments);
           case "etendo_action":
-            return handleAction(specName, arguments);
+            return McpActionBatchUnpost.runSingle(specName, arguments, this::handleAction);
+          case McpConstants.TOOL_NEO_ACTION_BATCH:
+            return McpActionBatch.handle(specName, arguments, this::handleAction);
           case McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN:
             return handleGenerateAmortizationPlan(arguments);
           case McpConstants.TOOL_NEO_WIDGET:
@@ -263,6 +272,18 @@ public class McpToolRouter {
             return imageToolResult(McpImageTools.uploadImage(arguments));
           case McpConstants.TOOL_NEO_GET_IMAGE_UPLOAD:
             return imageToolResult(McpImageTools.getUpload(arguments));
+          // ETP-5715: a document's attachments. Authorized per document by NeoAttachmentTarget.
+          case McpConstants.TOOL_NEO_REQUEST_ATTACHMENT_UPLOAD:
+          case McpConstants.TOOL_NEO_LIST_ATTACHMENTS:
+          case McpConstants.TOOL_NEO_DELETE_ATTACHMENT:
+            return McpAttachmentTools.handle(toolName, arguments);
+          case McpConstants.TOOL_NEO_GET_DOCUMENT_PDF:
+            return McpDocumentPdfTool.handle(arguments);
+          case McpConstants.TOOL_NEO_SEND_DOCUMENT_EMAIL:
+            return McpDocumentEmailTool.handle(arguments);
+          case McpConstants.TOOL_NEO_REQUEST_DOCUMENT_EXTRACTION_UPLOAD:
+          case McpConstants.TOOL_NEO_EXTRACT_INVOICE_DOCUMENT:
+            return McpOcrTools.handle(toolName, arguments);
           case "docs":
             return handleDocs(arguments);
           default:
@@ -1640,6 +1661,11 @@ public class McpToolRouter {
           authorizeSpecAccess(specName, HTTP_METHOD_POST);
         }
       }
+      if (args.optBoolean(BatchJobService.PARAM_ASYNC, true)) {
+        // ETP-5677: the batch becomes a job unless the agent sent async:false; the worker commits
+        // it row by row, so a large volume never waits on one request.
+        return McpBatchJobTools.submitBatchJob(operations, args, this::preprocessBatchOperation);
+      }
       // IMP-15 / ETP-5415: the body transforms that make etendo_batch accept exactly what etendo_create
       // accepts — FK-by-name and legacy-numeric ids, the UoM derivation, the bill-to and
       // line-price injections. They run per operation, from inside the batch loop, because that is
@@ -1661,6 +1687,8 @@ public class McpToolRouter {
     } catch (SecurityException e) {
       log.warn("etendo_batch access denied session={}", McpUsageTelemetry.sessionForLog(), e);
       return wrapAsErrorContent(e.getMessage());
+    } catch (BatchJobService.JobException e) {
+      return wrapAsErrorContent(McpBatchJobTools.jobErrorMessage(e));
     } catch (Exception e) {
       log.error("Error executing etendo_batch session={}", McpUsageTelemetry.sessionForLog(), e);
       return wrapAsErrorContent("Error executing etendo_batch: " + e.getMessage());
@@ -1879,6 +1907,10 @@ public class McpToolRouter {
     // ETP-5558: another tenant's record is a 404 before the customization or the button sees it,
     // the same check the REST action path runs (NeoHookDispatcher).
     NeoResponse foreignRecord = NeoActionRecordGuard.refusalFor(sfEntity, recordId);
+    if (foreignRecord == null) {
+      // ETP-5715: a document action on an id that is no row of the table answers the same 404.
+      foreignRecord = NeoActionRecordGuard.refusalForMissingDocument(sfEntity, recordId, firedName);
+    }
     if (foreignRecord != null) {
       return McpHookExecutor.neoResponseToMcpResult(foreignRecord);
     }

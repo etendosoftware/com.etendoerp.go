@@ -47,8 +47,10 @@ public final class EmailMessageEdits {
   private static final Set<String> ALLOWED_KEYS = Collections.unmodifiableSet(
       new LinkedHashSet<>(Arrays.asList(KEY_SUBJECT, KEY_MESSAGE)));
 
-  static final int MAX_SUBJECT_LENGTH = 200;
-  static final int MAX_MESSAGE_LENGTH = 5000;
+  /** Longest subject the send accepts; the send modal and the MCP tool both enforce it. */
+  public static final int MAX_SUBJECT_LENGTH = 200;
+  /** Longest message the send accepts; the send modal and the MCP tool both enforce it. */
+  public static final int MAX_MESSAGE_LENGTH = 5000;
 
   /** Reason codes for {@link InvalidMessageEditsException}, mapped to copy on the frontend. */
   public static final String REASON_INVALID_TYPE = "MESSAGE_EDITS_INVALID_TYPE";
