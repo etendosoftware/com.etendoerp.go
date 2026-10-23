@@ -4180,15 +4180,16 @@ applies only when the request does not carry the field (absent, null, blank or `
 behaviour is unchanged. Channels as noted per field:
 
 - **`partnerAddress`** (`C_BPartner_Location_ID`, mandatory) — on a create with a `businessPartner`
-  and no address, the customization pre-hook (`injectPartnerAddressIfMissing`) sets the partner's
-  active bill-to location **when it has exactly one**. With none or several it abstains: the invoicing
+  and no address, the customization pre-hook (`resolveServerCreateFields`, which `handle()` of the
+  purchase and sales invoice headers also runs) sets the partner's active bill-to location **when it
+  has exactly one**. With none or several it abstains: the invoicing
   address is the caller's choice when there is one to make. Read in the caller's DAL scope.
   Since ETP-5710 it fills the address on **every channel**, MCP `etendo_create` included. That
   channel's mandatory pre-check (`validateMandatoryFields`) runs **before** the customization
   pre-hook (ETP-5535), so the invoice handlers also implement the generic
-  `NeoHandler#resolveServerCreateFields` hook (same `injectPartnerAddressIfMissing` rule, no new
-  logic), which `McpHookExecutor.resolveServerCreateFields` calls from `handleCreate` right before
-  that check. With several (or no) bill-to locations the default abstains and the precise
+  `NeoHandler#resolveServerCreateFields` hook (the same rule, no new logic: `handle()` calls that
+  same method), which `McpHookExecutor.resolveServerCreateFields` calls from `handleCreate` right
+  before that check. With several (or no) bill-to locations the default abstains and the precise
   `missingFields` 422 naming `partnerAddress` (with the `etendo_selectors` hint) stands; a value the
   agent sends always wins. `partnerAddress` is deliberately **not** declared in
   `serverResolvedCreateFields()`: that would make `etendo_schema(view:"create")` list it as optional

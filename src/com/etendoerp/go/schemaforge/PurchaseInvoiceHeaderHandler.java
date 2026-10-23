@@ -187,7 +187,7 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
     }
     NeoHandlerUtils.mirrorAccountingDateOnCreate(context, "invoiceDate", "accountingDate");
     // ETP-5703: server-side defaults for a write that leaves them out (an agent; the SPA sends both).
-    injectPartnerAddressIfMissing(context);
+    resolveServerCreateFields(context);
     currencyRateDefaults.capture(context);
     captureOriginInvoice(context);
     NeoResponse siiAuthError = captureAndValidateSiiAuthorization(context);

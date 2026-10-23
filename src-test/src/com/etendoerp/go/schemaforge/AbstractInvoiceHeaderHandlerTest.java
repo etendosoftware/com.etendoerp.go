@@ -3525,7 +3525,7 @@ public class AbstractInvoiceHeaderHandlerTest {
       locationCriteria(dal, Collections.singletonList(only));
       JSONObject body = new JSONObject().put("businessPartner", "bp-1");
 
-      AbstractInvoiceHeaderHandler.injectPartnerAddressIfMissing(createContext(body));
+      handler.resolveServerCreateFields(createContext(body));
 
       assertEquals("loc-1", body.getString("partnerAddress"));
     }
@@ -3544,7 +3544,7 @@ public class AbstractInvoiceHeaderHandlerTest {
       locationCriteria(dal, java.util.Arrays.asList(first, second));
       JSONObject body = new JSONObject().put("businessPartner", "bp-1");
 
-      AbstractInvoiceHeaderHandler.injectPartnerAddressIfMissing(createContext(body));
+      handler.resolveServerCreateFields(createContext(body));
 
       assertFalse(body.has("partnerAddress"));
     }
@@ -3561,8 +3561,8 @@ public class AbstractInvoiceHeaderHandlerTest {
         .put("partnerAddress", "loc-caller");
     JSONObject withRef = new JSONObject().put("businessPartner", BatchService.REF_PREFIX + "op1");
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
-      AbstractInvoiceHeaderHandler.injectPartnerAddressIfMissing(createContext(withAddress));
-      AbstractInvoiceHeaderHandler.injectPartnerAddressIfMissing(createContext(withRef));
+      handler.resolveServerCreateFields(createContext(withAddress));
+      handler.resolveServerCreateFields(createContext(withRef));
 
       assertEquals("loc-caller", withAddress.getString("partnerAddress"));
       assertFalse(withRef.has("partnerAddress"));
@@ -3878,7 +3878,7 @@ public class AbstractInvoiceHeaderHandlerTest {
       locationCriteria(dal, Collections.emptyList());
       JSONObject body = new JSONObject().put("businessPartner", "bp-1");
 
-      AbstractInvoiceHeaderHandler.injectPartnerAddressIfMissing(createContext(body));
+      handler.resolveServerCreateFields(createContext(body));
 
       assertFalse(body.has("partnerAddress"));
     }
@@ -3902,7 +3902,7 @@ public class AbstractInvoiceHeaderHandlerTest {
     };
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
       for (NeoContext ctx : contexts) {
-        AbstractInvoiceHeaderHandler.injectPartnerAddressIfMissing(ctx);
+        handler.resolveServerCreateFields(ctx);
 
         assertFalse(ctx.getHttpMethod() + " " + ctx.getEndpointType(),
             ctx.getRequestBody().has("partnerAddress"));
