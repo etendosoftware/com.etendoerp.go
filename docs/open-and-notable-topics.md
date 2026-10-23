@@ -32,7 +32,7 @@ a moved topic leaves a gap in its old section rather than shifting its neighbour
 takes the next free number of the section it belongs to — a topic decided on arrival too (§5.15
 sits in §6 under its §5 number). A gap with no §6 entry (§3.1, §3.9 and §5.11 among them) is a
 topic deleted on or before 2026-09-28 under the earlier rule, or one removed or moved later and
-named in its section's note (§1.4, §1.6, §1.7, §1.9); its history is in git.
+named in its section's note (§1.4, §1.6, §1.7, §1.9, §2.4); its history is in git.
 
 ---
 
@@ -124,6 +124,10 @@ are unaffected either way.
 
 ## 2. Deployment — constraints that are not visible in the code
 
+*Removed on 2026-10-23 (Martin Taal): §2.4 "The R37 sandbox pre-check must be re-run on every
+target environment" — self-evident; its one non-obvious fact, the price fill on R37's rows, moved
+to §2.3.*
+
 ### 🟠 2.1 Fallback buyers are unlimited and stuck on `legacy-productive`
 
 **Ticket:** owner ETP-5053 (moving them to a real plan); felt in ETP-5051 (quotas). Related
@@ -145,7 +149,7 @@ ETP-5046, whose develop merge introduced the fallback.
   currency, because the plan has none (design doc §7). Since ETP-5048 the billing reconciliation
   fills a missing price id, amount and currency on an open row from the subscription's Stripe price,
   once, audited as a `reconcile:subscription-price:<sub>` billing event
-  (`SubscriptionReconciler.fillMissingPrice`, §2.4). Until the reconciliation has run on an
+  (`SubscriptionReconciler.fillMissingPrice`, §2.3). Until the reconciliation has run on an
   environment such rows stay without an amount; a fractional-cent price leaves the amount empty
   even then (§4.11).
 
@@ -154,8 +158,8 @@ that used to quote the legacy price was fixed in ETP-5049 and is now to be retir
 
 ### 🟠 2.3 Run the backfill AFTER the deploy, never before — and only as part of the switch
 
-**Ticket:** owner ETP-5046 (the pre-check, an R37 deployment step) and ETP-5048 (the adoption
-step, if the pre-check fails); moving grandfathered tenants to a priced plan is ETP-5053.
+**Ticket:** owner ETP-5046 (R37 deployment) and ETP-5048 (the price fill on R37's rows); moving
+grandfathered tenants to a priced plan is ETP-5053.
 
 `resolvePlan` reads the subscription first. A tenant provisioned between the schema landing and
 the code shipping gets a preference and no subscription. The backfill's `@check` catches exactly
@@ -176,29 +180,15 @@ for completeness.
 the runner retries — not a silent skip). If an environment already ran the pre-ETP-5047 R37, its
 rows are read through the `GRACE_ANCHOR` fallback (§3.7) and nothing needs re-running.
 
-### 🟠 2.4 The R37 sandbox pre-check must be re-run on every target environment
-
-**Ticket:** owner ETP-5046 (R37 deployment).
-
-`R37`'s `@report` carries the verbatim outcome of a manual pre-check: *re-verify that production
-Stripe checkout has not gone live since 2026-08-27; if it has, a real paying cohort exists that
-the backfill would orphan and an adoption step is required first.*
-
-The regression test fails the build while `@report` still carries the `TODO-PRECHECK-R37`
-placeholder; that placeholder has been replaced by the settled wording, so it no longer blocks
-the merge. The pre-check itself is not portable: it must be run against the **target**
-environment — verifying it on a dev box proves nothing about staging. On the dev box
-(2026-09-18) the Stripe key is `sk_test`, so the assumption holds *there*.
-
-**If the pre-check fails → ETP-5048.** R37 gives each backfilled tenant a row on the priceless
-`legacy-productive` plan, with the charged Stripe price id where its checkout request recorded one
-and never an amount or currency (design doc §7). That is enough for access control and webhook
-correlation, and acceptable only while every existing Stripe subscription is Test Mode. If
-production checkout has gone live, those rows describe real payers, and the adoption step is to
-read each one's subscription from Stripe and record its price, amount and currency. That is
-ETP-5048's local-to-provider reconciliation (PRD §9.3: read the real Stripe state of every locally
-active subscription and correct it locally), which fills the missing price on its first run;
-`StripeApiClient` makes the read cheap. **Delivered in ETP-5048:** the reconciliation's local-to-provider phase fills `PROVIDER_PRICE_ID`, `SNAPSHOT_AMOUNT` and `SNAPSHOT_CURRENCY` from the subscription's first item price on every open row where they are NULL, once, audited as a `reconcile:subscription-price:<sub>` billing event (`plans/2026-10-18-etp-5048-billing-reconciliation-design.md` §5). Until it has run on an environment such rows stay priceless — harmless for access, which reads `STATUS` alone, and visible only in billing records and quota snapshots.
+**R37's rows carry no amount or currency; the billing reconciliation fills them.** R37 gives each
+backfilled tenant a row on the priceless `legacy-productive` plan, with the charged Stripe price id
+where its checkout request recorded one and never an amount or currency (design doc §7). Since
+ETP-5048 the reconciliation's local-to-provider phase fills `PROVIDER_PRICE_ID`,
+`SNAPSHOT_AMOUNT` and `SNAPSHOT_CURRENCY` from the subscription's first item price on every open
+row where they are NULL, once, audited as a `reconcile:subscription-price:<sub>` billing event
+(`SubscriptionReconciler.fillMissingPrice`; `plans/2026-10-18-etp-5048-billing-reconciliation-design.md`
+§5). Until it has run on an environment such rows stay priceless — harmless for access, which reads
+`STATUS` alone, and visible only in billing records and quota snapshots.
 
 ### 🟠 2.5 `./gradlew test` needs JDK 17, not the default 21
 
@@ -1131,7 +1121,7 @@ That leaves the same Stripe price parsed twice, and the two parsers disagree:
 The first three rows are the dangerous ones: a plan saves cleanly, is listed as purchasable, and the
 buyer's checkout then fails on it.
 
-**A third reader since ETP-5048.** The reconciliation's price fill (§2.4) reads the subscription's
+**A third reader since ETP-5048.** The reconciliation's price fill (§2.3) reads the subscription's
 first item price through its own `SubscriptionReconciler.ProviderPrice`, which takes the amount
 from `unit_amount` only. For a fractional-minor-unit price (`unit_amount` null) it fills
 `PROVIDER_PRICE_ID` and `SNAPSHOT_CURRENCY` but leaves `SNAPSHOT_AMOUNT` NULL — and, the price id

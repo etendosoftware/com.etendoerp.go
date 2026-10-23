@@ -1163,7 +1163,8 @@ Switching, on the target environment — **switch first, then backfill** (order 
 Martin Taal):
 
 1. Re-verify the R37 pre-check (production Stripe checkout has not gone live since 2026-08-27,
-   `open-and-notable-topics.md` §2.4), and settle the two R37 edge cases of §3.11 there.
+   recorded in R37's `@report`), and settle the two R37 edge cases of
+   `open-and-notable-topics.md` §3.11 there.
 2. `make data-fixes` in `schema_forge` — bring every tenant's chain current. R37 is **opt-in**: a
    full run never applies it, and `FIX=` refuses a tenant whose chain is behind R37's date
    (`BLOCKED_CHAIN_BEHIND`, `optInChainGate` in `cli/src/data-fixes/run.js`).
