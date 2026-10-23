@@ -38,11 +38,6 @@ topic deleted on or before 2026-09-28 under the earlier rule; its history is in 
 
 *Moved to §6 on 2026-09-28: §1.1. On 2026-10-14: §1.3. On 2026-10-23: §1.5.*
 
-> **To confirm (Martin): has R37 run on a shared environment?** §5.13 says the R37 integration
-> test was removed "once R37 had been applied in production" (`66f7489c6`, 2026-10-21), while
-> §1.6, §2.4, §2.9 and §3.11 read as if R37 has not yet run on any shared environment. Only one can
-> be true; those entries are left as written until the answer is in.
-
 ### 🔴 1.2 The billing period is per subscription, not per price
 
 **Ticket:** related §5.9 / ETP-5051 (the evaluator that reads the period); no ticket for the
@@ -1381,6 +1376,40 @@ ever fixed:** an additive per-environment field such as `accessEnforced` (the sw
 the tenant, independent of today's decision) on `GET /sws/go/environments`, which the banner would
 read to drop the date, or the sentence, when enforcement is off. Not planned.
 
+### 🟡 4.18 R37 has not run in production, yet its integration test was removed
+
+**Ticket:** no ticket. Related ETP-5046 (R37), ETP-5047 (`66f7489c6`, which removed the test).
+
+**To raise with / decides:** Martin — whether to restore the test.
+
+`66f7489c6` ("Remove the R37 backfill integration test", 2026-10-21) deleted
+`payment/SubscriptionBackfillIdempotencyIntegrationTest` and its two `build.gradle` entries in the
+isolated-DAL test lists, on the premise that R37 had already been applied in production and so had
+no environment left to break. **R37 has not run in production** (Martin Taal, 2026-10-23): it is
+still the opt-in step 3.4 of the switch to the subscription model on every environment (§2.3,
+§2.9).
+
+**What the removed class covered.** It was the only test that **executed** the real
+`20261005T180000Z__R37-tenant-subscription-backfill.sql` against a database, on synthetic tenants
+(17 tests): a second run inserts nothing (the two-layer idempotency guard) and `@check` converges
+to zero rows (otherwise the runner would re-apply the fix on every run); the abort guard writes
+nothing when the legacy plan is inactive; the inserted row's shape, the Stripe ids and charged
+price id copied from the checkout request, and `STATUS` / `GRACE_ANCHOR` / `LAST_EVENT_AT` seeded
+from the lifecycle preferences; the marker retired in the same transaction, and only for a tenant
+with a row; and the R42 / ETP-5047 cases where a marker next to an open, closed or inactive row is
+retired without a backfill (§5.13).
+
+**What remains.** `schema_forge/cli/test/data-fixes-r37-tenant-subscription-backfill.test.js`, a
+Node test that reads the same SQL file **as text**, without a database: header metadata and
+opt-in, tenant scoping of every statement, the shape of `@check` branches (A) and (B), the
+missing-plan abort guard, the backfill `INSERT` and the `@report` contract. It pins what the SQL
+says, not what it does when run — idempotency and the convergence of `@check` are no longer checked
+by any test.
+
+**If restored:** the removed class is recoverable from git (`66f7489c6^`), with its two entries in
+`build.gradle`'s `isolatedDalTests` / `isolatedDalTestClasses`. It skips itself when the sibling
+schema_forge checkout is absent.
+
 ## 5. Handed forward to later tickets
 
 *Moved to §6 on 2026-09-28: §5.7, §5.10, §5.12; §5.15 was decided on arrival and sits there too.
@@ -1545,8 +1574,9 @@ consequence (product decision) is that such a tenant loses its marker and reads 
 operator restores the row. Before this module's close-on-cancel deploys no tenant has a closed row,
 so the only tenants whose outcome changes from the ETP-5046 text are hand-deactivated ones — on
 purpose. This was pinned by `SubscriptionBackfillIdempotencyIntegrationTest`, which executed the
-real SQL; the class was removed once R37 had been applied in production, since a one-shot fix
-that has already run everywhere has no environment left to break. The schema_forge source test
+real SQL. That class was removed in `66f7489c6` on the premise that R37 had already been applied
+in production; the premise is false — R37 has not run in production (Martin Taal, 2026-10-23). What
+coverage remains, and what is lost, is §4.18. The schema_forge source test
 (`cli/test/data-fixes-r37-tenant-subscription-backfill.test.js`) still guards the file's text.
 
 **The trap: "open" ignores the dates.** `OPEN_ROW_PREDICATE` in `SubscriptionService` is
