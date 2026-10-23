@@ -263,18 +263,36 @@ public class InvoiceReactivationGuardTest {
   }
 
   /**
-   * {@code fiscallyAcceptedSystem}'s if/else-if chain deterministically picks SII first when more
-   * than one fiscal system is simultaneously accepted — documented in the production Javadoc,
-   * guarded here.
+   * ETP-5745 CP-9: an invoice accepted by MORE THAN ONE fiscal system at once must name all of
+   * them, not just the first match — the previous if/else-if chain silently dropped every system
+   * after the first (SII) it found, which under-reported the real fiscal exposure to the user.
    */
   @Test
-  public void siiTakesPrecedenceOverVerifactuWhenBothAreSimultaneouslyAccepted() throws Exception {
+  public void everyAcceptedFiscalSystemIsNamedWhenMoreThanOneAccepts() throws Exception {
     Invoice invoice = invoice(true);
     when(invoice.getAeatsiiEstado()).thenReturn("CO");
     when(invoice.getEtvfacInvoiceStatus()).thenReturn("AC");
 
-    assertEquals("SII", body(check(reactivateAction(rootBody("RE")), invoice,
-        rectificativaRows("RECT-004"))).getJSONObject("messageParams").getString("fiscalSystem"));
+    JSONObject body = body(check(reactivateAction(rootBody("RE")), invoice,
+        rectificativaRows("RECT-004")));
+
+    assertEquals("SII, Verifactu", body.getJSONObject("messageParams").getString("fiscalSystem"));
+    assertTrue(body.getString("message").contains("SII, Verifactu"));
+  }
+
+  /** All three fiscal systems accepted at once — every one must be named, in the stable order. */
+  @Test
+  public void allThreeFiscalSystemsAreNamedWhenAllAccept() throws Exception {
+    Invoice invoice = invoice(true);
+    when(invoice.getAeatsiiEstado()).thenReturn("CO");
+    when(invoice.getEtvfacInvoiceStatus()).thenReturn("AC");
+    when(invoice.getETGOTbaiStatus()).thenReturn("Recibido");
+
+    JSONObject body = body(check(reactivateAction(rootBody("RE")), invoice,
+        rectificativaRows("RECT-005")));
+
+    assertEquals("SII, Verifactu, TicketBAI",
+        body.getJSONObject("messageParams").getString("fiscalSystem"));
   }
 
   @Test

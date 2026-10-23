@@ -131,15 +131,15 @@ public final class InvoiceReactivationGuard {
       if (invoice == null || !Boolean.TRUE.equals(invoice.isProcessed())) {
         return null;
       }
-      String fiscalSystem = fiscallyAcceptedSystem(invoice);
-      if (fiscalSystem == null) {
+      List<String> fiscalSystems = fiscallyAcceptedSystems(invoice);
+      if (fiscalSystems.isEmpty()) {
         return null;
       }
       List<String> rectificativaDocNos = completedRectificativaDocNos(invoiceId);
       if (rectificativaDocNos.isEmpty()) {
         return null;
       }
-      return new Block(fiscalSystem, rectificativaDocNos);
+      return new Block(String.join(", ", fiscalSystems), rectificativaDocNos);
     } catch (RuntimeException e) {
       log.warn("Could not evaluate the reactivation guard for invoice {}: {}", invoiceId,
           e.getMessage());
@@ -147,7 +147,10 @@ public final class InvoiceReactivationGuard {
     }
   }
 
-  /** The reason a reactivation would be refused: which fiscal system, and which rectificativa(s). */
+  /**
+   * The reason a reactivation would be refused: which fiscal system(s) — comma-joined when more
+   * than one accepted the invoice (ETP-5745 CP-9) — and which rectificativa(s).
+   */
   static final class Block {
     final String fiscalSystem;
     final List<String> rectificativaDocNos;
@@ -209,29 +212,32 @@ public final class InvoiceReactivationGuard {
   }
 
   /**
-   * The human-readable name of the fiscal system that accepted this invoice, or {@code null} when
-   * none of the three has an accepted status. Reading all three stored columns is cheap and
-   * harmless even for a system the org never configured (the column then simply stays blank).
+   * EVERY fiscal system that accepted this invoice, in a stable order (SII, Verifactu,
+   * TicketBAI), or an empty list when none has an accepted status. Reading all three stored
+   * columns is cheap and harmless even for a system the org never configured (the column then
+   * simply stays blank).
    *
-   * <p><b>Precedence when more than one system is simultaneously accepted</b> (e.g. an org
-   * migrating between fiscal systems momentarily has both columns set): the if/else-if chain
-   * below deterministically picks SII first, then Verifactu, then TicketBAI. This is a
-   * documentation clarification only — the order itself is unchanged.
+   * <p><b>ETP-5745 CP-9 fix:</b> an invoice accepted by more than one fiscal system at once (an
+   * org migrating between systems, or one simply running two in parallel) used to be reported as
+   * accepted by SII alone — the former if/else-if chain stopped at the first match, so a user
+   * reactivating an invoice that both SII AND TicketBAI had accepted only ever saw "SII" in the
+   * refusal message. Every accepted system is now collected and joined (see {@link #reject}).
    */
-  private static String fiscallyAcceptedSystem(Invoice invoice) {
+  private static List<String> fiscallyAcceptedSystems(Invoice invoice) {
+    List<String> systems = new ArrayList<>();
     String sii = invoice.getAeatsiiEstado();
     if (SII_ACCEPTED_CORRECT.equals(sii) || SII_ACCEPTED_WITH_ERRORS.equals(sii)) {
-      return "SII";
+      systems.add("SII");
     }
     String verifactu = invoice.getEtvfacInvoiceStatus();
     if (VERIFACTU_ACCEPTED.equals(verifactu) || VERIFACTU_ACCEPTED_WITH_ERRORS.equals(verifactu)) {
-      return "Verifactu";
+      systems.add("Verifactu");
     }
     String tbai = invoice.getETGOTbaiStatus();
     if (TBAI_ACCEPTED_RECEIVED.equals(tbai)) {
-      return "TicketBAI";
+      systems.add("TicketBAI");
     }
-    return null;
+    return systems;
   }
 
   /**
