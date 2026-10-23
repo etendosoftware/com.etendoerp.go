@@ -64,9 +64,14 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * protected from the native process swapping it for receipt lines; nothing is refused for having
  * deliveries.
  *
- * <p>The window's modal also patches the header's total discount; here the header takes the order's
- * {@code etgoTotalDiscount} when it is positive and the invoice has none yet (or the same one).
- * The discount line itself is materialised when the invoice is completed, as always.
+ * <p>The header's total discount (a percentage, never an amount) takes the order's
+ * {@code etgoTotalDiscount} only when it is positive and, before this import, the invoice either
+ * already had that same percentage, or had no total discount AND no lines (the total-discount line
+ * itself does not count). It is not carried when the invoice already has a different percentage
+ * (an earlier order of another percentage included, 0 counting as different) or when it already
+ * had lines and no total discount: applying it would discount those lines too. The import is never
+ * refused for this and the lines keep their own line discount. The discount line itself is
+ * materialised when the invoice is completed, as always.
  */
 @Named("importOrderLinesIntoInvoiceHandler")
 public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImportHandler {
@@ -128,8 +133,11 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
             + "invoiced against the order line alone (also when a " + inout + " line is already "
             + "covered by another draft invoice: the order's pending counts drafts, so what is "
             + "left is what can still be invoiced). The invoice's order reference is set when every line comes from one order and "
-            + "left empty when several orders are mixed; its total discount takes the order's "
-            + "when it has none. The order's invoiced quantity only moves when the invoice is "
+            + "left empty when several orders are mixed. The header's total discount (a %) takes "
+            + "the order's when it is positive and, before this call, the invoice had that same % "
+            + "or had neither a total discount nor lines; it is left unchanged when the invoice "
+            + "has another % or already had lines without one (never refused for this; lines "
+            + "keep their own line discount). The order's invoiced quantity only moves when the invoice is "
             + "completed. Refused (422) when the invoice is not a draft, the order is not "
             + "completed, or business partner, currency or direction differ. Returns "
             + "{data:{importedCount, lines:[{id, sourceLineId, product, productName, quantity}], "
@@ -198,10 +206,12 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
     Map<String, BigDecimal> planned = DocumentLineImport.plan(requested, documentLines, pending);
 
     Batches batches = buildBatches(linesById, planned, sales);
+    // Read BEFORE the lines of this call exist: they must not count as "the invoice had lines".
+    boolean hadLines = hasProductLines(invoice);
     List<DocumentLineImport.ImportedLine> created = createLines(invoice, batches.calls,
         OrderLine.class, planned, line -> line.getSalesOrderLine(),
         (call, lines) -> unmarkRemainder(batches, call, lines));
-    carryOrderDiscount(invoice, order);
+    carryOrderDiscount(invoice, order, hadLines);
     return DocumentLineImport.ok(created, invoice.getSalesOrder() == null ? null
         : invoice.getSalesOrder().getId());
   }
@@ -386,18 +396,34 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
         && orderLine.getUOM().getId().equals(movement.getUOM().getId());
   }
 
-  /** The order's total discount, when it is positive and the invoice has none yet or the same. */
-  private void carryOrderDiscount(Invoice invoice, Order order) {
+  /**
+   * The order's total discount, when it is positive and the invoice already has the same one, or
+   * has none and had no lines before this import ({@code hadLines}): a discount set over lines that
+   * were already there would discount them too.
+   */
+  private void carryOrderDiscount(Invoice invoice, Order order, boolean hadLines) {
     BigDecimal discount = order.getEtgoTotalDiscount();
     if (discount == null || discount.signum() <= 0) {
       return;
     }
     BigDecimal current = invoice.getEtgoTotalDiscount();
-    if (current == null || current.signum() == 0 || current.compareTo(discount) == 0) {
+    boolean none = current == null || current.signum() == 0;
+    if ((none && !hadLines) || (!none && current.compareTo(discount) == 0)) {
       invoice.setEtgoTotalDiscount(discount);
       OBDal.getInstance().save(invoice);
       OBDal.getInstance().flush();
     }
+  }
+
+  /** Whether the invoice holds an active line other than the total-discount line. */
+  static boolean hasProductLines(Invoice invoice) {
+    for (InvoiceLine line : invoice.getInvoiceLineList()) {
+      if (!Boolean.FALSE.equals(line.isActive()) && (line.getProduct() == null
+          || !TotalDiscountService.DISCOUNT_PRODUCT_ID.equals(line.getProduct().getId()))) {
+        return true;
+      }
+    }
+    return false;
   }
 
   // ---------------------------------------------------------------------------

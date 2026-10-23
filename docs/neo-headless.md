@@ -10321,8 +10321,13 @@ the native process sets / clears the invoice's order reference (one order: linke
 found by their lines (`OrderInvoiceListSupport.listInvoices`). `salesOrder` / `headerLinked` report the truth (see the
 response above): a header that links order X while the lines come only from order Y answers `headerLinked:false,
 salesOrder:X`. For an
-invoice imported from an order, the header's `etgoTotalDiscount` takes the order's when it is positive and the invoice
-has none yet (or the same one), as the modal's `afterImport` does; the discount line itself is materialised when the
+invoice imported from an order, the header's `etgoTotalDiscount` (always a %, never an amount) takes the order's
+only when it is positive and, judged on the invoice as it was BEFORE the call, the invoice already had that same %, or
+had no total discount AND no lines (the `ETGO_DTO` total-discount line does not count as a line) (ETP-5828). It is left
+unchanged when the invoice has another % (an earlier order of a different % included; 0 % counts as different) or
+when it already had lines and no total discount, since applying it would also discount those lines. The import is
+never refused for this, and every line keeps its own line discount. One order per call, so with several orders the
+first one decides and each later one only confirms an equal %. The discount line itself is materialised when the
 invoice is completed. A receipt / shipment imported into an invoice does NOT carry the order's `etgoTotalDiscount`
 (only the order import does), as in the window.
 
