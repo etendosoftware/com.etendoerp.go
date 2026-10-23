@@ -234,7 +234,7 @@ if blocking:
         filepath = comp[len(prefix):] if comp.startswith(prefix) else comp
         print(f"  {i}. {filepath}:{issue.get('line', '?')} — {issue.get('rule', '')} [{issue.get('severity', '')}]")
         print(f"     {issue.get('message', '')}")
-    print("\n   Fix these before pushing, or 'git push --no-verify' to bypass (WIP only).")
+    print("\n   Fix these before pushing.")
     sys.exit(1)
 
 print("✅ No blocking Sonar issues in your changed lines.")

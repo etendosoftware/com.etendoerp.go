@@ -24,7 +24,6 @@ import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
@@ -74,6 +73,7 @@ import com.etendoerp.go.common.EtendoGoCorsServlet;
 import com.etendoerp.go.common.JwtAuthUtils;
 import com.etendoerp.go.common.ProtocolErrorAdapters;
 import com.etendoerp.go.common.PublicUrlResolver;
+import com.etendoerp.go.hubspot.HubSpotOutbox;
 import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.payment.TenantPaywallService;
 import com.etendoerp.go.payment.TenantPlanService;
@@ -190,6 +190,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String UTF_8 = "UTF-8";
   private static final String FIELD_EMAIL = "email";
   private static final String FIELD_CLIENT_NAME = "clientName";
+  private static final String FIELD_FISCAL_ID_VALUE = "fiscalIdValue";
   private static final String FIELD_DEMO_CLIENT_ID = "demoClientId";
   private static final String FIELD_CLIENT_ID = "clientId";
   private static final String FIELD_ENVIRONMENT = "environment";
@@ -227,6 +228,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String VALUE_NO_STORE = "no-store";
   private static final String HEADER_SET_COOKIE = "Set-Cookie";
   private static final String PATH_SESSION = "/session";
+  /** ETP-5847 — signs in with the one-time login link the signup API mails. */
+  private static final String PATH_SESSION_LINK = "/session/link";
+  private static final String AUTH_METHOD_LINK = "link";
+  private static final String CODE_LOGIN_LINK_INVALID = "LOGIN_LINK_INVALID";
+  private static final String LOGIN_LINK_INVALID_MESSAGE =
+      "This login link is invalid, already used or expired";
   private static final String ERROR_UNKNOWN_ENDPOINT = "Unknown endpoint: ";
   private static final String FIELD_PAYMENT_TOKEN = "paymentToken";
   private static final String FIELD_PLAN_KEY = "planKey";
@@ -235,6 +242,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       "The selected plan is no longer available. Reload the page to see the current plans.";
   private static final String CHECKOUT_NOT_CONFIGURED = "CHECKOUT_NOT_CONFIGURED";
   private static final String CHECKOUT_NOT_CONFIGURED_MESSAGE = "Checkout is not configured";
+  private static final String MISSING_TOKEN_MESSAGE = "Missing required field: token";
   private static final String FIELD_INCLUDE_SAMPLE_DATA = "includeSampleData";
   private static final String FIELD_ACCOUNT_EMAIL = "accountEmail";
   private static final String FIELD_CURRENCY = "currency";
@@ -315,10 +323,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   // ETP-5258 — stable code so the reset screen translates the dead-link case by code instead of
   // showing the English text above, which is a developer-facing fallback only.
   private static final String CODE_PASSWORD_RESET_INVALID = "PASSWORD_RESET_INVALID";
-  // 24h, not the 30 minutes a password reset gets. A reset is a deliberate act the user performs
-  // and immediately waits on; a registration confirmation is often opened the next morning, and an
-  // expired link there means a dead end in the middle of signup.
-  private static final long EMAIL_VERIFICATION_TTL_SECONDS = 24 * 60 * 60L;
   private static final String EMAIL_NOT_VERIFIED_MESSAGE =
       "Confirm your email address before creating an environment.";
   private static final String EMAIL_VERIFY_INVALID_MESSAGE =
@@ -329,7 +333,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String PATH_VERIFY_EMAIL_RESEND = "/verify-email/resend";
   private static final String FIELD_EMAIL_VERIFIED = "emailVerified";
   private static final String FIELD_EMAIL_VERIFICATION_PENDING = "emailVerificationPending";
-  private static final String CONTRACT_NEW_ACCOUNT = "new-account";
   private static final String SSO_PREFIX = "/sso/";
   private static final String PATH_ONBOARDING_DRAFT = "/onboarding/draft";
   /** ETP-5734 — opt-in query parameter of {@code GET /environments}. */
@@ -360,7 +363,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String FIELD_CONTACTS = "contacts";
   private static final String[] ONBOARDING_DRAFT_FORM_FIELDS = { FIELD_FULL_NAME, "businessType",
       FIELD_CLIENT_NAME, FIELD_CURRENCY, FIELD_LANGUAGE, FIELD_COUNTRY_CODE, "fiscalIdType",
-      "fiscalIdValue", FIELD_ADDRESS, "sector", FIELD_INCLUDE_SAMPLE_DATA };
+      FIELD_FISCAL_ID_VALUE, FIELD_ADDRESS, "sector", FIELD_INCLUDE_SAMPLE_DATA };
   private static final String PATH_ONBOARDING_FIRST_STEPS = "/onboarding/first-steps";
   private static final String FIELD_FIRST_STEPS = "firstSteps";
   private static final String FIELD_FIRST_STEPS_VERSION = "v";
@@ -449,6 +452,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   StripeCustomerPortalService stripeCustomerPortalService = new StripeCustomerPortalService();
   CompanyInvitationService companyInvitationService;
   private final TransactionalAuthEmailSender authEmailSender;
+  private final AccountRegistrationService accountRegistration;
   com.etendoerp.go.schemaforge.email.InternalAlertService internalAlertService =
       new com.etendoerp.go.schemaforge.email.InternalAlertService();
   private final EtendoGoSsoProviderRegistry ssoProviderRegistry;
@@ -491,6 +495,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     this.goSessionService = goSessionService;
     this.stripePriceService = stripePriceService;
     this.companyInvitationService = new CompanyInvitationService(authEmailSender);
+    this.accountRegistration = new AccountRegistrationService(authEmailSender);
   }
 
   // --- HTTP method dispatchers ---
@@ -650,6 +655,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleSessionCreate(request, response);
     } else if (isPath(path, "/session/environment")) {
       handleSessionEnvironment(request, response);
+    } else if (isPath(path, PATH_SESSION_LINK)) {
+      handleSessionLink(request, response);
     } else if (isPath(path, "/session/refresh")) {
       handleSessionRefresh(request, response);
     } else if (path != null && path.startsWith("/session/sso/")) {
@@ -2175,6 +2182,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       String legacySessionToken = generateToken();
       Account account = EtendoGoJwtDalHelper.createAccount(email, passwordHash, name,
           legacySessionToken);
+      // createAccount committed the account; this commit carries only its HubSpot event.
+      HubSpotOutbox.accountCreated(account);
+      EtendoGoDalHelper.commitDalChanges("HubSpot account event", log);
       String normalizedLanguage = StringUtils.trimToNull(language);
       // ETP-4798: the session token below still comes back, so the user keeps filling in the
       // onboarding form and their draft keeps saving. What the unconfirmed address blocks is the
@@ -2346,9 +2356,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
     Date loginAt = new Date();
     if (account == null) {
-      return EtendoGoJwtDalHelper.createSsoAccount(assertion.getEmail(), assertion.getName(),
-          assertion.getProvider(), assertion.getSubject(), assertion.getEmail(), sessionToken,
-          loginAt);
+      Account created = EtendoGoJwtDalHelper.createSsoAccount(assertion.getEmail(),
+          assertion.getName(), assertion.getProvider(), assertion.getSubject(),
+          assertion.getEmail(), sessionToken, loginAt);
+      HubSpotOutbox.accountCreated(created);
+      EtendoGoDalHelper.commitDalChanges("HubSpot account event", log);
+      return created;
     }
     EtendoGoJwtDalHelper.updateSsoSession(account, assertion.getEmail(), sessionToken, loginAt);
     return account;
@@ -2564,7 +2577,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       verifyToken = body.getString(FIELD_TOKEN).trim();
     } catch (JSONException e) {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_INVALID_REQUEST,
-          "Missing required field: token", "Missing required field: token");
+          MISSING_TOKEN_MESSAGE, MISSING_TOKEN_MESSAGE);
       return;
     }
     if (verifyToken.isEmpty()) {
@@ -4476,6 +4489,25 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     if (preparation == null) {
       return;
     }
+    // Set up NDJSON streaming
+    response.setStatus(HttpServletResponse.SC_OK);
+    response.setContentType("application/x-ndjson");
+    response.setCharacterEncoding(UTF_8);
+    response.setHeader(HEADER_CONTENT_TYPE_OPTIONS, VALUE_NOSNIFF);
+    runOnboarding(preparation, new OnboardingStreamWriter(response.getWriter()));
+  }
+
+  /**
+   * Runs a prepared onboarding to its end, writing its progress to {@code writer}: the app's
+   * NDJSON stream, or a log sink for an environment the signup API creates (ETP-5847).
+   *
+   * @param writer remembers the result line a failing step writes, so the catch below neither
+   *     duplicates it nor records a generic reason in place of the real one
+   * @return the client id of the environment created, or {@code null} when it was not (the
+   *     failure is already rolled back and recorded, and its reason is on {@code writer})
+   */
+  private String runOnboarding(OnboardingPreparation preparation,
+      OnboardingStreamWriter writer) {
     String accountEmail = preparation.accountEmail;
     boolean paidUpgrade = preparation.paidUpgrade;
 
@@ -4487,15 +4519,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     String failureReason = null;
     String failureCode = null;
     ProvisioningAlertAttempt alertAttempt = new ProvisioningAlertAttempt(paidUpgrade);
-
-    // Set up NDJSON streaming
-    response.setStatus(HttpServletResponse.SC_OK);
-    response.setContentType("application/x-ndjson");
-    response.setCharacterEncoding(UTF_8);
-    response.setHeader(HEADER_CONTENT_TYPE_OPTIONS, VALUE_NOSNIFF);
-    // Remembers the result line a failing step writes, so the catch below neither duplicates it
-    // nor records a generic reason in place of the real one.
-    OnboardingStreamWriter writer = new OnboardingStreamWriter(response.getWriter());
 
     // Generate a random password for the admin user
     String adminPassword = UUID.randomUUID().toString().substring(0, 12);
@@ -4536,6 +4559,61 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       writer.flush();
       warnWhenOnboardingStreamWasLost(writer, accountEmail);
     }
+    return provisioningCompleted ? alertAttempt.clientId : null;
+  }
+
+  /** Outcome of {@link #provisionSignupEnvironment}: the client created, or why there is none. */
+  record SignupProvisioningResult(String clientId, String failure) {
+    boolean created() {
+      return clientId != null;
+    }
+  }
+
+  /**
+   * ETP-5847 — creates the demo environment of an account the signup API registered, with no
+   * HTTP request behind it: the same pipeline as {@code POST /onboarding}, fed from the company
+   * data the signup stored as the account's onboarding draft. The ready mail is left to the
+   * signup API ({@link SignupAccountService}), which decides whether to send it and with which
+   * link.
+   *
+   * <p>Only a free demo: an account that the paywall would charge, or refuses, is not provisioned.
+   *
+   * @param form the onboarding draft's form, with the keys {@code POST /onboarding} takes
+   * @param progress where the steps are written; nobody is streaming them, it is a log sink
+   */
+  SignupProvisioningResult provisionSignupEnvironment(String accountId, String accountEmail,
+      String accountName, JSONObject form, OnboardingStreamWriter progress) {
+    OnboardingRequestData onboardingRequest = new OnboardingRequestData();
+    onboardingRequest.clientName = form.optString(FIELD_CLIENT_NAME, "").trim();
+    onboardingRequest.currencyIso = form.optString(FIELD_CURRENCY, "EUR").trim();
+    onboardingRequest.language = form.optString(FIELD_LANGUAGE, "en_US").trim();
+    onboardingRequest.countryCode = form.optString(FIELD_COUNTRY_CODE, "ES").trim();
+    onboardingRequest.address = "";
+    onboardingRequest.taxId = form.optString(FIELD_FISCAL_ID_VALUE, "").trim();
+    onboardingRequest.paymentToken = "";
+    onboardingRequest.upgradeAction = "create-productive";
+    onboardingRequest.includeSampleData = form.optBoolean(FIELD_INCLUDE_SAMPLE_DATA, false);
+    onboardingRequest.fullName = EtendoGoJwtSupport.resolveOwnerDisplayName(
+        form.optString(FIELD_FULL_NAME, ""), accountName, accountEmail);
+    onboardingRequest.skipEnvironmentReadyMail = true;
+
+    String currencyId = findCurrencyId(onboardingRequest.currencyIso);
+    if (currencyId == null) {
+      return new SignupProvisioningResult(null,
+          "Unknown currency: " + onboardingRequest.currencyIso);
+    }
+    TenantPaywallService.Outcome paywall =
+        evaluatePaywall(accountId, accountEmail, onboardingRequest);
+    if (paywall.getDecision().isBlocked() || paywall.isProductive()) {
+      return new SignupProvisioningResult(null,
+          "The account cannot create a free demo environment");
+    }
+    String clientId = runOnboarding(new OnboardingPreparation(accountId, accountEmail,
+        onboardingRequest, currencyId, false, null), progress);
+    return clientId != null
+        ? new SignupProvisioningResult(clientId, null)
+        : new SignupProvisioningResult(null,
+            StringUtils.defaultIfBlank(progress.getResultMessage(), "Onboarding failed"));
   }
 
   /**
@@ -4726,6 +4804,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
           preparation.accountEmail, request.paymentToken);
     } else if (!tenantEnvironmentLifecycleService.markDemoReady(clientId, Instant.now())) {
       throw new IllegalStateException("Could not initialize demo trial lifecycle");
+    } else {
+      // In the onboarding transaction, so the deal exists in HubSpot exactly when the demo does.
+      HubSpotOutbox.demoReady(preparation.accountEmail, clientId, request.clientName,
+          request.countryCode);
     }
     // ETP-5577: in the onboarding transaction, so the markers exist exactly when the tenant does.
     onboardingInitialPeriodStateService.markPending(clientId, orgId, adminContext.adminUserId,
@@ -5179,6 +5261,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
     Account account = findAccountForCommittedOnboarding(accountId, accountEmail);
     clearOnboardingDraftBestEffort(account);
+    if (onboardingRequest.skipEnvironmentReadyMail) {
+      return;
+    }
     String normalizedLanguage = StringUtils.trimToNull(onboardingRequest.language);
     sendAuthEmailBestEffort("environment-ready",
         () -> authEmailSender.sendEnvironmentReady(account, clientId, normalizedLanguage));
@@ -5507,7 +5592,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       data.fullName = body.optString(FIELD_FULL_NAME, "").trim();
       // Tax ID (ETP-4749): optional in the wizard, so a blank value here is expected and
       // must not fail the request — wireOrgInfo() only persists it when non-blank.
-      data.taxId = body.optString("fiscalIdValue", "").trim();
+      data.taxId = body.optString(FIELD_FISCAL_ID_VALUE, "").trim();
       data.paymentToken = body.optString(FIELD_PAYMENT_TOKEN, "").trim();
       data.upgradeAction = body.optString("upgradeAction", "create-productive").trim();
       // ETP-5426: opt-in, off unless the form explicitly sends true.
@@ -5580,18 +5665,23 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
   private String resolveCurrencyId(String currencyIso, HttpServletResponse response)
       throws IOException {
+    String currencyId = findCurrencyId(currencyIso);
+    if (currencyId == null) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, "Unknown currency: " + currencyIso);
+    }
+    return currencyId;
+  }
+
+  /** The currency's id, or {@code null} when no currency has that ISO code. */
+  private String findCurrencyId(String currencyIso) {
     OBContext.setOBContext("0", "0", "0", "0");
     OBContext.setAdminMode(true);
     try {
       var currency = EtendoGoJwtDalHelper.findCurrencyByIsoCode(currencyIso);
-      if (currency != null) {
-        return currency.getId();
-      }
+      return currency == null ? null : currency.getId();
     } finally {
       OBContext.restorePreviousMode();
     }
-    writeError(response, HttpServletResponse.SC_BAD_REQUEST, "Unknown currency: " + currencyIso);
-    return null;
   }
 
   private VariablesSecureApp prepareAdminContext(PrintWriter writer, String language) {
@@ -5969,95 +6059,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
-   * ETP-4798: issues a fresh email-verification token and mails the link out, used both at
-   * registration ({@code welcome} true, the link rides inside the welcome mail) and on an explicit
-   * re-send ({@code welcome} false, its own {@code verify-email} message).
-   *
-   * <p><strong>Fails open only when there was nothing to fall back to.</strong> Issuing a token
-   * overwrites whatever was pending, so the previous state is captured first and put back when the
-   * mail does not go out. That distinction is the whole point: on a first issue at {@code /register}
-   * there is no previous token, so a failed send leaves the account reading as "nothing pending" and
-   * {@link #rejectWhenEmailNotVerified} lets it through — a misconfigured provider or an unset
-   * {@code etendo.go.app.baseUrl} must not silently lock every new signup out of creating an
-   * environment. On a re-send there IS a previous token, and restoring it keeps the account gated
-   * and keeps the link already sitting in the user's inbox working. Clearing it there instead
-   * would hand anyone a way to switch the gate off simply by pressing "resend" until the
-   * per-recipient throttle refuses the send. Same capture/restore pair
-   * {@link #storeResetTokenAndSendEmail} uses for the reset token.
-   *
-   * @param welcome true to fold the link into the {@code new-account} welcome mail, false to send
-   *     the standalone {@code verify-email} reminder
+   * ETP-4798: issues a fresh email-verification token and mails the link out. The logic lives in
+   * {@link AccountRegistrationService#issueEmailVerification} (ETP-5847), shared with the public
+   * signup API; this delegate keeps every call site here unchanged.
    */
   private void issueEmailVerification(Account account, String language, boolean welcome) {
-    EmailVerificationDalHelper.EmailVerifyTokenState previousTokenState =
-        EmailVerificationDalHelper.captureEmailVerifyToken(account);
-    boolean tokenStored = false;
-    try {
-      String verifyToken = generateSecureUrlToken();
-      String verifyTokenHash = hashAuthToken(verifyToken);
-      String verifyLink = EtendoGoAuthLinkBuilder.verifyEmailLink(verifyToken);
-      if (verifyLink == null) {
-        log.warn("Email verification skipped because the public app base URL "
-            + "({}) is not configured", PublicUrlResolver.APP_BASE_URL_PROPERTY);
-        if (welcome) {
-          sendAuthEmailBestEffort(CONTRACT_NEW_ACCOUNT,
-              () -> authEmailSender.sendNewAccount(account, language));
-        }
-        return;
-      }
-
-      // ETP-5003 — the same expiry the token is stored with is handed to the email, so the copy
-      // states the window the server actually grants instead of repeating a constant.
-      Date verifyExpiresAt = Date.from(Instant.now().plusSeconds(EMAIL_VERIFICATION_TTL_SECONDS));
-      EmailVerificationDalHelper.storeEmailVerifyToken(account, verifyTokenHash, verifyExpiresAt);
-      tokenStored = true;
-
-      boolean emailSent = welcome
-          ? authEmailSender.sendNewAccount(account, language, verifyLink, verifyExpiresAt)
-          : authEmailSender.sendVerifyEmail(account, verifyTokenHash, verifyLink, language,
-              verifyExpiresAt);
-      if (emailSent) {
-        return;
-      }
-    } catch (RuntimeException e) {
-      // Swallowed on purpose, and this is the whole reason the method owns its own try: it runs
-      // AFTER the account transaction has already committed. Letting the exception escape would
-      // reach handleRegister's catch, roll back nothing that matters, and answer "registration
-      // failed" for an account that exists — leaving the user unable to retry (the address is now
-      // taken) and unable to log in to the account they just created.
-      log.warn("Email verification could not be issued", e);
-    }
-    if (tokenStored) {
-      revertUnusableEmailVerifyToken(account, previousTokenState);
-    }
-  }
-
-  /**
-   * Undoes a token re-issue whose mail never went out, putting back whatever the account held
-   * before it.
-   *
-   * <p>When a confirmation was already pending, the previous token comes back: the account stays
-   * gated and the link already in the user's inbox keeps working. When nothing was pending this
-   * restores to "no token", leaving the account ungated rather than blocked behind a link nobody
-   * can click.
-   */
-  private void revertUnusableEmailVerifyToken(Account account,
-      EmailVerificationDalHelper.EmailVerifyTokenState previousTokenState) {
-    boolean hadPendingToken = previousTokenState != null && previousTokenState.hasToken();
-    try {
-      EmailVerificationDalHelper.restoreEmailVerifyToken(account, previousTokenState);
-    } catch (RuntimeException e) {
-      log.error("Could not revert the unusable email verification token; this account may be gated "
-          + "out of creating an environment with no deliverable confirmation link", e);
-      return;
-    }
-    if (hadPendingToken) {
-      log.warn("Email verification re-send could not be delivered; the previously issued token was "
-          + "restored, so the account stays gated and its earlier link still works");
-    } else {
-      log.warn("Email verification token dropped because its mail could not be sent — "
-          + "the account is left ungated rather than locked out");
-    }
+    accountRegistration.issueEmailVerification(account, language, welcome);
   }
 
   /**
@@ -6106,20 +6113,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
   /** Cryptographically random, URL-safe token for a mailed one-shot link (reset, verification). */
   private String generateSecureUrlToken() {
-    byte[] token = new byte[32];
-    new SecureRandom().nextBytes(token);
-    return Base64.getUrlEncoder().withoutPadding().encodeToString(token);
+    return AccountRegistrationService.generateSecureUrlToken();
   }
 
   /** SHA-256 of a mailed token. Only the digest is ever persisted. */
   private String hashAuthToken(String token) {
-    try {
-      MessageDigest md = MessageDigest.getInstance(HASH_ALGORITHM);
-      byte[] digest = md.digest(token.getBytes(StandardCharsets.UTF_8));
-      return Base64.getEncoder().encodeToString(digest);
-    } catch (NoSuchAlgorithmException e) {
-      throw new IllegalStateException("SHA-256 not available", e);
-    }
+    return AccountRegistrationService.hashAuthToken(token);
   }
 
   // --- HTTP utilities ---
@@ -6180,6 +6179,74 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     } catch (JSONException e) {
       log.error("JSON error building password reset request response", e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+    }
+  }
+
+  /**
+   * POST /sws/go/session/link
+   * Body: { "token": "..." }
+   *
+   * <p>ETP-5847 — signs in with the one-time login link the signup API mails when an account's
+   * environment is ready, so a passwordless account gets in without a password. It spends the
+   * link (it works once), confirms the address (the mail reached its owner) and opens a cookie
+   * session exactly like {@code POST /session}. The body adds {@code environment.userId}: the
+   * account's user in the environment the signup created, which the app enters next with
+   * {@code POST /session/environment}, so every rule of entering an environment stays in one
+   * place.
+   *
+   * <p>Only this POST spends the link. The page the mail links to asks for a click first, so a
+   * mail scanner that opens the URL spends nothing.
+   */
+  private void handleSessionLink(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    JSONObject body;
+    try {
+      body = readJsonBody(request);
+    } catch (JSONException e) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, INVALID_JSON_BODY);
+      return;
+    }
+    String token = body.optString(FIELD_TOKEN, "").trim();
+    if (token.isEmpty()) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_INVALID_REQUEST,
+          MISSING_TOKEN_MESSAGE, MISSING_TOKEN_MESSAGE);
+      return;
+    }
+    try {
+      OBContext.setOBContext("0", "0", "0", "0");
+      OBContext.setAdminMode(true);
+      Account account = SignupAccountDalHelper.findAccountByLoginLinkHash(hashAuthToken(token),
+          new Date());
+      if (account == null) {
+        writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_LOGIN_LINK_INVALID,
+            LOGIN_LINK_INVALID_MESSAGE, LOGIN_LINK_INVALID_MESSAGE);
+        return;
+      }
+      String accountId = account.getId();
+      SignupAccountDalHelper.consumeLoginLink(account, new Date());
+      Account consumed = EtendoGoJwtDalHelper.findActiveAccountById(accountId);
+      String environmentUserId = SignupAccountDalHelper.environmentUserId(consumed);
+      IssuedGoSession issued = goSessionService.create(accountId, AUTH_METHOD_LINK,
+          request.getHeader(HEADER_USER_AGENT), null);
+      setSessionCookies(response, issued);
+      response.setHeader(HEADER_CACHE_CONTROL, VALUE_NO_STORE);
+      response.setHeader(HEADER_CONTENT_TYPE_OPTIONS, VALUE_NOSNIFF);
+      JSONObject result = new JSONObject();
+      result.put(FIELD_STATUS, STATUS_SUCCESS);
+      result.put(FIELD_ACCOUNT, buildAccountJson(consumed));
+      result.put(FIELD_CSRF_TOKEN, issued.getCsrfToken());
+      result.put(FIELD_ENVIRONMENT, new JSONObject().put(FIELD_USER_ID,
+          environmentUserId == null ? JSONObject.NULL : environmentUserId));
+      writeResponse(response, HttpServletResponse.SC_OK, result);
+    } catch (RuntimeException e) {
+      EtendoGoDalHelper.rollbackDalChanges("login link", e, log);
+      log.error("Login link sign-in failed", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, SERVER_ERROR);
+    } catch (JSONException e) {
+      log.error("JSON error building the login link response", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+    } finally {
+      OBContext.restorePreviousMode();
     }
   }
 
@@ -6889,6 +6956,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     // ETP-5426: the signup form's "include sample data" opt-in. Honoured only when
     // OnboardingSampleDataService.isEligible accepts the request.
     private boolean includeSampleData;
+    // ETP-5847: set for an environment the signup API creates, which mails its own ready message
+    // (with a login link, or none at all when the caller turned mails off).
+    private boolean skipEnvironmentReadyMail;
   }
 
 }

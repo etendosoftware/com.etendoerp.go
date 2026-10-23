@@ -124,6 +124,23 @@ public class InitialEmailContractsTest {
     assertFalse(registry.find("support-custom-email").isPresent());
   }
 
+  @Test
+  public void registryListsEveryContractItsProvidersGive() {
+    DefaultEmailContractRegistry registry = DefaultEmailContractRegistry.create(
+        fixtureProviders());
+
+    List<String> names = new ArrayList<>();
+    for (EmailContract contract : registry.contracts()) {
+      names.add(contract.getName());
+    }
+
+    assertTrue(names.toString(), names.containsAll(Arrays.asList("reset-password",
+        "sales-invoice-send", "sales-order-send", "sales-quotation-send")));
+    assertEquals(names.size(), new java.util.HashSet<>(names).size());
+    assertTrue("an empty registry lists nothing", EmailContractRegistry.empty().contracts()
+        .isEmpty());
+  }
+
   // ── ETP-5069: the readable-history gate, contract by contract ───────────────
 
   @Test
@@ -284,6 +301,39 @@ public class InitialEmailContractsTest {
         .contains("https://app.example.test/dashboard"));
     assertEquals("environment-ready:tenant-1:client-1:v1",
         safetyStore.getAuditRecords().get(0).getIdempotencyKey());
+  }
+
+  @Test
+  public void environmentReadyCarriesTheLoginLinkOfASignupAccount() throws Exception {
+    // ETP-5847: the account has no password, so the dashboard button would end at the login.
+    String link = "https://app.example.test/onboarding?loginToken=abc";
+
+    JSONObject data = sendEnvironmentReadyWithLink(link);
+
+    assertEquals(link, data.getString("link"));
+    assertTrue(data.getString("body").contains(link));
+  }
+
+  @Test
+  public void environmentReadyIgnoresAnyOtherGivenLink() throws Exception {
+    for (String link : List.of("https://evil.example.test/onboarding?loginToken=abc",
+        "https://app.example.test/settings", "https://app.example.test/onboarding?loginToken=")) {
+      assertEquals(link, "https://app.example.test/dashboard",
+          sendEnvironmentReadyWithLink(link).getString("link"));
+    }
+  }
+
+  private JSONObject sendEnvironmentReadyWithLink(String link) throws Exception {
+    System.setProperty(PublicUrlResolver.APP_BASE_URL_PROPERTY, "https://app.example.test");
+    FakeProviderAdapter adapter = new FakeProviderAdapter();
+    TransactionalEmailService service = service(adapter);
+    JSONObject command = baseCommand();
+    command.put(EmailContractCommandSupport.FIELD_ACCOUNT_ID, "account-1");
+    command.put(EmailContractCommandSupport.FIELD_RECORD_ID, "client-1");
+    command.put(EmailContractCommandSupport.FIELD_LINK, link);
+
+    assertSent(service.send("environment-ready", command));
+    return adapter.getLastRequest().getData();
   }
 
   @Test

@@ -132,4 +132,40 @@ class NeoServletProcessRequestTest {
 
     verify(response).setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
   }
+
+  /**
+   * ETP-5715 — the MCP attachment upload link is credentialed by its token, so it is answered BEFORE
+   * authentication, exactly like the image link; nothing else about the request is trusted.
+   */
+  @Test
+  void aPutToTheAttachmentUploadLinkIsServedWithoutAuthentication() throws Exception {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    when(request.getPathInfo()).thenReturn("/attachment/upload/some-token");
+
+    try (MockedStatic<NeoAttachmentUploadEndpoint> endpoint =
+        mockStatic(NeoAttachmentUploadEndpoint.class, org.mockito.Mockito.CALLS_REAL_METHODS)) {
+      endpoint.when(() -> NeoAttachmentUploadEndpoint.handle(any(), any())).thenAnswer(i -> null);
+
+      servlet.doPut(request, response);
+
+      endpoint.verify(() -> NeoAttachmentUploadEndpoint.handle(request, response));
+    }
+    org.mockito.Mockito.verifyNoInteractions(authenticators.constructed().get(0));
+  }
+
+  /** Only a PUT is the link: any other verb on that path goes through authentication as usual. */
+  @Test
+  void aGetOnTheAttachmentUploadLinkPathIsNotTheLink() throws Exception {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    when(request.getPathInfo()).thenReturn("/attachment/upload/some-token");
+
+    try (MockedStatic<NeoAttachmentUploadEndpoint> endpoint =
+        mockStatic(NeoAttachmentUploadEndpoint.class, org.mockito.Mockito.CALLS_REAL_METHODS)) {
+      servlet.doGet(request, response);
+
+      endpoint.verify(() -> NeoAttachmentUploadEndpoint.handle(any(), any()),
+          org.mockito.Mockito.never());
+    }
+    verify(authenticators.constructed().get(0)).authenticateRequest(request, response);
+  }
 }

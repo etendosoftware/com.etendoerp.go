@@ -298,6 +298,24 @@ public final class NeoAttachmentPolicy {
     return null;
   }
 
+  /**
+   * Strips any directory component from a client-supplied file name, so it cannot escape the
+   * directory the bytes are materialized in (path traversal); a blank result becomes
+   * {@code "attachment"}. The one implementation behind the multipart upload and the MCP upload
+   * link (ETP-5715).
+   *
+   * @param name the file name as submitted
+   * @return its last path segment, trimmed
+   */
+  public static String sanitizeFileName(String name) {
+    String trimmed = StringUtils.defaultString(name).trim();
+    int sep = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'));
+    if (sep >= 0) {
+      trimmed = trimmed.substring(sep + 1);
+    }
+    return trimmed.isEmpty() ? "attachment" : trimmed;
+  }
+
   /** @return the lower-case extension without the dot, or an empty string when there is none. */
   static String extensionOf(String fileName) {
     if (StringUtils.isBlank(fileName)) {

@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# .githooks/post-rewrite
+# Runs after `git commit --amend` and `git rebase` rewrote commits ($1 = amend | rebase; stdin =
+# "<old-sha> <new-sha>" per rewritten commit). A rebase does not run pre-commit or commit-msg, so a
+# commit whose diff changed while it was replayed (a resolved conflict) keeps a Hooks-Verified
+# trailer that no longer matches it; so does an amend made with --no-verify. The pre-push and
+# CI's verify check refuse such commits. This hook only warns, right after the rewrite, while the
+# fix is one command away: it never blocks (git ignores a post-rewrite exit status anyway).
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+. "$SCRIPT_DIR/lib/hooks-proof.sh"
+
+STALE=""
+while read -r _old new _rest; do
+  [ -n "$new" ] || continue
+  git cat-file -e "${new}^{commit}" 2>/dev/null || continue
+  hooks_verify_commit "$new" || STALE="$STALE $new"
+done
+
+[ -n "$STALE" ] || exit 0
+
+{
+  echo ""
+  echo "⚠️  The ${1:-rewrite} left commits whose ${HOOKS_TRAILER_KEY} trailer does not match their content:"
+  for sha in $STALE; do
+    printf '     %s  %s\n' "$(git rev-parse --short "$sha")" "$(git log -1 --format=%s "$sha")"
+  done
+  echo "   The push and CI's verify check will refuse them. Re-seal them now; it runs the hooks again:"
+  echo "        git rebase --exec 'git commit --amend --no-edit' <base>"
+  echo "   <base> is the commit before the oldest one listed, for example origin/develop."
+  echo ""
+} >&2
+exit 0

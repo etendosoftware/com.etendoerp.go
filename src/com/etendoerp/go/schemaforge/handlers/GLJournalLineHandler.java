@@ -40,7 +40,7 @@ import com.etendoerp.go.schemaforge.util.PostingAccountGuard;
  * (update), else the body's {@code journalEntry} (MCP), else {@code parentId} in the body (batch)
  * or the query (REST).
  */
-@NeoExtension(spec = "simple-g-l-journal", entity = "gLJournalLine")
+@NeoExtension(spec = "manual-journals", entity = "gLJournalLine")
 public class GLJournalLineHandler implements NeoHandler {
 
   private static final String PARENT_ID = "parentId";

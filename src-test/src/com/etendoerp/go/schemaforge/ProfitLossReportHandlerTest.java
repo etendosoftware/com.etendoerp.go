@@ -58,6 +58,8 @@ import com.etendoerp.go.schemaforge.util.NeoReportParam;
  * roll-up/formula rules are covered by {@code AccountReportTreeTest}, not here).
  *
  * @covers com.etendoerp.go.schemaforge.ProfitLossReportHandler
+ * @covers com.etendoerp.go.schemaforge.AbstractAccountTreeReportHandler
+ * @covers com.etendoerp.go.schemaforge.AbstractSqlReportHandler
  */
 class ProfitLossReportHandlerTest {
 
@@ -314,6 +316,94 @@ class ProfitLossReportHandlerTest {
     }
   }
 
+  /**
+   * ETP-5793: another tenant's year answers exactly like an unknown one
+   * ({@code AbstractAccountTreeReportHandler#validateYearsResolved}).
+   */
+  @Test
+  @DisplayName("POST with another tenant's yearId answers exactly like an unknown one")
+  void postWithForeignYearAnswersLikeUnknown() throws Exception {
+    try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class);
+         MockedStatic<OBContext> contextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(true);
+      stubHappyPathObContextAndDal(contextMock, obDalMock, Collections.emptyList());
+      Client otherClient = mock(Client.class);
+      when(otherClient.getId()).thenReturn("otherClientId");
+      Year foreignYear = mock(Year.class);
+      when(foreignYear.getClient()).thenReturn(otherClient);
+      OBDal dal = OBDal.getInstance();
+      when(dal.get(Year.class, "foreignYear1")).thenReturn(foreignYear);
+
+      NeoResponse foreign = handler.handle(context("POST", new JSONObject().put("yearId", "foreignYear1")));
+      NeoResponse unknown = handler.handle(context("POST", new JSONObject().put("yearId", "unknownYear1")));
+
+      assertEquals(422, foreign.getHttpStatus());
+      assertEquals("year_not_resolved", foreign.getBody().getString("error"));
+      assertEquals(unknown.getBody().toString().replace("unknownYear1", "foreignYear1"),
+          foreign.getBody().toString());
+    }
+  }
+
+  /** ETP-5793: the comparison year gets the same tenant check as the main one. */
+  @Test
+  @DisplayName("POST with another tenant's referenceYearId answers exactly like an unknown one")
+  void postWithForeignReferenceYearAnswersLikeUnknown() throws Exception {
+    try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class);
+         MockedStatic<OBContext> contextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(true);
+      stubHappyPathObContextAndDal(contextMock, obDalMock, Collections.emptyList());
+      Client otherClient = mock(Client.class);
+      when(otherClient.getId()).thenReturn("otherClientId");
+      Year foreignYear = mock(Year.class);
+      when(foreignYear.getClient()).thenReturn(otherClient);
+      OBDal dal = OBDal.getInstance();
+      when(dal.get(Year.class, "foreignYear1")).thenReturn(foreignYear);
+
+      NeoResponse foreign = handler.handle(context("POST", new JSONObject().put("yearId", "year1")
+          .put("compareTo", true).put("referenceYearId", "foreignYear1")));
+      NeoResponse unknown = handler.handle(context("POST", new JSONObject().put("yearId", "year1")
+          .put("compareTo", true).put("referenceYearId", "unknownYear1")));
+
+      assertEquals(422, foreign.getHttpStatus());
+      assertEquals("reference_year_not_resolved", foreign.getBody().getString("error"));
+      assertEquals(unknown.getBody().toString().replace("unknownYear1", "foreignYear1"),
+          foreign.getBody().toString());
+    }
+  }
+
+  /**
+   * ETP-5793: another tenant's org answers exactly like an unknown one
+   * ({@code AbstractSqlReportHandler#validateOrgId}, shared by every SQL report).
+   */
+  @Test
+  @DisplayName("POST with another tenant's orgId answers exactly like an unknown one")
+  void postWithForeignOrgAnswersLikeUnknown() throws Exception {
+    try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class);
+         MockedStatic<OBContext> contextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(true);
+      stubHappyPathObContextAndDal(contextMock, obDalMock, Collections.emptyList());
+      Client otherClient = mock(Client.class);
+      when(otherClient.getId()).thenReturn("otherClientId");
+      Organization foreignOrg = mock(Organization.class);
+      when(foreignOrg.getClient()).thenReturn(otherClient);
+      OBDal dal = OBDal.getInstance();
+      when(dal.get(Organization.class, "foreignOrg1")).thenReturn(foreignOrg);
+
+      NeoResponse foreign = handler.handle(context("POST",
+          new JSONObject().put("yearId", "year1").put("orgId", "foreignOrg1")));
+      NeoResponse unknown = handler.handle(context("POST",
+          new JSONObject().put("yearId", "year1").put("orgId", "unknownOrg1")));
+
+      assertEquals(400, foreign.getHttpStatus());
+      assertEquals("organization_not_resolved", foreign.getBody().getString("error"));
+      assertEquals(unknown.getBody().toString().replace("unknownOrg1", "foreignOrg1"),
+          foreign.getBody().toString());
+    }
+  }
+
   @Test
   @DisplayName("POST with a malformed orgId is refused with 400")
   void postWithMalformedOrgIdIsRefused() throws Exception {
@@ -476,6 +566,9 @@ class ProfitLossReportHandlerTest {
 
     OBContext obContext = mock(OBContext.class);
     when(obContext.getCurrentClient()).thenReturn(client);
+    // ETP-5793: the org is resolved through TenantOwnership, which checks the readable clients.
+    when(org.getClient()).thenReturn(client);
+    when(obContext.getReadableClients()).thenReturn(new String[] { "sessionClientId1" });
     when(obContext.getCurrentOrganization()).thenReturn(org);
     contextMock.when(OBContext::getOBContext).thenReturn(obContext);
 
@@ -486,6 +579,7 @@ class ProfitLossReportHandlerTest {
     when(query.list()).thenReturn((List) rows);
 
     Year year = mock(Year.class);
+    when(year.getClient()).thenReturn(client);
 
     OBDal dal = mock(OBDal.class);
     when(dal.getSession()).thenReturn(session);

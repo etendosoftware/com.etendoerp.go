@@ -70,6 +70,18 @@ public final class NeoListAggregateQuery {
   }
 
   /**
+   * A query over an explicit param set, for a caller that built the list params itself (the
+   * {@code ?_distinct=} value fetch). The caller owns stripping {@code _distinct}, sort and
+   * {@code id} BEFORE this point; the params core would otherwise misread are not re-validated.
+   *
+   * @param dalParams the DAL params the filtered set is built from
+   * @return the query over those params
+   */
+  static NeoListAggregateQuery forParams(Map<String, String> dalParams) {
+    return new NeoListAggregateQuery(Collections.unmodifiableMap(new LinkedHashMap<>(dalParams)));
+  }
+
+  /**
    * Stores an immutable copy of the params a list GET fetched with, for the customization's
    * {@code afterHandle}. A {@code null} context or params is ignored.
    *
@@ -118,12 +130,70 @@ public final class NeoListAggregateQuery {
    * @return one {@code Object[]} per group, in select order
    */
   public List<Object[]> groupBy(String selectClause, String groupByClause) {
-    DataEntityQueryService service = new FilterQueryServiceFactory().create(params);
-    // Order matters: the where clause is what fills the named parameters.
-    String where = service.getWhereClause();
-    OBQuery<BaseOBObject> obq = OBDal.getInstance()
-        .createQuery(service.getEntityName(), where);
-    // Same flags DataEntityQueryService.count() applies, so the aggregate counts what the grid counts.
+    OBQuery<BaseOBObject> obq = buildQuery();
+    obq.setSelectClause(selectClause);
+
+    String hql = obq.createQuery(Object[].class).getQueryString() + " group by " + groupByClause;
+    Query<Object[]> query = OBDal.getInstance().getSession().createQuery(hql, Object[].class);
+    bind(query, obq.getNamedParameters());
+    QueryTimeOutUtil.getInstance().setQueryTimeOut(query, QUERY_PROFILE);
+    return query.list();
+  }
+
+  /**
+   * Runs one page of {@code select distinct <projection> from <entity> as e <filters> and
+   * <projection> is not null order by <projection>} over the filtered set (ETP-5561): the values a
+   * filter dropdown offers, restricted to the very rows the list would return for these params.
+   *
+   * @param projection server-side constant projection on {@code e}, never request-derived text
+   * @param extraPredicate an additional HQL predicate ANDed onto the filters, or {@code null}
+   * @param extraParams named parameters that {@code extraPredicate} references, or {@code null}
+   * @param firstResult zero-based offset of the page
+   * @param maxResults maximum rows to return
+   * @return the distinct projected values, ordered ascending
+   */
+  public List<Object> distinctValues(String projection, String extraPredicate,
+      Map<String, Object> extraParams, int firstResult, int maxResults) {
+    DataEntityQueryService service = createService();
+    boolean hasWhere = !service.getQueryBuilder().getWhereClause().isBlank();
+    StringBuilder where = new StringBuilder(service.getWhereClause())
+        .append(hasWhere ? " and " : " where ")
+        .append(projection).append(" is not null");
+    if (extraPredicate != null && !extraPredicate.isBlank()) {
+      where.append(" and (").append(extraPredicate).append(")");
+    }
+    where.append(" order by ").append(projection).append(" asc");
+
+    OBQuery<BaseOBObject> obq = buildQuery(service, where.toString());
+    obq.setSelectClause("DISTINCT " + projection);
+    if (extraParams != null) {
+      Map<String, Object> named = new LinkedHashMap<>();
+      if (obq.getNamedParameters() != null) {
+        named.putAll(obq.getNamedParameters());
+      }
+      named.putAll(extraParams);
+      obq.setNamedParameters(named);
+    }
+
+    obq.setFirstResult(firstResult);
+    obq.setMaxResult(maxResults);
+    Query<Object> query = obq.createQuery(Object.class);
+    QueryTimeOutUtil.getInstance().setQueryTimeOut(query, QUERY_PROFILE);
+    return query.list();
+  }
+
+  private DataEntityQueryService createService() {
+    return new FilterQueryServiceFactory().create(params);
+  }
+
+  private OBQuery<BaseOBObject> buildQuery() {
+    DataEntityQueryService service = createService();
+    return buildQuery(service, service.getWhereClause());
+  }
+
+  /** The OBQuery over {@code where}, carrying the service's readable/active flags and params. */
+  private static OBQuery<BaseOBObject> buildQuery(DataEntityQueryService service, String where) {
+    OBQuery<BaseOBObject> obq = OBDal.getInstance().createQuery(service.getEntityName(), where);
     obq.setFilterOnReadableClients(service.isFilterOnReadableClients());
     obq.setFilterOnReadableOrganization(service.isFilterOnReadableOrganizations());
     if (service.getQueryBuilder().hasOrganizationParameter()) {
@@ -133,15 +203,7 @@ public final class NeoListAggregateQuery {
       obq.setFilterOnActive(false);
     }
     obq.setNamedParameters(service.getQueryBuilder().getNamedParameters());
-    obq.setSelectClause(selectClause);
-
-    // The first Hibernate Query is intentionally discarded: it only yields the query string and,
-    // as a side effect, registers the readable org/client parameters on obq.
-    String hql = obq.createQuery(Object[].class).getQueryString() + " group by " + groupByClause;
-    Query<Object[]> query = OBDal.getInstance().getSession().createQuery(hql, Object[].class);
-    bind(query, obq.getNamedParameters());
-    QueryTimeOutUtil.getInstance().setQueryTimeOut(query, QUERY_PROFILE);
-    return query.list();
+    return obq;
   }
 
   private static void bind(Query<?> query, Map<String, Object> named) {
