@@ -44,24 +44,17 @@ import org.openbravo.dal.service.OBDal;
  * <p><b>Why.</b> A query that fails on the request's Hibernate session marks that transaction
  * rollback-only, and PostgreSQL aborts it too: everything the request writes afterwards is
  * silently rolled back at commit. A quota <em>report</em> (environment entry, the account page,
- * the environment list), the quota index refresh and the usage-lag check need no uncommitted row,
+ * the environment list) and the usage-lag check need no uncommitted row,
  * so they read through this instead and their failures stay theirs.
  * {@code OBDal.getReadOnlyInstance()} is not used because it falls back to the request's own
  * session unless a read-only pool is configured for the running process.
  *
- * <p><b>Two pools.</b> The DAL keeps its session per thread, so a read runs on a pool of named
- * daemon threads. Reports and the NEO write path never share one, so a burst of slow reports cannot
- * stall a create:
- * <ul>
- *   <li>{@link #call} — reports: {@value #WORKER_THREADS} workers, {@value #QUEUE_CAPACITY} queued,
- *       the caller waits up to {@value #TIMEOUT_SECONDS} s, statements capped at
- *       {@value #STATEMENT_TIMEOUT_MS} ms;</li>
- *   <li>{@link #callOnWritePath} — the reads a create waits for (quota index rebuild, usage-lag
- *       check): {@value #WRITE_PATH_WORKER_THREADS} workers, {@value #WRITE_PATH_QUEUE_CAPACITY}
- *       queued, the caller waits up to {@value #WRITE_PATH_TIMEOUT_SECONDS} s, statements capped at
- *       {@value #WRITE_PATH_STATEMENT_TIMEOUT_MS} ms.</li>
- * </ul>
- * A read beyond a pool's queue is refused at once. Idle workers end after a minute.
+ * <p><b>The pool.</b> The DAL keeps its session per thread, so a read runs on a bounded pool of
+ * named daemon threads: {@value #WORKER_THREADS} workers, {@value #QUEUE_CAPACITY} queued, the
+ * caller waits up to {@value #TIMEOUT_SECONDS} s, statements capped at
+ * {@value #STATEMENT_TIMEOUT_MS} ms. A read beyond the queue is refused at once. Idle workers end
+ * after a minute. The NEO write path never uses it: its quota reads run on the request's own
+ * session.
  *
  * <p><b>Each worker</b>:
  * <ul>
@@ -99,21 +92,10 @@ public final class IsolatedDalRead {
   /** PostgreSQL's cap on each statement of a report read, below the caller's wait. */
   static final long STATEMENT_TIMEOUT_MS = 25_000L;
 
-  /** Write-path workers: an index rebuild a minute and a lag read a minute, never at once more. */
-  static final int WRITE_PATH_WORKER_THREADS = 2;
-  /** Write-path reads waiting for a worker before new ones are refused. */
-  static final int WRITE_PATH_QUEUE_CAPACITY = 8;
-  /** Upper bound a create waits for one write-path read. */
-  static final long WRITE_PATH_TIMEOUT_SECONDS = 5L;
-  /** PostgreSQL's cap on each statement of a write-path read, below the create's wait. */
-  static final long WRITE_PATH_STATEMENT_TIMEOUT_MS = 4_000L;
-
   private static final ThreadLocal<Boolean> IN_WORKER = new ThreadLocal<>();
 
   private static final Pool REPORTS = new Pool("etgo-isolated-read-", WORKER_THREADS,
       QUEUE_CAPACITY, STATEMENT_TIMEOUT_MS);
-  private static final Pool WRITE_PATH = new Pool("etgo-quota-read-", WRITE_PATH_WORKER_THREADS,
-      WRITE_PATH_QUEUE_CAPACITY, WRITE_PATH_STATEMENT_TIMEOUT_MS);
 
   private IsolatedDalRead() {
   }
@@ -145,19 +127,6 @@ public final class IsolatedDalRead {
   }
 
   /**
-   * Runs a read a NEO create waits for — the quota index rebuild, the usage-lag check — on the
-   * write path's own small pool, with a short wait. Called from a worker, it runs inline.
-   *
-   * @param read the read
-   * @param <T> the result type
-   * @return what {@code read} returned
-   * @throws IllegalStateException as {@link #call(Supplier)}
-   */
-  public static <T> T callOnWritePath(Supplier<T> read) {
-    return WRITE_PATH.call(read, TimeUnit.SECONDS.toMillis(WRITE_PATH_TIMEOUT_SECONDS));
-  }
-
-  /**
    * Stops a long read whose caller gave up: throws when the current thread was interrupted, which
    * is how a worker learns that its caller timed out or the pool shut down. Cheap; call it between
    * the steps of a read that loops.
@@ -171,13 +140,12 @@ public final class IsolatedDalRead {
   }
 
   /**
-   * Stops the workers of both pools and cancels the reads still queued, so their callers stop
+   * Stops the workers and cancels the reads still queued, so their callers stop
    * waiting at once. Called from {@code NeoServlet#destroy()}, beside the batch job workers; the
    * next call builds a new pool.
    */
   public static void shutdown() {
     REPORTS.shutdown();
-    WRITE_PATH.shutdown();
   }
 
   /** One bounded pool of isolated workers. */

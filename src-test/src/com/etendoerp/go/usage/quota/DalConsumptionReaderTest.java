@@ -116,6 +116,22 @@ class DalConsumptionReaderTest {
     verify(freshness).checkLag();
   }
 
+  /**
+   * ETP-5051 redesign: the write-path reader (a create) reads the stored aggregate without the
+   * usage-lag check; that WARN belongs to the reports and the usage job.
+   */
+  @Test
+  void theWritePathReaderReadsTheAggregateWithoutTheLagCheck() {
+    storedDays(new Object[] { midnight(2026, 10, 17), 4L });
+
+    try (MockedStatic<UsageFreshness> shared = mockStatic(UsageFreshness.class)) {
+      assertEquals(4L, DalConsumptionReader.withoutLagCheck()
+          .read(quota("DOCS", "block", 10L, null).build(), CLIENT, period));
+      shared.verifyNoInteractions();
+    }
+    verify(freshness, never()).checkLag();
+  }
+
   @Test
   void theAggregateSumsByDefault() {
     storedDays(new Object[] { midnight(2026, 10, 17), 4L },

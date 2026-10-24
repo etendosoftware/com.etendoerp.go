@@ -90,8 +90,6 @@ class IsolatedDalReadTest {
   private static final String CAP_SQL = "set local statement_timeout = 25000";
   private static final String WORKER_NAME = "etgo-isolated-read-\\d+";
   private static final long WAIT_SECONDS = 10L;
-  private static final String WRITE_PATH_CAP_SQL = "set local statement_timeout = 4000";
-  private static final String WRITE_PATH_WORKER_NAME = "etgo-quota-read-\\d+";
   private static final long POLL_NANOS = TimeUnit.MILLISECONDS.toNanos(10L);
 
   private final List<String> events = Collections.synchronizedList(new ArrayList<>());
@@ -507,58 +505,6 @@ class IsolatedDalReadTest {
       Thread.interrupted();
     }
     IsolatedDalRead.checkNotAbandoned();
-  }
-
-  // --- the write path's own pool ---------------------------------------------------------------
-
-  /**
-   * REPRO (ETP-5051 re-review W1): the reads a create waits for (index rebuild, usage-lag check)
-   * must not queue behind reports. With every report worker stuck, a write-path read still runs at
-   * once, on its own named worker, with its own shorter statement cap.
-   */
-  @Test
-  void aWritePathReadRunsWhileEveryReportWorkerIsStuck() throws Exception {
-    CountDownLatch reportsBusy = new CountDownLatch(IsolatedDalRead.WORKER_THREADS);
-    CountDownLatch release = new CountDownLatch(1);
-    List<Future<String>> reports = new ArrayList<>();
-    try {
-      for (int i = 0; i < IsolatedDalRead.WORKER_THREADS; i++) {
-        reports.add(callFromAnotherThread(() -> {
-          reportsBusy.countDown();
-          awaitLatch(release);
-          return "report";
-        }));
-      }
-      awaitLatch(reportsBusy);
-
-      long start = System.nanoTime();
-      String worker = IsolatedDalRead.callOnWritePath(() -> Thread.currentThread().getName());
-      long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
-
-      assertTrue(worker.matches(WRITE_PATH_WORKER_NAME), worker);
-      assertTrue(elapsedMillis < 5_000L, "the write path waited " + elapsedMillis + " ms");
-      verify(session).createNativeQuery(WRITE_PATH_CAP_SQL);
-      assertTrue(IsolatedDalRead.WRITE_PATH_STATEMENT_TIMEOUT_MS
-          < TimeUnit.SECONDS.toMillis(IsolatedDalRead.WRITE_PATH_TIMEOUT_SECONDS));
-      release.countDown();
-      for (Future<String> report : reports) {
-        assertEquals("report", await(report));
-      }
-    } finally {
-      release.countDown();
-    }
-  }
-
-  @Test
-  void aCallFromAWritePathWorkerRunsInlineToo() {
-    Thread[] outer = new Thread[1];
-
-    Thread inner = IsolatedDalRead.callOnWritePath(() -> {
-      outer[0] = Thread.currentThread();
-      return IsolatedDalRead.call(Thread::currentThread);
-    });
-
-    assertSame(outer[0], inner);
   }
 
   // --- shutdown --------------------------------------------------------------------------------

@@ -31,13 +31,12 @@ import org.openbravo.dal.service.OBDal;
  * §5.15): the last successful run in {@code ETGO_USAGE_RUN_LOG} is older than
  * {@link UsageScheduleSettings#LAG_FACTOR} times the configured cadence, or there is none.
  *
- * <p>Checked where staleness matters — when a quota reads the stored aggregate, and when a scheduled
- * aggregation run starts — never on a timer of its own. The last-run read is cached for a minute and
- * the WARN is throttled to one line an hour, so a busy write path costs at most one small query a
- * minute. The production read runs in its own session on the write path's own pool
- * ({@link IsolatedDalRead#callOnWritePath}): it is reached from the NEO write check, so a failing
- * lag check must never poison the create it runs beside, and a busy report pool must never make it
- * wait.
+ * <p>Checked where staleness is reported — when a quota report (environment entry, the environment
+ * list, the account page) reads the stored aggregate, and when a scheduled aggregation run starts —
+ * never on a create and never on a timer of its own. The last-run read is cached for a minute (a
+ * failed read too) and the WARN is throttled to one line an hour. The production read runs in its
+ * own session ({@link IsolatedDalRead#call}); inside a report, which already runs on an isolated
+ * worker, that is the report's own session.
  *
  * <p><b>Known limit:</b> the run log has one row per resource and tenant that the run counted, and
  * a run that counted nothing for anyone writes none. An installation with resources but no usage at
@@ -54,7 +53,7 @@ public class UsageFreshness {
 
   private static final UsageFreshness DEFAULT = new UsageFreshness(
       System::currentTimeMillis,
-      () -> IsolatedDalRead.callOnWritePath(UsageFreshness::readLastSuccessfulRun),
+      () -> IsolatedDalRead.call(UsageFreshness::readLastSuccessfulRun),
       UsageScheduleSettings::lagThresholdMs);
 
   private final LongSupplier clock;

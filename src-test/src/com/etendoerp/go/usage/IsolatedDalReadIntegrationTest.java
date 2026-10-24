@@ -96,12 +96,6 @@ public class IsolatedDalReadIntegrationTest extends OBBaseTest {
   }
 
   @Test
-  public void theWritePathWorkerCarriesItsOwnShorterStatementTimeout() {
-    assertEquals("4s",
-        IsolatedDalRead.callOnWritePath(IsolatedDalReadIntegrationTest::statementTimeout));
-  }
-
-  @Test
   public void aStatementFailingInTheReadLeavesTheCallersTransactionUsable() {
     setTestUserContext();
     assertEquals(1, ((Number) OBDal.getInstance().getSession()

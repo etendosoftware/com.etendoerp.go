@@ -79,9 +79,10 @@ public class QuotaEvaluator {
   /**
    * The write-check evaluator: reads on the request's own session, so a live count sees the row
    * just inserted, and serialises live {@code block} checks with the advisory {@link QuotaLock}.
+   * It never checks the usage lag: that WARN belongs to the reports and the usage job.
    */
   public QuotaEvaluator() {
-    this(new DalQuotaLookup(), new DalConsumptionReader(), Clock.systemUTC(),
+    this(new DalQuotaLookup(), DalConsumptionReader.withoutLagCheck(), Clock.systemUTC(),
         QuotaLock.advisory());
   }
 

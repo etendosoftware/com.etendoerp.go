@@ -41,8 +41,8 @@ import com.etendoerp.go.usage.UsageResourceValidator;
  *
  * <ul>
  *   <li><b>Aggregate</b> — the tenant's {@code ETGO_USAGE_DAILY} rows of the window, combined with
- *       the resource's {@link UsageAggregation}. Lagged by the usage job, so it also checks the
- *       job's freshness ({@link UsageFreshness}).</li>
+ *       the resource's {@link UsageAggregation}. Lagged by the usage job, so a report also checks
+ *       the job's freshness ({@link UsageFreshness}); a create does not.</li>
  *   <li><b>Live, declarative</b> — one {@link UsageQueryComposer#composePerTenantCount} over the
  *       whole window: the same entity, date property and validated HQL restriction the job counts
  *       with, so the two sources can only differ by lag.</li>
@@ -72,7 +72,7 @@ public class DalConsumptionReader implements ConsumptionReader {
 
   private final UsageFreshness freshness;
 
-  /** Production wiring: the shared usage-freshness check. */
+  /** Report wiring: the shared usage-freshness check runs when the stored aggregate is read. */
   public DalConsumptionReader() {
     this(UsageFreshness.getDefault());
   }
@@ -80,10 +80,20 @@ public class DalConsumptionReader implements ConsumptionReader {
   /**
    * A reader over an explicit freshness check.
    *
-   * @param freshness checks the usage job's lag when the stored aggregate is read
+   * @param freshness checks the usage job's lag when the stored aggregate is read; null checks
+   *     nothing (the NEO write path: a create never pays for the lag check)
    */
   public DalConsumptionReader(UsageFreshness freshness) {
     this.freshness = freshness;
+  }
+
+  /**
+   * The write-path reader: no lag check, so a create reads the consumption and nothing else.
+   *
+   * @return a reader that never checks the usage lag
+   */
+  public static DalConsumptionReader withoutLagCheck() {
+    return new DalConsumptionReader(null);
   }
 
   @Override
@@ -91,7 +101,9 @@ public class DalConsumptionReader implements ConsumptionReader {
     if (quota.getSource() == ConsumptionSource.LIVE) {
       return readLive(quota, clientId, period);
     }
-    freshness.checkLag();
+    if (freshness != null) {
+      freshness.checkLag();
+    }
     return readStored(quota, clientId, period);
   }
 
