@@ -159,6 +159,24 @@ public final class EnvironmentQuotaReport {
     if (quotasByPlan.isEmpty()) {
       return EMPTY;
     }
+    List<Map.Entry<String, Tenant>> measured = measuredTenants(tenants, quotasByPlan);
+    Map<String, List<QuotaEvaluation>> reportable = new HashMap<>();
+    for (int i = 0; i < measured.size(); i++) {
+      // The caller may have stopped waiting (timeout, shutdown): stop reading for it.
+      IsolatedDalRead.checkNotAbandoned();
+      Map.Entry<String, Tenant> entry = measured.get(i);
+      if (!evaluateInto(reportable, entry, quotasByPlan, evaluator)) {
+        // The failed statement aborted this session's transaction: every later read would fail.
+        logSkipped(measured.size() - i - 1);
+        break;
+      }
+    }
+    return reportable.isEmpty() ? EMPTY : new EnvironmentQuotaReport(reportable);
+  }
+
+  /** The tenants whose plan has an enforced quota row: the only ones that are measured. */
+  private static List<Map.Entry<String, Tenant>> measuredTenants(Map<String, Tenant> tenants,
+      Map<String, List<QuotaDefinition>> quotasByPlan) {
     List<Map.Entry<String, Tenant>> measured = new ArrayList<>();
     for (Map.Entry<String, Tenant> entry : tenants.entrySet()) {
       List<QuotaDefinition> rows = quotasByPlan.get(entry.getValue().planId);
@@ -166,30 +184,31 @@ public final class EnvironmentQuotaReport {
         measured.add(entry);
       }
     }
-    Map<String, List<QuotaEvaluation>> reportable = new HashMap<>();
-    for (int i = 0; i < measured.size(); i++) {
-      // The caller may have stopped waiting (timeout, shutdown): stop reading for it.
-      IsolatedDalRead.checkNotAbandoned();
-      Map.Entry<String, Tenant> entry = measured.get(i);
-      try {
-        List<QuotaEvaluation> evaluations = evaluateOne(entry.getValue(),
-            quotasByPlan.get(entry.getValue().planId), evaluator);
-        if (!evaluations.isEmpty()) {
-          reportable.put(entry.getKey(), evaluations);
-        }
-      } catch (CancellationException e) {
-        throw e;
-      } catch (RuntimeException e) {
-        log.error("[QUOTA] Could not evaluate the quotas of tenant {} for the environment list; "
-            + "reporting none", entry.getKey(), e);
-        if (DatabaseFailures.isDatabaseFailure(e)) {
-          // The failed statement aborted this session's transaction: every later read would fail.
-          logSkipped(measured.size() - i - 1);
-          break;
-        }
+    return measured;
+  }
+
+  /**
+   * Evaluates one tenant into {@code reportable}. A failure reports nothing for it.
+   *
+   * @return {@code false} when the failure came from the database, so the hop must stop
+   */
+  private static boolean evaluateInto(Map<String, List<QuotaEvaluation>> reportable,
+      Map.Entry<String, Tenant> entry, Map<String, List<QuotaDefinition>> quotasByPlan,
+      QuotaEvaluator evaluator) {
+    try {
+      List<QuotaEvaluation> evaluations = evaluateOne(entry.getValue(),
+          quotasByPlan.get(entry.getValue().planId), evaluator);
+      if (!evaluations.isEmpty()) {
+        reportable.put(entry.getKey(), evaluations);
       }
+      return true;
+    } catch (CancellationException e) {
+      throw e;
+    } catch (RuntimeException e) {
+      log.error("[QUOTA] Could not evaluate the quotas of tenant {} for the environment list; "
+          + "reporting none", entry.getKey(), e);
+      return !DatabaseFailures.isDatabaseFailure(e);
     }
-    return reportable.isEmpty() ? EMPTY : new EnvironmentQuotaReport(reportable);
   }
 
   private static void logSkipped(int remaining) {

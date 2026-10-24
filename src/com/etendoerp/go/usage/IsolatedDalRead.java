@@ -202,7 +202,7 @@ public final class IsolatedDalRead {
       WorkerContext context = WorkerContext.of(OBContext.getOBContext());
       Future<T> future;
       try {
-        future = executor().submit(() -> runIsolated(read, context, capStatementsSql));
+        future = executor().submit(() -> runIsolated(read, context));
       } catch (RejectedExecutionException e) {
         throw new IllegalStateException("Isolated read refused: all " + workers
             + " workers busy and " + queueCapacity + " reads queued", e);
@@ -225,6 +225,25 @@ public final class IsolatedDalRead {
         future.cancel(true);
         Thread.currentThread().interrupt();
         throw new IllegalStateException("Interrupted while waiting for an isolated read", e);
+      }
+    }
+
+    private <T> T runIsolated(Supplier<T> read, WorkerContext context) {
+      IN_WORKER.set(Boolean.TRUE);
+      try {
+        // SET LOCAL ends with the transaction, so the pooled connection goes back with the default.
+        OBDal.getInstance().getSession().createNativeQuery(capStatementsSql).executeUpdate();
+        context.bind();
+        return read.get();
+      } finally {
+        try {
+          DalThreadCleaner.getInstance().cleanWithRollback();
+        } catch (RuntimeException e) {
+          log.debug("Cleaning the session of an isolated read failed", e);
+        } finally {
+          OBContext.clearAdminModeStack();
+          IN_WORKER.remove();
+        }
       }
     }
 
@@ -260,26 +279,6 @@ public final class IsolatedDalRead {
         if (queued instanceof Future) {
           ((Future<?>) queued).cancel(false);
         }
-      }
-    }
-  }
-
-  private static <T> T runIsolated(Supplier<T> read, WorkerContext context,
-      String capStatementsSql) {
-    IN_WORKER.set(Boolean.TRUE);
-    try {
-      // SET LOCAL ends with the transaction, so the pooled connection goes back with the default.
-      OBDal.getInstance().getSession().createNativeQuery(capStatementsSql).executeUpdate();
-      context.bind();
-      return read.get();
-    } finally {
-      try {
-        DalThreadCleaner.getInstance().cleanWithRollback();
-      } catch (RuntimeException e) {
-        log.debug("Cleaning the session of an isolated read failed", e);
-      } finally {
-        OBContext.clearAdminModeStack();
-        IN_WORKER.remove();
       }
     }
   }

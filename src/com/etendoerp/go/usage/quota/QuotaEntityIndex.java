@@ -61,9 +61,9 @@ public class QuotaEntityIndex {
   private static final Logger log = LogManager.getLogger(QuotaEntityIndex.class);
 
   /**
-   * How soon a build is retried while none has succeeded yet. Until one succeeds no create is quota-checked
-   * (fails open, open-and-notable-topics.md §4.19); shorter than {@link #TTL_MS} so that window
-   * stays short, long enough that a database in trouble is not asked again on every create.
+   * How soon a build is retried while none has succeeded yet. Until one succeeds no create is
+   * quota-checked (fails open, open-and-notable-topics.md §4.19); shorter than {@link #TTL_MS} so
+   * that window stays short, long enough that a database in trouble is not asked on every create.
    */
   public static final long RETRY_AFTER_FAILED_FIRST_BUILD_MS = 10_000L;
 
