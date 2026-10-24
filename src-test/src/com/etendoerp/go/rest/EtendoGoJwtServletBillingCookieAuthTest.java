@@ -87,8 +87,8 @@ import com.etendoerp.go.usage.quota.TenantQuotas;
  *
  * <p>ETP-5051 (O-1b) — the portal's optional {@code {"clientId"}} body names the environment a
  * "Mis empresas" row manages. Without one ({@code "0"}, blank, {@code {}} or no body at all) the
- * rule above applies; an unbought client or one without a Stripe customer is
- * {@code 404 NO_SUBSCRIPTION}; a body that is not a JSON object is 400; and the cookie session's
+ * rule above applies; an unbought client, one without a Stripe customer, a non-string
+ * {@code clientId} or a case variant of an owned id is {@code 404 NO_SUBSCRIPTION}; a body that is not a JSON object is 400; and the cookie session's
  * CSRF and Origin checks refuse the request before the body is read.
  *
  * @covers com.etendoerp.go.rest.EtendoGoJwtServlet
@@ -111,7 +111,7 @@ public class EtendoGoJwtServletBillingCookieAuthTest {
   /** Portal bodies that name no environment; null stands for a request with no body at all. */
   private static final String[] NO_CLIENT_BODIES = { null, "", "   ", "{}",
       "{\"clientId\":\"0\"}", "{\"clientId\":\"  \"}", "{\"clientId\":\"\"}",
-      "{\"clientId\":null}" };
+      "{\"clientId\":null}", " \n\t\r\n " };
 
   // ===================== GET /billing/subscription (cookie) =====================
 
@@ -595,6 +595,60 @@ public class EtendoGoJwtServletBillingCookieAuthTest {
       verifyNoMoreInteractions(fixture.requestStore);
       verifyNoInteractions(fixture.portalService);
     }
+  }
+
+  /**
+   * ETP-5051 (O-1b, QA) — a {@code clientId} that is not a string (a number, a boolean, an array,
+   * an object) names no environment the account bought: 404 {@code NO_SUBSCRIPTION}, never a 400
+   * or a 500, never the page's fallback purchase, and no portal session.
+   */
+  @Test
+  public void cookiePostPortalWithANonStringClientIdAnswers404() throws Exception {
+    for (String value : new String[] { "42", "true", "[\"" + ENTERED_CLIENT + "\"]",
+        "{\"id\":\"" + ENTERED_CLIENT + "\"}" }) {
+      Fixture fixture = new Fixture();
+      when(fixture.goSessionService.resolve(SESSION_TOKEN))
+          .thenReturn(fixture.enteredSession(ENTERED_CLIENT));
+      CheckoutRequest entered = purchase("sub_entered", "cus_entered", ENTERED_CLIENT);
+      when(fixture.requestStore.findSubscriptionForAccountClient(ACCOUNT_ID, ACCOUNT_EMAIL,
+          ENTERED_CLIENT)).thenReturn(entered);
+      when(fixture.requestStore.findSubscriptionForAccount(ACCOUNT_ID, ACCOUNT_EMAIL))
+          .thenReturn(entered);
+
+      ResponseCapture resp = cookiePostPortalWithBody(fixture, "{\"clientId\":" + value + "}");
+
+      assertEquals(value, 404, resp.status);
+      assertEquals(value, "NO_SUBSCRIPTION", resp.errorCode());
+      verify(fixture.requestStore, never()).findSubscriptionForAccountClient(ACCOUNT_ID,
+          ACCOUNT_EMAIL, ENTERED_CLIENT);
+      verify(fixture.requestStore, never()).findSubscriptionForAccount(anyString(), anyString());
+      verifyNoInteractions(fixture.portalService);
+    }
+  }
+
+  /**
+   * ETP-5051 (O-1b, QA) — client ids are matched exactly: a lowercase variant of an owned id is
+   * passed through unchanged, matches nothing and answers 404, opening no portal.
+   */
+  @Test
+  public void cookiePostPortalWithALowercaseVariantOfAnOwnedClientAnswers404() throws Exception {
+    String owned = "95E2A8B50A254B2AAE6774B8C2F28120";
+    Fixture fixture = new Fixture();
+    when(fixture.goSessionService.resolve(SESSION_TOKEN)).thenReturn(fixture.validSession());
+    CheckoutRequest row = purchase("sub_row", "cus_row", owned);
+    when(fixture.requestStore.findSubscriptionForAccountClient(ACCOUNT_ID, ACCOUNT_EMAIL, owned))
+        .thenReturn(row);
+
+    ResponseCapture resp = cookiePostPortalWithBody(fixture,
+        new JSONObject().put("clientId", owned.toLowerCase()).toString());
+
+    assertEquals(404, resp.status);
+    assertEquals("NO_SUBSCRIPTION", resp.errorCode());
+    verify(fixture.requestStore).findSubscriptionForAccountClient(ACCOUNT_ID, ACCOUNT_EMAIL,
+        owned.toLowerCase());
+    verify(fixture.requestStore, never()).findSubscriptionForAccountClient(ACCOUNT_ID,
+        ACCOUNT_EMAIL, owned);
+    verifyNoInteractions(fixture.portalService);
   }
 
   /** ETP-5051 (O-1b) — valid JSON that is not an object is as bad a body as broken JSON. */

@@ -94,6 +94,33 @@ class EnvironmentPlanCacheTest {
     assertEquals(SubscriptionService.STATUS_ACTIVE, cache.status(PAID_CLIENT));
   }
 
+  /**
+   * QA — a past-due row the customer has also set to cancel: no renewal date, and the flag changes
+   * nothing else the cache reports (plan, status, the coarse plan that keeps it productive while
+   * Stripe retries). The grace anchor is the lifecycle's, never read here.
+   */
+  @Test
+  void aPastDueRowSetToCancelReportsNoRenewalAndOtherwiseReadsAsWithoutTheFlag() {
+    Subscription cancelling =
+        withPeriodEnd(subscriptionOn(PLAN_KEY, SubscriptionService.STATUS_PAST_DUE));
+    when(cancelling.isCancelAtPeriodEnd()).thenReturn(true);
+    when(cancelling.getGraceAnchor()).thenReturn(Date.from(Instant.parse("2026-10-10T00:00:00Z")));
+    Subscription plain =
+        withPeriodEnd(subscriptionOn(PLAN_KEY, SubscriptionService.STATUS_PAST_DUE));
+    when(plain.isCancelAtPeriodEnd()).thenReturn(false);
+
+    EnvironmentPlanCache.PlanView flagged = cacheWith(PAID_CLIENT, cancelling)
+        .viewFor(PAID_CLIENT);
+    EnvironmentPlanCache.PlanView unflagged = cacheWith(PAID_CLIENT, plain).viewFor(PAID_CLIENT);
+
+    assertNull(flagged.renewalAt());
+    assertEquals(SubscriptionService.STATUS_PAST_DUE, flagged.status());
+    assertEquals(unflagged.status(), flagged.status());
+    assertEquals(unflagged.planKey(), flagged.planKey());
+    assertEquals(unflagged.legacyPlan(), flagged.legacyPlan());
+    assertTrue(cacheWith(PAID_CLIENT, cancelling).isProductive(PAID_CLIENT));
+  }
+
   @Test
   void reportsNoRenewalForAPastDueCanceledOrClosedSubscription() {
     assertNull(cacheWith(PAID_CLIENT,

@@ -1355,6 +1355,48 @@ class EtendoGoJwtDalHelperTest {
     }
 
     @Test
+    @DisplayName("ETP-5051 QA: a past-due tenant set to cancel at period end reports no "
+        + "renewalAt and the same grace, due date and access as without the flag")
+    void aPastDueTenantSetToCancelKeepsItsGraceAndAccess() throws Exception {
+      String clientId = givenTenant();
+      java.time.Instant anchor = givenPastDueTenantOutOfGrace();
+
+      JSONObject flagged = buildWithPlanRow(clientId, true, anchor);
+      JSONObject unflagged = buildWithPlanRow(clientId, false, anchor);
+
+      assertTrue(flagged.has("renewalAt"), flagged.toString());
+      assertTrue(flagged.isNull("renewalAt"), flagged.toString());
+      assertEquals(anchor.plus(java.time.Duration.ofDays(
+          TenantEnvironmentLifecycleService.DEFAULT_GRACE_DAYS)).toString(),
+          flagged.getString("graceEndsAt"));
+      assertEquals(anchor.toString(), flagged.getString("renewalDueAt"));
+      assertEquals("PAST_DUE", flagged.getString("subscriptionStatus"));
+      assertEquals("SUBSCRIPTION_REQUIRED", flagged.getString("accessState"));
+      assertEquals(String.valueOf(unflagged), String.valueOf(flagged));
+    }
+
+    /**
+     * The environment entry with the plan cache built from the tenant's own past-due row, whose
+     * {@code CANCEL_AT_PERIOD_END} is {@code cancelling}; enforcement on.
+     */
+    private JSONObject buildWithPlanRow(String clientId, boolean cancelling,
+        java.time.Instant anchor) throws Exception {
+      Subscription row = mock(Subscription.class);
+      when(row.getSubscriptionStatus()).thenReturn("past_due");
+      when(row.getGraceAnchor()).thenReturn(Date.from(anchor));
+      when(row.getCurrentPeriodEnd())
+          .thenReturn(Date.from(anchor.plus(java.time.Duration.ofDays(30))));
+      when(row.isCancelAtPeriodEnd()).thenReturn(cancelling);
+      try (MockedStatic<com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag> flag =
+          mockStatic(com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag.class)) {
+        flag.when(() -> com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag
+            .isEnforcementSwitchedOff(anyString())).thenReturn(false);
+        return EtendoGoJwtDalHelper.buildEnvironmentJson(client, null, environmentUser,
+            EnvironmentPlanCache.of(Map.of(clientId, row)));
+      }
+    }
+
+    @Test
     @DisplayName("ETP-5049: a current tenant reports graceEndsAt as JSON null even with a stored "
         + "due date")
     void aCurrentTenantReportsANullGraceEnd() throws Exception {
