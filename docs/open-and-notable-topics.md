@@ -1123,33 +1123,30 @@ quota: no other create pays for it. The stored `aggregate` takes no lock — it 
 usage job, so its cap is approximate anyway and may be overshot by what was created since the last
 run.
 
+**Which creates are checked: a per-client cache** (redesign, decided by Martin Taal 2026-10-24).
+`QuotaClientCache` keeps, per client id, the client's open subscription (period, closed flag) and
+its plan's active `block` quotas on declarative resources, grouped by the entity each counts. An
+entry is built on the request's own session through one `DalQuotaLookup.forTenant` call and trusted
+for 60 s; a client with no block quota gets an empty entry, cached too. A create of an entity the
+request's client does not cap returns at once with **no query**, whatever other clients' plans cap
+— this replaced a global index of every capped entity, which made a tenant with no quota pay one
+row-match query per create of an entity some other plan capped (review N4). A quota switched on
+or off, a plan change or a renewal reaches a client's creates within 60 s. The map is keyed by
+client id, not by HTTP session (bearer, batch and MCP requests have none), and bounded: expired
+entries are swept at most once a minute when an entry is stored, and if 10 000 entries are still
+held after a sweep the map is cleared and each client rebuilds its entry on its next create.
+
 **A failing check** (review B1). An error raised before any SQL (an invalid fragment, a missing
 strategy counter) fails open: logged, the create stands. An error from the database — or a
 transaction Hibernate marked rollback-only — has poisoned the request's transaction, so the create
 fails **closed**: rolled back, answered 500 `QUOTA_CHECK_FAILED` (in a batch: a failed operation,
-the batch rolls back). The quota *reports* and the index refresh never run on the request's
-transaction (`IsolatedDalRead`), so a failing report cannot poison what the request writes. Each
-report is one hop to a bounded pool of 4 daemon workers (64 queued, more refused and reported as
-`[]`), with a 25 s `statement_timeout` inside the worker's transaction and a 30 s wait in the
-caller (re-review W2–W4). The reads a create waits for — the index rebuild and the usage-lag
-check — have their own pool of 2 workers (8 queued, 5 s wait, 4 s `statement_timeout`), so stuck
-reports never stall a create (second re-review W1).
-
-**A quota index that cannot be built fails open** (second re-review W1, decided by the developer;
-open to the coordinator). The index of block-quota'd entities is what tells a create whether to
-check at all. If its very first build fails (database down, the write-path pool full or timed
-out), there is nothing to check against: creates are **not** quota-checked, an ERROR saying
-*fails open* is logged, and the build is retried every 10 s instead of after the 1-minute TTL,
-until one succeeds. Failing closed instead would refuse every create of every entity — quota'd or
-not — on any instance whose catalog read hiccups at start, for a quota that is a commercial limit,
-not a safety one; and a database that cannot answer a 4 s catalog read cannot save the create
-either. Once an index was built, a failed rebuild keeps it for another minute, and a create never
-waits behind another create's rebuild: it is served the previous index.
-
-**Known cost (review N4, not done).** The row match runs for every created row of an indexed
-entity before the tenant's quotas are known, so a tenant with no `block` quota on that resource
-still pays one row-match query per create while some other plan has one. A pre-filter by the
-tenant's quotas would save it; not worth it until it shows up.
+the batch rolls back). A client's cache entry that cannot be built fails the create closed the
+same way: it was read on the request's session, and nothing says whether the create is capped.
+The quota *reports* never run on the request's transaction (`IsolatedDalRead`), so a failing
+report cannot poison what the request writes. Each report is one hop to a bounded pool of 4 daemon
+workers (64 queued, more refused and reported as `[]`), with a 25 s `statement_timeout` inside the
+worker's transaction and a 30 s wait in the caller (re-review W2–W4). The usage-lag WARN is checked
+by the reports and the usage job, never on a create.
 
 ## 5. Handed forward to later tickets
 
@@ -1486,8 +1483,8 @@ evaluator (`com.etendoerp.go.usage.quota.QuotaEvaluator`) reads the quota rows e
 `PlanCatalogService.listActiveQuotas` returns them — the reader of `GET /sws/go/billing/subscription`
 — so an inactive row is no row on every surface. No row means no evaluation and **no consumption
 query**; there is no `COALESCE`: a null included quantity is not evaluated (`QuotaRules.verdict`)
-rather than read as zero. On the write path an entity that no active `block` quota counts costs no
-query either (`QuotaEntityIndex`, rebuilt at most once a minute). The environment list
+rather than read as zero. On the write path an entity that no active `block` quota of the
+request's client counts costs no query either (`QuotaClientCache`, one lookup per client a minute). The environment list
 (`quotas` per environment, contract §4b) reads the enforced quota rows of all its plans in one
 query (`EnvironmentQuotaReport`), none when no listed tenant has a plan, and measures consumption
 only for a tenant whose plan has an enforced quota.

@@ -5059,12 +5059,20 @@ neither the 402 of the commercial access check (§4.1) nor a permission error.
   `error.detail`) and the batch rolls back as a unit; on MCP the same body arrives flattened
   (`code`, `quota`, `detail`). A customization whose `handle()` creates the row itself and
   short-circuits the default create is not checked; nor are rows created by processes.
-- **What it checks.** Structural, driven by catalog data: the declarative billing resources whose
-  `COUNTED_ENTITY` is the created entity and that some active `block` quota names (an in-memory
-  index rebuilt at most once a minute, so a quota change applies within a minute, no restart). The
-  new row is tested against each resource's HQL restriction (`UsageQueryComposer.composeRowMatch`),
-  then `QuotaEvaluator` decides for the row's tenant: a live count includes the new row (refused
-  when it went over), the stored aggregate is lagged (refused when one more would go over).
+- **What it checks.** Structural, driven by catalog data: the `block` quotas of the request's
+  client whose declarative resource's `COUNTED_ENTITY` is the created entity. They come from
+  `QuotaClientCache`, an in-memory map keyed by client id (not by HTTP session: bearer, batch and
+  MCP requests have none). An entry holds the client's open subscription (period, closed flag) and
+  its plan's active `block` quotas on declarative resources, grouped by counted entity; it is built
+  on the request's own session in one `DalQuotaLookup` call and trusted for 60 s, and a client with
+  no block quota gets an empty entry, cached too. So a quota switched on or off, a plan change or
+  a renewal reaches a client within 60 s, no restart, and a create of an entity the client does not
+  cap runs **no query**, whatever other clients cap. The map is bounded: expired entries are swept
+  at most once a minute, and it is cleared if 10 000 entries remain after a sweep. For a capped
+  entity the new row is tested against each resource's HQL restriction
+  (`UsageQueryComposer.composeRowMatch`), then `QuotaEvaluator` decides for the row's tenant: a live
+  count includes the new row (refused when it went over), the stored aggregate is lagged (refused
+  when one more would go over).
 - **What it does not see.** A resource that grows through a state change rather than a create —
   `POSTED_SALES_INVOICES` grows on posting, and the invoice is created unposted — never matches at
   create time and is never refused here. Accepted; such a quota is reported on every environment
@@ -5101,33 +5109,25 @@ neither the 402 of the commercial access check (§4.1) nor a permission error.
   batch's failed operation) and rolls back entirely; the other one goes through. Nothing is
   half-saved: the client retries the refused batch. A single create takes one lock and cannot
   deadlock this way.
+- **A client entry that cannot be built** fails the create closed with `QUOTA_CHECK_FAILED`:
+  it was read on the request's session, and nothing says whether the create is capped.
 - **Reports never touch the request's transaction.** The quota reports (environment entry, the
-  environment list, the account page), the quota-index refresh and the usage-lag check read in
-  their own session (`IsolatedDalRead`), so a failing read cannot poison what the request writes
-  afterwards. They run on two separate pools of named daemon workers, so slow reports can never
-  stall a create:
-
-  | Pool | Used by | Workers/queue | Caller waits | `statement_timeout` |
-  |---|---|---|---|---|
-  | reports (`etgo-isolated-read-`) | env. entry and list, account page | 4 / 64 | 30 s | 25 s |
-  | write path (`etgo-quota-read-`) | quota-index rebuild, usage-lag check | 2 / 8 | 5 s | 4 s |
-
-  Each report is **one** hop: the environment list's batched quota read and all its evaluations
-  together, not one per tenant. A read beyond a pool's queue is refused at once (a report answers
-  `[]`). PostgreSQL's `statement_timeout`, set for the worker's transaction, really stops a slow
-  query; cancelling the Java future would not. When the caller stops waiting, the worker is
-  interrupted and the report stops before its next tenant or quota. After the first database
-  failure in a hop, the remaining tenants are not read (that session's transaction is aborted) and
-  one log line gives their count. The worker ends like a request thread
+  environment list, the account page) and the usage-lag check read in their own session
+  (`IsolatedDalRead`), so a failing read cannot poison what the request writes afterwards. They run
+  on a bounded pool of 4 named daemon workers (`etgo-isolated-read-N`) with 64 queued reads; a read
+  beyond that is refused at once and the report answers `[]`. Each report is **one** hop: the
+  environment list's batched quota read and all its evaluations together, not one per tenant. The
+  worker sets `statement_timeout` to 25 s for its transaction (PostgreSQL really stops the query;
+  cancelling the Java future would not) and the caller waits at most 30 s. When the caller stops
+  waiting, the worker is interrupted and the report stops before its next tenant or quota. After
+  the first database failure in a hop, the remaining tenants are not read (that session's
+  transaction is aborted) and one log line gives their count. The worker ends like a request thread
   (`DalThreadCleaner.cleanWithRollback()`, admin-mode stack cleared), with an `OBContext` of its
   own built from the caller's user, role, client, organization, language and warehouse. Idle
-  workers end after a minute; both pools stop in `NeoServlet.destroy()`, which cancels the reads
+  workers end after a minute; the pool stops in `NeoServlet.destroy()`, which cancels the reads
   still queued.
-- **The quota index is never waited on twice.** While one create rebuilds the expired index,
-  other creates are served the previous one. A rebuild that fails keeps the previous index for
-  another minute. Until a first build succeeds, the index is empty: no create is quota-checked
-  (fails open) and the build is retried every 10 s (`open-and-notable-topics.md` §4.19).
-- **A failed usage-lag read** is cached for a minute like a successful one.
+- **The usage-lag WARN is never checked on a create.** The reports and the usage job check it; a
+  failed lag read is cached for a minute like a successful one.
 - **Write warnings** (a WARN verdict on a create) are not returned on this path.
 
 ## 5. Configuration
