@@ -94,8 +94,9 @@ public final class IsolatedDalRead {
 
   private static final ThreadLocal<Boolean> IN_WORKER = new ThreadLocal<>();
 
-  private static final Pool REPORTS = new Pool("etgo-isolated-read-", WORKER_THREADS,
-      QUEUE_CAPACITY, STATEMENT_TIMEOUT_MS);
+  private static final String CAP_STATEMENTS_SQL =
+      "set local statement_timeout = " + STATEMENT_TIMEOUT_MS;
+  private static final AtomicReference<ThreadPoolExecutor> EXECUTOR = new AtomicReference<>();
 
   private IsolatedDalRead() {
   }
@@ -123,7 +124,7 @@ public final class IsolatedDalRead {
    * @return what {@code read} returned
    */
   static <T> T call(Supplier<T> read, long timeoutMillis) {
-    return REPORTS.call(read, timeoutMillis);
+    return submit(read, timeoutMillis);
   }
 
   /**
@@ -140,115 +141,96 @@ public final class IsolatedDalRead {
   }
 
   /**
-   * Stops the workers and cancels the reads still queued, so their callers stop
-   * waiting at once. Called from {@code NeoServlet#destroy()}, beside the batch job workers; the
-   * next call builds a new pool.
+   * Stops the workers and cancels the reads still queued, so their callers stop waiting at once.
+   * Called from {@code NeoServlet#destroy()}, beside the batch job workers; the next call builds a
+   * new pool.
    */
   public static void shutdown() {
-    REPORTS.shutdown();
+    ThreadPoolExecutor local = EXECUTOR.getAndSet(null);
+    if (local == null) {
+      return;
+    }
+    for (Runnable queued : local.shutdownNow()) {
+      if (queued instanceof Future) {
+        ((Future<?>) queued).cancel(false);
+      }
+    }
   }
 
-  /** One bounded pool of isolated workers. */
-  private static final class Pool {
-    private final String threadPrefix;
-    private final int workers;
-    private final int queueCapacity;
-    private final String capStatementsSql;
-    private final AtomicReference<ThreadPoolExecutor> executor = new AtomicReference<>();
-
-    private Pool(String threadPrefix, int workers, int queueCapacity, long statementTimeoutMs) {
-      this.threadPrefix = threadPrefix;
-      this.workers = workers;
-      this.queueCapacity = queueCapacity;
-      this.capStatementsSql = "set local statement_timeout = " + statementTimeoutMs;
+  private static <T> T submit(Supplier<T> read, long timeoutMillis) {
+    if (Boolean.TRUE.equals(IN_WORKER.get())) {
+      return read.get();
     }
-
-    private <T> T call(Supplier<T> read, long timeoutMillis) {
-      if (Boolean.TRUE.equals(IN_WORKER.get())) {
-        return read.get();
-      }
-      WorkerContext context = WorkerContext.of(OBContext.getOBContext());
-      Future<T> future;
-      try {
-        future = executor().submit(() -> runIsolated(read, context));
-      } catch (RejectedExecutionException e) {
-        throw new IllegalStateException("Isolated read refused: all " + workers
-            + " workers busy and " + queueCapacity + " reads queued", e);
-      }
-      try {
-        return future.get(timeoutMillis, TimeUnit.MILLISECONDS);
-      } catch (ExecutionException e) {
-        Throwable cause = e.getCause();
-        if (cause instanceof RuntimeException) {
-          throw (RuntimeException) cause;
-        }
-        throw new IllegalStateException("Isolated read failed", cause);
-      } catch (CancellationException e) {
-        throw new IllegalStateException("Isolated read cancelled: the pool shut down", e);
-      } catch (TimeoutException e) {
-        future.cancel(true);
-        throw new IllegalStateException("Isolated read timed out after " + timeoutMillis + " ms",
-            e);
-      } catch (InterruptedException e) {
-        future.cancel(true);
-        Thread.currentThread().interrupt();
-        throw new IllegalStateException("Interrupted while waiting for an isolated read", e);
-      }
+    WorkerContext context = WorkerContext.of(OBContext.getOBContext());
+    Future<T> future;
+    try {
+      future = executor().submit(() -> runIsolated(read, context));
+    } catch (RejectedExecutionException e) {
+      throw new IllegalStateException("Isolated read refused: all " + WORKER_THREADS
+          + " workers busy and " + QUEUE_CAPACITY + " reads queued", e);
     }
+    try {
+      return future.get(timeoutMillis, TimeUnit.MILLISECONDS);
+    } catch (ExecutionException e) {
+      Throwable cause = e.getCause();
+      if (cause instanceof RuntimeException) {
+        throw (RuntimeException) cause;
+      }
+      throw new IllegalStateException("Isolated read failed", cause);
+    } catch (CancellationException e) {
+      throw new IllegalStateException("Isolated read cancelled: the pool shut down", e);
+    } catch (TimeoutException e) {
+      future.cancel(true);
+      throw new IllegalStateException("Isolated read timed out after " + timeoutMillis + " ms",
+          e);
+    } catch (InterruptedException e) {
+      future.cancel(true);
+      Thread.currentThread().interrupt();
+      throw new IllegalStateException("Interrupted while waiting for an isolated read", e);
+    }
+  }
 
-    private <T> T runIsolated(Supplier<T> read, WorkerContext context) {
-      IN_WORKER.set(Boolean.TRUE);
+  private static <T> T runIsolated(Supplier<T> read, WorkerContext context) {
+    IN_WORKER.set(Boolean.TRUE);
+    try {
+      // SET LOCAL ends with the transaction, so the pooled connection goes back with the default.
+      OBDal.getInstance().getSession().createNativeQuery(CAP_STATEMENTS_SQL).executeUpdate();
+      context.bind();
+      return read.get();
+    } finally {
       try {
-        // SET LOCAL ends with the transaction, so the pooled connection goes back with the default.
-        OBDal.getInstance().getSession().createNativeQuery(capStatementsSql).executeUpdate();
-        context.bind();
-        return read.get();
+        DalThreadCleaner.getInstance().cleanWithRollback();
+      } catch (RuntimeException e) {
+        log.debug("Cleaning the session of an isolated read failed", e);
       } finally {
-        try {
-          DalThreadCleaner.getInstance().cleanWithRollback();
-        } catch (RuntimeException e) {
-          log.debug("Cleaning the session of an isolated read failed", e);
-        } finally {
-          OBContext.clearAdminModeStack();
-          IN_WORKER.remove();
-        }
+        OBContext.clearAdminModeStack();
+        IN_WORKER.remove();
       }
     }
+  }
 
-    /** The live pool, built on first use and after a shutdown; never null. */
-    private ThreadPoolExecutor executor() {
-      for (;;) {
-        ThreadPoolExecutor local = executor.get();
-        if (local != null) {
-          return local;
-        }
-        ThreadPoolExecutor created = build();
-        if (executor.compareAndSet(null, created)) {
-          return created;
-        }
-        created.shutdownNow();
+  /** The live pool, built on first use and after a shutdown; never null. */
+  private static ThreadPoolExecutor executor() {
+    for (;;) {
+      ThreadPoolExecutor local = EXECUTOR.get();
+      if (local != null) {
+        return local;
       }
+      ThreadPoolExecutor created = build();
+      if (EXECUTOR.compareAndSet(null, created)) {
+        return created;
+      }
+      created.shutdownNow();
     }
+  }
 
-    private ThreadPoolExecutor build() {
-      ThreadPoolExecutor pool = new ThreadPoolExecutor(workers, workers, 60L, TimeUnit.SECONDS,
-          new ArrayBlockingQueue<>(queueCapacity), new DaemonThreads(threadPrefix),
-          new ThreadPoolExecutor.AbortPolicy());
-      pool.allowCoreThreadTimeOut(true);
-      return pool;
-    }
-
-    private void shutdown() {
-      ThreadPoolExecutor local = executor.getAndSet(null);
-      if (local == null) {
-        return;
-      }
-      for (Runnable queued : local.shutdownNow()) {
-        if (queued instanceof Future) {
-          ((Future<?>) queued).cancel(false);
-        }
-      }
-    }
+  private static ThreadPoolExecutor build() {
+    ThreadPoolExecutor pool = new ThreadPoolExecutor(WORKER_THREADS, WORKER_THREADS, 60L,
+        TimeUnit.SECONDS,
+        new ArrayBlockingQueue<>(QUEUE_CAPACITY), new DaemonThreads(),
+        new ThreadPoolExecutor.AbortPolicy());
+    pool.allowCoreThreadTimeOut(true);
+    return pool;
   }
 
   /** The ids of the caller's context, to build an equivalent one on the worker. */
@@ -301,16 +283,11 @@ public final class IsolatedDalRead {
 
   /** Named daemon threads, so a pending read never keeps the JVM alive. */
   private static final class DaemonThreads implements ThreadFactory {
-    private final String prefix;
     private final AtomicInteger counter = new AtomicInteger();
-
-    private DaemonThreads(String prefix) {
-      this.prefix = prefix;
-    }
 
     @Override
     public Thread newThread(Runnable runnable) {
-      Thread thread = new Thread(runnable, prefix + counter.incrementAndGet());
+      Thread thread = new Thread(runnable, "etgo-isolated-read-" + counter.incrementAndGet());
       thread.setDaemon(true);
       return thread;
     }

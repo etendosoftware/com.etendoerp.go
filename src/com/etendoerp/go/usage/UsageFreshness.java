@@ -36,7 +36,9 @@ import org.openbravo.dal.service.OBDal;
  * never on a create and never on a timer of its own. The last-run read is cached for a minute (a
  * failed read too) and the WARN is throttled to one line an hour. The production read runs in its
  * own session ({@link IsolatedDalRead#call}); inside a report, which already runs on an isolated
- * worker, that is the report's own session.
+ * worker, that is the report's own session. So a run-log read that fails on the database aborts
+ * that report's session: the report answers {@code []} — at most once a minute, since the failed
+ * read is cached — and never touches the request's transaction.
  *
  * <p><b>Known limit:</b> the run log has one row per resource and tenant that the run counted, and
  * a run that counted nothing for anyone writes none. An installation with resources but no usage at
