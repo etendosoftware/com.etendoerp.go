@@ -5093,10 +5093,24 @@ neither the 402 of the commercial access check (§4.1) nor a permission error.
   (`pg_advisory_xact_lock`) right before its count, held to commit, so concurrent creates cannot
   both slip under the cap. The stored `aggregate` takes none: its cap is approximate by the usage
   job's lag.
+- **Two batches can deadlock on those locks.** A batch that creates rows of two quota'd resources
+  takes one lock per resource, in the order its operations run. Two concurrent batches of the same
+  tenant that touch the same two resources in opposite orders wait for each other; PostgreSQL
+  detects it and aborts one of them with `40P01` (deadlock detected). That batch's check fails on
+  the database, so the batch is refused with `QUOTA_CHECK_FAILED` (status 500, carried in the
+  batch's failed operation) and rolls back entirely; the other one goes through. Nothing is half-saved: the client retries the refused batch. A single create takes one
+  lock and cannot deadlock this way.
 - **Reports never touch the request's transaction.** The quota reports (environment entry, the
   environment list, the account page), the quota-index refresh and the usage-lag check read in
   their own session (`IsolatedDalRead`), so a failing report read cannot poison what the request
-  writes afterwards.
+  writes afterwards. Each report is **one** hop — the environment list's batched quota read and
+  all its evaluations together, not one per tenant — to a bounded pool of 4 named daemon workers
+  with 64 queued reads; a read beyond that is refused and the report answers `[]`. The worker sets
+  `statement_timeout` to 25 s for its transaction (PostgreSQL really stops the query; cancelling the
+  Java future would not), the caller waits at most 30 s, and the worker ends like a request thread
+  (`DalThreadCleaner.cleanWithRollback()`, admin-mode stack cleared) with an `OBContext` of its own
+  built from the caller's user, role, client and organization. A failed usage-lag read is cached
+  for a minute like a successful one. The pool stops in `NeoServlet.destroy()`.
 - **Write warnings** (a WARN verdict on a create) are not returned on this path.
 
 ## 5. Configuration

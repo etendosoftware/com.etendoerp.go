@@ -1128,7 +1128,10 @@ strategy counter) fails open: logged, the create stands. An error from the datab
 transaction Hibernate marked rollback-only — has poisoned the request's transaction, so the create
 fails **closed**: rolled back, answered 500 `QUOTA_CHECK_FAILED` (in a batch: a failed operation,
 the batch rolls back). The quota *reports* and the index refresh never run on the request's
-transaction (`IsolatedDalRead`), so a failing report cannot poison what the request writes.
+transaction (`IsolatedDalRead`), so a failing report cannot poison what the request writes. Each
+report is one hop to a bounded pool of 4 daemon workers (64 queued, more refused and reported as
+`[]`), with a 25 s `statement_timeout` inside the worker's transaction and a 30 s wait in the
+caller (re-review W2–W4).
 
 **Known cost (review N4, not done).** The row match runs for every created row of an indexed
 entity before the tenant's quotas are known, so a tenant with no `block` quota on that resource
@@ -1558,8 +1561,6 @@ modulescripts*). So the honest fix is the alias, not a migration.
 
 **Follow-up:** none required. Dropping `sum` from the check needs a data-fix run before the deploy
 that removes it; no ticket.
-
-**Follow-up:** none.
 
 ### ✅ 5.8 A quota on a yearly plan is a yearly quota
 
