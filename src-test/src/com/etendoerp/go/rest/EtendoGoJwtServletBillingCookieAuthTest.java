@@ -110,7 +110,8 @@ public class EtendoGoJwtServletBillingCookieAuthTest {
   private static final String NEWEST_CLIENT = "client-newest";
   /** Portal bodies that name no environment; null stands for a request with no body at all. */
   private static final String[] NO_CLIENT_BODIES = { null, "", "   ", "{}",
-      "{\"clientId\":\"0\"}", "{\"clientId\":\"  \"}", "{\"clientId\":\"\"}" };
+      "{\"clientId\":\"0\"}", "{\"clientId\":\"  \"}", "{\"clientId\":\"\"}",
+      "{\"clientId\":null}" };
 
   // ===================== GET /billing/subscription (cookie) =====================
 

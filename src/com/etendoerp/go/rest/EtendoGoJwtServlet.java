@@ -1603,8 +1603,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
   /**
    * ETP-5051 (O-1b) — the {@code clientId} of the portal's optional JSON body, or {@code null}
-   * when there is no body, the body is blank, or it names no client ({@code "0"}, the System
-   * client, counts as none).
+   * when there is no body, the body is blank, or it names no client (an absent key, a JSON null,
+   * a blank string or {@code "0"}, the System client, all count as none).
    *
    * @throws JSONException when a non-blank body is not a JSON object
    */
@@ -1614,8 +1614,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     if (StringUtils.isBlank(raw)) {
       return null;
     }
-    String clientId = StringUtils.trimToNull(
-        BoundedJsonParser.parseObject(raw).optString(FIELD_CLIENT_ID, ""));
+    JSONObject body = BoundedJsonParser.parseObject(raw);
+    // A JSON null is an absent key: optString would turn it into the string "null".
+    if (!body.has(FIELD_CLIENT_ID) || body.isNull(FIELD_CLIENT_ID)) {
+      return null;
+    }
+    String clientId = StringUtils.trimToNull(body.optString(FIELD_CLIENT_ID, ""));
     return ZERO_ID.equals(clientId) ? null : clientId;
   }
 

@@ -690,7 +690,7 @@ environment, whatever environment the session is in, so the portal takes an opti
 - **`clientId` present** (non-blank and not `"0"`): `findSubscriptionForAccountClient(account id,
   email, clientId)`, the same ownership-carrying query. A client the account did not buy, or a
   purchase without a Stripe customer, answers `404 NO_SUBSCRIPTION`, as before.
-- **No body, an empty body, or no `clientId`:** the rule above (`findShownSubscription`). The
+- **No body, an empty body, or no `clientId`** (absent, JSON `null`, blank or `"0"`): the rule above (`findShownSubscription`). The
   `/account` Subscription section keeps sending no body.
 - **A body that is not a JSON object:** `400 "Invalid JSON body"`, the servlet's usual envelope,
   with nothing looked up.
