@@ -651,7 +651,8 @@ of the subscription (ETP-5049, additive):
   "planQuotas": [
     { "resourceKey": "POSTED_SALES_INVOICES", "resourceName": "POSTED_SALES_INVOICES",
       "unitLabel": "Inv", "includedQty": 500, "enforcementMode": "warn", "warningThreshold": 80,
-      "period": "month" }
+      "period": "month", "consumptionSource": "aggregate", "consumed": 412, "verdict": "WARN",
+      "periodStart": "2026-10-23", "periodEnd": "2026-11-23" }
   ]
 }
 ```
@@ -666,8 +667,14 @@ of the subscription (ETP-5049, additive):
   `unitLabel` come from `ETGO_BILLING_RESOURCE`; `includedQty`, `enforcementMode`
   (`warn`/`block`/`off`) and `warningThreshold` (percent, may be null) from the quota row; `period`
   is the plan's billing interval (`month`/`year`, null when the plan has none), which is the quota's
-  consumption window (`open-and-notable-topics.md` §5.5, §5.8). It is empty when there is no plan
-  **and** when the plan has no quota rows — with a `planKey`, empty means **unlimited** (§5.1).
+  consumption window (`open-and-notable-topics.md` §5.5, §5.8). ETP-5051 adds the measurement:
+  `consumptionSource`, `consumed` and `verdict` (null when unmeasured), and `periodStart` /
+  `periodEnd`, the **counted window as date-only strings** (`yyyy-MM-dd`, server-local days): the
+  first counted day and the exclusive end day, so consumption covers `[periodStart, periodEnd)`.
+  They are not the subscription's UTC instants, which can name the day before (a period starting
+  at 00:30 CEST is 22:30 UTC the previous day). Null with no current period. It is empty when there
+  is no plan **and** when the plan has no quota rows — with a `planKey`, empty means **unlimited**
+  (§5.1).
 - **`graceEndsAt`** is computed by `EnvironmentAccessPolicy.graceEndsAt`: the stored renewal due
   date plus `etendo.go.billing.grace.days`, for a `PAST_DUE` subscription only. The access policy
   and the per-environment `graceEndsAt` of `GET /sws/go/environments` use the same method, so the

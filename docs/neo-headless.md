@@ -5046,8 +5046,14 @@ HTTP 403
              "quota": { "resourceKey": "...", "resourceName": "...", "unitLabel": "...",
                         "includedQty": 100, "enforcementMode": "block", "warningThreshold": 80,
                         "period": "month", "consumptionSource": "live", "consumed": 100,
-                        "verdict": "DENY", "periodStart": "...", "periodEnd": "..." } } }
+                        "verdict": "DENY", "periodStart": "2026-10-23",
+                        "periodEnd": "2026-11-23" } } }
 ```
+
+`periodStart` / `periodEnd` are the counted window as date-only strings (`yyyy-MM-dd`,
+server-local days): the first counted day and the exclusive end day, so consumption covers
+`[periodStart, periodEnd)`. Every `QuotaItem` (this refusal, `planQuotas` on the account page,
+`quotas` on environment entry and on the environment list) carries the same two fields.
 
 Clients key off `error.code === "QUOTA_EXCEEDED"`, never off the status or the message: it is
 neither the 402 of the commercial access check (§4.1) nor a permission error.
@@ -5072,7 +5078,10 @@ neither the 402 of the commercial access check (§4.1) nor a permission error.
   entity the new row is tested against each resource's HQL restriction
   (`UsageQueryComposer.composeRowMatch`), then `QuotaEvaluator` decides for the row's tenant: a live
   count includes the new row (refused when it went over), the stored aggregate is lagged (refused
-  when one more would go over).
+  when one more would go over). On the period's last, partial day — from local midnight of the
+  period's end — the new row is outside the counted window, so the live count is compared as is.
+  The periodless-subscription WARN is throttled to one line per tenant per hour across every
+  evaluator.
 - **What it does not see.** A resource that grows through a state change rather than a create —
   `POSTED_SALES_INVOICES` grows on posting, and the invoice is created unposted — never matches at
   create time and is never refused here. Accepted; such a quota is reported on every environment

@@ -1580,7 +1580,8 @@ that removes it; no ticket.
 
 The window is the billing period (§5.5), so `INCLUDED_QTY` on a `year` plan is consumed over the
 whole year. The **Plans** window's **Quotas** tab help and the **Included Qty** help now say so, and
-every `QuotaItem` carries `period` (the plan interval) with `periodStart` / `periodEnd`.
+every `QuotaItem` carries `period` (the plan interval) with `periodStart` / `periodEnd`: the
+counted window as server-local days (`yyyy-MM-dd`, end exclusive), not the period's UTC instants.
 
 **Follow-up:** the operator documentation (Sage, ETP-5051 docs pass), and the SPA showing `period`
 next to the included quantity (ETP-5051 frontend).
