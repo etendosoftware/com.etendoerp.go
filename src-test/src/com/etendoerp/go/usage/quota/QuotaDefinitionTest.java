@@ -21,6 +21,7 @@ import static com.etendoerp.go.usage.quota.QuotaTestFixtures.CLIENT;
 import static com.etendoerp.go.usage.quota.QuotaTestFixtures.NOW;
 import static com.etendoerp.go.usage.quota.QuotaTestFixtures.PERIOD_END;
 import static com.etendoerp.go.usage.quota.QuotaTestFixtures.PERIOD_START;
+import static com.etendoerp.go.usage.quota.QuotaTestFixtures.quota;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -181,5 +182,37 @@ class QuotaDefinitionTest {
     assertNull(tenant.currentPeriod(NOW));
     assertNull(tenant.getPlanInterval(), "a row without a plan has no interval");
     assertTrue(tenant.getQuotas().isEmpty());
+  }
+
+  @Test
+  void withQuotasKeepsTheTenantIntervalAndPeriodAndSwapsOnlyTheRows() {
+    TenantQuotas period = new TenantQuotas(CLIENT, "year", PERIOD_START, PERIOD_END, false,
+        List.of(quota("OLD", "block", 10L, 80L).build()));
+
+    TenantQuotas swapped = period.withQuotas(List.of(quota("NEW", "warn", 20L, 90L).build()));
+
+    assertEquals(CLIENT, swapped.getClientId());
+    assertEquals("year", swapped.getPlanInterval());
+    assertFalse(swapped.isClosed());
+    assertEquals(PERIOD_START, swapped.currentPeriod(NOW).getStart());
+    assertEquals(PERIOD_END, swapped.currentPeriod(NOW).getEnd());
+    assertEquals(1, swapped.getQuotas().size());
+    assertEquals("NEW", swapped.getQuotas().get(0).getResourceKey());
+    assertEquals("OLD", period.getQuotas().get(0).getResourceKey(), "the original is unchanged");
+    assertThrows(UnsupportedOperationException.class, () -> swapped.getQuotas().clear());
+  }
+
+  @Test
+  void withQuotasKeepsAClosedRowClosedAndReadsNullAsNoRows() {
+    TenantQuotas closed = new TenantQuotas(CLIENT, "month", PERIOD_START, PERIOD_END, true, null);
+
+    TenantQuotas swapped = closed.withQuotas(null);
+    TenantQuotas withRows = closed.withQuotas(List.of(quota("DOCS", "block", 10L, 80L).build()));
+
+    assertTrue(swapped.getQuotas().isEmpty());
+    assertTrue(withRows.isClosed());
+    assertNull(withRows.currentPeriod(NOW), "a closed row still has no current period");
+    assertEquals("month", withRows.getPlanInterval());
+    assertEquals(CLIENT, withRows.getClientId());
   }
 }

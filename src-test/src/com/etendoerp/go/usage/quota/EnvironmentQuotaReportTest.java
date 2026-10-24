@@ -42,6 +42,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
+import java.util.function.Supplier;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.junit.jupiter.api.BeforeEach;
@@ -51,12 +52,14 @@ import com.etendoerp.go.schemaforge.data.BillingResource;
 import com.etendoerp.go.schemaforge.data.Plan;
 import com.etendoerp.go.schemaforge.data.PlanQuota;
 import com.etendoerp.go.schemaforge.data.Subscription;
+import com.etendoerp.go.usage.IsolatedReader;
 import com.etendoerp.go.usage.quota.QuotaTestFixtures.MutableClock;
 
 /**
  * The per-request quota report of the environment list: one batched read of the listed plans'
  * enforced quota rows, consumption only for a tenant that has one, and only the WARN and DENY
- * items reported. A failure never fails the list: it reports nothing.
+ * items reported. A failure never fails the list: it reports nothing. The loader and every
+ * evaluation run together inside one call of the injected {@link IsolatedReader}.
  *
  * @covers com.etendoerp.go.usage.quota.EnvironmentQuotaReport
  */
@@ -226,5 +229,122 @@ class EnvironmentQuotaReportTest {
 
     assertTrue(report.reportableFor(CLIENT).isEmpty());
     assertEquals(1, report.reportableFor(OTHER_CLIENT).size());
+  }
+
+  /** Counts the hops and records whether the loader and the evaluations ran inside one. */
+  private static final class CountingReader implements IsolatedReader {
+    private int calls;
+    private boolean inside;
+
+    @Override
+    public <T> T call(Supplier<T> read) {
+      calls++;
+      inside = true;
+      try {
+        return read.get();
+      } finally {
+        inside = false;
+      }
+    }
+  }
+
+  @Test
+  void theLoaderAndEveryEvaluationRunInsideExactlyOneReaderCall() {
+    CountingReader reads = new CountingReader();
+    List<Boolean> loaderInside = new ArrayList<>();
+    List<Boolean> consumptionInside = new ArrayList<>();
+    when(reader.read(any(), anyString(), any())).thenAnswer(invocation -> {
+      consumptionInside.add(reads.inside);
+      return 100L;
+    });
+    Map<String, Subscription> subscriptions = new LinkedHashMap<>();
+    subscriptions.put(CLIENT, subscription(plan("PLAN-1")));
+    subscriptions.put(OTHER_CLIENT, subscription(plan("PLAN-2")));
+
+    EnvironmentQuotaReport report = EnvironmentQuotaReport.build(subscriptions, evaluator,
+        planIds -> {
+          loaderInside.add(reads.inside);
+          return Map.of("PLAN-1", List.of(row("DOCS", "block", 100L)),
+              "PLAN-2", List.of(row("DOCS", "block", 100L)));
+        }, reads);
+
+    assertEquals(1, reads.calls);
+    assertEquals(List.of(true), loaderInside);
+    assertEquals(List.of(true, true), consumptionInside);
+    assertEquals(1, report.reportableFor(CLIENT).size());
+    assertEquals(1, report.reportableFor(OTHER_CLIENT).size());
+  }
+
+  @Test
+  void theReaderIsNotCalledWhenNoListedTenantHasAPlan() {
+    CountingReader reads = new CountingReader();
+    Map<String, Subscription> subscriptions = new HashMap<>();
+    subscriptions.put(CLIENT, null);
+    subscriptions.put(OTHER_CLIENT, subscription(null));
+
+    EnvironmentQuotaReport report = EnvironmentQuotaReport.build(subscriptions, evaluator,
+        loader(Collections.emptyMap()), reads);
+
+    assertSame(EnvironmentQuotaReport.empty(), report);
+    assertEquals(0, reads.calls);
+    assertTrue(loaderCalls.isEmpty());
+  }
+
+  @Test
+  void aSubscriptionWhosePlanCannotBeReadIsSkippedForThatTenantOnly() {
+    Subscription broken = mock(Subscription.class);
+    when(broken.getPlan()).thenThrow(new IllegalStateException("detached proxy"));
+    Map<String, Subscription> subscriptions = new LinkedHashMap<>();
+    subscriptions.put(CLIENT, broken);
+    subscriptions.put(OTHER_CLIENT, subscription(plan("PLAN-1")));
+    consumed("DOCS", 100L);
+    CountingReader reads = new CountingReader();
+
+    EnvironmentQuotaReport report = EnvironmentQuotaReport.build(subscriptions, evaluator,
+        loader(Map.of("PLAN-1", List.of(row("DOCS", "block", 100L)))), reads);
+
+    assertTrue(report.reportableFor(CLIENT).isEmpty());
+    assertEquals(1, report.reportableFor(OTHER_CLIENT).size());
+    assertEquals(1, reads.calls);
+    assertEquals(List.of(List.of("PLAN-1")), loaderCalls);
+    verify(reader, never()).read(any(), eq(CLIENT), any());
+  }
+
+  @Test
+  void aSubscriptionWhosePeriodCannotBeReadIsSkippedForThatTenantOnly() {
+    Subscription broken = subscription(plan("PLAN-BROKEN"));
+    when(broken.getCurrentPeriodStart()).thenThrow(new IllegalStateException("lazy load"));
+    Map<String, Subscription> subscriptions = new LinkedHashMap<>();
+    subscriptions.put(CLIENT, broken);
+    subscriptions.put(OTHER_CLIENT, subscription(plan("PLAN-1")));
+    consumed("DOCS", 100L);
+
+    EnvironmentQuotaReport report = EnvironmentQuotaReport.build(subscriptions, evaluator,
+        loader(Map.of("PLAN-1", List.of(row("DOCS", "block", 100L)),
+            "PLAN-BROKEN", List.of(row("DOCS", "block", 100L)))), new CountingReader());
+
+    assertTrue(report.reportableFor(CLIENT).isEmpty());
+    assertEquals(1, report.reportableFor(OTHER_CLIENT).size());
+    assertEquals(List.of(List.of("PLAN-1")), loaderCalls,
+        "a skipped tenant's plan is not even loaded");
+  }
+
+  @Test
+  void aReaderThatThrowsGivesAnEmptyReport() {
+    Map<String, Subscription> subscriptions = Map.of(CLIENT, subscription(plan("PLAN-1")));
+    consumed("DOCS", 100L);
+
+    EnvironmentQuotaReport report = EnvironmentQuotaReport.build(subscriptions, evaluator,
+        loader(Map.of("PLAN-1", List.of(row("DOCS", "block", 100L)))), new IsolatedReader() {
+          @Override
+          public <T> T call(Supplier<T> read) {
+            throw new IllegalStateException("Isolated read refused: all workers busy");
+          }
+        });
+
+    assertSame(EnvironmentQuotaReport.empty(), report);
+    assertEquals(0, report.quotasJsonFor(CLIENT).length());
+    assertTrue(loaderCalls.isEmpty());
+    verifyNoInteractions(reader);
   }
 }
