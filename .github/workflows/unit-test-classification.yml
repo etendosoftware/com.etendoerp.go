@@ -20,6 +20,8 @@ on:
       - 'scripts/back-merge-main.sh'
       - 'scripts/test_back_merge_main.py'
       - '.githooks/lib/git-conventions.sh'
+      - '.githooks/lib/relevance.sh'
+      - 'scripts/test_relevance.py'
       - '.github/workflows/unit-test-classification.yml'
       - '.githooks/post-rewrite'
       - '.githooks/lib/hooks-proof.sh'

@@ -1512,7 +1512,6 @@ public class McpToolRouterTest {
     assertFalse(body.startsWith("Error executing"));
   }
 
-
   /**
    * ETP-5051 — the quota gate wraps the insert of {@code etendo_create}: the add is the create
    * handed to {@code NeoQuotaWriteGate.run} (which picks its service, refuses before the write when

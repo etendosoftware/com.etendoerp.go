@@ -894,6 +894,11 @@ public class McpToolRouter {
     // short-circuits, null proceeds to generic persistence, and the handler may have mutated the
     // body in place. The other five MCP hook sites are deliberately left alone in this step.
     NeoContext hookCtx = McpHookExecutor.buildHookContext(specName, entityName, HTTP_METHOD_POST, null, filteredBody, adTab, sfEntity);
+    // ETP-5680: the mandatory-defaults pass above filled some keys with a fallback placeholder
+    // (the first combo option, ...). The hook context is a new one, so without this copy the
+    // customization could not tell a placeholder from a value the caller chose, and the REST path
+    // (where the pre-hook runs before any placeholder exists) and this one would disagree.
+    McpHookExecutor.forwardFallbackDefaults(ctx, hookCtx);
     NeoExtensionRequest customizationRequest = NeoExtensionRequest.builder()
         .qualifier(sfEntity.getJavaQualifier())
         .specName(specName)
@@ -1273,6 +1278,8 @@ public class McpToolRouter {
     if (assetId != null) {
       queryParams.put(McpConstants.PARAM_ASSET_ID, assetId);
     }
+    McpDefaultsView.copyRecordContext(args.optJSONObject(McpConstants.PARAM_RECORD_CONTEXT),
+        queryParams);
 
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
     SFEntity sfEntity = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, entityName);
