@@ -54,8 +54,19 @@ public final class KeyedLogThrottle {
    *     one {@code true} between them
    */
   public boolean shouldLog(String key) {
+    return shouldLog(key, clock.getAsLong());
+  }
+
+  /**
+   * {@link #shouldLog(String)} at a time the caller read from its own clock: for a throttle shared
+   * by callers that each carry their own time source.
+   *
+   * @param key what the line is about
+   * @param now the caller's time, in milliseconds
+   * @return {@code true} when the caller should log now
+   */
+  public boolean shouldLog(String key, long now) {
     String safeKey = key == null ? "" : key;
-    long now = clock.getAsLong();
     boolean[] due = new boolean[1];
     lastLoggedAt.compute(safeKey, (k, last) -> {
       if (last == null || now - last >= intervalMs) {
@@ -65,5 +76,10 @@ public final class KeyedLogThrottle {
       return last;
     });
     return due[0];
+  }
+
+  /** Forgets every key, so the next line of each is due at once. */
+  public void reset() {
+    lastLoggedAt.clear();
   }
 }

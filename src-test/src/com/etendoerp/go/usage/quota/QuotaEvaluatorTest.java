@@ -317,6 +317,7 @@ class QuotaEvaluatorTest {
 
     @BeforeEach
     void attach() {
+      QuotaEvaluator.resetPeriodlessWarnings();
       logs = TestLogCapture.attachTo(QuotaEvaluator.class, Level.WARN);
     }
 
@@ -381,6 +382,24 @@ class QuotaEvaluatorTest {
       List<String> warnings = logs.messagesAt(Level.WARN);
       assertEquals(1, warnings.size(), String.valueOf(warnings));
       assertTrue(warnings.get(0).startsWith("[QUOTA] Tenant " + CLIENT), warnings.get(0));
+    }
+
+    /**
+     * REPRO (ETP-5051 QA BUG-1): the environment list, environment entry and the write guard each
+     * hold their own evaluator. The WARN is still one line per tenant per hour across all of them.
+     */
+    @Test
+    void exactlyOneWarnPerTenantAcrossEvaluators() {
+      TenantQuotas periodless = tenantWithPeriod(CLIENT, null, null, false, overQuota());
+      QuotaEvaluator report = new QuotaEvaluator(lookup, reader, clock);
+      QuotaEvaluator writeCheck = new QuotaEvaluator(lookup, reader, clock);
+
+      evaluator.evaluate(periodless, Scope.ENFORCEMENT);
+      report.evaluate(periodless, Scope.ACCOUNT);
+      writeCheck.refusalForCreate(periodless, "RES-DOCS");
+
+      assertEquals(1, logs.messagesAt(Level.WARN).size(),
+          String.valueOf(logs.messagesAt(Level.WARN)));
     }
 
     @Test
@@ -462,6 +481,35 @@ class QuotaEvaluatorTest {
         assertEquals(PERIOD_START, evaluation.getPeriod().getStart());
         assertEquals("month", evaluation.getPlanInterval());
       }
+    }
+
+    /**
+     * REPRO (ETP-5051 QA): the counted window ends at local midnight of the period's end, so a row
+     * created on the last, partial day is not in the live count. Subtracting it anyway let one
+     * create more through.
+     */
+    @Test
+    void onThePeriodsLastPartialDayTheLiveCountIsTakenAsIs() {
+      QuotaDefinition definition = quota("DOCS", "block", 100L, null)
+          .source(ConsumptionSource.LIVE).build();
+      when(reader.read(eq(definition), eq(CLIENT), any())).thenReturn(100L);
+      clock.set(local(2026, 11, 17, 8, 0));
+
+      Optional<QuotaEvaluation> refusal =
+          evaluator.refusalForCreate(tenant(CLIENT, definition), "RES-DOCS");
+
+      assertTrue(refusal.isPresent(), "100 already counted before this create: refused");
+      assertEquals(Long.valueOf(100L), refusal.get().getConsumed());
+    }
+
+    @Test
+    void justBeforeTheLastDayTheNewRowIsStillSubtracted() {
+      QuotaDefinition definition = quota("DOCS", "block", 100L, null)
+          .source(ConsumptionSource.LIVE).build();
+      when(reader.read(eq(definition), eq(CLIENT), any())).thenReturn(100L);
+      clock.set(local(2026, 11, 16, 23, 59));
+
+      assertTrue(evaluator.refusalForCreate(tenant(CLIENT, definition), "RES-DOCS").isEmpty());
     }
 
     @Test

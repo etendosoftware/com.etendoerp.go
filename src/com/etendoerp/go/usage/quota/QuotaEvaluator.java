@@ -55,6 +55,13 @@ public class QuotaEvaluator {
   private static final Logger log = LogManager.getLogger(QuotaEvaluator.class);
 
   private static final long PERIODLESS_WARN_INTERVAL_MS = 3_600_000L;
+  /**
+   * Shared by every evaluator — the environment list, environment entry and the account page, the
+   * write guard — so the §5.9 WARN is one line per tenant per hour, not one per evaluator. Each
+   * evaluator passes its own clock's time.
+   */
+  private static final KeyedLogThrottle PERIODLESS_WARNINGS =
+      new KeyedLogThrottle(PERIODLESS_WARN_INTERVAL_MS, System::currentTimeMillis);
 
   /** What a caller needs measured. */
   public enum Scope {
@@ -74,7 +81,6 @@ public class QuotaEvaluator {
   private final ConsumptionReader reader;
   private final Clock clock;
   private final QuotaLock lock;
-  private final KeyedLogThrottle periodlessWarnings;
 
   /**
    * The write-check evaluator: reads on the request's own session, so a live count sees the row
@@ -111,7 +117,6 @@ public class QuotaEvaluator {
     this.reader = reader;
     this.clock = clock;
     this.lock = lock;
-    this.periodlessWarnings = new KeyedLogThrottle(PERIODLESS_WARN_INTERVAL_MS, clock::millis);
   }
 
   /**
@@ -126,6 +131,11 @@ public class QuotaEvaluator {
   public static QuotaEvaluator forReports() {
     return new QuotaEvaluator(new DalQuotaLookup(), new DalConsumptionReader(), Clock.systemUTC(),
         QuotaLock.NONE);
+  }
+
+  /** Forgets which tenants were warned about: for tests, whose clocks jump. */
+  static void resetPeriodlessWarnings() {
+    PERIODLESS_WARNINGS.reset();
   }
 
   /**
@@ -156,7 +166,7 @@ public class QuotaEvaluator {
     if (tenant == null || tenant.getQuotas().isEmpty()) {
       return Collections.emptyList();
     }
-    QuotaPeriod period = currentPeriodOrWarn(tenant);
+    QuotaPeriod period = currentPeriodOrWarn(tenant, Date.from(clock.instant()));
     List<QuotaEvaluation> evaluations = new ArrayList<>(tenant.getQuotas().size());
     for (QuotaDefinition quota : tenant.getQuotas()) {
       // On an isolated worker whose caller gave up, stop before the next consumption query.
@@ -171,9 +181,12 @@ public class QuotaEvaluator {
    * {@code block} quota on that resource can refuse.
    *
    * <p>The row has already been inserted, in the same transaction, when this runs. A
-   * {@link ConsumptionSource#LIVE live} count therefore includes it, and the consumption before
-   * this create is {@code consumed - 1}; the {@link ConsumptionSource#AGGREGATE stored aggregate}
-   * is lagged and does not, so it is taken as is. A live check first takes the
+   * {@link ConsumptionSource#LIVE live} count therefore includes it — when it falls inside the
+   * counted window — and the consumption before this create is {@code consumed - 1}. The window
+   * ends at local midnight of the period's end ({@link QuotaPeriod#getWindowTo()}), so a row
+   * created on the period's last, partial day is not counted, and the live count is taken as is
+   * then. The {@link ConsumptionSource#AGGREGATE stored aggregate} is lagged and never includes
+   * it, so it is taken as is. A live check first takes the
    * {@link QuotaLock} of the tenant and resource, so concurrent creates are counted one after the
    * other; the aggregate's cap is approximate by its lag and takes none. Either way the comparison
    * is the one
@@ -192,7 +205,8 @@ public class QuotaEvaluator {
     if (quota == null) {
       return Optional.empty();
     }
-    QuotaPeriod period = currentPeriodOrWarn(tenant);
+    Date now = Date.from(clock.instant());
+    QuotaPeriod period = currentPeriodOrWarn(tenant, now);
     if (period == null) {
       return Optional.empty();
     }
@@ -203,7 +217,9 @@ public class QuotaEvaluator {
       lock.acquire(tenant.getClientId(), resourceId);
     }
     long consumed = reader.read(quota, tenant.getClientId(), period);
-    long before = live ? Math.max(0L, consumed - 1L) : consumed;
+    // The new row is in the live count only when it was created inside the counted window.
+    boolean countsTheNewRow = live && now.before(period.getWindowTo());
+    long before = countsTheNewRow ? Math.max(0L, consumed - 1L) : consumed;
     QuotaVerdict verdict = QuotaRules.verdict(quota.getEnforcementMode(), quota.getIncludedQty(),
         quota.getWarningThreshold(), before);
     if (verdict != QuotaVerdict.DENY) {
@@ -240,10 +256,10 @@ public class QuotaEvaluator {
    * ALLOW without measuring, and one WARN per tenant per hour so it is seen and fixed by hand. A
    * closed row has no current period by design and is not warned about.
    */
-  private QuotaPeriod currentPeriodOrWarn(TenantQuotas tenant) {
-    QuotaPeriod period = tenant.currentPeriod(Date.from(clock.instant()));
+  private QuotaPeriod currentPeriodOrWarn(TenantQuotas tenant, Date now) {
+    QuotaPeriod period = tenant.currentPeriod(now);
     if (period == null && !tenant.isClosed()
-        && periodlessWarnings.shouldLog(tenant.getClientId())) {
+        && PERIODLESS_WARNINGS.shouldLog(tenant.getClientId(), clock.millis())) {
       log.warn("[QUOTA] Tenant {} has {} active quota row(s) but its subscription has no current "
           + "billing period; its quotas are not enforced (ALLOW, nothing measured) until "
           + "CURRENT_PERIOD_START/END are filled (open-and-notable-topics.md §5.9).",
