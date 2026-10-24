@@ -48,7 +48,8 @@ import org.openbravo.dal.core.OBContext;
  * <p><b>What it cannot see:</b> a resource that grows through a state change rather than a create
  * — {@code POSTED_SALES_INVOICES} grows when an invoice is posted, and the row is created
  * unposted — does not match its restriction at create time, so it is never refused here. Accepted
- * (Martin Taal, 2026-10-24); such a quota is reported at login and on the account page.
+ * (Martin Taal, 2026-10-24); such a quota is reported on environment entry, on the environment
+ * list and on the account page.
  */
 public class QuotaWriteGuard {
 

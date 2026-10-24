@@ -28,7 +28,8 @@ import org.apache.commons.lang3.StringUtils;
  *
  * <p>The values mirror the check constraints of {@code ETGO_PLAN_QUOTA}: {@code ENFORCEMENT_MODE IN
  * ('warn', 'block', 'off')} and {@code CONSUMPTION_SOURCE IS NULL OR CONSUMPTION_SOURCE IN
- * ('aggregate', 'live')}.
+ * ('aggregate', 'live', 'sum')}, where {@code sum} is a legacy alias read as {@code aggregate}
+ * ({@link ConsumptionSource#fromColumn}).
  */
 public final class QuotaRules {
 
