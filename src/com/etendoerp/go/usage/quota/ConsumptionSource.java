@@ -48,8 +48,11 @@ public enum ConsumptionSource {
   }
 
   /**
-   * Reads the stored column. Null or blank means {@link #AGGREGATE}; so does a value the check
-   * constraint would not accept, which can only come from a row written before the constraint.
+   * Reads the stored column. Null or blank means {@link #AGGREGATE}, and so does the legacy value
+   * {@code sum}: ETP-5046 shipped {@code sum} as the column's only list value, so the check
+   * constraint still accepts it for rows written before ETP-5051 — a module script cannot rewrite
+   * them before the constraint is applied, because module scripts run after the model update —
+   * while the AD list offers only {@code aggregate} and {@code live}.
    *
    * @param raw the stored {@code CONSUMPTION_SOURCE}
    * @return the source to read from

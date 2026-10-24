@@ -83,10 +83,11 @@ public class UsageAggregationScheduleStartup extends SessionAwareStartup {
   /** {@code AD_PROCESS_ID} of {@code ETGO_UsageAggregation}. */
   static final String PROCESS_ID = "4602F18BBC93404CA81B3AA4D24F2E81";
   /**
-   * Fixed PK of the System process request this initializer owns. The process tells a scheduled
-   * run from an operator's by this id, so it is public.
+   * Fixed PK of the System process request this initializer owns. Never inserted twice: an
+   * operator who unscheduled it keeps it unscheduled. The process does not read it — it gates
+   * every request with timing Schedule, whoever created it.
    */
-  public static final String REQUEST_ID = "9BB3C066EA964187B9E9993D03343629";
+  static final String REQUEST_ID = "9BB3C066EA964187B9E9993D03343629";
 
   private static final String SYSTEM = "0";
   private static final String SYSTEM_USER = "100";

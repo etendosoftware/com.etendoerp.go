@@ -91,7 +91,11 @@ public final class QuotaDefinition {
     return builder.build();
   }
 
-  /** @return a builder, for tests and fixtures */
+  /**
+   * A builder, for tests and fixtures.
+   *
+   * @return a new builder
+   */
   public static Builder builder() {
     return new Builder();
   }
@@ -179,76 +183,165 @@ public final class QuotaDefinition {
     private Builder() {
     }
 
+    /**
+     * Sets the resource id.
+     *
+     * @param value the resource id
+     * @return this builder
+     */
     public Builder resourceId(String value) {
       this.resourceId = value;
       return this;
     }
 
+    /**
+     * Sets the resource key.
+     *
+     * @param value the resource key
+     * @return this builder
+     */
     public Builder resourceKey(String value) {
       this.resourceKey = value;
       return this;
     }
 
+    /**
+     * Sets the resource name.
+     *
+     * @param value the resource name
+     * @return this builder
+     */
     public Builder resourceName(String value) {
       this.resourceName = value;
       return this;
     }
 
+    /**
+     * Sets the unit label.
+     *
+     * @param value the unit label
+     * @return this builder
+     */
     public Builder unitLabel(String value) {
       this.unitLabel = value;
       return this;
     }
 
+    /**
+     * Sets the counting mode.
+     *
+     * @param value the counting mode
+     * @return this builder
+     */
     public Builder countingMode(String value) {
       this.countingMode = value;
       return this;
     }
 
+    /**
+     * Sets the counted entity.
+     *
+     * @param value the counted entity
+     * @return this builder
+     */
     public Builder countedEntity(String value) {
       this.countedEntity = value;
       return this;
     }
 
+    /**
+     * Sets the date property.
+     *
+     * @param value the date property
+     * @return this builder
+     */
     public Builder dateProperty(String value) {
       this.dateProperty = value;
       return this;
     }
 
+    /**
+     * Sets the hql restriction.
+     *
+     * @param value the hql restriction
+     * @return this builder
+     */
     public Builder hqlRestriction(String value) {
       this.hqlRestriction = value;
       return this;
     }
 
+    /**
+     * Sets the strategy qualifier.
+     *
+     * @param value the strategy qualifier
+     * @return this builder
+     */
     public Builder strategyQualifier(String value) {
       this.strategyQualifier = value;
       return this;
     }
 
+    /**
+     * Sets the aggregation.
+     *
+     * @param value the aggregation
+     * @return this builder
+     */
     public Builder aggregation(UsageAggregation value) {
       this.aggregation = value;
       return this;
     }
 
+    /**
+     * Sets the included qty.
+     *
+     * @param value the included qty
+     * @return this builder
+     */
     public Builder includedQty(Long value) {
       this.includedQty = value;
       return this;
     }
 
+    /**
+     * Sets the enforcement mode.
+     *
+     * @param value the enforcement mode
+     * @return this builder
+     */
     public Builder enforcementMode(String value) {
       this.enforcementMode = value;
       return this;
     }
 
+    /**
+     * Sets the warning threshold.
+     *
+     * @param value the warning threshold
+     * @return this builder
+     */
     public Builder warningThreshold(Long value) {
       this.warningThreshold = value;
       return this;
     }
 
+    /**
+     * Sets the source.
+     *
+     * @param value the source
+     * @return this builder
+     */
     public Builder source(ConsumptionSource value) {
       this.source = value;
       return this;
     }
 
+    /**
+     * Builds the definition.
+     *
+     * @return the definition
+     */
     public QuotaDefinition build() {
       return new QuotaDefinition(this);
     }

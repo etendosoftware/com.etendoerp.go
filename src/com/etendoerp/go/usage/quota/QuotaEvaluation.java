@@ -34,6 +34,8 @@ public final class QuotaEvaluation {
   private final QuotaVerdict verdict;
 
   /**
+   * Creates one evaluation.
+   *
    * @param quota the quota evaluated
    * @param planInterval the plan's billing interval, or null
    * @param period the current period, or null when there is none

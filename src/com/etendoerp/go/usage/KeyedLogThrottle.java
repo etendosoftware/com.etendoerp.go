@@ -36,6 +36,8 @@ public final class KeyedLogThrottle {
   private final Map<String, Long> lastLoggedAt = new ConcurrentHashMap<>();
 
   /**
+   * Creates a throttle with one interval for every key.
+   *
    * @param intervalMs the minimum time between two lines for the same key
    * @param clock the time source, in milliseconds
    */
@@ -45,6 +47,8 @@ public final class KeyedLogThrottle {
   }
 
   /**
+   * Tells whether a line about {@code key} is due now, and records it when it is.
+   *
    * @param key what the line is about
    * @return {@code true} when the caller should log now; concurrent callers for the same key get
    *     one {@code true} between them

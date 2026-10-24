@@ -50,6 +50,8 @@ public class QuotaWriteGuard {
   private final QuotaEvaluator evaluator;
 
   /**
+   * A guard over explicit seams.
+   *
    * @param index which entities can be refused at all
    * @param matcher tests a created row against a resource's restriction
    * @param lookup finds the tenant's quotas
@@ -63,7 +65,11 @@ public class QuotaWriteGuard {
     this.evaluator = evaluator;
   }
 
-  /** @return the shared instance; its index is per JVM */
+  /**
+   * The shared guard; its index is per JVM.
+   *
+   * @return the shared instance
+   */
   public static QuotaWriteGuard getDefault() {
     return DefaultHolder.INSTANCE;
   }

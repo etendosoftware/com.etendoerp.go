@@ -72,12 +72,14 @@ public class DalConsumptionReader implements ConsumptionReader {
 
   private final UsageFreshness freshness;
 
-  /** Production wiring. */
+  /** Production wiring: the shared usage-freshness check. */
   public DalConsumptionReader() {
     this(UsageFreshness.getDefault());
   }
 
   /**
+   * A reader over an explicit freshness check.
+   *
    * @param freshness checks the usage job's lag when the stored aggregate is read
    */
   public DalConsumptionReader(UsageFreshness freshness) {

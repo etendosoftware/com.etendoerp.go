@@ -30,13 +30,20 @@ import com.etendoerp.go.usage.UsageQueryComposer;
 public interface CreatedRowMatcher {
 
   /**
+   * Tells whether a resource counts a created row, and names the row's tenant.
+   *
    * @param resource the declarative resource
    * @param recordId the id of the created row, flushed in the current transaction
    * @return the row's tenant ({@code AD_CLIENT_ID}) when the resource counts it, else null
    */
   String tenantIfCounted(QuotaEntityIndex.IndexedResource resource, String recordId);
 
-  /** @return the production matcher, on the current DAL session */
+  /**
+   * The production matcher. It runs on the request's own session on purpose: it must see the row
+   * just inserted.
+   *
+   * @return the production matcher
+   */
   static CreatedRowMatcher dal() {
     return (resource, recordId) -> {
       String hql = UsageQueryComposer.composeRowMatch(resource.getCountedEntity(),

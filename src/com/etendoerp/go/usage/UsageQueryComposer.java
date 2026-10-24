@@ -51,6 +51,9 @@ public final class UsageQueryComposer {
 
   private static final String ALIAS_OUTER = "outer_";
   private static final String AND = " and ";
+  private static final String FROM = " from ";
+  private static final String WHERE = " where ";
+  private static final String ARG_ENTITY_NAME = "entityName";
   private static final String ALIAS_FRAGMENT = "e";
   private static final char QUOTE = '\'';
 
@@ -68,12 +71,12 @@ public final class UsageQueryComposer {
    */
   public static String composeGroupedCount(String entityName, String dateProperty,
       String restriction) {
-    requireIdentifier(entityName, "entityName");
+    requireIdentifier(entityName, ARG_ENTITY_NAME);
     requireIdentifier(dateProperty, "dateProperty");
     StringBuilder hql = new StringBuilder(256);
     hql.append("select ").append(ALIAS_OUTER).append(".client.id, count(*)")
-        .append(" from ").append(entityName).append(' ').append(ALIAS_OUTER)
-        .append(" where ").append(dayBounds(dateProperty));
+        .append(FROM).append(entityName).append(' ').append(ALIAS_OUTER)
+        .append(WHERE).append(dayBounds(dateProperty));
     appendRestriction(hql, entityName, restriction);
     hql.append(" group by ").append(ALIAS_OUTER).append(".client.id");
     return hql.toString();
@@ -92,12 +95,12 @@ public final class UsageQueryComposer {
    */
   public static String composePerTenantCount(String entityName, String dateProperty,
       String restriction) {
-    requireIdentifier(entityName, "entityName");
+    requireIdentifier(entityName, ARG_ENTITY_NAME);
     requireIdentifier(dateProperty, "dateProperty");
     StringBuilder hql = new StringBuilder(256);
     hql.append("select count(*)")
-        .append(" from ").append(entityName).append(' ').append(ALIAS_OUTER)
-        .append(" where ").append(ALIAS_OUTER).append(".client.id = :").append(PARAM_CLIENT_ID)
+        .append(FROM).append(entityName).append(' ').append(ALIAS_OUTER)
+        .append(WHERE).append(ALIAS_OUTER).append(".client.id = :").append(PARAM_CLIENT_ID)
         .append(AND).append(dayBounds(dateProperty));
     appendRestriction(hql, entityName, restriction);
     return hql.toString();
@@ -118,11 +121,11 @@ public final class UsageQueryComposer {
    *     {@link #PARAM_RECORD_ID}
    */
   public static String composeRowMatch(String entityName, String restriction) {
-    requireIdentifier(entityName, "entityName");
+    requireIdentifier(entityName, ARG_ENTITY_NAME);
     StringBuilder hql = new StringBuilder(256);
     hql.append("select ").append(ALIAS_OUTER).append(".client.id")
-        .append(" from ").append(entityName).append(' ').append(ALIAS_OUTER)
-        .append(" where ").append(ALIAS_OUTER).append(".id = :").append(PARAM_RECORD_ID);
+        .append(FROM).append(entityName).append(' ').append(ALIAS_OUTER)
+        .append(WHERE).append(ALIAS_OUTER).append(".id = :").append(PARAM_RECORD_ID);
     appendRestriction(hql, entityName, restriction);
     return hql.toString();
   }
