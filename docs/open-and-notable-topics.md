@@ -1114,6 +1114,27 @@ Such quotas are still measured and reported: on every environment of `GET /sws/g
 **If it is ever needed:** check at the state change (the posting process) through the same
 `QuotaEvaluator`, never with a second comparison.
 
+**Concurrent creates (review W4, decided by the coordinator 2026-10-24).** For a `live` `block`
+quota the check takes a PostgreSQL transaction advisory lock per tenant and resource
+(`pg_advisory_xact_lock`, `QuotaLock`) right before the live count, held until the create commits
+or rolls back, so two concurrent creates are counted one after the other and cannot both slip
+under the cap. It is taken only once a created row matched the resource and the tenant has such a
+quota: no other create pays for it. The stored `aggregate` takes no lock — it is lagged by the
+usage job, so its cap is approximate anyway and may be overshot by what was created since the last
+run.
+
+**A failing check** (review B1). An error raised before any SQL (an invalid fragment, a missing
+strategy counter) fails open: logged, the create stands. An error from the database — or a
+transaction Hibernate marked rollback-only — has poisoned the request's transaction, so the create
+fails **closed**: rolled back, answered 500 `QUOTA_CHECK_FAILED` (in a batch: a failed operation,
+the batch rolls back). The quota *reports* and the index refresh never run on the request's
+transaction (`IsolatedDalRead`), so a failing report cannot poison what the request writes.
+
+**Known cost (review N4, not done).** The row match runs for every created row of an indexed
+entity before the tenant's quotas are known, so a tenant with no `block` quota on that resource
+still pays one row-match query per create while some other plan has one. A pre-filter by the
+tenant's quotas would save it; not worth it until it shows up.
+
 ## 5. Handed forward to later tickets
 
 *Moved to §6 on 2026-09-28: §5.7, §5.10, §5.12; §5.15 was decided on arrival and sits there too.
@@ -1523,9 +1544,20 @@ CONSUMPTION_SOURCE = 'sum'`) — an aggregation.
 
 **Done in ETP-5051:** the values are `aggregate` (the stored daily usage) and `live` (counted at
 evaluation time from the same catalog descriptor); null means `aggregate`. Changed together: the
-check `ETGO_PLNQTA_SOURCE_CHK` (`CONSUMPTION_SOURCE IS NULL OR CONSUMPTION_SOURCE IN ('aggregate',
-'live')`), the `AD_REF_LIST` values of `ETGO_QuotaConsumptionSource` (`sum` dropped) and the
-reference description. No stored quota row used the column.
+`AD_REF_LIST` values of `ETGO_QuotaConsumptionSource` (`sum` dropped: the window offers only
+`aggregate` and `live`), the reference description, and the check `ETGO_PLNQTA_SOURCE_CHK`.
+
+**The check still accepts `sum`, as a legacy alias read as `aggregate`** (`CONSUMPTION_SOURCE IS
+NULL OR CONSUMPTION_SOURCE IN ('aggregate', 'live', 'sum')`; `ConsumptionSource.fromColumn`). The
+earlier claim that no stored row used the column held for no shipped sourcedata or data-fix, but
+the table is deployed and an operator may have picked `sum`, its only list value until ETP-5051. A
+check that rejected it would fail `update.database` on such an environment, and a module script
+cannot rewrite those rows first: `update.database` alters the model (checks included) **before**
+it runs module scripts (verified in the DBSM log: *Updating database model* precedes *Running
+modulescripts*). So the honest fix is the alias, not a migration.
+
+**Follow-up:** none required. Dropping `sum` from the check needs a data-fix run before the deploy
+that removes it; no ticket.
 
 **Follow-up:** none.
 

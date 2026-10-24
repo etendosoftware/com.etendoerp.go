@@ -5073,7 +5073,30 @@ neither the 402 of the commercial access check (§4.1) nor a permission error.
 - **Cost.** An entity no active `block` quota counts costs a map lookup: same service, same commit,
   no query. When a create is checked and no batch owns the transaction, it runs through the
   deferred-commit service a batch uses (IMP-23) and the gate commits or rolls back itself.
-- **Fails open.** An error while checking is logged (`[QUOTA]`) and the create stands.
+- **When the check itself fails.** An error raised before any SQL (an invalid restriction
+  fragment, a missing strategy counter) is logged (`[QUOTA]`) and the create stands — it fails
+  open. An error from the database, or a transaction Hibernate marked rollback-only, has poisoned
+  the request's transaction, and a commit would silently roll the row back while answering
+  success: so it fails **closed** — the create is rolled back (in a batch, the operation fails and
+  the batch rolls back) and the answer is
+
+  ```json
+  HTTP 500
+  { "error": { "message": "The quota check failed; nothing was saved. Try again.",
+               "status": 500, "code": "QUOTA_CHECK_FAILED" } }
+  ```
+
+  Clients key off `error.code === "QUOTA_CHECK_FAILED"` and show their own translated text.
+- **A failing commit.** When the gate commits a checked create itself and the commit fails (a
+  deferred constraint), the caller gets core's own error JSON for it, classified exactly as before.
+- **Concurrency.** A `live` `block` check takes a PostgreSQL advisory lock per tenant and resource
+  (`pg_advisory_xact_lock`) right before its count, held to commit, so concurrent creates cannot
+  both slip under the cap. The stored `aggregate` takes none: its cap is approximate by the usage
+  job's lag.
+- **Reports never touch the request's transaction.** The quota reports (environment entry, the
+  environment list, the account page), the quota-index refresh and the usage-lag check read in
+  their own session (`IsolatedDalRead`), so a failing report read cannot poison what the request
+  writes afterwards.
 - **Write warnings** (a WARN verdict on a create) are not returned on this path.
 
 ## 5. Configuration
