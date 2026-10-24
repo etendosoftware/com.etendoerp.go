@@ -94,6 +94,7 @@ final class EtendoGoJwtDalHelper {
   private static final String FIELD_ASSOCIATED_WITH_PRODUCTIVE = "associatedWithProductive";
   private static final String FIELD_SUBSCRIPTION_STATUS = "subscriptionStatus";
   private static final String FIELD_RENEWAL_DUE_AT = "renewalDueAt";
+  private static final String FIELD_RENEWAL_AT = "renewalAt";
   private static final String FIELD_GRACE_ENDS_AT = "graceEndsAt";
   private static final String FIELD_ACCESS_ENFORCED = "accessEnforced";
   private static final String FIELD_QUOTAS = "quotas";
@@ -830,6 +831,11 @@ final class EtendoGoJwtDalHelper {
     // and a free tenant has none, so reporting "free" would invent an entry nothing could look up.
     env.put(FIELD_PLAN_KEY,
         planView.planKey() == null ? JSONObject.NULL : planView.planKey());
+    // ETP-5051 (O-1b): when this environment's own subscription next renews, so "Mis empresas"
+    // shows each row's date. Local ETGO_SUBSCRIPTION state from the same batched read as the plan
+    // (no Stripe call per environment); JSON null unless the subscription is renewing.
+    env.put(FIELD_RENEWAL_AT,
+        planView.renewalAt() == null ? JSONObject.NULL : planView.renewalAt().toString());
     boolean flaggedOwner = OwnerSupport.isOwner(environmentUser.getId());
     env.put(FIELD_RELATIONSHIP, flaggedOwner ? "OWNER" : "INVITED");
     // ETP-5743: only an owned demo may be a purchase source. Unlike `relationship`, a legacy tenant

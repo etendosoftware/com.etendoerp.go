@@ -1559,11 +1559,24 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * subscription the page shows. ETP-5051 (O-1) — every environment has its own Stripe customer,
    * so resolving the account's newest purchase here while the page shows the entered one would let
    * a user look at SPRING7 and change SPRING8.
+   *
+   * <p>ETP-5051 (O-1b) — "Mis empresas" manages each row's own environment, whatever environment
+   * the session is in, so the optional JSON body {@code {"clientId": "<AD_CLIENT_ID>"}} names it
+   * ({@link #findPortalSubscription}). Ownership stays the query's: a client this account did not
+   * buy matches nothing and answers {@code 404 NO_SUBSCRIPTION}. No body, an empty body or no
+   * {@code clientId} keeps the rule above; a body that is not a JSON object answers 400.
    */
   private void handleBillingPortal(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
     runWithPlatformContext(request, response, "billing-portal", authenticated -> {
-      CheckoutRequest purchase = findShownSubscription(authenticated);
+      String requestedClientId;
+      try {
+        requestedClientId = requestedPortalClientId(request);
+      } catch (JSONException e) {
+        writeError(response, HttpServletResponse.SC_BAD_REQUEST, INVALID_JSON_BODY);
+        return;
+      }
+      CheckoutRequest purchase = findPortalSubscription(authenticated, requestedClientId);
       if (purchase == null || StringUtils.isBlank(purchase.getStripeCustomer())) {
         writeError(response, HttpServletResponse.SC_NOT_FOUND, "NO_SUBSCRIPTION",
             "No subscription for this account", "No subscription for this account");
@@ -1586,6 +1599,39 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       result.put("url", session.optString("url", ""));
       writeResponse(response, HttpServletResponse.SC_OK, result);
     });
+  }
+
+  /**
+   * ETP-5051 (O-1b) — the {@code clientId} of the portal's optional JSON body, or {@code null}
+   * when there is no body, the body is blank, or it names no client ({@code "0"}, the System
+   * client, counts as none).
+   *
+   * @throws JSONException when a non-blank body is not a JSON object
+   */
+  private String requestedPortalClientId(HttpServletRequest request)
+      throws IOException, JSONException {
+    String raw = request.getReader() == null ? null : readRawBody(request);
+    if (StringUtils.isBlank(raw)) {
+      return null;
+    }
+    String clientId = StringUtils.trimToNull(
+        BoundedJsonParser.parseObject(raw).optString(FIELD_CLIENT_ID, ""));
+    return ZERO_ID.equals(clientId) ? null : clientId;
+  }
+
+  /**
+   * ETP-5051 (O-1b) — the purchase the portal opens: the named environment's own one when the
+   * caller names it (a "Mis empresas" row), else the one the account page shows
+   * ({@link #findShownSubscription}). Both lookups keep the account id and email in the query.
+   */
+  private CheckoutRequest findPortalSubscription(AuthenticatedAccount authenticated,
+      String requestedClientId) {
+    if (requestedClientId == null) {
+      return findShownSubscription(authenticated);
+    }
+    Account account = authenticated.account;
+    return checkoutRequestStore.findSubscriptionForAccountClient(account.getId(),
+        account.getEmail(), requestedClientId);
   }
 
   /**

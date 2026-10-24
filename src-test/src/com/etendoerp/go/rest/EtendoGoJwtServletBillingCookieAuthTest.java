@@ -462,6 +462,58 @@ public class EtendoGoJwtServletBillingCookieAuthTest {
   }
 
   /**
+   * ETP-5051 (O-1b) — "Mis empresas" manages each row's own environment: a portal request naming
+   * a {@code clientId} opens THAT environment's customer, whatever environment the session is in.
+   */
+  @Test
+  public void cookiePostPortalNamingAClientOpensThatEnvironmentsCustomer() throws Exception {
+    Fixture fixture = new Fixture();
+    when(fixture.goSessionService.resolve(SESSION_TOKEN))
+        .thenReturn(fixture.enteredSession(ENTERED_CLIENT));
+    CheckoutRequest row = purchase("sub_row", "cus_row", NEWEST_CLIENT);
+    when(fixture.requestStore.findSubscriptionForAccountClient(ACCOUNT_ID, ACCOUNT_EMAIL,
+        NEWEST_CLIENT)).thenReturn(row);
+    when(fixture.portalService.createSession("cus_row"))
+        .thenReturn(new JSONObject().put("url", "https://billing.stripe.test/row"));
+
+    HttpServletRequest req = cookiePost(PORTAL_PATH, SESSION_TOKEN, CSRF,
+        new JSONObject().put("clientId", NEWEST_CLIENT).toString());
+    ResponseCapture resp = mockResponse();
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
+        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dal.when(() -> EtendoGoJwtDalHelper.findActiveAccountById(ACCOUNT_ID)).thenReturn(fixture.account);
+      fixture.servlet.doPost(req, resp.response);
+    }
+
+    assertEquals(200, resp.status);
+    assertEquals("https://billing.stripe.test/row", resp.json().getString("url"));
+    verify(fixture.requestStore).findSubscriptionForAccountClient(ACCOUNT_ID, ACCOUNT_EMAIL,
+        NEWEST_CLIENT);
+    verifyNoMoreInteractions(fixture.requestStore);
+    verify(fixture.portalService).createSession("cus_row");
+    verifyNoMoreInteractions(fixture.portalService);
+  }
+
+  /** ETP-5051 (O-1b) — a portal body that is not JSON is a 400, and nothing is looked up. */
+  @Test
+  public void cookiePostPortalWithAMalformedBodyAnswers400AndTouchesNothing() throws Exception {
+    Fixture fixture = new Fixture();
+    when(fixture.goSessionService.resolve(SESSION_TOKEN))
+        .thenReturn(fixture.enteredSession(ENTERED_CLIENT));
+
+    HttpServletRequest req = cookiePost(PORTAL_PATH, SESSION_TOKEN, CSRF, "{\"clientId\":");
+    ResponseCapture resp = mockResponse();
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
+        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dal.when(() -> EtendoGoJwtDalHelper.findActiveAccountById(ACCOUNT_ID)).thenReturn(fixture.account);
+      fixture.servlet.doPost(req, resp.response);
+    }
+
+    assertEquals(400, resp.status);
+    verifyNoInteractions(fixture.requestStore, fixture.portalService);
+  }
+
+  /**
    * The session authenticator requires the allowed {@code Origin} AND the CSRF token — a
    * correct {@code X-Go-CSRF} does not compensate for a disallowed origin, so this must fail on its
    * own, distinct from the CSRF-missing tests above (which use an allowed origin).

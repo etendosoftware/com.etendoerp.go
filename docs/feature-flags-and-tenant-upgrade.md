@@ -680,6 +680,24 @@ each paid by its own Stripe subscription and customer. The page and the Customer
 Ownership is the query's: both lookups filter on the account id and email, so a client id that is
 not one of the account's own purchases resolves to nothing, whoever owns that client.
 
+**The portal for a named environment (ETP-5051, O-1b).** "Mis empresas" manages each row's own
+environment, whatever environment the session is in, so the portal takes an optional JSON body:
+
+```json
+{ "clientId": "<AD_CLIENT_ID of the row>" }
+```
+
+- **`clientId` present** (non-blank and not `"0"`): `findSubscriptionForAccountClient(account id,
+  email, clientId)`, the same ownership-carrying query. A client the account did not buy, or a
+  purchase without a Stripe customer, answers `404 NO_SUBSCRIPTION`, as before.
+- **No body, an empty body, or no `clientId`:** the rule above (`findShownSubscription`). The
+  `/account` Subscription section keeps sending no body.
+- **A body that is not a JSON object:** `400 "Invalid JSON body"`, the servlet's usual envelope,
+  with nothing looked up.
+- The response is unchanged (`{"url": "…"}`), and so are the credential rules: the body is read
+  only after the account is resolved under `PLATFORM_CREDENTIAL_ONLY`, and a cookie-session POST
+  still needs its `Origin` and `X-Go-CSRF` proof.
+
 - **`planKey` / `planName`** come from the tenant's `ETGO_SUBSCRIPTION` row (open, else the latest
   closed one — `SubscriptionService#findLatest`, the row the lifecycle reads) and its `ETGO_PLAN`.
   `plan` stays the live Stripe product name. Both are JSON null when the tenant has no subscription
@@ -1450,6 +1468,18 @@ The `GET /sws/go/environments` response gained additive fields:
   `environment-access-enforcement-off` kill switch is on for that tenant, `true` otherwise —
   whatever today's decision. The grace banner drops its "will be blocked on <date>" when it is
   `false`. `GET /sws/go/billing/subscription` carries the same field for its tenant.
+- **`renewalAt`** (per environment, always present; ETP-5051 O-1b) is the ISO instant this
+  environment's own subscription next renews, in the same format as the `renewalAt` of
+  `GET /sws/go/billing/subscription`, or JSON null. "Mis empresas" shows it per row. It is read
+  from local state only — the `CURRENT_PERIOD_END` of the tenant's `ETGO_SUBSCRIPTION` row, from
+  the same batched `findLatestForClients` read as `plan`, so no Stripe call per environment — and
+  it is non-null only while that row is renewing: effective status `active` (Stripe `active` and
+  `trialing` are both stored so), not past due, not canceled, not closed. **Scheduled
+  cancellation is not seen:** `ETGO_SUBSCRIPTION` stores no cancel-at-period-end flag (the
+  lifecycle applier ignores it on purpose, since access runs to the period end), so a
+  subscription set to cancel still reports its period end here; only the live
+  `GET /sws/go/billing/subscription` (`cancelAtPeriodEnd`) knows it. A row that cannot be read
+  reports null, never a failed list.
 - **`quotas`** (per environment, always present, `[]` when nothing to report; ETP-5051) is the
   tenant's plan quotas at verdict WARN or DENY, as `QuotaItem`s (`neo-headless.md` §4.16 lists
   the keys). Report-only. The SPA's quota banner reads it for the current environment, because

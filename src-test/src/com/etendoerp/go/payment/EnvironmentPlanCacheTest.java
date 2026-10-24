@@ -16,6 +16,8 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
+import java.time.Instant;
+import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -35,6 +37,11 @@ import com.etendoerp.go.schemaforge.data.Subscription;
  * properties are asserted here: the value semantics (what a tenant with no subscription looks
  * like, that the coarse plan cannot disagree with the status) and immutability, which is what
  * makes handing the same instance to several frames safe.
+ *
+ * <p>ETP-5051 (O-1b) — each tenant's {@code renewalAt}, the local renewal date "Mis empresas"
+ * shows per row: the current period end, only while the subscription is renewing.
+ *
+ * @covers com.etendoerp.go.payment.EnvironmentPlanCache
  */
 class EnvironmentPlanCacheTest {
 
@@ -56,6 +63,53 @@ class EnvironmentPlanCacheTest {
     Map<String, Subscription> rows = new LinkedHashMap<>();
     rows.put(clientId, subscription);
     return EnvironmentPlanCache.of(rows);
+  }
+
+  private static final Instant PERIOD_END = Instant.parse("2026-11-23T14:09:48Z");
+
+  private static Subscription withPeriodEnd(Subscription subscription) {
+    when(subscription.getCurrentPeriodEnd()).thenReturn(Date.from(PERIOD_END));
+    return subscription;
+  }
+
+  @Test
+  void reportsTheCurrentPeriodEndAsTheRenewalOfARenewingSubscription() {
+    EnvironmentPlanCache cache = cacheWith(PAID_CLIENT,
+        withPeriodEnd(subscriptionOn(PLAN_KEY, SubscriptionService.STATUS_ACTIVE)));
+
+    assertEquals(PERIOD_END, cache.viewFor(PAID_CLIENT).renewalAt());
+  }
+
+  @Test
+  void reportsNoRenewalForAPastDueCanceledOrClosedSubscription() {
+    assertNull(cacheWith(PAID_CLIENT,
+        withPeriodEnd(subscriptionOn(PLAN_KEY, SubscriptionService.STATUS_PAST_DUE)))
+        .viewFor(PAID_CLIENT).renewalAt());
+    assertNull(cacheWith(PAID_CLIENT,
+        withPeriodEnd(subscriptionOn(PLAN_KEY, SubscriptionService.STATUS_CANCELED)))
+        .viewFor(PAID_CLIENT).renewalAt());
+    // A closed row that still says "active" is history, not a renewal.
+    Subscription closed = withPeriodEnd(subscriptionOn(PLAN_KEY, SubscriptionService.STATUS_ACTIVE));
+    when(closed.getEndDate()).thenReturn(Date.from(Instant.parse("2026-10-14T00:27:16Z")));
+    assertNull(cacheWith(PAID_CLIENT, closed).viewFor(PAID_CLIENT).renewalAt());
+  }
+
+  @Test
+  void reportsNoRenewalWithoutAPeriodEndOrForAnUnknownTenant() {
+    assertNull(cacheWith(PAID_CLIENT, subscriptionOn(PLAN_KEY, SubscriptionService.STATUS_ACTIVE))
+        .viewFor(PAID_CLIENT).renewalAt());
+    assertNull(EnvironmentPlanCache.empty().viewFor(FREE_CLIENT).renewalAt());
+  }
+
+  @Test
+  void anUnreadablePeriodEndReportsNoRenewalInsteadOfFailingTheCache() {
+    Subscription broken = subscriptionOn(PLAN_KEY, SubscriptionService.STATUS_ACTIVE);
+    when(broken.getCurrentPeriodEnd()).thenThrow(new IllegalStateException("lazy load failed"));
+
+    EnvironmentPlanCache cache = cacheWith(PAID_CLIENT, broken);
+
+    assertNull(cache.viewFor(PAID_CLIENT).renewalAt());
+    assertEquals(PLAN_KEY, cache.planKey(PAID_CLIENT));
   }
 
   @Test

@@ -925,7 +925,7 @@ class EtendoGoJwtDalHelperTest {
     }
 
     @Test
-    @DisplayName("all fourteen fields are populated")
+    @DisplayName("all fifteen fields are populated")
     void allTwelveFieldsPopulated() throws Exception {
       when(client.getId()).thenReturn("C-2");
       when(client.getName()).thenReturn("Client Two");
@@ -940,9 +940,11 @@ class EtendoGoJwtDalHelperTest {
 
       // Seven original fields, the plan badge (ETP-4686), the plan key (ETP-5046), the
       // relationship marker, the ownership flag (ETP-5743), the demo-association flag
-      // (ETP-5548), accessEnforced and quotas (ETP-5051). Lifecycle fields are conditional and
-      // absent here.
-      assertEquals(14, result.length());
+      // (ETP-5548), accessEnforced, quotas and renewalAt (ETP-5051). Lifecycle fields are
+      // conditional and absent here.
+      assertEquals(15, result.length());
+      // No subscription, so nothing renews: present, and JSON null.
+      assertTrue(result.isNull("renewalAt"), result.toString());
       // The four-argument form evaluates no quota: quotas is always present, and empty.
       assertEquals(0, result.getJSONArray("quotas").length());
       // graceEndsAt (ETP-5049) travels with the lifecycle fields: absent without lifecycle.
@@ -1022,6 +1024,30 @@ class EtendoGoJwtDalHelperTest {
           environmentUser, EnvironmentPlanCache.empty(), reportWithADenyFor("C-Q"));
 
       assertEquals(0, result.getJSONArray("quotas").length());
+    }
+
+    @Test
+    @DisplayName("ETP-5051 O-1b: renewalAt is the environment's own period end while renewing")
+    void carriesTheRenewalDateOfItsOwnSubscription() throws Exception {
+      when(client.getId()).thenReturn("C-R");
+      when(client.getName()).thenReturn("Renewing Client");
+      when(environmentUser.getId()).thenReturn("U-R");
+      Subscription renewing = mock(Subscription.class);
+      when(renewing.getSubscriptionStatus()).thenReturn("active");
+      when(renewing.getCurrentPeriodEnd())
+          .thenReturn(Date.from(java.time.Instant.parse("2026-11-23T14:09:48Z")));
+      Subscription other = mock(Subscription.class);
+      when(other.getSubscriptionStatus()).thenReturn("active");
+      when(other.getCurrentPeriodEnd())
+          .thenReturn(Date.from(java.time.Instant.parse("2026-11-30T00:00:00Z")));
+      Map<String, Subscription> rows = new java.util.LinkedHashMap<>();
+      rows.put("C-R", renewing);
+      rows.put("C-OTHER", other);
+
+      JSONObject result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, null,
+          environmentUser, EnvironmentPlanCache.of(rows));
+
+      assertEquals("2026-11-23T14:09:48Z", result.getString("renewalAt"));
     }
 
     @Test
