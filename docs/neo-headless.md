@@ -10157,17 +10157,29 @@ The invoice is left COMPLETED (decision kept from ETP-5381). The SPA carries `gr
 today, so there is nothing to format; a future display of it must go through `formatCurrency`.
 
 **Zero-amount guard.** `ReturnInvoiceSupport.refuseIfUnpriced` refuses with **422** `error.code
-returnInvoiceWithoutAmount` when ANY product line with a quantity would end at a unit price of 0, instead of
-creating and confirming a rectificativa of 0. It judges per line (one unpriced product among priced ones still
-refunds the wrong amount), the same stance as `InvoiceCompletionLineGuard` (ETP-5710), and it runs BEFORE the first
-`save`: it probes each line with the very sources `buildAndSaveInvoiceLine` uses (order line / source invoice line via
-`createShipmentInvoiceLine`, then the source invoice line, then the price list `standardPrice`) on a transient line,
-so a refusal persists nothing. Probe and line build share ONE resolver (`resolveLinePricing`), so they cannot drift. A deliberately free product therefore
-cannot be refunded through this action. Shape:
+returnInvoiceWithoutAmount` when ANY product line with a quantity has **no price source at all**, instead of
+creating and confirming a rectificativa of 0 because nothing priced it. It judges per line (one unpriced product among
+priced ones still refunds the wrong amount), the same stance as `InvoiceCompletionLineGuard` (ETP-5710), and it runs
+BEFORE the first `save`: it probes each line with the very sources `buildAndSaveInvoiceLine` uses, on a transient
+line, so a refusal persists nothing. Probe and line build share ONE resolver (`resolveLinePricing`), so they cannot
+drift. Resolution order: the handler's line (`createShipmentInvoiceLine`: order line, else a linked invoice line),
+then the price of the **completed invoice line being rectified**, then the price list `standardPrice`.
+
+A line counts as priced (`PricedLine.priceFound`) when it ends at a non-zero price, **or at the price of the source
+invoice line even if that price is 0**: a deliberately free product was invoiced at 0 and is refunded at 0 (the core
+`InvoiceFromShipmentActionHandler` does the same). A 0 that only the order line or the price list yields is NOT a
+price: with no invoice line behind it the line is still refused, so a missing price is never mistaken for a free one
+(ETP-5712 point 7; before it, a free product could not be refunded by any path, the SPA included). When `originInvoices`
+(or the auto-detected invoice) is known, the source-line lookup is restricted to THOSE invoices, so what is credited is
+literally what was invoiced; without them it takes the latest completed invoice line of the shipment line. A non-zero
+price from the order line still wins over the invoice line, so every amount that was already working is unchanged.
+Shape:
 `{error:{status:422, code:"returnInvoiceWithoutAmount", message:"The corrective invoice (factura rectificativa) cannot
-be created: no price could be found for Agua, Sal, so it would be confirmed with a zero amount. Set a price for those
-products (on the invoice being rectified or in its price list) and try again.", products:["Agua","Sal"]}}`. The SPA
-maps the sentence in `backendErrors.js` (`backendError.returnInvoiceWithoutAmount`).
+be created: no price source was found for Agua, Sal (not on the invoice being rectified, nor on its order line, nor in
+the price list), so it would be confirmed with a zero amount. Give those products a price in the price list, or
+rectify an invoice that has them.", products:["Agua","Sal"]}}`. The SPA maps the sentence in `backendErrors.js`
+(`backendError.returnInvoiceWithoutAmount`). The code and the `products` list are the contract; the sentence is only
+matched by the SPA translator, so change it there too.
 
 **The other refusals** (unchanged status codes): not completed 400, no product lines 400, no origin invoice
 **400** with `ERR_RECTIFIED_INVOICE_REQUIRED`, whose text now says what happened and what to do: `This return has no

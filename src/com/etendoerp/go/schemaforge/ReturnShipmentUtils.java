@@ -81,10 +81,10 @@ final class ReturnShipmentUtils {
   // English literals on purpose: localized by tools/app-shell/src/lib/backendErrors.js, which
   // splits the message on exactly this prefix and suffix.
   static final String MSG_WITHOUT_AMOUNT_PREFIX = "The corrective invoice (factura rectificativa) "
-      + "cannot be created: no price could be found for ";
-  static final String MSG_WITHOUT_AMOUNT_SUFFIX = ", so it would be confirmed with a zero amount. "
-      + "Set a price for those products (on the invoice being rectified or in its price list) and "
-      + "try again.";
+      + "cannot be created: no price source was found for ";
+  static final String MSG_WITHOUT_AMOUNT_SUFFIX = " (not on the invoice being rectified, nor on its "
+      + "order line, nor in the price list), so it would be confirmed with a zero amount. Give "
+      + "those products a price in the price list, or rectify an invoice that has them.";
   private static final String FIELD_INVOICE_STATUS = "invoiceStatus";
 
   private ReturnShipmentUtils() {}
