@@ -41,6 +41,7 @@ import java.io.BufferedReader;
 import java.io.PrintWriter;
 import java.io.StringReader;
 import java.io.StringWriter;
+import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
@@ -52,6 +53,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.Date;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
@@ -73,10 +75,15 @@ import com.etendoerp.go.common.BoundedJsonParserTest;
 import com.etendoerp.go.common.PublicUrlResolver;
 import com.etendoerp.go.hubspot.HubSpotOutbox;
 import com.etendoerp.go.payment.EnvironmentPlanCache;
+import com.etendoerp.go.payment.CheckoutConfiguration;
 import com.etendoerp.go.payment.CheckoutRequestStore;
+import com.etendoerp.go.payment.CheckoutRequestWrites;
 import com.etendoerp.go.payment.HostedCheckoutService;
 import com.etendoerp.go.payment.PlanCatalogService;
 import com.etendoerp.go.payment.PlanNotAvailableException;
+import com.etendoerp.go.payment.StripeApiClient;
+import com.etendoerp.go.payment.StripePriceService;
+import com.etendoerp.go.payment.StripeResponse;
 import com.etendoerp.go.payment.SubscriptionService;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.data.Plan;
@@ -87,6 +94,7 @@ import com.etendoerp.go.schemaforge.util.OwnerSupport;
  * Unit tests for {@link EtendoGoJwtServlet}.
  *
  * @covers com.etendoerp.go.rest.EtendoGoJwtServlet
+ * @covers com.etendoerp.go.payment.HostedCheckoutService
  */
 public class EtendoGoJwtServletTest {
 
@@ -2216,6 +2224,145 @@ public class EtendoGoJwtServletTest {
     verify(checkoutService).createSession(eq("ACC-1"), eq("user@test.com"),
         eq("Acme Productive"), any(), eq("productive-monthly"),
         any(HostedCheckoutService.SessionOptions.class));
+  }
+
+  // ===================== POST /billing/purchases — a plan, never a price =====================
+
+  /**
+   * {@code POST /billing/purchases} is the endpoint the SPA calls; {@code /checkout/sessions}
+   * above shares its code path but is not what a buyer hits. These specs drive the REAL
+   * {@link HostedCheckoutService} behind it — only its plan catalog, request store and provider
+   * gateway are doubles — so the price that reaches the provider and the body that reaches the
+   * browser are observed, not assumed from a mocked {@code createSession}.
+   */
+  @Test
+  public void billingPurchaseAnswersPlanNotAvailableForAnUnknownOrInactivePlanKey()
+      throws Exception {
+    PurchaseRig rig = new PurchaseRig();
+    // findPurchasablePlan returns only ACTIVE catalog rows, so an unknown key and the key of a
+    // switched-off plan both come back empty — and must be answered identically.
+    when(rig.catalog.findPurchasablePlan("retired-plan-key")).thenReturn(Optional.empty());
+    JSONObject body = new JSONObject().put("clientName", "Acme Productive")
+        .put("planKey", "retired-plan-key");
+
+    ResponseCapture resp = rig.post(body);
+
+    assertEquals(400, resp.status);
+    JSONObject error = new JSONObject(resp.body()).getJSONObject("error");
+    assertEquals("PLAN_NOT_AVAILABLE", error.getString("code"));
+    // Not echoed anywhere in the answer: probing keys must not tell a caller which ones exist.
+    assertFalse(resp.body(), resp.body().contains("retired-plan-key"));
+    // Refused before anything is recorded or sent to the provider.
+    verify(rig.store, never()).recordRequested(anyString(), anyString(), anyString(),
+        anyString(), any(CheckoutRequestStore.RequestOptions.class), any(Plan.class));
+    org.mockito.Mockito.verifyNoInteractions(rig.stripe, rig.prices);
+  }
+
+  @Test
+  public void billingPurchaseChargesThePlanPriceAndIgnoresAPriceSubmittedByTheBrowser()
+      throws Exception {
+    PurchaseRig rig = new PurchaseRig();
+    rig.sell("productive-monthly", "price_PLAN_OWN");
+    JSONObject body = new JSONObject().put("clientName", "Acme Productive")
+        .put("planKey", "productive-monthly")
+        // There is no request field for a price: it is ignored, not validated.
+        .put("priceId", "price_ATTACKER_CONTROLLED");
+
+    ResponseCapture resp = rig.post(body);
+
+    assertEquals(201, resp.status);
+    ArgumentCaptor<String> form = ArgumentCaptor.forClass(String.class);
+    verify(rig.stripe).postForm(eq("/v1/checkout/sessions"), form.capture(), anyString());
+    assertTrue(form.getValue(), form.getValue().contains("price_PLAN_OWN"));
+    assertFalse(form.getValue(), form.getValue().contains("price_ATTACKER_CONTROLLED"));
+    verify(rig.prices).retrievePrice("price_PLAN_OWN");
+    verify(rig.prices, never()).retrievePrice("price_ATTACKER_CONTROLLED");
+  }
+
+  @Test
+  public void billingPurchaseAnswersWithoutTheProviderPriceId() throws Exception {
+    PurchaseRig rig = new PurchaseRig();
+    rig.sell("productive-monthly", "price_PLAN_OWN");
+    JSONObject body = new JSONObject().put("clientName", "Acme Productive")
+        .put("planKey", "productive-monthly");
+
+    ResponseCapture resp = rig.post(body);
+
+    assertEquals(201, resp.status);
+    JSONObject created = new JSONObject(resp.body());
+    assertEquals("https://checkout.test/s", created.getString("checkoutUrl"));
+    assertTrue(created.has("requestId"));
+    // The browser names a plan, never a price: the charged price id stays server-side.
+    assertFalse(created.has("priceId"));
+    assertFalse(resp.body(), resp.body().contains("price_PLAN_OWN"));
+  }
+
+  /**
+   * The servlet wired to a real {@link HostedCheckoutService}. Its collaborators are
+   * package-private in {@code com.etendoerp.go.payment}, so they are replaced reflectively.
+   */
+  private final class PurchaseRig {
+    final PlanCatalogService catalog = mock(PlanCatalogService.class);
+    final CheckoutRequestStore store = mock(CheckoutRequestStore.class);
+    final StripeApiClient stripe = mock(StripeApiClient.class);
+    final StripePriceService prices = mock(StripePriceService.class);
+    final Account account = mock(Account.class);
+
+    PurchaseRig() throws Exception {
+      HostedCheckoutService service = new HostedCheckoutService();
+      setField(service, "planCatalogService", catalog);
+      setField(service, "checkoutRequestStore", store);
+      setField(service, "stripeApiClient", stripe);
+      setField(service, "stripePriceService", prices);
+      servlet.hostedCheckoutService = service;
+      // Also the servlet's own store: no purchase in flight, so a new checkout is opened.
+      servlet.checkoutRequestStore = store;
+      servlet.checkoutRequestWrites = mock(CheckoutRequestWrites.class);
+      when(account.getId()).thenReturn("ACC-1");
+      when(account.getEmail()).thenReturn("user@test.com");
+    }
+
+    /** Puts one active plan carrying its own provider price on sale. */
+    void sell(String planKey, String priceId) throws Exception {
+      Plan plan = mock(Plan.class);
+      when(plan.getSearchKey()).thenReturn(planKey);
+      when(plan.getProviderPriceID()).thenReturn(priceId);
+      when(catalog.findPurchasablePlan(planKey)).thenReturn(Optional.of(plan));
+      when(catalog.hasProviderPrice(plan)).thenReturn(true);
+      StripePriceService.Price price = mock(StripePriceService.Price.class);
+      when(price.getId()).thenReturn(priceId);
+      when(price.getInterval()).thenReturn("month");
+      when(prices.retrievePrice(priceId)).thenReturn(price);
+      when(stripe.postForm(anyString(), anyString(), anyString())).thenReturn(new StripeResponse(
+          200, new JSONObject().put("id", "cs_test_1").put("url", "https://checkout.test/s")
+              .toString()));
+    }
+
+    ResponseCapture post(JSONObject body) throws Exception {
+      ResponseCapture resp = mockResponse();
+      HttpServletRequest req = authenticatedJsonRequest("/billing/purchases", "valid-token", body);
+      try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+           MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class);
+           MockedStatic<PublicUrlResolver> urls = mockStatic(PublicUrlResolver.class);
+           MockedStatic<CheckoutConfiguration> config = mockStatic(CheckoutConfiguration.class)) {
+        dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("valid-token"))
+            .thenReturn(account);
+        // Owner-gated: an unstubbed static boolean is false, which would answer 403 first.
+        dalMock.when(() -> EtendoGoJwtDalHelper.hasOwnedEnvironmentForAccountEmail("user@test.com"))
+            .thenReturn(true);
+        urls.when(PublicUrlResolver::resolveConfiguredAppBaseUrl).thenReturn(TEST_APP_BASE_URL);
+        config.when(CheckoutConfiguration::isConfigured).thenReturn(true);
+
+        servlet.doPost(req, resp.response);
+      }
+      return resp;
+    }
+  }
+
+  private static void setField(Object target, String name, Object value) throws Exception {
+    Field field = target.getClass().getDeclaredField(name);
+    field.setAccessible(true);
+    field.set(target, value);
   }
 
   // ===================== GET /plans =====================

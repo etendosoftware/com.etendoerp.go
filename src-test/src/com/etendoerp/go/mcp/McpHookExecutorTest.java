@@ -668,6 +668,37 @@ public class McpHookExecutorTest {
     }
   }
 
+  // ── ETP-5680: placeholder forwarding ──
+
+  /** The placeholders the mandatory-defaults pass recorded reach the pre-hook's context. */
+  @Test
+  public void testFallbackPlaceholdersAreForwardedToTheHookContext() {
+    NeoContext from = NeoContext.builder()
+        .specName("product").entityName("product").httpMethod("POST").build();
+    from.addFallbackDefault("taxCategory");
+    from.addFallbackDefault("uOM");
+    NeoContext to = NeoContext.builder()
+        .specName("product").entityName("product").httpMethod("POST").build();
+
+    McpHookExecutor.forwardFallbackDefaults(from, to);
+
+    assertEquals(java.util.Set.of("taxCategory", "uOM"), to.getFallbackDefaults());
+    assertFalse(to.getFallbackDefaults().contains("productType"));
+  }
+
+  /** With nothing recorded (a value the caller sent is never recorded) nothing is forwarded. */
+  @Test
+  public void testNoPlaceholdersMeansNothingForwarded() {
+    NeoContext from = NeoContext.builder()
+        .specName("product").entityName("product").httpMethod("POST").build();
+    NeoContext to = NeoContext.builder()
+        .specName("product").entityName("product").httpMethod("POST").build();
+
+    McpHookExecutor.forwardFallbackDefaults(from, to);
+
+    assertTrue(to.getFallbackDefaults().isEmpty());
+  }
+
   // ── resolveServerCreateFields (ETP-5710) ──────────────────────────────
 
   @Test
