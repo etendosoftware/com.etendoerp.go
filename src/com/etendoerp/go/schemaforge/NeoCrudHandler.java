@@ -587,6 +587,8 @@ class NeoCrudHandler {
           if (quotaRefusal != null) {
             return quotaRefusal;
           }
+          // The gate's own commit may have failed: then this is core's error JSON for it.
+          result = quota.result();
         }
         break;
       }

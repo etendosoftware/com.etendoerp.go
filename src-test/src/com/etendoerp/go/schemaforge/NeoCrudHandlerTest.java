@@ -4367,4 +4367,47 @@ class NeoCrudHandlerTest {
       }
     }
   }
+
+  // -------------------------------------------------------------------------
+  // ETP-5051: the POST create runs inside the plan-quota gate
+  // -------------------------------------------------------------------------
+
+  /**
+   * The REST single and batch create runs its insert inside {@code NeoQuotaWriteGate}: the gate
+   * picks the service, checks the created row after the insert, a refusal is returned, and the
+   * caller goes on with the gate's result (core's error JSON when the gate's own commit failed).
+   * The POST path needs a live DAL and an {@code AD_Tab}, so the wiring is pinned on the source,
+   * anchored on the calls rather than on local variable names.
+   */
+  @Nested
+  @DisplayName("the POST create runs inside the plan-quota gate (ETP-5051)")
+  class QuotaGateWiring {
+
+    @Test
+    void theCreateRunsItsInsertInsideTheGate() throws Exception {
+      String source = readSource("com/etendoerp/go/schemaforge/NeoCrudHandler.java")
+          .replaceAll("\\s+", " ");
+
+      int begin = source.indexOf("NeoQuotaWriteGate.begin(");
+      int insert = source.indexOf(".jsonService(", begin);
+      int finish = source.indexOf(".finish(", insert);
+      int refusal = source.indexOf("return ", finish);
+      int result = source.indexOf(".result()", finish);
+
+      assertTrue(begin >= 0, "NeoCrudHandler no longer opens the quota gate around its create");
+      assertTrue(insert > begin, "the create no longer runs through the gate's service");
+      assertTrue(finish > insert, "the created row is no longer checked after the insert");
+      assertTrue(refusal > finish, "a quota refusal is no longer returned to the caller");
+      assertTrue(result > finish, "the caller no longer goes on with the gate's result");
+    }
+
+    private String readSource(String relative) throws java.io.IOException {
+      java.nio.file.Path fromRoot = java.nio.file.Paths.get("modules/com.etendoerp.go/src",
+          relative);
+      java.nio.file.Path file = java.nio.file.Files.exists(fromRoot) ? fromRoot
+          : java.nio.file.Paths.get("src", relative);
+      return new String(java.nio.file.Files.readAllBytes(file),
+          java.nio.charset.StandardCharsets.UTF_8);
+    }
+  }
 }

@@ -45,6 +45,10 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.hibernate.Session;
+import org.hibernate.Transaction;
+import org.hibernate.exception.GenericJDBCException;
+import org.hibernate.resource.transaction.spi.TransactionStatus;
 import org.mockito.MockedStatic;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.service.json.JsonConstants;
@@ -62,8 +66,9 @@ import com.etendoerp.go.usage.quota.QuotaWriteGuard;
  * <p>The check runs after the insert and before the commit, so the gate decides who ends the
  * transaction: itself for a checked create outside a batch (commit when the row may stand,
  * rollback when it is refused), nobody inside a batch (the batch commits or rolls back the whole
- * request). A failure of the check itself never refuses a create: it is logged under
- * {@code [QUOTA]} and the create stands.
+ * request). A failure of the check itself is logged under {@code [QUOTA]}: one raised before any
+ * SQL leaves the create standing (fails open); one from the database, or a transaction marked
+ * rollback-only, has poisoned the transaction and fails closed with {@code QUOTA_CHECK_FAILED}.
  *
  * @covers com.etendoerp.go.schemaforge.NeoQuotaWriteGate
  * @covers com.etendoerp.go.schemaforge.NeoCrudHandler
@@ -75,6 +80,8 @@ class NeoQuotaWriteGateTest {
 
   private QuotaWriteGuard guard;
   private OBDal dal;
+  private Session session;
+  private Transaction transaction;
   private MockedStatic<OBDal> obDal;
   private TestLogCapture logs;
 
@@ -84,6 +91,11 @@ class NeoQuotaWriteGateTest {
     dal = mock(OBDal.class);
     obDal = mockStatic(OBDal.class);
     obDal.when(OBDal::getInstance).thenReturn(dal);
+    session = mock(Session.class);
+    transaction = mock(Transaction.class);
+    when(dal.getSession()).thenReturn(session);
+    when(session.getTransaction()).thenReturn(transaction);
+    when(transaction.getStatus()).thenReturn(TransactionStatus.ACTIVE);
     logs = TestLogCapture.attachTo(NeoQuotaWriteGate.class, Level.INFO);
   }
 
@@ -208,9 +220,14 @@ class NeoQuotaWriteGateTest {
       verify(dal, never()).rollbackAndClose();
     }
 
+    /**
+     * An error raised before any SQL — an invalid restriction fragment — leaves the transaction
+     * intact, so the create stands and is committed.
+     */
     @Test
-    void aFailingQuotaCheckFailsOpenTheCreateStandsAndIsLogged() throws Exception {
-      when(guard.refusalFor(eq(ENTITY), any())).thenThrow(new IllegalStateException("db down"));
+    void aCheckFailingBeforeAnySqlFailsOpenTheCreateIsCommittedAndLogged() throws Exception {
+      when(guard.refusalFor(eq(ENTITY), any())).thenThrow(
+          new IllegalArgumentException("HQL restriction has unbalanced parentheses"));
 
       NeoResponse response;
       try (NeoQuotaWriteGate.Create create = begin(false)) {
@@ -224,6 +241,69 @@ class NeoQuotaWriteGateTest {
       assertEquals(1, errors.size(), String.valueOf(errors));
       assertTrue(errors.get(0).startsWith("[QUOTA]"), errors.get(0));
       assertTrue(errors.get(0).contains("the create stands"), errors.get(0));
+    }
+
+    /**
+     * REPRO (ETP-5051 review B1): a check that failed on the database leaves Hibernate's transaction
+     * marked rollback-only. Committing it would silently roll the row back while the caller is told
+     * it exists. The gate must fail closed: roll back, never commit, answer QUOTA_CHECK_FAILED.
+     */
+    @Test
+    void aCheckThatLeftTheTransactionRollbackOnlyFailsClosedAndSavesNothing() throws Exception {
+      when(guard.refusalFor(eq(ENTITY), any())).thenThrow(new IllegalStateException("boom"));
+      when(transaction.getStatus()).thenReturn(TransactionStatus.MARKED_ROLLBACK);
+
+      NeoResponse response;
+      try (NeoQuotaWriteGate.Create create = begin(false)) {
+        response = create.finish(created("ROW-1"));
+      }
+
+      assertCheckFailed(response);
+      verify(dal, times(1)).rollbackAndClose();
+      verify(dal, never()).commitAndClose();
+    }
+
+    /** A JDBC error anywhere in the cause chain is a poisoned transaction too. */
+    @Test
+    void aDatabaseErrorInTheCauseChainFailsClosed() throws Exception {
+      when(guard.refusalFor(eq(ENTITY), any())).thenThrow(new IllegalStateException("wrapped",
+          new GenericJDBCException("could not execute query",
+              new java.sql.SQLException("current transaction is aborted"))));
+
+      NeoResponse response;
+      try (NeoQuotaWriteGate.Create create = begin(false)) {
+        response = create.finish(created("ROW-1"));
+      }
+
+      assertCheckFailed(response);
+      verify(dal, times(1)).rollbackAndClose();
+      verify(dal, never()).commitAndClose();
+    }
+
+    /**
+     * ETP-5051 review W1: the gate's own commit failing (a deferred constraint) must reach the
+     * caller as core's error JSON, exactly as a failing self-committing add did, not as an
+     * exception.
+     */
+    @Test
+    void aFailingCommitHandsTheCallerCoresErrorJson() throws Exception {
+      when(guard.refusalFor(eq(ENTITY), any())).thenReturn(Optional.empty());
+      org.mockito.Mockito.doThrow(new IllegalStateException("deferred constraint violated"))
+          .when(dal).commitAndClose();
+
+      NeoResponse response;
+      String result;
+      try (NeoQuotaWriteGate.Create create = begin(false)) {
+        response = create.finish(created("ROW-1"));
+        result = create.result();
+      }
+
+      assertNull(response);
+      JSONObject inner = new JSONObject(result).getJSONObject(JsonConstants.RESPONSE_RESPONSE);
+      assertEquals(JsonConstants.RPCREQUEST_STATUS_FAILURE,
+          inner.getInt(JsonConstants.RESPONSE_STATUS));
+      // Committed once; core closed the session itself when the commit failed.
+      verify(dal, times(1)).commitAndClose();
     }
 
     @Test
@@ -299,6 +379,32 @@ class NeoQuotaWriteGateTest {
     }
   }
 
+  /** Inside a batch a poisoned check fails the operation, so the batch rolls back visibly. */
+  @Test
+  void insideABatchAPoisonedCheckFailsTheOperationAndLeavesTheRollbackToTheBatch()
+      throws Exception {
+    when(guard.refusalFor(eq(ENTITY), any())).thenThrow(new IllegalStateException("boom"));
+    when(transaction.getStatus()).thenReturn(TransactionStatus.MARKED_ROLLBACK);
+
+    NeoResponse response;
+    try (NeoQuotaWriteGate.Create create = begin(true)) {
+      response = create.finish(created("ROW-1"));
+    }
+
+    assertCheckFailed(response);
+    verify(dal, never()).rollbackAndClose();
+    verify(dal, never()).commitAndClose();
+  }
+
+  private static void assertCheckFailed(NeoResponse response) throws Exception {
+    assertNotNull(response);
+    assertEquals(500, response.getHttpStatus());
+    JSONObject error = response.getBody().getJSONObject("error");
+    assertEquals(NeoQuotaWriteGate.CHECK_FAILED_CODE, error.getString("code"));
+    assertEquals(500, error.getInt("status"));
+    assertEquals(NeoQuotaWriteGate.CHECK_FAILED_MESSAGE, error.getString("message"));
+  }
+
   @Nested
   @DisplayName("the production entry point")
   class ProductionBegin {
@@ -324,36 +430,6 @@ class NeoQuotaWriteGateTest {
 
       verify(dal, times(1)).rollbackAndClose();
     }
-
-    /**
-     * The REST single create runs its insert inside the gate too. {@code NeoCrudHandler}'s POST
-     * path needs a live DAL and an {@code AD_Tab}, so the wiring is pinned on its source.
-     */
-    @Test
-    void theRestCreateRunsItsInsertInsideTheGate() throws Exception {
-      String source = readSource("com/etendoerp/go/schemaforge/NeoCrudHandler.java")
-          .replaceAll("\\s+", " ");
-
-      int begin = source.indexOf("try (NeoQuotaWriteGate.Create quota = "
-          + "NeoQuotaWriteGate.begin(dalEntityName))");
-      int insert = source.indexOf("quota.jsonService(jsonService), params)", begin);
-      int finish = source.indexOf("NeoResponse quotaRefusal = quota.finish(result);", insert);
-      int refusal = source.indexOf("return quotaRefusal;", finish);
-
-      assertTrue(begin >= 0, "NeoCrudHandler no longer opens the quota gate around its create");
-      assertTrue(insert > begin, "the create no longer runs through the gate's service");
-      assertTrue(finish > insert, "the created row is no longer checked after the insert");
-      assertTrue(refusal > finish, "a quota refusal is no longer returned to the caller");
-    }
-
-    private String readSource(String relative) throws java.io.IOException {
-      java.nio.file.Path fromRoot = java.nio.file.Paths.get("modules/com.etendoerp.go/src",
-          relative);
-      java.nio.file.Path file = java.nio.file.Files.exists(fromRoot) ? fromRoot
-          : java.nio.file.Paths.get("src", relative);
-      return new String(java.nio.file.Files.readAllBytes(file),
-          java.nio.charset.StandardCharsets.UTF_8);
-    }
   }
 
   @Nested
@@ -362,8 +438,8 @@ class NeoQuotaWriteGateTest {
 
     @Test
     void theIdsOfEverySuccessfulRowAreRead() throws Exception {
-      assertEquals(List.of("ROW-1", "ROW-2"), NeoQuotaWriteGate.createdIds(created("ROW-1",
-          "ROW-2")));
+      assertEquals(Optional.of(List.of("ROW-1", "ROW-2")),
+          NeoQuotaWriteGate.createdIds(created("ROW-1", "ROW-2")));
     }
 
     @Test
@@ -374,7 +450,7 @@ class NeoQuotaWriteGateTest {
               .put("not an object").put(new JSONObject().put(JsonConstants.ID, "ROW-3"))))
           .toString();
 
-      assertEquals(List.of("ROW-3"), NeoQuotaWriteGate.createdIds(result));
+      assertEquals(Optional.of(List.of("ROW-3")), NeoQuotaWriteGate.createdIds(result));
     }
 
     @Test
@@ -383,16 +459,16 @@ class NeoQuotaWriteGateTest {
           .put(JsonConstants.RESPONSE_STATUS, JsonConstants.RPCREQUEST_STATUS_SUCCESS))
           .toString();
 
-      assertEquals(Collections.emptyList(), NeoQuotaWriteGate.createdIds(result));
+      assertEquals(Optional.of(Collections.emptyList()), NeoQuotaWriteGate.createdIds(result));
     }
 
     @Test
-    void aFailedBlankOrUnreadableResultIsNull() throws Exception {
-      assertNull(NeoQuotaWriteGate.createdIds(failedAdd()));
-      assertNull(NeoQuotaWriteGate.createdIds(" "));
-      assertNull(NeoQuotaWriteGate.createdIds(null));
-      assertNull(NeoQuotaWriteGate.createdIds("{not json"));
-      assertNull(NeoQuotaWriteGate.createdIds("{}"));
+    void aFailedBlankOrUnreadableResultIsEmpty() throws Exception {
+      assertFalse(NeoQuotaWriteGate.createdIds(failedAdd()).isPresent());
+      assertFalse(NeoQuotaWriteGate.createdIds(" ").isPresent());
+      assertFalse(NeoQuotaWriteGate.createdIds(null).isPresent());
+      assertFalse(NeoQuotaWriteGate.createdIds("{not json").isPresent());
+      assertFalse(NeoQuotaWriteGate.createdIds("{}").isPresent());
     }
   }
 

@@ -17,10 +17,12 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 
+import javax.persistence.PersistenceException;
 import javax.servlet.http.HttpServletResponse;
 
 import org.apache.commons.lang3.StringUtils;
@@ -29,9 +31,14 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.JDBCException;
+import org.hibernate.Transaction;
+import org.hibernate.resource.transaction.spi.TransactionStatus;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.service.db.DbUtility;
 import org.openbravo.service.json.DefaultJsonDataService;
 import org.openbravo.service.json.JsonConstants;
+import org.openbravo.service.json.JsonUtils;
 
 import com.etendoerp.go.usage.quota.QuotaEvaluation;
 import com.etendoerp.go.usage.quota.QuotaItemJson;
@@ -55,8 +62,21 @@ import com.etendoerp.go.usage.quota.QuotaWriteGuard;
  * the batch rolls everything back. A create that is not checked — every entity no active
  * {@code block} quota counts — is untouched: same service, same commit, no query.
  *
- * <p><b>Fails open.</b> An error while checking is logged and the create stands; a broken quota
- * configuration must not stop every create of an entity.
+ * <p><b>When the check itself fails.</b> It depends on whether the request's transaction survived:
+ * <ul>
+ *   <li><b>An error before any SQL ran</b> — an invalid restriction fragment, a missing strategy
+ *       counter — leaves the transaction intact: the error is logged and the create stands, so a
+ *       broken quota configuration does not stop every create of an entity (fails open).</li>
+ *   <li><b>An error from the database</b> (a JDBC / persistence exception anywhere in the cause
+ *       chain, or a transaction Hibernate has marked rollback-only) has poisoned the transaction:
+ *       PostgreSQL aborts it and the commit would silently roll the row back while the caller is
+ *       told it exists. So it fails <b>closed</b>: the gate rolls back the create it owns, or fails
+ *       the batch operation, and answers {@value #CHECK_FAILED_STATUS} {@value #CHECK_FAILED_CODE}
+ *       — nothing was saved.</li>
+ * </ul>
+ * A commit the gate makes that fails (a deferred constraint, say) does not escape as an exception:
+ * the add result is replaced by core's own error JSON for that exception ({@link Create#result()}),
+ * so the caller classifies it exactly as it classified a failing self-committing add before.
  *
  * <p>Structural only: the decision is driven by catalog data, never by an entity or spec name.
  */
@@ -68,6 +88,14 @@ public final class NeoQuotaWriteGate {
   public static final int STATUS = HttpServletResponse.SC_FORBIDDEN;
   /** Machine-readable code of a quota refusal; the SPA keys its own message off it. */
   public static final String CODE = "QUOTA_EXCEEDED";
+
+  /** HTTP status when the quota check failed on the database: nothing was saved. */
+  public static final int CHECK_FAILED_STATUS = HttpServletResponse.SC_INTERNAL_SERVER_ERROR;
+  /** Machine-readable code of a failed quota check; the SPA translates it. */
+  public static final String CHECK_FAILED_CODE = "QUOTA_CHECK_FAILED";
+  /** The message of {@link #CHECK_FAILED_CODE}; clients show their own translation. */
+  public static final String CHECK_FAILED_MESSAGE =
+      "The quota check failed; nothing was saved. Try again.";
 
   private static final String KEY_ERROR = "error";
   private static final String KEY_MESSAGE = "message";
@@ -124,6 +152,24 @@ public final class NeoQuotaWriteGate {
     }
   }
 
+  /**
+   * The response of a quota check that failed on the database: {@value #CHECK_FAILED_STATUS} with
+   * {@code error.message}, {@code error.status} and {@code error.code = QUOTA_CHECK_FAILED}.
+   *
+   * @return the response
+   */
+  public static NeoResponse checkFailedResponse() {
+    try {
+      JSONObject error = new JSONObject();
+      error.put(KEY_MESSAGE, CHECK_FAILED_MESSAGE);
+      error.put(KEY_STATUS, CHECK_FAILED_STATUS);
+      error.put(KEY_CODE, CHECK_FAILED_CODE);
+      return NeoResponse.error(CHECK_FAILED_STATUS, new JSONObject().put(KEY_ERROR, error));
+    } catch (JSONException e) {
+      return NeoResponse.error(CHECK_FAILED_STATUS, CHECK_FAILED_MESSAGE);
+    }
+  }
+
   /** One create under the gate. Not thread-safe; it lives for one request. */
   public static final class Create implements AutoCloseable {
 
@@ -132,6 +178,7 @@ public final class NeoQuotaWriteGate {
     private final boolean checked;
     private final boolean ownsTransaction;
     private boolean ended;
+    private String result;
 
     private Create(String dalEntityName, QuotaWriteGuard guard, boolean checked,
         boolean ownsTransaction) {
@@ -141,12 +188,20 @@ public final class NeoQuotaWriteGate {
       this.ownsTransaction = ownsTransaction;
     }
 
-    /** @return whether this create is quota-checked */
+    /**
+     * Whether this create is quota-checked.
+     *
+     * @return {@code true} when some active {@code block} quota counts the entity
+     */
     public boolean isChecked() {
       return checked;
     }
 
-    /** @return whether this gate ends the transaction (checked, and no batch owns it) */
+    /**
+     * Whether this gate ends the transaction: the create is checked and no batch owns it.
+     *
+     * @return {@code true} when the gate commits or rolls back itself
+     */
     public boolean ownsTransaction() {
       return ownsTransaction;
     }
@@ -163,32 +218,40 @@ public final class NeoQuotaWriteGate {
     }
 
     /**
-     * Checks the created rows and ends the transaction when this gate owns it.
+     * Checks the created rows and ends the transaction when this gate owns it. Afterwards the
+     * caller reads {@link #result()} instead of the add result it passed in.
      *
      * @param addResult the JSON string {@code add} returned
-     * @return the 403 refusal, or null when the caller carries on as before (the create stands,
-     *     or it failed and the caller reports that failure as it always did)
+     * @return the refusal (403 {@code QUOTA_EXCEEDED}, or {@value #CHECK_FAILED_STATUS}
+     *     {@code QUOTA_CHECK_FAILED}), or null when the caller carries on with {@link #result()}
      */
     public NeoResponse finish(String addResult) {
+      result = addResult;
       if (!checked) {
         return null;
       }
-      List<String> createdIds = createdIds(addResult);
-      if (createdIds == null) {
+      Optional<List<String>> createdIds = createdIds(addResult);
+      if (!createdIds.isPresent()) {
         rollbackIfOwned();
         return null;
       }
-      Optional<QuotaEvaluation> refusal = check(createdIds);
-      if (refusal.isPresent()) {
+      Outcome outcome = check(createdIds.get());
+      if (outcome.response != null) {
         rollbackIfOwned();
-        log.info("[QUOTA] Refused a create of {}: {}", dalEntityName, refusal.get());
-        return refusalResponse(refusal.get());
+        return outcome.response;
       }
-      if (ownsTransaction) {
-        ended = true;
-        OBDal.getInstance().commitAndClose();
-      }
+      commitIfOwned();
       return null;
+    }
+
+    /**
+     * The add result the caller must go on with: the one passed to {@link #finish}, or core's error
+     * JSON when the gate's own commit failed.
+     *
+     * @return the add result
+     */
+    public String result() {
+      return result;
     }
 
     /** Rolls back a transaction this gate owns and never ended (the create threw). */
@@ -197,13 +260,39 @@ public final class NeoQuotaWriteGate {
       rollbackIfOwned();
     }
 
-    private Optional<QuotaEvaluation> check(List<String> createdIds) {
+    private Outcome check(List<String> createdIds) {
       try {
-        return guard.refusalFor(dalEntityName, createdIds);
+        Optional<QuotaEvaluation> refusal = guard.refusalFor(dalEntityName, createdIds);
+        if (refusal.isPresent()) {
+          log.info("[QUOTA] Refused a create of {}: {}", dalEntityName, refusal.get());
+          return new Outcome(refusalResponse(refusal.get()));
+        }
+        return Outcome.STANDS;
       } catch (RuntimeException e) {
-        log.error("[QUOTA] The quota check of a create of {} failed; the create stands",
-            dalEntityName, e);
-        return Optional.empty();
+        if (isTransactionPoisoned(e)) {
+          log.error("[QUOTA] The quota check of a create of {} failed on the database; the "
+              + "transaction is lost, so nothing is saved ({})", dalEntityName, CHECK_FAILED_CODE,
+              e);
+          return new Outcome(checkFailedResponse());
+        }
+        log.error("[QUOTA] The quota check of a create of {} failed before reaching the "
+            + "database; the create stands", dalEntityName, e);
+        return Outcome.STANDS;
+      }
+    }
+
+    private void commitIfOwned() {
+      if (!ownsTransaction || ended) {
+        return;
+      }
+      ended = true;
+      try {
+        OBDal.getInstance().commitAndClose();
+      } catch (RuntimeException e) {
+        // Core's commitAndClose closes the session on failure. Hand the caller the same error JSON
+        // core's self-committing add returned for a failing commit, so it is classified as before.
+        log.warn("[QUOTA] The commit of a checked create of {} failed", dalEntityName, e);
+        result = JsonUtils.convertExceptionToJson(DbUtility.getUnderlyingSQLException(e));
       }
     }
 
@@ -215,36 +304,83 @@ public final class NeoQuotaWriteGate {
     }
   }
 
+  /** What the check decided: a response to return, or none (the create stands). */
+  private static final class Outcome {
+    private static final Outcome STANDS = new Outcome(null);
+    private final NeoResponse response;
+
+    private Outcome(NeoResponse response) {
+      this.response = response;
+    }
+  }
+
   /**
-   * The ids of the rows an {@code add} created, or null when it did not succeed.
+   * Whether a failed check has poisoned the request's transaction: an exception from the database
+   * anywhere in the cause chain, or a transaction Hibernate already marked rollback-only. Such a
+   * transaction cannot be committed, so the create must fail closed.
+   *
+   * @param error the check's failure
+   * @return {@code true} when the transaction is lost
+   */
+  static boolean isTransactionPoisoned(Throwable error) {
+    for (Throwable cause = error; cause != null; cause = nextCause(cause)) {
+      if (cause instanceof SQLException || cause instanceof JDBCException
+          || cause instanceof PersistenceException) {
+        return true;
+      }
+    }
+    return isMarkedRollbackOnly();
+  }
+
+  private static Throwable nextCause(Throwable cause) {
+    return cause.getCause() == cause ? null : cause.getCause();
+  }
+
+  private static boolean isMarkedRollbackOnly() {
+    try {
+      Transaction transaction = OBDal.getInstance().getSession().getTransaction();
+      return transaction != null && transaction.getStatus() == TransactionStatus.MARKED_ROLLBACK;
+    } catch (RuntimeException e) {
+      // No readable transaction state: the session itself is unusable.
+      log.debug("Could not read the transaction state after a failed quota check", e);
+      return true;
+    }
+  }
+
+  /**
+   * The ids of the rows an {@code add} created.
    *
    * @param addResult the JSON string {@code add} returned
-   * @return the ids, possibly empty; null on a failed or unreadable result
+   * @return the ids, possibly empty; empty {@link Optional} on a failed or unreadable result
    */
-  static List<String> createdIds(String addResult) {
+  static Optional<List<String>> createdIds(String addResult) {
     if (StringUtils.isBlank(addResult)) {
-      return null;
+      return Optional.empty();
     }
     try {
       JSONObject response = new JSONObject(addResult).optJSONObject(JsonConstants.RESPONSE_RESPONSE);
       if (response == null || response.optInt(JsonConstants.RESPONSE_STATUS,
           JsonConstants.RPCREQUEST_STATUS_FAILURE) != JsonConstants.RPCREQUEST_STATUS_SUCCESS) {
-        return null;
+        return Optional.empty();
       }
-      List<String> ids = new ArrayList<>();
-      JSONArray data = response.optJSONArray(JsonConstants.RESPONSE_DATA);
-      if (data != null) {
-        for (int i = 0; i < data.length(); i++) {
-          JSONObject row = data.optJSONObject(i);
-          String id = row == null ? null : row.optString(JsonConstants.ID, null);
-          if (StringUtils.isNotBlank(id)) {
-            ids.add(id);
-          }
-        }
-      }
-      return ids;
+      return Optional.of(idsOf(response.optJSONArray(JsonConstants.RESPONSE_DATA)));
     } catch (JSONException e) {
-      return null;
+      return Optional.empty();
     }
+  }
+
+  private static List<String> idsOf(JSONArray data) {
+    List<String> ids = new ArrayList<>();
+    if (data == null) {
+      return ids;
+    }
+    for (int i = 0; i < data.length(); i++) {
+      JSONObject row = data.optJSONObject(i);
+      String id = row == null ? null : row.optString(JsonConstants.ID, null);
+      if (StringUtils.isNotBlank(id)) {
+        ids.add(id);
+      }
+    }
+    return ids;
   }
 }

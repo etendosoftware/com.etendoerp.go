@@ -1524,12 +1524,14 @@ public class McpToolRouterTest {
     String body = McpSourceScanner.stripComments(McpSourceScanner.methodBody(
         McpSourceScanner.read("com/etendoerp/go/mcp/McpToolRouter.java"), "handleCreate"));
 
-    int begin = indexOf(body, "NeoQuotaWriteGate.begin(dalEntityName)");
-    int service = indexOf(body, "jsonService = quota.jsonService(jsonService)");
-    int add = indexOf(body, "result = jsonService.add(params, wrappedBody)");
-    int finish = indexOf(body, "NeoResponse quotaRefusal = quota.finish(result)");
-    int refusal = indexOf(body, "return McpHookExecutor.neoResponseToMcpResult(quotaRefusal)");
-    int successRead = indexOf(body, "new JSONObject(result)");
+    // Anchored on the calls, never on local variable names, and each searched after the one
+    // before it, so a rename does not break it and an earlier unrelated call cannot satisfy it.
+    int begin = indexOf(body, "NeoQuotaWriteGate.begin(", 0);
+    int service = indexOf(body, ".jsonService(", begin);
+    int add = indexOf(body, ".add(", service);
+    int finish = indexOf(body, ".finish(", add);
+    int refusal = indexOf(body, "neoResponseToMcpResult(", finish);
+    int successRead = indexOf(body, "new JSONObject(", refusal);
 
     assertTrue("the gate opens before the insert and chooses its service",
         begin < service && service < add);
@@ -1540,8 +1542,8 @@ public class McpToolRouterTest {
         body.split("jsonService\\.add\\(", -1).length - 1);
   }
 
-  private static int indexOf(String body, String code) {
-    int at = body.replaceAll("\\s+", " ").indexOf(code);
+  private static int indexOf(String body, String code, int from) {
+    int at = body.replaceAll("\\s+", " ").indexOf(code, from);
     assertTrue("handleCreate no longer contains `" + code + "`: the ETP-5051 quota gate was"
         + " dropped from etendo_create, or refactored and this guard needs updating", at >= 0);
     return at;

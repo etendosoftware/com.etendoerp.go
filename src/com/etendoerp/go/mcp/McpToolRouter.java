@@ -725,12 +725,7 @@ public class McpToolRouter {
     // got a 422 for parent-derived fields it was never told to send. Copied into `fields`
     // rather than handled separately so there stays exactly ONE downstream reader of it (the
     // resolveParentFK block below); the top-level argument wins, because it is the declared one.
-    if (args.has(McpConstants.PARAM_PARENT_ID) && !args.isNull(McpConstants.PARAM_PARENT_ID)) {
-      String topLevelParentId = args.getString(McpConstants.PARAM_PARENT_ID);
-      if (StringUtils.isNotBlank(topLevelParentId)) {
-        fields.put(McpConstants.PARAM_PARENT_ID, topLevelParentId);
-      }
-    }
+    copyTopLevelParentId(args, fields);
 
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
     SFEntity sfEntity = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, entityName);
@@ -919,13 +914,16 @@ public class McpToolRouter {
     // ETP-5051: the same plan-quota check as the REST create, after the insert and before the
     // commit. etendo_create does not pass through NeoCrudHandler, so it is wired here; the gate
     // is structural (catalog data only) and a no-op for every entity no block quota counts.
+    NeoResponse quotaRefusal;
     try (NeoQuotaWriteGate.Create quota = NeoQuotaWriteGate.begin(dalEntityName)) {
       jsonService = quota.jsonService(jsonService);
       result = jsonService.add(params, wrappedBody);
-      NeoResponse quotaRefusal = quota.finish(result);
-      if (quotaRefusal != null) {
-        return McpHookExecutor.neoResponseToMcpResult(quotaRefusal);
-      }
+      quotaRefusal = quota.finish(result);
+      // The gate's own commit may have failed: then this is core's error JSON for it.
+      result = quota.result();
+    }
+    if (quotaRefusal != null) {
+      return McpHookExecutor.neoResponseToMcpResult(quotaRefusal);
     }
     JSONObject responseJson = new JSONObject(result);
 
@@ -963,6 +961,21 @@ public class McpToolRouter {
   }
 
   // ── etendo_update ────────────────────────────────────────────────────────
+
+  /**
+   * Copies a non-blank top-level {@code parentId} argument of {@code etendo_create} into its
+   * {@code fields} (IMP-40). Extracted from {@link #handleCreate} to keep its cognitive complexity
+   * within Sonar's limit; behaviour unchanged.
+   */
+  private static void copyTopLevelParentId(JSONObject args, JSONObject fields)
+      throws JSONException {
+    if (args.has(McpConstants.PARAM_PARENT_ID) && !args.isNull(McpConstants.PARAM_PARENT_ID)) {
+      String topLevelParentId = args.getString(McpConstants.PARAM_PARENT_ID);
+      if (StringUtils.isNotBlank(topLevelParentId)) {
+        fields.put(McpConstants.PARAM_PARENT_ID, topLevelParentId);
+      }
+    }
+  }
 
   /**
    * Update an existing record.
