@@ -49,7 +49,10 @@ import com.etendoerp.go.payment.EnvironmentPlanCache;
 import com.etendoerp.go.payment.SubscriptionService;
 import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.payment.TenantPlanService;
+import com.etendoerp.go.usage.quota.EnvironmentQuotaReport;
+import com.etendoerp.go.usage.quota.QuotaEvaluator;
 import com.etendoerp.go.schemaforge.data.Account;
+import com.etendoerp.go.schemaforge.data.Subscription;
 import com.etendoerp.go.schemaforge.util.OwnerSupport;
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
@@ -93,6 +96,7 @@ final class EtendoGoJwtDalHelper {
   private static final String FIELD_RENEWAL_DUE_AT = "renewalDueAt";
   private static final String FIELD_GRACE_ENDS_AT = "graceEndsAt";
   private static final String FIELD_ACCESS_ENFORCED = "accessEnforced";
+  private static final String FIELD_QUOTAS = "quotas";
   private static final String FIELD_RELATIONSHIP = "relationship";
   private static final String FIELD_OWNED_BY_ACCOUNT = "ownedByAccount";
   private static final String PROPERTY_PASSWORD_CHANGED = Account.PROPERTY_PASSWORDCHANGED;
@@ -729,9 +733,51 @@ final class EtendoGoJwtDalHelper {
     // ETP-5046-TRANSITIONAL-FALLBACK — the id is passed so this single-environment path resolves
     // the plan exactly as the list endpoint does, including the retired-preference fallback for a
     // tenant the R37 backfill has not reached. Delete the extra argument in Phase F.
+    Map<String, Subscription> subscriptions =
+        SUBSCRIPTION_SERVICE.findLatestForClients(List.of(client.getId()));
     return buildEnvironmentJson(client, organization, environmentUser,
-        EnvironmentPlanCache.of(List.of(client.getId()),
-            SUBSCRIPTION_SERVICE.findLatestForClients(List.of(client.getId()))));
+        EnvironmentPlanCache.of(List.of(client.getId()), subscriptions),
+        quotaReport(subscriptions));
+  }
+
+  /**
+   * ETP-5051 (§4b) — the per-request quota report of a set of tenants, from the subscriptions the
+   * caller already loaded. One extra query at most (the enforced quota rows of the listed plans),
+   * none when no tenant has a plan; consumption only for a tenant with an enforced quota. Never
+   * throws: a failure reports {@code []}.
+   *
+   * @param subscriptionsByClient {@code SubscriptionService#findLatestForClients}
+   * @return the report
+   */
+  static EnvironmentQuotaReport quotaReport(Map<String, Subscription> subscriptionsByClient) {
+    try {
+      return EnvironmentQuotaReport.build(subscriptionsByClient, QuotaEvaluatorHolder.INSTANCE);
+    } catch (RuntimeException e) {
+      log.error("[QUOTA] Could not build the environment quota report; reporting none", e);
+      return EnvironmentQuotaReport.empty();
+    }
+  }
+
+  /** Built on first use, so loading this class wires no quota service. */
+  private static final class QuotaEvaluatorHolder {
+    private static final QuotaEvaluator INSTANCE = new QuotaEvaluator();
+  }
+
+  /**
+   * Serialises one environment with no quota evaluation: {@code quotas} is {@code []}. For callers
+   * that never report quotas; the environment list passes its report to the five-argument form.
+   *
+   * @param client the tenant
+   * @param organization the organization inside it, may be null
+   * @param environmentUser the tenant's admin user linked to the account
+   * @param planCache the per-request plan cache, never null
+   * @return the environment object
+   * @throws JSONException when the object cannot be built
+   */
+  static JSONObject buildEnvironmentJson(Client client, Organization organization,
+      User environmentUser, EnvironmentPlanCache planCache) throws JSONException {
+    return buildEnvironmentJson(client, organization, environmentUser, planCache,
+        EnvironmentQuotaReport.empty());
   }
 
   /**
@@ -760,11 +806,13 @@ final class EtendoGoJwtDalHelper {
    * @param organization the organization inside it, may be null
    * @param environmentUser the tenant's admin user linked to the account
    * @param planCache the per-request plan cache, never null
+   * @param quotaReport the per-request quota report (ETP-5051 §4b), never null
    * @return the environment object
    * @throws JSONException when the object cannot be built
    */
   static JSONObject buildEnvironmentJson(Client client, Organization organization,
-      User environmentUser, EnvironmentPlanCache planCache) throws JSONException {
+      User environmentUser, EnvironmentPlanCache planCache, EnvironmentQuotaReport quotaReport)
+      throws JSONException {
     JSONObject env = new JSONObject();
     env.put(FIELD_CLIENT_ID, client.getId());
     env.put(FIELD_CLIENT_NAME, client.getName());
@@ -803,6 +851,10 @@ final class EtendoGoJwtDalHelper {
     // "will be blocked on <date>" promise when no block would follow.
     env.put(FIELD_ACCESS_ENFORCED,
         !EnvironmentAccessEnforcementFlag.isEnforcementSwitchedOff(client.getId()));
+    // ETP-5051 (§4b): the tenant's quotas at WARN or DENY, report-only; [] when none. Core's
+    // loginEnvironment() drops the session/environment body, so the SPA's quota banner reads
+    // this field, like graceEndsAt.
+    env.put(FIELD_QUOTAS, quotaReport.quotasJsonFor(client.getId()));
     // ETP-5548: a demo that already originated a productive environment is not offered as the
     // source of another purchase; the picker reads this to leave it out.
     env.put(FIELD_ASSOCIATED_WITH_PRODUCTIVE,

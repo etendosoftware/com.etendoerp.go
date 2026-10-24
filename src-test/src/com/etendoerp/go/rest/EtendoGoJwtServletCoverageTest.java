@@ -1398,16 +1398,16 @@ public class EtendoGoJwtServletCoverageTest {
       dalMock.when(() -> EtendoGoJwtDalHelper.findNonStarOrganizations("client-2"))
           .thenReturn(Collections.emptyList());
       dalMock.when(() -> EtendoGoJwtDalHelper.buildEnvironmentJson(
-          any(Client.class), any(), any(User.class), any(EnvironmentPlanCache.class)))
+          any(Client.class), any(), any(User.class), any(EnvironmentPlanCache.class), any()))
           .thenReturn(new JSONObject());
 
       servlet.doGet(req, resp.response);
 
       dalMock.verify(() -> EtendoGoJwtDalHelper.buildEnvironmentJson(
-          eq(clientWithOrgs), eq(org), eq(userWithOrgs), any(EnvironmentPlanCache.class)));
+          eq(clientWithOrgs), eq(org), eq(userWithOrgs), any(EnvironmentPlanCache.class), any()));
       dalMock.verify(() -> EtendoGoJwtDalHelper.buildEnvironmentJson(
           eq(clientWithoutOrgs), eq(null), eq(userWithoutOrgs),
-          any(EnvironmentPlanCache.class)));
+          any(EnvironmentPlanCache.class), any()));
     }
 
     assertEquals(200, resp.status);

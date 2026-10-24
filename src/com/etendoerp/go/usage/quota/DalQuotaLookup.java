@@ -17,10 +17,21 @@
 
 package com.etendoerp.go.usage.quota;
 
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+
+import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.dal.service.OBQuery;
 
 import com.etendoerp.go.payment.PlanCatalogService;
 import com.etendoerp.go.payment.SubscriptionService;
+import com.etendoerp.go.schemaforge.data.PlanQuota;
 import com.etendoerp.go.schemaforge.data.Subscription;
 
 /**
@@ -58,5 +69,39 @@ public class DalQuotaLookup implements QuotaLookup {
     Subscription subscription = open.get();
     return TenantQuotas.of(clientId, subscription,
         planCatalogService.listActiveQuotas(subscription.getPlan()));
+  }
+
+  /**
+   * ETP-5051 (§4b) — the active quota rows of several plans in one query, keeping only the rows
+   * that are enforced (mode other than {@code off}): the only ones an enforcement report can show.
+   * The same active-row reading as {@link PlanCatalogService#listActiveQuotas}, in the same
+   * resource order.
+   *
+   * @param planIds the plan ids; null or empty reads nothing and runs no query
+   * @return the rows keyed by plan id; plans with no enforced row are absent
+   */
+  public static Map<String, List<PlanQuota>> enforcedQuotasByPlan(Collection<String> planIds) {
+    if (planIds == null || planIds.isEmpty()) {
+      return Collections.emptyMap();
+    }
+    OBContext.setAdminMode(true);
+    try {
+      OBQuery<PlanQuota> query = OBDal.getInstance().createQuery(PlanQuota.class,
+          "as quota where quota." + PlanQuota.PROPERTY_PLAN + ".id in (:planIds)"
+              + " and quota." + PlanQuota.PROPERTY_ACTIVE + " = true"
+              + " and quota." + PlanQuota.PROPERTY_ENFORCEMENTMODE + " <> :off"
+              + " order by quota." + PlanQuota.PROPERTY_BILLINGRESOURCE + ".searchKey");
+      query.setNamedParameter("planIds", planIds);
+      query.setNamedParameter("off", QuotaRules.MODE_OFF);
+      query.setFilterOnReadableClients(false);
+      query.setFilterOnReadableOrganization(false);
+      Map<String, List<PlanQuota>> byPlan = new LinkedHashMap<>();
+      for (PlanQuota quota : query.list()) {
+        byPlan.computeIfAbsent(quota.getPlan().getId(), k -> new ArrayList<>()).add(quota);
+      }
+      return byPlan;
+    } finally {
+      OBContext.restorePreviousMode();
+    }
   }
 }

@@ -925,7 +925,7 @@ class EtendoGoJwtDalHelperTest {
     }
 
     @Test
-    @DisplayName("all thirteen fields are populated")
+    @DisplayName("all fourteen fields are populated")
     void allTwelveFieldsPopulated() throws Exception {
       when(client.getId()).thenReturn("C-2");
       when(client.getName()).thenReturn("Client Two");
@@ -940,8 +940,11 @@ class EtendoGoJwtDalHelperTest {
 
       // Seven original fields, the plan badge (ETP-4686), the plan key (ETP-5046), the
       // relationship marker, the ownership flag (ETP-5743), the demo-association flag
-      // (ETP-5548) and accessEnforced (ETP-5051). Lifecycle fields are conditional and absent here.
-      assertEquals(13, result.length());
+      // (ETP-5548), accessEnforced and quotas (ETP-5051). Lifecycle fields are conditional and
+      // absent here.
+      assertEquals(14, result.length());
+      // The four-argument form evaluates no quota: quotas is always present, and empty.
+      assertEquals(0, result.getJSONArray("quotas").length());
       // graceEndsAt (ETP-5049) travels with the lifecycle fields: absent without lifecycle.
       assertFalse(result.has("graceEndsAt"), result.toString());
     }

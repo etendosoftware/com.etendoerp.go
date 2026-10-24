@@ -93,6 +93,7 @@ import com.etendoerp.go.payment.PlanCatalogService;
 import com.etendoerp.go.payment.PlanNotAvailableException;
 import com.etendoerp.go.payment.SubscriptionModelSwitch;
 import com.etendoerp.go.payment.SubscriptionService;
+import com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag;
 import com.etendoerp.go.payment.EnvironmentAccessPolicy;
 import com.etendoerp.go.payment.SubscriptionEventOutcome;
 import com.etendoerp.go.payment.StripeJson;
@@ -144,6 +145,7 @@ import com.etendoerp.go.session.JdbcGoSessionStore;
 import com.etendoerp.go.session.SessionRoleRevokedException;
 import com.auth0.jwt.JWT;
 import com.auth0.jwt.interfaces.DecodedJWT;
+import com.etendoerp.go.usage.quota.EnvironmentQuotaReport;
 import com.etendoerp.go.usage.quota.QuotaDefinition;
 import com.etendoerp.go.usage.quota.QuotaEvaluation;
 import com.etendoerp.go.usage.quota.QuotaEvaluator;
@@ -1604,6 +1606,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     // ETP-5734 — the company the subscription pays for, so "Mis empresas" can put the live
     // renewal date on that company's row. Additive: existing consumers ignore it.
     result.put(FIELD_CLIENT_ID, clientId == null ? JSONObject.NULL : clientId);
+    // ETP-5051 (§4c) — the environment-access kill switch for this tenant, from the same source as
+    // accessEnforced on GET /environments: false while enforcement is switched off for it, so the
+    // grace countdown drops its "before access is paused". With no tenant, enforcing (true).
+    result.put("accessEnforced", clientId == null
+        || !EnvironmentAccessEnforcementFlag.isEnforcementSwitchedOff(clientId));
     putSubscriptionPlan(result, clientId);
     return result;
   }
@@ -4428,8 +4435,13 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       // retired preference about the tenants that have no subscription row yet. Exactly one extra
       // query, only when at least one tenant is missing, and it keeps this list in agreement with
       // TenantPlanService#resolvePlan. Delete the extra argument in Phase F.
+      Map<String, Subscription> subscriptions =
+          subscriptionService.findLatestForClients(environmentClientIds);
       EnvironmentPlanCache planCache = EnvironmentPlanCache.of(environmentClientIds,
-          subscriptionService.findLatestForClients(environmentClientIds));
+          subscriptions);
+      // ETP-5051 (§4b): every environment carries its WARN/DENY quotas. One batched read of the
+      // listed plans' enforced quota rows, none without a plan; never fails the list.
+      EnvironmentQuotaReport quotaReport = EtendoGoJwtDalHelper.quotaReport(subscriptions);
       // The first environment is entered automatically after account login. Prefer the paid
       // productive tenant so a demo tenant never unexpectedly becomes the active workspace when
       // an account owns both plans. The client repeats this ordering for older backends.
@@ -4441,7 +4453,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       Map<String, Date> unfinishedPaidClients = findUnfinishedPaidClients(account);
       for (User environmentUser : environmentUsers) {
         if (!isUnfinishedPaidEnvironment(environmentUser.getClient(), unfinishedPaidClients)) {
-          addEnvironmentEntries(envArray, environmentUser, planCache, withDetails);
+          addEnvironmentEntries(envArray, environmentUser, planCache, quotaReport, withDetails);
         }
       }
 
@@ -4468,8 +4480,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
   /** One entry per business organization of the user's client, or one without when it has none. */
   private static void addEnvironmentEntries(org.codehaus.jettison.json.JSONArray envArray,
-      User environmentUser, EnvironmentPlanCache planCache, boolean withDetails)
-      throws JSONException {
+      User environmentUser, EnvironmentPlanCache planCache, EnvironmentQuotaReport quotaReport,
+      boolean withDetails) throws JSONException {
     Client client = environmentUser.getClient();
     JSONObject details = withDetails
         ? EnvironmentDetails.resolve(client.getId(), environmentUser,
@@ -4479,13 +4491,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         EtendoGoJwtDalHelper.findNonStarOrganizations(client.getId());
     if (organizations.isEmpty()) {
       envArray.put(withEnvironmentDetails(
-          EtendoGoJwtDalHelper.buildEnvironmentJson(client, null, environmentUser, planCache),
+          EtendoGoJwtDalHelper.buildEnvironmentJson(client, null, environmentUser, planCache,
+              quotaReport),
           details));
       return;
     }
     for (Organization organization : organizations) {
       envArray.put(withEnvironmentDetails(EtendoGoJwtDalHelper.buildEnvironmentJson(client,
-          organization, environmentUser, planCache), details));
+          organization, environmentUser, planCache, quotaReport), details));
     }
   }
 

@@ -5067,8 +5067,9 @@ neither the 402 of the commercial access check (§4.1) nor a permission error.
   when it went over), the stored aggregate is lagged (refused when one more would go over).
 - **What it does not see.** A resource that grows through a state change rather than a create —
   `POSTED_SALES_INVOICES` grows on posting, and the invoice is created unposted — never matches at
-  create time and is never refused here. Accepted; such a quota is reported on entering the
-  environment (`POST /sws/go/session/environment`, `quotas`) and on the account page.
+  create time and is never refused here. Accepted; such a quota is reported on every environment
+  of `GET /sws/go/environments` (`quotas`), on entering the environment
+  (`POST /sws/go/session/environment`, `quotas`) and on the account page.
 - **Cost.** An entity no active `block` quota counts costs a map lookup: same service, same commit,
   no query. When a create is checked and no batch owns the transaction, it runs through the
   deferred-commit service a batch uses (IMP-23) and the gate commits or rolls back itself.

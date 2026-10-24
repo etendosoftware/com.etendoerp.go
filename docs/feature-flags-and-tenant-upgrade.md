@@ -249,7 +249,7 @@ A positively phrased "enforcement enabled" flag would do the opposite — a miss
 open every blocked tenant — so do not flip the polarity.
 
 Evaluated in exactly one place, `EnvironmentAccessEnforcementFlag.isEnforcementSwitchedOff(clientId)`,
-called by `EnvironmentAccessGuard` — the one check every tenant entry point shares — and, report-only, by the environments list (`accessEnforced`, ETP-5051). The guard serves the bind
+called by `EnvironmentAccessGuard` — the one check every tenant entry point shares — and, report-only, by the environments list and `GET /sws/go/billing/subscription` (`accessEnforced`, ETP-5051). The guard serves the bind
 step of the shared auth pipeline (`EnvironmentRequestAuthenticator`, ETP-5455) for every surface
 whose `SurfacePolicy` requires commercial access (`NEO_API`: NEO; `NEO_DATA`: favorites, fiscal test
 mode, report selectors, the OAuth2 API-key endpoints), the `/sws/go` endpoints that act on the
@@ -261,9 +261,11 @@ the blocked customer reaches the pay path. The context is
 account-less and carries the tenant as the `clientId` attribute, so a ConfigCat rule can switch
 enforcement off for one tenant or for all. It is consulted **only for a denial**: an allowed request
 never evaluates it. The one exception is a report, never a refusal: since ETP-5051 every environment
-of `GET /sws/go/environments` carries `accessEnforced`, the switch evaluated for that tenant whatever
-today's decision is (`false` while the switch is on for it), so the grace banner can drop its "will
-be blocked on <date>" promise when no block would follow (`open-and-notable-topics.md` §4.17).
+of `GET /sws/go/environments`, and `GET /sws/go/billing/subscription` for its tenant, carry
+`accessEnforced`, the switch evaluated for that tenant whatever today's decision is (`false` while the
+switch is on for it), so the grace banner and the /account grace countdown drop their "will be
+blocked on <date>" / "before access is paused" promise when no block would follow
+(`open-and-notable-topics.md` §4.17).
 Locally: `etendo.go.flags.environment-access-enforcement-off=true` /
 `ETGO_FLAG_ENVIRONMENT_ACCESS_ENFORCEMENT_OFF=true`.
 
@@ -1381,7 +1383,7 @@ says no tenant still *needs* one. Phase F deletes `TenantPlanPreferenceFallback`
 
 ### Exposure in `/environments`
 
-The `GET /sws/go/environments` response gained two additive fields:
+The `GET /sws/go/environments` response gained additive fields:
 
 ```json
 {
@@ -1406,14 +1408,24 @@ The `GET /sws/go/environments` response gained two additive fields:
   (ETP-5049). It is `EnvironmentAccessPolicy.graceEndsAt`, the rule the access policy locks the
   tenant out on and `GET /sws/go/billing/subscription` reports, so an in-app grace banner needs no
   copy of `etendo.go.billing.grace.days`. It is the policy's date, not a promise: with the kill
-  switch on for the tenant nothing is locked at that instant, and no field here says so
-  (`open-and-notable-topics.md` §4.17).
+  switch on for the tenant nothing is locked at that instant — `accessEnforced` says so (below,
+  `open-and-notable-topics.md` §4.17).
 - **`accessState`** (per environment, when the tenant has lifecycle metadata) is the
   `EnvironmentAccessPolicy.Decision` name. Since ETP-5047 it is the decision **actually enforced**
   (`EnvironmentAccessGuard.enforcedDecision`): with the kill switch on for that tenant a refusal
   reads `ALLOWED`, while `subscriptionStatus` and the trial fields keep reporting the facts.
+- **`accessEnforced`** (per environment, always present; ETP-5051) is `false` while the
+  `environment-access-enforcement-off` kill switch is on for that tenant, `true` otherwise —
+  whatever today's decision. The grace banner drops its "will be blocked on <date>" when it is
+  `false`. `GET /sws/go/billing/subscription` carries the same field for its tenant.
+- **`quotas`** (per environment, always present, `[]` when nothing to report; ETP-5051) is the
+  tenant's plan quotas at verdict WARN or DENY, as `QuotaItem`s (`neo-headless.md` §4.16 lists
+  the keys). Report-only. The SPA's quota banner reads it for the current environment, because
+  core's `loginEnvironment()` drops the `POST /sws/go/session/environment` body that carries the
+  same items. One batched read of the listed plans' enforced quota rows, none when no tenant has a
+  plan; a failed evaluation reports `[]` with a `[QUOTA]` log line, never a failed list.
 
-Both are backward compatible; clients that ignore them are unaffected.
+All are backward compatible; clients that ignore them are unaffected.
 
 > **`accountEmail` is invisible through the core helper.** `fetchEnvironments` in
 > `@etendosoftware/etendo-go-core` returns `data.environments || []`, so it drops every top-level

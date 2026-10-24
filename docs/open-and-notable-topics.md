@@ -1107,8 +1107,10 @@ ways to consume a resource never pass through it:
 - **Rows created by processes**, imports or the Classic UI. The check sits on the NEO write path
   only; there is no DAL observer, by decision.
 
-Such quotas are still measured and reported: on entering the environment (`quotas` on
-`POST /sws/go/session/environment`, WARN and DENY only) and on the account page (`planQuotas`).
+Such quotas are still measured and reported: on every environment of `GET /sws/go/environments`
+(`quotas`, WARN and DENY only — what the SPA's quota banner reads, because core's
+`loginEnvironment()` drops the session/environment body), on entering the environment (the same
+`quotas` on `POST /sws/go/session/environment`) and on the account page (`planQuotas`).
 **If it is ever needed:** check at the state change (the posting process) through the same
 `QuotaEvaluator`, never with a second comparison.
 
@@ -1429,10 +1431,11 @@ backend delivered in ETP-5051.
 environment-access kill switch evaluated for that tenant, independent of today's decision —
 `false` while `environment-access-enforcement-off` is on for it, `true` otherwise. The grace
 banner (`BillingStatusBanner`) uses neutral wording when it is `false` ("payment overdue", with no
-"will be blocked on <date>"). `accessState` is unchanged: during grace it still reads `ALLOWED`
-either way.
+"will be blocked on <date>"). `GET /sws/go/billing/subscription` carries the same field for its
+tenant (contract §4c), so the /account grace countdown drops "before access is paused" too.
+`accessState` is unchanged: during grace it still reads `ALLOWED` either way.
 
-**Follow-up:** the banner wording — the ETP-5051 frontend change in schema_forge.
+**Follow-up:** the banner and countdown wording — the ETP-5051 frontend change in schema_forge.
 
 ### ✅ 5.1 ETP-5051: "no quota row" means UNLIMITED
 
@@ -1447,7 +1450,10 @@ evaluator (`com.etendoerp.go.usage.quota.QuotaEvaluator`) reads the quota rows e
 — so an inactive row is no row on every surface. No row means no evaluation and **no consumption
 query**; there is no `COALESCE`: a null included quantity is not evaluated (`QuotaRules.verdict`)
 rather than read as zero. On the write path an entity that no active `block` quota counts costs no
-query either (`QuotaEntityIndex`, rebuilt at most once a minute).
+query either (`QuotaEntityIndex`, rebuilt at most once a minute). The environment list
+(`quotas` per environment, contract §4b) reads the enforced quota rows of all its plans in one
+query (`EnvironmentQuotaReport`), none when no listed tenant has a plan, and measures consumption
+only for a tenant whose plan has an enforced quota.
 
 **Follow-up:** the "no rows, no consumption query" acceptance test (tester-go). No ticket.
 
