@@ -18,6 +18,7 @@
 package com.etendoerp.go.usage;
 
 import java.util.Date;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 
@@ -33,7 +34,9 @@ import org.openbravo.dal.service.OBDal;
  * <p>Checked where staleness matters — when a quota reads the stored aggregate, and when a scheduled
  * aggregation run starts — never on a timer of its own. The last-run read is cached for a minute and
  * the WARN is throttled to one line an hour, so a busy write path costs at most one small query a
- * minute.
+ * minute. The production read runs in its own session ({@link IsolatedDalRead}): it is reached from
+ * the NEO write check, and a failing lag check must never be able to poison the create it runs
+ * beside.
  *
  * <p><b>Known limit:</b> the run log has one row per resource and tenant that the run counted, and
  * a run that counted nothing for anyone writes none. An installation with resources but no usage at
@@ -49,17 +52,19 @@ public class UsageFreshness {
   private static final String THROTTLE_KEY = "usage-lag";
 
   private static final UsageFreshness DEFAULT = new UsageFreshness(
-      System::currentTimeMillis, UsageFreshness::readLastSuccessfulRun,
+      System::currentTimeMillis,
+      () -> IsolatedDalRead.call(UsageFreshness::readLastSuccessfulRun),
       UsageScheduleSettings::lagThresholdMs);
 
   private final LongSupplier clock;
   private final Supplier<Date> lastSuccessfulRun;
   private final LongSupplier lagThresholdMs;
   private final KeyedLogThrottle throttle;
-  private volatile long cachedAt;
-  private volatile Date cachedLastRun;
+  private final AtomicReference<CachedRun> cached = new AtomicReference<>();
 
   /**
+   * Creates a checker over the given time source, run-log reader and threshold.
+   *
    * @param clock the time source, in milliseconds
    * @param lastSuccessfulRun reads the finish time of the last successful run, or null
    * @param lagThresholdMs the age past which a run is late
@@ -72,7 +77,11 @@ public class UsageFreshness {
     this.throttle = new KeyedLogThrottle(WARN_INTERVAL_MS, clock);
   }
 
-  /** @return the shared instance the readers and the process use */
+  /**
+   * The shared instance the consumption reader and the aggregation process use.
+   *
+   * @return the shared instance
+   */
   public static UsageFreshness getDefault() {
     return DEFAULT;
   }
@@ -86,11 +95,12 @@ public class UsageFreshness {
   public boolean checkLag() {
     try {
       long now = clock.getAsLong();
-      if (cachedAt == 0L || now - cachedAt >= CACHE_MS) {
-        cachedLastRun = lastSuccessfulRun.get();
-        cachedAt = now;
+      CachedRun current = cached.get();
+      if (current == null || now - current.readAt >= CACHE_MS) {
+        current = new CachedRun(now, lastSuccessfulRun.get());
+        cached.set(current);
       }
-      Date last = cachedLastRun;
+      Date last = current.lastRun;
       long threshold = lagThresholdMs.getAsLong();
       boolean late = last == null || now - last.getTime() > threshold;
       if (late && throttle.shouldLog(THROTTLE_KEY)) {
@@ -105,6 +115,17 @@ public class UsageFreshness {
     } catch (RuntimeException e) {
       log.debug("Could not check the usage lag", e);
       return false;
+    }
+  }
+
+  /** One read of the run log: when it was read, and what it said. Immutable. */
+  private static final class CachedRun {
+    private final long readAt;
+    private final Date lastRun;
+
+    private CachedRun(long readAt, Date lastRun) {
+      this.readAt = readAt;
+      this.lastRun = lastRun == null ? null : new Date(lastRun.getTime());
     }
   }
 

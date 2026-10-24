@@ -72,23 +72,60 @@ public class QuotaEvaluator {
   private final QuotaLookup lookup;
   private final ConsumptionReader reader;
   private final Clock clock;
+  private final QuotaLock lock;
   private final KeyedLogThrottle periodlessWarnings;
 
-  /** Production wiring. */
+  /**
+   * The write-check evaluator: reads on the request's own session, so a live count sees the row
+   * just inserted, and serialises live {@code block} checks with the advisory {@link QuotaLock}.
+   */
   public QuotaEvaluator() {
-    this(new DalQuotaLookup(), new DalConsumptionReader(), Clock.systemUTC());
+    this(new DalQuotaLookup(), new DalConsumptionReader(), Clock.systemUTC(),
+        QuotaLock.advisory());
   }
 
   /**
+   * An evaluator with no lock, for reports and tests: {@link #refusalForCreate} then takes none.
+   *
    * @param lookup finds a tenant's quotas and period
    * @param reader reads consumption; the only place a consumption query runs
    * @param clock decides "now", hence which period is current
    */
   public QuotaEvaluator(QuotaLookup lookup, ConsumptionReader reader, Clock clock) {
+    this(lookup, reader, clock, QuotaLock.NONE);
+  }
+
+  /**
+   * An evaluator over explicit seams.
+   *
+   * @param lookup finds a tenant's quotas and period
+   * @param reader reads consumption; the only place a consumption query runs
+   * @param clock decides "now", hence which period is current
+   * @param lock serialises the live write check of one tenant and resource
+   */
+  public QuotaEvaluator(QuotaLookup lookup, ConsumptionReader reader, Clock clock,
+      QuotaLock lock) {
     this.lookup = lookup;
     this.reader = reader;
     this.clock = clock;
+    this.lock = lock;
     this.periodlessWarnings = new KeyedLogThrottle(PERIODLESS_WARN_INTERVAL_MS, clock::millis);
+  }
+
+  /**
+   * The evaluator for quota <em>reports</em> — environment entry, the environment list, the account
+   * page. Its lookup and its consumption reads each run in their own session
+   * ({@link com.etendoerp.go.usage.IsolatedDalRead}), so a failing report read can never poison the
+   * request's transaction and silently roll back what the request writes afterwards. It must not
+   * run the write check: it cannot see uncommitted rows, and it takes no lock.
+   *
+   * @return a report evaluator
+   */
+  public static QuotaEvaluator forReports() {
+    QuotaLookup lookup = new DalQuotaLookup();
+    return new QuotaEvaluator(QuotaLookup.isolated(lookup),
+        ConsumptionReader.isolated(new DalConsumptionReader()), Clock.systemUTC(),
+        QuotaLock.NONE);
   }
 
   /**
@@ -132,7 +169,10 @@ public class QuotaEvaluator {
    * <p>The row has already been inserted, in the same transaction, when this runs. A
    * {@link ConsumptionSource#LIVE live} count therefore includes it, and the consumption before
    * this create is {@code consumed - 1}; the {@link ConsumptionSource#AGGREGATE stored aggregate}
-   * is lagged and does not, so it is taken as is. Either way the comparison is the one
+   * is lagged and does not, so it is taken as is. A live check first takes the
+   * {@link QuotaLock} of the tenant and resource, so concurrent creates are counted one after the
+   * other; the aggregate's cap is approximate by its lag and takes none. Either way the comparison
+   * is the one
    * {@link QuotaRules#verdict} makes on the consumption before the create — DENY when it already
    * reached the included quantity — and the reported {@code consumed} is that same number.
    *
@@ -152,9 +192,14 @@ public class QuotaEvaluator {
     if (period == null) {
       return Optional.empty();
     }
+    boolean live = quota.getSource() == ConsumptionSource.LIVE;
+    if (live) {
+      // Serialise with every concurrent create of this tenant and resource until commit, so two
+      // creates cannot both count the same consumption and both slip under the quota.
+      lock.acquire(tenant.getClientId(), resourceId);
+    }
     long consumed = reader.read(quota, tenant.getClientId(), period);
-    long before = quota.getSource() == ConsumptionSource.LIVE ? Math.max(0L, consumed - 1L)
-        : consumed;
+    long before = live ? Math.max(0L, consumed - 1L) : consumed;
     QuotaVerdict verdict = QuotaRules.verdict(quota.getEnforcementMode(), quota.getIncludedQty(),
         quota.getWarningThreshold(), before);
     if (verdict != QuotaVerdict.DENY) {

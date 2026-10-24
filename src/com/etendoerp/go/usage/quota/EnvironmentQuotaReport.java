@@ -34,8 +34,8 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 
 import com.etendoerp.go.schemaforge.data.Plan;
-import com.etendoerp.go.schemaforge.data.PlanQuota;
 import com.etendoerp.go.schemaforge.data.Subscription;
+import com.etendoerp.go.usage.IsolatedDalRead;
 
 /**
  * ETP-5051 (contract §4b) — the {@code quotas} of every environment of
@@ -68,56 +68,49 @@ public final class EnvironmentQuotaReport {
     this.reportableByClient = reportableByClient;
   }
 
-  /** @return a report with nothing to say for any tenant */
+  /**
+   * A report with nothing to say for any tenant.
+   *
+   * @return the empty report
+   */
   public static EnvironmentQuotaReport empty() {
     return EMPTY;
   }
 
   /**
-   * Production wiring: the enforced quota rows come from
-   * {@link DalQuotaLookup#enforcedQuotasByPlan}.
+   * Builds the report with the production wiring: the enforced quota rows come from
+   * {@link DalQuotaLookup#enforcedQuotasByPlan}, read in their own session
+   * ({@link IsolatedDalRead}) so a failing read cannot poison the request's transaction.
    *
    * @param subscriptionsByClient the subscription of each listed tenant (open, else the latest
    *     closed one — a closed row has no current period and so reports nothing)
-   * @param evaluator the quota evaluator
+   * @param evaluator the quota evaluator; {@link QuotaEvaluator#forReports()} in production
    * @return the report; empty on any failure
    */
   public static EnvironmentQuotaReport build(Map<String, Subscription> subscriptionsByClient,
       QuotaEvaluator evaluator) {
-    return build(subscriptionsByClient, evaluator, DalQuotaLookup::enforcedQuotasByPlan);
+    return build(subscriptionsByClient, evaluator,
+        planIds -> IsolatedDalRead.call(() -> DalQuotaLookup.enforcedQuotasByPlan(planIds)));
   }
 
   /**
+   * Builds the report over an explicit loader of the enforced quota rows.
+   *
    * @param subscriptionsByClient the subscription of each listed tenant
    * @param evaluator the quota evaluator
-   * @param enforcedQuotasByPlan reads the enforced active quota rows of the given plan ids, keyed
-   *     by plan id; called at most once, and never with an empty set
+   * @param enforcedQuotasByPlan reads the enforced active quota rows of the given plan ids, as
+   *     plain definitions keyed by plan id; called at most once, and never with an empty set
    * @return the report; empty on any failure
    */
   public static EnvironmentQuotaReport build(Map<String, Subscription> subscriptionsByClient,
       QuotaEvaluator evaluator,
-      Function<Collection<String>, Map<String, List<PlanQuota>>> enforcedQuotasByPlan) {
-    if (subscriptionsByClient == null || subscriptionsByClient.isEmpty()) {
-      return EMPTY;
-    }
-    Set<String> planIds = new LinkedHashSet<>();
-    for (Subscription subscription : subscriptionsByClient.values()) {
-      Plan plan = subscription == null ? null : subscription.getPlan();
-      if (plan != null && StringUtils.isNotBlank(plan.getId())) {
-        planIds.add(plan.getId());
-      }
-    }
+      Function<Collection<String>, Map<String, List<QuotaDefinition>>> enforcedQuotasByPlan) {
+    Set<String> planIds = planIdsOf(subscriptionsByClient);
     if (planIds.isEmpty()) {
       return EMPTY;
     }
-    Map<String, List<PlanQuota>> quotasByPlan;
-    try {
-      quotasByPlan = enforcedQuotasByPlan.apply(planIds);
-    } catch (RuntimeException e) {
-      log.error("[QUOTA] Could not read the quota rows of the listed plans; reporting none", e);
-      return EMPTY;
-    }
-    if (quotasByPlan == null || quotasByPlan.isEmpty()) {
+    Map<String, List<QuotaDefinition>> quotasByPlan = load(enforcedQuotasByPlan, planIds);
+    if (quotasByPlan.isEmpty()) {
       return EMPTY;
     }
     Map<String, List<QuotaEvaluation>> reportable = new HashMap<>();
@@ -131,17 +124,49 @@ public final class EnvironmentQuotaReport {
     return reportable.isEmpty() ? EMPTY : new EnvironmentQuotaReport(reportable);
   }
 
-  private static List<QuotaEvaluation> evaluateOne(String clientId, Subscription subscription,
-      Map<String, List<PlanQuota>> quotasByPlan, QuotaEvaluator evaluator) {
+  private static Set<String> planIdsOf(Map<String, Subscription> subscriptionsByClient) {
+    Set<String> planIds = new LinkedHashSet<>();
+    if (subscriptionsByClient == null) {
+      return planIds;
+    }
+    for (Subscription subscription : subscriptionsByClient.values()) {
+      String planId = planIdOf(subscription);
+      if (planId != null) {
+        planIds.add(planId);
+      }
+    }
+    return planIds;
+  }
+
+  private static String planIdOf(Subscription subscription) {
     Plan plan = subscription == null ? null : subscription.getPlan();
-    List<PlanQuota> rows = plan == null ? null : quotasByPlan.get(plan.getId());
+    return plan == null ? null : StringUtils.trimToNull(plan.getId());
+  }
+
+  private static Map<String, List<QuotaDefinition>> load(
+      Function<Collection<String>, Map<String, List<QuotaDefinition>>> loader,
+      Set<String> planIds) {
+    try {
+      Map<String, List<QuotaDefinition>> loaded = loader.apply(planIds);
+      return loaded == null ? Collections.emptyMap() : loaded;
+    } catch (RuntimeException e) {
+      log.error("[QUOTA] Could not read the quota rows of the listed plans; reporting none", e);
+      return Collections.emptyMap();
+    }
+  }
+
+  private static List<QuotaEvaluation> evaluateOne(String clientId, Subscription subscription,
+      Map<String, List<QuotaDefinition>> quotasByPlan, QuotaEvaluator evaluator) {
+    String planId = planIdOf(subscription);
+    List<QuotaDefinition> rows = planId == null ? null : quotasByPlan.get(planId);
     if (rows == null || rows.isEmpty()) {
       return Collections.emptyList();
     }
     try {
       List<QuotaEvaluation> reportable = new ArrayList<>();
       for (QuotaEvaluation evaluation : evaluator.evaluate(
-          TenantQuotas.of(clientId, subscription, rows), QuotaEvaluator.Scope.ENFORCEMENT)) {
+          TenantQuotas.ofDefinitions(clientId, subscription, rows),
+          QuotaEvaluator.Scope.ENFORCEMENT)) {
         if (evaluation.isReportable()) {
           reportable.add(evaluation);
         }
@@ -155,6 +180,8 @@ public final class EnvironmentQuotaReport {
   }
 
   /**
+   * The WARN and DENY evaluations of one tenant.
+   *
    * @param clientId the tenant
    * @return its WARN and DENY evaluations, possibly empty
    */
@@ -163,6 +190,8 @@ public final class EnvironmentQuotaReport {
   }
 
   /**
+   * The {@code quotas} array of one tenant's environment entries.
+   *
    * @param clientId the tenant
    * @return the {@code quotas} array of its environment entries; {@code []} when nothing to report
    */

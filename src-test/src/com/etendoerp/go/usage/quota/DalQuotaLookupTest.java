@@ -151,7 +151,7 @@ class DalQuotaLookupTest {
     when(dal.createQuery(eq(PlanQuota.class), anyString())).thenReturn(query);
     when(query.list()).thenReturn(List.of(a, b, c));
 
-    Map<String, List<PlanQuota>> byPlan;
+    Map<String, List<QuotaDefinition>> byPlan;
     try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
         MockedStatic<OBContext> obContext = mockStatic(OBContext.class)) {
       obDal.when(OBDal::getInstance).thenReturn(dal);
@@ -160,8 +160,9 @@ class DalQuotaLookupTest {
       obContext.verify(OBContext::restorePreviousMode);
     }
 
-    assertEquals(List.of(a, c), byPlan.get("PLAN-1"));
-    assertEquals(List.of(b), byPlan.get("PLAN-2"));
+    // Detached while the session is open: plain definitions, in the query's order.
+    assertEquals(List.of("A", "C"), keysOf(byPlan.get("PLAN-1")));
+    assertEquals(List.of("B"), keysOf(byPlan.get("PLAN-2")));
     ArgumentCaptor<String> hql = ArgumentCaptor.forClass(String.class);
     verify(dal).createQuery(eq(PlanQuota.class), hql.capture());
     assertTrue(hql.getValue().contains(".id in (:planIds)"), hql.getValue());
@@ -171,5 +172,13 @@ class DalQuotaLookupTest {
     verify(query).setNamedParameter("off", "off");
     verify(query).setFilterOnReadableClients(false);
     verify(query).setFilterOnReadableOrganization(false);
+  }
+
+  private static List<String> keysOf(List<QuotaDefinition> definitions) {
+    List<String> keys = new java.util.ArrayList<>();
+    for (QuotaDefinition definition : definitions) {
+      keys.add(definition.getResourceKey());
+    }
+    return keys;
   }
 }

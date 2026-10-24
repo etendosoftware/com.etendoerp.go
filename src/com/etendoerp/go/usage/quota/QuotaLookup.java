@@ -17,6 +17,8 @@
 
 package com.etendoerp.go.usage.quota;
 
+import com.etendoerp.go.usage.IsolatedDalRead;
+
 /**
  * ETP-5051 — finds the tenant's subscription and its plan's active quota rows. The seam the
  * evaluator's tests replace with a fixture.
@@ -32,4 +34,16 @@ public interface QuotaLookup {
    * @return never null; {@link TenantQuotas#none(String)} when there is nothing to enforce
    */
   TenantQuotas forTenant(String clientId);
+
+  /**
+   * Wraps a lookup so that it runs in its own session ({@link IsolatedDalRead}); the
+   * {@link TenantQuotas} it returns holds plain values only, so nothing is navigated after that
+   * session closes. For reports only.
+   *
+   * @param delegate the lookup to isolate
+   * @return the isolated lookup
+   */
+  static QuotaLookup isolated(QuotaLookup delegate) {
+    return clientId -> IsolatedDalRead.call(() -> delegate.forTenant(clientId));
+  }
 }

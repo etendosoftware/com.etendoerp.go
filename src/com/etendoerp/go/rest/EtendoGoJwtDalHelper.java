@@ -760,7 +760,7 @@ final class EtendoGoJwtDalHelper {
 
   /** Built on first use, so loading this class wires no quota service. */
   private static final class QuotaEvaluatorHolder {
-    private static final QuotaEvaluator INSTANCE = new QuotaEvaluator();
+    private static final QuotaEvaluator INSTANCE = QuotaEvaluator.forReports();
   }
 
   /**

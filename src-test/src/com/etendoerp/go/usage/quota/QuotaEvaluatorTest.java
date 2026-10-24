@@ -70,6 +70,7 @@ import com.etendoerp.go.usage.quota.QuotaTestFixtures.MutableClock;
  * @covers com.etendoerp.go.usage.quota.QuotaEvaluator
  * @covers com.etendoerp.go.usage.quota.QuotaEvaluation
  * @covers com.etendoerp.go.usage.quota.TenantQuotas
+ * @covers com.etendoerp.go.usage.quota.QuotaLock
  */
 @SuppressWarnings("java:S2187")
 class QuotaEvaluatorTest {
@@ -480,6 +481,79 @@ class QuotaEvaluatorTest {
       assertTrue(evaluator.refusalForCreate(tenant(CLIENT, docs), null).isEmpty());
       assertTrue(evaluator.refusalForCreate(null, "RES-DOCS").isEmpty());
       verifyNoInteractions(reader);
+    }
+  }
+
+  /**
+   * ETP-5051 review W4: a live block check serialises concurrent creates of one tenant and
+   * resource with the advisory lock, taken right before the live count; nothing else takes it.
+   */
+  @Nested
+  @DisplayName("the write check locks only a live block quota")
+  class WriteLock {
+
+    private QuotaLock lock;
+    private QuotaEvaluator locking;
+
+    @BeforeEach
+    void setUpLock() {
+      lock = mock(QuotaLock.class);
+      locking = new QuotaEvaluator(lookup, reader, clock, lock);
+    }
+
+    @Test
+    void aLiveBlockQuotaTakesTheTenantResourceLockBeforeTheCount() {
+      QuotaDefinition definition = quota("DOCS", "block", 100L, null)
+          .source(ConsumptionSource.LIVE).build();
+      when(reader.read(eq(definition), eq(CLIENT), any())).thenReturn(1L);
+
+      locking.refusalForCreate(tenant(CLIENT, definition), "RES-DOCS");
+
+      org.mockito.InOrder order = org.mockito.Mockito.inOrder(lock, reader);
+      order.verify(lock).acquire(CLIENT, "RES-DOCS");
+      order.verify(reader).read(eq(definition), eq(CLIENT), any());
+    }
+
+    @Test
+    void theStoredAggregateTakesNoLock() {
+      QuotaDefinition definition = quota("DOCS", "block", 100L, null)
+          .source(ConsumptionSource.AGGREGATE).build();
+      when(reader.read(eq(definition), eq(CLIENT), any())).thenReturn(1L);
+
+      locking.refusalForCreate(tenant(CLIENT, definition), "RES-DOCS");
+
+      verifyNoInteractions(lock);
+    }
+
+    @Test
+    void noBlockQuotaOnTheResourceTakesNoLock() {
+      QuotaDefinition warn = quota("DOCS", "warn", 100L, null)
+          .source(ConsumptionSource.LIVE).build();
+
+      locking.refusalForCreate(tenant(CLIENT, warn), "RES-DOCS");
+      locking.refusalForCreate(tenant(CLIENT, warn), "RES-OTHER");
+      locking.refusalForCreate(TenantQuotas.none(CLIENT), "RES-DOCS");
+
+      verifyNoInteractions(lock);
+    }
+
+    @Test
+    void aPeriodlessTenantTakesNoLock() {
+      QuotaDefinition definition = quota("DOCS", "block", 100L, null)
+          .source(ConsumptionSource.LIVE).build();
+
+      locking.refusalForCreate(QuotaTestFixtures.tenantWithPeriod(CLIENT, null, null, false,
+          definition), "RES-DOCS");
+
+      verifyNoInteractions(lock);
+    }
+
+    @Test
+    void theLockKeyIsStableAndDistinctPerTenantAndResource() {
+      long key = QuotaLock.key(CLIENT, "RES-DOCS");
+      assertEquals(key, QuotaLock.key(CLIENT, "RES-DOCS"));
+      assertTrue(key != QuotaLock.key(CLIENT, "RES-USERS"));
+      assertTrue(key != QuotaLock.key("OTHER-CLIENT", "RES-DOCS"));
     }
   }
 

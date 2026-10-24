@@ -22,6 +22,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 
@@ -29,6 +30,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.openbravo.dal.service.OBDal;
 
+import com.etendoerp.go.usage.IsolatedDalRead;
 import com.etendoerp.go.usage.UsageResourceValidator;
 
 /**
@@ -47,7 +49,8 @@ import com.etendoerp.go.usage.UsageResourceValidator;
  * entity and is never write-checked.
  *
  * <p>A failed rebuild keeps the previous index (empty on the first build) and is retried on the next
- * create after the TTL: availability over enforcement, as everywhere in this check.
+ * create after the TTL. The rebuild runs in its own session, so it can never break the create that
+ * triggered it — not even a create of an entity no quota counts.
  */
 public class QuotaEntityIndex {
 
@@ -63,16 +66,20 @@ public class QuotaEntityIndex {
 
   private final Supplier<List<IndexedResource>> loader;
   private final LongSupplier clock;
-  private volatile Map<String, List<IndexedResource>> byEntity = Collections.emptyMap();
-  private volatile long builtAt;
-  private volatile boolean built;
+  private final AtomicReference<Snapshot> snapshot = new AtomicReference<>();
 
-  /** Production wiring: reads the catalog, on the wall clock. */
+  /**
+   * Production wiring: reads the catalog in its own session ({@link IsolatedDalRead}), so a failing
+   * rebuild can never break the create that triggered it, on the wall clock.
+   */
   public QuotaEntityIndex() {
-    this(QuotaEntityIndex::loadFromDatabase, System::currentTimeMillis);
+    this(() -> IsolatedDalRead.call(QuotaEntityIndex::loadFromDatabase),
+        System::currentTimeMillis);
   }
 
   /**
+   * Creates an index over the given loader and time source.
+   *
    * @param loader reads the indexed resources; called at most once per {@link #TTL_MS}
    * @param clock the time source, in milliseconds
    */
@@ -82,6 +89,9 @@ public class QuotaEntityIndex {
   }
 
   /**
+   * The resources that may refuse a create of this entity: those that count it under an active
+   * {@code block} quota. Rebuilds the index first when it is older than {@link #TTL_MS}.
+   *
    * @param entityName the DAL entity name of a created row
    * @return the resources that count that entity under a {@code block} quota; empty for every
    *     other entity
@@ -90,27 +100,41 @@ public class QuotaEntityIndex {
     if (entityName == null) {
       return Collections.emptyList();
     }
-    refreshIfStale();
-    return byEntity.getOrDefault(entityName, Collections.emptyList());
+    return current().byEntity.getOrDefault(entityName, Collections.emptyList());
   }
 
-  private void refreshIfStale() {
-    long now = clock.getAsLong();
-    if (built && now - builtAt < TTL_MS) {
-      return;
+  private Snapshot current() {
+    Snapshot built = snapshot.get();
+    if (built != null && clock.getAsLong() - built.builtAt < TTL_MS) {
+      return built;
     }
     synchronized (this) {
-      if (built && clock.getAsLong() - builtAt < TTL_MS) {
-        return;
+      built = snapshot.get();
+      if (built != null && clock.getAsLong() - built.builtAt < TTL_MS) {
+        return built;
       }
+      Map<String, List<IndexedResource>> byEntity = built == null ? Collections.emptyMap()
+          : built.byEntity;
       try {
         byEntity = group(loader.get());
       } catch (RuntimeException e) {
         log.error("[QUOTA] Could not rebuild the quota entity index; keeping the previous one "
             + "for {} ms", TTL_MS, e);
       }
-      builtAt = clock.getAsLong();
-      built = true;
+      Snapshot rebuilt = new Snapshot(byEntity, clock.getAsLong());
+      snapshot.set(rebuilt);
+      return rebuilt;
+    }
+  }
+
+  /** One built index and when it was built. Immutable, swapped as a whole. */
+  private static final class Snapshot {
+    private final Map<String, List<IndexedResource>> byEntity;
+    private final long builtAt;
+
+    private Snapshot(Map<String, List<IndexedResource>> byEntity, long builtAt) {
+      this.byEntity = byEntity;
+      this.builtAt = builtAt;
     }
   }
 
@@ -152,6 +176,8 @@ public class QuotaEntityIndex {
     private final String hqlRestriction;
 
     /**
+     * Creates one indexed resource.
+     *
      * @param resourceId {@code ETGO_BILLING_RESOURCE_ID}
      * @param countedEntity the DAL entity it counts
      * @param hqlRestriction its restriction fragment, or null

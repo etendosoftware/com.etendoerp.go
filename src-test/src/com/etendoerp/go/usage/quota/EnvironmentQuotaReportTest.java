@@ -73,8 +73,8 @@ class EnvironmentQuotaReportTest {
     loaderCalls = new ArrayList<>();
   }
 
-  private Function<Collection<String>, Map<String, List<PlanQuota>>> loader(
-      Map<String, List<PlanQuota>> rows) {
+  private Function<Collection<String>, Map<String, List<QuotaDefinition>>> loader(
+      Map<String, List<QuotaDefinition>> rows) {
     return planIds -> {
       loaderCalls.add(new ArrayList<>(planIds));
       return rows;
@@ -96,7 +96,8 @@ class EnvironmentQuotaReportTest {
     return subscription;
   }
 
-  private static PlanQuota row(String key, String mode, long included) {
+  /** One enforced row, detached as the production loader detaches it. */
+  private static QuotaDefinition row(String key, String mode, long included) {
     BillingResource resource = mock(BillingResource.class);
     when(resource.getId()).thenReturn("RES-" + key);
     when(resource.getSearchKey()).thenReturn(key);
@@ -106,7 +107,7 @@ class EnvironmentQuotaReportTest {
     when(quota.getEnforcementMode()).thenReturn(mode);
     when(quota.getIncludedQty()).thenReturn(included);
     when(quota.getWarningThreshold()).thenReturn(80L);
-    return quota;
+    return QuotaDefinition.of(quota);
   }
 
   private void consumed(String key, long quantity) {

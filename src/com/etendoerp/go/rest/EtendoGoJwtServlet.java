@@ -460,7 +460,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   HostedCheckoutService hostedCheckoutService = new HostedCheckoutService();
   PlanCatalogService planCatalogService = new PlanCatalogService();
   /** ETP-5051 — the one quota evaluator; package-visible for tests. */
-  QuotaEvaluator quotaEvaluator = new QuotaEvaluator();
+  QuotaEvaluator quotaEvaluator = QuotaEvaluator.forReports();
   CheckoutRequestStore checkoutRequestStore = new CheckoutRequestStore();
   DemoDataTransferService demoDataTransferService = new DemoDataTransferService();
   BillingEventStore billingEventStore = new BillingEventStore();

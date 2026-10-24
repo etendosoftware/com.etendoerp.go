@@ -971,8 +971,9 @@ class EtendoGoJwtDalHelperTest {
               mock(com.etendoerp.go.usage.quota.QuotaLookup.class), reader,
               java.time.Clock.fixed(java.time.Instant.parse("2026-10-24T12:00:00Z"),
                   java.time.ZoneOffset.UTC));
-      List<com.etendoerp.go.schemaforge.data.PlanQuota> rows = List.of(
-          planQuota("DOCS"), planQuota("USERS"));
+      List<com.etendoerp.go.usage.quota.QuotaDefinition> rows = List.of(
+          com.etendoerp.go.usage.quota.QuotaDefinition.of(planQuota("DOCS")),
+          com.etendoerp.go.usage.quota.QuotaDefinition.of(planQuota("USERS")));
       return com.etendoerp.go.usage.quota.EnvironmentQuotaReport.build(
           Map.of(clientId, subscription), evaluator, planIds -> Map.of("PLAN-Q", rows));
     }

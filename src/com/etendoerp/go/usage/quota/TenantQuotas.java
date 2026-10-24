@@ -47,6 +47,8 @@ public final class TenantQuotas {
   private final List<QuotaDefinition> quotas;
 
   /**
+   * Creates a tenant view from plain values.
+   *
    * @param clientId the tenant
    * @param planInterval the plan's billing interval ({@code month} / {@code year}), or null
    * @param periodStart {@code CURRENT_PERIOD_START}, or null
@@ -85,16 +87,30 @@ public final class TenantQuotas {
    */
   public static TenantQuotas of(String clientId, Subscription subscription,
       List<PlanQuota> activeQuotas) {
-    if (subscription == null) {
-      return none(clientId);
-    }
-    Plan plan = subscription.getPlan();
     List<QuotaDefinition> definitions = new ArrayList<>();
-    if (activeQuotas != null) {
+    if (subscription != null && activeQuotas != null) {
       for (PlanQuota quota : activeQuotas) {
         definitions.add(QuotaDefinition.of(quota));
       }
     }
+    return ofDefinitions(clientId, subscription, definitions);
+  }
+
+  /**
+   * Snapshots a subscription row with quota definitions already detached from the DAL — the
+   * environment list reads them for every listed plan at once.
+   *
+   * @param clientId the tenant
+   * @param subscription the tenant's subscription row
+   * @param definitions the enforced quota definitions of its plan
+   * @return the detached view
+   */
+  public static TenantQuotas ofDefinitions(String clientId, Subscription subscription,
+      List<QuotaDefinition> definitions) {
+    if (subscription == null) {
+      return none(clientId);
+    }
+    Plan plan = subscription.getPlan();
     return new TenantQuotas(clientId, plan == null ? null : plan.getBillingInterval(),
         subscription.getCurrentPeriodStart(), subscription.getCurrentPeriodEnd(),
         subscription.getEndDate() != null, definitions);
@@ -119,6 +135,8 @@ public final class TenantQuotas {
   }
 
   /**
+   * The subscription's billing period in effect at {@code now}, if any.
+   *
    * @param now the evaluation instant
    * @return the current period, or null when there is none (§5.9)
    */

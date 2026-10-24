@@ -45,12 +45,14 @@ public class DalQuotaLookup implements QuotaLookup {
   private final SubscriptionService subscriptionService;
   private final PlanCatalogService planCatalogService;
 
-  /** Production wiring. */
+  /** Production wiring: a lookup over new subscription and plan catalog services. */
   public DalQuotaLookup() {
     this(new SubscriptionService(), new PlanCatalogService());
   }
 
   /**
+   * A lookup over the given services.
+   *
    * @param subscriptionService finds the open subscription row
    * @param planCatalogService lists the plan's active quota rows
    */
@@ -77,10 +79,14 @@ public class DalQuotaLookup implements QuotaLookup {
    * The same active-row reading as {@link PlanCatalogService#listActiveQuotas}, in the same
    * resource order.
    *
+   * <p>The rows are snapshotted as {@link QuotaDefinition}s while the session is open, so the
+   * result can outlive it (the environment list reads it in an isolated session).
+   *
    * @param planIds the plan ids; null or empty reads nothing and runs no query
-   * @return the rows keyed by plan id; plans with no enforced row are absent
+   * @return the definitions keyed by plan id; plans with no enforced row are absent
    */
-  public static Map<String, List<PlanQuota>> enforcedQuotasByPlan(Collection<String> planIds) {
+  public static Map<String, List<QuotaDefinition>> enforcedQuotasByPlan(
+      Collection<String> planIds) {
     if (planIds == null || planIds.isEmpty()) {
       return Collections.emptyMap();
     }
@@ -95,9 +101,10 @@ public class DalQuotaLookup implements QuotaLookup {
       query.setNamedParameter("off", QuotaRules.MODE_OFF);
       query.setFilterOnReadableClients(false);
       query.setFilterOnReadableOrganization(false);
-      Map<String, List<PlanQuota>> byPlan = new LinkedHashMap<>();
+      Map<String, List<QuotaDefinition>> byPlan = new LinkedHashMap<>();
       for (PlanQuota quota : query.list()) {
-        byPlan.computeIfAbsent(quota.getPlan().getId(), k -> new ArrayList<>()).add(quota);
+        byPlan.computeIfAbsent(quota.getPlan().getId(), k -> new ArrayList<>())
+            .add(QuotaDefinition.of(quota));
       }
       return byPlan;
     } finally {
