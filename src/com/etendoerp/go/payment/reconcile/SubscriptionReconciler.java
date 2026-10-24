@@ -295,7 +295,9 @@ final class SubscriptionReconciler {
       return applyOutcome(candidate, target, outcome, providerAt, "provider status " + status,
           result, audit);
     }
-    if (outcome.status() != SubscriptionStatus.EXPIRED && target.subscription() != null) {
+    // Only a still-open row gets here: every EXPIRED outcome closes the row, and a close is a
+    // change (changesStoredState), so it already took the applyOutcome path above.
+    if (target.subscription() != null) {
       fillMissingPrice(candidate, target.subscription(), subscription, result, audit);
       syncCancelAtPeriodEnd(candidate, target.subscription(), outcome, result, audit);
     }
@@ -308,7 +310,8 @@ final class SubscriptionReconciler {
    * ({@code applyLifecycleOutcome}); this covers the no-op diff, which writes nothing else. It is
    * also how rows created before the column existed (all 'N') pick up a scheduled cancellation:
    * every run re-reads each paying subscription anyway, so the backfill costs no extra call.
-   * No audit row: the flag decides no access, grace or status, and it may legitimately toggle.
+   * No audit row: the flag decides no access, grace or status, and it may legitimately toggle;
+   * the change is logged like any other repair ({@code audit.repaired}).
    */
   private static void syncCancelAtPeriodEnd(SubscriptionCandidate candidate, Subscription row,
       SubscriptionEventOutcome outcome, ReconciliationResult result, ReconciliationAudit audit) {
@@ -320,6 +323,8 @@ final class SubscriptionReconciler {
       SubscriptionService.writeCancelAtPeriodEnd(row, cancel);
       OBDal.getInstance().save(row);
     }
+    audit.repaired("synced the cancel-at-period-end flag of subscription {} to {}",
+        candidate.subscriptionId, cancel ? "Y" : "N");
     result.increment(Counter.CANCEL_FLAGS_SYNCED);
     result.item(candidate.subscriptionId, candidate.clientName,
         "sync the cancel-at-period-end flag", cancel ? "Y" : "N");
