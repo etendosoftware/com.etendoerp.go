@@ -138,8 +138,8 @@ ETP-5046, whose develop merge introduced the fallback.
 - **Who.** Customers who bought through the legacy price fallback land on the grandfathered
   `legacy-productive` plan.
 - **Unlimited.** That plan has no quota rows, so they have no limits (§5.1).
-- **Harmless today, real from ETP-5051.** Nothing enforces quotas yet. Once ETP-5051 does, these
-  are the only customers it cannot limit.
+- **Real since ETP-5051.** Quotas are now reported and, in mode `block`, enforced on NEO creates
+  (`plan-quotas.md`); these are the only customers they cannot limit.
 - **The fix is a plan change, not a quota.** Adding quotas to `legacy-productive` is not the fix;
   moving these customers to a real catalog plan is. That is a plan change, which only ETP-5053
   provides. Until then they stay on `legacy-productive`.
@@ -1112,7 +1112,8 @@ Such quotas are still measured and reported: on every environment of `GET /sws/g
 `loginEnvironment()` drops the session/environment body), on entering the environment (the same
 `quotas` on `POST /sws/go/session/environment`) and on the account page (`planQuotas`).
 **If it is ever needed:** check at the state change (the posting process) through the same
-`QuotaEvaluator`, never with a second comparison.
+`QuotaEvaluator`, never with a second comparison. The enforcement table, the extensibility ladder
+and every accepted limit, for operators: `plan-quotas.md` §2, §3 and §6.
 
 **Concurrent creates (review W4, decided by the coordinator 2026-10-24).** For a `live` `block`
 quota the check takes a PostgreSQL transaction advisory lock per tenant and resource
@@ -1121,7 +1122,9 @@ or rolls back, so two concurrent creates are counted one after the other and can
 under the cap. It is taken only once a created row matched the resource and the tenant has such a
 quota: no other create pays for it. The stored `aggregate` takes no lock — it is lagged by the
 usage job, so its cap is approximate anyway and may be overshot by what was created since the last
-run.
+run. A batch adds to that (review N6): each operation is its own create, the per-create charge
+resets per operation and the aggregate never sees rows earlier operations of the batch created,
+so a batch of N creates can go up to N−1 over an `aggregate` cap.
 
 **Which creates are checked: a per-client cache** (redesign, decided by Martin Taal 2026-10-24).
 `QuotaClientCache` keeps, per client id, the client's open subscription (period, closed flag) and
@@ -1152,13 +1155,52 @@ a row dated outside it (a backdated invoice, say) does not consume this period a
 in-window row is refused when the consumption before the create — a live count leaving out the
 created rows, or the stored aggregate — plus one exceeds the included quantity. Because the window
 is day-aligned (`[startOfDay(start), startOfDay(end))`), a row created on a period's last, partial
-day falls outside it: it does not count, in this period or the next, and a block quota does not
-refuse it (QA INFO note, accepted).
+day falls outside it: it is not charged to the ending period and a block quota does not refuse it
+(QA INFO note, accepted). That day opens the next period's window, so the row counts there once
+the renewal is recorded (corrected in the ETP-5051 docs pass; the earlier text said it counted in
+no period).
 The quota *reports* never run on the request's transaction (`IsolatedDalRead`), so a failing
 report cannot poison what the request writes. Each report is one hop to a bounded pool of 4 daemon
 workers (64 queued, more refused and reported as `[]`), with a 25 s `statement_timeout` inside the
 worker's transaction and a 30 s wait in the caller (re-review W2–W4). The usage-lag WARN is checked
 by the reports and the usage job, never on a create.
+
+### 🟡 4.20 The CSV/XLSX import shows a quota refusal as a generic row error (ETP-5051)
+
+**Ticket:** no ticket. Related ETP-5051 (found in its frontend work); the fix belongs to
+schema_forge_core.
+
+The SPA's generic import (`ImportDialog` in `@etendosoftware/app-shell-core`) writes through
+`/sws/neo/batch`, so a create of a capped entity **is** refused: 403 `QUOTA_EXCEEDED` (or 500
+`QUOTA_CHECK_FAILED`) at `error.detail.error` of the batch failure envelope, and nothing of that
+batch is saved. The refusal itself is correct; only its message is lost. The row message is decided
+in core's `importEngine.classifyImportError`, which has no quota case, so the user sees the generic
+row error instead of "plan limit reached". Every other SPA write path translates both codes
+(`schema_forge/docs/generated-custom-windows/app-shell-functional-flows.md` §3.2a-ter).
+
+**Fix:** a quota case in `classifyImportError` in schema_forge_core, reading the code at
+`error.detail.error` as `extractQuotaExceeded` / `isQuotaCheckFailed` (`lib/planQuotas.js`) do in
+the functional repo, then a core version bump. Workaround meanwhile: none in the import; the
+quota banner and `/account` show the limit.
+
+### 🟡 4.21 A request right after `POST /sws/go/session` or `/session/environment` can get a 401
+
+**Ticket:** no ticket. Pre-existing; observed while testing ETP-5051, outside its scope.
+
+Right after `POST /sws/go/session` (login) or `POST /sws/go/session/environment` (environment
+entry), an immediate follow-up request with the freshly rotated session cookie and CSRF token was
+answered 401 in about one of three attempts (seen with `curl` against a local Tomcat on
+`GET /sws/go/environments` and `GET /sws/go/billing/subscription`); the same request moments later
+succeeded. The pattern looks like **commit-after-response**: the response, with the new session
+cookie, reaches the client before the transaction that stores the session is committed, so a fast
+next request does not find it yet. Not confirmed in the code.
+
+**Workaround:** none in the product. In the observation a repeat of the same request moments
+later went through; whether the SPA hits the window in practice was not measured.
+
+**To investigate:** when the session row is committed relative to writing the response in the
+session endpoints (ADR `adr/0001-backend-managed-session.md`), and whether the rotation on
+environment entry has the same order.
 
 ## 5. Handed forward to later tickets
 
@@ -1481,7 +1523,9 @@ banner (`BillingStatusBanner`) uses neutral wording when it is `false` ("payment
 tenant (contract §4c), so the /account grace countdown drops "before access is paused" too.
 `accessState` is unchanged: during grace it still reads `ALLOWED` either way.
 
-**Follow-up:** the banner and countdown wording — the ETP-5051 frontend change in schema_forge.
+**Follow-up:** none. The banner and countdown wording shipped with the ETP-5051 frontend in
+schema_forge (`BillingStatusBanner`, `SubscriptionSection`; `app-shell-functional-flows.md`
+§3.2a and §3.2a-quater).
 
 ### ✅ 5.1 ETP-5051: "no quota row" means UNLIMITED
 
@@ -1501,7 +1545,9 @@ request's client counts costs no query either (`QuotaClientCache`, one lookup pe
 query (`EnvironmentQuotaReport`), none when no listed tenant has a plan, and measures consumption
 only for a tenant whose plan has an enforced quota.
 
-**Follow-up:** the "no rows, no consumption query" acceptance test (tester-go). No ticket.
+**Follow-up:** none. The acceptance test exists: `QuotaEvaluatorTest`, nested *no quota rows
+means zero consumption queries* (no subscription row, all rows inactive, mode `off`), with
+`EnvironmentQuotaReportTest` for the environment list (no plan or no enforced row: no evaluation).
 
 ### ✅ 5.5 Consumption window = the subscription billing period — decided, filled from ETP-5047 on
 
@@ -1588,15 +1634,16 @@ that removes it; no ticket.
 
 **Ticket:** owner ETP-5051.
 
-**Status:** done 2026-10-24 (ETP-5051) in the window help; operator docs pending.
+**Status:** done 2026-10-24 (ETP-5051): the window help, the operator documentation
+(`plan-quotas.md` §4.2) and the SPA.
 
 The window is the billing period (§5.5), so `INCLUDED_QTY` on a `year` plan is consumed over the
 whole year. The **Plans** window's **Quotas** tab help and the **Included Qty** help now say so, and
 every `QuotaItem` carries `period` (the plan interval) with `periodStart` / `periodEnd`: the
 counted window as server-local days (`yyyy-MM-dd`, end exclusive), not the period's UTC instants.
 
-**Follow-up:** the operator documentation (Sage, ETP-5051 docs pass), and the SPA showing `period`
-next to the included quantity (ETP-5051 frontend).
+**Follow-up:** none. `/account` shows the period word next to the included quantity ("… per
+year") and the counted window above the list (`app-shell-functional-flows.md` §3.2a-quater).
 
 ### ✅ 5.9 A subscription with no current period needs a defined answer
 
@@ -1743,6 +1790,9 @@ scheduling.
 - `plans/2026-09-18-etp-5046-plan-and-subscription-design.md` — the ETP-5046 design of record
 - `plans/2026-09-18-etp-5046-stage-b-ad-handoff.md` — the AD authoring record
 - `plans/2026-09-15-etp-5050-usage-measurement-design.md` — the usage engine design
+- `plan-quotas.md` — the operator/developer entry point for plan quotas (ETP-5051): where they are
+  enforced and where only reported, the extensibility ladder, capping a resource, freshness and the
+  accepted limits (§4.19, §4.20)
 - `schema_forge/docs/usage-measurement.md` — §4 is the full flow-versus-stock analysis
 - `schema_forge/docs/plans/2026-08-27-recurring-billing-and-resource-limits-prd.md` — the governing PRD
 - `feature-flags-and-tenant-upgrade.md` — paywall, plan marker, transitional fallback, the

@@ -5038,7 +5038,9 @@ throws; the INSERT happens on the recorder's writer thread, so a slow or locked
 ### 4.16 Plan quota refusal on create (ETP-5051)
 
 A create can be refused because the tenant is over a plan quota in mode `block`
-(`ETGO_PLAN_QUOTA`, `open-and-notable-topics.md` §5.1–§5.9):
+(`ETGO_PLAN_QUOTA`, `open-and-notable-topics.md` §5.1–§5.9). This section is the API-level
+reference of that refusal. Which points enforce or only report quotas, how an operator caps a
+resource, freshness and the accepted limits: [`plan-quotas.md`](plan-quotas.md).
 
 ```json
 HTTP 403
@@ -5089,8 +5091,10 @@ neither the 402 of the commercial access check (§4.1) nor a permission error.
   count that leaves out the rows the create inserted (`id not in (:excludedIds)`), for the stored
   `aggregate` the aggregate (lagged, it never has them); several rows of one create are charged one
   after the other. The window is day-aligned, `[startOfDay(periodStart), startOfDay(periodEnd))`,
-  so **a row created on a period's last, partial day falls outside it and does not count** — on
-  that day a block quota does not refuse, and the row is in no period's consumption. The
+  so **a row created on a period's last, partial day falls outside it and is not charged to that
+  period** — on that day a block quota does not refuse it. The day belongs to the next period
+  (its window starts at local midnight of the same day), so once the renewal is recorded the row
+  counts there. The
   periodless-subscription WARN is throttled to one line per tenant per hour across every
   evaluator.
 - **What it does not see.** A resource that grows through a state change rather than a create —
@@ -5123,7 +5127,10 @@ neither the 402 of the commercial access check (§4.1) nor a permission error.
 - **Concurrency.** A `live` `block` check takes a PostgreSQL advisory lock per tenant and resource
   (`pg_advisory_xact_lock`) right before its count, held to commit, so concurrent creates cannot
   both slip under the cap. The stored `aggregate` takes none: its cap is approximate by the usage
-  job's lag.
+  job's lag. Inside a batch it is looser still: each operation is its own create, so the charge
+  for rows already created resets per operation, and the aggregate never sees the rows earlier
+  operations of the same batch created — a batch of N creates can exceed an `aggregate` cap by up
+  to N−1 on top of the lag. A `live` count does see them (same transaction).
 - **Two batches can deadlock on those locks.** A batch that creates rows of two quota'd resources
   takes one lock per resource, in the order its operations run. Two concurrent batches of the same
   tenant that touch the same two resources in opposite orders wait for each other; PostgreSQL
@@ -5133,9 +5140,19 @@ neither the 402 of the commercial access check (§4.1) nor a permission error.
   half-saved: the client retries the refused batch. A single create takes one lock and cannot
   deadlock this way.
 - **A client entry that cannot be built** fails the create closed with `QUOTA_CHECK_FAILED`
-  **before it runs** (`NeoQuotaWriteGate.run`): no callout cascade, no insert. It was read on the
-  request's session, and nothing says whether the create is capped. The entry read before the
-  insert is the one checked after it.
+  **before the add runs** (`NeoQuotaWriteGate.run`). It was read on the request's session, and
+  nothing says whether the create is capped. How much of the create has run by then depends on the
+  channel, because the gate wraps a different part of each:
+  - **REST single, `/sws/neo/batch`, MCP `etendo_batch` and the batch jobs** (all through
+    `NeoCrudHandler`): the gate wraps `executePostCreate`, which holds the
+    mandatory defaults and the callout cascade, so neither runs: no cascade, no insert. The
+    entity's pre-hook (`handle()`) has already run, as it does before every CRUD operation.
+  - **MCP `etendo_create`:** `McpToolRouter.handleCreate` injects the mandatory defaults (with
+    their callout cascade), runs the compensations and the pre-hook **before** calling the gate,
+    which wraps only the add. Those steps have run; only the insert is skipped, and the gate's
+    rollback (or, inside a batch, the batch's) undoes whatever they wrote to the session.
+
+  Either way nothing is saved. The entry read before the insert is the one checked after it.
 - **Reports never touch the request's transaction.** The quota reports (environment entry, the
   environment list, the account page) and the usage-lag check read in their own session
   (`IsolatedDalRead`), so a failing read cannot poison what the request writes afterwards. They run

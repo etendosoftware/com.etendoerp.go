@@ -473,7 +473,9 @@ Aggregation**) runs on a schedule (`open-and-notable-topics.md` §5.15). The sam
 Each run still writes one transaction per resource-day; one transaction per tenant is ETP-5905
 (§5.17). Environment level, evaluated with an empty context; read on every scheduled run, so
 turning it off (ConfigCat, live within one poll) stops the scheduled work without a restart. Its
-callers are `UsageAggregationScheduleStartup` and `UsageAggregationProcess`.
+callers are `UsageAggregationScheduleStartup` and `UsageAggregationProcess`. What the
+schedule feeds — plan quotas on the stored aggregate — and how stale they may get:
+[`plan-quotas.md`](plan-quotas.md) §5.
 
 ## 2. The onboarding paywall
 
@@ -681,10 +683,12 @@ of the subscription (ETP-5049, additive):
   page, the banner and the lockout cannot drift apart — except that the kill switch can cancel the
   lockout without the page or the banner knowing (`open-and-notable-topics.md` §4.17).
 
-> **No UI consumer yet for `planKey`, `planName` and `planQuotas`.** ETP-5049 ships them in this
-> response only. The `/account` Subscription section (`SubscriptionSection`, schema_forge) still
-> shows `plan` (the live Stripe product name), the amount, the renewal and the grace state; showing
-> the catalog plan name and the included quotas there was moved to ETP-5051.
+> **UI consumer since ETP-5051.** The `/account` Subscription section (`SubscriptionSection`,
+> schema_forge) shows `planName` (falling back to the live Stripe product name `plan`) and every
+> `planQuotas` item with its consumption, verdict and period, and switches the grace countdown to
+> neutral text when `accessEnforced` is `false`
+> (`schema_forge/docs/generated-custom-windows/app-shell-functional-flows.md` §3.2a-quater).
+> `planKey` still has no UI consumer. Operating quotas: [`plan-quotas.md`](plan-quotas.md).
 
 `POST /sws/go/billing/purchases` also checks the durable request table for an active purchase with
 the same account and environment name. A duplicate submission returns the existing purchase only
