@@ -26,6 +26,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CancellationException;
 import java.util.function.Function;
 
 import org.apache.commons.lang3.StringUtils;
@@ -36,6 +37,8 @@ import org.codehaus.jettison.json.JSONException;
 
 import com.etendoerp.go.schemaforge.data.Plan;
 import com.etendoerp.go.schemaforge.data.Subscription;
+import com.etendoerp.go.usage.DatabaseFailures;
+import com.etendoerp.go.usage.IsolatedDalRead;
 import com.etendoerp.go.usage.IsolatedReader;
 
 /**
@@ -56,7 +59,8 @@ import com.etendoerp.go.usage.IsolatedReader;
  * <p><b>One isolated hop.</b> The subscriptions are snapshotted on the request's thread, then the
  * batched read and every evaluation run together in one session of their own
  * ({@link IsolatedReader#DAL}), never on the request's. A failed SQL statement aborts that session
- * only, so the tenants evaluated after it in the same request report {@code []} as well.
+ * only: the remaining tenants are not evaluated (they report {@code []}), with one log line saying
+ * how many. A hop whose caller stopped waiting stops before its next tenant.
  *
  * <p>Built per request and passed down, never cached: the next request on a pooled thread belongs
  * to another account.
@@ -155,15 +159,45 @@ public final class EnvironmentQuotaReport {
     if (quotasByPlan.isEmpty()) {
       return EMPTY;
     }
-    Map<String, List<QuotaEvaluation>> reportable = new HashMap<>();
+    List<Map.Entry<String, Tenant>> measured = new ArrayList<>();
     for (Map.Entry<String, Tenant> entry : tenants.entrySet()) {
-      List<QuotaEvaluation> evaluations = evaluateOne(entry.getKey(), entry.getValue(),
-          quotasByPlan, evaluator);
-      if (!evaluations.isEmpty()) {
-        reportable.put(entry.getKey(), evaluations);
+      List<QuotaDefinition> rows = quotasByPlan.get(entry.getValue().planId);
+      if (rows != null && !rows.isEmpty()) {
+        measured.add(entry);
+      }
+    }
+    Map<String, List<QuotaEvaluation>> reportable = new HashMap<>();
+    for (int i = 0; i < measured.size(); i++) {
+      // The caller may have stopped waiting (timeout, shutdown): stop reading for it.
+      IsolatedDalRead.checkNotAbandoned();
+      Map.Entry<String, Tenant> entry = measured.get(i);
+      try {
+        List<QuotaEvaluation> evaluations = evaluateOne(entry.getValue(),
+            quotasByPlan.get(entry.getValue().planId), evaluator);
+        if (!evaluations.isEmpty()) {
+          reportable.put(entry.getKey(), evaluations);
+        }
+      } catch (CancellationException e) {
+        throw e;
+      } catch (RuntimeException e) {
+        log.error("[QUOTA] Could not evaluate the quotas of tenant {} for the environment list; "
+            + "reporting none", entry.getKey(), e);
+        if (DatabaseFailures.isDatabaseFailure(e)) {
+          // The failed statement aborted this session's transaction: every later read would fail.
+          logSkipped(measured.size() - i - 1);
+          break;
+        }
       }
     }
     return reportable.isEmpty() ? EMPTY : new EnvironmentQuotaReport(reportable);
+  }
+
+  private static void logSkipped(int remaining) {
+    if (remaining > 0) {
+      log.error("[QUOTA] The environment list's read session failed on the database; not "
+          + "evaluating the quotas of the {} remaining tenant(s), reporting none for them",
+          remaining);
+    }
   }
 
   /** The tenants that have a plan, as plain values: nothing of the caller's session leaves. */
@@ -204,26 +238,16 @@ public final class EnvironmentQuotaReport {
     }
   }
 
-  private static List<QuotaEvaluation> evaluateOne(String clientId, Tenant tenant,
-      Map<String, List<QuotaDefinition>> quotasByPlan, QuotaEvaluator evaluator) {
-    List<QuotaDefinition> rows = quotasByPlan.get(tenant.planId);
-    if (rows == null || rows.isEmpty()) {
-      return Collections.emptyList();
-    }
-    try {
-      List<QuotaEvaluation> reportable = new ArrayList<>();
-      for (QuotaEvaluation evaluation : evaluator.evaluate(tenant.quotas.withQuotas(rows),
-          QuotaEvaluator.Scope.ENFORCEMENT)) {
-        if (evaluation.isReportable()) {
-          reportable.add(evaluation);
-        }
+  private static List<QuotaEvaluation> evaluateOne(Tenant tenant, List<QuotaDefinition> rows,
+      QuotaEvaluator evaluator) {
+    List<QuotaEvaluation> reportable = new ArrayList<>();
+    for (QuotaEvaluation evaluation : evaluator.evaluate(tenant.quotas.withQuotas(rows),
+        QuotaEvaluator.Scope.ENFORCEMENT)) {
+      if (evaluation.isReportable()) {
+        reportable.add(evaluation);
       }
-      return reportable;
-    } catch (RuntimeException e) {
-      log.error("[QUOTA] Could not evaluate the quotas of tenant {} for the environment list; "
-          + "reporting none", clientId, e);
-      return Collections.emptyList();
     }
+    return reportable;
   }
 
   /**

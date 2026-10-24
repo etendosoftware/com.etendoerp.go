@@ -17,7 +17,6 @@
 
 package com.etendoerp.go.schemaforge;
 
-import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -30,7 +29,6 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
-import org.hibernate.JDBCException;
 import org.hibernate.Transaction;
 import org.hibernate.resource.transaction.spi.TransactionStatus;
 import org.openbravo.dal.service.OBDal;
@@ -39,6 +37,7 @@ import org.openbravo.service.json.DefaultJsonDataService;
 import org.openbravo.service.json.JsonConstants;
 import org.openbravo.service.json.JsonUtils;
 
+import com.etendoerp.go.usage.DatabaseFailures;
 import com.etendoerp.go.usage.quota.QuotaEvaluation;
 import com.etendoerp.go.usage.quota.QuotaItemJson;
 import com.etendoerp.go.usage.quota.QuotaWriteGuard;
@@ -315,28 +314,15 @@ public final class NeoQuotaWriteGate {
 
   /**
    * Whether a failed check has poisoned the request's transaction: an exception from the database
-   * anywhere in the cause chain, or a transaction Hibernate already marked rollback-only. Such a
-   * transaction cannot be committed, so the create must fail closed.
-   *
-   * <p>A bare {@code PersistenceException} is not enough: every {@code HibernateException} is one,
-   * including a {@code QueryException} raised while parsing HQL, before any SQL reached the
-   * database. Hibernate wraps a real database failure with its {@link JDBCException} as the cause,
-   * so the chain walk still finds it.
+   * anywhere in the cause chain ({@link DatabaseFailures#isDatabaseFailure}), or a transaction
+   * Hibernate already marked rollback-only. Such a transaction cannot be committed, so the create
+   * must fail closed. An HQL parse error raised before any SQL is neither, and fails open.
    *
    * @param error the check's failure
    * @return {@code true} when the transaction is lost
    */
   static boolean isTransactionPoisoned(Throwable error) {
-    for (Throwable cause = error; cause != null; cause = nextCause(cause)) {
-      if (cause instanceof SQLException || cause instanceof JDBCException) {
-        return true;
-      }
-    }
-    return isMarkedRollbackOnly();
-  }
-
-  private static Throwable nextCause(Throwable cause) {
-    return cause.getCause() == cause ? null : cause.getCause();
+    return DatabaseFailures.isDatabaseFailure(error) || isMarkedRollbackOnly();
   }
 
   private static boolean isMarkedRollbackOnly() {

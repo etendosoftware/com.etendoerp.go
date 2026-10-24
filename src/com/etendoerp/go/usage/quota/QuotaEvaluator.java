@@ -28,6 +28,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import com.etendoerp.go.usage.IsolatedDalRead;
 import com.etendoerp.go.usage.KeyedLogThrottle;
 
 /**
@@ -147,6 +148,8 @@ public class QuotaEvaluator {
    * @param tenant the tenant's quotas and period
    * @param scope what to measure
    * @return one evaluation per quota, in the given order; empty when there is no quota
+   * @throws java.util.concurrent.CancellationException when the thread is interrupted between two
+   *     quotas: an isolated worker whose caller stopped waiting
    */
   public List<QuotaEvaluation> evaluate(TenantQuotas tenant, Scope scope) {
     if (tenant == null || tenant.getQuotas().isEmpty()) {
@@ -155,6 +158,8 @@ public class QuotaEvaluator {
     QuotaPeriod period = currentPeriodOrWarn(tenant);
     List<QuotaEvaluation> evaluations = new ArrayList<>(tenant.getQuotas().size());
     for (QuotaDefinition quota : tenant.getQuotas()) {
+      // On an isolated worker whose caller gave up, stop before the next consumption query.
+      IsolatedDalRead.checkNotAbandoned();
       evaluations.add(evaluateOne(tenant, quota, period, scope));
     }
     return evaluations;

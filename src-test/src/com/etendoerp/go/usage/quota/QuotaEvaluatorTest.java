@@ -31,6 +31,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -45,6 +46,7 @@ import static org.mockito.Mockito.when;
 import java.util.Date;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.CancellationException;
 
 import org.apache.logging.log4j.Level;
 import org.junit.jupiter.api.AfterEach;
@@ -91,6 +93,29 @@ class QuotaEvaluatorTest {
   private QuotaEvaluation only(List<QuotaEvaluation> evaluations) {
     assertEquals(1, evaluations.size(), String.valueOf(evaluations));
     return evaluations.get(0);
+  }
+
+  /**
+   * REPRO (ETP-5051 re-review W2): on an isolated worker whose caller stopped waiting (interrupted
+   * by {@code future.cancel(true)}), the evaluation stops before its next consumption query.
+   */
+  @Test
+  void anInterruptedEvaluationStopsBeforeItsNextConsumptionQuery() {
+    QuotaDefinition first = quota("DOCS", "block", 100L, 80L).build();
+    QuotaDefinition second = quota("USERS", "block", 100L, 80L).build();
+    when(reader.read(eq(first), eq(CLIENT), any())).thenAnswer(invocation -> {
+      Thread.currentThread().interrupt();
+      return 1L;
+    });
+    try {
+      TenantQuotas tenant = tenant(CLIENT, first, second);
+      assertThrows(CancellationException.class,
+          () -> evaluator.evaluate(tenant, Scope.ACCOUNT));
+
+      verify(reader, never()).read(eq(second), anyString(), any());
+    } finally {
+      Thread.interrupted();
+    }
   }
 
   @Nested

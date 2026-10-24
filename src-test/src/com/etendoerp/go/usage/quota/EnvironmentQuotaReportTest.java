@@ -34,6 +34,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -44,10 +45,13 @@ import java.util.Map;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
+import org.apache.logging.log4j.Level;
 import org.codehaus.jettison.json.JSONArray;
+import org.hibernate.exception.GenericJDBCException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import com.etendoerp.go.payment.TestLogCapture;
 import com.etendoerp.go.schemaforge.data.BillingResource;
 import com.etendoerp.go.schemaforge.data.Plan;
 import com.etendoerp.go.schemaforge.data.PlanQuota;
@@ -64,6 +68,8 @@ import com.etendoerp.go.usage.quota.QuotaTestFixtures.MutableClock;
  * @covers com.etendoerp.go.usage.quota.EnvironmentQuotaReport
  */
 class EnvironmentQuotaReportTest {
+
+  private static final String THIRD_CLIENT = "TENANT-C";
 
   private ConsumptionReader reader;
   private QuotaEvaluator evaluator;
@@ -346,5 +352,64 @@ class EnvironmentQuotaReportTest {
     assertEquals(0, report.quotasJsonFor(CLIENT).length());
     assertTrue(loaderCalls.isEmpty());
     verifyNoInteractions(reader);
+  }
+
+  /**
+   * REPRO (ETP-5051 re-review N1): a database failure aborts the hop's session, so every later read
+   * would fail too. The hop stops there: the remaining tenants are not read, and one line says how
+   * many were skipped instead of one stack trace each.
+   */
+  @Test
+  void aDatabaseFailureStopsTheHopWithOneLineForTheRemainingTenants() {
+    Map<String, Subscription> subscriptions = new LinkedHashMap<>();
+    subscriptions.put(CLIENT, subscription(plan("PLAN-1")));
+    subscriptions.put(OTHER_CLIENT, subscription(plan("PLAN-1")));
+    subscriptions.put(THIRD_CLIENT, subscription(plan("PLAN-1")));
+    when(reader.read(any(), eq(CLIENT), any())).thenThrow(new IllegalStateException("wrapped",
+        new GenericJDBCException("could not execute query",
+            new SQLException("canceling statement due to statement timeout"))));
+    when(reader.read(any(), eq(OTHER_CLIENT), any())).thenReturn(100L);
+    when(reader.read(any(), eq(THIRD_CLIENT), any())).thenReturn(100L);
+    TestLogCapture logs = TestLogCapture.attachTo(EnvironmentQuotaReport.class, Level.ERROR);
+    EnvironmentQuotaReport report;
+    try {
+      report = EnvironmentQuotaReport.build(subscriptions, evaluator,
+          loader(Map.of("PLAN-1", List.of(row("DOCS", "block", 100L)))));
+
+      List<String> errors = logs.messagesAt(Level.ERROR);
+      assertEquals(2, errors.size(), String.valueOf(errors));
+      assertTrue(errors.get(1).contains("the 2 remaining tenant(s)"), errors.get(1));
+    } finally {
+      logs.detach();
+    }
+
+    assertSame(EnvironmentQuotaReport.empty(), report);
+    verify(reader, never()).read(any(), eq(OTHER_CLIENT), any());
+    verify(reader, never()).read(any(), eq(THIRD_CLIENT), any());
+  }
+
+  /**
+   * REPRO (ETP-5051 re-review W2): when the caller stops waiting, the pool interrupts the worker.
+   * The hop must stop before its next tenant instead of reading on for nobody.
+   */
+  @Test
+  void anAbandonedHopStopsBeforeTheNextTenant() {
+    Map<String, Subscription> subscriptions = new LinkedHashMap<>();
+    subscriptions.put(CLIENT, subscription(plan("PLAN-1")));
+    subscriptions.put(OTHER_CLIENT, subscription(plan("PLAN-1")));
+    when(reader.read(any(), eq(CLIENT), any())).thenAnswer(invocation -> {
+      Thread.currentThread().interrupt(); // what future.cancel(true) does to the worker
+      return 100L;
+    });
+    try {
+      EnvironmentQuotaReport report = EnvironmentQuotaReport.build(subscriptions, evaluator,
+          loader(Map.of("PLAN-1", List.of(row("DOCS", "block", 100L)))));
+
+      assertSame(EnvironmentQuotaReport.empty(), report);
+      verify(reader, never()).read(any(), eq(OTHER_CLIENT), any());
+      assertTrue(Thread.currentThread().isInterrupted(), "the interrupt flag is kept");
+    } finally {
+      Thread.interrupted();
+    }
   }
 }
