@@ -84,6 +84,14 @@ import org.openbravo.scheduling.ProcessBundle;
  * settling-window run: no error, a plausible-looking success message, and the month the operator
  * asked to review simply never computed. The lowercase case is therefore asserted explicitly, in
  * both the "which method was called" and the "with which bounds" senses.
+ *
+ * <p><b>Schedule gating (ETP-5051).</b> A run the Process Scheduler fires for a request whose
+ * timing is <em>Schedule</em> does nothing, and ends as an ERROR, while the
+ * {@code usage-aggregation-schedule} flag is off; every other launch is never gated.
+ * {@link ScheduleGating} drives that through {@code doExecute} with the two package-visible seams,
+ * {@code timingOf} and {@code scheduleEnabled}, answered by a subclass.
+ *
+ * @covers com.etendoerp.go.usage.UsageAggregationProcess
  */
 // Test methods live in the @Nested inner classes below; S2187 only inspects
 // the outer class for @Test methods, hence the suppression.
@@ -147,8 +155,21 @@ class UsageAggregationProcessTest {
   private static Outcome execute(Map<String, Object> params,
       Consumer<MockedStatic<OBPropertiesProvider>> propertiesStub,
       UsageAggregationResult serviceResult) throws Exception {
+    return execute(new UsageAggregationProcess(), bundle -> {
+    }, params, propertiesStub, serviceResult);
+  }
+
+  /**
+   * Runs doExecute on the given process instance, over a bundle the caller may stub further (its
+   * channel and process request, for the scheduled-run specs).
+   */
+  private static Outcome execute(UsageAggregationProcess process,
+      Consumer<ProcessBundle> bundleStub, Map<String, Object> params,
+      Consumer<MockedStatic<OBPropertiesProvider>> propertiesStub,
+      UsageAggregationResult serviceResult) throws Exception {
     ProcessBundle bundle = mock(ProcessBundle.class);
     when(bundle.getParams()).thenReturn(params);
+    bundleStub.accept(bundle);
 
     OBDal obDal = mock(OBDal.class);
 
@@ -166,7 +187,7 @@ class UsageAggregationProcessTest {
 
       OBException thrown = null;
       try {
-        new UsageAggregationProcess().doExecute(bundle);
+        process.doExecute(bundle);
       } catch (OBException e) {
         thrown = e;
       }
@@ -925,6 +946,141 @@ class UsageAggregationProcessTest {
           executeWithoutProperties(params("DateFrom", "08-09-2010", "DateTo", "08-09-2010"));
 
       assertEquals("Error", outcome.error.getType(), outcome.error.getMessage());
+    }
+  }
+
+  /** ETP-5051 — a recurring scheduled run works only while the schedule flag is on. */
+  @Nested
+  @DisplayName("schedule gating")
+  class ScheduleGating {
+
+    private static final String REQUEST_ID = "REQ-1";
+
+    /** A process whose request timing and flag are decided by the test. */
+    private final class Gated extends UsageAggregationProcess {
+      private final String timing;
+      private final boolean enabled;
+      private int timingReads;
+      private int flagReads;
+
+      Gated(String timing, boolean enabled) {
+        this.timing = timing;
+        this.enabled = enabled;
+      }
+
+      @Override
+      String timingOf(String requestId) {
+        timingReads++;
+        assertEquals(REQUEST_ID, requestId);
+        return timing;
+      }
+
+      @Override
+      boolean scheduleEnabled() {
+        flagReads++;
+        return enabled;
+      }
+    }
+
+    private Outcome run(Gated process, ProcessBundle.Channel channel, String requestId)
+        throws Exception {
+      return execute(process, bundle -> {
+        when(bundle.getChannel()).thenReturn(channel);
+        when(bundle.getProcessRequestId()).thenReturn(requestId);
+      }, new LinkedHashMap<>(), properties -> {
+      }, new UsageAggregationResult());
+    }
+
+    @Test
+    void aScheduledRunWithTheFlagOffDoesNothingAndEndsAsAnError() throws Exception {
+      Outcome outcome = run(new Gated("S", false), ProcessBundle.Channel.SCHEDULED, REQUEST_ID);
+
+      outcome.assertFailedWith("usage-aggregation-schedule flag is off");
+      assertEquals("Usage Aggregation Schedule Is Off", outcome.error.getTitle());
+      assertNull(outcome.service, "no aggregation may run while the schedule flag is off");
+      verify(outcome.obDal, never()).flush();
+    }
+
+    @Test
+    void aScheduledRunWithTheFlagOnRunsTheSettlingWindow() throws Exception {
+      Gated process = new Gated("S", true);
+
+      Outcome outcome = run(process, ProcessBundle.Channel.SCHEDULED, REQUEST_ID);
+
+      outcome.assertSucceeded();
+      verify(outcome.service).runForSettlingWindow();
+      assertEquals(1, process.flagReads);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = { "I", "L" })
+    void aProcessRequestRunOnceIsNeverGated(String timing) throws Exception {
+      Gated process = new Gated(timing, false);
+
+      Outcome outcome = run(process, ProcessBundle.Channel.SCHEDULED, REQUEST_ID);
+
+      outcome.assertSucceeded();
+      assertEquals(1, process.timingReads);
+      assertEquals(0, process.flagReads, "the flag is only read for a recurring schedule");
+    }
+
+    @Test
+    void aLaunchFromTheMenuIsNeverGatedAndReadsNoRequest() throws Exception {
+      Gated process = new Gated("S", false);
+
+      Outcome outcome = run(process, ProcessBundle.Channel.DIRECT, REQUEST_ID);
+
+      outcome.assertSucceeded();
+      assertEquals(0, process.timingReads);
+      assertEquals(0, process.flagReads);
+    }
+
+    @Test
+    void aScheduledBundleWithoutARequestIsNotAScheduledRun() throws Exception {
+      Gated process = new Gated("S", false);
+
+      Outcome outcome = run(process, ProcessBundle.Channel.SCHEDULED, null);
+
+      outcome.assertSucceeded();
+      assertEquals(0, process.timingReads);
+    }
+
+    @Test
+    void theTimingIsReadFromTheProcessRequestInAdminMode() {
+      OBDal dal = mock(OBDal.class);
+      org.openbravo.model.ad.ui.ProcessRequest request =
+          mock(org.openbravo.model.ad.ui.ProcessRequest.class);
+      when(request.getTiming()).thenReturn("S");
+      when(dal.get(org.openbravo.model.ad.ui.ProcessRequest.class, REQUEST_ID))
+          .thenReturn(request);
+
+      try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+          MockedStatic<OBContext> obContext = mockStatic(OBContext.class)) {
+        obDal.when(OBDal::getInstance).thenReturn(dal);
+
+        assertEquals("S", new UsageAggregationProcess().timingOf(REQUEST_ID));
+        assertNull(new UsageAggregationProcess().timingOf("MISSING"));
+
+        obContext.verify(() -> OBContext.setAdminMode(true), org.mockito.Mockito.times(2));
+        obContext.verify(OBContext::restorePreviousMode, org.mockito.Mockito.times(2));
+      }
+    }
+
+    @Test
+    void theFlagReadIsTheUsageAggregationScheduleFlag() {
+      try (MockedStatic<com.etendoerp.go.featureflags.GoFeatureFlags> flags =
+          mockStatic(com.etendoerp.go.featureflags.GoFeatureFlags.class)) {
+        flags.when(() -> com.etendoerp.go.featureflags.GoFeatureFlags.isEnabled(
+            org.mockito.ArgumentMatchers.eq("usage-aggregation-schedule"), any()))
+            .thenReturn(true);
+
+        assertTrue(new UsageAggregationProcess().scheduleEnabled());
+      }
+      try (MockedStatic<com.etendoerp.go.featureflags.GoFeatureFlags> flags =
+          mockStatic(com.etendoerp.go.featureflags.GoFeatureFlags.class)) {
+        assertFalse(new UsageAggregationProcess().scheduleEnabled(),
+            "a flag nobody turned on reads as off");
+      }
     }
   }
 }

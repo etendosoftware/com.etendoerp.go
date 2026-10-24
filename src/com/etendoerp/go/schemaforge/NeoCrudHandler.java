@@ -577,7 +577,18 @@ class NeoCrudHandler {
         if (earlyError != null) {
           return earlyError;
         }
-        result = executePostCreate(context, adTab, dalEntityName, fieldFilter, jsonService, params);
+        // ETP-5051: the plan-quota check runs after the insert, in the same transaction. The gate
+        // decides from catalog data alone whether this entity is checked; when it is not, the
+        // create runs exactly as before (same service, same commit, no query). When the client's
+        // quotas cannot be read the create is refused before it runs: no callout, no insert.
+        NeoQuotaWriteGate.Gated gated = NeoQuotaWriteGate.run(dalEntityName, jsonService,
+            service -> executePostCreate(context, adTab, dalEntityName, fieldFilter, service,
+                params));
+        if (gated.refusal() != null) {
+          return gated.refusal();
+        }
+        // The gate's own commit may have failed: then this is core's error JSON for it.
+        result = gated.result();
         break;
       }
       case "PUT":

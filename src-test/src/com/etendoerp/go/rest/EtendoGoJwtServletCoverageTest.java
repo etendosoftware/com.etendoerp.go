@@ -1356,6 +1356,60 @@ public class EtendoGoJwtServletCoverageTest {
 
   // ===================== GET /environments — data-mapping loop =====================
 
+  /**
+   * ETP-5051 (§4b) — the environment list builds ONE quota report, from the same subscriptions it
+   * reads the plans from, and hands that report to every environment entry it writes.
+   */
+  @Test
+  public void environmentsBuildOneQuotaReportAndHandItToEveryEntry() throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = mockRequest("/environments");
+    when(req.getHeader("Authorization")).thenReturn("Bearer valid-token");
+    Account account = mock(Account.class);
+    when(account.getEmail()).thenReturn("user@test.com");
+    User first = mock(User.class);
+    Client firstClient = mock(Client.class);
+    when(firstClient.getId()).thenReturn("client-1");
+    when(first.getClient()).thenReturn(firstClient);
+    User second = mock(User.class);
+    Client secondClient = mock(Client.class);
+    when(secondClient.getId()).thenReturn("client-2");
+    when(second.getClient()).thenReturn(secondClient);
+    java.util.Map<String, com.etendoerp.go.schemaforge.data.Subscription> subscriptions =
+        new java.util.HashMap<>();
+    subscriptions.put("client-1", mock(com.etendoerp.go.schemaforge.data.Subscription.class));
+    SubscriptionService subscriptionService = mock(SubscriptionService.class);
+    when(subscriptionService.findLatestForClients(any())).thenReturn(subscriptions);
+    servlet.subscriptionService = subscriptionService;
+    com.etendoerp.go.usage.quota.EnvironmentQuotaReport report =
+        com.etendoerp.go.usage.quota.EnvironmentQuotaReport.empty();
+
+    try (var ctxMock = mockStatic(OBContext.class);
+         var dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("valid-token"))
+          .thenReturn(account);
+      dalMock.when(() -> EtendoGoJwtDalHelper.findEnvironmentUsersByAccountEmail("user@test.com"))
+          .thenReturn(new ArrayList<>(List.of(first, second)));
+      dalMock.when(() -> EtendoGoJwtDalHelper.findNonStarOrganizations(anyString()))
+          .thenReturn(Collections.emptyList());
+      dalMock.when(() -> EtendoGoJwtDalHelper.quotaReport(subscriptions)).thenReturn(report);
+      dalMock.when(() -> EtendoGoJwtDalHelper.buildEnvironmentJson(
+          any(Client.class), any(), any(User.class), any(EnvironmentPlanCache.class), any()))
+          .thenReturn(new JSONObject());
+
+      servlet.doGet(req, resp.response);
+
+      dalMock.verify(() -> EtendoGoJwtDalHelper.quotaReport(subscriptions),
+          org.mockito.Mockito.times(1));
+      dalMock.verify(() -> EtendoGoJwtDalHelper.buildEnvironmentJson(eq(firstClient), eq(null),
+          eq(first), any(EnvironmentPlanCache.class), org.mockito.ArgumentMatchers.same(report)));
+      dalMock.verify(() -> EtendoGoJwtDalHelper.buildEnvironmentJson(eq(secondClient), eq(null),
+          eq(second), any(EnvironmentPlanCache.class), org.mockito.ArgumentMatchers.same(report)));
+    }
+
+    assertEquals(200, resp.status);
+  }
+
   @Test
   public void environmentsMapsUsersWithAndWithoutOrganizations() throws Exception {
     ResponseCapture resp = mockResponse();
@@ -1398,16 +1452,16 @@ public class EtendoGoJwtServletCoverageTest {
       dalMock.when(() -> EtendoGoJwtDalHelper.findNonStarOrganizations("client-2"))
           .thenReturn(Collections.emptyList());
       dalMock.when(() -> EtendoGoJwtDalHelper.buildEnvironmentJson(
-          any(Client.class), any(), any(User.class), any(EnvironmentPlanCache.class)))
+          any(Client.class), any(), any(User.class), any(EnvironmentPlanCache.class), any()))
           .thenReturn(new JSONObject());
 
       servlet.doGet(req, resp.response);
 
       dalMock.verify(() -> EtendoGoJwtDalHelper.buildEnvironmentJson(
-          eq(clientWithOrgs), eq(org), eq(userWithOrgs), any(EnvironmentPlanCache.class)));
+          eq(clientWithOrgs), eq(org), eq(userWithOrgs), any(EnvironmentPlanCache.class), any()));
       dalMock.verify(() -> EtendoGoJwtDalHelper.buildEnvironmentJson(
           eq(clientWithoutOrgs), eq(null), eq(userWithoutOrgs),
-          any(EnvironmentPlanCache.class)));
+          any(EnvironmentPlanCache.class), any()));
     }
 
     assertEquals(200, resp.status);

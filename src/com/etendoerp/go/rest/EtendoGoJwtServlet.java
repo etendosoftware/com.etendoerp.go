@@ -93,6 +93,7 @@ import com.etendoerp.go.payment.PlanCatalogService;
 import com.etendoerp.go.payment.PlanNotAvailableException;
 import com.etendoerp.go.payment.SubscriptionModelSwitch;
 import com.etendoerp.go.payment.SubscriptionService;
+import com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag;
 import com.etendoerp.go.payment.EnvironmentAccessPolicy;
 import com.etendoerp.go.payment.SubscriptionEventOutcome;
 import com.etendoerp.go.payment.StripeJson;
@@ -101,10 +102,8 @@ import com.etendoerp.go.payment.EnvironmentAccessGuard;
 import com.etendoerp.go.payment.SystemContext;
 import com.etendoerp.go.payment.StripeCustomerPortalService;
 import com.etendoerp.go.payment.DemoDataTransferService;
-import com.etendoerp.go.schemaforge.data.BillingResource;
 import com.etendoerp.go.schemaforge.data.CheckoutRequest;
 import com.etendoerp.go.schemaforge.data.Plan;
-import com.etendoerp.go.schemaforge.data.PlanQuota;
 import com.etendoerp.go.schemaforge.data.Subscription;
 import com.etendoerp.go.payment.CheckoutWebhookProcessor;
 import com.etendoerp.go.onboarding.OnboardingAcctdimCentrallyMaintainedService;
@@ -146,6 +145,13 @@ import com.etendoerp.go.session.JdbcGoSessionStore;
 import com.etendoerp.go.session.SessionRoleRevokedException;
 import com.auth0.jwt.JWT;
 import com.auth0.jwt.interfaces.DecodedJWT;
+import com.etendoerp.go.usage.IsolatedReader;
+import com.etendoerp.go.usage.quota.EnvironmentQuotaReport;
+import com.etendoerp.go.usage.quota.QuotaDefinition;
+import com.etendoerp.go.usage.quota.QuotaEvaluation;
+import com.etendoerp.go.usage.quota.QuotaEvaluator;
+import com.etendoerp.go.usage.quota.QuotaItemJson;
+import com.etendoerp.go.usage.quota.TenantQuotas;
 import com.etendoerp.go.usageevents.SessionLoginUsage;
 import com.etendoerp.go.schemaforge.util.OwnerSupport;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
@@ -454,6 +460,13 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   SubscriptionModelSwitch subscriptionModelSwitch = new SubscriptionModelSwitch();
   HostedCheckoutService hostedCheckoutService = new HostedCheckoutService();
   PlanCatalogService planCatalogService = new PlanCatalogService();
+  /** ETP-5051 — the one quota evaluator; package-visible for tests. */
+  QuotaEvaluator quotaEvaluator = QuotaEvaluator.forReports();
+  /**
+   * ETP-5051 — runs each quota report as one read in its own session, off the request's
+   * transaction; package-visible so a test runs it inline.
+   */
+  IsolatedReader quotaReads = IsolatedReader.DAL;
   CheckoutRequestStore checkoutRequestStore = new CheckoutRequestStore();
   DemoDataTransferService demoDataTransferService = new DemoDataTransferService();
   BillingEventStore billingEventStore = new BillingEventStore();
@@ -1599,6 +1612,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     // ETP-5734 — the company the subscription pays for, so "Mis empresas" can put the live
     // renewal date on that company's row. Additive: existing consumers ignore it.
     result.put(FIELD_CLIENT_ID, clientId == null ? JSONObject.NULL : clientId);
+    // ETP-5051 (§4c) — the environment-access kill switch for this tenant, from the same source as
+    // accessEnforced on GET /environments: false while enforcement is switched off for it, so the
+    // grace countdown drops its "before access is paused". With no tenant, enforcing (true).
+    result.put("accessEnforced", clientId == null
+        || !EnvironmentAccessEnforcementFlag.isEnforcementSwitchedOff(clientId));
     putSubscriptionPlan(result, clientId);
     return result;
   }
@@ -1614,15 +1632,22 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * which would name a plan catalog row that does not exist. With a plan, an empty
    * {@code planQuotas} means the plan has no quota rows, which is <em>unlimited</em>
    * ({@code open-and-notable-topics.md} §5.1).
+   *
+   * <p>ETP-5051 — each item is the full {@code QuotaItem} ({@code QuotaItemJson}): the consumption
+   * over the subscription's current billing period is measured for every active row, mode
+   * {@code off} included (whose verdict stays null), by the one {@code QuotaEvaluator}. A closed or
+   * periodless row has no current period: {@code consumed}, {@code verdict} and the period bounds
+   * are null. A failed measurement never fails the page: the items are sent without it.
    */
   private void putSubscriptionPlan(JSONObject result, String clientId) throws JSONException {
-    Plan plan = clientId == null ? null
-        : subscriptionService.findLatest(clientId).map(Subscription::getPlan).orElse(null);
+    Subscription subscription = clientId == null ? null
+        : subscriptionService.findLatest(clientId).orElse(null);
+    Plan plan = subscription == null ? null : subscription.getPlan();
     JSONArray quotas = new JSONArray();
     if (plan != null) {
-      for (PlanQuota quota : planCatalogService.listActiveQuotas(plan)) {
-        quotas.put(buildPlanQuotaJson(quota, plan));
-      }
+      TenantQuotas tenant = TenantQuotas.of(clientId, subscription,
+          planCatalogService.listActiveQuotas(plan));
+      quotas = QuotaItemJson.ofAll(evaluateQuotas(tenant));
     }
     result.put(FIELD_PLAN_KEY, plan == null ? JSONObject.NULL : plan.getSearchKey());
     result.put("planName",
@@ -1631,26 +1656,44 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
-   * One included quota, informational only: what the plan includes, not what has been used.
-   * {@code period} is the plan's billing interval, which is the quota's consumption window
-   * ({@code open-and-notable-topics.md} §5.5, §5.8): a quota on a yearly plan is a yearly quota.
+   * Measures the account page's quotas; on a failed measurement, answers the same rows unmeasured
+   * rather than failing the page.
    */
-  private static JSONObject buildPlanQuotaJson(PlanQuota quota, Plan plan) throws JSONException {
-    BillingResource resource = quota.getBillingResource();
-    JSONObject item = new JSONObject();
-    item.put("resourceKey", resource == null ? JSONObject.NULL : resource.getSearchKey());
-    item.put("resourceName", resource == null ? JSONObject.NULL
-        : StringUtils.defaultString(resource.getName()));
-    item.put("unitLabel", resource == null || resource.getUnitLabel() == null ? JSONObject.NULL
-        : resource.getUnitLabel());
-    item.put("includedQty", quota.getIncludedQty() == null ? JSONObject.NULL
-        : quota.getIncludedQty());
-    item.put("enforcementMode", StringUtils.defaultString(quota.getEnforcementMode()));
-    item.put("warningThreshold", quota.getWarningThreshold() == null ? JSONObject.NULL
-        : quota.getWarningThreshold());
-    item.put("period", StringUtils.isBlank(plan.getBillingInterval()) ? JSONObject.NULL
-        : plan.getBillingInterval());
-    return item;
+  private List<QuotaEvaluation> evaluateQuotas(TenantQuotas tenant) {
+    try {
+      return quotaReads.call(() -> quotaEvaluator.evaluate(tenant, QuotaEvaluator.Scope.ACCOUNT));
+    } catch (RuntimeException e) {
+      log.error("Could not measure the quotas of tenant {}; sending them unmeasured",
+          tenant.getClientId(), e);
+      List<QuotaEvaluation> unmeasured = new ArrayList<>();
+      for (QuotaDefinition quota : tenant.getQuotas()) {
+        unmeasured.add(new QuotaEvaluation(quota, tenant.getPlanInterval(), null, null, null));
+      }
+      return unmeasured;
+    }
+  }
+
+  /**
+   * ETP-5051 — the quotas to report on entering an environment (contract §2): only the items whose
+   * verdict is WARN or DENY. Report-only: entering is never refused because of a quota, and a
+   * failed evaluation reports nothing. A tenant with no quota row costs no consumption query.
+   */
+  private JSONArray loginQuotas(String clientId) {
+    try {
+      List<QuotaEvaluation> reportable = new ArrayList<>();
+      List<QuotaEvaluation> evaluations = quotaReads.call(
+          () -> quotaEvaluator.evaluateTenant(clientId, QuotaEvaluator.Scope.ENFORCEMENT));
+      for (QuotaEvaluation evaluation : evaluations) {
+        if (evaluation.isReportable()) {
+          reportable.add(evaluation);
+        }
+      }
+      return QuotaItemJson.ofAll(reportable);
+    } catch (RuntimeException | JSONException e) {
+      log.warn("Could not evaluate the quotas of tenant {} on environment entry; reporting none",
+          clientId, e);
+      return new JSONArray();
+    }
   }
 
   /** Returns one account-scoped purchase projection, with foreign IDs kept indistinguishable. */
@@ -4399,8 +4442,13 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       // retired preference about the tenants that have no subscription row yet. Exactly one extra
       // query, only when at least one tenant is missing, and it keeps this list in agreement with
       // TenantPlanService#resolvePlan. Delete the extra argument in Phase F.
+      Map<String, Subscription> subscriptions =
+          subscriptionService.findLatestForClients(environmentClientIds);
       EnvironmentPlanCache planCache = EnvironmentPlanCache.of(environmentClientIds,
-          subscriptionService.findLatestForClients(environmentClientIds));
+          subscriptions);
+      // ETP-5051 (§4b): every environment carries its WARN/DENY quotas. One batched read of the
+      // listed plans' enforced quota rows, none without a plan; never fails the list.
+      EnvironmentQuotaReport quotaReport = EtendoGoJwtDalHelper.quotaReport(subscriptions);
       // The first environment is entered automatically after account login. Prefer the paid
       // productive tenant so a demo tenant never unexpectedly becomes the active workspace when
       // an account owns both plans. The client repeats this ordering for older backends.
@@ -4412,7 +4460,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       Map<String, Date> unfinishedPaidClients = findUnfinishedPaidClients(account);
       for (User environmentUser : environmentUsers) {
         if (!isUnfinishedPaidEnvironment(environmentUser.getClient(), unfinishedPaidClients)) {
-          addEnvironmentEntries(envArray, environmentUser, planCache, withDetails);
+          addEnvironmentEntries(envArray, environmentUser, planCache, quotaReport, withDetails);
         }
       }
 
@@ -4439,8 +4487,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
   /** One entry per business organization of the user's client, or one without when it has none. */
   private static void addEnvironmentEntries(org.codehaus.jettison.json.JSONArray envArray,
-      User environmentUser, EnvironmentPlanCache planCache, boolean withDetails)
-      throws JSONException {
+      User environmentUser, EnvironmentPlanCache planCache, EnvironmentQuotaReport quotaReport,
+      boolean withDetails) throws JSONException {
     Client client = environmentUser.getClient();
     JSONObject details = withDetails
         ? EnvironmentDetails.resolve(client.getId(), environmentUser,
@@ -4450,13 +4498,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         EtendoGoJwtDalHelper.findNonStarOrganizations(client.getId());
     if (organizations.isEmpty()) {
       envArray.put(withEnvironmentDetails(
-          EtendoGoJwtDalHelper.buildEnvironmentJson(client, null, environmentUser, planCache),
+          EtendoGoJwtDalHelper.buildEnvironmentJson(client, null, environmentUser, planCache,
+              quotaReport),
           details));
       return;
     }
     for (Organization organization : organizations) {
       envArray.put(withEnvironmentDetails(EtendoGoJwtDalHelper.buildEnvironmentJson(client,
-          organization, environmentUser, planCache), details));
+          organization, environmentUser, planCache, quotaReport), details));
     }
   }
 
@@ -6745,6 +6794,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       if (accessDecision != null && accessDecision != EnvironmentAccessPolicy.Decision.ALLOWED) {
         result.put(FIELD_ACCESS_DECISION, accessDecision.name());
       }
+      // ETP-5051 — quotas at WARN or DENY, report-only like accessDecision: never refuses entry.
+      result.put("quotas", loginQuotas(entered.getRecord().getCtxClientId()));
       writeResponse(response, HttpServletResponse.SC_OK, result);
       recordCookieEnvironmentLogin(entered.getRecord(), startNanos);
       retryInitialPeriodStateOnLogin(entered.getRecord().getCtxClientId());

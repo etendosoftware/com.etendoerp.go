@@ -147,6 +147,17 @@ public class BatchService {
   }
 
   /**
+   * Whether a batch owns the transaction on this thread, so a write must not end it (ETP-5051: the
+   * quota write gate leaves the commit to the batch then, and refuses through a failed operation
+   * that rolls the whole batch back).
+   *
+   * @return {@code true} inside {@link #executeBatch}
+   */
+  static boolean isCallerOwnedTransaction() {
+    return Boolean.TRUE.equals(CALLER_OWNS_TRANSACTION.get());
+  }
+
+  /**
    * The write path the current thread must use: the deferred-commit one while a batch owns the
    * transaction, core's self-committing one otherwise. Single decision point — callers such as
    * {@link NeoCrudHandler} ask for "the current service" and never branch themselves.
@@ -154,7 +165,7 @@ public class BatchService {
    * @return the {@link DefaultJsonDataService} appropriate for the current thread
    */
   static DefaultJsonDataService currentJsonService() {
-    return Boolean.TRUE.equals(CALLER_OWNS_TRANSACTION.get())
+    return isCallerOwnedTransaction()
         ? NeoBatchJsonDataService.deferredCommitInstance()
         : DefaultJsonDataService.getInstance();
   }

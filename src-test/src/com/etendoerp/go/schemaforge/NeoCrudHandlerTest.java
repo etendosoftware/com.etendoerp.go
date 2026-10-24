@@ -4367,4 +4367,54 @@ class NeoCrudHandlerTest {
       }
     }
   }
+
+  // -------------------------------------------------------------------------
+  // ETP-5051: the POST create runs inside the plan-quota gate
+  // -------------------------------------------------------------------------
+
+  /**
+   * The REST single and batch create runs its insert inside {@code NeoQuotaWriteGate}: the gate
+   * picks the service, checks the created row after the insert, a refusal is returned, and the
+   * caller goes on with the gate's result (core's error JSON when the gate's own commit failed).
+   * The POST path needs a live DAL and an {@code AD_Tab}, so the wiring is pinned on the source,
+   * anchored on the calls rather than on local variable names.
+   */
+  @Nested
+  @DisplayName("the POST create runs inside the plan-quota gate (ETP-5051)")
+  class QuotaGateWiring {
+
+    /**
+     * Also the ETP-5051 re-review W1 guard: the create ({@code executePostCreate}, callout cascade
+     * and add) is what the handler hands to {@code NeoQuotaWriteGate.run}, so the gate can refuse
+     * before it runs; {@code NeoQuotaWriteGateTest} shows it is never invoked on that refusal. The
+     * gate's {@code begin} is package-private, so no handler can open the gate around a create of
+     * its own.
+     */
+    @Test
+    void theCreateRunsItsInsertInsideTheGate() throws Exception {
+      String source = readSource("com/etendoerp/go/schemaforge/NeoCrudHandler.java")
+          .replaceAll("\\s+", " ");
+
+      int run = source.indexOf("NeoQuotaWriteGate.run(");
+      int insert = source.indexOf("executePostCreate(", run);
+      int refusal = source.indexOf(".refusal()", run);
+      int returned = source.indexOf("return ", refusal);
+      int result = source.indexOf(".result()", returned);
+
+      assertTrue(run >= 0, "NeoCrudHandler no longer runs its create inside the quota gate");
+      assertTrue(insert > run && insert < refusal,
+          "the create is no longer handed to the gate (it must run inside run(...))");
+      assertTrue(returned > refusal, "a quota refusal is no longer returned to the caller");
+      assertTrue(result > returned, "the caller no longer goes on with the gate's result");
+    }
+
+    private String readSource(String relative) throws java.io.IOException {
+      java.nio.file.Path fromRoot = java.nio.file.Paths.get("modules/com.etendoerp.go/src",
+          relative);
+      java.nio.file.Path file = java.nio.file.Files.exists(fromRoot) ? fromRoot
+          : java.nio.file.Paths.get("src", relative);
+      return new String(java.nio.file.Files.readAllBytes(file),
+          java.nio.charset.StandardCharsets.UTF_8);
+    }
+  }
 }

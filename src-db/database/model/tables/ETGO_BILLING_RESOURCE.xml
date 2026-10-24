@@ -77,6 +77,10 @@
         <default/>
         <onCreateDefault/>
       </column>
+      <column name="AGGREGATION" primaryKey="false" required="true" type="VARCHAR" size="60" autoIncrement="false">
+        <default><![CDATA[sum]]></default>
+        <onCreateDefault><![CDATA['sum']]></onCreateDefault>
+      </column>
       <foreign-key foreignTable="AD_CLIENT" name="ETGO_BILLRES_CLIENT_FK">
         <reference local="AD_CLIENT_ID" foreign="AD_CLIENT_ID"/>
       </foreign-key>
@@ -92,6 +96,7 @@
       <unique name="ETGO_BILLRES_VALUE_UQ">
         <unique-column name="VALUE"/>
       </unique>
+      <check name="ETGO_BILLRES_AGGR_CHK"><![CDATA[AGGREGATION IN ('sum', 'max', 'last')]]></check>
       <check name="ETGO_BILLRES_ISACTIVE_CHK"><![CDATA[ISACTIVE IN ('Y', 'N')]]></check>
       <check name="ETGO_BILLRES_MODE_CHK"><![CDATA[COUNTING_MODE IN ('D', 'S')]]></check>
     </table>

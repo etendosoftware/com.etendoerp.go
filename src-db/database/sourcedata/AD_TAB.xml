@@ -228,7 +228,7 @@
 <!--37BBC059BC9E4449B356ABE86CD39163-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
 <!--37BBC059BC9E4449B356ABE86CD39163-->  <NAME><![CDATA[Quotas]]></NAME>
 <!--37BBC059BC9E4449B356ABE86CD39163-->  <DESCRIPTION><![CDATA[Resource allowances granted by the plan]]></DESCRIPTION>
-<!--37BBC059BC9E4449B356ABE86CD39163-->  <HELP><![CDATA[One row per billing resource included in the plan. The absence of a row means the resource is unlimited, so deleting the last row is how the unlimited state is restored.]]></HELP>
+<!--37BBC059BC9E4449B356ABE86CD39163-->  <HELP><![CDATA[One row per billing resource included in the plan. The absence of a row, or an inactive row, means the resource is unlimited, so deleting or deactivating the last row is how the unlimited state is restored. A quota is consumed over the subscription billing period of the plan: on a yearly plan the included quantity is a yearly quantity, consumed over the whole year, not per month.]]></HELP>
 <!--37BBC059BC9E4449B356ABE86CD39163-->  <AD_TABLE_ID><![CDATA[C2DF98CC43D74F39988C581ECDE34852]]></AD_TABLE_ID>
 <!--37BBC059BC9E4449B356ABE86CD39163-->  <AD_WINDOW_ID><![CDATA[98824E1FB32949F8B07F1FE52FF909F2]]></AD_WINDOW_ID>
 <!--37BBC059BC9E4449B356ABE86CD39163-->  <SEQNO><![CDATA[20]]></SEQNO>

@@ -1243,7 +1243,9 @@ rejected row does not stop the others. The status carries, per row, `committed:t
 `safeToResend`. A row reported `committed:true` exists. Resend only rows with `committed:false` **and**
 `safeToResend:true` (the batch vouches it was rolled back: `atomic:true`, empty `persisted`); a row with
 `safeToResend:false` (`atomic:false` — a process committed underneath it — or no outcome) may have left
-records, listed in its `persisted`: look them up first.
+records, listed in its `persisted`: look them up first. A row refused for a plan quota
+(`QUOTA_EXCEEDED`, §4.16) is also `safeToResend:false`: nothing of it exists, but a resend is
+refused again until the quota changes.
 
 ```
 { jobId, state, done, channel, totalRows, totalOps, processedRows, committedRows, failedRows,
@@ -5042,6 +5044,145 @@ this endpoint — some are recorded by the backend itself through `UsageEventRec
 Recording is the last statement of the success path, after the response is written, and never
 throws; the INSERT happens on the recorder's writer thread, so a slow or locked
 `ETGO_USAGE_EVENT` does not slow a login.
+
+### 4.16 Plan quota refusal on create (ETP-5051)
+
+A create can be refused because the tenant is over a plan quota in mode `block`
+(`ETGO_PLAN_QUOTA`, `open-and-notable-topics.md` §5.1–§5.9). This section is the API-level
+reference of that refusal. Which points enforce or only report quotas, how an operator caps a
+resource, freshness and the accepted limits: [`plan-quotas.md`](plan-quotas.md).
+
+```json
+HTTP 403
+{ "error": { "message": "Quota exceeded: Posted sales invoices (100/100 Inv)",
+             "status": 403,
+             "code": "QUOTA_EXCEEDED",
+             "quota": { "resourceKey": "...", "resourceName": "...", "unitLabel": "...",
+                        "includedQty": 100, "enforcementMode": "block", "warningThreshold": 80,
+                        "period": "month", "consumptionSource": "live", "consumed": 100,
+                        "verdict": "DENY", "periodStart": "2026-10-23",
+                        "periodEnd": "2026-11-23" } } }
+```
+
+`periodStart` / `periodEnd` are the counted window as date-only strings (`yyyy-MM-dd`,
+server-local days): the first counted day and the exclusive end day, so consumption covers
+`[periodStart, periodEnd)`. Every `QuotaItem` (this refusal, `planQuotas` on the account page,
+`quotas` on environment entry and on the environment list) carries the same two fields.
+
+Clients key off `error.code === "QUOTA_EXCEEDED"`, never off the status or the message: it is
+neither the 402 of the commercial access check (§4.1) nor a permission error.
+
+- **Where it runs.** `NeoQuotaWriteGate`, after the insert and before the commit, on every create
+  channel: REST single and `/sws/neo/batch` in `NeoCrudHandler`'s POST branch, MCP `etendo_create`
+  in `McpToolRouter#handleCreate`, and MCP `etendo_batch` and the batch jobs through `BatchService`.
+  Inside a batch the refusal fails the operation (`failedAt`, the body above under
+  `error.detail`) and the batch rolls back as a unit; on MCP — `etendo_create`, `etendo_batch` and
+  the batch jobs alike — the same body arrives flattened (`status`, `error`, `detail`, `code`,
+  `quota`), so `code === "QUOTA_EXCEEDED"` / `"QUOTA_CHECK_FAILED"` survives a batch too. An async
+  batch job row refused with `QUOTA_EXCEEDED` reports `safeToResend:false`: it was rolled back, but
+  a resend is refused again until the quota changes. A `QUOTA_CHECK_FAILED` row keeps the normal
+  rule (`safeToResend:true` for a proven rollback): nothing was saved and the check may pass. A customization whose `handle()` creates the row itself and
+  short-circuits the default create is not checked; nor are rows created by processes.
+- **What it checks.** Structural, driven by catalog data: the `block` quotas of the request's
+  client whose declarative resource's `COUNTED_ENTITY` is the created entity. They come from
+  `QuotaClientCache`, an in-memory map keyed by client id (not by HTTP session: bearer, batch and
+  MCP requests have none). An entry holds the client's open subscription (period, closed flag) and
+  its plan's active `block` quotas on declarative resources, grouped by counted entity; it is built
+  on the request's own session in one `DalQuotaLookup` call and trusted for 60 s, and a client with
+  no block quota gets an empty entry, cached too. So a quota switched on or off, a plan change or
+  a renewal reaches a client within 60 s, no restart, and a create of an entity the client does not
+  cap runs **no query**, whatever other clients cap. The map is bounded: expired entries are swept
+  at most once a minute, and it is cleared if 10 000 entries remain after a sweep. For a capped
+  entity the new row is tested against each resource's HQL restriction **and the current
+  period's counted window** on its date property (`UsageQueryComposer.composeRowMatchInRange`, the
+  same validated composition and day bounds as the counts). A row dated outside the window does not
+  consume this period and stands, at the cap or not. An in-window row is refused when the
+  consumption before the create plus one exceeds the included quantity: for a `live` source a
+  count that leaves out the rows the create inserted (`id not in (:excludedIds)`), for the stored
+  `aggregate` the aggregate (lagged, it never has them); several rows of one create are charged one
+  after the other. The window is day-aligned, `[startOfDay(periodStart), startOfDay(periodEnd))`,
+  so **a row created on a period's last, partial day falls outside it and is not charged to that
+  period** — on that day a block quota does not refuse it. The day belongs to the next period
+  (its window starts at local midnight of the same day), so once the renewal is recorded the row
+  counts there. The
+  periodless-subscription WARN is throttled to one line per tenant per hour across every
+  evaluator.
+- **What it does not see.** A resource that grows through a state change rather than a create —
+  `POSTED_SALES_INVOICES` grows on posting, and the invoice is created unposted — never matches at
+  create time and is never refused here. Accepted; such a quota is reported on every environment
+  of `GET /sws/go/environments` (`quotas`), on entering the environment
+  (`POST /sws/go/session/environment`, `quotas`) and on the account page.
+- **Cost.** An entity no active `block` quota counts costs a map lookup: same service, same commit,
+  no query. When a create is checked and no batch owns the transaction, it runs through the
+  deferred-commit service a batch uses (IMP-23) and the gate commits or rolls back itself.
+- **When the check itself fails.** Only an error raised before Hibernate sees a query — a
+  restriction fragment `UsageQueryComposer` rejects, a missing strategy counter — is logged
+  (`[QUOTA]`) and lets the create stand: it fails open. Everything else fails **closed**: an error
+  from the database, a transaction Hibernate marked rollback-only — which includes an HQL that
+  fails to parse, e.g. a restriction naming an unknown property (Hibernate marks the transaction
+  rollback-only; `UsageResourceValidator` already rejects such a restriction at save time) — and a
+  client entry that cannot be built. A commit would silently roll the row back while answering
+  success, so the create is rolled back (in a batch, the operation fails and the batch rolls back)
+  and the answer is
+
+  ```json
+  HTTP 500
+  { "error": { "message": "The quota check failed; nothing was saved. Try again.",
+               "status": 500, "code": "QUOTA_CHECK_FAILED" } }
+  ```
+
+  Clients key off `error.code === "QUOTA_CHECK_FAILED"` and show their own translated text.
+- **A failing commit.** When the gate commits a checked create itself and the commit fails (a
+  deferred constraint), the caller gets core's own error JSON for it, classified exactly as before.
+- **Concurrency.** A `live` `block` check takes a PostgreSQL advisory lock per tenant and resource
+  (`pg_advisory_xact_lock`) right before its count, held to commit, so concurrent creates cannot
+  both slip under the cap. The stored `aggregate` takes none: its cap is approximate by the usage
+  job's lag. Inside a batch it is looser still: each operation is its own create, so the charge
+  for rows already created resets per operation, and the aggregate never sees the rows earlier
+  operations of the same batch created — a batch of N creates can exceed an `aggregate` cap by up
+  to N−1 on top of the lag. A `live` count does see them (same transaction).
+- **Two batches can deadlock on those locks.** A batch that creates rows of two quota'd resources
+  takes one lock per resource, in the order its operations run. Two concurrent batches of the same
+  tenant that touch the same two resources in opposite orders wait for each other; PostgreSQL
+  detects it and aborts one of them with `40P01` (deadlock detected). That batch's check fails on
+  the database, so the batch is refused with `QUOTA_CHECK_FAILED` (status 500, carried in the
+  batch's failed operation) and rolls back entirely; the other one goes through. Nothing is
+  half-saved: the client retries the refused batch. A single create takes one lock and cannot
+  deadlock this way.
+- **A client entry that cannot be built** fails the create closed with `QUOTA_CHECK_FAILED`
+  **before the add runs** (`NeoQuotaWriteGate.run`). It was read on the request's session, and
+  nothing says whether the create is capped. How much of the create has run by then depends on the
+  channel, because the gate wraps a different part of each:
+  - **REST single, `/sws/neo/batch`, MCP `etendo_batch` and the batch jobs** (all through
+    `NeoCrudHandler`): the gate wraps `executePostCreate`, which holds the
+    mandatory defaults and the callout cascade, so neither runs: no cascade, no insert. The
+    entity's pre-hook (`handle()`) has already run, as it does before every CRUD operation.
+  - **MCP `etendo_create`:** `McpToolRouter.handleCreate` injects the mandatory defaults (with
+    their callout cascade), runs the compensations and the pre-hook **before** calling the gate,
+    which wraps only the add. Those steps have run; only the insert is skipped, and the gate's
+    rollback (or, inside a batch, the batch's) undoes whatever they wrote to the session.
+
+  Either way nothing is saved. The entry read before the insert is the one checked after it.
+- **Reports never touch the request's transaction.** The quota reports (environment entry, the
+  environment list, the account page) and the usage-lag check read in their own session
+  (`IsolatedDalRead`), so a failing read cannot poison what the request writes afterwards. They run
+  on a bounded pool of 4 named daemon workers (`etgo-isolated-read-N`) with 64 queued reads; a read
+  beyond that is refused at once and the report answers `[]`. Each report is **one** hop: the
+  environment list's batched quota read and all its evaluations together, not one per tenant. The
+  worker sets `statement_timeout` to 25 s for its transaction (PostgreSQL really stops the query;
+  cancelling the Java future would not) and the caller waits at most 30 s. When the caller stops
+  waiting, the worker is interrupted and the report stops before its next tenant or quota. After
+  the first database failure in a hop, the remaining tenants are not read (that session's
+  transaction is aborted) and one log line gives their count. The worker ends like a request thread
+  (`DalThreadCleaner.cleanWithRollback()`, admin-mode stack cleared), with an `OBContext` of its
+  own built from the caller's user, role, client, organization, language and warehouse. Idle
+  workers end after a minute; the pool stops in `NeoServlet.destroy()`, which cancels the reads
+  still queued.
+- **The usage-lag WARN is never checked on a create.** The reports and the usage job check it; a
+  failed lag read is cached for a minute like a successful one. Inside a report the lag read runs
+  in the report's own isolated session, so one that fails on the database aborts that report: it
+  answers `[]`, at most once a minute (the failure is cached), never touching the request.
+- **Write warnings** (a WARN verdict on a create) are not returned on this path.
 
 ## 5. Configuration
 

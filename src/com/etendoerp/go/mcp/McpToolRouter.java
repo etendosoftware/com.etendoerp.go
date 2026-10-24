@@ -75,6 +75,7 @@ import com.etendoerp.go.schemaforge.NeoMandatoryDefaultsService;
 import com.etendoerp.go.schemaforge.NeoParentTabFilterResolver;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoProcessService;
+import com.etendoerp.go.schemaforge.NeoQuotaWriteGate;
 import com.etendoerp.go.schemaforge.NeoReadPredicates;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.NeoSelectorService;
@@ -724,12 +725,7 @@ public class McpToolRouter {
     // got a 422 for parent-derived fields it was never told to send. Copied into `fields`
     // rather than handled separately so there stays exactly ONE downstream reader of it (the
     // resolveParentFK block below); the top-level argument wins, because it is the declared one.
-    if (args.has(McpConstants.PARAM_PARENT_ID) && !args.isNull(McpConstants.PARAM_PARENT_ID)) {
-      String topLevelParentId = args.getString(McpConstants.PARAM_PARENT_ID);
-      if (StringUtils.isNotBlank(topLevelParentId)) {
-        fields.put(McpConstants.PARAM_PARENT_ID, topLevelParentId);
-      }
-    }
+    McpArgumentUtils.copyTopLevelParentId(args, fields);
 
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
     SFEntity sfEntity = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, entityName);
@@ -919,8 +915,17 @@ public class McpToolRouter {
 
     // Wrap for DefaultJsonDataService
     String wrappedBody = McpToolRouterSupport.wrapForSmartclient(filteredBody, dalEntityName, null, log);
-    String result = jsonService.add(params, wrappedBody);
-    JSONObject responseJson = new JSONObject(result);
+    // ETP-5051: the same plan-quota check as the REST create, after the insert and before the
+    // commit. etendo_create does not pass through NeoCrudHandler, so it is wired here; the gate
+    // is structural (catalog data only) and a no-op for every entity no block quota counts. When
+    // the client's quotas cannot be read the add never runs.
+    NeoQuotaWriteGate.Gated gated = NeoQuotaWriteGate.run(dalEntityName, jsonService,
+        service -> service.add(params, wrappedBody));
+    if (gated.refusal() != null) {
+      return McpHookExecutor.neoResponseToMcpResult(gated.refusal());
+    }
+    // The gate's own commit may have failed: then this is core's error JSON for it.
+    JSONObject responseJson = new JSONObject(gated.result());
 
     // userProvided is still the pre-defaults snapshot here (ETP-4793 / IMP-24's witness),
     // so it also answers "did the caller actually send this field" for a 422's fieldErrors —
