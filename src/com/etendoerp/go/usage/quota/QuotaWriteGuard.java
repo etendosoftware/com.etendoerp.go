@@ -139,18 +139,21 @@ public class QuotaWriteGuard {
       return Optional.empty();
     }
     for (QuotaDefinition quota : quotas) {
-      long charged = 0L;
-      for (String recordId : recordIds) {
-        String rowClient = matcher.tenantIfCounted(quota, recordId, period);
-        if (rowClient == null) {
-          continue;
-        }
-        if (!rowClient.equals(tenant.getClientId())) {
-          // NEO creates rows in the request's client; another client here is not ours to measure.
-          log.warn("[QUOTA] A created {} row belongs to client {}, not to the request's client {};"
-              + " not quota-checked", entityName, rowClient, tenant.getClientId());
-          continue;
-        }
+      Optional<QuotaEvaluation> refusal = refusalForQuota(tenant, quota, period, entityName,
+          recordIds);
+      if (refusal.isPresent()) {
+        return refusal;
+      }
+    }
+    return Optional.empty();
+  }
+
+  /** The created rows against one quota, charged one after the other. */
+  private Optional<QuotaEvaluation> refusalForQuota(TenantQuotas tenant, QuotaDefinition quota,
+      QuotaPeriod period, String entityName, Collection<String> recordIds) {
+    long charged = 0L;
+    for (String recordId : recordIds) {
+      if (countsInWindow(tenant, quota, period, entityName, recordId)) {
         Optional<QuotaEvaluation> refusal =
             evaluator.refusalForCreate(tenant, quota, period, recordIds, charged);
         if (refusal.isPresent()) {
@@ -160,5 +163,21 @@ public class QuotaWriteGuard {
       }
     }
     return Optional.empty();
+  }
+
+  /** Whether the quota's resource counts the row in the period, for the request's own client. */
+  private boolean countsInWindow(TenantQuotas tenant, QuotaDefinition quota, QuotaPeriod period,
+      String entityName, String recordId) {
+    String rowClient = matcher.tenantIfCounted(quota, recordId, period);
+    if (rowClient == null) {
+      return false;
+    }
+    if (rowClient.equals(tenant.getClientId())) {
+      return true;
+    }
+    // NEO creates rows in the request's client; another client here is not ours to measure.
+    log.warn("[QUOTA] A created {} row belongs to client {}, not to the request's client {}; not "
+        + "quota-checked", entityName, rowClient, tenant.getClientId());
+    return false;
   }
 }

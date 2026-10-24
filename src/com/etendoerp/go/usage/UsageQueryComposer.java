@@ -55,6 +55,8 @@ public final class UsageQueryComposer {
   private static final String AND = " and ";
   private static final String FROM = " from ";
   private static final String WHERE = " where ";
+  private static final String SELECT = "select ";
+  private static final String CLIENT_ID = ".client.id";
   private static final String ARG_ENTITY_NAME = "entityName";
   private static final String ARG_DATE_PROPERTY = "dateProperty";
   private static final String ALIAS_FRAGMENT = "e";
@@ -77,11 +79,11 @@ public final class UsageQueryComposer {
     requireIdentifier(entityName, ARG_ENTITY_NAME);
     requireIdentifier(dateProperty, ARG_DATE_PROPERTY);
     StringBuilder hql = new StringBuilder(256);
-    hql.append("select ").append(ALIAS_OUTER).append(".client.id, count(*)")
+    hql.append(SELECT).append(ALIAS_OUTER).append(CLIENT_ID).append(", count(*)")
         .append(FROM).append(entityName).append(' ').append(ALIAS_OUTER)
         .append(WHERE).append(dayBounds(dateProperty));
     appendRestriction(hql, entityName, restriction);
-    hql.append(" group by ").append(ALIAS_OUTER).append(".client.id");
+    hql.append(" group by ").append(ALIAS_OUTER).append(CLIENT_ID);
     return hql.toString();
   }
 
@@ -122,9 +124,9 @@ public final class UsageQueryComposer {
     requireIdentifier(entityName, ARG_ENTITY_NAME);
     requireIdentifier(dateProperty, ARG_DATE_PROPERTY);
     StringBuilder hql = new StringBuilder(256);
-    hql.append("select count(*)")
+    hql.append(SELECT).append("count(*)")
         .append(FROM).append(entityName).append(' ').append(ALIAS_OUTER)
-        .append(WHERE).append(ALIAS_OUTER).append(".client.id = :").append(PARAM_CLIENT_ID)
+        .append(WHERE).append(ALIAS_OUTER).append(CLIENT_ID).append(" = :").append(PARAM_CLIENT_ID)
         .append(AND).append(dayBounds(dateProperty));
     if (excluding) {
       hql.append(AND).append(ALIAS_OUTER).append(".id not in (:").append(PARAM_EXCLUDED_IDS)
@@ -149,13 +151,7 @@ public final class UsageQueryComposer {
    *     {@link #PARAM_RECORD_ID}
    */
   public static String composeRowMatch(String entityName, String restriction) {
-    requireIdentifier(entityName, ARG_ENTITY_NAME);
-    StringBuilder hql = new StringBuilder(256);
-    hql.append("select ").append(ALIAS_OUTER).append(".client.id")
-        .append(FROM).append(entityName).append(' ').append(ALIAS_OUTER)
-        .append(WHERE).append(ALIAS_OUTER).append(".id = :").append(PARAM_RECORD_ID);
-    appendRestriction(hql, entityName, restriction);
-    return hql.toString();
+    return rowMatch(entityName, null, restriction);
   }
 
   /**
@@ -172,13 +168,19 @@ public final class UsageQueryComposer {
    */
   public static String composeRowMatchInRange(String entityName, String dateProperty,
       String restriction) {
-    requireIdentifier(entityName, ARG_ENTITY_NAME);
     requireIdentifier(dateProperty, ARG_DATE_PROPERTY);
+    return rowMatch(entityName, dateProperty, restriction);
+  }
+
+  private static String rowMatch(String entityName, String dateProperty, String restriction) {
+    requireIdentifier(entityName, ARG_ENTITY_NAME);
     StringBuilder hql = new StringBuilder(256);
-    hql.append("select ").append(ALIAS_OUTER).append(".client.id")
+    hql.append(SELECT).append(ALIAS_OUTER).append(CLIENT_ID)
         .append(FROM).append(entityName).append(' ').append(ALIAS_OUTER)
-        .append(WHERE).append(ALIAS_OUTER).append(".id = :").append(PARAM_RECORD_ID)
-        .append(AND).append(dayBounds(dateProperty));
+        .append(WHERE).append(ALIAS_OUTER).append(".id = :").append(PARAM_RECORD_ID);
+    if (dateProperty != null) {
+      hql.append(AND).append(dayBounds(dateProperty));
+    }
     appendRestriction(hql, entityName, restriction);
     return hql.toString();
   }
