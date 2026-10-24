@@ -2695,6 +2695,73 @@ public class ReturnShipmentUtilsTest {
   }
 
   /**
+   * When the completion rolled the draft back (rollback-only transaction), the invoice cannot be
+   * read back: that is a clear error, not an IllegalArgumentException from {@code refresh(null)}.
+   */
+  @Test
+  public void finalizeReturnInvoice_invoiceGoneAfterCompletion_throwsAClearError() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<InvoiceCompletionService> completion =
+            Mockito.mockStatic(InvoiceCompletionService.class);
+        MockedStatic<ReturnInvoiceSupport> support =
+            Mockito.mockStatic(ReturnInvoiceSupport.class, Mockito.CALLS_REAL_METHODS)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getSession()).thenReturn(mock(Session.class));
+      when(dal.get(Invoice.class, "inv-1")).thenReturn(null);
+      support.when(() -> ReturnInvoiceSupport.linkRectifiedInvoices(any(), any()))
+          .thenAnswer(inv -> null);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getId()).thenReturn("inv-1");
+      CreateDraftInvoiceHandler handler = mock(CreateDraftInvoiceHandler.class);
+      when(handler.getSupport()).thenReturn(mock(InvoiceFromOrderSupport.class));
+
+      try {
+        ReturnInvoiceSupport.finalizeReturnInvoice(invoice, Collections.<ShipmentInOutLine>emptyList(),
+            handler, Collections.singletonList("orig-1"), null);
+        fail("expected a clear error");
+      } catch (IllegalStateException e) {
+        assertTrue(e.getMessage(), e.getMessage().contains("inv-1")
+            && e.getMessage().contains("could not be read back"));
+      }
+      verify(dal, never()).refresh(any());
+    }
+  }
+
+  /** A bad HQL (QueryException) is a programming error: it propagates; any other failure falls through. */
+  @Test
+  public void priceLookups_queryExceptionPropagates_otherFailuresFallThrough() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      Session session = mock(Session.class);
+      when(dal.getSession()).thenReturn(session);
+
+      when(session.createQuery(anyString(), eq(BigDecimal.class)))
+          .thenThrow(new org.hibernate.QueryException("could not resolve property: created"));
+      try {
+        ReturnInvoiceSupport.resolvePriceFromSourceInvoiceLine("sl-1", "unitPrice", null);
+        fail("source lookup must not swallow a QueryException");
+      } catch (org.hibernate.QueryException expected) {
+        // propagated
+      }
+      try {
+        ReturnInvoiceSupport.resolvePriceFromPriceList("p", "pl", "standardPrice", BigDecimal.ZERO);
+        fail("price list lookup must not swallow a QueryException");
+      } catch (org.hibernate.QueryException expected) {
+        // propagated
+      }
+
+      when(session.createQuery(anyString(), eq(BigDecimal.class)))
+          .thenThrow(new RuntimeException("session closed"));
+      assertEquals(Optional.empty(),
+          ReturnInvoiceSupport.resolvePriceFromSourceInvoiceLine("sl-1", "unitPrice", null));
+      assertEquals(new BigDecimal("3"),
+          ReturnInvoiceSupport.resolvePriceFromPriceList("p", "pl", "standardPrice", new BigDecimal("3")));
+    }
+  }
+
+  /**
    * A free line (0 from the rectified invoice line) whose tax cannot be determined is not built:
    * the tax guard throws instead of saving a line without tax.
    */

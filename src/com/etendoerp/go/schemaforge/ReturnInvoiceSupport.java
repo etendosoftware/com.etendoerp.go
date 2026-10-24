@@ -29,6 +29,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.QueryException;
 import org.hibernate.criterion.Restrictions;
 import org.hibernate.query.Query;
 import org.openbravo.base.exception.OBException;
@@ -115,7 +116,8 @@ final class ReturnInvoiceSupport {
    * @param previousReturnInvoices the rectificativas the return had BEFORE this call, as
    *     {@link ReturnShipmentUtils#fetchPreviousReturnInvoices} reports them; {@code null} reads as none
    * @return the 200 with the completed invoice
-   * @throws Exception when a line cannot be built or the completion is refused
+   * @throws Exception when a line cannot be built or the completion is refused; an
+   *     {@link IllegalStateException} when the invoice cannot be read back afterwards
    */
   static NeoResponse finalizeReturnInvoice(Invoice invoice, List<ShipmentInOutLine> lines,
       CreateDraftInvoiceHandler createDraftInvoiceHandler, List<String> originInvoiceIds,
@@ -132,6 +134,14 @@ final class ReturnInvoiceSupport {
     String invoiceId = invoice.getId();
     InvoiceCompletionService.completeInvoiceOrThrow(invoiceId, obContext);
     Invoice completed = OBDal.getInstance().get(Invoice.class, invoiceId);
+    if (completed == null) {
+      // The completion rolls the draft back when the transaction was marked rollback-only: say so
+      // instead of letting refresh(null) fail with an IllegalArgumentException.
+      // A server fault, not a user error: IllegalStateException, so the handler answers 500
+      // (generic message, details only in the log) instead of the OBException 400.
+      throw new IllegalStateException("The return invoice " + invoiceId + " could not be read "
+          + "back after the completion; the transaction was rolled back.");
+    }
     // The totals are computed by the DB triggers during the completion: read them from a fresh
     // copy, never from the entity as it was loaded before (ETP-5712).
     OBDal.getInstance().refresh(completed);
@@ -614,27 +624,41 @@ final class ReturnInvoiceSupport {
   }
 
   /**
+   * The HQL of {@link #resolvePriceFromSourceInvoiceLine}, exposed so a test can parse it against
+   * the real model (a bad property path is otherwise swallowed and poisons the transaction).
+   *
+   * @param priceField the {@code InvoiceLine} property to select ({@code unitPrice}, {@code listPrice})
+   * @param constrained whether the lookup is restricted to the {@code :invoiceIds} being rectified
+   * @return the HQL string
+   */
+  static String sourceInvoiceLinePriceHql(String priceField, boolean constrained) {
+    return "SELECT il." + priceField + " FROM InvoiceLine il " +
+        "WHERE il.goodsShipmentLine.id = :lineId " +
+        "AND il.active = true " +
+        "AND il.invoice.documentStatus = 'CO' " +
+        (constrained ? "AND il.invoice.id IN (:invoiceIds) " : "") +
+        "ORDER BY il.invoice.invoiceDate DESC, il.invoice.creationDate DESC, "
+        + "il.lineNo DESC, il.id DESC";
+  }
+
+  /**
    * The price field of the completed invoice line that invoiced a shipment line, or empty when
    * there is none. A 0 IS an answer (a deliberately free product); only a missing row or a null
-   * price is empty.
+   * price is empty. A {@link QueryException} (a bad HQL) is rethrown, not swallowed.
    *
+   * @param shipmentLineId the shipment line the invoice line invoiced; {@code null} gives empty
+   * @param priceField the {@code InvoiceLine} property to read ({@code unitPrice}, {@code listPrice})
    * @param rectifiedIds when not empty, only lines of THOSE invoices count, so what is credited is
    *     literally what was invoiced; empty keeps the latest completed invoice line of the
    *     shipment line
+   * @return the price, possibly 0, or empty when there is no completed invoice line or no price
    */
   static Optional<BigDecimal> resolvePriceFromSourceInvoiceLine(String shipmentLineId,
       String priceField, List<String> rectifiedIds) {
     if (shipmentLineId == null) return Optional.empty();
     boolean constrained = rectifiedIds != null && !rectifiedIds.isEmpty();
     try {
-      String hql =
-          "SELECT il." + priceField + " FROM InvoiceLine il " +
-          "WHERE il.goodsShipmentLine.id = :lineId " +
-          "AND il.active = true " +
-          "AND il.invoice.documentStatus = 'CO' " +
-          (constrained ? "AND il.invoice.id IN (:invoiceIds) " : "") +
-          "ORDER BY il.invoice.invoiceDate DESC, il.invoice.created DESC, "
-          + "il.lineNo DESC, il.id DESC";
+      String hql = sourceInvoiceLinePriceHql(priceField, constrained);
       Query<BigDecimal> query = OBDal.getInstance().getSession()
           .createQuery(hql, BigDecimal.class)
           .setParameter("lineId", shipmentLineId);
@@ -646,25 +670,51 @@ final class ReturnInvoiceSupport {
         return Optional.ofNullable(rows.get(0));
       }
       log.warn("No completed invoice line found for shipment line {} ({})", shipmentLineId, priceField);
+    } catch (QueryException e) {
+      throw badHql(e);
     } catch (Exception e) {
+      // Everything else (a lookup that fails or finds nothing) falls through to the next price
+      // source. A QueryException is different, see badHql.
       log.warn("Could not resolve {} from source invoice line {}: {}",
           priceField, shipmentLineId, e.getMessage());
     }
     return Optional.empty();
   }
 
+  /**
+   * A QueryException is a programming error (a bad property path), not a missing price: it leaves
+   * the Hibernate transaction rollback-only, so the completion that follows would silently roll
+   * the whole draft back. Rethrown so it fails loudly (500, logged with its stack trace); the
+   * property paths are checked against the real model by
+   * {@code ReturnLineQuantitySignIntegrationTest}.
+   */
+  private static QueryException badHql(QueryException e) {
+    log.error("Invalid HQL in a return invoice price lookup: {}", e.getMessage(), e);
+    return e;
+  }
+
+  /**
+   * The HQL of {@link #resolvePriceFromPriceList}, exposed so a test can parse it against the real
+   * model.
+   *
+   * @param priceProperty the {@code PricingProductPrice} property to select
+   * @return the HQL string
+   */
+  static String priceListPriceHql(String priceProperty) {
+    return "SELECT pp." + priceProperty + " FROM PricingProductPrice pp " +
+        "WHERE pp.product.id = :productId " +
+        "AND pp.priceListVersion.priceList.id = :priceListId " +
+        "AND pp.priceListVersion.active = true " +
+        "AND pp.active = true " +
+        "AND pp.priceListVersion.validFromDate <= :today " +
+        "ORDER BY pp.priceListVersion.validFromDate DESC";
+  }
+
   static BigDecimal resolvePriceFromPriceList(String productId, String priceListId,
       String priceProperty, BigDecimal fallback) {
     if (productId == null || priceListId == null) return fallback;
     try {
-      String hql =
-          "SELECT pp." + priceProperty + " FROM PricingProductPrice pp " +
-          "WHERE pp.product.id = :productId " +
-          "AND pp.priceListVersion.priceList.id = :priceListId " +
-          "AND pp.priceListVersion.active = true " +
-          "AND pp.active = true " +
-          "AND pp.priceListVersion.validFromDate <= :today " +
-          "ORDER BY pp.priceListVersion.validFromDate DESC";
+      String hql = priceListPriceHql(priceProperty);
       List<BigDecimal> rows = OBDal.getInstance().getSession()
           .createQuery(hql, BigDecimal.class)
           .setParameter("productId", productId)
@@ -678,6 +728,8 @@ final class ReturnInvoiceSupport {
       }
       log.warn("No price list entry for product {} in price list {} ({})",
           productId, priceListId, priceProperty);
+    } catch (QueryException e) {
+      throw badHql(e);
     } catch (Exception e) {
       log.warn("Could not resolve {} for product {} from price list {}: {}",
           priceProperty, productId, priceListId, e.getMessage());
