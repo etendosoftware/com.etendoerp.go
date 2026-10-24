@@ -114,17 +114,15 @@ public class QuotaEvaluator {
 
   /**
    * The evaluator for quota <em>reports</em> — environment entry, the environment list, the account
-   * page. Its lookup and its consumption reads each run in their own session
-   * ({@link com.etendoerp.go.usage.IsolatedDalRead}), so a failing report read can never poison the
-   * request's transaction and silently roll back what the request writes afterwards. It must not
-   * run the write check: it cannot see uncommitted rows, and it takes no lock.
+   * page. It reads on whatever session the thread has and takes no lock; its callers run each
+   * report as one {@link com.etendoerp.go.usage.IsolatedDalRead} hop, so a failing report read can
+   * never poison the request's transaction and silently roll back what the request writes
+   * afterwards. It must not run the write check: in that hop it cannot see uncommitted rows.
    *
    * @return a report evaluator
    */
   public static QuotaEvaluator forReports() {
-    QuotaLookup lookup = new DalQuotaLookup();
-    return new QuotaEvaluator(QuotaLookup.isolated(lookup),
-        ConsumptionReader.isolated(new DalConsumptionReader()), Clock.systemUTC(),
+    return new QuotaEvaluator(new DalQuotaLookup(), new DalConsumptionReader(), Clock.systemUTC(),
         QuotaLock.NONE);
   }
 

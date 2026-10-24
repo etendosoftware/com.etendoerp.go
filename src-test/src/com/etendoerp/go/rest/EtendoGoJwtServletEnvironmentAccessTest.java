@@ -67,6 +67,7 @@ import com.etendoerp.go.session.GoSessionRoleReconciler;
 import com.etendoerp.go.session.GoSessionSecurity;
 import com.etendoerp.go.session.GoSessionService;
 import com.etendoerp.go.session.IssuedGoSession;
+import com.etendoerp.go.usage.IsolatedReader;
 import com.etendoerp.go.usage.quota.ConsumptionReader;
 import com.etendoerp.go.usage.quota.QuotaDefinition;
 import com.etendoerp.go.usage.quota.QuotaEvaluator;
@@ -343,6 +344,7 @@ public class EtendoGoJwtServletEnvironmentAccessTest {
     when(quotaLookup.forTenant(CLIENT_ID)).thenReturn(tenant);
     servlet.quotaEvaluator = new QuotaEvaluator(quotaLookup, consumption,
         Clock.fixed(Instant.parse("2026-10-24T12:00:00Z"), ZoneOffset.UTC));
+    servlet.quotaReads = IsolatedReader.INLINE;
   }
 
   private static QuotaDefinition blockQuota(String key, long included) {

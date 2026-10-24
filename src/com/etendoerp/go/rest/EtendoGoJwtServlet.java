@@ -145,6 +145,7 @@ import com.etendoerp.go.session.JdbcGoSessionStore;
 import com.etendoerp.go.session.SessionRoleRevokedException;
 import com.auth0.jwt.JWT;
 import com.auth0.jwt.interfaces.DecodedJWT;
+import com.etendoerp.go.usage.IsolatedReader;
 import com.etendoerp.go.usage.quota.EnvironmentQuotaReport;
 import com.etendoerp.go.usage.quota.QuotaDefinition;
 import com.etendoerp.go.usage.quota.QuotaEvaluation;
@@ -461,6 +462,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   PlanCatalogService planCatalogService = new PlanCatalogService();
   /** ETP-5051 — the one quota evaluator; package-visible for tests. */
   QuotaEvaluator quotaEvaluator = QuotaEvaluator.forReports();
+  /**
+   * ETP-5051 — runs each quota report as one read in its own session, off the request's
+   * transaction; package-visible so a test runs it inline.
+   */
+  IsolatedReader quotaReads = IsolatedReader.DAL;
   CheckoutRequestStore checkoutRequestStore = new CheckoutRequestStore();
   DemoDataTransferService demoDataTransferService = new DemoDataTransferService();
   BillingEventStore billingEventStore = new BillingEventStore();
@@ -1655,7 +1661,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    */
   private List<QuotaEvaluation> evaluateQuotas(TenantQuotas tenant) {
     try {
-      return quotaEvaluator.evaluate(tenant, QuotaEvaluator.Scope.ACCOUNT);
+      return quotaReads.call(() -> quotaEvaluator.evaluate(tenant, QuotaEvaluator.Scope.ACCOUNT));
     } catch (RuntimeException e) {
       log.error("Could not measure the quotas of tenant {}; sending them unmeasured",
           tenant.getClientId(), e);
@@ -1675,8 +1681,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private JSONArray loginQuotas(String clientId) {
     try {
       List<QuotaEvaluation> reportable = new ArrayList<>();
-      for (QuotaEvaluation evaluation : quotaEvaluator.evaluateTenant(clientId,
-          QuotaEvaluator.Scope.ENFORCEMENT)) {
+      List<QuotaEvaluation> evaluations = quotaReads.call(
+          () -> quotaEvaluator.evaluateTenant(clientId, QuotaEvaluator.Scope.ENFORCEMENT));
+      for (QuotaEvaluation evaluation : evaluations) {
         if (evaluation.isReportable()) {
           reportable.add(evaluation);
         }

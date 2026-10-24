@@ -17,8 +17,6 @@
 
 package com.etendoerp.go.usage.quota;
 
-import com.etendoerp.go.usage.IsolatedDalRead;
-
 /**
  * ETP-5051 — reads one tenant's consumption of one quota's resource over a period. The seam the
  * evaluator's tests replace: every consumption query in the quota code goes through an
@@ -36,16 +34,4 @@ public interface ConsumptionReader {
    * @return the consumed quantity
    */
   long read(QuotaDefinition quota, String clientId, QuotaPeriod period);
-
-  /**
-   * Wraps a reader so that every read runs in its own session ({@link IsolatedDalRead}). For
-   * reports only: an isolated read cannot see the caller's uncommitted rows.
-   *
-   * @param delegate the reader to isolate
-   * @return the isolated reader
-   */
-  static ConsumptionReader isolated(ConsumptionReader delegate) {
-    return (quota, clientId, period) -> IsolatedDalRead.call(
-        () -> delegate.read(quota, clientId, period));
-  }
 }

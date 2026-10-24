@@ -116,6 +116,17 @@ public final class TenantQuotas {
         subscription.getEndDate() != null, definitions);
   }
 
+  /**
+   * The same tenant and period with other quota rows: the environment list snapshots the period
+   * on the request's thread and adds the rows it reads in its own session.
+   *
+   * @param definitions the quota definitions; null reads as none
+   * @return a new view
+   */
+  public TenantQuotas withQuotas(List<QuotaDefinition> definitions) {
+    return new TenantQuotas(clientId, planInterval, periodStart, periodEnd, closed, definitions);
+  }
+
   public String getClientId() {
     return clientId;
   }

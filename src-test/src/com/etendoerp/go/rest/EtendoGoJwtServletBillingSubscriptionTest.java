@@ -73,6 +73,7 @@ import com.etendoerp.go.schemaforge.data.CheckoutRequest;
 import com.etendoerp.go.schemaforge.data.Plan;
 import com.etendoerp.go.schemaforge.data.PlanQuota;
 import com.etendoerp.go.schemaforge.data.Subscription;
+import com.etendoerp.go.usage.IsolatedReader;
 import com.etendoerp.go.usage.quota.ConsumptionReader;
 import com.etendoerp.go.usage.quota.QuotaEvaluator;
 import com.etendoerp.go.usage.quota.QuotaLookup;
@@ -355,6 +356,7 @@ public class EtendoGoJwtServletBillingSubscriptionTest {
   private static void measureWith(Fixture fixture, ConsumptionReader reader) {
     fixture.servlet.quotaEvaluator = new QuotaEvaluator(mock(QuotaLookup.class), reader,
         Clock.fixed(Instant.parse("2026-10-24T12:00:00Z"), ZoneOffset.UTC));
+    fixture.servlet.quotaReads = IsolatedReader.INLINE;
   }
 
   private static void givenSubscriptionWithPeriod(Fixture fixture, Plan plan, Instant endDate) {
