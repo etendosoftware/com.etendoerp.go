@@ -801,6 +801,36 @@ class SubscriptionServiceTest {
     }
 
     @Test
+    void writeCancelAtPeriodEndReportsNoChangeForAnEqualOrUnreportedFlag() {
+      for (Boolean stored : new Boolean[] { Boolean.TRUE, Boolean.FALSE }) {
+        Subscription row = subscriptionOf(CLIENT_ID);
+        when(row.isCancelAtPeriodEnd()).thenReturn(stored);
+
+        assertFalse(SubscriptionService.writeCancelAtPeriodEnd(row, stored), "same " + stored);
+        assertFalse(SubscriptionService.writeCancelAtPeriodEnd(row, null), "null on " + stored);
+        verify(row, never()).setCancelAtPeriodEnd(any());
+      }
+    }
+
+    @Test
+    void writeCancelAtPeriodEndTogglesTheFlagInEitherDirection() {
+      Subscription scheduling = subscriptionOf(CLIENT_ID);
+      when(scheduling.isCancelAtPeriodEnd()).thenReturn(false);
+      Subscription resuming = subscriptionOf(CLIENT_ID);
+      when(resuming.isCancelAtPeriodEnd()).thenReturn(true);
+      Subscription unset = subscriptionOf(CLIENT_ID);
+      when(unset.isCancelAtPeriodEnd()).thenReturn(null);
+
+      assertTrue(SubscriptionService.writeCancelAtPeriodEnd(scheduling, true));
+      assertTrue(SubscriptionService.writeCancelAtPeriodEnd(resuming, false));
+      assertTrue(SubscriptionService.writeCancelAtPeriodEnd(unset, false));
+
+      verify(scheduling).setCancelAtPeriodEnd(true);
+      verify(resuming).setCancelAtPeriodEnd(false);
+      verify(unset).setCancelAtPeriodEnd(false);
+    }
+
+    @Test
     void setsTheWatermarkOnARowThatHasNone() {
       Subscription row = subscriptionOf(CLIENT_ID);
 
