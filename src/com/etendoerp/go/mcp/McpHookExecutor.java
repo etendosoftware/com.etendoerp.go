@@ -630,4 +630,13 @@ final class McpHookExecutor {
     }
     return McpToolRouter.wrapAsTextContent(neoResponse.getBody());
   }
+
+  /**
+   * Copies the body keys the mandatory-defaults pass filled with a fallback placeholder from the
+   * context that pass ran with onto the context handed to the entity's pre-hook. Structural only:
+   * it names no field and no entity, and a key the caller sent is never in the set.
+   */
+  static void forwardFallbackDefaults(NeoContext from, NeoContext to) {
+    from.getFallbackDefaults().forEach(to::addFallbackDefault);
+  }
 }
