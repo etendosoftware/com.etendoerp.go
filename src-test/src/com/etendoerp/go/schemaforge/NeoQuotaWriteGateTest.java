@@ -154,19 +154,53 @@ class NeoQuotaWriteGateTest {
       verify(guard, never()).refusalFor(anyString(), any());
       obDal.verifyNoInteractions();
     }
+  }
+
+  /**
+   * REPRO (ETP-5051 redesign): the request's client's quota entry is built on the request's own
+   * session. A failure there may have aborted the transaction, and nothing says whether the create
+   * is capped, so it fails closed: QUOTA_CHECK_FAILED, nothing saved.
+   */
+  @Nested
+  @DisplayName("the client's quota entry cannot be read")
+  class EntryBuildFails {
+
+    @BeforeEach
+    void entryBuildFails() {
+      when(guard.appliesTo(ENTITY)).thenThrow(new IllegalStateException("wrapped",
+          new GenericJDBCException("could not execute query",
+              new java.sql.SQLException("canceling statement due to statement timeout"))));
+    }
 
     @Test
-    void aFailingApplicabilityCheckFailsOpenAndIsLogged() throws Exception {
-      when(guard.appliesTo(ENTITY)).thenThrow(new IllegalStateException("index broken"));
-
+    void outsideABatchTheCreateIsRolledBackAndAnsweredQuotaCheckFailed() throws Exception {
+      NeoResponse response;
       try (NeoQuotaWriteGate.Create create = NeoQuotaWriteGate.begin(ENTITY, guard, false)) {
-        assertFalse(create.isChecked());
-        assertNull(create.finish(created("ROW-1")));
+        assertTrue(create.isChecked());
+        assertTrue(create.ownsTransaction(), "the add must not commit on its own");
+        response = create.finish(failedAdd());
       }
 
-      obDal.verifyNoInteractions();
-      assertTrue(logs.messagesAt(Level.ERROR).get(0).startsWith("[QUOTA] Could not decide"),
+      assertCheckFailed(response);
+      verify(dal, times(1)).rollbackAndClose();
+      verify(dal, never()).commitAndClose();
+      verify(guard, never()).refusalFor(anyString(), any());
+      assertTrue(logs.messagesAt(Level.ERROR).get(0)
+          .startsWith("[QUOTA] Could not read the quotas of the request's client"),
           String.valueOf(logs.messagesAt(Level.ERROR)));
+    }
+
+    @Test
+    void insideABatchTheOperationFailsAndTheBatchEndsTheTransaction() throws Exception {
+      NeoResponse response;
+      try (NeoQuotaWriteGate.Create create = NeoQuotaWriteGate.begin(ENTITY, guard, true)) {
+        assertFalse(create.ownsTransaction());
+        response = create.finish(created("ROW-1"));
+      }
+
+      assertCheckFailed(response);
+      verify(dal, never()).rollbackAndClose();
+      verify(dal, never()).commitAndClose();
     }
   }
 

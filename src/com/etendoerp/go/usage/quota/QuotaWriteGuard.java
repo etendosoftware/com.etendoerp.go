@@ -18,24 +18,27 @@
 package com.etendoerp.go.usage.quota;
 
 import java.util.Collection;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.Optional;
+import java.util.function.Supplier;
+
+import org.openbravo.dal.core.OBContext;
 
 /**
  * ETP-5051 — the quota check of the NEO write path, structural and driven by catalog data only:
  * no entity or spec name appears here or in its callers.
  *
- * <p>For a created row of entity {@code E}:
+ * <p>For a row of entity {@code E} created by a request of client {@code C}:
  * <ol>
- *   <li>the {@link QuotaEntityIndex} names the declarative resources whose {@code COUNTED_ENTITY}
- *       is {@code E} under some active {@code block} quota — none, and the check ends with no
- *       query at all;</li>
+ *   <li>{@code C}'s entry in the {@link QuotaClientCache} names the {@code block} quotas of
+ *       {@code C}'s plan whose declarative resource counts {@code E} — none, and the check ends
+ *       with no query at all, whatever other clients' plans cap;</li>
  *   <li>each such resource's HQL restriction is tested against the new row
  *       ({@link CreatedRowMatcher}), which also names the row's tenant;</li>
- *   <li>the tenant's quotas are looked up and the {@link QuotaEvaluator} decides.</li>
+ *   <li>the {@link QuotaEvaluator} takes the lock (live), reads the consumption and decides.</li>
  * </ol>
+ * The client is the request's {@link OBContext} client. The cache entry is built on the request's
+ * own session; a failure there propagates to the caller, which fails the create closed.
  *
  * <p><b>What it cannot see:</b> a resource that grows through a state change rather than a create
  * — {@code POSTED_SALES_INVOICES} grows when an invoice is posted, and the row is created
@@ -44,29 +47,29 @@ import java.util.Optional;
  */
 public class QuotaWriteGuard {
 
-  private final QuotaEntityIndex index;
+  private final QuotaClientCache cache;
   private final CreatedRowMatcher matcher;
-  private final QuotaLookup lookup;
   private final QuotaEvaluator evaluator;
+  private final Supplier<String> currentClient;
 
   /**
    * A guard over explicit seams.
    *
-   * @param index which entities can be refused at all
+   * @param cache each client's block quotas, by counted entity
    * @param matcher tests a created row against a resource's restriction
-   * @param lookup finds the tenant's quotas
    * @param evaluator decides
+   * @param currentClient the client of the running request, or null when there is none
    */
-  public QuotaWriteGuard(QuotaEntityIndex index, CreatedRowMatcher matcher, QuotaLookup lookup,
-      QuotaEvaluator evaluator) {
-    this.index = index;
+  public QuotaWriteGuard(QuotaClientCache cache, CreatedRowMatcher matcher,
+      QuotaEvaluator evaluator, Supplier<String> currentClient) {
+    this.cache = cache;
     this.matcher = matcher;
-    this.lookup = lookup;
     this.evaluator = evaluator;
+    this.currentClient = currentClient;
   }
 
   /**
-   * The shared guard; its index is per JVM.
+   * The shared guard; its cache is per JVM.
    *
    * @return the shared instance
    */
@@ -76,19 +79,30 @@ public class QuotaWriteGuard {
 
   /** Built on first use, so loading this class wires no service. */
   private static final class DefaultHolder {
-    private static final QuotaWriteGuard INSTANCE = new QuotaWriteGuard(new QuotaEntityIndex(),
-        CreatedRowMatcher.dal(), new DalQuotaLookup(), new QuotaEvaluator());
+    private static final QuotaWriteGuard INSTANCE = new QuotaWriteGuard(
+        new QuotaClientCache(new DalQuotaLookup(), System::currentTimeMillis),
+        CreatedRowMatcher.dal(), new QuotaEvaluator(), QuotaWriteGuard::contextClient);
+  }
+
+  /** @return the client of the request's {@link OBContext}, or null */
+  static String contextClient() {
+    OBContext context = OBContext.getOBContext();
+    return context == null || context.getCurrentClient() == null ? null
+        : context.getCurrentClient().getId();
   }
 
   /**
-   * Whether creates of this entity must be checked. Cheap: a map lookup, plus one catalog query a
-   * minute at most. Callers ask before the insert, to decide how to run it.
+   * Whether this request's creates of this entity must be checked. A map lookup, plus building the
+   * client's entry on the request's session once per {@link QuotaClientCache#TTL_MS}. Callers ask
+   * before the insert, to decide how to run it.
    *
    * @param entityName the DAL entity name
-   * @return {@code true} when some active {@code block} quota counts this entity
+   * @return {@code true} when a {@code block} quota of the request's client counts this entity
+   * @throws RuntimeException when the client's entry could not be built
    */
   public boolean appliesTo(String entityName) {
-    return !index.resourcesFor(entityName).isEmpty();
+    String clientId = currentClient.get();
+    return clientId != null && !cache.entryFor(clientId).blockQuotasFor(entityName).isEmpty();
   }
 
   /**
@@ -99,20 +113,23 @@ public class QuotaWriteGuard {
    * @return the first DENY evaluation, or empty when every row may stand
    */
   public Optional<QuotaEvaluation> refusalFor(String entityName, Collection<String> recordIds) {
-    List<QuotaEntityIndex.IndexedResource> resources = index.resourcesFor(entityName);
-    if (resources.isEmpty() || recordIds == null || recordIds.isEmpty()) {
+    String clientId = currentClient.get();
+    if (clientId == null || recordIds == null || recordIds.isEmpty()) {
       return Optional.empty();
     }
-    Map<String, TenantQuotas> tenants = new HashMap<>();
+    QuotaClientCache.Entry entry = cache.entryFor(clientId);
+    List<QuotaDefinition> quotas = entry.blockQuotasFor(entityName);
     for (String recordId : recordIds) {
-      for (QuotaEntityIndex.IndexedResource resource : resources) {
-        String clientId = matcher.tenantIfCounted(resource, recordId);
-        if (clientId == null) {
+      for (QuotaDefinition quota : quotas) {
+        String rowClient = matcher.tenantIfCounted(quota, recordId);
+        if (rowClient == null) {
           continue;
         }
-        TenantQuotas tenant = tenants.computeIfAbsent(clientId, lookup::forTenant);
+        // A row created into another client is measured against that client's own quotas.
+        TenantQuotas tenant = rowClient.equals(clientId) ? entry.getTenant()
+            : cache.entryFor(rowClient).getTenant();
         Optional<QuotaEvaluation> refusal =
-            evaluator.refusalForCreate(tenant, resource.getResourceId());
+            evaluator.refusalForCreate(tenant, quota.getResourceId());
         if (refusal.isPresent()) {
           return refusal;
         }

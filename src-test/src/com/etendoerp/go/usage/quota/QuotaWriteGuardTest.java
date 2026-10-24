@@ -24,6 +24,7 @@ import static com.etendoerp.go.usage.quota.QuotaTestFixtures.quota;
 import static com.etendoerp.go.usage.quota.QuotaTestFixtures.tenant;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -38,6 +39,8 @@ import static org.mockito.Mockito.when;
 import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.Session;
@@ -53,16 +56,16 @@ import org.openbravo.dal.service.OBDal;
 import com.etendoerp.go.schemaforge.NeoQuotaWriteGate;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.usage.UsageQueryComposer;
-import com.etendoerp.go.usage.quota.QuotaEntityIndex.IndexedResource;
 import com.etendoerp.go.usage.quota.QuotaTestFixtures.MutableClock;
 
 /**
  * The NEO write check: which created rows can be refused, and when.
  *
- * <p>The index decides which entities are checked at all, the matcher whether a created row is
- * the kind of row the resource counts, and the evaluator whether the tenant is already at its
- * {@code block} quota. The {@link CatalogAddedResource} block wires the real index and evaluator
- * together on a resource no production code names, to show a catalog row is all it takes.
+ * <p>The request's client's entry in the {@link QuotaClientCache} decides which entities are
+ * checked at all, the matcher whether a created row is the kind of row the resource counts, and the
+ * evaluator whether the tenant is already at its {@code block} quota. The
+ * {@link CatalogAddedResource} block wires the real cache and evaluator together on a resource no
+ * production code names, to show a catalog row is all it takes.
  *
  * @covers com.etendoerp.go.usage.quota.QuotaWriteGuard
  * @covers com.etendoerp.go.usage.quota.CreatedRowMatcher
@@ -70,10 +73,11 @@ import com.etendoerp.go.usage.quota.QuotaTestFixtures.MutableClock;
 @SuppressWarnings("java:S2187")
 class QuotaWriteGuardTest {
 
-  private static final IndexedResource INVOICES =
-      new IndexedResource("RES-DOCS", "Invoice", "e.salesTransaction = true");
+  private static final QuotaDefinition INVOICES = quota("DOCS", "block", 10L, null)
+      .hqlRestriction("e.salesTransaction = true").build();
 
-  private QuotaEntityIndex index;
+  private final AtomicLong now = new AtomicLong(1_000_000L);
+  private final AtomicReference<String> requestClient = new AtomicReference<>(CLIENT);
   private CreatedRowMatcher matcher;
   private QuotaLookup lookup;
   private ConsumptionReader reader;
@@ -81,12 +85,13 @@ class QuotaWriteGuardTest {
 
   @BeforeEach
   void setUp() {
-    index = new QuotaEntityIndex(() -> List.of(INVOICES), () -> 0L);
     matcher = mock(CreatedRowMatcher.class);
     lookup = mock(QuotaLookup.class);
     reader = mock(ConsumptionReader.class);
-    guard = new QuotaWriteGuard(index, matcher, lookup,
-        new QuotaEvaluator(lookup, reader, new MutableClock(NOW)));
+    when(lookup.forTenant(CLIENT)).thenReturn(tenant(CLIENT, INVOICES));
+    when(lookup.forTenant(OTHER_CLIENT)).thenReturn(TenantQuotas.none(OTHER_CLIENT));
+    guard = new QuotaWriteGuard(new QuotaClientCache(lookup, now::get), matcher,
+        new QuotaEvaluator(lookup, reader, new MutableClock(NOW)), requestClient::get);
   }
 
   @Nested
@@ -94,15 +99,85 @@ class QuotaWriteGuardTest {
   class Applicability {
 
     @Test
-    void anEntityCountedByABlockQuotaIsChecked() {
+    void anEntityCountedByABlockQuotaOfTheClientIsChecked() {
       assertTrue(guard.appliesTo("Invoice"));
     }
 
     @Test
-    void anEntityOutsideTheIndexIsNotCheckedAndRunsNoQuery() {
+    void anEntityTheClientDoesNotCapIsNotCheckedAndRunsNoQuery() {
       assertFalse(guard.appliesTo("BusinessPartner"));
       assertTrue(guard.refusalFor("BusinessPartner", List.of("ROW-1")).isEmpty());
-      verifyNoInteractions(matcher, lookup, reader);
+      verifyNoInteractions(matcher, reader);
+      verify(lookup, times(1)).forTenant(CLIENT);
+    }
+
+    /**
+     * REPRO (ETP-5051 redesign): the global index checked every create of an entity that ANY plan
+     * capped. A client whose plan does not cap the entity must run no query, even while another
+     * client has a block quota on that very entity.
+     */
+    @Test
+    void anEntityCappedOnlyForAnotherClientIsNotCheckedForThisOne() {
+      assertTrue(guard.appliesTo("Invoice"), "capped for CLIENT");
+
+      requestClient.set(OTHER_CLIENT);
+      assertFalse(guard.appliesTo("Invoice"));
+      assertTrue(guard.refusalFor("Invoice", List.of("ROW-1")).isEmpty());
+      assertFalse(guard.appliesTo("Invoice"));
+
+      verifyNoInteractions(matcher, reader);
+      verify(lookup, times(1)).forTenant(OTHER_CLIENT);
+    }
+
+    /**
+     * REPRO (ETP-5051 redesign): the client's quotas are looked up once per TTL, not on every
+     * create; a client with no block quota at all is cached too.
+     */
+    @Test
+    void theClientsQuotasAreLookedUpOnceForManyCreates() {
+      when(matcher.tenantIfCounted(any(), anyString())).thenReturn(CLIENT);
+      when(reader.read(any(), eq(CLIENT), any())).thenReturn(1L);
+      for (int create = 0; create < 5; create++) {
+        assertTrue(guard.appliesTo("Invoice"));
+        assertTrue(guard.refusalFor("Invoice", List.of("ROW-" + create)).isEmpty());
+      }
+      requestClient.set(OTHER_CLIENT);
+      for (int create = 0; create < 5; create++) {
+        assertFalse(guard.appliesTo("Invoice"));
+      }
+
+      verify(lookup, times(1)).forTenant(CLIENT);
+      verify(lookup, times(1)).forTenant(OTHER_CLIENT);
+    }
+
+    @Test
+    void anExpiredEntryIsRebuiltOnTheNextCreate() {
+      guard.appliesTo("Invoice");
+      now.addAndGet(QuotaClientCache.TTL_MS - 1);
+      guard.appliesTo("Invoice");
+      verify(lookup, times(1)).forTenant(CLIENT);
+
+      when(lookup.forTenant(CLIENT)).thenReturn(TenantQuotas.none(CLIENT));
+      now.addAndGet(1);
+
+      assertFalse(guard.appliesTo("Invoice"), "the quota switched off reached the client");
+      verify(lookup, times(2)).forTenant(CLIENT);
+    }
+
+    @Test
+    void aFailedLookupPropagatesSoTheGateFailsClosed() {
+      when(lookup.forTenant(CLIENT)).thenThrow(new IllegalStateException("aborted"));
+
+      assertThrows(IllegalStateException.class, () -> guard.appliesTo("Invoice"));
+    }
+
+    @Test
+    void aRequestWithNoClientChecksNothing() {
+      requestClient.set(null);
+
+      assertFalse(guard.appliesTo("Invoice"));
+      assertTrue(guard.refusalFor("Invoice", List.of("ROW-1")).isEmpty());
+      verifyNoInteractions(lookup, matcher, reader);
     }
 
     @Test
@@ -118,19 +193,17 @@ class QuotaWriteGuardTest {
   class CreatedRow {
 
     @Test
-    void outsideTheRestrictionIsLetThroughWithoutLookingUpTheTenant() {
+    void outsideTheRestrictionIsLetThroughWithoutReadingConsumption() {
       when(matcher.tenantIfCounted(INVOICES, "ROW-1")).thenReturn(null);
 
       assertTrue(guard.refusalFor("Invoice", List.of("ROW-1")).isEmpty());
-      verifyNoInteractions(lookup, reader);
+      verifyNoInteractions(reader);
     }
 
     @Test
     void insideTheRestrictionOverQuotaIsRefused() {
-      QuotaDefinition docs = quota("DOCS", "block", 10L, null).build();
       when(matcher.tenantIfCounted(INVOICES, "ROW-1")).thenReturn(CLIENT);
-      when(lookup.forTenant(CLIENT)).thenReturn(tenant(CLIENT, docs));
-      when(reader.read(eq(docs), eq(CLIENT), any())).thenReturn(10L);
+      when(reader.read(eq(INVOICES), eq(CLIENT), any())).thenReturn(10L);
 
       Optional<QuotaEvaluation> refusal = guard.refusalFor("Invoice", List.of("ROW-1"));
 
@@ -141,33 +214,26 @@ class QuotaWriteGuardTest {
 
     @Test
     void insideTheRestrictionUnderQuotaStands() {
-      QuotaDefinition docs = quota("DOCS", "block", 10L, null).build();
       when(matcher.tenantIfCounted(INVOICES, "ROW-1")).thenReturn(CLIENT);
-      when(lookup.forTenant(CLIENT)).thenReturn(tenant(CLIENT, docs));
-      when(reader.read(eq(docs), eq(CLIENT), any())).thenReturn(9L);
+      when(reader.read(eq(INVOICES), eq(CLIENT), any())).thenReturn(9L);
 
       assertTrue(guard.refusalFor("Invoice", List.of("ROW-1")).isEmpty());
     }
 
     @Test
-    void aTenantIsLookedUpOncePerCheckWhateverTheNumberOfRows() {
-      QuotaDefinition docs = quota("DOCS", "block", 10L, null).build();
-      when(matcher.tenantIfCounted(any(), anyString())).thenReturn(CLIENT);
-      when(lookup.forTenant(CLIENT)).thenReturn(tenant(CLIENT, docs));
-      when(reader.read(eq(docs), eq(CLIENT), any())).thenReturn(1L);
+    void aRowCreatedIntoAnotherClientIsMeasuredAgainstThatClientsQuotas() {
+      when(matcher.tenantIfCounted(INVOICES, "ROW-1")).thenReturn(OTHER_CLIENT);
 
-      assertTrue(guard.refusalFor("Invoice", List.of("ROW-1", "ROW-2", "ROW-3")).isEmpty());
-      verify(lookup, times(1)).forTenant(CLIENT);
+      assertTrue(guard.refusalFor("Invoice", List.of("ROW-1")).isEmpty());
+      verify(lookup, times(1)).forTenant(OTHER_CLIENT);
+      verifyNoInteractions(reader);
     }
 
     @Test
     void theFirstRefusedRowStopsTheCheck() {
-      QuotaDefinition docs = quota("DOCS", "block", 10L, null).build();
       when(matcher.tenantIfCounted(INVOICES, "ROW-1")).thenReturn(OTHER_CLIENT);
       when(matcher.tenantIfCounted(INVOICES, "ROW-2")).thenReturn(CLIENT);
-      when(lookup.forTenant(OTHER_CLIENT)).thenReturn(TenantQuotas.none(OTHER_CLIENT));
-      when(lookup.forTenant(CLIENT)).thenReturn(tenant(CLIENT, docs));
-      when(reader.read(eq(docs), eq(CLIENT), any())).thenReturn(12L);
+      when(reader.read(eq(INVOICES), eq(CLIENT), any())).thenReturn(12L);
 
       Optional<QuotaEvaluation> refusal =
           guard.refusalFor("Invoice", List.of("ROW-1", "ROW-2", "ROW-3"));
@@ -203,13 +269,10 @@ class QuotaWriteGuardTest {
     }
 
     private QuotaWriteGuard catalogGuard(QuotaDefinition definition) {
-      QuotaEntityIndex catalogIndex = new QuotaEntityIndex(() -> List.of(new IndexedResource(
-          definition.getResourceId(), definition.getCountedEntity(),
-          definition.getHqlRestriction())), () -> 0L);
       when(lookup.forTenant(CLIENT)).thenReturn(tenant(CLIENT, definition));
       when(reader.read(eq(definition), eq(CLIENT), any())).thenReturn(5L);
-      return new QuotaWriteGuard(catalogIndex, matcher, lookup,
-          new QuotaEvaluator(lookup, reader, new MutableClock(NOW)));
+      return new QuotaWriteGuard(new QuotaClientCache(lookup, now::get), matcher,
+          new QuotaEvaluator(lookup, reader, new MutableClock(NOW)), requestClient::get);
     }
 
     @Test
@@ -256,7 +319,7 @@ class QuotaWriteGuardTest {
 
       assertTrue(refusal.isPresent());
       assertEquals("SIGNED_CONTRACTS", refusal.get().getQuota().getResourceKey());
-      ArgumentCaptor<IndexedResource> matched = ArgumentCaptor.forClass(IndexedResource.class);
+      ArgumentCaptor<QuotaDefinition> matched = ArgumentCaptor.forClass(QuotaDefinition.class);
       verify(matcher).tenantIfCounted(matched.capture(), eq("ROW-9"));
       assertEquals("e.status = 'SIGNED'", matched.getValue().getHqlRestriction());
     }

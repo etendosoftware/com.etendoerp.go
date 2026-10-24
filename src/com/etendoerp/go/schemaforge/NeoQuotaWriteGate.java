@@ -58,7 +58,8 @@ import com.etendoerp.go.usage.quota.QuotaWriteGuard;
  * and this gate ends the transaction itself: commit when the row may stand, roll back when it is
  * refused or the write failed. Inside a batch it never commits: a refusal fails the operation and
  * the batch rolls everything back. A create that is not checked — every entity no active
- * {@code block} quota counts — is untouched: same service, same commit, no query.
+ * {@code block} quota of the request's client counts — is untouched: same service, same commit,
+ * and no query once the client's quota entry is cached.
  *
  * <p><b>When the check itself fails.</b> It depends on whether the request's transaction survived:
  * <ul>
@@ -72,7 +73,11 @@ import com.etendoerp.go.usage.quota.QuotaWriteGuard;
  *       the batch operation, and answers {@value #CHECK_FAILED_STATUS} {@value #CHECK_FAILED_CODE}
  *       — nothing was saved.</li>
  * </ul>
- * A commit the gate makes that fails (a deferred constraint, say) does not escape as an exception:
+ * The client's quota entry ({@code QuotaClientCache}) is read in {@link #begin}, on the request's
+ * session, once a minute per client; if that read fails the create fails closed the same way, even
+ * though the add still runs (core's add answers its own error on an aborted transaction).
+ *
+ * <p>A commit the gate makes that fails (a deferred constraint, say) does not escape as an exception:
  * the add result is replaced by core's own error JSON for that exception ({@link Create#result()}),
  * so the caller classifies it exactly as it classified a failing self-committing add before.
  *
@@ -119,14 +124,19 @@ public final class NeoQuotaWriteGate {
 
   static Create begin(String dalEntityName, QuotaWriteGuard guard, boolean batchOwnsTransaction) {
     boolean checked;
+    boolean failedBeforeWrite = false;
     try {
       checked = guard.appliesTo(dalEntityName);
     } catch (RuntimeException e) {
-      log.error("[QUOTA] Could not decide whether creates of {} are quota-checked; not checking",
-          dalEntityName, e);
-      checked = false;
+      // The client's quota entry is read on the request's own session: a failure there may have
+      // aborted the transaction, and nothing tells whether this create is capped. Fail closed.
+      log.error("[QUOTA] Could not read the quotas of the request's client for a create of {}; "
+          + "nothing is saved ({})", dalEntityName, CHECK_FAILED_CODE, e);
+      checked = true;
+      failedBeforeWrite = true;
     }
-    return new Create(dalEntityName, guard, checked, checked && !batchOwnsTransaction);
+    return new Create(dalEntityName, guard, checked, checked && !batchOwnsTransaction,
+        failedBeforeWrite);
   }
 
   /**
@@ -175,15 +185,17 @@ public final class NeoQuotaWriteGate {
     private final QuotaWriteGuard guard;
     private final boolean checked;
     private final boolean ownsTransaction;
+    private final boolean failedBeforeWrite;
     private boolean ended;
     private String result;
 
     private Create(String dalEntityName, QuotaWriteGuard guard, boolean checked,
-        boolean ownsTransaction) {
+        boolean ownsTransaction, boolean failedBeforeWrite) {
       this.dalEntityName = dalEntityName;
       this.guard = guard;
       this.checked = checked;
       this.ownsTransaction = ownsTransaction;
+      this.failedBeforeWrite = failedBeforeWrite;
     }
 
     /**
@@ -225,6 +237,11 @@ public final class NeoQuotaWriteGate {
      */
     public NeoResponse finish(String addResult) {
       result = addResult;
+      if (failedBeforeWrite) {
+        // Whatever the add did — it may have failed on the aborted transaction — is undone.
+        rollbackIfOwned();
+        return checkFailedResponse();
+      }
       if (!checked) {
         return null;
       }

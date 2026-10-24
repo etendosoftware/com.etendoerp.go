@@ -30,13 +30,13 @@ import com.etendoerp.go.usage.UsageQueryComposer;
 public interface CreatedRowMatcher {
 
   /**
-   * Tells whether a resource counts a created row, and names the row's tenant.
+   * Tells whether a quota's resource counts a created row, and names the row's tenant.
    *
-   * @param resource the declarative resource
+   * @param quota the quota; its declarative resource's counted entity and restriction are used
    * @param recordId the id of the created row, flushed in the current transaction
    * @return the row's tenant ({@code AD_CLIENT_ID}) when the resource counts it, else null
    */
-  String tenantIfCounted(QuotaEntityIndex.IndexedResource resource, String recordId);
+  String tenantIfCounted(QuotaDefinition quota, String recordId);
 
   /**
    * The production matcher. It runs on the request's own session on purpose: it must see the row
@@ -45,9 +45,9 @@ public interface CreatedRowMatcher {
    * @return the production matcher
    */
   static CreatedRowMatcher dal() {
-    return (resource, recordId) -> {
-      String hql = UsageQueryComposer.composeRowMatch(resource.getCountedEntity(),
-          resource.getHqlRestriction());
+    return (quota, recordId) -> {
+      String hql = UsageQueryComposer.composeRowMatch(quota.getCountedEntity(),
+          quota.getHqlRestriction());
       // A scalar on the raw session, like the usage counts: no DAL filter, no entity loaded.
       return OBDal.getInstance().getSession().createQuery(hql, String.class)
           .setParameter(UsageQueryComposer.PARAM_RECORD_ID, recordId)
