@@ -19,8 +19,11 @@ package com.etendoerp.go.rest;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
@@ -36,9 +39,12 @@ import java.io.IOException;
 import java.io.PrintWriter;
 import java.io.StringReader;
 import java.io.StringWriter;
+import java.time.Clock;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
 import java.util.Collections;
+import java.util.Date;
 import java.util.List;
 import java.util.Optional;
 
@@ -55,6 +61,7 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.system.Client;
 
 import com.etendoerp.go.payment.CheckoutRequestStore;
+import com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag;
 import com.etendoerp.go.payment.EnvironmentAccessPolicy;
 import com.etendoerp.go.payment.PlanCatalogService;
 import com.etendoerp.go.payment.StripeCustomerPortalService;
@@ -66,6 +73,9 @@ import com.etendoerp.go.schemaforge.data.CheckoutRequest;
 import com.etendoerp.go.schemaforge.data.Plan;
 import com.etendoerp.go.schemaforge.data.PlanQuota;
 import com.etendoerp.go.schemaforge.data.Subscription;
+import com.etendoerp.go.usage.quota.ConsumptionReader;
+import com.etendoerp.go.usage.quota.QuotaEvaluator;
+import com.etendoerp.go.usage.quota.QuotaLookup;
 
 /**
  * Unit tests for {@code GET /sws/go/billing/subscription} and
@@ -80,6 +90,11 @@ import com.etendoerp.go.schemaforge.data.Subscription;
  * <p>Since ETP-5049 the page also carries the plan catalog view of the subscription
  * ({@code planKey}, {@code planName}, {@code planQuotas}) and a {@code graceEndsAt} decided by
  * {@link EnvironmentAccessPolicy#graceEndsAt}, the rule the access policy cuts access on.
+ *
+ * <p>Since ETP-5051 every {@code planQuotas} item is the full {@code QuotaItem}: the consumption
+ * over the subscription's current period is measured for every active row, mode {@code off}
+ * included (its verdict stays null), and the page carries {@code accessEnforced}, the tenant's
+ * environment-access kill switch read the other way round.
  *
  * @covers com.etendoerp.go.rest.EtendoGoJwtServlet
  */
@@ -329,6 +344,177 @@ public class EtendoGoJwtServletBillingSubscriptionTest {
 
     assertTrue(quota.has("period"));
     assertTrue(quota.isNull("period"));
+  }
+
+  // ===================== measured QuotaItems and accessEnforced (ETP-5051) =====================
+
+  private static final Instant PERIOD_START = Instant.parse("2026-10-17T09:30:00Z");
+  private static final Instant PERIOD_END = Instant.parse("2026-11-17T09:30:00Z");
+
+  /** The servlet's evaluator over a fixed clock inside the period, reading from {@code reader}. */
+  private static void measureWith(Fixture fixture, ConsumptionReader reader) {
+    fixture.servlet.quotaEvaluator = new QuotaEvaluator(mock(QuotaLookup.class), reader,
+        Clock.fixed(Instant.parse("2026-10-24T12:00:00Z"), ZoneOffset.UTC));
+  }
+
+  private static void givenSubscriptionWithPeriod(Fixture fixture, Plan plan, Instant endDate) {
+    Subscription subscription = mock(Subscription.class);
+    when(subscription.getPlan()).thenReturn(plan);
+    when(subscription.getCurrentPeriodStart()).thenReturn(Date.from(PERIOD_START));
+    when(subscription.getCurrentPeriodEnd()).thenReturn(Date.from(PERIOD_END));
+    when(subscription.getEndDate()).thenReturn(endDate == null ? null : Date.from(endDate));
+    when(fixture.subscriptionService.findLatest(CLIENT_ID)).thenReturn(Optional.of(subscription));
+  }
+
+  private static void consumed(ConsumptionReader reader, String key, long quantity) {
+    when(reader.read(argThat(quota -> quota != null && key.equals(quota.getResourceKey())),
+        eq(CLIENT_ID), any())).thenReturn(quantity);
+  }
+
+  @Test
+  public void planQuotasCarryTheMeasuredConsumptionVerdictAndPeriod() throws Exception {
+    Fixture fixture = subscribedFixture(null);
+    Plan plan = plan("productive-monthly", "Productive monthly", "month");
+    givenSubscriptionWithPeriod(fixture, plan, null);
+    PlanQuota documentsRow = quota(resource("documents", "Documents", "documents"), 100L,
+        "block", 80L);
+    PlanQuota storageRow = quota(resource("storage", "Storage", "GB"), 10L, "warn", null);
+    when(fixture.planCatalog.listActiveQuotas(plan)).thenReturn(List.of(documentsRow,
+        storageRow));
+    ConsumptionReader reader = mock(ConsumptionReader.class);
+    consumed(reader, "documents", 87L);
+    consumed(reader, "storage", 4L);
+    measureWith(fixture, reader);
+
+    JSONArray quotas = get(fixture, VALID_TOKEN).json().getJSONArray("planQuotas");
+
+    JSONObject documents = quotas.getJSONObject(0);
+    assertEquals(87L, documents.getLong("consumed"));
+    assertEquals("WARN", documents.getString("verdict"));
+    assertEquals("aggregate", documents.getString("consumptionSource"));
+    assertEquals(PERIOD_START.toString(), documents.getString("periodStart"));
+    assertEquals(PERIOD_END.toString(), documents.getString("periodEnd"));
+    assertEquals("month", documents.getString("period"));
+    JSONObject storage = quotas.getJSONObject(1);
+    assertEquals(4L, storage.getLong("consumed"));
+    assertEquals("ALLOW", storage.getString("verdict"));
+  }
+
+  /** The account page measures mode off too: the plan includes it, so its use is shown. */
+  @Test
+  public void anOffQuotaIsMeasuredOnTheAccountPageWithANullVerdict() throws Exception {
+    Fixture fixture = subscribedFixture(null);
+    Plan plan = plan("productive-monthly", "Productive monthly", "month");
+    givenSubscriptionWithPeriod(fixture, plan, null);
+    PlanQuota usersRow = quota(resource("users", "Users", "users"), 3L, "off", 2L);
+    when(fixture.planCatalog.listActiveQuotas(plan)).thenReturn(List.of(usersRow));
+    ConsumptionReader reader = mock(ConsumptionReader.class);
+    consumed(reader, "users", 5L);
+    measureWith(fixture, reader);
+
+    JSONObject users = get(fixture, VALID_TOKEN).json().getJSONArray("planQuotas")
+        .getJSONObject(0);
+
+    assertEquals(5L, users.getLong("consumed"));
+    assertTrue(users.has("verdict"));
+    assertTrue(users.isNull("verdict"));
+    assertEquals("off", users.getString("enforcementMode"));
+  }
+
+  /** A canceled subscription keeps its last period but has no current one: nothing measured. */
+  @Test
+  public void aClosedSubscriptionSendsItsQuotasUnmeasured() throws Exception {
+    Fixture fixture = subscribedFixture(null);
+    Plan plan = plan("productive-monthly", "Productive monthly", "month");
+    givenSubscriptionWithPeriod(fixture, plan, Instant.parse("2026-10-20T00:00:00Z"));
+    PlanQuota documentsRow = quota(resource("documents", "Documents", "documents"), 100L,
+        "block", null);
+    when(fixture.planCatalog.listActiveQuotas(plan)).thenReturn(List.of(documentsRow));
+    ConsumptionReader reader = mock(ConsumptionReader.class);
+    measureWith(fixture, reader);
+
+    JSONObject documents = get(fixture, VALID_TOKEN).json().getJSONArray("planQuotas")
+        .getJSONObject(0);
+
+    for (String key : new String[] { "consumed", "verdict", "periodStart", "periodEnd" }) {
+      assertTrue(key + " must be JSON null: " + documents, documents.isNull(key));
+    }
+    verifyNoInteractions(reader);
+  }
+
+  @Test
+  public void aFailedMeasurementSendsTheQuotasUnmeasuredAndThePageStillAnswers()
+      throws Exception {
+    Fixture fixture = subscribedFixture(null);
+    Plan plan = plan("productive-monthly", "Productive monthly", "month");
+    givenSubscriptionWithPeriod(fixture, plan, null);
+    PlanQuota documentsRow = quota(resource("documents", "Documents", "documents"), 100L,
+        "block", 80L);
+    when(fixture.planCatalog.listActiveQuotas(plan)).thenReturn(List.of(documentsRow));
+    ConsumptionReader reader = mock(ConsumptionReader.class);
+    when(reader.read(any(), anyString(), any())).thenThrow(new IllegalStateException("db down"));
+    measureWith(fixture, reader);
+
+    ResponseCapture resp = get(fixture, VALID_TOKEN);
+
+    assertEquals(200, resp.status);
+    JSONObject documents = resp.json().getJSONArray("planQuotas").getJSONObject(0);
+    assertEquals("documents", documents.getString("resourceKey"));
+    assertEquals(100L, documents.getLong("includedQty"));
+    assertTrue(documents.isNull("consumed"));
+    assertTrue(documents.isNull("verdict"));
+  }
+
+  @Test
+  public void accessEnforcedIsTrueWhileTheKillSwitchIsOff() throws Exception {
+    Fixture fixture = subscribedFixture(null);
+    when(fixture.subscriptionService.findLatest(CLIENT_ID)).thenReturn(Optional.empty());
+
+    JSONObject body;
+    try (MockedStatic<EnvironmentAccessEnforcementFlag> flag =
+        mockStatic(EnvironmentAccessEnforcementFlag.class)) {
+      flag.when(() -> EnvironmentAccessEnforcementFlag.isEnforcementSwitchedOff(CLIENT_ID))
+          .thenReturn(false);
+      body = get(fixture, VALID_TOKEN).json();
+      flag.verify(() -> EnvironmentAccessEnforcementFlag.isEnforcementSwitchedOff(CLIENT_ID));
+    }
+
+    assertTrue(body.getBoolean("accessEnforced"));
+  }
+
+  @Test
+  public void accessEnforcedIsFalseWhileTheKillSwitchIsOnForTheTenant() throws Exception {
+    Fixture fixture = subscribedFixture(null);
+    when(fixture.subscriptionService.findLatest(CLIENT_ID)).thenReturn(Optional.empty());
+
+    JSONObject body;
+    try (MockedStatic<EnvironmentAccessEnforcementFlag> flag =
+        mockStatic(EnvironmentAccessEnforcementFlag.class)) {
+      flag.when(() -> EnvironmentAccessEnforcementFlag.isEnforcementSwitchedOff(CLIENT_ID))
+          .thenReturn(true);
+      body = get(fixture, VALID_TOKEN).json();
+    }
+
+    assertFalse(body.getBoolean("accessEnforced"));
+  }
+
+  @Test
+  public void aPurchaseWithoutEnvironmentReportsAccessEnforced() throws Exception {
+    Fixture fixture = new Fixture();
+    CheckoutRequest withoutEnvironment = purchase(ACCOUNT_SUBSCRIPTION, ACCOUNT_CUSTOMER, null);
+    when(fixture.requestStore.findSubscriptionForAccount(ACCOUNT_ID, ACCOUNT_EMAIL))
+        .thenReturn(withoutEnvironment);
+    when(fixture.portalService.retrieveSubscription(ACCOUNT_SUBSCRIPTION))
+        .thenReturn(fixture.live);
+
+    JSONObject body;
+    try (MockedStatic<EnvironmentAccessEnforcementFlag> flag =
+        mockStatic(EnvironmentAccessEnforcementFlag.class)) {
+      body = get(fixture, VALID_TOKEN).json();
+      flag.verifyNoInteractions();
+    }
+
+    assertTrue(body.getBoolean("accessEnforced"));
   }
 
   @Test

@@ -46,6 +46,11 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  * instance via OBBaseTest. These tests cover the pure-logic, no-DAL parts
  * plus the authorization guard and exception-wrapping logic of {@code route()}.
  *
+ * <p>ETP-5051: {@code etendo_create} runs its insert inside the plan-quota gate. The router method
+ * needs a live DAL and an {@code AD_Tab}, so that wiring is pinned with {@link McpSourceScanner}
+ * (as the other MCP call-site guards are); the gate's behaviour is covered by
+ * {@code NeoQuotaWriteGateTest} and the refusal's MCP translation by {@code McpHookExecutorTest}.
+ *
  * @covers com.etendoerp.go.mcp.McpToolRouter
  * @covers com.etendoerp.go.mcp.McpToolResponses
  * @covers com.etendoerp.go.mcp.McpResponseSanitizer
@@ -1507,4 +1512,38 @@ public class McpToolRouterTest {
     assertFalse(body.startsWith("Error executing"));
   }
 
+
+  /**
+   * ETP-5051 — the quota gate wraps the insert of {@code etendo_create}: the gate picks the service
+   * the insert runs through (the deferred-commit one when it owns the transaction), checks the
+   * created row right after it, and a refusal leaves the router through the MCP error translation
+   * before anything reads the add result as a success.
+   */
+  @Test
+  public void testCreateRunsItsInsertInsideTheQuotaGate() {
+    String body = McpSourceScanner.stripComments(McpSourceScanner.methodBody(
+        McpSourceScanner.read("com/etendoerp/go/mcp/McpToolRouter.java"), "handleCreate"));
+
+    int begin = indexOf(body, "NeoQuotaWriteGate.begin(dalEntityName)");
+    int service = indexOf(body, "jsonService = quota.jsonService(jsonService)");
+    int add = indexOf(body, "result = jsonService.add(params, wrappedBody)");
+    int finish = indexOf(body, "NeoResponse quotaRefusal = quota.finish(result)");
+    int refusal = indexOf(body, "return McpHookExecutor.neoResponseToMcpResult(quotaRefusal)");
+    int successRead = indexOf(body, "new JSONObject(result)");
+
+    assertTrue("the gate opens before the insert and chooses its service",
+        begin < service && service < add);
+    assertTrue("the created row is checked right after the insert", add < finish);
+    assertTrue("a refusal returns before the add result is read as a success",
+        finish < refusal && refusal < successRead);
+    assertEquals("etendo_create inserts exactly once", 1,
+        body.split("jsonService\\.add\\(", -1).length - 1);
+  }
+
+  private static int indexOf(String body, String code) {
+    int at = body.replaceAll("\\s+", " ").indexOf(code);
+    assertTrue("handleCreate no longer contains `" + code + "`: the ETP-5051 quota gate was"
+        + " dropped from etendo_create, or refactored and this guard needs updating", at >= 0);
+    return at;
+  }
 }
