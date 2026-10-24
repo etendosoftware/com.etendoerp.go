@@ -28,7 +28,7 @@ import java.util.function.Supplier;
 public interface IsolatedReader {
 
   /** Runs the read on the caller's thread and session: for tests only. */
-  IsolatedReader INLINE = IsolatedReader::inline;
+  IsolatedReader INLINE = IsolatedReader::onCallerThread;
 
   /** The production reader: a hop to a worker with its own DAL session. */
   IsolatedReader DAL = IsolatedDalRead::call;
@@ -49,7 +49,7 @@ public interface IsolatedReader {
    * @param <T> the result type
    * @return what {@code read} returned
    */
-  static <T> T inline(Supplier<T> read) {
+  static <T> T onCallerThread(Supplier<T> read) {
     return read.get();
   }
 }
