@@ -224,6 +224,27 @@ class EnvironmentPlanCacheTest {
     assertNull(cache.status(FREE_CLIENT));
   }
 
+  /**
+   * ETP-5051 (O-1b) — a tenant productive only through the retired preference has no
+   * subscription row, so nothing renews: its {@code renewalAt} is null, while a subscribed
+   * renewing tenant in the same cache keeps its own period end.
+   */
+  @Test
+  void aTenantProductiveOnlyThroughTheFallbackHasNoRenewal() {
+    TenantPlanPreferenceFallback fallback = mock(TenantPlanPreferenceFallback.class);
+    when(fallback.productiveAmong(Set.of(LEGACY_CLIENT))).thenReturn(Set.of(LEGACY_CLIENT));
+    Map<String, Subscription> open = new LinkedHashMap<>();
+    open.put(PAID_CLIENT,
+        withPeriodEnd(subscriptionOn(PLAN_KEY, SubscriptionService.STATUS_ACTIVE)));
+
+    EnvironmentPlanCache cache = EnvironmentPlanCache.of(List.of(PAID_CLIENT, LEGACY_CLIENT),
+        open, fallback);
+
+    assertTrue(cache.isProductive(LEGACY_CLIENT));
+    assertNull(cache.viewFor(LEGACY_CLIENT).renewalAt());
+    assertEquals(PERIOD_END, cache.viewFor(PAID_CLIENT).renewalAt());
+  }
+
   @Test
   void asksTheFallbackExactlyOnceForOnlyTheTenantsWithNoSubscription() {
     // Looping resolvePlan here would reintroduce the N+1 this cache exists to remove. One extra

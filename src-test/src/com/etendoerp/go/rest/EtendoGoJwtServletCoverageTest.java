@@ -1410,6 +1410,119 @@ public class EtendoGoJwtServletCoverageTest {
     assertEquals(200, resp.status);
   }
 
+  /**
+   * ETP-5051 (O-1b) — "Mis empresas" dates each row by its own environment. End to end through
+   * {@code handleEnvironments} and the real {@code buildEnvironmentJson}: two renewing tenants
+   * each carry their OWN {@code CURRENT_PERIOD_END} as {@code renewalAt} ({@link
+   * java.time.Instant#toString()} form), read from ONE batched {@code findLatestForClients} (no
+   * per-environment read, no Stripe), and a tenant productive only through the transitional
+   * preference fallback, with no subscription row, has {@code renewalAt} JSON null.
+   */
+  @Test
+  public void environmentsCarryEachTenantsOwnRenewalFromOneBatchedRead() throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = mockRequest("/environments");
+    when(req.getHeader("Authorization")).thenReturn("Bearer valid-token");
+    Account account = mock(Account.class);
+    when(account.getEmail()).thenReturn("user@test.com");
+    User spring7 = environmentUser("client-spring7", "SPRING7", "user-7");
+    User spring8 = environmentUser("client-spring8", "SPRING8", "user-8");
+    User legacy = environmentUser("client-legacy", "LEGACY", "user-l");
+    java.util.Map<String, Subscription> subscriptions = new java.util.LinkedHashMap<>();
+    subscriptions.put("client-spring7", renewingSubscription("2026-11-23T14:09:48Z"));
+    subscriptions.put("client-spring8", renewingSubscription("2026-12-05T08:00:00Z"));
+    SubscriptionService subscriptionService = mock(SubscriptionService.class);
+    when(subscriptionService.findLatestForClients(any())).thenReturn(subscriptions);
+    servlet.subscriptionService = subscriptionService;
+    // The retired ETGO_TenantPlan preference that keeps the legacy tenant productive.
+    org.openbravo.model.ad.domain.Preference legacyPreference =
+        mock(org.openbravo.model.ad.domain.Preference.class);
+    Client legacyClient = legacy.getClient();
+    when(legacyPreference.getVisibleAtClient()).thenReturn(legacyClient);
+    when(legacyPreference.getSearchKey()).thenReturn(TenantPlanService.PLAN_PRODUCTIVE);
+    @SuppressWarnings("unchecked")
+    org.openbravo.dal.service.OBQuery<org.openbravo.model.ad.domain.Preference> preferences =
+        mock(org.openbravo.dal.service.OBQuery.class);
+    when(preferences.list()).thenReturn(List.of(legacyPreference));
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.createQuery(eq(org.openbravo.model.ad.domain.Preference.class), anyString()))
+        .thenReturn(preferences);
+    org.openbravo.base.session.OBPropertiesProvider properties =
+        mock(org.openbravo.base.session.OBPropertiesProvider.class);
+    when(properties.getOpenbravoProperties()).thenReturn(new java.util.Properties());
+
+    try (var ctxMock = mockStatic(OBContext.class);
+         var dalMock = mockStatic(EtendoGoJwtDalHelper.class);
+         var obDalMock = mockStatic(OBDal.class);
+         var ownerMock = mockStatic(com.etendoerp.go.schemaforge.util.OwnerSupport.class);
+         var flagMock = mockStatic(com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag.class);
+         var configMock = mockStatic(com.etendoerp.go.common.ConfigPropertyReader.class);
+         var propertiesMock = mockStatic(org.openbravo.base.session.OBPropertiesProvider.class);
+         var modelSwitch = mockConstruction(SubscriptionModelSwitch.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      propertiesMock.when(org.openbravo.base.session.OBPropertiesProvider::getInstance)
+          .thenReturn(properties);
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("valid-token"))
+          .thenReturn(account);
+      dalMock.when(() -> EtendoGoJwtDalHelper.findEnvironmentUsersByAccountEmail("user@test.com"))
+          .thenReturn(new ArrayList<>(List.of(spring7, spring8, legacy)));
+      dalMock.when(() -> EtendoGoJwtDalHelper.findNonStarOrganizations(anyString()))
+          .thenReturn(Collections.emptyList());
+      dalMock.when(() -> EtendoGoJwtDalHelper.quotaReport(subscriptions))
+          .thenReturn(com.etendoerp.go.usage.quota.EnvironmentQuotaReport.empty());
+      dalMock.when(() -> EtendoGoJwtDalHelper.buildEnvironmentJson(
+          any(Client.class), any(), any(User.class), any(EnvironmentPlanCache.class), any()))
+          .thenCallRealMethod();
+
+      servlet.doGet(req, resp.response);
+    }
+
+    assertEquals(200, resp.status);
+    verify(subscriptionService, times(1)).findLatestForClients(
+        new java.util.LinkedHashSet<>(List.of("client-spring7", "client-spring8",
+            "client-legacy")));
+    verifyNoMoreInteractions(subscriptionService);
+    JSONArray environments = new JSONObject(resp.body()).getJSONArray("environments");
+    assertEquals(3, environments.length());
+    JSONObject spring7Row = environmentRow(environments, "client-spring7");
+    JSONObject spring8Row = environmentRow(environments, "client-spring8");
+    JSONObject legacyRow = environmentRow(environments, "client-legacy");
+    assertEquals("2026-11-23T14:09:48Z", spring7Row.getString("renewalAt"));
+    assertEquals("2026-12-05T08:00:00Z", spring8Row.getString("renewalAt"));
+    // Productive through the fallback (the badge the SPA branches on), yet nothing renews.
+    assertEquals(TenantPlanService.PLAN_PRODUCTIVE, legacyRow.getString("plan"));
+    assertTrue(legacyRow.toString(), legacyRow.has("renewalAt"));
+    assertTrue(legacyRow.toString(), legacyRow.isNull("renewalAt"));
+  }
+
+  private static User environmentUser(String clientId, String clientName, String userId) {
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn(clientId);
+    when(client.getName()).thenReturn(clientName);
+    User user = mock(User.class);
+    when(user.getId()).thenReturn(userId);
+    when(user.getClient()).thenReturn(client);
+    return user;
+  }
+
+  private static Subscription renewingSubscription(String periodEnd) {
+    Subscription subscription = mock(Subscription.class);
+    when(subscription.getSubscriptionStatus()).thenReturn(SubscriptionService.STATUS_ACTIVE);
+    when(subscription.getCurrentPeriodEnd())
+        .thenReturn(Date.from(java.time.Instant.parse(periodEnd)));
+    return subscription;
+  }
+
+  private static JSONObject environmentRow(JSONArray environments, String clientId)
+      throws Exception {
+    for (int i = 0; i < environments.length(); i++) {
+      if (clientId.equals(environments.getJSONObject(i).getString("clientId"))) {
+        return environments.getJSONObject(i);
+      }
+    }
+    throw new AssertionError("No environment row for " + clientId + ": " + environments);
+  }
+
   @Test
   public void environmentsMapsUsersWithAndWithoutOrganizations() throws Exception {
     ResponseCapture resp = mockResponse();

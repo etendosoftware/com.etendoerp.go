@@ -85,6 +85,12 @@ import com.etendoerp.go.usage.quota.TenantQuotas;
  * subscription" instead of falling back to another environment's. An account-level session
  * ({@code ctxClientId} absent, blank or {@code "0"}) and the legacy bearer keep the newest.
  *
+ * <p>ETP-5051 (O-1b) — the portal's optional {@code {"clientId"}} body names the environment a
+ * "Mis empresas" row manages. Without one ({@code "0"}, blank, {@code {}} or no body at all) the
+ * rule above applies; an unbought client or one without a Stripe customer is
+ * {@code 404 NO_SUBSCRIPTION}; a body that is not a JSON object is 400; and the cookie session's
+ * CSRF and Origin checks refuse the request before the body is read.
+ *
  * @covers com.etendoerp.go.rest.EtendoGoJwtServlet
  */
 public class EtendoGoJwtServletBillingCookieAuthTest {
@@ -102,6 +108,9 @@ public class EtendoGoJwtServletBillingCookieAuthTest {
   private static final String FOREIGN_SUBSCRIPTION = "sub_foreign";
   private static final String ENTERED_CLIENT = "client-entered";
   private static final String NEWEST_CLIENT = "client-newest";
+  /** Portal bodies that name no environment; null stands for a request with no body at all. */
+  private static final String[] NO_CLIENT_BODIES = { null, "", "   ", "{}",
+      "{\"clientId\":\"0\"}", "{\"clientId\":\"  \"}", "{\"clientId\":\"\"}" };
 
   // ===================== GET /billing/subscription (cookie) =====================
 
@@ -514,6 +523,154 @@ public class EtendoGoJwtServletBillingCookieAuthTest {
   }
 
   /**
+   * ETP-5051 (O-1b) — a body that names no environment keeps the page's rule. Inside an entered
+   * environment that is the entered one's purchase, whatever the account bought last.
+   */
+  @Test
+  public void cookiePostPortalNamingNoClientInsideAnEnvironmentOpensTheEnteredOne()
+      throws Exception {
+    for (String body : NO_CLIENT_BODIES) {
+      Fixture fixture = new Fixture();
+      when(fixture.goSessionService.resolve(SESSION_TOKEN))
+          .thenReturn(fixture.enteredSession(ENTERED_CLIENT));
+      CheckoutRequest entered = purchase("sub_entered", "cus_entered", ENTERED_CLIENT);
+      when(fixture.requestStore.findSubscriptionForAccountClient(ACCOUNT_ID, ACCOUNT_EMAIL,
+          ENTERED_CLIENT)).thenReturn(entered);
+      when(fixture.portalService.createSession("cus_entered"))
+          .thenReturn(new JSONObject().put("url", "https://billing.stripe.test/entered"));
+
+      ResponseCapture resp = cookiePostPortalWithBody(fixture, body);
+
+      assertEquals(String.valueOf(body), 200, resp.status);
+      verify(fixture.requestStore).findSubscriptionForAccountClient(ACCOUNT_ID, ACCOUNT_EMAIL,
+          ENTERED_CLIENT);
+      verifyNoMoreInteractions(fixture.requestStore);
+      verify(fixture.portalService).createSession("cus_entered");
+    }
+  }
+
+  /** ETP-5051 (O-1b) — and in an account-level session it is the account's newest purchase. */
+  @Test
+  public void cookiePostPortalNamingNoClientAtAccountLevelOpensTheNewest() throws Exception {
+    for (String body : NO_CLIENT_BODIES) {
+      Fixture fixture = new Fixture();
+      when(fixture.goSessionService.resolve(SESSION_TOKEN)).thenReturn(fixture.validSession());
+      CheckoutRequest newest = purchase("sub_newest", "cus_newest", NEWEST_CLIENT);
+      when(fixture.requestStore.findSubscriptionForAccount(ACCOUNT_ID, ACCOUNT_EMAIL))
+          .thenReturn(newest);
+      when(fixture.portalService.createSession("cus_newest"))
+          .thenReturn(new JSONObject().put("url", "https://billing.stripe.test/newest"));
+
+      ResponseCapture resp = cookiePostPortalWithBody(fixture, body);
+
+      assertEquals(String.valueOf(body), 200, resp.status);
+      verify(fixture.requestStore).findSubscriptionForAccount(ACCOUNT_ID, ACCOUNT_EMAIL);
+      verifyNoMoreInteractions(fixture.requestStore);
+      verify(fixture.portalService).createSession("cus_newest");
+    }
+  }
+
+  /**
+   * ETP-5051 (O-1b) — a client the account did not buy matches nothing in the store, and a match
+   * without a Stripe customer cannot open a portal: both are {@code 404 NO_SUBSCRIPTION} (the code
+   * the SPA keys its message on), and no portal session is created.
+   */
+  @Test
+  public void cookiePostPortalForAnUnboughtOrCustomerlessClientAnswers404() throws Exception {
+    CheckoutRequest withoutCustomer = purchase("sub_row", "  ", NEWEST_CLIENT);
+    for (CheckoutRequest match : new CheckoutRequest[] { null, withoutCustomer }) {
+      Fixture fixture = new Fixture();
+      when(fixture.goSessionService.resolve(SESSION_TOKEN)).thenReturn(fixture.validSession());
+      when(fixture.requestStore.findSubscriptionForAccountClient(ACCOUNT_ID, ACCOUNT_EMAIL,
+          "client-not-bought")).thenReturn(match);
+
+      ResponseCapture resp = cookiePostPortalWithBody(fixture,
+          new JSONObject().put("clientId", "client-not-bought").toString());
+
+      assertEquals(404, resp.status);
+      assertEquals("NO_SUBSCRIPTION", resp.errorCode());
+      verify(fixture.requestStore).findSubscriptionForAccountClient(ACCOUNT_ID, ACCOUNT_EMAIL,
+          "client-not-bought");
+      verifyNoMoreInteractions(fixture.requestStore);
+      verifyNoInteractions(fixture.portalService);
+    }
+  }
+
+  /** ETP-5051 (O-1b) — valid JSON that is not an object is as bad a body as broken JSON. */
+  @Test
+  public void cookiePostPortalWithAnArrayOrScalarBodyAnswers400AndLooksNothingUp()
+      throws Exception {
+    for (String body : new String[] { "[\"client-1\"]", "42", "\"client-1\"", "true" }) {
+      Fixture fixture = new Fixture();
+      when(fixture.goSessionService.resolve(SESSION_TOKEN))
+          .thenReturn(fixture.enteredSession(ENTERED_CLIENT));
+
+      ResponseCapture resp = cookiePostPortalWithBody(fixture, body);
+
+      assertEquals(body, 400, resp.status);
+      assertTrue(body, resp.json().has("error"));
+      verifyNoInteractions(fixture.requestStore, fixture.portalService);
+    }
+  }
+
+  /**
+   * ETP-5051 (O-1b) — the CSRF proof and the Origin are checked before the body: a request naming
+   * a client is refused 403 without its body being read or anything being looked up.
+   */
+  @Test
+  public void cookiePostPortalNamingAClientIsRefusedBeforeItsBodyIsRead() throws Exception {
+    String body = new JSONObject().put("clientId", NEWEST_CLIENT).toString();
+
+    Fixture noCsrf = new Fixture();
+    when(noCsrf.goSessionService.resolve(SESSION_TOKEN)).thenReturn(noCsrf.validSession());
+    HttpServletRequest noCsrfReq = cookiePost(PORTAL_PATH, SESSION_TOKEN, null, body);
+    ResponseCapture noCsrfResp = send(noCsrf, noCsrfReq);
+
+    Fixture badOrigin = new Fixture();
+    when(badOrigin.goSessionService.resolve(SESSION_TOKEN)).thenReturn(badOrigin.validSession());
+    HttpServletRequest badOriginReq = cookiePost(PORTAL_PATH, SESSION_TOKEN, CSRF, body);
+    when(badOriginReq.getHeader("Origin")).thenReturn("https://evil.example.test");
+    ResponseCapture badOriginResp = send(badOrigin, badOriginReq);
+
+    assertEquals(403, noCsrfResp.status);
+    assertEquals(403, badOriginResp.status);
+    verify(noCsrfReq, never()).getReader();
+    verify(badOriginReq, never()).getReader();
+    verifyNoInteractions(noCsrf.requestStore, noCsrf.portalService, badOrigin.requestStore,
+        badOrigin.portalService);
+  }
+
+  /**
+   * ETP-5051 (O-1b) — the legacy platform-token bearer may name a row too: it resolves through
+   * the same owned-client lookup, never the account's newest purchase.
+   */
+  @Test
+  public void legacyBearerPortalNamingAClientResolvesThatClientsPurchase() throws Exception {
+    Fixture fixture = new Fixture();
+    CheckoutRequest row = purchase("sub_row", "cus_row", NEWEST_CLIENT);
+    when(fixture.requestStore.findSubscriptionForAccountClient(ACCOUNT_ID, ACCOUNT_EMAIL,
+        NEWEST_CLIENT)).thenReturn(row);
+    when(fixture.portalService.createSession("cus_row"))
+        .thenReturn(new JSONObject().put("url", "https://billing.stripe.test/row"));
+
+    HttpServletRequest req = bearerRequest(PORTAL_PATH, "POST", PLATFORM_TOKEN,
+        new JSONObject().put("clientId", NEWEST_CLIENT).toString());
+    ResponseCapture resp = mockResponse();
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
+        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dal.when(() -> EtendoGoJwtDalHelper.findActiveAccountByPlatformToken(PLATFORM_TOKEN))
+          .thenReturn(fixture.account);
+      fixture.servlet.doPost(req, resp.response);
+    }
+
+    assertEquals(200, resp.status);
+    assertEquals("https://billing.stripe.test/row", resp.json().getString("url"));
+    verify(fixture.requestStore).findSubscriptionForAccountClient(ACCOUNT_ID, ACCOUNT_EMAIL,
+        NEWEST_CLIENT);
+    verify(fixture.requestStore, never()).findSubscriptionForAccount(anyString(), anyString());
+  }
+
+  /**
    * The session authenticator requires the allowed {@code Origin} AND the CSRF token — a
    * correct {@code X-Go-CSRF} does not compensate for a disallowed origin, so this must fail on its
    * own, distinct from the CSRF-missing tests above (which use an allowed origin).
@@ -708,6 +865,32 @@ public class EtendoGoJwtServletBillingCookieAuthTest {
   /** Sends {@code POST /billing/subscription/portal} with the session cookie and a valid CSRF. */
   private static ResponseCapture cookiePostPortal(Fixture fixture) throws Exception {
     HttpServletRequest req = cookiePost(PORTAL_PATH, SESSION_TOKEN, CSRF, "{}");
+    ResponseCapture resp = mockResponse();
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
+        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dal.when(() -> EtendoGoJwtDalHelper.findActiveAccountById(ACCOUNT_ID))
+          .thenReturn(fixture.account);
+      fixture.servlet.doPost(req, resp.response);
+    }
+    return resp;
+  }
+
+  /**
+   * Sends {@code POST /billing/subscription/portal} with the session cookie, a valid CSRF and the
+   * given body; a null body is a request whose reader is absent.
+   */
+  private static ResponseCapture cookiePostPortalWithBody(Fixture fixture, String body)
+      throws Exception {
+    HttpServletRequest req = cookiePost(PORTAL_PATH, SESSION_TOKEN, CSRF,
+        body == null ? "" : body);
+    if (body == null) {
+      when(req.getReader()).thenReturn(null);
+    }
+    return send(fixture, req);
+  }
+
+  /** Sends a POST through the servlet with the session account resolvable by id. */
+  private static ResponseCapture send(Fixture fixture, HttpServletRequest req) throws Exception {
     ResponseCapture resp = mockResponse();
     try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
         MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class)) {
