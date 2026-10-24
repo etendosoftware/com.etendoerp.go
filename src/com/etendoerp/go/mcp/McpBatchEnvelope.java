@@ -34,15 +34,15 @@ final class McpBatchEnvelope {
   private McpBatchEnvelope() {
   }
 
+  /** The machine-readable code a NEO handler error carries ({@code error.code}). */
+  private static final String KEY_CODE = "code";
+
   /**
    * Error codes of a batch operation that no change to its body can fix: the entity refuses the
    * verb ({@code method_not_allowed}) or cannot be attached to a parent at all
    * ({@code parent_unresolvable}). The criterion is the code, not the status — a 422 can just as
    * well be a field the agent can correct.
    */
-  /** The machine-readable code a NEO handler error carries ({@code error.code}). */
-  private static final String KEY_CODE = "code";
-
   private static final java.util.Set<String> NON_RETRYABLE_OP_CODES = java.util.Set.of(
       McpConstants.ERROR_METHOD_NOT_ALLOWED, McpConstants.ERROR_PARENT_UNRESOLVABLE);
 

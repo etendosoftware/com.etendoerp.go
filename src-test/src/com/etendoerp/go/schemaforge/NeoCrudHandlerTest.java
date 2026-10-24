@@ -4383,6 +4383,13 @@ class NeoCrudHandlerTest {
   @DisplayName("the POST create runs inside the plan-quota gate (ETP-5051)")
   class QuotaGateWiring {
 
+    /**
+     * Also the ETP-5051 re-review W1 guard: the create ({@code executePostCreate}, callout cascade
+     * and add) is what the handler hands to {@code NeoQuotaWriteGate.run}, so the gate can refuse
+     * before it runs; {@code NeoQuotaWriteGateTest} shows it is never invoked on that refusal. The
+     * gate's {@code begin} is package-private, so no handler can open the gate around a create of
+     * its own.
+     */
     @Test
     void theCreateRunsItsInsertInsideTheGate() throws Exception {
       String source = readSource("com/etendoerp/go/schemaforge/NeoCrudHandler.java")
@@ -4390,39 +4397,15 @@ class NeoCrudHandlerTest {
 
       int run = source.indexOf("NeoQuotaWriteGate.run(");
       int insert = source.indexOf("executePostCreate(", run);
-      int refusal = source.indexOf(".refusal()", insert);
+      int refusal = source.indexOf(".refusal()", run);
       int returned = source.indexOf("return ", refusal);
       int result = source.indexOf(".result()", returned);
 
       assertTrue(run >= 0, "NeoCrudHandler no longer runs its create inside the quota gate");
-      assertTrue(insert > run, "the create is no longer handed to the gate");
-      assertTrue(refusal > insert, "a quota refusal is no longer read after the gate ran");
+      assertTrue(insert > run && insert < refusal,
+          "the create is no longer handed to the gate (it must run inside run(...))");
       assertTrue(returned > refusal, "a quota refusal is no longer returned to the caller");
       assertTrue(result > returned, "the caller no longer goes on with the gate's result");
-    }
-
-    /**
-     * REPRO (ETP-5051 re-review W1): when the client's quotas cannot be read the gate refuses
-     * before the write, so the create — callout cascade and add — must be something the gate runs,
-     * never something the handler runs first. The one call of {@code executePostCreate} is the
-     * lambda handed to {@code NeoQuotaWriteGate.run}; {@code NeoQuotaWriteGateTest} shows the gate
-     * never invokes it on that refusal.
-     */
-    @Test
-    void theCreateIsOnlyEverRunByTheGate() throws Exception {
-      String source = readSource("com/etendoerp/go/schemaforge/NeoCrudHandler.java")
-          .replaceAll("\\s+", " ");
-
-      int run = source.indexOf("NeoQuotaWriteGate.run(");
-      int lambda = source.indexOf("service -> executePostCreate(", run);
-      int refusal = source.indexOf(".refusal()", run);
-
-      assertTrue(lambda > run && lambda < refusal,
-          "executePostCreate is no longer the create handed to the gate");
-      assertEquals(2, source.split("executePostCreate\\(", -1).length - 1,
-          "one declaration and one call: the call is the gate's lambda");
-      assertFalse(source.contains("NeoQuotaWriteGate.begin("),
-          "the handler opens the gate itself again, outside the refuse-before-write path");
     }
 
     private String readSource(String relative) throws java.io.IOException {

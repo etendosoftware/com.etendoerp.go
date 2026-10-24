@@ -115,11 +115,14 @@ public final class NeoQuotaWriteGate {
    * Starts one create of {@code dalEntityName}, deciding whether it is checked and who ends its
    * transaction.
    *
+   * <p>Package-private on purpose: a create channel goes through {@link #run}, which also refuses
+   * before the write when the client's quotas cannot be read.
+   *
    * @param dalEntityName the DAL entity name of the created row
    * @return the create's gate; call {@link Create#finish} with the add result, and
    *     {@link Create#close} in a finally
    */
-  public static Create begin(String dalEntityName) {
+  static Create begin(String dalEntityName) {
     return begin(dalEntityName, QuotaWriteGuard.getDefault(),
         BatchService.isCallerOwnedTransaction());
   }
@@ -418,7 +421,10 @@ public final class NeoQuotaWriteGate {
    * Whether a failed check has poisoned the request's transaction: an exception from the database
    * anywhere in the cause chain ({@link DatabaseFailures#isDatabaseFailure}), or a transaction
    * Hibernate already marked rollback-only. Such a transaction cannot be committed, so the create
-   * must fail closed. An HQL parse error raised before any SQL is neither, and fails open.
+   * must fail closed. Only a failure raised before Hibernate sees a query — a restriction fragment
+   * {@code UsageQueryComposer} rejects, a missing strategy counter — is neither, and fails open. An
+   * HQL parse error is not one of those: Hibernate marks the transaction rollback-only, so it fails
+   * closed.
    *
    * @param error the check's failure
    * @return {@code true} when the transaction is lost

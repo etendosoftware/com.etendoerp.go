@@ -1527,7 +1527,7 @@ public class McpToolRouterTest {
     // Anchored on the calls, never on local variable names, and each searched after the one
     // before it, so a rename does not break it and an earlier unrelated call cannot satisfy it.
     int run = indexOf(body, "NeoQuotaWriteGate.run(", 0);
-    int add = indexOf(body, "service -> service.add(", run);
+    int add = indexOf(body, ".add(", run);
     int refusal = indexOf(body, "neoResponseToMcpResult(", add);
     int successRead = indexOf(body, "new JSONObject(", refusal);
 
@@ -1535,9 +1535,7 @@ public class McpToolRouterTest {
     assertTrue("a refusal returns before the add result is read as a success",
         add < refusal && refusal < successRead);
     assertEquals("etendo_create inserts exactly once", 1,
-        body.split("service\\.add\\(", -1).length - 1);
-    assertFalse("handleCreate opens the gate itself again",
-        body.contains("NeoQuotaWriteGate.begin("));
+        body.split("\\.\\s*add\\s*\\(", -1).length - 1);
   }
 
   private static int indexOf(String body, String code, int from) {
