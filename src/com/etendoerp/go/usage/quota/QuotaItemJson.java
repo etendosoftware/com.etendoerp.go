@@ -17,6 +17,7 @@
 
 package com.etendoerp.go.usage.quota;
 
+import java.time.ZoneId;
 import java.util.Collection;
 import java.util.Date;
 
@@ -33,6 +34,10 @@ import org.codehaus.jettison.json.JSONObject;
  * <p>The keys of ETP-5049's {@code planQuotas} item are unchanged; {@code consumptionSource},
  * {@code consumed}, {@code verdict}, {@code periodStart} and {@code periodEnd} are new. A missing
  * value is JSON null, never a default.
+ *
+ * <p>{@code periodStart} and {@code periodEnd} are the <b>counted window</b> as date-only strings
+ * ({@code yyyy-MM-dd}, server-local days): the first counted day and the exclusive end day, the day
+ * the period ends on. Consumption is counted over {@code [periodStart, periodEnd)}.
  */
 public final class QuotaItemJson {
 
@@ -75,8 +80,10 @@ public final class QuotaItemJson {
     item.put(VERDICT, evaluation.getVerdict() == null ? JSONObject.NULL
         : evaluation.getVerdict().name());
     QuotaPeriod period = evaluation.getPeriod();
-    item.put(PERIOD_START, period == null ? JSONObject.NULL : instant(period.getStart()));
-    item.put(PERIOD_END, period == null ? JSONObject.NULL : instant(period.getEnd()));
+    // The counted window, as days: the first counted day and the exclusive end day. The server
+    // counts in local days, so the UTC instants of the period would name the wrong day.
+    item.put(PERIOD_START, period == null ? JSONObject.NULL : day(period.getWindowFrom()));
+    item.put(PERIOD_END, period == null ? JSONObject.NULL : day(period.getWindowTo()));
     return item;
   }
 
@@ -117,7 +124,8 @@ public final class QuotaItemJson {
     return value == null ? JSONObject.NULL : value;
   }
 
-  private static String instant(Date date) {
-    return date.toInstant().toString();
+  /** The server-local calendar day of a day boundary, as {@code yyyy-MM-dd}. */
+  private static String day(Date startOfDay) {
+    return startOfDay.toInstant().atZone(ZoneId.systemDefault()).toLocalDate().toString();
   }
 }

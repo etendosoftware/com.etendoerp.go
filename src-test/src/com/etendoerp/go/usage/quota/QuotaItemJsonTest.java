@@ -20,6 +20,7 @@ package com.etendoerp.go.usage.quota;
 import static com.etendoerp.go.usage.quota.QuotaTestFixtures.NOW;
 import static com.etendoerp.go.usage.quota.QuotaTestFixtures.PERIOD_END;
 import static com.etendoerp.go.usage.quota.QuotaTestFixtures.PERIOD_START;
+import static com.etendoerp.go.usage.quota.QuotaTestFixtures.local;
 import static com.etendoerp.go.usage.quota.QuotaTestFixtures.quota;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -74,8 +75,25 @@ class QuotaItemJsonTest {
     assertEquals("live", item.getString("consumptionSource"));
     assertEquals(87L, item.getLong("consumed"));
     assertEquals("WARN", item.getString("verdict"));
-    assertEquals(PERIOD_START.toInstant().toString(), item.getString("periodStart"));
-    assertEquals(PERIOD_END.toInstant().toString(), item.getString("periodEnd"));
+    assertEquals("2026-10-17", item.getString("periodStart"));
+    assertEquals("2026-11-17", item.getString("periodEnd"), "the exclusive end day");
+  }
+
+  /**
+   * REPRO (ETP-5051 QA BUG-2): a period starting at 00:30 local time is 22:30 UTC the day before.
+   * The item names the counted days, so it must say the 24th, the first day that is counted, not
+   * the UTC date of the instant.
+   */
+  @Test
+  void thePeriodIsTheCountedWindowAsLocalDays() throws Exception {
+    QuotaPeriod period = QuotaPeriod.current(local(2026, 10, 24, 0, 30),
+        local(2026, 11, 24, 0, 30), false, local(2026, 11, 1, 12, 0));
+
+    JSONObject item = QuotaItemJson.of(new QuotaEvaluation(quota("DOCS", "block", 10L, null)
+        .build(), "month", period, 1L, QuotaVerdict.ALLOW));
+
+    assertEquals("2026-10-24", item.getString("periodStart"));
+    assertEquals("2026-11-24", item.getString("periodEnd"));
   }
 
   @Test

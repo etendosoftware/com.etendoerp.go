@@ -394,8 +394,11 @@ public class EtendoGoJwtServletBillingSubscriptionTest {
     assertEquals(87L, documents.getLong("consumed"));
     assertEquals("WARN", documents.getString("verdict"));
     assertEquals("aggregate", documents.getString("consumptionSource"));
-    assertEquals(PERIOD_START.toString(), documents.getString("periodStart"));
-    assertEquals(PERIOD_END.toString(), documents.getString("periodEnd"));
+    // The counted window as server-local days (QA BUG-2): first day and exclusive end day.
+    assertEquals(PERIOD_START.atZone(java.time.ZoneId.systemDefault()).toLocalDate().toString(),
+        documents.getString("periodStart"));
+    assertEquals(PERIOD_END.atZone(java.time.ZoneId.systemDefault()).toLocalDate().toString(),
+        documents.getString("periodEnd"));
     assertEquals("month", documents.getString("period"));
     JSONObject storage = quotas.getJSONObject(1);
     assertEquals(4L, storage.getLong("consumed"));
