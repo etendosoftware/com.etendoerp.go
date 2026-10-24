@@ -3667,7 +3667,7 @@
 <!--DFC9376CF7694C0E96B665B7498CBBF0-->  <NAME><![CDATA[Enforcement Mode]]></NAME>
 <!--DFC9376CF7694C0E96B665B7498CBBF0-->  <PRINTNAME><![CDATA[Enforcement Mode]]></PRINTNAME>
 <!--DFC9376CF7694C0E96B665B7498CBBF0-->  <DESCRIPTION><![CDATA[What happens when the quota is exceeded]]></DESCRIPTION>
-<!--DFC9376CF7694C0E96B665B7498CBBF0-->  <HELP><![CDATA[warn only records the overage, block rejects the operation. Mandatory and without default so the policy is always an explicit decision.]]></HELP>
+<!--DFC9376CF7694C0E96B665B7498CBBF0-->  <HELP><![CDATA[off: not evaluated. warn: reported (environment entry, environment list, account page), never refused. block: reported, and a NEO create of the resource's counted entity that would exceed the quota is refused; other operations and Classic UI creates are not refused (see docs/plan-quotas.md). Mandatory and without default so the policy is always an explicit decision.]]></HELP>
 <!--DFC9376CF7694C0E96B665B7498CBBF0-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
 <!--DFC9376CF7694C0E96B665B7498CBBF0-->  <ISGLOSSARY><![CDATA[N]]></ISGLOSSARY>
 <!--DFC9376CF7694C0E96B665B7498CBBF0--></AD_ELEMENT>

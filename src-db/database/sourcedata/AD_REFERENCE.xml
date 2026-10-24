@@ -162,7 +162,7 @@
 <!--6D72D0F57CDE4DB18BE5576C33F1672A-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
 <!--6D72D0F57CDE4DB18BE5576C33F1672A-->  <NAME><![CDATA[ETGO_QuotaEnforcementMode]]></NAME>
 <!--6D72D0F57CDE4DB18BE5576C33F1672A-->  <DESCRIPTION><![CDATA[What a plan quota does when the allowance is exceeded]]></DESCRIPTION>
-<!--6D72D0F57CDE4DB18BE5576C33F1672A-->  <HELP><![CDATA[warn = record the overage only; block = reject the operation. The values match the ETGO_PLNQTA_MODE_CHK check constraint.]]></HELP>
+<!--6D72D0F57CDE4DB18BE5576C33F1672A-->  <HELP><![CDATA[off = not evaluated; warn = reported, never refused; block = reported, and a NEO create of the counted entity that would exceed the quota is refused (other operations and Classic UI creates are not). The values match the ETGO_PLNQTA_MODE_CHK check constraint.]]></HELP>
 <!--6D72D0F57CDE4DB18BE5576C33F1672A-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
 <!--6D72D0F57CDE4DB18BE5576C33F1672A-->  <ISBASEREFERENCE><![CDATA[N]]></ISBASEREFERENCE>
 <!--6D72D0F57CDE4DB18BE5576C33F1672A-->  <PARENTREFERENCE_ID><![CDATA[17]]></PARENTREFERENCE_ID>

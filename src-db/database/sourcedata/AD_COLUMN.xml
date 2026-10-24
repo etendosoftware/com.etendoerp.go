@@ -25079,7 +25079,7 @@ Usually, company's internal identifiers for various records (products, customers
 <!--EB5D06F6E1CE4BE0B415A18E7FE52ADF-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
 <!--EB5D06F6E1CE4BE0B415A18E7FE52ADF-->  <NAME><![CDATA[Enforcement Mode]]></NAME>
 <!--EB5D06F6E1CE4BE0B415A18E7FE52ADF-->  <DESCRIPTION><![CDATA[What happens when the quota is exceeded]]></DESCRIPTION>
-<!--EB5D06F6E1CE4BE0B415A18E7FE52ADF-->  <HELP><![CDATA[Mandatory and deliberately WITHOUT a default value: defaulting it would pick the enforcement policy on the operator behalf.]]></HELP>
+<!--EB5D06F6E1CE4BE0B415A18E7FE52ADF-->  <HELP><![CDATA[off: not evaluated. warn: reported (environment entry, environment list, account page), never refused. block: reported, and a NEO create of the resource's counted entity that would exceed the quota is refused; other operations and Classic UI creates are not refused (see docs/plan-quotas.md). Mandatory and deliberately WITHOUT a default value: defaulting it would pick the enforcement policy on the operator behalf.]]></HELP>
 <!--EB5D06F6E1CE4BE0B415A18E7FE52ADF-->  <COLUMNNAME><![CDATA[Enforcement_Mode]]></COLUMNNAME>
 <!--EB5D06F6E1CE4BE0B415A18E7FE52ADF-->  <AD_TABLE_ID><![CDATA[C2DF98CC43D74F39988C581ECDE34852]]></AD_TABLE_ID>
 <!--EB5D06F6E1CE4BE0B415A18E7FE52ADF-->  <AD_REFERENCE_ID><![CDATA[17]]></AD_REFERENCE_ID>
