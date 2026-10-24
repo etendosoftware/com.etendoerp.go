@@ -19,12 +19,15 @@ package com.etendoerp.go.rest;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
@@ -34,6 +37,8 @@ import java.io.BufferedReader;
 import java.io.PrintWriter;
 import java.io.StringReader;
 import java.io.StringWriter;
+import java.util.Collections;
+import java.util.Optional;
 
 import javax.servlet.http.Cookie;
 import javax.servlet.http.HttpServletRequest;
@@ -41,6 +46,7 @@ import javax.servlet.http.HttpServletResponse;
 
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.model.ad.system.Client;
@@ -53,9 +59,14 @@ import com.etendoerp.go.payment.SubscriptionService;
 import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.data.CheckoutRequest;
+import com.etendoerp.go.schemaforge.data.Plan;
+import com.etendoerp.go.schemaforge.data.Subscription;
 import com.etendoerp.go.session.GoSessionRecord;
 import com.etendoerp.go.session.GoSessionSecurity;
 import com.etendoerp.go.session.GoSessionService;
+import com.etendoerp.go.usage.IsolatedReader;
+import com.etendoerp.go.usage.quota.QuotaEvaluator;
+import com.etendoerp.go.usage.quota.TenantQuotas;
 
 /**
  * Unit tests for the {@code __Host-go_session} cookie path on the billing endpoints (ETP-5443,
@@ -69,7 +80,10 @@ import com.etendoerp.go.session.GoSessionService;
  * to, never anything the caller supplies in the query string, headers or body.
  *
  * <p>ETP-5051 (O-1) — a cookie session that has entered an environment resolves that environment's
- * own subscription, not the account's newest one.
+ * own subscription, not the account's newest one — on the page, in its plan quotas and in the
+ * Customer Portal — and an entered environment without a purchase of its own answers "no
+ * subscription" instead of falling back to another environment's. An account-level session
+ * ({@code ctxClientId} absent, blank or {@code "0"}) and the legacy bearer keep the newest.
  *
  * @covers com.etendoerp.go.rest.EtendoGoJwtServlet
  */
@@ -151,6 +165,100 @@ public class EtendoGoJwtServletBillingCookieAuthTest {
     verify(fixture.lifecycle).resolve(ENTERED_CLIENT);
     verify(fixture.subscriptionService).findLatest(ENTERED_CLIENT);
     verify(fixture.subscriptionService, never()).findLatest(NEWEST_CLIENT);
+  }
+
+  /**
+   * An entered environment the account has no billable purchase for (a demo, or one it was only
+   * invited into) shows "no subscription" — never the account's newest purchase of another one.
+   */
+  @Test
+  public void cookieGetSubscriptionInsideAnEnvironmentWithoutItsOwnPurchaseHasNoSubscription()
+      throws Exception {
+    Fixture fixture = new Fixture();
+    when(fixture.goSessionService.resolve(SESSION_TOKEN))
+        .thenReturn(fixture.enteredSession(ENTERED_CLIENT));
+    CheckoutRequest newest = purchase("sub_newest", "cus_newest", NEWEST_CLIENT);
+    when(fixture.requestStore.findSubscriptionForAccount(ACCOUNT_ID, ACCOUNT_EMAIL))
+        .thenReturn(newest);
+    when(fixture.requestStore.findSubscriptionForAccountClient(ACCOUNT_ID, ACCOUNT_EMAIL,
+        ENTERED_CLIENT)).thenReturn(null);
+
+    ResponseCapture resp = cookieGetSubscription(fixture);
+
+    assertEquals(200, resp.status);
+    JSONObject body = resp.json();
+    assertFalse(body.getBoolean("hasSubscription"));
+    assertEquals(1, body.length());
+    verify(fixture.requestStore).findSubscriptionForAccountClient(ACCOUNT_ID, ACCOUNT_EMAIL,
+        ENTERED_CLIENT);
+    verify(fixture.requestStore, never()).findSubscriptionForAccount(anyString(), anyString());
+    verifyNoInteractions(fixture.portalService, fixture.lifecycle, fixture.subscriptionService);
+  }
+
+  /**
+   * {@code "0"} is the System client: a session with it, or with a blank client, has entered no
+   * environment, so it stays on the account's newest purchase.
+   */
+  @Test
+  public void cookieGetSubscriptionWithTheSystemOrABlankClientStaysAccountLevel()
+      throws Exception {
+    for (String accountLevelClient : new String[] { "0", "   " }) {
+      Fixture fixture = new Fixture();
+      when(fixture.goSessionService.resolve(SESSION_TOKEN))
+          .thenReturn(fixture.enteredSession(accountLevelClient));
+      when(fixture.requestStore.findSubscriptionForAccount(ACCOUNT_ID, ACCOUNT_EMAIL))
+          .thenReturn(null);
+
+      ResponseCapture resp = cookieGetSubscription(fixture);
+
+      assertEquals(accountLevelClient, 200, resp.status);
+      assertFalse(resp.json().getBoolean("hasSubscription"));
+      verify(fixture.requestStore).findSubscriptionForAccount(ACCOUNT_ID, ACCOUNT_EMAIL);
+      verify(fixture.requestStore, never()).findSubscriptionForAccountClient(anyString(),
+          anyString(), anyString());
+    }
+  }
+
+  /**
+   * The plan quotas follow the entered environment too: its own {@code ETGO_SUBSCRIPTION} row is
+   * read and the quota evaluator measures that tenant, never the newest purchase's.
+   */
+  @Test
+  public void cookieGetSubscriptionInsideAnEnvironmentMeasuresThatEnvironmentsQuotas()
+      throws Exception {
+    Fixture fixture = new Fixture();
+    when(fixture.goSessionService.resolve(SESSION_TOKEN))
+        .thenReturn(fixture.enteredSession(ENTERED_CLIENT));
+    CheckoutRequest newest = purchase("sub_newest", "cus_newest", NEWEST_CLIENT);
+    when(fixture.requestStore.findSubscriptionForAccount(ACCOUNT_ID, ACCOUNT_EMAIL))
+        .thenReturn(newest);
+    CheckoutRequest entered = purchase("sub_entered", "cus_entered", ENTERED_CLIENT);
+    when(fixture.requestStore.findSubscriptionForAccountClient(ACCOUNT_ID, ACCOUNT_EMAIL,
+        ENTERED_CLIENT)).thenReturn(entered);
+    when(fixture.portalService.retrieveSubscription("sub_entered")).thenReturn(fixture.live);
+    Plan plan = mock(Plan.class);
+    when(plan.getSearchKey()).thenReturn("productive-monthly");
+    when(plan.getName()).thenReturn("Productive monthly");
+    Subscription subscription = mock(Subscription.class);
+    when(subscription.getPlan()).thenReturn(plan);
+    when(fixture.subscriptionService.findLatest(ENTERED_CLIENT))
+        .thenReturn(Optional.of(subscription));
+    when(fixture.planCatalog.listActiveQuotas(plan)).thenReturn(Collections.emptyList());
+    QuotaEvaluator evaluator = mock(QuotaEvaluator.class);
+    when(evaluator.evaluate(any(TenantQuotas.class), eq(QuotaEvaluator.Scope.ACCOUNT)))
+        .thenReturn(Collections.emptyList());
+    fixture.servlet.quotaEvaluator = evaluator;
+    fixture.servlet.quotaReads = IsolatedReader.INLINE;
+
+    ResponseCapture resp = cookieGetSubscription(fixture);
+
+    assertEquals(200, resp.status);
+    assertEquals("productive-monthly", resp.json().getString("planKey"));
+    verify(fixture.subscriptionService).findLatest(ENTERED_CLIENT);
+    verify(fixture.subscriptionService, never()).findLatest(NEWEST_CLIENT);
+    ArgumentCaptor<TenantQuotas> tenant = ArgumentCaptor.forClass(TenantQuotas.class);
+    verify(evaluator).evaluate(tenant.capture(), eq(QuotaEvaluator.Scope.ACCOUNT));
+    assertEquals(ENTERED_CLIENT, tenant.getValue().getClientId());
   }
 
   // ETP-5675 — the cookie is the browser profile's, so a tab still showing another account sends
@@ -306,6 +414,54 @@ public class EtendoGoJwtServletBillingCookieAuthTest {
   }
 
   /**
+   * Every environment has its own Stripe customer: inside one, the portal must open for THAT
+   * customer, the one whose subscription the page shows — never the newest purchase's.
+   */
+  @Test
+  public void cookiePostPortalInsideAnEnvironmentOpensThatEnvironmentsCustomer()
+      throws Exception {
+    Fixture fixture = new Fixture();
+    when(fixture.goSessionService.resolve(SESSION_TOKEN))
+        .thenReturn(fixture.enteredSession(ENTERED_CLIENT));
+    CheckoutRequest newest = purchase("sub_newest", "cus_newest", NEWEST_CLIENT);
+    when(fixture.requestStore.findSubscriptionForAccount(ACCOUNT_ID, ACCOUNT_EMAIL))
+        .thenReturn(newest);
+    CheckoutRequest entered = purchase("sub_entered", "cus_entered", ENTERED_CLIENT);
+    when(fixture.requestStore.findSubscriptionForAccountClient(ACCOUNT_ID, ACCOUNT_EMAIL,
+        ENTERED_CLIENT)).thenReturn(entered);
+    when(fixture.portalService.createSession("cus_entered")).thenReturn(
+        new JSONObject().put("url", "https://billing.stripe.test/entered"));
+
+    ResponseCapture resp = cookiePostPortal(fixture);
+
+    assertEquals(200, resp.status);
+    assertEquals("https://billing.stripe.test/entered", resp.json().getString("url"));
+    verify(fixture.portalService).createSession("cus_entered");
+    verify(fixture.portalService, never()).createSession("cus_newest");
+    verify(fixture.requestStore, never()).findSubscriptionForAccount(anyString(), anyString());
+  }
+
+  @Test
+  public void cookiePostPortalInsideAnEnvironmentWithoutItsOwnPurchaseAnswers404()
+      throws Exception {
+    Fixture fixture = new Fixture();
+    when(fixture.goSessionService.resolve(SESSION_TOKEN))
+        .thenReturn(fixture.enteredSession(ENTERED_CLIENT));
+    CheckoutRequest newest = purchase("sub_newest", "cus_newest", NEWEST_CLIENT);
+    when(fixture.requestStore.findSubscriptionForAccount(ACCOUNT_ID, ACCOUNT_EMAIL))
+        .thenReturn(newest);
+    when(fixture.requestStore.findSubscriptionForAccountClient(ACCOUNT_ID, ACCOUNT_EMAIL,
+        ENTERED_CLIENT)).thenReturn(null);
+
+    ResponseCapture resp = cookiePostPortal(fixture);
+
+    assertEquals(404, resp.status);
+    assertEquals("NO_SUBSCRIPTION", resp.errorCode());
+    verify(fixture.requestStore, never()).findSubscriptionForAccount(anyString(), anyString());
+    verifyNoInteractions(fixture.portalService);
+  }
+
+  /**
    * The session authenticator requires the allowed {@code Origin} AND the CSRF token — a
    * correct {@code X-Go-CSRF} does not compensate for a disallowed origin, so this must fail on its
    * own, distinct from the CSRF-missing tests above (which use an allowed origin).
@@ -360,6 +516,10 @@ public class EtendoGoJwtServletBillingCookieAuthTest {
     }
     assertEquals(404, postResp.status);
     assertEquals("NO_SUBSCRIPTION", postResp.errorCode());
+    // ETP-5051 (O-1) — a platform-token bearer carries no environment: account level, always.
+    verify(fixture.requestStore, times(2)).findSubscriptionForAccount(ACCOUNT_ID, ACCOUNT_EMAIL);
+    verify(fixture.requestStore, never()).findSubscriptionForAccountClient(anyString(),
+        anyString(), anyString());
   }
 
   /**
@@ -434,6 +594,7 @@ public class EtendoGoJwtServletBillingCookieAuthTest {
     final TenantEnvironmentLifecycleService lifecycle =
         mock(TenantEnvironmentLifecycleService.class);
     final SubscriptionService subscriptionService = mock(SubscriptionService.class);
+    final PlanCatalogService planCatalog = mock(PlanCatalogService.class);
     final Account account = mock(Account.class);
     final StripeCustomerPortalService.SubscriptionDetail live =
         mock(StripeCustomerPortalService.SubscriptionDetail.class);
@@ -443,7 +604,7 @@ public class EtendoGoJwtServletBillingCookieAuthTest {
       servlet.stripeCustomerPortalService = portalService;
       servlet.tenantEnvironmentLifecycleService = lifecycle;
       servlet.subscriptionService = subscriptionService;
-      servlet.planCatalogService = mock(PlanCatalogService.class);
+      servlet.planCatalogService = planCatalog;
       when(account.getId()).thenReturn(ACCOUNT_ID);
       when(account.getEmail()).thenReturn(ACCOUNT_EMAIL);
       when(live.getPlan()).thenReturn("Productive");
@@ -475,6 +636,34 @@ public class EtendoGoJwtServletBillingCookieAuthTest {
     when(client.getId()).thenReturn(clientId);
     when(purchase.getCreatedClient()).thenReturn(client);
     return purchase;
+  }
+
+  /** Sends {@code GET /billing/subscription} with the session cookie and no foreign ids. */
+  private static ResponseCapture cookieGetSubscription(Fixture fixture) throws Exception {
+    HttpServletRequest req = cookieGet(SUBSCRIPTION_PATH, SESSION_TOKEN, false);
+    ResponseCapture resp = mockResponse();
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
+        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class);
+        MockedStatic<EnvironmentAccessEnforcementFlag> flag =
+            mockStatic(EnvironmentAccessEnforcementFlag.class)) {
+      dal.when(() -> EtendoGoJwtDalHelper.findActiveAccountById(ACCOUNT_ID))
+          .thenReturn(fixture.account);
+      fixture.servlet.doGet(req, resp.response);
+    }
+    return resp;
+  }
+
+  /** Sends {@code POST /billing/subscription/portal} with the session cookie and a valid CSRF. */
+  private static ResponseCapture cookiePostPortal(Fixture fixture) throws Exception {
+    HttpServletRequest req = cookiePost(PORTAL_PATH, SESSION_TOKEN, CSRF, "{}");
+    ResponseCapture resp = mockResponse();
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
+        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dal.when(() -> EtendoGoJwtDalHelper.findActiveAccountById(ACCOUNT_ID))
+          .thenReturn(fixture.account);
+      fixture.servlet.doPost(req, resp.response);
+    }
+    return resp;
   }
 
   /** A GET request carrying (or not) the {@code __Host-go_session} cookie; GET is CSRF-exempt. */
