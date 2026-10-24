@@ -452,7 +452,9 @@ class QuotaEvaluatorTest {
 
     private Optional<QuotaEvaluation> refusal(QuotaEvaluator on, QuotaDefinition quota,
         long chargedEarlier) {
-      return on.refusalForCreate(tenant(CLIENT, quota), quota, period, created, chargedEarlier);
+      TenantQuotas tenant = tenant(CLIENT, quota);
+      return on.refusalForCreate(tenant, quota, period,
+          on.consumptionBeforeCreate(tenant, quota, period, created) + chargedEarlier);
     }
 
     private void before(QuotaDefinition quota, long consumed) {
@@ -541,11 +543,12 @@ class QuotaEvaluatorTest {
     void missingInputsRefuseNothingAndMeasureNothing() {
       QuotaDefinition docs = quota("DOCS", "block", 0L, null).build();
 
-      assertTrue(evaluator.refusalForCreate(null, docs, period, created, 0L).isEmpty());
-      assertTrue(evaluator.refusalForCreate(tenant(CLIENT, docs), null, period, created, 0L)
-          .isEmpty());
-      assertTrue(evaluator.refusalForCreate(tenant(CLIENT, docs), docs, null, created, 0L)
-          .isEmpty());
+      assertTrue(evaluator.refusalForCreate(null, docs, period, 5L).isEmpty());
+      assertTrue(evaluator.refusalForCreate(tenant(CLIENT, docs), null, period, 5L).isEmpty());
+      assertTrue(evaluator.refusalForCreate(tenant(CLIENT, docs), docs, null, 5L).isEmpty());
+      assertEquals(0L, evaluator.consumptionBeforeCreate(null, docs, period, created));
+      assertEquals(0L, evaluator.consumptionBeforeCreate(tenant(CLIENT, docs), docs, null,
+          created));
       verifyNoInteractions(reader);
     }
 
@@ -575,7 +578,7 @@ class QuotaEvaluatorTest {
     }
 
     private void check(QuotaDefinition quota) {
-      locking.refusalForCreate(tenant(CLIENT, quota), quota, period, List.of("ROW-1"), 0L);
+      locking.consumptionBeforeCreate(tenant(CLIENT, quota), quota, period, List.of("ROW-1"));
     }
 
     @Test

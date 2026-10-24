@@ -288,6 +288,8 @@ class QuotaWriteGuardTest {
 
       assertTrue(refusal.isPresent());
       assertEquals(Long.valueOf(10L), refusal.get().getConsumed());
+      // ETP-5051 re-review N5: the consumption before the create is read once per quota.
+      verify(reader, times(1)).readBeforeCreate(eq(INVOICES), eq(CLIENT), any(), any());
     }
 
     @Test

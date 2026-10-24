@@ -148,14 +148,22 @@ public class QuotaWriteGuard {
     return Optional.empty();
   }
 
-  /** The created rows against one quota, charged one after the other. */
+  /**
+   * The created rows against one quota, charged one after the other on top of the consumption
+   * before the create. That consumption is read once for the quota — lazily, on the first row the
+   * quota counts in the window, so a create none of whose rows count (a backdated row) reads none.
+   */
   private Optional<QuotaEvaluation> refusalForQuota(TenantQuotas tenant, QuotaDefinition quota,
       QuotaPeriod period, String entityName, Collection<String> recordIds) {
+    Long before = null;
     long charged = 0L;
     for (String recordId : recordIds) {
       if (countsInWindow(tenant, quota, period, entityName, recordId)) {
+        if (before == null) {
+          before = evaluator.consumptionBeforeCreate(tenant, quota, period, recordIds);
+        }
         Optional<QuotaEvaluation> refusal =
-            evaluator.refusalForCreate(tenant, quota, period, recordIds, charged);
+            evaluator.refusalForCreate(tenant, quota, period, before + charged);
         if (refusal.isPresent()) {
           return refusal;
         }
