@@ -159,6 +159,29 @@ class UsageFreshnessTest {
       assertFalse(failing.checkLag());
       assertTrue(warnings().isEmpty());
     }
+
+    /**
+     * REPRO (ETP-5051 re-review W4): a failed read may have waited the whole isolated-read timeout.
+     * It is cached for the minute like a successful one, so a broken run log costs one attempt a
+     * minute, not one per consumption read on the write path.
+     */
+    @Test
+    void aFailedReadIsRetriedAtMostOnceAMinute() {
+      AtomicInteger attempts = new AtomicInteger();
+      UsageFreshness failing = new UsageFreshness(clock::get, () -> {
+        attempts.incrementAndGet();
+        throw new IllegalStateException("isolated read timed out");
+      }, () -> THRESHOLD);
+
+      assertFalse(failing.checkLag());
+      clock.addAndGet(MINUTE - 1);
+      assertFalse(failing.checkLag());
+      assertEquals(1, attempts.get());
+
+      clock.addAndGet(1);
+      assertFalse(failing.checkLag());
+      assertEquals(2, attempts.get());
+    }
   }
 
   @Nested

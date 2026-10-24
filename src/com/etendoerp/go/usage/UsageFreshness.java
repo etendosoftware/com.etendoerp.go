@@ -97,8 +97,11 @@ public class UsageFreshness {
       long now = clock.getAsLong();
       CachedRun current = cached.get();
       if (current == null || now - current.readAt >= CACHE_MS) {
-        current = new CachedRun(now, lastSuccessfulRun.get());
+        current = readRun(now);
         cached.set(current);
+      }
+      if (current.failed) {
+        return false;
       }
       Date last = current.lastRun;
       long threshold = lagThresholdMs.getAsLong();
@@ -118,14 +121,30 @@ public class UsageFreshness {
     }
   }
 
-  /** One read of the run log: when it was read, and what it said. Immutable. */
+  /**
+   * Reads the run log once. A failed read is cached like a successful one, so a slow or broken
+   * read (it may wait up to the isolated read's timeout) is retried once a minute, not on every
+   * consumption read.
+   */
+  private CachedRun readRun(long now) {
+    try {
+      return new CachedRun(now, lastSuccessfulRun.get(), false);
+    } catch (RuntimeException e) {
+      log.debug("Could not read the usage run log; not checking the lag for a minute", e);
+      return new CachedRun(now, null, true);
+    }
+  }
+
+  /** One read of the run log: when it was read, what it said, and whether it failed. Immutable. */
   private static final class CachedRun {
     private final long readAt;
     private final Date lastRun;
+    private final boolean failed;
 
-    private CachedRun(long readAt, Date lastRun) {
+    private CachedRun(long readAt, Date lastRun, boolean failed) {
       this.readAt = readAt;
       this.lastRun = lastRun == null ? null : new Date(lastRun.getTime());
+      this.failed = failed;
     }
   }
 
