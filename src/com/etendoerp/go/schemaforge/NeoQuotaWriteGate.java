@@ -22,7 +22,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 
-import javax.persistence.PersistenceException;
 import javax.servlet.http.HttpServletResponse;
 
 import org.apache.commons.lang3.StringUtils;
@@ -319,13 +318,17 @@ public final class NeoQuotaWriteGate {
    * anywhere in the cause chain, or a transaction Hibernate already marked rollback-only. Such a
    * transaction cannot be committed, so the create must fail closed.
    *
+   * <p>A bare {@code PersistenceException} is not enough: every {@code HibernateException} is one,
+   * including a {@code QueryException} raised while parsing HQL, before any SQL reached the
+   * database. Hibernate wraps a real database failure with its {@link JDBCException} as the cause,
+   * so the chain walk still finds it.
+   *
    * @param error the check's failure
    * @return {@code true} when the transaction is lost
    */
   static boolean isTransactionPoisoned(Throwable error) {
     for (Throwable cause = error; cause != null; cause = nextCause(cause)) {
-      if (cause instanceof SQLException || cause instanceof JDBCException
-          || cause instanceof PersistenceException) {
+      if (cause instanceof SQLException || cause instanceof JDBCException) {
         return true;
       }
     }

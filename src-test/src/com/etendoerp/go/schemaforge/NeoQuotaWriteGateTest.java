@@ -281,6 +281,26 @@ class NeoQuotaWriteGateTest {
     }
 
     /**
+     * REPRO (ETP-5051 re-review W1): a Hibernate {@code QueryException} is a
+     * {@code PersistenceException} but is raised while parsing HQL, before any SQL ran. The
+     * transaction is intact, so the create stands and is committed.
+     */
+    @Test
+    void aQueryParseErrorBeforeAnySqlFailsOpen() throws Exception {
+      when(guard.refusalFor(eq(ENTITY), any())).thenThrow(new IllegalStateException("wrapped",
+          new org.hibernate.QueryException("unexpected token: )")));
+
+      NeoResponse response;
+      try (NeoQuotaWriteGate.Create create = begin(false)) {
+        response = create.finish(created("ROW-1"));
+      }
+
+      assertNull(response);
+      verify(dal).commitAndClose();
+      verify(dal, never()).rollbackAndClose();
+    }
+
+    /**
      * ETP-5051 review W1: the gate's own commit failing (a deferred constraint) must reach the
      * caller as core's error JSON, exactly as a failing self-committing add did, not as an
      * exception.
