@@ -11,7 +11,7 @@ before promising a customer that something can be capped.
 | The HTTP contract: the 403 `QUOTA_EXCEEDED` and 500 `QUOTA_CHECK_FAILED` bodies, the gate's transaction handling, the cache, locks, failure modes | [`neo-headless.md`](neo-headless.md) §4.16 |
 | The `quotas` and `accessEnforced` fields of `GET /sws/go/environments`, `planQuotas` of `GET /sws/go/billing/subscription` | [`feature-flags-and-tenant-upgrade.md`](feature-flags-and-tenant-upgrade.md) §2 and §3 (*Exposure in `/environments`*) |
 | The `usage-aggregation-schedule` flag | [`feature-flags-and-tenant-upgrade.md`](feature-flags-and-tenant-upgrade.md) §1 |
-| The decisions behind each rule, and the accepted limits as register topics | [`open-and-notable-topics.md`](open-and-notable-topics.md) §4.19, §5.1–§5.9, §5.15 |
+| The decisions behind each rule, and the accepted limits as register topics | [`open-and-notable-topics.md`](open-and-notable-topics.md) §4.19, §5.1–§5.9, §5.15, §5.18 |
 | How usage is counted and stored (catalog, counting modes, settling window, run log) | `schema_forge/docs/usage-measurement.md` |
 | What the SPA shows (banner, `/account`, translated refusals) | `schema_forge/docs/generated-custom-windows/app-shell-functional-flows.md` §3.2a-bis … §3.2a-quater |
 | The product requirements, including the ladder of §4 below | `schema_forge/docs/plans/2026-08-27-recurring-billing-and-resource-limits-prd.md` §7, §9.2 |
@@ -270,7 +270,8 @@ Each was accepted during ETP-5051; none is a bug to fix silently.
 - **The SPA's CSV/XLSX import shows a generic row error.** The import writes through
   `/sws/neo/batch`, so a capped entity **is** refused, but the row message is decided in core's
   `importEngine.classifyImportError` (`@etendosoftware/app-shell-core`), which has no quota case
-  yet; the user sees a generic row error, not "plan limit reached" (register §4.20).
+  yet; the user sees a generic row error, not "plan limit reached". The fix is owed to
+  [ETP-5911](https://etendoproject.atlassian.net/browse/ETP-5911) (register §5.18).
 - **The last, partial day of a period is charged to the next period.** The window is
   day-aligned, so a row dated on the day the period ends, created before the renewal time on that
   day, falls outside the ending period's window: it is not charged to it, and a `block` quota does

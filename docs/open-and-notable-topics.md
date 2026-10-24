@@ -32,7 +32,8 @@ a moved topic leaves a gap in its old section rather than shifting its neighbour
 takes the next free number of the section it belongs to — a topic decided on arrival too (§5.15
 sits in §6 under its §5 number). A gap with no §6 entry (§3.1, §3.9 and §5.11 among them) is a
 topic deleted on or before 2026-09-28 under the earlier rule, or one removed or moved later and
-named in its section's note (§1.4, §1.6, §1.7, §1.9, §2.4, §3.8); its history is in git.
+named in its section's note (§1.4, §1.6, §1.7, §1.9, §2.4, §3.8, §4.20, §4.21); its history is in
+git.
 
 ---
 
@@ -699,6 +700,10 @@ header as well.
 *Fixed on arrival and recorded in §6 on 2026-10-14: §4.14. Moved to §6 on 2026-10-23: §4.8.
 On 2026-10-24: §4.17. Marked resolved inside their open topic on 2026-10-23: §4.13 items 11 and
 12.*
+*Moved to §5 on 2026-10-24: §4.20 "The CSV/XLSX import shows a quota refusal as a generic row
+error" — ticket created, now §5.18 (ETP-5911); §4.21 "A request right after
+`POST /sws/go/session` or `/session/environment` can get a 401" — ticket created, now §5.19
+(ETP-5912).*
 
 ### 🟡 4.4 The at-sign guard is over-tested (ETP-5050)
 
@@ -1165,48 +1170,12 @@ workers (64 queued, more refused and reported as `[]`), with a 25 s `statement_t
 worker's transaction and a 30 s wait in the caller (re-review W2–W4). The usage-lag WARN is checked
 by the reports and the usage job, never on a create.
 
-### 🟡 4.20 The CSV/XLSX import shows a quota refusal as a generic row error (ETP-5051)
-
-**Ticket:** no ticket. Related ETP-5051 (found in its frontend work); the fix belongs to
-schema_forge_core.
-
-The SPA's generic import (`ImportDialog` in `@etendosoftware/app-shell-core`) writes through
-`/sws/neo/batch`, so a create of a capped entity **is** refused: 403 `QUOTA_EXCEEDED` (or 500
-`QUOTA_CHECK_FAILED`) at `error.detail.error` of the batch failure envelope, and nothing of that
-batch is saved. The refusal itself is correct; only its message is lost. The row message is decided
-in core's `importEngine.classifyImportError`, which has no quota case, so the user sees the generic
-row error instead of "plan limit reached". Every other SPA write path translates both codes
-(`schema_forge/docs/generated-custom-windows/app-shell-functional-flows.md` §3.2a-ter).
-
-**Fix:** a quota case in `classifyImportError` in schema_forge_core, reading the code at
-`error.detail.error` as `extractQuotaExceeded` / `isQuotaCheckFailed` (`lib/planQuotas.js`) do in
-the functional repo, then a core version bump. Workaround meanwhile: none in the import; the
-quota banner and `/account` show the limit.
-
-### 🟡 4.21 A request right after `POST /sws/go/session` or `/session/environment` can get a 401
-
-**Ticket:** no ticket. Pre-existing; observed while testing ETP-5051, outside its scope.
-
-Right after `POST /sws/go/session` (login) or `POST /sws/go/session/environment` (environment
-entry), an immediate follow-up request with the freshly rotated session cookie and CSRF token was
-answered 401 in about one of three attempts (seen with `curl` against a local Tomcat on
-`GET /sws/go/environments` and `GET /sws/go/billing/subscription`); the same request moments later
-succeeded. The pattern looks like **commit-after-response**: the response, with the new session
-cookie, reaches the client before the transaction that stores the session is committed, so a fast
-next request does not find it yet. Not confirmed in the code.
-
-**Workaround:** none in the product. In the observation a repeat of the same request moments
-later went through; whether the SPA hits the window in practice was not measured.
-
-**To investigate:** when the session row is committed relative to writing the response in the
-session endpoints (ADR `adr/0001-backend-managed-session.md`), and whether the rotation on
-environment entry has the same order.
-
 ## 5. Handed forward to later tickets
 
 *Moved to §6 on 2026-09-28: §5.7, §5.10, §5.12; §5.15 was decided on arrival and sits there too.
 On 2026-10-23: §5.14, §5.5. On 2026-10-24 (ETP-5051): §5.1, §5.6, §5.8, §5.9. Moved in from §1
-on 2026-10-23: §1.9, now §5.16; §1.4, now §5.17.*
+on 2026-10-23: §1.9, now §5.16; §1.4, now §5.17. Moved in from §4 on 2026-10-24: §4.20, now
+§5.18; §4.21, now §5.19.*
 
 ### 🔴 5.13 `END_DATE` records what happened, never what will happen — and any value closes the row
 
@@ -1326,6 +1295,46 @@ pay that cost on the two-hour cadence of §5.15.
 - **Consequences:** the same query count as today; a write failure loses only that tenant's period,
   which the next run retries; commits become one per tenant instead of one per resource-day. A
   failing counting query still fails for every tenant — inherent to a grouped query.
+
+### 🟡 5.18 The CSV/XLSX import shows a quota refusal as a generic row error — owed to ETP-5911
+
+**Ticket:** owner [ETP-5911](https://etendoproject.atlassian.net/browse/ETP-5911). Related ETP-5051
+(found in its frontend work); the fix belongs to schema_forge_core.
+Was §4.20 (ticket created 2026-10-24, Martin Taal).
+
+The SPA's generic import (`ImportDialog` in `@etendosoftware/app-shell-core`) writes through
+`/sws/neo/batch`, so a create of a capped entity **is** refused: 403 `QUOTA_EXCEEDED` (or 500
+`QUOTA_CHECK_FAILED`) at `error.detail.error` of the batch failure envelope, and nothing of that
+batch is saved. The refusal itself is correct; only its message is lost. The row message is decided
+in core's `importEngine.classifyImportError`, which has no quota case, so the user sees the generic
+row error instead of "plan limit reached". Every other SPA write path translates both codes
+(`schema_forge/docs/generated-custom-windows/app-shell-functional-flows.md` §3.2a-ter).
+
+**Fix:** a quota case in `classifyImportError` in schema_forge_core, reading the code at
+`error.detail.error` as `extractQuotaExceeded` / `isQuotaCheckFailed` (`lib/planQuotas.js`) do in
+the functional repo, then a core version bump. Workaround meanwhile: none in the import; the
+quota banner and `/account` show the limit.
+
+### 🟡 5.19 A request right after `POST /sws/go/session` or `/session/environment` can get a 401 — owed to ETP-5912
+
+**Ticket:** owner [ETP-5912](https://etendoproject.atlassian.net/browse/ETP-5912). Related
+ETP-5051 (where it was observed, outside its scope; pre-existing) and ETP-5455 (the backend-managed
+session). Was §4.21 (ticket created 2026-10-24, Martin Taal).
+
+Right after `POST /sws/go/session` (login) or `POST /sws/go/session/environment` (environment
+entry), an immediate follow-up request with the freshly rotated session cookie and CSRF token was
+answered 401 in about one of three attempts (seen with `curl` against a local Tomcat on
+`GET /sws/go/environments` and `GET /sws/go/billing/subscription`); the same request moments later
+succeeded. The pattern looks like **commit-after-response**: the response, with the new session
+cookie, reaches the client before the transaction that stores the session is committed, so a fast
+next request does not find it yet. Not confirmed in the code.
+
+**Workaround:** none in the product. In the observation a repeat of the same request moments
+later went through; whether the SPA hits the window in practice was not measured.
+
+**To investigate:** when the session row is committed relative to writing the response in the
+session endpoints (ADR `adr/0001-backend-managed-session.md`), and whether the rotation on
+environment entry has the same order.
 
 ---
 
@@ -1792,7 +1801,7 @@ scheduling.
 - `plans/2026-09-15-etp-5050-usage-measurement-design.md` — the usage engine design
 - `plan-quotas.md` — the operator/developer entry point for plan quotas (ETP-5051): where they are
   enforced and where only reported, the extensibility ladder, capping a resource, freshness and the
-  accepted limits (§4.19, §4.20)
+  accepted limits (§4.19, and §5.18 — the import message, owed to ETP-5911)
 - `schema_forge/docs/usage-measurement.md` — §4 is the full flow-versus-stock analysis
 - `schema_forge/docs/plans/2026-08-27-recurring-billing-and-resource-limits-prd.md` — the governing PRD
 - `feature-flags-and-tenant-upgrade.md` — paywall, plan marker, transitional fallback, the
