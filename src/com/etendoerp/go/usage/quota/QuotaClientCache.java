@@ -60,17 +60,21 @@ public class QuotaClientCache {
   /** The most entries kept at once. */
   static final int MAX_ENTRIES = 10_000;
 
+  /** {@link #lastSweep} before the first sweep; a monotonic clock may read negative. */
+  private static final long NEVER = Long.MIN_VALUE;
+
   private final QuotaLookup lookup;
   private final LongSupplier clock;
   private final int maxEntries;
   private final Map<String, Entry> entries = new ConcurrentHashMap<>();
-  private final AtomicLong lastSweep = new AtomicLong();
+  private final AtomicLong lastSweep = new AtomicLong(NEVER);
 
   /**
    * A cache over the given lookup and clock, holding at most {@link #MAX_ENTRIES} clients.
    *
    * @param lookup builds a client's entry; called at most once per client per {@link #TTL_MS}
-   * @param clock the time source, in milliseconds
+   * @param clock the time source, in milliseconds; only differences are used, so a monotonic
+   *     clock of any origin fits ({@code System.nanoTime() / 1_000_000} in production)
    */
   public QuotaClientCache(QuotaLookup lookup, LongSupplier clock) {
     this(lookup, clock, MAX_ENTRIES);
@@ -107,7 +111,7 @@ public class QuotaClientCache {
 
   private void store(String clientId, Entry entry, long now) {
     long swept = lastSweep.get();
-    if (now - swept >= TTL_MS && lastSweep.compareAndSet(swept, now)) {
+    if ((swept == NEVER || now - swept >= TTL_MS) && lastSweep.compareAndSet(swept, now)) {
       evictExpired(now);
     }
     if (entries.size() >= maxEntries && !entries.containsKey(clientId)) {

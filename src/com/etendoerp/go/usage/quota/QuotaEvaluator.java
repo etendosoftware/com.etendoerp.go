@@ -19,6 +19,7 @@ package com.etendoerp.go.usage.quota;
 
 import java.time.Clock;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.Date;
 import java.util.List;
@@ -177,49 +178,52 @@ public class QuotaEvaluator {
   }
 
   /**
-   * The NEO write check for one created row that the resource counts (contract §3). Only a
-   * {@code block} quota on that resource can refuse.
+   * The current period of the NEO write check, or null when the tenant has none — then nothing is
+   * checked (§5.9), with the throttled WARN of a periodless open row.
    *
-   * <p>The row has already been inserted, in the same transaction, when this runs. A
-   * {@link ConsumptionSource#LIVE live} count therefore includes it — when it falls inside the
-   * counted window — and the consumption before this create is {@code consumed - 1}. The window
-   * ends at local midnight of the period's end ({@link QuotaPeriod#getWindowTo()}), so a row
-   * created on the period's last, partial day is not counted, and the live count is taken as is
-   * then. The {@link ConsumptionSource#AGGREGATE stored aggregate} is lagged and never includes
-   * it, so it is taken as is. A live check first takes the
-   * {@link QuotaLock} of the tenant and resource, so concurrent creates are counted one after the
-   * other; the aggregate's cap is approximate by its lag and takes none. Either way the comparison
-   * is the one
-   * {@link QuotaRules#verdict} makes on the consumption before the create — DENY when it already
-   * reached the included quantity — and the reported {@code consumed} is that same number.
+   * @param tenant the tenant of the created rows
+   * @return the current period, or null
+   */
+  public QuotaPeriod writeCheckPeriod(TenantQuotas tenant) {
+    return tenant == null ? null : currentPeriodOrWarn(tenant, Date.from(clock.instant()));
+  }
+
+  /**
+   * The NEO write check for one created row that the quota's resource counts <b>inside the
+   * period's counted window</b> (contract §3); the caller has established both with
+   * {@link CreatedRowMatcher}. A row dated outside the window does not consume this period and is
+   * never brought here.
+   *
+   * <p>The comparison is on the consumption <em>before</em> this row:
+   * {@link ConsumptionReader#readBeforeCreate} — a {@link ConsumptionSource#LIVE live} count that
+   * leaves out the rows the create inserted, or the {@link ConsumptionSource#AGGREGATE stored
+   * aggregate}, lagged and blind to them — plus the rows of the same create already charged to
+   * this quota. The row is refused when that number plus one exceeds the included quantity, i.e.
+   * when {@link QuotaRules#verdict} answers DENY for it; the reported {@code consumed} is that same
+   * number. A live check first takes the {@link QuotaLock} of the tenant and resource, so
+   * concurrent creates are counted one after the other; the aggregate's cap is approximate by its
+   * lag and takes none.
    *
    * @param tenant the tenant the row belongs to
-   * @param resourceId the billing resource the row was matched to
-   * @return the DENY evaluation, or empty when the create may stand
+   * @param quota the {@code block} quota whose resource counts the row
+   * @param period the current period, from {@link #writeCheckPeriod}
+   * @param createdIds the ids of every row the create inserted
+   * @param chargedEarlier the rows of the same create already charged to this quota
+   * @return the DENY evaluation, or empty when the row may stand
    */
-  public Optional<QuotaEvaluation> refusalForCreate(TenantQuotas tenant, String resourceId) {
-    if (tenant == null || resourceId == null) {
+  public Optional<QuotaEvaluation> refusalForCreate(TenantQuotas tenant, QuotaDefinition quota,
+      QuotaPeriod period, Collection<String> createdIds, long chargedEarlier) {
+    if (tenant == null || quota == null || period == null
+        || !QuotaRules.MODE_BLOCK.equals(quota.getEnforcementMode())) {
       return Optional.empty();
     }
-    QuotaDefinition quota = blockingQuotaFor(tenant, resourceId);
-    if (quota == null) {
-      return Optional.empty();
-    }
-    Date now = Date.from(clock.instant());
-    QuotaPeriod period = currentPeriodOrWarn(tenant, now);
-    if (period == null) {
-      return Optional.empty();
-    }
-    boolean live = quota.getSource() == ConsumptionSource.LIVE;
-    if (live) {
+    if (quota.getSource() == ConsumptionSource.LIVE) {
       // Serialise with every concurrent create of this tenant and resource until commit, so two
       // creates cannot both count the same consumption and both slip under the quota.
-      lock.acquire(tenant.getClientId(), resourceId);
+      lock.acquire(tenant.getClientId(), quota.getResourceId());
     }
-    long consumed = reader.read(quota, tenant.getClientId(), period);
-    // The new row is in the live count only when it was created inside the counted window.
-    boolean countsTheNewRow = live && now.before(period.getWindowTo());
-    long before = countsTheNewRow ? Math.max(0L, consumed - 1L) : consumed;
+    long before = reader.readBeforeCreate(quota, tenant.getClientId(), period, createdIds)
+        + chargedEarlier;
     QuotaVerdict verdict = QuotaRules.verdict(quota.getEnforcementMode(), quota.getIncludedQty(),
         quota.getWarningThreshold(), before);
     if (verdict != QuotaVerdict.DENY) {
@@ -227,16 +231,6 @@ public class QuotaEvaluator {
     }
     return Optional.of(new QuotaEvaluation(quota, tenant.getPlanInterval(), period, before,
         verdict));
-  }
-
-  private static QuotaDefinition blockingQuotaFor(TenantQuotas tenant, String resourceId) {
-    for (QuotaDefinition quota : tenant.getQuotas()) {
-      if (resourceId.equals(quota.getResourceId())
-          && QuotaRules.MODE_BLOCK.equals(quota.getEnforcementMode())) {
-        return quota;
-      }
-    }
-    return null;
   }
 
   private QuotaEvaluation evaluateOne(TenantQuotas tenant, QuotaDefinition quota,

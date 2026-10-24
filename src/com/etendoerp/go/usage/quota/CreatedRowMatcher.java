@@ -22,21 +22,27 @@ import org.openbravo.dal.service.OBDal;
 import com.etendoerp.go.usage.UsageQueryComposer;
 
 /**
- * ETP-5051 — decides whether a just-created row is counted by a declarative resource, by running
- * the resource's own HQL restriction against that one row. The restriction is never formatted
- * here: {@link UsageQueryComposer#composeRowMatch} wraps it exactly as the usage job's counts do.
+ * ETP-5051 — decides whether a just-created row is counted by a declarative resource in the
+ * current period, by running the resource's own HQL restriction and the period's day bounds against
+ * that one row. The restriction is never formatted
+ * here: {@link UsageQueryComposer#composeRowMatchInRange} wraps it exactly as the usage job's counts
+ * do.
  */
 @FunctionalInterface
 public interface CreatedRowMatcher {
 
   /**
-   * Tells whether a quota's resource counts a created row, and names the row's tenant.
+   * Tells whether a quota's resource counts a created row <b>in a period</b>, and names the row's
+   * tenant: the row must match the resource's restriction and its date property must fall inside
+   * the period's counted window. A row dated outside it does not consume this period.
    *
-   * @param quota the quota; its declarative resource's counted entity and restriction are used
+   * @param quota the quota; its resource's counted entity, date property and restriction are used
    * @param recordId the id of the created row, flushed in the current transaction
-   * @return the row's tenant ({@code AD_CLIENT_ID}) when the resource counts it, else null
+   * @param period the period whose counted window the row must fall in
+   * @return the row's tenant ({@code AD_CLIENT_ID}) when the resource counts it in the period,
+   *     else null
    */
-  String tenantIfCounted(QuotaDefinition quota, String recordId);
+  String tenantIfCounted(QuotaDefinition quota, String recordId, QuotaPeriod period);
 
   /**
    * The production matcher. It runs on the request's own session on purpose: it must see the row
@@ -45,12 +51,14 @@ public interface CreatedRowMatcher {
    * @return the production matcher
    */
   static CreatedRowMatcher dal() {
-    return (quota, recordId) -> {
-      String hql = UsageQueryComposer.composeRowMatch(quota.getCountedEntity(),
-          quota.getHqlRestriction());
+    return (quota, recordId, period) -> {
+      String hql = UsageQueryComposer.composeRowMatchInRange(quota.getCountedEntity(),
+          quota.getDateProperty(), quota.getHqlRestriction());
       // A scalar on the raw session, like the usage counts: no DAL filter, no entity loaded.
       return OBDal.getInstance().getSession().createQuery(hql, String.class)
           .setParameter(UsageQueryComposer.PARAM_RECORD_ID, recordId)
+          .setParameter(UsageQueryComposer.PARAM_DAY_START, period.getWindowFrom())
+          .setParameter(UsageQueryComposer.PARAM_DAY_END, period.getWindowTo())
           .setMaxResults(1)
           .uniqueResult();
     };

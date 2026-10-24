@@ -910,22 +910,17 @@ public class McpToolRouter {
 
     // Wrap for DefaultJsonDataService
     String wrappedBody = McpToolRouterSupport.wrapForSmartclient(filteredBody, dalEntityName, null, log);
-    String result;
     // ETP-5051: the same plan-quota check as the REST create, after the insert and before the
     // commit. etendo_create does not pass through NeoCrudHandler, so it is wired here; the gate
-    // is structural (catalog data only) and a no-op for every entity no block quota counts.
-    NeoResponse quotaRefusal;
-    try (NeoQuotaWriteGate.Create quota = NeoQuotaWriteGate.begin(dalEntityName)) {
-      jsonService = quota.jsonService(jsonService);
-      result = jsonService.add(params, wrappedBody);
-      quotaRefusal = quota.finish(result);
-      // The gate's own commit may have failed: then this is core's error JSON for it.
-      result = quota.result();
+    // is structural (catalog data only) and a no-op for every entity no block quota counts. When
+    // the client's quotas cannot be read the add never runs.
+    NeoQuotaWriteGate.Gated gated = NeoQuotaWriteGate.run(dalEntityName, jsonService,
+        service -> service.add(params, wrappedBody));
+    if (gated.refusal() != null) {
+      return McpHookExecutor.neoResponseToMcpResult(gated.refusal());
     }
-    if (quotaRefusal != null) {
-      return McpHookExecutor.neoResponseToMcpResult(quotaRefusal);
-    }
-    JSONObject responseJson = new JSONObject(result);
+    // The gate's own commit may have failed: then this is core's error JSON for it.
+    JSONObject responseJson = new JSONObject(gated.result());
 
     // userProvided is still the pre-defaults snapshot here (ETP-4793 / IMP-24's witness),
     // so it also answers "did the caller actually send this field" for a 422's fieldErrors —

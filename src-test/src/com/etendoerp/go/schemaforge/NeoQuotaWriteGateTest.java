@@ -54,6 +54,7 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.service.json.JsonConstants;
 
 import com.etendoerp.go.payment.TestLogCapture;
+import com.etendoerp.go.usage.quota.QuotaClientCache;
 import com.etendoerp.go.usage.quota.QuotaDefinition;
 import com.etendoerp.go.usage.quota.QuotaEvaluation;
 import com.etendoerp.go.usage.quota.QuotaPeriod;
@@ -77,6 +78,8 @@ import com.etendoerp.go.usage.quota.QuotaWriteGuard;
 class NeoQuotaWriteGateTest {
 
   private static final String ENTITY = "Invoice";
+  /** The request's client's cache entry the gate reads before the insert and checks after it. */
+  private static final QuotaClientCache.Entry ENTRY = mock(QuotaClientCache.Entry.class);
 
   private QuotaWriteGuard guard;
   private OBDal dal;
@@ -132,7 +135,7 @@ class NeoQuotaWriteGateTest {
   }
 
   private NeoQuotaWriteGate.Create begin(boolean batchOwnsTransaction) {
-    when(guard.appliesTo(ENTITY)).thenReturn(true);
+    when(guard.entryIfChecked(ENTITY)).thenReturn(Optional.of(ENTRY));
     return NeoQuotaWriteGate.begin(ENTITY, guard, batchOwnsTransaction);
   }
 
@@ -142,7 +145,7 @@ class NeoQuotaWriteGateTest {
 
     @Test
     void runsExactlyAsBeforeNoCheckNoCommitNoRollback() throws Exception {
-      when(guard.appliesTo(ENTITY)).thenReturn(false);
+      when(guard.entryIfChecked(ENTITY)).thenReturn(Optional.empty());
 
       try (NeoQuotaWriteGate.Create create = NeoQuotaWriteGate.begin(ENTITY, guard, false)) {
         assertFalse(create.isChecked());
@@ -151,7 +154,7 @@ class NeoQuotaWriteGateTest {
         assertNull(create.finish(created("ROW-1")));
       }
 
-      verify(guard, never()).refusalFor(anyString(), any());
+      verify(guard, never()).refusalFor(any(), anyString(), any());
       obDal.verifyNoInteractions();
     }
   }
@@ -167,7 +170,7 @@ class NeoQuotaWriteGateTest {
 
     @BeforeEach
     void entryBuildFails() {
-      when(guard.appliesTo(ENTITY)).thenThrow(new IllegalStateException("wrapped",
+      when(guard.entryIfChecked(ENTITY)).thenThrow(new IllegalStateException("wrapped",
           new GenericJDBCException("could not execute query",
               new java.sql.SQLException("canceling statement due to statement timeout"))));
     }
@@ -184,10 +187,37 @@ class NeoQuotaWriteGateTest {
       assertCheckFailed(response);
       verify(dal, times(1)).rollbackAndClose();
       verify(dal, never()).commitAndClose();
-      verify(guard, never()).refusalFor(anyString(), any());
+      verify(guard, never()).refusalFor(any(), anyString(), any());
       assertTrue(logs.messagesAt(Level.ERROR).get(0)
           .startsWith("[QUOTA] Could not read the quotas of the request's client"),
           String.valueOf(logs.messagesAt(Level.ERROR)));
+    }
+
+    /**
+     * REPRO (ETP-5051 re-review W1): the gate already knows before the insert that the create
+     * fails closed, so the create itself — callout cascade, add — never runs.
+     */
+    @Test
+    void theCreateNeverRunsAndIsRefusedBeforeTheWrite() throws Exception {
+      NeoQuotaWriteGate.GatedCreate add = mock(NeoQuotaWriteGate.GatedCreate.class);
+
+      NeoQuotaWriteGate.Gated gated = NeoQuotaWriteGate.run(ENTITY, null, add, guard, false);
+
+      assertCheckFailed(gated.refusal());
+      verify(add, never()).run(any());
+      verify(dal, times(1)).rollbackAndClose();
+      verify(dal, never()).commitAndClose();
+    }
+
+    @Test
+    void insideABatchTheCreateNeverRunsAndTheOperationFails() throws Exception {
+      NeoQuotaWriteGate.GatedCreate add = mock(NeoQuotaWriteGate.GatedCreate.class);
+
+      NeoQuotaWriteGate.Gated gated = NeoQuotaWriteGate.run(ENTITY, null, add, guard, true);
+
+      assertCheckFailed(gated.refusal());
+      verify(add, never()).run(any());
+      verify(dal, never()).rollbackAndClose();
     }
 
     @Test
@@ -208,10 +238,31 @@ class NeoQuotaWriteGateTest {
   @DisplayName("a checked create outside a batch")
   class OwnTransaction {
 
+    /**
+     * ETP-5051 re-review N1: the entry read before the insert is the one checked after it — no
+     * second read, so no rebuild in between can change the answer or fail open.
+     */
+    @Test
+    void theEntryReadBeforeTheInsertIsTheOneChecked() throws Exception {
+      when(guard.entryIfChecked(ENTITY)).thenReturn(Optional.of(ENTRY));
+      when(guard.refusalFor(any(), eq(ENTITY), any())).thenReturn(Optional.empty());
+      String added = created("ROW-1");
+
+      // Inside a batch, so the caller's own service is kept and no CDI lookup is needed.
+      NeoQuotaWriteGate.Gated gated = NeoQuotaWriteGate.run(ENTITY, null, service -> added,
+          guard, true);
+
+      assertNull(gated.refusal());
+      assertEquals(added, gated.result());
+      verify(guard, times(1)).entryIfChecked(ENTITY);
+      verify(guard).refusalFor(org.mockito.ArgumentMatchers.same(ENTRY), eq(ENTITY),
+          eq(List.of("ROW-1")));
+    }
+
     @Test
     void aMatchingRowOverQuotaIsRolledBackAndRefusedWithTheContractBody() throws Exception {
       QuotaEvaluation denial = denial();
-      when(guard.refusalFor(ENTITY, List.of("ROW-1"))).thenReturn(Optional.of(denial));
+      when(guard.refusalFor(ENTRY, ENTITY, List.of("ROW-1"))).thenReturn(Optional.of(denial));
 
       NeoResponse response;
       try (NeoQuotaWriteGate.Create create = begin(false)) {
@@ -244,7 +295,7 @@ class NeoQuotaWriteGateTest {
 
     @Test
     void aRowOutsideTheRestrictionIsCommitted() throws Exception {
-      when(guard.refusalFor(ENTITY, List.of("ROW-1"))).thenReturn(Optional.empty());
+      when(guard.refusalFor(ENTRY, ENTITY, List.of("ROW-1"))).thenReturn(Optional.empty());
 
       try (NeoQuotaWriteGate.Create create = begin(false)) {
         assertNull(create.finish(created("ROW-1")));
@@ -260,7 +311,7 @@ class NeoQuotaWriteGateTest {
      */
     @Test
     void aCheckFailingBeforeAnySqlFailsOpenTheCreateIsCommittedAndLogged() throws Exception {
-      when(guard.refusalFor(eq(ENTITY), any())).thenThrow(
+      when(guard.refusalFor(any(), eq(ENTITY), any())).thenThrow(
           new IllegalArgumentException("HQL restriction has unbalanced parentheses"));
 
       NeoResponse response;
@@ -284,7 +335,8 @@ class NeoQuotaWriteGateTest {
      */
     @Test
     void aCheckThatLeftTheTransactionRollbackOnlyFailsClosedAndSavesNothing() throws Exception {
-      when(guard.refusalFor(eq(ENTITY), any())).thenThrow(new IllegalStateException("boom"));
+      when(guard.refusalFor(any(), eq(ENTITY), any()))
+          .thenThrow(new IllegalStateException("boom"));
       when(transaction.getStatus()).thenReturn(TransactionStatus.MARKED_ROLLBACK);
 
       NeoResponse response;
@@ -300,7 +352,8 @@ class NeoQuotaWriteGateTest {
     /** A JDBC error anywhere in the cause chain is a poisoned transaction too. */
     @Test
     void aDatabaseErrorInTheCauseChainFailsClosed() throws Exception {
-      when(guard.refusalFor(eq(ENTITY), any())).thenThrow(new IllegalStateException("wrapped",
+      when(guard.refusalFor(any(), eq(ENTITY), any())).thenThrow(
+          new IllegalStateException("wrapped",
           new GenericJDBCException("could not execute query",
               new java.sql.SQLException("current transaction is aborted"))));
 
@@ -315,13 +368,16 @@ class NeoQuotaWriteGateTest {
     }
 
     /**
-     * REPRO (ETP-5051 re-review W1): a Hibernate {@code QueryException} is a
-     * {@code PersistenceException} but is raised while parsing HQL, before any SQL ran. The
-     * transaction is intact, so the create stands and is committed.
+     * ETP-5051 re-review W1: a {@code QueryException} in the cause chain is not by itself a
+     * database failure. This mock keeps the transaction ACTIVE, so the create stands. Live,
+     * Hibernate marks the transaction rollback-only when it fails to parse HQL, and the create then
+     * fails closed (QA BUG-4, accepted) — see the rollback-only test above. Fail-open in practice
+     * applies only to a fragment {@code UsageQueryComposer} rejects before Hibernate sees it.
      */
     @Test
-    void aQueryParseErrorBeforeAnySqlFailsOpen() throws Exception {
-      when(guard.refusalFor(eq(ENTITY), any())).thenThrow(new IllegalStateException("wrapped",
+    void aQueryExceptionAloneWithTheTransactionIntactIsNotADatabaseFailure() throws Exception {
+      when(guard.refusalFor(any(), eq(ENTITY), any())).thenThrow(
+          new IllegalStateException("wrapped",
           new org.hibernate.QueryException("unexpected token: )")));
 
       NeoResponse response;
@@ -341,7 +397,7 @@ class NeoQuotaWriteGateTest {
      */
     @Test
     void aFailingCommitHandsTheCallerCoresErrorJson() throws Exception {
-      when(guard.refusalFor(eq(ENTITY), any())).thenReturn(Optional.empty());
+      when(guard.refusalFor(any(), eq(ENTITY), any())).thenReturn(Optional.empty());
       org.mockito.Mockito.doThrow(new IllegalStateException("deferred constraint violated"))
           .when(dal).commitAndClose();
 
@@ -368,7 +424,7 @@ class NeoQuotaWriteGateTest {
       }
 
       assertNull(response);
-      verify(guard, never()).refusalFor(anyString(), any());
+      verify(guard, never()).refusalFor(any(), anyString(), any());
       verify(dal, times(1)).rollbackAndClose();
       verify(dal, never()).commitAndClose();
     }
@@ -391,7 +447,7 @@ class NeoQuotaWriteGateTest {
 
     @Test
     void aRefusalIsReturnedButTheTransactionIsLeftToTheBatch() throws Exception {
-      when(guard.refusalFor(ENTITY, List.of("ROW-1"))).thenReturn(Optional.of(denial()));
+      when(guard.refusalFor(ENTRY, ENTITY, List.of("ROW-1"))).thenReturn(Optional.of(denial()));
 
       NeoResponse response;
       try (NeoQuotaWriteGate.Create create = begin(true)) {
@@ -410,13 +466,13 @@ class NeoQuotaWriteGateTest {
 
     @Test
     void anAllowedRowIsNeverCommittedByTheGate() throws Exception {
-      when(guard.refusalFor(ENTITY, List.of("ROW-1"))).thenReturn(Optional.empty());
+      when(guard.refusalFor(ENTRY, ENTITY, List.of("ROW-1"))).thenReturn(Optional.empty());
 
       try (NeoQuotaWriteGate.Create create = begin(true)) {
         assertNull(create.finish(created("ROW-1")));
       }
 
-      verify(guard).refusalFor(ENTITY, List.of("ROW-1"));
+      verify(guard).refusalFor(ENTRY, ENTITY, List.of("ROW-1"));
       obDal.verifyNoInteractions();
     }
 
@@ -437,7 +493,8 @@ class NeoQuotaWriteGateTest {
   @Test
   void insideABatchAPoisonedCheckFailsTheOperationAndLeavesTheRollbackToTheBatch()
       throws Exception {
-    when(guard.refusalFor(eq(ENTITY), any())).thenThrow(new IllegalStateException("boom"));
+    when(guard.refusalFor(any(), eq(ENTITY), any()))
+          .thenThrow(new IllegalStateException("boom"));
     when(transaction.getStatus()).thenReturn(TransactionStatus.MARKED_ROLLBACK);
 
     NeoResponse response;
@@ -465,7 +522,7 @@ class NeoQuotaWriteGateTest {
 
     @Test
     void insideABatchTheDefaultGateLeavesTheTransactionToTheBatch() {
-      when(guard.appliesTo(ENTITY)).thenReturn(true);
+      when(guard.entryIfChecked(ENTITY)).thenReturn(Optional.of(ENTRY));
       try (MockedStatic<QuotaWriteGuard> defaults = mockStatic(QuotaWriteGuard.class)) {
         defaults.when(QuotaWriteGuard::getDefault).thenReturn(guard);
 
@@ -528,7 +585,7 @@ class NeoQuotaWriteGateTest {
 
   @Test
   void aSuccessfulAddThatCreatedNoRowsIsCommitted() throws Exception {
-    when(guard.refusalFor(ENTITY, Collections.emptyList())).thenReturn(Optional.empty());
+    when(guard.refusalFor(ENTRY, ENTITY, Collections.emptyList())).thenReturn(Optional.empty());
 
     try (NeoQuotaWriteGate.Create create = begin(false)) {
       assertNull(create.finish(created()));

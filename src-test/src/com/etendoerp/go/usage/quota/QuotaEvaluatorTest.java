@@ -193,7 +193,7 @@ class QuotaEvaluatorTest {
       when(lookup.forTenant(CLIENT)).thenReturn(TenantQuotas.none(CLIENT));
 
       assertTrue(evaluator.evaluateTenant(CLIENT, Scope.ACCOUNT).isEmpty());
-      assertTrue(evaluator.refusalForCreate(TenantQuotas.none(CLIENT), "RES-DOCS").isEmpty());
+      assertNull(evaluator.writeCheckPeriod(TenantQuotas.none(CLIENT)));
       verifyNoInteractions(reader);
     }
 
@@ -327,15 +327,12 @@ class QuotaEvaluatorTest {
     }
 
     private void assertAllowedUnmeasured(TenantQuotas tenant) {
-      QuotaDefinition definition = tenant.getQuotas().get(0);
       QuotaEvaluation evaluation = only(evaluator.evaluate(tenant, Scope.ENFORCEMENT));
       assertNull(evaluation.getPeriod());
       assertNull(evaluation.getConsumed());
       assertNull(evaluation.getVerdict());
       assertFalse(evaluation.isReportable());
-      Optional<QuotaEvaluation> refusal =
-          evaluator.refusalForCreate(tenant, definition.getResourceId());
-      assertTrue(refusal.isEmpty(), "the create must stand: " + refusal);
+      assertNull(evaluator.writeCheckPeriod(tenant), "no period: the create is not checked");
       verifyNoInteractions(reader);
     }
 
@@ -377,7 +374,7 @@ class QuotaEvaluatorTest {
 
       evaluator.evaluate(periodless, Scope.ENFORCEMENT);
       evaluator.evaluate(periodless, Scope.ACCOUNT);
-      evaluator.refusalForCreate(periodless, "RES-DOCS");
+      evaluator.writeCheckPeriod(periodless);
 
       List<String> warnings = logs.messagesAt(Level.WARN);
       assertEquals(1, warnings.size(), String.valueOf(warnings));
@@ -396,7 +393,7 @@ class QuotaEvaluatorTest {
 
       evaluator.evaluate(periodless, Scope.ENFORCEMENT);
       report.evaluate(periodless, Scope.ACCOUNT);
-      writeCheck.refusalForCreate(periodless, "RES-DOCS");
+      writeCheck.writeCheckPeriod(periodless);
 
       assertEquals(1, logs.messagesAt(Level.WARN).size(),
           String.valueOf(logs.messagesAt(Level.WARN)));
@@ -433,7 +430,7 @@ class QuotaEvaluatorTest {
       TenantQuotas closed = tenantWithPeriod(CLIENT, PERIOD_START, PERIOD_END, true, overQuota());
 
       evaluator.evaluate(closed, Scope.ENFORCEMENT);
-      evaluator.refusalForCreate(closed, "RES-DOCS");
+      evaluator.writeCheckPeriod(closed);
 
       assertTrue(logs.messagesAt(Level.WARN).isEmpty(), String.valueOf(logs.messagesAt(Level.WARN)));
     }
@@ -450,110 +447,112 @@ class QuotaEvaluatorTest {
   @DisplayName("the write path compares the consumption before the create")
   class WritePath {
 
-    @ParameterizedTest(name = "{0} read {1} of {2} -> refused {3}, consumed {4}")
-    @CsvSource(nullValues = "NULL", value = {
-        // source,   read, included, refused, reported consumed
-        "LIVE,        99,  100,  false, NULL",
-        "LIVE,       100,  100,  false, NULL",
-        "LIVE,       101,  100,  true,  100",
-        "LIVE,       150,  100,  true,  149",
-        "LIVE,         0,  100,  false, NULL",
-        "LIVE,         1,    0,  true,  0",
-        "AGGREGATE,   99,  100,  false, NULL",
-        "AGGREGATE,  100,  100,  true,  100",
-        "AGGREGATE,  150,  100,  true,  150",
-        "AGGREGATE,    0,    0,  true,  0",
-    })
-    void liveSubtractsTheNewRowAndAggregateDoesNot(ConsumptionSource source, long read,
-        long included, boolean refused, Long reported) {
-      QuotaDefinition definition = quota("DOCS", "block", included, 80L).source(source).build();
-      TenantQuotas tenant = tenant(CLIENT, definition);
-      when(reader.read(eq(definition), eq(CLIENT), any())).thenReturn(read);
+    private final QuotaPeriod period = QuotaPeriod.current(PERIOD_START, PERIOD_END, false, NOW);
+    private final List<String> created = List.of("ROW-1");
 
-      Optional<QuotaEvaluation> refusal = evaluator.refusalForCreate(tenant, "RES-DOCS");
+    private Optional<QuotaEvaluation> refusal(QuotaEvaluator on, QuotaDefinition quota,
+        long chargedEarlier) {
+      return on.refusalForCreate(tenant(CLIENT, quota), quota, period, created, chargedEarlier);
+    }
+
+    private void before(QuotaDefinition quota, long consumed) {
+      when(reader.readBeforeCreate(eq(quota), eq(CLIENT), any(), eq(created)))
+          .thenReturn(consumed);
+    }
+
+    /**
+     * ETP-5051 re-review W2: the comparison is on the consumption before the create (the created
+     * rows left out of a live count; the aggregate never has them), for either source the same:
+     * refused when it plus the new row exceeds the included quantity.
+     */
+    @ParameterizedTest(name = "{0} {1} before, {2} included -> refused {3}")
+    @CsvSource(value = {
+        "LIVE,        99,  100,  false",
+        "LIVE,       100,  100,  true",
+        "LIVE,       150,  100,  true",
+        "LIVE,         0,  100,  false",
+        "LIVE,         0,    0,  true",
+        "AGGREGATE,   99,  100,  false",
+        "AGGREGATE,  100,  100,  true",
+        "AGGREGATE,    0,    0,  true",
+    })
+    void theConsumptionBeforeTheCreatePlusOneIsCompared(ConsumptionSource source, long before,
+        long included, boolean refused) {
+      QuotaDefinition definition = quota("DOCS", "block", included, 80L).source(source).build();
+      before(definition, before);
+
+      Optional<QuotaEvaluation> refusal = refusal(evaluator, definition, 0L);
 
       assertEquals(refused, refusal.isPresent(), String.valueOf(refusal));
       if (refused) {
         QuotaEvaluation evaluation = refusal.get();
         assertEquals(QuotaVerdict.DENY, evaluation.getVerdict());
-        assertEquals(reported, evaluation.getConsumed());
+        assertEquals(Long.valueOf(before), evaluation.getConsumed());
         assertSame(definition, evaluation.getQuota());
         assertEquals(PERIOD_START, evaluation.getPeriod().getStart());
         assertEquals("month", evaluation.getPlanInterval());
       }
+      verify(reader, never()).read(any(), anyString(), any());
     }
 
     /**
-     * REPRO (ETP-5051 QA): the counted window ends at local midnight of the period's end, so a row
-     * created on the last, partial day is not in the live count. Subtracting it anyway let one
-     * create more through.
+     * ETP-5051 re-review W2: the period's last, partial day is no longer special-cased — the row's
+     * own date decides (the matcher), and the count before the create is the same at any hour.
      */
     @Test
-    void onThePeriodsLastPartialDayTheLiveCountIsTakenAsIs() {
+    void theLastPartialDayIsNotSpecialCased() {
       QuotaDefinition definition = quota("DOCS", "block", 100L, null)
           .source(ConsumptionSource.LIVE).build();
-      when(reader.read(eq(definition), eq(CLIENT), any())).thenReturn(100L);
+      before(definition, 99L);
+
       clock.set(local(2026, 11, 17, 8, 0));
-
-      Optional<QuotaEvaluation> refusal =
-          evaluator.refusalForCreate(tenant(CLIENT, definition), "RES-DOCS");
-
-      assertTrue(refusal.isPresent(), "100 already counted before this create: refused");
-      assertEquals(Long.valueOf(100L), refusal.get().getConsumed());
+      assertTrue(refusal(evaluator, definition, 0L).isEmpty());
+      clock.set(local(2026, 11, 16, 23, 59));
+      assertTrue(refusal(evaluator, definition, 0L).isEmpty());
     }
 
     @Test
-    void justBeforeTheLastDayTheNewRowIsStillSubtracted() {
-      QuotaDefinition definition = quota("DOCS", "block", 100L, null)
-          .source(ConsumptionSource.LIVE).build();
-      when(reader.read(eq(definition), eq(CLIENT), any())).thenReturn(100L);
-      clock.set(local(2026, 11, 16, 23, 59));
+    void rowsAlreadyChargedInTheSameCreateCount() {
+      QuotaDefinition definition = quota("DOCS", "block", 10L, null).build();
+      before(definition, 8L);
 
-      assertTrue(evaluator.refusalForCreate(tenant(CLIENT, definition), "RES-DOCS").isEmpty());
+      assertTrue(refusal(evaluator, definition, 1L).isEmpty());
+      Optional<QuotaEvaluation> second = refusal(evaluator, definition, 2L);
+      assertTrue(second.isPresent());
+      assertEquals(Long.valueOf(10L), second.get().getConsumed());
     }
 
     @Test
     void reachingTheWarningThresholdDoesNotRefuse() {
       QuotaDefinition definition = quota("DOCS", "block", 100L, 80L).build();
-      when(reader.read(eq(definition), eq(CLIENT), any())).thenReturn(95L);
+      before(definition, 95L);
 
-      assertTrue(evaluator.refusalForCreate(tenant(CLIENT, definition), "RES-DOCS").isEmpty());
+      assertTrue(refusal(evaluator, definition, 0L).isEmpty());
     }
 
     @Test
-    void aWarnModeQuotaNeverRefusesAndIsNotMeasured() {
-      QuotaDefinition definition = quota("DOCS", "warn", 0L, null).build();
-
-      assertTrue(evaluator.refusalForCreate(tenant(CLIENT, definition), "RES-DOCS").isEmpty());
+    void warnAndOffModeQuotasNeverRefuseAndAreNotMeasured() {
+      assertTrue(refusal(evaluator, quota("DOCS", "warn", 0L, null).build(), 0L).isEmpty());
+      assertTrue(refusal(evaluator, quota("DOCS", "off", 0L, null).build(), 0L).isEmpty());
       verifyNoInteractions(reader);
     }
 
     @Test
-    void anOffModeQuotaNeverRefusesAndIsNotMeasured() {
-      QuotaDefinition definition = quota("DOCS", "off", 0L, null).build();
-
-      assertTrue(evaluator.refusalForCreate(tenant(CLIENT, definition), "RES-DOCS").isEmpty());
-      verifyNoInteractions(reader);
-    }
-
-    @Test
-    void onlyTheMatchedResourceIsMeasured() {
-      QuotaDefinition docs = quota("DOCS", "block", 0L, null).build();
-      QuotaDefinition users = quota("USERS", "block", 10L, null).build();
-      when(reader.read(eq(users), eq(CLIENT), any())).thenReturn(1L);
-
-      assertTrue(evaluator.refusalForCreate(tenant(CLIENT, docs, users), "RES-USERS").isEmpty());
-      verify(reader, never()).read(eq(docs), anyString(), any());
-    }
-
-    @Test
-    void anUnknownResourceIsNotMeasured() {
+    void missingInputsRefuseNothingAndMeasureNothing() {
       QuotaDefinition docs = quota("DOCS", "block", 0L, null).build();
 
-      assertTrue(evaluator.refusalForCreate(tenant(CLIENT, docs), "RES-OTHER").isEmpty());
-      assertTrue(evaluator.refusalForCreate(tenant(CLIENT, docs), null).isEmpty());
-      assertTrue(evaluator.refusalForCreate(null, "RES-DOCS").isEmpty());
+      assertTrue(evaluator.refusalForCreate(null, docs, period, created, 0L).isEmpty());
+      assertTrue(evaluator.refusalForCreate(tenant(CLIENT, docs), null, period, created, 0L)
+          .isEmpty());
+      assertTrue(evaluator.refusalForCreate(tenant(CLIENT, docs), docs, null, created, 0L)
+          .isEmpty());
       verifyNoInteractions(reader);
+    }
+
+    @Test
+    void theCurrentPeriodOfTheWriteCheck() {
+      assertEquals(period, evaluator.writeCheckPeriod(tenant(CLIENT)));
+      assertNull(evaluator.writeCheckPeriod(null));
     }
   }
 
@@ -565,6 +564,7 @@ class QuotaEvaluatorTest {
   @DisplayName("the write check locks only a live block quota")
   class WriteLock {
 
+    private final QuotaPeriod period = QuotaPeriod.current(PERIOD_START, PERIOD_END, false, NOW);
     private QuotaLock lock;
     private QuotaEvaluator locking;
 
@@ -574,49 +574,33 @@ class QuotaEvaluatorTest {
       locking = new QuotaEvaluator(lookup, reader, clock, lock);
     }
 
+    private void check(QuotaDefinition quota) {
+      locking.refusalForCreate(tenant(CLIENT, quota), quota, period, List.of("ROW-1"), 0L);
+    }
+
     @Test
     void aLiveBlockQuotaTakesTheTenantResourceLockBeforeTheCount() {
       QuotaDefinition definition = quota("DOCS", "block", 100L, null)
           .source(ConsumptionSource.LIVE).build();
-      when(reader.read(eq(definition), eq(CLIENT), any())).thenReturn(1L);
+      when(reader.readBeforeCreate(eq(definition), eq(CLIENT), any(), any())).thenReturn(1L);
 
-      locking.refusalForCreate(tenant(CLIENT, definition), "RES-DOCS");
+      check(definition);
 
       org.mockito.InOrder order = org.mockito.Mockito.inOrder(lock, reader);
       order.verify(lock).acquire(CLIENT, "RES-DOCS");
-      order.verify(reader).read(eq(definition), eq(CLIENT), any());
+      order.verify(reader).readBeforeCreate(eq(definition), eq(CLIENT), any(), any());
     }
 
     @Test
     void theStoredAggregateTakesNoLock() {
-      QuotaDefinition definition = quota("DOCS", "block", 100L, null)
-          .source(ConsumptionSource.AGGREGATE).build();
-      when(reader.read(eq(definition), eq(CLIENT), any())).thenReturn(1L);
-
-      locking.refusalForCreate(tenant(CLIENT, definition), "RES-DOCS");
+      check(quota("DOCS", "block", 100L, null).source(ConsumptionSource.AGGREGATE).build());
 
       verifyNoInteractions(lock);
     }
 
     @Test
-    void noBlockQuotaOnTheResourceTakesNoLock() {
-      QuotaDefinition warn = quota("DOCS", "warn", 100L, null)
-          .source(ConsumptionSource.LIVE).build();
-
-      locking.refusalForCreate(tenant(CLIENT, warn), "RES-DOCS");
-      locking.refusalForCreate(tenant(CLIENT, warn), "RES-OTHER");
-      locking.refusalForCreate(TenantQuotas.none(CLIENT), "RES-DOCS");
-
-      verifyNoInteractions(lock);
-    }
-
-    @Test
-    void aPeriodlessTenantTakesNoLock() {
-      QuotaDefinition definition = quota("DOCS", "block", 100L, null)
-          .source(ConsumptionSource.LIVE).build();
-
-      locking.refusalForCreate(QuotaTestFixtures.tenantWithPeriod(CLIENT, null, null, false,
-          definition), "RES-DOCS");
+    void aNonBlockQuotaTakesNoLock() {
+      check(quota("DOCS", "warn", 100L, null).source(ConsumptionSource.LIVE).build());
 
       verifyNoInteractions(lock);
     }

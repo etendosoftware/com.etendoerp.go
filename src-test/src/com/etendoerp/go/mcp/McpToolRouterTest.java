@@ -1514,10 +1514,10 @@ public class McpToolRouterTest {
 
 
   /**
-   * ETP-5051 — the quota gate wraps the insert of {@code etendo_create}: the gate picks the service
-   * the insert runs through (the deferred-commit one when it owns the transaction), checks the
-   * created row right after it, and a refusal leaves the router through the MCP error translation
-   * before anything reads the add result as a success.
+   * ETP-5051 — the quota gate wraps the insert of {@code etendo_create}: the add is the create
+   * handed to {@code NeoQuotaWriteGate.run} (which picks its service, refuses before the write when
+   * the client's quotas cannot be read, and checks the created row right after it), and a refusal
+   * leaves the router through the MCP error translation before anything reads the add result.
    */
   @Test
   public void testCreateRunsItsInsertInsideTheQuotaGate() {
@@ -1526,20 +1526,18 @@ public class McpToolRouterTest {
 
     // Anchored on the calls, never on local variable names, and each searched after the one
     // before it, so a rename does not break it and an earlier unrelated call cannot satisfy it.
-    int begin = indexOf(body, "NeoQuotaWriteGate.begin(", 0);
-    int service = indexOf(body, ".jsonService(", begin);
-    int add = indexOf(body, ".add(", service);
-    int finish = indexOf(body, ".finish(", add);
-    int refusal = indexOf(body, "neoResponseToMcpResult(", finish);
+    int run = indexOf(body, "NeoQuotaWriteGate.run(", 0);
+    int add = indexOf(body, "service -> service.add(", run);
+    int refusal = indexOf(body, "neoResponseToMcpResult(", add);
     int successRead = indexOf(body, "new JSONObject(", refusal);
 
-    assertTrue("the gate opens before the insert and chooses its service",
-        begin < service && service < add);
-    assertTrue("the created row is checked right after the insert", add < finish);
+    assertTrue("the add is the create handed to the gate (never run before it)", run < add);
     assertTrue("a refusal returns before the add result is read as a success",
-        finish < refusal && refusal < successRead);
+        add < refusal && refusal < successRead);
     assertEquals("etendo_create inserts exactly once", 1,
-        body.split("jsonService\\.add\\(", -1).length - 1);
+        body.split("service\\.add\\(", -1).length - 1);
+    assertFalse("handleCreate opens the gate itself again",
+        body.contains("NeoQuotaWriteGate.begin("));
   }
 
   private static int indexOf(String body, String code, int from) {

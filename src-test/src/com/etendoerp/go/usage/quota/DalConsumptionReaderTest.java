@@ -132,6 +132,36 @@ class DalConsumptionReaderTest {
     verify(freshness, never()).checkLag();
   }
 
+  /**
+   * ETP-5051 re-review W2: on the write path the live count leaves the created rows out, so it is
+   * the consumption before the create whatever the rows' dates.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void theCountBeforeACreateLeavesTheCreatedRowsOut() {
+    Query<Object> query = mock(Query.class);
+    when(session.createQuery(anyString())).thenReturn((Query) query);
+    when(query.uniqueResult()).thenReturn(7L);
+    QuotaDefinition definition = quota("DOCS", "block", 10L, null)
+        .hqlRestriction("e.salesTransaction = true").source(ConsumptionSource.LIVE).build();
+    List<String> created = List.of("ROW-1", "ROW-2");
+
+    assertEquals(7L, reader.readBeforeCreate(definition, CLIENT, period, created));
+
+    verify(session).createQuery(UsageQueryComposer.composePerTenantCountExcluding("Invoice",
+        "invoiceDate", "e.salesTransaction = true"));
+    verify(query).setParameterList(UsageQueryComposer.PARAM_EXCLUDED_IDS, created);
+    verify(query).setParameter(UsageQueryComposer.PARAM_DAY_START, midnight(2026, 10, 17));
+  }
+
+  @Test
+  void theAggregateBeforeACreateIsTheAggregate() {
+    storedDays(new Object[] { midnight(2026, 10, 17), 4L });
+
+    assertEquals(4L, reader.readBeforeCreate(quota("DOCS", "block", 10L, null).build(), CLIENT,
+        period, List.of("ROW-1")));
+  }
+
   @Test
   void theAggregateSumsByDefault() {
     storedDays(new Object[] { midnight(2026, 10, 17), 4L },

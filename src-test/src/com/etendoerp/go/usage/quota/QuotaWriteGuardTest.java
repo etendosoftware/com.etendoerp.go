@@ -20,6 +20,8 @@ package com.etendoerp.go.usage.quota;
 import static com.etendoerp.go.usage.quota.QuotaTestFixtures.CLIENT;
 import static com.etendoerp.go.usage.quota.QuotaTestFixtures.NOW;
 import static com.etendoerp.go.usage.quota.QuotaTestFixtures.OTHER_CLIENT;
+import static com.etendoerp.go.usage.quota.QuotaTestFixtures.PERIOD_END;
+import static com.etendoerp.go.usage.quota.QuotaTestFixtures.PERIOD_START;
 import static com.etendoerp.go.usage.quota.QuotaTestFixtures.quota;
 import static com.etendoerp.go.usage.quota.QuotaTestFixtures.tenant;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -31,6 +33,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -94,19 +97,33 @@ class QuotaWriteGuardTest {
         new QuotaEvaluator(lookup, reader, new MutableClock(NOW)), requestClient::get);
   }
 
+  private static boolean applies(QuotaWriteGuard g, String entity) {
+    return g.entryIfChecked(entity).isPresent();
+  }
+
+  /** What the gate does: the entry read before the insert, checked after it. */
+  private static Optional<QuotaEvaluation> check(QuotaWriteGuard g, String entity,
+      List<String> ids) {
+    return g.refusalFor(g.entryIfChecked(entity).orElse(null), entity, ids);
+  }
+
+  private void preCreate(QuotaDefinition quota, long consumed) {
+    when(reader.readBeforeCreate(eq(quota), eq(CLIENT), any(), any())).thenReturn(consumed);
+  }
+
   @Nested
   @DisplayName("which creates are checked")
   class Applicability {
 
     @Test
     void anEntityCountedByABlockQuotaOfTheClientIsChecked() {
-      assertTrue(guard.appliesTo("Invoice"));
+      assertTrue(applies(guard, "Invoice"));
     }
 
     @Test
     void anEntityTheClientDoesNotCapIsNotCheckedAndRunsNoQuery() {
-      assertFalse(guard.appliesTo("BusinessPartner"));
-      assertTrue(guard.refusalFor("BusinessPartner", List.of("ROW-1")).isEmpty());
+      assertFalse(applies(guard, "BusinessPartner"));
+      assertTrue(check(guard, "BusinessPartner", List.of("ROW-1")).isEmpty());
       verifyNoInteractions(matcher, reader);
       verify(lookup, times(1)).forTenant(CLIENT);
     }
@@ -118,12 +135,12 @@ class QuotaWriteGuardTest {
      */
     @Test
     void anEntityCappedOnlyForAnotherClientIsNotCheckedForThisOne() {
-      assertTrue(guard.appliesTo("Invoice"), "capped for CLIENT");
+      assertTrue(applies(guard, "Invoice"), "capped for CLIENT");
 
       requestClient.set(OTHER_CLIENT);
-      assertFalse(guard.appliesTo("Invoice"));
-      assertTrue(guard.refusalFor("Invoice", List.of("ROW-1")).isEmpty());
-      assertFalse(guard.appliesTo("Invoice"));
+      assertFalse(applies(guard, "Invoice"));
+      assertTrue(check(guard, "Invoice", List.of("ROW-1")).isEmpty());
+      assertFalse(applies(guard, "Invoice"));
 
       verifyNoInteractions(matcher, reader);
       verify(lookup, times(1)).forTenant(OTHER_CLIENT);
@@ -135,15 +152,15 @@ class QuotaWriteGuardTest {
      */
     @Test
     void theClientsQuotasAreLookedUpOnceForManyCreates() {
-      when(matcher.tenantIfCounted(any(), anyString())).thenReturn(CLIENT);
-      when(reader.read(any(), eq(CLIENT), any())).thenReturn(1L);
+      when(matcher.tenantIfCounted(any(), anyString(), any())).thenReturn(CLIENT);
+      when(reader.readBeforeCreate(any(), eq(CLIENT), any(), any())).thenReturn(1L);
       for (int create = 0; create < 5; create++) {
-        assertTrue(guard.appliesTo("Invoice"));
-        assertTrue(guard.refusalFor("Invoice", List.of("ROW-" + create)).isEmpty());
+        assertTrue(applies(guard, "Invoice"));
+        assertTrue(check(guard, "Invoice", List.of("ROW-" + create)).isEmpty());
       }
       requestClient.set(OTHER_CLIENT);
       for (int create = 0; create < 5; create++) {
-        assertFalse(guard.appliesTo("Invoice"));
+        assertFalse(applies(guard, "Invoice"));
       }
 
       verify(lookup, times(1)).forTenant(CLIENT);
@@ -152,15 +169,15 @@ class QuotaWriteGuardTest {
 
     @Test
     void anExpiredEntryIsRebuiltOnTheNextCreate() {
-      guard.appliesTo("Invoice");
+      applies(guard, "Invoice");
       now.addAndGet(QuotaClientCache.TTL_MS - 1);
-      guard.appliesTo("Invoice");
+      applies(guard, "Invoice");
       verify(lookup, times(1)).forTenant(CLIENT);
 
       when(lookup.forTenant(CLIENT)).thenReturn(TenantQuotas.none(CLIENT));
       now.addAndGet(1);
 
-      assertFalse(guard.appliesTo("Invoice"), "the quota switched off reached the client");
+      assertFalse(applies(guard, "Invoice"), "the quota switched off reached the client");
       verify(lookup, times(2)).forTenant(CLIENT);
     }
 
@@ -168,23 +185,24 @@ class QuotaWriteGuardTest {
     void aFailedLookupPropagatesSoTheGateFailsClosed() {
       when(lookup.forTenant(CLIENT)).thenThrow(new IllegalStateException("aborted"));
 
-      assertThrows(IllegalStateException.class, () -> guard.appliesTo("Invoice"));
+      assertThrows(IllegalStateException.class, () -> applies(guard, "Invoice"));
     }
 
     @Test
     void aRequestWithNoClientChecksNothing() {
       requestClient.set(null);
 
-      assertFalse(guard.appliesTo("Invoice"));
-      assertTrue(guard.refusalFor("Invoice", List.of("ROW-1")).isEmpty());
+      assertFalse(applies(guard, "Invoice"));
+      assertTrue(check(guard, "Invoice", List.of("ROW-1")).isEmpty());
       verifyNoInteractions(lookup, matcher, reader);
     }
 
     @Test
     void noCreatedIdsMeansNothingToCheck() {
-      assertTrue(guard.refusalFor("Invoice", Collections.emptyList()).isEmpty());
-      assertTrue(guard.refusalFor("Invoice", null).isEmpty());
-      verifyNoInteractions(matcher, lookup, reader);
+      assertTrue(check(guard, "Invoice", Collections.emptyList()).isEmpty());
+      assertTrue(check(guard, "Invoice", null).isEmpty());
+      // The entry is read (before the insert, as the gate does); nothing is matched or measured.
+      verifyNoInteractions(matcher, reader);
     }
   }
 
@@ -194,18 +212,18 @@ class QuotaWriteGuardTest {
 
     @Test
     void outsideTheRestrictionIsLetThroughWithoutReadingConsumption() {
-      when(matcher.tenantIfCounted(INVOICES, "ROW-1")).thenReturn(null);
+      when(matcher.tenantIfCounted(eq(INVOICES), eq("ROW-1"), any())).thenReturn(null);
 
-      assertTrue(guard.refusalFor("Invoice", List.of("ROW-1")).isEmpty());
+      assertTrue(check(guard, "Invoice", List.of("ROW-1")).isEmpty());
       verifyNoInteractions(reader);
     }
 
     @Test
     void insideTheRestrictionOverQuotaIsRefused() {
-      when(matcher.tenantIfCounted(INVOICES, "ROW-1")).thenReturn(CLIENT);
-      when(reader.read(eq(INVOICES), eq(CLIENT), any())).thenReturn(10L);
+      when(matcher.tenantIfCounted(eq(INVOICES), eq("ROW-1"), any())).thenReturn(CLIENT);
+      preCreate(INVOICES, 10L);
 
-      Optional<QuotaEvaluation> refusal = guard.refusalFor("Invoice", List.of("ROW-1"));
+      Optional<QuotaEvaluation> refusal = check(guard, "Invoice", List.of("ROW-1"));
 
       assertTrue(refusal.isPresent());
       assertEquals(QuotaVerdict.DENY, refusal.get().getVerdict());
@@ -214,32 +232,84 @@ class QuotaWriteGuardTest {
 
     @Test
     void insideTheRestrictionUnderQuotaStands() {
-      when(matcher.tenantIfCounted(INVOICES, "ROW-1")).thenReturn(CLIENT);
-      when(reader.read(eq(INVOICES), eq(CLIENT), any())).thenReturn(9L);
+      when(matcher.tenantIfCounted(eq(INVOICES), eq("ROW-1"), any())).thenReturn(CLIENT);
+      preCreate(INVOICES, 9L);
 
-      assertTrue(guard.refusalFor("Invoice", List.of("ROW-1")).isEmpty());
+      assertTrue(check(guard, "Invoice", List.of("ROW-1")).isEmpty());
+    }
+
+    /** NEO creates rows in the request's client; another client's row is skipped, not measured. */
+    @Test
+    void aRowOfAnotherClientIsSkippedWithoutMeasuringAnything() {
+      when(matcher.tenantIfCounted(eq(INVOICES), eq("ROW-1"), any())).thenReturn(OTHER_CLIENT);
+
+      assertTrue(check(guard, "Invoice", List.of("ROW-1")).isEmpty());
+      verify(lookup, never()).forTenant(OTHER_CLIENT);
+      verifyNoInteractions(reader);
+    }
+
+    /**
+     * REPRO (ETP-5051 re-review W2): a row dated outside the counted window does not consume this
+     * period — the matcher, bound to the window, does not count it — so it stands at the cap and no
+     * consumption is read.
+     */
+    @Test
+    void aRowDatedOutsideTheWindowStandsAtTheCap() {
+      preCreate(INVOICES, 10L);
+      when(matcher.tenantIfCounted(eq(INVOICES), eq("ROW-1"), any())).thenReturn(null);
+
+      assertTrue(check(guard, "Invoice", List.of("ROW-1")).isEmpty());
+      ArgumentCaptor<QuotaPeriod> window = ArgumentCaptor.forClass(QuotaPeriod.class);
+      verify(matcher).tenantIfCounted(eq(INVOICES), eq("ROW-1"), window.capture());
+      assertEquals(PERIOD_START, window.getValue().getStart());
+      verifyNoInteractions(reader);
+    }
+
+    /** REPRO (ETP-5051 re-review W2): an in-window row at the cap is refused. */
+    @Test
+    void anInWindowRowAtTheCapIsRefused() {
+      preCreate(INVOICES, 10L);
+      when(matcher.tenantIfCounted(eq(INVOICES), eq("ROW-1"), any())).thenReturn(CLIENT);
+
+      Optional<QuotaEvaluation> refusal = check(guard, "Invoice", List.of("ROW-1"));
+
+      assertTrue(refusal.isPresent());
+      assertEquals(Long.valueOf(10L), refusal.get().getConsumed());
+      verify(reader).readBeforeCreate(eq(INVOICES), eq(CLIENT), any(), eq(List.of("ROW-1")));
+    }
+
+    /** The rows of one create are charged one after the other: the one over the cap is refused. */
+    @Test
+    void theRowsOfOneCreateAreChargedOneAfterTheOther() {
+      preCreate(INVOICES, 9L);
+      when(matcher.tenantIfCounted(eq(INVOICES), anyString(), any())).thenReturn(CLIENT);
+
+      Optional<QuotaEvaluation> refusal = check(guard, "Invoice", List.of("ROW-1", "ROW-2"));
+
+      assertTrue(refusal.isPresent());
+      assertEquals(Long.valueOf(10L), refusal.get().getConsumed());
     }
 
     @Test
-    void aRowCreatedIntoAnotherClientIsMeasuredAgainstThatClientsQuotas() {
-      when(matcher.tenantIfCounted(INVOICES, "ROW-1")).thenReturn(OTHER_CLIENT);
+    void aTenantWithNoCurrentPeriodRunsNoRowMatch() {
+      when(lookup.forTenant(CLIENT)).thenReturn(
+          QuotaTestFixtures.tenantWithPeriod(CLIENT, null, null, false, INVOICES));
 
-      assertTrue(guard.refusalFor("Invoice", List.of("ROW-1")).isEmpty());
-      verify(lookup, times(1)).forTenant(OTHER_CLIENT);
-      verifyNoInteractions(reader);
+      assertTrue(check(guard, "Invoice", List.of("ROW-1")).isEmpty());
+      verifyNoInteractions(matcher, reader);
     }
 
     @Test
     void theFirstRefusedRowStopsTheCheck() {
-      when(matcher.tenantIfCounted(INVOICES, "ROW-1")).thenReturn(OTHER_CLIENT);
-      when(matcher.tenantIfCounted(INVOICES, "ROW-2")).thenReturn(CLIENT);
-      when(reader.read(eq(INVOICES), eq(CLIENT), any())).thenReturn(12L);
+      when(matcher.tenantIfCounted(eq(INVOICES), eq("ROW-1"), any())).thenReturn(OTHER_CLIENT);
+      when(matcher.tenantIfCounted(eq(INVOICES), eq("ROW-2"), any())).thenReturn(CLIENT);
+      preCreate(INVOICES, 12L);
 
       Optional<QuotaEvaluation> refusal =
-          guard.refusalFor("Invoice", List.of("ROW-1", "ROW-2", "ROW-3"));
+          check(guard, "Invoice", List.of("ROW-1", "ROW-2", "ROW-3"));
 
       assertTrue(refusal.isPresent());
-      verify(matcher, times(0)).tenantIfCounted(INVOICES, "ROW-3");
+      verify(matcher, times(0)).tenantIfCounted(eq(INVOICES), eq("ROW-3"), any());
     }
   }
 
@@ -271,6 +341,7 @@ class QuotaWriteGuardTest {
     private QuotaWriteGuard catalogGuard(QuotaDefinition definition) {
       when(lookup.forTenant(CLIENT)).thenReturn(tenant(CLIENT, definition));
       when(reader.read(eq(definition), eq(CLIENT), any())).thenReturn(5L);
+      preCreate(definition, 5L);
       return new QuotaWriteGuard(new QuotaClientCache(lookup, now::get), matcher,
           new QuotaEvaluator(lookup, reader, new MutableClock(NOW)), requestClient::get);
     }
@@ -291,9 +362,9 @@ class QuotaWriteGuardTest {
     void itsRefusalIsWordedFromTheCatalogNameAndUnit() throws Exception {
       QuotaDefinition definition = signedContracts();
       QuotaWriteGuard catalogGuard = catalogGuard(definition);
-      when(matcher.tenantIfCounted(any(), eq("ROW-9"))).thenReturn(CLIENT);
+      when(matcher.tenantIfCounted(any(), eq("ROW-9"), any())).thenReturn(CLIENT);
 
-      QuotaEvaluation refusal = catalogGuard.refusalFor(ENTITY, List.of("ROW-9")).get();
+      QuotaEvaluation refusal = check(catalogGuard, ENTITY, List.of("ROW-9")).get();
       NeoResponse response = NeoQuotaWriteGate.refusalResponse(refusal);
 
       assertEquals("Quota exceeded: Signed contracts (5/5 contracts)",
@@ -312,15 +383,15 @@ class QuotaWriteGuardTest {
     void theWriteGuardRefusesACreateOfItsEntity() {
       QuotaDefinition definition = signedContracts();
       QuotaWriteGuard catalogGuard = catalogGuard(definition);
-      when(matcher.tenantIfCounted(any(), eq("ROW-9"))).thenReturn(CLIENT);
+      when(matcher.tenantIfCounted(any(), eq("ROW-9"), any())).thenReturn(CLIENT);
 
-      assertTrue(catalogGuard.appliesTo(ENTITY));
-      Optional<QuotaEvaluation> refusal = catalogGuard.refusalFor(ENTITY, List.of("ROW-9"));
+      assertTrue(applies(catalogGuard, ENTITY));
+      Optional<QuotaEvaluation> refusal = check(catalogGuard, ENTITY, List.of("ROW-9"));
 
       assertTrue(refusal.isPresent());
       assertEquals("SIGNED_CONTRACTS", refusal.get().getQuota().getResourceKey());
       ArgumentCaptor<QuotaDefinition> matched = ArgumentCaptor.forClass(QuotaDefinition.class);
-      verify(matcher).tenantIfCounted(matched.capture(), eq("ROW-9"));
+      verify(matcher).tenantIfCounted(matched.capture(), eq("ROW-9"), any());
       assertEquals("e.status = 'SIGNED'", matched.getValue().getHqlRestriction());
     }
   }
@@ -331,7 +402,7 @@ class QuotaWriteGuardTest {
 
     @Test
     @SuppressWarnings("unchecked")
-    void itRunsTheComposedRowMatchBoundToTheRecordId() {
+    void itRunsTheComposedRowMatchBoundToTheRecordIdAndTheWindow() {
       OBDal dal = mock(OBDal.class);
       Session session = mock(Session.class);
       Query<String> query = mock(Query.class);
@@ -340,18 +411,20 @@ class QuotaWriteGuardTest {
       when(query.setParameter(anyString(), any())).thenReturn(query);
       when(query.setMaxResults(1)).thenReturn(query);
       when(query.uniqueResult()).thenReturn(CLIENT);
+      QuotaPeriod period = QuotaPeriod.current(PERIOD_START, PERIOD_END, false, NOW);
 
       String tenant;
       try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
         obDal.when(OBDal::getInstance).thenReturn(dal);
-        tenant = CreatedRowMatcher.dal().tenantIfCounted(INVOICES, "ROW-1");
+        tenant = CreatedRowMatcher.dal().tenantIfCounted(INVOICES, "ROW-1", period);
       }
 
       assertEquals(CLIENT, tenant);
-      verify(session).createQuery(
-          UsageQueryComposer.composeRowMatch("Invoice", "e.salesTransaction = true"),
-          String.class);
+      verify(session).createQuery(UsageQueryComposer.composeRowMatchInRange("Invoice",
+          "invoiceDate", "e.salesTransaction = true"), String.class);
       verify(query).setParameter(UsageQueryComposer.PARAM_RECORD_ID, "ROW-1");
+      verify(query).setParameter(UsageQueryComposer.PARAM_DAY_START, period.getWindowFrom());
+      verify(query).setParameter(UsageQueryComposer.PARAM_DAY_END, period.getWindowTo());
     }
   }
 }

@@ -38,6 +38,7 @@ import org.openbravo.service.json.JsonConstants;
 import org.openbravo.service.json.JsonUtils;
 
 import com.etendoerp.go.usage.DatabaseFailures;
+import com.etendoerp.go.usage.quota.QuotaClientCache;
 import com.etendoerp.go.usage.quota.QuotaEvaluation;
 import com.etendoerp.go.usage.quota.QuotaItemJson;
 import com.etendoerp.go.usage.quota.QuotaWriteGuard;
@@ -74,8 +75,9 @@ import com.etendoerp.go.usage.quota.QuotaWriteGuard;
  *       — nothing was saved.</li>
  * </ul>
  * The client's quota entry ({@code QuotaClientCache}) is read in {@link #begin}, on the request's
- * session, once a minute per client; if that read fails the create fails closed the same way, even
- * though the add still runs (core's add answers its own error on an aborted transaction).
+ * session, once a minute per client; if that read fails the create is refused before it runs
+ * ({@link Create#refusalBeforeWrite}, applied by {@link #run}) with the same
+ * {@code QUOTA_CHECK_FAILED}: no callout, no insert.
  *
  * <p>A commit the gate makes that fails (a deferred constraint, say) does not escape as an exception:
  * the add result is replaced by core's own error JSON for that exception ({@link Create#result()}),
@@ -123,20 +125,84 @@ public final class NeoQuotaWriteGate {
   }
 
   static Create begin(String dalEntityName, QuotaWriteGuard guard, boolean batchOwnsTransaction) {
-    boolean checked;
+    QuotaClientCache.Entry entry = null;
     boolean failedBeforeWrite = false;
     try {
-      checked = guard.appliesTo(dalEntityName);
+      entry = guard.entryIfChecked(dalEntityName).orElse(null);
     } catch (RuntimeException e) {
       // The client's quota entry is read on the request's own session: a failure there may have
       // aborted the transaction, and nothing tells whether this create is capped. Fail closed.
       log.error("[QUOTA] Could not read the quotas of the request's client for a create of {}; "
           + "nothing is saved ({})", dalEntityName, CHECK_FAILED_CODE, e);
-      checked = true;
       failedBeforeWrite = true;
     }
-    return new Create(dalEntityName, guard, checked, checked && !batchOwnsTransaction,
+    boolean checked = failedBeforeWrite || entry != null;
+    return new Create(dalEntityName, guard, entry, checked, checked && !batchOwnsTransaction,
         failedBeforeWrite);
+  }
+
+  /** One create, given the service it must run through; returns the add result. */
+  @FunctionalInterface
+  public interface GatedCreate {
+    /**
+     * Runs the create.
+     *
+     * @param service the service to run it through ({@link Create#jsonService})
+     * @return the add result JSON
+     * @throws Exception whatever the create throws
+     */
+    String run(DefaultJsonDataService service) throws Exception; // NOSONAR — mirrors the callers
+  }
+
+  /** What a create run through the gate came to: a refusal, or the add result to go on with. */
+  public static final class Gated {
+    private final NeoResponse refusal;
+    private final String result;
+
+    private Gated(NeoResponse refusal, String result) {
+      this.refusal = refusal;
+      this.result = result;
+    }
+
+    /** @return the refusal to answer with, or null when the create stands */
+    public NeoResponse refusal() {
+      return refusal;
+    }
+
+    /** @return the add result to go on with (core's error JSON when the gate's commit failed) */
+    public String result() {
+      return result;
+    }
+  }
+
+  /**
+   * Runs one create inside the gate: refused before the write when the client's quotas could not
+   * be read ({@link Create#refusalBeforeWrite}), else run through the gate's service and checked
+   * after the insert ({@link Create#finish}). The one way both create channels use the gate.
+   *
+   * @param dalEntityName the DAL entity name of the created row
+   * @param current the service the caller would use otherwise
+   * @param create the create itself; never run when the create is refused before the write
+   * @return the refusal, or the add result to go on with
+   * @throws Exception whatever the create throws; the gate then rolls back what it owns
+   */
+  public static Gated run(String dalEntityName, DefaultJsonDataService current,
+      GatedCreate create) throws Exception { // NOSONAR — the create's own exceptions pass through
+    return run(dalEntityName, current, create, QuotaWriteGuard.getDefault(),
+        BatchService.isCallerOwnedTransaction());
+  }
+
+  static Gated run(String dalEntityName, DefaultJsonDataService current, GatedCreate create,
+      QuotaWriteGuard guard, boolean batchOwnsTransaction) throws Exception { // NOSONAR
+    try (Create quota = begin(dalEntityName, guard, batchOwnsTransaction)) {
+      NeoResponse early = quota.refusalBeforeWrite();
+      if (early != null) {
+        return new Gated(early, null);
+      }
+      String result = create.run(quota.jsonService(current));
+      NeoResponse refusal = quota.finish(result);
+      return new Gated(refusal, quota.result());
+    }
   }
 
   /**
@@ -183,16 +249,18 @@ public final class NeoQuotaWriteGate {
 
     private final String dalEntityName;
     private final QuotaWriteGuard guard;
+    private final QuotaClientCache.Entry entry;
     private final boolean checked;
     private final boolean ownsTransaction;
     private final boolean failedBeforeWrite;
     private boolean ended;
     private String result;
 
-    private Create(String dalEntityName, QuotaWriteGuard guard, boolean checked,
-        boolean ownsTransaction, boolean failedBeforeWrite) {
+    private Create(String dalEntityName, QuotaWriteGuard guard, QuotaClientCache.Entry entry,
+        boolean checked, boolean ownsTransaction, boolean failedBeforeWrite) {
       this.dalEntityName = dalEntityName;
       this.guard = guard;
+      this.entry = entry;
       this.checked = checked;
       this.ownsTransaction = ownsTransaction;
       this.failedBeforeWrite = failedBeforeWrite;
@@ -201,7 +269,8 @@ public final class NeoQuotaWriteGate {
     /**
      * Whether this create is quota-checked.
      *
-     * @return {@code true} when some active {@code block} quota counts the entity
+     * @return {@code true} when a {@code block} quota of the request's client counts the entity,
+     *     or when the client's quotas could not be read (the create then fails closed)
      */
     public boolean isChecked() {
       return checked;
@@ -225,6 +294,22 @@ public final class NeoQuotaWriteGate {
      */
     public DefaultJsonDataService jsonService(DefaultJsonDataService current) {
       return ownsTransaction ? NeoBatchJsonDataService.deferredCommitInstance() : current;
+    }
+
+    /**
+     * The refusal of a create whose client's quotas could not be read, to answer <b>before</b>
+     * running it: {@value NeoQuotaWriteGate#CHECK_FAILED_STATUS} {@code QUOTA_CHECK_FAILED}, with
+     * the transaction rolled back when this gate owns it (inside a batch, the failed operation
+     * rolls the batch back). Null for every other create, which then runs.
+     *
+     * @return the refusal, or null
+     */
+    public NeoResponse refusalBeforeWrite() {
+      if (!failedBeforeWrite) {
+        return null;
+      }
+      rollbackIfOwned();
+      return checkFailedResponse();
     }
 
     /**
@@ -277,7 +362,7 @@ public final class NeoQuotaWriteGate {
 
     private Outcome check(List<String> createdIds) {
       try {
-        Optional<QuotaEvaluation> refusal = guard.refusalFor(dalEntityName, createdIds);
+        Optional<QuotaEvaluation> refusal = guard.refusalFor(entry, dalEntityName, createdIds);
         if (refusal.isPresent()) {
           log.info("[QUOTA] Refused a create of {}: {}", dalEntityName, refusal.get());
           return new Outcome(refusalResponse(refusal.get()));

@@ -17,6 +17,8 @@
 
 package com.etendoerp.go.usage.quota;
 
+import java.util.Collection;
+
 /**
  * ETP-5051 — reads one tenant's consumption of one quota's resource over a period. The seam the
  * evaluator's tests replace: every consumption query in the quota code goes through an
@@ -34,4 +36,20 @@ public interface ConsumptionReader {
    * @return the consumed quantity
    */
   long read(QuotaDefinition quota, String clientId, QuotaPeriod period);
+
+  /**
+   * The consumption <b>before</b> a create, for the NEO write check: the rows the create just
+   * inserted (flushed, in the same transaction) are left out of a count that would see them. The
+   * default is {@link #read}, right for a source that cannot see them — the stored aggregate.
+   *
+   * @param quota the quota
+   * @param clientId the tenant
+   * @param period the current period
+   * @param createdIds the ids of the rows the create inserted; never empty
+   * @return the consumed quantity without the created rows
+   */
+  default long readBeforeCreate(QuotaDefinition quota, String clientId, QuotaPeriod period,
+      Collection<String> createdIds) {
+    return read(quota, clientId, period);
+  }
 }

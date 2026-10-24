@@ -567,5 +567,61 @@ class UsageQueryComposerTest {
       assertThrows(IllegalArgumentException.class,
           () -> UsageQueryComposer.composeRowMatch(entityName, null));
     }
+
+    /**
+     * ETP-5051 re-review W2: the write check charges a created row to the current period only when
+     * its date falls inside the counted window, so the row match carries the same day bounds as
+     * the counts, as bound parameters, with the restriction wrapped exactly as before.
+     */
+    @Test
+    void theInRangeFormAddsTheDayBoundsOfTheCounts() {
+      String hql = UsageQueryComposer.composeRowMatchInRange(ENTITY, DATE_PROPERTY,
+          WIDENING_FRAGMENT);
+      String count = UsageQueryComposer.composePerTenantCount(ENTITY, DATE_PROPERTY,
+          WIDENING_FRAGMENT);
+
+      int bounds = hql.indexOf("outer_." + DATE_PROPERTY + " >= :"
+          + UsageQueryComposer.PARAM_DAY_START);
+      assertAll(
+          () -> assertTrue(hql.contains("outer_.id = :" + UsageQueryComposer.PARAM_RECORD_ID),
+              hql),
+          () -> assertTrue(bounds > 0 && bounds < hql.indexOf(SUBQUERY_OPENER),
+              "the day bounds must stay in the outer where-clause: " + hql),
+          () -> assertTrue(hql.contains("outer_." + DATE_PROPERTY + " < :"
+              + UsageQueryComposer.PARAM_DAY_END), hql),
+          () -> assertTrue(hql.endsWith(
+              count.substring(count.indexOf(" and outer_.id in (select"))),
+              "the restriction must be wrapped by the same subquery as the counts: " + hql));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = { BREAKOUT_FRAGMENT, BALANCED_ESCAPE_FRAGMENT })
+    void theInRangeFormRejectsWhatTheValidatorRejects(String malicious) {
+      assertThrows(IllegalArgumentException.class,
+          () -> UsageQueryComposer.composeRowMatchInRange(ENTITY, DATE_PROPERTY, malicious));
+      assertThrows(IllegalArgumentException.class,
+          () -> UsageQueryComposer.composeRowMatchInRange(ENTITY, "invoiceDate or 1=1", null));
+    }
+
+    /**
+     * ETP-5051 re-review W2: the count before a create leaves the created rows out, as a bound
+     * collection in the outer where-clause; otherwise it is the per-tenant count.
+     */
+    @Test
+    void theExcludingCountLeavesTheCreatedRowsOut() {
+      String hql = UsageQueryComposer.composePerTenantCountExcluding(ENTITY, DATE_PROPERTY,
+          WIDENING_FRAGMENT);
+      String plain = UsageQueryComposer.composePerTenantCount(ENTITY, DATE_PROPERTY,
+          WIDENING_FRAGMENT);
+
+      int excluded = hql.indexOf("outer_.id not in (:" + UsageQueryComposer.PARAM_EXCLUDED_IDS
+          + ")");
+      assertAll(
+          () -> assertTrue(excluded > 0 && excluded < hql.indexOf(SUBQUERY_OPENER),
+              "the exclusion must stay in the outer where-clause: " + hql),
+          () -> assertTrue(hql.replace(" and outer_.id not in (:"
+              + UsageQueryComposer.PARAM_EXCLUDED_IDS + ")", "").equals(plain),
+              "otherwise the same count: " + hql));
+    }
   }
 }

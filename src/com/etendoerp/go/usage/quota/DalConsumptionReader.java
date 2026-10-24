@@ -18,6 +18,7 @@
 package com.etendoerp.go.usage.quota;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Date;
 import java.util.List;
 
@@ -105,6 +106,29 @@ public class DalConsumptionReader implements ConsumptionReader {
       freshness.checkLag();
     }
     return readStored(quota, clientId, period);
+  }
+
+  /**
+   * The live declarative count leaves the created rows out ({@code id not in (:excludedIds)}), so
+   * it is the consumption before the create whatever the created rows' dates. Every other source
+   * cannot see them and reads as {@link #read} does.
+   */
+  @Override
+  public long readBeforeCreate(QuotaDefinition quota, String clientId, QuotaPeriod period,
+      Collection<String> createdIds) {
+    if (quota.getSource() == ConsumptionSource.LIVE
+        && UsageResourceValidator.MODE_DECLARATIVE.equals(quota.getCountingMode())
+        && createdIds != null && !createdIds.isEmpty()) {
+      String hql = UsageQueryComposer.composePerTenantCountExcluding(quota.getCountedEntity(),
+          quota.getDateProperty(), quota.getHqlRestriction());
+      Query<?> query = OBDal.getInstance().getSession().createQuery(hql);
+      query.setParameter(UsageQueryComposer.PARAM_CLIENT_ID, clientId);
+      query.setParameter(UsageQueryComposer.PARAM_DAY_START, period.getWindowFrom());
+      query.setParameter(UsageQueryComposer.PARAM_DAY_END, period.getWindowTo());
+      query.setParameterList(UsageQueryComposer.PARAM_EXCLUDED_IDS, createdIds);
+      return toLong(query.uniqueResult());
+    }
+    return read(quota, clientId, period);
   }
 
   private long readStored(QuotaDefinition quota, String clientId, QuotaPeriod period) {

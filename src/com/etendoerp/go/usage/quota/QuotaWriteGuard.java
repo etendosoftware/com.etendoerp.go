@@ -22,6 +22,8 @@ import java.util.List;
 import java.util.Optional;
 import java.util.function.Supplier;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.openbravo.dal.core.OBContext;
 
 /**
@@ -32,10 +34,13 @@ import org.openbravo.dal.core.OBContext;
  * <ol>
  *   <li>{@code C}'s entry in the {@link QuotaClientCache} names the {@code block} quotas of
  *       {@code C}'s plan whose declarative resource counts {@code E} — none, and the check ends
- *       with no query at all, whatever other clients' plans cap;</li>
- *   <li>each such resource's HQL restriction is tested against the new row
- *       ({@link CreatedRowMatcher}), which also names the row's tenant;</li>
- *   <li>the {@link QuotaEvaluator} takes the lock (live), reads the consumption and decides.</li>
+ *       with no query at all, whatever other clients' plans cap. The entry is read once, before
+ *       the insert ({@link #entryIfChecked}), and the same entry is checked after it;</li>
+ *   <li>each such resource's HQL restriction and the current period's day bounds are tested
+ *       against the new row ({@link CreatedRowMatcher}): a row dated outside the counted window
+ *       does not consume this period and is let through;</li>
+ *   <li>the {@link QuotaEvaluator} takes the lock (live), reads the consumption before the create
+ *       and decides.</li>
  * </ol>
  * The client is the request's {@link OBContext} client. The cache entry is built on the request's
  * own session; a failure there propagates to the caller, which fails the create closed.
@@ -47,6 +52,8 @@ import org.openbravo.dal.core.OBContext;
  */
 public class QuotaWriteGuard {
 
+  private static final Logger log = LogManager.getLogger(QuotaWriteGuard.class);
+
   private final QuotaClientCache cache;
   private final CreatedRowMatcher matcher;
   private final QuotaEvaluator evaluator;
@@ -56,7 +63,7 @@ public class QuotaWriteGuard {
    * A guard over explicit seams.
    *
    * @param cache each client's block quotas, by counted entity
-   * @param matcher tests a created row against a resource's restriction
+   * @param matcher tests a created row against a resource's restriction and the period
    * @param evaluator decides
    * @param currentClient the client of the running request, or null when there is none
    */
@@ -79,8 +86,9 @@ public class QuotaWriteGuard {
 
   /** Built on first use, so loading this class wires no service. */
   private static final class DefaultHolder {
+    // Monotonic: a wall-clock step back must not keep an entry alive, nor a step forward drop all.
     private static final QuotaWriteGuard INSTANCE = new QuotaWriteGuard(
-        new QuotaClientCache(new DalQuotaLookup(), System::currentTimeMillis),
+        new QuotaClientCache(new DalQuotaLookup(), () -> System.nanoTime() / 1_000_000L),
         CreatedRowMatcher.dal(), new QuotaEvaluator(), QuotaWriteGuard::contextClient);
   }
 
@@ -92,47 +100,63 @@ public class QuotaWriteGuard {
   }
 
   /**
-   * Whether this request's creates of this entity must be checked. A map lookup, plus building the
-   * client's entry on the request's session once per {@link QuotaClientCache#TTL_MS}. Callers ask
-   * before the insert, to decide how to run it.
+   * The request's client's entry when its creates of this entity must be checked. A map lookup,
+   * plus building the entry on the request's session once per {@link QuotaClientCache#TTL_MS}.
+   * Callers ask before the insert, to decide how to run it, and hand the entry back to
+   * {@link #refusalFor} after it.
    *
    * @param entityName the DAL entity name
-   * @return {@code true} when a {@code block} quota of the request's client counts this entity
+   * @return the entry when a {@code block} quota of the request's client counts this entity, else
+   *     empty
    * @throws RuntimeException when the client's entry could not be built
    */
-  public boolean appliesTo(String entityName) {
+  public Optional<QuotaClientCache.Entry> entryIfChecked(String entityName) {
     String clientId = currentClient.get();
-    return clientId != null && !cache.entryFor(clientId).blockQuotasFor(entityName).isEmpty();
+    if (clientId == null) {
+      return Optional.empty();
+    }
+    QuotaClientCache.Entry entry = cache.entryFor(clientId);
+    return entry.blockQuotasFor(entityName).isEmpty() ? Optional.empty() : Optional.of(entry);
   }
 
   /**
-   * Checks created rows, after the insert and before the commit.
+   * Checks created rows, after the insert and before the commit, against the entry read before it.
    *
+   * @param entry the request's client's entry, from {@link #entryIfChecked}
    * @param entityName the DAL entity name of the rows
    * @param recordIds the ids of the created rows
    * @return the first DENY evaluation, or empty when every row may stand
    */
-  public Optional<QuotaEvaluation> refusalFor(String entityName, Collection<String> recordIds) {
-    String clientId = currentClient.get();
-    if (clientId == null || recordIds == null || recordIds.isEmpty()) {
+  public Optional<QuotaEvaluation> refusalFor(QuotaClientCache.Entry entry, String entityName,
+      Collection<String> recordIds) {
+    if (entry == null || recordIds == null || recordIds.isEmpty()) {
       return Optional.empty();
     }
-    QuotaClientCache.Entry entry = cache.entryFor(clientId);
     List<QuotaDefinition> quotas = entry.blockQuotasFor(entityName);
-    for (String recordId : recordIds) {
-      for (QuotaDefinition quota : quotas) {
-        String rowClient = matcher.tenantIfCounted(quota, recordId);
+    TenantQuotas tenant = entry.getTenant();
+    QuotaPeriod period = quotas.isEmpty() ? null : evaluator.writeCheckPeriod(tenant);
+    if (period == null) {
+      return Optional.empty();
+    }
+    for (QuotaDefinition quota : quotas) {
+      long charged = 0L;
+      for (String recordId : recordIds) {
+        String rowClient = matcher.tenantIfCounted(quota, recordId, period);
         if (rowClient == null) {
           continue;
         }
-        // A row created into another client is measured against that client's own quotas.
-        TenantQuotas tenant = rowClient.equals(clientId) ? entry.getTenant()
-            : cache.entryFor(rowClient).getTenant();
+        if (!rowClient.equals(tenant.getClientId())) {
+          // NEO creates rows in the request's client; another client here is not ours to measure.
+          log.warn("[QUOTA] A created {} row belongs to client {}, not to the request's client {};"
+              + " not quota-checked", entityName, rowClient, tenant.getClientId());
+          continue;
+        }
         Optional<QuotaEvaluation> refusal =
-            evaluator.refusalForCreate(tenant, quota.getResourceId());
+            evaluator.refusalForCreate(tenant, quota, period, recordIds, charged);
         if (refusal.isPresent()) {
           return refusal;
         }
+        charged++;
       }
     }
     return Optional.empty();
