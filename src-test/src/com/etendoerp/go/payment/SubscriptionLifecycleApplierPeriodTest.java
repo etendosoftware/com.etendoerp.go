@@ -256,23 +256,23 @@ public class SubscriptionLifecycleApplierPeriodTest {
     SubscriptionEventOutcome expired =
         SubscriptionEventOutcome.apply(EnvironmentAccessPolicy.SubscriptionStatus.EXPIRED, null);
 
-    SubscriptionEventOutcome flagFirst = expired.withCancelAtPeriodEnd(true)
+    SubscriptionEventOutcome flagFirst = expired.withCancelAtPeriodEnd(CancelAtPeriodEnd.SET)
         .withPeriod(at(NOV), at(DEC)).closing(at(DEC));
     SubscriptionEventOutcome flagLast = expired.withPeriod(at(NOV), at(DEC)).closing(at(DEC))
-        .withCancelAtPeriodEnd(true);
+        .withCancelAtPeriodEnd(CancelAtPeriodEnd.SET);
     SubscriptionEventOutcome flagBetween = expired.withPeriod(at(NOV), at(DEC))
-        .withCancelAtPeriodEnd(false).closing(at(DEC));
+        .withCancelAtPeriodEnd(CancelAtPeriodEnd.CLEARED).closing(at(DEC));
 
     for (SubscriptionEventOutcome outcome : new SubscriptionEventOutcome[] { flagFirst,
         flagLast }) {
-      assertEquals(Boolean.TRUE, outcome.cancelAtPeriodEnd());
+      assertEquals(CancelAtPeriodEnd.SET, outcome.cancelAtPeriodEnd());
       assertEquals(at(NOV), outcome.periodStart());
       assertEquals(at(DEC), outcome.periodEnd());
       assertTrue(outcome.closesSubscription());
       assertEquals(at(DEC), outcome.endedAt());
       assertEquals(EnvironmentAccessPolicy.SubscriptionStatus.EXPIRED, outcome.status());
     }
-    assertEquals(Boolean.FALSE, flagBetween.cancelAtPeriodEnd());
+    assertEquals(CancelAtPeriodEnd.CLEARED, flagBetween.cancelAtPeriodEnd());
     assertTrue(flagBetween.closesSubscription());
   }
 
@@ -281,12 +281,13 @@ public class SubscriptionLifecycleApplierPeriodTest {
     SubscriptionEventOutcome pastDue = SubscriptionEventOutcome
         .apply(EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE, at(NOV));
 
-    SubscriptionEventOutcome flagged = pastDue.withCancelAtPeriodEnd(true);
+    SubscriptionEventOutcome flagged = pastDue.withCancelAtPeriodEnd(CancelAtPeriodEnd.SET);
 
     assertEquals(EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE, flagged.status());
     assertEquals(at(NOV), flagged.dueAt());
     assertFalse(flagged.closesSubscription());
-    assertNull("an unflagged outcome reports nothing", pastDue.cancelAtPeriodEnd());
+    assertEquals("an unflagged outcome reports nothing", CancelAtPeriodEnd.NOT_REPORTED,
+        pastDue.cancelAtPeriodEnd());
   }
 
   @Test
@@ -297,28 +298,31 @@ public class SubscriptionLifecycleApplierPeriodTest {
     SubscriptionEventOutcome ignored = SubscriptionEventOutcome.ignore("stale event");
 
     assertSame(current, current.withCancelAtPeriodEnd(null));
-    assertSame(ignored, ignored.withCancelAtPeriodEnd(true));
-    assertNull(ignored.cancelAtPeriodEnd());
+    assertSame(current, current.withCancelAtPeriodEnd(CancelAtPeriodEnd.NOT_REPORTED));
+    assertSame(ignored, ignored.withCancelAtPeriodEnd(CancelAtPeriodEnd.SET));
+    assertEquals(CancelAtPeriodEnd.NOT_REPORTED, ignored.cancelAtPeriodEnd());
   }
 
   @Test
   public void cancelAtPeriodEndOfReadsABooleanOrItsStringForm() throws Exception {
-    assertEquals(Boolean.TRUE, SubscriptionLifecycleApplier.cancelAtPeriodEndOf(
+    assertEquals(CancelAtPeriodEnd.SET, SubscriptionLifecycleApplier.cancelAtPeriodEndOf(
         new JSONObject("{\"cancel_at_period_end\":true}")));
-    assertEquals(Boolean.FALSE, SubscriptionLifecycleApplier.cancelAtPeriodEndOf(
+    assertEquals(CancelAtPeriodEnd.CLEARED, SubscriptionLifecycleApplier.cancelAtPeriodEndOf(
         new JSONObject("{\"cancel_at_period_end\":false}")));
-    assertEquals(Boolean.TRUE, SubscriptionLifecycleApplier.cancelAtPeriodEndOf(
+    assertEquals(CancelAtPeriodEnd.SET, SubscriptionLifecycleApplier.cancelAtPeriodEndOf(
         new JSONObject("{\"cancel_at_period_end\":\"true\"}")));
-    assertEquals(Boolean.FALSE, SubscriptionLifecycleApplier.cancelAtPeriodEndOf(
+    assertEquals(CancelAtPeriodEnd.CLEARED, SubscriptionLifecycleApplier.cancelAtPeriodEndOf(
         new JSONObject("{\"cancel_at_period_end\":\"FALSE\"}")));
   }
 
   @Test
   public void cancelAtPeriodEndOfReportsNothingForAbsentNullOrJunk() throws Exception {
-    assertNull(SubscriptionLifecycleApplier.cancelAtPeriodEndOf(null));
-    assertNull(SubscriptionLifecycleApplier.cancelAtPeriodEndOf(new JSONObject("{}")));
+    assertEquals(CancelAtPeriodEnd.NOT_REPORTED,
+        SubscriptionLifecycleApplier.cancelAtPeriodEndOf(null));
+    assertEquals(CancelAtPeriodEnd.NOT_REPORTED,
+        SubscriptionLifecycleApplier.cancelAtPeriodEndOf(new JSONObject("{}")));
     for (String junk : new String[] { "null", "\"yes\"", "1", "0", "\"\"", "{}", "[]" }) {
-      assertNull(junk, SubscriptionLifecycleApplier.cancelAtPeriodEndOf(
+      assertEquals(junk, CancelAtPeriodEnd.NOT_REPORTED, SubscriptionLifecycleApplier.cancelAtPeriodEndOf(
           new JSONObject("{\"cancel_at_period_end\":" + junk + "}")));
     }
   }
@@ -331,6 +335,6 @@ public class SubscriptionLifecycleApplierPeriodTest {
 
     assertTrue(outcome.closesSubscription());
     assertEquals(EnvironmentAccessPolicy.SubscriptionStatus.EXPIRED, outcome.status());
-    assertEquals(Boolean.TRUE, outcome.cancelAtPeriodEnd());
+    assertEquals(CancelAtPeriodEnd.SET, outcome.cancelAtPeriodEnd());
   }
 }

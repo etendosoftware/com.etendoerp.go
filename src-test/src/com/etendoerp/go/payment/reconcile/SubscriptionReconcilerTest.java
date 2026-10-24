@@ -42,6 +42,7 @@ import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.ad.system.Client;
 
 import com.etendoerp.go.payment.BillingEventStore;
+import com.etendoerp.go.payment.CancelAtPeriodEnd;
 import com.etendoerp.go.payment.CheckoutConfiguration;
 import com.etendoerp.go.payment.CheckoutRequestStore;
 import com.etendoerp.go.payment.EnvironmentAccessPolicy.SubscriptionStatus;
@@ -436,7 +437,7 @@ public class SubscriptionReconcilerTest {
     SubscriptionEventOutcome outcome =
         appliedOutcome(lifecycle.targetForSubscription("sub_r"), null);
     assertEquals(SubscriptionStatus.CURRENT, outcome.status());
-    assertEquals(Boolean.TRUE, outcome.cancelAtPeriodEnd());
+    assertEquals(CancelAtPeriodEnd.SET, outcome.cancelAtPeriodEnd());
     assertEquals(1, result.get(Counter.SUBSCRIPTIONS_CURRENT));
     assertEquals(0, result.get(Counter.CANCEL_FLAGS_SYNCED));
     verify(row, never()).setCancelAtPeriodEnd(any());

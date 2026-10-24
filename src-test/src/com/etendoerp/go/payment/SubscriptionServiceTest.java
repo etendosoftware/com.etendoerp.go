@@ -784,7 +784,7 @@ class SubscriptionServiceTest {
 
       service.applyLifecycleOutcome(row, SubscriptionEventOutcome
           .apply(EnvironmentAccessPolicy.SubscriptionStatus.CURRENT, null)
-          .withCancelAtPeriodEnd(true), eventAt);
+          .withCancelAtPeriodEnd(CancelAtPeriodEnd.SET), eventAt);
 
       verify(row).setCancelAtPeriodEnd(true);
       verify(row).setSubscriptionStatus(SubscriptionService.STATUS_ACTIVE);
@@ -806,7 +806,10 @@ class SubscriptionServiceTest {
         Subscription row = subscriptionOf(CLIENT_ID);
         when(row.isCancelAtPeriodEnd()).thenReturn(stored);
 
-        assertFalse(SubscriptionService.writeCancelAtPeriodEnd(row, stored), "same " + stored);
+        assertFalse(SubscriptionService.writeCancelAtPeriodEnd(row, CancelAtPeriodEnd.of(stored)),
+            "same " + stored);
+        assertFalse(SubscriptionService.writeCancelAtPeriodEnd(row, CancelAtPeriodEnd.NOT_REPORTED),
+            "not reported on " + stored);
         assertFalse(SubscriptionService.writeCancelAtPeriodEnd(row, null), "null on " + stored);
         verify(row, never()).setCancelAtPeriodEnd(any());
       }
@@ -821,9 +824,9 @@ class SubscriptionServiceTest {
       Subscription unset = subscriptionOf(CLIENT_ID);
       when(unset.isCancelAtPeriodEnd()).thenReturn(null);
 
-      assertTrue(SubscriptionService.writeCancelAtPeriodEnd(scheduling, true));
-      assertTrue(SubscriptionService.writeCancelAtPeriodEnd(resuming, false));
-      assertTrue(SubscriptionService.writeCancelAtPeriodEnd(unset, false));
+      assertTrue(SubscriptionService.writeCancelAtPeriodEnd(scheduling, CancelAtPeriodEnd.SET));
+      assertTrue(SubscriptionService.writeCancelAtPeriodEnd(resuming, CancelAtPeriodEnd.CLEARED));
+      assertTrue(SubscriptionService.writeCancelAtPeriodEnd(unset, CancelAtPeriodEnd.CLEARED));
 
       verify(scheduling).setCancelAtPeriodEnd(true);
       verify(resuming).setCancelAtPeriodEnd(false);

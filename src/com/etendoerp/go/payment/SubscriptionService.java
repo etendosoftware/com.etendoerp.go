@@ -732,14 +732,15 @@ public class SubscriptionService {
    * reads it. {@code null} (the event does not report it) leaves the stored flag alone.
    *
    * @param subscription the row to update
-   * @param cancel the provider flag, or null
+   * @param cancel the provider flag; {@link CancelAtPeriodEnd#NOT_REPORTED} (or null) writes nothing
    * @return true when the stored flag changed
    */
-  public static boolean writeCancelAtPeriodEnd(Subscription subscription, Boolean cancel) {
-    if (cancel == null || cancel.equals(subscription.isCancelAtPeriodEnd())) {
+  public static boolean writeCancelAtPeriodEnd(Subscription subscription,
+      CancelAtPeriodEnd cancel) {
+    if (cancel == null || cancel.leavesUnchanged(subscription.isCancelAtPeriodEnd())) {
       return false;
     }
-    subscription.setCancelAtPeriodEnd(cancel);
+    subscription.setCancelAtPeriodEnd(cancel.isSet());
     return true;
   }
 

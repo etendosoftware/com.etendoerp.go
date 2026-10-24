@@ -289,26 +289,27 @@ public class SubscriptionLifecycleApplier {
    * {@link #fromSubscriptionStatus} never reads it, so it cannot change the status mapping.
    *
    * @param subscription a Stripe subscription object
-   * @return the flag, or null when absent or not a boolean
+   * @return the flag; {@link CancelAtPeriodEnd#NOT_REPORTED} when absent, null or not a boolean
    */
-  static Boolean cancelAtPeriodEndOf(JSONObject subscription) {
+  static CancelAtPeriodEnd cancelAtPeriodEndOf(JSONObject subscription) {
     if (subscription == null || !subscription.has(CANCEL_AT_PERIOD_END)
         || subscription.isNull(CANCEL_AT_PERIOD_END)) {
-      return null;
+      return CancelAtPeriodEnd.NOT_REPORTED;
     }
     Object value = subscription.opt(CANCEL_AT_PERIOD_END);
     if (value instanceof Boolean) {
-      return (Boolean) value;
+      return CancelAtPeriodEnd.of((Boolean) value);
     }
     String text = String.valueOf(value);
     if ("true".equalsIgnoreCase(text)) {
-      return Boolean.TRUE;
+      return CancelAtPeriodEnd.SET;
     }
     if ("false".equalsIgnoreCase(text)) {
-      return Boolean.FALSE;
+      return CancelAtPeriodEnd.CLEARED;
     }
-    return null;
+    return CancelAtPeriodEnd.NOT_REPORTED;
   }
+
 
   /**
    * Reads the subscription's own status.

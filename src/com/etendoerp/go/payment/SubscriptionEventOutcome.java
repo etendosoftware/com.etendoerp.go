@@ -18,16 +18,16 @@ public final class SubscriptionEventOutcome {
   private final Instant periodEnd;
   private final boolean closesSubscription;
   private final Instant endedAt;
-  private final Boolean cancelAtPeriodEnd;
+  private final CancelAtPeriodEnd cancelAtPeriodEnd;
 
   private SubscriptionEventOutcome(EnvironmentAccessPolicy.SubscriptionStatus status,
       Instant dueAt, String reason) {
-    this(status, dueAt, reason, null, null, false, null, null);
+    this(status, dueAt, reason, null, null, false, null, CancelAtPeriodEnd.NOT_REPORTED);
   }
 
   private SubscriptionEventOutcome(EnvironmentAccessPolicy.SubscriptionStatus status,
       Instant dueAt, String reason, Instant periodStart, Instant periodEnd,
-      boolean closesSubscription, Instant endedAt, Boolean cancelAtPeriodEnd) {
+      boolean closesSubscription, Instant endedAt, CancelAtPeriodEnd cancelAtPeriodEnd) {
     this.status = status;
     this.dueAt = dueAt;
     this.reason = reason;
@@ -87,11 +87,12 @@ public final class SubscriptionEventOutcome {
    * {@code cancel_at_period_end}. Display-only: it never changes the status, the grace anchor or
    * the close, and an ignored outcome stays ignored (nothing is written for it).
    *
-   * @param cancel the provider flag; null when the event does not report it (left as stored)
+   * @param cancel the provider flag; {@link CancelAtPeriodEnd#NOT_REPORTED} (or null) when the
+   *     event does not report it, which leaves the stored value alone
    * @return an outcome carrying the flag, or this one
    */
-  public SubscriptionEventOutcome withCancelAtPeriodEnd(Boolean cancel) {
-    if (isIgnored() || cancel == null) {
+  public SubscriptionEventOutcome withCancelAtPeriodEnd(CancelAtPeriodEnd cancel) {
+    if (isIgnored() || cancel == null || !cancel.isReported()) {
       return this;
     }
     return new SubscriptionEventOutcome(status, dueAt, reason, periodStart, periodEnd,
@@ -158,9 +159,10 @@ public final class SubscriptionEventOutcome {
   /**
    * Whether the provider will cancel the subscription at the end of the current period.
    *
-   * @return the provider flag, or null when the event does not report it
+   * @return the provider flag; {@link CancelAtPeriodEnd#NOT_REPORTED} when the event does not
+   *     report it, never null
    */
-  public Boolean cancelAtPeriodEnd() {
+  public CancelAtPeriodEnd cancelAtPeriodEnd() {
     return cancelAtPeriodEnd;
   }
 }

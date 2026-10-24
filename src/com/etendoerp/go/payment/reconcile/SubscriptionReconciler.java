@@ -34,6 +34,7 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.service.OBDal;
 
 import com.etendoerp.go.payment.BillingEventStore;
+import com.etendoerp.go.payment.CancelAtPeriodEnd;
 import com.etendoerp.go.payment.CheckoutConfiguration;
 import com.etendoerp.go.payment.CheckoutRequestStore;
 import com.etendoerp.go.payment.EnvironmentAccessPolicy.SubscriptionStatus;
@@ -315,8 +316,8 @@ final class SubscriptionReconciler {
    */
   private static void syncCancelAtPeriodEnd(SubscriptionCandidate candidate, Subscription row,
       SubscriptionEventOutcome outcome, ReconciliationResult result, ReconciliationAudit audit) {
-    Boolean cancel = outcome.cancelAtPeriodEnd();
-    if (cancel == null || cancel.equals(row.isCancelAtPeriodEnd())) {
+    CancelAtPeriodEnd cancel = outcome.cancelAtPeriodEnd();
+    if (cancel.leavesUnchanged(row.isCancelAtPeriodEnd())) {
       return;
     }
     if (!audit.isDryRun()) {
@@ -324,10 +325,10 @@ final class SubscriptionReconciler {
       OBDal.getInstance().save(row);
     }
     audit.repaired("synced the cancel-at-period-end flag of subscription {} to {}",
-        candidate.subscriptionId, cancel ? "Y" : "N");
+        candidate.subscriptionId, cancel.isSet() ? "Y" : "N");
     result.increment(Counter.CANCEL_FLAGS_SYNCED);
     result.item(candidate.subscriptionId, candidate.clientName,
-        "sync the cancel-at-period-end flag", cancel ? "Y" : "N");
+        "sync the cancel-at-period-end flag", cancel.isSet() ? "Y" : "N");
   }
 
   private void alertPaused(SubscriptionCandidate candidate, ReconciliationResult result,
