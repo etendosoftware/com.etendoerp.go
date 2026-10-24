@@ -23,6 +23,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 
@@ -48,13 +49,23 @@ import com.etendoerp.go.usage.UsageResourceValidator;
  * would only buy queries whose answer nothing reads. A named-strategy resource has no counted
  * entity and is never write-checked.
  *
- * <p>A failed rebuild keeps the previous index (empty on the first build) and is retried on the next
- * create after the TTL. The rebuild runs in its own session, so it can never break the create that
- * triggered it — not even a create of an entity no quota counts.
+ * <p>A failed rebuild keeps the previous index and is retried on the next create after the TTL.
+ * While one create rebuilds, the others are served the previous index instead of waiting. A first
+ * build that fails leaves the index empty — no create is quota-checked, it fails open — and is
+ * retried after {@link #RETRY_AFTER_FAILED_FIRST_BUILD_MS} ms. The rebuild runs in its own session
+ * on the write path's own pool ({@link IsolatedDalRead#callOnWritePath}), so it can never break the
+ * create that triggered it, and a busy report pool never makes it wait.
  */
 public class QuotaEntityIndex {
 
   private static final Logger log = LogManager.getLogger(QuotaEntityIndex.class);
+
+  /**
+   * How soon a build is retried while none has succeeded yet. Until one succeeds no create is quota-checked
+   * (fails open, open-and-notable-topics.md §4.19); shorter than {@link #TTL_MS} so that window
+   * stays short, long enough that a database in trouble is not asked again on every create.
+   */
+  public static final long RETRY_AFTER_FAILED_FIRST_BUILD_MS = 10_000L;
 
   /** How long a built index is trusted. */
   public static final long TTL_MS = 60_000L;
@@ -67,13 +78,15 @@ public class QuotaEntityIndex {
   private final Supplier<List<IndexedResource>> loader;
   private final LongSupplier clock;
   private final AtomicReference<Snapshot> snapshot = new AtomicReference<>();
+  private final ReentrantLock rebuildLock = new ReentrantLock();
 
   /**
-   * Production wiring: reads the catalog in its own session ({@link IsolatedDalRead}), so a failing
-   * rebuild can never break the create that triggered it, on the wall clock.
+   * Production wiring: reads the catalog in its own session on the write path's pool
+   * ({@link IsolatedDalRead#callOnWritePath}), so a failing rebuild can never break the create that
+   * triggered it, on the wall clock.
    */
   public QuotaEntityIndex() {
-    this(() -> IsolatedDalRead.call(QuotaEntityIndex::loadFromDatabase),
+    this(() -> IsolatedDalRead.callOnWritePath(QuotaEntityIndex::loadFromDatabase),
         System::currentTimeMillis);
   }
 
@@ -105,36 +118,66 @@ public class QuotaEntityIndex {
 
   private Snapshot current() {
     Snapshot built = snapshot.get();
-    if (built != null && clock.getAsLong() - built.builtAt < TTL_MS) {
+    if (isFresh(built)) {
       return built;
     }
-    synchronized (this) {
+    if (built == null) {
+      // Cold start: nothing to serve meanwhile, so wait for the one rebuild.
+      rebuildLock.lock();
+    } else if (!rebuildLock.tryLock()) {
+      // Another create is rebuilding: serve the previous index instead of queueing behind it.
+      return built;
+    }
+    try {
       built = snapshot.get();
-      if (built != null && clock.getAsLong() - built.builtAt < TTL_MS) {
+      if (isFresh(built)) {
         return built;
       }
-      Map<String, List<IndexedResource>> byEntity = built == null ? Collections.emptyMap()
-          : built.byEntity;
-      try {
-        byEntity = group(loader.get());
-      } catch (RuntimeException e) {
-        log.error("[QUOTA] Could not rebuild the quota entity index; keeping the previous one "
-            + "for {} ms", TTL_MS, e);
-      }
-      Snapshot rebuilt = new Snapshot(byEntity, clock.getAsLong());
+      Snapshot rebuilt = rebuild(built);
       snapshot.set(rebuilt);
       return rebuilt;
+    } finally {
+      rebuildLock.unlock();
     }
   }
 
-  /** One built index and when it was built. Immutable, swapped as a whole. */
+  private boolean isFresh(Snapshot built) {
+    return built != null && clock.getAsLong() - built.builtAt < built.trustedForMs;
+  }
+
+  private Snapshot rebuild(Snapshot previous) {
+    try {
+      return new Snapshot(group(loader.get()), clock.getAsLong(), TTL_MS, true);
+    } catch (RuntimeException e) {
+      if (previous != null && previous.loaded) {
+        log.error("[QUOTA] Could not rebuild the quota entity index; keeping the previous one "
+            + "for {} ms", TTL_MS, e);
+        return new Snapshot(previous.byEntity, clock.getAsLong(), TTL_MS, true);
+      }
+      log.error("[QUOTA] Could not build the quota entity index yet; no create is "
+          + "quota-checked until it builds (fails open), retrying in {} ms",
+          RETRY_AFTER_FAILED_FIRST_BUILD_MS, e);
+      return new Snapshot(Collections.emptyMap(), clock.getAsLong(),
+          RETRY_AFTER_FAILED_FIRST_BUILD_MS, false);
+    }
+  }
+
+  /**
+   * One index, when it was built, for how long it is trusted, and whether it was ever loaded (false
+   * while no build has succeeded yet). Immutable.
+   */
   private static final class Snapshot {
     private final Map<String, List<IndexedResource>> byEntity;
     private final long builtAt;
+    private final long trustedForMs;
+    private final boolean loaded;
 
-    private Snapshot(Map<String, List<IndexedResource>> byEntity, long builtAt) {
+    private Snapshot(Map<String, List<IndexedResource>> byEntity, long builtAt,
+        long trustedForMs, boolean loaded) {
       this.byEntity = byEntity;
       this.builtAt = builtAt;
+      this.trustedForMs = trustedForMs;
+      this.loaded = loaded;
     }
   }
 

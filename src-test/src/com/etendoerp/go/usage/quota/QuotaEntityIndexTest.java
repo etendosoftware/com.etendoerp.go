@@ -29,6 +29,11 @@ import static org.mockito.Mockito.when;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
@@ -151,6 +156,93 @@ class QuotaEntityIndexTest {
       assertTrue(logs.messagesAt(Level.ERROR).get(0).startsWith("[QUOTA]"));
     } finally {
       logs.detach();
+    }
+  }
+
+  /**
+   * REPRO (ETP-5051 re-review W1): a first build that fails (the write-path pool timed out or was
+   * full) leaves no create quota-checked. It fails open, but it is retried after
+   * {@link QuotaEntityIndex#RETRY_AFTER_FAILED_FIRST_BUILD_MS}, not after the full TTL — and it
+   * stays on that short retry for as long as no build has succeeded.
+   */
+  @Test
+  void aFailedFirstBuildFailsOpenAndIsRetriedSoonUntilOneSucceeds() {
+    AtomicReference<RuntimeException> failure =
+        new AtomicReference<>(new IllegalStateException("Isolated read timed out after 5000 ms"));
+    QuotaEntityIndex coldIndex = new QuotaEntityIndex(() -> {
+      loads.incrementAndGet();
+      if (failure.get() != null) {
+        throw failure.get();
+      }
+      return List.of(INVOICES);
+    }, now::get);
+    TestLogCapture logs = TestLogCapture.attachTo(QuotaEntityIndex.class, Level.ERROR);
+    try {
+      assertTrue(coldIndex.resourcesFor("Invoice").isEmpty(), "fails open");
+      now.addAndGet(QuotaEntityIndex.RETRY_AFTER_FAILED_FIRST_BUILD_MS - 1);
+      assertTrue(coldIndex.resourcesFor("Invoice").isEmpty());
+      assertEquals(1, loads.get(), "not retried on every create");
+
+      now.addAndGet(1);
+      assertTrue(coldIndex.resourcesFor("Invoice").isEmpty());
+      assertEquals(2, loads.get(), "a second failure keeps the short retry");
+
+      failure.set(null);
+      now.addAndGet(QuotaEntityIndex.RETRY_AFTER_FAILED_FIRST_BUILD_MS);
+      assertEquals(List.of(INVOICES), coldIndex.resourcesFor("Invoice"));
+      assertEquals(3, loads.get());
+      assertTrue(QuotaEntityIndex.RETRY_AFTER_FAILED_FIRST_BUILD_MS < QuotaEntityIndex.TTL_MS);
+      assertEquals(2, logs.messagesAt(Level.ERROR).size());
+      assertTrue(logs.messagesAt(Level.ERROR).get(0).contains("fails open"),
+          logs.messagesAt(Level.ERROR).get(0));
+    } finally {
+      logs.detach();
+    }
+  }
+
+  /**
+   * REPRO (ETP-5051 re-review W1): while one create rebuilds an expired index, another create is
+   * served the previous index at once instead of queueing behind the rebuild's read.
+   */
+  @Test
+  void aCreateDuringARebuildIsServedThePreviousIndexWithoutWaiting() throws Exception {
+    CountDownLatch rebuildStarted = new CountDownLatch(1);
+    CountDownLatch releaseRebuild = new CountDownLatch(1);
+    AtomicInteger calls = new AtomicInteger();
+    QuotaEntityIndex slowIndex = new QuotaEntityIndex(() -> {
+      if (calls.incrementAndGet() == 1) {
+        return List.of(INVOICES);
+      }
+      rebuildStarted.countDown();
+      awaitQuietly(releaseRebuild);
+      return List.of(ORDERS);
+    }, now::get);
+    slowIndex.resourcesFor("Invoice");
+    now.addAndGet(QuotaEntityIndex.TTL_MS);
+    ExecutorService rebuilder = Executors.newSingleThreadExecutor();
+    try {
+      Future<List<IndexedResource>> rebuilding = rebuilder.submit(
+          () -> slowIndex.resourcesFor("Order"));
+      assertTrue(rebuildStarted.await(10, TimeUnit.SECONDS));
+
+      assertEquals(List.of(INVOICES), slowIndex.resourcesFor("Invoice"),
+          "served the previous index while the rebuild is still running");
+
+      releaseRebuild.countDown();
+      assertEquals(List.of(ORDERS), rebuilding.get(10, TimeUnit.SECONDS));
+      assertTrue(slowIndex.resourcesFor("Invoice").isEmpty(), "the rebuilt index from now on");
+      assertEquals(2, calls.get());
+    } finally {
+      releaseRebuild.countDown();
+      rebuilder.shutdownNow();
+    }
+  }
+
+  private static void awaitQuietly(CountDownLatch latch) {
+    try {
+      latch.await(10, TimeUnit.SECONDS);
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
     }
   }
 

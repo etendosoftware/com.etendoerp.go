@@ -38,6 +38,7 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.ExecutionException;
@@ -46,7 +47,9 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.LockSupport;
 import java.util.function.Supplier;
 
 import org.hibernate.Session;
@@ -75,9 +78,9 @@ import org.openbravo.model.ad.system.Client;
  * database; that, the real {@code statement_timeout} and the caller's transaction surviving a
  * failed read are shown in {@code IsolatedDalReadIntegrationTest}.
  *
- * <p>The 30 s wait of the caller is a compile-time constant with no seam, so its expiry is not
- * exercised here; {@link #thePostgresCapStopsAStatementBeforeTheCallerStopsWaiting()} guards the
- * ordering of the two limits instead.
+ * <p>The caller's wait is exercised through the package-private {@code call(read, timeoutMillis)}
+ * seam; {@link #thePostgresCapStopsAStatementBeforeTheCallerStopsWaiting()} guards the ordering of
+ * the production limits.
  *
  * @covers com.etendoerp.go.usage.IsolatedDalRead
  * @covers com.etendoerp.go.usage.IsolatedReader
@@ -87,6 +90,9 @@ class IsolatedDalReadTest {
   private static final String CAP_SQL = "set local statement_timeout = 25000";
   private static final String WORKER_NAME = "etgo-isolated-read-\\d+";
   private static final long WAIT_SECONDS = 10L;
+  private static final String WRITE_PATH_CAP_SQL = "set local statement_timeout = 4000";
+  private static final String WRITE_PATH_WORKER_NAME = "etgo-quota-read-\\d+";
+  private static final long POLL_NANOS = TimeUnit.MILLISECONDS.toNanos(10L);
 
   private final List<String> events = Collections.synchronizedList(new ArrayList<>());
   private final List<Thread> callerThreads = Collections.synchronizedList(new ArrayList<>());
@@ -282,7 +288,7 @@ class IsolatedDalReadTest {
    * A caller is parked in a timed wait only inside {@code future.get(timeout)}, i.e. once its read
    * was accepted by the pool.
    */
-  private void awaitAllCallersWaitingOnTheirRead(int count) throws InterruptedException {
+  private void awaitAllCallersWaitingOnTheirRead(int count) {
     long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(WAIT_SECONDS);
     while (System.nanoTime() < deadline) {
       long waiting;
@@ -294,7 +300,7 @@ class IsolatedDalReadTest {
       if (waiting == count) {
         return;
       }
-      Thread.sleep(10L);
+      LockSupport.parkNanos(POLL_NANOS);
     }
     throw new AssertionError("the pool and its queue did not fill up in time");
   }
@@ -462,6 +468,135 @@ class IsolatedDalReadTest {
 
     assertNull(onWorker);
     assertSame(caller, OBContext.getOBContext(), "the caller's own context is left alone");
+  }
+
+  // --- the caller's wait --------------------------------------------------------------------
+
+  /**
+   * ETP-5051 re-review: the caller stops waiting at its timeout, and the abandoned worker is
+   * interrupted so that a long read can stop ({@code checkNotAbandoned}).
+   */
+  @Test
+  void aReadPastTheCallersWaitTimesOutAndItsWorkerIsInterrupted() {
+    CountDownLatch neverReleased = new CountDownLatch(1);
+    CountDownLatch workerInterrupted = new CountDownLatch(1);
+
+    IllegalStateException caught = assertThrows(IllegalStateException.class,
+        () -> IsolatedDalRead.call(() -> {
+          try {
+            neverReleased.await(WAIT_SECONDS, TimeUnit.SECONDS);
+          } catch (InterruptedException e) {
+            workerInterrupted.countDown();
+            Thread.currentThread().interrupt();
+          }
+          return "too late";
+        }, 100L));
+
+    assertInstanceOf(TimeoutException.class, caught.getCause());
+    assertEquals("Isolated read timed out after 100 ms", caught.getMessage());
+    awaitLatch(workerInterrupted);
+  }
+
+  @Test
+  void anAbandonedWorkerStopsAtItsNextCheck() {
+    Thread.currentThread().interrupt();
+    try {
+      assertThrows(CancellationException.class,
+          IsolatedDalRead::checkNotAbandoned);
+    } finally {
+      Thread.interrupted();
+    }
+    IsolatedDalRead.checkNotAbandoned();
+  }
+
+  // --- the write path's own pool ---------------------------------------------------------------
+
+  /**
+   * REPRO (ETP-5051 re-review W1): the reads a create waits for (index rebuild, usage-lag check)
+   * must not queue behind reports. With every report worker stuck, a write-path read still runs at
+   * once, on its own named worker, with its own shorter statement cap.
+   */
+  @Test
+  void aWritePathReadRunsWhileEveryReportWorkerIsStuck() throws Exception {
+    CountDownLatch reportsBusy = new CountDownLatch(IsolatedDalRead.WORKER_THREADS);
+    CountDownLatch release = new CountDownLatch(1);
+    List<Future<String>> reports = new ArrayList<>();
+    try {
+      for (int i = 0; i < IsolatedDalRead.WORKER_THREADS; i++) {
+        reports.add(callFromAnotherThread(() -> {
+          reportsBusy.countDown();
+          awaitLatch(release);
+          return "report";
+        }));
+      }
+      awaitLatch(reportsBusy);
+
+      long start = System.nanoTime();
+      String worker = IsolatedDalRead.callOnWritePath(() -> Thread.currentThread().getName());
+      long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+
+      assertTrue(worker.matches(WRITE_PATH_WORKER_NAME), worker);
+      assertTrue(elapsedMillis < 5_000L, "the write path waited " + elapsedMillis + " ms");
+      verify(session).createNativeQuery(WRITE_PATH_CAP_SQL);
+      assertTrue(IsolatedDalRead.WRITE_PATH_STATEMENT_TIMEOUT_MS
+          < TimeUnit.SECONDS.toMillis(IsolatedDalRead.WRITE_PATH_TIMEOUT_SECONDS));
+      release.countDown();
+      for (Future<String> report : reports) {
+        assertEquals("report", await(report));
+      }
+    } finally {
+      release.countDown();
+    }
+  }
+
+  @Test
+  void aCallFromAWritePathWorkerRunsInlineToo() {
+    Thread[] outer = new Thread[1];
+
+    Thread inner = IsolatedDalRead.callOnWritePath(() -> {
+      outer[0] = Thread.currentThread();
+      return IsolatedDalRead.call(Thread::currentThread);
+    });
+
+    assertSame(outer[0], inner);
+  }
+
+  // --- shutdown --------------------------------------------------------------------------------
+
+  /**
+   * ETP-5051 re-review N2: shutdown cancels the reads still queued, so their callers stop waiting
+   * at once instead of waiting out their timeout.
+   */
+  @Test
+  void shutdownCancelsTheQueuedReadsAndTheirCallersStopWaiting() throws Exception {
+    CountDownLatch workersBusy = new CountDownLatch(IsolatedDalRead.WORKER_THREADS);
+    CountDownLatch release = new CountDownLatch(1);
+    AtomicBoolean queuedReadRan = new AtomicBoolean();
+    try {
+      for (int i = 0; i < IsolatedDalRead.WORKER_THREADS; i++) {
+        callFromAnotherThread(() -> {
+          workersBusy.countDown();
+          awaitLatch(release);
+          return "running";
+        });
+      }
+      awaitLatch(workersBusy);
+      Future<String> queued = callFromAnotherThread(() -> {
+        queuedReadRan.set(true);
+        return "queued";
+      });
+      awaitAllCallersWaitingOnTheirRead(IsolatedDalRead.WORKER_THREADS + 1);
+
+      IsolatedDalRead.shutdown();
+
+      ExecutionException failed = assertThrows(ExecutionException.class, () -> await(queued));
+      assertInstanceOf(IllegalStateException.class, failed.getCause());
+      assertInstanceOf(CancellationException.class,
+          failed.getCause().getCause());
+      assertFalse(queuedReadRan.get());
+    } finally {
+      release.countDown();
+    }
   }
 
   // --- IsolatedReader --------------------------------------------------------------------------

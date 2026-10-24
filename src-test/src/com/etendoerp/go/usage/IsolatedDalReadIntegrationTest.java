@@ -60,14 +60,16 @@ public class IsolatedDalReadIntegrationTest extends OBBaseTest {
   }
 
   @Test
-  public void theWorkerHasItsOwnContextForTheCallersUserRoleClientAndOrg() {
+  public void theWorkerHasItsOwnContextForTheCallersUserRoleClientOrgLanguageAndWarehouse() {
     setTestUserContext();
     OBContext caller = OBContext.getOBContext();
 
     Object[] seen = IsolatedDalRead.call(() -> {
       OBContext worker = OBContext.getOBContext();
       return new Object[] { worker, worker.getUser().getId(), worker.getRole().getId(),
-          worker.getCurrentClient().getId(), worker.getCurrentOrganization().getId() };
+          worker.getCurrentClient().getId(), worker.getCurrentOrganization().getId(),
+          worker.getLanguage().getLanguage(),
+          worker.getWarehouse() == null ? null : worker.getWarehouse().getId() };
     });
 
     assertNotSame("the worker must never share the caller's OBContext instance", caller, seen[0]);
@@ -75,6 +77,10 @@ public class IsolatedDalReadIntegrationTest extends OBBaseTest {
     assertEquals(TEST_ROLE_ID, seen[2]);
     assertEquals(TEST_CLIENT_ID, seen[3]);
     assertEquals(TEST_ORG_ID, seen[4]);
+    assertEquals("the caller's language (re-review N5)", caller.getLanguage().getLanguage(),
+        seen[5]);
+    assertEquals("the caller's warehouse (re-review N5)",
+        caller.getWarehouse() == null ? null : caller.getWarehouse().getId(), seen[6]);
     assertSame("the caller keeps its own context", caller, OBContext.getOBContext());
   }
 
@@ -87,6 +93,12 @@ public class IsolatedDalReadIntegrationTest extends OBBaseTest {
     assertEquals("25s", onWorker);
     assertFalse("this test needs a server default other than 25s", "25s".equals(callerBefore));
     assertEquals(callerBefore, statementTimeout());
+  }
+
+  @Test
+  public void theWritePathWorkerCarriesItsOwnShorterStatementTimeout() {
+    assertEquals("4s",
+        IsolatedDalRead.callOnWritePath(IsolatedDalReadIntegrationTest::statementTimeout));
   }
 
   @Test
