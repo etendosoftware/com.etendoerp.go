@@ -18,6 +18,7 @@ package com.etendoerp.go.rest;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
@@ -42,9 +43,13 @@ import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.model.ad.system.Client;
 
 import com.etendoerp.go.payment.CheckoutRequestStore;
+import com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag;
+import com.etendoerp.go.payment.PlanCatalogService;
 import com.etendoerp.go.payment.StripeCustomerPortalService;
+import com.etendoerp.go.payment.SubscriptionService;
 import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.data.CheckoutRequest;
@@ -54,7 +59,7 @@ import com.etendoerp.go.session.GoSessionService;
 
 /**
  * Unit tests for the {@code __Host-go_session} cookie path on the billing endpoints (ETP-5443,
- * ADR-0001). {@code resolvePlatformAccount}/{@code runWithPlatformAccount} now accept the SPA's
+ * ADR-0001). {@code runWithPlatformAccount}/{@code runWithPlatformContext} now accept the SPA's
  * cookie session — resolved through the same {@code resolveAuthenticatedAccount} path {@code /me}
  * already uses, so a session-bound CSRF proof ({@code X-Go-CSRF}) is required on unsafe methods —
  * in addition to the legacy platform-token Bearer, which is left untouched when no cookie is sent.
@@ -62,6 +67,11 @@ import com.etendoerp.go.session.GoSessionService;
  * <p>The criterion pinned above all others, same as {@link EtendoGoJwtServletBillingSubscriptionTest},
  * is authorization: the account acted upon is always the one the session (or bearer token) resolves
  * to, never anything the caller supplies in the query string, headers or body.
+ *
+ * <p>ETP-5051 (O-1) — a cookie session that has entered an environment resolves that environment's
+ * own subscription, not the account's newest one.
+ *
+ * @covers com.etendoerp.go.rest.EtendoGoJwtServlet
  */
 public class EtendoGoJwtServletBillingCookieAuthTest {
 
@@ -76,6 +86,8 @@ public class EtendoGoJwtServletBillingCookieAuthTest {
   private static final String ACCOUNT_EMAIL = "owner@example.test";
   private static final String FOREIGN_CUSTOMER = "cus_foreign";
   private static final String FOREIGN_SUBSCRIPTION = "sub_foreign";
+  private static final String ENTERED_CLIENT = "client-entered";
+  private static final String NEWEST_CLIENT = "client-newest";
 
   // ===================== GET /billing/subscription (cookie) =====================
 
@@ -98,6 +110,47 @@ public class EtendoGoJwtServletBillingCookieAuthTest {
     verify(fixture.requestStore).findSubscriptionForAccount(ACCOUNT_ID, ACCOUNT_EMAIL);
     verifyNoMoreInteractions(fixture.requestStore);
     verifyNoInteractions(fixture.portalService);
+  }
+
+  /**
+   * ETP-5051 (O-1) — an account that owns several environments, each with its own Stripe
+   * subscription. Inside one of them (the session's entered client) the page must describe THAT
+   * environment, not the account's newest purchase: the quota banner of SPRING7 links here, and
+   * used to land on SPRING8's plan.
+   */
+  @Test
+  public void cookieGetSubscriptionInsideAnEnvironmentResolvesThatEnvironmentsSubscription()
+      throws Exception {
+    Fixture fixture = new Fixture();
+    when(fixture.goSessionService.resolve(SESSION_TOKEN))
+        .thenReturn(fixture.enteredSession(ENTERED_CLIENT));
+    CheckoutRequest newest = purchase("sub_newest", "cus_newest", NEWEST_CLIENT);
+    CheckoutRequest entered = purchase("sub_entered", "cus_entered", ENTERED_CLIENT);
+    when(fixture.requestStore.findSubscriptionForAccount(ACCOUNT_ID, ACCOUNT_EMAIL))
+        .thenReturn(newest);
+    when(fixture.requestStore.findSubscriptionForAccountClient(ACCOUNT_ID, ACCOUNT_EMAIL,
+        ENTERED_CLIENT)).thenReturn(entered);
+    when(fixture.portalService.retrieveSubscription("sub_entered")).thenReturn(fixture.live);
+
+    HttpServletRequest req = cookieGet(SUBSCRIPTION_PATH, SESSION_TOKEN, false);
+    ResponseCapture resp = mockResponse();
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
+        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class);
+        MockedStatic<EnvironmentAccessEnforcementFlag> flag =
+            mockStatic(EnvironmentAccessEnforcementFlag.class)) {
+      dal.when(() -> EtendoGoJwtDalHelper.findActiveAccountById(ACCOUNT_ID)).thenReturn(fixture.account);
+      fixture.servlet.doGet(req, resp.response);
+    }
+
+    assertEquals(200, resp.status);
+    JSONObject body = resp.json();
+    assertTrue(body.getBoolean("hasSubscription"));
+    assertEquals(ENTERED_CLIENT, body.getString("clientId"));
+    verify(fixture.portalService).retrieveSubscription("sub_entered");
+    verify(fixture.portalService, never()).retrieveSubscription("sub_newest");
+    verify(fixture.lifecycle).resolve(ENTERED_CLIENT);
+    verify(fixture.subscriptionService).findLatest(ENTERED_CLIENT);
+    verify(fixture.subscriptionService, never()).findLatest(NEWEST_CLIENT);
   }
 
   // ETP-5675 — the cookie is the browser profile's, so a tab still showing another account sends
@@ -278,7 +331,7 @@ public class EtendoGoJwtServletBillingCookieAuthTest {
   // ===================== Legacy Bearer is unaffected =====================
 
   /**
-   * Without the session cookie, {@code resolvePlatformAccount} keeps the pre-ETP-5443 narrow
+   * Without the session cookie, {@code runWithPlatformContext} keeps the pre-ETP-5443 narrow
    * platform-token lookup verbatim — no CSRF proof is required on the POST, unlike the cookie path.
    */
   @Test
@@ -380,14 +433,22 @@ public class EtendoGoJwtServletBillingCookieAuthTest {
     final StripeCustomerPortalService portalService = mock(StripeCustomerPortalService.class);
     final TenantEnvironmentLifecycleService lifecycle =
         mock(TenantEnvironmentLifecycleService.class);
+    final SubscriptionService subscriptionService = mock(SubscriptionService.class);
     final Account account = mock(Account.class);
+    final StripeCustomerPortalService.SubscriptionDetail live =
+        mock(StripeCustomerPortalService.SubscriptionDetail.class);
 
     Fixture() {
       servlet.checkoutRequestStore = requestStore;
       servlet.stripeCustomerPortalService = portalService;
       servlet.tenantEnvironmentLifecycleService = lifecycle;
+      servlet.subscriptionService = subscriptionService;
+      servlet.planCatalogService = mock(PlanCatalogService.class);
       when(account.getId()).thenReturn(ACCOUNT_ID);
       when(account.getEmail()).thenReturn(ACCOUNT_EMAIL);
+      when(live.getPlan()).thenReturn("Productive");
+      when(live.getCurrency()).thenReturn("EUR");
+      when(live.getStatus()).thenReturn("active");
     }
 
     GoSessionRecord validSession() {
@@ -396,6 +457,24 @@ public class EtendoGoJwtServletBillingCookieAuthTest {
       session.setCsrfToken(CSRF);
       return session;
     }
+
+    /** A session rotated into an environment by {@code POST /session/environment}. */
+    GoSessionRecord enteredSession(String clientId) {
+      GoSessionRecord session = validSession();
+      session.setCtxClientId(clientId);
+      return session;
+    }
+  }
+
+  private static CheckoutRequest purchase(String subscriptionId, String customerId,
+      String clientId) {
+    CheckoutRequest purchase = mock(CheckoutRequest.class);
+    when(purchase.getStripeSubscription()).thenReturn(subscriptionId);
+    when(purchase.getStripeCustomer()).thenReturn(customerId);
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn(clientId);
+    when(purchase.getCreatedClient()).thenReturn(client);
+    return purchase;
   }
 
   /** A GET request carrying (or not) the {@code __Host-go_session} cookie; GET is CSRF-exempt. */

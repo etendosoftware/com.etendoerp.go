@@ -659,6 +659,27 @@ of the subscription (ETP-5049, additive):
 }
 ```
 
+**Which subscription the page shows (ETP-5051, O-1).** An account can own several environments,
+each paid by its own Stripe subscription and customer. The page and the Customer Portal
+(`POST /sws/go/billing/subscription/portal`) resolve the purchase through the one servlet helper
+`findShownSubscription`, so the portal always acts on the subscription the page shows:
+
+- **Session entered into an environment** (the cookie session's client, written by
+  `POST /sws/go/session/environment`): that environment's own billable purchase,
+  `CheckoutRequestStore#findSubscriptionForAccountClient` — the newest row of this account whose
+  `CREATED_CLIENT_ID` is the entered client and that carries both Stripe ids. Plan, `planQuotas`
+  and their consumption, grace, price and `accessEnforced` all describe the environment the user
+  is in. When the account has no such purchase (a demo, or an environment it was only invited
+  into), the page answers `{"hasSubscription": false}` and the portal `404 NO_SUBSCRIPTION`: it
+  never falls back to another environment's subscription, which was the bug (inside SPRING7 the
+  quota banner's "Ver el uso del plan" opened SPRING8's plan and quotas).
+- **No environment entered** (account-level session, or the legacy platform-token bearer, which
+  carries no environment): the account's newest billable purchase
+  (`CheckoutRequestStore#findSubscriptionForAccount`), as before.
+
+Ownership is the query's: both lookups filter on the account id and email, so a client id that is
+not one of the account's own purchases resolves to nothing, whoever owns that client.
+
 - **`planKey` / `planName`** come from the tenant's `ETGO_SUBSCRIPTION` row (open, else the latest
   closed one — `SubscriptionService#findLatest`, the row the lifecycle reads) and its `ETGO_PLAN`.
   `plan` stays the live Stripe product name. Both are JSON null when the tenant has no subscription

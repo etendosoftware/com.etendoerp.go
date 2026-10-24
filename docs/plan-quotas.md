@@ -60,7 +60,7 @@ Exactly four points read quotas today. Three report; one refuses.
 |---|---|---|---|---|
 | **Environment entry** | `POST /sws/go/session/environment` → `quotas` | Lists the tenant's WARN and DENY items. Login is never refused for a quota. | `warn`, `block` | **No** — report |
 | **Environment list** | `GET /sws/go/environments` → `quotas` and `accessEnforced` per environment | The same WARN/DENY items for every listed tenant; the SPA's quota banner reads them for the current environment. Never fails the list. | `warn`, `block` | **No** — report |
-| **`/account`** | `GET /sws/go/billing/subscription` → `planQuotas`, `accessEnforced` | Every active quota with its consumption, mode `off` included (measured, no verdict). | all | **No** — report |
+| **`/account`** | `GET /sws/go/billing/subscription` → `planQuotas`, `accessEnforced` | Every active quota with its consumption, mode `off` included (measured, no verdict), for the **entered environment's** subscription (the account's newest only when no environment is entered — ETP-5051 O-1, see [`feature-flags-and-tenant-upgrade.md`](feature-flags-and-tenant-upgrade.md), *Which subscription the page shows*). | all | **No** — report |
 | **NEO write path** | REST `POST /sws/neo/{spec}/{entity}`, `/sws/neo/batch`, MCP `etendo_create`, MCP `etendo_batch` and the MCP batch jobs | Refuses a **create** of the counted entity with 403 `QUOTA_EXCEEDED` when the row would take the tenant over the included quantity. | `block` only, on **declarative** resources only | **Yes** — on create of the counted entity only |
 
 Read the last row literally:
@@ -308,6 +308,7 @@ Each was accepted during ETP-5051; none is a bug to fix silently.
 | A quota refuses too early / too late with `aggregate` | Stored usage is up to one cadence old; switch to `live` for an exact cap |
 | `consumed` is null on `/account` | No current period on the subscription row (register §5.9); fix the period by hand from Stripe |
 | No banner although `/account` shows DENY | The environment list blanked the report (a `[QUOTA] Could not …` line), or the user dismissed the banner for the session |
+| `/account` shows no subscription inside an environment the account owns | The page describes the entered environment only (ETP-5051 O-1): that environment has no billable purchase of this account — a demo, an environment the account was invited into, or a purchase whose `CREATED_CLIENT_ID` is not set. Another environment's subscription is never shown in its place |
 | 500 `QUOTA_CHECK_FAILED` | `[QUOTA]` ERROR lines: a database failure during the check, or the client's quota entry could not be built. Nothing was saved; retrying is safe |
 
 Log prefixes: `[QUOTA]` (evaluator, gate, reports), `[USAGE-LAG]` (stored usage late).

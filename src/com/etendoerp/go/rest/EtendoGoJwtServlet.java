@@ -1503,17 +1503,18 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
-   * Returns the authenticated account's live subscription detail plus stored grace state.
+   * Returns the live subscription detail plus stored grace state of the subscription the account
+   * page shows: the entered environment's own one, else the account's newest
+   * ({@link #findShownSubscription}).
    *
    * <p>Only the provider call maps an {@link IllegalStateException} to 503: that is where the
    * Stripe "not configured" condition is raised. The same exception from the stored-state lookup
-   * is a real server fault and reaches {@code runWithPlatformAccount}'s 500 path.
+   * is a real server fault and reaches {@code runWithPlatformContext}'s 500 path.
    */
   private void handleBillingSubscription(HttpServletRequest request,
       HttpServletResponse response) throws IOException {
-    runWithPlatformAccount(request, response, "billing-subscription", account -> {
-      CheckoutRequest purchase = checkoutRequestStore.findSubscriptionForAccount(account.getId(),
-          account.getEmail());
+    runWithPlatformContext(request, response, "billing-subscription", authenticated -> {
+      CheckoutRequest purchase = findShownSubscription(authenticated);
       if (purchase == null) {
         JSONObject result = new JSONObject();
         result.put("hasSubscription", false);
@@ -1553,14 +1554,16 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   /**
    * Creates a portal session using only the authenticated account's stored customer id.
    *
-   * <p>The purchase is resolved exactly as the Subscription page resolves it, so the portal always
-   * opens for the customer of the subscription the page shows.
+   * <p>The purchase is resolved exactly as the Subscription page resolves it
+   * ({@link #findShownSubscription}), so the portal always opens for the customer of the
+   * subscription the page shows. ETP-5051 (O-1) — every environment has its own Stripe customer,
+   * so resolving the account's newest purchase here while the page shows the entered one would let
+   * a user look at SPRING7 and change SPRING8.
    */
   private void handleBillingPortal(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
-    runWithPlatformAccount(request, response, "billing-portal", account -> {
-      CheckoutRequest purchase = checkoutRequestStore.findSubscriptionForAccount(account.getId(),
-          account.getEmail());
+    runWithPlatformContext(request, response, "billing-portal", authenticated -> {
+      CheckoutRequest purchase = findShownSubscription(authenticated);
       if (purchase == null || StringUtils.isBlank(purchase.getStripeCustomer())) {
         writeError(response, HttpServletResponse.SC_NOT_FOUND, "NO_SUBSCRIPTION",
             "No subscription for this account", "No subscription for this account");
@@ -1583,6 +1586,34 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       result.put("url", session.optString("url", ""));
       writeResponse(response, HttpServletResponse.SC_OK, result);
     });
+  }
+
+  /**
+   * ETP-5051 (O-1) — the one purchase the account page shows and acts on, for both
+   * {@code GET /billing/subscription} and the Customer Portal.
+   *
+   * <ul>
+   *   <li>Session entered into an environment ({@code POST /session/environment} wrote its
+   *       client on the cookie session): that environment's own subscription, so plan, quotas
+   *       and their consumption, grace, price and {@code accessEnforced} all describe the
+   *       environment the user is in. When the account has no billable purchase for it (a demo,
+   *       or an environment it was only invited into), the answer is "no subscription" — never
+   *       another environment's subscription, which is the mismatch this fixes.</li>
+   *   <li>Account-level session (no environment entered) or the legacy platform-token bearer,
+   *       which carries no environment: the account's newest subscription, as before.</li>
+   * </ul>
+   *
+   * <p>Ownership is the query's: both lookups carry the account id and email, so a client id that
+   * is not one of the account's own environments resolves to nothing.
+   */
+  private CheckoutRequest findShownSubscription(AuthenticatedAccount authenticated) {
+    Account account = authenticated.account;
+    String enteredClientId = enteredSessionClientId(authenticated);
+    if (enteredClientId == null || ZERO_ID.equals(enteredClientId)) {
+      return checkoutRequestStore.findSubscriptionForAccount(account.getId(), account.getEmail());
+    }
+    return checkoutRequestStore.findSubscriptionForAccountClient(account.getId(),
+        account.getEmail(), enteredClientId);
   }
 
   private JSONObject buildBillingSubscriptionJson(
@@ -3234,23 +3265,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
-   * Resolve the platform account for a billing / checkout / upgrade endpoint. Always enters admin
-   * mode (so callers can restore it in their finally block) and writes the error response,
-   * returning null, when the request is not authenticated.
-   *
-   * <p>ETP-5455 — the account surface's single resolver under
-   * {@link AccountRequirement#PLATFORM_CREDENTIAL_ONLY}. It used to carry its own Bearer branch,
-   * which skipped the legacy kill switch and the use counter, and branched on the mere PRESENCE
-   * of a session cookie: a blank {@code __Host-go_session} value sent billing down the cookie
-   * resolver's wide lookup, where an environment JWT got past the platform-token-only rule.
-   */
-  private Account resolvePlatformAccount(HttpServletRequest request, HttpServletResponse response) throws IOException {
-    AuthenticatedAccount authenticated =
-        resolveAccount(request, response, AccountRequirement.PLATFORM_CREDENTIAL_ONLY);
-    return authenticated == null ? null : authenticated.account;
-  }
-
-  /**
    * Whether the request carries any credential at all (a session cookie or a bearer header),
    * without touching {@code OBContext} or the DB — lets callers fail fast with 401 for a fully
    * unauthenticated request before ever entering admin mode.
@@ -3371,10 +3385,30 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private void runWithPlatformAccount(HttpServletRequest request,
       HttpServletResponse response, String actionLabel, AuthenticatedAccountAction action)
       throws IOException {
+    runWithPlatformContext(request, response, actionLabel,
+        authenticated -> action.execute(authenticated.account));
+  }
+
+  /**
+   * {@link #runWithPlatformAccount}, but the action also sees the cookie session, if any — for the
+   * billing endpoints that must know which environment the session has entered (ETP-5051 O-1).
+   *
+   * <p>Resolves the platform account for a billing / checkout / upgrade endpoint through
+   * {@link #resolveAccount} under {@link AccountRequirement#PLATFORM_CREDENTIAL_ONLY}, which
+   * always enters admin mode (restored in the finally block) and writes the error response itself
+   * when the request is not authenticated. ETP-5455 — this used to carry its own Bearer branch,
+   * which skipped the legacy kill switch and the use counter, and branched on the mere PRESENCE
+   * of a session cookie: a blank {@code __Host-go_session} value sent billing down the cookie
+   * resolver's wide lookup, where an environment JWT got past the platform-token-only rule.
+   */
+  private void runWithPlatformContext(HttpServletRequest request,
+      HttpServletResponse response, String actionLabel, AuthenticatedContextAction action)
+      throws IOException {
     try {
-      Account account = resolvePlatformAccount(request, response);
-      if (account == null) return;
-      action.execute(account);
+      AuthenticatedAccount authenticated =
+          resolveAccount(request, response, AccountRequirement.PLATFORM_CREDENTIAL_ONLY);
+      if (authenticated == null) return;
+      action.execute(authenticated);
     } catch (RuntimeException e) {
       EtendoGoDalHelper.rollbackDalChanges(actionLabel, e, log);
       log.error("Platform request failed: {}", actionLabel, e);
@@ -3834,10 +3868,20 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         demoClientId != null && transfer != null && transfer.optBoolean(FIELD_CONTACTS, false));
   }
 
+  /**
+   * The environment the cookie session has entered: the client {@code POST /session/environment}
+   * wrote on the session record, or {@code null} for an account-level session and for a request
+   * authenticated without a cookie session. A pure read of server-written state; ownership is the
+   * caller's to check.
+   */
+  private static String enteredSessionClientId(AuthenticatedAccount authenticated) {
+    return authenticated.sessionRecord == null ? null
+        : StringUtils.trimToNull(authenticated.sessionRecord.getCtxClientId());
+  }
+
   private String currentSessionClientId(HttpServletRequest request, HttpServletResponse response,
       AuthenticatedAccount authenticated) throws IOException {
-    String clientId = authenticated.sessionRecord == null ? null
-        : StringUtils.trimToNull(authenticated.sessionRecord.getCtxClientId());
+    String clientId = enteredSessionClientId(authenticated);
     if (authenticated.sessionRecord == null) {
       DecodedJWT jwt = bearerTenantClaims(request);
       if (jwt != null) clientId = StringUtils.trimToNull(
