@@ -1136,12 +1136,24 @@ client id, not by HTTP session (bearer, batch and MCP requests have none), and b
 entries are swept at most once a minute when an entry is stored, and if 10 000 entries are still
 held after a sweep the map is cleared and each client rebuilds its entry on its next create.
 
-**A failing check** (review B1). An error raised before any SQL (an invalid fragment, a missing
-strategy counter) fails open: logged, the create stands. An error from the database — or a
-transaction Hibernate marked rollback-only — has poisoned the request's transaction, so the create
-fails **closed**: rolled back, answered 500 `QUOTA_CHECK_FAILED` (in a batch: a failed operation,
-the batch rolls back). A client's cache entry that cannot be built fails the create closed the
-same way: it was read on the request's session, and nothing says whether the create is capped.
+**A failing check** (review B1; QA BUG-4). Only an error raised before Hibernate sees a query
+(a fragment `UsageQueryComposer` rejects, a missing strategy counter) fails open: logged, the
+create stands. Everything else fails **closed**: rolled back, answered 500 `QUOTA_CHECK_FAILED` (in
+a batch: a failed operation, the batch rolls back). That covers an error from the database, a
+transaction Hibernate marked rollback-only — including an HQL that fails to parse, e.g. a
+restriction naming an unknown property, which Hibernate marks rollback-only (accepted by the
+coordinator as the safe direction; `UsageResourceValidator` rejects such a restriction at save
+time) — and a client's cache entry that cannot be built, which is refused before the create runs
+(no callout, no insert).
+
+**Which created row counts** (re-review W2). A created row is charged to the current period only
+when it matches the resource's restriction **and** its date property falls in the counted window;
+a row dated outside it (a backdated invoice, say) does not consume this period and stands. An
+in-window row is refused when the consumption before the create — a live count leaving out the
+created rows, or the stored aggregate — plus one exceeds the included quantity. Because the window
+is day-aligned (`[startOfDay(start), startOfDay(end))`), a row created on a period's last, partial
+day falls outside it: it does not count, in this period or the next, and a block quota does not
+refuse it (QA INFO note, accepted).
 The quota *reports* never run on the request's transaction (`IsolatedDalRead`), so a failing
 report cannot poison what the request writes. Each report is one hop to a bounded pool of 4 daemon
 workers (64 queued, more refused and reported as `[]`), with a 25 s `statement_timeout` inside the

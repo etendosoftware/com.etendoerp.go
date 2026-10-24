@@ -1235,7 +1235,9 @@ rejected row does not stop the others. The status carries, per row, `committed:t
 `safeToResend`. A row reported `committed:true` exists. Resend only rows with `committed:false` **and**
 `safeToResend:true` (the batch vouches it was rolled back: `atomic:true`, empty `persisted`); a row with
 `safeToResend:false` (`atomic:false` — a process committed underneath it — or no outcome) may have left
-records, listed in its `persisted`: look them up first.
+records, listed in its `persisted`: look them up first. A row refused for a plan quota
+(`QUOTA_EXCEEDED`, §4.16) is also `safeToResend:false`: nothing of it exists, but a resend is
+refused again until the quota changes.
 
 ```
 { jobId, state, done, channel, totalRows, totalOps, processedRows, committedRows, failedRows,
@@ -5062,8 +5064,12 @@ neither the 402 of the commercial access check (§4.1) nor a permission error.
   channel: REST single and `/sws/neo/batch` in `NeoCrudHandler`'s POST branch, MCP `etendo_create`
   in `McpToolRouter#handleCreate`, and MCP `etendo_batch` and the batch jobs through `BatchService`.
   Inside a batch the refusal fails the operation (`failedAt`, the body above under
-  `error.detail`) and the batch rolls back as a unit; on MCP the same body arrives flattened
-  (`code`, `quota`, `detail`). A customization whose `handle()` creates the row itself and
+  `error.detail`) and the batch rolls back as a unit; on MCP — `etendo_create`, `etendo_batch` and
+  the batch jobs alike — the same body arrives flattened (`status`, `error`, `detail`, `code`,
+  `quota`), so `code === "QUOTA_EXCEEDED"` / `"QUOTA_CHECK_FAILED"` survives a batch too. An async
+  batch job row refused with `QUOTA_EXCEEDED` reports `safeToResend:false`: it was rolled back, but
+  a resend is refused again until the quota changes. A `QUOTA_CHECK_FAILED` row keeps the normal
+  rule (`safeToResend:true` for a proven rollback): nothing was saved and the check may pass. A customization whose `handle()` creates the row itself and
   short-circuits the default create is not checked; nor are rows created by processes.
 - **What it checks.** Structural, driven by catalog data: the `block` quotas of the request's
   client whose declarative resource's `COUNTED_ENTITY` is the created entity. They come from
@@ -5075,12 +5081,17 @@ neither the 402 of the commercial access check (§4.1) nor a permission error.
   a renewal reaches a client within 60 s, no restart, and a create of an entity the client does not
   cap runs **no query**, whatever other clients cap. The map is bounded: expired entries are swept
   at most once a minute, and it is cleared if 10 000 entries remain after a sweep. For a capped
-  entity the new row is tested against each resource's HQL restriction
-  (`UsageQueryComposer.composeRowMatch`), then `QuotaEvaluator` decides for the row's tenant: a live
-  count includes the new row (refused when it went over), the stored aggregate is lagged (refused
-  when one more would go over). On the period's last, partial day — from local midnight of the
-  period's end — the new row is outside the counted window, so the live count is compared as is.
-  The periodless-subscription WARN is throttled to one line per tenant per hour across every
+  entity the new row is tested against each resource's HQL restriction **and the current
+  period's counted window** on its date property (`UsageQueryComposer.composeRowMatchInRange`, the
+  same validated composition and day bounds as the counts). A row dated outside the window does not
+  consume this period and stands, at the cap or not. An in-window row is refused when the
+  consumption before the create plus one exceeds the included quantity: for a `live` source a
+  count that leaves out the rows the create inserted (`id not in (:excludedIds)`), for the stored
+  `aggregate` the aggregate (lagged, it never has them); several rows of one create are charged one
+  after the other. The window is day-aligned, `[startOfDay(periodStart), startOfDay(periodEnd))`,
+  so **a row created on a period's last, partial day falls outside it and does not count** — on
+  that day a block quota does not refuse, and the row is in no period's consumption. The
+  periodless-subscription WARN is throttled to one line per tenant per hour across every
   evaluator.
 - **What it does not see.** A resource that grows through a state change rather than a create —
   `POSTED_SALES_INVOICES` grows on posting, and the invoice is created unposted — never matches at
@@ -5090,12 +5101,15 @@ neither the 402 of the commercial access check (§4.1) nor a permission error.
 - **Cost.** An entity no active `block` quota counts costs a map lookup: same service, same commit,
   no query. When a create is checked and no batch owns the transaction, it runs through the
   deferred-commit service a batch uses (IMP-23) and the gate commits or rolls back itself.
-- **When the check itself fails.** An error raised before any SQL (an invalid restriction
-  fragment, a missing strategy counter) is logged (`[QUOTA]`) and the create stands — it fails
-  open. An error from the database, or a transaction Hibernate marked rollback-only, has poisoned
-  the request's transaction, and a commit would silently roll the row back while answering
-  success: so it fails **closed** — the create is rolled back (in a batch, the operation fails and
-  the batch rolls back) and the answer is
+- **When the check itself fails.** Only an error raised before Hibernate sees a query — a
+  restriction fragment `UsageQueryComposer` rejects, a missing strategy counter — is logged
+  (`[QUOTA]`) and lets the create stand: it fails open. Everything else fails **closed**: an error
+  from the database, a transaction Hibernate marked rollback-only — which includes an HQL that
+  fails to parse, e.g. a restriction naming an unknown property (Hibernate marks the transaction
+  rollback-only; `UsageResourceValidator` already rejects such a restriction at save time) — and a
+  client entry that cannot be built. A commit would silently roll the row back while answering
+  success, so the create is rolled back (in a batch, the operation fails and the batch rolls back)
+  and the answer is
 
   ```json
   HTTP 500
@@ -5118,8 +5132,10 @@ neither the 402 of the commercial access check (§4.1) nor a permission error.
   batch's failed operation) and rolls back entirely; the other one goes through. Nothing is
   half-saved: the client retries the refused batch. A single create takes one lock and cannot
   deadlock this way.
-- **A client entry that cannot be built** fails the create closed with `QUOTA_CHECK_FAILED`:
-  it was read on the request's session, and nothing says whether the create is capped.
+- **A client entry that cannot be built** fails the create closed with `QUOTA_CHECK_FAILED`
+  **before it runs** (`NeoQuotaWriteGate.run`): no callout cascade, no insert. It was read on the
+  request's session, and nothing says whether the create is capped. The entry read before the
+  insert is the one checked after it.
 - **Reports never touch the request's transaction.** The quota reports (environment entry, the
   environment list, the account page) and the usage-lag check read in their own session
   (`IsolatedDalRead`), so a failing read cannot poison what the request writes afterwards. They run
@@ -5136,7 +5152,9 @@ neither the 402 of the commercial access check (§4.1) nor a permission error.
   workers end after a minute; the pool stops in `NeoServlet.destroy()`, which cancels the reads
   still queued.
 - **The usage-lag WARN is never checked on a create.** The reports and the usage job check it; a
-  failed lag read is cached for a minute like a successful one.
+  failed lag read is cached for a minute like a successful one. Inside a report the lag read runs
+  in the report's own isolated session, so one that fails on the database aborts that report: it
+  answers `[]`, at most once a minute (the failure is cached), never touching the request.
 - **Write warnings** (a WARN verdict on a create) are not returned on this path.
 
 ## 5. Configuration
