@@ -5098,19 +5098,36 @@ neither the 402 of the commercial access check (§4.1) nor a permission error.
   tenant that touch the same two resources in opposite orders wait for each other; PostgreSQL
   detects it and aborts one of them with `40P01` (deadlock detected). That batch's check fails on
   the database, so the batch is refused with `QUOTA_CHECK_FAILED` (status 500, carried in the
-  batch's failed operation) and rolls back entirely; the other one goes through. Nothing is half-saved: the client retries the refused batch. A single create takes one
-  lock and cannot deadlock this way.
+  batch's failed operation) and rolls back entirely; the other one goes through. Nothing is
+  half-saved: the client retries the refused batch. A single create takes one lock and cannot
+  deadlock this way.
 - **Reports never touch the request's transaction.** The quota reports (environment entry, the
   environment list, the account page), the quota-index refresh and the usage-lag check read in
-  their own session (`IsolatedDalRead`), so a failing report read cannot poison what the request
-  writes afterwards. Each report is **one** hop — the environment list's batched quota read and
-  all its evaluations together, not one per tenant — to a bounded pool of 4 named daemon workers
-  with 64 queued reads; a read beyond that is refused and the report answers `[]`. The worker sets
-  `statement_timeout` to 25 s for its transaction (PostgreSQL really stops the query; cancelling the
-  Java future would not), the caller waits at most 30 s, and the worker ends like a request thread
-  (`DalThreadCleaner.cleanWithRollback()`, admin-mode stack cleared) with an `OBContext` of its own
-  built from the caller's user, role, client and organization. A failed usage-lag read is cached
-  for a minute like a successful one. The pool stops in `NeoServlet.destroy()`.
+  their own session (`IsolatedDalRead`), so a failing read cannot poison what the request writes
+  afterwards. They run on two separate pools of named daemon workers, so slow reports can never
+  stall a create:
+
+  | Pool | Used by | Workers/queue | Caller waits | `statement_timeout` |
+  |---|---|---|---|---|
+  | reports (`etgo-isolated-read-`) | env. entry and list, account page | 4 / 64 | 30 s | 25 s |
+  | write path (`etgo-quota-read-`) | quota-index rebuild, usage-lag check | 2 / 8 | 5 s | 4 s |
+
+  Each report is **one** hop: the environment list's batched quota read and all its evaluations
+  together, not one per tenant. A read beyond a pool's queue is refused at once (a report answers
+  `[]`). PostgreSQL's `statement_timeout`, set for the worker's transaction, really stops a slow
+  query; cancelling the Java future would not. When the caller stops waiting, the worker is
+  interrupted and the report stops before its next tenant or quota. After the first database
+  failure in a hop, the remaining tenants are not read (that session's transaction is aborted) and
+  one log line gives their count. The worker ends like a request thread
+  (`DalThreadCleaner.cleanWithRollback()`, admin-mode stack cleared), with an `OBContext` of its
+  own built from the caller's user, role, client, organization, language and warehouse. Idle
+  workers end after a minute; both pools stop in `NeoServlet.destroy()`, which cancels the reads
+  still queued.
+- **The quota index is never waited on twice.** While one create rebuilds the expired index,
+  other creates are served the previous one. A rebuild that fails keeps the previous index for
+  another minute. Until a first build succeeds, the index is empty: no create is quota-checked
+  (fails open) and the build is retried every 10 s (`open-and-notable-topics.md` §4.19).
+- **A failed usage-lag read** is cached for a minute like a successful one.
 - **Write warnings** (a WARN verdict on a create) are not returned on this path.
 
 ## 5. Configuration

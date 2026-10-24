@@ -1131,7 +1131,20 @@ the batch rolls back). The quota *reports* and the index refresh never run on th
 transaction (`IsolatedDalRead`), so a failing report cannot poison what the request writes. Each
 report is one hop to a bounded pool of 4 daemon workers (64 queued, more refused and reported as
 `[]`), with a 25 s `statement_timeout` inside the worker's transaction and a 30 s wait in the
-caller (re-review W2–W4).
+caller (re-review W2–W4). The reads a create waits for — the index rebuild and the usage-lag
+check — have their own pool of 2 workers (8 queued, 5 s wait, 4 s `statement_timeout`), so stuck
+reports never stall a create (second re-review W1).
+
+**A quota index that cannot be built fails open** (second re-review W1, decided by the developer;
+open to the coordinator). The index of block-quota'd entities is what tells a create whether to
+check at all. If its very first build fails (database down, the write-path pool full or timed
+out), there is nothing to check against: creates are **not** quota-checked, an ERROR saying
+*fails open* is logged, and the build is retried every 10 s instead of after the 1-minute TTL,
+until one succeeds. Failing closed instead would refuse every create of every entity — quota'd or
+not — on any instance whose catalog read hiccups at start, for a quota that is a commercial limit,
+not a safety one; and a database that cannot answer a 4 s catalog read cannot save the create
+either. Once an index was built, a failed rebuild keeps it for another minute, and a create never
+waits behind another create's rebuild: it is served the previous index.
 
 **Known cost (review N4, not done).** The row match runs for every created row of an indexed
 entity before the tenant's quotas are known, so a tenant with no `block` quota on that resource
