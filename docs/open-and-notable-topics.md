@@ -545,6 +545,13 @@ projection (`ETP-5046-TRANSITIONAL-FALLBACK`). Design doc §8.4; operator view:
   `CURRENT_PERIOD_START/END`: Stripe's period, written as a pair; on `invoice.paid` from the invoice
   lines, never from `invoice.payment_failed`. `LAST_EVENT_AT`: the forward-only ordering watermark;
   while NULL the `ETGO_SubscriptionEventAt` preference is read instead.
+- **`CANCEL_AT_PERIOD_END` (ETP-5051 O-1b), display-only.** CHAR(1) Y/N, default `N`. Stripe's
+  `cancel_at_period_end`, written by `applyLifecycleOutcome` from `customer.subscription.updated`
+  and `.deleted` (an invoice event leaves it alone) and by the billing reconciliation, which syncs
+  it on a consistent paying row every run (`SubscriptionReconciler.syncCancelAtPeriodEnd`, counter
+  `CANCEL_FLAGS_SYNCED`, no audit row). Its only reader is `EnvironmentPlanCache.renewalAtOf`
+  (`renewalAt` null while `Y`). It never decides access, grace or status: a scheduled
+  cancellation keeps the subscription `active` until Stripe deletes it at the period boundary.
 - **Period after onboarding:** `fillSubscriptionPeriodBestEffort` →
   `SubscriptionService.fillPeriodFromProviderAfterCommit` reads the subscription once the row is
   open and writes the period only while both boundaries are NULL, so an event's period wins. Best

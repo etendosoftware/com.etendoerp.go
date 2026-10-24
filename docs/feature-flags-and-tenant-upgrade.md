@@ -1474,12 +1474,16 @@ The `GET /sws/go/environments` response gained additive fields:
   from local state only — the `CURRENT_PERIOD_END` of the tenant's `ETGO_SUBSCRIPTION` row, from
   the same batched `findLatestForClients` read as `plan`, so no Stripe call per environment — and
   it is non-null only while that row is renewing: effective status `active` (Stripe `active` and
-  `trialing` are both stored so), not past due, not canceled, not closed. **Scheduled
-  cancellation is not seen:** `ETGO_SUBSCRIPTION` stores no cancel-at-period-end flag (the
-  lifecycle applier ignores it on purpose, since access runs to the period end), so a
-  subscription set to cancel still reports its period end here; only the live
-  `GET /sws/go/billing/subscription` (`cancelAtPeriodEnd`) knows it. A row that cannot be read
-  reports null, never a failed list.
+  `trialing` are both stored so), not past due, not canceled, not closed, and **not scheduled to
+  cancel** — `ETGO_SUBSCRIPTION.CANCEL_AT_PERIOD_END = 'Y'`. That column is display-only: the
+  lifecycle webhooks (`customer.subscription.updated`/`.deleted`) and the billing reconciliation
+  write Stripe's `cancel_at_period_end` into it, and nothing that decides access, grace or the
+  status reads it. **Rows that existed before the column start at `N`:** a subscription already
+  scheduled to cancel shows its date until its next `customer.subscription.updated` or the next
+  reconciliation run, which re-reads every paying subscription anyway and syncs the flag at no
+  extra provider cost (`CANCEL_FLAGS_SYNCED` in its report). A past-due subscription is left to
+  the webhook, and its `renewalAt` is null regardless. A row that cannot be read reports null,
+  never a failed list.
 - **`quotas`** (per environment, always present, `[]` when nothing to report; ETP-5051) is the
   tenant's plan quotas at verdict WARN or DENY, as `QuotaItem`s (`neo-headless.md` §4.16 lists
   the keys). Report-only. The SPA's quota banner reads it for the current environment, because

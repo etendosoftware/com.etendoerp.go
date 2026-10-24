@@ -18,15 +18,16 @@ public final class SubscriptionEventOutcome {
   private final Instant periodEnd;
   private final boolean closesSubscription;
   private final Instant endedAt;
+  private final Boolean cancelAtPeriodEnd;
 
   private SubscriptionEventOutcome(EnvironmentAccessPolicy.SubscriptionStatus status,
       Instant dueAt, String reason) {
-    this(status, dueAt, reason, null, null, false, null);
+    this(status, dueAt, reason, null, null, false, null, null);
   }
 
   private SubscriptionEventOutcome(EnvironmentAccessPolicy.SubscriptionStatus status,
       Instant dueAt, String reason, Instant periodStart, Instant periodEnd,
-      boolean closesSubscription, Instant endedAt) {
+      boolean closesSubscription, Instant endedAt, Boolean cancelAtPeriodEnd) {
     this.status = status;
     this.dueAt = dueAt;
     this.reason = reason;
@@ -34,6 +35,7 @@ public final class SubscriptionEventOutcome {
     this.periodEnd = periodEnd;
     this.closesSubscription = closesSubscription;
     this.endedAt = endedAt;
+    this.cancelAtPeriodEnd = cancelAtPeriodEnd;
   }
 
   /** The event maps to a state transition. */
@@ -61,7 +63,7 @@ public final class SubscriptionEventOutcome {
       return this;
     }
     return new SubscriptionEventOutcome(status, dueAt, reason, start, end, closesSubscription,
-        endedAt);
+        endedAt, cancelAtPeriodEnd);
   }
 
   /**
@@ -76,7 +78,24 @@ public final class SubscriptionEventOutcome {
     if (isIgnored()) {
       return this;
     }
-    return new SubscriptionEventOutcome(status, dueAt, reason, periodStart, periodEnd, true, ended);
+    return new SubscriptionEventOutcome(status, dueAt, reason, periodStart, periodEnd, true, ended,
+        cancelAtPeriodEnd);
+  }
+
+  /**
+   * ETP-5051 (O-1b) — the same transition, also carrying the provider's
+   * {@code cancel_at_period_end}. Display-only: it never changes the status, the grace anchor or
+   * the close, and an ignored outcome stays ignored (nothing is written for it).
+   *
+   * @param cancel the provider flag; null when the event does not report it (left as stored)
+   * @return an outcome carrying the flag, or this one
+   */
+  public SubscriptionEventOutcome withCancelAtPeriodEnd(Boolean cancel) {
+    if (isIgnored() || cancel == null) {
+      return this;
+    }
+    return new SubscriptionEventOutcome(status, dueAt, reason, periodStart, periodEnd,
+        closesSubscription, endedAt, cancel);
   }
 
   public boolean isApplied() {
@@ -134,5 +153,14 @@ public final class SubscriptionEventOutcome {
    */
   public Instant endedAt() {
     return endedAt;
+  }
+
+  /**
+   * Whether the provider will cancel the subscription at the end of the current period.
+   *
+   * @return the provider flag, or null when the event does not report it
+   */
+  public Boolean cancelAtPeriodEnd() {
+    return cancelAtPeriodEnd;
   }
 }

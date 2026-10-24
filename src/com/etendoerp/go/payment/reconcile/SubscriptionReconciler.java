@@ -297,8 +297,32 @@ final class SubscriptionReconciler {
     }
     if (outcome.status() != SubscriptionStatus.EXPIRED && target.subscription() != null) {
       fillMissingPrice(candidate, target.subscription(), subscription, result, audit);
+      syncCancelAtPeriodEnd(candidate, target.subscription(), outcome, result, audit);
     }
     return true;
+  }
+
+  /**
+   * ETP-5051 (O-1b) — keeps the display-only {@code CANCEL_AT_PERIOD_END} of a consistent open row
+   * in step with the provider. A status repair already carries the flag through the outcome
+   * ({@code applyLifecycleOutcome}); this covers the no-op diff, which writes nothing else. It is
+   * also how rows created before the column existed (all 'N') pick up a scheduled cancellation:
+   * every run re-reads each paying subscription anyway, so the backfill costs no extra call.
+   * No audit row: the flag decides no access, grace or status, and it may legitimately toggle.
+   */
+  private static void syncCancelAtPeriodEnd(SubscriptionCandidate candidate, Subscription row,
+      SubscriptionEventOutcome outcome, ReconciliationResult result, ReconciliationAudit audit) {
+    Boolean cancel = outcome.cancelAtPeriodEnd();
+    if (cancel == null || cancel.equals(row.isCancelAtPeriodEnd())) {
+      return;
+    }
+    if (!audit.isDryRun()) {
+      SubscriptionService.writeCancelAtPeriodEnd(row, cancel);
+      OBDal.getInstance().save(row);
+    }
+    result.increment(Counter.CANCEL_FLAGS_SYNCED);
+    result.item(candidate.subscriptionId, candidate.clientName,
+        "sync the cancel-at-period-end flag", cancel ? "Y" : "N");
   }
 
   private void alertPaused(SubscriptionCandidate candidate, ReconciliationResult result,

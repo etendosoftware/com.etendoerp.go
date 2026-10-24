@@ -176,12 +176,9 @@ public final class EnvironmentPlanCache {
    * ETP-5051 (O-1b) — when the tenant's subscription next renews, from local state only: the
    * row's {@code CURRENT_PERIOD_END}, and only while it is renewing, i.e. its effective status is
    * {@value SubscriptionService#STATUS_ACTIVE} (Stripe {@code active} and {@code trialing} are
-   * both stored so). Past due, canceled or closed: null.
-   *
-   * <p><b>Scheduled cancellation is not seen.</b> {@code ETGO_SUBSCRIPTION} stores no
-   * cancel-at-period-end flag — the lifecycle applier deliberately ignores it, since access
-   * continues to the period end — so a subscription the customer set to cancel still reports its
-   * period end here. Only the live {@code GET /billing/subscription} knows it.
+   * both stored so) and the provider has not scheduled it to cancel at the period end
+   * ({@code CANCEL_AT_PERIOD_END = 'Y'}, display-only, written by the lifecycle webhooks and the
+   * billing reconciliation). Past due, canceled, closed or cancelling: null.
    *
    * <p>Never throws: a row that cannot be read reports no renewal, never a failed list.
    */
@@ -191,6 +188,9 @@ public final class EnvironmentPlanCache {
       return null;
     }
     try {
+      if (Boolean.TRUE.equals(subscription.isCancelAtPeriodEnd())) {
+        return null;
+      }
       return subscription.getCurrentPeriodEnd() == null ? null
           : subscription.getCurrentPeriodEnd().toInstant();
     } catch (RuntimeException e) {

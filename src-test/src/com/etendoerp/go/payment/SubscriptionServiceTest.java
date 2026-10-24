@@ -777,6 +777,30 @@ class SubscriptionServiceTest {
     }
 
     @Test
+    void writesTheProviderCancelAtPeriodEndFlagWithoutTouchingTheStatusMapping() {
+      // ETP-5051 (O-1b) — display-only: the flag rides along, the status stays CURRENT -> active.
+      Subscription row = subscriptionOf(CLIENT_ID);
+      when(row.isCancelAtPeriodEnd()).thenReturn(false);
+
+      service.applyLifecycleOutcome(row, SubscriptionEventOutcome
+          .apply(EnvironmentAccessPolicy.SubscriptionStatus.CURRENT, null)
+          .withCancelAtPeriodEnd(true), eventAt);
+
+      verify(row).setCancelAtPeriodEnd(true);
+      verify(row).setSubscriptionStatus(SubscriptionService.STATUS_ACTIVE);
+      verify(row).setGraceAnchor(null);
+    }
+
+    @Test
+    void leavesTheCancelFlagAloneWhenTheEventDoesNotReportIt() {
+      Subscription row = subscriptionOf(CLIENT_ID);
+
+      service.applyLifecycleOutcome(row, pastDue(), eventAt);
+
+      verify(row, never()).setCancelAtPeriodEnd(any());
+    }
+
+    @Test
     void setsTheWatermarkOnARowThatHasNone() {
       Subscription row = subscriptionOf(CLIENT_ID);
 

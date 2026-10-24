@@ -689,6 +689,7 @@ public class SubscriptionService {
     try {
       writeStatus(subscription, storedStatus, outcome.dueAt());
       writePeriod(subscription, outcome);
+      writeCancelAtPeriodEnd(subscription, outcome.cancelAtPeriodEnd());
       writeEventWatermark(subscription, eventAt);
       if (outcome.closesSubscription() && subscription.getEndDate() == null) {
         close(subscription, outcome.endedAt());
@@ -723,6 +724,23 @@ public class SubscriptionService {
     }
     subscription.setCurrentPeriodStart(Date.from(outcome.periodStart()));
     subscription.setCurrentPeriodEnd(Date.from(outcome.periodEnd()));
+  }
+
+  /**
+   * ETP-5051 (O-1b) — the provider's {@code cancel_at_period_end}, display-only: it feeds the
+   * environment list's {@code renewalAt} and nothing else — no access, grace or status decision
+   * reads it. {@code null} (the event does not report it) leaves the stored flag alone.
+   *
+   * @param subscription the row to update
+   * @param cancel the provider flag, or null
+   * @return true when the stored flag changed
+   */
+  public static boolean writeCancelAtPeriodEnd(Subscription subscription, Boolean cancel) {
+    if (cancel == null || cancel.equals(subscription.isCancelAtPeriodEnd())) {
+      return false;
+    }
+    subscription.setCancelAtPeriodEnd(cancel);
+    return true;
   }
 
   /**

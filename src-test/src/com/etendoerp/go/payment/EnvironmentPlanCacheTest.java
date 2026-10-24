@@ -81,6 +81,20 @@ class EnvironmentPlanCacheTest {
   }
 
   @Test
+  void reportsNoRenewalWhileTheProviderWillCancelAtThePeriodEnd() {
+    Subscription cancelling =
+        withPeriodEnd(subscriptionOn(PLAN_KEY, SubscriptionService.STATUS_ACTIVE));
+    when(cancelling.isCancelAtPeriodEnd()).thenReturn(true);
+
+    EnvironmentPlanCache cache = cacheWith(PAID_CLIENT, cancelling);
+
+    assertNull(cache.viewFor(PAID_CLIENT).renewalAt());
+    // Display-only: still active, still productive.
+    assertTrue(cache.isProductive(PAID_CLIENT));
+    assertEquals(SubscriptionService.STATUS_ACTIVE, cache.status(PAID_CLIENT));
+  }
+
+  @Test
   void reportsNoRenewalForAPastDueCanceledOrClosedSubscription() {
     assertNull(cacheWith(PAID_CLIENT,
         withPeriodEnd(subscriptionOn(PLAN_KEY, SubscriptionService.STATUS_PAST_DUE)))
