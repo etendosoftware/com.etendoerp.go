@@ -79,6 +79,8 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * replaced here by a recording double that creates one invoice line per entry it is handed.
  *
  * @covers com.etendoerp.go.schemaforge.ImportOrderLinesIntoInvoiceHandler
+ * @covers com.etendoerp.go.schemaforge.AbstractLineImportHandler
+ * @covers com.etendoerp.go.schemaforge.NeoQuotaCreateCheck
  * @covers com.etendoerp.go.schemaforge.AbstractInvoiceLineImportHandler
  */
 public class ImportOrderLinesIntoInvoiceHandlerTest {
@@ -323,6 +325,30 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
   }
 
   // ── the happy paths ───────────────────────────────────────────────────────
+
+  /**
+   * ETP-5051 — the lines this import added are checked against the plan quotas before the answer
+   * ({@code AbstractLineImportHandler#requireQuotaAllowed}): at a {@code block} limit the
+   * order-lines import into an invoice answers 403 {@code QUOTA_EXCEEDED} and the whole import is rolled back.
+   */
+  @Test
+  public void importOrderLines_overABlockQuota_answers403AndRollsBackTheImport() throws Exception {
+    Probe probe = scenario();
+
+    NeoResponse response;
+    try (MockedStatic<NeoQuotaCreateCheck> quota = QuotaRefusalTestSupport.everyCreateRefused()) {
+      response = run(probe, "importOrderLines", "{\"orderId\":\"o1\"}");
+
+      quota.verify(() -> NeoQuotaCreateCheck.requireAllowed(
+          org.mockito.ArgumentMatchers.eq(InvoiceLine.ENTITY_NAME),
+          org.mockito.ArgumentMatchers.argThat(ids -> ids != null && ids.size() == 2)));
+    }
+
+    QuotaRefusalTestSupport.assertQuotaExceeded(response);
+    verify(dal).rollbackAndClose();
+    verify(dal, org.mockito.Mockito.never()).commitAndClose();
+  }
+
 
   /** Without lines: every pending line, in full, through the native process, on the draft. */
   @Test

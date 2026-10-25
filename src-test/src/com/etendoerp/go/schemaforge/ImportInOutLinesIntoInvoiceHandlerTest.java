@@ -71,6 +71,8 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * line per entry it is handed.
  *
  * @covers com.etendoerp.go.schemaforge.ImportInOutLinesIntoInvoiceHandler
+ * @covers com.etendoerp.go.schemaforge.AbstractLineImportHandler
+ * @covers com.etendoerp.go.schemaforge.NeoQuotaCreateCheck
  */
 public class ImportInOutLinesIntoInvoiceHandlerTest {
 
@@ -230,6 +232,30 @@ public class ImportInOutLinesIntoInvoiceHandlerTest {
   }
 
   // ── the happy paths ───────────────────────────────────────────────────────
+
+  /**
+   * ETP-5051 — the lines this import added are checked against the plan quotas before the answer
+   * ({@code AbstractLineImportHandler#requireQuotaAllowed}): at a {@code block} limit the
+   * movement-lines import into an invoice answers 403 {@code QUOTA_EXCEEDED} and the whole import is rolled back.
+   */
+  @Test
+  public void importReceiptLines_overABlockQuota_answers403AndRollsBackTheImport() throws Exception {
+    Probe probe = purchase();
+
+    NeoResponse response;
+    try (MockedStatic<NeoQuotaCreateCheck> quota = QuotaRefusalTestSupport.everyCreateRefused()) {
+      response = importReceipt(probe, "{\"receiptId\":\"rc1\"}");
+
+      quota.verify(() -> NeoQuotaCreateCheck.requireAllowed(
+          org.mockito.ArgumentMatchers.eq(InvoiceLine.ENTITY_NAME),
+          org.mockito.ArgumentMatchers.argThat(ids -> ids != null && ids.size() == 2)));
+    }
+
+    QuotaRefusalTestSupport.assertQuotaExceeded(response);
+    verify(dal).rollbackAndClose();
+    verify(dal, org.mockito.Mockito.never()).commitAndClose();
+  }
+
 
   /** No lines: everything pending, in full, through the native process with movement lines. */
   @Test

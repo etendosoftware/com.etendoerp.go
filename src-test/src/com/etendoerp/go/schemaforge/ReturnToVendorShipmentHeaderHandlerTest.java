@@ -94,6 +94,7 @@ import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
  * </ul>
  *
  * @covers com.etendoerp.go.schemaforge.ReturnToVendorShipmentHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.NeoQuotaCreateCheck
  * @covers com.etendoerp.go.schemaforge.ReturnShipmentUtils
  * @covers com.etendoerp.go.schemaforge.ReturnInvoiceSupport
  */
@@ -424,6 +425,47 @@ public class ReturnToVendorShipmentHeaderHandlerTest {
       assertNotNull(result);
       assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
       assertEquals("No product lines in this return shipment", errorMessage(result));
+    }
+  }
+
+  /**
+   * ETP-5051 — the rectificative invoice created from the return shipment is refused by a plan quota
+   * ({@code ReturnInvoiceSupport} checks it before the completion commits): the handler answers
+   * 403 {@code QUOTA_EXCEEDED}, not its generic 500, and the creation is rolled back.
+   */
+  @Test
+  public void testHandleCreateReturnInvoiceOverABlockQuotaAnswers403AndRollsBack()
+      throws Exception {
+    try (MockedStatic<OBContext> ignored = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<ReturnShipmentUtils> utils = Mockito.mockStatic(ReturnShipmentUtils.class);
+         MockedStatic<ReturnInvoiceSupport> support =
+             Mockito.mockStatic(ReturnInvoiceSupport.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      ShipmentInOut returnDoc = mock(ShipmentInOut.class);
+      when(dal.get(ShipmentInOut.class, "ret-1")).thenReturn(returnDoc);
+      when(returnDoc.getDocumentStatus()).thenReturn("CO");
+      ShipmentInOutLine line = mock(ShipmentInOutLine.class);
+      when(line.getProduct()).thenReturn(mock(Product.class));
+      when(returnDoc.getMaterialMgmtShipmentInOutLineList())
+          .thenReturn(Collections.singletonList(line));
+      Organization org = mock(Organization.class);
+      when(org.getId()).thenReturn("org-1");
+      when(returnDoc.getOrganization()).thenReturn(org);
+      DocumentType docType = mock(DocumentType.class);
+      utils.when(() -> ReturnShipmentUtils.findReturnDocTypeForOrg(any(), eq("org-1"),
+          eq("API"), anyBoolean(), anyBoolean(), anyBoolean())).thenReturn(docType);
+      support.when(() -> ReturnInvoiceSupport.createReturnInvoice(any(), anyString(), any(),
+          any(), anyBoolean(), any(), any())).thenThrow(QuotaRefusalTestSupport.refusal());
+
+      NeoResponse result = handler.handle(NeoContext.builder()
+          .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+          .fieldName("createReturnInvoice").recordId("ret-1").build());
+
+      QuotaRefusalTestSupport.assertQuotaExceeded(result);
+      Mockito.verify(dal).rollbackAndClose();
+      Mockito.verify(dal, Mockito.never()).commitAndClose();
     }
   }
 

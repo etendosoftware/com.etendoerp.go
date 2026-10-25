@@ -1611,6 +1611,157 @@ public class CreateDraftInvoiceHandlerTest {
     }
   }
 
+  /**
+   * ETP-5051 — the quotation route generates the invoice through the same creator and is checked
+   * the same way: refused at the limit, the quotation is not marked as invoiced and nothing is
+   * completed.
+   */
+  @Test
+  public void handleCreate_quotationOverABlockQuota_answers403AndMarksNothing() throws Exception {
+    try (MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      mockAdminMode(obContextMock);
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getSession()).thenReturn(mock(Session.class));
+
+      DispatchHandler handler = new DispatchHandler();
+      handler.orderInvoice = quotaInvoice("inv-quota-q");
+      handler.sourceOrderStatus = "UE";
+      handler.quotaGuard = refusingGuard("inv-quota-q");
+
+      try (CompletionMocks completion = new CompletionMocks(dal, completionSuccess())) {
+        NeoResponse response = handler.handle(NeoContext.builder()
+            .specName(SPEC_SALES_QUOTATION)
+            .entityName(ENTITY_HEADER)
+            .httpMethod("POST")
+            .endpointType(NeoEndpointType.ACTION)
+            .fieldName(ACTION_CREATE)
+            .recordId("quotation-quota-1")
+            .build());
+
+        assertQuotaExceeded(response);
+        assertNull("the quotation must not be marked as invoiced", handler.markedQuotationId);
+        verify(dal).rollbackAndClose();
+        verify(completion.processInvoiceUtil, never()).process(any(), any(), any(), any(), any(),
+            any(), any());
+      }
+    }
+  }
+
+  /** ETP-5051 — the goods-shipment route: refused at the limit, nothing completed. */
+  @Test
+  public void handleCreate_goodsShipmentOverABlockQuota_answers403AndCompletesNothing()
+      throws Exception {
+    try (MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<NeoInvoiceSupport> supportMock =
+            Mockito.mockStatic(NeoInvoiceSupport.class)) {
+      mockAdminMode(obContextMock);
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getSession()).thenReturn(mock(Session.class));
+      supportMock.when(() -> NeoInvoiceSupport.computePendingQtyPerLineOrThrow(anyString(),
+          eq(true))).thenReturn(Collections.singletonMap("sl-1", new BigDecimal("3")));
+
+      DispatchHandler handler = new DispatchHandler();
+      handler.shipmentInvoice = quotaInvoice("inv-quota-s");
+      handler.parsedShipmentIds = Arrays.asList("ship-1");
+      handler.quotaGuard = refusingGuard("inv-quota-s");
+
+      try (CompletionMocks completion = new CompletionMocks(dal, completionSuccess())) {
+        NeoResponse response = handler.handle(NeoContext.builder()
+            .specName(SPEC_GOODS_SHIPMENT)
+            .entityName(ENTITY_HEADER)
+            .httpMethod("POST")
+            .endpointType(NeoEndpointType.ACTION)
+            .fieldName(ACTION_CREATE)
+            .recordId("ship-1")
+            .requestBody(new JSONObject())
+            .build());
+
+        assertQuotaExceeded(response);
+        verify(dal).rollbackAndClose();
+        verify(completion.processInvoiceUtil, never()).process(any(), any(), any(), any(), any(),
+            any(), any());
+      }
+    }
+  }
+
+  /**
+   * ETP-5051 — a quota check that failed on the database lost the transaction: 500
+   * {@code QUOTA_CHECK_FAILED}, rolled back, never the handler's generic error, nothing completed.
+   */
+  @Test
+  public void handleCreate_quotaCheckFailedOnTheDatabase_answers500AndCompletesNothing()
+      throws Exception {
+    try (MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      mockAdminMode(obContextMock);
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getSession()).thenReturn(mock(Session.class));
+
+      QuotaWriteGuard guard = mock(QuotaWriteGuard.class);
+      QuotaClientCache.Entry entry = mock(QuotaClientCache.Entry.class);
+      when(guard.entryIfChecked(anyString())).thenReturn(Optional.empty());
+      when(guard.entryIfChecked(Invoice.ENTITY_NAME)).thenReturn(Optional.of(entry));
+      when(guard.refusalFor(entry, Invoice.ENTITY_NAME, List.of("inv-quota-f")))
+          .thenThrow(new IllegalStateException("wrapped",
+              new org.hibernate.exception.GenericJDBCException("could not execute query",
+                  new java.sql.SQLException("canceling statement due to statement timeout"))));
+
+      DispatchHandler handler = new DispatchHandler();
+      handler.orderInvoice = quotaInvoice("inv-quota-f");
+      handler.quotaGuard = guard;
+
+      try (CompletionMocks completion = new CompletionMocks(dal, completionSuccess())) {
+        NeoResponse response = handler.handle(NeoContext.builder()
+            .specName(SPEC_SALES_ORDER)
+            .entityName(ENTITY_HEADER)
+            .httpMethod("POST")
+            .endpointType(NeoEndpointType.ACTION)
+            .fieldName(ACTION_CREATE)
+            .recordId("order-quota-f")
+            .build());
+
+        assertNotNull(response);
+        assertEquals(500, response.getHttpStatus());
+        assertEquals("QUOTA_CHECK_FAILED",
+            response.getBody().getJSONObject("error").getString("code"));
+        verify(dal).rollbackAndClose();
+        verify(completion.processInvoiceUtil, never()).process(any(), any(), any(), any(), any(),
+            any(), any());
+      }
+    }
+  }
+
+  private static Invoice quotaInvoice(String id) {
+    Invoice invoice = mock(Invoice.class);
+    when(invoice.getId()).thenReturn(id);
+    when(invoice.getEntityName()).thenReturn(Invoice.ENTITY_NAME);
+    return invoice;
+  }
+
+  /** A guard that counts invoices only and refuses {@code invoiceId} at the limit. */
+  private static QuotaWriteGuard refusingGuard(String invoiceId) {
+    QuotaWriteGuard guard = mock(QuotaWriteGuard.class);
+    QuotaClientCache.Entry entry = mock(QuotaClientCache.Entry.class);
+    when(guard.entryIfChecked(anyString())).thenReturn(Optional.empty());
+    when(guard.entryIfChecked(Invoice.ENTITY_NAME)).thenReturn(Optional.of(entry));
+    when(guard.refusalFor(entry, Invoice.ENTITY_NAME, List.of(invoiceId)))
+        .thenReturn(Optional.of(atLimit()));
+    return guard;
+  }
+
+  private static void assertQuotaExceeded(NeoResponse response) throws Exception {
+    assertNotNull(response);
+    assertEquals(403, response.getHttpStatus());
+    JSONObject error = response.getBody().getJSONObject("error");
+    assertEquals("QUOTA_EXCEEDED", error.getString("code"));
+    assertEquals("CREATED_SALES_INVOICES", error.getJSONObject("quota").getString("resourceKey"));
+  }
+
   /** A {@code block} quota of 10 sales invoices, all 10 consumed: the next one is refused. */
   private static QuotaEvaluation atLimit() {
     QuotaDefinition quota =
