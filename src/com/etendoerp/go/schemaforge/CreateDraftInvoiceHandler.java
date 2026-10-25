@@ -315,26 +315,8 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
         MultiDocumentInvoiceSupport.requireParsedLines(body, PARAM_LINES, lineOverrides,
             ERR_LINES_UNUSABLE);
 
-        Invoice invoice;
-        if (SPEC_SALES_ORDER.equals(specName)) {
-          // ETP-5709: only the direct-from-order route. createFromOrder is also what the
-          // quotation route calls, so the check cannot live there; a quotation never reaches CO
-          // and keeps its own flow unchanged.
-          requireOrderCompleted(recordId);
-          invoice = createFromOrder(recordId, lineOverrides, null);
-        } else if (SPEC_SALES_QUOTATION.equals(specName)) {
-          // ETP-5709: the SPA offers this only from UE or CO; the route used to accept any
-          // status (a draft or rejected quotation could be invoiced by guessing the action).
-          requireQuotationInvoiceable(recordId);
-          if (body != null && body.has(PARAM_LINES)) {
-            throw new OBException(ERR_QUOTATION_LINES);
-          }
-          invoice = createFromOrder(recordId, lineOverrides, null);
-        } else if (SPEC_GOODS_SHIPMENT.equals(specName)) {
-          List<String> shipmentIds = parseShipmentIds(body, recordId);
-          String priceListId = body != null ? body.optString(PARAM_PRICE_LIST_ID, null) : null;
-          invoice = createFromShipments(shipmentIds, lineOverrides, priceListId);
-        } else {
+        Invoice invoice = createForSpec(specName, recordId, body, lineOverrides);
+        if (invoice == null) {
           return null;
         }
 
@@ -404,6 +386,36 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "An internal error occurred while creating the invoice");
     }
+  }
+
+  /**
+   * Creates the draft invoice of the route {@code specName} serves, or returns {@code null} for a
+   * spec this action does not serve.
+   */
+  private Invoice createForSpec(String specName, String recordId, JSONObject body,
+      Map<String, BigDecimal> lineOverrides) {
+    if (SPEC_SALES_ORDER.equals(specName)) {
+      // ETP-5709: only the direct-from-order route. createFromOrder is also what the
+      // quotation route calls, so the check cannot live there; a quotation never reaches CO
+      // and keeps its own flow unchanged.
+      requireOrderCompleted(recordId);
+      return createFromOrder(recordId, lineOverrides, null);
+    }
+    if (SPEC_SALES_QUOTATION.equals(specName)) {
+      // ETP-5709: the SPA offers this only from UE or CO; the route used to accept any
+      // status (a draft or rejected quotation could be invoiced by guessing the action).
+      requireQuotationInvoiceable(recordId);
+      if (body != null && body.has(PARAM_LINES)) {
+        throw new OBException(ERR_QUOTATION_LINES);
+      }
+      return createFromOrder(recordId, lineOverrides, null);
+    }
+    if (SPEC_GOODS_SHIPMENT.equals(specName)) {
+      List<String> shipmentIds = parseShipmentIds(body, recordId);
+      String priceListId = body != null ? body.optString(PARAM_PRICE_LIST_ID, null) : null;
+      return createFromShipments(shipmentIds, lineOverrides, priceListId);
+    }
+    return null;
   }
 
   /**
