@@ -76,6 +76,13 @@ Read the last row literally:
 - **Only rows that count in the current period's window.** The created row must match the HQL
   restriction **and** its date property must fall inside the counted window. A backdated row
   consumes no current-period quota and stands.
+- **Only restrictions that hold at create time.** The row is matched as it is created. A
+  restriction on a property that changes after the create — `e.posted = 'Y'`, a document status
+  such as `e.documentStatus = 'CO'` — matches no new row, so a `block` quota on it is measured and
+  reported but **never refused on create** (§6). For a refusable cap, restrict on properties the
+  row already has when it is created, for example `e.salesTransaction = true`, and use the `live`
+  source for an exact cap (§4.5). Excluding a later state (`e.documentStatus <> 'VO'`) is fine:
+  the new row does not have it yet, so it still matches.
 
 The reports run in their own isolated, bounded read pool and never touch the request's
 transaction; the write check runs inside the create's transaction. Both are described in
@@ -119,7 +126,7 @@ What each tier means with what ETP-5051 delivered:
    but a `block` quota on it **refuses nothing** on the NEO write path (§2): making it refusable
    at a point is tier 4. Reference: `schema_forge/docs/neo-headless-extensibility.md` §2.8.
 4. **Enforce at an unwired place — development, additive, through the same evaluator.** For
-   example at posting (the only way `POSTED_SALES_INVOICES` grows, §6), at a process, or for
+   example at posting (the only way a posted-invoices count grows, §6), at a process, or for
    Classic writes through a DAL observer. The new point must take its verdict from
    `QuotaEvaluator` (`refusalForCreate`, or `evaluate` for a report) — never a second comparison
    of consumed against included, which is how two points drift apart (PRD §9.2). It is additive:
@@ -213,6 +220,36 @@ With `aggregate` instead of `live`, the same quota reads the stored daily usage:
 create, but the cap is only as fresh as the last usage-job run (§5), and only enforceable while
 the schedule is on.
 
+### 4.5 Example: a refusable cap on sales invoices
+
+Counting **posted** invoices (`e.posted = 'Y'`) cannot be refused: an invoice is created unposted,
+so the create never matches (§2, §6). The configuration route to a refusable invoice cap counts
+**sales invoices created** instead, with a restriction that holds at create time:
+
+| Field | Value |
+|---|---|
+| Search Key | `CREATED_SALES_INVOICES` |
+| Name / Unit Label | `Sales invoices` / `invoices` |
+| Counting Mode | `D` |
+| Counted Entity | `Invoice` |
+| Date Property | `invoiceDate` |
+| HQL Restriction | `e.salesTransaction = true` |
+| Aggregation | `sum` |
+
+On the plan: a Quotas row with Enforcement Mode `block` and Consumption Source `live`, so every
+NEO create of a sales invoice is checked against an exact count.
+
+- **The metric changes meaning:** it counts invoices created in the period, drafts included,
+  whether or not they are ever completed or posted.
+- **Voided invoices.** Voiding an invoice creates a reversal invoice, and both are sales invoices,
+  so as written both count. Excluding the voided originals —
+  `e.salesTransaction = true and e.documentStatus <> 'VO'` — still matches every new invoice,
+  because a new invoice is never `VO`. How a reversal is flagged depends on the document type and
+  the modules installed: **verify on your data** which rows the restriction counts (void a test
+  invoice, then compare the `/account` figure) before promising a customer what the cap includes.
+- A reversal created by the void process is not refused (processes are not an enforcement
+  point, §2), but it is counted if it matches.
+
 ---
 
 ## 5. Freshness: when does a change or a create show up
@@ -257,10 +294,12 @@ Flag details: [`feature-flags-and-tenant-upgrade.md`](feature-flags-and-tenant-u
 
 Each was accepted during ETP-5051; none is a bug to fix silently.
 
-- **`POSTED_SALES_INVOICES` (and any resource that grows through a state change) is only warned
-  about.** A resource that counts `e.posted = 'Y'` matches no row at create time — invoices are
-  created unposted — so a `block` quota on it is never refused. It is measured and reported at
-  the three report points. Refusing it means enforcing at posting: tier 4 (register §4.19).
+- **A resource that grows through a state change is only warned about.** A restriction on a
+  property that changes after the create (`e.posted = 'Y'`, a document status) matches no row at
+  create time — an invoice is created unposted — so a `block` quota on it is never refused. It is
+  measured and reported at the three report points. Refusing it at the state change means
+  enforcing at posting: tier 4 (register §4.19). The configuration route to a refusable cap is a
+  restriction that holds at create time, such as `e.salesTransaction = true` with `live` (§4.5).
 - **Not covered by the write check:**
   - rows created by a customization whose `handle()` creates them itself and short-circuits the
     default create;

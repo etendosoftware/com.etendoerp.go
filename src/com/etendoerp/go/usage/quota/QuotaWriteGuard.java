@@ -49,7 +49,9 @@ import org.openbravo.dal.core.OBContext;
  * — {@code POSTED_SALES_INVOICES} grows when an invoice is posted, and the row is created
  * unposted — does not match its restriction at create time, so it is never refused here. Accepted
  * (Martin Taal, 2026-10-24); such a quota is reported on environment entry, on the environment
- * list and on the account page.
+ * list and on the account page. The configuration route to a refusable cap is a restriction that
+ * holds at create time, for example {@code e.salesTransaction = true} ("sales invoices created",
+ * with the {@code live} source), which this guard does match.
  */
 public class QuotaWriteGuard {
 
