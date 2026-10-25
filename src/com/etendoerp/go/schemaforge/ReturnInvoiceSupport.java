@@ -115,6 +115,9 @@ final class ReturnInvoiceSupport {
     createDraftInvoiceHandler.getSupport().ensureLineGrossAmounts(invoice);
     linkRectifiedInvoices(invoice, originInvoiceIds);
     OBDal.getInstance().flush();
+    // ETP-5051: the plan-quota check of the rectificative invoice and its lines, BEFORE the
+    // completion commits it.
+    NeoQuotaCreateCheck.requireAllowedDocument(invoice);
 
     String invoiceId = invoice.getId();
     InvoiceCompletionService.completeInvoiceOrThrow(invoiceId, obContext);

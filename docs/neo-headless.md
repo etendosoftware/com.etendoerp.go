@@ -5082,7 +5082,20 @@ neither the 402 of the commercial access check (§4.1) nor a permission error.
   batch job row refused with `QUOTA_EXCEEDED` reports `safeToResend:false`: it was rolled back, but
   a resend is refused again until the quota changes. A `QUOTA_CHECK_FAILED` row keeps the normal
   rule (`safeToResend:true` for a proven rollback): nothing was saved and the check may pass. A customization whose `handle()` creates the row itself and
-  short-circuits the default create is not checked; nor are rows created by processes.
+  short-circuits the default create is not checked by the gate; nor are rows created by processes.
+- **NEO actions that create documents (ETP-5051).** The creating actions call
+  `NeoQuotaCreateCheck` right after they saved the new header (and its lines) and **before**
+  anything irreversible — before an invoice completion that commits (`ProcessInvoiceUtil`), before
+  the answer. It runs the same `QuotaWriteGuard` as the gate. `requireAllowedDocument(header)`
+  checks the header and every row of its child collections, found from the DAL model (one-to-many
+  child properties), so a creator passes no list of lines and an uncounted child entity costs no
+  query; `requireAllowed(entity, ids)` checks rows added to an existing document (line imports).
+  A refusal is thrown as `NeoQuotaCreateCheck.Refused`: a handler with a catch-all answers
+  `Refused#toResponse()` from a `catch` placed before it, and `NeoExtensionDispatcher` maps a
+  `Refused` anywhere in the cause chain of an exception that escapes a customization — so REST and
+  MCP `etendo_action` both get the gate's 403 `QUOTA_EXCEEDED` body (or `QUOTA_CHECK_FAILED`), with
+  the transaction rolled back (left to the batch inside a batch). The checked actions are listed in
+  [`plan-quotas.md`](plan-quotas.md) §2.
 - **What it checks.** Structural, driven by catalog data: the `block` quotas of the request's
   client whose declarative resource's `COUNTED_ENTITY` is the created entity. They come from
   `QuotaClientCache`, an in-memory map keyed by client id (not by HTTP session: bearer, batch and

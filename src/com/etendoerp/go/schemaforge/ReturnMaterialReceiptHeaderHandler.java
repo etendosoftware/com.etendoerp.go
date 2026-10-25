@@ -447,7 +447,9 @@ public class ReturnMaterialReceiptHeaderHandler extends AbstractReturnDocumentHe
       } finally {
         OBContext.restorePreviousMode();
       }
-        } catch (OBException e) {
+    } catch (NeoQuotaCreateCheck.Refused e) {
+      return e.toResponse();
+    } catch (OBException e) {
       log.warn("Return invoice creation rejected for receipt {}: {}", receiptId, e.getMessage());
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
     } catch (Exception e) {

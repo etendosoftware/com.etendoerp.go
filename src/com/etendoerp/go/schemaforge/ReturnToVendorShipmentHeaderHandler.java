@@ -457,7 +457,9 @@ public class ReturnToVendorShipmentHeaderHandler extends AbstractReturnDocumentH
       } finally {
         OBContext.restorePreviousMode();
       }
-        } catch (OBException e) {
+    } catch (NeoQuotaCreateCheck.Refused e) {
+      return e.toResponse();
+    } catch (OBException e) {
       log.warn("Return invoice creation rejected for shipment {}: {}", returnId, e.getMessage());
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
     } catch (Exception e) {

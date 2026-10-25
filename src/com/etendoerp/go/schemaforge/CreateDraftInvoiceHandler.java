@@ -64,6 +64,7 @@ import org.openbravo.base.weld.WeldUtils;
 
 import com.etendoerp.go.schemaforge.util.DocumentStatusGuard;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
+import com.etendoerp.go.usage.quota.QuotaWriteGuard;
 
 /**
  * NeoHandler that creates a Sales Invoice in Draft status from a Sales Order,
@@ -346,6 +347,9 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
           getSupport().alignLineListPrices(invoice, null);
           OBDal.getInstance().flush();
         }
+        // ETP-5051: the plan-quota check of the generated invoice and its lines, BEFORE the
+        // completion below commits (ProcessInvoiceUtil): a refusal rolls the whole generation back.
+        requireQuotaAllowed(invoice);
 
         // ETP-5381: create and confirm in a single atomic step. A draft invoice reserves nothing
         // — c_orderline.qtyinvoiced and m_inoutline.isinvoiced are only written by C_Invoice_Post
@@ -386,6 +390,8 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
       } finally {
         OBContext.restorePreviousMode();
       }
+    } catch (NeoQuotaCreateCheck.Refused e) {
+      return e.toResponse();
     } catch (DocumentCurrencyRate.MissingRateException e) {
       OBDal.getInstance().rollbackAndClose();
       log.warn("Refused to generate invoice from {}: {}", recordId, e.getMessage());
@@ -398,6 +404,19 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "An internal error occurred while creating the invoice");
     }
+  }
+
+  /**
+   * Seam for tests: the plan-quota check of a generated invoice and its lines
+   * ({@link NeoQuotaCreateCheck}).
+   */
+  protected void requireQuotaAllowed(Invoice invoice) {
+    NeoQuotaCreateCheck.requireAllowedDocument(invoice, quotaGuard());
+  }
+
+  /** Seam for tests: the plan-quota guard of {@link #requireQuotaAllowed}. */
+  protected QuotaWriteGuard quotaGuard() {
+    return QuotaWriteGuard.getDefault();
   }
 
   /**

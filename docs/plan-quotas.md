@@ -61,7 +61,29 @@ Exactly four points read quotas today. Three report; one refuses.
 | **Environment entry** | `POST /sws/go/session/environment` → `quotas` | Lists the tenant's WARN and DENY items. Login is never refused for a quota. | `warn`, `block` | **No** — report |
 | **Environment list** | `GET /sws/go/environments` → `quotas` and `accessEnforced` per environment | The same WARN/DENY items for every listed tenant; the SPA's quota banner reads them for the current environment. Never fails the list. | `warn`, `block` | **No** — report |
 | **`/account`** | `GET /sws/go/billing/subscription` → `planQuotas`, `accessEnforced` | Every active quota with its consumption, mode `off` included (measured, no verdict), for the **entered environment's** subscription (the account's newest only when no environment is entered — ETP-5051 O-1, see [`feature-flags-and-tenant-upgrade.md`](feature-flags-and-tenant-upgrade.md), *Which subscription the page shows*). | all | **No** — report |
-| **NEO write path** | REST `POST /sws/neo/{spec}/{entity}`, `/sws/neo/batch`, MCP `etendo_create`, MCP `etendo_batch` and the MCP batch jobs | Refuses a **create** of the counted entity with 403 `QUOTA_EXCEEDED` when the row would take the tenant over the included quantity. | `block` only, on **declarative** resources only | **Yes** — on create of the counted entity only |
+| **NEO write path** | REST `POST /sws/neo/{spec}/{entity}`, `/sws/neo/batch`, MCP `etendo_create`, MCP `etendo_batch` and the MCP batch jobs; **and the NEO actions that create documents** (REST `…/{id}/action/{name}` and MCP `etendo_action` alike), listed below | Refuses a **create** of the counted entity with 403 `QUOTA_EXCEEDED` when the row would take the tenant over the included quantity. | `block` only, on **declarative** resources only | **Yes** — on create of the counted entity only |
+
+The NEO actions checked (ETP-5051), all through `NeoQuotaCreateCheck` — the same guard, restriction
+match, lock and count as the CRUD gate, run on the created header **and its lines** right after they
+are saved and **before** anything irreversible (a completion that commits, the response):
+
+| Action (window) | Creates | Note |
+|---|---|---|
+| `createDraftInvoice` (sales order, sales quotation, goods shipment) | sales invoice | checked before the invoice is completed in the same request |
+| `createPurchaseInvoice` (purchase order, goods receipt) | purchase invoice | checked before completion |
+| `createShipment` (sales order) | goods shipment | |
+| `createGoodsReceipt` (purchase order) | goods receipt | |
+| `Convertquotation` (sales quotation) | sales order | checked after core's conversion, before the answer; nothing is committed before it |
+| return creation (`NeoReturnReceiptService`, `createPurchaseReturn`) | return shipment / receipt | |
+| return invoice (return material receipt, return to vendor) | rectificative invoice | checked before completion |
+| follow-up documents (invoice → shipment / receipt, `FollowUpActionHandler`) | goods movement | |
+| clone (`neoCloneRecordHandler`, any window) | a copy of the record, with the children a hook copies | |
+| line imports (`Import*Lines*Handler`) | lines added to an existing document | only the added lines are checked |
+
+A refusal rolls the whole action back (the generated invoice is never completed, the converted order
+never kept) and answers the CRUD gate's envelope: 403 `QUOTA_EXCEEDED` with the `quota` body, or 500
+`QUOTA_CHECK_FAILED`. Discount lines added by `TotalDiscountService` while a document is saved are
+not checked.
 
 Read the last row literally:
 
@@ -88,9 +110,10 @@ The reports run in their own isolated, bounded read pool and never touch the req
 transaction; the write check runs inside the create's transaction. Both are described in
 [`neo-headless.md`](neo-headless.md) §4.16.
 
-**There is no other enforcement point.** Not the Classic UI, not processes (posting, completing,
-generating invoices from orders), not a DAL observer, not a `NeoHandler` whose `handle()` creates
-the row and short-circuits the default create. A quota cannot cap "everything everywhere"; it caps
+**There is no other enforcement point.** Not the Classic UI, not processes run outside NEO
+(posting, completing, Classic "generate invoices"), not a DAL observer, not a `NeoHandler` whose
+`handle()` creates the row and short-circuits the default create **unless it is one of the actions
+listed above**. A quota cannot cap "everything everywhere"; it caps
 NEO creates of one entity, and reports everything else. Adding a point is development (§3, tier 4).
 
 ---
@@ -250,6 +273,24 @@ NEO create of a sales invoice is checked against an exact count.
 - A reversal created by the void process is not refused (processes are not an enforcement
   point, §2), but it is counted if it matches.
 
+**Restricting on the document type: use `transactionDocument`, not `documentType`.** To count only
+one kind of sales invoice — for example the standard ones, leaving rectificatives out — restrict on
+the invoice's target document type, `C_DocTypeTarget_ID`:
+
+| Field | Value |
+|---|---|
+| HQL Restriction | `e.salesTransaction = true and e.transactionDocument.documentCategory = 'ARI'` |
+
+A join is fine: the write check matches the inserted row with the full HQL restriction in the
+create's own transaction (§2). `e.documentType` (`C_DocType_ID`) does not hold at create time on
+every path: its AD default is `'0'`, a draft created through the CRUD POST keeps it until
+`C_Invoice_Post` copies the target into it on completion, and only some generators set it
+themselves. Verified on 2026-10-25 against the local database: `AD_Column.DefaultValue` of
+`C_Invoice.C_DocType_ID` is `0`, and draft invoices with `C_DocType_ID = '0'` exist next to drafts
+from the order generator that carry the target. A restriction on `e.documentType` would therefore
+miss CRUD-created invoices at create time and never refuse them (§2, *Only restrictions that hold at
+create time*).
+
 ---
 
 ## 5. Freshness: when does a change or a create show up
@@ -302,8 +343,9 @@ Each was accepted during ETP-5051; none is a bug to fix silently.
   restriction that holds at create time, such as `e.salesTransaction = true` with `live` (§4.5).
 - **Not covered by the write check:**
   - rows created by a customization whose `handle()` creates them itself and short-circuits the
-    default create;
-  - rows created by processes (posting, completion, generation from another document);
+    default create, other than the NEO actions listed in §2;
+  - rows created by processes outside NEO (posting, completion, Classic generation from another
+    document), and rows a PL/SQL procedure inserts — for example the reversal invoice of a void;
   - creates in the Classic UI — there is no DAL observer, by decision.
   All of them are still counted and reported.
 - **The SPA's CSV/XLSX import shows a generic row error.** The import writes through

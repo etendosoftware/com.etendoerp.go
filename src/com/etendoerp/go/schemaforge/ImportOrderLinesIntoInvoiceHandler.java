@@ -202,6 +202,7 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
         OrderLine.class, planned, line -> line.getSalesOrderLine(),
         (call, lines) -> unmarkRemainder(batches, call, lines));
     carryOrderDiscount(invoice, order);
+    requireQuotaAllowed(InvoiceLine.ENTITY_NAME, created);
     return DocumentLineImport.ok(created, invoice.getSalesOrder() == null ? null
         : invoice.getSalesOrder().getId());
   }

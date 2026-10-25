@@ -92,6 +92,14 @@ public final class NeoExtensionDispatcher {
     try {
       response = invoke(request, customization);
     } catch (RuntimeException e) {
+      // ETP-5051 — a NEO action's created rows refused by a plan quota (NeoQuotaCreateCheck)
+      // answer the CRUD gate's 403 QUOTA_EXCEEDED on every channel, even when the customization
+      // let the refusal escape or wrapped it. Structural: driven by the exception type only.
+      NeoResponse quotaRefusal = NeoQuotaCreateCheck.responseFor(e);
+      if (quotaRefusal != null) {
+        return finish(request, customization, quotaRefusal,
+            NeoExtensionOutcome.RESOLVED_AND_RAN);
+      }
       finish(request, customization, null, NeoExtensionOutcome.FAILED);
       throw e;
     }
