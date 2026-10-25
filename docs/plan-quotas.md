@@ -287,9 +287,13 @@ Each was accepted during ETP-5051; none is a bug to fix silently.
   tenant also reports `[]` for every tenant not yet evaluated in that request (one log line gives
   the count). The list itself never fails. The write path is not affected: it fails closed (500
   `QUOTA_CHECK_FAILED`) instead.
-- **A DENY banner can be dismissed for the browser session.** The dismissal names the reported
-  verdicts, so a new alert (another resource, or WARN turning into DENY) shows again. The write
-  refusal itself cannot be dismissed.
+- **A WARN banner can be dismissed for the browser session; a DENY banner cannot.** The WARN
+  dismissal names the reported verdicts, so a new alert (another resource, or WARN turning into
+  DENY) shows again. A banner with any DENY item has no close button and ignores a stored
+  dismissal. The SPA re-reads the environment list when the tab regains focus, every 5 minutes
+  while it is visible, and right after a 403 `QUOTA_EXCEEDED`, so a quota that reaches DENY
+  between page loads shows within that time, not at the next login (schema_forge
+  `useEnvironmentListFreshness`).
 - **Two concurrent batches can deadlock on the quota locks.** A batch that creates rows of two
   `live` `block` resources takes one lock per resource in its own order; two batches of the same
   tenant in opposite orders deadlock, PostgreSQL aborts one, and that batch answers 500
@@ -307,7 +311,7 @@ Each was accepted during ETP-5051; none is a bug to fix silently.
 | A quota never refuses | Mode is `block`? The resource is declarative and its `COUNTED_ENTITY` is the entity being created? The created row matches the restriction at create time (not after a state change)? Its date is in the period? The source is `aggregate` and the usage job is not running (`[USAGE-LAG]`)? The tenant's subscription has a current period (`[QUOTA] … has no current billing period`)? |
 | A quota refuses too early / too late with `aggregate` | Stored usage is up to one cadence old; switch to `live` for an exact cap |
 | `consumed` is null on `/account` | No current period on the subscription row (register §5.9); fix the period by hand from Stripe |
-| No banner although `/account` shows DENY | The environment list blanked the report (a `[QUOTA] Could not …` line), or the user dismissed the banner for the session |
+| No banner although `/account` shows DENY | The environment list blanked the report (a `[QUOTA] Could not …` line). A DENY banner cannot be dismissed. If the DENY is newer than the page, the SPA picks it up on the next tab focus, within 5 minutes, or at the next `QUOTA_EXCEEDED` refusal; with an `aggregate` source it shows only once the usage job has stored the new usage (§5) |
 | `/account` shows no subscription inside an environment the account owns | The page describes the entered environment only (ETP-5051 O-1): that environment has no billable purchase of this account — a demo, an environment the account was invited into, or a purchase whose `CREATED_CLIENT_ID` is not set. Another environment's subscription is never shown in its place |
 | 500 `QUOTA_CHECK_FAILED` | `[QUOTA]` ERROR lines: a database failure during the check, or the client's quota entry could not be built. Nothing was saved; retrying is safe |
 
