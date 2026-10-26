@@ -22,6 +22,7 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -155,12 +156,11 @@ public class SiiSendHandlerTest {
   // request's language via NeoHints/NeoLanguage, not a substring swap on the classic text — a
   // Spanish-only sentence with just the field name fixed is not a bilingual fix.
 
+  // The language is now an explicit parameter (not read internally via NeoLanguage.currentCode())
+  // — see the ETP-5745 "language must be captured BEFORE executeObuiappClass" javadoc for why.
   private static NeoResponse remapWithLanguage(String rawMessage, String languageCode) throws JSONException {
     NeoResponse response = NeoResponse.error(400, rawMessage);
-    try (MockedStatic<NeoLanguage> lang = Mockito.mockStatic(NeoLanguage.class)) {
-      lang.when(NeoLanguage::currentCode).thenReturn(languageCode);
-      return SiiSendHandler.remapDriftedFieldLabels(SiiSendHandler.normalizeErrorShape(response));
-    }
+    return SiiSendHandler.remapDriftedFieldLabels(SiiSendHandler.normalizeErrorShape(response), languageCode);
   }
 
   @Test
@@ -231,7 +231,7 @@ public class SiiSendHandlerTest {
 
   @Test
   public void remapToleratesANullResponse() {
-    assertNull(SiiSendHandler.remapDriftedFieldLabels(null));
+    assertNull(SiiSendHandler.remapDriftedFieldLabels(null, "en_US"));
   }
 
   // ── executeAction() routing — ETP-5272 ─────────────────────────────────────
@@ -332,6 +332,48 @@ public class SiiSendHandlerTest {
           eq("org.openbravo.module.sii.process.MultiEnvioFactura"),
           eq("2ECF46DAAEEB486EAF79D3594D50DE5F"),
           any(JSONObject.class)));
+    }
+  }
+
+  /**
+   * ETP-5745 regression repro (live-verified bug): {@code executeAction} must capture
+   * {@code NeoLanguage.currentCode()} BEFORE calling {@code executeObuiappClass}, not after.
+   * Simulates the real-world failure directly — the classic bridge call itself (mocked here)
+   * changes what {@code NeoLanguage.currentCode()} returns, exactly as the live classic
+   * {@code MultiEnvioFactura} call was observed to do (exact clobbering line not pinpointed, see
+   * the class javadoc) — and asserts the final replacement message still uses the language
+   * captured BEFORE that call, not whatever it resolves to afterwards.
+   */
+  @Test
+  public void executeActionUsesTheLanguageCapturedBeforeTheClassicCallNotAfter() throws Exception {
+    Invoice invoice = mock(Invoice.class);
+    when(invoice.isAeatsiiErrorRegistral()).thenReturn(Boolean.FALSE);
+    Organization org = mock(Organization.class);
+    when(org.getId()).thenReturn("org-1");
+    when(invoice.getOrganization()).thenReturn(org);
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<NeoProcessService> processMock = Mockito.mockStatic(NeoProcessService.class);
+         MockedStatic<NeoLanguage> langMock = Mockito.mockStatic(NeoLanguage.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(Invoice.class, "inv-lang-clobber")).thenReturn(invoice);
+
+      // Before the call: en_US, as EnvironmentRequestAuthenticator set it from Accept-Language.
+      langMock.when(NeoLanguage::currentCode).thenReturn("en_US");
+      // The classic bridge call itself flips it to es_ES as a side effect — the observed bug.
+      processMock.when(() -> NeoProcessService.executeObuiappClass(anyString(), anyString(), any(JSONObject.class)))
+          .thenAnswer(invocation -> {
+            langMock.when(NeoLanguage::currentCode).thenReturn("es_ES");
+            return NeoResponse.error(400,
+                "La factura de compra debe contener información en el campo Referencia del proveedor. ");
+          });
+
+      NeoResponse result = handler.executeAction("inv-lang-clobber");
+
+      // Must be the ENGLISH replacement (the pre-call language), never the Spanish one.
+      assertEquals("The purchase invoice must contain information in the Document No. field.",
+          result.getBody().getString("message"));
     }
   }
 

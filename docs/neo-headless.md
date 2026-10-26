@@ -10597,6 +10597,31 @@ with no SPA-side translation step, so resolving an untranslated AD_Message serve
 rendered English regardless of locale. Any message that does not match one of the two known
 sentences passes through byte for byte, unchanged. Same handler on every channel, so no divergence
 to declare here.
+
+**Live-verified regression on this fix: the language MUST be captured BEFORE the classic bridge
+call, not after.** `executeAction` used to call `NeoLanguage.currentCode()` AFTER
+`NeoProcessService.executeObuiappClass` had already run the classic `MultiEnvioFactura`/
+`MultiInvoiceSIIModification` handler. A live English-locale session still got the Spanish
+`NeoHints` text — which rules out "no language resolved" (`NeoHints#text` falls back to English on
+a missing language, not Spanish), so `OBContext`'s language was actively overwritten to `es_*` by
+something inside that classic call. Investigated and ruled out: `OBContext.setAdminMode()`/
+`restorePreviousMode()` — both `executeObuiappClass`'s own wrapping and the classic handlers' many
+internal `setAdminMode(true)` pairs are no-ops on the context's identity/fields whenever a non-null,
+non-singleton context already exists (true here: the per-request context
+`EnvironmentRequestAuthenticator` built and set the language on, via `NeoLanguage.applyToContext`).
+No explicit `OBContext.setOBContext`/`.setLanguage` call was found in `MultiEnvioFactura`/
+`MultiInvoiceSIIModification` either. **The exact clobbering line was not pinpointed** (no live
+backend available to add a diagnostic log and confirm) — likely a classic/legacy CDI or
+session-scoped mechanism reasserting the authenticated user's own stored `AD_User.AD_Language`
+somewhere in the `BaseActionHandler` invocation chain. Fix: `executeAction` now calls
+`NeoLanguage.currentCode()` itself BEFORE invoking `executeObuiappClass`, and threads the captured
+value down to `remapDriftedFieldLabels` as an explicit parameter — this is still the one canonical
+`NeoLanguage` resolver, just called at a point in the request known to be correct, not a raw
+`Accept-Language` re-read bypassing it. No other `NeoLanguage.currentCode()` caller in this module
+crosses a classic-process boundary, so there was no prior instance of this "capture before a
+classic call" combination to copy; this is a new but minimal, defensible fix, not a deviation from
+an established pattern that was overlooked. If the exact clobbering mechanism is found later,
+this capture-before approach remains correct regardless of root cause.
 **MCP path only:** the hook is in `McpToolRouter.route` (`etendo_action` case), not in `handleAction` or `NeoButtonActionHelper`, so the REST action endpoint and the SPA (which
 un-posts on its own and then posts `documentAction RE` to `/sws/neo`) never reach it: a double un-post is impossible. A single call leaves the final commit of the
 reactivation to the request, as every `etendo_action` does; the un-post is committed on its own before it.

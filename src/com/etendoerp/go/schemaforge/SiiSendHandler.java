@@ -63,14 +63,17 @@ public class SiiSendHandler extends AbstractLegacyInvoiceActionHandler {
   @Override
   protected NeoResponse executeAction(String recordId) throws Exception {
     Invoice invoice = OBDal.getInstance().get(Invoice.class, recordId);
+    // ETP-5745 bilingual follow-up: captured BEFORE the classic bridge call, not after — see
+    // remapDriftedFieldLabels's javadoc for why.
+    String requestLanguage = NeoLanguage.currentCode();
 
     if (invoice != null && Boolean.TRUE.equals(invoice.isAeatsiiErrorRegistral())) {
-      return executeRegistralModification(recordId, invoice);
+      return executeRegistralModification(recordId, invoice, requestLanguage);
     }
 
     NeoResponse response = NeoProcessService.executeObuiappClass(PROCESS_CLASS, PROCESS_ID,
         buildInvoiceSendParams(recordId, invoice));
-    return remapDriftedFieldLabels(normalizeErrorShape(response));
+    return remapDriftedFieldLabels(normalizeErrorShape(response), requestLanguage);
   }
 
   /**
@@ -79,12 +82,14 @@ public class SiiSendHandler extends AbstractLegacyInvoiceActionHandler {
    * {@link Invoice#isAeatsiiErrorRegistral()} is {@code true} — regardless of the invoice's
    * AEAT error code. Like {@code MultiEnvioFactura}, this is a real {@code BaseActionHandler},
    * so it is invoked through the same {@link NeoProcessService#executeObuiappClass} bridge.
+   *
+   * @param requestLanguage the language {@link #executeAction} captured BEFORE this call
    */
-  private static NeoResponse executeRegistralModification(String recordId, Invoice invoice)
-      throws Exception {
+  private static NeoResponse executeRegistralModification(String recordId, Invoice invoice,
+      String requestLanguage) throws Exception {
     NeoResponse response = NeoProcessService.executeObuiappClass(MODIFICATION_PROCESS_CLASS,
         MODIFICATION_PROCESS_ID, buildInvoiceSendParams(recordId, invoice));
-    return remapDriftedFieldLabels(normalizeErrorShape(response));
+    return remapDriftedFieldLabels(normalizeErrorShape(response), requestLanguage);
   }
 
   /**
@@ -164,6 +169,37 @@ public class SiiSendHandler extends AbstractLegacyInvoiceActionHandler {
    * header (independent of, and more reliable than, {@code AD_User.AD_Language}: the SPA's
    * language switcher is purely client-side and never writes that field back).
    *
+   * <p><b>ETP-5745 — language must be captured BEFORE {@code executeObuiappClass} (2nd
+   * correction, live-verified regression).</b> The first bilingual version called
+   * {@code NeoLanguage.currentCode()} HERE, i.e. AFTER {@code executeObuiappClass} had already run
+   * the classic {@code MultiEnvioFactura}/{@code MultiInvoiceSIIModification} handler. A live
+   * English-locale session still got the Spanish {@code NeoHints} text, which rules out the
+   * "no language resolved, fell back to English" failure mode — {@link NeoHints#text} falls back
+   * to English on a missing/unresolvable language, so to end up with SPANISH text,
+   * {@code OBContext}'s language must have been ACTIVELY overwritten to {@code es_*} by
+   * something inside that classic call, not merely lost. Investigated and RULED OUT:
+   * {@code OBContext.setAdminMode()}/{@code restorePreviousMode()} (both {@code executeObuiappClass}'s
+   * own wrapping and the classic handlers' many internal {@code setAdminMode(true)} pairs) —
+   * read against core's own source, both are no-ops on the context's identity/fields whenever a
+   * non-null, non-singleton context already exists, which is the case here (the per-request
+   * context {@code EnvironmentRequestAuthenticator} built and set the language on). No explicit
+   * {@code OBContext.setOBContext}/{@code .setLanguage} call was found in
+   * {@code MultiEnvioFactura}/{@code MultiInvoiceSIIModification} either. The exact line inside
+   * the classic bridge that performs the overwrite was NOT pinpointed (no live backend available
+   * to add a diagnostic log and confirm) — likely a classic/legacy CDI or session-scoped
+   * mechanism reasserting the authenticated user's own stored {@code AD_User.AD_Language}
+   * somewhere in the {@code BaseActionHandler} invocation chain, triggered lazily. <b>Fix:</b>
+   * {@link #executeAction} now calls {@code NeoLanguage.currentCode()} itself, BEFORE invoking
+   * {@code executeObuiappClass}, and passes the captured value down — this still resolves the
+   * language through the one canonical {@code NeoLanguage} function (not a raw
+   * {@code Accept-Language} re-read, which would bypass it), only at a point in the SAME request
+   * the value is known-good. No other caller of {@code NeoLanguage.currentCode()} in this module
+   * crosses a classic-process boundary between authentication and the read, so there was no prior
+   * instance of this exact "capture before a classic call" combination to copy — grepped for one
+   * before writing this; it does not exist. If the exact clobbering mechanism is found later, this
+   * capture-before approach should still be the right fix (it is correct regardless of root cause,
+   * and is the minimal change), not something to revert.
+   *
    * <p><b>Why not {@code AD_Message}/{@code AD_Message_Trl}:</b> this module's own {@code ETGO_*}
    * AD_Message catalog (e.g. {@code ETGO_InsufficientStockLine}) exists as STABLE IDENTITY TOKENS
    * the SPA re-translates client-side via {@code backendErrors.js} — their {@code AD_Message_Trl}
@@ -198,9 +234,12 @@ public class SiiSendHandler extends AbstractLegacyInvoiceActionHandler {
    *
    * @param response the response {@link #normalizeErrorShape} already ran on (so a top-level
    *     {@code message} is present whenever the body carried one at all)
+   * @param requestLanguage the language to build the replacement in — MUST be captured by the
+   *     caller BEFORE the classic {@code executeObuiappClass} call that produced {@code response}
+   *     (see the class javadoc's "language must be captured BEFORE" section for why)
    * @return {@code response}, with its body's {@code message} replaced in place when it matched
    */
-  static NeoResponse remapDriftedFieldLabels(NeoResponse response) {
+  static NeoResponse remapDriftedFieldLabels(NeoResponse response, String requestLanguage) {
     if (response == null || response.getBody() == null) {
       return response;
     }
@@ -211,7 +250,7 @@ public class SiiSendHandler extends AbstractLegacyInvoiceActionHandler {
     }
     for (Map.Entry<String, String> entry : DRIFTED_CLASSIC_SENTENCES.entrySet()) {
       if (message.contains(entry.getKey())) {
-        String replacement = NeoHints.text(entry.getValue(), NeoLanguage.currentCode());
+        String replacement = NeoHints.text(entry.getValue(), requestLanguage);
         try {
           body.put("message", replacement);
         } catch (JSONException ignored) {
