@@ -6771,8 +6771,14 @@ fix stops the existence leak (an empty report used to confirm that the id existe
 client for an `Organization`, which is not `OrganizationEnabled`. An org of the caller's own client
 outside the role's org access still resolves; that is unchanged and is not a tenant leak. Pinned by
 `TenantIsolationPolicyTest`, which guards the aging, trial balance, general ledger, journal entries,
-balance sheet and P&L handlers. The fiscal reports (`TaxReportHandler`, `Fiscal303BoxesHandler`)
-are swept separately (ETP-5794). Years, accounting schemas and journals are `OrganizationEnabled`,
+balance sheet and P&L handlers. The fiscal reports were swept in ETP-5794: `tax-report` answers a
+foreign, unknown or role-unreadable `orgId` with the same `organization_not_resolved` (400)
+envelope, before anything is resolved from it. That check is stricter than the reports above: it
+also requires the org to be in the role's readable organizations, because the tax report SQL binds
+`ad_org_id` straight from the request. An omitted `orgId` still defaults to the session
+organization, `"0"` included. Before the fix, an MCP call without `currencyId` answered with the
+ledger currency of another tenant's org. `Fiscal303BoxesHandler` takes no org from the request
+(`resolveEffectiveOrg()`), so it only carries a `tenant-ok` justification. Years, accounting schemas and journals are `OrganizationEnabled`,
 so `loadOwned` also requires their organization to be readable by the role: one of the caller's
 own client in an organization outside the role's access now answers as unknown too.
 

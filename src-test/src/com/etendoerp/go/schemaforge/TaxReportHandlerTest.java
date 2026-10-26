@@ -118,6 +118,11 @@ class TaxReportHandlerTest {
     when(client.getId()).thenReturn("test-client-id");
     when(obContext.getCurrentOrganization()).thenReturn(organization);
     when(organization.getId()).thenReturn("test-org-id");
+    // ETP-5794: a request orgId and the default-currency org go through TenantOwnership.loadOwned
+    // plus the role's readable organizations.
+    when(obContext.getReadableClients()).thenReturn(new String[] { "test-client-id", "0" });
+    when(obContext.getReadableOrganizations())
+        .thenReturn(new String[] { "test-org-id", "custom-org-id", "0" });
     when(obContext.getLanguage()).thenReturn(language);
     when(language.getLanguage()).thenReturn("en_US");
     when(obDal.getConnection()).thenReturn(connection);
@@ -731,6 +736,9 @@ class TaxReportHandlerTest {
     mockResultSetRows(0);
     JSONObject body = buildValidBody("P", false, false);
     body.put("orgId", "custom-org-id");
+    Organization customOrg = mock(Organization.class);
+    when(customOrg.getClient()).thenReturn(client);
+    when(obDal.get(Organization.class, "custom-org-id")).thenReturn(customOrg);
     NeoResponse response = handler.handle(buildPostContext(body));
 
     assertEquals(200, response.getHttpStatus());
@@ -1268,6 +1276,7 @@ class TaxReportHandlerTest {
     when(client.getCurrency()).thenReturn(clientCurrency);
 
     Organization targetOrg = mock(Organization.class);
+    when(targetOrg.getClient()).thenReturn(client);
     when(obDal.get(Organization.class, "test-org-id")).thenReturn(targetOrg);
     AcctSchema ledger = mock(AcctSchema.class);
     Currency orgCurrency = mock(Currency.class);
@@ -1302,6 +1311,7 @@ class TaxReportHandlerTest {
     when(client.getCurrency()).thenReturn(clientCurrency);
 
     Organization targetOrg = mock(Organization.class);
+    when(targetOrg.getClient()).thenReturn(client);
     when(obDal.get(Organization.class, "test-org-id")).thenReturn(targetOrg);
     when(targetOrg.getGeneralLedger()).thenReturn(null);
 
@@ -1339,6 +1349,7 @@ class TaxReportHandlerTest {
     when(client.getCurrency()).thenReturn(clientCurrency);
 
     Organization targetOrg = mock(Organization.class);
+    when(targetOrg.getClient()).thenReturn(client);
     when(obDal.get(Organization.class, "test-org-id")).thenReturn(targetOrg);
     when(targetOrg.getGeneralLedger()).thenReturn(null);
 
@@ -1388,6 +1399,7 @@ class TaxReportHandlerTest {
   @Test
   void testExplicitCurrencyIdWinsOverOrgGeneralLedgerCurrency() throws Exception {
     Organization targetOrg = mock(Organization.class);
+    when(targetOrg.getClient()).thenReturn(client);
     when(obDal.get(Organization.class, "test-org-id")).thenReturn(targetOrg);
     AcctSchema ledger = mock(AcctSchema.class);
     Currency orgCurrency = mock(Currency.class);

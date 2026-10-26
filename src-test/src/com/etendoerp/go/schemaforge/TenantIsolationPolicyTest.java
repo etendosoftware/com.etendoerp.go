@@ -75,7 +75,8 @@ class TenantIsolationPolicyTest {
    * they delegate to. Plus the general ledger configuration, which writes accounting combinations
    * into the ledger setup (ETP-5722). Plus the accounting reports (aging, trial balance, general
    * ledger, journal entries, profit and loss, balance sheet), the G/L journal header and the
-   * organization information tab (ETP-5793).
+   * organization information tab (ETP-5793). Plus the fiscal reports: the tax report and the
+   * Modelo 303 box computation (ETP-5794).
    */
   private static final List<String> GUARDED_CLASSES = Arrays.asList(
       "AbstractAccountTreeReportHandler.java",
@@ -95,6 +96,7 @@ class TenantIsolationPolicyTest {
       "FinancialAccountHandler.java",
       "FinancialAccountTransactionsHandler.java",
       "FinancialAccountTransactionsSupport.java",
+      "Fiscal303BoxesHandler.java",
       "GeneralLedgerBalancingRule.java",
       "GeneralLedgerConfigurationHandler.java",
       "GeneralLedgerReportHandler.java",
@@ -107,6 +109,7 @@ class TenantIsolationPolicyTest {
       "ReconciliationHandler.java",
       "ReconciliationHandlerSupport.java",
       "ReconciliationWriteoffSupport.java",
+      "TaxReportHandler.java",
       "TrialBalanceReportHandler.java",
       "handlers/OrganizationInformationHandler.java");
 
