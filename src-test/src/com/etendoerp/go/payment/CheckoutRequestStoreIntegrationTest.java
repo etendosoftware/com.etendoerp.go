@@ -23,13 +23,24 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 import java.sql.Timestamp;
 import java.util.Date;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
 
+import org.apache.logging.log4j.Level;
 import org.junit.After;
+import org.hibernate.query.NativeQuery;
 import org.junit.Test;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
@@ -92,7 +103,19 @@ import com.etendoerp.go.schemaforge.data.CheckoutRequest;
  * <p>Assertions on committed values load fresh DAL entities rather than retaining objects from a
  * previous session, so they read committed state after bulk HQL updates.
  *
+ * <p><b>Group 7 (ETP-5048) — the two writes the billing reconciliation added</b>, kept in
+ * {@link CheckoutRequestWrites} beside the store: the conditional {@code CREATED → EXPIRED} close
+ * (a bulk update whose row count is the answer) and the first-write-wins onboarding inputs, plus
+ * the store's guard that keeps {@code EXPIRED} terminal.
+ *
+ * <p><b>Group 8 (ETP-5048) — the fence of a paid re-subscription.</b> The payment webhook and the
+ * billing reconciliation can both reach one paid re-subscription. {@code findPaidReactivation}
+ * locks the row ({@code SELECT ... FOR UPDATE}) and re-reads it, so of two racing callers exactly
+ * one applies it; the other waits for that commit and then finds nothing to do. Proven with two
+ * threads, each with its own DAL session, against the real row lock; every wait is bounded.
+ *
  * @covers com.etendoerp.go.payment.CheckoutRequestStore
+ * @covers com.etendoerp.go.payment.CheckoutRequestWrites
  */
 public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
 
@@ -121,6 +144,7 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
   private static final Timestamp DISTANT_PAST = Timestamp.valueOf("2020-01-01 00:00:00");
 
   private final CheckoutRequestStore store = new CheckoutRequestStore();
+  private final CheckoutRequestWrites writes = new CheckoutRequestWrites();
 
   /**
    * Deletes the committed fixtures, closes the session, and clears the thread context.
@@ -673,16 +697,16 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
     String accountId = createAccount(email);
     String requestId = createPaidRequest(accountId, email);
 
-    assertNotNull("Sanity: the first payment must have stamped PAID_AT",
-        rawTimestamp(requestId, "PAID_AT"));
+    Timestamp firstPaidAt = rawTimestamp(requestId, "PAID_AT");
+    assertNotNull("Sanity: the first payment must have stamped PAID_AT", firstPaidAt);
 
-    // Same device as in the retry test: an expected value "now" can never coincide with makes the
-    // assertion about the guard, not about clock resolution.
-    forceTimestamp(requestId, "PAID_AT", DISTANT_PAST);
+    // Compared with the first stamp rather than a backdated one: a PAID row backdated past the
+    // paid grace would be a provisioning candidate for a live billing reconciliation run. The
+    // redelivery is a full DB round trip later, so a rewritten stamp would differ from the first.
     store.recordPaid(requestId, "cus_" + requestId, "sub_" + requestId);
 
     assertEquals("A redelivered webhook must leave PAID_AT at the moment the payment was "
-        + "actually confirmed", DISTANT_PAST, rawTimestamp(requestId, "PAID_AT"));
+        + "actually confirmed", firstPaidAt, rawTimestamp(requestId, "PAID_AT"));
     assertEquals("A redelivery must not change the status either", STATUS_PAID,
         rawStatus(requestId));
   }
@@ -900,6 +924,404 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
     assertNotNull("The fixture must genuinely fail, or this test asserts nothing at all", failure);
     assertSame("A store call that throws must still give the caller's context back — the caller "
         + "handles the failure next, and it must do so as itself", caller, contextAfterFailure);
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Group 7 — ETP-5048: EXPIRED and the onboarding inputs (CheckoutRequestWrites)
+  // ---------------------------------------------------------------------------------------------
+
+  /** A request at {@code CREATED} with a fake test-mode session id, as the real flow leaves it. */
+  private String createCreatedRequest(String accountId, String email) {
+    String requestId = createRequest(accountId, email);
+    store.recordSessionCreated(requestId, "cs_test_" + requestId);
+    return requestId;
+  }
+
+  @Test
+  public void testRecordExpiredClosesACreatedRequest() {
+    String email = newEmail("expire-created");
+    String requestId = createCreatedRequest(createAccount(email), email);
+
+    assertTrue("The conditional update must report that it closed the request",
+        writes.recordExpired(requestId));
+
+    CheckoutRequest closed = findCommittedRequest(requestId);
+    assertEquals(CheckoutRequestStore.STATUS_EXPIRED, closed.getCheckoutRequestStatus());
+    assertNotNull("EXPIRED_AT is stamped", closed.getExpiredAt());
+    assertEquals(CheckoutRequestStore.DERIVED_STATUS_EXPIRED,
+        store.deriveProvisioningStatus(closed));
+  }
+
+  /** The webhook racing the reconciliation: a payment recorded first is never overwritten. */
+  @Test
+  public void testRecordExpiredNeverClosesAPaidRequest() {
+    String email = newEmail("expire-paid");
+    String requestId = createPaidRequest(createAccount(email), email);
+
+    assertFalse(writes.recordExpired(requestId));
+
+    assertEquals(STATUS_PAID, rawStatus(requestId));
+    assertNull(findCommittedRequest(requestId).getExpiredAt());
+  }
+
+  @Test
+  public void testRecordExpiredOfAnUnknownRequestClosesNothing() {
+    assertFalse(writes.recordExpired(newRequestId()));
+  }
+
+  /**
+   * EXPIRED sits outside the forward-only rank, so without the guard in {@code advance} every
+   * later step would look "forward" of it. A late payment or a provisioning claim must not reopen
+   * a closed request.
+   */
+  /**
+   * Review F1: the reconciliation's repairs are left pending, so the commit of their audit row
+   * commits them and a failed audit insert (a rollback) discards them. Nothing commits on its own.
+   */
+  @Test
+  public void testPendingRepairsCommitOnlyWithTheCallerAndARollbackDiscardsThem() {
+    String email = newEmail("pending-repairs");
+    String requestId = createCreatedRequest(createAccount(email), email);
+
+    assertTrue(writes.recordPaidPending(requestId, "cus_" + requestId, "sub_" + requestId));
+    OBDal.getInstance().rollbackAndClose();
+    assertEquals("A rolled-back payment leaves no trace", "CREATED", rawStatus(requestId));
+
+    assertTrue(writes.recordExpiredPending(requestId));
+    OBDal.getInstance().rollbackAndClose();
+    assertEquals("A rolled-back close leaves no trace", "CREATED", rawStatus(requestId));
+
+    assertTrue(writes.recordPaidPending(requestId, "cus_" + requestId, "sub_" + requestId));
+    OBDal.getInstance().commitAndClose();
+    CheckoutRequest paid = findCommittedRequest(requestId);
+    assertEquals("PAID", paid.getCheckoutRequestStatus());
+    assertNotNull(paid.getPaidAt());
+    assertEquals("sub_" + requestId, paid.getStripeSubscription());
+    assertFalse("No row, nothing recorded", writes.recordPaidPending(newRequestId(), null, null));
+  }
+
+  /** The pending close commits with the caller's commit, and closes a request only once. */
+  @Test
+  public void testAPendingCloseCommitsWithTheCallerAndOnlyOnce() {
+    String email = newEmail("pending-close");
+    String requestId = createCreatedRequest(createAccount(email), email);
+
+    assertTrue(writes.recordExpiredPending(requestId));
+    OBDal.getInstance().commitAndClose();
+
+    CheckoutRequest closed = findCommittedRequest(requestId);
+    assertEquals(CheckoutRequestStore.STATUS_EXPIRED, closed.getCheckoutRequestStatus());
+    assertNotNull(closed.getExpiredAt());
+    OBDal.getInstance().rollbackAndClose();
+    assertFalse("Already closed: nothing to close", writes.recordExpiredPending(requestId));
+    OBDal.getInstance().rollbackAndClose();
+  }
+
+  /** The shared payment write keeps EXPIRED terminal on the reconciliation's path too. */
+  @Test
+  public void testAPendingPaymentLeavesAnExpiredRequestExpired() {
+    String email = newEmail("pending-paid-expired");
+    String requestId = createCreatedRequest(createAccount(email), email);
+    assertTrue(writes.recordExpired(requestId));
+
+    assertTrue("The request exists", writes.recordPaidPending(requestId, "cus_" + requestId,
+        null));
+    OBDal.getInstance().commitAndClose();
+
+    CheckoutRequest request = findCommittedRequest(requestId);
+    assertEquals(CheckoutRequestStore.STATUS_EXPIRED, request.getCheckoutRequestStatus());
+    assertNull(request.getPaidAt());
+  }
+
+  /**
+   * A payment recorded twice through the pending path, as a re-run would, keeps its first
+   * {@code PAID_AT} and the provider ids it captured first.
+   */
+  @Test
+  public void testAPendingPaymentRecordedTwiceKeepsItsFirstPaidAtAndIds() {
+    String email = newEmail("pending-paid-twice");
+    String requestId = createCreatedRequest(createAccount(email), email);
+    assertTrue(writes.recordPaidPending(requestId, "cus_first", "sub_first_" + requestId));
+    OBDal.getInstance().commitAndClose();
+    Date firstPaidAt = findCommittedRequest(requestId).getPaidAt();
+    assertNotNull(firstPaidAt);
+    OBDal.getInstance().rollbackAndClose();
+
+    assertTrue(writes.recordPaidPending(requestId, "cus_second", "sub_second_" + requestId));
+    OBDal.getInstance().commitAndClose();
+
+    CheckoutRequest paid = findCommittedRequest(requestId);
+    assertEquals(STATUS_PAID, paid.getCheckoutRequestStatus());
+    assertEquals(firstPaidAt.getTime(), paid.getPaidAt().getTime());
+    assertEquals("cus_first", paid.getStripeCustomer());
+    assertEquals("sub_first_" + requestId, paid.getStripeSubscription());
+  }
+
+  /** The webhook's recordPaid now writes through the same code: CREATING advances to PAID. */
+  @Test
+  public void testRecordPaidAdvancesARequestThatNeverGotItsSessionRecorded() {
+    String email = newEmail("paid-from-creating");
+    String requestId = createRequest(createAccount(email), email);
+
+    assertTrue(store.recordPaid(requestId, "cus_" + requestId, null));
+
+    CheckoutRequest paid = findCommittedRequest(requestId);
+    assertEquals(STATUS_PAID, paid.getCheckoutRequestStatus());
+    assertNotNull(paid.getPaidAt());
+    assertEquals("cus_" + requestId, paid.getStripeCustomer());
+  }
+
+  @Test
+  public void testAnExpiredRequestIsTerminal() {
+    String email = newEmail("expired-terminal");
+    String accountId = createAccount(email);
+    String requestId = createCreatedRequest(accountId, email);
+    assertTrue(writes.recordExpired(requestId));
+
+    store.recordPaid(requestId, "cus_" + requestId, "sub_" + requestId);
+    assertEquals("A late payment must not reopen it", CheckoutRequestStore.STATUS_EXPIRED,
+        rawStatus(requestId));
+    assertNull(findCommittedRequest(requestId).getPaidAt());
+
+    assertFalse("An expired request cannot be claimed",
+        store.claimForProvisioning(requestId, accountId, email));
+    assertEquals(CheckoutRequestStore.STATUS_EXPIRED, rawStatus(requestId));
+    assertFalse("A second close finds nothing to close", writes.recordExpired(requestId));
+  }
+
+  @Test
+  public void testOnboardingInputsAreRecordedNormalized() {
+    String email = newEmail("inputs-normalized");
+    String requestId = createCreatedRequest(createAccount(email), email);
+
+    writes.recordOnboardingInputs(requestId, " es_ES ", "usd", "ar");
+
+    CheckoutRequest request = findCommittedRequest(requestId);
+    assertEquals("es_ES", request.getLanguage());
+    assertEquals("USD", request.getCurrency());
+    assertEquals("AR", request.getCountry());
+    assertEquals("Recording inputs never changes the status", "CREATED",
+        request.getCheckoutRequestStatus());
+  }
+
+  @Test
+  public void testTheFirstWriteOfAnOnboardingInputWins() {
+    String email = newEmail("inputs-first-wins");
+    String requestId = createCreatedRequest(createAccount(email), email);
+
+    writes.recordOnboardingInputs(requestId, "es_ES", null, null);
+    writes.recordOnboardingInputs(requestId, "fr_FR", "GBP", "FR");
+
+    CheckoutRequest request = findCommittedRequest(requestId);
+    assertEquals("The first language stays", "es_ES", request.getLanguage());
+    assertEquals("An empty column is filled by a later write", "GBP", request.getCurrency());
+    assertEquals("FR", request.getCountry());
+  }
+
+  @Test
+  public void testMalformedOnboardingInputsAreDropped() {
+    String email = newEmail("inputs-malformed");
+    String requestId = createCreatedRequest(createAccount(email), email);
+
+    TestLogCapture log = TestLogCapture.attachTo(CheckoutRequestWrites.class, Level.WARN);
+    try {
+      writes.recordOnboardingInputs(requestId, "Spanish", "EURO", "ESP");
+      writes.recordOnboardingInputs(requestId, "ES_es", "€", "1");
+
+      // Never silent, and never the raw value: the field and the length only.
+      List<String> warnings = log.messagesAt(Level.WARN);
+      assertEquals(warnings.toString(), 6, warnings.size());
+      assertTrue(warnings.get(0), warnings.get(0).startsWith(
+          "[BILLING-RECONCILE] Checkout request " + requestId
+              + ": the language sent with the purchase is malformed (7 characters)"));
+      assertTrue(warnings.toString(), warnings.stream().noneMatch(line -> line.contains("Spanish")
+          || line.contains("EURO") || line.contains("€")));
+    } finally {
+      log.detach();
+    }
+
+    CheckoutRequest request = findCommittedRequest(requestId);
+    assertNull(request.getLanguage());
+    assertNull(request.getCurrency());
+    assertNull(request.getCountry());
+  }
+
+  @Test
+  public void testOnboardingInputsForAnUnknownRequestAreANoOp() {
+    // Best effort on the purchase path: it must neither throw nor create a row, but the row was
+    // created moments earlier in the same purchase, so not finding it is logged.
+    String requestId = newRequestId();
+    TestLogCapture log = TestLogCapture.attachTo(CheckoutRequestWrites.class, Level.WARN);
+    try {
+      writes.recordOnboardingInputs(requestId, "es_ES", "EUR", "ES");
+
+      assertEquals(List.of("[BILLING-RECONCILE] Checkout request " + requestId + " not found "
+          + "while recording its onboarding inputs; a server-side provisioning will fall back to "
+          + "the draft or the defaults"), log.messagesAt(Level.WARN));
+    } finally {
+      log.detach();
+    }
+    assertNull(findCommittedRequest(requestId));
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Group 8 — ETP-5048: the fence of a paid re-subscription
+  // ---------------------------------------------------------------------------------------------
+
+  /** How often the main thread looks whether the second caller is blocked yet. */
+  private static final long POLL_MILLIS = 50L;
+  /** Every wait of the race is bounded by this, so a regression cannot hang the build. */
+  private static final long BOUND_SECONDS = 60L;
+
+  /** A re-subscription of client {@code 0}, paid and not applied: what the webhook would apply. */
+  private String createPaidReactivation(String accountId, String email) {
+    String requestId = newRequestId();
+    store.recordRequested(requestId, accountId, email, ENVIRONMENT,
+        new CheckoutRequestStore.RequestOptions(null, false, false, false, null, ZERO));
+    store.recordSessionCreated(requestId, "cs_test_" + requestId);
+    // No subscription id: a provisioned row without one is never a reconciliation candidate.
+    store.recordPaid(requestId, "cus_" + requestId, null);
+    return requestId;
+  }
+
+  /** Runs {@code body} in this thread's own DAL session, closed and cleared afterwards. */
+  private static <T> T inOwnSession(Callable<T> body) throws Exception {
+    try {
+      return body.call();
+    } finally {
+      try {
+        OBDal.getInstance().rollbackAndClose();
+      } finally {
+        OBContext.setOBContext((OBContext) null);
+      }
+    }
+  }
+
+  /** Bounds this transaction's wait for a row lock, so a broken fence fails instead of hanging. */
+  @SuppressWarnings("rawtypes")
+  private static void boundTheLockWait() {
+    NativeQuery statement = OBDal.getInstance().getSession()
+        .createNativeQuery("SET LOCAL lock_timeout = '" + BOUND_SECONDS + "s'");
+    statement.executeUpdate();
+  }
+
+  @Test
+  public void testAPaidReactivationIsFoundOnlyWhileItIsPending() {
+    String email = newEmail("reactivation-pending");
+    String accountId = createAccount(email);
+    String requestId = createPaidReactivation(accountId, email);
+    String newPurchase = createPaidRequest(accountId, email);
+
+    CheckoutRequest found = store.findPaidReactivation(requestId);
+
+    assertNotNull(found);
+    assertEquals(requestId, found.getRequest());
+    OBDal.getInstance().rollbackAndClose(); // releases the lock the lookup took
+    assertNull("A new purchase is provisioned, never applied", store.findPaidReactivation(
+        newPurchase));
+    OBDal.getInstance().rollbackAndClose();
+    store.recordProvisioned(requestId, ZERO);
+    assertNull("Once applied it is no longer pending", store.findPaidReactivation(requestId));
+  }
+
+  /** @return the PostgreSQL backend of this thread's DAL session */
+  @SuppressWarnings("rawtypes")
+  private static int backendPid() {
+    NativeQuery query = OBDal.getInstance().getSession()
+        .createNativeQuery("SELECT pg_backend_pid()");
+    return ((Number) query.uniqueResult()).intValue();
+  }
+
+  /**
+   * @return whether that backend is waiting on a lock now, read in a fresh transaction each time:
+   *     PostgreSQL keeps one snapshot of {@code pg_stat_activity} per transaction
+   */
+  @SuppressWarnings("rawtypes")
+  private static boolean isWaitingOnALock(int pid) {
+    try {
+      NativeQuery query = OBDal.getInstance().getSession().createNativeQuery(
+          "SELECT count(*) FROM pg_stat_activity WHERE pid = :pid AND wait_event_type = 'Lock'");
+      query.setParameter("pid", pid);
+      return ((Number) query.uniqueResult()).longValue() > 0L;
+    } finally {
+      OBDal.getInstance().rollbackAndClose();
+    }
+  }
+
+  /**
+   * Waits, bounded, until the second caller's backend is blocked on a lock. Polls with a bounded
+   * {@code Future.get}, which also fails the test at once if that caller returned without waiting.
+   */
+  private static void awaitBlockedOnTheLock(Future<?> contender, int pid) throws Exception {
+    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(BOUND_SECONDS);
+    while (!isWaitingOnALock(pid)) {
+      assertTrue("The second caller never blocked on the row lock",
+          System.nanoTime() < deadline);
+      try {
+        contender.get(POLL_MILLIS, TimeUnit.MILLISECONDS);
+        fail("The second caller returned while the first still held the row lock");
+      } catch (TimeoutException stillRunning) {
+        // not blocked yet, or blocked and not yet visible: look again
+      }
+    }
+  }
+
+  /**
+   * The webhook and the reconciliation race on one paid re-subscription. The first takes the row
+   * lock and holds it; the second is shown, in {@code pg_stat_activity}, to be blocked on it. Only
+   * then does the first apply the re-subscription and commit, and the second re-reads the row as
+   * {@code PROVISIONED} and gets nothing to apply. No step rests on a sleep: each hand-over is a
+   * latch or a database state, and every wait is bounded.
+   */
+  @Test
+  public void testTwoCallersRacingOnAPaidReactivationApplyItExactlyOnce() throws Exception {
+    String email = newEmail("reactivation-race");
+    String accountId = createAccount(email);
+    String requestId = createPaidReactivation(accountId, email);
+    assertEquals(STATUS_PAID, rawStatus(requestId));
+    OBDal.getInstance().rollbackAndClose();
+
+    CountDownLatch firstHoldsTheLock = new CountDownLatch(1);
+    CountDownLatch secondIsBlocked = new CountDownLatch(1);
+    CountDownLatch secondHasItsBackend = new CountDownLatch(1);
+    AtomicInteger secondPid = new AtomicInteger();
+    ExecutorService callers = Executors.newFixedThreadPool(2);
+    try {
+      Future<Boolean> webhook = callers.submit(() -> inOwnSession(() -> {
+        boundTheLockWait();
+        CheckoutRequest found = store.findPaidReactivation(requestId);
+        firstHoldsTheLock.countDown();
+        if (found == null) {
+          return false;
+        }
+        assertTrue("The main thread never saw the second caller blocked",
+            secondIsBlocked.await(BOUND_SECONDS, TimeUnit.SECONDS));
+        store.recordProvisioned(requestId, ZERO); // commits, releasing the lock
+        return true;
+      }));
+      assertTrue("The first caller must take the lock",
+          firstHoldsTheLock.await(BOUND_SECONDS, TimeUnit.SECONDS));
+      Future<Boolean> reconciler = callers.submit(() -> inOwnSession(() -> {
+        boundTheLockWait();
+        secondPid.set(backendPid());
+        secondHasItsBackend.countDown();
+        // Null only once it reads PROVISIONED, which exists only after the first commit.
+        return store.findPaidReactivation(requestId) == null;
+      }));
+      assertTrue(secondHasItsBackend.await(BOUND_SECONDS, TimeUnit.SECONDS));
+
+      awaitBlockedOnTheLock(reconciler, secondPid.get());
+      secondIsBlocked.countDown();
+
+      assertTrue("The first caller applies it", webhook.get(BOUND_SECONDS, TimeUnit.SECONDS));
+      assertTrue("The second caller finds it applied and does nothing",
+          reconciler.get(BOUND_SECONDS, TimeUnit.SECONDS));
+    } finally {
+      secondIsBlocked.countDown();
+      callers.shutdownNow();
+      callers.awaitTermination(BOUND_SECONDS, TimeUnit.SECONDS);
+    }
+    assertEquals(STATUS_PROVISIONED, rawStatus(requestId));
   }
 
   // ---------------------------------------------------------------------------------------------

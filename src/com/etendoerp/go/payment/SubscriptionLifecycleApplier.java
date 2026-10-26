@@ -33,13 +33,19 @@ public class SubscriptionLifecycleApplier {
   static final String INVOICE_PAYMENT_FAILED = "invoice.payment_failed";
   static final String SUBSCRIPTION_UPDATED = "customer.subscription.updated";
   static final String SUBSCRIPTION_DELETED = "customer.subscription.deleted";
-  static final String SUBSCRIPTION_EVENT_PREFIX = "customer.subscription.";
+  /** The prefix of every {@code customer.subscription.*} event type. */
+  public static final String SUBSCRIPTION_EVENT_PREFIX = "customer.subscription.";
 
   static final String CURRENT_PERIOD_START = "current_period_start";
   static final String CURRENT_PERIOD_END = "current_period_end";
 
   private static final String MISSING_PERIOD_END = "missing period end";
   private static final String STALE_EVENT = "stale event";
+  /**
+   * ETP-5048 — the ignore reason of a {@code paused} subscription. Public so the webhook and the
+   * billing reconciliation can tell it from any other ignore and raise their review alert.
+   */
+  public static final String REASON_PAUSED = "subscription paused at the provider";
 
   /**
    * Evaluates an event against an empty stored projection.
@@ -170,6 +176,59 @@ public class SubscriptionLifecycleApplier {
   }
 
   /**
+   * ETP-5048 — the provider instant a re-read subscription's state was asserted at, for a
+   * correction made from a re-read instead of from an event. It plays the event's
+   * {@code created}: the stale check runs against it and it becomes the stored watermark, so a
+   * correction is ordered against the webhook's events on the provider's clock, never on this
+   * server's.
+   *
+   * <ul>
+   *   <li><b>Terminated</b> ({@code canceled}, {@code incomplete_expired}) — when it ended
+   *       ({@link #subscriptionEndedAt}).</li>
+   *   <li><b>Anything else</b> — the later of the start of its current period and the moment its
+   *       latest invoice was paid ({@code latest_invoice.status_transitions.paid_at}, present
+   *       when the read expanded {@code latest_invoice}): a subscription that recovered from a
+   *       failed renewal is asserted current at the payment, which follows the failure.</li>
+   * </ul>
+   * Falls back to {@code start_date}, then {@code created}.
+   *
+   * @param subscription a Stripe subscription object
+   * @return the instant, or null when the object carries none
+   */
+  public static Instant providerStateAt(JSONObject subscription) {
+    if (subscription == null) {
+      return null;
+    }
+    String status = StringUtils.trimToEmpty(subscription.optString("status", ""));
+    Instant asserted;
+    if ("canceled".equals(status) || "incomplete_expired".equals(status)) {
+      asserted = subscriptionEndedAt(subscription);
+    } else {
+      asserted = later(subscriptionPeriodBoundary(subscription, CURRENT_PERIOD_START),
+          latestInvoicePaidAt(subscription));
+    }
+    if (asserted != null) {
+      return asserted;
+    }
+    Instant start = epochSeconds(subscription, "start_date");
+    return start != null ? start : epochSeconds(subscription, "created");
+  }
+
+  private static Instant latestInvoicePaidAt(JSONObject subscription) {
+    JSONObject invoice = subscription.optJSONObject("latest_invoice");
+    JSONObject transitions = invoice == null ? null
+        : invoice.optJSONObject("status_transitions");
+    return transitions == null ? null : epochSeconds(transitions, "paid_at");
+  }
+
+  private static Instant later(Instant first, Instant second) {
+    if (first == null) {
+      return second;
+    }
+    return second == null || first.isAfter(second) ? first : second;
+  }
+
+  /**
    * The Stripe subscription an event belongs to.
    *
    * <p>Subscription events are keyed by their own object id; invoice events carry the id either
@@ -240,9 +299,19 @@ public class SubscriptionLifecycleApplier {
       case "canceled":
         // Terminal at the provider: a canceled Stripe subscription cannot be reactivated, so the
         // row closes here too, not only on customer.subscription.deleted (ETP-5047).
+      case "incomplete_expired":
+        // ETP-5048 (decided by Martin, 2026-10-20): the first payment never succeeded and Stripe
+        // gave up — terminal too, so it closes the row (EXPIRED on the preference route). The
+        // webhook and the billing reconciliation both read the status through this mapping.
         return SubscriptionEventOutcome.apply(
             EnvironmentAccessPolicy.SubscriptionStatus.EXPIRED, null)
             .closing(subscriptionEndedAt(object));
+      case "paused":
+        // ETP-5048 (decided by Martin, 2026-10-20): alert only, never a state change. Our checkout
+        // sets no trial, so a paused subscription means a trial or a pause was configured in
+        // Stripe by hand, and a paused subscription can be resumed — closing the row would make
+        // that resume impossible. Callers recognise the reason and raise the review alert.
+        return SubscriptionEventOutcome.ignore(REASON_PAUSED);
       default:
         return SubscriptionEventOutcome.ignore("unhandled subscription status");
     }

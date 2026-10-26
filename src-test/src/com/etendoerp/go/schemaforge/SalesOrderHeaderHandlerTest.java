@@ -1069,6 +1069,98 @@ public class SalesOrderHeaderHandlerTest {
     }
   }
 
+  // ── partner-location lookups keep the tenant READ filters on ───────────────
+
+  /** A Location criteria that answers {@code locations} and records every filter toggle. */
+  @SuppressWarnings("unchecked")
+  private static OBCriteria<Location> stubFilteredCriteria(OBDal dal, List<Location> locations) {
+    OBCriteria<Location> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(Location.class)).thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.addOrderBy(anyString(), anyBoolean())).thenReturn(criteria);
+    when(criteria.setMaxResults(anyInt())).thenReturn(criteria);
+    when(criteria.list()).thenReturn(locations);
+    return criteria;
+  }
+
+  /**
+   * MCP runs these lookups under {@code OBContext.setAdminMode()}, which skips only the entity
+   * access check. The OBCriteria client/organization READ filters are what keeps another tenant's
+   * location out of the body when a caller sends a foreign businessPartner id, so no lookup may
+   * switch them off.
+   */
+  private static void assertTenantFiltersNeverDisabled(OBCriteria<Location> criteria) {
+    Mockito.verify(criteria, Mockito.never()).setFilterOnReadableClients(false);
+    Mockito.verify(criteria, Mockito.never()).setFilterOnReadableOrganization(false);
+    Mockito.verify(criteria, Mockito.never()).setFilterOnActive(false);
+  }
+
+  @Test
+  public void partnerLocationLookupsNeverDisableTheTenantReadFilters() throws Exception {
+    Location only = mock(Location.class);
+    when(only.getId()).thenReturn("loc-1");
+    try (MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      OBCriteria<Location> criteria = stubFilteredCriteria(dal, Collections.singletonList(only));
+
+      assertEquals("loc-1",
+          PartnerLocationDefaults.findSingleLocation("bp-1", Location.PROPERTY_SHIPTOADDRESS));
+      assertEquals("loc-1",
+          PartnerLocationDefaults.findOldestLocation("bp-1", Location.PROPERTY_INVOICETOADDRESS));
+
+      Mockito.verify(criteria, Mockito.times(2)).list(); // both lookups really ran
+      assertTenantFiltersNeverDisabled(criteria);
+    }
+  }
+
+  @Test
+  public void fillIfMissingAndShipToBillToKeepTheTenantReadFiltersOn() throws Exception {
+    Location shipTo = mock(Location.class);
+    when(shipTo.getId()).thenReturn("ship-1");
+    when(shipTo.get(Location.PROPERTY_INVOICETOADDRESS)).thenReturn(Boolean.FALSE);
+    try (MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      OBCriteria<Location> criteria = stubFilteredCriteria(dal, Collections.singletonList(shipTo));
+      when(dal.get(Location.class, "ship-1")).thenReturn(shipTo);
+      JSONObject body = new JSONObject().put("businessPartner", "bp-1");
+
+      PartnerLocationDefaults.fillShipToAndBillTo(createCtx(body), "partnerAddress",
+          Location.PROPERTY_SHIPTOADDRESS, "invoiceAddress", Location.PROPERTY_INVOICETOADDRESS);
+
+      assertEquals("ship-1", body.getString("partnerAddress"));
+      assertEquals("ship-1", body.getString("invoiceAddress"));
+      assertTenantFiltersNeverDisabled(criteria);
+    }
+  }
+
+  /**
+   * A foreign tenant's partner id: the filtered query returns no row, so nothing is written to the
+   * body (no partnerAddress, no invoiceAddress) and no fallback lookup bypasses the filter.
+   */
+  @Test
+  public void foreignPartnerWithNoVisibleLocationLeavesTheBodyUntouched() throws Exception {
+    try (MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      OBCriteria<Location> criteria = stubFilteredCriteria(dal, Collections.emptyList());
+      JSONObject body = new JSONObject().put("businessPartner", "bp-foreign");
+
+      assertFalse(PartnerLocationDefaults.fillIfMissing(createCtx(body), "partnerAddress",
+          Location.PROPERTY_SHIPTOADDRESS));
+      PartnerLocationDefaults.fillShipToAndBillTo(createCtx(body), "partnerAddress",
+          Location.PROPERTY_SHIPTOADDRESS, "invoiceAddress", Location.PROPERTY_INVOICETOADDRESS);
+
+      assertFalse(body.has("partnerAddress"));
+      assertFalse(body.has("invoiceAddress"));
+      assertEquals(1, body.length());
+      Mockito.verify(criteria, Mockito.atLeastOnce()).list(); // it did query, and found nothing
+      Mockito.verify(dal, Mockito.never()).get(Mockito.eq(Location.class), anyString());
+      assertTenantFiltersNeverDisabled(criteria);
+    }
+  }
+
   // ── declared action contracts (ETP-5709) ──────────────────────────────────
 
   @Test
