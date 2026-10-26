@@ -151,7 +151,7 @@ class InventoryStockReportHandlerTest {
   void testAccessGrantedProceedsNormally() throws Exception {
     List<Object[]> rows = Collections.singletonList(
         new Object[]{ "Main Warehouse", "Beverages", "P001", "Test Product", "Unit",
-            new BigDecimal("100"), new BigDecimal("10.50"), new BigDecimal("1050.00") });
+            new BigDecimal("100"), new BigDecimal("10.50"), new BigDecimal("1050.00"), "row-product-id" });
     mockQueryReturning(rows);
 
     NeoResponse response = handler.handle(postContextNoBody());
@@ -213,11 +213,99 @@ class InventoryStockReportHandlerTest {
 
   @SuppressWarnings("unchecked")
   private void mockQueryReturning(List<Object[]> rows) {
-    when(session.createNativeQuery(anyString())).thenReturn(nativeQuery);
+    mockQueries(rows, Collections.emptyList());
+  }
+
+  /**
+   * The report query (the only one with a CROSS JOIN) returns {@code rows}; every ETP-5852
+   * requested-id lookup returns {@code existingIds} — the ids that "exist" for that lookup.
+   */
+  @SuppressWarnings("unchecked")
+  private void mockQueries(List<Object[]> rows, List<String> existingIds) {
+    NativeQuery lookupQuery = mock(NativeQuery.class);
+    when(session.createNativeQuery(anyString())).thenAnswer(
+        inv -> ((String) inv.getArgument(0)).contains("CROSS JOIN") ? nativeQuery : lookupQuery);
     when(nativeQuery.setParameter(anyString(), org.mockito.ArgumentMatchers.any())).thenReturn(nativeQuery);
     when(nativeQuery.setParameterList(anyString(), org.mockito.ArgumentMatchers.<Set<String>>any())).thenReturn(
         nativeQuery);
     when(nativeQuery.list()).thenReturn(rows);
+    when(lookupQuery.list()).thenReturn(existingIds);
+  }
+
+  private static Object[] stockRow(String productId, String qty) {
+    return new Object[]{ "WH-A", "Category A", "P-" + productId, "Product " + productId, "Unit",
+        new BigDecimal(qty), new BigDecimal("2.00"), new BigDecimal(qty), productId };
+  }
+
+  // ── ETP-5852 requested-id classification ────────────────────────────────
+
+  /**
+   * The four cases agents could not tell apart behind an empty data array: a requested product
+   * with rows is withStock, a valid product without rows is noStock, and an id the visibility
+   * lookup does not return (unknown, inactive, other tenant/org) is notFound. Duplicates are
+   * reported once, in request order.
+   */
+  @Test
+  void testRequestedProductsSplitIntoWithStockNoStockNotFound() throws Exception {
+    mockQueries(Collections.singletonList(stockRow("p-stock", "5")),
+        Arrays.asList("p-stock", "p-empty"));
+
+    JSONObject body = new JSONObject();
+    body.put("M_Product_ID", "p-empty, p-stock, p-ghost, p-stock");
+    body.put("includeZeroStock", true);
+    JSONObject response = handler.handle(postContext(body)).getBody().getJSONObject("response");
+
+    JSONObject products = response.getJSONObject("requested").getJSONObject("products");
+    assertEquals("[\"p-stock\"]", products.getJSONArray("withStock").toString());
+    assertEquals("[\"p-empty\"]", products.getJSONArray("noStock").toString());
+    assertEquals("[\"p-ghost\"]", products.getJSONArray("notFound").toString());
+    assertEquals(1, response.getInt("count"));
+    assertEquals("p-stock", response.getJSONArray("data").getJSONObject(0).getString("productId"));
+  }
+
+  /** A single unknown product id — the production case — is notFound, not a silent empty. */
+  @Test
+  void testUnknownProductIdIsNotFound() throws Exception {
+    mockQueries(Collections.emptyList(), Collections.emptyList());
+
+    JSONObject body = new JSONObject();
+    body.put("M_Product_ID", "ghost");
+    JSONObject response = handler.handle(postContext(body)).getBody().getJSONObject("response");
+
+    assertEquals(0, response.getInt("count"));
+    JSONObject products = response.getJSONObject("requested").getJSONObject("products");
+    assertEquals("[\"ghost\"]", products.getJSONArray("notFound").toString());
+    assertEquals(0, products.getJSONArray("noStock").length());
+  }
+
+  /** Warehouse and category filters report found/notFound; products are absent when not sent. */
+  @Test
+  void testRequestedWarehousesAndCategoriesReportFoundAndNotFound() throws Exception {
+    mockQueries(Collections.emptyList(), Arrays.asList("wh-ok", "cat-ok"));
+
+    JSONObject body = new JSONObject();
+    body.put("M_Warehouse_ID", "wh-ok,wh-bad");
+    body.put("M_Product_Category_ID", "cat-bad,cat-ok");
+    JSONObject requested = handler.handle(postContext(body)).getBody()
+        .getJSONObject("response").getJSONObject("requested");
+
+    assertFalse(requested.has("products"));
+    assertEquals("[\"wh-ok\"]", requested.getJSONObject("warehouses").getJSONArray("found").toString());
+    assertEquals("[\"wh-bad\"]", requested.getJSONObject("warehouses").getJSONArray("notFound").toString());
+    assertEquals("[\"cat-ok\"]", requested.getJSONObject("categories").getJSONArray("found").toString());
+    assertEquals("[\"cat-bad\"]", requested.getJSONObject("categories").getJSONArray("notFound").toString());
+  }
+
+  /** Without any id filter there is nothing to classify: no requested block, no extra query. */
+  @Test
+  void testNoFiltersAddNoRequestedBlock() throws Exception {
+    mockQueryReturning(Collections.singletonList(stockRow("p1", "3")));
+
+    JSONObject response = handler.handle(postContext(new JSONObject())).getBody()
+        .getJSONObject("response");
+
+    assertFalse(response.has("requested"));
+    verify(session, org.mockito.Mockito.times(1)).createNativeQuery(anyString());
   }
 
   // ── reportParameters() contract (ETP-5483 follow-up) ────────────────────
@@ -269,7 +357,7 @@ class InventoryStockReportHandlerTest {
   void testPostWithCategoryFilterSetsParameters() throws Exception {
     mockQueryReturning(Collections.singletonList(
         new Object[]{ "WH-A", "Category A", "P001", "Product A", "Unit",
-            new BigDecimal("10"), new BigDecimal("2.00"), new BigDecimal("20.00") }));
+            new BigDecimal("10"), new BigDecimal("2.00"), new BigDecimal("20.00"), "row-product-id" }));
 
     JSONObject body = new JSONObject();
     body.put("M_Product_Category_ID", "cat-id-1, cat-id-2");
@@ -289,7 +377,7 @@ class InventoryStockReportHandlerTest {
   void testPostWithIncludeZeroStockTrueBindsParameter() throws Exception {
     mockQueryReturning(Collections.singletonList(
         new Object[]{ "WH-A", "Category A", "P001", "Product A", "Unit",
-            BigDecimal.ZERO, new BigDecimal("2.00"), BigDecimal.ZERO }));
+            BigDecimal.ZERO, new BigDecimal("2.00"), BigDecimal.ZERO, "row-product-id" }));
 
     JSONObject body = new JSONObject();
     body.put("includeZeroStock", true);
@@ -309,7 +397,7 @@ class InventoryStockReportHandlerTest {
   void testPostWithoutIncludeZeroStockDefaultsToFalse() throws Exception {
     mockQueryReturning(Collections.singletonList(
         new Object[]{ "WH-A", "Category A", "P001", "Product A", "Unit",
-            new BigDecimal("10"), new BigDecimal("2.00"), new BigDecimal("20.00") }));
+            new BigDecimal("10"), new BigDecimal("2.00"), new BigDecimal("20.00"), "row-product-id" }));
 
     NeoResponse response = handler.handle(postContext(new JSONObject()));
 
@@ -374,7 +462,7 @@ class InventoryStockReportHandlerTest {
   void testBindsSessionLanguageForUomTranslation() throws Exception {
     mockQueryReturning(Collections.singletonList(
         new Object[]{ "WH-A", "Category A", "P001", "Product A", "Unidad",
-            new BigDecimal("10"), new BigDecimal("2.00"), new BigDecimal("20.00") }));
+            new BigDecimal("10"), new BigDecimal("2.00"), new BigDecimal("20.00"), "row-product-id" }));
     when(language.getLanguage()).thenReturn("es_ES");
 
     NeoResponse response = handler.handle(postContext(new JSONObject()));
@@ -395,7 +483,7 @@ class InventoryStockReportHandlerTest {
   void testPostWithNoBodyReturnsData() throws Exception {
     List<Object[]> rows = Collections.singletonList(
         new Object[]{ "Main Warehouse", "Beverages", "P001", "Test Product", "Unit",
-            new BigDecimal("100"), new BigDecimal("10.50"), new BigDecimal("1050.00") });
+            new BigDecimal("100"), new BigDecimal("10.50"), new BigDecimal("1050.00"), "row-product-id" });
     mockQueryReturning(rows);
 
     NeoResponse response = handler.handle(postContextNoBody());
@@ -421,9 +509,9 @@ class InventoryStockReportHandlerTest {
   void testPostWithEmptyBodyReturnsData() throws Exception {
     List<Object[]> rows = Arrays.asList(
         new Object[]{ "WH-A", "Category A", "P001", "Product A", "Kg",
-            new BigDecimal("50"), new BigDecimal("5.00"), new BigDecimal("250.00") },
+            new BigDecimal("50"), new BigDecimal("5.00"), new BigDecimal("250.00"), "row-product-id" },
         new Object[]{ "WH-B", "Category B", "P002", "Product B", "Liter",
-            new BigDecimal("30"), new BigDecimal("8.00"), new BigDecimal("240.00") });
+            new BigDecimal("30"), new BigDecimal("8.00"), new BigDecimal("240.00"), "row-product-id" });
     mockQueryReturning(rows);
 
     NeoResponse response = handler.handle(postContext(new JSONObject()));
@@ -443,7 +531,7 @@ class InventoryStockReportHandlerTest {
   void testPostWithProductFilterSetsParameters() throws Exception {
     mockQueryReturning(Collections.singletonList(
         new Object[]{ "WH-A", "Category A", "P001", "Product A", "Unit",
-            new BigDecimal("10"), new BigDecimal("2.00"), new BigDecimal("20.00") }));
+            new BigDecimal("10"), new BigDecimal("2.00"), new BigDecimal("20.00"), "row-product-id" }));
 
     JSONObject body = new JSONObject();
     body.put("M_Product_ID", "prod-id-1, prod-id-2");
@@ -465,7 +553,7 @@ class InventoryStockReportHandlerTest {
   void testPostWithWarehouseFilterSetsParameters() throws Exception {
     mockQueryReturning(Collections.singletonList(
         new Object[]{ "WH-A", "Category A", "P001", "Product A", "Unit",
-            new BigDecimal("10"), new BigDecimal("2.00"), new BigDecimal("20.00") }));
+            new BigDecimal("10"), new BigDecimal("2.00"), new BigDecimal("20.00"), "row-product-id" }));
 
     JSONObject body = new JSONObject();
     body.put("M_Warehouse_ID", "wh-id-1");
@@ -484,7 +572,7 @@ class InventoryStockReportHandlerTest {
   void testPostWithBothFiltersSetsAllParameters() throws Exception {
     mockQueryReturning(Collections.singletonList(
         new Object[]{ "WH-A", "Category A", "P001", "Product A", "Unit",
-            new BigDecimal("10"), new BigDecimal("2.00"), new BigDecimal("20.00") }));
+            new BigDecimal("10"), new BigDecimal("2.00"), new BigDecimal("20.00"), "row-product-id" }));
 
     JSONObject body = new JSONObject();
     body.put("M_Product_ID", "prod-id-1");
@@ -627,7 +715,7 @@ class InventoryStockReportHandlerTest {
   void testResponseNumericFieldsAreBigDecimal() throws Exception {
     List<Object[]> rows = Collections.singletonList(
         new Object[]{ "WH-A", "Category A", "P001", "Product A", "Unit",
-            new BigDecimal("100.50"), new BigDecimal("12.75"), new BigDecimal("1281.375") });
+            new BigDecimal("100.50"), new BigDecimal("12.75"), new BigDecimal("1281.375"), "row-product-id" });
     mockQueryReturning(rows);
 
     NeoResponse response = handler.handle(postContext(new JSONObject()));
@@ -651,11 +739,11 @@ class InventoryStockReportHandlerTest {
   void testNullCostRowsEmitJsonNullAndKeepRealZeroDistinct() throws Exception {
     List<Object[]> rows = Arrays.asList(
         new Object[]{ "WH", "Cat", "P001", "With cost", "Unit",
-            new BigDecimal("10"), new BigDecimal("2.50"), new BigDecimal("25.00") },
+            new BigDecimal("10"), new BigDecimal("2.50"), new BigDecimal("25.00"), "row-product-id" },
         new Object[]{ "WH", "Cat", "P002", "No cost", "Unit",
-            new BigDecimal("7"), null, null },
+            new BigDecimal("7"), null, null, "row-product-id" },
         new Object[]{ "WH", "Cat", "P003", "Zero cost", "Unit",
-            new BigDecimal("4"), BigDecimal.ZERO, BigDecimal.ZERO });
+            new BigDecimal("4"), BigDecimal.ZERO, BigDecimal.ZERO, "row-product-id" });
     mockQueryReturning(rows);
 
     NeoResponse response = handler.handle(postContext(new JSONObject()));
@@ -689,7 +777,7 @@ class InventoryStockReportHandlerTest {
   @SuppressWarnings("unchecked")
   void testNullQtyOnHandFallsBackToZeroWhileCostStaysNull() throws Exception {
     mockQueryReturning(Collections.singletonList(
-        new Object[]{ "WH", "Cat", "P004", "Product", "Unit", null, null, null }));
+        new Object[]{ "WH", "Cat", "P004", "Product", "Unit", null, null, null, "row-product-id" }));
 
     NeoResponse response = handler.handle(postContext(new JSONObject()));
 
