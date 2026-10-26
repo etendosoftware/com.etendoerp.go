@@ -10537,9 +10537,16 @@ did not need it has no `steps` key. In a single `etendo_action` the same keys ar
 **ETP-5745 CP-9 — `InvoiceReactivationGuard` names EVERY accepted fiscal system, not just the first.**
 `messageParams.fiscalSystem` on the `ETGO_InvoiceReactivateFiscalRectified` refusal used to report only
 the first fiscal system an if/else-if chain matched (SII, then Verifactu, then TicketBAI), so an invoice
-accepted by BOTH SII and TicketBAI at once was reported as SII-only. It is now a comma-joined list of
-every accepted system (e.g. `"SII, TicketBAI"`); `rectificativas` is unchanged. Same code path on every
-channel, so no divergence to declare here.
+accepted by BOTH SII and TicketBAI at once was reported as SII-only. It is now a real `JSONArray` of
+every accepted system (`Block#fiscalSystems`, `reject()`), deliberately NOT pre-joined into a string, so
+the SPA can render it with a locale-aware conjunction ("SII y TicketBAI" / "SII and TicketBAI") instead of
+a generic comma join — `tools/app-shell/src/lib/backendErrors.js`'s `joinWithConjunction`, in
+`etendo_schema_forge`. The top-level fallback `message` string (plain English, for a caller that ignores
+`messageParams`) still comma-joins (`"SII, TicketBAI"`) via `Block#fiscalSystem`. The GET-only
+`reactivationBlockedFiscalSystem` enrichment signal (see below) is ALSO a real `JSONArray` built from
+`Block#fiscalSystems` now, not the comma-joined string it used to be, so its two SPA consumers can apply
+the same conjunction join. `rectificativas` stays a plain comma-joined-on-render array throughout. Same
+code path on every channel, so no divergence to declare here.
 
 **ETP-5745 CP-9 — `RectificationTotalGuard` caps a rectificativa's total against its origin.** New guard,
 wired from `AbstractInvoiceHeaderHandler#completeInvoiceIfNeeded` right before the real completion runs
