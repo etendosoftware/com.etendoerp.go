@@ -457,6 +457,7 @@
 <!--01021906DD794F2097FA560CD1034415-->  <JAVA_QUALIFIER><![CDATA[openClose]]></JAVA_QUALIFIER>
 <!--01021906DD794F2097FA560CD1034415-->  <SEQNO><![CDATA[130]]></SEQNO>
 <!--01021906DD794F2097FA560CD1034415-->  <VISIBILITY><![CDATA[editable]]></VISIBILITY>
+<!--01021906DD794F2097FA560CD1034415-->  <AGENT_PROMPT><![CDATA[Button, not a state: its value is the action the button offers next (O open, C close, P close permanently, N no action), so it reads the opposite of the period's state. Read the period's state from status. Run it with etendo_action action:"openClose".]]></AGENT_PROMPT>
 <!--01021906DD794F2097FA560CD1034415-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
 <!--01021906DD794F2097FA560CD1034415--></ETGO_SF_FIELD>
 
@@ -19260,6 +19261,7 @@
 <!--2EE7C5AF33FE4F54A38F9B3388B338D1-->  <JAVA_QUALIFIER><![CDATA[openClose]]></JAVA_QUALIFIER>
 <!--2EE7C5AF33FE4F54A38F9B3388B338D1-->  <SEQNO><![CDATA[70]]></SEQNO>
 <!--2EE7C5AF33FE4F54A38F9B3388B338D1-->  <VISIBILITY><![CDATA[editable]]></VISIBILITY>
+<!--2EE7C5AF33FE4F54A38F9B3388B338D1-->  <AGENT_PROMPT><![CDATA[Button, not a state: its value is the action the button offers next (O open, C close, P close permanently, N no action), so it reads the opposite of the period's state. Read the period's state from status. Run it with etendo_action action:"openClose".]]></AGENT_PROMPT>
 <!--2EE7C5AF33FE4F54A38F9B3388B338D1-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
 <!--2EE7C5AF33FE4F54A38F9B3388B338D1--></ETGO_SF_FIELD>
 
@@ -32407,6 +32409,7 @@
 <!--5056966D7FFF416DB336769D0136F2BB-->  <JAVA_QUALIFIER><![CDATA[status]]></JAVA_QUALIFIER>
 <!--5056966D7FFF416DB336769D0136F2BB-->  <SEQNO><![CDATA[140]]></SEQNO>
 <!--5056966D7FFF416DB336769D0136F2BB-->  <VISIBILITY><![CDATA[readOnly]]></VISIBILITY>
+<!--5056966D7FFF416DB336769D0136F2BB-->  <AGENT_PROMPT><![CDATA[The period's state: O open, C closed, P permanently closed, N never opened, M mixed (document categories in different states). This is the field that decides whether documents can be posted in the period. Read-only: change it with the openClose action.]]></AGENT_PROMPT>
 <!--5056966D7FFF416DB336769D0136F2BB-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
 <!--5056966D7FFF416DB336769D0136F2BB--></ETGO_SF_FIELD>
 

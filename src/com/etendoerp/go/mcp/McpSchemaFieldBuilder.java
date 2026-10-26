@@ -675,6 +675,9 @@ final class McpSchemaFieldBuilder {
         businessCriticalByColumnId.get((String) col.getId()));
     addAgentPrompt(fieldObj, promptByColumnId.get((String) col.getId()));
     addSelectorInfo(fieldObj, refId, selectorRefs);
+    if ("list".equals(type)) {
+      McpSchemaActionFields.addListOptions(fieldObj, col);
+    }
     addWritableVia(fieldObj, dalEntity, dbColName);
     if (isButton) {
       addButtonInfo(fieldObj, col, visibility, isHiddenButtonField(adTab, col));
