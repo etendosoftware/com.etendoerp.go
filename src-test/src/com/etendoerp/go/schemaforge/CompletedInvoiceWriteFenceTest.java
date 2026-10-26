@@ -64,6 +64,7 @@ public class CompletedInvoiceWriteFenceTest {
   private static final String PROJECT = "project";
   private static final String DESCRIPTION = "description";
   private static final String PAYMENT_METHOD = "paymentMethod";
+  private static final String AEATSII_ERROR_REGISTRAL = "aeatsiiErrorRegistral";
   private static final String CODE = "code";
   private static final String FIELDS = "fields";
   private static final String ERROR = "error";
@@ -100,6 +101,7 @@ public class CompletedInvoiceWriteFenceTest {
     stored.put(COSTCENTER, ref("CC-1"));
     stored.put(PROJECT, ref("PRJ-1"));
     stored.put("orderReference", "SUP-1");
+    stored.put(AEATSII_ERROR_REGISTRAL, Boolean.FALSE);
     stored.put("accountingDate", new GregorianCalendar(2026, Calendar.OCTOBER, 9).getTime());
     stored.put("grandTotalAmount", new BigDecimal("121.00"));
     stored.put("salesTransaction", Boolean.TRUE);
@@ -197,6 +199,24 @@ public class CompletedInvoiceWriteFenceTest {
     assertFalse("never the SPA's drop-and-retry code", "read_only_field".equals(error.optString(ERROR)));
   }
 
+  /**
+   * ETP-5714: the refusal says how to change a locked field — reactivate (documentAction RE), edit,
+   * complete again — and that RE depends on the reactivation guard, instead of only listing the
+   * editable fields. The SPA reads {@code messageKeys}, so the extra {@code hint} key is harmless.
+   */
+  @Test
+  public void completedInvoiceRefusalSaysToReactivateFirst() throws Exception {
+    JSONObject error = errorOf(header(invoice(STATUS_CO, "N", true), SALES,
+        body(PAYMENT_METHOD, "PM-2")));
+
+    String hint = error.getString("hint");
+    assertTrue(hint, hint.contains("documentAction"));
+    assertTrue(hint, hint.contains("RE"));
+    assertTrue(hint, hint.contains("complete it again"));
+    assertTrue(hint, hint.contains("view:'actions'"));
+    assertEquals(CompletedInvoiceWriteFence.MSG_FIELDS_LOCKED, only(error.getJSONArray("messageKeys")));
+  }
+
   @Test
   public void completedInvoiceNamesEveryRefusedField() throws Exception {
     JSONObject error = errorOf(header(invoice(STATUS_CO, "N", true), SALES,
@@ -218,6 +238,20 @@ public class CompletedInvoiceWriteFenceTest {
   public void completedUnpostedInvoiceAcceptsTheAllowlist() throws Exception {
     assertNull(header(invoice(STATUS_CO, "N", true), SALES, body(PROJECT, "PRJ-2",
         COSTCENTER, "CC-2", "accountingDate", "2026-10-10", DESCRIPTION, "new note")));
+  }
+
+  /**
+   * ETP-5745: a document already accepted by the SII must still be flaggable as corrected by
+   * registry error after completion — Classic's own reactivation gate requires it before allowing
+   * reactivation of an SII-accepted invoice. Both header allowlists now carry it; it used to be
+   * refused (outside any allowlist) for both sales and purchase invoices.
+   */
+  @Test
+  public void completedInvoiceAcceptsAeatsiiErrorRegistralOnBothWindows() throws Exception {
+    assertNull("sales invoice must accept the field once completed",
+        header(invoice(STATUS_CO, "N", true), SALES, body(AEATSII_ERROR_REGISTRAL, true)));
+    assertNull("purchase invoice must accept the field once completed",
+        header(invoice(STATUS_CO, "N", true), PURCHASE, body(AEATSII_ERROR_REGISTRAL, true)));
   }
 
   @Test

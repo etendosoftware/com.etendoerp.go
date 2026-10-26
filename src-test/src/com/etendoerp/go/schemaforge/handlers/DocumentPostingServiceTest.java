@@ -88,6 +88,7 @@ import org.openbravo.model.ad.ui.Tab;
  * mocked {@link ConnectionProvider}. The public API stays exactly as specified.</p>
  *
  * @covers com.etendoerp.go.schemaforge.handlers.DocumentPostingService
+ * @covers com.etendoerp.go.schemaforge.handlers.CostingStall
  */
 @RunWith(MockitoJUnitRunner.Silent.class)
 public class DocumentPostingServiceTest {
@@ -209,6 +210,45 @@ public class DocumentPostingServiceTest {
       assertEquals(List.of("OtherPostingProcessActive"), r.messageKeys());
       assertTrue(r.messageParams().isEmpty());
       verify(conn).releaseRollbackConnection(con);
+    }
+  }
+
+  /**
+   * ETP-5577: a document dated in a period that is not open ({@code STATUS_PeriodClosed}) is
+   * re-localized like a locked one and names {@code PeriodNotAvailable}, so the SPA can send the
+   * user to open the period.
+   */
+  @Test
+  public void postReLocalizesPeriodClosedMessageAndSendsItsKey() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    Connection con = mock(Connection.class);
+    when(conn.getTransactionConnection()).thenReturn(con);
+
+    AcctServer acct = mock(AcctServer.class);
+    acct.errors = 0;
+    when(acct.post(eq("rec-1"), eq(false), any(), any(), any())).thenReturn(false);
+    when(acct.getStatus()).thenReturn(AcctServer.STATUS_PeriodClosed);
+    OBError err = new OBError();
+    err.setMessage("Period does not exist or is not open");
+    when(acct.getMessageResult()).thenReturn(err);
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      stubObContext(obc, "es_ES");
+      acctStatic
+          .when(() -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(acct);
+      msgMock.when(() -> OBMessageUtils.messageBD("PeriodNotAvailable"))
+          .thenReturn("El Periodo no existe o no está abierto");
+
+      DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
+
+      assertFalse(r.ok());
+      assertEquals("El Periodo no existe o no está abierto", r.message());
+      assertEquals(List.of("PeriodNotAvailable"), r.messageKeys());
     }
   }
 
@@ -353,6 +393,226 @@ public class DocumentPostingServiceTest {
       assertEquals(1, body.getJSONArray("messageKeys").length());
       assertFalse(body.has("messageParams"));
     }
+  }
+
+  /**
+   * ETP-5714: a post refused only because cost is not calculated yet ({@code STATUS_NotCalculatedCost}
+   * — a goods receipt, shipment or return posted right after completing) is RETRYABLE: its own
+   * identity, the generic GO-locale text instead of core's per-product one, and the delay.
+   */
+  @Test
+  public void postNotCalculatedCostIsRetryableWithItsOwnIdentity() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    Connection con = mock(Connection.class);
+    when(conn.getTransactionConnection()).thenReturn(con);
+    AcctServer acct = stubNotCalculatedCostAcctServer();
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      stubObContext(obc, "es_ES");
+      acctStatic
+          .when(() -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(acct);
+      msgMock.when(() -> OBMessageUtils.messageBD("NotCalculatedCost"))
+          .thenReturn("El coste aún no se ha calculado para todos los productos del documento.");
+
+      DocumentPostingService.PostResult r = svc.post("319", "rec-1", conn);
+
+      assertFalse(r.ok());
+      assertEquals("El coste aún no se ha calculado para todos los productos del documento.",
+          r.message());
+      assertEquals(List.of("NotCalculatedCost"), r.messageKeys());
+      assertEquals(30, r.messageParams().get("retryAfterSeconds"));
+      verify(conn).releaseRollbackConnection(con);
+    }
+  }
+
+  /**
+   * ETP-5714: through the action endpoint the retryable post answers HTTP 409 with the code
+   * {@code costNotCalculated} as {@code error} (so the MCP envelope keeps it), {@code retryable},
+   * {@code retryAfterSeconds}, {@code Retry-After}, and the flat {@code message}/{@code messageKeys}
+   * the SPA reads. Every other failure stays a 422.
+   */
+  @Test
+  public void handleActionAnswersNotCalculatedCostWith409AndRetryAfter() throws Exception {
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    Connection con = mock(Connection.class);
+    when(conn.getTransactionConnection()).thenReturn(con);
+    DocumentPostingService svc = new DocumentPostingService() {
+      @Override
+      ConnectionProvider getConnectionProvider() {
+        return conn;
+      }
+    };
+    AcctServer acct = stubNotCalculatedCostAcctServer();
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      stubObContext(obc, "en_US");
+      obDalStatic.when(OBDal::getInstance).thenReturn(mock(OBDal.class));
+      acctStatic
+          .when(() -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(acct);
+      msgMock.when(() -> OBMessageUtils.messageBD("NotCalculatedCost"))
+          .thenReturn("Cost has not yet been calculated for all products in the document.");
+
+      NeoResponse resp = svc.handleAction(mockPostActionContext());
+
+      assertEquals(409, resp.getHttpStatus());
+      assertEquals("30", resp.getHeaders().get("Retry-After"));
+      JSONObject body = resp.getBody();
+      assertFalse(body.getBoolean("success"));
+      assertEquals("costNotCalculated", body.getString("error"));
+      assertEquals(409, body.getInt("status"));
+      assertTrue(body.getBoolean("retryable"));
+      assertEquals(30, body.getInt("retryAfterSeconds"));
+      assertEquals(30, body.getJSONObject("messageParams").getInt("retryAfterSeconds"));
+      assertEquals("NotCalculatedCost", body.getJSONArray("messageKeys").getString(0));
+      assertEquals("Cost has not yet been calculated for all products in the document.",
+          body.getString("message"));
+      assertTrue(body.getString("hint"), body.getString("hint").contains("every 30 seconds"));
+    }
+  }
+
+  /**
+   * ETP-5714 (round 2): "retry in 30 seconds" is a lie when costing is stuck — in a live tenant the
+   * background process ran every 30 s but aborted on the first transaction it could not cost, so
+   * everything behind it waited for ever. When the oldest uncalculated transaction of the
+   * document's organisation is older than the threshold the answer says costing looks stalled and
+   * that retrying will not help: its own code and key, {@code retryable:false}, no
+   * {@code Retry-After}.
+   */
+  @Test
+  public void handleActionAnswersStalledCostingAsNotRetryable() throws Exception {
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    Connection con = mock(Connection.class);
+    when(conn.getTransactionConnection()).thenReturn(con);
+    DocumentPostingService svc = new DocumentPostingService() {
+      @Override
+      ConnectionProvider getConnectionProvider() {
+        return conn;
+      }
+    };
+    AcctServer acct = stubNotCalculatedCostAcctServer();
+    acct.AD_Client_ID = "C1";
+    acct.AD_Org_ID = "O1";
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      stubObContext(obc, "en_US");
+      stubStalledLookup(obDalStatic, true);
+      acctStatic
+          .when(() -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(acct);
+      msgMock.when(() -> OBMessageUtils.messageBD("ETGO_CostCalculationStalled"))
+          .thenReturn("Cost calculation looks stalled.");
+
+      NeoResponse resp = svc.handleAction(mockPostActionContext());
+
+      assertEquals(422, resp.getHttpStatus());
+      assertNull(resp.getHeaders().get("Retry-After"));
+      JSONObject body = resp.getBody();
+      assertEquals("costCalculationStalled", body.getString("error"));
+      assertFalse(body.getBoolean("retryable"));
+      assertFalse(body.has("retryAfterSeconds"));
+      assertEquals("ETGO_CostCalculationStalled", body.getJSONArray("messageKeys").getString(0));
+      assertEquals("Cost calculation looks stalled.", body.getString("message"));
+      assertTrue(body.getString("hint"), body.getString("hint").contains("administrator"));
+    }
+  }
+
+  /** A fresh queue (nothing older than the threshold) keeps the 409 with its 30 second retry. */
+  @Test
+  public void handleActionKeepsTheRetryWhenCostingIsNotStalled() throws Exception {
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    Connection con = mock(Connection.class);
+    when(conn.getTransactionConnection()).thenReturn(con);
+    DocumentPostingService svc = new DocumentPostingService() {
+      @Override
+      ConnectionProvider getConnectionProvider() {
+        return conn;
+      }
+    };
+    AcctServer acct = stubNotCalculatedCostAcctServer();
+    acct.AD_Client_ID = "C1";
+    acct.AD_Org_ID = "O1";
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      stubObContext(obc, "en_US");
+      stubStalledLookup(obDalStatic, false);
+      acctStatic
+          .when(() -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(acct);
+      msgMock.when(() -> OBMessageUtils.messageBD("NotCalculatedCost")).thenReturn("not yet");
+
+      NeoResponse resp = svc.handleAction(mockPostActionContext());
+
+      assertEquals(409, resp.getHttpStatus());
+      assertEquals("costNotCalculated", resp.getBody().getString("error"));
+      assertEquals("30", resp.getHeaders().get("Retry-After"));
+    }
+  }
+
+  /** A failing stalled-queue lookup keeps the retryable answer: the check must never make a post worse. */
+  @Test
+  public void aFailingStalledLookupKeepsTheRetryableAnswer() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    Connection con = mock(Connection.class);
+    when(conn.getTransactionConnection()).thenReturn(con);
+    AcctServer acct = stubNotCalculatedCostAcctServer();
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      stubObContext(obc, "en_US");
+      obDalStatic.when(OBDal::getInstance).thenThrow(new IllegalStateException("no session"));
+      acctStatic
+          .when(() -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(acct);
+      msgMock.when(() -> OBMessageUtils.messageBD("NotCalculatedCost")).thenReturn("not yet");
+
+      DocumentPostingService.PostResult r = svc.post("319", "rec-1", conn);
+
+      assertEquals(List.of("NotCalculatedCost"), r.messageKeys());
+    }
+  }
+
+  /** Stubs the one query that asks whether an uncalculated transaction is older than the threshold. */
+  private static void stubStalledLookup(MockedStatic<OBDal> obDalStatic, boolean stalled)
+      throws Exception {
+    OBDal dal = mock(OBDal.class);
+    Connection read = mock(Connection.class);
+    java.sql.PreparedStatement ps = mock(java.sql.PreparedStatement.class);
+    java.sql.ResultSet rs = mock(java.sql.ResultSet.class);
+    obDalStatic.when(OBDal::getInstance).thenReturn(dal);
+    when(dal.getConnection()).thenReturn(read);
+    when(read.prepareStatement(anyString())).thenReturn(ps);
+    when(ps.executeQuery()).thenReturn(rs);
+    when(rs.next()).thenReturn(true);
+    when(rs.getBoolean(1)).thenReturn(stalled);
+  }
+
+  /** An {@code AcctServer} mock whose post fails with core's per-product cost message. */
+  private static AcctServer stubNotCalculatedCostAcctServer() throws Exception {
+    AcctServer acct = mock(AcctServer.class);
+    acct.errors = 0;
+    when(acct.post(eq("rec-1"), eq(false), any(), any(), any())).thenReturn(false);
+    when(acct.getStatus()).thenReturn(AcctServer.STATUS_NotCalculatedCost);
+    OBError err = new OBError();
+    err.setMessage("The cost of the product Widget has not been calculated.");
+    when(acct.getMessageResult()).thenReturn(err);
+    return acct;
   }
 
   /** An {@code AcctServer} mock whose post fails on the Processing lock, with core's English text. */
@@ -651,9 +911,9 @@ public class DocumentPostingServiceTest {
     acct.errors = 1;
     acct.C_BPartner_ID = "bp-1";
     when(acct.post(anyString(), eq(false), any(), any(), any())).thenReturn(true);
-    when(acct.getStatus()).thenReturn(AcctServer.STATUS_PeriodClosed);
+    when(acct.getStatus()).thenReturn(AcctServer.STATUS_NotBalanced);
     OBError err = new OBError();
-    err.setMessage("Period is closed.");
+    err.setMessage("Document is not balanced.");
     when(acct.getMessageResult()).thenReturn(err);
 
     try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
@@ -665,7 +925,7 @@ public class DocumentPostingServiceTest {
       DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
 
       assertFalse(r.ok());
-      assertEquals("Period is closed.", r.message());
+      assertEquals("Document is not balanced.", r.message());
       assertTrue(r.messageKeys().isEmpty());
       assertTrue(r.messageParams().isEmpty());
     }
@@ -771,9 +1031,9 @@ public class DocumentPostingServiceTest {
     AcctServer acct = mock(AcctServer.class);
     acct.errors = 1;
     when(acct.post(anyString(), eq(false), any(), any(), any())).thenReturn(true);
-    when(acct.getStatus()).thenReturn(AcctServer.STATUS_PeriodClosed);
+    when(acct.getStatus()).thenReturn(AcctServer.STATUS_NotBalanced);
     OBError err = new OBError();
-    err.setMessage("Period is closed.");
+    err.setMessage("Document is not balanced.");
     when(acct.getMessageResult()).thenReturn(err);
 
     try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
@@ -786,7 +1046,7 @@ public class DocumentPostingServiceTest {
       DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
 
       assertFalse(r.ok());
-      assertEquals("Period is closed.", r.message());
+      assertEquals("Document is not balanced.", r.message());
       msgMock.verify(() -> OBMessageUtils.messageBD("InvalidAccount"), never());
     }
   }

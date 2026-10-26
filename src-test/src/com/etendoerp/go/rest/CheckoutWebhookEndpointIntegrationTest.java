@@ -18,13 +18,17 @@
 package com.etendoerp.go.rest;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.io.BufferedReader;
@@ -55,6 +59,11 @@ import org.openbravo.test.base.OBBaseTest;
 
 import com.etendoerp.go.payment.CheckoutRequestStore;
 import com.etendoerp.go.payment.CheckoutWebhookProcessor;
+import com.etendoerp.go.payment.PausedSubscriptionAlert;
+import com.etendoerp.go.payment.SubscriptionLifecycleApplier;
+import com.etendoerp.go.payment.SubscriptionModelSwitch;
+import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
+import com.etendoerp.go.payment.TenantPlanService;
 import com.etendoerp.go.schemaforge.data.Account;
 
 /**
@@ -88,6 +97,17 @@ import com.etendoerp.go.schemaforge.data.Account;
  * write path commits. Fixtures carry the {@code etp5045-whk-} / {@code evt_etp5045whk_} markers
  * and are deleted in {@link #cleanUp()} in FK order. The environment's own live Stripe replay rows
  * are never matched by those markers and are left alone.
+ *
+ * <p>ETP-5048 adds the two Stripe statuses the billing reconciliation also reads through the same
+ * mapping: {@code incomplete_expired} closes the row, and {@code paused} is alert-only — one
+ * {@link PausedSubscriptionAlert} row shared by the {@code customer.subscription.updated} and the
+ * {@code customer.subscription.paused} paths, and no state change. A pause alerts once per
+ * episode: {@code customer.subscription.resumed}, or an update that is no longer paused (or has
+ * {@code pause_collection} cleared), ends it.
+ *
+ * @covers com.etendoerp.go.rest.EtendoGoJwtServlet
+ * @covers com.etendoerp.go.payment.TenantEnvironmentLifecycleService
+ * @covers com.etendoerp.go.payment.PausedSubscriptionAlert
  */
 public class CheckoutWebhookEndpointIntegrationTest extends OBBaseTest {
 
@@ -117,6 +137,12 @@ public class CheckoutWebhookEndpointIntegrationTest extends OBBaseTest {
   private static final String STATUS_PAID = "PAID";
 
   private static final String ENVIRONMENT = "ETP-5045 Webhook Environment";
+
+  /** Prefix on the {@code AD_CLIENT.VALUE} of every synthetic tenant this class creates. */
+  private static final String TENANT_MARKER = "ETP5046WHK-";
+  /** The grandfathered plan, seeded by EnsureLegacyPlanScript, so it exists in every environment. */
+  private static final String LEGACY_PLAN_ID = "219D5C8E15C64E97B2F553B228D30DD0";
+  private static final String PAYMENT_FAILED = "invoice.payment_failed";
 
   private final EtendoGoJwtServlet servlet = new EtendoGoJwtServlet();
   private final CheckoutRequestStore fixtureStore = new CheckoutRequestStore();
@@ -322,6 +348,31 @@ public class CheckoutWebhookEndpointIntegrationTest extends OBBaseTest {
     assertEquals("unhandled event type", rawEvent(eventId, "FAILURE_REASON"));
     assertEquals("An unhandled type must not confirm a payment", STATUS_CREATED,
         rawRequest(requestId, "CHECKOUT_STATUS"));
+  }
+
+  /**
+   * ETP-5847 — a paid invoice of an Etendo purchase is recorded for HubSpot in the event's own
+   * transaction, before the subscription is even resolved: the first payment usually arrives
+   * before its environment exists. A redelivery records nothing more.
+   */
+  @Test
+  public void testAPaidInvoiceOfAPurchaseIsRecordedForHubSpotOnce() throws Exception {
+    String email = newEmail("hubspot");
+    String requestId = createRequest(email);
+    String invoiceEvent = newEventId();
+    String invoice = "{\"id\":\"" + invoiceEvent + "\",\"type\":\"" + INVOICE_PAID + "\","
+        + "\"created\":1792000000,\"data\":{\"object\":{\"id\":\"in_" + invoiceEvent + "\","
+        + "\"amount_paid\":2200,\"currency\":\"eur\",\"parent\":{\"subscription_details\":{"
+        + "\"subscription\":\"sub_" + requestId + "\",\"metadata\":{\"request_id\":\""
+        + requestId + "\"}}}}}}";
+
+    assertEquals(200, deliver(invoice).status);
+    assertEquals("a duplicate delivery is acknowledged without a second claim", 200,
+        deliver(invoice).status);
+
+    assertEquals("PAYMENT", hubSpotEvent(email, "EVENT_TYPE"));
+    assertEquals("in_" + invoiceEvent, hubSpotEvent(email, "EVENT_KEY"));
+    assertEquals("1", hubSpotEvent(email, "COUNT(*) OVER ()"));
   }
 
   /**
@@ -666,11 +717,599 @@ public class CheckoutWebhookEndpointIntegrationTest extends OBBaseTest {
   }
 
   // ---------------------------------------------------------------------------------------------
+  // Group 5 — a correlated lifecycle event is applied with NO OBContext on the thread (ETP-5046)
+  // ---------------------------------------------------------------------------------------------
+
+  /**
+   * ETP-5446 — the lifecycle webhook arrives with no {@code OBContext}. Before the fix the watermark
+   * preference write NPE'd inside {@code OBQuery} and every correlated event ended {@code FAILED}
+   * with a 500. This pins the route for a tenant WITH an {@code ETGO_SUBSCRIPTION} row: the row
+   * takes the outcome.
+   *
+   * <p>ETP-5047 — the grace anchor lands in {@code GRACE_ANCHOR}, the billing period is left alone
+   * ({@code invoice.payment_failed} reports none), and the ordering watermark is the row's own
+   * {@code LAST_EVENT_AT}: the row route writes no preference at all.
+   */
+  @Test
+  public void testAPaymentFailureIsAppliedToTheSubscriptionRowWithNoContextOnTheThread()
+      throws Exception {
+    String tenantId = createTenant("with-row");
+    String requestId = createPaidRequestFor(tenantId, newEmail("lifecycle-row"));
+    String subscriptionId = createOpenSubscription(tenantId);
+    String eventId = newEventId();
+    long periodEnd = Instant.now().getEpochSecond() - 3600;
+    long created = Instant.now().getEpochSecond() - 60;
+
+    OBContext.setOBContext((OBContext) null);
+    ResponseCapture response = deliver(paymentFailedEvent(eventId, requestId, periodEnd, created));
+
+    // Checked before any fixture reader runs: those install the system context themselves.
+    assertNull("The webhook must hand the thread back without a context", OBContext.getOBContext());
+    assertEquals(200, response.status);
+    assertEquals(APPLIED, rawEvent(eventId, "EVENT_RESULT"));
+    assertEquals("past_due", subscriptionColumn(subscriptionId, "STATUS"));
+    assertEquals("The grace anchor is the end of the period the customer already paid for",
+        periodEnd * 1000L, ((Timestamp) subscriptionColumn(subscriptionId, "GRACE_ANCHOR"))
+            .getTime());
+    assertNull("A payment failure reports no billing period: the period is left alone",
+        subscriptionColumn(subscriptionId, "CURRENT_PERIOD_START"));
+    assertNull(subscriptionColumn(subscriptionId, "CURRENT_PERIOD_END"));
+    assertEquals("The watermark is the event's created instant, on the row", created * 1000L,
+        ((Timestamp) subscriptionColumn(subscriptionId, "LAST_EVENT_AT")).getTime());
+    assertNull("A tenant with a row must not also get the preference projection",
+        rawPreference(tenantId, TenantEnvironmentLifecycleService.SUBSCRIPTION_STATUS_ATTRIBUTE));
+    assertNull("ETP-5047 — the row route keeps its watermark on the row, not in a preference",
+        rawPreference(tenantId, TenantEnvironmentLifecycleService.SUBSCRIPTION_EVENT_AT_ATTRIBUTE));
+  }
+
+  /**
+   * ETP-5047 — {@code invoice.paid} on the row carrying the event's Stripe subscription id: the
+   * grace anchor is cleared and the billing period comes from the invoice LINES (the line reaching
+   * furthest), never from the invoice's own {@code period_*}, which looks back one period.
+   */
+  @Test
+  public void testAPaidInvoiceClearsTheAnchorAndSetsThePeriodFromItsLines() throws Exception {
+    String tenantId = createTenant("paid-row");
+    String requestId = createPaidRequestFor(tenantId, newEmail("lifecycle-paid"));
+    String subscriptionId = createOpenSubscription(tenantId);
+    nativeUpdateCommitted("UPDATE ETGO_SUBSCRIPTION SET STATUS = 'past_due', "
+            + "STRIPE_SUBSCRIPTION_ID = :subscription, "
+            + "GRACE_ANCHOR = now() - interval '2 days' WHERE ETGO_SUBSCRIPTION_ID = :id",
+        "subscription", "sub_" + requestId, "id", subscriptionId);
+    String eventId = newEventId();
+    long now = Instant.now().getEpochSecond();
+    long lineStart = now - 3600;
+    long lineEnd = lineStart + 30L * 24 * 3600;
+    long created = now - 30;
+
+    OBContext.setOBContext((OBContext) null);
+    ResponseCapture response = deliver(lifecycleEvent(eventId, "invoice.paid", created,
+        "\"id\":\"in_" + eventId + "\",\"customer\":\"cus_" + requestId + "\","
+            + "\"subscription\":\"sub_" + requestId + "\","
+            + "\"period_start\":" + (lineStart - 30L * 24 * 3600) + ",\"period_end\":" + lineStart
+            + ",\"lines\":{\"data\":[{\"period\":{\"start\":" + (lineStart - 600)
+            + ",\"end\":" + (lineStart + 600) + "}},{\"period\":{\"start\":" + lineStart
+            + ",\"end\":" + lineEnd + "}}]}"));
+
+    assertEquals(200, response.status);
+    assertEquals(APPLIED, rawEvent(eventId, "EVENT_RESULT"));
+    assertEquals("active", subscriptionColumn(subscriptionId, "STATUS"));
+    assertNull("A paid invoice clears the grace anchor",
+        subscriptionColumn(subscriptionId, "GRACE_ANCHOR"));
+    assertEquals(lineStart * 1000L,
+        ((Timestamp) subscriptionColumn(subscriptionId, "CURRENT_PERIOD_START")).getTime());
+    assertEquals(lineEnd * 1000L,
+        ((Timestamp) subscriptionColumn(subscriptionId, "CURRENT_PERIOD_END")).getTime());
+    assertEquals(created * 1000L,
+        ((Timestamp) subscriptionColumn(subscriptionId, "LAST_EVENT_AT")).getTime());
+    // Review fix W4 — the ledger records the same line period the row got, never the invoice's
+    // own look-back period_*.
+    JSONObject summary = new JSONObject((String) rawEvent(eventId, "PAYLOAD_SUMMARY"));
+    assertEquals(lineStart, summary.getLong("service_period_start"));
+    assertEquals(lineEnd, summary.getLong("service_period_end"));
+    assertFalse(summary.has("period_start"));
+    assertFalse(summary.has("period_end"));
+  }
+
+  /** ETP-5047 — {@code customer.subscription.updated} writes the provider billing period. */
+  @Test
+  public void testASubscriptionUpdateSetsThePeriodOnTheRow() throws Exception {
+    String tenantId = createTenant("updated-row");
+    String requestId = createPaidRequestFor(tenantId, newEmail("lifecycle-updated"));
+    String subscriptionId = createOpenSubscription(tenantId);
+    String eventId = newEventId();
+    long now = Instant.now().getEpochSecond();
+    long periodStart = now - 3600;
+    long periodEnd = periodStart + 30L * 24 * 3600;
+
+    OBContext.setOBContext((OBContext) null);
+    ResponseCapture response = deliver(lifecycleEvent(eventId, "customer.subscription.updated",
+        now - 10, "\"id\":\"sub_" + requestId + "\",\"customer\":\"cus_" + requestId + "\","
+            + "\"status\":\"active\",\"items\":{\"data\":[{\"current_period_start\":"
+            + periodStart + ",\"current_period_end\":" + periodEnd + "}]}"));
+
+    assertEquals(200, response.status);
+    assertEquals(APPLIED, rawEvent(eventId, "EVENT_RESULT"));
+    assertEquals("active", subscriptionColumn(subscriptionId, "STATUS"));
+    assertEquals(periodStart * 1000L,
+        ((Timestamp) subscriptionColumn(subscriptionId, "CURRENT_PERIOD_START")).getTime());
+    assertEquals(periodEnd * 1000L,
+        ((Timestamp) subscriptionColumn(subscriptionId, "CURRENT_PERIOD_END")).getTime());
+    assertEquals((now - 10) * 1000L,
+        ((Timestamp) subscriptionColumn(subscriptionId, "LAST_EVENT_AT")).getTime());
+    assertNull(subscriptionColumn(subscriptionId, "END_DATE"));
+  }
+
+  /**
+   * ETP-5047 — {@code customer.subscription.deleted} closes the row at Stripe's {@code ended_at};
+   * a late event of that subscription then finds only a closed row and is ignored, never reviving
+   * it.
+   */
+  @Test
+  public void testASubscriptionDeletionClosesTheRowAndALateEventCannotReviveIt()
+      throws Exception {
+    String tenantId = createTenant("deleted-row");
+    String requestId = createPaidRequestFor(tenantId, newEmail("lifecycle-deleted"));
+    String subscriptionId = createOpenSubscription(tenantId);
+    String deletedId = newEventId();
+    long now = Instant.now().getEpochSecond();
+    long endedAt = now - 120;
+
+    OBContext.setOBContext((OBContext) null);
+    ResponseCapture deleted = deliver(lifecycleEvent(deletedId, "customer.subscription.deleted",
+        now - 60, "\"id\":\"sub_" + requestId + "\",\"customer\":\"cus_" + requestId + "\","
+            + "\"status\":\"canceled\",\"ended_at\":" + endedAt));
+
+    assertEquals(200, deleted.status);
+    assertEquals(APPLIED, rawEvent(deletedId, "EVENT_RESULT"));
+    assertEquals("canceled", subscriptionColumn(subscriptionId, "STATUS"));
+    assertEquals("The row closes at the provider's end instant", endedAt * 1000L,
+        ((Timestamp) subscriptionColumn(subscriptionId, "END_DATE")).getTime());
+
+    String lateId = newEventId();
+    OBContext.setOBContext((OBContext) null);
+    ResponseCapture late = deliver(paymentFailedEvent(lateId, requestId, now - 3600, now));
+
+    assertEquals(200, late.status);
+    assertEquals(IGNORED, rawEvent(lateId, "EVENT_RESULT"));
+    assertEquals("subscription closed", rawEvent(lateId, "FAILURE_REASON"));
+    assertEquals("canceled", subscriptionColumn(subscriptionId, "STATUS"));
+    assertNull(subscriptionColumn(subscriptionId, "GRACE_ANCHOR"));
+  }
+
+  /** ETP-5048 — {@code incomplete_expired} is terminal at Stripe: the row closes at ended_at. */
+  @Test
+  public void testAnIncompleteExpiredUpdateClosesTheRow() throws Exception {
+    String tenantId = createTenant("inc-expired");
+    String requestId = createPaidRequestFor(tenantId, newEmail("lifecycle-incomplete-expired"));
+    String subscriptionId = createOpenSubscription(tenantId);
+    String eventId = newEventId();
+    long now = Instant.now().getEpochSecond();
+    long endedAt = now - 120;
+
+    OBContext.setOBContext((OBContext) null);
+    ResponseCapture response = deliver(lifecycleEvent(eventId, "customer.subscription.updated",
+        now - 60, "\"id\":\"sub_" + requestId + "\",\"customer\":\"cus_" + requestId + "\","
+            + "\"status\":\"incomplete_expired\",\"ended_at\":" + endedAt));
+
+    assertEquals(200, response.status);
+    assertEquals(APPLIED, rawEvent(eventId, "EVENT_RESULT"));
+    assertEquals("canceled", subscriptionColumn(subscriptionId, "STATUS"));
+    assertEquals(endedAt * 1000L,
+        ((Timestamp) subscriptionColumn(subscriptionId, "END_DATE")).getTime());
+  }
+
+  /**
+   * ETP-5048 — {@code paused} is alert-only, and the alert fires exactly once per subscription:
+   * an update carrying the status raises it, and a later {@code customer.subscription.paused}
+   * event and a redelivered update find its row and stay silent. Nothing about the subscription
+   * changes — not the status, not the end date, not the event watermark.
+   */
+  @Test
+  public void testAPausedSubscriptionIsAlertedOnceAcrossBothWebhookPathsAndChangesNothing()
+      throws Exception {
+    servlet.internalAlertService =
+        mock(com.etendoerp.go.schemaforge.email.InternalAlertService.class);
+    String tenantId = createTenant("paused");
+    String requestId = createPaidRequestFor(tenantId, newEmail("lifecycle-paused"));
+    String subscriptionId = createOpenSubscription(tenantId);
+    String stripeSubscription = "sub_" + requestId;
+    String alertId = PausedSubscriptionAlert.eventIdOf(stripeSubscription);
+    long now = Instant.now().getEpochSecond();
+    String pausedObject = "\"id\":\"" + stripeSubscription + "\",\"customer\":\"cus_"
+        + requestId + "\",\"status\":\"paused\",\"ended_at\":" + (now - 30);
+
+    String updatedId = newEventId();
+    OBContext.setOBContext((OBContext) null);
+    ResponseCapture updated = deliver(lifecycleEvent(updatedId, "customer.subscription.updated",
+        now - 20, pausedObject));
+
+    assertEquals(200, updated.status);
+    assertEquals(IGNORED, rawEvent(updatedId, "EVENT_RESULT"));
+    assertEquals(SubscriptionLifecycleApplier.REASON_PAUSED, rawEvent(updatedId,
+        "FAILURE_REASON"));
+    assertEquals(1L, rawEventCount(alertId));
+    assertEquals("reconciler", rawEvent(alertId, "PROVIDER"));
+    assertEquals(IGNORED, rawEvent(alertId, "EVENT_RESULT"));
+    assertEquals(requestId, rawEvent(alertId, "REQUEST_ID"));
+
+    String pausedId = newEventId();
+    OBContext.setOBContext((OBContext) null);
+    ResponseCapture paused = deliver(lifecycleEvent(pausedId, "customer.subscription.paused",
+        now - 10, pausedObject));
+    String redeliveredId = newEventId();
+    OBContext.setOBContext((OBContext) null);
+    ResponseCapture redelivered = deliver(lifecycleEvent(redeliveredId,
+        "customer.subscription.updated", now - 5, pausedObject));
+
+    assertEquals(200, paused.status);
+    assertEquals(APPLIED, rawEvent(pausedId, "EVENT_RESULT"));
+    assertEquals(200, redelivered.status);
+    assertEquals(IGNORED, rawEvent(redeliveredId, "EVENT_RESULT"));
+    assertEquals("Still exactly one alert row", 1L, rawEventCount(alertId));
+    verify(servlet.internalAlertService, times(1)).sendAfterTransaction(any());
+    assertEquals("active", subscriptionColumn(subscriptionId, "STATUS"));
+    assertNull(subscriptionColumn(subscriptionId, "END_DATE"));
+    assertNull(subscriptionColumn(subscriptionId, "LAST_EVENT_AT"));
+    assertNull(subscriptionColumn(subscriptionId, "GRACE_ANCHOR"));
+  }
+
+  /** @return how many ended episodes of this marker are kept as history */
+  @SuppressWarnings("rawtypes")
+  private long endedEpisodes(String markerId) {
+    OBContext.setOBContext(ZERO, ZERO, ZERO, ZERO);
+    OBContext.setAdminMode(true);
+    try {
+      NativeQuery query = OBDal.getInstance().getSession().createNativeQuery(
+          "SELECT COUNT(*) FROM ETGO_BILLING_EVENT WHERE EVENT_ID LIKE :ended");
+      query.setParameter("ended", markerId + ":ended:%");
+      return ((Number) query.uniqueResult()).longValue();
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * ETP-5048 — a pause alerts once per <em>episode</em>. Within one pause a redelivery stays
+   * silent; {@code customer.subscription.resumed} ends the episode, so the next pause alerts
+   * again; an update whose status is no longer {@code paused} ends that one too. An ended episode
+   * is kept as history under {@code <id>:ended:<millis>}.
+   */
+  @Test
+  public void testEachPauseEpisodeAlertsOnceAndAResumeOrAnUnpausedUpdateEndsIt()
+      throws Exception {
+    servlet.internalAlertService =
+        mock(com.etendoerp.go.schemaforge.email.InternalAlertService.class);
+    String tenantId = createTenant("pause-episodes");
+    String requestId = createPaidRequestFor(tenantId, newEmail("lifecycle-episodes"));
+    createOpenSubscription(tenantId);
+    String stripeSubscription = "sub_" + requestId;
+    String alertId = PausedSubscriptionAlert.eventIdOf(stripeSubscription);
+    long now = Instant.now().getEpochSecond();
+    String paused = "\"id\":\"" + stripeSubscription + "\",\"customer\":\"cus_" + requestId
+        + "\",\"status\":\"paused\"";
+    String active = "\"id\":\"" + stripeSubscription + "\",\"customer\":\"cus_" + requestId
+        + "\",\"status\":\"active\"";
+
+    deliverAsWebhook(lifecycleEvent(newEventId(), "customer.subscription.updated", now - 50,
+        paused));
+    deliverAsWebhook(lifecycleEvent(newEventId(), "customer.subscription.updated", now - 45,
+        paused));
+    assertEquals("A redelivery inside one episode stays silent", 1L, rawEventCount(alertId));
+    verify(servlet.internalAlertService, times(1)).sendAfterTransaction(any());
+
+    String resumedId = newEventId();
+    deliverAsWebhook(lifecycleEvent(resumedId, "customer.subscription.resumed", now - 40,
+        active));
+    assertEquals(APPLIED, rawEvent(resumedId, "EVENT_RESULT"));
+    assertEquals("The resume ended the episode", 0L, rawEventCount(alertId));
+    assertEquals(1L, endedEpisodes(alertId));
+
+    deliverAsWebhook(lifecycleEvent(newEventId(), "customer.subscription.updated", now - 30,
+        paused));
+    assertEquals("The next pause opens a new episode", 1L, rawEventCount(alertId));
+    verify(servlet.internalAlertService, times(2)).sendAfterTransaction(any());
+
+    deliverAsWebhook(lifecycleEvent(newEventId(), "customer.subscription.updated", now - 20,
+        active));
+    assertEquals("An update that is no longer paused ends it too", 0L, rawEventCount(alertId));
+    assertEquals(2L, endedEpisodes(alertId));
+    verify(servlet.internalAlertService, times(2)).sendAfterTransaction(any());
+  }
+
+  /**
+   * ETP-5048 — the paused-collection episode (raised by the reconciliation) ends on an update
+   * whose {@code pause_collection} is cleared, and stays open while it is still set.
+   */
+  @Test
+  public void testAnUpdateWithPauseCollectionClearedEndsThatEpisode() throws Exception {
+    servlet.internalAlertService =
+        mock(com.etendoerp.go.schemaforge.email.InternalAlertService.class);
+    String tenantId = createTenant("coll-ep");
+    String requestId = createPaidRequestFor(tenantId, newEmail("lifecycle-collection"));
+    createOpenSubscription(tenantId);
+    String stripeSubscription = "sub_" + requestId;
+    String markerId = PausedSubscriptionAlert.pauseCollectionEventIdOf(stripeSubscription);
+    assertTrue(new com.etendoerp.go.payment.BillingEventStore().recordReconciliation(markerId,
+        "reconciliation.pause-collection", requestId, IGNORED, "Collection paused", null));
+    long now = Instant.now().getEpochSecond();
+    String base = "\"id\":\"" + stripeSubscription + "\",\"customer\":\"cus_" + requestId
+        + "\",\"status\":\"active\"";
+
+    deliverAsWebhook(lifecycleEvent(newEventId(), "customer.subscription.updated", now - 30,
+        base + ",\"pause_collection\":{\"behavior\":\"void\"}"));
+    assertEquals("Still paused: the episode stays open", 1L, rawEventCount(markerId));
+
+    deliverAsWebhook(lifecycleEvent(newEventId(), "customer.subscription.updated", now - 20,
+        base + ",\"pause_collection\":null"));
+    assertEquals(0L, rawEventCount(markerId));
+    assertEquals(1L, endedEpisodes(markerId));
+  }
+
+  /**
+   * ETP-5048 — {@link PausedSubscriptionAlert#endResolved} against the database: it renames the
+   * open marker to {@code <id>:ended:<millis>}, the next episode inserts a fresh marker, and a
+   * call with no open marker changes nothing.
+   */
+  @Test
+  public void testEndResolvedRenamesTheOpenMarkerAndLeavesNothingElse() throws Exception {
+    com.etendoerp.go.payment.BillingEventStore store =
+        new com.etendoerp.go.payment.BillingEventStore();
+    PausedSubscriptionAlert alerts = new PausedSubscriptionAlert(store,
+        mock(com.etendoerp.go.schemaforge.email.InternalAlertService.class));
+    String stripeSubscription = "sub_" + REQUEST_MARKER + UUID.randomUUID().toString()
+        .replace("-", "");
+    String alertId = PausedSubscriptionAlert.eventIdOf(stripeSubscription);
+    JSONObject resumed = new JSONObject("{\"id\":\"" + stripeSubscription
+        + "\",\"status\":\"active\"}");
+    assertTrue(alerts.raiseOnce("[TEST]", stripeSubscription, null, null, "webhook"));
+
+    assertEquals(1, alerts.endResolved(stripeSubscription, resumed));
+    assertEquals(0L, rawEventCount(alertId));
+    assertEquals(1L, endedEpisodes(alertId));
+    assertEquals("No open marker: a no-op", 0, alerts.endResolved(stripeSubscription, resumed));
+    assertEquals(1L, endedEpisodes(alertId));
+
+    assertTrue("The next episode inserts a fresh marker",
+        alerts.raiseOnce("[TEST]", stripeSubscription, null, null, "webhook"));
+    assertEquals(1L, rawEventCount(alertId));
+    assertEquals("A subscription still paused keeps its episode", 0, alerts.endResolved(
+        stripeSubscription, new JSONObject("{\"status\":\"paused\"}")));
+    assertEquals(1L, rawEventCount(alertId));
+  }
+
+  private void deliverAsWebhook(String event) throws Exception {
+    OBContext.setOBContext((OBContext) null);
+    assertEquals(200, deliver(event).status);
+  }
+
+  /**
+   * Same event for a tenant WITHOUT a subscription row — a productive tenant the R37 backfill has
+   * not reached: the outcome lands on the {@code ETGO_SubscriptionStatus} /
+   * {@code ETGO_SubscriptionDueAt} preferences instead, together with the event watermark.
+   */
+  @Test
+  public void testAPaymentFailureIsAppliedToThePreferencesWhenTheTenantHasNoRow()
+      throws Exception {
+    String tenantId = createTenant("no-row");
+    String requestId = createPaidRequestFor(tenantId, newEmail("lifecycle-pref"));
+    String eventId = newEventId();
+    long periodEnd = Instant.now().getEpochSecond() - 3600;
+
+    OBContext.setOBContext((OBContext) null);
+    ResponseCapture response = deliver(paymentFailedEvent(eventId, requestId, periodEnd));
+
+    // Checked before any fixture reader runs: those install the system context themselves.
+    assertNull("The webhook must hand the thread back without a context", OBContext.getOBContext());
+    assertEquals(200, response.status);
+    assertEquals(APPLIED, rawEvent(eventId, "EVENT_RESULT"));
+    assertEquals("PAST_DUE",
+        rawPreference(tenantId, TenantEnvironmentLifecycleService.SUBSCRIPTION_STATUS_ATTRIBUTE));
+    assertEquals(Instant.ofEpochSecond(periodEnd).toString(),
+        rawPreference(tenantId, TenantEnvironmentLifecycleService.SUBSCRIPTION_DUE_AT_ATTRIBUTE));
+    assertNotNull(
+        rawPreference(tenantId, TenantEnvironmentLifecycleService.SUBSCRIPTION_EVENT_AT_ATTRIBUTE));
+  }
+
+  /**
+   * ETP-5046 — the state of every environment until its operator switches the subscription model
+   * on: a paid purchase writes the {@code ETGO_TenantPlan} marker and opens no row (see
+   * {@code TenantContextSubscriptionWriteIntegrationTest}), so every NEW paying tenant is rowless.
+   * Its billing lifecycle must keep landing on the {@code ETGO_SubscriptionStatus} /
+   * {@code ETGO_SubscriptionDueAt} preferences; a lifecycle event must neither open a row for it nor
+   * touch the marker that makes it productive.
+   *
+   * <p>The webhook commits, so the switch cannot be forced OFF inside a rolled-back transaction
+   * here; the spec asserts instead that this database has not switched, which is the state of every
+   * environment that has not run the R37 backfill. It never writes a switch row.
+   */
+  @Test
+  public void testWithTheSwitchOffANewlyPaidRowlessTenantKeepsItsLifecycleInThePreferences()
+      throws Exception {
+    assertFalse("Precondition: this database must not have switched the subscription model on (a "
+        + "System-level " + SubscriptionModelSwitch.PREFERENCE_PROPERTY + " = 'Y' row)",
+        readSwitchAsSystem());
+    String tenantId = createTenant("switch-off");
+    markProductiveCommitted(tenantId);
+    String requestId = createPaidRequestFor(tenantId, newEmail("lifecycle-switch-off"));
+    String eventId = newEventId();
+    long periodEnd = Instant.now().getEpochSecond() - 3600;
+
+    OBContext.setOBContext((OBContext) null);
+    ResponseCapture response = deliver(paymentFailedEvent(eventId, requestId, periodEnd));
+
+    assertNull("The webhook must hand the thread back without a context", OBContext.getOBContext());
+    assertEquals(200, response.status);
+    assertEquals(APPLIED, rawEvent(eventId, "EVENT_RESULT"));
+    assertEquals("PAST_DUE",
+        rawPreference(tenantId, TenantEnvironmentLifecycleService.SUBSCRIPTION_STATUS_ATTRIBUTE));
+    assertEquals(Instant.ofEpochSecond(periodEnd).toString(),
+        rawPreference(tenantId, TenantEnvironmentLifecycleService.SUBSCRIPTION_DUE_AT_ATTRIBUTE));
+    assertNotNull(
+        rawPreference(tenantId, TenantEnvironmentLifecycleService.SUBSCRIPTION_EVENT_AT_ATTRIBUTE));
+    assertEquals("A lifecycle event must not open a row while the switch is off", 0L,
+        rawTenantCount("SELECT COUNT(*) FROM ETGO_SUBSCRIPTION WHERE ENVIRONMENT_CLIENT_ID = "
+            + ":tenant", tenantId));
+    assertEquals("The purchase's plan marker must survive the lifecycle event", 1L,
+        rawTenantCount("SELECT COUNT(*) FROM AD_PREFERENCE WHERE ATTRIBUTE = '"
+            + TenantPlanService.PREFERENCE_ATTRIBUTE + "' AND VISIBLEAT_CLIENT_ID = :tenant "
+            + "AND ISACTIVE = 'Y'", tenantId));
+  }
+
+  /** Reads the switch the way the purchase path does, as System. */
+  private static boolean readSwitchAsSystem() {
+    OBContext.setOBContext(ZERO, ZERO, ZERO, ZERO);
+    try {
+      return new SubscriptionModelSwitch().isOn();
+    } finally {
+      OBContext.setOBContext((OBContext) null);
+    }
+  }
+
+  /** What a switched-off paid purchase writes: the marker, through the real service, committed. */
+  private void markProductiveCommitted(String tenantId) {
+    OBContext.setOBContext(ZERO, ZERO, ZERO, ZERO);
+    try {
+      assertTrue("Sanity: the marker must be written",
+          new TenantPlanService().markProductive(tenantId, null));
+      OBDal.getInstance().flush();
+      OBDal.getInstance().commitAndClose();
+    } finally {
+      OBContext.setOBContext((OBContext) null);
+    }
+  }
+
+  /** @return the committed result of a {@code COUNT(*)} bound to one tenant */
+  @SuppressWarnings("rawtypes")
+  private long rawTenantCount(String sql, String tenantId) {
+    OBContext.setOBContext(ZERO, ZERO, ZERO, ZERO);
+    OBContext.setAdminMode(true);
+    try {
+      NativeQuery query = OBDal.getInstance().getSession().createNativeQuery(sql);
+      query.setParameter("tenant", tenantId);
+      return ((Number) query.uniqueResult()).longValue();
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * A correlated {@code invoice.payment_failed}: keyed by the subscription the paid checkout
+   * recorded, carrying the invoice's own {@code period_end} as the grace anchor.
+   */
+  private String paymentFailedEvent(String eventId, String requestId, long periodEnd) {
+    return paymentFailedEvent(eventId, requestId, periodEnd, Instant.now().getEpochSecond());
+  }
+
+  private String paymentFailedEvent(String eventId, String requestId, long periodEnd,
+      long created) {
+    return "{"
+        + "\"id\":\"" + eventId + "\","
+        + "\"type\":\"" + PAYMENT_FAILED + "\","
+        + "\"created\":" + created + ","
+        + "\"data\":{\"object\":{"
+        + "  \"id\":\"in_" + eventId + "\","
+        + "  \"customer\":\"cus_" + requestId + "\","
+        + "  \"subscription\":\"sub_" + requestId + "\","
+        + "  \"period_end\":" + periodEnd
+        + "}}}";
+  }
+
+  /** A lifecycle event of {@code type} whose {@code data.object} has the given JSON members. */
+  private static String lifecycleEvent(String eventId, String type, long created,
+      String objectMembers) {
+    return "{\"id\":\"" + eventId + "\",\"type\":\"" + type + "\",\"created\":" + created
+        + ",\"data\":{\"object\":{" + objectMembers + "}}}";
+  }
+
+  private Object subscriptionColumn(String subscriptionId, String column) {
+    return rawColumn("ETGO_SUBSCRIPTION", "ETGO_SUBSCRIPTION_ID", subscriptionId, column);
+  }
+
+  /**
+   * Creates a synthetic tenant, never a real one: a fixture on a real tenant could leave it
+   * looking past due. The {@code AD_CLIENT} insert trigger adds its sequences; cleanup removes them.
+   */
+  private String createTenant(String label) {
+    String id = UUID.randomUUID().toString().replace("-", "").toUpperCase(java.util.Locale.ROOT);
+    nativeUpdateCommitted("INSERT INTO AD_CLIENT (AD_CLIENT_ID, AD_ORG_ID, ISACTIVE, CREATED, "
+            + "CREATEDBY, UPDATED, UPDATEDBY, VALUE, NAME) "
+            + "VALUES (:id, '0', 'Y', now(), '0', now(), '0', :value, :name)",
+        "id", id, "value", TENANT_MARKER + label, "name", TENANT_MARKER + label + " " + id);
+    return id;
+  }
+
+  /** A checkout request that was paid and provisioned into {@code tenantId}. */
+  private String createPaidRequestFor(String tenantId, String email) {
+    String requestId = createRequest(email);
+    nativeUpdateCommitted("UPDATE ETGO_CHECKOUT_REQUEST SET CREATED_CLIENT_ID = :tenant, "
+            + "STRIPE_CUSTOMER_ID = :customer, STRIPE_SUBSCRIPTION_ID = :subscription "
+            + "WHERE REQUEST_ID = :requestId",
+        "tenant", tenantId, "customer", "cus_" + requestId, "subscription", "sub_" + requestId,
+        "requestId", requestId);
+    return requestId;
+  }
+
+  /** An open, active subscription row on the grandfathered plan. */
+  private String createOpenSubscription(String tenantId) {
+    String id = UUID.randomUUID().toString().replace("-", "").toUpperCase(java.util.Locale.ROOT);
+    nativeUpdateCommitted("INSERT INTO ETGO_SUBSCRIPTION (ETGO_SUBSCRIPTION_ID, AD_CLIENT_ID, "
+            + "AD_ORG_ID, ISACTIVE, CREATED, CREATEDBY, UPDATED, UPDATEDBY, ENVIRONMENT_CLIENT_ID, "
+            + "ETGO_PLAN_ID, STATUS, START_DATE) VALUES (:id, '0', '0', 'Y', now(), '0', now(), "
+            + "'0', :tenant, :plan, 'active', now() - interval '1 day')",
+        "id", id, "tenant", tenantId, "plan", LEGACY_PLAN_ID);
+    return id;
+  }
+
+  /** @return the committed value of a lifecycle preference of the tenant, or null */
+  private Object rawPreference(String tenantId, String attribute) {
+    OBContext.setOBContext(ZERO, ZERO, ZERO, ZERO);
+    OBContext.setAdminMode(true);
+    try {
+      @SuppressWarnings("rawtypes")
+      NativeQuery query = OBDal.getInstance().getSession().createNativeQuery(
+          "SELECT VALUE FROM AD_PREFERENCE WHERE AD_CLIENT_ID = :tenant AND ATTRIBUTE = :attribute"
+              + " AND ISACTIVE = 'Y'");
+      query.setParameter("tenant", tenantId);
+      query.setParameter("attribute", attribute);
+      query.setMaxResults(1);
+      return query.uniqueResult();
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  @SuppressWarnings("rawtypes")
+  private void nativeUpdateCommitted(String sql, Object... nameValuePairs) {
+    OBContext.setOBContext(ZERO, ZERO, ZERO, ZERO);
+    OBContext.setAdminMode(true);
+    try {
+      NativeQuery query = OBDal.getInstance().getSession().createNativeQuery(sql);
+      for (int i = 0; i + 1 < nameValuePairs.length; i += 2) {
+        query.setParameter((String) nameValuePairs[i], nameValuePairs[i + 1]);
+      }
+      query.executeUpdate();
+      OBDal.getInstance().flush();
+      OBDal.getInstance().commitAndClose();
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  // ---------------------------------------------------------------------------------------------
   // Fixtures
   // ---------------------------------------------------------------------------------------------
 
   private String newEventId() {
     return EVENT_MARKER + UUID.randomUUID().toString().replace("-", "");
+  }
+
+  private static String hubSpotEvent(String email, String column) {
+    Object value = OBDal.getInstance().getSession().createNativeQuery("SELECT " + column
+        + " FROM ETGO_HUBSPOT_OUTBOX o JOIN ETGO_ACCOUNT a ON a.ETGO_ACCOUNT_ID = o.ETGO_ACCOUNT_ID"
+        + " WHERE a.EMAIL = :email").setParameter("email", email).setMaxResults(1)
+        .getSingleResult();
+    return value == null ? null : value.toString();
   }
 
   private String newEmail(String label) {
@@ -688,6 +1327,7 @@ public class CheckoutWebhookEndpointIntegrationTest extends OBBaseTest {
   private String createRequest(String email) {
     String accountId = createAccount(email);
     String requestId = REQUEST_MARKER + UUID.randomUUID().toString().replace("-", "");
+    // No plan: this fixture exercises webhook correlation, which does not read one.
     fixtureStore.recordRequested(requestId, accountId, email, ENVIRONMENT,
         new CheckoutRequestStore.RequestOptions(null, false, false, false, null));
     fixtureStore.recordSessionCreated(requestId, "cs_" + requestId);
@@ -822,11 +1462,42 @@ public class CheckoutWebhookEndpointIntegrationTest extends OBBaseTest {
       deleteEvents.setParameter("marker", EVENT_MARKER + "%");
       deleteEvents.executeUpdate();
 
+      // ETP-5048 — the paused-review alert rows of this class's subscriptions (sub_<requestId>),
+      // before the requests their FK names.
+      NativeQuery deleteAlerts = OBDal.getInstance()
+          .getSession()
+          .createNativeQuery("DELETE FROM ETGO_BILLING_EVENT WHERE EVENT_ID LIKE :alertMarker");
+      deleteAlerts.setParameter("alertMarker", "reconcile:%:sub_" + REQUEST_MARKER + "%");
+      deleteAlerts.executeUpdate();
+
       NativeQuery deleteRequests = OBDal.getInstance()
           .getSession()
           .createNativeQuery("DELETE FROM ETGO_CHECKOUT_REQUEST WHERE REQUEST_ID LIKE :marker");
       deleteRequests.setParameter("marker", REQUEST_MARKER + "%");
       deleteRequests.executeUpdate();
+
+      // Synthetic tenants: their subscription rows and lifecycle preferences, the sequences the
+      // AD_CLIENT insert trigger created, then the clients themselves.
+      String tenants = "(SELECT AD_CLIENT_ID FROM AD_CLIENT WHERE VALUE LIKE :tenantMarker)";
+      for (String sql : new String[] {
+          "DELETE FROM ETGO_SUBSCRIPTION WHERE ENVIRONMENT_CLIENT_ID IN " + tenants,
+          "DELETE FROM AD_PREFERENCE WHERE AD_CLIENT_ID IN " + tenants,
+          // The ETGO_TenantPlan marker lives at client 0 and names the tenant here only.
+          "DELETE FROM AD_PREFERENCE WHERE VISIBLEAT_CLIENT_ID IN " + tenants,
+          "DELETE FROM AD_SEQUENCE WHERE AD_CLIENT_ID IN " + tenants,
+          "DELETE FROM AD_CLIENT WHERE VALUE LIKE :tenantMarker" }) {
+        NativeQuery deleteTenantRows = OBDal.getInstance().getSession().createNativeQuery(sql);
+        deleteTenantRows.setParameter("tenantMarker", TENANT_MARKER + "%");
+        deleteTenantRows.executeUpdate();
+      }
+
+      // The webhook reports billing events to HubSpot, so an account may have outbox rows.
+      NativeQuery deleteHubSpotEvents = OBDal.getInstance()
+          .getSession()
+          .createNativeQuery("DELETE FROM ETGO_HUBSPOT_OUTBOX WHERE ETGO_ACCOUNT_ID IN"
+              + " (SELECT ETGO_ACCOUNT_ID FROM ETGO_ACCOUNT WHERE EMAIL LIKE :marker)");
+      deleteHubSpotEvents.setParameter("marker", REQUEST_MARKER + "%");
+      deleteHubSpotEvents.executeUpdate();
 
       NativeQuery deleteAccounts = OBDal.getInstance()
           .getSession()

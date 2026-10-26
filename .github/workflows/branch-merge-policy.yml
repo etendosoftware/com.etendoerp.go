@@ -1,14 +1,20 @@
 name: Branch Merge Policy
 
 # Restricts which source branch a PR may come from, based on its target:
-#   -> main            only from develop or hotfix/*
+#   -> main            only from hotfix/* or mergeblock/* (the daily cut)
 #   -> develop         from anywhere (feature/*, fix/*, chore/*, epic/*, main back-merge)
 #   -> anything else   from anywhere (unrestricted)
 #
 # ETP-5028: 'develop' no longer accepts only 'epic/*'. The branching model moves to
 # two branches (main = production, develop = pre-production) and features go straight
-# to develop. The guard that matters — that 'main' is only reachable through develop
-# or a hotfix — is kept.
+# to develop.
+#
+# ETP-5695: the daily cut reaches main as mergeblock/ETP-XXXX, a cut of develop at a chosen
+# commit with main merged in (docs/branch-workflow.md § Daily Cut).
+#
+# ETP-5885: 'develop' no longer reaches main directly. A develop -> main PR skips the cut
+# procedure and validates a moving head; since the first cuts through mergeblock/* (20-10),
+# main is reachable only through a cut or a hotfix.
 #
 # Self-contained (no external service) — intended to eventually replace the
 # equivalent rule in Git Police, alongside the local pre-push checks and the
@@ -32,9 +38,9 @@ jobs:
           case "$BASE_REF" in
             main)
               case "$HEAD_REF" in
-                develop|hotfix/*) ;;
+                hotfix/*|mergeblock/*) ;;
                 *)
-                  echo "::error::'main' only accepts PRs from 'develop' or 'hotfix/*' (got '$HEAD_REF')."
+                  echo "::error::'main' only accepts PRs from 'hotfix/*' or 'mergeblock/*' (got '$HEAD_REF'). Changes reach main through the daily cut (mergeblock/ETP-XXXX)."
                   exit 1
                   ;;
               esac

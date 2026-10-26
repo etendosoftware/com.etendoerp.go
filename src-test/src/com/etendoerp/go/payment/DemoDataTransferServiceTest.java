@@ -22,9 +22,11 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
@@ -36,6 +38,7 @@ import java.lang.reflect.Field;
 import java.math.BigDecimal;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
@@ -60,10 +63,12 @@ import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
 import org.openbravo.erpCommon.businessUtility.Preferences;
+import org.openbravo.erpCommon.utility.OBCurrencyUtils;
 import org.openbravo.model.ad.domain.Preference;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
+import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.plm.Product;
 import org.openbravo.model.common.plm.ProductCategory;
@@ -84,6 +89,9 @@ import org.openbravo.model.pricing.pricelist.PriceListVersion;
  * They still exercise real DAL calls and entity setters through Mockito: an existing target row
  * must be reused, its lookup must stay tenant-scoped, and blank CIF/Tax ID must be copied instead
  * of being routed through the interactive import validator.
+ *
+ * @covers com.etendoerp.go.payment.DemoDataTransferService
+ * @covers com.etendoerp.go.payment.DemoDataTransferEntityCopier
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -141,6 +149,66 @@ class DemoDataTransferServiceTest {
         system, null, null, null, null, null));
     verify(obDal).flush();
     verify(obDal).commitAndClose();
+  }
+
+  /**
+   * ETP-5047 — the selection is written as system, and the caller gets its own context back. The
+   * paid onboarding calls this from {@code completeCommittedOnboarding} and keeps working on that
+   * thread afterwards; a system context left behind makes every later step run as system.
+   */
+  @Test
+  void handsTheCallerItsOwnContextBackAfterWritingAsSystem() {
+    OBContext caller = mock(OBContext.class);
+    contextStatic.when(OBContext::getOBContext).thenReturn(caller);
+    when(obDal.get(Client.class, SYSTEM_ID)).thenReturn(mock(Client.class));
+    givenPreferenceReads((Preference) null);
+
+    service.recordSelection(REQUEST_ID, true, false);
+
+    contextStatic.verify(() -> OBContext.setOBContext(SYSTEM_ID, SYSTEM_ID, SYSTEM_ID, SYSTEM_ID));
+    contextStatic.verify(() -> OBContext.setOBContext(caller));
+  }
+
+  /**
+   * ETP-5047 — the worker's failure path: the rollback and the recorded failure both run as
+   * system, and the worker gets its own context back afterwards rather than a system context left
+   * behind by chance.
+   */
+  @Test
+  void aFailedTransferIsRolledBackAndRecordedAsSystemAndHandsTheWorkerItsContextBack()
+      throws Exception {
+    OBContext worker = mock(OBContext.class);
+    String[] current = { "worker" };
+    contextStatic.when(OBContext::getOBContext).thenReturn(worker);
+    contextStatic.when(() -> OBContext.setOBContext(SYSTEM_ID, SYSTEM_ID, SYSTEM_ID, SYSTEM_ID))
+        .thenAnswer(invocation -> current[0] = "system");
+    contextStatic.when(() -> OBContext.setOBContext(worker))
+        .thenAnswer(invocation -> current[0] = "worker");
+    List<String> seen = new ArrayList<>();
+    doAnswer(invocation -> seen.add("rollback as " + current[0]))
+        .when(obDal).rollbackAndClose();
+    preferencesStatic.when(() -> Preferences.setPreferenceValue(
+        eq("ETGO_DemoDataTransferStatus"), eq(DemoDataTransferService.STATUS_FAILED), eq(false),
+        any(Client.class), eq(null), eq(null), eq(null), eq(null),
+        eq(null))).thenAnswer(invocation -> {
+          seen.add("failure recorded as " + current[0]);
+          return null;
+        });
+    Client target = mock(Client.class);
+    when(obDal.get(Client.class, TARGET_ID)).thenReturn(target);
+    // Running, with a source that no longer exists: the transfer throws.
+    givenPreferenceReads(preference(DemoDataTransferService.STATUS_RUNNING),
+        preference(SOURCE_ID));
+    Method run = DemoDataTransferService.class.getDeclaredMethod("run", String.class);
+    run.setAccessible(true);
+
+    run.invoke(service, TARGET_ID);
+
+    assertEquals(List.of("rollback as system", "failure recorded as system"), seen);
+    preferencesStatic.verify(() -> Preferences.setPreferenceValue(
+        "ETGO_DemoDataTransferFailure", "Transfer environment is unavailable", false,
+        target, null, null, null, null, null));
+    assertEquals("worker", current[0], "the worker must get its own context back");
   }
 
   @Test
@@ -449,10 +517,102 @@ class DemoDataTransferServiceTest {
     Organization targetOrg = mock(Organization.class);
     BusinessPartner sourceContact = mock(BusinessPartner.class);
     BusinessPartner targetContact = mock(BusinessPartner.class);
+    Currency systemCurrency = currency(SYSTEM_ID);
     when(sourceContact.getSearchKey()).thenReturn("CONTACT-001");
     when(sourceContact.getName()).thenReturn("Migrated contact");
     when(sourceContact.getTaxID()).thenReturn("");
+    when(sourceContact.getCurrency()).thenReturn(systemCurrency);
+    OBQuery<BusinessPartner> existingTarget = givenOneContactToUpsert(sourceContact, targetContact);
 
+    invokeCopy("copyContacts", Client.class, Client.class, Organization.class, source, target, targetOrg);
+
+    verify(existingTarget).setNamedParameter("clientId", TARGET_ID);
+    verify(obProvider, never()).get(BusinessPartner.class);
+    verify(targetContact).setSearchKey("CONTACT-001");
+    verify(targetContact).setTaxID("");
+    // ETP-5768: currencies are System rows, so the source one is reused without a lookup.
+    verify(targetContact).setCurrency(systemCurrency);
+    verify(obDal, never()).getProxy(eq(Currency.class), anyString());
+    verify(obDal).save(targetContact);
+    // The organization's fiscal address shares the table: only contact addresses are reusable.
+    verify(obDal).createQuery(eq(org.openbravo.model.common.geography.Location.class),
+        contains("BusinessPartnerLocation"));
+    verify(sessionHandler, times(3)).commitAndStart();
+  }
+
+  /**
+   * ETP-5768: the copy bypasses the NEO hook that defaults a contact's currency, and Core refuses
+   * to complete a document for a contact without one. A source contact with no currency, or with
+   * one that belongs to the demo tenant, must still land with the target organization's currency.
+   */
+  @Test
+  void contactWithoutAUsableSourceCurrencyGetsTheTargetOrganizationCurrency() throws Exception {
+    Organization targetOrg = organization("target-org");
+    Currency orgCurrency = currency(SYSTEM_ID);
+    when(obDal.getProxy(Currency.class, "EUR-ID")).thenReturn(orgCurrency);
+    for (Currency sourceCurrency : Arrays.asList(null, currency(SOURCE_ID))) {
+      BusinessPartner sourceContact = mock(BusinessPartner.class);
+      BusinessPartner targetContact = mock(BusinessPartner.class);
+      when(sourceContact.getCurrency()).thenReturn(sourceCurrency);
+      givenOneContactToUpsert(sourceContact, targetContact);
+
+      try (MockedStatic<OBCurrencyUtils> currencyUtils = mockStatic(OBCurrencyUtils.class)) {
+        currencyUtils.when(() -> OBCurrencyUtils.getOrgCurrency("target-org")).thenReturn("EUR-ID");
+        invokeCopy("copyContacts", Client.class, Client.class, Organization.class,
+            client(SOURCE_ID), client(TARGET_ID), targetOrg);
+      }
+
+      verify(targetContact).setCurrency(orgCurrency);
+      verify(obDal).save(targetContact);
+    }
+  }
+
+  @Test
+  void contactCopyFailsLoudlyWhenNoCurrencyCanBeResolved() throws Exception {
+    Organization targetOrg = organization("target-org");
+    BusinessPartner sourceContact = mock(BusinessPartner.class);
+    BusinessPartner targetContact = mock(BusinessPartner.class);
+    givenOneContactToUpsert(sourceContact, targetContact);
+
+    try (MockedStatic<OBCurrencyUtils> currencyUtils = mockStatic(OBCurrencyUtils.class)) {
+      currencyUtils.when(() -> OBCurrencyUtils.getOrgCurrency("target-org")).thenReturn(null);
+      InvocationTargetException failure = assertThrows(InvocationTargetException.class,
+          () -> invokeCopy("copyContacts", Client.class, Client.class, Organization.class,
+              client(SOURCE_ID), client(TARGET_ID), targetOrg));
+      assertTrue(failure.getCause() instanceof IllegalStateException);
+    }
+    verify(obDal, never()).save(targetContact);
+  }
+
+  @Test
+  void pinsTheRuntimeProductFieldOrderAsTheContractForThisModule() {
+    assertEquals(List.of("searchKey", "name", "description", "productType", "uOM",
+        "salesPrice", "purchasePrice", "cost", "costStartingDate", "category"),
+        DemoDataTransferService.PRODUCT_IMPORT_FIELDS);
+  }
+
+  private static Client client(String id) {
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn(id);
+    return client;
+  }
+
+  private static Organization organization(String id) {
+    Organization organization = mock(Organization.class);
+    when(organization.getId()).thenReturn(id);
+    return organization;
+  }
+
+  private static Currency currency(String ownerClientId) {
+    Client owner = client(ownerClientId);
+    Currency currency = mock(Currency.class);
+    when(currency.getClient()).thenReturn(owner);
+    return currency;
+  }
+
+  /** One source contact whose target row already exists, with no addresses or persons. */
+  private OBQuery<BusinessPartner> givenOneContactToUpsert(BusinessPartner sourceContact,
+      BusinessPartner targetContact) {
     OBQuery<BusinessPartner> sourceContacts = queryWithList(List.of(sourceContact));
     OBQuery<BusinessPartner> existingTarget = queryWithUniqueResult(targetContact);
     when(obDal.createQuery(eq(BusinessPartner.class), anyString()))
@@ -467,31 +627,7 @@ class DemoDataTransferServiceTest {
     when(obDal.createQuery(eq(org.openbravo.model.common.geography.Location.class), anyString()))
         .thenReturn(emptyAddresses);
     when(obDal.createQuery(eq(User.class), anyString())).thenReturn(emptyUsers, emptyUsers);
-
-    invokeCopy("copyContacts", Client.class, Client.class, Organization.class, source, target, targetOrg);
-
-    verify(existingTarget).setNamedParameter("clientId", TARGET_ID);
-    verify(obProvider, never()).get(BusinessPartner.class);
-    verify(targetContact).setSearchKey("CONTACT-001");
-    verify(targetContact).setTaxID("");
-    verify(obDal).save(targetContact);
-    // The organization's fiscal address shares the table: only contact addresses are reusable.
-    verify(obDal).createQuery(eq(org.openbravo.model.common.geography.Location.class),
-        contains("BusinessPartnerLocation"));
-    verify(sessionHandler, times(3)).commitAndStart();
-  }
-
-  @Test
-  void pinsTheRuntimeProductFieldOrderAsTheContractForThisModule() {
-    assertEquals(List.of("searchKey", "name", "description", "productType", "uOM",
-        "salesPrice", "purchasePrice", "cost", "costStartingDate", "category"),
-        DemoDataTransferService.PRODUCT_IMPORT_FIELDS);
-  }
-
-  private static Client client(String id) {
-    Client client = mock(Client.class);
-    when(client.getId()).thenReturn(id);
-    return client;
+    return existingTarget;
   }
 
   private static Preference preference(String value) {

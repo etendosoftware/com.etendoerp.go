@@ -27,7 +27,6 @@ import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.when;
 
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
@@ -45,6 +44,8 @@ import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
 /**
  * Unit tests for {@link NeoReadPredicates} (ETP-5009): the single place every generic list read
  * asks an entity's customization for the predicates its rows must satisfy.
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoReadPredicates
  */
 @DisplayName("NeoReadPredicates — customization read predicates (ETP-5009)")
 class NeoReadPredicatesTest {
@@ -138,6 +139,43 @@ class NeoReadPredicatesTest {
 
       assertEquals(Collections.emptyList(), plain.readPredicates(context(QUALIFIER)));
       assertNull(NeoReadPredicates.resolve(context(QUALIFIER), NeoExtensionChannel.REST_SINGLE));
+    }
+  }
+
+  // ---- resolveFilterAliases (ETP-5705) ----
+
+  /**
+   * The aliases come from the same customization the predicates do, and every way of declaring
+   * nothing — no customization, the default method, a {@code null} map — reads as an empty map,
+   * so the MCP where builder never has to guard against {@code null}.
+   */
+  @Test
+  @DisplayName("resolveFilterAliases — the customization's map, else an empty map")
+  void resolveFilterAliasesReturnsTheDeclaredMapOrEmpty() {
+    Map<String, String> declared = Map.of("shown", "storedTwin");
+    NeoHandler aliasing = mock(NeoHandler.class);
+    when(aliasing.filterAliases(any())).thenReturn(declared);
+    NeoHandler nullMap = mock(NeoHandler.class);
+    when(nullMap.filterAliases(any())).thenReturn(null);
+    NeoHandler plain = new NeoHandler() {
+      @Override
+      public NeoResponse handle(NeoContext context) {
+        return null;
+      }
+    };
+    try (MockedStatic<NeoExtensionDispatcher> dispatcher =
+             mockStatic(NeoExtensionDispatcher.class)) {
+      dispatcher.when(() -> NeoExtensionDispatcher.resolveOnly(any()))
+          .thenReturn(aliasing, nullMap, plain, null);
+
+      assertEquals(declared,
+          NeoReadPredicates.resolveFilterAliases(context(QUALIFIER), NeoExtensionChannel.MCP));
+      for (int i = 0; i < 3; i++) {
+        assertEquals(Collections.emptyMap(),
+            NeoReadPredicates.resolveFilterAliases(context(QUALIFIER), NeoExtensionChannel.MCP));
+      }
+      assertEquals(Collections.emptyMap(),
+          NeoReadPredicates.resolveFilterAliases(null, NeoExtensionChannel.MCP));
     }
   }
 
@@ -417,40 +455,6 @@ class NeoReadPredicatesTest {
       dispatcher.when(() -> NeoExtensionDispatcher.resolveOnly(any())).thenReturn(null);
 
       assertNull(NeoReadPredicates.forRestListGet(context(QUALIFIER)));
-    }
-  }
-
-  // ---- addRestTo ----
-
-  @Test
-  @DisplayName("addRestTo — The resolved predicate is added parenthesised")
-  void addRestToAddsWrappedPredicate() {
-    NeoHandler customization = declaring(List.of("e.a = 1", "e.b = 2"));
-    try (MockedStatic<NeoExtensionDispatcher> dispatcher =
-             mockStatic(NeoExtensionDispatcher.class)) {
-      dispatcher.when(() -> NeoExtensionDispatcher.resolveOnly(any()))
-          .thenReturn(customization);
-      List<String> predicates = new ArrayList<>(List.of("e.existing = true"));
-
-      NeoReadPredicates.addRestTo(predicates, context(QUALIFIER));
-
-      assertEquals(List.of("e.existing = true", "((e.a = 1) and (e.b = 2))"), predicates);
-    }
-  }
-
-  @Test
-  @DisplayName("addRestTo — Nothing is added when no predicate is declared")
-  void addRestToAddsNothingWhenNone() {
-    NeoHandler customization = declaring(Collections.emptyList());
-    try (MockedStatic<NeoExtensionDispatcher> dispatcher =
-             mockStatic(NeoExtensionDispatcher.class)) {
-      dispatcher.when(() -> NeoExtensionDispatcher.resolveOnly(any()))
-          .thenReturn(customization);
-      List<String> predicates = new ArrayList<>(List.of("e.existing = true"));
-
-      NeoReadPredicates.addRestTo(predicates, context(QUALIFIER));
-
-      assertEquals(List.of("e.existing = true"), predicates);
     }
   }
 

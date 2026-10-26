@@ -17,10 +17,19 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.util.LinkedHashMap;
+import java.util.Map;
+
 import javax.inject.Inject;
 import javax.inject.Named;
 
+import org.openbravo.model.common.businesspartner.Location;
+import org.openbravo.model.common.order.Order;
+
 import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
+import org.openbravo.base.structure.BaseOBObject;
+import java.util.Set;
 
 /**
  * NeoHandler for the Sales Order header entity.
@@ -65,6 +74,51 @@ public class SalesOrderHeaderHandler extends AbstractOrderHeaderHandler {
   @Inject
   private TotalDiscountService totalDiscountService;
 
+  /**
+   * ETP-5840: the rate is the one valid on the {@code orderDate} ({@code DateOrdered}), shown as
+   * "Order date". Order-family rules in {@link DocumentRateGuards#guardOrderHeader}.
+   */
+  static final DocumentCurrencyRate.RateType RATE_TYPE = new DocumentCurrencyRate.RateType(
+      Order.ENTITY_NAME, Order.PROPERTY_ETGOCURRENCYRATE, Order.PROPERTY_ORDERDATE,
+      DocumentRateMessages.LABEL_ORDER_DATE);
+
+  private final DocumentCurrencyRate currencyRate = new DocumentCurrencyRate(RATE_TYPE);
+
+  @Override
+  protected DocumentCurrencyRate currencyRate() {
+    return currencyRate;
+  }
+
+  /**
+   * The actions this header serves through its delegates, declared for agents (ETP-5709):
+   * {@code createShipment}, {@code createDraftInvoice} and {@code cloneRecord}. Published by the
+   * MCP next to the AD buttons; REST and the SPA do not read it.
+   */
+  @Override
+  public Map<String, NeoActionContract> actionContracts() {
+    Map<String, NeoActionContract> contracts = new LinkedHashMap<>();
+    contracts.put(CreateShipmentHandler.CONTRACT.getName(), CreateShipmentHandler.CONTRACT);
+    contracts.put(CreateDraftInvoiceHandler.ORDER_CONTRACT.getName(),
+        CreateDraftInvoiceHandler.ORDER_CONTRACT);
+    contracts.put(NeoCloneRecordHandler.CONTRACT.getName(), NeoCloneRecordHandler.CONTRACT);
+    return contracts;
+  }
+
+  /**
+   * {@inheritDoc} The order header adds {@code hasLinkedDocuments}, {@code needsPrimaryDoc} and
+   * {@code needsInvoiceDoc} to every GET record (ETP-5714).
+   */
+  @Override
+  public Set<String> responseEnrichedFields() {
+    return OrderDocumentAvailability.RESPONSE_ENRICHED_FIELDS;
+  }
+
+  /** {@inheritDoc} Reactivate is ruled out for an order that has linked documents (ETP-5714). */
+  @Override
+  public Map<String, String> unavailableActions(BaseOBObject subject) {
+    return OrderDocumentAvailability.unavailable(subject);
+  }
+
   @Override
   public NeoResponse handle(NeoContext context) {
     NeoResponse paymentMethodSelector = PaymentMethodSelectorSupport.handleIfPaymentMethodSelector(context,
@@ -78,7 +132,22 @@ public class SalesOrderHeaderHandler extends AbstractOrderHeaderHandler {
     if (reactivationRefusal != null) {
       return reactivationRefusal;
     }
+    // ETP-5703: a create that names a business partner but no address (an agent; the SPA always
+    // sends one) gets the partner's only ship-to location — the AD rule of
+    // C_Order.C_BPartner_Location_ID is "C_BPartner Location - Ship To" — and, only then, a bill-to
+    // for BillTo_ID ("C_BPartner Location - Bill To") that is never left empty (see
+    // PartnerLocationDefaults#alignBillTo). REST single and batch; etendo_create keeps its 422
+    // (declared divergence, neo-headless.md §4.12.9).
+    PartnerLocationDefaults.fillShipToAndBillTo(context, Order.PROPERTY_PARTNERADDRESS,
+        Location.PROPERTY_SHIPTOADDRESS, Order.PROPERTY_INVOICEADDRESS,
+        Location.PROPERTY_INVOICETOADDRESS);
     AbstractOrderHeaderHandler.mirrorAccountingDate(context);
+    // ETP-5840: exchange rate — recalculation, save and completion validation — before anything
+    // with side effects runs.
+    NeoResponse rateRefusal = DocumentRateGuards.guardOrderHeader(context, currencyRate);
+    if (rateRefusal != null) {
+      return rateRefusal;
+    }
     AbstractOrderHeaderHandler.applyTotalDiscountBeforeComplete(context, totalDiscountService, false);
     return NeoHeaderActionRouter.dispatch(
         context,

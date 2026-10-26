@@ -23,12 +23,16 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 import javax.inject.Inject;
 import javax.inject.Named;
+
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -65,6 +69,14 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
       "       AND rl.isactive = 'Y' AND r.isactive = 'Y'" +
       "       AND r.docstatus <> 'VO'" +
       "   )";
+  /**
+   * Restricts an aggregation arm to the requested shipment's lines. It is applied to each arm's
+   * own {@code GROUP BY} key ({@code m_inoutline_id}), so whole groups are kept or dropped and no
+   * sum changes; the planner can then drive the arm from the shipment instead of aggregating every
+   * invoice in the instance (ETP-5653).
+   */
+  private static final String SHIPMENT_LINES_FILTER =
+      " IN (SELECT m_inoutline_id FROM shipment_lines)";
   private static final String FIELD_DOCUMENT_NO = "documentNo";
   private static final String FIELD_DOCUMENT_STATUS = "documentStatus";
   private static final String FIELD_MOVEMENT_DATE = "movementDate";
@@ -86,11 +98,60 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
   private CreateReturnReceiptHandler createReturnReceiptHandler;
 
   @Inject
+  private ImportOrderLinesIntoInOutHandler importOrderLinesHandler;
+
+  @Inject
   private DocumentPostingService postingService;
 
   /** Package-private seam so unit tests can inject a mocked {@link DocumentPostingService}. */
   void setPostingService(DocumentPostingService postingService) {
     this.postingService = postingService;
+  }
+
+  /**
+   * The actions this header serves AND declares for agents (ETP-5709): {@code documentAction}
+   * (CO only, {@link InOutCompletionContract}), {@code createDraftInvoice} (shipment to sales
+   * invoice, {@link CreateDraftInvoiceHandler#SHIPMENT_CONTRACT}), {@code createReturn} (ETP-5711,
+   * {@link CreateReturnReceiptHandler#CONTRACT}), the order import ({@code availableOrders},
+   * {@code availableOrderLines}, {@code importOrderLines},
+   * {@link ImportOrderLinesIntoInOutHandler}, ETP-5713) and {@code cloneRecord}.
+   * {@code createDraftInvoice} is declared because the classic {@code Invoicefromshipment} button
+   * bypasses the guards of that path (status check, nothing-pending 400, scoping to the
+   * shipment's own lines, honoured partial {@code lines}); MCP_CONFIG redirects the button to it.
+   * Published by the MCP next to the AD buttons; REST and the SPA do not read it.
+   */
+  @Override
+  public Map<String, NeoActionContract> actionContracts() {
+    Map<String, NeoActionContract> contracts = new LinkedHashMap<>();
+    contracts.put(InOutCompletionContract.CONTRACT.getName(), InOutCompletionContract.CONTRACT);
+    contracts.putAll(ImportOrderLinesIntoInOutHandler.contracts(true));
+    contracts.put(CreateDraftInvoiceHandler.SHIPMENT_CONTRACT.getName(),
+        CreateDraftInvoiceHandler.SHIPMENT_CONTRACT);
+    contracts.put(CreateReturnReceiptHandler.CONTRACT.getName(),
+        CreateReturnReceiptHandler.CONTRACT);
+    contracts.put(NeoCloneRecordHandler.CONTRACT.getName(), NeoCloneRecordHandler.CONTRACT);
+    contracts.putAll(GoodsPostingContracts.CONTRACTS);
+    return contracts;
+  }
+
+  /**
+   * The keys {@link #afterHandle} adds to a GET record that no spec field backs (ETP-5714):
+   * {@code invoiceStatus} (0 to 100: the percentage of the shipment already invoiced),
+   * {@code linkedOrders}, {@code linkedInvoices}, {@code returnReceipts}, {@code canCreateReturn},
+   * {@code issuerOrg} and the resolved price list. Declared so an MCP {@code fields:[…]}
+   * projection does not report them in {@code unknownFields} while the same response carries them.
+   */
+  static final Set<String> RESPONSE_ENRICHED_FIELDS = Set.of(FIELD_INVOICE_STATUS,
+      FIELD_LINKED_ORDERS, "linkedInvoices", "returnReceipts", "canCreateReturn", "issuerOrg",
+      FIELD_RESOLVED_PRICE_LIST_ID, FIELD_RESOLVED_PRICE_LIST_IDENTIFIER);
+
+  /**
+   * {@inheritDoc} The keys {@link #afterHandle} adds to a GET record (see
+   * {@link #RESPONSE_ENRICHED_FIELDS}).
+   */
+  @Override
+  public Set<String> responseEnrichedFields() {
+    return RESPONSE_ENRICHED_FIELDS;
   }
 
   @Override
@@ -111,7 +172,8 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
       return null; // let NEO native process handle completion
     }
     return NeoHeaderActionRouter.dispatch(context,
-        createDraftInvoiceHandler, neoCloneRecordHandler, createReturnReceiptHandler);
+        createDraftInvoiceHandler, neoCloneRecordHandler, createReturnReceiptHandler,
+        importOrderLinesHandler);
   }
 
   /**
@@ -438,7 +500,15 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
   }
 
   private static String buildInvoiceStatusSql(String whereClause) {
+    // The requested shipment's lines are resolved once, in a CTE, so `whereClause` keeps its
+    // placeholders exactly once and every arm can be restricted to that set. The restriction is
+    // applied to each arm's own GROUP BY key, so it keeps or drops whole groups and the sums are
+    // unchanged — it only spares the planner from aggregating every invoice in the instance.
     return
+      "WITH shipment_lines AS ( " +
+      "  SELECT iol.m_inoutline_id FROM m_inoutline iol " +
+      "  WHERE iol.isactive = 'Y' AND " + whereClause + " " +
+      ") " +
       "SELECT iol.m_inout_id, " +
       "  CASE WHEN SUM(ABS(iol.movementqty)) = 0 THEN 0 " +
       "       ELSE LEAST(100, ROUND( " +
@@ -456,6 +526,7 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
       "  JOIN c_invoiceline il ON il.c_invoiceline_id = msi.c_invoiceline_id " +
       "  JOIN c_invoice i ON i.c_invoice_id = il.c_invoice_id " +
       "  WHERE i.docstatus NOT IN ('VO','CL','DR') AND i.isactive = 'Y' " +
+      "    AND msi.m_inoutline_id" + SHIPMENT_LINES_FILTER + " " +
       "  GROUP BY msi.m_inoutline_id " +
       ") msi_qty ON msi_qty.m_inoutline_id = iol.m_inoutline_id " +
       "LEFT JOIN ( " +
@@ -463,6 +534,7 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
       "  FROM c_invoiceline il2 " +
       "  JOIN c_invoice i2 ON i2.c_invoice_id = il2.c_invoice_id " +
       "  WHERE i2.docstatus NOT IN ('VO','CL','DR') AND i2.isactive = 'Y' " +
+      "    AND il2.m_inoutline_id" + SHIPMENT_LINES_FILTER + " " +
       "  GROUP BY il2.m_inoutline_id " +
       ") direct_qty ON direct_qty.m_inoutline_id = iol.m_inoutline_id " +
       // Invoice created from the order (m_inoutline_id is NULL on the invoice line):
@@ -476,9 +548,10 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
       "  WHERE i3.docstatus NOT IN ('VO','CL','DR') AND i3.isactive = 'Y' " +
       "    AND il3.c_orderline_id IS NOT NULL " +
       "    AND il3.m_inoutline_id IS NULL " +
+      "    AND iol2.m_inoutline_id" + SHIPMENT_LINES_FILTER + " " +
       "  GROUP BY iol2.m_inoutline_id " +
       ") ol_qty ON ol_qty.m_inoutline_id = iol.m_inoutline_id " +
-      "WHERE iol.isactive = 'Y' AND " + whereClause + " " +
+      "WHERE iol.m_inoutline_id" + SHIPMENT_LINES_FILTER + " " +
       "GROUP BY iol.m_inout_id";
   }
 

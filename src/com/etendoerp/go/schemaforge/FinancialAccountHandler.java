@@ -17,6 +17,7 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -153,6 +154,9 @@ public class FinancialAccountHandler implements NeoHandler {
   private static final String FIELD_LAST_SYNC_DATE = "lastSyncDate";
   /** Soft-disconnected but still linked to Salt Edge — drives the "Reconectar" action. */
   private static final String FIELD_BANK_RECONNECTABLE = "bankReconnectable";
+  /** Still connected, but the active connection stopped refreshing (ETP-5089) — drives the stale
+   *  warning and the "Reconectar" action on a connected account. Not the same as reconnectable. */
+  private static final String FIELD_BANK_CONNECTION_STALE = "bankConnectionStale";
   /** {@code PSD2_Provider.Logo_Url} of the connected provider; blank when there is none. Also the
    *  transient create-body key (ETP-5521) carrying the logo of the Salt Edge provider picked in the
    *  offline bank picker — see {@link FinancialAccountProviderEnricher}. */
@@ -227,14 +231,23 @@ public class FinancialAccountHandler implements NeoHandler {
   FinancialAccountTransferActions transferActions = new FinancialAccountTransferActions();
 
   /**
-   * The movement and funds-transfer actions of the account, declared for agents (ETP-5558): the
-   * SPA runs them through {@code financial-account-transactions}, a spec the MCP does not serve.
+   * The account's bank disconnection as declared actions (ETP-5804). Swappable like the above, so
+   * unit tests can run it over a stubbed bank connection endpoint.
+   */
+  FinancialAccountBankConnectionActions bankConnectionActions =
+      new FinancialAccountBankConnectionActions();
+
+  /**
+   * The movement, funds-transfer and bank disconnection actions of the account, declared for
+   * agents (ETP-5558, ETP-5804): the SPA runs them through {@code financial-account-transactions}
+   * and {@code financial-account-bank-connection}, specs the MCP does not serve.
    */
   @Override
   public Map<String, NeoActionContract> actionContracts() {
     Map<String, NeoActionContract> contracts =
         new LinkedHashMap<>(FinancialAccountMovementActions.actionContracts());
     contracts.putAll(FinancialAccountTransferActions.actionContracts());
+    contracts.putAll(FinancialAccountBankConnectionActions.actionContracts());
     return contracts;
   }
 
@@ -251,6 +264,10 @@ public class FinancialAccountHandler implements NeoHandler {
       NeoResponse transfer = transferActions.handle(context);
       if (transfer != null) {
         return transfer;
+      }
+      NeoResponse bankConnection = bankConnectionActions.handle(context);
+      if (bankConnection != null) {
+        return bankConnection;
       }
     }
     if (!NeoEndpointTypes.isCrud(context)) {
@@ -292,6 +309,70 @@ public class FinancialAccountHandler implements NeoHandler {
   // Post-hook: auto-assign default payment methods by account type on create
   // ---------------------------------------------------------------------------
 
+  private static boolean isUpdateMethod(String method) {
+    return METHOD_PUT.equals(method) || METHOD_PATCH.equals(method);
+  }
+
+  /**
+   * ETP-5805. When a PUT/PATCH sets {@code pSD2ImportFromDate} beyond the bank's history, the save
+   * stands and the response gains a non-blocking warning in the {@code messages} envelope
+   * (ETP-5703). Gated on the field being in the request, so the SPA's generic form (which never
+   * sends it) is untouched. Best-effort: never breaks the save.
+   */
+  private void addImportFromAdvisory(NeoContext context) {
+    // Cheap gating first, so the normal SPA save (no such field) never touches the admin-mode stack.
+    JSONObject request = context.getRequestBody();
+    NeoResponse prev = context.getPreviousResult();
+    if (request == null || !request.has("pSD2ImportFromDate") || prev == null
+        || prev.getBody() == null || StringUtils.isBlank(context.getRecordId())) {
+      return;
+    }
+    // The post-hook also runs on a failed write (previousResult is then the error response): a
+    // save that did not happen gets no advisory.
+    if (prev.getHttpStatus() < 200 || prev.getHttpStatus() >= 300) {
+      return;
+    }
+    LocalDate importFromDay = requestedCalendarDay(request.optString("pSD2ImportFromDate", null));
+    if (importFromDay == null) {
+      return;
+    }
+    enterAdminMode();
+    try {
+      FIN_FinancialAccount account = loadAccount(context.getRecordId());
+      if (account == null) {
+        return;
+      }
+      FinancialAccountBankConnectionSupport.FetchIntervalExceeded exceeded =
+          FinancialAccountBankConnectionSupport.findImportFromBeyondFetchInterval(account,
+              importFromDay, LocalDate.now());
+      if (exceeded != null) {
+        NeoHints.addMessage(prev.getBody(), context.isMcpOrigin(), NeoHints.TYPE_WARNING,
+            FinancialAccountBankConnectionSupport.fetchIntervalExceededText(exceeded,
+                com.etendoerp.go.schemaforge.util.NeoLanguage.currentCode()));
+      }
+    } catch (Exception e) {
+      log.error("financial-account afterHandle: failed to evaluate the import-from advisory", e);
+    } finally {
+      exitAdminMode();
+    }
+  }
+
+  /**
+   * The calendar day the caller sent. Taken from the request string, not from the persisted
+   * {@code Date}: the generic CRUD stores a {@code yyyy-MM-dd} at local midnight, so reading it back
+   * in another zone could shift the day.
+   */
+  private static LocalDate requestedCalendarDay(String raw) {
+    if (raw == null || raw.trim().length() < 10) {
+      return null;
+    }
+    try {
+      return LocalDate.parse(raw.trim().substring(0, 10));
+    } catch (java.time.format.DateTimeParseException e) {
+      return null;
+    }
+  }
+
   /**
    * After the generic CRUD persists a new financial account, link the default
    * payment methods that correspond to its type via
@@ -310,6 +391,13 @@ public class FinancialAccountHandler implements NeoHandler {
     }
     if (METHOD_GET.equals(context.getHttpMethod()) && NeoEndpointType.CRUD.equals(context.getEndpointType())) {
       return injectHasTransactions(context);
+    }
+    if (isUpdateMethod(context.getHttpMethod()) && NeoEndpointType.CRUD.equals(context.getEndpointType())) {
+      if (!ENTITY_ACCOUNT.equals(context.getEntityName())) {
+        return null;
+      }
+      addImportFromAdvisory(context);
+      return null;
     }
     if (!METHOD_POST.equals(context.getHttpMethod()) || !NeoEndpointTypes.isCrud(context)) {
       // ETP-5468: a POST to a sub-endpoint (button action, callout) did not create an account,
@@ -542,6 +630,7 @@ public class FinancialAccountHandler implements NeoHandler {
         ? FinancialAccountBankConnectionSupport.formatInstant(row.lastSyncDate)
         : JSONObject.NULL);
     rec.put(FIELD_BANK_RECONNECTABLE, row.bankReconnectable);
+    rec.put(FIELD_BANK_CONNECTION_STALE, row.bankConnectionStale);
     rec.put(FIELD_PROVIDER_LOGO_URL, row.providerLogoUrl);
     rec.put(FIELD_BANK_CONNECTION_PENDING, row.bankConnectionPending);
     rec.put(FIELD_CURRENCY_ISO, row.currency.iso);

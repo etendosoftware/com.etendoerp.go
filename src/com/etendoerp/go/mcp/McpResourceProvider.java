@@ -235,11 +235,7 @@ public class McpResourceProvider {
       }
     }
 
-    OBCriteria<SFEntity> entityCriteria = OBDal.getInstance().createCriteria(SFEntity.class);
-    entityCriteria.add(Restrictions.eq(SFEntity.PROPERTY_ETGOSFSPEC + ".id", spec.getId()));
-    entityCriteria.add(Restrictions.eq(SFEntity.PROPERTY_ISACTIVE, true));
-    entityCriteria.add(Restrictions.eq(SFEntity.PROPERTY_ISINCLUDED, true));
-    specObj.put("entityCount", entityCriteria.list().size());
+    specObj.put("entityCount", McpToolRouterSupport.listVisibleEntities(spec.getId()).size());
     return specObj;
   }
 
@@ -274,7 +270,7 @@ public class McpResourceProvider {
 
     // Query entities
     JSONArray entitiesArray = new JSONArray();
-    for (SFEntity entity : McpToolRouterSupport.listIncludedEntities(spec.getId())) {
+    for (SFEntity entity : McpToolRouterSupport.listVisibleEntities(spec.getId())) {
       JSONObject entityObj = buildEntityJson(entity, true);
       entitiesArray.put(entityObj);
     }

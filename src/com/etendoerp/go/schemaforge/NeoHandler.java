@@ -23,6 +23,8 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
+import org.openbravo.base.structure.BaseOBObject;
+
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import com.etendoerp.go.schemaforge.util.NeoReportParam;
 
@@ -117,6 +119,36 @@ public interface NeoHandler {
   }
 
   /**
+   * Declares list-filter keys that must be evaluated on another property of the same entity
+   * (ETP-5705).
+   *
+   * <p><b>Why this exists.</b> A handler that rewrites a value in {@link #afterHandle} changes
+   * what the caller sees, but not what the query filters on: the filter still runs against the
+   * raw database value. When the two differ, a filter matches rows whose displayed value does not
+   * satisfy it, and misses rows whose displayed value does — with a 200 and nothing to say so. A
+   * customization that keeps a second property holding the displayed value (canonically a stored
+   * computed twin of a virtual column) maps the displayed property to it here, and the filter is
+   * evaluated on that property instead.</p>
+   *
+   * <p><b>Contract.</b> Keys and values are DAL property names of the entity being read; the
+   * caller may still spell the key as its DB column name. Both properties must have the same type.
+   * The filter is rendered as {@code coalesce(<target>, <key>)}, so a row whose target has not
+   * been computed yet falls back to the key's own value rather than dropping out of the result.
+   * The target is not checked against the spec's excluded fields: the condition only ever
+   * compares the value the caller is already shown.</p>
+   *
+   * <p><b>Where it is applied.</b> MCP {@code etendo_list} only, and the response says so when it
+   * happens. The REST list does not consult it — the SPA filters on the stored columns directly —
+   * a divergence declared in {@code docs/neo-headless.md} §4.12.9.</p>
+   *
+   * @param context the read context: spec, entity, {@code GET}, no record id, the query params
+   * @return displayed property name to the property the filter is evaluated on; empty by default
+   */
+  default Map<String, String> filterAliases(NeoContext context) {
+    return Collections.emptyMap();
+  }
+
+  /**
    * Whether the current role may reach the surface this handler serves.
    *
    * <p>Only meaningful for handlers that own their own access rule — today the report handlers,
@@ -181,6 +213,44 @@ public interface NeoHandler {
    */
   default Set<String> serverResolvedCreateFields() {
     return Collections.emptySet();
+  }
+
+  /**
+   * Fills create-body defaults that this customization can derive from the body alone, on the
+   * channels whose mandatory-field pre-check runs <b>before</b> the pre-hook (ETP-5710).
+   *
+   * <p>MCP {@code etendo_create} validates mandatory fields before it dispatches the pre-hook
+   * ({@link #handle}), so a default that only {@code handle()} fills is refused there with a 422
+   * the REST channels never produce. The MCP create path therefore calls this method on the
+   * resolved customization right before that pre-check. The default is a no-op, so an entity that
+   * does not override it behaves exactly as before.</p>
+   *
+   * <p>Contract: <b>idempotent</b> (the same logic may also run later from {@code handle()}),
+   * <b>never overwrites</b> a value the caller sent, and <b>never throws</b> for missing data —
+   * when the value cannot be established it abstains and leaves the body untouched, so the
+   * pre-check still reports the field. The body is {@link NeoContext#getRequestBody()}, mutated
+   * in place.</p>
+   *
+   * @param context a CRUD {@code POST} create context carrying the live request body
+   */
+  default void resolveServerCreateFields(NeoContext context) {
+    // no-op by default
+  }
+
+  /**
+   * Declares the create-body directives this customization reads and removes in its pre-hook,
+   * each with a one-line description for an agent (ETP-5676).
+   *
+   * <p>A directive is a request option, not a field: an underscore-prefixed body key that tunes
+   * what the customization does around the write (e.g. the product's {@code _skipPricesSeed}).
+   * The customization strips it in {@link #handle} so it never reaches the field filter or the
+   * DAL. Declaring it here is what lets the MCP write verbs accept it without reporting it in
+   * {@code unknownFields}, and {@code etendo_schema(view:"create")} publish it.</p>
+   *
+   * @return directive name to description; empty by default
+   */
+  default Map<String, String> createDirectives() {
+    return Collections.emptyMap();
   }
 
   /**
@@ -252,6 +322,48 @@ public interface NeoHandler {
    */
   default Map<String, NeoActionContract> actionContracts() {
     return Collections.emptyMap();
+  }
+
+  /**
+   * Declares, for one concrete record, the actions that do not apply to it for a reason a column
+   * value cannot express (ETP-5714).
+   *
+   * <p>The static part of availability ({@code NeoActionContract#availableWhen}, the
+   * {@code MCP_CONFIG.actions} {@code availableWhen}) compares record properties with allowed
+   * values. Some rules depend on other rows: a return can be invoiced only while it has no
+   * corrective invoice yet, an order can be reactivated only while nothing is linked to it. The
+   * customization that owns the rule answers here, with one sentence per action.</p>
+   *
+   * <p>Advisory, like the rest of availability: {@code etendo_schema(view:"actions")} reports the
+   * entry as {@code availableNow:false} with the sentence as {@code unavailableReason} when it is
+   * asked about a record. It never refuses a call, so the handler's own guard stays the
+   * enforcement. An implementation must not throw for a record it cannot judge: it omits the
+   * action instead.</p>
+   *
+   * @param subject the record the agent asked about
+   * @return {@code action name → reason}; empty by default
+   */
+  default Map<String, String> unavailableActions(BaseOBObject subject) {
+    return Collections.emptyMap();
+  }
+
+  /**
+   * Whether reactivating one of this entity's posted records first un-posts it, exactly as the
+   * SPA's Reactivate does for it (ETP-5715).
+   *
+   * <p>Opt-in on purpose: reversing a document's accounting is not something a reactivation does
+   * everywhere. The SPA un-posts first only in the sales and purchase invoice windows
+   * ({@code preUnpost: true}); goods documents, returns and journals never do, so a customization
+   * answers {@code true} only for the windows whose SPA does. The MCP then un-posts through the
+   * entity's declared {@code unpost} action before a {@code documentAction} {@code RE}, in
+   * {@code etendo_action} and {@code etendo_action_batch} alike. MCP only: REST and the SPA ignore
+   * it, because the SPA already sends the un-post itself.</p>
+   *
+   * @return {@code true} when a posted record is un-posted before it is reactivated; {@code false}
+   *         by default
+   */
+  default boolean unpostBeforeReactivate() {
+    return false;
   }
 
   /**

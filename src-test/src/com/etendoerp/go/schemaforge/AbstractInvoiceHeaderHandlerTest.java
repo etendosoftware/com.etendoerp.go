@@ -58,6 +58,7 @@ import org.openbravo.erpCommon.utility.OBCurrencyUtils;
 import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.ad.ui.Process;
+import org.openbravo.model.common.businesspartner.Location;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.enterprise.Organization;
@@ -81,6 +82,7 @@ import org.openbravo.model.common.invoice.ReversedInvoice;
  * </ul>
  *
  * @covers com.etendoerp.go.schemaforge.AbstractInvoiceHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.DocumentRateGuards
  */
 public class AbstractInvoiceHeaderHandlerTest {
 
@@ -145,7 +147,8 @@ public class AbstractInvoiceHeaderHandlerTest {
     }
 
     public NeoResponse callHandleInvoiceAfterCallout(NeoContext ctx) {
-      return handleInvoiceAfterCallout(ctx);
+      return handleInvoiceAfterCallout(ctx,
+          new DocumentCurrencyRate(SalesInvoiceHeaderHandler.RATE_TYPE));
     }
 
     public void callEnrichIsRectificative(JSONObject rec) throws Exception {
@@ -1802,278 +1805,6 @@ public class AbstractInvoiceHeaderHandlerTest {
     assertEquals("dt-user-chosen", updates.getString("transactionDocument"));
   }
 
-  // ── ETP-4029: checkExchangeRateWarning ───────────────────────────────────────
-
-  @Test
-  public void checkExchangeRateWarning_nullFormState_noop() throws Exception {
-    JSONObject body = new JSONObject();
-    JSONObject requestBody = new JSONObject().put("value", "usd-id");
-
-    AbstractInvoiceHeaderHandler.checkExchangeRateWarning(body, requestBody, null, "currency");
-
-    assertTrue(!body.has("messages"));
-  }
-
-  @Test
-  public void checkExchangeRateWarning_triggerFieldNotCurrency_noop() throws Exception {
-    JSONObject body = new JSONObject();
-    JSONObject requestBody = new JSONObject().put("value", "usd-id");
-    JSONObject formState = new JSONObject()
-        .put("currencyid", "usd-id").put("invoiceDate", "2026-07-01");
-
-    AbstractInvoiceHeaderHandler.checkExchangeRateWarning(body, requestBody, formState, "businessPartner");
-
-    assertTrue(!body.has("messages"));
-  }
-
-  @Test
-  public void checkExchangeRateWarning_currencyChangeNoRateAvailable_appendsWarning() throws Exception {
-    JSONObject body = new JSONObject();
-    JSONObject requestBody = new JSONObject().put("value", "usd-id");
-    JSONObject formState = new JSONObject()
-        .put("currencyid", "usd-id").put("invoiceDate", "2026-07-01");
-
-    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
-         MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class);
-         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
-
-      OBContext obContext = mock(OBContext.class);
-      Organization org = mock(Organization.class);
-      Client client = mock(Client.class);
-      ctxMock.when(OBContext::getOBContext).thenReturn(obContext);
-      when(obContext.getCurrentOrganization()).thenReturn(org);
-      when(obContext.getCurrentClient()).thenReturn(client);
-      when(org.getId()).thenReturn("org-1");
-      when(client.getId()).thenReturn("client-1");
-
-      curMock.when(() -> OBCurrencyUtils.getOrgCurrency("org-1")).thenReturn("eur-id");
-
-      // hasConversionRate queries via OBDal.getInstance().getConnection() — return no rows.
-      OBDal dal = mock(OBDal.class);
-      dalMock.when(OBDal::getInstance).thenReturn(dal);
-      Connection conn = mock(Connection.class);
-      PreparedStatement ps = mock(PreparedStatement.class);
-      ResultSet rs = mock(ResultSet.class);
-      when(dal.getConnection()).thenReturn(conn);
-      when(conn.prepareStatement(anyString())).thenReturn(ps);
-      when(ps.executeQuery()).thenReturn(rs);
-      when(rs.next()).thenReturn(false); // no conversion rate found
-
-      AbstractInvoiceHeaderHandler.checkExchangeRateWarning(body, requestBody, formState, "currency");
-
-      assertTrue(body.has("messages"));
-      org.codehaus.jettison.json.JSONArray messages = body.getJSONArray("messages");
-      assertEquals(1, messages.length());
-      assertEquals("WARNING", messages.getJSONObject(0).getString("type"));
-      assertEquals("noExchangeRateAvailable", messages.getJSONObject(0).getString("text"));
-    }
-  }
-
-  @Test
-  public void checkExchangeRateWarning_currencyChangeRateExists_noWarning() throws Exception {
-    JSONObject body = new JSONObject();
-    JSONObject requestBody = new JSONObject().put("value", "usd-id");
-    JSONObject formState = new JSONObject()
-        .put("currencyid", "usd-id").put("invoiceDate", "2026-07-01");
-
-    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
-         MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class);
-         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
-
-      OBContext obContext = mock(OBContext.class);
-      Organization org = mock(Organization.class);
-      Client client = mock(Client.class);
-      ctxMock.when(OBContext::getOBContext).thenReturn(obContext);
-      when(obContext.getCurrentOrganization()).thenReturn(org);
-      when(obContext.getCurrentClient()).thenReturn(client);
-      when(org.getId()).thenReturn("org-1");
-      when(client.getId()).thenReturn("client-1");
-
-      curMock.when(() -> OBCurrencyUtils.getOrgCurrency("org-1")).thenReturn("eur-id");
-
-      OBDal dal = mock(OBDal.class);
-      dalMock.when(OBDal::getInstance).thenReturn(dal);
-      Connection conn = mock(Connection.class);
-      PreparedStatement ps = mock(PreparedStatement.class);
-      ResultSet rs = mock(ResultSet.class);
-      when(dal.getConnection()).thenReturn(conn);
-      when(conn.prepareStatement(anyString())).thenReturn(ps);
-      when(ps.executeQuery()).thenReturn(rs);
-      when(rs.next()).thenReturn(true); // conversion rate exists
-
-      AbstractInvoiceHeaderHandler.checkExchangeRateWarning(body, requestBody, formState, "currency");
-
-      assertTrue(!body.has("messages"));
-    }
-  }
-
-  @Test
-  public void checkExchangeRateWarning_sameCurrencyAsOrg_noWarning() throws Exception {
-    JSONObject body = new JSONObject();
-    JSONObject requestBody = new JSONObject().put("value", "eur-id");
-    JSONObject formState = new JSONObject()
-        .put("currencyid", "eur-id").put("invoiceDate", "2026-07-01");
-
-    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
-         MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class)) {
-
-      OBContext obContext = mock(OBContext.class);
-      Organization org = mock(Organization.class);
-      ctxMock.when(OBContext::getOBContext).thenReturn(obContext);
-      when(obContext.getCurrentOrganization()).thenReturn(org);
-      when(org.getId()).thenReturn("org-1");
-
-      curMock.when(() -> OBCurrencyUtils.getOrgCurrency("org-1")).thenReturn("eur-id");
-
-      AbstractInvoiceHeaderHandler.checkExchangeRateWarning(body, requestBody, formState, "currency");
-
-      assertTrue(!body.has("messages"));
-    }
-  }
-
-  @Test
-  public void checkExchangeRateWarning_blankInvoiceDate_noWarning() throws Exception {
-    JSONObject body = new JSONObject();
-    JSONObject requestBody = new JSONObject().put("value", "usd-id");
-    JSONObject formState = new JSONObject().put("currencyid", "usd-id").put("invoiceDate", "");
-
-    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
-         MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class)) {
-
-      OBContext obContext = mock(OBContext.class);
-      Organization org = mock(Organization.class);
-      ctxMock.when(OBContext::getOBContext).thenReturn(obContext);
-      when(obContext.getCurrentOrganization()).thenReturn(org);
-      when(org.getId()).thenReturn("org-1");
-
-      curMock.when(() -> OBCurrencyUtils.getOrgCurrency("org-1")).thenReturn("eur-id");
-
-      AbstractInvoiceHeaderHandler.checkExchangeRateWarning(body, requestBody, formState, "currency");
-
-      assertTrue(!body.has("messages"));
-    }
-  }
-
-  @Test
-  public void checkExchangeRateWarning_valueFallsBackToFormStateCurrencyId() throws Exception {
-    // requestBody carries no "value" — must fall back to formState.currencyid.
-    JSONObject body = new JSONObject();
-    JSONObject requestBody = new JSONObject();
-    JSONObject formState = new JSONObject()
-        .put("currencyid", "usd-id").put("invoiceDate", "2026-07-01");
-
-    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
-         MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class);
-         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
-
-      OBContext obContext = mock(OBContext.class);
-      Organization org = mock(Organization.class);
-      Client client = mock(Client.class);
-      ctxMock.when(OBContext::getOBContext).thenReturn(obContext);
-      when(obContext.getCurrentOrganization()).thenReturn(org);
-      when(obContext.getCurrentClient()).thenReturn(client);
-      when(org.getId()).thenReturn("org-1");
-      when(client.getId()).thenReturn("client-1");
-
-      curMock.when(() -> OBCurrencyUtils.getOrgCurrency("org-1")).thenReturn("eur-id");
-
-      OBDal dal = mock(OBDal.class);
-      dalMock.when(OBDal::getInstance).thenReturn(dal);
-      Connection conn = mock(Connection.class);
-      PreparedStatement ps = mock(PreparedStatement.class);
-      ResultSet rs = mock(ResultSet.class);
-      when(dal.getConnection()).thenReturn(conn);
-      when(conn.prepareStatement(anyString())).thenReturn(ps);
-      when(ps.executeQuery()).thenReturn(rs);
-      when(rs.next()).thenReturn(false);
-
-      AbstractInvoiceHeaderHandler.checkExchangeRateWarning(body, requestBody, formState, "currencyid");
-
-      assertTrue(body.has("messages"));
-    }
-  }
-
-  @Test
-  public void checkExchangeRateWarning_rateLookupThrows_failsOpenNoWarning() throws Exception {
-    // NeoExchangeRateService.hasRate returns true (fail-open) on any exception —
-    // so an unexpected DB failure must NOT produce a false warning.
-    JSONObject body = new JSONObject();
-    JSONObject requestBody = new JSONObject().put("value", "usd-id");
-    JSONObject formState = new JSONObject()
-        .put("currencyid", "usd-id").put("invoiceDate", "2026-07-01");
-
-    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
-         MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class);
-         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
-
-      OBContext obContext = mock(OBContext.class);
-      Organization org = mock(Organization.class);
-      Client client = mock(Client.class);
-      ctxMock.when(OBContext::getOBContext).thenReturn(obContext);
-      when(obContext.getCurrentOrganization()).thenReturn(org);
-      when(obContext.getCurrentClient()).thenReturn(client);
-      when(org.getId()).thenReturn("org-1");
-      when(client.getId()).thenReturn("client-1");
-
-      curMock.when(() -> OBCurrencyUtils.getOrgCurrency("org-1")).thenReturn("eur-id");
-
-      OBDal dal = mock(OBDal.class);
-      dalMock.when(OBDal::getInstance).thenReturn(dal);
-      when(dal.getConnection()).thenThrow(new RuntimeException("connection lost"));
-
-      AbstractInvoiceHeaderHandler.checkExchangeRateWarning(body, requestBody, formState, "currency");
-
-      assertTrue(!body.has("messages"));
-    }
-  }
-
-  @Test
-  public void checkExchangeRateWarning_ratesLookupIsClientOrSystemScoped() throws Exception {
-    // ETP-4838 regression: this path used to run a private query filtered by `ad_client_id = ?`
-    // alone, so it stopped finding the shared system ('0') rates once ETP-4474 centralised the
-    // currencyLayer sync there — warning "noExchangeRateAvailable" while the frontend's own
-    // /validate-exchange-rate call, on the very same pair and date, answered hasRate: true.
-    // The delegation to NeoExchangeRateService is what keeps the two answers in sync.
-    JSONObject body = new JSONObject();
-    JSONObject requestBody = new JSONObject().put("value", "gbp-id");
-    JSONObject formState = new JSONObject()
-        .put("currencyid", "gbp-id").put("invoiceDate", "2026-08-07");
-
-    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
-         MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class);
-         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
-
-      OBContext obContext = mock(OBContext.class);
-      Organization org = mock(Organization.class);
-      Client client = mock(Client.class);
-      ctxMock.when(OBContext::getOBContext).thenReturn(obContext);
-      when(obContext.getCurrentOrganization()).thenReturn(org);
-      when(obContext.getCurrentClient()).thenReturn(client);
-      when(org.getId()).thenReturn("org-1");
-      when(client.getId()).thenReturn("client-1");
-
-      curMock.when(() -> OBCurrencyUtils.getOrgCurrency("org-1")).thenReturn("eur-id");
-
-      OBDal dal = mock(OBDal.class);
-      dalMock.when(OBDal::getInstance).thenReturn(dal);
-      Connection conn = mock(Connection.class);
-      PreparedStatement ps = mock(PreparedStatement.class);
-      ResultSet rs = mock(ResultSet.class);
-      when(dal.getConnection()).thenReturn(conn);
-      when(conn.prepareStatement(anyString())).thenReturn(ps);
-      when(ps.executeQuery()).thenReturn(rs);
-      when(rs.next()).thenReturn(true); // a system-level rate exists for the pair
-      when(rs.getDouble("multiplyrate")).thenReturn(0.87);
-
-      AbstractInvoiceHeaderHandler.checkExchangeRateWarning(body, requestBody, formState, "currency");
-
-      ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
-      Mockito.verify(conn).prepareStatement(sqlCaptor.capture());
-      assertTrue(sqlCaptor.getValue().contains("ad_client_id IN ('0', ?)"));
-      assertTrue(!body.has("messages"));
-    }
-  }
-
   // ── ETP-4029: autoCreateOrUpdateConversionRateDocument(String) ───────────────
 
   @Test
@@ -2258,36 +1989,78 @@ public class AbstractInvoiceHeaderHandlerTest {
     }
   }
 
+  /**
+   * Table-driven (ETP-5840): an empty header rate (null or zero) never writes a rate row; it deletes
+   * the invoice's rows only when the caller itself left the rate empty ({@code rateCleared}) — a
+   * line save or a write that did not touch the rate keeps them ("no override set yet").
+   */
   @Test
-  public void autoCreateOrUpdate_nullRateOverride_noop() {
-    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
-         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
-         MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class)) {
-      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
-      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+  public void autoCreateOrUpdate_emptyRate_deletesRowsOnlyWhenCleared() {
+    Object[][] cases = {
+        { "null rate, not cleared", null, false, false },
+        { "null rate, cleared", null, true, true },
+        { "zero rate, cleared", BigDecimal.ZERO, true, true },
+    };
+    for (Object[] c : cases) {
+      String name = (String) c[0];
+      try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+           MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+           MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class);
+           MockedStatic<ConversionRateDocumentSync> syncMock =
+               Mockito.mockStatic(ConversionRateDocumentSync.class)) {
+        OBDal dal = mock(OBDal.class);
+        dalMock.when(OBDal::getInstance).thenReturn(dal);
+        Invoice invoice = mock(Invoice.class);
+        Currency currency = mock(Currency.class);
+        Organization org = mock(Organization.class);
+        when(dal.get(Invoice.class, "inv-no-rate")).thenReturn(invoice);
+        when(invoice.getId()).thenReturn("inv-no-rate");
+        when(invoice.getCurrency()).thenReturn(currency);
+        when(currency.getId()).thenReturn("usd-id");
+        when(invoice.getOrganization()).thenReturn(org);
+        when(org.getId()).thenReturn("org-1");
+        when(invoice.getETGOCurrencyRate()).thenReturn((BigDecimal) c[1]);
+        curMock.when(() -> OBCurrencyUtils.getOrgCurrency("org-1")).thenReturn("eur-id");
+        when(dal.getSession()).thenReturn(mock(org.hibernate.Session.class));
 
-      OBDal dal = mock(OBDal.class);
-      dalMock.when(OBDal::getInstance).thenReturn(dal);
+        AbstractInvoiceHeaderHandler.autoCreateOrUpdateConversionRateDocument("inv-no-rate",
+            (Boolean) c[2]);
 
-      Invoice invoice = mock(Invoice.class);
-      Currency currency = mock(Currency.class);
-      Organization org = mock(Organization.class);
-      when(dal.get(Invoice.class, "inv-no-rate")).thenReturn(invoice);
-      when(invoice.getCurrency()).thenReturn(currency);
-      when(currency.getId()).thenReturn("usd-id");
-      when(invoice.getOrganization()).thenReturn(org);
-      when(org.getId()).thenReturn("org-1");
-      when(invoice.getETGOCurrencyRate()).thenReturn(null);
-
-      curMock.when(() -> OBCurrencyUtils.getOrgCurrency("org-1")).thenReturn("eur-id");
-
-      org.hibernate.Session session = mock(org.hibernate.Session.class);
-      when(dal.getSession()).thenReturn(session);
-
-      callAutoCreateOrUpdate("inv-no-rate");
-
-      Mockito.verify(dal, Mockito.never()).getConnection();
+        try {
+          syncMock.verify(() -> ConversionRateDocumentSync.deleteAllForInvoice("inv-no-rate",
+              "eur-id"), Mockito.times((Boolean) c[3] ? 1 : 0));
+          Mockito.verify(dal, Mockito.never()).getConnection();
+        } catch (AssertionError e) {
+          throw new AssertionError(name, e);
+        }
+      }
     }
+  }
+
+  /**
+   * Table-driven (ETP-5840): a header CRUD write "left the rate empty" only when its body carries
+   * {@code eTGOCurrencyRate} without a positive value (null, zero, blank — sent by the caller or
+   * written by the pre-hook's recalculation). A body without the key, a positive rate, a non-CRUD
+   * request or no body never counts.
+   */
+  @Test
+  public void headerWriteClearedRate_onlyWhenTheBodyCarriesAnEmptyRate() throws Exception {
+    Object[][] cases = {
+        { "null rate", NeoEndpointType.CRUD, new JSONObject().put("eTGOCurrencyRate", JSONObject.NULL), true },
+        { "zero rate", NeoEndpointType.CRUD, new JSONObject().put("eTGOCurrencyRate", "0"), true },
+        { "blank rate", NeoEndpointType.CRUD, new JSONObject().put("eTGOCurrencyRate", ""), true },
+        { "positive rate", NeoEndpointType.CRUD, new JSONObject().put("eTGOCurrencyRate", "1.16"), false },
+        { "rate not in body", NeoEndpointType.CRUD, new JSONObject().put("description", "x"), false },
+        { "no body", NeoEndpointType.CRUD, null, false },
+        { "action request", NeoEndpointType.ACTION, new JSONObject().put("eTGOCurrencyRate", JSONObject.NULL), false },
+    };
+    for (Object[] c : cases) {
+      NeoContext ctx = NeoContext.builder().httpMethod("PATCH")
+          .endpointType((NeoEndpointType) c[1]).recordId("inv-1")
+          .requestBody((JSONObject) c[2]).build();
+      assertEquals((String) c[0], c[3], DocumentRateGuards.invoiceHeaderWriteClearedRate(ctx));
+    }
+    assertFalse("null context", DocumentRateGuards.invoiceHeaderWriteClearedRate(null));
   }
 
   /**
@@ -3486,4 +3259,191 @@ public class AbstractInvoiceHeaderHandlerTest {
       assertTrue(docTypeHandler.isStandardInvoiceDocType("dt-ari"));
     }
   }
+
+  // ── ETP-5703: server-side defaults for a write that leaves them out ───────────
+
+  /** A criteria over Location whose list() answers {@code locations}. */
+  @SuppressWarnings("unchecked")
+  private static OBCriteria<Location> locationCriteria(OBDal dal,
+      java.util.List<Location> locations) {
+    OBCriteria<Location> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(Location.class)).thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.list()).thenReturn(locations);
+    return criteria;
+  }
+
+  private static NeoContext createContext(JSONObject body) {
+    return NeoContext.builder()
+        .httpMethod("POST")
+        .endpointType(NeoEndpointType.CRUD)
+        .requestBody(body)
+        .build();
+  }
+
+  /**
+   * ETP-5703 repro (A): an invoice header created with only {@code businessPartner} was refused
+   * with a 422 naming {@code partnerAddress}, although the partner has exactly one bill-to
+   * location. The create pre-hook must fill it from that location.
+   */
+  @Test
+  public void injectPartnerAddress_createWithSingleBillToLocation_fillsIt() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      Location only = mock(Location.class);
+      when(only.getId()).thenReturn("loc-1");
+      locationCriteria(dal, Collections.singletonList(only));
+      JSONObject body = new JSONObject().put("businessPartner", "bp-1");
+
+      handler.resolveServerCreateFields(createContext(body));
+
+      assertEquals("loc-1", body.getString("partnerAddress"));
+    }
+  }
+
+  /** With two bill-to locations the choice is the caller's: nothing is filled. */
+  @Test
+  public void injectPartnerAddress_twoBillToLocations_abstains() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      Location first = mock(Location.class);
+      Location second = mock(Location.class);
+      when(first.getId()).thenReturn("loc-1");
+      when(second.getId()).thenReturn("loc-2");
+      locationCriteria(dal, java.util.Arrays.asList(first, second));
+      JSONObject body = new JSONObject().put("businessPartner", "bp-1");
+
+      handler.resolveServerCreateFields(createContext(body));
+
+      assertFalse(body.has("partnerAddress"));
+    }
+  }
+
+  /**
+   * The caller's own address is kept, and a partner still a batch {@code $ref:} placeholder is
+   * never looked up — neither case reaches the DAL.
+   */
+  @Test
+  public void injectPartnerAddress_addressSentOrPartnerStillRef_untouchedNoLookup()
+      throws Exception {
+    JSONObject withAddress = new JSONObject().put("businessPartner", "bp-1")
+        .put("partnerAddress", "loc-caller");
+    JSONObject withRef = new JSONObject().put("businessPartner", BatchService.REF_PREFIX + "op1");
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      handler.resolveServerCreateFields(createContext(withAddress));
+      handler.resolveServerCreateFields(createContext(withRef));
+
+      assertEquals("loc-caller", withAddress.getString("partnerAddress"));
+      assertFalse(withRef.has("partnerAddress"));
+      dalMock.verifyNoInteractions();
+    }
+  }
+
+  /**
+   * ETP-5710 repro: MCP etendo_create runs the mandatory pre-check before the pre-hook, so the
+   * partner-address default has to be reachable through the generic hook the MCP path calls.
+   */
+  @Test
+  public void resolveServerCreateFields_singleBillToLocation_fillsPartnerAddress() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      Location only = mock(Location.class);
+      when(only.getId()).thenReturn("loc-1");
+      locationCriteria(dal, Collections.singletonList(only));
+      JSONObject body = new JSONObject().put("businessPartner", "bp-1");
+
+      handler.resolveServerCreateFields(createContext(body));
+
+      assertEquals("loc-1", body.getString("partnerAddress"));
+    }
+  }
+
+  /** Several bill-to locations: the hook abstains, so the pre-check still reports the field. */
+  @Test
+  public void resolveServerCreateFields_twoBillToLocations_leavesFieldMissing() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      Location first = mock(Location.class);
+      Location second = mock(Location.class);
+      locationCriteria(dal, java.util.Arrays.asList(first, second));
+      JSONObject body = new JSONObject().put("businessPartner", "bp-1");
+
+      handler.resolveServerCreateFields(createContext(body));
+
+      assertFalse(body.has("partnerAddress"));
+    }
+  }
+
+  /** A caller-sent address wins and the hook is idempotent (second run changes nothing). */
+  @Test
+  public void resolveServerCreateFields_callerAddress_keptAndIdempotent() throws Exception {
+    JSONObject body = new JSONObject().put("businessPartner", "bp-1")
+        .put("partnerAddress", "loc-caller");
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      handler.resolveServerCreateFields(createContext(body));
+      handler.resolveServerCreateFields(createContext(body));
+
+      assertEquals("loc-caller", body.getString("partnerAddress"));
+      dalMock.verifyNoInteractions();
+    }
+  }
+
+  /**
+   * partnerAddress must NOT be declared server-resolved: etendo_schema would demote it to optional
+   * while the default abstains with several addresses and the field is still required.
+   */
+  @Test
+  public void serverResolvedCreateFields_doesNotDeclarePartnerAddress() {
+    assertFalse(new SalesInvoiceHeaderHandler().serverResolvedCreateFields()
+        .contains("partnerAddress"));
+    assertFalse(new PurchaseInvoiceHeaderHandler().serverResolvedCreateFields()
+        .contains("partnerAddress"));
+  }
+
+  /** A partner with no active bill-to location: nothing to pick, the address stays absent. */
+  @Test
+  public void injectPartnerAddress_noBillToLocation_abstains() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      locationCriteria(dal, Collections.emptyList());
+      JSONObject body = new JSONObject().put("businessPartner", "bp-1");
+
+      handler.resolveServerCreateFields(createContext(body));
+
+      assertFalse(body.has("partnerAddress"));
+    }
+  }
+
+  /**
+   * Only a CRUD create is defaulted: a PATCH, a POST on an existing record and a non-CRUD request
+   * (callout) are left untouched without any lookup.
+   */
+  @Test
+  public void injectPartnerAddress_notACrudCreate_untouchedNoLookup() throws Exception {
+    NeoContext[] contexts = {
+        NeoContext.builder().httpMethod("PATCH").endpointType(NeoEndpointType.CRUD)
+            .recordId("inv-1").requestBody(new JSONObject().put("businessPartner", "bp-1"))
+            .build(),
+        NeoContext.builder().httpMethod("POST").endpointType(NeoEndpointType.CRUD)
+            .recordId("inv-1").requestBody(new JSONObject().put("businessPartner", "bp-1"))
+            .build(),
+        NeoContext.builder().httpMethod("POST").endpointType(NeoEndpointType.CALLOUT)
+            .requestBody(new JSONObject().put("businessPartner", "bp-1")).build(),
+    };
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      for (NeoContext ctx : contexts) {
+        handler.resolveServerCreateFields(ctx);
+
+        assertFalse(ctx.getHttpMethod() + " " + ctx.getEndpointType(),
+            ctx.getRequestBody().has("partnerAddress"));
+      }
+      dalMock.verifyNoInteractions();
+    }
+  }
+
 }

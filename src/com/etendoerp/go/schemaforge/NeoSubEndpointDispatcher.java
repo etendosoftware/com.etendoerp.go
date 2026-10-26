@@ -96,9 +96,13 @@ class NeoSubEndpointDispatcher {
           "Entity not found in spec: " + pathInfo.entityName);
       return true;
     }
+    // ETP-5840: like the defaults sub-endpoint (ETP-5680), the hooks see the query string, so a
+    // GET action such as currencyOptions can take an input (`date`) without reading the servlet
+    // request. Structural: every action gets it; one that reads nothing is unaffected.
     return handleHookedSubEndpoint(new HookedSubEndpointRequest(spec, pathInfo.entityName,
         NeoEndpointType.ACTION, pathInfo.actionName, method, actionParams,
-        () -> servlet.buttonHandler.handleButtonAction(pathInfo, method, request, actionEntity)), response);
+        () -> servlet.buttonHandler.handleButtonAction(pathInfo, method, request, actionEntity))
+        .withQueryParams(servlet.extractQueryParams(request)), response);
   }
 
   private boolean handleEvaluateDisplaySubEndpoint(SFSpec spec, NeoPathInfo pathInfo, String method,
@@ -137,18 +141,18 @@ class NeoSubEndpointDispatcher {
           "Defaults endpoint only supports GET");
       return true;
     }
+    // ETP-5680: the hooks must see the same query string the defaults resolver itself reads, so a
+    // customization can honor a parameter such as `productType` without reaching for the servlet
+    // request.
     return handleHookedSubEndpoint(new HookedSubEndpointRequest(spec, pathInfo.entityName,
         NeoEndpointType.DEFAULTS, null, method, null,
-        () -> servlet.defaultsEndpoint.handleDefaults(spec, pathInfo, request)), response);
+        () -> servlet.defaultsEndpoint.handleDefaults(spec, pathInfo, request))
+        .withQueryParams(servlet.extractQueryParams(request)), response);
   }
 
   private boolean handleHookedSubEndpoint(HookedSubEndpointRequest request,
       HttpServletResponse response) throws IOException {
-    NeoResponse endpointResult = request.actionParams == null
-        ? servlet.hookDispatcher.dispatchWithHooks(request.spec, request.entityName, request.endpointType,
-            request.fieldName, request.method, request.defaultAction)
-        : servlet.hookDispatcher.dispatchWithHooks(request.spec, request.entityName, request.endpointType,
-            request.fieldName, request.method, request.actionParams, request.defaultAction);
+    NeoResponse endpointResult = servlet.hookDispatcher.dispatchWithHooks(request);
     servlet.writeResponse(response, endpointResult);
     return true;
   }
@@ -180,7 +184,8 @@ class NeoSubEndpointDispatcher {
     }
   }
 
-  private static class HookedSubEndpointRequest {
+  /** One hooked sub-endpoint call: what {@link NeoHookDispatcher} needs to build its context. */
+  static class HookedSubEndpointRequest {
     final SFSpec spec;
     final String entityName;
     final NeoEndpointType endpointType;
@@ -188,6 +193,8 @@ class NeoSubEndpointDispatcher {
     final String method;
     final ActionDispatchParams actionParams;
     final java.util.function.Supplier<NeoResponse> defaultAction;
+    /** Query string forwarded to the hook context; {@code null} when the endpoint has none. */
+    java.util.Map<String, String> queryParams;
 
     HookedSubEndpointRequest(SFSpec spec, String entityName, NeoEndpointType endpointType,
         String fieldName, String method, ActionDispatchParams actionParams,
@@ -199,6 +206,12 @@ class NeoSubEndpointDispatcher {
       this.method = method;
       this.actionParams = actionParams;
       this.defaultAction = defaultAction;
+    }
+
+    /** Sets the query string the hooks will see through {@code NeoContext#getQueryParams()}. */
+    HookedSubEndpointRequest withQueryParams(java.util.Map<String, String> params) {
+      this.queryParams = params;
+      return this;
     }
   }
 }

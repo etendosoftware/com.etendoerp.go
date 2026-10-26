@@ -340,7 +340,7 @@ final class PaymentActionHandlerSupport {
     } catch (OBException e) {
       OBDal.getInstance().rollbackAndClose();
       log.warn("Payment action '{}' failed for invoice {}: {}", fieldName, invoiceId, e.getMessage());
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, e);
     } catch (Exception e) {
       OBDal.getInstance().rollbackAndClose();
       log.error("Error in payment action '{}' for invoice {}: {}", fieldName, invoiceId, e.getMessage(), e);

@@ -34,6 +34,7 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
+import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.ad.ui.Tab;
@@ -91,6 +92,32 @@ final class McpDeclaredActions {
       }
     }
     return offered;
+  }
+
+  /**
+   * The actions the entity's customization says do not apply to one record, for a reason a column
+   * value cannot express (ETP-5714, {@link NeoHandler#unavailableActions}).
+   *
+   * <p>Advisory and quiet: a customization that throws must not break the catalogue, so a failure
+   * is logged and answered as "nothing derived".</p>
+   *
+   * @param entity the SchemaForge entity
+   * @param subject the record the agent asked about
+   * @return {@code action → reason}; empty when none or when the customization cannot be resolved
+   */
+  static Map<String, String> unavailableFor(SFEntity entity, BaseOBObject subject) {
+    NeoHandler handler = customizationOf(entity);
+    if (handler == null) {
+      return Collections.emptyMap();
+    }
+    try {
+      Map<String, String> derived = handler.unavailableActions(subject);
+      return derived != null ? derived : Collections.emptyMap();
+    } catch (RuntimeException e) {
+      log.warn("Could not derive the unavailable actions of {}: {}", handler.getClass().getName(),
+          e.getMessage());
+      return Collections.emptyMap();
+    }
   }
 
   /**
@@ -169,6 +196,12 @@ final class McpDeclaredActions {
     Set<String> excluded = excludedBy(customization, entity);
     Column button = declared.containsKey(action) ? null : buttonOf(entity, action);
     Set<String> names = namesOf(action, button);
+    // ETP-5714: another spelling of a name the configuration hides or redirects is that name.
+    // Never for a name the customization declares as an action: that one is judged by its contract.
+    String configured = declared.containsKey(action) ? null : config.configuredNameLike(action);
+    if (configured != null) {
+      names.add(configured);
+    }
     for (String name : names) {
       refuseUnlessRunnable(specName, entityName, action, name, excluded, config, parameters);
     }
@@ -178,6 +211,41 @@ final class McpDeclaredActions {
       return contract;
     }
     return null;
+  }
+
+  /**
+   * The name a customization sees an AD button under (ETP-5710): the field name
+   * {@code etendo_schema} publishes (the DAL property name), whichever spelling the agent typed.
+   *
+   * <p>{@code etendo_schema} advertises a button under its DB column name ({@code action}) and the
+   * REST action route reaches the customization under the name in its URL — for the document-action
+   * button the SPA posts the field name. A customization discriminates on that name, so a call
+   * typed by column name used to skip it: the header handler never saw a completion, and the
+   * total-discount lines and the line-amount guard were bypassed. Resolving the button the way
+   * {@link NeoButtonActionHelper#findButtonColumn} does and answering its property name makes both
+   * spellings reach the customization alike. Structure only: it names no entity.</p>
+   *
+   * <p>Only the name the customization is dispatched under changes. {@code MCP_CONFIG} and the
+   * declared-contract precedence are judged on the typed name before this runs
+   * ({@link #precheck}), and the button is still fired under the typed name.</p>
+   *
+   * @param entity the SchemaForge entity
+   * @param action the action as typed
+   * @return the button's property name, or {@code action} itself when it names no button the
+   *         entity fires
+   */
+  static String customizationNameOf(SFEntity entity, String action) {
+    if (entity == null || action == null) {
+      return action;
+    }
+    try {
+      Column fired = NeoButtonActionHelper.findButtonColumn(entity.getId(), action);
+      String property = fired == null ? null : NeoButtonActionHelper.propertyNameOf(fired);
+      return property == null ? action : property;
+    } catch (RuntimeException e) {
+      log.debug("Button lookup failed for {} on {}: {}", action, entity.getName(), e.getMessage());
+      return action;
+    }
   }
 
   /**
@@ -319,7 +387,7 @@ final class McpDeclaredActions {
     }
     for (Column column : columns) {
       if (Boolean.TRUE.equals(column.isActive()) && McpSchemaActionFields.isButtonColumn(column)
-          && (action.equals(column.getDBColumnName()) || action.equals(propertyNameOf(column)))) {
+          && (action.equals(column.getDBColumnName()) || action.equals(NeoButtonActionHelper.propertyNameOf(column)))) {
         return column;
       }
     }
@@ -336,7 +404,7 @@ final class McpDeclaredActions {
     names.add(action);
     if (button != null) {
       names.add(button.getDBColumnName());
-      String property = propertyNameOf(button);
+      String property = NeoButtonActionHelper.propertyNameOf(button);
       if (property != null) {
         names.add(property);
       }
@@ -344,14 +412,21 @@ final class McpDeclaredActions {
     return names;
   }
 
-  private static String propertyNameOf(Column column) {
+  /**
+   * Whether the entity's customization un-posts a posted record before reactivating it
+   * ({@link NeoHandler#unpostBeforeReactivate}); quiet, a customization that throws opts out.
+   *
+   * @param entity the SchemaForge entity
+   * @return {@code true} only when the customization opts in
+   */
+  static boolean unpostsBeforeReactivation(SFEntity entity) {
+    NeoHandler handler = customizationOf(entity);
     try {
-      Entity dal = ModelProvider.getInstance()
-          .getEntityByTableName(column.getTable().getDBTableName());
-      Property property = dal == null ? null : dal.getPropertyByColumnName(column.getDBColumnName());
-      return property == null ? null : property.getName();
+      return handler != null && handler.unpostBeforeReactivate();
     } catch (RuntimeException e) {
-      return null;
+      log.warn("Could not read unpostBeforeReactivate of {}: {}", handler.getClass().getName(),
+          e.getMessage());
+      return false;
     }
   }
 

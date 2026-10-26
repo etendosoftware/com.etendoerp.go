@@ -304,10 +304,13 @@ public class NeoMandatoryDefaultsService {
       // documents to be saved with the wrong business partner when the user clicked Save
       // without choosing one. tryInjectFirstFromLookup is kept because it only fires for
       // combo-style references (TableDir/Table/List), matching legitimate FIC parity.
-      if (tryInjectFirstFromLookup(body, dalEntity, propName, col, mCtx.neoCtx)) {
-        return;
+      if (!tryInjectFirstFromLookup(body, dalEntity, propName, col, mCtx.neoCtx)) {
+        NeoDefaultsCascadeHelper.injectSafeTypeDefault(body, propName, col);
       }
-      NeoDefaultsCascadeHelper.injectSafeTypeDefault(body, propName, col);
+      // ETP-5669: a placeholder, not a decision: the create's callout cascade may refine it.
+      if (mCtx.neoCtx != null && body.has(propName)) {
+        mCtx.neoCtx.addFallbackDefault(propName);
+      }
     } catch (Exception e) {
       log.debug("Could not process mandatory column {}: {}",
           col.getDBColumnName(), e.getMessage());

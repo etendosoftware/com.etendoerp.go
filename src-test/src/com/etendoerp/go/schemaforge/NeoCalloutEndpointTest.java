@@ -38,7 +38,6 @@ import java.util.Set;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
-import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -50,6 +49,7 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.ad.ui.Tab;
 
+import com.etendoerp.go.common.MalformedJsonException;
 import com.etendoerp.go.schemaforge.NeoServlet.NeoPathInfo;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
@@ -58,6 +58,8 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  * Unit tests for {@link NeoCalloutEndpoint}.
  * Covers handleCallout validation paths, cascade merging, afterCallout hook,
  * and exception handling.
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoCalloutEndpoint
  */
 class NeoCalloutEndpointTest {
 
@@ -180,7 +182,7 @@ class NeoCalloutEndpointTest {
       bodyParserMock.when(() -> NeoRequestBodyParser.readRequestBody(any()))
           .thenReturn("not-json");
       bodyParserMock.when(() -> NeoRequestBodyParser.parseJsonObject("not-json"))
-          .thenThrow(new JSONException("Invalid JSON"));
+          .thenThrow(new MalformedJsonException("Invalid JSON"));
       HttpServletRequest request = mock(HttpServletRequest.class);
 
       NeoResponse response = endpoint.handleCallout(spec, pathInfo, request);
@@ -735,7 +737,7 @@ class NeoCalloutEndpointTest {
     @DisplayName("Returns NeoResponse error when parsing fails")
     void parseFailureReturnsError() throws Exception {
       bodyParserMock.when(() -> NeoRequestBodyParser.parseJsonObject("bad"))
-          .thenThrow(new JSONException("Unexpected token"));
+          .thenThrow(new MalformedJsonException("Unexpected token"));
 
       Tab tab = mock(Tab.class);
       mockEntityWithTab(tab);

@@ -62,6 +62,9 @@ import org.openbravo.model.pricing.pricelist.PriceList;
 import org.openbravo.common.actionhandler.createlinesfromprocess.CreateInvoiceLinesFromProcess;
 import org.openbravo.base.weld.WeldUtils;
 
+import com.etendoerp.go.schemaforge.util.DocumentStatusGuard;
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
+
 /**
  * NeoHandler that creates a Sales Invoice in Draft status from a Sales Order,
  * Sales Quotation, or Goods Shipment record. Invoked as an ACTION endpoint via:
@@ -83,6 +86,110 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(CreateDraftInvoiceHandler.class);
   private static final String ACTION_NAME = "createDraftInvoice";
+  private static final String PARAM_LINES = "lines";
+  private static final String PARAM_SHIPMENT_IDS = "shipmentIds";
+  private static final String PARAM_PRICE_LIST_ID = "priceListId";
+  private static final String ERR_ORDER_NOT_FOUND = "Order not found: ";
+
+  /**
+   * What an agent reads about {@code createDraftInvoice} on a sales order (ETP-5709). Despite the
+   * name the invoice is COMPLETED in the same call (ETP-5381), which the description says
+   * explicitly. {@code lines} is the one body key the order path reads
+   * ({@link #parseLineOverrides}); the SPA sends {@code {}}. The MCP publishes it and judges the
+   * call against it; REST and the SPA do not validate against it.
+   */
+  static final NeoActionContract ORDER_CONTRACT = NeoActionContract.write(ACTION_NAME,
+      "Creates a sales invoice from the lines of this sales order that are still pending "
+          + "invoicing and COMPLETES it in the same call (created AND completed, there is no "
+          + "draft step despite the name), returning 201 with {id, documentNo, documentStatus}. "
+          + "Precondition: the order is completed (status CO), otherwise 400 naming its status. "
+          + "It is independent of createShipment: an order can be invoiced without being "
+          + "shipped, shipped without being invoiced, or both. Typical sequence for an order: "
+          + "documentAction (confirm) -> createShipment -> createDraftInvoice. A line is invoiced "
+          + "only for what is still pending (ordered minus invoiced, same sign as the ordered "
+          + "quantity): an already-invoiced or over-invoiced line is never invoiced again, so a "
+          + "second call does not duplicate the invoice and, once nothing is pending, answers "
+          + "400 'No hay líneas a facturar en este pedido'. Without lines, a line with completed, "
+          + "not-yet-invoiced shipments is invoiced for the quantity of those shipments. Only "
+          + "COMPLETED invoices count as "
+          + "invoiced: an invoice left in draft by other means does not reduce what is pending.",
+      NeoActionContract.Param.array(PARAM_LINES, NeoActionContract.TYPE_OBJECT, false,
+          "Partial invoicing: [{orderLineId, quantity}] with the quantity to invoice per order "
+              + "line. Honoured only for order lines that have NO completed shipment not yet "
+              + "invoiced; if a requested line has one, the call is refused with 400 naming the "
+              + "line and telling you to invoice from the shipment instead (createDraftInvoice "
+              + "on the goods shipment, where quantities per shipment line are honoured). An "
+              + "invoice generated from a shipment cannot have its quantities edited afterwards "
+              + "(reactivating it does not allow it), so give any partial quantity at creation. "
+              + "A quantity above what is still pending for that line, or for a line with "
+              + "nothing pending, is refused with 400 naming the line and its pending quantity "
+              + "(it is never capped silently), and so is a list none of whose entries has an "
+              + "orderLineId and a quantity above zero. Omit to invoice the pending quantity of "
+              + "every line."))
+      .withIdDescription("the id of the sales order to invoice")
+      .availableWhen(DocumentAvailability.WHEN_COMPLETED);
+
+  /**
+   * What an agent reads about {@code createDraftInvoice} on a sales quotation (ETP-5709). No
+   * parameters: a quotation is invoiced in full (the SPA's QuotationConfirmModal posts {@code {}}),
+   * because a partial invoice would leave the quotation closed ({@code ETGO_CI}) with the remainder
+   * impossible to invoice. A {@code lines} key is a 422 on MCP and a 400 from the handler on REST
+   * ({@link #ERR_QUOTATION_LINES}). The MCP publishes it and judges the call against it.
+   */
+  static final NeoActionContract QUOTATION_CONTRACT = NeoActionContract.write(ACTION_NAME,
+      "Invoices the WHOLE sales quotation: creates a sales invoice with every line of this "
+          + "quotation and COMPLETES it in the same call (created AND completed, there is no "
+          + "draft step despite the name), returning 201 with {id, documentNo, documentStatus}. "
+          + "No parameters: a quotation cannot be invoiced partially (any body key is refused). "
+          + "Precondition: the quotation is Under Evaluation (status UE, reached with "
+          + "documentAction CO) or completed (status CO), otherwise 400 naming its number and "
+          + "status (a draft, rejected, already-invoiced or order-converted quotation is "
+          + "refused). Once the invoice is "
+          + "completed the quotation moves to status ETGO_CI (\"Closed - Invoice Created\") and "
+          + "can no longer be invoiced: a second call answers 400 naming the status. This action "
+          + "never creates an order from the quotation.")
+      .withIdDescription("the id of the sales quotation to invoice");
+
+  /**
+   * What an agent reads about {@code createDraftInvoice} on a goods shipment (ETP-5709). The three
+   * keys are the ones {@link #handleCreate} reads on the shipment route: {@code shipmentIds}
+   * ({@link #parseShipmentIds}), {@code priceListId} and {@code lines} ({@link #parseLineOverrides},
+   * which reads {@code shipmentLineId}). Declared because the classic {@code Invoicefromshipment}
+   * button bypasses every guard of this path and is redirected here through MCP_CONFIG. The SPA
+   * posts {@code {priceListId}} and {@code {shipmentIds, priceListId}}. The MCP publishes it and
+   * judges the call against it; REST and the SPA do not validate against it.
+   */
+  static final NeoActionContract SHIPMENT_CONTRACT = NeoActionContract.write(ACTION_NAME,
+      "Creates a sales invoice from this goods shipment (or from several shipments together, see "
+          + "shipmentIds) and COMPLETES it in the same call (created AND completed, there is no "
+          + "draft step despite the name), returning 201 with {id, documentNo, documentStatus}. "
+          + "Precondition: the shipment is completed (status CO; every shipment of shipmentIds), "
+          + "otherwise 400 naming the shipment and its status. It is independent of the order's "
+          + "own createDraftInvoice. It invoices only what is still pending on each shipment line "
+          + "(shipped minus invoiced, draft invoices included) and only the lines of the "
+          + "shipment(s) sent, so a second call does not duplicate the invoice: once nothing is "
+          + "pending it answers 400 'No hay líneas pendientes de facturar en este albarán'. By "
+          + "default it invoices the pending quantity of every line. An invoice generated from a "
+          + "shipment cannot have its quantities edited afterwards (reactivating it does not "
+          + "allow it), so give any partial quantity at creation.",
+      NeoActionContract.Param.array(PARAM_SHIPMENT_IDS, NeoActionContract.TYPE_STRING, false,
+          "Ids of the goods shipments to invoice together in ONE invoice (all of the same "
+              + "business partner). When sent, exactly these shipments are invoiced, so include "
+              + "this one. Omit to invoice only this shipment."),
+      NeoActionContract.Param.optional(PARAM_PRICE_LIST_ID, NeoActionContract.TYPE_STRING,
+          "Id of the sales price list to price the invoice with. Only required when none can be "
+              + "resolved (shipments without a linked order and a business partner without a "
+              + "default price list); otherwise the order's or partner's list is used."),
+      NeoActionContract.Param.array(PARAM_LINES, NeoActionContract.TYPE_OBJECT, false,
+          "Partial invoicing, honoured exactly: [{shipmentLineId, quantity}] with the quantity to "
+              + "invoice per shipment line (a quantity above zero). A quantity above what is "
+              + "still pending for that line, with the opposite sign to the line, or for a line "
+              + "with nothing pending is refused with 400 naming the line and its pending "
+              + "quantity (it is never capped silently), and so is a list none of whose entries "
+              + "has a shipmentLineId and a quantity above zero. Omit to invoice the pending "
+              + "quantity of every line."))
+      .withIdDescription("the id of the goods shipment to invoice")
+      .availableWhen(DocumentAvailability.WHEN_COMPLETED);
 
   @Inject
   InvoiceFromOrderSupport invoiceFromOrderSupport;
@@ -100,9 +207,24 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
   private static final String SPEC_SALES_ORDER = "sales-order";
   private static final String FIELD_DOCUMENT_NO = "documentNo";
   private static final String FIELD_ORDERED_QUANTITY = "orderedQuantity";
-  private static final String PARAM_SHIPMENT_IDS = "shipmentIds";
-  private static final String PARAM_PRICE_LIST_ID = "priceListId";
+  private static final String ERR_QUOTATION_LINES =
+      "Una cotización se factura completa: no admite 'lines' (facturación parcial)";
   private static final String ERR_RECORD_ID_REQUIRED = "Record ID is required";
+  // ETP-5709 — explicit `lines` quantities are validated against what is pending, never capped.
+  private static final String ERR_ORDER_LINE_EXCEEDS_PENDING =
+      "No se puede facturar la línea %s del pedido: cantidad solicitada %s, pero lo pendiente "
+          + "de facturar es %s";
+  private static final String ERR_ORDER_LINE_HAS_SHIPMENTS =
+      "La línea %s del pedido ya tiene albaranes sin facturar: facture desde el albarán para "
+          + "indicar cantidades parciales";
+  private static final String ERR_SHIPMENT_LINE_EXCEEDS_PENDING =
+      "No se puede facturar la línea %s: cantidad solicitada %s, pero lo pendiente de "
+          + "facturar es %s (ya facturado o cubierto por una factura en borrador)";
+  private static final String ERR_LINES_UNUSABLE =
+      "Se enviaron 'lines' pero ninguna entrada tiene un orderLineId/shipmentLineId y una "
+          + "cantidad mayor que cero";
+  private static final String ERR_SHIPMENT_NOTHING_PENDING =
+      "No hay líneas pendientes de facturar en este albarán";
   // ETP-4942 — surfaced as a 400 validation error instead of letting a null
   // Invoice.getPriceList() reach UpdatePricesAndAmounts and blow up as an
   // unguarded 500 further down the native invoice-line-creation pipeline.
@@ -189,11 +311,23 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
       try {
         JSONObject body = context.getRequestBody();
         Map<String, BigDecimal> lineOverrides = parseLineOverrides(body);
+        MultiDocumentInvoiceSupport.requireParsedLines(body, PARAM_LINES, lineOverrides,
+            ERR_LINES_UNUSABLE);
 
         Invoice invoice;
         if (SPEC_SALES_ORDER.equals(specName)) {
+          // ETP-5709: only the direct-from-order route. createFromOrder is also what the
+          // quotation route calls, so the check cannot live there; a quotation never reaches CO
+          // and keeps its own flow unchanged.
+          requireOrderCompleted(recordId);
           invoice = createFromOrder(recordId, lineOverrides, null);
         } else if (SPEC_SALES_QUOTATION.equals(specName)) {
+          // ETP-5709: the SPA offers this only from UE or CO; the route used to accept any
+          // status (a draft or rejected quotation could be invoiced by guessing the action).
+          requireQuotationInvoiceable(recordId);
+          if (body != null && body.has(PARAM_LINES)) {
+            throw new OBException(ERR_QUOTATION_LINES);
+          }
           invoice = createFromOrder(recordId, lineOverrides, null);
         } else if (SPEC_GOODS_SHIPMENT.equals(specName)) {
           List<String> shipmentIds = parseShipmentIds(body, recordId);
@@ -208,6 +342,8 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
         ensureDocumentNo(invoice);
         if (SPEC_GOODS_SHIPMENT.equals(specName)) {
           getSupport().ensureLineGrossAmounts(invoice);
+          // ETP-5714: the native copy of a shipment line keeps a source list price of 0
+          getSupport().alignLineListPrices(invoice, null);
           OBDal.getInstance().flush();
         }
 
@@ -219,6 +355,12 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
         // session, which also picks up the DocumentNo the completion may have reassigned from the
         // document type's sequence. On failure the internal rollback reverts the whole creation.
         String invoiceId = invoice.getId();
+        // ETP-5840: an invoice generated from an order or quotation got its rate recomputed for its
+        // own accounting date; a foreign-currency one without a rate is refused before completing,
+        // and the generation rolled back (catch below) — nothing is left behind.
+        if (!SPEC_GOODS_SHIPMENT.equals(specName)) {
+          DocumentCurrencyRate.requireRateForCompletion(invoice, Invoice.PROPERTY_ETGOCURRENCYRATE);
+        }
         InvoiceCompletionService.completeInvoiceOrThrow(invoiceId, context.getObContext());
         Invoice completed = OBDal.getInstance().get(Invoice.class, invoiceId);
 
@@ -244,6 +386,10 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
       } finally {
         OBContext.restorePreviousMode();
       }
+    } catch (DocumentCurrencyRate.MissingRateException e) {
+      OBDal.getInstance().rollbackAndClose();
+      log.warn("Refused to generate invoice from {}: {}", recordId, e.getMessage());
+      return e.toResponse();
     } catch (OBException e) {
       log.warn("Error creating draft invoice from {}: {}", specName, e.getMessage());
       return errorResponse(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
@@ -252,6 +398,32 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "An internal error occurred while creating the invoice");
     }
+  }
+
+  /**
+   * Seam for tests: refuses a quotation that is neither Under Evaluation ({@code UE}) nor
+   * {@code CO}: the two statuses the SPA offers the action from (QuotationTopbarActions opens
+   * QuotationConfirmModal for {@code CO} or {@code UE}; {@code CO} can only be a legacy quotation).
+   */
+  protected void requireQuotationInvoiceable(String quotationId) {
+    Order quotation = OBDal.getInstance().get(Order.class, quotationId);
+    if (quotation == null) {
+      throw new OBException(ERR_ORDER_NOT_FOUND + quotationId);
+    }
+    DocumentStatusGuard.requireAnyStatus(quotation.getDocumentNo(), quotation.getDocumentStatus(),
+        "La cotización %s no se puede facturar en su estado actual (estado %s): solo se factura "
+            + "una cotización en evaluación (UE) o completada (CO)",
+        DocumentStatusGuard.STATUS_UNDER_EVALUATION, DocumentStatusGuard.STATUS_COMPLETED);
+  }
+
+  /** Seam for tests: refuses a source order that is not completed (see {@link #handleCreate}). */
+  protected void requireOrderCompleted(String orderId) {
+    Order order = OBDal.getInstance().get(Order.class, orderId);
+    if (order == null) {
+      throw new OBException(ERR_ORDER_NOT_FOUND + orderId);
+    }
+    DocumentStatusGuard.requireCompleted(order.getDocumentNo(), order.getDocumentStatus(),
+        "El pedido %s no está completado (estado %s): complétalo antes de crear la factura");
   }
 
   /**
@@ -435,6 +607,17 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
   }
 
   /**
+   * Seam for tests. Same computation as {@link #computePendingQtyPerLine(String, boolean)} but a
+   * DB failure propagates (ETP-5709): every path that DECIDES what to invoice must use this one,
+   * because the swallowing variant returns an empty map both for "nothing pending" and for "the
+   * query failed".
+   */
+  protected Map<String, BigDecimal> computePendingQtyPerLineOrThrow(String shipmentId,
+      boolean includeDrafts) {
+    return NeoInvoiceSupport.computePendingQtyPerLineOrThrow(shipmentId, includeDrafts);
+  }
+
+  /**
    * Finds all draft invoices ({@code documentStatus = 'DR'}) linked to the given
    * source record IDs. For order/quotation specs the link is {@code C_Invoice.C_Order_ID};
    * for goods-shipment the lookup goes through the shipment's linked sales order.
@@ -569,11 +752,11 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
    */
   protected Map<String, BigDecimal> parseLineOverrides(JSONObject body) {
     Map<String, BigDecimal> overrides = new HashMap<>();
-    if (body == null || !body.has("lines")) {
+    if (body == null || !body.has(PARAM_LINES)) {
       return overrides;
     }
     try {
-      JSONArray lines = body.getJSONArray("lines");
+      JSONArray lines = body.getJSONArray(PARAM_LINES);
       for (int i = 0; i < lines.length(); i++) {
         JSONObject line = lines.getJSONObject(i);
         String lineId = line.optString("orderLineId", line.optString("shipmentLineId", null));
@@ -613,7 +796,75 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
 
   protected Invoice createFromOrder(String orderId, Map<String, BigDecimal> lineOverrides,
       String priceListId) {
+    // ETP-5709: this is the entry for a caller's own `lines` (order and quotation routes), whose
+    // explicit quantities are refused when not invoiceable, never capped silently. The single-
+    // shipment route no longer comes through here: it builds its own selection (see
+    // buildShipmentScopedOrderSelection).
+    if (!lineOverrides.isEmpty()) {
+      Order order = OBDal.getInstance().get(Order.class, orderId);
+      if (order == null) {
+        throw new OBException(ERR_ORDER_NOT_FOUND + orderId);
+      }
+      requireOverridesWithinPending(order, lineOverrides);
+      requireNoUninvoicedShipments(order, lineOverrides);
+    }
     return createFromOrder(orderId, lineOverrides, priceListId, null);
+  }
+
+  /**
+   * Seam (DB): whether the order line has completed shipment lines not yet invoiced — the same
+   * population the native {@code CreateLinesFromUtil#getRelatedNotInvoicedInOutLines} reads for a
+   * sales order line (processed, completed or closed shipment, not completely invoiced, line not
+   * yet invoiced), which is the one that replaces an order-line entry by those shipment lines.
+   */
+  protected boolean hasUninvoicedShipmentLines(OrderLine orderLine) {
+    Long count = OBDal.getInstance()
+        .getSession()
+        .createQuery("select count(il.id) from MaterialMgmtShipmentInOutLine as il "
+            + "join il.shipmentReceipt sh where il.salesOrderLine.id = :orderLineId "
+            + "and sh.processed = 'Y' and sh.documentStatus in ('CO', 'CL') "
+            + "and sh.completelyInvoiced = 'N' and il.reinvoice = 'N'", Long.class)
+        .setParameter("orderLineId", orderLine.getId())
+        .uniqueResult();
+    return count != null && count > 0;
+  }
+
+  /**
+   * Refuses explicit quantities for an order line that has completed shipment lines not yet
+   * invoiced (ETP-5709). The native process would replace the entry by ALL of those shipment lines
+   * at their full quantity and ignore the quantity asked for; allocating a partial quantity over
+   * shipments is deliberately not implemented, so the caller is told to invoice from the shipment,
+   * where quantities per line are honoured. Order lines without shipments keep working: the
+   * native process uses their entry as is.
+   */
+  private void requireNoUninvoicedShipments(Order order, Map<String, BigDecimal> lineOverrides) {
+    for (OrderLine ol : order.getOrderLineList()) {
+      if (lineOverrides.containsKey(ol.getId()) && hasUninvoicedShipmentLines(ol)) {
+        throw new OBException(String.format(ERR_ORDER_LINE_HAS_SHIPMENTS,
+            ol.getLineNo() + " (" + ol.getId() + ")"));
+      }
+    }
+  }
+
+  /**
+   * Refuses an explicit per-line quantity that is not invoiceable (ETP-5709): the line has
+   * nothing pending, or the quantity has the wrong sign or exceeds the pending magnitude. An
+   * agent must learn that its request cannot be honoured, so nothing is capped silently.
+   */
+  private void requireOverridesWithinPending(Order order, Map<String, BigDecimal> lineOverrides) {
+    for (OrderLine ol : order.getOrderLineList()) {
+      BigDecimal requested = lineOverrides.get(ol.getId());
+      if (requested == null) {
+        continue;
+      }
+      BigDecimal pending = resolvePendingForLine(ol, false, Collections.emptyMap());
+      if (pending == null || requested.signum() != pending.signum()
+          || requested.abs().compareTo(pending.abs()) > 0) {
+        throw new OBException(String.format(ERR_ORDER_LINE_EXCEEDS_PENDING,
+            ol.getLineNo() + " (" + ol.getId() + ")", requested.toPlainString(),
+            pending == null ? "0" : pending.toPlainString()));
+      }
+    }
   }
 
   /**
@@ -627,12 +878,27 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
       String priceListId, String currencyId) {
     Order order = OBDal.getInstance().get(Order.class, orderId);
     if (order == null) {
-      throw new OBException("Order not found: " + orderId);
+      throw new OBException(ERR_ORDER_NOT_FOUND + orderId);
     }
 
     JSONArray selectedLines = buildSelectedLinesForOrder(order, lineOverrides);
     if (selectedLines.length() == 0) {
       throw new OBException("No hay líneas a facturar en este pedido");
+    }
+    return createFromOrderLines(orderId, selectedLines, priceListId, currencyId);
+  }
+
+  /**
+   * Creates the invoice from an already-built {@code selectedLines} selection of the order's
+   * lines (see {@link #buildSelectedLinesForOrder}): header from the order, lines by the native
+   * {@code CreateInvoiceLinesFromProcess}. Split out of {@link #createFromOrder} so the
+   * single-shipment route (ETP-5709) can hand it entries scoped to ITS shipment lines.
+   */
+  protected Invoice createFromOrderLines(String orderId, JSONArray selectedLines, String priceListId,
+      String currencyId) {
+    Order order = OBDal.getInstance().get(Order.class, orderId);
+    if (order == null) {
+      throw new OBException(ERR_ORDER_NOT_FOUND + orderId);
     }
 
     DocumentType invoiceDocType = resolveARInvoiceDocType(order);
@@ -664,6 +930,8 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
     // ETP-4780: moved into InvoiceFromOrderSupport so CreatePurchaseInvoiceHandler
     // can reuse the same behaviour without duplication.
     getSupport().copyLineDiscountsFromOrder(invoice);
+    // ETP-5714: a source line without a list price gives a copied line the form would not store
+    getSupport().alignLineListPrices(invoice, null);
 
     InvoiceLineLinker.linkInvoiceLinesToExistingInouts(invoice.getId());
 
@@ -734,17 +1002,20 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
     BigDecimal invoiced = ol.getInvoicedQuantity() != null ? ol.getInvoicedQuantity() : BigDecimal.ZERO;
     BigDecimal pending = ordered.subtract(invoiced);
     // ETP-4722: quantities can be NEGATIVE since ETP-4567 removed the old
-    // min: 0 constraint (e.g. a return-style order line). Only an exact zero
-    // means "nothing left to invoice" — a strictly-positive check silently
-    // dropped every negative-quantity line here. This is the routine that
-    // actually runs for "Crear factura" on a Goods Shipment linked to this
-    // order: createFromShipments delegates straight to createFromOrder for
-    // the single-shipment-with-linked-order case, bypassing the shipment
-    // lines entirely.
-    if (pending.compareTo(BigDecimal.ZERO) == 0) return null;
+    // min: 0 constraint (e.g. a return-style order line), so "nothing left" is not
+    // "pending <= 0". (Used by the order and quotation routes; "Crear factura" on a Goods
+    // Shipment linked to an order builds its own shipment-scoped selection since ETP-5709.)
+    // ETP-5709: a pending quantity only counts when it has the SAME sign as the ordered
+    // quantity: ordered 2 / invoiced 4 is pending -2, an OVER-invoiced line, and invoicing it
+    // would create a -2 invoice line. A legit negative line (ordered -3, invoiced 0 -> -3)
+    // keeps the ordered sign and is still invoiced.
+    if (pending.signum() == 0 || pending.signum() != ordered.signum()) return null;
     if (hasOverrides) {
       BigDecimal override = lineOverrides.get(ol.getId());
-      return override != null ? override.min(pending) : pending;
+      if (override == null) return pending;
+      // Never above the pending magnitude, never against the line's sign.
+      if (override.signum() != pending.signum()) return null;
+      return override.abs().min(pending.abs()).multiply(BigDecimal.valueOf(pending.signum()));
     }
     return pending;
   }
@@ -826,25 +1097,47 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
     List<ShipmentInOut> shipments = loadAndValidateShipments(shipmentIds);
     ShipmentInOut first = shipments.get(0);
 
-    // Single shipment with a linked order: delegate to createFromOrder so that
-    // CreateInvoiceLinesFromProcess handles price-list lookups, taxes, and pending
-    // quantity exactly as Etendo core does — avoiding the manual pricelist=0 issue.
-    // Cap overrides by draft-aware pending so a second draft cannot be created for
-    // quantities already committed in an existing draft invoice.
+    // Single shipment with a linked order: delegate to the order-based creation so that
+    // CreateInvoiceLinesFromProcess handles price-list lookups and taxes as Etendo core does —
+    // avoiding the manual pricelist=0 issue. The selection is scoped to THIS shipment's lines
+    // (ETP-5709), see buildShipmentScopedOrderSelection.
     if (shipments.size() == 1 && first.getSalesOrder() != null) {
-      Map<String, BigDecimal> draftCapped = capShipmentLineOverrides(first, lineOverrides);
-      Map<String, BigDecimal> orderLineOverrides = translateToOrderLineOverrides(first, draftCapped);
+      JSONArray selectedLines = buildShipmentScopedOrderSelection(first, lineOverrides);
       String currencyId = first.getEtgoCurrency() != null ? first.getEtgoCurrency().getId() : null;
-      return createFromOrder(first.getSalesOrder().getId(), orderLineOverrides, priceListId, currencyId);
+      String orderId = first.getSalesOrder().getId();
+      evictShipmentFromSession(first);
+      return createFromOrderLines(orderId, selectedLines, priceListId, currencyId);
     }
 
     Invoice invoice = createInvoiceHeaderFromShipment(first, shipments);
     applyPriceListOverride(invoice, priceListId);
     ensurePriceListResolved(invoice);
+
+    // ETP-5709: validate BEFORE the header is saved — the invoice is still transient here, so
+    // nothing has been written on a path that is about to answer 400. After the price-list
+    // guard so ETP-4942's more specific message keeps winning. The throwing variant: a DB
+    // failure must surface as an error, not as an empty map that used to mean "invoice
+    // everything".
+    Map<String, BigDecimal> pendingQtyMap = computePendingForShipments(shipments);
+    if (pendingQtyMap.isEmpty()) {
+      throw new OBException(ERR_SHIPMENT_NOTHING_PENDING);
+    }
+    MultiDocumentInvoiceSupport.requireOverridesWithinPending(shipments, lineOverrides,
+        pendingQtyMap, ERR_SHIPMENT_LINE_EXCEEDS_PENDING);
+
     OBDal.getInstance().save(invoice);
     OBDal.getInstance().flush();
     addShipmentLinesToInvoice(invoice, shipments, lineOverrides);
     return invoice;
+  }
+
+  /** Merged draft-aware pending quantities of {@code shipments}; propagates DB failures. */
+  private Map<String, BigDecimal> computePendingForShipments(List<ShipmentInOut> shipments) {
+    Map<String, BigDecimal> merged = new HashMap<>();
+    for (ShipmentInOut shipment : shipments) {
+      merged.putAll(computePendingQtyPerLineOrThrow(shipment.getId(), true));
+    }
+    return merged;
   }
 
   /**
@@ -903,55 +1196,67 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
   }
 
   /**
-   * Reduces each shipment-line override by the draft-aware pending quantity so that
-   * quantities already committed in a draft invoice cannot be re-invoiced by a second
-   * draft. Lines whose remaining pending qty ≤ 0 are dropped from the result, causing
-   * {@link #createFromOrder} to skip them. When {@code lineOverrides} is empty (no
-   * per-line selection from the frontend) the method returns it unchanged.
+   * Detaches the shipment and its lines before the native process links invoice lines to them by
+   * id — the same precaution {@code CreatePurchaseInvoiceHandler#createFromReceipt} takes (the
+   * process saves/loads those movement lines itself and fails with an EntityExistsException when
+   * the handler already holds them in the session). Everything needed from the shipment is read
+   * before this call.
    */
-  private Map<String, BigDecimal> capShipmentLineOverrides(ShipmentInOut shipment,
-      Map<String, BigDecimal> lineOverrides) {
-    if (lineOverrides.isEmpty()) {
-      return lineOverrides;
+  protected void evictShipmentFromSession(ShipmentInOut shipment) {
+    for (ShipmentInOutLine sl : shipment.getMaterialMgmtShipmentInOutLineList()) {
+      OBDal.getInstance().getSession().evict(sl);
     }
-    Map<String, BigDecimal> pending = computePendingQtyPerLine(shipment.getId(), true);
-    Map<String, BigDecimal> capped = new HashMap<>();
-    for (Map.Entry<String, BigDecimal> entry : lineOverrides.entrySet()) {
-      BigDecimal pendingQty = pending.getOrDefault(entry.getKey(), BigDecimal.ZERO);
-      BigDecimal cappedQty = entry.getValue().min(pendingQty);
-      // ETP-4722: same sign-unaware bug as resolvePendingForLine above — only an
-      // exact zero means "nothing to invoice". pendingQty here is an ABS-based
-      // magnitude (see computePendingQtyPerLine), so a negative override is always
-      // <= it and min() already returns the override unchanged with its sign intact.
-      if (cappedQty.compareTo(BigDecimal.ZERO) != 0) {
-        capped.put(entry.getKey(), cappedQty);
-      }
-    }
-    if (capped.isEmpty()) {
-      throw new OBException("No hay líneas pendientes de facturar en este albarán");
-    }
-    return capped;
+    OBDal.getInstance().getSession().evict(shipment);
   }
 
   /**
-   * Converts a map of {@code M_InOutLine_ID → qty} overrides (sent by the frontend
-   * when the user selects specific quantities in the preview) into the equivalent
-   * {@code C_OrderLine_ID → qty} map expected by {@link #createFromOrder}.
-   * Lines without a linked order line are silently dropped.
+   * The {@code selectedLines} of the single-shipment-with-order route (ETP-5709): ONE entry per
+   * line of THIS shipment, {@code {id: orderLineId, orderedQuantity, shipmentInOutLine: lineId}},
+   * at that line's draft-aware pending quantity or the caller's explicit {@code lines} quantity.
+   *
+   * <p>It used to hand the order to the native process with an EMPTY selection, which decides the
+   * quantities from the order line: invoiced shipped quantities were safe (an order line with
+   * completed, not-yet-invoiced shipment lines is replaced by those lines), but a second call on an
+   * already-invoiced shipment invoiced the order line's remaining, never-shipped quantity, and
+   * invoicing shipment A of an order shipped in A and B also invoiced B. Naming the shipment line
+   * makes the native process use the entry as is. Invoiced from the shipment, a shipment of 3 from
+   * an order of 5 yields 3 (live-verified), and an explicit partial quantity is honoured.
+   *
+   * <p>Everything is validated BEFORE anything is created: the pending query is the throwing
+   * variant (a DB failure surfaces as such), a quantity above pending, against the line's sign or
+   * for a line with nothing pending is a 400 naming the line (never a silent cap), and nothing
+   * pending is a 400. Shipment lines without an order line cannot be invoiced through the order
+   * and are skipped.
    */
-  private Map<String, BigDecimal> translateToOrderLineOverrides(ShipmentInOut shipment,
-      Map<String, BigDecimal> shipmentLineOverrides) {
-    if (shipmentLineOverrides.isEmpty()) {
-      return Collections.emptyMap();
+  private JSONArray buildShipmentScopedOrderSelection(ShipmentInOut shipment,
+      Map<String, BigDecimal> lineOverrides) {
+    Map<String, BigDecimal> pending = computePendingQtyPerLineOrThrow(shipment.getId(), true);
+    // Explicit lines first: against an empty pending map they are refused naming the line.
+    MultiDocumentInvoiceSupport.requireOverridesWithinPending(List.of(shipment), lineOverrides,
+        pending, ERR_SHIPMENT_LINE_EXCEEDS_PENDING);
+    if (pending.isEmpty()) {
+      throw new OBException(ERR_SHIPMENT_NOTHING_PENDING);
     }
-    Map<String, BigDecimal> result = new HashMap<>();
+    boolean hasOverrides = !lineOverrides.isEmpty();
+    JSONArray selectedLines = new JSONArray();
     for (ShipmentInOutLine sl : shipment.getMaterialMgmtShipmentInOutLineList()) {
-      BigDecimal qty = shipmentLineOverrides.get(sl.getId());
-      if (qty != null && sl.getSalesOrderLine() != null) {
-        result.put(sl.getSalesOrderLine().getId(), qty);
+      BigDecimal qty = MultiDocumentInvoiceSupport.resolveInOutLineQty(sl, hasOverrides,
+          lineOverrides, pending);
+      if (qty == null || sl.getSalesOrderLine() == null) {
+        continue;
+      }
+      try {
+        selectedLines.put(MultiDocumentInvoiceSupport.buildOrderLineEntryForInOutLine(
+            sl.getSalesOrderLine().getId(), sl, qty));
+      } catch (Exception e) {
+        log.warn("Failed to build invoice line entry for shipment line {}: {}", sl.getId(),
+            e.getMessage());
       }
     }
-    return result;
+    if (selectedLines.length() == 0) {
+      throw new OBException(ERR_SHIPMENT_NOTHING_PENDING);
+    }
+    return selectedLines;
   }
 
   /**
@@ -966,8 +1271,16 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
    *     if any ID is not found or shipments span multiple BPs
    */
   protected List<ShipmentInOut> loadAndValidateShipments(List<String> shipmentIds) {
-    return MultiDocumentInvoiceSupport.loadAndValidateSameBusinessPartner(shipmentIds, "Shipment not found: ",
-        "No shipments provided", "All shipments must belong to the same Business Partner");
+    List<ShipmentInOut> shipments = MultiDocumentInvoiceSupport.loadAndValidateSameBusinessPartner(
+        shipmentIds, "Shipment not found: ", "No shipments provided",
+        "All shipments must belong to the same Business Partner");
+    // ETP-5709: every shipment that feeds an invoice must be completed, checked before anything
+    // is created (the classic Invoicefromshipment button, redirected here, checked it).
+    for (ShipmentInOut shipment : shipments) {
+      DocumentStatusGuard.requireCompleted(shipment.getDocumentNo(), shipment.getDocumentStatus(),
+          "El albarán %s no está completado (estado %s): complétalo antes de crear la factura");
+    }
+    return shipments;
   }
 
   /**
@@ -1065,10 +1378,9 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
    */
   protected void addShipmentLinesToInvoice(Invoice invoice, List<ShipmentInOut> shipments,
       Map<String, BigDecimal> lineOverrides) {
-    Map<String, BigDecimal> pendingQtyMap = new HashMap<>();
-    for (ShipmentInOut shipment : shipments) {
-      pendingQtyMap.putAll(computePendingQtyPerLine(shipment.getId(), true));
-    }
+    // ETP-5709: the throwing variant — the swallowing one returned an empty map on a DB error,
+    // which read as "no pending information" and invoiced every line in full.
+    Map<String, BigDecimal> pendingQtyMap = computePendingForShipments(shipments);
 
     boolean hasOverrides = !lineOverrides.isEmpty();
     JSONArray selectedLines = new JSONArray();
@@ -1089,7 +1401,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
       }
     }
     if (selectedLines.length() == 0) {
-      throw new OBException("No hay líneas pendientes de facturar en este albarán");
+      throw new OBException(ERR_SHIPMENT_NOTHING_PENDING);
     }
     createInvoiceLinesFromShipmentLines(selectedLines, invoice);
   }
@@ -1101,13 +1413,15 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
   }
 
   /**
-   * Backward-compatible 3-arg overload. Delegates to the 4-arg variant with an
-   * empty pending-qty map, which falls back to movement quantity for every line
-   * (same behaviour as before pending-qty awareness was added).
+   * Backward-compatible 3-arg overload. Delegates to the 4-arg variant with a {@code null}
+   * pending-qty map ("no pending information"), which falls back to movement quantity for
+   * every line (same behaviour as before pending-qty awareness was added). It is deliberately
+   * {@code null}, not an empty map: a non-null map is authoritative and an empty one means
+   * "nothing pending" (ETP-5709).
    */
   protected BigDecimal resolveShipmentLineQty(ShipmentInOutLine sl, boolean hasOverrides,
       Map<String, BigDecimal> lineOverrides) {
-    return resolveShipmentLineQty(sl, hasOverrides, lineOverrides, Collections.emptyMap());
+    return resolveShipmentLineQty(sl, hasOverrides, lineOverrides, null);
   }
 
   /**
@@ -1139,8 +1453,9 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
    * @param lineOverrides
    *     caller-supplied quantity caps per shipment line
    * @param pendingQtyMap
-   *     pre-computed uninvoiced qty MAGNITUDE per {@code M_InOutLine_ID}; empty map
-   *     means treat all lines as fully pending (backward-compat behaviour)
+   *     pre-computed uninvoiced qty MAGNITUDE per {@code M_InOutLine_ID}; a line absent from
+   *     the map has nothing pending (ETP-5709); {@code null} means no pending information
+   *     and falls back to the movement quantity (backward-compat behaviour)
    * @return quantity to invoice (sign matches the shipment line), or {@code null} to skip this line
    */
   protected BigDecimal resolveShipmentLineQty(ShipmentInOutLine sl, boolean hasOverrides,

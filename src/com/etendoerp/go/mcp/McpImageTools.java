@@ -71,7 +71,7 @@ final class McpImageTools {
    * and the only deployment-varying half of the URL — the public base and the context path — is
    * resolved from configuration in {@link #buildUploadUrl}.
    */
-  private static final String NEO_SERVLET_PATH = "/sws/neo";
+  static final String NEO_SERVLET_PATH = "/sws/neo";
 
   /**
    * Relative path of the ticketed upload endpoint; joined to the resolved base in
@@ -169,13 +169,26 @@ final class McpImageTools {
    * gets a network error instead of an upload.
    */
   private static String buildUploadUrl(String token) {
+    return publicUrl(UPLOAD_PATH + token);
+  }
+
+  /**
+   * Absolute URL, reachable by the client, of a path inside the web context — the resolution
+   * {@link #buildUploadUrl} documents, shared with the attachment links (ETP-5715) so every link
+   * the MCP hands out is built from the same base.
+   *
+   * @param path the path inside the context, starting with {@value #NEO_SERVLET_PATH} (the token,
+   *             when there is one, already appended)
+   * @return the absolute URL, or a context-relative path when no base can be resolved
+   */
+  static String publicUrl(String path) {
     String base = readAppBaseUrl();
     if (base == null) {
       base = readContextUrl();
     }
     return base == null
-        ? contextPrefix() + UPLOAD_PATH + token
-        : StringUtils.removeEnd(base, "/") + UPLOAD_PATH + token;
+        ? contextPrefix() + path
+        : StringUtils.removeEnd(base, "/") + path;
   }
 
   /**

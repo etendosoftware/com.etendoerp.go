@@ -21,15 +21,18 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.anyString;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
 
+import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.stream.Stream;
 
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.AfterEach;
@@ -39,6 +42,8 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mock;
 import org.mockito.MockedStatic;
@@ -211,6 +216,16 @@ class McpWriteGateTest {
     when(entity.getId()).thenReturn("sf-entity-" + id);
     when(entity.getName()).thenReturn(ENTITY_NAME);
     when(entity.get(SFEntity.PROPERTY_MCPCONFIG)).thenReturn(mcpConfig);
+    return entity;
+  }
+
+  /** A product entity, whose customization declares create directives (ETP-5676). */
+  private SFEntity productEntity() {
+    SFEntity entity = sfEntityFor("product", null);
+    com.etendoerp.go.schemaforge.data.SFSpec spec =
+        mock(com.etendoerp.go.schemaforge.data.SFSpec.class);
+    when(spec.getName()).thenReturn("product");
+    when(entity.getETGOSFSpec()).thenReturn(spec);
     return entity;
   }
 
@@ -716,6 +731,55 @@ class McpWriteGateTest {
     }
 
     /**
+     * ETP-5676: a create directive the entity's customization declares (the product's
+     * {@code _skipPricesSeed}) is honoured by its pre-hook, so it is not reported unknown — and it
+     * still travels on to that pre-hook. An undeclared underscore key is still reported.
+     */
+    @Test
+    @DisplayName("a declared create directive is carried through and not reported unknown")
+    void aDeclaredDirectiveIsNotReported() throws Exception {
+      declareProperty("name", "Name");
+      Set<String> unknown = new TreeSet<>();
+      JSONObject body = new JSONObject();
+      body.put("Name", "P");
+      body.put("_skipPricesSeed", true);
+      body.put("_notADirective", true);
+
+      JSONObject mapped;
+      try (MockedStatic<com.etendoerp.go.schemaforge.NeoExtensionDispatcher> dispatcher =
+          mockStatic(com.etendoerp.go.schemaforge.NeoExtensionDispatcher.class)) {
+        dispatcher.when(() -> com.etendoerp.go.schemaforge.NeoExtensionDispatcher
+            .resolveOnly(org.mockito.ArgumentMatchers.any()))
+            .thenReturn(new com.etendoerp.go.schemaforge.ProductDefaultsHandler());
+        mapped = McpWriteRequestSupport.mapFieldsToDalProperties(body, adTab, productEntity(),
+            unknown);
+        // Resolved once for the body, not once per unresolved key.
+        dispatcher.verify(
+            () -> com.etendoerp.go.schemaforge.NeoExtensionDispatcher
+                .resolveOnly(org.mockito.ArgumentMatchers.any()),
+            org.mockito.Mockito.times(1));
+      }
+
+      assertEquals(Set.of("_notADirective"), unknown);
+      assertTrue(mapped.getBoolean("_skipPricesSeed"),
+          "the directive must reach the customization's pre-hook, which strips it");
+    }
+
+    /** A body with nothing unresolved never asks the customization for its directives. */
+    @Test
+    @DisplayName("a clean write does not look up the create directives")
+    void aCleanWriteDoesNotResolveDirectives() throws Exception {
+      declareProperty("name", "Name");
+      try (MockedStatic<com.etendoerp.go.schemaforge.NeoExtensionDispatcher> dispatcher =
+          mockStatic(com.etendoerp.go.schemaforge.NeoExtensionDispatcher.class)) {
+        McpWriteRequestSupport.mapFieldsToDalProperties(fields("Name", "P"), adTab,
+            productEntity(), new TreeSet<>());
+
+        dispatcher.verifyNoInteractions();
+      }
+    }
+
+    /**
      * {@code parentId} is a declared argument of both write tools — {@code resolveParentFK}
      * consumes it — so reporting it would fire on the documented way to create a line.
      */
@@ -1019,5 +1083,170 @@ class McpWriteGateTest {
             verb + " collects the report and never attaches it to the response");
       }
     }
+  }
+
+  // ── filters on computed columns (ETP-5705) ────────────────────────────
+
+  /**
+   * A computed column (AD SQLLogic) is a DAL property but not a mapped Hibernate one: written as
+   * {@code e.<name>} the HQL failed with "could not resolve property" and the filter answered 500.
+   * It is only reachable through the {@code _computedColumns} proxy, as in core's
+   * {@code AdvancedQueryBuilder}.
+   */
+  @Nested
+  @DisplayName("a filter on a computed column goes through the _computedColumns proxy")
+  class ComputedColumnFilters {
+
+    @Test
+    @DisplayName("a comparison operator on a computed primitive targets e._computedColumns")
+    void comparisonOnComputedColumnUsesTheProxy() throws Exception {
+      Property prop = declareProperty("deliveryStatus", "DeliveryStatus");
+      when(prop.isComputedColumn()).thenReturn(true);
+      when(prop.isPrimitive()).thenReturn(true);
+      doReturn(BigDecimal.class).when(prop).getPrimitiveObjectType();
+
+      String where = McpQuerySupport.buildWhereFromFilters(
+          fields("deliveryStatus", new JSONObject().put("lt", 100)), adTab, specEntity(), null);
+
+      assertEquals("e." + Entity.COMPUTED_COLUMNS_PROXY_PROPERTY + ".deliveryStatus < 100", where);
+    }
+
+    /**
+     * The other two branches that render the property path, plus the regression guard: a
+     * property that is NOT computed must keep rendering exactly the HQL it rendered before the
+     * proxy was introduced ({@code e.<name>}, and {@code e.<name>.id=} for a foreign key).
+     *
+     * @param property the DAL property name, also used as the filter key
+     * @param computed whether the property is a computed column
+     * @param type     the primitive Java type, or {@code null} for a foreign key
+     * @param filter   the {@code filters} argument as JSON
+     * @param expected the exact HQL condition
+     */
+    @ParameterizedTest(name = "{0} computed={1} {3} -> {4}")
+    @MethodSource("com.etendoerp.go.mcp.McpWriteGateTest#filterPathCases")
+    @DisplayName("each filter branch renders the proxy path only for a computed property")
+    void filterBranchRendersThePathOfThePropertyKind(String property, boolean computed,
+        Class<?> type, String filter, String expected) throws Exception {
+      Property prop = declareProperty(property, property);
+      when(prop.isComputedColumn()).thenReturn(computed);
+      when(prop.isPrimitive()).thenReturn(type != null);
+      if (type != null) {
+        doReturn(type).when(prop).getPrimitiveObjectType();
+      }
+
+      String where = McpQuerySupport.buildWhereFromFilters(new JSONObject(filter), adTab,
+          specEntity(), null);
+
+      assertEquals(expected, where);
+    }
+
+    /**
+     * A customization's {@code filterAliases} redirects every filter shape on the virtual column
+     * to {@code coalesce(<stored twin>, <virtual>)}: the twin holds the value afterHandle shows,
+     * and the virtual is the fallback for a row whose twin was never computed. The key is matched
+     * on the resolved property, so the column-name spelling is redirected too, and an alias for a
+     * different property leaves the filter exactly as it was.
+     *
+     * @param filter   the {@code filters} argument as JSON
+     * @param aliasKey the property the declared alias redirects
+     * @param expected the exact HQL condition
+     */
+    @ParameterizedTest(name = "{0} alias on {1} -> {2}")
+    @MethodSource("com.etendoerp.go.mcp.McpWriteGateTest#aliasedFilterCases")
+    @DisplayName("an aliased filter compares the stored twin, falling back to the virtual")
+    void aliasedFilterComparesTheStoredTwin(String filter, String aliasKey, String expected)
+        throws Exception {
+      declareStatusTwins();
+      java.util.Map<String, String> applied = new java.util.LinkedHashMap<>();
+
+      String where = McpQuerySupport.buildWhereFromFilters(new JSONObject(filter), adTab,
+          specEntity(), java.util.Map.of(aliasKey, "eTGODeliveryStatus"), applied, null);
+
+      assertEquals(expected, where);
+      assertEquals("deliveryStatus".equals(aliasKey)
+          ? java.util.Map.of("deliveryStatus", "eTGODeliveryStatus") : java.util.Map.of(), applied);
+    }
+
+    @Test
+    @DisplayName("an applied alias is reported in the response as filter / evaluatedOn")
+    void appliedAliasIsReportedInTheResponse() throws Exception {
+      declareStatusTwins();
+      java.util.Map<String, String> applied = new java.util.LinkedHashMap<>();
+      McpQuerySupport.buildWhereFromFilters(fields("deliveryStatus", new JSONObject().put("lt", 100)),
+          adTab, specEntity(), java.util.Map.of("deliveryStatus", "eTGODeliveryStatus"), applied,
+          null);
+      JSONObject body = new JSONObject();
+
+      McpQuerySupport.attachFilterAliases(body, applied);
+
+      JSONObject note = body.getJSONArray(McpQuerySupport.KEY_FILTER_ALIASES).getJSONObject(0);
+      assertEquals("deliveryStatus", note.getString("filter"));
+      assertEquals("eTGODeliveryStatus", note.getString("evaluatedOn"));
+      assertTrue(note.getString("reason").contains("eTGODeliveryStatus"), note.toString());
+    }
+
+    /**
+     * A misdeclared alias fails the read instead of filtering on the raw value: a target that is
+     * not a property of the entity, or one of another type than the filtered property (the value
+     * is formatted for the filtered property, so a String target would compare a Long literal).
+     *
+     * @param target the declared alias target
+     */
+    @ParameterizedTest(name = "deliveryStatus -> {0}")
+    @ValueSource(strings = { "noSuchTwin", "documentNo" })
+    @DisplayName("an alias to a missing or differently typed property fails the read")
+    void misdeclaredAliasFailsTheRead(String target) throws Exception {
+      declareStatusTwins();
+      Property text = declareProperty("documentNo", "DocumentNo");
+      when(text.isPrimitive()).thenReturn(true);
+      doReturn(String.class).when(text).getPrimitiveObjectType();
+
+      IllegalStateException ex = assertThrows(IllegalStateException.class,
+          () -> McpQuerySupport.buildWhereFromFilters(fields("deliveryStatus", 100), adTab,
+              specEntity(), java.util.Map.of("deliveryStatus", target), null, null));
+
+      assertTrue(ex.getMessage().contains(target), ex.getMessage());
+    }
+
+    /** The virtual {@code deliveryStatus} (computed) and its stored twin (a mapped column). */
+    private void declareStatusTwins() {
+      Property virtual = declareProperty("deliveryStatus", "DeliveryStatus");
+      when(virtual.isComputedColumn()).thenReturn(true);
+      when(virtual.isPrimitive()).thenReturn(true);
+      doReturn(Long.class).when(virtual).getPrimitiveObjectType();
+      Property stored = declareProperty("eTGODeliveryStatus", "EM_ETGO_Delivery_Status");
+      when(stored.isComputedColumn()).thenReturn(false);
+      when(stored.isPrimitive()).thenReturn(true);
+      doReturn(Long.class).when(stored).getPrimitiveObjectType();
+    }
+  }
+
+  static Stream<Arguments> aliasedFilterCases() {
+    String aliased = "coalesce(e.eTGODeliveryStatus, e." + Entity.COMPUTED_COLUMNS_PROXY_PROPERTY
+        + ".deliveryStatus)";
+    return Stream.of(
+        Arguments.of("{\"deliveryStatus\":100}", "deliveryStatus", aliased + "=100"),
+        Arguments.of("{\"deliveryStatus\":{\"lt\":100}}", "deliveryStatus", aliased + " < 100"),
+        Arguments.of("{\"deliveryStatus\":{\"between\":[10,20]}}", "deliveryStatus",
+            aliased + " between 10 and 20"),
+        Arguments.of("{\"DeliveryStatus\":100}", "deliveryStatus", aliased + "=100"),
+        Arguments.of("{\"deliveryStatus\":100}", "invoiceStatus",
+            "e." + Entity.COMPUTED_COLUMNS_PROXY_PROPERTY + ".deliveryStatus=100"));
+  }
+
+  static Stream<Arguments> filterPathCases() {
+    String proxy = "e." + Entity.COMPUTED_COLUMNS_PROXY_PROPERTY + ".";
+    return Stream.of(
+        Arguments.of("deliveryStatus", true, BigDecimal.class, "{\"deliveryStatus\":100}",
+            proxy + "deliveryStatus=100"),
+        Arguments.of("deliveryStatus", true, BigDecimal.class,
+            "{\"deliveryStatus\":{\"between\":[10,20]}}",
+            proxy + "deliveryStatus between 10 and 20"),
+        Arguments.of("grandTotalAmount", false, BigDecimal.class,
+            "{\"grandTotalAmount\":{\"gt\":5}}", "e.grandTotalAmount > 5"),
+        Arguments.of("businessPartner", false, null, "{\"businessPartner\":\"BP-1\"}",
+            "e.businessPartner.id='BP-1'"),
+        Arguments.of("lastShipment", true, null, "{\"lastShipment\":\"SH-1\"}",
+            proxy + "lastShipment.id='SH-1'"));
   }
 }

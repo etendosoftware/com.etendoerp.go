@@ -75,6 +75,8 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  * is mocked and {@code OBContext}/{@code EtendoGoJwtDalHelper} are statically stubbed, so these run
  * fast with no database — the servlet wiring (routing → service → cookie/CSRF/response envelope) is
  * what's under test. DB-level store behavior is covered by {@code JdbcGoSessionStoreIntegrationTest}.
+ *
+ * @covers com.etendoerp.go.rest.EtendoGoJwtServlet
  */
 public class GoSessionEndpointsTest {
 
@@ -145,6 +147,68 @@ public class GoSessionEndpointsTest {
     }
 
     assertEquals(401, resp.status);
+    verify(goSessionService, never()).create(anyString(), anyString(), any(), any());
+  }
+
+  // ETP-5847 — POST /session/link: the signup API's one-time login link.
+
+  @Test
+  public void loginLinkSpendsTheLinkAndOpensALinkSession() throws Exception {
+    Account account = mock(Account.class);
+    when(account.getId()).thenReturn("ACC1");
+    when(account.getEmail()).thenReturn(EMAIL);
+    IssuedGoSession issued = new IssuedGoSession(
+        "sess-token-xyz", "refresh-abc", "csrf-xyz", new GoSessionRecord());
+    when(goSessionService.create(eq("ACC1"), eq("link"), any(), any())).thenReturn(issued);
+
+    CapturedResponse resp = new CapturedResponse();
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
+        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class);
+        MockedStatic<SignupAccountDalHelper> signup = mockStatic(SignupAccountDalHelper.class)) {
+      signup.when(() -> SignupAccountDalHelper.findAccountByLoginLinkHash(
+          eq(AccountRegistrationService.hashAuthToken("link-token")), any())).thenReturn(account);
+      dal.when(() -> EtendoGoJwtDalHelper.findActiveAccountById("ACC1")).thenReturn(account);
+      signup.when(() -> SignupAccountDalHelper.environmentUserId(account)).thenReturn("USER1");
+
+      servlet.doPost(jsonPost("/session/link", new JSONObject().put("token", "link-token")),
+          resp.response);
+
+      signup.verify(() -> SignupAccountDalHelper.consumeLoginLink(eq(account), any()));
+    }
+
+    assertEquals(200, resp.status);
+    assertNotNull(resp.cookie(GoSessionSecurity.COOKIE_NAME));
+    JSONObject body = new JSONObject(resp.body.toString());
+    assertEquals("csrf-xyz", body.getString("csrfToken"));
+    assertEquals("USER1", body.getJSONObject("environment").getString("userId"));
+    assertFalse("session token must NOT be in the body", body.has("token"));
+  }
+
+  @Test
+  public void anUnknownOrSpentLoginLinkOpensNoSession() throws Exception {
+    CapturedResponse resp = new CapturedResponse();
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
+        MockedStatic<SignupAccountDalHelper> signup = mockStatic(SignupAccountDalHelper.class)) {
+      servlet.doPost(jsonPost("/session/link", new JSONObject().put("token", "spent")),
+          resp.response);
+
+      signup.verify(() -> SignupAccountDalHelper.consumeLoginLink(any(), any()), never());
+    }
+
+    assertEquals(400, resp.status);
+    assertEquals("LOGIN_LINK_INVALID",
+        new JSONObject(resp.body.toString()).getJSONObject("error").getString("code"));
+    verify(goSessionService, never()).create(anyString(), anyString(), any(), any());
+  }
+
+  @Test
+  public void aLoginLinkCallWithoutATokenIsABadRequest() throws Exception {
+    CapturedResponse resp = new CapturedResponse();
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class)) {
+      servlet.doPost(jsonPost("/session/link", new JSONObject()), resp.response);
+    }
+
+    assertEquals(400, resp.status);
     verify(goSessionService, never()).create(anyString(), anyString(), any(), any());
   }
 
@@ -568,26 +632,36 @@ public class GoSessionEndpointsTest {
    */
   private CapturedResponse enterEnvironment(GoSessionRecord sessionRecord)
       throws Exception {
+    EtendoGoJwtSupport.RoleListData roleListData = new EtendoGoJwtSupport.RoleListData(
+        "R1", new JSONArray().put(roleEntry("R1", "O1")));
+    return enterEnvironment(sessionRecord, roleListData, new JSONObject()
+        .put("userId", "U1")
+        .put("roleId", "R1")
+        .put("orgId", "O1"), "R1");
+  }
+
+  /**
+   * Posts {@code /session/environment} with {@code requestBody}, the user holding the roles in
+   * {@code roleListData}; only {@code enteredRoleId} resolves to a {@link Role}, so entering with
+   * any other role fails instead of passing by accident.
+   */
+  private CapturedResponse enterEnvironment(GoSessionRecord sessionRecord,
+      EtendoGoJwtSupport.RoleListData roleListData, JSONObject requestBody, String enteredRoleId)
+      throws Exception {
     when(goSessionService.resolve("tok")).thenReturn(sessionRecord);
 
     Account account = mock(Account.class);
     when(account.getEmail()).thenReturn(EMAIL);
 
-    EtendoGoJwtSupport.RoleListData roleListData = new EtendoGoJwtSupport.RoleListData(
-        "R1",
-        new JSONArray().put(new JSONObject()
-            .put("id", "R1")
-            .put("orgList", new JSONArray().put(new JSONObject().put("id", "O1")))));
-
     User user = mock(User.class);
     Role role = mock(Role.class);
     OBDal obDal = mock(OBDal.class);
     when(obDal.get(User.class, "U1")).thenReturn(user);
-    when(obDal.get(Role.class, "R1")).thenReturn(role);
+    when(obDal.get(Role.class, enteredRoleId)).thenReturn(role);
 
     DecodedJWT decoded = mock(DecodedJWT.class);
     Claim userClaim = claim("U1");
-    Claim roleClaim = claim("R1");
+    Claim roleClaim = claim(enteredRoleId);
     Claim clientClaim = claim("C1");
     Claim orgClaim = claim("O1");
     Claim warehouseClaim = claim("W1");
@@ -611,13 +685,77 @@ public class GoSessionEndpointsTest {
       sws.when(() -> SecureWebServicesUtils.generateToken(user, role)).thenReturn("jwt");
       sws.when(() -> SecureWebServicesUtils.decodeToken("jwt")).thenReturn(decoded);
 
-      servlet.doPost(postEnv(new JSONObject()
-              .put("userId", "U1")
-              .put("roleId", "R1")
-              .put("orgId", "O1").toString(), "tok", CSRF),
-          resp.response);
+      servlet.doPost(postEnv(requestBody.toString(), "tok", CSRF), resp.response);
     }
     return resp;
+  }
+
+  /** The role the session was rotated into: what every later request is authorized with. */
+  private String rotatedRoleId() {
+    ArgumentCaptor<GoSessionRecord> captor = ArgumentCaptor.forClass(GoSessionRecord.class);
+    verify(goSessionService).rotate(captor.capture());
+    return captor.getValue().getRoleId();
+  }
+
+  private static JSONObject roleEntry(String roleId, String... orgIds) throws Exception {
+    JSONArray orgList = new JSONArray();
+    for (String orgId : orgIds) {
+      orgList.put(new JSONObject().put("id", orgId));
+    }
+    return new JSONObject().put("id", roleId).put("orgList", orgList);
+  }
+
+  /** The client never sends a role, only its first organization (EnvSelectStep/loginEnvironment). */
+  private static JSONObject entryWithoutRole() throws Exception {
+    return new JSONObject().put("userId", "U1").put("orgId", "O1");
+  }
+
+  /** ETP-5096 — an entry with no role enters with the user's default role, not the oldest one. */
+  @Test
+  public void environmentEntryWithoutARoleUsesTheDefaultRole() throws Exception {
+    when(goSessionService.rotate(any())).thenReturn(
+        new IssuedGoSession("newsess", "newref", "newcsrf", new GoSessionRecord()));
+    EtendoGoJwtSupport.RoleListData roles = new EtendoGoJwtSupport.RoleListData("R-OLD", "R-DEF",
+        new JSONArray().put(roleEntry("R-OLD", "O1")).put(roleEntry("R-DEF", "O1")));
+
+    CapturedResponse resp = enterEnvironment(sessionInEnvironment("O1"), roles,
+        entryWithoutRole(), "R-DEF");
+
+    assertEquals(200, resp.status);
+    assertEquals("R-DEF", rotatedRoleId());
+  }
+
+  /**
+   * ETP-5096 — the default role cannot open the organization the client sends, so entry keeps the
+   * oldest role it used before instead of answering a 403 to someone who could enter yesterday.
+   */
+  @Test
+  public void environmentEntryKeepsTheOldestRoleWhenTheDefaultCannotOpenTheOrg() throws Exception {
+    when(goSessionService.rotate(any())).thenReturn(
+        new IssuedGoSession("newsess", "newref", "newcsrf", new GoSessionRecord()));
+    EtendoGoJwtSupport.RoleListData roles = new EtendoGoJwtSupport.RoleListData("R-OLD", "R-DEF",
+        new JSONArray().put(roleEntry("R-OLD", "O1")).put(roleEntry("R-DEF", "O2")));
+
+    CapturedResponse resp = enterEnvironment(sessionInEnvironment("O1"), roles,
+        entryWithoutRole(), "R-OLD");
+
+    assertEquals(200, resp.status);
+    assertEquals("R-OLD", rotatedRoleId());
+  }
+
+  /** An explicit role is still honoured as requested, default or not. */
+  @Test
+  public void environmentEntryWithAnExplicitRoleIgnoresTheDefault() throws Exception {
+    when(goSessionService.rotate(any())).thenReturn(
+        new IssuedGoSession("newsess", "newref", "newcsrf", new GoSessionRecord()));
+    EtendoGoJwtSupport.RoleListData roles = new EtendoGoJwtSupport.RoleListData("R-OLD", "R-DEF",
+        new JSONArray().put(roleEntry("R-OLD", "O1")).put(roleEntry("R-DEF", "O1")));
+
+    CapturedResponse resp = enterEnvironment(sessionInEnvironment("O1"), roles,
+        entryWithoutRole().put("roleId", "R-OLD"), "R-OLD");
+
+    assertEquals(200, resp.status);
+    assertEquals("R-OLD", rotatedRoleId());
   }
 
   @Test

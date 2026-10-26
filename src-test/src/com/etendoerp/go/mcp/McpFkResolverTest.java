@@ -129,6 +129,7 @@ class McpFkResolverTest {
     private static final String KEY = "currency";
     private static final String UUID_ID = "95E2A8B50A254B2AAE6774B8C2F28120";
     private static final String LEGACY_ID = "102";
+    private static final String OTHER_ID = "A2A2A8B50A254B2AAE6774B8C2F28120";
     private static final String TARGET_ENTITY = "Currency";
 
     private Entity dalEntity;
@@ -347,6 +348,78 @@ class McpFkResolverTest {
         JSONObject error = McpFkResolver.resolveFkNames(body, dalEntity, adTab, Map.of(), log);
         assertEquals(McpConstants.ERROR_AMBIGUOUS_FK, error.getString(McpConstants.KEY_ERROR));
         assertTrue(error.getString(McpConstants.KEY_DETAIL).contains("id or its exact label"));
+      }
+    }
+
+    /**
+     * ETP-5703 repro: a custom-HQL selector (the product selector) returns one row per joined child,
+     * so a single product came back twice and was reported ambiguous against itself.
+     */
+    @Test
+    @DisplayName("one record returned as several rows resolves to it instead of ambiguous_fk")
+    void duplicateRowsOfOneRecordResolve() throws Exception {
+      JSONObject body = bodyWith("Agua");
+      Column column = mock(Column.class);
+      NeoResponse twoRowsOneRecord = labelledHits(UUID_ID, "Agua", UUID_ID, "Agua");
+      try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+          MockedStatic<NeoSelectorService> selector = mockStatic(NeoSelectorService.class);
+          MockedStatic<McpSchemaFieldBuilder> fields = mockStatic(McpSchemaFieldBuilder.class)) {
+        obDal.when(OBDal::getInstance).thenReturn(obDalInstance);
+        fields.when(() -> McpSchemaFieldBuilder.findColumn(adTab, KEY, dalEntity)).thenReturn(column);
+        selector.when(() -> NeoSelectorService.querySelectorByColumn(eq(column), eq(KEY), eq("Agua"),
+            anyInt(), anyInt(), any())).thenReturn(twoRowsOneRecord);
+
+        assertNull(McpFkResolver.resolveFkNames(body, dalEntity, adTab, Map.of(), log));
+        assertEquals(UUID_ID, body.getString(KEY));
+      }
+    }
+
+    /**
+     * ETP-5703: "agua" against "Agua" and "Agua con gas" names one record exactly (ignoring case),
+     * so the AMBIGUOUS outcome resolves to it instead of answering ambiguous_fk.
+     */
+    @Test
+    @DisplayName("a case-insensitive exact label among several hits resolves to that record")
+    void caseInsensitiveExactLabelResolvesAmbiguousHits() throws Exception {
+      JSONObject body = bodyWith("agua");
+      Column column = mock(Column.class);
+      NeoResponse hits = labelledHits(UUID_ID, "Agua", OTHER_ID, "Agua con gas");
+      try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+          MockedStatic<NeoSelectorService> selector = mockStatic(NeoSelectorService.class);
+          MockedStatic<McpSchemaFieldBuilder> fields = mockStatic(McpSchemaFieldBuilder.class)) {
+        obDal.when(OBDal::getInstance).thenReturn(obDalInstance);
+        fields.when(() -> McpSchemaFieldBuilder.findColumn(adTab, KEY, dalEntity)).thenReturn(column);
+        selector.when(() -> NeoSelectorService.querySelectorByColumn(eq(column), eq(KEY), eq("agua"),
+            anyInt(), anyInt(), any())).thenReturn(hits);
+
+        assertNull(McpFkResolver.resolveFkNames(body, dalEntity, adTab, Map.of(), log));
+        assertEquals(UUID_ID, body.getString(KEY));
+      }
+    }
+
+    /**
+     * The case-insensitive preference only picks a record when exactly one DISTINCT record is shown
+     * by that name, and only through its display keys (label, _identifier, searchKey, value) —
+     * another string column that happens to equal the value never decides.
+     */
+    @Test
+    @DisplayName("ignore-case label match: distinct records sharing it stay ambiguous; display keys only")
+    void ignoreCaseLabelMatchNeedsOneRecordAndADisplayKey() throws Exception {
+      JSONArray twoRecordsOneLabel = new JSONArray()
+          .put(new JSONObject().put("id", UUID_ID).put("label", "Agua"))
+          .put(new JSONObject().put("id", OTHER_ID).put("label", "AGUA"));
+      JSONArray onlyInOtherColumn = new JSONArray()
+          .put(new JSONObject().put("id", UUID_ID).put("label", "Agua mineral")
+              .put("description", "agua"))
+          .put(new JSONObject().put("id", OTHER_ID).put("label", "Agua con gas"));
+
+      assertNull(McpFkResolver.uniqueLabelMatchIgnoreCase(twoRecordsOneLabel, "agua"));
+      assertNull(McpFkResolver.uniqueLabelMatchIgnoreCase(onlyInOtherColumn, "agua"));
+      for (String displayKey : new String[] {"_identifier", "searchKey", "value"}) {
+        JSONArray items = new JSONArray()
+            .put(new JSONObject().put("id", UUID_ID).put(displayKey, "AGUA"))
+            .put(new JSONObject().put("id", OTHER_ID).put(displayKey, "Agua con gas"));
+        assertEquals(UUID_ID, McpFkResolver.uniqueLabelMatchIgnoreCase(items, "agua"), displayKey);
       }
     }
 

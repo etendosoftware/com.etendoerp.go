@@ -1,0 +1,45 @@
+/*
+ * *************************************************************************
+ * The contents of this file are subject to the Etendo License
+ * (the "License"), you may not use this file except in compliance with
+ * the License.
+ * You may obtain a copy of the License at
+ * https://github.com/etendosoftware/etendo_core/blob/main/legal/Etendo_license.txt
+ * Software distributed under the License is distributed on an
+ * "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing rights
+ * and limitations under the License.
+ * All portions are Copyright © 2021–2026 FUTIT SERVICES, S.L
+ * All Rights Reserved.
+ * Contributor(s): Futit Services S.L.
+ * *************************************************************************
+ */
+
+package com.etendoerp.go.schemaforge.handlers;
+
+import com.etendoerp.go.schemaforge.GeneralLedgerBalancingRule;
+import com.etendoerp.go.schemaforge.NeoContext;
+import com.etendoerp.go.schemaforge.NeoExtension;
+import com.etendoerp.go.schemaforge.NeoResponse;
+
+/**
+ * ETP-5693: customization of the {@code Cuentas generales} entity in the General Ledger Configuration window — accounting
+ * combinations must be posting accounts of the row's ledger, and that ledger cannot change on
+ * update. See {@link AbstractAccountingSchemaAutoFillHandler}. ETP-5724: a balancing switch that is
+ * on requires its account ({@link GeneralLedgerBalancingRule}).
+ */
+// The entity is decisions.json -> entities.generalAccounts.name: renaming it there silently unbinds this.
+@NeoExtension(spec = "general-ledger-configuration", entity = "Cuentas generales")
+public class GeneralLedgerAccountsHandler extends AbstractAccountingSchemaAutoFillHandler {
+
+  @Override
+  public NeoResponse handle(NeoContext context) {
+    NeoResponse refusal = super.handle(context);
+    return refusal != null ? refusal : GeneralLedgerBalancingRule.checkUpdate(context);
+  }
+
+  @Override
+  protected String describeContext() {
+    return "ledger general accounts";
+  }
+}

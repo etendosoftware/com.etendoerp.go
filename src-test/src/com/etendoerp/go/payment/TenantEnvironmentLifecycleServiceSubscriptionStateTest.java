@@ -4,7 +4,6 @@ package com.etendoerp.go.payment;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
-import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -45,22 +44,14 @@ public class TenantEnvironmentLifecycleServiceSubscriptionStateTest {
   private static final Instant DUE_AT = Instant.parse("2026-10-31T00:00:00Z");
   private static final Instant EVENT_AT = Instant.parse("2026-11-01T12:30:00Z");
 
+  /**
+   * A tenant with no active subscription row, open or closed, so these specs exercise the
+   * preference projection. A mocked {@code findLatest} answers {@code Optional.empty()} by
+   * default; the row route has its own specs.
+   */
+  private final SubscriptionService subscriptionService = mock(SubscriptionService.class);
   private final TenantEnvironmentLifecycleService service =
-      new TenantEnvironmentLifecycleService(mock(TenantPlanService.class));
-
-  @Test
-  public void blankClientReadsAsTheEmptyProjectionWithoutTouchingTheDal() {
-    // readPreference enters admin mode, which needs no real session in a unit test.
-    try (MockedStatic<OBDal> dal = mockStatic(OBDal.class);
-        MockedStatic<org.openbravo.dal.core.OBContext> context =
-            mockStatic(org.openbravo.dal.core.OBContext.class)) {
-      assertSame(SubscriptionLifecycleApplier.StoredState.NONE,
-          service.readSubscriptionState(null));
-      assertSame(SubscriptionLifecycleApplier.StoredState.NONE,
-          service.readSubscriptionState("  "));
-      dal.verify(OBDal::getInstance, never());
-    }
-  }
+      new TenantEnvironmentLifecycleService(mock(TenantPlanService.class), subscriptionService);
 
   @Test
   public void storedPreferencesAreReadBackAsTheProjection() {
@@ -76,7 +67,8 @@ public class TenantEnvironmentLifecycleServiceSubscriptionStateTest {
         MockedStatic<org.openbravo.dal.core.OBContext> context =
             mockStatic(org.openbravo.dal.core.OBContext.class)) {
       dal.when(OBDal::getInstance).thenReturn(dalInstance);
-      SubscriptionLifecycleApplier.StoredState state = service.readSubscriptionState(CLIENT_ID);
+      SubscriptionLifecycleApplier.StoredState state = service.targetForTenant(CLIENT_ID, null)
+          .storedState();
 
       assertEquals(EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE, state.status());
       assertEquals(DUE_AT, state.dueAt());
@@ -96,7 +88,8 @@ public class TenantEnvironmentLifecycleServiceSubscriptionStateTest {
         MockedStatic<org.openbravo.dal.core.OBContext> context =
             mockStatic(org.openbravo.dal.core.OBContext.class)) {
       dal.when(OBDal::getInstance).thenReturn(dalInstance);
-      SubscriptionLifecycleApplier.StoredState state = service.readSubscriptionState(CLIENT_ID);
+      SubscriptionLifecycleApplier.StoredState state = service.targetForTenant(CLIENT_ID, null)
+          .storedState();
 
       assertNull(state.status());
       assertNull(state.dueAt());
@@ -142,11 +135,18 @@ public class TenantEnvironmentLifecycleServiceSubscriptionStateTest {
     when(provider.get(Preference.class)).thenReturn(created);
 
     try (MockedStatic<OBDal> dal = mockStatic(OBDal.class);
-         MockedStatic<OBProvider> providerStatic = mockStatic(OBProvider.class)) {
+         MockedStatic<OBProvider> providerStatic = mockStatic(OBProvider.class);
+         MockedStatic<org.openbravo.dal.core.OBContext> context =
+             mockStatic(org.openbravo.dal.core.OBContext.class)) {
       dal.when(OBDal::getInstance).thenReturn(dalInstance);
       providerStatic.when(OBProvider::getInstance).thenReturn(provider);
 
       service.recordSubscriptionEventAt(CLIENT_ID, EVENT_AT);
+
+      // The Stripe webhook has no user context of its own: the write runs in admin mode and
+      // leaves it again, rather than depending on a context an earlier call leaked.
+      context.verify(org.openbravo.dal.core.OBContext::setAdminMode);
+      context.verify(org.openbravo.dal.core.OBContext::restorePreviousMode);
     }
 
     verify(created).setAttribute(TenantEnvironmentLifecycleService.SUBSCRIPTION_EVENT_AT_ATTRIBUTE);

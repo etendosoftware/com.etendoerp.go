@@ -26,6 +26,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -51,6 +52,7 @@ import org.openbravo.service.json.DefaultJsonDataService;
 import org.openbravo.service.json.JsonConstants;
 
 import com.etendoerp.go.schemaforge.AmortizationPlanService;
+import com.etendoerp.go.schemaforge.BatchJobService;
 import com.etendoerp.go.schemaforge.util.NeoRecordVersion;
 import com.etendoerp.go.schemaforge.BatchService;
 import com.etendoerp.go.schemaforge.NeoActionRecordGuard;
@@ -148,6 +150,49 @@ public class McpToolRouter {
     }
   }
 
+  /**
+   * An entity named with different capitals ({@code 'Header'}) is routed as the spec spells it
+   * (ETP-5714). Entity names are case-sensitive in the catalogue and the tool description used to
+   * give a capitalised example, so the first call of an agent following it failed with
+   * {@code not_found}.
+   *
+   * <p>Only a {@code not_found} about the {@code entity} argument is retried, and only when exactly
+   * one included entity of the spec matches ignoring case. The argument itself is rewritten before
+   * the retry, so every later consumer — hooks, customization lookup, messages — sees the canonical
+   * name and none can silently miss a binding keyed on the exact one. The normal path is untouched:
+   * this runs after a miss.</p>
+   *
+   * @return the retried call's result, or {@code null} when the refusal is not a case mismatch
+   */
+  private JSONObject retryWithCanonicalEntity(McpRoutingException refusal, String toolName,
+      JSONObject arguments, Set<String> scopes) {
+    if (arguments == null || !McpConstants.PARAM_ENTITY.equals(refusal.getField())
+        || !McpConstants.ERROR_NOT_FOUND.equals(refusal.getErrorCode())
+        || !(arguments.opt(McpConstants.PARAM_ENTITY) instanceof String)) {
+      return null;
+    }
+    String canonical;
+    OBContext.setAdminMode();
+    try {
+      canonical = McpEntityNames.canonicalName(
+          ToolRegistry.resolveSpecName(toolName, arguments),
+          arguments.getString(McpConstants.PARAM_ENTITY));
+    } catch (JSONException | RuntimeException e) {
+      return null;
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+    if (canonical == null) {
+      return null;
+    }
+    try {
+      arguments.put(McpConstants.PARAM_ENTITY, canonical);
+    } catch (JSONException e) {
+      return null;
+    }
+    return routeCall(toolName, arguments, scopes);
+  }
+
   private JSONObject routeCall(String toolName, JSONObject arguments,
       java.util.Set<String> scopes) {
     String renamedTo = McpRoutingException.renamedToolName(toolName);
@@ -203,8 +248,16 @@ public class McpToolRouter {
               return wrapAsErrorContent(McpRouterErrorBodies.batchDisabled());
             }
             return handleBatch(arguments);
+          case McpConstants.TOOL_NEO_JOB_STATUS:
+          case McpConstants.TOOL_NEO_JOB_CANCEL:
+            if (!McpConstants.batchToolEnabled()) {
+              return wrapAsErrorContent(McpRouterErrorBodies.batchDisabled());
+            }
+            return McpBatchJobTools.handleBatchJob(toolName, arguments);
           case "etendo_action":
-            return handleAction(specName, arguments);
+            return McpActionBatchUnpost.runSingle(specName, arguments, this::handleAction);
+          case McpConstants.TOOL_NEO_ACTION_BATCH:
+            return McpActionBatch.handle(specName, arguments, this::handleAction);
           case McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN:
             return handleGenerateAmortizationPlan(arguments);
           case McpConstants.TOOL_NEO_WIDGET:
@@ -218,6 +271,18 @@ public class McpToolRouter {
             return imageToolResult(McpImageTools.uploadImage(arguments));
           case McpConstants.TOOL_NEO_GET_IMAGE_UPLOAD:
             return imageToolResult(McpImageTools.getUpload(arguments));
+          // ETP-5715: a document's attachments. Authorized per document by NeoAttachmentTarget.
+          case McpConstants.TOOL_NEO_REQUEST_ATTACHMENT_UPLOAD:
+          case McpConstants.TOOL_NEO_LIST_ATTACHMENTS:
+          case McpConstants.TOOL_NEO_DELETE_ATTACHMENT:
+            return McpAttachmentTools.handle(toolName, arguments);
+          case McpConstants.TOOL_NEO_GET_DOCUMENT_PDF:
+            return McpDocumentPdfTool.handle(arguments);
+          case McpConstants.TOOL_NEO_SEND_DOCUMENT_EMAIL:
+            return McpDocumentEmailTool.handle(arguments);
+          case McpConstants.TOOL_NEO_REQUEST_DOCUMENT_EXTRACTION_UPLOAD:
+          case McpConstants.TOOL_NEO_EXTRACT_INVOICE_DOCUMENT:
+            return McpOcrTools.handle(toolName, arguments);
           case "docs":
             return handleDocs(arguments);
           default:
@@ -232,6 +297,10 @@ public class McpToolRouter {
         OBContext.restorePreviousMode();
       }
     } catch (McpRoutingException e) {
+      JSONObject retried = retryWithCanonicalEntity(e, toolName, arguments, scopes);
+      if (retried != null) {
+        return retried;
+      }
       // ETP-4793 / IMP-17: a spec/entity that does not exist already knows its own envelope,
       // including the self-correcting `available` list (evidence B20).
       // ETP-5639: keyed on the refusal's own code. It used to say "addressed something that does
@@ -399,9 +468,19 @@ public class McpToolRouter {
     // order-by instead of the random id order.
     NeoTabDefaultSort.applyIfAbsent(params, adTab, dalEntityName);
 
-    // Apply filters as where clause
+    // One read context for the customization's filter aliases and read predicates below.
+    NeoContext readCtx = McpHookExecutor.buildReadHookContext(specName, entityName, null, adTab,
+        sfEntity, McpHookExecutor.buildReadProviderParams(filters, parentId, offset, limit, orderBy));
+
+    // Apply filters as where clause. ETP-5705: when a customization rewrites a value after the
+    // read, it can declare a filter alias naming the property that holds the displayed value.
+    // A filter on that field is evaluated against the alias, or it would match the raw value
+    // the caller is never shown. Every alias used is reported back in the response.
+    Map<String, String> appliedAliases = new LinkedHashMap<>();
     if (filters != null && filters.length() > 0) {
-      String whereClause = McpQuerySupport.buildWhereFromFilters(filters, adTab, sfEntity, log);
+      String whereClause = McpQuerySupport.buildWhereFromFilters(filters, adTab, sfEntity,
+          NeoReadPredicates.resolveFilterAliases(readCtx, NeoExtensionChannel.MCP),
+          appliedAliases, log);
       if (StringUtils.isNotBlank(whereClause)) {
         params.put(JsonConstants.WHERE_AND_FILTER_CLAUSE, whereClause);
         params.put(JsonConstants.USE_ALIAS, "true");
@@ -426,10 +505,7 @@ public class McpToolRouter {
     // ETP-5009: the customization's read predicates, ANDed in exactly as the REST list GET and
     // its ?_distinct= fetch do (NeoReadPredicates), so a row a customization excludes from the
     // query is excluded here too — rather than only from the page its afterHandle was handed.
-    String readPredicate = NeoReadPredicates.resolve(McpHookExecutor.buildReadHookContext(
-        specName, entityName, null, adTab, sfEntity,
-        McpHookExecutor.buildReadProviderParams(filters, parentId, offset, limit, orderBy)),
-        NeoExtensionChannel.MCP);
+    String readPredicate = NeoReadPredicates.resolve(readCtx, NeoExtensionChannel.MCP);
     if (StringUtils.isNotBlank(readPredicate)) {
       params.put(JsonConstants.WHERE_AND_FILTER_CLAUSE, NeoReadPredicates.and(
           params.get(JsonConstants.WHERE_AND_FILTER_CLAUSE), readPredicate));
@@ -473,6 +549,7 @@ public class McpToolRouter {
     // other filters mean — the moment it is choosing among them. After projection on purpose:
     // `fields` selects row columns, and this block is not one.
     McpNamedFilters.attachApplied(flat, sfEntity.getNamedFilters(), filters);
+    McpQuerySupport.attachFilterAliases(flat, appliedAliases);
     return wrapAsTextContent(flat);
   }
 
@@ -775,6 +852,11 @@ public class McpToolRouter {
     // McpBillToInjector for why this compensation lives in the MCP layer.
     McpBillToInjector.injectIfMissing(filteredBody, adTab, dalEntity, log);
 
+    // ETP-5710: the entity's customization may derive create defaults from the body (e.g. the
+    // invoice partner address) — they must exist before the mandatory check below, which runs
+    // ahead of its pre-hook. A no-op for entities that do not override the hook.
+    McpHookExecutor.resolveServerCreateFields(specName, entityName, adTab, sfEntity, filteredBody);
+
     // Fix FK sentinel values: "0" is a UI-level sentinel (means "not yet set") that can't
     // go through the DAL as an entity reference. Replace with a real value from the body
     // when possible (e.g. documentType="0" -> copy from transactionDocument); keep it when "0" is
@@ -816,6 +898,11 @@ public class McpToolRouter {
     // short-circuits, null proceeds to generic persistence, and the handler may have mutated the
     // body in place. The other five MCP hook sites are deliberately left alone in this step.
     NeoContext hookCtx = McpHookExecutor.buildHookContext(specName, entityName, HTTP_METHOD_POST, null, filteredBody, adTab, sfEntity);
+    // ETP-5680: the mandatory-defaults pass above filled some keys with a fallback placeholder
+    // (the first combo option, ...). The hook context is a new one, so without this copy the
+    // customization could not tell a placeholder from a value the caller chose, and the REST path
+    // (where the pre-hook runs before any placeholder exists) and this one would disagree.
+    McpHookExecutor.forwardFallbackDefaults(ctx, hookCtx);
     NeoExtensionRequest customizationRequest = NeoExtensionRequest.builder()
         .qualifier(sfEntity.getJavaQualifier())
         .specName(specName)
@@ -1186,6 +1273,8 @@ public class McpToolRouter {
     if (assetId != null) {
       queryParams.put(McpConstants.PARAM_ASSET_ID, assetId);
     }
+    McpDefaultsView.copyRecordContext(args.optJSONObject(McpConstants.PARAM_RECORD_CONTEXT),
+        queryParams);
 
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
     SFEntity sfEntity = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, entityName);
@@ -1262,6 +1351,26 @@ public class McpToolRouter {
 
   // ── etendo_schema ─────────────────────────────────────────────────────────
 
+  /**
+   * The record {@code etendo_schema(view:"actions", id:…)} judges availability against
+   * (ETP-5714), or {@code null} when no id was given.
+   *
+   * @throws McpRoutingException {@code not_found} when the id names no readable record
+   */
+  private static McpActionAvailabilityContext availabilityContextOf(JSONObject args, SFSpec spec,
+      SFEntity sfEntity, Entity dalEntity) {
+    String recordId = StringUtils.trimToNull(args.optString(McpConstants.PARAM_ID, null));
+    if (recordId == null) {
+      return null;
+    }
+    McpActionAvailabilityContext asked =
+        McpActionAvailabilityContext.forRecord(sfEntity, dalEntity, recordId);
+    if (asked == null) {
+      throw McpRoutingException.recordNotFound(spec.getName(), sfEntity.getName(), recordId);
+    }
+    return asked;
+  }
+
   // AD_Reference ID for OBUISEL selectors (extends the base FK refs from NeoSelectorService)
   private static final java.util.Set<String> SELECTOR_REFS = new java.util.HashSet<>(
       java.util.Arrays.asList(NeoSelectorService.REF_TABLEDIR, NeoSelectorService.REF_TABLE,
@@ -1278,6 +1387,16 @@ public class McpToolRouter {
    * Reads AD_Column metadata directly (same source as the Etendo classic UI form),
    * so the agent sees exactly the same fields the UI would show.
    */
+  private static String[] schemaRequiredArgs(JSONObject args) {
+    boolean viewMissing = args == null
+        || args.optString(McpActionsView.PARAM_VIEW, "").trim().isEmpty();
+    boolean entityMissing = args == null || !args.has(McpConstants.PARAM_ENTITY)
+        || args.isNull(McpConstants.PARAM_ENTITY);
+    return viewMissing && entityMissing
+        ? new String[] { McpConstants.PARAM_ENTITY, McpActionsView.PARAM_VIEW }
+        : new String[] { McpConstants.PARAM_ENTITY };
+  }
+
   private JSONObject handleSchema(String specName, JSONObject args) throws Exception {
     // ETP-5468: a report spec whose handler declares named actions (bank-reconciliation) is
     // answered with its action catalog BEFORE the generic path, which rejects every SPEC_TYPE=R
@@ -1288,7 +1407,9 @@ public class McpToolRouter {
     if (declaredActionsSchema != null) {
       return declaredActionsSchema;
     }
-    McpToolRouterSupport.validateArgs(args, McpConstants.PARAM_ENTITY);
+    // ETP-5669: an absent view is named together with an absent entity, not one call later. A
+    // present entity keeps the view check below, which lists the views.
+    McpToolRouterSupport.validateArgs(args, schemaRequiredArgs(args));
 
     String entityName = args.getString(McpConstants.PARAM_ENTITY);
 
@@ -1363,8 +1484,10 @@ public class McpToolRouter {
     String view = args.optString(McpActionsView.PARAM_VIEW, null);
     // IMP-6: view:"actions" collapses the dump down to the callable buttons/processes.
     if (McpActionsView.isActionsView(view)) {
+      // ETP-5714: with an id, each action is also judged against that record (advisory only).
+      McpActionAvailabilityContext asked = availabilityContextOf(args, spec, sfEntity, dalEntity);
       return wrapAsTextContent(McpActionsView.buildResponse(specName, entityName, fieldsArray,
-          declaredActions, actionsConfig, excludedActions));
+          declaredActions, actionsConfig, excludedActions, asked));
     }
     // IMP-12: view:"create" keeps only what the agent may actually send, split into
     // required/optional. 157 fields / 62 kB on sales-invoice/header collapses to the handful that
@@ -1388,9 +1511,13 @@ public class McpToolRouter {
       Set<String> serverResolved = new HashSet<>(
           McpSchemaResponseHints.serverDefaultedNames(specName, entityName, adTab, sfEntity));
       serverResolved.addAll(McpServerResolvedFields.forCreate(sfEntity));
-      return wrapAsTextContent(McpSchemaCreateView
+      JSONObject createView = McpSchemaCreateView
           .buildResponse(specName, entityName, fieldsArray, serverResolved, isChildEntity,
-              entityAgentPrompt));
+              entityAgentPrompt);
+      // ETP-5676: the request options the entity's customization accepts on create, e.g. the
+      // product's _skipPricesSeed. Absent for every entity that declares none.
+      McpServerResolvedFields.addCreateDirectives(createView, sfEntity);
+      return wrapAsTextContent(createView);
     }
     // IMP-44: everything below is the full dump, and reaching it now requires having asked for
     // it. Omitting `view` used to land here — 39.5 kB on sales-order/header against 5.4 kB for
@@ -1545,14 +1672,23 @@ public class McpToolRouter {
           authorizeSpecAccess(specName, HTTP_METHOD_POST);
         }
       }
+      if (args.optBoolean(BatchJobService.PARAM_ASYNC, true)) {
+        // ETP-5677: the batch becomes a job unless the agent sent async:false; the worker commits
+        // it row by row, so a large volume never waits on one request.
+        return McpBatchJobTools.submitBatchJob(operations, args, this::preprocessBatchOperation);
+      }
       // IMP-15 / ETP-5415: the body transforms that make etendo_batch accept exactly what etendo_create
       // accepts — FK-by-name and legacy-numeric ids, the UoM derivation, the bill-to and
       // line-price injections. They run per operation, from inside the batch loop, because that is
       // the first point where a $ref is resolved and a parentRef's parent exists; running them
       // over the whole array beforehand made every parent-dependent injection abstain in silence.
       // See BatchService#executeBatch(JSONArray, OperationPreprocessor).
+      // ETP-5676: both optional, default false — the response is ids-only either way; the options
+      // only let each write skip decorating its echo and skip callouts proven redundant.
       JSONObject result = BatchService.forBatchOnly()
-          .executeBatch(operations, this::preprocessBatchOperation);
+          .executeBatch(operations, this::preprocessBatchOperation,
+              args.optBoolean(BatchService.PARAM_ONLY_RETURN_IDS, false),
+              args.optBoolean(BatchService.PARAM_SKIP_REDUNDANT_CALLOUTS, false));
       if (!result.optBoolean("committed", false)) {
         // IMP-15: rewrite the failure in place into the IMP-5 envelope, so an agent gets a stable
         // error code instead of the raw DAL sub-response BatchService forwards to REST callers.
@@ -1562,6 +1698,8 @@ public class McpToolRouter {
     } catch (SecurityException e) {
       log.warn("etendo_batch access denied session={}", McpUsageTelemetry.sessionForLog(), e);
       return wrapAsErrorContent(e.getMessage());
+    } catch (BatchJobService.JobException e) {
+      return wrapAsErrorContent(McpBatchJobTools.jobErrorMessage(e));
     } catch (Exception e) {
       log.error("Error executing etendo_batch session={}", McpUsageTelemetry.sessionForLog(), e);
       return wrapAsErrorContent("Error executing etendo_batch: " + e.getMessage());
@@ -1766,12 +1904,24 @@ public class McpToolRouter {
         : NeoActionContract.DEFAULT_HTTP_METHOD;
     // ETP-5587: a contract that describes an AD button is run under its declared name, whichever
     // spelling the agent typed — the customization discriminates on that name.
+    // ETP-5710: any other AD button reaches the customization under its field name — what the
+    // REST path carries for the document-action button — so a call typed by DB column name
+    // ("DocAction", what etendo_schema advertises) is not invisible to it. The button itself is
+    // still fired under the typed name, which findButtonColumn resolves either way.
+    String firedName = actionName;
     if (declared != null) {
       actionName = declared.getName();
+      firedName = actionName;
+    } else {
+      actionName = McpDeclaredActions.customizationNameOf(sfEntity, actionName);
     }
     // ETP-5558: another tenant's record is a 404 before the customization or the button sees it,
     // the same check the REST action path runs (NeoHookDispatcher).
     NeoResponse foreignRecord = NeoActionRecordGuard.refusalFor(sfEntity, recordId);
+    if (foreignRecord == null) {
+      // ETP-5715: a document action on an id that is no row of the table answers the same 404.
+      foreignRecord = NeoActionRecordGuard.refusalForMissingDocument(sfEntity, recordId, firedName);
+    }
     if (foreignRecord != null) {
       return McpHookExecutor.neoResponseToMcpResult(foreignRecord);
     }
@@ -1800,7 +1950,7 @@ public class McpToolRouter {
     }
 
     NeoResponse neoResponse = NeoButtonActionHelper.executeButtonActionCore(
-        sfEntity, recordId, actionName, actionParams);
+        sfEntity, recordId, firedName, actionParams);
 
     JSONObject actionResult = McpToolRouterSupport.mapNeoResponseToActionResult(neoResponse);
 
@@ -2109,6 +2259,67 @@ public class McpToolRouter {
     }
   }
 
+  /** Recovery hint for a refusal keyed {@code PeriodNotAvailable} (ETP-5577). */
+  static final String PERIOD_NOT_AVAILABLE_HINT = "The date falls in an accounting period that is "
+      + "not open (a new company starts with every period never-opened). Do not open it on your "
+      + "own: ask the user first. If they agree, find the period with etendo_list on spec "
+      + "'open-close-period-control', entity 'periodControl', then call etendo_action on it with "
+      + "action 'openClose' and openClose = 'O', and retry.";
+
+  private static final String PERIOD_NOT_AVAILABLE_KEY = "PeriodNotAvailable";
+
+  /**
+   * Core's {@code AD_MESSAGE} 20501 ("Document posted/processed", shown in Spanish as "Documento
+   * ya procesado"): the document is already processed and the request needed it editable
+   * (ETP-5714).
+   */
+  static final String DOCUMENT_PROCESSED_KEY = "20501";
+
+  /** Recovery hint for a refusal keyed {@code 20501} (ETP-5714). */
+  static final String DOCUMENT_PROCESSED_HINT = "The document is already processed (completed), "
+      + "so it cannot be changed or processed again as it is. Reactivate it first if its document "
+      + "actions allow that (etendo_action with documentAction RE) and retry. "
+      + "etendo_schema(view:'actions', id:<record id>) says which actions apply to this record "
+      + "right now and why the others do not.";
+
+  /**
+   * Recovery hints keyed on the message key that identifies the refusal (ETP-5577, ETP-5714). The
+   * key is the identity — never the entity — so a refusal of any document gets the same advice.
+   */
+  private static final Map<String, String> HINT_BY_MESSAGE_KEY = new LinkedHashMap<>();
+
+  static {
+    HINT_BY_MESSAGE_KEY.put(PERIOD_NOT_AVAILABLE_KEY, PERIOD_NOT_AVAILABLE_HINT);
+    HINT_BY_MESSAGE_KEY.put(DOCUMENT_PROCESSED_KEY, DOCUMENT_PROCESSED_HINT);
+  }
+
+  /**
+   * ETP-5577 / ETP-5714: a refusal that names a known {@code messageKeys} entry — wherever the key
+   * sits, top level or under a nested {@code error} — gets the {@code hint} for it ({@code
+   * PeriodNotAvailable} names the {@code openClose} action, {@code 20501} names reactivation),
+   * unless the body already carries one.
+   */
+  private static void addMessageKeyHint(JSONObject body) throws JSONException {
+    if (body == null || body.has(McpConstants.KEY_HINT)) {
+      return;
+    }
+    JSONObject nested = body.optJSONObject(McpConstants.KEY_ERROR);
+    JSONArray keys = body.optJSONArray("messageKeys");
+    if (keys == null && nested != null) {
+      keys = nested.optJSONArray("messageKeys");
+    }
+    if (keys == null) {
+      return;
+    }
+    String rendered = keys.toString();
+    for (Map.Entry<String, String> entry : HINT_BY_MESSAGE_KEY.entrySet()) {
+      if (rendered.contains('"' + entry.getKey() + '"')) {
+        body.put(McpConstants.KEY_HINT, entry.getValue());
+        return;
+      }
+    }
+  }
+
   /**
    * Wrap a JSON error body as MCP tool result content with the {@code isError} flag.
    *
@@ -2121,6 +2332,7 @@ public class McpToolRouter {
    */
   static JSONObject wrapAsErrorContent(JSONObject body) {
     try {
+      addMessageKeyHint(body);
       return wrapAsErrorContent(McpResponseSanitizer.render(body));
     } catch (JSONException e) {
       throw new McpToolException(ERROR_BUILDING_CONTENT, e);

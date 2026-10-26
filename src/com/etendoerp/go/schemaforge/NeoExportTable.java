@@ -15,6 +15,8 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 
+import com.etendoerp.go.common.BoundedJsonParser;
+
 /**
  * The tabular view of a NEO list response that an export serializes — column spec, id filter,
  * value translation and per-cell resolution — with no knowledge of any file format.
@@ -194,7 +196,7 @@ final class NeoExportTable {
       return maps;
     }
     try {
-      JSONObject root = new JSONObject(spec);
+      JSONObject root = BoundedJsonParser.parseObject(spec);
       for (Iterator<String> cols = root.keys(); cols.hasNext();) {
         String column = cols.next();
         JSONObject entries = root.optJSONObject(column);

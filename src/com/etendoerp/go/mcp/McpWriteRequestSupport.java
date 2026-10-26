@@ -193,6 +193,10 @@ final class McpWriteRequestSupport {
     McpQuerySupport.WriteGate gate = McpQuerySupport.writeGate(sfEntity, dalEntity);
     // ETP-5368: resolved once for the whole body rather than per unresolved key — it is a DB read.
     Set<String> virtualFieldNames = virtualFieldNames(sfEntity);
+    // ETP-5676: request options the entity's customization reads and strips in its pre-hook. Not
+    // properties, so they would otherwise be reported unknown while being honoured. Resolved only
+    // when an unresolved key turns up: it is a customization lookup most writes never need.
+    Set<String> directiveNames = null;
     JSONObject mapped = new JSONObject();
 
     Iterator<String> keys = fields.keys();
@@ -217,15 +221,35 @@ final class McpWriteRequestSupport {
         // ETP-5368: a wrapper entity's virtual fields resolve against a second table, so they are
         // not properties of this one - but etendo_schema now publishes them and the handler writes
         // them, and a key the schema advertises must not come back labelled unrecognised.
-        if (!McpConstants.PARAM_PARENT_ID.equals(key) && !virtualFieldNames.contains(key)) {
-          unknown.add(key);
-        }
+        directiveNames = reportIfUnknown(key, sfEntity, virtualFieldNames, directiveNames,
+            unknown);
       } else {
         applyWriteGates(gate, key, mappedKey, value, sfEntity, dalEntity);
       }
       mapped.put(mappedKey, value);
     }
     return mapped;
+  }
+
+  /**
+   * Adds an unresolved key to {@code unknown} unless the write tools or the entity declare it:
+   * {@code parentId}, a wrapper's virtual field, or a create directive of its customization.
+   *
+   * @param directiveNames the create directives resolved so far, or {@code null} when not yet
+   *                       resolved
+   * @return the create directives, resolved on first need so most writes never look them up
+   */
+  private static Set<String> reportIfUnknown(String key, SFEntity sfEntity,
+      Set<String> virtualFieldNames, Set<String> directiveNames, Set<String> unknown) {
+    if (McpConstants.PARAM_PARENT_ID.equals(key) || virtualFieldNames.contains(key)) {
+      return directiveNames;
+    }
+    Set<String> resolved = directiveNames != null ? directiveNames
+        : McpServerResolvedFields.createDirectives(sfEntity).keySet();
+    if (!resolved.contains(key)) {
+      unknown.add(key);
+    }
+    return resolved;
   }
 
   /**
@@ -414,12 +438,13 @@ final class McpWriteRequestSupport {
     }
     try {
       body.put("supersededDefaults", superseded);
-      body.put("supersededDefaultsHint", "For each field listed, the value you sent was kept and a "
-          + "callout had resolved a different one from this record's own context (the business "
-          + "partner's configuration, for one). That is correct if the value was chosen "
-          + "deliberately. If you copied it from etendo_defaults, it was a generic default resolved "
-          + "before this record had a business partner: omit that field and let the server resolve "
-          + "it, or send the value under \"callout\" instead.");
+      body.put("supersededDefaultsHint", "For each field listed, the value you sent was kept; "
+          + "\"callout\" is only what a callout would have set from this record's own context. "
+          + "You can ignore it when the callout value is 0 or empty, or when the field is governed "
+          + "by another rule. If you copied the value from "
+          + "etendo_defaults and it differs from a meaningful callout value, it was a generic "
+          + "default resolved before this record had its context: send the callout value instead, "
+          + "or confirm the one you sent was deliberate.");
     } catch (JSONException ignored) {
       // Same reasoning as reportUnknownFields: the record is written and correct as far as the
       // caller asked; losing a diagnostic must never turn a successful create into a failure.

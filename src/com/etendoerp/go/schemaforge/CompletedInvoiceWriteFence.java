@@ -100,15 +100,21 @@ public final class CompletedInvoiceWriteFence {
   private static final String FIELD_PROJECT = "project";
   private static final String FIELD_COSTCENTER = "costcenter";
   private static final String FIELD_DESCRIPTION = "description";
+  private static final String FIELD_AEATSII_ERROR_REGISTRAL = "aeatsiiErrorRegistral";
 
   /**
    * Header fields both invoice windows can still change once completed: the
    * {@code keepSaveWhenCompletedFields} of sales-invoice ({@code accountingDate}, {@code project},
    * {@code costcenter}) plus {@code description}, the window's {@code notesField}, which the notes
-   * panel saves on a completed document by design (ETP-5205).
+   * panel saves on a completed document by design (ETP-5205), plus {@code aeatsiiErrorRegistral}
+   * ("Modificada error registral") — a document already accepted by the SII must still be
+   * flaggable as corrected-by-registry-error after completion; that flag is what Classic's own
+   * reactivation gate requires before it allows reactivating an SII-accepted invoice at all
+   * (ETP-5745).
    */
   private static final Set<String> HEADER_EDITABLE_WHEN_COMPLETED = orderedSet(
-      FIELD_ACCOUNTING_DATE, FIELD_PROJECT, FIELD_COSTCENTER, FIELD_DESCRIPTION);
+      FIELD_ACCOUNTING_DATE, FIELD_PROJECT, FIELD_COSTCENTER, FIELD_DESCRIPTION,
+      FIELD_AEATSII_ERROR_REGISTRAL);
 
   /**
    * Purchase-invoice header: the above plus {@code orderReference} (the supplier's invoice
@@ -133,6 +139,18 @@ public final class CompletedInvoiceWriteFence {
       "createdBy", "parentId", "recordTime");
 
   static final String CODE_FIELDS_LOCKED = "completed_invoice_fields_locked";
+  /**
+   * What to do to change a field a completed invoice has locked (ETP-5714): reactivate it, edit,
+   * complete again. Reactivation is itself guarded ({@link InvoiceReactivationGuard}: a fiscally
+   * accepted invoice already rectified cannot be reactivated), so the hint points at the actions
+   * view, which reports whether {@code RE} applies to this very invoice.
+   */
+  static final String HINT_REACTIVATE_FIRST = "To change any other field, reactivate the invoice "
+      + "first (etendo_action documentAction with docAction RE), edit it, then complete it again. "
+      + "Reactivation can be refused, for example for an invoice a fiscal system accepted that is "
+      + "already rectified: etendo_schema(view:'actions', id:<invoice id>) says whether RE is "
+      + "available for this invoice now.";
+
   static final String CODE_POSTED_LOCKED = "posted_invoice_fields_locked";
   static final String CODE_STATUS_LOCKED = "invoice_status_fields_locked";
   static final String CODE_SII_SENT_LOCKED = "sii_sent_invoice_fields_locked";
@@ -280,7 +298,7 @@ public final class CompletedInvoiceWriteFence {
       return reject(CODE_FIELDS_LOCKED, MSG_FIELDS_LOCKED, refused, editableWhenCompleted, null,
           "This invoice is completed, so @fields@ can no longer be changed. Fields that can still "
               + "be changed: @allowedFields@.",
-          null);
+          HINT_REACTIVATE_FIRST);
     }
     if (changed.contains(FIELD_ORDER_REFERENCE) && Boolean.TRUE.equals(invoice.isAeatsiiIssent())
         && !Boolean.TRUE.equals(invoice.isSalesTransaction())) {

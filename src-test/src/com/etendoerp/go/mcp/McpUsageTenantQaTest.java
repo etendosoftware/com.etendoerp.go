@@ -31,6 +31,7 @@ import java.io.BufferedReader;
 import java.io.PrintWriter;
 import java.io.StringReader;
 import java.io.StringWriter;
+import java.lang.reflect.Field;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -48,12 +49,13 @@ import org.openbravo.dal.service.OBDal;
 
 import com.etendoerp.go.common.PublicUrlResolver;
 import com.etendoerp.go.oauth2.OAuth2Filter;
-import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
+import com.etendoerp.go.payment.EnvironmentAccessGuard;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
  * QA edge cases for ETP-5594 (effective tenant on ETGO_MCP_USAGE rows).
  *
+ * @covers com.etendoerp.go.mcp.McpServlet
  * @covers com.etendoerp.go.mcp.McpUsageRow
  * @covers com.etendoerp.go.mcp.McpUsageTelemetry
  * @covers com.etendoerp.go.mcp.McpCallObservation
@@ -63,10 +65,14 @@ public class McpUsageTenantQaTest {
   private McpServlet servlet;
 
   @Before
-  public void setUp() {
-    // A mocked lifecycle answers null (no lifecycle metadata): the commercial gate lets the call
-    // through without touching the DAL these tests stub call by call.
-    servlet = new McpServlet(mock(TenantEnvironmentLifecycleService.class));
+  public void setUp() throws Exception {
+    servlet = new McpServlet();
+    // ETP-5047 — doPost asks the commercial access guard first, which runs as system against the
+    // DAL. A mock that allows every tenant (null denial) keeps these telemetry specs DB-free, as
+    // McpServletTest does; the refusal itself is pinned there.
+    Field guardField = McpServlet.class.getDeclaredField("environmentAccessGuard");
+    guardField.setAccessible(true);
+    guardField.set(servlet, mock(EnvironmentAccessGuard.class));
     System.setProperty(PublicUrlResolver.MCP_PUBLIC_URL_PROPERTY, "https://example.com/mcp");
     McpUsageTelemetry.clearCurrentTenant();
   }
@@ -124,11 +130,17 @@ public class McpUsageTenantQaTest {
   }
 
   /**
-   * Stubs the lookups of a wildcard ({@code "0"}) token in call order: the commercial-access gate
-   * resolves the role's client first (ETP-5642), then executeInContext resolves org and client.
+   * The lookups of a WILDCARD token, in order (ETP-5047): McpServlet resolves the client once,
+   * before the access guard; McpSessionManager then resolves the org, and the client again only
+   * if it is still {@code "0"}.
    */
   private static WorkStub resolves(String org, String client) {
     return s -> when(s.doReturningWork(any())).thenReturn(client, org, client);
+  }
+
+  /** A concrete-client token: only the org is looked up. */
+  private static WorkStub resolvesOrgOnly(String org) {
+    return s -> when(s.doReturningWork(any())).thenReturn(org);
   }
 
   private static JSONObject neoListArgs() throws Exception {
@@ -153,21 +165,22 @@ public class McpUsageTenantQaTest {
 
   @Test
   public void nullTokenOrgIsRecordedAsTheResolvedOrg() throws Exception {
-    // A concrete token client needs no role lookup: the only query is the org resolution.
     McpUsageRow row = doPostToolsCall("etendo_list", neoListArgs(), "client1", null,
-        s -> when(s.doReturningWork(any())).thenReturn("realOrg"), new JSONObject());
+        resolvesOrgOnly("realOrg"), new JSONObject());
     assertEquals("client1", row.clientId());
     assertEquals("realOrg", row.orgId());
   }
 
   @Test
-  public void resolutionFailureIsSwallowedAndTheRowKeepsZero() throws Exception {
-    // resolveDefaultOrg/resolveClientFromRole catch and log: the call proceeds on "0".
-    McpUsageRow row = doPostToolsCall("etendo_list", neoListArgs(), "0", "0",
+  public void orgResolutionFailureIsSwallowedAndTheRowKeepsOrgZero() throws Exception {
+    // resolveDefaultOrg catches and logs: the call proceeds on org "0". (A failed CLIENT lookup
+    // is no longer swallowed — since ETP-5047 it refuses the request before the access guard,
+    // see McpServletTest#doPostWithAWildcardTokenWhoseRoleLookupFailsIsRefusedUnjudged.)
+    McpUsageRow row = doPostToolsCall("etendo_list", neoListArgs(), "client1", "0",
         s -> when(s.doReturningWork(any())).thenThrow(new RuntimeException("db down")),
         new JSONObject());
     assertEquals(McpUsageRow.OUTCOME_OK, row.outcome());
-    assertEquals("0", row.clientId());
+    assertEquals("client1", row.clientId());
     assertEquals("0", row.orgId());
   }
 
@@ -178,11 +191,12 @@ public class McpUsageTenantQaTest {
     assertEquals("clientA", first.clientId());
     assertNull(McpUsageTelemetry.currentTenant());
 
-    // Same thread, next request never reaches setCurrentTenant (resolution blows up).
-    McpUsageRow second = doPostToolsCall("etendo_list", neoListArgs(), "0", "0",
+    // Same thread, next request for another tenant whose org resolution blows up: it must record
+    // its own tenant, never the one the previous request bound.
+    McpUsageRow second = doPostToolsCall("etendo_list", neoListArgs(), "clientB", "0",
         s -> when(s.doReturningWork(any())).thenThrow(new RuntimeException("db down")),
         new JSONObject());
-    assertEquals("0", second.clientId());
+    assertEquals("clientB", second.clientId());
     assertEquals("0", second.orgId());
   }
 
@@ -221,8 +235,7 @@ public class McpUsageTenantQaTest {
     OBDal obDal = mock(OBDal.class);
     Session session = mock(Session.class);
     when(obDal.getSession()).thenReturn(session);
-    // Gate role lookup (ETP-5642), then executeInContext's org and client resolution.
-    when(session.doReturningWork(any())).thenReturn("clientA", "orgA", "clientA");
+    when(session.doReturningWork(any())).thenReturn("clientA", "orgA");
     try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
          MockedStatic<OBContext> contextMock = mockStatic(OBContext.class);
          MockedStatic<SecureWebServicesUtils> swsMock = mockStatic(SecureWebServicesUtils.class)) {
@@ -370,5 +383,27 @@ public class McpUsageTenantQaTest {
     assertEquals("m-abc", new McpCallObservation("m-abc", "{}", "{}", System.nanoTime())
         .sessionKey());
     assertNull(new McpCallObservation(null, "{}", "{}", System.nanoTime()).sessionKey());
+  }
+
+  /**
+   * ETP-5715 — the usage row records the verb of the attachment tools, so their use shows up in the
+   * telemetry instead of being filed under the {@code process} default.
+   */
+  @Test
+  public void attachmentToolsHaveTheirOwnTelemetryVerbs() {
+    assertEquals("attachment_upload",
+        McpUsageTelemetry.verbFor(McpConstants.TOOL_NEO_REQUEST_ATTACHMENT_UPLOAD));
+    assertEquals("attachment_list",
+        McpUsageTelemetry.verbFor(McpConstants.TOOL_NEO_LIST_ATTACHMENTS));
+    assertEquals("attachment_delete",
+        McpUsageTelemetry.verbFor(McpConstants.TOOL_NEO_DELETE_ATTACHMENT));
+    assertEquals("document_pdf",
+        McpUsageTelemetry.verbFor(McpConstants.TOOL_NEO_GET_DOCUMENT_PDF));
+    assertEquals("document_email",
+        McpUsageTelemetry.verbFor(McpConstants.TOOL_NEO_SEND_DOCUMENT_EMAIL));
+    assertEquals("document_extraction_upload",
+        McpUsageTelemetry.verbFor(McpConstants.TOOL_NEO_REQUEST_DOCUMENT_EXTRACTION_UPLOAD));
+    assertEquals("document_extraction",
+        McpUsageTelemetry.verbFor(McpConstants.TOOL_NEO_EXTRACT_INVOICE_DOCUMENT));
   }
 }

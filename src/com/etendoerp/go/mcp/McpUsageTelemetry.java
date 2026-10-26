@@ -430,6 +430,22 @@ final class McpUsageTelemetry {
         return "batch";
       case "etendo_action":
         return "action";
+      case "etendo_action_batch":
+        return "action_batch";
+      case McpConstants.TOOL_NEO_REQUEST_ATTACHMENT_UPLOAD:
+        return "attachment_upload";
+      case McpConstants.TOOL_NEO_LIST_ATTACHMENTS:
+        return "attachment_list";
+      case McpConstants.TOOL_NEO_DELETE_ATTACHMENT:
+        return "attachment_delete";
+      case McpConstants.TOOL_NEO_GET_DOCUMENT_PDF:
+        return "document_pdf";
+      case McpConstants.TOOL_NEO_SEND_DOCUMENT_EMAIL:
+        return "document_email";
+      case McpConstants.TOOL_NEO_REQUEST_DOCUMENT_EXTRACTION_UPLOAD:
+        return "document_extraction_upload";
+      case McpConstants.TOOL_NEO_EXTRACT_INVOICE_DOCUMENT:
+        return "document_extraction";
       case "etendo_schema":
         return "schema";
       case "etendo_defaults":

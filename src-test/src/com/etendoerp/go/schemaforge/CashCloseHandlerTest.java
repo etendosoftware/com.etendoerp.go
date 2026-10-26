@@ -259,14 +259,21 @@ public class CashCloseHandlerTest {
     FIN_Reconciliation draft = draftEndingOn(pastDate());
     doReturn(null).when(handler).findLastProcessed(acc);
     doNothing().when(handler).checkPeriod(any(), any(), any(), any());
-    doReturn("1000381 - Transportes Vega").when(handler).findLineInClosedPeriod(draft);
+    java.util.Date movementDate = new java.util.GregorianCalendar(2026, java.util.Calendar.MARCH, 15)
+        .getTime();
+    doReturn(new CashCloseHandler.BlockedLine("1000381 - Transportes Vega", movementDate))
+        .when(handler).findLineInClosedPeriod(draft);
 
     NeoResponse res = CashCloseSupport.confirmDraft(handler, acc, draft,
         BigDecimal.ZERO, BigDecimal.ZERO);
 
     assertEquals(HttpServletResponse.SC_CONFLICT, res.getHttpStatus());
+    JSONObject error = res.getBody().getJSONObject("error");
     assertTrue("the message must name the blocking movement",
-        res.getBody().getJSONObject("error").getString("message").contains("Transportes Vega"));
+        error.getString("message").contains("Transportes Vega"));
+    // ETP-5577 — keyed and dated by the movement, so the SPA opens the year that holds it.
+    assertEquals("PeriodNotAvailable", error.getJSONArray("messageKeys").getString(0));
+    assertEquals("2026-03-15", error.getString("periodDate"));
   }
 
   /** With every linked line postable, the guard lets the close through and it completes. */
@@ -307,6 +314,9 @@ public class CashCloseHandlerTest {
         BigDecimal.ZERO, BigDecimal.ZERO);
 
     assertEquals(HttpServletResponse.SC_CONFLICT, res.getHttpStatus());
+    // ETP-5577 — keyed, so the SPA offers to open the period.
+    assertEquals("PeriodNotAvailable", res.getBody().getJSONObject("error")
+        .getJSONArray("messageKeys").getString(0));
     verify(handler, never()).findLineInClosedPeriod(any());
   }
 

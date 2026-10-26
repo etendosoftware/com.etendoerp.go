@@ -50,6 +50,7 @@ import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.access.User;
 
+import com.etendoerp.go.common.BoundedJsonParser;
 import com.etendoerp.go.common.ConfigPropertyReader;
 import com.etendoerp.go.schemaforge.data.SupportConversation;
 import com.etendoerp.go.schemaforge.data.SupportMessage;
@@ -432,7 +433,7 @@ final class SupportJiraWebhookHandler {
     String s = raw.trim();
     if (!s.startsWith("{")) return s;
     try {
-      return extractAdfText(new JSONObject(s));
+      return extractAdfText(BoundedJsonParser.parseObject(s));
     } catch (Exception e) {
       return s;
     }

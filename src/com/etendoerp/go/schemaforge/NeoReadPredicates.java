@@ -18,7 +18,9 @@
 package com.etendoerp.go.schemaforge;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 
 import org.apache.commons.lang3.StringUtils;
 
@@ -35,6 +37,10 @@ import org.apache.commons.lang3.StringUtils;
  * <p>Nothing here names an entity: what to restrict is entirely the customization's decision.
  * Nothing is swallowed either: a customization that throws propagates to the caller's own error
  * handling, so a read never silently returns the rows a predicate was meant to exclude.</p>
+ *
+ * <p>The same lookup also serves {@link NeoHandler#filterAliases} (ETP-5705) through
+ * {@link #resolveFilterAliases}, so a list read finds its predicates and its aliases on the same
+ * customization.</p>
  */
 public final class NeoReadPredicates {
 
@@ -53,10 +59,38 @@ public final class NeoReadPredicates {
    *         {@code null} when the entity has no customization or it declares none
    */
   public static String resolve(NeoContext context, NeoExtensionChannel channel) {
+    NeoHandler customization = customization(context, channel);
+    if (customization == null) {
+      return null;
+    }
+    return join(customization.readPredicates(context));
+  }
+
+  /**
+   * The {@link NeoHandler#filterAliases} the entity's customization declares for this read
+   * (ETP-5705), resolved through the same customization lookup as {@link #resolve}.
+   *
+   * @param context the read context; may be {@code null}, which declares nothing
+   * @param channel the caller family, which selects the qualifier resolver
+   * @return the declared aliases, never {@code null}; empty when the entity has no customization
+   *         or it declares none
+   */
+  public static Map<String, String> resolveFilterAliases(NeoContext context,
+      NeoExtensionChannel channel) {
+    NeoHandler customization = customization(context, channel);
+    if (customization == null) {
+      return Collections.emptyMap();
+    }
+    Map<String, String> aliases = customization.filterAliases(context);
+    return aliases == null ? Collections.emptyMap() : aliases;
+  }
+
+  /** The entity's READ customization for this context, or {@code null} when it has none. */
+  private static NeoHandler customization(NeoContext context, NeoExtensionChannel channel) {
     if (context == null) {
       return null;
     }
-    NeoHandler customization = NeoExtensionDispatcher.resolveOnly(NeoExtensionRequest.builder()
+    return NeoExtensionDispatcher.resolveOnly(NeoExtensionRequest.builder()
         .qualifier(context.getSfEntity() != null ? context.getSfEntity().getJavaQualifier() : null)
         .specName(context.getSpecName())
         .entityName(context.getEntityName())
@@ -64,10 +98,6 @@ public final class NeoReadPredicates {
         .channel(channel)
         .context(context)
         .build());
-    if (customization == null) {
-      return null;
-    }
-    return join(customization.readPredicates(context));
   }
 
   /**
@@ -102,20 +132,6 @@ public final class NeoReadPredicates {
       return null;
     }
     return resolve(context, NeoExtensionChannel.REST_SINGLE);
-  }
-
-  /**
-   * Appends the REST read predicate, parenthesised, to a predicate list that will be joined with
-   * {@code and} (the REST {@code ?_distinct=} value fetch). A blank predicate adds nothing.
-   *
-   * @param predicates the predicate list being built
-   * @param context    the REST read context
-   */
-  static void addRestTo(List<String> predicates, NeoContext context) {
-    String readPredicate = resolve(context, NeoExtensionChannel.REST_SINGLE);
-    if (StringUtils.isNotBlank(readPredicate)) {
-      predicates.add("(" + readPredicate + ")");
-    }
   }
 
   /**

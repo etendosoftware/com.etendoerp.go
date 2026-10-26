@@ -62,6 +62,9 @@ import com.etendoerp.go.schemaforge.util.NeoReportParam;
  * artifacts/report-journal-entries/report-contract.json}'s {@code sql.query} plus
  * {@link JournalEntriesGrouping} (whose own nesting/truncation rules are covered by
  * {@code JournalEntriesGroupingTest}, not here).
+ *
+ * @covers com.etendoerp.go.schemaforge.JournalEntriesReportHandler
+ * @covers com.etendoerp.go.schemaforge.AbstractSqlReportHandler
  */
 class JournalEntriesReportHandlerTest {
 
@@ -274,6 +277,9 @@ class JournalEntriesReportHandlerTest {
 
     OBContext obContext = mock(OBContext.class);
     when(obContext.getCurrentClient()).thenReturn(client);
+    // ETP-5793: the org is resolved through TenantOwnership, which checks the readable clients.
+    when(org.getClient()).thenReturn(client);
+    when(obContext.getReadableClients()).thenReturn(new String[] { "sessionClientId1" });
     when(obContext.getCurrentOrganization()).thenReturn(org);
     when(obContext.getLanguage()).thenReturn(language);
 
@@ -362,6 +368,9 @@ class JournalEntriesReportHandlerTest {
 
     OBContext obContext = mock(OBContext.class);
     when(obContext.getCurrentClient()).thenReturn(client);
+    // ETP-5793: the org is resolved through TenantOwnership, which checks the readable clients.
+    when(org.getClient()).thenReturn(client);
+    when(obContext.getReadableClients()).thenReturn(new String[] { "sessionClientId1" });
     when(obContext.getCurrentOrganization()).thenReturn(org);
     when(obContext.getLanguage()).thenReturn(language);
 

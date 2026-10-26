@@ -27,6 +27,8 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 
+import javax.servlet.ServletException;
+
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -55,10 +57,12 @@ import org.openbravo.scheduling.ProcessBundle;
 import org.openbravo.service.db.CallProcess;
 import org.openbravo.model.ad.domain.ModelImplementation;
 import org.openbravo.service.db.DalBaseProcess;
+import org.openbravo.service.db.DalConnectionProvider;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
+import com.etendoerp.go.schemaforge.util.NeoMessageTranslator;
 
 /**
  * Service for executing AD_Process definitions via the Neo headless API.
@@ -779,17 +783,10 @@ public class NeoProcessService {
           "Process class is not a DalBaseProcess: " + processClass.getName());
     }
 
-    // Build a ProcessBundle using the Map-based constructor
-    Map<String, Object> bundleMap = new HashMap<>();
-    bundleMap.put(ProcessBundle.FIELD_PROCESS_ID, process.getId());
-    ProcessBundle bundle = new ProcessBundle(bundleMap);
+    ProcessBundle bundle = newClassicBundle(process.getId(), buildBundleParams(params));
 
-    // Set the process parameters
-    bundle.setParams(buildBundleParams(params));
-
-    // Invoke protected doExecute directly via reflection.
-    // We bypass DalBaseProcess.execute() because it requires a
-    // ProcessContext with VariablesSecureApp (HTTP session-based).
+    // Invoke protected doExecute directly via reflection: DalBaseProcess.execute() would also
+    // commit, close and restore the context, which NEO manages itself.
     // OBContext is already set by the caller (admin mode).
     Method doExecuteMethod = DalBaseProcess.class
         .getDeclaredMethod("doExecute", ProcessBundle.class);
@@ -799,6 +796,20 @@ public class NeoProcessService {
     // Read the result from the bundle
     Object bundleResult = bundle.getResult();
     return translateClassicResult(bundleResult, process);
+  }
+
+  /**
+   * ETP-5669 — a classic bundle with a {@code ProcessContext} and a connection: many
+   * {@code DalBaseProcess}es call {@code bundle.getContext()} / {@code getConnection()} and NPE'd
+   * on the bare map-built bundle. {@code init} resets the params, so they are set after it.
+   * Package-private seam for unit tests.
+   */
+  static ProcessBundle newClassicBundle(String processId, Map<String, Object> params)
+      throws ServletException {
+    VariablesSecureApp vars = NeoDefaultsService.buildVariablesSecureApp(OBContext.getOBContext());
+    ProcessBundle bundle = new ProcessBundle(processId, vars).init(new DalConnectionProvider(false));
+    bundle.setParams(params);
+    return bundle;
   }
 
   /**
@@ -1109,6 +1120,14 @@ public class NeoProcessService {
           safeParseTranslation(StringUtils.defaultString(error.getMessage())));
 
       if (ERROR.equalsIgnoreCase(error.getType())) {
+        // ETP-5577 — a classic process hands its error over already translated (ProcessInvoiceUtil,
+        // FIN_AddPaymentFromJournal), so a period refusal is recognised from its text: the SPA
+        // keys the "open the period" way out, and its own wording, on this identity.
+        List<String> periodKeys = NeoMessageTranslator.recognizeMessageKeys(
+            error.getMessage(), NeoMessageTranslator.PERIOD_REFUSAL_KEYS);
+        if (!periodKeys.isEmpty()) {
+          result.put(MESSAGE_KEYS, new JSONArray(periodKeys));
+        }
         return new NeoResponse(400, result);
       }
       return NeoResponse.ok(result);

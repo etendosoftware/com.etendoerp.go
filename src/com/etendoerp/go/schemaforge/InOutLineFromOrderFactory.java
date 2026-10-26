@@ -18,7 +18,11 @@ package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.function.Function;
 
 import org.apache.logging.log4j.LogManager;
@@ -123,26 +127,6 @@ final class InOutLineFromOrderFactory {
   }
 
   /**
-   * Walks every line of {@code order} and returns the ones still pending
-   * delivery/receipt, paired with their pending quantity. Single collection
-   * point shared by {@code CreateShipmentHandler} and
-   * {@code CreateGoodsReceiptHandler} so both can validate "are there any
-   * lines at all" BEFORE creating and persisting the document header —
-   * see ETP-5276, where persisting the header first left an empty, orphaned
-   * shipment/receipt behind whenever this list turned out empty.
-   */
-  static List<PendingOrderLine> collectPendingLines(Order order) {
-    List<PendingOrderLine> pendingLines = new ArrayList<>();
-    for (OrderLine orderLine : order.getOrderLineList()) {
-      BigDecimal pendingQty = pendingQuantityFor(orderLine);
-      if (pendingQty != null) {
-        pendingLines.add(new PendingOrderLine(orderLine, pendingQty));
-      }
-    }
-    return pendingLines;
-  }
-
-  /**
    * True when at least one of {@code pendingLines} needs a real storage bin
    * ({@link #isStockable}). Callers use this to decide whether resolving the
    * order's default locator is required at all — an order made up entirely
@@ -159,12 +143,14 @@ final class InOutLineFromOrderFactory {
   }
 
   /**
-   * The single validate-before-mutate step shared by {@code CreateShipmentHandler} and
-   * {@code CreateGoodsReceiptHandler}: computes the pending lines, throws {@code emptyLinesMessage}
-   * when there are none, and — only when at least one pending line {@link #isStockable} — resolves
-   * and validates the order's default locator, throwing when the warehouse has none configured.
-   * Extracted here (rather than duplicated per handler) because both handlers previously carried
-   * near-identical copies of this exact sequence (ETP-5276 Sonar duplication follow-up).
+   * The tail of the validate-before-mutate step shared by {@code CreateShipmentHandler} and
+   * {@code CreateGoodsReceiptHandler} (see
+   * {@link #resolvePendingLinesAndLocator(Order, boolean, String, String, Function)}): throws
+   * {@code emptyLinesMessage} when there are no pending lines, and — only when at least one
+   * pending line {@link #isStockable} — resolves and validates the order's default locator,
+   * throwing when the warehouse has none configured. Extracted here (rather than duplicated per
+   * handler) because both handlers previously carried near-identical copies of this exact
+   * sequence (ETP-5276 Sonar duplication follow-up).
    *
    * <p>{@code locatorResolver} is a method reference to the CALLING handler's own
    * {@code findDefaultLocator(Order)} — a {@code protected} hook each handler's tests override to
@@ -172,6 +158,7 @@ final class InOutLineFromOrderFactory {
    * override instead of hardcoding one handler's lookup.
    *
    * @param order the order being converted to a shipment/receipt
+   * @param pendingLines the lines still pending, already computed by the caller
    * @param emptyLinesMessage the handler-specific message to throw when there are zero pending lines
    * @param locatorResolver resolves the calling handler's default locator for {@code order}
    * @return the validated pending lines plus the resolved default locator ({@code null} when no
@@ -179,9 +166,9 @@ final class InOutLineFromOrderFactory {
    * @throws OBException when there are no pending lines, or a stockable line exists but the
    *         order's warehouse has no locator configured
    */
-  static PendingLinesResult resolvePendingLinesAndLocator(Order order, String emptyLinesMessage,
+  private static PendingLinesResult finishResolution(Order order,
+      List<PendingOrderLine> pendingLines, String emptyLinesMessage,
       Function<Order, Locator> locatorResolver) {
-    List<PendingOrderLine> pendingLines = collectPendingLines(order);
     if (pendingLines.isEmpty()) {
       throw new OBException(emptyLinesMessage);
     }
@@ -194,6 +181,113 @@ final class InOutLineFromOrderFactory {
       }
     }
     return new PendingLinesResult(pendingLines, defaultLocator);
+  }
+
+  /**
+   * The single validate-before-mutate step shared by {@code CreateShipmentHandler} and
+   * {@code CreateGoodsReceiptHandler} (ETP-5276, draft-aware since ETP-5709): computes the pending
+   * lines, throws when there are none, and resolves the default locator when a line needs one.
+   * A DRAFT shipment/receipt reserves nothing ({@code c_orderline.qtydelivered} only
+   * moves when the document is completed), so without this the same order could be turned into
+   * several drafts for the same quantities and, once all were completed, over-received.
+   *
+   * <p>pending(line) = ordered - delivered - SUM(movementQuantity of the lines of DRAFT
+   * documents of the same {@code salesTransaction} that point at that order line). A line is created
+   * only when the remainder is non-zero AND has the same sign as the base pending quantity
+   * (negative lines are legitimate, ETP-4722); a zero or sign-flipped remainder means the drafts
+   * already cover the line, possibly with MORE than is pending (a manual or edited draft, or an
+   * order line reduced after the draft), and the line is skipped rather than turned into an
+   * inverted-sign line. When no line is left but at least one was skipped only because
+   * of drafts, the error is {@code draftCoveredMessageFormat} formatted with the covering draft
+   * document numbers; otherwise it is {@code emptyLinesMessage}.
+   *
+   * <p>Generic by construction: it keys on {@code salesTransaction} (a structural flag of the
+   * document) and never names a spec or entity; each handler passes its own direction and
+   * messages. Single HQL per call, aggregated in Java per order line.
+   *
+   * <p><b>Concurrency:</b> two simultaneous calls can both read "no draft" and each create one.
+   * This is intentionally not handled here (no row lock on the order); the window is the
+   * duration of one request.
+   *
+   * @param draftCoveredMessageFormat {@link String#format} pattern with one {@code %s} for the
+   *     comma-separated draft document numbers
+   */
+  static PendingLinesResult resolvePendingLinesAndLocator(Order order, boolean salesTransaction,
+      String emptyLinesMessage, String draftCoveredMessageFormat,
+      Function<Order, Locator> locatorResolver) {
+    Set<String> coveringDrafts = new LinkedHashSet<>();
+    List<PendingOrderLine> pendingLines =
+        collectPendingLines(order, salesTransaction, coveringDrafts);
+    if (pendingLines.isEmpty() && !coveringDrafts.isEmpty()) {
+      throw new OBException(String.format(draftCoveredMessageFormat,
+          String.join(", ", coveringDrafts)));
+    }
+    return finishResolution(order, pendingLines, emptyLinesMessage, locatorResolver);
+  }
+
+  /**
+   * Collects the lines still pending after discounting DRAFT documents; see
+   * {@link #resolvePendingLinesAndLocator(Order, boolean, String, String, Function)}.
+   *
+   * @param coveringDrafts out parameter: document numbers of the drafts that fully or partially
+   *     covered a line that would otherwise have been pending
+   */
+  static List<PendingOrderLine> collectPendingLines(Order order, boolean salesTransaction,
+      Set<String> coveringDrafts) {
+    Map<String, BigDecimal> basePending = new HashMap<>();
+    List<OrderLine> candidates = new ArrayList<>();
+    for (OrderLine orderLine : order.getOrderLineList()) {
+      BigDecimal pendingQty = pendingQuantityFor(orderLine);
+      if (pendingQty != null) {
+        basePending.put(orderLine.getId(), pendingQty);
+        candidates.add(orderLine);
+      }
+    }
+    List<PendingOrderLine> pendingLines = new ArrayList<>();
+    if (candidates.isEmpty()) {
+      return pendingLines;
+    }
+
+    Map<String, BigDecimal> draftQty = new HashMap<>();
+    Map<String, Set<String>> draftDocs = new HashMap<>();
+    loadDraftQuantities(basePending.keySet(), salesTransaction, draftQty, draftDocs);
+
+    for (OrderLine orderLine : candidates) {
+      String id = orderLine.getId();
+      BigDecimal inDraft = draftQty.getOrDefault(id, BigDecimal.ZERO);
+      BigDecimal remainder = basePending.get(id).subtract(inDraft);
+      // Same sign only: a draft larger than the pending quantity leaves a remainder of the
+      // opposite sign, which would otherwise become an inverted line on the new document.
+      if (remainder.signum() == basePending.get(id).signum()) {
+        pendingLines.add(new PendingOrderLine(orderLine, remainder));
+      } else if (draftDocs.containsKey(id)) {
+        coveringDrafts.addAll(draftDocs.get(id));
+      }
+    }
+    return pendingLines;
+  }
+
+  /** One HQL for every order line: quantity and document number of lines in DRAFT documents. */
+  private static void loadDraftQuantities(java.util.Collection<String> orderLineIds,
+      boolean salesTransaction, Map<String, BigDecimal> draftQty,
+      Map<String, Set<String>> draftDocs) {
+    // The IN list binds one parameter per order line; PostgreSQL caps a statement at 32767 bind
+    // parameters, so an order with tens of thousands of lines would fail here. Not chunked: no
+    // real order comes close.
+    String hql = "select iol.salesOrderLine.id, iol.movementQuantity, io.documentNo "
+        + "from MaterialMgmtShipmentInOutLine iol join iol.shipmentReceipt io "
+        + "where io.documentStatus = 'DR' and io.salesTransaction = :sot "
+        + "and iol.salesOrderLine.id in :ids order by io.creationDate";
+    List<Object[]> rows = OBDal.getInstance().getSession().createQuery(hql, Object[].class)
+        .setParameter("sot", salesTransaction)
+        .setParameterList("ids", orderLineIds)
+        .list();
+    for (Object[] row : rows) {
+      String id = (String) row[0];
+      BigDecimal qty = row[1] != null ? (BigDecimal) row[1] : BigDecimal.ZERO;
+      draftQty.merge(id, qty, BigDecimal::add);
+      draftDocs.computeIfAbsent(id, k -> new LinkedHashSet<>()).add((String) row[2]);
+    }
   }
 
   /**
@@ -217,8 +311,11 @@ final class InOutLineFromOrderFactory {
    * candidate is {@code null} (see its javadoc), so passing {@code locator=null} straight through
    * for a non-stockable line would still end up anchoring a bin onto it. The bin must stay
    * {@code null} for those lines, matching classic {@code M_INOUT_CREATE}.
+   *
+   * @return the persisted line, already flushed, so a caller that reports what it created (the
+   *         order-line import of ETP-5713) can name its id
    */
-  static void createAndLinkLine(ShipmentInOut parentInOut, OrderLine orderLine,
+  static ShipmentInOutLine createAndLinkLine(ShipmentInOut parentInOut, OrderLine orderLine,
       Locator locator, long lineNo, BigDecimal pendingQty) {
     ShipmentInOutLine line = OBProvider.getInstance().get(ShipmentInOutLine.class);
     line.setClient(orderLine.getClient());
@@ -239,18 +336,19 @@ final class InOutLineFromOrderFactory {
     // helper, which uses it as the `inoutLineId` parameter of the UPDATE.
     OBDal.getInstance().flush();
     InvoiceLineLinker.linkPendingInvoiceLinesToInout(line, orderLine.getId());
+    return line;
   }
 
   /**
    * Pairs an {@link OrderLine} with its still-pending quantity, as computed by
    * {@link #pendingQuantityFor}. Immutable value holder returned by
-   * {@link #collectPendingLines}.
+   * {@link #collectPendingLines(Order, boolean, Set)}.
    */
   static final class PendingOrderLine {
     private final OrderLine orderLine;
     private final BigDecimal pendingQty;
 
-    private PendingOrderLine(OrderLine orderLine, BigDecimal pendingQty) {
+    PendingOrderLine(OrderLine orderLine, BigDecimal pendingQty) {
       this.orderLine = orderLine;
       this.pendingQty = pendingQty;
     }

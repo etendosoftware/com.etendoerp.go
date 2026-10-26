@@ -52,6 +52,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.junit.jupiter.params.ParameterizedTest;
 import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.openbravo.base.provider.OBProvider;
@@ -65,8 +67,15 @@ import org.openbravo.model.common.enterprise.Organization;
 
 import com.auth0.jwt.interfaces.Claim;
 import com.auth0.jwt.interfaces.DecodedJWT;
+import com.etendoerp.go.auth.DalWarehouseResolver;
+import com.etendoerp.go.auth.EnvironmentRequestAuthenticator;
+import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.schemaforge.data.SupportConversation;
 import com.etendoerp.go.schemaforge.data.SupportMessage;
+import com.etendoerp.go.session.GoSessionAuthenticator;
+import com.etendoerp.go.session.GoSessionRoleReconciler;
+import com.etendoerp.go.session.GoSessionService;
+import com.etendoerp.go.session.JdbcGoSessionStore;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
@@ -80,6 +89,8 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  * classes (stubbing only the getters each handler actually reads) rather than instantiating them.
  * Outbound ADK/Jira calls are mocked via {@link SupportIntegrationClient} static mocks so tests
  * never touch the network.
+ *
+ * @covers com.etendoerp.go.support.SupportConversationsServlet
  */
 class SupportConversationsServletTest {
 
@@ -107,6 +118,22 @@ class SupportConversationsServletTest {
   void restoreRealBackgroundTasks() {
     SupportConversationsServlet.backgroundTaskRunner =
         (threadName, task) -> new Thread(task, threadName).start();
+  }
+
+  /** ETP-5270 — the pipeline now checks a JWT's role against {@code AD_User_Roles}; this class
+   * mocks the DAL per test, so the role lookups are swapped for a fake that finds the role held.
+   * Everything else is the production wiring. */
+  @BeforeEach
+  void useFakeRoleLookups() {
+    SupportConversationsServlet.authenticator = new EnvironmentRequestAuthenticator(
+        new GoSessionAuthenticator(new GoSessionService(new JdbcGoSessionStore())),
+        new TenantEnvironmentLifecycleService(), new DalWarehouseResolver(),
+        mock(GoSessionRoleReconciler.class));
+  }
+
+  @AfterEach
+  void restoreRealRoleLookups() {
+    SupportConversationsServlet.authenticator = new EnvironmentRequestAuthenticator();
   }
 
   private static HttpServletResponse mockResponse(StringWriter capture) throws Exception {
@@ -1116,6 +1143,22 @@ class SupportConversationsServletTest {
         new SupportConversationsServlet().doPost(request, response);
       }
 
+      assertTrue(capture.toString().contains("Invalid JSON body"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = { "{\"x\":[", "[[", "{\"a\":[}", "{\"a\":1}#" })
+    @DisplayName("A body that breaks the JSON parser returns 400")
+    void parserBreakingBody(String body) throws Exception {
+      StringWriter capture = new StringWriter();
+      HttpServletResponse response = mockResponse(capture);
+      HttpServletRequest request = authenticatedRequest("/conversations", body);
+
+      try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth()) {
+        new SupportConversationsServlet().doPost(request, response);
+      }
+
+      verify(response).setStatus(HttpServletResponse.SC_BAD_REQUEST);
       assertTrue(capture.toString().contains("Invalid JSON body"));
     }
 

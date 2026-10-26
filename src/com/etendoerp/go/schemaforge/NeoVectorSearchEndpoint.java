@@ -260,34 +260,37 @@ public class NeoVectorSearchEndpoint {
    * @return the configured keys, possibly empty; {@code null} when the catalogue cannot be read
    */
   public static Optional<List<String>> configuredTargetKeys() {
-    // The admin-mode switch is INSIDE the try on purpose: it is itself a call that can fail (no
-    // live Hibernate session, as in tool generation outside a request), and when it did, the
-    // exception escaped this method, broke buildVectorSearchTool and took the whole MCP tool list
-    // down with it — the opposite of the graceful degradation the catch clause exists to provide.
+    // The admin-mode switch is itself a call that can fail (no live Hibernate session, as in tool
+    // generation outside a request). When its exception escaped this method, it broke
+    // buildVectorSearchTool and took the whole MCP tool list down with it, so it is caught too.
+    // setAdminMode pushes the mode BEFORE it can throw: the failure must pop it, or the mode leaks
+    // to the thread and is charged to whichever OBBaseTest the Gradle worker runs next.
     try {
       OBContext.setAdminMode(true);
-      try {
-        OBCriteria<VectorSearchTarget> criteria =
-            OBDal.getInstance().createCriteria(VectorSearchTarget.class);
-        criteria.add(Restrictions.eq(VectorSearchTarget.PROPERTY_ACTIVE, true));
-        criteria.addOrder(Order.asc(VectorSearchTarget.PROPERTY_SEARCHKEY));
-        List<String> keys = new ArrayList<>();
-        for (VectorSearchTarget target : criteria.list()) {
-          if (target.getSearchKey() != null) {
-            keys.add(target.getSearchKey());
-          }
+    } catch (RuntimeException e) {
+      OBContext.restorePreviousMode();
+      return Optional.empty();
+    }
+    try {
+      OBCriteria<VectorSearchTarget> criteria =
+          OBDal.getInstance().createCriteria(VectorSearchTarget.class);
+      criteria.add(Restrictions.eq(VectorSearchTarget.PROPERTY_ACTIVE, true));
+      criteria.addOrder(Order.asc(VectorSearchTarget.PROPERTY_SEARCHKEY));
+      List<String> keys = new ArrayList<>();
+      for (VectorSearchTarget target : criteria.list()) {
+        if (target.getSearchKey() != null) {
+          keys.add(target.getSearchKey());
         }
-        return Optional.of(keys);
-      } finally {
-        // Only reached when setAdminMode succeeded, so there is always a mode to restore.
-        OBContext.restorePreviousMode();
       }
+      return Optional.of(keys);
     } catch (Exception e) {
       // A catalogue that cannot be read must not turn every search into a 422, nor break tool
       // generation: fall back to the pre-IMP-41 behaviour, where the authorizer alone decides.
       // Optional.empty() is "could not be read" and is NOT the same as a readable-but-empty
       // catalogue, which is Optional.of(List.of()) — conflating the two is the defect IMP-41 fixed.
       return Optional.empty();
+    } finally {
+      OBContext.restorePreviousMode();
     }
   }
 
