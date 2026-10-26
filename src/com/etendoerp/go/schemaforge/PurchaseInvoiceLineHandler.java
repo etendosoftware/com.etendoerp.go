@@ -161,23 +161,40 @@ public class PurchaseInvoiceLineHandler extends InvoiceLineHandler {
     Date date = parseDate(body);
     BigDecimal rate = parseRate(body);
 
+    Result result = resolveOwned(addressId, productId, date, rate);
+    if (result == null) {
+      return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, MSG_RECORD_NOT_FOUND);
+    }
+    JSONObject wrapper = new JSONObject();
+    wrapper.put("response", new JSONObject().put("data", toJson(result)));
+    return NeoResponse.ok(wrapper);
+  }
+
+  /**
+   * The default tax for a vendor address, after checking the address (and the product, when given)
+   * belong to the session's tenant — the lookup {@code defaultTax} serves, shared with the OCR
+   * review (ETP-5715) so both answer with the very same rule.
+   *
+   * @param addressId the vendor's business partner location id
+   * @param productId the product id, or {@code null}
+   * @param date      the document date
+   * @param rate      the printed percentage, or {@code null}
+   * @return the resolution, or {@code null} when the address or the product is not the tenant's
+   */
+  static Result resolveOwned(String addressId, String productId, Date date, BigDecimal rate) {
     OBContext.setAdminMode(true);
     try {
       boolean foreignProduct = productId != null
           && NeoActionRecordGuard.loadOwned(Product.class, productId) == null;
       if (NeoActionRecordGuard.loadOwned(Location.class, addressId) == null || foreignProduct) {
-        return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, MSG_RECORD_NOT_FOUND);
+        return null;
       }
     } finally {
       OBContext.restorePreviousMode();
     }
-
     OBContext session = OBContext.getOBContext();
-    Result result = DefaultTaxResolver.resolve(session.getCurrentOrganization().getId(),
+    return DefaultTaxResolver.resolve(session.getCurrentOrganization().getId(),
         session.getCurrentClient().getId(), addressId, date, rate, productId, false);
-    JSONObject wrapper = new JSONObject();
-    wrapper.put("response", new JSONObject().put("data", toJson(result)));
-    return NeoResponse.ok(wrapper);
   }
 
   private static Date parseDate(JSONObject body) {

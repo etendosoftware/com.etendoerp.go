@@ -76,6 +76,11 @@ public final class DefaultEmailContractRegistry implements EmailContractRegistry
   }
 
   @Override
+  public Collection<EmailContract> contracts() {
+    return Collections.unmodifiableCollection(contracts.values());
+  }
+
+  @Override
   public Optional<EmailContract> find(String contractName) {
     return Optional.ofNullable(contracts.get(contractName));
   }

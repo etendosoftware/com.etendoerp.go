@@ -280,6 +280,11 @@ public class BatchService {
       return;
     }
 
+    if (body.optBoolean(BatchJobService.PARAM_ASYNC, false)) {
+      handleAsync(body, operations, response);
+      return;
+    }
+
     JSONObject result;
     try {
       result = executeBatch(operations, null, body.optBoolean(PARAM_ONLY_RETURN_IDS, false),
@@ -301,6 +306,61 @@ public class BatchService {
       }
     }
     servlet.writeResponse(response, new NeoResponse(status, result));
+  }
+
+  /**
+   * {@code POST /sws/neo/batch} with {@code async:true} (ETP-5677): records the batch as a job,
+   * answers {@code 202 {jobId, state, totalRows, totalOps}} at once and lets a worker run it row by
+   * row. Each row goes through the very same {@link #executeBatch} the synchronous request uses.
+   */
+  private void handleAsync(JSONObject body, JSONArray operations, HttpServletResponse response)
+      throws IOException {
+    boolean onlyReturnIds = body.optBoolean(PARAM_ONLY_RETURN_IDS, false);
+    boolean skipCallouts = body.optBoolean(PARAM_SKIP_REDUNDANT_CALLOUTS, false);
+    try {
+      JSONObject accepted = BatchJobService.getInstance().submit(BatchJobService.Owner.current(),
+          operations, "rest",
+          rowOps -> executeBatch(rowOps, null, onlyReturnIds, skipCallouts));
+      servlet.writeResponse(response, new NeoResponse(HttpServletResponse.SC_ACCEPTED, accepted));
+    } catch (BatchJobService.JobException e) {
+      writeJobError(response, e);
+    } catch (JSONException | RuntimeException e) {
+      log.error("[BATCH] could not submit the async batch", e);
+      servlet.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          "Could not start the batch job: " + e.getMessage());
+    }
+  }
+
+  /**
+   * {@code GET /sws/neo/batch/jobs/{id}} (status) and {@code DELETE /sws/neo/batch/jobs/{id}}
+   * (cancel) — only the job's owner sees it (ETP-5677).
+   */
+  void handleJob(String method, String jobId, HttpServletResponse response) throws IOException {
+    if (servlet == null) {
+      throw new IllegalStateException("BatchService.handleJob requires the servlet-bound constructor");
+    }
+    try {
+      BatchJobService.Owner owner = BatchJobService.Owner.current();
+      JSONObject job = "DELETE".equals(method)
+          ? BatchJobService.getInstance().cancel(owner, jobId)
+          : BatchJobService.getInstance().status(owner, jobId);
+      servlet.writeResponse(response, new NeoResponse(HttpServletResponse.SC_OK, job));
+    } catch (BatchJobService.JobException e) {
+      writeJobError(response, e);
+    } catch (JSONException | RuntimeException e) {
+      log.error("[BATCH] job request failed", e);
+      servlet.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          "Batch job request failed: " + e.getMessage());
+    }
+  }
+
+  private void writeJobError(HttpServletResponse response, BatchJobService.JobException e)
+      throws IOException {
+    NeoResponse error = NeoResponse.error(e.getStatus(), e.getMessage());
+    if (e.getRetryAfter() != null) {
+      error = error.withHeader("Retry-After", String.valueOf(e.getRetryAfter()));
+    }
+    servlet.writeResponse(response, error);
   }
 
   /**

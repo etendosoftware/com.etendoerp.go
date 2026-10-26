@@ -64,4 +64,67 @@ class McpAuthorizationServiceVectorTest {
     McpAuthorizationService.authorizeToolCall("etendo_action", Set.of("etendo:process"));
     McpAuthorizationService.authorizeToolCall("etendo_action", Set.of("etendo:*"));
   }
+
+  /** ETP-5873: a batch of actions asks for what each action asks, the process scope. */
+  @Test
+  void actionBatchRequiresTheSameScopeAsEtendoAction() {
+    for (String tool : new String[] {"etendo_action", McpConstants.TOOL_NEO_ACTION_BATCH}) {
+      assertThrows(OBSecurityException.class,
+          () -> McpAuthorizationService.authorizeToolCall(tool, Set.of("etendo:read")), tool);
+      assertThrows(OBSecurityException.class,
+          () -> McpAuthorizationService.authorizeToolCall(tool, Set.of("etendo:write")), tool);
+      McpAuthorizationService.authorizeToolCall(tool, Set.of("etendo:process"));
+    }
+  }
+
+  /** ETP-5715: getting the stored PDF of a document is a read, so a read-only session may do it. */
+  @Test
+  void documentPdfToolIsReadTier() {
+    McpAuthorizationService.authorizeToolCall(McpConstants.TOOL_NEO_GET_DOCUMENT_PDF,
+        Set.of("etendo:read"));
+    assertThrows(OBSecurityException.class, () -> McpAuthorizationService.authorizeToolCall(
+        McpConstants.TOOL_NEO_GET_DOCUMENT_PDF, Set.of("etendo:process")));
+  }
+
+  /** ETP-5715: sending a document by email delivers a real message, so it needs the write scope. */
+  @Test
+  void sendDocumentEmailToolIsWriteTier() {
+    McpAuthorizationService.authorizeToolCall(McpConstants.TOOL_NEO_SEND_DOCUMENT_EMAIL,
+        Set.of("etendo:write"));
+    assertThrows(OBSecurityException.class, () -> McpAuthorizationService.authorizeToolCall(
+        McpConstants.TOOL_NEO_SEND_DOCUMENT_EMAIL, Set.of("etendo:read")));
+    assertThrows(OBSecurityException.class, () -> McpAuthorizationService.authorizeToolCall(
+        McpConstants.TOOL_NEO_SEND_DOCUMENT_EMAIL, Set.of("etendo:process")));
+  }
+
+  /**
+   * ETP-5715: staging a PDF and reading it with a paid external model are steps of the write flow
+   * that creates a document from it, so both need the write scope.
+   */
+  @Test
+  void documentExtractionToolsAreWriteTier() {
+    for (String tool : new String[] {McpConstants.TOOL_NEO_REQUEST_DOCUMENT_EXTRACTION_UPLOAD,
+        McpConstants.TOOL_NEO_EXTRACT_INVOICE_DOCUMENT}) {
+      McpAuthorizationService.authorizeToolCall(tool, Set.of("etendo:write"));
+      assertThrows(OBSecurityException.class,
+          () -> McpAuthorizationService.authorizeToolCall(tool, Set.of("etendo:read")), tool);
+      assertThrows(OBSecurityException.class,
+          () -> McpAuthorizationService.authorizeToolCall(tool, Set.of("etendo:process")), tool);
+    }
+  }
+
+  /** ETP-5715: a read-only session may list a document's attachments; changing them needs write. */
+  @Test
+  void attachmentToolsAreSplitBetweenReadAndWrite() {
+    McpAuthorizationService.authorizeToolCall(McpConstants.TOOL_NEO_LIST_ATTACHMENTS,
+        Set.of("etendo:read"));
+    for (String tool : new String[] {McpConstants.TOOL_NEO_REQUEST_ATTACHMENT_UPLOAD,
+        McpConstants.TOOL_NEO_DELETE_ATTACHMENT}) {
+      assertThrows(OBSecurityException.class,
+          () -> McpAuthorizationService.authorizeToolCall(tool, Set.of("etendo:read")), tool);
+      assertThrows(OBSecurityException.class,
+          () -> McpAuthorizationService.authorizeToolCall(tool, Set.of("etendo:process")), tool);
+      McpAuthorizationService.authorizeToolCall(tool, Set.of("etendo:write"));
+    }
+  }
 }

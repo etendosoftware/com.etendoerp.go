@@ -25,9 +25,11 @@ import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Tab;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
+import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
 
 /**
  * Record ownership for actions and CRUD targets. The strict CRUD contract is documented by
@@ -51,7 +53,12 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
  *   <li>no tab, or a tab without a DAL entity (a report or tab-less spec) — passes;</li>
  *   <li>an id that is not a row of that table (an action whose id names another table, such as a
  *       financial account on a report spec) — passes; the handler resolves it, and the handlers of
- *       that kind already go through {@link TenantOwnership#loadOwned};</li>
+ *       that kind already go through {@link TenantOwnership#loadOwned}. The one exception is the
+ *       document-action button ({@code DocAction}), whose id always names a row of the entity's own
+ *       table: {@link #refusalForMissingDocument} answers it the same 404 (ETP-5715, <b>MCP
+ *       only</b>: REST and the SPA do not call it and still get the core's "not correct
+ *       organization/doctype" message for an absent row), because the core process otherwise
+ *       reports that unrelated message;</li>
  *   <li>a row of a table without a client (system/reference data) — visible, as
  *       {@link TenantOwnership#isVisibleToCurrentTenant} decides for every caller.</li>
  * </ul>
@@ -62,6 +69,9 @@ public final class NeoActionRecordGuard {
 
   /** Same text as an unknown record, on purpose. */
   static final String MSG_RECORD_NOT_FOUND = "Record not found";
+
+  /** The AD document-action button column; its id is always a row of the entity's own table. */
+  private static final String DOC_ACTION_COLUMN = "DocAction";
 
   private NeoActionRecordGuard() {
   }
@@ -101,6 +111,52 @@ public final class NeoActionRecordGuard {
     } catch (RuntimeException e) {
       log.warn("CRUD target refused: ownership lookup failed ({})", e.getClass().getSimpleName());
       return NeoResponse.error(404, MSG_RECORD_NOT_FOUND);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * The refusal for a document action on an id that is not a row of the entity's table, or
+   * {@code null} when it may run (ETP-5715).
+   *
+   * <p>Only for the document-action button ({@code DocAction}): its id is always a document of the
+   * entity's own table, and the core process answers a missing one with an unrelated message
+   * ({@code NotCorrectOrgDoctypeInvoice}) that sends the caller looking for a configuration problem.
+   * The answer is the same 404 a foreign id gets, so an unknown id and another tenant's id cannot be
+   * told apart. Every other action is left untouched, because its id may name another table. A
+   * lookup that cannot be made passes (the action runs as it did before).</p>
+   *
+   * @param entity   the SchemaForge entity the action is addressed to
+   * @param recordId the record id of the request
+   * @param action   the action as typed (field or DB column name of the button)
+   * @return a 404, or {@code null}
+   */
+  public static NeoResponse refusalForMissingDocument(SFEntity entity, String recordId,
+      String action) {
+    if (entity == null || StringUtils.isAnyBlank(recordId, action)) {
+      return null;
+    }
+    Column button = NeoButtonActionHelper.findButtonColumn(entity.getId(), action);
+    if (button == null || !DOC_ACTION_COLUMN.equalsIgnoreCase(button.getDBColumnName())) {
+      return null;
+    }
+    return isMissingRow(entity, recordId) ? NeoResponse.error(404, MSG_RECORD_NOT_FOUND) : null;
+  }
+
+  /** Whether the entity's table has no row with this id; {@code false} when that cannot be told. */
+  private static boolean isMissingRow(SFEntity entity, String recordId) {
+    OBContext.setAdminMode(true);
+    try {
+      Tab tab = entity.getADTab();
+      if (tab == null || tab.getTable() == null) {
+        return false;
+      }
+      Entity dalEntity = ModelProvider.getInstance().getEntityByTableId(tab.getTable().getId());
+      return dalEntity != null && OBDal.getInstance().get(dalEntity.getName(), recordId) == null;
+    } catch (RuntimeException e) {
+      log.debug("Could not tell whether record {} exists: {}", recordId, e.getMessage());
+      return false;
     } finally {
       OBContext.restorePreviousMode();
     }

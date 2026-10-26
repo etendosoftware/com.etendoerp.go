@@ -940,6 +940,8 @@ class EtendoGoJwtDalHelperTest {
       // relationship marker, the ownership flag (ETP-5743) and the demo-association flag
       // (ETP-5548). Lifecycle fields are conditional and absent here.
       assertEquals(12, result.length());
+      // graceEndsAt (ETP-5049) travels with the lifecycle fields: absent without lifecycle.
+      assertFalse(result.has("graceEndsAt"), result.toString());
     }
 
     @Test
@@ -1168,6 +1170,69 @@ class EtendoGoJwtDalHelperTest {
         assertEquals(anchor.toString(), result.getString("renewalDueAt"));
       }
       assertOnlyAccessStateDiffers(enforced, switchedOff);
+    }
+
+    // ===================== graceEndsAt (ETP-5049) =====================
+
+    @Test
+    @DisplayName("ETP-5049: a past-due tenant reports graceEndsAt as its due date plus the grace "
+        + "days")
+    void aPastDueTenantReportsItsGraceEnd() throws Exception {
+      String clientId = givenTenant();
+      java.time.Instant anchor = givenPastDueTenantOutOfGrace();
+
+      JSONObject result = buildWithSwitch(clientId, false);
+
+      assertEquals(anchor.plus(java.time.Duration.ofDays(
+          TenantEnvironmentLifecycleService.DEFAULT_GRACE_DAYS)).toString(),
+          result.getString("graceEndsAt"));
+      assertEquals(anchor.toString(), result.getString("renewalDueAt"));
+    }
+
+    @Test
+    @DisplayName("ETP-5049: a current tenant reports graceEndsAt as JSON null even with a stored "
+        + "due date")
+    void aCurrentTenantReportsANullGraceEnd() throws Exception {
+      givenTenant();
+      java.time.Instant anchor = java.time.Instant.now().plus(java.time.Duration.ofDays(3))
+          .truncatedTo(java.time.temporal.ChronoUnit.MILLIS);
+      Subscription current = mock(Subscription.class);
+      when(current.getEnvironmentClient()).thenReturn(client);
+      when(current.getSubscriptionStatus()).thenReturn("active");
+      when(current.getGraceAnchor()).thenReturn(Date.from(anchor));
+      givenOpenRow(current);
+      givenPreferences(Map.of("ETGO_EnvironmentType", "PRODUCTIVE"));
+
+      // An allowed tenant has no refusal to switch off, so buildWithSwitch's flag check does not
+      // apply here.
+      JSONObject result;
+      try (MockedStatic<com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag> flag =
+          mockStatic(com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag.class)) {
+        result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, null, environmentUser);
+      }
+
+      assertEquals("CURRENT", result.getString("subscriptionStatus"));
+      assertEquals(anchor.toString(), result.getString("renewalDueAt"));
+      assertTrue(result.has("graceEndsAt"), result.toString());
+      assertTrue(result.isNull("graceEndsAt"), result.toString());
+    }
+
+    @Test
+    @DisplayName("ETP-5049: a past-due tenant without a due date reports graceEndsAt as JSON null")
+    void aPastDueTenantWithoutDueDateReportsANullGraceEnd() throws Exception {
+      String clientId = givenTenant();
+      Subscription pastDue = mock(Subscription.class);
+      when(pastDue.getEnvironmentClient()).thenReturn(client);
+      when(pastDue.getSubscriptionStatus()).thenReturn("past_due");
+      givenOpenRow(pastDue);
+      givenPreferences(Map.of("ETGO_EnvironmentType", "PRODUCTIVE"));
+
+      JSONObject result = buildWithSwitch(clientId, false);
+
+      assertEquals("PAST_DUE", result.getString("subscriptionStatus"));
+      assertFalse(result.has("renewalDueAt"), result.toString());
+      assertTrue(result.has("graceEndsAt"), result.toString());
+      assertTrue(result.isNull("graceEndsAt"), result.toString());
     }
 
     @Test

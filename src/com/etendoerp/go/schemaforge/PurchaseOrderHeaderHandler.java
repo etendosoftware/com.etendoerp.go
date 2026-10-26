@@ -23,6 +23,8 @@ import java.util.Map;
 import javax.inject.Inject;
 import javax.inject.Named;
 
+import org.openbravo.model.common.order.Order;
+
 import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import org.openbravo.base.structure.BaseOBObject;
@@ -69,6 +71,21 @@ public class PurchaseOrderHeaderHandler extends AbstractOrderHeaderHandler {
 
   @Inject
   private TotalDiscountService totalDiscountService;
+
+  /**
+   * ETP-5840: the rate is the one valid on the {@code orderDate} ({@code DateOrdered}), shown as
+   * "Order date". Order-family rules in {@link DocumentRateGuards#guardOrderHeader}.
+   */
+  static final DocumentCurrencyRate.RateType RATE_TYPE = new DocumentCurrencyRate.RateType(
+      Order.ENTITY_NAME, Order.PROPERTY_ETGOCURRENCYRATE, Order.PROPERTY_ORDERDATE,
+      DocumentRateMessages.LABEL_ORDER_DATE);
+
+  private final DocumentCurrencyRate currencyRate = new DocumentCurrencyRate(RATE_TYPE);
+
+  @Override
+  protected DocumentCurrencyRate currencyRate() {
+    return currencyRate;
+  }
 
   @Override
   protected boolean isSalesTransaction() {
@@ -119,6 +136,12 @@ public class PurchaseOrderHeaderHandler extends AbstractOrderHeaderHandler {
         Location.PROPERTY_SHIPTOADDRESS, Order.PROPERTY_INVOICEADDRESS,
         Location.PROPERTY_INVOICETOADDRESS);
     AbstractOrderHeaderHandler.mirrorAccountingDate(context);
+    // ETP-5840: exchange rate — recalculation, save and completion validation — before anything
+    // with side effects runs.
+    NeoResponse rateRefusal = DocumentRateGuards.guardOrderHeader(context, currencyRate);
+    if (rateRefusal != null) {
+      return rateRefusal;
+    }
     AbstractOrderHeaderHandler.applyTotalDiscountBeforeComplete(context, totalDiscountService, false);
     return NeoHeaderActionRouter.dispatch(
         context,

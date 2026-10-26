@@ -130,6 +130,8 @@ final class InvoiceLineAmountSupport {
   static final String FIELD_TAX = InvoiceLine.PROPERTY_TAX;
   static final String FIELD_LINE_NET_AMOUNT = InvoiceLine.PROPERTY_LINENETAMOUNT;
   static final String FIELD_GROSS_AMOUNT = InvoiceLine.PROPERTY_GROSSAMOUNT;
+  /** {@code C_InvoiceLine.TaxBaseAmt}: the tax base, the net after the discount. */
+  static final String FIELD_TAXABLE_AMOUNT = InvoiceLine.PROPERTY_TAXABLEAMOUNT;
 
   /** The scale of a derived unit price: the one the SPA posts ({@code toFixed(6)}). */
   static final int PRICE_SCALE = 6;
@@ -325,6 +327,7 @@ final class InvoiceLineAmountSupport {
               discounted, scale);
         }
       }
+      writeTaxableAmount(body, netToStore(body, derived), scale);
     } catch (Exception e) {
       log.warn("[INVOICE-LINE-AMOUNTS] Could not derive the line amounts on {} {}: {}",
           ctx.getSpecName(), ctx.getEntityName(), e.getMessage());
@@ -376,6 +379,9 @@ final class InvoiceLineAmountSupport {
         if (value != null && !sent.has(out)) {
           body.put(out, value.setScale(scale.getAsInt(), RoundingMode.HALF_UP));
         }
+      }
+      if (!sent.has(FIELD_TAXABLE_AMOUNT)) {
+        writeTaxableAmount(body, netToStore(body, derived), scale);
       }
     } catch (Exception | LinkageError e) {
       log.warn("[INVOICE-LINE-AMOUNTS] Could not recalculate the line {} on {} {}: {}",
@@ -579,6 +585,41 @@ final class InvoiceLineAmountSupport {
       return unit != null && unit.compareTo(list) == 0 ? list : null;
     }
     return patch.has(FIELD_DISCOUNT) || patch.has(FIELD_LIST_PRICE) ? list : null;
+  }
+
+  /**
+   * The net amount the line will be stored with: the body's {@code lineNetAmount} when it carries
+   * one (the caller's, or one the amount writes above just set), otherwise the derived net.
+   *
+   * @param body    the request body, after the amount writes
+   * @param derived the amounts the policy derived
+   * @return the net to persist, or {@code null} when there is none
+   */
+  private static Object netToStore(JSONObject body, JSONObject derived) {
+    if (LineAmountSupport.decimal(body.opt(FIELD_LINE_NET_AMOUNT)) != null) {
+      return body.opt(FIELD_LINE_NET_AMOUNT);
+    }
+    return derived.opt(FIELD_LINE_NET_AMOUNT);
+  }
+
+  /**
+   * Sets {@code taxableAmount} ({@code TaxBaseAmt}) to the line's final net amount, the core
+   * semantics ({@code UpdateTax.updateTaxableAmount}: the net after the line discount). Unlike
+   * {@link #writeIfStale} it overwrites whatever the body carries and writes a net of exactly 0
+   * (100 % discount, free line): only the SPA's callout filled it, before the discount, so a line
+   * written through REST or MCP kept 0 or the undiscounted quantity x price. A sign is kept as is
+   * (returns). Nothing is written when there is no net to copy.
+   *
+   * @param body  the request body; mutated in place
+   * @param net   the final net amount of the line, any JSON number or string
+   * @param scale the invoice currency's standard precision
+   */
+  private static void writeTaxableAmount(JSONObject body, Object net, IntSupplier scale)
+      throws JSONException {
+    BigDecimal value = LineAmountSupport.decimal(net);
+    if (value != null) {
+      body.put(FIELD_TAXABLE_AMOUNT, value.setScale(scale.getAsInt(), RoundingMode.HALF_UP));
+    }
   }
 
   /**

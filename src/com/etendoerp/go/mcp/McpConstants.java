@@ -79,6 +79,33 @@ final class McpConstants {
   static final String TOOL_NEO_REQUEST_IMAGE_UPLOAD = "etendo_request_image_upload";
   /** Tool name of the read-only ticket-status lookup (ETP-5184). */
   static final String TOOL_NEO_GET_IMAGE_UPLOAD = "etendo_get_image_upload";
+  /** Tool name of the single-use attachment upload link request (ETP-5715). */
+  static final String TOOL_NEO_REQUEST_ATTACHMENT_UPLOAD = "etendo_request_attachment_upload";
+  /** Tool name of the read-only listing of a document's attachments, download links included (ETP-5715). */
+  static final String TOOL_NEO_LIST_ATTACHMENTS = "etendo_list_attachments";
+  /** Tool name of the removal of one attachment of a document (ETP-5715). */
+  static final String TOOL_NEO_DELETE_ATTACHMENT = "etendo_delete_attachment";
+  /** Tool name of the read-only fetch of the PDF the application stored for a document (ETP-5715). */
+  static final String TOOL_NEO_GET_DOCUMENT_PDF = "etendo_get_document_pdf";
+  /** Tool name of the document email send, the application's "Enviar" (ETP-5715). */
+  static final String TOOL_NEO_SEND_DOCUMENT_EMAIL = "etendo_send_document_email";
+  /** Tool name of the single-use link that stages a PDF for data extraction (ETP-5715). */
+  static final String TOOL_NEO_REQUEST_DOCUMENT_EXTRACTION_UPLOAD =
+      "etendo_request_document_extraction_upload";
+  /** Tool name of the data extraction of a staged supplier-invoice PDF, read-only (ETP-5715). */
+  static final String TOOL_NEO_EXTRACT_INVOICE_DOCUMENT = "etendo_extract_invoice_document";
+  /** Error code: the extraction service could not be used (503, ETP-5715). */
+  static final String ERROR_OCR_UNAVAILABLE = "ocr_unavailable";
+  /** Error code: the staged document exists but its file has not been uploaded yet (409, ETP-5715). */
+  static final String ERROR_NOT_UPLOADED = "not_uploaded";
+  /** HTTP-style status for a request the service rejected before running (ETP-5715). */
+  static final int STATUS_BAD_REQUEST = 400;
+  /** HTTP-style status for a dependency that cannot be reached (ETP-5715). */
+  static final int STATUS_SERVICE_UNAVAILABLE = 503;
+  /** Error code: the document has no stored PDF yet (409, ETP-5715). */
+  static final String ERROR_NO_PDF = "no_pdf";
+  /** Error code: the stored PDF predates the document's last change and is not current (409, ETP-5715). */
+  static final String ERROR_PDF_STALE = "pdf_stale";
   /**
    * Hard cap on the DECODED size of {@link #TOOL_NEO_UPLOAD_IMAGE}'s {@code data_base64}.
    *
@@ -443,8 +470,14 @@ final class McpConstants {
   static final String TOOL_NEO_DISCOVER = "etendo_discover";
   /** Tool name for the multi-operation write tool. */
   static final String TOOL_NEO_BATCH = "etendo_batch";
+  /** Tool name for reading the status of an asynchronous batch job (ETP-5677). */
+  static final String TOOL_NEO_JOB_STATUS = "etendo_job_status";
+  /** Tool name for cancelling an asynchronous batch job (ETP-5677). */
+  static final String TOOL_NEO_JOB_CANCEL = "etendo_job_cancel";
   /** Tool name for the document action / process tool. */
   static final String TOOL_NEO_ACTION = "etendo_action";
+  /** Tool name for one document action over several documents, one result each (ETP-5715). */
+  static final String TOOL_NEO_ACTION_BATCH = "etendo_action_batch";
 
   /** Tool name for the business-widget enum tool (gap G4, ETP-4284). */
   static final String TOOL_NEO_WIDGET = "etendo_widget";

@@ -1,0 +1,38 @@
+name: Back-merge main into develop
+
+# ETP-5904: whatever enters main (a hotfix, a fix or revert made on the daily cut, the cut's own
+# merge commit) comes back to develop at once through a main -> develop PR (etendo_schema_forge
+# docs/branch-workflow.md § Back to develop). This opens that PR when main moves, instead of
+# waiting for someone to remember it. Merging it stays human, after review and required checks.
+#
+# ETENDOBOT_TOKEN, not GITHUB_TOKEN: a PR opened with GITHUB_TOKEN triggers no pull_request
+# workflow, so its required checks would never report and the PR could not be merged.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: back-merge-main
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  open-pr:
+    name: Open the main -> develop PR
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Open it when develop lacks main's commits
+        env:
+          GH_TOKEN: ${{ secrets.ETENDOBOT_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          MERGED_SHA: ${{ github.event_name == 'push' && github.sha || '' }}
+        run: bash scripts/back-merge-main.sh

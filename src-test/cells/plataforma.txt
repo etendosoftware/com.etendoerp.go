@@ -23,6 +23,11 @@ com.etendoerp.go.schemaforge.NeoActionSurfaceTest
 com.etendoerp.go.schemaforge.NeoAttachmentAuthorizationMatrixTest
 com.etendoerp.go.schemaforge.NeoAttachmentAuthorizerTest
 com.etendoerp.go.schemaforge.NeoAttachmentPolicyTest
+com.etendoerp.go.schemaforge.NeoAttachmentStoreTest
+com.etendoerp.go.schemaforge.NeoAttachmentTargetTest
+com.etendoerp.go.schemaforge.NeoAttachmentUploadEndpointTest
+com.etendoerp.go.schemaforge.NeoAttachmentUploadTicketsTest
+com.etendoerp.go.schemaforge.NeoAttachmentsConfigTest
 com.etendoerp.go.schemaforge.NeoAttachmentsHelperTest
 com.etendoerp.go.schemaforge.NeoAuthenticatorEnvironmentAccessTest
 com.etendoerp.go.schemaforge.NeoAuthenticatorSchemeParityTest
@@ -51,6 +56,8 @@ com.etendoerp.go.schemaforge.NeoDefaultsServiceTest
 com.etendoerp.go.schemaforge.NeoDiscoveryHandlerTest
 com.etendoerp.go.schemaforge.NeoDisplayLogicHandlerTest
 com.etendoerp.go.schemaforge.NeoDocumentDownloadServiceTest
+com.etendoerp.go.schemaforge.NeoDocumentPdfTest
+com.etendoerp.go.schemaforge.NeoPdfSourceConfigTest
 com.etendoerp.go.schemaforge.NeoExtensionParityTest
 com.etendoerp.go.schemaforge.NeoFavoritesServiceTest
 com.etendoerp.go.schemaforge.NeoFavoritesServletTest

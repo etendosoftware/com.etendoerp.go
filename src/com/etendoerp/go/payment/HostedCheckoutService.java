@@ -168,7 +168,7 @@ public class HostedCheckoutService {
    * @param clientName requested environment name
    * @param origin public application origin for return URLs
    * @param planKey plan catalog key of the plan being bought; blank asks for the legacy fallback
-   * @return checkout request id, URL, mode and price id
+   * @return checkout request id, URL and mode (never the provider price id)
    * @throws PlanNotAvailableException when the key names no active plan catalog row, or asks for
    *     the legacy plan while the legacy price fallback is inactive
    * @throws CheckoutNotConfiguredException when checkout has no credentials, or the plan carries
@@ -197,7 +197,7 @@ public class HostedCheckoutService {
    * @param origin public application origin for return URLs
    * @param planKey plan catalog key of the plan being bought; blank asks for the legacy fallback
    * @param options demo source, transfer selection and pre-provider callback
-   * @return checkout request id, URL, mode and price id
+   * @return checkout request id, URL and mode (never the provider price id)
    * @throws PlanNotAvailableException when the key names no active plan catalog row, or asks for
    *     the legacy plan while the legacy price fallback is inactive
    * @throws CheckoutNotConfiguredException when checkout has no credentials, or the plan carries
@@ -216,8 +216,9 @@ public class HostedCheckoutService {
     // Recorded and committed BEFORE the provider is contacted. A crash during the call below would
     // otherwise leave a session at Stripe that nothing on this side can name, and therefore that no
     // reconciliation could ever find. The row is deliberately not rolled back when the call fails:
-    // it is the evidence that someone tried to buy something, and it is always safe to expire
-    // because the checkoutUrl only reaches the browser once this method returns.
+    // it is the evidence that someone tried to buy something. A row left without a session id is
+    // never closed automatically: the provider cannot confirm it was not paid, so the billing
+    // reconciliation parks it for review (ETP-5048 decision 6).
     checkoutRequestStore.recordRequested(requestId, accountId, accountEmail, clientName,
         new CheckoutRequestStore.RequestOptions(sessionOptions.demoClientId, true,
             sessionOptions.transferProducts, sessionOptions.transferContacts, price.getId(),
@@ -331,8 +332,7 @@ public class HostedCheckoutService {
         if (originalMode.isEmpty()) {
           throw new IOException("Stripe returned an existing session without its checkout mode");
         }
-        return buildResult(requestId, existing.optString("url", ""),
-            checkoutRequestStore.findStripePriceId(requestId), originalMode);
+        return buildResult(requestId, existing.optString("url", ""), originalMode);
       }
       if ("complete".equals(sessionStatus)) {
         return buildCompletedResult(requestId, existing);
@@ -404,7 +404,8 @@ public class HostedCheckoutService {
     result.put(REQUEST_ID_FIELD, requestId);
     result.put("checkoutUrl", providerUrl);
     result.put("mode", mode);
-    result.put("priceId", price.getId());
+    // ETP-5049: no provider price id in a browser-facing answer. The browser names a plan, never a
+    // price; the charged price id stays on the request row (STRIPE_PRICE_ID) for the server.
     return result;
   }
 
@@ -422,7 +423,7 @@ public class HostedCheckoutService {
     return response.json();
   }
 
-  private JSONObject buildResult(String requestId, String checkoutUrl, String priceId, String mode)
+  private JSONObject buildResult(String requestId, String checkoutUrl, String mode)
       throws JSONException {
     if (checkoutUrl == null || checkoutUrl.isEmpty()) {
       throw new IllegalStateException("The checkout provider returned no session URL");
@@ -431,7 +432,6 @@ public class HostedCheckoutService {
     result.put(REQUEST_ID_FIELD, requestId);
     result.put("checkoutUrl", checkoutUrl);
     result.put("mode", mode);
-    if (priceId != null) result.put("priceId", priceId);
     return result;
   }
 
