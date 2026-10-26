@@ -471,9 +471,12 @@ public class OnboardingOrgInfoServiceTest {
     OBDal dal = mock(OBDal.class);
 
     try (MockedStatic<OBProvider> obProvider = mockStatic(OBProvider.class);
-        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class)) {
       obProvider.when(OBProvider::getInstance).thenReturn(provider);
       obDal.when(OBDal::getInstance).thenReturn(dal);
+      flags.when(() -> GoFeatureFlags.isEnabled(
+          eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(true);
       service.createLocation(client, org, country, "Legacy free text — must be ignored",
           "Gran Via", "45", "Torre A", "Madrid");
     }
@@ -602,9 +605,12 @@ public class OnboardingOrgInfoServiceTest {
     OBDal dal = mock(OBDal.class);
 
     try (MockedStatic<OBProvider> obProvider = mockStatic(OBProvider.class);
-        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class)) {
       obProvider.when(OBProvider::getInstance).thenReturn(provider);
       obDal.when(OBDal::getInstance).thenReturn(dal);
+      flags.when(() -> GoFeatureFlags.isEnabled(
+          eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(true);
       service.createLocation(client, org, country, null, "Gran Via", "  ", "   ", "Madrid");
     }
 
