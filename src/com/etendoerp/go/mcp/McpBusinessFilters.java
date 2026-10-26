@@ -52,6 +52,15 @@ final class McpBusinessFilters {
   /** {@code between} range operator — its value is a two-element {@code [from, to]} array. */
   static final String OP_BETWEEN = "between";
 
+  /**
+   * {@code contains} text operator (ETP-5852) — case-insensitive substring match on a text
+   * property; its value is the text to look for.
+   */
+  static final String OP_CONTAINS = "contains";
+
+  /** {@code in} set operator (ETP-5852) — its value is a non-empty array of exact values. */
+  static final String OP_IN = "in";
+
   /** Range-operator keys mapped to their SQL comparison symbol (insertion order = doc order). */
   private static final Map<String, String> OPERATORS = new LinkedHashMap<>();
 
@@ -75,12 +84,42 @@ final class McpBusinessFilters {
    * (ETP-5184). {@code between} is appended because it is handled outside {@link #OPERATORS} but
    * is just as valid a thing for a caller to have meant.
    *
-   * @return the operator keys in documentation order, {@code between} last
+   * @return the operator keys in documentation order, then {@code between}, {@code contains}, {@code in}
    */
   static java.util.List<String> operatorKeys() {
     java.util.List<String> keys = new java.util.ArrayList<>(OPERATORS.keySet());
     keys.add(OP_BETWEEN);
+    keys.add(OP_CONTAINS);
+    keys.add(OP_IN);
     return keys;
+  }
+
+  /**
+   * HQL for {@code contains}: {@code upper(path) like upper('%text%') escape '\'}. The text's own
+   * {@code \ % _} are escaped so they match literally instead of acting as wildcards, and the
+   * literal is quoted like every other value, so the caller's text can neither widen the match
+   * nor inject HQL.
+   */
+  static String containsCondition(String path, Object value) {
+    String text = value == null ? "" : String.valueOf(value);
+    String escaped = text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_");
+    return "upper(" + path + ") like upper(" + quote("%" + escaped + "%") + ") escape '\\'";
+  }
+
+  /**
+   * HQL for {@code in}: {@code path in (v1, v2, ...)}, each value rendered by
+   * {@link #formatHqlValue} for the property's type, exactly like an equality filter.
+   */
+  static String inCondition(String path, Class<?> javaType, boolean primitive,
+      java.util.List<Object> values) {
+    StringBuilder sb = new StringBuilder(path).append(" in (");
+    for (int i = 0; i < values.size(); i++) {
+      if (i > 0) {
+        sb.append(", ");
+      }
+      sb.append(formatHqlValue(javaType, primitive, values.get(i)));
+    }
+    return sb.append(')').toString();
   }
 
   /** @return {@code true} if {@code key} is any recognized range operator (including {@code between}). */

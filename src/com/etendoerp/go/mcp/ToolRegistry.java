@@ -743,10 +743,14 @@ public class ToolRegistry {
     props.put(McpConstants.PARAM_ENTITY,
       stringProp(McpConstants.LABEL_ENTITY_NAME_WITH_EXAMPLE));
     props.put("filters", objectProp(
-        "Filter criteria. Three shapes, combinable: (1) exact match {\"column\": value}; "
+        "Filter criteria. Five shapes, combinable: (1) exact match {\"column\": value}; "
             + "(2) range operators {\"column\": {\"gt\"|\"gte\"|\"lt\"|\"lte\": value}} or "
             + "{\"column\": {\"between\": [from, to]}} (dates as \"YYYY-MM-DD\"); "
-            + "(3) named business filter {\"status\": \"<name>\"} — a hand-authored business "
+            + "(3) partial text, case-insensitive, text fields only "
+            + "{\"column\": {\"contains\": \"text\"}}; "
+            + "(4) any of several exact values {\"column\": {\"in\": [v1, v2]}} (ids for a "
+            + "reference field); "
+            + "(5) named business filter {\"status\": \"<name>\"} — a hand-authored business "
             + "state; an unknown name returns the valid list with what each one means."
             + (namedFilterSummary == null ? ""
                 : " Configured named filters (spec/entity: name (meaning)):\n" + namedFilterSummary)));

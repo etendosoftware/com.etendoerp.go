@@ -122,4 +122,41 @@ class McpBusinessFiltersTest {
           McpBusinessFilters.formatHqlValue(Date.class, true, "2026-07-31'); drop"));
     }
   }
+
+  @Nested
+  @DisplayName("contains / in (ETP-5852)")
+  class ContainsAndIn {
+
+    @Test
+    @DisplayName("contains is a case-insensitive substring match")
+    void containsIsCaseInsensitiveSubstring() {
+      assertEquals("upper(e.name) like upper('%ern%') escape '\\'",
+          McpBusinessFilters.containsCondition("e.name", "ern"));
+    }
+
+    @Test
+    @DisplayName("contains matches wildcards and quotes literally, never as HQL")
+    void containsEscapesWildcardsAndQuotes() {
+      assertEquals("upper(e.name) like upper('%50\\% o''Brien\\_x%') escape '\\'",
+          McpBusinessFilters.containsCondition("e.name", "50% o'Brien_x"));
+    }
+
+    @Test
+    @DisplayName("in renders each value for the property's type")
+    void inRendersTypedValues() {
+      assertEquals("e.searchKey in ('SK-1', 'it''s')", McpBusinessFilters.inCondition(
+          "e.searchKey", String.class, true, java.util.List.of("SK-1", "it's")));
+      assertEquals("e.qty in (1, 2.5)", McpBusinessFilters.inCondition(
+          "e.qty", BigDecimal.class, true, java.util.List.of(1, "2.5")));
+      assertEquals("e.qty in ('1 or 1=1')", McpBusinessFilters.inCondition(
+          "e.qty", BigDecimal.class, true, java.util.List.of("1 or 1=1")));
+    }
+
+    @Test
+    @DisplayName("an unknown-operator refusal lists contains and in")
+    void operatorKeysListContainsAndIn() {
+      assertTrue(McpBusinessFilters.operatorKeys()
+          .containsAll(java.util.List.of("gt", "gte", "lt", "lte", "between", "contains", "in")));
+    }
+  }
 }

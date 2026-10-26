@@ -600,6 +600,34 @@ final class McpQuerySupport {
             .append(McpBusinessFilters.formatHqlValue(type, prop.isPrimitive(), bounds.get(0)))
             .append(" and ")
             .append(McpBusinessFilters.formatHqlValue(type, prop.isPrimitive(), bounds.get(1)));
+      } else if (McpBusinessFilters.OP_CONTAINS.equals(op)) {
+        // ETP-5852: partial text search. Only on a text column — on a number, date, boolean or
+        // foreign key a substring match is meaningless, so refuse it instead of guessing.
+        if (!prop.isPrimitive() || !String.class.equals(type)) {
+          throw McpRoutingException.malformedFilterOperator(key, op,
+              "'contains' works only on text fields; use exact match, 'in' or a range here");
+        }
+        Object text = operators.get(op);
+        if (!(text instanceof String) || ((String) text).isEmpty()) {
+          throw McpRoutingException.malformedFilterOperator(key, op,
+              "the 'contains' operator takes a non-empty text value");
+        }
+        appendAnd(where);
+        where.append(McpBusinessFilters.containsCondition(path, text));
+      } else if (McpBusinessFilters.OP_IN.equals(op)) {
+        // ETP-5852: one request for several exact values (ids, search keys, codes).
+        JSONArray values = operators.optJSONArray(op);
+        if (values == null || values.length() == 0) {
+          throw McpRoutingException.malformedFilterOperator(key, op,
+              "the 'in' operator takes a non-empty array of values");
+        }
+        java.util.List<Object> list = new java.util.ArrayList<>();
+        for (int i = 0; i < values.length(); i++) {
+          list.add(values.get(i));
+        }
+        String inPath = prop.isPrimitive() ? path : filterPath(prop, target, ".id");
+        appendAnd(where);
+        where.append(McpBusinessFilters.inCondition(inPath, type, prop.isPrimitive(), list));
       } else {
         String sql = McpBusinessFilters.operatorToSql(op);
         if (sql == null) {
