@@ -67,6 +67,8 @@ import com.etendoerp.go.schemaforge.util.NeoReportCallability;
  * (process/report/window), handleProcessSpecRequest (access denied, GET describe,
  * GET with null process, POST execute, unsupported methods), handleWindowSpecRequest
  * (access denied, spec describe on GET without entity, method not allowed without entity).
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoRequestRouter
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -428,6 +430,63 @@ class NeoRequestRouterTest {
     when(process.getId()).thenReturn("proc-id");
     when(spec.getProcess()).thenReturn(process);
     when(servlet.authenticator.hasProcessAccess("proc-id")).thenReturn(true);
+
+    router.handleProcessSpecRequest(spec, "POST", request, response);
+
+    verify(servlet.processReportEndpoint).handleProcessSpec(spec, request, response);
+  }
+
+  /**
+   * ETP-5783: a process spec is told apart by its spec type, not its path, so the process scope is
+   * asked here. An OAuth2 key holding only the write scope must not run a process.
+   */
+  @Test
+  void testHandleProcessSpecPostRefusesAnOAuth2KeyWithoutTheProcessScope() throws Exception {
+    SFSpec spec = mock(SFSpec.class);
+    Process process = mock(Process.class);
+    when(process.getId()).thenReturn("proc-id");
+    when(spec.getProcess()).thenReturn(process);
+    when(servlet.authenticator.hasProcessAccess("proc-id")).thenReturn(true);
+    when(request.getAttribute(
+        com.etendoerp.go.auth.EnvironmentRequestAuthenticator.ATTR_GRANTED_SCOPES))
+        .thenReturn("etendo:write");
+
+    router.handleProcessSpecRequest(spec, "POST", request, response);
+
+    ArgumentCaptor<NeoResponse> written = ArgumentCaptor.forClass(NeoResponse.class);
+    verify(servlet).writeResponse(eq(response), written.capture());
+    assertEquals(HttpServletResponse.SC_FORBIDDEN, written.getValue().getHttpStatus());
+    verify(servlet.processReportEndpoint, never()).handleProcessSpec(any(), any(), any());
+  }
+
+  /** The same key with the process scope, and any non-OAuth2 credential, still runs it. */
+  @Test
+  void testHandleProcessSpecPostAllowsTheProcessScope() throws Exception {
+    SFSpec spec = mock(SFSpec.class);
+    Process process = mock(Process.class);
+    when(process.getId()).thenReturn("proc-id");
+    when(spec.getProcess()).thenReturn(process);
+    when(servlet.authenticator.hasProcessAccess("proc-id")).thenReturn(true);
+    when(request.getAttribute(
+        com.etendoerp.go.auth.EnvironmentRequestAuthenticator.ATTR_GRANTED_SCOPES))
+        .thenReturn("etendo:process");
+
+    router.handleProcessSpecRequest(spec, "POST", request, response);
+
+    verify(servlet.processReportEndpoint).handleProcessSpec(spec, request, response);
+  }
+
+  /** A cookie or legacy-JWT session carries no granted-scopes attribute: never narrowed by scope. */
+  @Test
+  void testHandleProcessSpecPostAllowsASessionWithoutGrantedScopes() throws Exception {
+    SFSpec spec = mock(SFSpec.class);
+    Process process = mock(Process.class);
+    when(process.getId()).thenReturn("proc-id");
+    when(spec.getProcess()).thenReturn(process);
+    when(servlet.authenticator.hasProcessAccess("proc-id")).thenReturn(true);
+    when(request.getAttribute(
+        com.etendoerp.go.auth.EnvironmentRequestAuthenticator.ATTR_GRANTED_SCOPES))
+        .thenReturn(null);
 
     router.handleProcessSpecRequest(spec, "POST", request, response);
 

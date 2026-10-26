@@ -156,8 +156,13 @@ jobs:
         env:
           DOCKER_BUILDKIT: "1"
         run: |
+          # ETP-5751 — dd-java-agent version comes from the module's single pin, so the agent in
+          # the image always matches the dd-openfeature jar in the WAR (Dockerfile verifies sha256).
+          DD_JAVA_AGENT_VERSION=$(sed -n "s/^ext\.ddJavaAgentVersion *= *'\([^']*\)'.*/\1/p" ../module/build.gradle)
+          test -n "$DD_JAVA_AGENT_VERSION" || { echo "ddJavaAgentVersion not found in module/build.gradle"; exit 1; }
           docker build \
             --secret id=gradle_props,src=gradle.properties \
+            --build-arg DD_JAVA_AGENT_VERSION="$DD_JAVA_AGENT_VERSION" \
             -t ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:${{ env.IMAGE_TAG }} \
             .
 

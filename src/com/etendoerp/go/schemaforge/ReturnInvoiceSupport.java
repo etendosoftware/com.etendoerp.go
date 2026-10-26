@@ -20,14 +20,20 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Date;
 import java.util.List;
+import java.util.Optional;
+
+import javax.servlet.http.HttpServletResponse;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.QueryException;
 import org.hibernate.criterion.Restrictions;
+import org.hibernate.query.Query;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
@@ -99,16 +105,27 @@ final class ReturnInvoiceSupport {
   /**
    * Same as above, plus what the answer reports about the linkage (ETP-5712).
    *
+   * <p>{@code originInvoiceIds} is also threaded to the pricing: each line's source price is read
+   * from those invoices.
+   *
+   * @param invoice the draft header
+   * @param lines the return shipment lines
+   * @param createDraftInvoiceHandler builds the invoice lines
+   * @param originInvoiceIds the invoices being rectified (linked, and used to price)
+   * @param obContext the context the completion runs under
    * @param returnDoc the return document the invoice refunds; {@code null} leaves
    *     {@code linkedReturnId} / {@code returnDocumentNo} out of the answer
    * @param previousReturnInvoices the rectificativas the return had BEFORE this call, as
    *     {@link ReturnShipmentUtils#fetchPreviousReturnInvoices} reports them; {@code null} reads as none
+   * @return the 200 with the completed invoice
+   * @throws Exception when a line cannot be built or the completion is refused; an
+   *     {@link IllegalStateException} when the invoice cannot be read back afterwards
    */
   static NeoResponse finalizeReturnInvoice(Invoice invoice, List<ShipmentInOutLine> lines,
       CreateDraftInvoiceHandler createDraftInvoiceHandler, List<String> originInvoiceIds,
       OBContext obContext, ShipmentInOut returnDoc, JSONArray previousReturnInvoices)
       throws Exception {
-    addReturnInvoiceLines(invoice, lines, createDraftInvoiceHandler);
+    addReturnInvoiceLines(invoice, lines, createDraftInvoiceHandler, originInvoiceIds);
     OBDal.getInstance().flush();
     OBDal.getInstance().getSession().refresh(invoice);
     createDraftInvoiceHandler.ensureDocumentNo(invoice);
@@ -119,6 +136,14 @@ final class ReturnInvoiceSupport {
     String invoiceId = invoice.getId();
     InvoiceCompletionService.completeInvoiceOrThrow(invoiceId, obContext);
     Invoice completed = OBDal.getInstance().get(Invoice.class, invoiceId);
+    if (completed == null) {
+      // The completion rolls the draft back when the transaction was marked rollback-only: say so
+      // instead of letting refresh(null) fail with an IllegalArgumentException.
+      // A server fault, not a user error: IllegalStateException, so the handler answers 500
+      // (generic message, details only in the log) instead of the OBException 400.
+      throw new IllegalStateException("The return invoice " + invoiceId + " could not be read "
+          + "back after the completion; the transaction was rolled back.");
+    }
     // The totals are computed by the DB triggers during the completion: read them from a fresh
     // copy, never from the entity as it was loaded before (ETP-5712).
     OBDal.getInstance().refresh(completed);
@@ -166,7 +191,8 @@ final class ReturnInvoiceSupport {
 
   /**
    * The shared body of {@code createReturnInvoice} of both return headers (ETP-5712): resolves the
-   * invoices to rectify, notes the rectificativas the return already has, builds the header,
+   * invoices to rectify, refuses a return that already has a rectificativa (unless
+   * {@code allowDuplicate:true}), builds the header,
    * refuses a document that would end at a zero amount, and only then persists, links and
    * confirms.
    *
@@ -185,16 +211,21 @@ final class ReturnInvoiceSupport {
       CreateDraftInvoiceHandler createDraftInvoiceHandler) throws Exception {
     JSONObject body = context.getRequestBody();
     OBContext obContext = context.getObContext();
+    // ETP-5712: one rectificativa per return, like the screen (it hides the button once the
+    // return has one). The check reads only, so it runs before anything else.
+    JSONArray previous = ReturnShipmentUtils.fetchPreviousReturnInvoices(returnId);
+    NeoResponse duplicate = refuseIfAlreadyInvoiced(body, previous);
+    if (duplicate != null) {
+      return duplicate;
+    }
     // ETP-5381: resolve WHICH invoices are being rectified before creating anything. Without
     // the C_Invoice_Reverse link the rectificative invoice cannot be confirmed, so failing
     // here leaves no stuck draft behind.
     List<String> rectifiedIds = resolveRectifiedInvoiceIds(body, returnId);
-    // A second rectificative on the same return is allowed (ETP-5381); it is reported instead.
-    JSONArray previous = ReturnShipmentUtils.fetchPreviousReturnInvoices(returnId);
 
     Invoice sourceInvoice = findSourceInvoice(lines);
     Invoice invoice = ReturnShipmentUtils.buildReturnInvoiceHeader(returnDoc, docType, sourceInvoice, isSales);
-    NeoResponse refused = refuseIfUnpriced(lines, invoice, createDraftInvoiceHandler);
+    NeoResponse refused = refuseIfUnpriced(lines, invoice, createDraftInvoiceHandler, rectifiedIds);
     if (refused != null) {
       return refused;
     }
@@ -215,6 +246,42 @@ final class ReturnInvoiceSupport {
   }
 
   /**
+   * ETP-5712: the one-rectificativa-per-return rule of the screen, for every channel. Refuses with
+   * 409 {@code returnInvoiceAlreadyExists} (the message is the exact sentence the SPA localizes)
+   * when the return already has a non-voided rectificativa, unless the request carries the JSON
+   * boolean {@code allowDuplicate:true}. The check is strict: a string, a number or {@code null}
+   * is never read as true and never fails open, it is a 422.
+   *
+   * @param body the request body; {@code null} reads as empty
+   * @param previous the non-voided rectificativas the return already has, as
+   *     {@link ReturnShipmentUtils#fetchPreviousReturnInvoices} reports them
+   * @return the 409 or 422, or {@code null} when the creation may go on
+   */
+  static NeoResponse refuseIfAlreadyInvoiced(JSONObject body, JSONArray previous) {
+    Object raw = body != null ? body.opt(ReturnShipmentUtils.PARAM_ALLOW_DUPLICATE) : null;
+    if (raw != null && !(raw instanceof Boolean)) {
+      return NeoResponse.error(ReturnableQuantity.SC_UNPROCESSABLE,
+          ReturnShipmentUtils.MSG_ALLOW_DUPLICATE_NOT_BOOLEAN);
+    }
+    if (Boolean.TRUE.equals(raw) || previous == null || previous.length() == 0) {
+      return null;
+    }
+    try {
+      JSONObject error = new JSONObject();
+      error.put("status", HttpServletResponse.SC_CONFLICT);
+      error.put("code", ReturnShipmentUtils.ERROR_RETURN_INVOICE_ALREADY_EXISTS);
+      error.put("message", ReturnShipmentUtils.MSG_RETURN_INVOICE_ALREADY_EXISTS);
+      error.put("hint", ReturnShipmentUtils.HINT_RETURN_INVOICE_ALREADY_EXISTS);
+      error.put("previousReturnInvoices", previous);
+      return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
+          new JSONObject().put("error", error));
+    } catch (Exception e) {
+      return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
+          ReturnShipmentUtils.MSG_RETURN_INVOICE_ALREADY_EXISTS);
+    }
+  }
+
+  /**
    * Rolls the current transaction back, never throwing: it may run right after the core already
    * rolled back and closed the session, and a failure here must not hide the error being
    * propagated.
@@ -230,8 +297,10 @@ final class ReturnInvoiceSupport {
 
   /**
    * ETP-5712: refuses (422 {@code returnInvoiceWithoutAmount}) a rectificativa in which ANY
-   * product line, with a quantity, would end at a unit price of 0. The alternative was a COMPLETED
+   * product line, with a quantity, has NO price source at all. The alternative was a COMPLETED
    * document with a total of 0 (nothing to refund, books a zero, cannot be edited once confirmed).
+   * A 0 that comes from the completed invoice line being rectified is a source (a deliberately
+   * free product is refunded at 0); a 0 that only the order line or the price list yields is not.
    * It judges per line, not on the document total: one unpriced product among priced ones still
    * refunds the wrong amount, the same stance as {@link InvoiceCompletionLineGuard}.
    *
@@ -239,14 +308,32 @@ final class ReturnInvoiceSupport {
    * price it ({@link #resolveLinePricing}, the same resolver {@link #buildAndSaveInvoiceLine}
    * uses) on a transient line that is never persisted.
    *
+   * @param lines the return shipment lines
    * @param invoice the transient header the lines will be built under (its price list matters)
-   * @return the 422, or {@code null} when every line has a price
+   * @param createDraftInvoiceHandler builds the handler's line from the shipment line
+   * @return the 422, or {@code null} when every line has a price source
    */
   static NeoResponse refuseIfUnpriced(List<ShipmentInOutLine> lines, Invoice invoice,
       CreateDraftInvoiceHandler createDraftInvoiceHandler) {
+    return refuseIfUnpriced(lines, invoice, createDraftInvoiceHandler, Collections.emptyList());
+  }
+
+  /**
+   * Same as above, with the invoices being rectified: the price a line is judged and built with is
+   * then the one on THOSE invoices' lines (see {@link #resolveLinePricing}).
+   *
+   * @param lines the return shipment lines
+   * @param invoice the (transient) header the lines would be built under
+   * @param createDraftInvoiceHandler builds the handler's line from the shipment line
+   * @param rectifiedIds the invoices the corrective invoice rectifies; empty looks the source
+   *     invoice line up across every completed invoice of the shipment line
+   * @return the 422, or {@code null} when every line has a price source
+   */
+  static NeoResponse refuseIfUnpriced(List<ShipmentInOutLine> lines, Invoice invoice,
+      CreateDraftInvoiceHandler createDraftInvoiceHandler, List<String> rectifiedIds) {
     List<String> unpriced = new ArrayList<>();
     for (ShipmentInOutLine retLine : lines) {
-      String label = unpricedLabel(retLine, invoice, createDraftInvoiceHandler);
+      String label = unpricedLabel(retLine, invoice, createDraftInvoiceHandler, rectifiedIds);
       if (label != null && !unpriced.contains(label)) {
         unpriced.add(label);
       }
@@ -255,18 +342,24 @@ final class ReturnInvoiceSupport {
   }
 
   /**
-   * The product label of a return line that would end at a unit price of 0, or {@code null} when
-   * the line is skipped (no product, no quantity: {@code addReturnInvoiceLines} skips it too) or
-   * has a price.
+   * The product label of a return line with no price source, or {@code null} when the line is
+   * skipped (no product, no quantity: {@code addReturnInvoiceLines} skips it too) or has one.
+   *
+   * @param retLine the return shipment line to judge
+   * @param invoice the (transient) header the line would be built under
+   * @param createDraftInvoiceHandler builds the handler's line from the shipment line
+   * @param rectifiedIds the invoices being rectified; empty means any completed invoice
+   * @return the product label, or {@code null} when the line is skipped or priced
    */
   private static String unpricedLabel(ShipmentInOutLine retLine, Invoice invoice,
-      CreateDraftInvoiceHandler createDraftInvoiceHandler) {
+      CreateDraftInvoiceHandler createDraftInvoiceHandler, List<String> rectifiedIds) {
     BigDecimal qty = retLine.getMovementQuantity() != null
         ? retLine.getMovementQuantity().abs().negate() : BigDecimal.ZERO;
     if (retLine.getProduct() == null || qty.signum() == 0) {
       return null;
     }
-    if (resolveLinePricing(invoice, retLine, qty, 0L, createDraftInvoiceHandler).unitPrice.signum() != 0) {
+    if (resolveLinePricing(invoice, retLine, qty, 0L, createDraftInvoiceHandler,
+        rectifiedIds).priceFound) {
       return null;
     }
     String name = retLine.getProduct().getName();
@@ -294,12 +387,28 @@ final class ReturnInvoiceSupport {
    * The single pricing chain of a return invoice line, shared by the zero-amount probe
    * ({@link #refuseIfUnpriced}) and the real build ({@link #buildAndSaveInvoiceLine}) so the two
    * cannot drift: the line the handler builds from the shipment line, then the source invoice
-   * line (completed invoices only), then the price list. It only reads and builds a transient
-   * line: it never saves it nor attaches it to the session; applying the fallback price onto the
-   * line is the caller's decision ({@link PricedLine#applyFallbackTo}).
+   * line (completed invoices only, those being rectified when known), then the price list.
+   *
+   * <p>A line is {@linkplain PricedLine#priceFound found} when it ends at a non-zero price, or at
+   * the price of the source invoice line even if that is 0: a deliberately free product was
+   * invoiced at 0 and is refunded at 0. A 0 coming only from the handler (order line) or the
+   * price list is not found, so a missing price is never mistaken for a free one.
+   *
+   * <p>It only reads and builds a transient line: it never saves it nor attaches it to the
+   * session; applying the fallback price onto the line is the caller's decision
+   * ({@link PricedLine#applyFallbackTo}).
+   *
+   * @param invoice the (transient) header the line is built under; its price list matters
+   * @param retLine the return shipment line being priced
+   * @param qty the (negative) quantity of the invoice line
+   * @param lineNo the line number given to the transient line
+   * @param createDraftInvoiceHandler builds the handler's line from the shipment line
+   * @param rectifiedIds the invoices being rectified; empty means any completed invoice
+   * @return the transient line, its price and whether a price source exists
    */
   private static PricedLine resolveLinePricing(Invoice invoice, ShipmentInOutLine retLine,
-      BigDecimal qty, long lineNo, CreateDraftInvoiceHandler createDraftInvoiceHandler) {
+      BigDecimal qty, long lineNo, CreateDraftInvoiceHandler createDraftInvoiceHandler,
+      List<String> rectifiedIds) {
     ShipmentInOutLine origLine = retLine.getCanceledInoutLine();
     ShipmentInOutLine pricingLine = origLine != null ? origLine : retLine;
     InvoiceLine il = createDraftInvoiceHandler.createShipmentInvoiceLine(invoice, pricingLine, qty,
@@ -308,21 +417,27 @@ final class ReturnInvoiceSupport {
         : BigDecimal.ZERO;
     BigDecimal fallbackList = null;
     boolean overridden = false;
-    if (unitPrice.signum() == 0 && origLine != null) {
-      unitPrice = resolvePriceFromSourceInvoiceLine(origLine.getId(), "unitPrice", BigDecimal.ZERO);
-      if (unitPrice.signum() != 0) {
-        fallbackList = resolvePriceFromSourceInvoiceLine(origLine.getId(), "listPrice", unitPrice);
+    boolean priceFound = unitPrice.signum() != 0;
+    if (!priceFound && origLine != null) {
+      Optional<BigDecimal> sourcePrice = resolvePriceFromSourceInvoiceLine(origLine.getId(),
+          "unitPrice", rectifiedIds);
+      if (sourcePrice.isPresent()) {
+        unitPrice = sourcePrice.get();
+        fallbackList = resolvePriceFromSourceInvoiceLine(origLine.getId(), "listPrice",
+            rectifiedIds).orElse(unitPrice);
         overridden = true;
+        priceFound = true;
       }
     }
-    if (unitPrice.signum() == 0 && retLine.getProduct() != null && invoice.getPriceList() != null) {
+    if (!priceFound && retLine.getProduct() != null && invoice.getPriceList() != null) {
       String productId = retLine.getProduct().getId();
       String priceListId = invoice.getPriceList().getId();
       unitPrice = resolvePriceFromPriceList(productId, priceListId, "standardPrice", BigDecimal.ZERO);
       fallbackList = resolvePriceFromPriceList(productId, priceListId, "listPrice", unitPrice);
       overridden = true;
+      priceFound = unitPrice.signum() != 0;
     }
-    return new PricedLine(il, unitPrice, fallbackList, overridden);
+    return new PricedLine(il, unitPrice, fallbackList, overridden, priceFound);
   }
 
   /** Outcome of {@link #resolveLinePricing}: the transient line and the price it ends with. */
@@ -331,8 +446,12 @@ final class ReturnInvoiceSupport {
     final BigDecimal unitPrice;
     private final BigDecimal listPrice;
     private final boolean overridden;
+    /** Whether a price source exists: non-zero, or the real price (even 0) of the source invoice line. */
+    final boolean priceFound;
 
-    PricedLine(InvoiceLine line, BigDecimal unitPrice, BigDecimal listPrice, boolean overridden) {
+    PricedLine(InvoiceLine line, BigDecimal unitPrice, BigDecimal listPrice, boolean overridden,
+        boolean priceFound) {
+      this.priceFound = priceFound;
       this.line = line;
       this.unitPrice = unitPrice;
       this.listPrice = listPrice;
@@ -439,8 +558,29 @@ final class ReturnInvoiceSupport {
     return null;
   }
 
+  /**
+   * Builds and saves the invoice lines of a return, pricing them from any completed invoice.
+   *
+   * @param invoice the header the lines are added to
+   * @param lines the return shipment lines
+   * @param createDraftInvoiceHandler builds the handler's line from the shipment line
+   */
   static void addReturnInvoiceLines(Invoice invoice, List<ShipmentInOutLine> lines,
       CreateDraftInvoiceHandler createDraftInvoiceHandler) {
+    addReturnInvoiceLines(invoice, lines, createDraftInvoiceHandler, Collections.emptyList());
+  }
+
+  /**
+   * Builds and saves the invoice lines of a return; the source price of each line is read from the
+   * invoices being rectified.
+   *
+   * @param invoice the header the lines are added to
+   * @param lines the return shipment lines
+   * @param createDraftInvoiceHandler builds the handler's line from the shipment line
+   * @param rectifiedIds the invoices being rectified; empty means any completed invoice
+   */
+  static void addReturnInvoiceLines(Invoice invoice, List<ShipmentInOutLine> lines,
+      CreateDraftInvoiceHandler createDraftInvoiceHandler, List<String> rectifiedIds) {
     int precision = invoice.getCurrency() != null
         ? invoice.getCurrency().getStandardPrecision().intValue() : 2;
     long lineNo = 10;
@@ -457,14 +597,29 @@ final class ReturnInvoiceSupport {
       BigDecimal qty = retLine.getMovementQuantity() != null
           ? retLine.getMovementQuantity().abs().negate() : BigDecimal.ZERO;
       if (retLine.getProduct() == null || qty.compareTo(BigDecimal.ZERO) == 0) continue;
-      buildAndSaveInvoiceLine(invoice, retLine, qty, precision, lineNo, createDraftInvoiceHandler);
+      buildAndSaveInvoiceLine(invoice, retLine, qty, precision, lineNo, createDraftInvoiceHandler,
+          rectifiedIds);
       lineNo += 10;
     }
   }
 
+  /**
+   * Prices, completes (tax) and saves one invoice line of a return.
+   *
+   * @param invoice the header the line is added to
+   * @param retLine the return shipment line
+   * @param qty the (negative) quantity of the invoice line
+   * @param precision the currency precision of the line net amount
+   * @param lineNo the line number
+   * @param createDraftInvoiceHandler builds the handler's line from the shipment line
+   * @param rectifiedIds the invoices being rectified; empty means any completed invoice
+   * @throws OBException when no tax rate can be determined for the product
+   */
   static void buildAndSaveInvoiceLine(Invoice invoice, ShipmentInOutLine retLine,
-      BigDecimal qty, int precision, long lineNo, CreateDraftInvoiceHandler createDraftInvoiceHandler) {
-    PricedLine priced = resolveLinePricing(invoice, retLine, qty, lineNo, createDraftInvoiceHandler);
+      BigDecimal qty, int precision, long lineNo, CreateDraftInvoiceHandler createDraftInvoiceHandler,
+      List<String> rectifiedIds) {
+    PricedLine priced = resolveLinePricing(invoice, retLine, qty, lineNo, createDraftInvoiceHandler,
+        rectifiedIds);
     InvoiceLine il = priced.line;
     il.setGoodsShipmentLine(retLine);
     // The original document's order line is only the SOURCE of price and tax. Keeping it as the
@@ -476,12 +631,11 @@ final class ReturnInvoiceSupport {
     // to the order.
     il.setSalesOrderLine(null);
     priced.applyFallbackTo(qty, precision);
-    BigDecimal unitPrice = priced.unitPrice;
 
     if (il.getTax() == null && retLine.getProduct() != null) {
       il.setTax(resolveApplicableTax(invoice, retLine));
     }
-    if (il.getTax() == null && unitPrice.compareTo(BigDecimal.ZERO) != 0) {
+    if (il.getTax() == null) {
       throw new OBException("Cannot determine tax rate for product '"
           + retLine.getProduct().getName() + "'.");
     }
@@ -513,45 +667,98 @@ final class ReturnInvoiceSupport {
     return null;
   }
 
-  static BigDecimal resolvePriceFromSourceInvoiceLine(String shipmentLineId,
-      String priceField, BigDecimal fallback) {
-    if (shipmentLineId == null) return fallback;
+  /**
+   * The HQL of {@link #resolvePriceFromSourceInvoiceLine}, exposed so a test can parse it against
+   * the real model (a bad property path is otherwise swallowed and poisons the transaction).
+   *
+   * @param priceField the {@code InvoiceLine} property to select ({@code unitPrice}, {@code listPrice})
+   * @param constrained whether the lookup is restricted to the {@code :invoiceIds} being rectified
+   * @return the HQL string
+   */
+  static String sourceInvoiceLinePriceHql(String priceField, boolean constrained) {
+    return "SELECT il." + priceField + " FROM InvoiceLine il " +
+        "WHERE il.goodsShipmentLine.id = :lineId " +
+        "AND il.active = true " +
+        "AND il.invoice.documentStatus = 'CO' " +
+        (constrained ? "AND il.invoice.id IN (:invoiceIds) " : "") +
+        "ORDER BY il.invoice.invoiceDate DESC, il.invoice.creationDate DESC, "
+        + "il.lineNo DESC, il.id DESC";
+  }
+
+  /**
+   * The price field of the completed invoice line that invoiced a shipment line, or empty when
+   * there is none. A 0 IS an answer (a deliberately free product); only a missing row or a null
+   * price is empty. A {@link QueryException} (a bad HQL) is rethrown, not swallowed.
+   *
+   * @param shipmentLineId the shipment line the invoice line invoiced; {@code null} gives empty
+   * @param priceField the {@code InvoiceLine} property to read ({@code unitPrice}, {@code listPrice})
+   * @param rectifiedIds when not empty, only lines of THOSE invoices count, so what is credited is
+   *     literally what was invoiced; empty keeps the latest completed invoice line of the
+   *     shipment line
+   * @return the price, possibly 0, or empty when there is no completed invoice line or no price
+   */
+  static Optional<BigDecimal> resolvePriceFromSourceInvoiceLine(String shipmentLineId,
+      String priceField, List<String> rectifiedIds) {
+    if (shipmentLineId == null) return Optional.empty();
+    boolean constrained = rectifiedIds != null && !rectifiedIds.isEmpty();
     try {
-      String hql =
-          "SELECT il." + priceField + " FROM InvoiceLine il " +
-          "WHERE il.goodsShipmentLine.id = :lineId " +
-          "AND il.active = true " +
-          "AND il.invoice.documentStatus = 'CO' " +
-          "ORDER BY il.invoice.invoiceDate DESC";
-      List<BigDecimal> rows = OBDal.getInstance().getSession()
+      String hql = sourceInvoiceLinePriceHql(priceField, constrained);
+      Query<BigDecimal> query = OBDal.getInstance().getSession()
           .createQuery(hql, BigDecimal.class)
-          .setParameter("lineId", shipmentLineId)
-          .setMaxResults(1)
-          .list();
+          .setParameter("lineId", shipmentLineId);
+      if (constrained) {
+        query = query.setParameterList("invoiceIds", rectifiedIds);
+      }
+      List<BigDecimal> rows = query.setMaxResults(1).list();
       if (!rows.isEmpty()) {
-        BigDecimal price = rows.get(0);
-        return (price != null && price.compareTo(BigDecimal.ZERO) > 0) ? price : fallback;
+        return Optional.ofNullable(rows.get(0));
       }
       log.warn("No completed invoice line found for shipment line {} ({})", shipmentLineId, priceField);
+    } catch (QueryException e) {
+      throw badHql(e);
     } catch (Exception e) {
+      // Everything else (a lookup that fails or finds nothing) falls through to the next price
+      // source. A QueryException is different, see badHql.
       log.warn("Could not resolve {} from source invoice line {}: {}",
           priceField, shipmentLineId, e.getMessage());
     }
-    return fallback;
+    return Optional.empty();
+  }
+
+  /**
+   * A QueryException is a programming error (a bad property path), not a missing price: it leaves
+   * the Hibernate transaction rollback-only, so the completion that follows would silently roll
+   * the whole draft back. Rethrown so it fails loudly (500, logged with its stack trace); the
+   * property paths are checked against the real model by
+   * {@code ReturnLineQuantitySignIntegrationTest}.
+   */
+  private static QueryException badHql(QueryException e) {
+    log.error("Invalid HQL in a return invoice price lookup: {}", e.getMessage(), e);
+    return e;
+  }
+
+  /**
+   * The HQL of {@link #resolvePriceFromPriceList}, exposed so a test can parse it against the real
+   * model.
+   *
+   * @param priceProperty the {@code PricingProductPrice} property to select
+   * @return the HQL string
+   */
+  static String priceListPriceHql(String priceProperty) {
+    return "SELECT pp." + priceProperty + " FROM PricingProductPrice pp " +
+        "WHERE pp.product.id = :productId " +
+        "AND pp.priceListVersion.priceList.id = :priceListId " +
+        "AND pp.priceListVersion.active = true " +
+        "AND pp.active = true " +
+        "AND pp.priceListVersion.validFromDate <= :today " +
+        "ORDER BY pp.priceListVersion.validFromDate DESC";
   }
 
   static BigDecimal resolvePriceFromPriceList(String productId, String priceListId,
       String priceProperty, BigDecimal fallback) {
     if (productId == null || priceListId == null) return fallback;
     try {
-      String hql =
-          "SELECT pp." + priceProperty + " FROM PricingProductPrice pp " +
-          "WHERE pp.product.id = :productId " +
-          "AND pp.priceListVersion.priceList.id = :priceListId " +
-          "AND pp.priceListVersion.active = true " +
-          "AND pp.active = true " +
-          "AND pp.priceListVersion.validFromDate <= :today " +
-          "ORDER BY pp.priceListVersion.validFromDate DESC";
+      String hql = priceListPriceHql(priceProperty);
       List<BigDecimal> rows = OBDal.getInstance().getSession()
           .createQuery(hql, BigDecimal.class)
           .setParameter("productId", productId)
@@ -565,6 +772,8 @@ final class ReturnInvoiceSupport {
       }
       log.warn("No price list entry for product {} in price list {} ({})",
           productId, priceListId, priceProperty);
+    } catch (QueryException e) {
+      throw badHql(e);
     } catch (Exception e) {
       log.warn("Could not resolve {} for product {} from price list {}: {}",
           priceProperty, productId, priceListId, e.getMessage());

@@ -20,6 +20,9 @@ package com.etendoerp.go.featureflags;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+import java.util.function.BooleanSupplier;
+import java.util.function.Supplier;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -28,6 +31,7 @@ import org.apache.logging.log4j.Logger;
 import com.configcat.PollingModes;
 import com.etendoerp.go.common.GoRuntimeProperties;
 
+import datadog.trace.api.openfeature.Provider;
 import dev.openfeature.contrib.providers.configcat.ConfigCatProvider;
 import dev.openfeature.contrib.providers.configcat.ConfigCatProviderConfig;
 import dev.openfeature.sdk.Client;
@@ -35,6 +39,7 @@ import dev.openfeature.sdk.FeatureProvider;
 import dev.openfeature.sdk.FlagEvaluationDetails;
 import dev.openfeature.sdk.MutableContext;
 import dev.openfeature.sdk.OpenFeatureAPI;
+import dev.openfeature.sdk.exceptions.ProviderNotReadyError;
 
 /**
  * Backend feature-flag entry point for Etendo Go.
@@ -43,18 +48,28 @@ import dev.openfeature.sdk.OpenFeatureAPI;
  * calls {@link #isEnabled(String, FeatureFlagContext)} and never sees an OpenFeature type, so the
  * control plane behind it can change without touching a single caller.
  *
- * <p><strong>Control plane: ConfigCat when configured, local properties otherwise.</strong> With
- * {@value #CONFIGCAT_SDK_KEY_PROPERTY} set, {@link ConfigCatProvider} serves flags from ConfigCat,
- * so a flag can be flipped and per-account targeting rules changed <em>without a restart</em>. With
- * it unset, {@link PropertiesFeatureProvider} resolves flags from local configuration
- * ({@code etendo.go.flags.<flag-key>}) in-process with no network call — a plain boolean per
- * environment, with no per-account targeting. Keeping both is deliberate: dev, CI and e2e stay
- * deterministic and independent of a shared remote project.
+ * <p><strong>Control plane: Datadog, then ConfigCat, then local properties (ETP-5751).</strong>
+ * {@link #createProvider()} picks the first arm that is both configured and usable:
+ * <ol>
+ *   <li><b>Datadog Feature Flags</b> ({@link Provider}, {@code com.datadoghq:dd-openfeature}) when
+ *       {@value #DATADOG_FLAGS_ENABLED_ENV} / {@value #DATADOG_FLAGS_ENABLED_PROPERTY} is true
+ *       <em>and</em> {@code dd-java-agent} is loaded in this JVM. The provider is only a thin
+ *       bridge; the agent fetches the configuration, so without the agent it can never become
+ *       ready. The Datadog environment a flag answers from is chosen by {@code DD_ENV}.</li>
+ *   <li><b>ConfigCat</b> ({@link ConfigCatProvider}) when {@value #CONFIGCAT_SDK_KEY_PROPERTY} /
+ *       {@value #CONFIGCAT_SDK_KEY_ENV} is set.</li>
+ *   <li><b>Local properties</b> ({@link PropertiesFeatureProvider}, {@code etendo.go.flags.<flag-key>})
+ *       otherwise — in-process, no network call, a plain boolean per environment with no
+ *       per-account targeting.</li>
+ * </ol>
+ * Both hosted arms let a flag be flipped and per-account targeting rules changed <em>without a
+ * restart</em>. Keeping the local arm is deliberate: dev, CI and e2e have no agent and no SDK key,
+ * so they stay deterministic and independent of any shared remote project.
  *
- * <p><b>Per-account targeting therefore requires ConfigCat.</b> There is deliberately no
+ * <p><b>Per-account targeting therefore requires a hosted arm.</b> There is deliberately no
  * local mechanism for it: a second way to express the same decision is a second thing to keep in
- * sync, and — worse — it would silently do nothing wherever an SDK key is set, since only one
- * provider is ever installed. A configuration knob that silently does nothing is the same family of
+ * sync, and — worse — it would silently do nothing wherever a hosted arm is selected, since only
+ * one provider is ever installed. A configuration knob that silently does nothing is the same family of
  * trap as ETP-4966. Locally the plain boolean is enough, because a dev box has one user.
  *
  * <p><strong>Swap point.</strong> {@link #createProvider()} is the <em>only</em> place that decides
@@ -103,8 +118,9 @@ public final class GoFeatureFlags {
    * decision is "does the account sending this invoice have the portal link switched on", answered
    * against the {@code ETGO_ACCOUNT} email this module publishes in the evaluation context (both as
    * the targeting key and as {@link FeatureFlagContext#ATTRIBUTE_EMAIL}). Per-account enablement is
-   * a ConfigCat targeting rule; with no SDK key configured the flag is a plain per-environment
-   * boolean, so a shared environment must have ConfigCat set up before this is switched on for
+   * a targeting rule on a hosted arm (Datadog or ConfigCat); with neither configured the flag is a
+   * plain per-environment boolean, so a shared environment must have a hosted arm before this is
+   * switched on for
    * anyone. See {@code PortalLinkPolicy}, which resolves the sending account and owns this flag's
    * only call site.
    *
@@ -187,11 +203,11 @@ public final class GoFeatureFlags {
    * Unset or {@code false} is the normal state: the server is dual-era.
    *
    * <p>The inversion follows from this class's failure behaviour: every flag resolves to
-   * {@code false} when it is missing, when ConfigCat is unreachable or when evaluation fails. A
-   * flag that <em>enabled</em> the modern era would switch it off on any control-plane hiccup;
-   * this one leaves the default in place and only a deliberate {@code true} rolls back — live
-   * within one ConfigCat poll where {@value #CONFIGCAT_SDK_KEY_PROPERTY} is set; without an SDK
-   * key the value comes from {@code etendo.go.flags.mcp-modern-era-disabled} and needs a restart.
+   * {@code false} when it is missing, when the hosted control plane is unreachable or when
+   * evaluation fails. A flag that <em>enabled</em> the modern era would switch it off on any
+   * control-plane hiccup; this one leaves the default in place and only a deliberate {@code true}
+   * rolls back — live without a restart on a hosted arm (Datadog or ConfigCat); on the local arm
+   * the value comes from {@code etendo.go.flags.mcp-modern-era-disabled} and needs a restart.
    *
    * <p><b>Environment level only — never target it per account.</b> MCP clients cache the era per
    * origin, and one origin serves every tenant, so a per-account answer would hand one cached
@@ -220,6 +236,24 @@ public final class GoFeatureFlags {
   public static final String FLAG_BATCH_CALLOUT_SKIP_DISABLED = "batch-callout-skip-disabled";
 
   /**
+   * ETP-5048 — whether the billing reconciliation is scheduled. Strictly off by default (and off
+   * on every failure of this class): while it is off {@code BillingReconciliationScheduleStartup}
+   * plants no process request, so turning it on takes effect at the next restart. The process also
+   * checks it on every scheduled run (a process request with timing {@code S}), whoever created
+   * the request, so turning it off stops all scheduled work without a restart: a scheduled run
+   * with the flag off does nothing, ends as ERROR in Process Monitor and raises one internal alert
+   * per UTC day. A run an operator starts from the Classic menu, and a run fired as part of a
+   * Process Group (it has no process-request id of its own), is not gated. Environment level,
+   * evaluated with an empty context;
+   * locally {@code etendo.go.flags.billing-reconciliation-schedule} /
+   * {@code ETGO_FLAG_BILLING_RECONCILIATION_SCHEDULE}. Backend-only. Its callers are
+   * {@code BillingReconciliationScheduleStartup} and
+   * {@code BillingReconciliationProcess}.
+   */
+  public static final String FLAG_BILLING_RECONCILIATION_SCHEDULE =
+      "billing-reconciliation-schedule";
+
+  /**
    * ConfigCat SDK key. Set ⇒ flags come from ConfigCat and can be flipped without a restart; unset
    * ⇒ {@link PropertiesFeatureProvider} resolves them from local configuration.
    */
@@ -227,6 +261,39 @@ public final class GoFeatureFlags {
 
   /** Environment-variable spelling of {@value #CONFIGCAT_SDK_KEY_PROPERTY}. */
   static final String CONFIGCAT_SDK_KEY_ENV = "ETGO_CONFIGCAT_SDK_KEY";
+
+  /**
+   * Turns the Datadog arm on (ETP-5751). Deliberately the <em>same</em> switch {@code dd-java-agent}
+   * reads to start its feature-flag subsystem, so there is one knob to set, not two that can
+   * disagree: with it on and no agent loaded, the arm is skipped and the next one is tried.
+   */
+  static final String DATADOG_FLAGS_ENABLED_PROPERTY = "dd.feature.flags.enabled";
+
+  /** Environment-variable spelling of {@value #DATADOG_FLAGS_ENABLED_PROPERTY}. */
+  static final String DATADOG_FLAGS_ENABLED_ENV = "DD_FEATURE_FLAGS_ENABLED";
+
+  /**
+   * A class that only {@code dd-java-agent} puts on the bootstrap class path. {@code dd-openfeature}
+   * resolves it lazily inside {@link Provider#initialize}, so it is the exact dependency whose
+   * absence would make the Datadog arm fail — probing it first lets an agent-less JVM (dev, CI, e2e)
+   * fall through to the next arm instead of resolving every flag false. It is not shipped by any
+   * public jar ({@code dd-trace-api} included), so its presence means the agent is loaded.
+   */
+  static final String DATADOG_AGENT_PROBE_CLASS =
+      "datadog.trace.api.featureflag.FeatureFlaggingGateway";
+
+  /**
+   * Upper bound on how long installing the Datadog provider waits for its first configuration (its
+   * own default is 30 s). Same reasoning as {@link #CONFIGCAT_MAX_INIT_WAIT_SECONDS}; past it the
+   * provider stays installed and turns ready by itself when the configuration arrives — see
+   * {@link #install()}.
+   */
+  private static final int DATADOG_MAX_INIT_WAIT_SECONDS = 5;
+
+  /** The control planes {@link #createProvider()} can select, in priority order. */
+  enum ProviderKind {
+    DATADOG, CONFIGCAT, PROPERTIES
+  }
 
   /** How often ConfigCat re-polls its configuration in the background. */
   private static final int CONFIGCAT_POLL_SECONDS = 60;
@@ -250,6 +317,19 @@ public final class GoFeatureFlags {
 
   private static volatile Client openFeatureClient;
   private static volatile boolean initializationAttempted;
+
+  /**
+   * Builds the provider {@link #install()} binds. Always {@link #createProvider()} in production;
+   * a test seam only, so the install failure paths can be driven with a provider that fails on
+   * purpose.
+   */
+  static Supplier<FeatureProvider> providerFactory = GoFeatureFlags::createProvider;
+
+  /**
+   * Answers whether {@code dd-java-agent} is loaded. Always {@link #isDatadogAgentLoaded()} in
+   * production; a test seam only, since no test JVM runs with the agent.
+   */
+  static BooleanSupplier datadogAgentProbe = GoFeatureFlags::isDatadogAgentLoaded;
 
   private GoFeatureFlags() {
   }
@@ -301,44 +381,96 @@ public final class GoFeatureFlags {
   /**
    * Builds the provider backing flag evaluation.
    *
-   * <p><strong>This is the swap point for the control plane, and it now has two arms.</strong>
-   * With {@value #CONFIGCAT_SDK_KEY_PROPERTY} set, flags come from ConfigCat — hosted, so a flag
-   * can be flipped without a restart, with per-account targeting rules evaluated remotely. With it
-   * unset, {@link PropertiesFeatureProvider} resolves flags from local configuration. That fallback
-   * is deliberate, not a leftover: dev boxes, CI and e2e stay deterministic and independent of any
-   * shared remote project. It is a plain per-environment boolean — per-account targeting exists
-   * only on the ConfigCat arm, on purpose (see this class's javadoc).
+   * <p><strong>This is the swap point for the control plane, and it has three arms</strong>, chosen
+   * by {@link #selectProvider(boolean, boolean, String)}: Datadog when it is switched on and the
+   * agent is loaded, else ConfigCat when an SDK key is set, else {@link PropertiesFeatureProvider}.
+   * The local fallback is deliberate, not a leftover: dev boxes, CI and e2e stay deterministic and
+   * independent of any shared remote project. It is a plain per-environment boolean — per-account
+   * targeting exists only on the hosted arms, on purpose (see this class's javadoc).
    *
-   * <p><strong>An absent, blank or wrong SDK key must mean "flag off", never "flag on".</strong> A
-   * blank key takes the local arm, where an unconfigured flag is {@code false}. A wrong key makes
-   * ConfigCat's initialization fail, {@link #install()} catch it, and every flag resolve to its
-   * {@code false} code default. Both roads lead to off. This is the ETP-4966 shape and it is the
-   * one behaviour here that must never be "improved" into a fallback that allows.
+   * <p><strong>A missing prerequisite skips an arm; a broken arm turns every flag off.</strong>
+   * Datadog switched on without the agent, or a blank SDK key, simply moves on to the next arm —
+   * that is configuration absent, not configuration wrong. But once a hosted arm is selected, a
+   * failure to initialize it (a wrong ConfigCat key, a Datadog provider that cannot start) makes
+   * {@link #install()} catch it and every flag resolve to its {@code false} code default; it never
+   * falls through to a lower arm whose local value might say {@code true}. This is the ETP-4966
+   * shape and it is the one behaviour here that must never be "improved" into a fallback that
+   * allows.
    *
-   * <p>Initialization is bounded: {@link PollingModes#autoPoll(int, int)} caps how long the first
-   * evaluation may wait on the network at {@value #CONFIGCAT_MAX_INIT_WAIT_SECONDS} seconds, after
-   * which the client answers from its own in-memory snapshot while background polling continues.
-   * Nothing here caches by hand — that is the SDK's job, and duplicating it would add a second
-   * staleness window nobody is watching.
+   * <p>Initialization is bounded on both hosted arms: {@link PollingModes#autoPoll(int, int)} caps
+   * ConfigCat's first fetch at {@value #CONFIGCAT_MAX_INIT_WAIT_SECONDS} seconds and
+   * {@link Provider.Options#initTimeout(long, TimeUnit)} caps Datadog's at
+   * {@value #DATADOG_MAX_INIT_WAIT_SECONDS}. Nothing here caches by hand — that is the SDK's job,
+   * and duplicating it would add a second staleness window nobody is watching.
    *
    * @return the provider to bind to the {@value #OPENFEATURE_DOMAIN} domain
    */
-  private static FeatureProvider createProvider() {
+  static FeatureProvider createProvider() {
+    boolean datadogRequested = GoRuntimeProperties.readBoolean(
+        DATADOG_FLAGS_ENABLED_PROPERTY, DATADOG_FLAGS_ENABLED_ENV, false);
+    boolean datadogAgentLoaded = datadogRequested && datadogAgentProbe.getAsBoolean();
     String sdkKey = StringUtils.trimToNull(GoRuntimeProperties.readValue(
         CONFIGCAT_SDK_KEY_PROPERTY, CONFIGCAT_SDK_KEY_ENV, null));
-    if (sdkKey == null) {
-      log.info("{} is not configured; selecting the local properties feature-flag provider",
-          CONFIGCAT_SDK_KEY_PROPERTY);
-      return new PropertiesFeatureProvider();
+    if (datadogRequested && !datadogAgentLoaded) {
+      // Visible on purpose: in a deployed environment this means the image lost its -javaagent and
+      // flags are being served from a different control plane than the one the team is editing.
+      log.warn("{} is on but dd-java-agent is not loaded; skipping the Datadog feature-flag "
+          + "provider", DATADOG_FLAGS_ENABLED_ENV);
     }
-    log.info("{} is configured; selecting the ConfigCat feature-flag provider (SDK key omitted)",
-        CONFIGCAT_SDK_KEY_PROPERTY);
-    ConfigCatProviderConfig config = ConfigCatProviderConfig.builder()
-        .sdkKey(sdkKey)
-        .options(options -> options.pollingMode(
-            PollingModes.autoPoll(CONFIGCAT_POLL_SECONDS, CONFIGCAT_MAX_INIT_WAIT_SECONDS)))
-        .build();
-    return new ConfigCatProvider(config);
+    switch (selectProvider(datadogRequested, datadogAgentLoaded, sdkKey)) {
+      case DATADOG:
+        log.info("Selecting the Datadog feature-flag provider (environment from DD_ENV)");
+        return new Provider(new Provider.Options()
+            .initTimeout(DATADOG_MAX_INIT_WAIT_SECONDS, TimeUnit.SECONDS));
+      case CONFIGCAT:
+        log.info("{} is configured; selecting the ConfigCat feature-flag provider (SDK key "
+            + "omitted)", CONFIGCAT_SDK_KEY_PROPERTY);
+        ConfigCatProviderConfig config = ConfigCatProviderConfig.builder()
+            .sdkKey(sdkKey)
+            .options(options -> options.pollingMode(
+                PollingModes.autoPoll(CONFIGCAT_POLL_SECONDS, CONFIGCAT_MAX_INIT_WAIT_SECONDS)))
+            .build();
+        return new ConfigCatProvider(config);
+      default:
+        log.info("No hosted feature-flag control plane is configured; selecting the local "
+            + "properties feature-flag provider");
+        return new PropertiesFeatureProvider();
+    }
+  }
+
+  /**
+   * Pure selection rule behind {@link #createProvider()}: the first arm whose prerequisites are all
+   * met wins, in the order Datadog → ConfigCat → local properties.
+   *
+   * @param datadogRequested whether {@value #DATADOG_FLAGS_ENABLED_ENV} is on
+   * @param datadogAgentLoaded whether {@code dd-java-agent} is loaded in this JVM
+   * @param configCatSdkKey the trimmed ConfigCat SDK key, or {@code null} when unset or blank
+   * @return the arm to install
+   */
+  static ProviderKind selectProvider(boolean datadogRequested, boolean datadogAgentLoaded,
+      String configCatSdkKey) {
+    if (datadogRequested && datadogAgentLoaded) {
+      return ProviderKind.DATADOG;
+    }
+    if (configCatSdkKey != null) {
+      return ProviderKind.CONFIGCAT;
+    }
+    return ProviderKind.PROPERTIES;
+  }
+
+  /**
+   * Whether {@code dd-java-agent} is loaded in this JVM, probed through
+   * {@value #DATADOG_AGENT_PROBE_CLASS} without initializing it.
+   *
+   * @return {@code true} when the agent's feature-flag bootstrap classes are visible
+   */
+  static boolean isDatadogAgentLoaded() {
+    try {
+      Class.forName(DATADOG_AGENT_PROBE_CLASS, false, GoFeatureFlags.class.getClassLoader());
+      return true;
+    } catch (ClassNotFoundException | LinkageError e) {
+      return false;
+    }
   }
 
   /**
@@ -367,18 +499,14 @@ public final class GoFeatureFlags {
     }
   }
 
-  private static Client install() {
+  static Client install() {
     try {
       OpenFeatureAPI api = OpenFeatureAPI.getInstance();
-      FeatureProvider provider = createProvider();
-      // Blocking install: setProvider() alone returns before the provider is
-      // ready to evaluate, so the first read after installing can still hit the
-      // previous provider and silently answer with the code default. For a flag
-      // that gates authorisation, "not ready yet" and "disabled" must never be
-      // the same observable outcome.
-      api.setProviderAndWait(OPENFEATURE_DOMAIN, provider);
-      log.info("Etendo Go feature-flag provider '{}' initialized for domain '{}'",
-          provider.getMetadata().getName(), OPENFEATURE_DOMAIN);
+      FeatureProvider provider = providerFactory.get();
+      if (bindProvider(api, provider)) {
+        log.info("Etendo Go feature-flag provider '{}' initialized for domain '{}'",
+            provider.getMetadata().getName(), OPENFEATURE_DOMAIN);
+      }
       return api.getClient(OPENFEATURE_DOMAIN);
     } catch (Exception e) {
       // Provider exceptions can contain request URLs or configuration material; keep the
@@ -386,6 +514,36 @@ public final class GoFeatureFlags {
       log.error("Could not initialize the feature-flag provider ({}); all flags resolve to their "
           + "code defaults", e.getClass().getSimpleName());
       return null;
+    }
+  }
+
+  /**
+   * Binds the provider to the {@value #OPENFEATURE_DOMAIN} domain, waiting (bounded) until it is
+   * ready.
+   *
+   * <p>Blocking install: setProvider() alone returns before the provider is ready to evaluate, so
+   * the first read after installing can still hit the previous provider and silently answer with
+   * the code default. For a flag that gates authorisation, "not ready yet" and "disabled" must
+   * never be the same observable outcome.
+   *
+   * @return {@code true} when the provider is ready; {@code false} when it is bound but still
+   *     waiting for its first configuration
+   * @throws dev.openfeature.sdk.exceptions.OpenFeatureError any other initialization failure (e.g. {@code FatalError}), which
+   *     {@link #install()} turns into "every flag off"
+   */
+  private static boolean bindProvider(OpenFeatureAPI api, FeatureProvider provider) {
+    try {
+      api.setProviderAndWait(OPENFEATURE_DOMAIN, provider);
+      return true;
+    } catch (ProviderNotReadyError e) {
+      // The bounded wait ran out before the first configuration arrived (Datadog's agent fetches
+      // it asynchronously). The provider stays bound in the ERROR state, every flag resolves to
+      // its false default meanwhile, and it turns READY by itself when the configuration lands.
+      // Dropping the client here instead would pin every flag false until the next restart.
+      log.warn("Feature-flag provider '{}' is not ready yet for domain '{}'; flags resolve to "
+          + "their code defaults until its first configuration arrives",
+          provider.getMetadata().getName(), OPENFEATURE_DOMAIN);
+      return false;
     }
   }
 

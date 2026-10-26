@@ -23,6 +23,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.time.Instant;
@@ -37,7 +39,9 @@ import org.junit.jupiter.api.Test;
 import com.etendoerp.go.hubspot.HubSpotClient.HubSpotUnreachableException;
 import com.etendoerp.go.hubspot.HubSpotClient.Response;
 import com.etendoerp.go.hubspot.HubSpotEventSender.Outcome;
+import com.etendoerp.go.hubspot.HubSpotOutboxStore.EnvironmentDeal;
 import com.etendoerp.go.hubspot.HubSpotOutboxStore.PendingEvent;
+import com.etendoerp.go.hubspot.HubSpotOutboxStore.SubscriptionEnvironment;
 
 /**
  * The HubSpot calls each outbox event becomes, and what a refusal or an outage makes of it.
@@ -87,7 +91,7 @@ class HubSpotEventSenderTest {
 
   private static PendingEvent event(String type, String payload) {
     return new PendingEvent("row-1", ACCOUNT, type, CLIENT, payload, 0, null, "ana@empresa.es",
-        "Ana García López");
+        "Ana García López", null);
   }
 
   private Call call(String method, String pathEnd) {
@@ -138,6 +142,7 @@ class HubSpotEventSenderTest {
     assertEquals("trial", deal.properties().getString("dealstage"));
     assertEquals(ACCOUNT, deal.properties().getString("etendo_account_id"));
     assertEquals("self_serve", deal.properties().getString("etendo_camino_entrada_deal"));
+    assertEquals("trial", deal.properties().getString("etendo_estado_suscripcion"));
     String associations = deal.body().getJSONArray("associations").toString();
     assertTrue(associations.contains("contact-1") && associations.contains("company-1"));
   }
@@ -282,5 +287,221 @@ class HubSpotEventSenderTest {
     assertTrue(calls.stream().noneMatch(c -> c.path().endsWith("/companies")));
     assertEquals("ana@empresa.es — Self-serve",
         call("POST", "/crm/v3/objects/deals").properties().getString("dealname"));
+  }
+
+  // --- Billing events: each lands on the deal of the productive its subscription pays for ---
+
+  private static final String SUBSCRIPTION = "sub_1";
+  private static final String PRODUCTIVE = "P1";
+  private static final Instant OCCURRED = Instant.parse("2026-10-20T10:00:00Z");
+
+  private static PendingEvent billing(String type, String extraPayload) {
+    String payload = "{\"subscriptionId\":\"" + SUBSCRIPTION + "\",\"at\":\"" + OCCURRED + "\""
+        + (extraPayload == null ? "" : "," + extraPayload) + "}";
+    return new PendingEvent("row-2", ACCOUNT, type, null, payload, 0, null, "ana@empresa.es",
+        "Ana García López", OCCURRED);
+  }
+
+  private void productiveWithKnownDeal(String dealId, boolean owned) {
+    when(store.findSubscriptionEnvironment(SUBSCRIPTION)).thenReturn(Optional.of(
+        new SubscriptionEnvironment(PRODUCTIVE, "Empresa SL", "core")));
+    when(store.findEnvironmentDeal(ACCOUNT, PRODUCTIVE))
+        .thenReturn(Optional.of(new EnvironmentDeal(dealId, owned)));
+  }
+
+  @Test
+  void aPaymentOnTheFirstProductiveTakesTheDemosDealAndWinsIt() throws Exception {
+    when(store.findSubscriptionEnvironment(SUBSCRIPTION)).thenReturn(Optional.of(
+        new SubscriptionEnvironment(PRODUCTIVE, "Empresa SL", "core")));
+    when(store.findEnvironmentDeal(ACCOUNT, PRODUCTIVE)).thenReturn(Optional.empty());
+    when(store.findDealId(ACCOUNT)).thenReturn("deal-1");
+
+    Outcome outcome = sender.send(billing(HubSpotOutboxStore.PAYMENT,
+        "\"amount\":\"22.00\",\"currency\":\"EUR\",\"interval\":\"monthly\""), NOW);
+
+    assertEquals(Outcome.Kind.SENT, outcome.kind());
+    assertEquals("deal-1", outcome.hubSpotObjectId());
+    verify(store).assignEnvironment("row-2", PRODUCTIVE);
+    verify(store).recordEnvironmentDeal(ACCOUNT, PRODUCTIVE, new EnvironmentDeal("deal-1", true));
+    JSONObject deal = call("PATCH", "/deals/deal-1").properties();
+    assertEquals("active", deal.getString("etendo_estado_suscripcion"));
+    assertEquals("2026-10-20", deal.getString("etendo_fecha_ultimo_pago"));
+    assertEquals("22.00", deal.getString("amount"));
+    assertEquals("monthly", deal.getString("etendo_periodicidad"));
+    assertEquals("won", deal.getString("dealstage"));
+    assertEquals("core", deal.getString("etendo_plan"));
+  }
+
+  @Test
+  void aMarketingDealOnlyGetsItsPropertiesWritten() throws Exception {
+    when(store.findSubscriptionEnvironment(SUBSCRIPTION)).thenReturn(Optional.of(
+        new SubscriptionEnvironment(PRODUCTIVE, "Empresa SL", "core")));
+    when(store.findEnvironmentDeal(ACCOUNT, PRODUCTIVE)).thenReturn(Optional.empty());
+    answers = call -> call.path().endsWith("/deals/search")
+        ? new Response(200, "{\"results\":[{\"id\":\"deal-7\",\"properties\":"
+            + "{\"pipeline\":\"demo-pipeline\"}}]}")
+        : ok(call);
+
+    sender.send(billing(HubSpotOutboxStore.PAYMENT, null), NOW);
+
+    verify(store).recordEnvironmentDeal(ACCOUNT, PRODUCTIVE, new EnvironmentDeal("deal-7", false));
+    JSONObject deal = call("PATCH", "/deals/deal-7").properties();
+    assertEquals("active", deal.getString("etendo_estado_suscripcion"));
+    assertFalse(deal.has("dealstage"), "a marketing deal's stage is marketing's");
+    assertFalse(deal.has("etendo_plan"));
+  }
+
+  @Test
+  void aFurtherProductiveGetsItsOwnWonDealNextToTheFirstOnesCompany() throws Exception {
+    when(store.findSubscriptionEnvironment(SUBSCRIPTION)).thenReturn(Optional.of(
+        new SubscriptionEnvironment(PRODUCTIVE, "Segunda SL", "pro")));
+    when(store.findEnvironmentDeal(ACCOUNT, PRODUCTIVE)).thenReturn(Optional.empty());
+    when(store.findDealId(ACCOUNT)).thenReturn("deal-1");
+    when(store.countEnvironmentDeals(ACCOUNT)).thenReturn(1);
+    answers = call -> call.path().endsWith("/deals/deal-1/associations/companies")
+        ? new Response(200, "{\"results\":[{\"id\":\"company-1\"}]}")
+        : call.path().equals("/crm/v3/objects/deals")
+            ? new Response(201, "{\"id\":\"deal-2\"}") : ok(call);
+
+    Outcome outcome = sender.send(billing(HubSpotOutboxStore.PAYMENT, null), NOW);
+
+    assertEquals("deal-2", outcome.hubSpotObjectId());
+    Call created = call("POST", "/crm/v3/objects/deals");
+    assertEquals("Segunda SL — Self-serve", created.properties().getString("dealname"));
+    assertEquals("won", created.properties().getString("dealstage"));
+    assertEquals("pro", created.properties().getString("etendo_plan"));
+    assertFalse(created.properties().has("etendo_account_id"),
+        "HubSpot keeps the account id unique, and the first deal holds it");
+    String associations = created.body().getJSONArray("associations").toString();
+    assertTrue(associations.contains("contact-1") && associations.contains("company-1"));
+    JSONObject contact = call("POST", "/batch/upsert").body().getJSONArray("inputs")
+        .getJSONObject(0).getJSONObject("properties");
+    assertEquals(1, contact.length(), "only the address: a marketing contact keeps its own data");
+    verify(store).recordEnvironmentDeal(ACCOUNT, PRODUCTIVE, new EnvironmentDeal("deal-2", true));
+    assertEquals("active", call("PATCH", "/deals/deal-2").properties()
+        .getString("etendo_estado_suscripcion"));
+  }
+
+  @Test
+  void aFurtherProductiveDealAlreadyCreatedByAnInterruptedSendIsReused() {
+    when(store.findSubscriptionEnvironment(SUBSCRIPTION)).thenReturn(Optional.of(
+        new SubscriptionEnvironment(PRODUCTIVE, "Segunda SL", null)));
+    when(store.findEnvironmentDeal(ACCOUNT, PRODUCTIVE)).thenReturn(Optional.empty());
+    when(store.findDealId(ACCOUNT)).thenReturn("deal-1");
+    when(store.countEnvironmentDeals(ACCOUNT)).thenReturn(1);
+    answers = call -> call.path().endsWith("/deals/search")
+        && call.body().toString().contains("Segunda SL")
+        && call.body().toString().contains("associations.contact")
+        ? new Response(200, "{\"results\":[{\"id\":\"deal-2\"}]}") : ok(call);
+
+    sender.send(billing(HubSpotOutboxStore.PAYMENT, null), NOW);
+
+    assertTrue(calls.stream().noneMatch(c -> c.method().equals("POST")
+        && c.path().equals("/crm/v3/objects/deals")));
+    verify(store).recordEnvironmentDeal(ACCOUNT, PRODUCTIVE, new EnvironmentDeal("deal-2", true));
+  }
+
+  @Test
+  void aBillingEventWaitsForItsEnvironmentToBeProvisioned() {
+    when(store.findSubscriptionEnvironment(SUBSCRIPTION)).thenReturn(Optional.empty());
+
+    Outcome outcome = sender.send(billing(HubSpotOutboxStore.PAYMENT, null), NOW);
+
+    assertEquals(Outcome.Kind.RETRY, outcome.kind());
+    assertTrue(calls.isEmpty());
+  }
+
+  @Test
+  void aBillingEventOlderThanOneAlreadySentIsSkipped() {
+    productiveWithKnownDeal("deal-1", true);
+    when(store.hasNewerBillingEvent(ACCOUNT, PRODUCTIVE, OCCURRED)).thenReturn(true);
+
+    Outcome outcome = sender.send(billing(HubSpotOutboxStore.PAYMENT_FAILED, null), NOW);
+
+    assertEquals(Outcome.Kind.SKIPPED, outcome.kind());
+    assertTrue(calls.isEmpty());
+  }
+
+  @Test
+  void anAccountWithNoDealAnywhereIsSkippedAndNothingIsRecorded() {
+    when(store.findSubscriptionEnvironment(SUBSCRIPTION)).thenReturn(Optional.of(
+        new SubscriptionEnvironment(PRODUCTIVE, "Empresa SL", null)));
+    when(store.findEnvironmentDeal(ACCOUNT, PRODUCTIVE)).thenReturn(Optional.empty());
+
+    Outcome outcome = sender.send(billing(HubSpotOutboxStore.PAYMENT, null), NOW);
+
+    assertEquals(Outcome.Kind.SKIPPED, outcome.kind());
+    verify(store, never()).recordEnvironmentDeal(any(), any(), any());
+  }
+
+  @Test
+  void aFailedChargeSuspendsTheSubscription() throws Exception {
+    productiveWithKnownDeal("deal-1", true);
+
+    sender.send(billing(HubSpotOutboxStore.PAYMENT_FAILED, null), NOW);
+
+    JSONObject deal = call("PATCH", "/deals/deal-1").properties();
+    assertEquals("suspended", deal.getString("etendo_estado_suscripcion"));
+    assertEquals("2026-10-20", deal.getString("etendo_fecha_cobro_fallido"));
+    assertFalse(deal.has("dealstage"));
+  }
+
+  @Test
+  void aScheduledCancellationIsDatedTheDayItWasAskedAndStaysActive() throws Exception {
+    productiveWithKnownDeal("deal-1", true);
+
+    sender.send(billing(HubSpotOutboxStore.CANCEL_REQUESTED, null), NOW);
+
+    JSONObject deal = call("PATCH", "/deals/deal-1").properties();
+    assertEquals("2026-10-20", deal.getString("etendo_fecha_baja"));
+    assertFalse(deal.has("etendo_estado_suscripcion"), "the owner keeps access until the end");
+  }
+
+  @Test
+  void aWithdrawnCancellationReactivatesAndClearsTheDate() throws Exception {
+    productiveWithKnownDeal("deal-1", true);
+
+    sender.send(billing(HubSpotOutboxStore.CANCEL_REVERTED, null), NOW);
+
+    JSONObject deal = call("PATCH", "/deals/deal-1").properties();
+    assertEquals("active", deal.getString("etendo_estado_suscripcion"));
+    assertEquals("", deal.getString("etendo_fecha_baja"));
+  }
+
+  @Test
+  void anEndedSubscriptionKeepsTheDateTheCancellationWasAskedFor() throws Exception {
+    productiveWithKnownDeal("deal-1", true);
+    answers = call -> call.method().equals("GET")
+        ? new Response(200, "{\"properties\":{\"etendo_fecha_baja\":\"2026-10-01\"}}")
+        : ok(call);
+
+    sender.send(billing(HubSpotOutboxStore.CANCELED, null), NOW);
+
+    JSONObject deal = call("PATCH", "/deals/deal-1").properties();
+    assertEquals("cancelled", deal.getString("etendo_estado_suscripcion"));
+    assertFalse(deal.has("etendo_fecha_baja"));
+  }
+
+  @Test
+  void anImmediateCancellationIsDatedWhenItEnds() throws Exception {
+    productiveWithKnownDeal("deal-1", true);
+    // How HubSpot answers for a property that was never set.
+    answers = call -> call.method().equals("GET")
+        ? new Response(200, "{\"properties\":{\"etendo_fecha_baja\":null}}")
+        : ok(call);
+
+    sender.send(billing(HubSpotOutboxStore.CANCELED, null), NOW);
+
+    assertEquals("2026-10-20", call("PATCH", "/deals/deal-1").properties()
+        .getString("etendo_fecha_baja"));
+  }
+
+  @Test
+  void enteringTheDemoAfterABillingPaymentLeavesTheDealWon() {
+    when(store.findStatus(ACCOUNT, HubSpotOutboxStore.PAYMENT)).thenReturn("SENT");
+
+    sender.send(event(HubSpotOutboxStore.DEMO_ENTERED, null), NOW);
+
+    assertTrue(calls.stream().noneMatch(c -> c.path().contains("/deals/")));
   }
 }

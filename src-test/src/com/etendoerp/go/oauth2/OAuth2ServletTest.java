@@ -26,9 +26,11 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -41,10 +43,14 @@ import java.security.MessageDigest;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Base64;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -59,11 +65,15 @@ import org.mockito.MockedStatic;
 
 import com.auth0.jwt.interfaces.Claim;
 import com.auth0.jwt.interfaces.DecodedJWT;
+import com.etendoerp.go.auth.AuthScheme;
 import com.etendoerp.go.auth.DalWarehouseResolver;
+import com.etendoerp.go.auth.EnvironmentAuthOutcome;
 import com.etendoerp.go.auth.EnvironmentRequestAuthenticator;
+import com.etendoerp.go.auth.SurfacePolicy;
 import com.etendoerp.go.common.BoundedJsonParserTest;
 import com.etendoerp.go.common.MalformedJsonException;
 import com.etendoerp.go.common.PublicUrlResolver;
+import com.etendoerp.go.schemaforge.data.com.etendoerp.go.schemaforge.data.OAuth2Client;
 import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.session.GoSessionAuthenticator;
 import com.etendoerp.go.session.GoSessionRecord;
@@ -75,13 +85,15 @@ import com.etendoerp.go.session.SessionRoleRevokedException;
 import com.etendoerp.go.usageevents.LogCapture;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.SequenceIdData;
 
 /**
  * Unit tests for {@link OAuth2Servlet}.
  * Covers token endpoints, client CRUD, revocation, introspection,
- * authorization code flow, refresh token, and dynamic client registration.
+ * authorization code flow, refresh token, dynamic client registration, and the self-service
+ * public API key lifecycle ({@code /api-keys}).
  *
  * @covers com.etendoerp.go.oauth2.OAuth2Servlet
  */
@@ -1294,7 +1306,7 @@ public class OAuth2ServletTest {
     verify(ps, never()).executeUpdate();
   }
 
-  /** The shared reader behind PUT /clients and PUT /api-keys: a client type error is malformed. */
+  /** The shared reader behind PUT /clients: a client type error is malformed (PUT /api-keys is stricter, see requireBoolean). */
   @Test
   public void requireBooleanFieldRejectsNonBooleansAsMalformed() throws Exception {
     assertTrue(OAuth2Servlet.requireBooleanField(new JSONObject("{\"f\":true}"), "f"));
@@ -2682,6 +2694,544 @@ public class OAuth2ServletTest {
     assertNotNull("the refresh must succeed for the INSERT to have run",
         body.getString("access_token"));
     return insertPs;
+  }
+
+  // ===================== Public API keys (/api-keys) =====================
+  //
+  // The lifecycle runs against a mocked PublicApiKeyStore: these cases guard what the endpoints
+  // answer. What the store does to the database (tokens revoked by SQL, not DAL) is guarded by
+  // PublicApiKeyStoreTest and, against a real database, PublicApiKeyStoreIntegrationTest.
+
+  private static final String KEY_USER_ID = "user-1";
+  private static final String KEY_ROLE_ID = "role-1";
+  private static final String KEY_CLIENT_ID = "client-1";
+  private static final String KEY_ORG_ID = "org-1";
+  private static final String READ_WRITE_SCOPES =
+      "neo:public-api-key etendo:read etendo:write neo:public-api-owner-org:org-1";
+
+  private final PublicApiKeyStore apiKeyStore = mock(PublicApiKeyStore.class);
+  private final OAuth2Servlet apiKeyServlet = apiKeyServletOver(apiKeyStore);
+
+  /** ETP-5781 — rotating a key that has issued tokens answered 500; it must revoke them. */
+  @Test
+  public void rotateUsedPublicApiKeyRevokesItsTokensAndReturnsANewSecret() throws Exception {
+    OAuth2Client key = ownedKey("key-1", "Production", READ_WRITE_SCOPES, true);
+    when(apiKeyStore.revokeTokens("key-1", KEY_USER_ID)).thenReturn(3);
+
+    ResponseCapture resp = callApiKeys("POST", "/api-keys/key-1/rotate", null);
+
+    assertEquals(200, resp.status);
+    JSONObject body = new JSONObject(resp.body());
+    assertEquals(3, body.getInt("tokensRevoked"));
+    assertTrue(body.getString("clientSecret").length() > 0);
+    verify(key).setClientSecretHash(anyString());
+    verify(apiKeyStore).save(key, KEY_USER_ID);
+    verify(apiKeyStore).revokeTokens("key-1", KEY_USER_ID);
+  }
+
+  /** ETP-5781 — rotate answered {@code "capabilities": []}; it must return the stored ones. */
+  @Test
+  public void rotatePublicApiKeyReturnsTheRealCapabilities() throws Exception {
+    ownedKey("key-1", "Production", READ_WRITE_SCOPES, true);
+
+    ResponseCapture resp = callApiKeys("POST", "/api-keys/key-1/rotate", null);
+
+    assertEquals(200, resp.status);
+    assertCapabilities(new JSONObject(resp.body()), "public-api:read", "public-api:write");
+  }
+
+  /** A failed store call must not let the request commit what was already flushed. */
+  @Test
+  public void rotateThatFailsToRevokeTokensRollsBackTheNewSecret() throws Exception {
+    ownedKey("key-1", "Production", READ_WRITE_SCOPES, true);
+    when(apiKeyStore.revokeTokens("key-1", KEY_USER_ID)).thenThrow(new SQLException("boom"));
+
+    assertServerErrorRollsBack(() -> callApiKeys("POST", "/api-keys/key-1/rotate", null));
+  }
+
+  @Test
+  public void revokeTokensThatFailsRollsBack() throws Exception {
+    ownedKey("key-1", "Production", READ_WRITE_SCOPES, true);
+    when(apiKeyStore.revokeTokens("key-1", KEY_USER_ID)).thenThrow(new SQLException("boom"));
+
+    assertServerErrorRollsBack(() -> callApiKeys("POST", "/api-keys/key-1/revoke-tokens", null));
+  }
+
+  @Test
+  public void deleteThatFailsRollsBack() throws Exception {
+    OAuth2Client key = ownedKey("key-1", "Production", READ_WRITE_SCOPES, true);
+    doThrow(new SQLException("boom")).when(apiKeyStore).delete(key);
+
+    assertServerErrorRollsBack(() -> callApiKeys("DELETE", "/api-keys/key-1", null));
+  }
+
+  @Test
+  public void rotateOfAKeyThatIsNotOwnedIsNotFound() throws Exception {
+    ResponseCapture resp = callApiKeys("POST", "/api-keys/someone-else/rotate", null);
+
+    assertEquals(404, resp.status);
+    verify(apiKeyStore, never()).revokeTokens(anyString(), anyString());
+  }
+
+  @Test
+  public void revokeTokensOfAKeyThatIsNotOwnedIsNotFound() throws Exception {
+    ResponseCapture resp = callApiKeys("POST", "/api-keys/someone-else/revoke-tokens", null);
+
+    assertEquals(404, resp.status);
+    assertEquals("not_found", new JSONObject(resp.body()).getString("error"));
+    verify(apiKeyStore, never()).revokeTokens(anyString(), anyString());
+  }
+
+  /** ETP-5781 — revoke-tokens of a used key answered 500. */
+  @Test
+  public void revokeTokensOfAUsedPublicApiKeyReportsHowManyWereRevoked() throws Exception {
+    ownedKey("key-1", "Production", READ_WRITE_SCOPES, true);
+    when(apiKeyStore.revokeTokens("key-1", KEY_USER_ID)).thenReturn(2);
+
+    ResponseCapture resp = callApiKeys("POST", "/api-keys/key-1/revoke-tokens", null);
+
+    assertEquals(200, resp.status);
+    JSONObject body = new JSONObject(resp.body());
+    assertTrue(body.getBoolean("revoked"));
+    assertEquals(2, body.getInt("tokensRevoked"));
+    assertFalse("revoke-tokens never returns credential material", body.has("clientSecret"));
+  }
+
+  @Test
+  public void deleteOfAUsedPublicApiKeyDeletesItThroughTheStore() throws Exception {
+    OAuth2Client key = ownedKey("key-1", "Production", READ_WRITE_SCOPES, true);
+
+    ResponseCapture resp = callApiKeys("DELETE", "/api-keys/key-1", null);
+
+    assertEquals(200, resp.status);
+    assertTrue(new JSONObject(resp.body()).getBoolean("deleted"));
+    verify(apiKeyStore).delete(key);
+  }
+
+  @Test
+  public void deleteOfAKeyThatIsNotOwnedIsIdempotent() throws Exception {
+    ResponseCapture resp = callApiKeys("DELETE", "/api-keys/gone", null);
+
+    assertEquals(200, resp.status);
+    JSONObject body = new JSONObject(resp.body());
+    assertFalse(body.getBoolean("deleted"));
+    assertEquals("gone", body.getString("id"));
+    verify(apiKeyStore, never()).delete(any());
+  }
+
+  /** ETP-5781 — PUT answered {@code "capabilities": []}; it must return the stored ones. */
+  @Test
+  public void updatePublicApiKeyReturnsTheRealCapabilities() throws Exception {
+    ownedKey("key-1", "Production", READ_WRITE_SCOPES, true);
+
+    ResponseCapture resp = callApiKeys("PUT", "/api-keys/key-1", "{\"name\":\"Renamed\"}");
+
+    assertEquals(200, resp.status);
+    JSONObject body = new JSONObject(resp.body());
+    assertEquals("Renamed", body.getString("name"));
+    assertCapabilities(body, "public-api:read", "public-api:write");
+  }
+
+  /** ETP-5781 — malformed, empty or wrongly typed bodies answered 500 instead of 400. */
+  @Test
+  public void createPublicApiKeyWithInvalidJsonIsABadRequest() throws Exception {
+    assertBadRequest(callApiKeys("POST", "/api-keys", "{not json"));
+  }
+
+  @Test
+  public void createPublicApiKeyWithAnEmptyBodyIsABadRequest() throws Exception {
+    assertBadRequest(callApiKeys("POST", "/api-keys", ""));
+  }
+
+  @Test
+  public void createPublicApiKeyWithANonObjectBodyIsABadRequest() throws Exception {
+    assertBadRequest(callApiKeys("POST", "/api-keys", "[\"public-api:read\"]"));
+  }
+
+  @Test
+  public void createPublicApiKeyWithANonStringNameIsABadRequest() throws Exception {
+    assertBadRequest(callApiKeys("POST", "/api-keys",
+        "{\"name\":42,\"capabilities\":[\"public-api:read\"]}"));
+  }
+
+  @Test
+  public void updatePublicApiKeyWithInvalidJsonIsABadRequest() throws Exception {
+    ownedKey("key-1", "Production", READ_WRITE_SCOPES, true);
+    assertBadRequest(callApiKeys("PUT", "/api-keys/key-1", "{\"isActive\":"));
+  }
+
+  @Test
+  public void updatePublicApiKeyWithAnEmptyBodyIsABadRequest() throws Exception {
+    ownedKey("key-1", "Production", READ_WRITE_SCOPES, true);
+    assertBadRequest(callApiKeys("PUT", "/api-keys/key-1", ""));
+  }
+
+  @Test
+  public void updatePublicApiKeyWithAStringIsActiveIsABadRequest() throws Exception {
+    ownedKey("key-1", "Production", READ_WRITE_SCOPES, true);
+    assertBadRequest(callApiKeys("PUT", "/api-keys/key-1", "{\"isActive\":\"true\"}"));
+  }
+
+  @Test
+  public void updatePublicApiKeyWithANullIsActiveIsABadRequest() throws Exception {
+    ownedKey("key-1", "Production", READ_WRITE_SCOPES, true);
+    assertBadRequest(callApiKeys("PUT", "/api-keys/key-1", "{\"isActive\":null}"));
+  }
+
+  @Test
+  public void updatePublicApiKeyWithANonObjectBodyIsABadRequest() throws Exception {
+    ownedKey("key-1", "Production", READ_WRITE_SCOPES, true);
+    assertBadRequest(callApiKeys("PUT", "/api-keys/key-1", "[1]"));
+  }
+
+  @Test
+  public void updatePublicApiKeyWithANonStringNameIsABadRequest() throws Exception {
+    ownedKey("key-1", "Production", READ_WRITE_SCOPES, true);
+    assertBadRequest(callApiKeys("PUT", "/api-keys/key-1", "{\"name\":42}"));
+  }
+
+  @Test
+  public void updatePublicApiKeyWithANumericIsActiveIsABadRequest() throws Exception {
+    ownedKey("key-1", "Production", READ_WRITE_SCOPES, true);
+    assertBadRequest(callApiKeys("PUT", "/api-keys/key-1", "{\"isActive\":1}"));
+  }
+
+  /** ETP-5781 — reactivating skipped the 10-active-keys limit. */
+  @Test
+  public void reactivatingAKeyBeyondTheActiveLimitIsAConflict() throws Exception {
+    OAuth2Client key = ownedKey("key-1", "Dormant", READ_WRITE_SCOPES, false);
+    List<OAuth2Client> owned = new ArrayList<>();
+    owned.add(key);
+    for (int i = 0; i < PublicApiKeyPolicy.MAX_ACTIVE_KEYS_PER_OWNER; i++) {
+      owned.add(otherKey("other-" + i, "Other " + i, true));
+    }
+    when(apiKeyStore.ownedKeys(any())).thenReturn(owned);
+
+    ResponseCapture resp = callApiKeys("PUT", "/api-keys/key-1", "{\"isActive\":true}");
+
+    assertEquals(409, resp.status);
+    assertTrue(errorDescription(resp).contains("maximum number of active public API keys"));
+    verify(apiKeyStore, never()).save(any(), anyString());
+  }
+
+  /** ETP-5781 — reactivating skipped the duplicate-name check against the other active keys. */
+  @Test
+  public void reactivatingAKeyWhoseNameAnotherActiveKeyTookIsAConflict() throws Exception {
+    OAuth2Client key = ownedKey("key-1", "Production", READ_WRITE_SCOPES, false);
+    List<OAuth2Client> owned = Arrays.asList(key, otherKey("key-2", "PRODUCTION", true));
+    when(apiKeyStore.ownedKeys(any())).thenReturn(owned);
+
+    ResponseCapture resp = callApiKeys("PUT", "/api-keys/key-1", "{\"isActive\":true}");
+
+    assertEquals(409, resp.status);
+    assertTrue(errorDescription(resp).contains("name already exists"));
+    verify(apiKeyStore, never()).save(any(), anyString());
+  }
+
+  @Test
+  public void reactivatingAKeyWithinTheLimitSucceeds() throws Exception {
+    OAuth2Client key = ownedKey("key-1", "Production", READ_WRITE_SCOPES, false);
+    List<OAuth2Client> owned = Arrays.asList(key, otherKey("key-2", "Staging", true),
+        otherKey("key-3", "Production", false));
+    when(apiKeyStore.ownedKeys(any())).thenReturn(owned);
+
+    ResponseCapture resp = callApiKeys("PUT", "/api-keys/key-1", "{\"isActive\":true}");
+
+    assertEquals(200, resp.status);
+    assertTrue(new JSONObject(resp.body()).getBoolean("isActive"));
+    verify(apiKeyStore).save(key, KEY_USER_ID);
+  }
+
+  /** The limit counts the OTHER active keys: one below it leaves room for this one. */
+  @Test
+  public void reactivatingAKeyWithOneOtherActiveKeyLessThanTheLimitSucceeds() throws Exception {
+    OAuth2Client key = ownedKey("key-1", "Dormant", READ_WRITE_SCOPES, false);
+    List<OAuth2Client> owned =
+        ownedWithOtherActiveKeys(key, PublicApiKeyPolicy.MAX_ACTIVE_KEYS_PER_OWNER - 1);
+    when(apiKeyStore.ownedKeys(any())).thenReturn(owned);
+
+    ResponseCapture resp = callApiKeys("PUT", "/api-keys/key-1", "{\"isActive\":true}");
+
+    assertEquals(200, resp.status);
+    assertTrue(new JSONObject(resp.body()).getBoolean("isActive"));
+    verify(apiKeyStore).save(key, KEY_USER_ID);
+  }
+
+  /**
+   * An inactive key does not take part in the name check, so it may be renamed to an active
+   * key's name; the collision is then caught when it is reactivated.
+   */
+  @Test
+  public void renamingAnInactiveKeyToAnActiveKeysNameIsAcceptedUntilItIsReactivated()
+      throws Exception {
+    OAuth2Client key = ownedKey("key-1", "Dormant", READ_WRITE_SCOPES, false);
+    List<OAuth2Client> owned = Arrays.asList(key, otherKey("key-2", "Production", true));
+    when(apiKeyStore.ownedKeys(any())).thenReturn(owned);
+
+    ResponseCapture rename = callApiKeys("PUT", "/api-keys/key-1", "{\"name\":\"production\"}");
+
+    assertEquals(200, rename.status);
+    JSONObject renamed = new JSONObject(rename.body());
+    assertEquals("production", renamed.getString("name"));
+    assertFalse(renamed.getBoolean("isActive"));
+
+    ResponseCapture reactivate = callApiKeys("PUT", "/api-keys/key-1", "{\"isActive\":true}");
+
+    assertEquals(409, reactivate.status);
+    assertTrue(errorDescription(reactivate).contains("name already exists"));
+    assertFalse(key.isActive());
+    verify(apiKeyStore, times(1)).save(key, KEY_USER_ID);
+  }
+
+  /** Deactivating never adds an active key, so it is not subject to the limit at all. */
+  @Test
+  public void deactivatingAKeyWhileAtTheActiveLimitSucceeds() throws Exception {
+    OAuth2Client key = ownedKey("key-1", "Production", READ_WRITE_SCOPES, true);
+    List<OAuth2Client> owned =
+        ownedWithOtherActiveKeys(key, PublicApiKeyPolicy.MAX_ACTIVE_KEYS_PER_OWNER - 1);
+    when(apiKeyStore.ownedKeys(any())).thenReturn(owned);
+
+    ResponseCapture resp = callApiKeys("PUT", "/api-keys/key-1", "{\"isActive\":false}");
+
+    assertEquals(200, resp.status);
+    assertFalse(new JSONObject(resp.body()).getBoolean("isActive"));
+    verify(apiKeyStore).save(key, KEY_USER_ID);
+    verify(apiKeyStore, never()).ownedKeys(any());
+  }
+
+  /** The SPA sends name and isActive together: a reactivation with a fresh name still counts. */
+  @Test
+  public void renameAndReactivateInOnePutIsCheckedAgainstTheActiveLimit() throws Exception {
+    OAuth2Client key = ownedKey("key-1", "Dormant", READ_WRITE_SCOPES, false);
+    List<OAuth2Client> owned =
+        ownedWithOtherActiveKeys(key, PublicApiKeyPolicy.MAX_ACTIVE_KEYS_PER_OWNER);
+    when(apiKeyStore.ownedKeys(any())).thenReturn(owned);
+
+    ResponseCapture resp = callApiKeys("PUT", "/api-keys/key-1",
+        "{\"name\":\"Fresh name\",\"isActive\":true}");
+
+    assertEquals(409, resp.status);
+    assertTrue(errorDescription(resp).contains("maximum number of active public API keys"));
+    verify(apiKeyStore, never()).save(any(), anyString());
+  }
+
+  @Test
+  public void renameAndReactivateInOnePutIsCheckedAgainstTheOtherActiveNames() throws Exception {
+    OAuth2Client key = ownedKey("key-1", "Dormant", READ_WRITE_SCOPES, false);
+    List<OAuth2Client> owned = Arrays.asList(key, otherKey("key-2", "Production", true));
+    when(apiKeyStore.ownedKeys(any())).thenReturn(owned);
+
+    ResponseCapture resp = callApiKeys("PUT", "/api-keys/key-1",
+        "{\"name\":\" PRODUCTION \",\"isActive\":true}");
+
+    assertEquals(409, resp.status);
+    assertTrue(errorDescription(resp).contains("name already exists"));
+    verify(apiKeyStore, never()).save(any(), anyString());
+  }
+
+  @Test
+  public void renameAndReactivateInOnePutAppliesBothWhenNeitherConflicts() throws Exception {
+    OAuth2Client key = ownedKey("key-1", "Dormant", READ_WRITE_SCOPES, false);
+    List<OAuth2Client> owned =
+        ownedWithOtherActiveKeys(key, PublicApiKeyPolicy.MAX_ACTIVE_KEYS_PER_OWNER - 1);
+    when(apiKeyStore.ownedKeys(any())).thenReturn(owned);
+
+    ResponseCapture resp = callApiKeys("PUT", "/api-keys/key-1",
+        "{\"name\":\"Fresh name\",\"isActive\":true}");
+
+    assertEquals(200, resp.status);
+    JSONObject body = new JSONObject(resp.body());
+    assertEquals("Fresh name", body.getString("name"));
+    assertTrue(body.getBoolean("isActive"));
+    verify(apiKeyStore).save(key, KEY_USER_ID);
+  }
+
+  /** ETP-5781 decision — a case-only rename of an active key is the same key: accept it. */
+  @Test
+  public void caseOnlyRenameOfAnActiveKeyIsAccepted() throws Exception {
+    OAuth2Client key = ownedKey("key-1", "production", READ_WRITE_SCOPES, true);
+    when(apiKeyStore.ownedKeys(any())).thenReturn(Arrays.asList(key));
+
+    ResponseCapture resp = callApiKeys("PUT", "/api-keys/key-1", "{\"name\":\"Production\"}");
+
+    assertEquals(200, resp.status);
+    assertEquals("Production", new JSONObject(resp.body()).getString("name"));
+    verify(apiKeyStore).save(key, KEY_USER_ID);
+  }
+
+  @Test
+  public void renamingAnActiveKeyToAnotherActiveKeysNameIsAConflict() throws Exception {
+    OAuth2Client key = ownedKey("key-1", "Staging", READ_WRITE_SCOPES, true);
+    List<OAuth2Client> owned = Arrays.asList(key, otherKey("key-2", "Production", true));
+    when(apiKeyStore.ownedKeys(any())).thenReturn(owned);
+
+    ResponseCapture resp = callApiKeys("PUT", "/api-keys/key-1", "{\"name\":\"production\"}");
+
+    assertEquals(409, resp.status);
+    verify(apiKeyStore, never()).save(any(), anyString());
+  }
+
+  /** ETP-5781 decision — a role that cannot write is a permission refusal: 403, not 400. */
+  @Test
+  public void createWithWriteCapabilityForARoleWithoutWritableAccessIsForbidden()
+      throws Exception {
+    ResponseCapture resp = callApiKeys("POST", "/api-keys",
+        "{\"name\":\"Writer\",\"capabilities\":[\"public-api:write\"]}");
+
+    assertEquals(403, resp.status);
+    assertEquals("public-api:write is not allowed for the active role", errorDescription(resp));
+    verify(apiKeyStore, never()).create(any(), anyString(), anyString(), anyString(), anyString());
+  }
+
+  @Test
+  public void createWithProcessCapabilityForARoleWithoutProcessAccessIsForbidden()
+      throws Exception {
+    ResponseCapture resp = callApiKeys("POST", "/api-keys",
+        "{\"name\":\"Runner\",\"capabilities\":[\"public-api:process\"]}");
+
+    assertEquals(403, resp.status);
+    assertEquals("public-api:process is not allowed for the active role", errorDescription(resp));
+  }
+
+  @Test
+  public void createWithAnUnknownCapabilityIsStillABadRequest() throws Exception {
+    assertBadRequest(callApiKeys("POST", "/api-keys",
+        "{\"name\":\"Odd\",\"capabilities\":[\"etendo:read\"]}"));
+  }
+
+  @Test
+  public void createPublicApiKeyReturnsItsCapabilitiesAndTheSecretOnce() throws Exception {
+    when(apiKeyStore.hasWritableWindowAccess(KEY_ROLE_ID, KEY_CLIENT_ID, KEY_ORG_ID))
+        .thenReturn(true);
+    OAuth2Client created = apiKey("key-new", "Integration", READ_WRITE_SCOPES, true);
+    when(apiKeyStore.create(any(), eq("Integration"), anyString(), anyString(),
+        eq("neo:public-api-key etendo:read etendo:write"))).thenReturn(created);
+
+    ResponseCapture resp = callApiKeys("POST", "/api-keys",
+        "{\"name\":\"  Integration \",\"capabilities\":[\"public-api:read\",\"public-api:write\"]}");
+
+    assertEquals(201, resp.status);
+    JSONObject body = new JSONObject(resp.body());
+    assertEquals("key-new", body.getString("id"));
+    assertTrue(body.getString("clientSecret").length() > 0);
+    assertCapabilities(body, "public-api:read", "public-api:write");
+  }
+
+  @Test
+  public void getPublicApiKeyReturnsTheBareKeyObject() throws Exception {
+    ownedKey("key-1", "Production", READ_WRITE_SCOPES, true);
+
+    ResponseCapture resp = callApiKeys("GET", "/api-keys/key-1", null);
+
+    assertEquals(200, resp.status);
+    JSONObject body = new JSONObject(resp.body());
+    assertEquals("key-1", body.getString("id"));
+    assertFalse(body.has("apiKeys"));
+    assertFalse(body.has("clientSecret"));
+  }
+
+  private OAuth2Servlet apiKeyServletOver(PublicApiKeyStore store) {
+    EnvironmentRequestAuthenticator authenticator = mock(EnvironmentRequestAuthenticator.class);
+    when(authenticator.authenticate(any(), eq(SurfacePolicy.NEO_DATA), anyString())).thenReturn(
+        EnvironmentAuthOutcome.authenticated(AuthScheme.COOKIE, mock(OBContext.class),
+            KEY_USER_ID, KEY_ROLE_ID, KEY_CLIENT_ID, KEY_ORG_ID));
+    OAuth2Servlet created = new OAuth2Servlet(mock(GoSessionService.class), authenticator);
+    created.publicApiKeyStore = store;
+    return created;
+  }
+
+  private ResponseCapture callApiKeys(String method, String path, String body) throws Exception {
+    HttpServletRequest req = mockRequest(method, path);
+    if (body != null) {
+      when(req.getContentType()).thenReturn("application/json");
+      when(req.getReader()).thenReturn(new BufferedReader(new StringReader(body)));
+    }
+    ResponseCapture resp = mockResponse();
+    try (MockedStatic<OBContext> ignored = mockStatic(OBContext.class)) {
+      if ("GET".equals(method)) {
+        apiKeyServlet.doGet(req, resp.response);
+      } else if ("POST".equals(method)) {
+        apiKeyServlet.doPost(req, resp.response);
+      } else if ("PUT".equals(method)) {
+        apiKeyServlet.doPut(req, resp.response);
+      } else {
+        apiKeyServlet.doDelete(req, resp.response);
+      }
+    }
+    return resp;
+  }
+
+  /** A key the store finds as owned by the caller under {@code id}. */
+  private OAuth2Client ownedKey(String id, String name, String scopes, boolean active) {
+    OAuth2Client key = apiKey(id, name, scopes, active);
+    when(apiKeyStore.findOwned(eq(id), any())).thenReturn(key);
+    return key;
+  }
+
+  /** The key itself plus {@code count} other active keys with distinct names. */
+  private static List<OAuth2Client> ownedWithOtherActiveKeys(OAuth2Client key, int count) {
+    List<OAuth2Client> owned = new ArrayList<>();
+    owned.add(key);
+    for (int i = 0; i < count; i++) {
+      owned.add(otherKey("other-" + i, "Other " + i, true));
+    }
+    return owned;
+  }
+
+  private static OAuth2Client otherKey(String id, String name, boolean active) {
+    return apiKey(id, name, READ_WRITE_SCOPES, active);
+  }
+
+  /** A key mock whose name and active flag behave like entity properties. */
+  private static OAuth2Client apiKey(String id, String name, String scopes, boolean active) {
+    Map<String, Object> state = new HashMap<>();
+    state.put("name", name);
+    state.put("active", active);
+    OAuth2Client key = mock(OAuth2Client.class);
+    when(key.getId()).thenReturn(id);
+    when(key.getClientIdentifier()).thenReturn("etgo-" + id);
+    when(key.getScopes()).thenReturn(scopes);
+    when(key.getName()).thenAnswer(inv -> state.get("name"));
+    when(key.isActive()).thenAnswer(inv -> state.get("active"));
+    doAnswer(inv -> state.put("name", inv.getArgument(0))).when(key).setName(anyString());
+    doAnswer(inv -> state.put("active", inv.getArgument(0))).when(key).setActive(any());
+    return key;
+  }
+
+  private interface ApiKeyCall {
+    ResponseCapture run() throws Exception;
+  }
+
+  private static void assertServerErrorRollsBack(ApiKeyCall call) throws Exception {
+    OBDal dal = mock(OBDal.class);
+    try (MockedStatic<OBDal> dalStatic = mockStatic(OBDal.class)) {
+      dalStatic.when(OBDal::getInstance).thenReturn(dal);
+
+      ResponseCapture resp = call.run();
+
+      assertEquals(500, resp.status);
+      assertEquals("server_error", new JSONObject(resp.body()).getString("error"));
+      verify(dal).rollbackAndClose();
+    }
+  }
+
+  private void assertBadRequest(ResponseCapture resp) throws Exception {
+    assertEquals(400, resp.status);
+    assertEquals("invalid_request", new JSONObject(resp.body()).getString("error"));
+    verify(apiKeyStore, never()).save(any(), anyString());
+    verify(apiKeyStore, never()).create(any(), anyString(), anyString(), anyString(), anyString());
+  }
+
+  private static void assertCapabilities(JSONObject key, String... expected) throws Exception {
+    JSONArray capabilities = key.getJSONArray("capabilities");
+    assertEquals(expected.length, capabilities.length());
+    for (int i = 0; i < expected.length; i++) {
+      assertEquals(expected[i], capabilities.getString(i));
+    }
+  }
+
+  private static String errorDescription(ResponseCapture resp) throws Exception {
+    return new JSONObject(resp.body()).getString("error_description");
   }
 
   // ===================== Helpers =====================

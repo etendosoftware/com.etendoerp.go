@@ -41,7 +41,8 @@ import org.openbravo.dal.service.OBDal;
 import com.etendoerp.go.schemaforge.data.Account;
 
 /**
- * Reporting an account event: written in the caller's transaction, and never able to fail it.
+ * Reporting an account or billing event: written in the caller's transaction, and never able
+ * to fail it.
  *
  * @covers com.etendoerp.go.hubspot.HubSpotOutbox
  */
@@ -107,5 +108,32 @@ class HubSpotOutboxTest {
 
     assertEquals("Empresa SL", payload.getString("companyName"));
     assertEquals("", payload.getString("country"));
+  }
+
+  @Test
+  void aStripeEventHubSpotDoesNotHearAboutTouchesNothing() throws Exception {
+    JSONObject event = new JSONObject().put("data", new JSONObject()
+        .put("object", new JSONObject().put("id", "cs_1")));
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      HubSpotOutbox.stripeEvent("checkout.session.completed", event);
+      HubSpotOutbox.stripeEvent("invoice.paid", null);
+
+      obDal.verifyNoInteractions();
+    }
+  }
+
+  @Test
+  void aStripeEventThatCannotBeRecordedDoesNotFailTheWebhook() throws Exception {
+    OBDal dal = mock(OBDal.class);
+    when(dal.getSession()).thenThrow(new IllegalStateException("no session"));
+    JSONObject event = new JSONObject().put("id", "evt_1").put("data", new JSONObject()
+        .put("object", new JSONObject().put("id", "in_1").put("subscription", "sub_1")));
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+
+      assertDoesNotThrow(() -> HubSpotOutbox.stripeEvent("invoice.paid", event));
+    }
   }
 }

@@ -47,6 +47,9 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
 
 /**
+ * @covers com.etendoerp.go.schemaforge.NeoActionRecordGuard
+ * @covers com.etendoerp.go.schemaforge.TenantOwnership
+ *
  * ETP-5558 — the record an action runs on must belong to the caller's tenant.
  *
  * <p>The DAL is mocked at its edges (the model lookup, {@code OBDal.get} and the session's readable
@@ -80,6 +83,10 @@ class NeoActionRecordGuardTest {
     dalMock = mockStatic(OBDal.class);
     dalMock.when(OBDal::getInstance).thenReturn(dal);
     OBContext context = mock(OBContext.class);
+    Client caller = mock(Client.class);
+    when(caller.getId()).thenReturn(OWN_CLIENT);
+    when(context.getCurrentClient()).thenReturn(caller);
+    when(context.getWritableOrganizations()).thenReturn(java.util.Set.of(OWN_ORG));
     when(context.getReadableClients()).thenReturn(new String[] { OWN_CLIENT });
     when(context.getReadableOrganizations()).thenReturn(new String[] { OWN_ORG });
     contextMock = mockStatic(OBContext.class);
@@ -268,6 +275,49 @@ class NeoActionRecordGuardTest {
     assertNull(NeoActionRecordGuard.loadOwned(FIN_Payment.class, RECORD));
     assertFalse(NeoActionRecordGuard.isForeignRecord(paymentEntity(), ""));
   }
+  @Test
+  void crudRefusesForeignAndMissingTargetsIdentically() throws Exception {
+    SFEntity entity = paymentEntity();
+    payment(OTHER_CLIENT, OWN_ORG);
+    NeoResponse foreign = NeoActionRecordGuard.writeRefusalFor(entity, RECORD);
+    when(dal.get(FIN_Payment.ENTITY_NAME, RECORD)).thenReturn(null);
+    NeoResponse missing = NeoActionRecordGuard.writeRefusalFor(entity, RECORD);
+    assertRecordNotFound(foreign);
+    assertEquals(foreign.getBody().toString(), missing.getBody().toString());
+    assertEquals(foreign.getHttpStatus(), missing.getHttpStatus());
+  }
+
+  @Test
+  void crudAllowsOwnWritableRow() {
+    payment(OWN_CLIENT, OWN_ORG);
+    assertNull(NeoActionRecordGuard.writeRefusalFor(paymentEntity(), RECORD));
+  }
+
+  @Test
+  void crudRefusesReadableSystemRowsForTenantCallers() throws Exception {
+    OBContext context = OBContext.getOBContext();
+    when(context.getReadableClients()).thenReturn(new String[] {OWN_CLIENT, "0"});
+    payment("0", OWN_ORG);
+    assertRecordNotFound(NeoActionRecordGuard.writeRefusalFor(paymentEntity(), RECORD));
+  }
+
+  @Test
+  void crudRefusesReadableButNotWritableOrganization() throws Exception {
+    when(OBContext.getOBContext().getReadableOrganizations())
+        .thenReturn(new String[] {OWN_ORG, OTHER_ORG});
+    payment(OWN_CLIENT, OTHER_ORG);
+    assertRecordNotFound(NeoActionRecordGuard.writeRefusalFor(paymentEntity(), RECORD));
+  }
+
+  @Test
+  void crudFailsClosedOnLookupErrorOrMissingModel() throws Exception {
+    SFEntity entity = paymentEntity();
+    when(dal.get(FIN_Payment.ENTITY_NAME, RECORD)).thenThrow(new IllegalStateException("broken"));
+    assertRecordNotFound(NeoActionRecordGuard.writeRefusalFor(entity, RECORD));
+    when(model.getEntityByTableId(TABLE_ID)).thenReturn(null);
+    assertRecordNotFound(NeoActionRecordGuard.writeRefusalFor(entity, RECORD));
+  }
+
 
   // ── ETP-5715: refusalForMissingDocument ──────────────────────────────────
 

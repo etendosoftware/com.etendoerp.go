@@ -28,6 +28,8 @@ import org.openbravo.model.common.order.Order;
 import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import org.openbravo.base.structure.BaseOBObject;
+import org.openbravo.model.common.businesspartner.Location;
+import org.openbravo.model.common.order.Order;
 import java.util.Set;
 
 /**
@@ -127,6 +129,12 @@ public class PurchaseOrderHeaderHandler extends AbstractOrderHeaderHandler {
     if (paymentMethodSelector != null) {
       return paymentMethodSelector;
     }
+    // A create that names a vendor but no address (REST and the public API; the SPA always sends
+    // one) gets the vendor's address, as on sales orders (ETP-5703) and as SE_Order_BPartner does
+    // for both sides.
+    PartnerLocationDefaults.fillShipToAndBillTo(context, Order.PROPERTY_PARTNERADDRESS,
+        Location.PROPERTY_SHIPTOADDRESS, Order.PROPERTY_INVOICEADDRESS,
+        Location.PROPERTY_INVOICETOADDRESS);
     AbstractOrderHeaderHandler.mirrorAccountingDate(context);
     // ETP-5840: exchange rate — recalculation, save and completion validation — before anything
     // with side effects runs.

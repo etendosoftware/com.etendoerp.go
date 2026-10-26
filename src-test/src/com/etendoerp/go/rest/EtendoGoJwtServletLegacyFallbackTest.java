@@ -28,6 +28,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import java.io.BufferedReader;
@@ -48,6 +49,7 @@ import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBDal;
 
 import com.etendoerp.go.common.PublicUrlResolver;
 import com.etendoerp.go.payment.CheckoutRequestStore;
@@ -69,6 +71,13 @@ import com.etendoerp.go.session.GoSessionService;
  * from the configured <em>Stripe</em> price — never from a typed amount — so the amount
  * shown is the amount charged. When Stripe cannot quote it the plan is left out; the page must
  * never get a 500 for a problem the buyer cannot act on.
+ *
+ * <p>{@code GET /sws/go/billing/offers} follows the same predicate (ETP-5049): it quotes the
+ * configured legacy price while the fallback holds, and the first purchasable plan at its own
+ * provider price once it is retired, so the offer is always what checkout would charge.
+ *
+ * @covers com.etendoerp.go.rest.EtendoGoJwtServlet
+ * @covers com.etendoerp.go.payment.BillingOfferConfiguration
  */
 public class EtendoGoJwtServletLegacyFallbackTest {
 
@@ -229,6 +238,105 @@ public class EtendoGoJwtServletLegacyFallbackTest {
     assertEquals(201, resp.status);
     verify(checkout).createSession(anyString(), anyString(), anyString(), any(), isNull(),
         any(HostedCheckoutService.SessionOptions.class));
+  }
+
+  // ===================== GET /billing/offers =====================
+
+  @Test
+  public void theOfferQuotesTheConfiguredLegacyPriceWhileTheFallbackIsActive() throws Exception {
+    Plan legacy = mock(Plan.class);
+    when(legacy.getSearchKey()).thenReturn(LEGACY_KEY);
+    PlanCatalogService catalog = mock(PlanCatalogService.class);
+    when(catalog.findDefaultPurchasablePlan())
+        .thenReturn(Optional.of(new PlanCatalogService.DefaultPlan(legacy, true)));
+    when(prices.retrieveConfiguredPrice()).thenReturn(price(LEGACY_PRICE_ID, 2900, "eur", "month"));
+
+    ResponseCapture resp = getOffers(catalog);
+
+    assertEquals(resp.body(), 200, resp.status);
+    JSONObject offer = new JSONObject(resp.body());
+    assertEquals("productive-tenant", offer.getString("code"));
+    assertEquals(LEGACY_KEY, offer.getString("planKey"));
+    assertEquals(2900L, offer.getLong("amountMinor"));
+    assertEquals("EUR", offer.getString("currency"));
+    assertEquals("month", offer.getString("interval"));
+    assertNoProviderPriceId(resp, LEGACY_PRICE_ID);
+    verify(prices, never()).retrievePrice(anyString());
+  }
+
+  @Test
+  public void theOfferQuotesTheFirstPurchasablePlanOnceTheFallbackIsRetired() throws Exception {
+    Plan priced = pricedPlan("productive-monthly", "price_PLAN_SECRET");
+    PlanCatalogService catalog = mock(PlanCatalogService.class);
+    when(catalog.findDefaultPurchasablePlan())
+        .thenReturn(Optional.of(new PlanCatalogService.DefaultPlan(priced, false)));
+    when(prices.retrievePrice("price_PLAN_SECRET"))
+        .thenReturn(price("price_PLAN_SECRET", 4900, "eur", "year"));
+
+    ResponseCapture resp = getOffers(catalog);
+
+    assertEquals(resp.body(), 200, resp.status);
+    JSONObject offer = new JSONObject(resp.body());
+    assertEquals("productive-monthly", offer.getString("planKey"));
+    // Quoted from Stripe, never from the row's typed display price.
+    assertEquals(4900L, offer.getLong("amountMinor"));
+    assertEquals("EUR", offer.getString("currency"));
+    assertEquals("year", offer.getString("interval"));
+    assertNoProviderPriceId(resp, "price_PLAN_SECRET");
+    // The legacy property may still be set; it is no longer what checkout charges.
+    verify(prices, never()).retrieveConfiguredPrice();
+  }
+
+  @Test
+  public void anEmptyCatalogAnswers503AndReachesNoProvider() throws Exception {
+    PlanCatalogService catalog = mock(PlanCatalogService.class);
+    when(catalog.findDefaultPurchasablePlan()).thenReturn(Optional.empty());
+
+    ResponseCapture resp = getOffers(catalog);
+
+    assertEquals(503, resp.status);
+    assertEquals("BILLING_OFFER_UNAVAILABLE",
+        new JSONObject(resp.body()).getJSONObject("error").getString("code"));
+    verifyNoInteractions(prices);
+  }
+
+  @Test
+  public void aStripeFailureQuotingTheDefaultPlanAnswers503() throws Exception {
+    Plan priced = pricedPlan("productive-monthly", "price_PLAN_SECRET");
+    PlanCatalogService catalog = mock(PlanCatalogService.class);
+    when(catalog.findDefaultPurchasablePlan())
+        .thenReturn(Optional.of(new PlanCatalogService.DefaultPlan(priced, false)));
+    when(prices.retrievePrice("price_PLAN_SECRET")).thenThrow(new IOException("Stripe down"));
+
+    ResponseCapture resp = getOffers(catalog);
+
+    // An offer whose price nobody could verify is never shown.
+    assertEquals(503, resp.status);
+    assertEquals("BILLING_OFFER_UNAVAILABLE",
+        new JSONObject(resp.body()).getJSONObject("error").getString("code"));
+  }
+
+  private static void assertNoProviderPriceId(ResponseCapture resp, String providerPriceId) {
+    assertFalse(resp.body(), resp.body().contains(providerPriceId));
+    assertFalse(resp.body(), resp.body().toLowerCase(Locale.ROOT).contains("priceid"));
+  }
+
+  private ResponseCapture getOffers(PlanCatalogService catalog) throws Exception {
+    servlet.planCatalogService = catalog;
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = authenticatedRequest("/billing/offers");
+    when(req.getMethod()).thenReturn("GET");
+    Account account = account();
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(mock(OBDal.class));
+      // The billing offer is a platform-credential endpoint.
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByPlatformToken(TOKEN))
+          .thenReturn(account);
+      servlet.doGet(req, resp.response);
+    }
+    return resp;
   }
 
   // ===================== helpers =====================
