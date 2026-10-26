@@ -23,6 +23,7 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
@@ -43,6 +44,13 @@ import org.openbravo.model.common.enterprise.OrganizationInformation;
 import org.openbravo.model.common.geography.Country;
 import org.openbravo.model.common.geography.Location;
 
+import com.etendoerp.go.featureflags.GoFeatureFlags;
+
+/**
+ * Unit tests for {@link OnboardingOrgInfoService}.
+ *
+ * @covers com.etendoerp.go.onboarding.OnboardingOrgInfoService
+ */
 public class OnboardingOrgInfoServiceTest {
 
   // ---------------------------------------------------------------------------
@@ -478,6 +486,80 @@ public class OnboardingOrgInfoServiceTest {
     verify(location).setCityName("Madrid");
     verify(location, never()).setAddressLine1("Legacy free text — must be ignored");
     verify(dal).save(location);
+  }
+
+  /**
+   * ETP-5806 BUG-1 (fixed in ecd181dd8) — flag OFF: the 3 structured SEPA fields are never
+   * persisted, even when all three are fully populated and no legacy {@code address} was given.
+   * City is independent of the flag and is still set.
+   */
+  @Test
+  public void testCreateLocationFlagOffNeverPersistsStructuredFieldsWithNoLegacyAddress() {
+    OnboardingOrgInfoService service = new OnboardingOrgInfoService();
+    Client client = mock(Client.class);
+    Organization org = mock(Organization.class);
+    Country country = mock(Country.class);
+
+    OBProvider provider = mock(OBProvider.class);
+    Location location = mock(Location.class);
+    when(provider.get(Location.class)).thenReturn(location);
+    OBDal dal = mock(OBDal.class);
+
+    try (MockedStatic<OBProvider> obProvider = mockStatic(OBProvider.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class)) {
+      obProvider.when(OBProvider::getInstance).thenReturn(provider);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      flags.when(() -> GoFeatureFlags.isEnabled(
+          eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(false);
+
+      service.createLocation(client, org, country, null, "Gran Via", "45", "Torre A", "Madrid");
+    }
+
+    verify(location, never()).setOBSEPAStreetName(any());
+    verify(location, never()).setOBSEPABuildingNumber(any());
+    verify(location, never()).setOBSEPABuildingName(any());
+    verify(location, never()).setAddressLine1(anyString());
+    verify(location, never()).setAddressLine2(anyString());
+    verify(location).setCityName("Madrid");
+    verify(dal).save(location);
+  }
+
+  /**
+   * ETP-5806 BUG-1 (fixed in ecd181dd8) — flag OFF with a legacy {@code address} also present
+   * alongside the 3 structured fields: the pre-ETP-5806 fallback persists Address1 from the
+   * legacy value, never from the structured composer.
+   */
+  @Test
+  public void testCreateLocationFlagOffFallsBackToLegacyAddressWhenStructuredFieldsAlsoPresent() {
+    OnboardingOrgInfoService service = new OnboardingOrgInfoService();
+    Client client = mock(Client.class);
+    Organization org = mock(Organization.class);
+    Country country = mock(Country.class);
+
+    OBProvider provider = mock(OBProvider.class);
+    Location location = mock(Location.class);
+    when(provider.get(Location.class)).thenReturn(location);
+    OBDal dal = mock(OBDal.class);
+
+    try (MockedStatic<OBProvider> obProvider = mockStatic(OBProvider.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class)) {
+      obProvider.when(OBProvider::getInstance).thenReturn(provider);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      flags.when(() -> GoFeatureFlags.isEnabled(
+          eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(false);
+
+      service.createLocation(client, org, country, "Legacy free text", "Gran Via", "45",
+          "Torre A", "Madrid");
+    }
+
+    verify(location).setAddressLine1("Legacy free text");
+    verify(location, never()).setOBSEPAStreetName(any());
+    verify(location, never()).setOBSEPABuildingNumber(any());
+    verify(location, never()).setOBSEPABuildingName(any());
+    verify(location, never()).setAddressLine2(anyString());
+    verify(location).setCityName("Madrid");
   }
 
   /**
