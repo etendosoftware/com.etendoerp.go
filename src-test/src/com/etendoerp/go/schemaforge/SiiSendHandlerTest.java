@@ -377,6 +377,55 @@ public class SiiSendHandlerTest {
     }
   }
 
+  /**
+   * ETP-5745 regression repro, registral-modification path: the same language-clobbering
+   * scenario as {@link #executeActionUsesTheLanguageCapturedBeforeTheClassicCallNotAfter}, but
+   * with {@code Invoice#isAeatsiiErrorRegistral()} true, so {@code executeAction} routes through
+   * {@code executeRegistralModification}/{@code MultiInvoiceSIIModification} instead of
+   * {@code MultiEnvioFactura}. Confirms the captured-before-the-call language also protects that
+   * second call site, not just the normal-send path.
+   */
+  @Test
+  public void executeActionUsesTheLanguageCapturedBeforeTheClassicCallNotAfter_registralPath()
+      throws Exception {
+    Invoice invoice = mock(Invoice.class);
+    when(invoice.isAeatsiiErrorRegistral()).thenReturn(Boolean.TRUE);
+    Organization org = mock(Organization.class);
+    when(org.getId()).thenReturn("org-1");
+    when(invoice.getOrganization()).thenReturn(org);
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<NeoProcessService> processMock = Mockito.mockStatic(NeoProcessService.class);
+         MockedStatic<NeoLanguage> langMock = Mockito.mockStatic(NeoLanguage.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(Invoice.class, "inv-registral-lang-clobber")).thenReturn(invoice);
+
+      // Before the call: en_US, as EnvironmentRequestAuthenticator set it from Accept-Language.
+      langMock.when(NeoLanguage::currentCode).thenReturn("en_US");
+      // The classic bridge call itself flips it to es_ES as a side effect — the observed bug.
+      processMock.when(() -> NeoProcessService.executeObuiappClass(
+              eq("org.openbravo.module.sii.process.MultiInvoiceSIIModification"),
+              eq("F5CCFE8DCAC04FBD9B4A217C6383032B"),
+              any(JSONObject.class)))
+          .thenAnswer(invocation -> {
+            langMock.when(NeoLanguage::currentCode).thenReturn("es_ES");
+            return NeoResponse.error(400,
+                "La factura de compra debe contener información en el campo Referencia del proveedor. ");
+          });
+
+      NeoResponse result = handler.executeAction("inv-registral-lang-clobber");
+
+      // Must be the ENGLISH replacement (the pre-call language), never the Spanish one.
+      assertEquals("The purchase invoice must contain information in the Document No. field.",
+          result.getBody().getString("message"));
+      processMock.verify(() -> NeoProcessService.executeObuiappClass(
+          eq("org.openbravo.module.sii.process.MultiInvoiceSIIModification"),
+          eq("F5CCFE8DCAC04FBD9B4A217C6383032B"),
+          any(JSONObject.class)));
+    }
+  }
+
   @Test
   public void testExecuteActionRoutesToMultiEnvioFacturaWhenFlagIsNull() throws Exception {
     Invoice invoice = mock(Invoice.class);
