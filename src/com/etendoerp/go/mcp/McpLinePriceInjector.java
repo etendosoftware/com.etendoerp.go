@@ -91,7 +91,8 @@ final class McpLinePriceInjector {
 
   /**
    * Resolves and writes {@code unitPrice}, {@code listPrice} and {@code priceLimit} when the agent
-   * did not supply a price of its own.
+   * did not supply a price of its own; when it supplied only {@code unitPrice}, writes the list
+   * side ({@code listPrice}, {@code priceLimit}) and keeps the agent's price (ETP-5852).
    *
    * <p>Abstains — leaving the body untouched — whenever the price cannot be established with
    * certainty: no product, no resolvable parent document, no price list on it, or no price for the
@@ -162,7 +163,8 @@ final class McpLinePriceInjector {
             parent.getEntityName());
         return;
       }
-      applyResolvedPrice(body, dalEntity, parent, priceList, documentDate, log);
+      boolean keepUnitPrice = agentProvided != null && agentProvided.contains(FIELD_UNIT_PRICE);
+      applyResolvedPrice(body, dalEntity, parent, priceList, documentDate, keepUnitPrice, log);
     } catch (Exception e) {
       // Never fail a create over a convenience default: without this the agent keeps the
       // pre-existing behaviour, with it the whole write would 500.
@@ -191,10 +193,16 @@ final class McpLinePriceInjector {
     if (productId.startsWith(BatchService.REF_PREFIX)) {
       return false;
     }
-    // The agent's own price wins, exactly as userProvided protects it from the callout cascade.
-    if (agentProvided != null
-        && (agentProvided.contains(FIELD_UNIT_PRICE) || agentProvided.contains(FIELD_LIST_PRICE))) {
+    // The agent's own list price wins, exactly as userProvided protects it from the callout cascade.
+    if (agentProvided != null && agentProvided.contains(FIELD_LIST_PRICE)) {
       return false;
+    }
+    // ETP-5852: an agent that sent only its unitPrice still gets the tariff's list price (and
+    // price limit), as the form shows it when the product is picked; its unitPrice is kept. Before,
+    // the injector abstained and the line kept listPrice 0, so the price the agent negotiated below
+    // the tariff carried no discount at all.
+    if (agentProvided != null && agentProvided.contains(FIELD_UNIT_PRICE)) {
+      return true;
     }
     return !hasNonZeroPrice(body);
   }
@@ -283,7 +291,8 @@ final class McpLinePriceInjector {
    * {@code OBException} and defaulting to zero.
    */
   private static void applyResolvedPrice(JSONObject body, Entity lineEntity, BaseOBObject parent,
-      PriceList priceList, Date documentDate, Logger log) throws JSONException {
+      PriceList priceList, Date documentDate, boolean keepUnitPrice, Logger log)
+      throws JSONException {
     Product product = OBDal.getInstance()
         .get(Product.class, body.optString(FIELD_PRODUCT, ""));
     if (product == null) {
@@ -297,7 +306,10 @@ final class McpLinePriceInjector {
           product.getIdentifier(), priceList.getIdentifier(), documentDate);
       return;
     }
-    putIfDeclared(body, lineEntity, FIELD_UNIT_PRICE, productPrice.getStandardPrice());
+    // ETP-5852: the agent's own unitPrice is never replaced; only the list side is filled.
+    if (!keepUnitPrice) {
+      putIfDeclared(body, lineEntity, FIELD_UNIT_PRICE, productPrice.getStandardPrice());
+    }
     putIfDeclared(body, lineEntity, FIELD_LIST_PRICE, productPrice.getListPrice());
     putIfDeclared(body, lineEntity, FIELD_PRICE_LIMIT, productPrice.getPriceLimit());
     log.debug("[MCP-LINE-PRICE] Resolved {} from list {}: unitPrice={} listPrice={}",

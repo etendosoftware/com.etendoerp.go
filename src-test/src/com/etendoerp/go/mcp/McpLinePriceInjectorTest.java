@@ -329,16 +329,21 @@ class McpLinePriceInjectorTest {
   }
 
   @Test
-  @DisplayName("Abstains when the agent supplied unitPrice itself — the agent's price wins")
-  void abstainsWhenTheAgentSuppliedUnitPrice() throws Exception {
+  @DisplayName("An agent's own unitPrice is kept, and the tariff's list side is still filled")
+  void keepsTheAgentUnitPriceAndFillsTheListSide() throws Exception {
     withResolvedScope();
-    withEverythingNeededForAPrice();
-    JSONObject body = body(UNIT_PRICE, new BigDecimal("0"));
+    parentDocument("priceList", priceList(false), "orderDate", date(2026, 9, 7),
+        "salesTransaction", Boolean.TRUE);
+    withProduct();
+    withResolvedPrice("12.50", "15.00", "10.00");
+    JSONObject body = body(UNIT_PRICE, new BigDecimal("13.50"));
 
     McpLinePriceInjector.injectIfMissing(body, commercialLineEntity(), sfEntity(),
         Set.of(UNIT_PRICE), log);
 
-    assertAbstainedBeforeAnyLoad(body);
+    assertEquals("13.50", body.get(UNIT_PRICE).toString(), "the agent's price wins");
+    assertEquals("15.00", body.get(LIST_PRICE).toString());
+    assertEquals("10.00", body.get(PRICE_LIMIT).toString());
   }
 
   @Test
