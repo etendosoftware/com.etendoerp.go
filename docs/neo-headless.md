@@ -3385,7 +3385,9 @@ metadata.
   `view:"create"` lists the field under `required` or `optional`. For a value a customization
   supplies in its pre-hook, which the structural rule cannot see: `contacts/businessPartner.vendor`
   (`C_BPartner.IsVendor`, mandatory, no default) carries `userRequired:false` at field level because
-  `BusinessPartnerHandler` inherits it from the business partner category when a create omits it.
+  `BusinessPartnerHandler` inherits it from the business partner category when a create omits it
+  (with the `contact-category-type` flag on; off, the omitted value falls to the mandatory-defaults
+  `false`, see §5.3.6).
   It changes the advice, never the contract: the raw `required` (AD NOT NULL) is left as it is and
   no write-side check is relaxed. Ignored on buttons. Applied before the precondition overlay
   (`ETGO_SF_ENTITY.preconditions`), which can still force `userRequired:true`. An absent key leaves
@@ -6062,7 +6064,19 @@ MCP `etendo_update`, so the body handed to the pre-hook is exactly what the call
 
 **Contact types (ETP-5791).** `C_BP_Group.EM_Etgo_Iscustomer/Isvendor` say whether a category's
 contacts are customers, vendors/creditors or both. Rules live in `handlers/ContactTypeRules`
-(an entity util, called only by the customizations below):
+(an entity util, called only by the customizations below).
+
+**Behind the `contact-category-type` feature flag** (`GoFeatureFlags.FLAG_CONTACT_CATEGORY_TYPE`,
+environment level, default **off** — `etendo.go.flags.contact-category-type` /
+`ETGO_FLAG_CONTACT_CATEGORY_TYPE`; see `docs/feature-flags-and-tenant-upgrade.md` §1). Every
+customization in the table asks `ContactTypeRules.isEnabled()` first; off, it returns `null` and the
+default CRUD runs exactly as before ETP-5791 (no inheritance, no "at least one type" rejection, no
+post-create posting-account backfill). What stays unconditional: the `C_BP_Group` columns and their
+AD metadata, the `ETGO_SF_FIELD` rows, reference/sample data, the demo-data copy of both columns
+(`DemoDataTransferEntityCopier`), `ATTR_CLIENT_PROVIDED_FIELDS` (inert unless a customization reads
+it) and the generic `MCP_CONFIG.fields.userRequired` key. The `vendor` override therefore keeps
+advertising the field as optional with the flag off; an omitted `vendor` then gets the
+mandatory-defaults fallback `false` on every channel, as before ETP-5791.
 
 | Customization | Binding | Behaviour |
 |---|---|---|

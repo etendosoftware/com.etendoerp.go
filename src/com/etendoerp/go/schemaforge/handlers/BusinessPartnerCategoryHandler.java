@@ -37,6 +37,9 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  *
  * <p>What the flags drive — inheritance of the type by a new contact — lives in the contact's own
  * customization, see {@link ContactTypeRules}.</p>
+ *
+ * <p>Behind the {@code contact-category-type} feature flag: off, this pre-hook returns
+ * {@code null} and the category is saved by the default CRUD with no type check.</p>
  */
 @NeoExtension(spec = "business-partner-category", entity = "businessPartnerCategory")
 public class BusinessPartnerCategoryHandler implements NeoHandler {
@@ -45,7 +48,7 @@ public class BusinessPartnerCategoryHandler implements NeoHandler {
 
   @Override
   public NeoResponse handle(NeoContext ctx) {
-    if (!ContactTypeRules.isCrudWrite(ctx)) {
+    if (!ContactTypeRules.isEnabled() || !ContactTypeRules.isCrudWrite(ctx)) {
       return null;
     }
     try {

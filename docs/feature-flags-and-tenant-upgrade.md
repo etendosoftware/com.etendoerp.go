@@ -72,6 +72,7 @@ Declare every flag's key as a constant on `GoFeatureFlags` and add its row here.
 | `onboarding-tenant-pool` | `etendo.go.flags.onboarding-tenant-pool` | `ETGO_FLAG_ONBOARDING_TENANT_POOL` | absent ⇒ **`false`** |
 | `mcp-modern-era-disabled` | `etendo.go.flags.mcp-modern-era-disabled` | `ETGO_FLAG_MCP_MODERN_ERA_DISABLED` | absent ⇒ **`false`** (dual-era on) |
 | `batch-callout-skip-disabled` | `etendo.go.flags.batch-callout-skip-disabled` | `ETGO_FLAG_BATCH_CALLOUT_SKIP_DISABLED` | absent ⇒ **`false`** (opt-in skip honoured) |
+| `contact-category-type` | `etendo.go.flags.contact-category-type` | `ETGO_FLAG_CONTACT_CATEGORY_TYPE` | absent ⇒ **`false`** (pre-ETP-5791 contact behaviour) |
 | *(pattern for a new flag)* | `etendo.go.flags.<key>` | `ETGO_FLAG_<KEY>` | absent ⇒ **`false`** |
 
 `bp-portal-link` (ETP-5267) decides whether a `sales-invoice-send` email carries a link to the
@@ -400,6 +401,18 @@ To flip it: set it to `true` in ConfigCat (live within one 60 s poll). The local
 `ETGO_FLAG_BATCH_CALLOUT_SKIP_DISABLED=true`, plus a Tomcat restart) is read **only where no
 ConfigCat SDK key is configured**: `GoFeatureFlags#createProvider()` installs one provider, ConfigCat
 when `etendo.go.configcat.sdkKey` resolves, `PropertiesFeatureProvider` otherwise, never both.
+
+### `contact-category-type` (ETP-5791) — backend-only, environment level
+
+Turns on contact types driven by the contact category: a category (`C_BP_Group`) must declare
+Customer and/or Vendor/Creditor, a new contact inherits them unless the request sends them, a
+contact cannot be saved with no type, and moving a contact to another category re-inherits both.
+Unset or `false` (the default) keeps the pre-ETP-5791 behaviour: the contact and contact-category
+customizations return `null` and the default CRUD runs. Only behaviour is gated — the new
+`EM_ETGO_ISCUSTOMER`/`EM_ETGO_ISVENDOR` columns, AD metadata, `ETGO_SF_FIELD` rows and
+reference/sample data ship unconditionally. Environment level (account-less context); its only
+caller is `ContactTypeRules.isEnabled()`. Nothing in the browser reads it. Full reference:
+[`neo-headless.md`](neo-headless.md) §5.3.6.
 
 ## 2. The onboarding paywall
 

@@ -85,7 +85,9 @@ import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
  * inherited from the contact's category; on an update that changes the category and carries neither
  * flag, both are re-inherited from the new category; on create and update, a contact left with
  * neither type is rejected with {@code ETGO_BPartnerContactTypeRequired}. After a create, {@code afterHandle()}
- * makes sure each type the contact ended up with has its posting-account row.
+ * makes sure each type the contact ended up with has its posting-account row. All of this is
+ * behind the {@code contact-category-type} feature flag (off by default: the pre-ETP-5791
+ * behaviour).
  *
  * <p>On GET (single record, i.e. {@code /contacts/businessPartner/{id}}):
  * <ul>
@@ -449,13 +451,13 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
    * category change); on create and on every update the write is rejected when the contact would
    * end up with neither type. Only CRUD writes are
    * judged — a selector or action request that happens to carry a body is not a save of the
-   * contact.</p>
+   * contact. A no-op while the {@code contact-category-type} feature flag is off.</p>
    *
    * @return the rejection, or {@code null} to continue with the (possibly enriched) body
    */
   private static NeoResponse applyContactTypeRules(NeoContext ctx, JSONObject body, String method)
       throws Exception {
-    if (!ContactTypeRules.isCrudWrite(ctx)) {
+    if (!ContactTypeRules.isEnabled() || !ContactTypeRules.isCrudWrite(ctx)) {
       return null;
     }
     if ("POST".equals(method)) {
@@ -807,9 +809,10 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
    * from its category) has its posting-account row. Both statements are guarded by the BP's own
    * {@code IsCustomer}/{@code IsVendor} and by {@code NOT EXISTS}, so they are a no-op for a type
    * the contact does not have and for a row {@code c_bpartner_trg} already created on INSERT.
+   * Skipped while the {@code contact-category-type} feature flag is off, as nothing is inherited.
    */
   private static void provisionBpAcctRowsAfterCreate(String recordId) {
-    if (StringUtils.isBlank(recordId)) {
+    if (StringUtils.isBlank(recordId) || !ContactTypeRules.isEnabled()) {
       return;
     }
     try {

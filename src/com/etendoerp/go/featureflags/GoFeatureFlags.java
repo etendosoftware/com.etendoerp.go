@@ -220,6 +220,25 @@ public final class GoFeatureFlags {
   public static final String FLAG_BATCH_CALLOUT_SKIP_DISABLED = "batch-callout-skip-disabled";
 
   /**
+   * ETP-5791 — contact types driven by the contact category. On, a contact category
+   * ({@code C_BP_Group}) must declare Customer and/or Vendor/Creditor, a new contact inherits
+   * those types from its category unless the request sends them explicitly, a contact cannot be
+   * saved with no type, and moving a contact to another category re-inherits both types. Off (the
+   * default), the contact and contact-category customizations skip those rules and every write
+   * behaves as before the ticket.
+   *
+   * <p><b>It gates behaviour, not schema.</b> The {@code EM_Etgo_Iscustomer} /
+   * {@code EM_Etgo_Isvendor} columns, their AD metadata, the {@code ETGO_SF_FIELD} rows and the
+   * reference/sample data ship unconditionally; with the flag off nothing enforces or reads them.
+   *
+   * <p><b>Environment level and backend-only.</b> Evaluated with an account-less context by
+   * {@code ContactTypeRules#isEnabled()}, its only caller; nothing in the browser reads it, so
+   * never add it to the web client's {@code flag-keys.js}. Locally
+   * {@code etendo.go.flags.contact-category-type} / {@code ETGO_FLAG_CONTACT_CATEGORY_TYPE}.
+   */
+  public static final String FLAG_CONTACT_CATEGORY_TYPE = "contact-category-type";
+
+  /**
    * ConfigCat SDK key. Set ⇒ flags come from ConfigCat and can be flipped without a restart; unset
    * ⇒ {@link PropertiesFeatureProvider} resolves them from local configuration.
    */

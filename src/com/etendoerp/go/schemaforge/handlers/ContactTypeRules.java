@@ -29,6 +29,8 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 
+import com.etendoerp.go.featureflags.FeatureFlagContext;
+import com.etendoerp.go.featureflags.GoFeatureFlags;
 import com.etendoerp.go.schemaforge.MessageKeyedException;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
@@ -82,6 +84,11 @@ import com.etendoerp.go.schemaforge.util.NeoBooleanFormat;
  * That channel hands over the keys the agent actually sent under
  * {@link NeoContext#ATTR_CLIENT_PROVIDED_FIELDS}, and when that attribute is present it is the
  * answer instead of the body. Every channel therefore honours an explicit flag the same way.</p>
+ *
+ * <h2>Feature flag</h2>
+ * <p>All of the above is behind {@link GoFeatureFlags#FLAG_CONTACT_CATEGORY_TYPE} (default off).
+ * Every customization that applies these rules asks {@link #isEnabled()} first and, when it is
+ * off, returns {@code null} so the default CRUD runs exactly as before ETP-5791.</p>
  */
 public final class ContactTypeRules {
 
@@ -126,7 +133,20 @@ public final class ContactTypeRules {
   private static final String CONTACT_CATEGORY_SQL =
       "SELECT c_bp_group_id FROM c_bpartner WHERE c_bpartner_id = ?";
 
+  /** Environment-level evaluation: the flag is not targeted per account. */
+  private static final FeatureFlagContext ENVIRONMENT = FeatureFlagContext.forAccount(null);
+
   private ContactTypeRules() {
+  }
+
+  /**
+   * Toggle point of {@link GoFeatureFlags#FLAG_CONTACT_CATEGORY_TYPE}. A missing flag, an
+   * unreachable control plane or an evaluation error resolves to {@code false}: the rules stay off.
+   *
+   * @return {@code true} when the contact-type rules must be applied
+   */
+  public static boolean isEnabled() {
+    return GoFeatureFlags.isEnabled(GoFeatureFlags.FLAG_CONTACT_CATEGORY_TYPE, ENVIRONMENT);
   }
 
   /** The two type flags of a contact or a category. */

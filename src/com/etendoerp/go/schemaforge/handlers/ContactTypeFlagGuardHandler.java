@@ -39,6 +39,9 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  *
  * <p>Bound per entity with {@code @NeoExtension} on the two concrete subclasses, so every channel
  * (REST single, MCP) resolves it through the same dispatcher.</p>
+ *
+ * <p>Behind the {@code contact-category-type} feature flag: off, this pre-hook returns
+ * {@code null} and the tab saves through the default CRUD unchecked.</p>
  */
 public abstract class ContactTypeFlagGuardHandler implements NeoHandler {
 
@@ -46,7 +49,8 @@ public abstract class ContactTypeFlagGuardHandler implements NeoHandler {
 
   @Override
   public NeoResponse handle(NeoContext ctx) {
-    if (!ContactTypeRules.isCrudWrite(ctx) || ContactTypeRules.isCreate(ctx)) {
+    if (!ContactTypeRules.isEnabled() || !ContactTypeRules.isCrudWrite(ctx)
+        || ContactTypeRules.isCreate(ctx)) {
       return null;
     }
     try {
