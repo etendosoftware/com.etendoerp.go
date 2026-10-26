@@ -623,7 +623,7 @@ public class McpToolRouter {
     // ETP-5200: the link the agent hands the user. Header records only — a line has no app page.
     McpRecordUrls.addRecordUrl(flat, specName, recordId,
         McpToolRouterSupport.isPrimaryTab(adTab));
-    return wrapAsTextContent(flat);
+    return wrapAsTextContent(McpToolRouterSupport.unwrapSingleRecord(flat));
   }
 
   // ── etendo_create ────────────────────────────────────────────────────────

@@ -804,7 +804,8 @@ public class ToolRegistry {
 
     return new McpToolDefinition(
         McpConstants.TOOL_NEO_GET,
-        "Get a single record by ID from an Etendo API spec. Supports field projection "
+        "Get a single record by ID from an Etendo API spec. The record comes back as an object "
+            + "in `data` ({\"data\": {…}}), not a list. Supports field projection "
             + "(`fields` / view:\"summary\"). "
             + McpConstants.RECORD_URL_NOTE,
           buildObjectSchema(props, List.of("spec", McpConstants.PARAM_ENTITY, "id")));

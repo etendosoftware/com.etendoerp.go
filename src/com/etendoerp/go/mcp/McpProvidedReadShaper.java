@@ -75,7 +75,10 @@ final class McpProvidedReadShaper {
       page(wrapped.getJSONObject(KEY_RESPONSE), offset, limit);
     }
     project(wrapped, args);
-    return McpToolRouter.wrapAsTextContent(McpToolRouterSupport.flattenCoreResponse(wrapped));
+    JSONObject flat = McpToolRouterSupport.flattenCoreResponse(wrapped);
+    // etendo_get (no paging) answers one record as an object, as the generic get does.
+    return McpToolRouter.wrapAsTextContent(offset == null && limit == null
+        ? McpToolRouterSupport.unwrapSingleRecord(flat) : flat);
   }
 
   /**
