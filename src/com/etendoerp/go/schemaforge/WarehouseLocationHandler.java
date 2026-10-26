@@ -200,6 +200,12 @@ public class WarehouseLocationHandler implements NeoHandler {
    * existing C_Location" mode, so the check applies unconditionally on both create and update.
    */
   private static NeoResponse rejectIncompleteAddressPayload(JSONObject body, String countryId) {
+    // ETP-5806 — `structured-address-for-sepa` off: nothing to validate for fields that do not
+    // exist on the wire; fall back to the pre-ETP-5806 rule (country only).
+    if (!StructuredAddressComposer.isEnabled()) {
+      return countryId == null
+          ? NeoResponse.error(400, "Missing required field: country (C_Country_ID)") : null;
+    }
     List<String> missing = StructuredAddressComposer.missingMandatoryFields(
         nullIfEmpty(body.optString(FIELD_STREET_NAME, null)),
         nullIfEmpty(body.optString(FIELD_BUILDING_NUMBER, null)),
@@ -224,12 +230,20 @@ public class WarehouseLocationHandler implements NeoHandler {
   // ------------------------------------------------------------------ field mapping
 
   private static void applyGeoLocFields(JSONObject body, Location geoLoc) {
-    String streetName = nullIfEmpty(body.optString(FIELD_STREET_NAME, null));
-    String buildingNumber = nullIfEmpty(body.optString(FIELD_BUILDING_NUMBER, null));
-    String buildingName = nullIfEmpty(body.optString(FIELD_BUILDING_NAME, null));
-    geoLoc.setOBSEPAStreetName(streetName);
-    geoLoc.setOBSEPABuildingNumber(buildingNumber);
-    geoLoc.setOBSEPABuildingName(buildingName);
+    // ETP-5806 — see ContactsLocationAddressHandler#applyGeoLocFields for why the 3 fields are
+    // ignored entirely (not read, not written) while `structured-address-for-sepa` is off.
+    boolean structuredAddressEnabled = StructuredAddressComposer.isEnabled();
+    String streetName = structuredAddressEnabled
+        ? nullIfEmpty(body.optString(FIELD_STREET_NAME, null)) : null;
+    String buildingNumber = structuredAddressEnabled
+        ? nullIfEmpty(body.optString(FIELD_BUILDING_NUMBER, null)) : null;
+    String buildingName = structuredAddressEnabled
+        ? nullIfEmpty(body.optString(FIELD_BUILDING_NAME, null)) : null;
+    if (structuredAddressEnabled) {
+      geoLoc.setOBSEPAStreetName(streetName);
+      geoLoc.setOBSEPABuildingNumber(buildingNumber);
+      geoLoc.setOBSEPABuildingName(buildingName);
+    }
 
     // ETP-5806 — same compute-only-when-street-present rule as ContactsLocationAddressHandler.
     // See the comment there for the Classic-parity rationale.
@@ -267,10 +281,13 @@ public class WarehouseLocationHandler implements NeoHandler {
     json.put("addressLine2", orNull(geoLoc.getAddressLine2()));
     json.put(FIELD_CITY_NAME, orNull(geoLoc.getCityName()));
     json.put("postalCode", orNull(geoLoc.getPostalCode()));
-    // ETP-5806 — structured SEPA address fields, so the modal can pre-populate them.
-    json.put(FIELD_STREET_NAME, orNull(geoLoc.getOBSEPAStreetName()));
-    json.put(FIELD_BUILDING_NUMBER, orNull(geoLoc.getOBSEPABuildingNumber()));
-    json.put(FIELD_BUILDING_NAME, orNull(geoLoc.getOBSEPABuildingName()));
+    // ETP-5806 — structured SEPA address fields, so the modal can pre-populate them. Omitted
+    // entirely (not even as null) while `structured-address-for-sepa` is off.
+    if (StructuredAddressComposer.isEnabled()) {
+      json.put(FIELD_STREET_NAME, orNull(geoLoc.getOBSEPAStreetName()));
+      json.put(FIELD_BUILDING_NUMBER, orNull(geoLoc.getOBSEPABuildingNumber()));
+      json.put(FIELD_BUILDING_NAME, orNull(geoLoc.getOBSEPABuildingName()));
+    }
     if (geoLoc.getCountry() != null) {
       json.put(FIELD_COUNTRY, geoLoc.getCountry().getId());
       // ETP-5022: getIdentifier(), NOT getName(). getName() is the plain Hibernate getter —

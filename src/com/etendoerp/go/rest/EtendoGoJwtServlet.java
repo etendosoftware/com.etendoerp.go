@@ -73,6 +73,8 @@ import com.etendoerp.go.common.EtendoGoCorsServlet;
 import com.etendoerp.go.common.JwtAuthUtils;
 import com.etendoerp.go.common.ProtocolErrorAdapters;
 import com.etendoerp.go.common.PublicUrlResolver;
+import com.etendoerp.go.featureflags.FeatureFlagContext;
+import com.etendoerp.go.featureflags.GoFeatureFlags;
 import com.etendoerp.go.hubspot.HubSpotOutbox;
 import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.payment.TenantPaywallService;
@@ -255,6 +257,17 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String MISSING_TOKEN_MESSAGE = "Missing required field: token";
   private static final String FIELD_INCLUDE_SAMPLE_DATA = "includeSampleData";
   private static final String FIELD_ACCOUNT_EMAIL = "accountEmail";
+  /**
+   * ETP-5806 — backend-only feature flags surfaced to the onboarding bootstrap (no tenant exists
+   * yet at this point, so {@code SFWindowAccessMap}'s role-scoped {@code capabilities} map is not
+   * reachable here). The frontend reads {@code capabilities.<flag>} and never evaluates a flag
+   * itself — see {@code GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA}'s javadoc.
+   */
+  private static final String FIELD_CAPABILITIES = "capabilities";
+  private static final String CAPABILITY_STRUCTURED_ADDRESS = "structuredAddressForSepa";
+  /** Account-less evaluation context for the environment-level {@code structured-address-for-sepa} flag. */
+  private static final FeatureFlagContext STRUCTURED_ADDRESS_CONTEXT =
+      FeatureFlagContext.forAccount(null);
   private static final String FIELD_CURRENCY = "currency";
   /** Key of the resource a Stripe event carries under {@code data}. */
   private static final String STRIPE_EVENT_OBJECT = "object";
@@ -5970,6 +5983,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    */
   private boolean validateStructuredAddressBlock(OnboardingRequestData data,
       HttpServletResponse response) throws IOException {
+    // ETP-5806 — `structured-address-for-sepa` off: nothing to validate for fields the onboarding
+    // UI does not even render while the flag is off (defense in depth against a stale client that
+    // still sends them — ignored, not rejected, same contract as the NEO handlers).
+    if (!StructuredAddressComposer.isEnabled()) {
+      return true;
+    }
     boolean addressBlockStarted = StringUtils.isNotBlank(data.streetName)
         || StringUtils.isNotBlank(data.buildingNumber)
         || StringUtils.isNotBlank(data.buildingName)
@@ -6003,6 +6022,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    */
   private boolean validateStructuredAddressLength(OnboardingRequestData data,
       HttpServletResponse response) throws IOException {
+    // ETP-5806 — same reasoning as validateStructuredAddressBlock above.
+    if (!StructuredAddressComposer.isEnabled()) {
+      return true;
+    }
     List<String> tooLong = StructuredAddressComposer.fieldsExceedingMaxLength(data.streetName,
         data.buildingNumber, data.buildingName);
     if (tooLong.isEmpty()) {
@@ -7044,6 +7067,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       result.put(FIELD_ENVIRONMENT, buildSessionEnvironment(sessionRecord));
       result.put(FIELD_ROLE_LIST, loadSessionRoleList(sessionRecord));
       result.put(FIELD_CSRF_TOKEN, sessionRecord.getCsrfToken());
+      result.put(FIELD_CAPABILITIES, buildSessionCapabilities());
 
       response.setHeader(HEADER_CACHE_CONTROL, VALUE_NO_STORE);
       response.setHeader(HEADER_CONTENT_TYPE_OPTIONS, VALUE_NOSNIFF);
@@ -7057,6 +7081,18 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /**
+   * ETP-5806 — environment-level backend-only flags surfaced to the (pre-tenant) onboarding
+   * bootstrap. Currently only {@code structured-address-for-sepa}; add new backend-only onboarding-time
+   * flags here rather than inventing a second capabilities endpoint.
+   */
+  private static JSONObject buildSessionCapabilities() throws JSONException {
+    JSONObject capabilities = new JSONObject();
+    capabilities.put(CAPABILITY_STRUCTURED_ADDRESS,
+        GoFeatureFlags.isEnabled(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA, STRUCTURED_ADDRESS_CONTEXT));
+    return capabilities;
   }
 
   /**

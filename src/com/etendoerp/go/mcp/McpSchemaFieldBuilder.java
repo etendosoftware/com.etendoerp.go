@@ -621,9 +621,25 @@ final class McpSchemaFieldBuilder {
     return virtualFields;
   }
 
+  /**
+   * ETP-5806 — the 3 structured SEPA address columns, gated behind the backend-only
+   * {@code structured-address-for-sepa} flag (TTL 2026-11-15). Structural (checked by DB column
+   * name, same set {@link com.etendoerp.go.schemaforge.selector.policy.AddressVirtualSelectorPolicy}
+   * already special-cases for the published-name override), applying identically to any entity
+   * that happens to carry one of these 3 columns directly — e.g. {@code bpLocation}'s own table
+   * walk, the one case {@code resolveVirtualColumns} above does not cover since that entity reads
+   * {@code C_Location} as its own table rather than as a wrapper.
+   */
+  private static final java.util.Set<String> STRUCTURED_ADDRESS_COLUMNS = java.util.Set.of(
+      "EM_OBSEPA_STRTNM", "EM_OBSEPA_BLDGNB", "EM_OBSEPA_BLDGNM");
+
   private static boolean shouldIncludeSchemaColumn(Column col, java.util.Set<String> systemColumns,
       FieldMetadata fieldMetadata) {
     if (!col.isActive() || systemColumns.contains(col.getDBColumnName().toUpperCase())) {
+      return false;
+    }
+    if (STRUCTURED_ADDRESS_COLUMNS.contains(col.getDBColumnName().toUpperCase())
+        && !com.etendoerp.go.schemaforge.util.StructuredAddressComposer.isEnabled()) {
       return false;
     }
     return McpSchemaActionFields.isButtonColumn(col) || fieldMetadata.exposes(col);

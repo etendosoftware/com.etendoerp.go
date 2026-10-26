@@ -238,6 +238,42 @@ public final class GoFeatureFlags {
       "billing-reconciliation-schedule";
 
   /**
+   * ETP-5806 — whether the structured address fields (Street/Number/Building Name) are visible,
+   * writable and validated across the 4 address popups (Contacts, Warehouse, Business Partner
+   * location, onboarding's Company step), MCP, and the onboarding mandatory-address check.
+   * Relaunch flag for a feature built, reviewed and QA'd once already, then reverted at product's
+   * request before it shipped (TTL 2026-11-15 — by then the feature must be live, or this flag is
+   * reclassified as a permanent toggle).
+   *
+   * <p><b>Positive polarity, not inverted</b> — unlike {@link #FLAG_MCP_MODERN_ERA_DISABLED} or
+   * {@link #FLAG_BATCH_CALLOUT_SKIP_DISABLED}. {@code true} = feature visible/active; the default
+   * ({@code false}, every failure of this class) is "hidden", which is the required pre-launch
+   * state.
+   *
+   * <p><b>Both ends evaluate it, deliberately against the ETP-4966 "one flag, one evaluator"
+   * default</b> — because it must also hide <em>data</em> (3 fields), not just a UI entry point,
+   * the backend's answer is the single source of truth and the frontend never evaluates the flag
+   * itself: it reads {@code capabilities.structuredAddressForSepa} off {@code SFWindowAccessMap}'s
+   * response (populated here via {@code isEnabled(FLAG_STRUCTURED_ADDRESS_FOR_SEPA, ...)}) and the
+   * onboarding session bootstrap, and never imports a flag key of its own. See
+   * {@code docs/neo-headless.md} §8c and the ETP-5806 plan for the full architecture.
+   *
+   * <p><b>Environment level for now</b> (plain boolean, no per-account targeting) — the TTL is a
+   * hard global deadline, not a staged per-tenant rollout; revisit if that changes.
+   * Locally {@code etendo.go.flags.structured-address-for-sepa} / {@code ETGO_FLAG_STRUCTURED_ADDRESS_FOR_SEPA}.
+   * Must also be created as a boolean setting in the ConfigCat dashboard before it can be toggled
+   * in any environment with an SDK key configured — an undeclared ConfigCat setting resolves to
+   * this class's code default ({@code false}) regardless of local configuration.
+   *
+   * <p>Callers: {@code SFWindowAccessMap} (capability), {@code ContactsLocationAddressHandler},
+   * {@code WarehouseLocationHandler}, {@code BpLocationHandler} (NEO read/write gating),
+   * {@code AddressVirtualSelectorPolicy}/{@code McpSchemaFieldBuilder} (MCP schema gating),
+   * {@code StructuredAddressComposer} and {@code EtendoGoJwtServlet} (mandatory-field
+   * validation).
+   */
+  public static final String FLAG_STRUCTURED_ADDRESS_FOR_SEPA = "structured-address-for-sepa";
+
+  /**
    * ConfigCat SDK key. Set ⇒ flags come from ConfigCat and can be flipped without a restart; unset
    * ⇒ {@link PropertiesFeatureProvider} resolves them from local configuration.
    */

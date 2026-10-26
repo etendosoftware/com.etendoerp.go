@@ -65,7 +65,7 @@ import com.etendoerp.go.schemaforge.util.StructuredAddressComposer.ComposedAddre
  *
  * <p>Country/Region/City/Postal and the base record lifecycle (id generation, client/org, active
  * flag) are left to the generic CRUD fallthrough (this handler returns {@code null} for those)
- * exactly as before this change — only the structured-address slice is intercepted.
+ * exactly as before this change — only the structured-address-for-sepa slice is intercepted.
  *
  * <p>{@code @NeoExtension} only, no {@code @Named}: a brand-new handler has nothing to migrate and
  * CLAUDE.md's NeoHandler Pattern section asks for the annotation-only binding on new code (see
@@ -103,6 +103,13 @@ public class BpLocationHandler implements NeoHandler {
     if (context == null || context.getEndpointType() != NeoEndpointType.CRUD) {
       return null;
     }
+    // ETP-5806 — `structured-address-for-sepa` off: never intercept. The 3 fields fall through to
+    // generic CRUD, which already drops them (no ETGO_SF_FIELD row for this entity — see class
+    // javadoc), so a stray value from a stale client is silently ignored, never persisted and
+    // never rejected, exactly as the flag's write-path contract requires.
+    if (!StructuredAddressComposer.isEnabled()) {
+      return null;
+    }
     String method = context.getHttpMethod();
     String recordId = context.getRecordId();
     if (!isCreateOrUpdate(method, recordId)) {
@@ -129,7 +136,7 @@ public class BpLocationHandler implements NeoHandler {
   }
 
   /**
-   * Resolves the effective structured-address fields (body value, or {@code existing}'s own value
+   * Resolves the effective structured-address-for-sepa fields (body value, or {@code existing}'s own value
    * when the body omits the key), validates them, and — when valid — stashes the result on
    * {@link #pendingStreetName} and its siblings for {@link #afterHandle} to persist.
    *
@@ -192,6 +199,12 @@ public class BpLocationHandler implements NeoHandler {
     if (context == null || context.getEndpointType() != NeoEndpointType.CRUD) {
       return null;
     }
+    // ETP-5806 — off: never enrich a GET with the 3 fields (they must be omitted from reads, not
+    // just unwritable) and never run the pending-write persistence (handle() never set it when
+    // off, so hasPendingWrite is always false here anyway — this is belt-and-suspenders).
+    if (!StructuredAddressComposer.isEnabled()) {
+      return null;
+    }
     String method = context.getHttpMethod();
     NeoResponse previousResult = context.getPreviousResult();
     if (previousResult == null || previousResult.getBody() == null) {
@@ -242,7 +255,7 @@ public class BpLocationHandler implements NeoHandler {
     try {
       Location geoLoc = OBDal.getInstance().get(Location.class, id);
       if (geoLoc == null) {
-        log.warn("BpLocationHandler: record {} vanished before structured-address write", id);
+        log.warn("BpLocationHandler: record {} vanished before structured-address-for-sepa write", id);
         return;
       }
       geoLoc.setOBSEPAStreetName(pendingStreetName);

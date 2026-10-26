@@ -21,6 +21,9 @@ import java.util.List;
 
 import org.apache.commons.lang3.StringUtils;
 
+import com.etendoerp.go.featureflags.FeatureFlagContext;
+import com.etendoerp.go.featureflags.GoFeatureFlags;
+
 /**
  * Composes {@code C_Location.Address1}/{@code Address2} from the structured SEPA address fields
  * (ETP-5806): Street Name, Building Number and Building Name.
@@ -55,7 +58,26 @@ public final class StructuredAddressComposer {
   private static final int BUILDING_NUMBER_MAX_LENGTH = 16;
   private static final int BUILDING_NAME_MAX_LENGTH = 35;
 
+  /** Account-less evaluation context — this flag is environment-level, never per-account. */
+  private static final FeatureFlagContext ENVIRONMENT = FeatureFlagContext.forAccount(null);
+
   private StructuredAddressComposer() {
+  }
+
+  /**
+   * Whether the {@code structured-address-for-sepa} backend-only flag (ETP-5806, TTL 2026-11-15) is on.
+   *
+   * <p>The 3 call sites below — {@link #missingMandatoryFields}, {@link #fieldsExceedingMaxLength}
+   * and {@link #composeAddressLines} — are each only meaningful once the structured fields exist
+   * on the wire; every handler that calls into this composer MUST check this first and, when
+   * {@code false}, skip straight to the pre-ETP-5806 legacy path (country-only mandatoriness,
+   * {@code addressLine1}/{@code addressLine2} passed through as given) rather than calling any of
+   * them. Centralized here rather than duplicated per handler because the composer is already the
+   * one place {@code ContactsLocationAddressHandler}, {@code WarehouseLocationHandler} and {@code
+   * BpLocationHandler} share for structured-address-for-sepa logic.
+   */
+  public static boolean isEnabled() {
+    return GoFeatureFlags.isEnabled(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA, ENVIRONMENT);
   }
 
   /** The two computed address lines. Either may be {@code null} when empty. */
@@ -114,7 +136,7 @@ public final class StructuredAddressComposer {
   }
 
   /**
-   * The structured-address mandatory fields (ETP-5806 product decision: Street, Number, City and
+   * The structured-address-for-sepa mandatory fields (ETP-5806 product decision: Street, Number, City and
    * Country are mandatory in Etendo Go, stricter than Classic's optional SEPA fields) that are
    * missing from the given values.
    *
@@ -143,7 +165,7 @@ public final class StructuredAddressComposer {
   }
 
   /**
-   * The structured-address fields whose value exceeds the DB column's own length — see the
+   * The structured-address-for-sepa fields whose value exceeds the DB column's own length — see the
    * constants' doc comment above for why this check exists. A blank/{@code null} value is never
    * "too long" regardless of length (that is {@link #missingMandatoryFields}'s concern).
    *

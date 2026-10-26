@@ -36,6 +36,7 @@ import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.common.geography.Location;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
+import com.etendoerp.go.schemaforge.util.StructuredAddressComposer;
 
 /**
  * Declares the {@code C_Location} columns that the address wrapper entities expose as if they
@@ -106,6 +107,13 @@ public final class AddressVirtualSelectorPolicy {
   private static final Set<String> VIRTUAL_COLUMNS = new LinkedHashSet<>(List.of(
       "Address1", "Address2", "City", "Postal", COLUMN_COUNTRY, COLUMN_REGION, "RegionName",
       "EM_OBSEPA_StrtNm", "EM_OBSEPA_BldgNb", "EM_OBSEPA_BldgNm"));
+
+  /**
+   * The 3 structured SEPA columns, gated behind {@code structured-address-for-sepa}
+   * (backend-only flag, TTL 2026-11-15) — see {@link #resolveVirtualColumns}.
+   */
+  private static final Set<String> STRUCTURED_ADDRESS_COLUMNS = Set.of(
+      "EM_OBSEPA_STRTNM", "EM_OBSEPA_BLDGNB", "EM_OBSEPA_BLDGNM");
 
   /**
    * The wrapper's OWN column that the handler resolves instead of the caller (ETP-5368).
@@ -276,9 +284,15 @@ public final class AddressVirtualSelectorPolicy {
     if (!isAddressWrapper(entity)) {
       return List.of();
     }
+    boolean structuredAddressEnabled = StructuredAddressComposer.isEnabled();
     Map<String, Column> byName = locationColumns();
     List<Column> resolved = new ArrayList<>();
     for (String columnName : VIRTUAL_COLUMNS) {
+      // ETP-5806 — `structured-address-for-sepa` off: an MCP schema walk must not advertise the 3
+      // structured columns, same "omit entirely" contract as the REST handlers.
+      if (!structuredAddressEnabled && STRUCTURED_ADDRESS_COLUMNS.contains(columnName.toUpperCase())) {
+        continue;
+      }
       Column column = byName.get(columnName.toUpperCase());
       if (column != null) {
         resolved.add(column);

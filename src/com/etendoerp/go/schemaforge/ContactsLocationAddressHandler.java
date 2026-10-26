@@ -289,6 +289,12 @@ public class ContactsLocationAddressHandler implements NeoHandler {
     if (locationAddressId != null) {
       return null;
     }
+    // ETP-5806 — `structured-address-for-sepa` off: nothing to validate for fields that do not exist on
+    // the wire; fall back to the pre-ETP-5806 rule (country only; addressLine1 is not enforced
+    // server-side, matching the original Mode B check before this feature existed).
+    if (!StructuredAddressComposer.isEnabled()) {
+      return countryId == null ? NeoResponse.error(400, "Missing required field: country (C_Country_ID)") : null;
+    }
     List<String> missing = StructuredAddressComposer.missingMandatoryFields(
         nullIfEmpty(body.optString(FIELD_STREET_NAME, null)),
         nullIfEmpty(body.optString(FIELD_BUILDING_NUMBER, null)),
@@ -311,6 +317,10 @@ public class ContactsLocationAddressHandler implements NeoHandler {
    * reaching {@code OBDal.flush()} as a raw data-truncation SQL exception (a bare 500).
    */
   private static NeoResponse rejectOversizedFields(JSONObject body) {
+    // ETP-5806 — fields that do not exist on the wire while the flag is off cannot overflow.
+    if (!StructuredAddressComposer.isEnabled()) {
+      return null;
+    }
     List<String> tooLong = StructuredAddressComposer.fieldsExceedingMaxLength(
         nullIfEmpty(body.optString(FIELD_STREET_NAME, null)),
         nullIfEmpty(body.optString(FIELD_BUILDING_NUMBER, null)),
@@ -354,13 +364,21 @@ public class ContactsLocationAddressHandler implements NeoHandler {
       // matching applyGeoLocFields' own set-if-provided semantics for that one field.
       String effectiveCountryForValidation =
           countryId != null ? countryId : countryIdOf(geoLoc);
-      List<String> missing = StructuredAddressComposer.missingMandatoryFields(
-          nullIfEmpty(body.optString(FIELD_STREET_NAME, null)),
-          nullIfEmpty(body.optString(FIELD_BUILDING_NUMBER, null)),
-          nullIfEmpty(body.optString(FIELD_CITY_NAME, null)),
-          effectiveCountryForValidation);
-      if (!missing.isEmpty()) {
-        return NeoResponse.error(400, "Missing required field(s): " + String.join(", ", missing));
+      // ETP-5806 — `structured-address-for-sepa` off: nothing to validate for fields that do not
+      // exist on the wire; fall back to the pre-ETP-5806 rule (country only).
+      if (!StructuredAddressComposer.isEnabled()) {
+        if (effectiveCountryForValidation == null) {
+          return NeoResponse.error(400, "Missing required field: country (C_Country_ID)");
+        }
+      } else {
+        List<String> missing = StructuredAddressComposer.missingMandatoryFields(
+            nullIfEmpty(body.optString(FIELD_STREET_NAME, null)),
+            nullIfEmpty(body.optString(FIELD_BUILDING_NUMBER, null)),
+            nullIfEmpty(body.optString(FIELD_CITY_NAME, null)),
+            effectiveCountryForValidation);
+        if (!missing.isEmpty()) {
+          return NeoResponse.error(400, "Missing required field(s): " + String.join(", ", missing));
+        }
       }
       NeoResponse tooLong = rejectOversizedFields(body);
       if (tooLong != null) {
@@ -522,12 +540,23 @@ public class ContactsLocationAddressHandler implements NeoHandler {
 
   private static void applyGeoLocFields(JSONObject body,
       org.openbravo.model.common.geography.Location geoLoc) throws Exception {
-    String streetName = nullIfEmpty(body.optString(FIELD_STREET_NAME, null));
-    String buildingNumber = nullIfEmpty(body.optString(FIELD_BUILDING_NUMBER, null));
-    String buildingName = nullIfEmpty(body.optString(FIELD_BUILDING_NAME, null));
-    geoLoc.setOBSEPAStreetName(streetName);
-    geoLoc.setOBSEPABuildingNumber(buildingNumber);
-    geoLoc.setOBSEPABuildingName(buildingName);
+    // ETP-5806 — `structured-address-for-sepa` backend-only flag (TTL 2026-11-15). While off, the 3
+    // structured fields are ignored entirely: never read off the body (so a stray value from a
+    // stale client is dropped, not persisted and not validated) and never written, so a record
+    // that already has structured data from before the flag was switched off keeps it untouched
+    // instead of being clobbered by this write's absence of the fields.
+    boolean structuredAddressEnabled = StructuredAddressComposer.isEnabled();
+    String streetName = structuredAddressEnabled
+        ? nullIfEmpty(body.optString(FIELD_STREET_NAME, null)) : null;
+    String buildingNumber = structuredAddressEnabled
+        ? nullIfEmpty(body.optString(FIELD_BUILDING_NUMBER, null)) : null;
+    String buildingName = structuredAddressEnabled
+        ? nullIfEmpty(body.optString(FIELD_BUILDING_NAME, null)) : null;
+    if (structuredAddressEnabled) {
+      geoLoc.setOBSEPAStreetName(streetName);
+      geoLoc.setOBSEPABuildingNumber(buildingNumber);
+      geoLoc.setOBSEPABuildingName(buildingName);
+    }
 
     // ETP-5806 — Address1/Address2 are no longer user-editable in the UI; they are computed here
     // from the structured fields, replicating Classic's own rule: the lines are (re)computed only
@@ -537,6 +566,7 @@ public class ContactsLocationAddressHandler implements NeoHandler {
     // mandatory for every NEW save (rejectUnusableCreatePayload / the update check above), this
     // branch is the one every fresh save actually takes; the raw addressLine1/addressLine2 the
     // client may still send are deliberately ignored in that case — the composed value wins.
+    // With the flag off, `streetName` is always null here, so this always takes the legacy branch.
     if (streetName != null) {
       ComposedAddress composed =
           StructuredAddressComposer.composeAddressLines(streetName, buildingNumber, buildingName);
@@ -803,9 +833,14 @@ public class ContactsLocationAddressHandler implements NeoHandler {
 
     // ETP-5806 — structured SEPA address fields, so the modal can pre-populate Street/Number/
     // Building Name and so an MCP read sees them too (same response shape on every channel).
-    putOrNull(locationJson, FIELD_STREET_NAME, geoLoc.getOBSEPAStreetName());
-    putOrNull(locationJson, FIELD_BUILDING_NUMBER, geoLoc.getOBSEPABuildingNumber());
-    putOrNull(locationJson, FIELD_BUILDING_NAME, geoLoc.getOBSEPABuildingName());
+    // Gated behind `structured-address-for-sepa` (backend-only flag, TTL 2026-11-15): while off,
+    // the 3 keys are omitted from the response entirely — not nulled, not present-and-empty —
+    // matching the plan's "hide data, not just a UI entry point" requirement.
+    if (StructuredAddressComposer.isEnabled()) {
+      putOrNull(locationJson, FIELD_STREET_NAME, geoLoc.getOBSEPAStreetName());
+      putOrNull(locationJson, FIELD_BUILDING_NUMBER, geoLoc.getOBSEPABuildingNumber());
+      putOrNull(locationJson, FIELD_BUILDING_NAME, geoLoc.getOBSEPABuildingName());
+    }
   }
 
   private static void putOrNull(JSONObject json, String key, String value) throws Exception {
