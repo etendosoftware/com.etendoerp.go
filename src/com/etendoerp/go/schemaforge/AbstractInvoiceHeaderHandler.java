@@ -830,6 +830,78 @@ public abstract class AbstractInvoiceHeaderHandler {
     rec.put("hasRectifications", result);
   }
 
+  /** Response key of {@link #enrichLinkedOrders}: the orders reached through the invoice lines. */
+  protected static final String FIELD_LINKED_ORDERS = "linkedOrders";
+
+  /**
+   * Distinct orders reached through the invoice's own lines ({@code C_InvoiceLine.C_OrderLine_ID}),
+   * excluding the {@code ETGO_DTO} total-discount line. Bound twice: invoice id, discount product.
+   */
+  static final String LINKED_ORDERS_SQL =
+      "SELECT o.c_order_id, o.documentno, o.docstatus, o.grandtotal, cur.iso_code, o.dateordered, "
+          + "  dt.docsubtypeso "
+          + "FROM c_order o "
+          + "LEFT JOIN c_currency cur ON cur.c_currency_id = o.c_currency_id "
+          + "LEFT JOIN c_doctype dt ON dt.c_doctype_id = o.c_doctypetarget_id "
+          + "WHERE o.c_order_id IN ("
+          + "  SELECT ol.c_order_id FROM c_invoiceline il "
+          + "  JOIN c_orderline ol ON ol.c_orderline_id = il.c_orderline_id "
+          + "  WHERE il.c_invoice_id = ? AND il.isactive = 'Y' "
+          + "    AND (il.m_product_id IS NULL OR il.m_product_id <> ?)) "
+          + "ORDER BY o.dateordered, o.documentno";
+
+  /**
+   * Injects {@code linkedOrders} into the invoice detail record (ETP-5828): every order one of the
+   * invoice's lines comes from, through {@code C_InvoiceLine.C_OrderLine_ID}. The header's
+   * {@code C_Order_ID} cannot answer this — since ETP-5381 it is blanked when the lines come from
+   * more than one order (Classic's rule) — so an invoice built from several orders would show none
+   * of them as related documents. Same placement and contract as the sales handler's
+   * {@code linkedShipments}: detail GET only, best-effort (the key stays absent on failure).
+   *
+   * <p>Each entry carries what the related-documents order chip renders: {@code id},
+   * {@code documentNo}, {@code documentStatus}, {@code grandTotalAmount},
+   * {@code currency$_identifier} (ISO code), {@code orderDate} ({@code yyyy-MM-dd}) and
+   * {@code isQuotation} ({@code DocSubTypeSO = 'OB'}: a sales invoice can come from a quotation).
+   *
+   * @param rec
+   *     the detail record to enrich
+   * @param invoiceId
+   *     the invoice id
+   */
+  @SuppressWarnings("java:S2077") // constant SQL, every value is bound
+  protected void enrichLinkedOrders(JSONObject rec, String invoiceId) {
+    if (StringUtils.isBlank(invoiceId)) {
+      return;
+    }
+    Connection conn = OBDal.getReadOnlyInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(LINKED_ORDERS_SQL)) {
+      ps.setString(1, invoiceId);
+      ps.setString(2, TotalDiscountService.DISCOUNT_PRODUCT_ID);
+      JSONArray orders = new JSONArray();
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          JSONObject o = new JSONObject();
+          o.put("id", rs.getString(1));
+          o.put("documentNo", rs.getString(2));
+          o.put("documentStatus", rs.getString(3));
+          BigDecimal total = rs.getBigDecimal(4);
+          o.put(FIELD_GRAND_TOTAL_AMOUNT, total != null ? total : BigDecimal.ZERO);
+          String iso = rs.getString(5);
+          o.put("currency$_identifier", iso != null ? iso : JSONObject.NULL);
+          java.sql.Date ordered = rs.getDate(6);
+          if (ordered != null) {
+            o.put("orderDate", ordered.toString());
+          }
+          o.put("isQuotation", "OB".equals(rs.getString(7)));
+          orders.put(o);
+        }
+      }
+      rec.put(FIELD_LINKED_ORDERS, orders);
+    } catch (Exception e) {
+      log.warn("Could not enrich linked orders for invoice {}: {}", invoiceId, e.getMessage());
+    }
+  }
+
 
   /**
    * Adjusts {@code grandTotalAmount} and {@code outstandingAmount} for a draft invoice carrying

@@ -3319,7 +3319,7 @@ through `NeoHandler#responseEnrichedFields()`, and the MCP unions them into the 
 (from `FollowUpSupport.responseFields()`, only when a flow is registered) and their subtype key. It
 is read by the projection validator only: nothing is filtered, renamed or made writable by it. The
 goods shipment / receipt line handler (`AbstractInOutLineHandler`) declares `invoicedQuantity` and
-`productCode` (`orderQuantity` is a spec field already). The other keys the invoice headers inject on read (`linkedShipments` / `linkedReceipts`, `docTypeLocked`, `isRectificative`, …) are not
+`productCode` (`orderQuantity` is a spec field already). The other keys the invoice headers inject on read (`linkedShipments` / `linkedReceipts`, `linkedOrders`, `docTypeLocked`, `isRectificative`, …) are not
 declared yet and are still reported if requested explicitly.
 
 #### 4.12.6 `MCP_CONFIG` — the MCP's own configuration column (ETP-5184)
@@ -4232,6 +4232,26 @@ behaviour is unchanged. Channels as noted per field:
   flattened record has it at top level); REST puts it at the root of the body. `import-settings` builds
   its body with `okData` (`{"response":{"data":{"saved":true}}}`), so over REST `messages` sits at the
   root next to `response`, not inside it.
+
+##### Orders of an invoice resolved from its lines — `linkedOrders` (ETP-5828)
+
+Both invoice headers inject `linkedOrders` on the **detail GET only** (same placement and contract as
+`linkedShipments` / `linkedReceipts`), from `AbstractInvoiceHeaderHandler#enrichLinkedOrders`: the
+DISTINCT orders reached through the invoice's own lines (`C_InvoiceLine.C_OrderLine_ID →
+C_OrderLine.C_Order_ID`), active lines only, excluding the `ETGO_DTO` total-discount line
+(`TotalDiscountService.DISCOUNT_PRODUCT_ID`), ordered by `DateOrdered`, `DocumentNo`. The header's
+`C_Order_ID` cannot answer this: since ETP-5381 (`InvoiceLineHandler#syncInvoiceOrderReferenceAfterLineSave`,
+Classic's rule) it is blanked when the lines come from more than one order — that rule stays — so an
+invoice built from several orders showed none of them as related documents.
+
+Each entry: `{id, documentNo, documentStatus, grandTotalAmount, currency$_identifier, orderDate, isQuotation}`
+— `currency$_identifier` is the ISO code (what the related-documents chip formats the amount with,
+same key as `listInvoices`), `orderDate` is `yyyy-MM-dd` (absent when null), `isQuotation` is
+`C_DocType.DocSubTypeSO = 'OB'` of the order's target doc type (a sales invoice can come from a
+quotation). An invoice with no order-linked line answers `[]`. Best-effort: on a SQL failure the key
+is absent and a warning is logged. The reverse direction (order → invoices, `listInvoices`,
+`OrderInvoiceListSupport`) already joins through the invoice lines, for sales and purchase alike.
+Not declared in `responseEnrichedFields()`, like the other detail-only keys (§4.12.5).
 
 ##### Document exchange rate (ETP-5840)
 
