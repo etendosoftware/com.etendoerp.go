@@ -131,7 +131,10 @@ public final class NeoQuotaCreateCheck {
     flush();
     for (Map.Entry<Property, QuotaClientCache.Entry> child : checkedChildren.entrySet()) {
       String childEntity = child.getKey().getTargetEntity().getName();
-      idsByEntity.put(childEntity, childIds(child.getKey(), headerId));
+      // Merge, never replace: a child collection may target the header's own entity, or two
+      // collections the same entity, and each must keep the ids the others contributed.
+      idsByEntity.computeIfAbsent(childEntity, name -> new ArrayList<>())
+          .addAll(childIds(child.getKey(), headerId));
       checked.put(childEntity, child.getValue());
     }
     checkAll(guard, checked, idsByEntity);

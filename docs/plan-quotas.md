@@ -273,13 +273,25 @@ NEO create of a sales invoice is checked against an exact count.
 - A reversal created by the void process is not refused (processes are not an enforcement
   point, §2), but it is counted if it matches.
 
-**Restricting on the document type: use `transactionDocument`, not `documentType`.** To count only
-one kind of sales invoice — for example the standard ones, leaving rectificatives out — restrict on
-the invoice's target document type, `C_DocTypeTarget_ID`:
+**Restricting on the document type: use `transactionDocument`, not `documentType`.** A restriction
+on the kind of invoice goes through the invoice's target document type, `C_DocTypeTarget_ID`. The
+document category alone does not separate standard invoices from the others: `ARI` (AR invoice) is
+also the category of return and rectificative document types. Whether those count is the
+operator's choice — counting them is a legitimate setup. To leave them **out**, add their flags:
 
-| Field | Value |
+| To count | HQL Restriction |
 |---|---|
-| HQL Restriction | `e.salesTransaction = true and e.transactionDocument.documentCategory = 'ARI'` |
+| every sales invoice | `e.salesTransaction = true` |
+| `ARI` invoices, returns excluded | `e.salesTransaction = true and e.transactionDocument.documentCategory = 'ARI' and e.transactionDocument.return = false` |
+| `ARI` invoices, returns and rectificatives excluded | `e.salesTransaction = true and e.transactionDocument.documentCategory = 'ARI' and e.transactionDocument.return = false and e.transactionDocument.etsgIsRectificative = false` |
+
+`return` is `C_DocType.IsReturn` (core). `etsgIsRectificative` is `C_DocType.EM_Etsg_Isrectificative`,
+added by the module `com.etendoerp.sif.general`: the last restriction only works where that module
+is installed, and on an instance without it the save-time validation rejects the unknown property.
+Checked on 2026-10-26 against the local database with these exact fragments (over `DocumentType`,
+every client): 99 `ARI` document types; 90 once returns are excluded (9 are returns); 47 once
+rectificatives are excluded too (43 are rectificatives). **Verify on your data** which document
+types your tenants use before promising what a cap includes.
 
 A join is fine: the write check matches the inserted row with the full HQL restriction in the
 create's own transaction (§2). `e.documentType` (`C_DocType_ID`) does not hold at create time on

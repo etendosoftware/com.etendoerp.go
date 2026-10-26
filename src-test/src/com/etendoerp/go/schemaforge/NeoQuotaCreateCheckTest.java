@@ -316,6 +316,38 @@ class NeoQuotaCreateCheckTest {
       assertRefusal(refused.response());
     }
 
+    /**
+     * Two child collections targeting the same entity (or one targeting the header's own) must
+     * both reach the check: the ids of the second merge with the first, never replace them.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void twoChildCollectionsOfTheSameEntityAreBothChecked() {
+      when(guard.entryIfChecked(LINE_ENTITY)).thenReturn(Optional.of(entry));
+      Property first = lineCollection();
+      Property second = lineCollection();
+      Property otherParent = mock(Property.class);
+      when(otherParent.getName()).thenReturn("secondaryInvoice");
+      when(second.getReferencedProperty()).thenReturn(otherParent);
+      Entity entity = mock(Entity.class);
+      when(entity.getProperties()).thenReturn(Arrays.asList(first, second));
+      BaseOBObject header = row(HEADER_ENTITY, HEADER_ID);
+      when(header.getEntity()).thenReturn(entity);
+      Query<String> firstQuery = mock(Query.class, RETURNS_SELF);
+      when(firstQuery.list()).thenReturn(new ArrayList<>(List.of("L-1", "L-2")));
+      Query<String> secondQuery = mock(Query.class, RETURNS_SELF);
+      when(secondQuery.list()).thenReturn(new ArrayList<>(List.of("L-3")));
+      when(session.createQuery("select e.id from InvoiceLine e where e.invoice.id = :headerId",
+          String.class)).thenReturn(firstQuery);
+      when(session.createQuery(
+          "select e.id from InvoiceLine e where e.secondaryInvoice.id = :headerId", String.class))
+          .thenReturn(secondQuery);
+
+      NeoQuotaCreateCheck.requireAllowedDocument(header, guard);
+
+      verify(guard).refusalFor(entry, LINE_ENTITY, List.of("L-1", "L-2", "L-3"));
+    }
+
     @Test
     void childCollectionsKeepsOnlyOneToManyChildrenWithAParentAndATarget() {
       Property noParent = lineCollection();
