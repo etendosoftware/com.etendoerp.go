@@ -93,8 +93,10 @@ final class ReturnDocumentAvailability {
         docNos.append(i == 0 ? "" : ", ").append(previous.optJSONObject(i).optString("documentNo"));
       }
       return Map.of(ACTION_CREATE_RETURN_INVOICE, "This return already has a factura "
-          + "rectificativa (" + docNos + "); calling it again would NOT be refused and would "
-          + "create a second one.");
+          + "rectificativa (" + docNos + "); calling it again is refused with 409 "
+          + ReturnShipmentUtils.ERROR_RETURN_INVOICE_ALREADY_EXISTS
+          + " and creates nothing, unless "
+          + ReturnShipmentUtils.PARAM_ALLOW_DUPLICATE + ":true is passed.");
     } catch (OBException e) {
       log.debug("Could not read the rectificativas of return {}: {}", inout.getId(), e.getMessage());
       return Collections.emptyMap();
