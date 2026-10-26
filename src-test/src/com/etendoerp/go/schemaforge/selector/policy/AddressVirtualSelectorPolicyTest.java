@@ -24,6 +24,7 @@ import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
@@ -46,6 +47,7 @@ import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.ad.ui.Tab;
 
+import com.etendoerp.go.featureflags.GoFeatureFlags;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 
 /**
@@ -57,6 +59,11 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
  * signal we want. The cases that ARE about a wrapper have to get past the guard by definition, so
  * they stub that one query through {@link #stubLocationColumns}; they must never be rewritten to
  * avoid it, because what they assert only means anything once the column really resolved.</p>
+ *
+ * <p>Also the ETP-5806 {@code structured-address-for-sepa} flag-OFF branch of
+ * {@link AddressVirtualSelectorPolicy#resolveVirtualColumns}, with
+ * {@link GoFeatureFlags#isEnabled} stubbed to {@code false} directly, independent of the local
+ * {@code Openbravo.properties} toggle: the 3 structured SEPA columns are excluded.
  *
  * @covers com.etendoerp.go.schemaforge.selector.policy.AddressVirtualSelectorPolicy
  */
@@ -315,6 +322,35 @@ public class AddressVirtualSelectorPolicyTest {
           entityOnTable(WRAPPER_TABLE));
 
       assertEquals(3, resolved.size());
+    }
+  }
+
+  /**
+   * ETP-5806 — with {@code structured-address-for-sepa} off, a wrapper's schema walk must exclude
+   * the 3 structured SEPA columns entirely, the same "omit, don't null" contract as the REST
+   * handlers' GET response. Other, pre-existing virtual columns the wrapper declares are
+   * unaffected by the flag.
+   */
+  @Test
+  public void wrapperExcludesTheStructuredAddressColumnsWhenTheFlagIsOff() {
+    Map<String, String> columns = new LinkedHashMap<>();
+    columns.put("EM_OBSEPA_StrtNm", "oBSEPAStreetName");
+    columns.put("EM_OBSEPA_BldgNb", "oBSEPABuildingNumber");
+    columns.put("EM_OBSEPA_BldgNm", "oBSEPABuildingName");
+    columns.put("Address1", "addressLine1");
+
+    try (MockedStatic<OBDal> dal = mockStatic(OBDal.class);
+         MockedStatic<ModelProvider> models = mockStatic(ModelProvider.class);
+         MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class)) {
+      stubLocationColumns(dal, models, columns);
+      flags.when(() -> GoFeatureFlags.isEnabled(
+          eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(false);
+
+      List<Column> resolved = AddressVirtualSelectorPolicy.resolveVirtualColumns(
+          entityOnTable(WRAPPER_TABLE));
+
+      assertEquals(1, resolved.size());
+      assertEquals("Address1", resolved.get(0).getDBColumnName());
     }
   }
 

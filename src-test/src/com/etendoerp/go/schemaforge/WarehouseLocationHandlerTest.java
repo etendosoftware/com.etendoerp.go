@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.ArgumentMatchers.any;
@@ -50,6 +51,8 @@ import org.openbravo.model.common.geography.Country;
 import org.openbravo.model.common.geography.Location;
 import org.openbravo.model.common.geography.Region;
 
+import com.etendoerp.go.featureflags.GoFeatureFlags;
+
 /**
  * Unit tests for {@link WarehouseLocationHandler}.
  *
@@ -60,6 +63,10 @@ import org.openbravo.model.common.geography.Region;
  * three public-facing flows. Also the ETP-5806 structured-address rules: mandatory
  * streetName/buildingNumber/cityName/country, the oversized-field 400 (the former raw-SQL 500),
  * and address-line recomposition over any raw addressLine1/addressLine2 the body also sends.
+ * Also the ETP-5806 {@code structured-address-for-sepa} flag-OFF branch, with
+ * {@link GoFeatureFlags#isEnabled} stubbed to {@code false} so the suite is independent of the
+ * local {@code Openbravo.properties} toggle: only {@code country} is mandatory, the 3 structured
+ * fields are never read nor written, and a GET response omits their keys entirely.
  *
  * @covers com.etendoerp.go.schemaforge.WarehouseLocationHandler
  */
@@ -431,6 +438,96 @@ class WarehouseLocationHandlerTest {
     assertNotNull(r);
     assertEquals(500, r.getHttpStatus());
     verify(sessionHandler).rollback();
+  }
+
+  // ── ETP-5806: structured-address-for-sepa flag OFF ─────────────────────
+
+  /** Stubs {@link GoFeatureFlags#isEnabled} for the {@code structured-address-for-sepa} flag only. */
+  private MockedStatic<GoFeatureFlags> mockStructuredAddressFlag(boolean enabled) {
+    MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class);
+    flags.when(() -> GoFeatureFlags.isEnabled(
+        eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(enabled);
+    return flags;
+  }
+
+  /**
+   * Flag off: only {@code country} is mandatory on create — streetName/buildingNumber/cityName
+   * are not required, and the legacy raw addressLine1 is used as given.
+   */
+  @Test
+  void testCreateFlagOffOnlyRequiresCountryNotStructuredFields() throws Exception {
+    Location geoLoc = mock(Location.class);
+    when(geoLoc.getId()).thenReturn("geo-flag-off-1");
+    when(obProvider.get(Location.class)).thenReturn(geoLoc);
+
+    JSONObject body = new JSONObject();
+    body.put("country", "country-x");
+    body.put("addressLine1", "Legacy free-text line");
+    // streetName, buildingNumber, buildingName and cityName intentionally omitted.
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(false)) {
+      NeoResponse r = handler.handle(buildContext("POST", null, body));
+
+      assertNotNull(r);
+      assertEquals(201, r.getHttpStatus());
+      verify(geoLoc).setAddressLine1("Legacy free-text line");
+      verify(obDal).save(geoLoc);
+    }
+  }
+
+  /**
+   * Flag off: a create payload that still carries the 3 structured fields does not persist them
+   * (never read off the body, never written to the record) and does not error on the missing
+   * {@code cityName} that would be mandatory with the flag on.
+   */
+  @Test
+  void testCreateFlagOffNeverPersistsStructuredFieldsEvenWhenPayloadCarriesThem() throws Exception {
+    Location geoLoc = mock(Location.class);
+    when(geoLoc.getId()).thenReturn("geo-flag-off-2");
+    when(obProvider.get(Location.class)).thenReturn(geoLoc);
+
+    JSONObject body = new JSONObject();
+    body.put("country", "country-x");
+    body.put("streetName", "Gran Via");
+    body.put("buildingNumber", "45");
+    body.put("buildingName", "Torre A");
+    // cityName intentionally omitted — mandatory only when the flag is on.
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(false)) {
+      NeoResponse r = handler.handle(buildContext("POST", null, body));
+
+      assertNotNull(r);
+      assertEquals(201, r.getHttpStatus());
+      verify(geoLoc, never()).setOBSEPAStreetName(any());
+      verify(geoLoc, never()).setOBSEPABuildingNumber(any());
+      verify(geoLoc, never()).setOBSEPABuildingName(any());
+    }
+  }
+
+  /**
+   * Flag off: a GET-by-id response omits the 3 structured-address keys entirely (absent, not
+   * {@code JSONObject.NULL}) — the SEPA getters are never even called.
+   */
+  @Test
+  void testGetByIdFlagOffOmitsStructuredAddressKeysEntirely() throws Exception {
+    Location geoLoc = mock(Location.class);
+    when(geoLoc.getId()).thenReturn("geo-flag-off-3");
+    when(obDal.get(Location.class, "geo-flag-off-3")).thenReturn(geoLoc);
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(false)) {
+      NeoResponse r = handler.handle(buildContext("GET", "geo-flag-off-3", null));
+
+      assertNotNull(r);
+      assertEquals(200, r.getHttpStatus());
+      JSONObject rec = r.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertEquals("Location", rec.getString("name"));
+      assertFalse(rec.has("streetName"), rec.toString());
+      assertFalse(rec.has("buildingNumber"), rec.toString());
+      assertFalse(rec.has("buildingName"), rec.toString());
+      verify(geoLoc, never()).getOBSEPAStreetName();
+      verify(geoLoc, never()).getOBSEPABuildingNumber();
+      verify(geoLoc, never()).getOBSEPABuildingName();
+    }
   }
 
   // ── handleUpdate ──────────────────────────────────────────────────────────

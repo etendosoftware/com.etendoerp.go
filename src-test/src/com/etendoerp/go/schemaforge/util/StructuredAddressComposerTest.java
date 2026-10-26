@@ -18,15 +18,21 @@
 package com.etendoerp.go.schemaforge.util;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mockStatic;
 
 import java.util.List;
 
 import org.apache.commons.lang3.StringUtils;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.mockito.MockedStatic;
 
+import com.etendoerp.go.featureflags.GoFeatureFlags;
 import com.etendoerp.go.schemaforge.util.StructuredAddressComposer.ComposedAddress;
 
 /**
@@ -36,6 +42,9 @@ import com.etendoerp.go.schemaforge.util.StructuredAddressComposer.ComposedAddre
  * {@code LocationSEPA.java::fillAddressLines}: these tests pin that algorithm (everything fits
  * on line 1, overflow to line 2 with a truncated building name, a street alone longer than the
  * line gets truncated, separators), not a reinterpretation of the ticket's simplified wording.
+ * Also {@link #isEnabled}, which mirrors {@code GoFeatureFlags.isEnabled} for
+ * {@code FLAG_STRUCTURED_ADDRESS_FOR_SEPA}, stubbed directly so the assertion is independent of
+ * the local {@code Openbravo.properties} toggle.
  *
  * @covers com.etendoerp.go.schemaforge.util.StructuredAddressComposer
  */
@@ -181,6 +190,50 @@ class StructuredAddressComposerTest {
       List<String> missing = StructuredAddressComposer.missingMandatoryFields(
           "   ", "45", "Madrid", "ES");
       assertEquals(List.of("streetName"), missing);
+    }
+  }
+
+  @Nested
+  class IsEnabled {
+
+    /** {@code isEnabled()} reflects {@link GoFeatureFlags#isEnabled} resolving {@code true}. */
+    @Test
+    void reflectsTheFlagResolvingTrue() {
+      try (MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class)) {
+        flags.when(() -> GoFeatureFlags.isEnabled(
+            eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(true);
+
+        assertTrue(StructuredAddressComposer.isEnabled());
+      }
+    }
+
+    /** {@code isEnabled()} reflects {@link GoFeatureFlags#isEnabled} resolving {@code false}. */
+    @Test
+    void reflectsTheFlagResolvingFalse() {
+      try (MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class)) {
+        flags.when(() -> GoFeatureFlags.isEnabled(
+            eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(false);
+
+        assertFalse(StructuredAddressComposer.isEnabled());
+      }
+    }
+
+    /**
+     * {@code isEnabled()} queries exactly {@code FLAG_STRUCTURED_ADDRESS_FOR_SEPA} with a
+     * non-null (account-less/environment) context — never a different flag key, never a null
+     * context.
+     */
+    @Test
+    void queriesExactlyTheStructuredAddressFlagKey() {
+      try (MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class)) {
+        flags.when(() -> GoFeatureFlags.isEnabled(
+            eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(true);
+
+        StructuredAddressComposer.isEnabled();
+
+        flags.verify(() -> GoFeatureFlags.isEnabled(
+            eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any()));
+      }
     }
   }
 

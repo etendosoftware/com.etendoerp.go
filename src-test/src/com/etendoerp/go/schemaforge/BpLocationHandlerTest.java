@@ -20,8 +20,11 @@ package com.etendoerp.go.schemaforge;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -40,6 +43,8 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.geography.Location;
 
+import com.etendoerp.go.featureflags.GoFeatureFlags;
+
 /**
  * Unit tests for {@link BpLocationHandler} (ETP-5806).
  *
@@ -48,6 +53,10 @@ import org.openbravo.model.common.geography.Location;
  * handler owns them end to end: a pre-hook ({@code handle}) validates and remembers the effective
  * values, and a post-hook ({@code afterHandle}) persists them (POST/PUT) once the base record
  * exists, or enriches the response with them (GET) — bypassing {@code NeoFieldFilter} either way.
+ * Also the {@code structured-address-for-sepa} flag-OFF branch ({@link FlagOff}), stubbing
+ * {@link GoFeatureFlags#isEnabled} directly so the suite does not depend on the local
+ * {@code Openbravo.properties} toggle: {@code handle()}/{@code afterHandle()} return {@code null}
+ * immediately, so the 3 fields fall through untouched to generic CRUD.
  *
  * @covers com.etendoerp.go.schemaforge.BpLocationHandler
  */
@@ -360,6 +369,86 @@ class BpLocationHandlerTest {
       assertEquals("Gran Via", recordJson.getString("streetName"));
       assertEquals("45", recordJson.getString("buildingNumber"));
       assertEquals(JSONObject.NULL, recordJson.get("buildingName"));
+    }
+  }
+
+  // ── structured-address-for-sepa flag OFF ─────────────────────────────────
+
+  @Nested
+  class FlagOff {
+
+    private MockedStatic<GoFeatureFlags> flags;
+
+    @BeforeEach
+    void stubFlagOff() {
+      flags = mockStatic(GoFeatureFlags.class);
+      flags.when(() -> GoFeatureFlags.isEnabled(
+          eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(false);
+    }
+
+    @AfterEach
+    void closeFlag() {
+      flags.close();
+    }
+
+    /**
+     * Flag off: {@code handle()} never intercepts a create, even one missing every mandatory
+     * structured field — the validation in {@link BpLocationHandler#prepareStructuredAddress}
+     * never runs, so the request falls straight through to generic CRUD.
+     */
+    @Test
+    void handleReturnsNullForCreateRegardlessOfBody() throws Exception {
+      JSONObject body = new JSONObject();
+      // No streetName/buildingNumber/cityName/country at all — would be a 400 with the flag on.
+      NeoResponse r = handler.handle(buildCrudContext("POST", null, body));
+      assertNull(r);
+      verify(obDal, never()).get(eq(Location.class), any());
+    }
+
+    /**
+     * Flag off: {@code handle()} never intercepts an update either, so a stale client sending the
+     * 3 structured fields on a PUT never reaches {@link BpLocationHandler#loadExisting}.
+     */
+    @Test
+    void handleReturnsNullForUpdateRegardlessOfBody() throws Exception {
+      JSONObject body = new JSONObject();
+      body.put("streetName", "Gran Via");
+      body.put("buildingNumber", "45");
+      body.put("buildingName", "Local 2");
+      NeoResponse r = handler.handle(buildCrudContext("PUT", "loc-1", body));
+      assertNull(r);
+      verify(obDal, never()).get(eq(Location.class), any());
+    }
+
+    /**
+     * Flag off: {@code afterHandle()} never persists the pending write (there is none — {@code
+     * handle()} never set it while off) and never enriches a GET with the 3 structured keys; the
+     * previous result passes through to the caller exactly as the generic CRUD layer produced it.
+     */
+    @Test
+    void afterHandleReturnsNullAndNeverEnrichesAGetResponse() throws Exception {
+      NeoContext ctx = buildCrudContext("GET", "loc-get", null);
+      ctx.setPreviousResult(wrapRecord("loc-get"));
+
+      NeoResponse result = handler.afterHandle(ctx);
+
+      assertNull(result);
+      verify(obDal, never()).get(eq(Location.class), any());
+    }
+
+    /**
+     * Flag off: {@code afterHandle()} never persists pending structured fields after a create
+     * either — the base record's fields fall through untouched to whatever generic CRUD wrote.
+     */
+    @Test
+    void afterHandleReturnsNullAfterCreateRegardlessOfPreviousResult() throws Exception {
+      NeoContext ctx = buildCrudContext("POST", null, new JSONObject());
+      ctx.setPreviousResult(wrapRecord("new-loc-id"));
+
+      NeoResponse result = handler.afterHandle(ctx);
+
+      assertNull(result);
+      verify(obDal, never()).get(eq(Location.class), any());
     }
   }
 
