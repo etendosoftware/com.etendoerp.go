@@ -167,7 +167,12 @@ public class SiiSendHandler extends AbstractLegacyInvoiceActionHandler {
    * {@link com.etendoerp.go.schemaforge.util.NeoLanguage#currentCode()} — the GO locale
    * {@code NeoAuthenticator} already applied to this request from its {@code Accept-Language}
    * header (independent of, and more reliable than, {@code AD_User.AD_Language}: the SPA's
-   * language switcher is purely client-side and never writes that field back).
+   * language switcher is purely client-side and never writes that field back). This handler is
+   * also MCP-reachable (a {@code NeoEndpointType.ACTION} handler, same as any {@code etendo_action}
+   * call): there {@code NeoLanguage.currentCode()} resolves from the token-owning user's own
+   * {@code OBContext}, not a per-request {@code Accept-Language} header — the same established
+   * fallback {@code McpToolTitles} already uses for MCP tool-title localization, so this is
+   * intentional existing behavior on that channel, not a gap.
    *
    * <p><b>ETP-5745 — language must be captured BEFORE {@code executeObuiappClass} (2nd
    * correction, live-verified regression).</b> The first bilingual version called

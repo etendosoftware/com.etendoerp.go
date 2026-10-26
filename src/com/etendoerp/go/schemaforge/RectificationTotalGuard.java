@@ -195,6 +195,11 @@ final class RectificationTotalGuard {
    * "Multi-currency" section). A rectificativa whose amount cannot be converted (no rate for its
    * currency pair/date) is skipped — excluded from the sum, not treated as a blocking failure —
    * consistent with this guard's fail-open stance everywhere else.
+   *
+   * <p>One {@code OBDal.get} per rectification id (N+1 vs. the single aggregate SQL this replaced)
+   * — needed now that currency/date/org/client must be read per row for conversion. Accepted: this
+   * runs on document completion, bounded by the small set of rectificativas against one origin,
+   * never a list/report path.
    */
   private static BigDecimal sumCompletedRectifications(String originId, String excludeOrIncludeInvoiceId,
       Currency originCurrency) {

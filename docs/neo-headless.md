@@ -10550,6 +10550,7 @@ COMPLETED rectificativa against the same origin — including the one about to c
 origin's own `ABS(GrandTotal)`. Fails open on any read error, mirroring `InvoiceReactivationGuard`. Applies
 identically to sales and purchase invoices (shared `C_Invoice`/`C_Invoice_Reverse` tables, no spec/table
 name in the guard itself) and on every channel (`completeInvoiceIfNeeded` runs before `handle()` dispatches
+to the channel-specific response building), so no divergence to declare here either.
 
 **Multi-currency (QA finding, found during the CP-9 pass).** `RectifiableInvoiceUtils`' eligible-source
 query never filters by currency, so a rectificativa can legitimately be booked in a different currency
@@ -10564,7 +10565,6 @@ configured for the pair/date fails OPEN for that one rectificativa** — logged 
 the rest of the check proceeds — consistent with every other failure mode in this guard: an unconvertible
 amount must not block a legitimate completion, since hard-blocking on a missing FX rate would turn an AD
 configuration gap into a frozen AP/AR process.
-to the channel-specific response building), so no divergence to declare here either.
 
 **ETP-5745 CP-12 — `rectifyingInvoices`, the mirror of `originInvoices`.** The detail GET of an invoice
 already carried `originInvoices` (what THIS invoice rectifies). It now also carries `rectifyingInvoices`
