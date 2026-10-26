@@ -2836,6 +2836,81 @@ public class ReturnShipmentUtilsTest {
     }
   }
 
+  private static final String EXISTING_SENTENCE =
+      "A rectificative invoice already exists for this return document.";
+
+  private static JSONArray onePrevious() throws Exception {
+    return new JSONArray().put(new JSONObject().put("id", "prev-1").put("documentNo", "REC-1")
+        .put("documentStatus", "CO"));
+  }
+
+  /** ETP-5712: a return that already has a rectificativa is refused 409 with the SPA's exact sentence. */
+  @Test
+  public void refuseIfAlreadyInvoiced_existingOneWithoutTheFlag_is409WithTheExactSentence()
+      throws Exception {
+    for (JSONObject body : new JSONObject[] {null, new JSONObject(),
+        new JSONObject().put("allowDuplicate", false)}) {
+      NeoResponse refused = ReturnInvoiceSupport.refuseIfAlreadyInvoiced(body, onePrevious());
+
+      assertEquals(409, refused.getHttpStatus());
+      JSONObject error = refused.getBody().getJSONObject("error");
+      assertEquals(EXISTING_SENTENCE, error.getString("message"));
+      assertEquals("returnInvoiceAlreadyExists", error.getString("code"));
+      assertEquals(409, error.getInt("status"));
+      assertTrue(error.getString("hint"), error.getString("hint").contains("allowDuplicate:true"));
+      assertEquals("prev-1", error.getJSONArray("previousReturnInvoices").getJSONObject(0)
+          .getString("id"));
+    }
+  }
+
+  /** Only the JSON boolean true lifts the refusal. */
+  @Test
+  public void refuseIfAlreadyInvoiced_allowDuplicateTrue_letsItThrough() throws Exception {
+    assertNull(ReturnInvoiceSupport.refuseIfAlreadyInvoiced(
+        new JSONObject().put("allowDuplicate", true), onePrevious()));
+  }
+
+  /** A string, a number or null is never read as true, and never fails open: 422, nothing created. */
+  @Test
+  public void refuseIfAlreadyInvoiced_nonBooleanAllowDuplicate_isNeverAcceptedAsTrue()
+      throws Exception {
+    Object[] wrong = {"true", "yes", 1, 0, JSONObject.NULL, new JSONArray()};
+    for (Object value : wrong) {
+      JSONObject body = new JSONObject().put("allowDuplicate", value);
+      for (JSONArray previous : new JSONArray[] {onePrevious(), new JSONArray()}) {
+        NeoResponse refused = ReturnInvoiceSupport.refuseIfAlreadyInvoiced(body, previous);
+        assertEquals("allowDuplicate=" + value, 422, refused.getHttpStatus());
+      }
+    }
+  }
+
+  /** The first rectificativa of a return is unaffected, whatever the flag says. */
+  @Test
+  public void refuseIfAlreadyInvoiced_noPreviousOne_isNeverRefused() throws Exception {
+    assertNull(ReturnInvoiceSupport.refuseIfAlreadyInvoiced(null, new JSONArray()));
+    assertNull(ReturnInvoiceSupport.refuseIfAlreadyInvoiced(new JSONObject(), null));
+    assertNull(ReturnInvoiceSupport.refuseIfAlreadyInvoiced(
+        new JSONObject().put("allowDuplicate", false), new JSONArray()));
+  }
+
+  /** A VOIDED earlier rectificativa does not count: the lookup the guard reads excludes DocStatus VO. */
+  @Test
+  public void fetchPreviousReturnInvoices_excludesVoidedInvoices() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      Connection conn = stubReturnInvoiceQueries(dal, false, Collections.<String>emptyList(),
+          Collections.<String>emptyList(), Collections.<String[]>emptyList());
+
+      JSONArray previous = ReturnShipmentUtils.fetchPreviousReturnInvoices("ret-1");
+
+      assertEquals(0, previous.length());
+      ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
+      verify(conn).prepareStatement(sql.capture());
+      assertTrue(sql.getValue(), sql.getValue().contains("i.DocStatus != 'VO'"));
+    }
+  }
+
   /** A failing lookup must not read as "no previous one": it would hide the duplicate. */
   @Test
   public void fetchPreviousReturnInvoices_failurePropagates() {

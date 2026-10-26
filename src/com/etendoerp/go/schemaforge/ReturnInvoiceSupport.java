@@ -25,6 +25,8 @@ import java.util.Date;
 import java.util.List;
 import java.util.Optional;
 
+import javax.servlet.http.HttpServletResponse;
+
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
@@ -189,7 +191,8 @@ final class ReturnInvoiceSupport {
 
   /**
    * The shared body of {@code createReturnInvoice} of both return headers (ETP-5712): resolves the
-   * invoices to rectify, notes the rectificativas the return already has, builds the header,
+   * invoices to rectify, refuses a return that already has a rectificativa (unless
+   * {@code allowDuplicate:true}), builds the header,
    * refuses a document that would end at a zero amount, and only then persists, links and
    * confirms.
    *
@@ -208,12 +211,17 @@ final class ReturnInvoiceSupport {
       CreateDraftInvoiceHandler createDraftInvoiceHandler) throws Exception {
     JSONObject body = context.getRequestBody();
     OBContext obContext = context.getObContext();
+    // ETP-5712: one rectificativa per return, like the screen (it hides the button once the
+    // return has one). The check reads only, so it runs before anything else.
+    JSONArray previous = ReturnShipmentUtils.fetchPreviousReturnInvoices(returnId);
+    NeoResponse duplicate = refuseIfAlreadyInvoiced(body, previous);
+    if (duplicate != null) {
+      return duplicate;
+    }
     // ETP-5381: resolve WHICH invoices are being rectified before creating anything. Without
     // the C_Invoice_Reverse link the rectificative invoice cannot be confirmed, so failing
     // here leaves no stuck draft behind.
     List<String> rectifiedIds = resolveRectifiedInvoiceIds(body, returnId);
-    // A second rectificative on the same return is allowed (ETP-5381); it is reported instead.
-    JSONArray previous = ReturnShipmentUtils.fetchPreviousReturnInvoices(returnId);
 
     Invoice sourceInvoice = findSourceInvoice(lines);
     Invoice invoice = ReturnShipmentUtils.buildReturnInvoiceHeader(returnDoc, docType, sourceInvoice, isSales);
@@ -234,6 +242,42 @@ final class ReturnInvoiceSupport {
       // request, so nothing this request needs persisted is lost.
       rollbackQuietly();
       throw e;
+    }
+  }
+
+  /**
+   * ETP-5712: the one-rectificativa-per-return rule of the screen, for every channel. Refuses with
+   * 409 {@code returnInvoiceAlreadyExists} (the message is the exact sentence the SPA localizes)
+   * when the return already has a non-voided rectificativa, unless the request carries the JSON
+   * boolean {@code allowDuplicate:true}. The check is strict: a string, a number or {@code null}
+   * is never read as true and never fails open, it is a 422.
+   *
+   * @param body the request body; {@code null} reads as empty
+   * @param previous the non-voided rectificativas the return already has, as
+   *     {@link ReturnShipmentUtils#fetchPreviousReturnInvoices} reports them
+   * @return the 409 or 422, or {@code null} when the creation may go on
+   */
+  static NeoResponse refuseIfAlreadyInvoiced(JSONObject body, JSONArray previous) {
+    Object raw = body != null ? body.opt(ReturnShipmentUtils.PARAM_ALLOW_DUPLICATE) : null;
+    if (raw != null && !(raw instanceof Boolean)) {
+      return NeoResponse.error(ReturnableQuantity.SC_UNPROCESSABLE,
+          ReturnShipmentUtils.MSG_ALLOW_DUPLICATE_NOT_BOOLEAN);
+    }
+    if (Boolean.TRUE.equals(raw) || previous == null || previous.length() == 0) {
+      return null;
+    }
+    try {
+      JSONObject error = new JSONObject();
+      error.put("status", HttpServletResponse.SC_CONFLICT);
+      error.put("code", ReturnShipmentUtils.ERROR_RETURN_INVOICE_ALREADY_EXISTS);
+      error.put("message", ReturnShipmentUtils.MSG_RETURN_INVOICE_ALREADY_EXISTS);
+      error.put("hint", ReturnShipmentUtils.HINT_RETURN_INVOICE_ALREADY_EXISTS);
+      error.put("previousReturnInvoices", previous);
+      return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
+          new JSONObject().put("error", error));
+    } catch (Exception e) {
+      return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
+          ReturnShipmentUtils.MSG_RETURN_INVOICE_ALREADY_EXISTS);
     }
   }
 

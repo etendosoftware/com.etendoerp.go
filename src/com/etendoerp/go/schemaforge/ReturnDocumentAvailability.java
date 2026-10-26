@@ -35,9 +35,9 @@ import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
  * factura rectificativa, and the keys the headers add to a GET that no spec field backs.
  *
  * <p>Shared by {@link ReturnToVendorShipmentHeaderHandler} and
- * {@link ReturnMaterialReceiptHeaderHandler}, which call it explicitly. Advisory only: a second
- * {@code createReturnInvoice} is still NOT refused (the answer lists
- * {@code previousReturnInvoices} instead), so this is the one place that warns before the call.</p>
+ * {@link ReturnMaterialReceiptHeaderHandler}, which call it explicitly. Advisory only: it warns
+ * before the call; the refusal itself (409 {@code returnInvoiceAlreadyExists}, unless
+ * {@code allowDuplicate:true}) lives in {@link ReturnInvoiceSupport#refuseIfAlreadyInvoiced}.</p>
  */
 final class ReturnDocumentAvailability {
 

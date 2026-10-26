@@ -76,6 +76,24 @@ final class ReturnShipmentUtils {
       "This return has no invoice to rectify: the document it returns has not been invoiced, so "
           + "the factura rectificativa has nothing to link to. Invoice the original document "
           + "first, or pass originInvoices with the id of an invoice from rectifiableInvoices.";
+  /**
+   * Request-body key that lets {@code createReturnInvoice} create a second rectificativa for a
+   * return that already has one (ETP-5712). Only a JSON boolean {@code true} counts.
+   */
+  static final String PARAM_ALLOW_DUPLICATE = "allowDuplicate";
+  /** {@code error.code} of the 409 of a return that already has a non-voided rectificativa (ETP-5712). */
+  static final String ERROR_RETURN_INVOICE_ALREADY_EXISTS = "returnInvoiceAlreadyExists";
+  // English literal on purpose: the exact legacy sentence tools/app-shell/src/lib/backendErrors.js
+  // already localizes (backendError.returnInvoiceAlreadyExists). Do not reword it.
+  static final String MSG_RETURN_INVOICE_ALREADY_EXISTS =
+      "A rectificative invoice already exists for this return document.";
+  /** {@code error.hint} of that 409: the one way past it, which the screen does not offer. */
+  static final String HINT_RETURN_INVOICE_ALREADY_EXISTS = "Pass allowDuplicate:true only if a "
+      + "second rectificative invoice for this return is really intended (for example one per "
+      + "origin invoice). Nothing was created.";
+  /** The 422 message of an {@code allowDuplicate} that is not a JSON boolean. */
+  static final String MSG_ALLOW_DUPLICATE_NOT_BOOLEAN =
+      "'allowDuplicate' must be the JSON boolean true or false. Nothing was created.";
   /** {@code error.code} of the 422 of a rectificativa whose lines would all end at price 0 (ETP-5712). */
   static final String ERROR_RETURN_INVOICE_WITHOUT_AMOUNT = "returnInvoiceWithoutAmount";
   // English literals on purpose: localized by tools/app-shell/src/lib/backendErrors.js, which
