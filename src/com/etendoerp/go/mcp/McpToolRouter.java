@@ -447,7 +447,8 @@ public class McpToolRouter {
     // cannot serve rows belonging to a parent the caller never asked about (IMP-40), and before
     // getAdTabOrThrow, so a tab-less entity is reached at all.
     JSONObject handled = McpHookExecutor.runReadProvider(specName, entityName, null, sfEntity,
-        McpHookExecutor.buildReadProviderParams(filters, parentId, offset, limit, orderBy));
+        McpHookExecutor.buildReadProviderParams(filters, parentId, offset, limit, orderBy), args,
+        offset, limit);
     if (handled != null) {
       return handled;
     }
@@ -570,7 +571,7 @@ public class McpToolRouter {
     // ETP-5405 + ETP-5415 (D13): see the twin call in handleList. recordId is what lets a
     // customization tell a single-record read from a list, exactly as it does in the post phase.
     JSONObject handled = McpHookExecutor.runReadProvider(specName, entityName, recordId, sfEntity,
-        McpHookExecutor.buildReadProviderParams(null, null, null, null, null));
+        McpHookExecutor.buildReadProviderParams(null, null, null, null, null), args, null, null);
     if (handled != null) {
       return handled;
     }

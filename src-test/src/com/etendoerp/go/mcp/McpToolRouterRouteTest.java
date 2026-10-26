@@ -3720,7 +3720,7 @@ class McpToolRouterRouteTest {
         // ETP-5415 (D13): the tab-less read is served by runReadProvider, which runs the read's
         // PRE phase before the tab is demanded. ETP-5405 reached the same behaviour through
         // resolveEntityHandler + runPreHook; the seam moved, the assertion below did not.
-        hookMock.when(() -> McpHookExecutor.runReadProvider(any(), any(), any(), any(), any()))
+        hookMock.when(() -> McpHookExecutor.runReadProvider(any(), any(), any(), any(), any(), any(), any(), any()))
             .thenReturn(handled);
         hookMock.when(() -> McpHookExecutor.runPreHook(eq(handler), any())).thenReturn(handled);
 
@@ -3757,7 +3757,7 @@ class McpToolRouterRouteTest {
         // ETP-5415 (D13): the tab-less read is served by runReadProvider, which runs the read's
         // PRE phase before the tab is demanded. ETP-5405 reached the same behaviour through
         // resolveEntityHandler + runPreHook; the seam moved, the assertion below did not.
-        hookMock.when(() -> McpHookExecutor.runReadProvider(any(), any(), any(), any(), any()))
+        hookMock.when(() -> McpHookExecutor.runReadProvider(any(), any(), any(), any(), any(), any(), any(), any()))
             .thenReturn(handled);
         hookMock.when(() -> McpHookExecutor.runPreHook(eq(handler), any())).thenReturn(handled);
 
@@ -3768,7 +3768,7 @@ class McpToolRouterRouteTest {
         // The seam the router now calls is runReadProvider (ETP-5415, D13); the earlier assertion on
         // buildReadHookContext could not hold once the whole McpHookExecutor is stubbed.
         hookMock.verify(() -> McpHookExecutor.runReadProvider(eq(SPEC_NAME), eq(ENTITY_NAME),
-            eq("rec-1"), eq(entity), any()));
+            eq("rec-1"), eq(entity), any(), any(), any(), any()));
       }
     }
 

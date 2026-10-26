@@ -129,12 +129,17 @@ final class McpHookExecutor {
    * @param sfEntity   the entity configuration, whose {@code Java_Qualifier} is resolved
    * @param queryParams the provider's inputs, built by {@link #buildReadProviderParams}; never
    *                   {@code null}
-   * @return the MCP result when the customization served the read, or {@code null} to carry on
+   * @param args       the tool arguments, for the {@code fields} projection (ETP-5852)
+   * @param offset     the caller's first row on {@code etendo_list}, {@code null} on a get
+   * @param limit      the caller's page size on {@code etendo_list}, {@code null} on a get
+   * @return the MCP result when the customization served the read — in the generic read's shape,
+   *         paged and projected ({@link McpProvidedReadShaper}) — or {@code null} to carry on
    *         with the generic path
    * @throws JSONException when the customization's response cannot be converted
    */
   static JSONObject runReadProvider(String specName, String entityName, String recordId,
-      SFEntity sfEntity, Map<String, String> queryParams) throws JSONException {
+      SFEntity sfEntity, Map<String, String> queryParams, JSONObject args, Integer offset,
+      Integer limit) throws JSONException {
     NeoContext ctx = NeoContext.builder()
         .specName(specName)
         .entityName(entityName)
@@ -155,7 +160,7 @@ final class McpHookExecutor {
         .context(ctx)
         .build());
     NeoResponse response = result.response();
-    return response != null ? neoResponseToMcpResult(response) : null;
+    return response != null ? McpProvidedReadShaper.shape(response, args, offset, limit) : null;
   }
 
   /**
