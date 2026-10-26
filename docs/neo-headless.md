@@ -3835,7 +3835,7 @@ a per-operation error is not keyed — only the envelope goes through these two 
 `NeoHandler#filterAliases` is applied by MCP `etendo_list` only. A filter on an aliased property
 (for the order headers: `invoiceStatus`, `deliveryStatus`, `deliveryStatusPurchase`) is evaluated on
 `coalesce(<stored twin>, <virtual>)` there, and the response carries a `filterAliases` note
-(§4.12.32). The REST list does **not** consult the aliases: a `criteria=` on the virtual column still
+(§4.12.32; it names the stored twin only when the spec exposes it). The REST list does **not** consult the aliases: a `criteria=` on the virtual column still
 matches the raw SQLLogic value. That is deliberate, not an oversight — the SPA's generated order
 lists already show and filter the stored columns (`EM_ETGO_*_Status`), so no REST caller filters
 on the virtual one, and rewriting the REST criteria builder for a filter nobody sends would add risk
@@ -9025,8 +9025,9 @@ against `coalesce(<target>, <virtual>)`:
   the fallback is the virtual value, `0` for a lineless order — what `afterHandle` displays too.
 - **A target that is not a property of the entity fails the read** (500), rather than quietly
   filtering on the raw value. It is a customization bug, not a caller mistake.
-- **The target is not checked against the spec's excluded fields.** It is declared by the server,
-  and the condition only compares the value the caller is already shown.
+- **The target is not checked against the spec's excluded fields** for the evaluation. It is
+  declared by the server, and the condition only compares the value the caller is already shown.
+  The exclusion only decides whether the note may *name* the target (see Transparency below).
 - A named `status` filter is never aliased: it is a hand-authored fragment, not a property.
 - **The target must have the filtered property's type** (both primitive with the same Java type,
   or both references); the value is formatted for the filtered property. A mismatch fails the
@@ -9045,6 +9046,25 @@ against `coalesce(<target>, <virtual>)`:
   "reason": "The filter on deliveryStatus was evaluated on eTGODeliveryStatus, which holds the value this list shows for deliveryStatus."
 }]
 ```
+
+**The note names only a field the caller can filter on.** `evaluatedOn` is emitted only when the
+target is filterable in the spec being read — the same rule that answers a filter key with 422
+`unknown_filter_field`: a target whose `ETGO_SF_FIELD` row is excluded (`McpQuerySupport.excludedPropertyNames`)
+is not named. The entry is still emitted, because the caller must know the filter was redirected,
+but without `evaluatedOn` and with a reason that does not name the target. Canonical case: the
+purchase order excludes `eTGODeliveryStatus`, so `{"deliveryStatus":{"lt":100}}` there answers
+
+```json
+"filterAliases": [{
+  "filter": "deliveryStatus",
+  "reason": "The filter on deliveryStatus was evaluated on the stored value this list shows for deliveryStatus; that field is not exposed by this spec."
+}]
+```
+
+(the mirror case is `deliveryStatusPurchase` on the sales order, whose `eTGODelivStatusPurchase`
+is excluded). Naming it would invite a retry the spec refuses with 422 and disclose a field the
+spec was curated to hide. The evaluation itself is unchanged — `coalesce(<target>, <virtual>)`
+either way.
 
 **The order headers' mapping** (`AbstractOrderHeaderHandler#filterAliases`, inherited by the sales
 order, purchase order and sales quotation handlers):
