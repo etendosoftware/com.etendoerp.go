@@ -93,7 +93,8 @@ final class McpQuerySupport {
    * property.</p>
    *
    * @param aliases the customization's aliases, property name to property name; never {@code null}
-   * @param applied collects every alias actually used, for the response note; may be {@code null}
+   * @param applied collects every alias actually used, for the response note (see
+   *                {@link #aliasTarget} for what a {@code null} value means); may be {@code null}
    */
   static String buildWhereFromFilters(JSONObject filters, Tab adTab, SFEntity sfEntity,
       java.util.Map<String, String> aliases, java.util.Map<String, String> applied,
@@ -118,7 +119,7 @@ final class McpQuerySupport {
         continue;
       }
       Property prop = resolveFilterProperty(dalEntity, sfEntity, excluded, key);
-      Property target = aliasTarget(dalEntity, prop, aliases, applied);
+      Property target = aliasTarget(dalEntity, prop, aliases, excluded, applied);
       if (value instanceof JSONObject) {
         appendOperatorConditions(where, prop, target, key, (JSONObject) value);
       } else {
@@ -460,22 +461,32 @@ final class McpQuerySupport {
    * {@code applied}.
    *
    * <p>Matched on the resolved property name, so a caller that spells the key as its DB column
-   * name is redirected too. The target is not checked against the spec's excluded fields: it is
-   * declared by the server, and the condition only compares the value the caller is already
-   * shown. A target that is not a property of the entity, or whose type differs from the
-   * filtered property's (the value is formatted for the latter), is a customization bug, not a
-   * caller mistake, so it fails the read instead of silently filtering on the raw value.</p>
+   * name is redirected too. The target is not checked against the spec's excluded fields for the
+   * evaluation: it is declared by the server, and the condition only compares the value the
+   * caller is already shown. A target that is not a property of the entity, or whose type
+   * differs from the filtered property's (the value is formatted for the latter), is a
+   * customization bug, not a caller mistake, so it fails the read instead of silently filtering
+   * on the raw value.</p>
+   *
+   * <p>The exclusion does decide what the note may name, though. A target the spec excludes is
+   * recorded with a {@code null} value: the evaluation is the same, but naming it would invite a
+   * filter that {@link #resolveFilterProperty} refuses with 422 {@code unknown_filter_field}, and
+   * would disclose a field the spec was curated to hide.</p>
    *
    * @param dalEntity the DAL entity being read
    * @param prop      the property the caller filtered on
    * @param aliases   the customization's aliases, property name to property name
-   * @param applied   collects {@code prop -> target} for every alias used; may be {@code null}
+   * @param excluded  the property names the spec excluded, as {@link #excludedPropertyNames}
+   *                  resolves them — the same set that refuses a filter key
+   * @param applied   collects {@code prop -> target} for every alias used, with a {@code null}
+   *                  target when the spec excludes it; may be {@code null}
    * @return the target property, or {@code null} when {@code prop} is not aliased
    * @throws IllegalStateException when the declared target does not exist on the entity or its
    *                               type differs from {@code prop}'s
    */
   static Property aliasTarget(Entity dalEntity, Property prop,
-      java.util.Map<String, String> aliases, java.util.Map<String, String> applied) {
+      java.util.Map<String, String> aliases, java.util.Set<String> excluded,
+      java.util.Map<String, String> applied) {
     String targetName = aliases == null ? null : aliases.get(prop.getName());
     if (StringUtils.isBlank(targetName) || targetName.equals(prop.getName())) {
       return null;
@@ -492,7 +503,8 @@ final class McpQuerySupport {
           + " joins properties of different types on entity " + dalEntity.getName());
     }
     if (applied != null) {
-      applied.put(prop.getName(), target.getName());
+      applied.put(prop.getName(),
+          excluded.contains(target.getName()) ? null : target.getName());
     }
     return target;
   }
@@ -504,10 +516,14 @@ final class McpQuerySupport {
    *
    * <p>Shape: {@code "filterAliases": [{"filter": <requested>, "evaluatedOn": <target>,
    * "reason": <one sentence>}]}, a top-level sibling of the rows exactly like the
-   * {@code namedFilters} block {@link McpNamedFilters#attachApplied} adds.</p>
+   * {@code namedFilters} block {@link McpNamedFilters#attachApplied} adds. When the spec excludes
+   * the target ({@code null} in {@code applied}), the entry is still emitted — the caller must
+   * know the filter was redirected — but {@code evaluatedOn} is omitted and the reason does not
+   * name the target: every field a note names must be one the caller can filter on.</p>
    *
    * @param body    the response body about to be returned
-   * @param applied the redirections {@link #aliasTarget} recorded; may be {@code null} or empty
+   * @param applied the redirections {@link #aliasTarget} recorded, a {@code null} target meaning
+   *                the spec does not expose it; may be {@code null} or empty
    * @throws JSONException never in practice (all values are plain strings)
    */
   static void attachFilterAliases(JSONObject body, java.util.Map<String, String> applied)
@@ -517,15 +533,33 @@ final class McpQuerySupport {
     }
     JSONArray notes = new JSONArray();
     for (java.util.Map.Entry<String, String> alias : applied.entrySet()) {
-      JSONObject note = new JSONObject();
-      note.put("filter", alias.getKey());
-      note.put("evaluatedOn", alias.getValue());
-      note.put("reason", "The filter on " + alias.getKey() + " was evaluated on "
-          + alias.getValue() + ", which holds the value this list shows for " + alias.getKey()
-          + ".");
-      notes.put(note);
+      notes.put(filterAliasNote(alias.getKey(), alias.getValue()));
     }
     body.put(KEY_FILTER_ALIASES, notes);
+  }
+
+  /**
+   * One entry of the {@code filterAliases} note.
+   *
+   * @param filter the property the caller filtered on
+   * @param target the property the filter was evaluated on, or {@code null} when the spec does not
+   *               expose it
+   * @return the note entry
+   * @throws JSONException never in practice (all values are plain strings)
+   */
+  private static JSONObject filterAliasNote(String filter, String target) throws JSONException {
+    JSONObject note = new JSONObject();
+    note.put("filter", filter);
+    if (target == null) {
+      note.put("reason", "The filter on " + filter + " was evaluated on the stored value this list"
+          + " shows for " + filter
+          + "; the field holding that value is not exposed by this spec.");
+    } else {
+      note.put("evaluatedOn", target);
+      note.put("reason", "The filter on " + filter + " was evaluated on " + target
+          + ", which holds the value this list shows for " + filter + ".");
+    }
+    return note;
   }
 
   /**
