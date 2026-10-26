@@ -371,9 +371,9 @@ class PropertiesFeatureProviderTest {
     System.setProperty(GoFeatureFlags.DATADOG_FLAGS_ENABLED_PROPERTY, configured);
     GoFeatureFlags.datadogAgentProbe = () -> true;
 
-    FeatureProvider provider = GoFeatureFlags.createProvider();
+    FeatureProvider created = GoFeatureFlags.createProvider();
 
-    assertEquals(selected, provider instanceof Provider);
+    assertEquals(selected, created instanceof Provider);
   }
 
   // --- install() failure paths (ETP-5751) ---
