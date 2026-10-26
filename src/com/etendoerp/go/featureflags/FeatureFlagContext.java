@@ -19,6 +19,7 @@ package com.etendoerp.go.featureflags;
 
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.Locale;
 import java.util.Map;
 
 import org.apache.commons.lang3.StringUtils;
@@ -27,8 +28,11 @@ import org.apache.commons.lang3.StringUtils;
  * Targeting information for a single flag evaluation, expressed without any OpenFeature type so
  * application code never depends on the flag vendor's API.
  *
- * <p>The targeting key is the account email, which matches the identity the web client uses as its
- * own targeting key. Both ends therefore land in the same percentage bucket for a given user.
+ * <p>The targeting key is the account email. Every hosted provider buckets percentage rollouts on
+ * the targeting key, and each one names the email attribute its rules match differently, so the
+ * address is published once per provider spelling — see {@link #ATTRIBUTE_EMAIL} and
+ * {@link #ATTRIBUTE_EMAIL_LOWERCASE}. Note the web client does <em>not</em> share this key yet
+ * (the {@code targeting-key-divergence} item in {@code GoFeatureFlags}).
  */
 public final class FeatureFlagContext {
 
@@ -50,6 +54,24 @@ public final class FeatureFlagContext {
    */
   public static final String ATTRIBUTE_EMAIL = "Email";
 
+  /**
+   * The same account email under the attribute name Datadog Feature Flags targeting rules use
+   * (ETP-5751).
+   *
+   * <p>Datadog has no reserved user fields: the targeting key drives bucketing and every rule
+   * matches a flat attribute <em>by its exact name</em>, and the rules in the Datadog project are
+   * written against lowercase {@code email}. Attribute names are case-sensitive, so
+   * {@value #ATTRIBUTE_EMAIL} alone would match none of them and the flag would read as off for
+   * everyone — the ETP-4966 failure again. Both spellings are published while ConfigCat remains a
+   * fallback arm; drop {@value #ATTRIBUTE_EMAIL} only when ConfigCat is retired.
+   *
+   * <p><b>The value is lowercased</b> ({@link Locale#ROOT}): rule values are matched
+   * case-sensitively too, and every value in the Datadog project is lowercase, so a mixed-case
+   * {@code ETGO_ACCOUNT} email would otherwise match no rule. The targeting key and
+   * {@value #ATTRIBUTE_EMAIL} keep the address as stored.
+   */
+  public static final String ATTRIBUTE_EMAIL_LOWERCASE = "email";
+
   private final String targetingKey;
   private final Map<String, String> attributes;
 
@@ -59,8 +81,9 @@ public final class FeatureFlagContext {
   }
 
   /**
-   * Builds a context targeted at an account, carrying the email as both the targeting key and the
-   * {@value #ATTRIBUTE_EMAIL} attribute — see that constant for why both.
+   * Builds a context targeted at an account, carrying the email as the targeting key and as both
+   * the {@value #ATTRIBUTE_EMAIL} (ConfigCat) and {@value #ATTRIBUTE_EMAIL_LOWERCASE} (Datadog)
+   * attributes — see those constants for why each.
    *
    * @param accountEmail the authenticated account email; may be null when no account is known
    * @return a context targeted at the account, or one with no targeting key at all when the email
@@ -71,7 +94,9 @@ public final class FeatureFlagContext {
     // with() ignores a blank value, so an unknown account yields a context carrying neither the
     // key nor the attribute rather than an empty-string identity that could match a rule.
     return new FeatureFlagContext(normalized, Collections.emptyMap())
-        .with(ATTRIBUTE_EMAIL, normalized);
+        .with(ATTRIBUTE_EMAIL, normalized)
+        .with(ATTRIBUTE_EMAIL_LOWERCASE,
+            normalized == null ? null : normalized.toLowerCase(Locale.ROOT));
   }
 
   /**

@@ -9718,8 +9718,9 @@ newly required header would loop it forever. A mismatch is always refused.
 (`GoFeatureFlags.FLAG_MCP_MODERN_ERA_DISABLED`), environment level, never per account (clients cache
 the era per origin, and one origin serves every tenant). `true` restores the pre-ETP-5640
 behaviour: `server/discover` gets `200` + `-32601`, `_meta` is ignored, everything is legacy. Unset,
-`false` or an unreachable control plane keep the server dual-era. Live within one ConfigCat poll
-where ConfigCat is configured; a restart where the flag comes from
+`false` or an unreachable control plane keep the server dual-era. Live without a restart on a hosted
+control plane (Datadog Feature Flags, or ConfigCat where it is still the selected arm — see
+`docs/feature-flags-and-tenant-upgrade.md` §1); a restart where the flag comes from
 `etendo.go.flags.mcp-modern-era-disabled`. A client that already cached "modern" keeps working
 after a rollback, because tool calls never needed `initialize`.
 
