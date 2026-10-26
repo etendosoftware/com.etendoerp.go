@@ -1785,6 +1785,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * happened.
    */
   private void applyCheckoutEvent(String eventId, String type, JSONObject event) {
+    // Recorded in this event's transaction, which the result mark below commits: if applying
+    // fails, it is rolled back with it and the redelivery records it again. Never throws.
+    HubSpotOutbox.stripeEvent(type, event);
     if (CHECKOUT_PAID_EVENT_TYPES.contains(type)) {
       applyCheckoutPaid(eventId, type, event);
       return;
