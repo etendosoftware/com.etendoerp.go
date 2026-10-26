@@ -29,6 +29,8 @@ import java.util.Set;
 import javax.inject.Inject;
 import javax.inject.Named;
 
+import org.openbravo.model.common.invoice.Invoice;
+
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -40,6 +42,7 @@ import org.openbravo.model.common.enterprise.DocumentType;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import com.etendoerp.go.schemaforge.handlers.DocumentPostingService;
 import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
+import org.openbravo.base.structure.BaseOBObject;
 
 /**
  * NeoHandler for the Sales Invoice header entity.
@@ -94,11 +97,29 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
   @Inject
   private TotalDiscountService totalDiscountService;
 
+  /**
+   * ETP-5840: the rate is the one valid on the {@code accountingDate} ({@code DateAcct}) — not the
+   * invoice date — shown as "Accounting date". Invoice-family rules in
+   * {@link DocumentRateGuards#guardInvoiceHeader}.
+   */
+  static final DocumentCurrencyRate.RateType RATE_TYPE = new DocumentCurrencyRate.RateType(
+      Invoice.ENTITY_NAME, Invoice.PROPERTY_ETGOCURRENCYRATE, Invoice.PROPERTY_ACCOUNTINGDATE,
+      DocumentRateMessages.LABEL_ACCOUNTING_DATE);
+
+  private final DocumentCurrencyRate currencyRate = new DocumentCurrencyRate(RATE_TYPE);
+
+
   @Inject
   private DocumentPostingService postingService;
 
   @Inject
   private CurrencyOptionsHandler currencyOptionsHandler;
+
+  @Inject
+  private ImportOrderLinesIntoInvoiceHandler importOrderLinesHandler;
+
+  @Inject
+  private ImportInOutLinesIntoInvoiceHandler importShipmentLinesHandler;
 
   /** Package-private seam so unit tests can inject a mocked {@link DocumentPostingService}. */
   void setPostingService(DocumentPostingService postingService) {
@@ -123,7 +144,28 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
     contracts.putAll(InvoicePostingGate.CONTRACTS);
     // ETP-5709: cloneRecord was served (see handle) but undeclared.
     contracts.put(NeoCloneRecordHandler.CONTRACT.getName(), NeoCloneRecordHandler.CONTRACT);
+    // ETP-5713: import the pending lines of a completed order / goods shipment into this draft.
+    contracts.putAll(ImportOrderLinesIntoInvoiceHandler.contracts(true));
+    contracts.putAll(ImportInOutLinesIntoInvoiceHandler.contracts(true));
     return contracts;
+  }
+
+  /**
+   * {@inheritDoc} Reactivate is ruled out for an invoice {@link InvoiceReactivationGuard} would
+   * refuse to reactivate (ETP-5714).
+   */
+  @Override
+  public Map<String, String> unavailableActions(BaseOBObject subject) {
+    return InvoiceDocumentAvailability.unavailable(subject);
+  }
+
+  /**
+   * {@inheritDoc} The invoice windows un-post a posted invoice before reactivating it
+   * ({@code preUnpost: true} in the SPA), so the MCP does too (ETP-5715).
+   */
+  @Override
+  public boolean unpostBeforeReactivate() {
+    return true;
   }
 
   /** The PIS actions: served to the SPA, never to an agent (ETP-5558). */
@@ -146,6 +188,14 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
       return invoiceGuard;
     }
     NeoHandlerUtils.mirrorAccountingDateOnCreate(context, "invoiceDate", "accountingDate");
+    // ETP-5703: server-side defaults for a write that leaves them out (an agent; the SPA sends both).
+    resolveServerCreateFields(context);
+    // ETP-5840: exchange rate — recalculation on the accounting date, save and completion
+    // validation — before anything with side effects runs.
+    NeoResponse rateRefusal = DocumentRateGuards.guardInvoiceHeader(context, currencyRate);
+    if (rateRefusal != null) {
+      return rateRefusal;
+    }
     captureOriginInvoice(context);
     NeoResponse siiAuthError = captureAndValidateSiiAuthorization(context);
     if (siiAuthError != null) {
@@ -185,18 +235,20 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
       return reactivationGuard;
     }
     return NeoHeaderActionRouter.dispatch(context, currencyOptionsHandler, cloneRecordHandler,
-        registerPaymentHandler, siiSendHandler, tbaiXmlgeneratorHandler, followUp.actionHandler());
+        registerPaymentHandler, siiSendHandler, tbaiXmlgeneratorHandler, importOrderLinesHandler,
+        importShipmentLinesHandler, followUp.actionHandler());
   }
 
   /**
-   * Post-callout hook: blocks callout-driven currency updates and appends an exchange-rate
-   * warning when the user directly changes the invoice currency (ETP-4029), and blocks
+   * Post-callout hook: blocks callout-driven currency updates (ETP-4029), returns the exchange rate
+   * recalculated for the accounting date when the currency or that date changes (ETP-5840), and
+   * blocks
    * callout-driven document type updates once the invoice has been saved (ETP-4535). Mirrors
    * {@code AbstractOrderHeaderHandler#afterCallout}.
    */
   @Override
   public NeoResponse afterCallout(NeoContext context) {
-    return handleInvoiceAfterCallout(context);
+    return handleInvoiceAfterCallout(context, currencyRate);
   }
 
   /**
@@ -213,6 +265,12 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
    */
   @Override
   public NeoResponse afterHandle(NeoContext context) {
+    // ETP-5840: a create whose currency or accounting date only the create cascade derived; before
+    // the rate-document sync, which must see the resolved rate.
+    NeoResponse rateRefusal = currencyRate.afterWrite(context);
+    if (rateRefusal != null) {
+      return rateRefusal;
+    }
     autoCreateOrUpdateConversionRateDocument(context);
     // POST/PUT/PATCH: persist origin invoice relationship after the record is saved.
     // Mirrors PurchaseInvoiceHeaderHandler#afterHandle (ETP-4737) — the manual
@@ -237,7 +295,8 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
       JSONObject body = prev.getBody();
       JSONArray dataArr = NeoHandlerUtils.extractGetDataArray(context);
       if (dataArr == null || dataArr.length() == 0) {
-        return null;
+        // ETP-5757: an empty page still carries the (zeroed) whole-set footer totals.
+        return DocumentListTotals.injectInto(context, true) ? NeoResponse.ok(body) : null;
       }
       for (int i = 0; i < dataArr.length(); i++) {
         JSONObject rec = dataArr.getJSONObject(i);
@@ -262,6 +321,7 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
         SifSubRecordAttachments.enrich(rec, context.getRecordId());
         InvoiceReactivationGuard.enrichReactivationBlock(rec, context.getRecordId());
       }
+      DocumentListTotals.injectInto(context, true); // ETP-5757, last: see AbstractInvoiceHeaderHandler
       return NeoResponse.ok(body);
     } catch (Exception e) {
       log.error("Error enriching sales invoice response", e);
@@ -277,6 +337,9 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
    * {@inheritDoc} AR: {@code EM_Etsg_Isrectificative = 'Y'} (ETP-4737 unified "Factura
    * Rectificativa") → RECTIFICATIVA; legacy fallback for pre-existing invoices — ARC (Credit
    * Memo) or ARI_RM (Return Material Sales Invoice) → RECTIFICATIVA; otherwise FAC.
+   *
+   * <p>{@code ETGO_GET_DELIVERY_STATUS} mirrors this rule in SQL to answer {@code NULL} for a
+   * sales rectificative (ETP-5706): keep both in sync.
    */
   @Override
   protected String classifyDocType(DocumentType dt) {

@@ -24,6 +24,7 @@ import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -42,6 +43,8 @@ import org.openbravo.model.ad.ui.Tab;
 
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
+import com.etendoerp.go.schemaforge.NeoExtensionDispatcher;
+import com.etendoerp.go.schemaforge.NeoExtensionRequest;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.data.SFEntity;
@@ -262,6 +265,82 @@ public class McpHookExecutorTest {
     JSONObject envelope = new JSONObject(
         result.getJSONArray(FIELD_CONTENT).getJSONObject(0).getString(FIELD_TEXT));
     assertFalse(envelope.has("hint"));
+  }
+
+  /**
+   * ETP-5714: core's "Documento ya procesado" (message key {@code 20501}) gets a hint that names
+   * reactivation and the actions view, wherever the key sits — keyed on the message identity, never
+   * on the entity — and a body that already carries its own hint keeps it.
+   */
+  @Test
+  public void testNeoResponseToMcpResultAddsProcessedDocumentHint() throws Exception {
+    JSONObject flat = new JSONObject().put("message", "Documento ya procesado")
+        .put("messageKeys", new JSONArray().put("20501"));
+    JSONObject nested = new JSONObject().put("error", new JSONObject()
+        .put("message", "Documento ya procesado").put("status", 400)
+        .put("messageKeys", new JSONArray().put("20501")));
+
+    for (JSONObject body : List.of(flat, nested)) {
+      JSONObject result = McpHookExecutor.neoResponseToMcpResult(NeoResponse.error(400, body));
+      JSONObject envelope = new JSONObject(
+          result.getJSONArray(FIELD_CONTENT).getJSONObject(0).getString(FIELD_TEXT));
+      assertEquals(McpToolRouter.DOCUMENT_PROCESSED_HINT, envelope.getString("hint"));
+    }
+    assertTrue(McpToolRouter.DOCUMENT_PROCESSED_HINT.contains("documentAction RE"));
+    assertTrue(McpToolRouter.DOCUMENT_PROCESSED_HINT.contains("view:'actions'"));
+    assertFalse("the hint is keyed by message, not entity: no goods-specific wording",
+        McpToolRouter.DOCUMENT_PROCESSED_HINT.contains("goods"));
+
+    JSONObject own = new JSONObject().put("message", "x").put("hint", "mine")
+        .put("messageKeys", new JSONArray().put("20501"));
+    JSONObject kept = new JSONObject(McpHookExecutor.neoResponseToMcpResult(
+        NeoResponse.error(400, own)).getJSONArray(FIELD_CONTENT).getJSONObject(0)
+        .getString(FIELD_TEXT));
+    assertEquals("mine", kept.getString("hint"));
+  }
+
+  /** The two keyed hints do not leak into each other, and a key that merely contains 20501 is not it. */
+  @Test
+  public void testMessageKeyHintsAreKeyedExactly() throws Exception {
+    JSONObject period = new JSONObject().put("message", "p")
+        .put("messageKeys", new JSONArray().put("PeriodNotAvailable"));
+    JSONObject lookalike = new JSONObject().put("message", "l")
+        .put("messageKeys", new JSONArray().put("205010"));
+
+    JSONObject periodEnvelope = new JSONObject(McpHookExecutor.neoResponseToMcpResult(
+        NeoResponse.error(400, period)).getJSONArray(FIELD_CONTENT).getJSONObject(0)
+        .getString(FIELD_TEXT));
+    JSONObject lookalikeEnvelope = new JSONObject(McpHookExecutor.neoResponseToMcpResult(
+        NeoResponse.error(400, lookalike)).getJSONArray(FIELD_CONTENT).getJSONObject(0)
+        .getString(FIELD_TEXT));
+
+    assertEquals(McpToolRouter.PERIOD_NOT_AVAILABLE_HINT, periodEnvelope.getString("hint"));
+    assertFalse(lookalikeEnvelope.has("hint"));
+  }
+
+  /**
+   * ETP-5714: the retryable posting refusal keeps its own code through the MCP funnel, with the
+   * 409, {@code retryable} and {@code retryAfterSeconds}, instead of the generic code the status
+   * would give it.
+   */
+  @Test
+  public void testNeoResponseToMcpResultKeepsTheCostNotCalculatedCode() throws Exception {
+    JSONObject body = new JSONObject().put("success", false)
+        .put("message", "Cost has not yet been calculated for all products in the document.")
+        .put("messageKeys", new JSONArray().put("NotCalculatedCost"))
+        .put("error", "costNotCalculated").put("status", 409).put("retryable", true)
+        .put("retryAfterSeconds", 30).put("hint", "wait");
+
+    JSONObject result = McpHookExecutor.neoResponseToMcpResult(NeoResponse.error(409, body));
+
+    assertTrue(result.getBoolean(FIELD_IS_ERROR));
+    JSONObject envelope = new JSONObject(
+        result.getJSONArray(FIELD_CONTENT).getJSONObject(0).getString(FIELD_TEXT));
+    assertEquals("costNotCalculated", envelope.getString("error"));
+    assertEquals(409, envelope.getInt(FIELD_STATUS));
+    assertTrue(envelope.getBoolean("retryable"));
+    assertEquals(30, envelope.getInt("retryAfterSeconds"));
+    assertEquals("wait", envelope.getString("hint"));
   }
 
   // ── runPreHook ────────────────────────────────────────────────────────
@@ -587,5 +666,89 @@ public class McpHookExecutorTest {
       assertEquals(adTab, ctx.getAdTab());
       assertEquals(sfEntity, ctx.getSfEntity());
     }
+  }
+
+  // ── ETP-5680: placeholder forwarding ──
+
+  /** The placeholders the mandatory-defaults pass recorded reach the pre-hook's context. */
+  @Test
+  public void testFallbackPlaceholdersAreForwardedToTheHookContext() {
+    NeoContext from = NeoContext.builder()
+        .specName("product").entityName("product").httpMethod("POST").build();
+    from.addFallbackDefault("taxCategory");
+    from.addFallbackDefault("uOM");
+    NeoContext to = NeoContext.builder()
+        .specName("product").entityName("product").httpMethod("POST").build();
+
+    McpHookExecutor.forwardFallbackDefaults(from, to);
+
+    assertEquals(java.util.Set.of("taxCategory", "uOM"), to.getFallbackDefaults());
+    assertFalse(to.getFallbackDefaults().contains("productType"));
+  }
+
+  /** With nothing recorded (a value the caller sent is never recorded) nothing is forwarded. */
+  @Test
+  public void testNoPlaceholdersMeansNothingForwarded() {
+    NeoContext from = NeoContext.builder()
+        .specName("product").entityName("product").httpMethod("POST").build();
+    NeoContext to = NeoContext.builder()
+        .specName("product").entityName("product").httpMethod("POST").build();
+
+    McpHookExecutor.forwardFallbackDefaults(from, to);
+
+    assertTrue(to.getFallbackDefaults().isEmpty());
+  }
+
+  // ── resolveServerCreateFields (ETP-5710) ──────────────────────────────
+
+  @Test
+  public void testResolveServerCreateFieldsCallsCustomizationWithLiveBody() throws Exception {
+    NeoHandler customization = mock(NeoHandler.class);
+    SFEntity sfEntity = mock(SFEntity.class);
+    JSONObject body = new JSONObject().put("businessPartner", "bp-1");
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+        MockedStatic<NeoExtensionDispatcher> dispatcher = mockStatic(NeoExtensionDispatcher.class)) {
+      obContextMock.when(OBContext::getOBContext).thenReturn(null);
+      dispatcher.when(() -> NeoExtensionDispatcher.resolveOnly(any(NeoExtensionRequest.class)))
+          .thenReturn(customization);
+
+      McpHookExecutor.resolveServerCreateFields("sales-invoice", "header", null, sfEntity, body);
+
+      verify(customization).resolveServerCreateFields(argThat(ctx ->
+          ctx.getRequestBody() == body && "POST".equals(ctx.getHttpMethod())
+              && ctx.getRecordId() == null && ctx.getEndpointType() == NeoEndpointType.CRUD));
+    }
+  }
+
+  @Test
+  public void testResolveServerCreateFieldsWithoutCustomizationOrOnFailureLeavesBody()
+      throws Exception {
+    SFEntity sfEntity = mock(SFEntity.class);
+    JSONObject body = new JSONObject().put("a", "b");
+
+    try (MockedStatic<NeoExtensionDispatcher> dispatcher = mockStatic(NeoExtensionDispatcher.class)) {
+      dispatcher.when(() -> NeoExtensionDispatcher.resolveOnly(any(NeoExtensionRequest.class)))
+          .thenReturn(null);
+      McpHookExecutor.resolveServerCreateFields("s", "e", null, sfEntity, body);
+
+      dispatcher.when(() -> NeoExtensionDispatcher.resolveOnly(any(NeoExtensionRequest.class)))
+          .thenThrow(new IllegalStateException("boom"));
+      McpHookExecutor.resolveServerCreateFields("s", "e", null, sfEntity, body);
+    }
+    assertEquals(1, body.length());
+  }
+
+  @Test
+  public void testNeoHandlerDefaultResolveServerCreateFieldsIsNoOp() throws Exception {
+    NeoHandler plain = new NeoHandler() {
+      @Override
+      public NeoResponse handle(NeoContext context) {
+        return null;
+      }
+    };
+    JSONObject body = new JSONObject().put("a", "b");
+    plain.resolveServerCreateFields(NeoContext.builder().requestBody(body).build());
+    assertEquals(1, body.length());
   }
 }

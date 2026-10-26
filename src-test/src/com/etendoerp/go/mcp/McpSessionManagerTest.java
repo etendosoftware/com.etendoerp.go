@@ -196,7 +196,7 @@ class McpSessionManagerTest {
     }
 
     @Test
-    @DisplayName("client '0' triggers resolveClientFromRole")
+    @DisplayName("client '0' is resolved to the role's client")
     void zeroClientTriggersResolution() throws Exception {
       // org is non-zero to avoid org resolution interfering
       // First doReturningWork call is for client resolution
@@ -232,7 +232,7 @@ class McpSessionManagerTest {
     }
 
     @Test
-    @DisplayName("client '0' with resolveClientFromRole returning null keeps '0'")
+    @DisplayName("client '0' of a role with no tenant keeps '0'")
     void clientZeroWithNullResolutionKeepsZero() throws Exception {
       when(hibernateSession.doReturningWork(any())).thenReturn(null);
 
@@ -387,91 +387,6 @@ class McpSessionManagerTest {
       String result = (String) resolveDefaultOrgMethod.invoke(null, ROLE_ID);
 
       assertNull(result);
-    }
-  }
-
-  @Nested
-  @DisplayName("resolveClientFromRole (via reflection)")
-  class ResolveClientFromRole {
-
-    private Method resolveClientFromRoleMethod;
-
-    @BeforeEach
-    void setUpReflection() throws Exception {
-      resolveClientFromRoleMethod = McpSessionManager.class.getDeclaredMethod(
-          "resolveClientFromRole", String.class);
-      resolveClientFromRoleMethod.setAccessible(true);
-    }
-
-    @Test
-    @DisplayName("returns client when found and non-zero")
-    void returnsClientWhenFoundNonZero() throws Exception {
-      when(hibernateSession.doReturningWork(any())).thenReturn("clientABC");
-
-      String result = (String) resolveClientFromRoleMethod.invoke(null, ROLE_ID);
-
-      assertEquals("clientABC", result);
-    }
-
-    @Test
-    @DisplayName("returns null when client is '0'")
-    void returnsNullWhenClientIsZero() throws Exception {
-      // The method internally checks if cid is "0" and returns null
-      // doReturningWork returns null because the lambda returns null for "0"
-      when(hibernateSession.doReturningWork(any())).thenReturn(null);
-
-      String result = (String) resolveClientFromRoleMethod.invoke(null, ROLE_ID);
-
-      assertNull(result);
-    }
-
-    @Test
-    @DisplayName("returns null when no result")
-    void returnsNullWhenNoResult() throws Exception {
-      when(hibernateSession.doReturningWork(any())).thenReturn(null);
-
-      String result = (String) resolveClientFromRoleMethod.invoke(null, ROLE_ID);
-
-      assertNull(result);
-    }
-
-    @Test
-    @DisplayName("returns null on exception")
-    void returnsNullOnException() throws Exception {
-      when(hibernateSession.doReturningWork(any()))
-          .thenThrow(new RuntimeException("db error"));
-
-      String result = (String) resolveClientFromRoleMethod.invoke(null, ROLE_ID);
-
-      assertNull(result);
-    }
-  }
-
-  @Nested
-  @DisplayName("resolveEffectiveClientId (ETP-5642)")
-  class ResolveEffectiveClientId {
-
-    @Test
-    @DisplayName("a concrete client is returned unchanged without querying the role")
-    void concreteClientPassesThrough() {
-      assertEquals("myClient", McpSessionManager.resolveEffectiveClientId("myClient", ROLE_ID));
-      verify(hibernateSession, never()).doReturningWork(any());
-    }
-
-    @Test
-    @DisplayName("the System wildcard resolves to the role's client")
-    void wildcardResolvesRoleClient() {
-      when(hibernateSession.doReturningWork(any())).thenReturn("roleClient");
-
-      assertEquals("roleClient", McpSessionManager.resolveEffectiveClientId("0", ROLE_ID));
-    }
-
-    @Test
-    @DisplayName("the System wildcard is kept when the role resolves no client")
-    void wildcardWithoutRoleClientKeepsZero() {
-      when(hibernateSession.doReturningWork(any())).thenReturn(null);
-
-      assertEquals("0", McpSessionManager.resolveEffectiveClientId("0", ROLE_ID));
     }
   }
 }

@@ -32,11 +32,16 @@ import org.junit.Test;
 import org.mockito.MockedStatic;
 
 import com.etendoerp.copilot.toolpack.webhooks.SimSearch;
+import com.etendoerp.go.common.BoundedJsonParserTest;
 import com.etendoerp.go.schemaforge.util.NeoLanguage;
 import com.etendoerp.go.schemaforge.util.NeoTrl;
 import com.smf.securewebservices.utils.WSResult;
 
-/** Tests for {@link NeoSimSearchEndpoint}. */
+/**
+ * Tests for {@link NeoSimSearchEndpoint}.
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoSimSearchEndpoint
+ */
 public class NeoSimSearchEndpointTest {
 
   private static HttpServletRequest requestWith(String entityName, String items, String qty, String minPct) {
@@ -86,6 +91,20 @@ public class NeoSimSearchEndpointTest {
     NeoResponse resp = endpoint.handle(req);
 
     assertEquals(HttpServletResponse.SC_BAD_REQUEST, resp.getHttpStatus());
+  }
+
+  /** An {@code items} array that breaks the JSON parser is a 400, and nothing is searched. */
+  @Test
+  public void parserBreakingItemsReturnsBadRequest() {
+    NeoSimSearchEndpoint endpoint = new NeoSimSearchEndpoint();
+
+    try (MockedStatic<SimSearch> simSearchMock = mockStatic(SimSearch.class)) {
+      BoundedJsonParserTest.stackBreakingBodies().filter(items -> items.length() < 100)
+          .forEach(items -> assertEquals(items, HttpServletResponse.SC_BAD_REQUEST,
+              endpoint.handle(requestWith("Country", items, null, null)).getHttpStatus()));
+
+      simSearchMock.verifyNoInteractions();
+    }
   }
 
   @Test
@@ -212,6 +231,58 @@ public class NeoSimSearchEndpointTest {
       assertEquals(200, resp.getHttpStatus());
       simSearchMock.verify(
           () -> SimSearch.handleSimSearch("Sparta", "Country", 1, "30"), times(1));
+    }
+  }
+
+  // ── searchTerm: ONE term, shared with the OCR review (ETP-5715) ─────────────────────────────
+
+  @Test
+  public void searchTermRemovesQuotesAndAsksSimSearchForThatTerm() throws Exception {
+    JSONObject answer = mock(JSONObject.class);
+    WSResult result = mock(WSResult.class);
+    when(result.getJSONResponse()).thenReturn(answer);
+
+    try (MockedStatic<SimSearch> simSearchMock = mockStatic(SimSearch.class)) {
+      simSearchMock
+          .when(() -> SimSearch.handleSimSearch(anyString(), anyString(), anyInt(), anyString()))
+          .thenReturn(result);
+
+      JSONObject found = NeoSimSearchEndpoint.searchTerm("Product", "Tornillo 'M8'", 3, "50");
+
+      assertEquals(answer, found);
+      simSearchMock.verify(() -> SimSearch.handleSimSearch("Tornillo M8", "Product", 3, "50"),
+          times(1));
+    }
+  }
+
+  @Test
+  public void searchTermOfABlankTermIsNullAndSearchesNothing() throws Exception {
+    try (MockedStatic<SimSearch> simSearchMock = mockStatic(SimSearch.class)) {
+      assertEquals(null, NeoSimSearchEndpoint.searchTerm("Product", "  ", 3, "50"));
+      assertEquals(null, NeoSimSearchEndpoint.searchTerm("Product", "''", 3, "50"));
+
+      simSearchMock.verifyNoInteractions();
+    }
+  }
+
+  @Test
+  public void searchTermRewritesATranslatedTermToTheBaseNameLikeTheEndpointDoes() throws Exception {
+    WSResult result = mock(WSResult.class);
+    when(result.getJSONResponse()).thenReturn(mock(JSONObject.class));
+
+    try (MockedStatic<SimSearch> simSearchMock = mockStatic(SimSearch.class);
+        MockedStatic<NeoLanguage> language = mockStatic(NeoLanguage.class);
+        MockedStatic<NeoTrl> trl = mockStatic(NeoTrl.class)) {
+      language.when(NeoLanguage::currentCode).thenReturn("es_ES");
+      trl.when(() -> NeoTrl.baseNameForTranslation("Product", "Tornillo", "es_ES"))
+          .thenReturn("Screw");
+      simSearchMock
+          .when(() -> SimSearch.handleSimSearch(anyString(), anyString(), anyInt(), anyString()))
+          .thenReturn(result);
+
+      NeoSimSearchEndpoint.searchTerm("Product", "Tornillo", 3, "50");
+
+      simSearchMock.verify(() -> SimSearch.handleSimSearch("Screw", "Product", 3, "50"), times(1));
     }
   }
 }

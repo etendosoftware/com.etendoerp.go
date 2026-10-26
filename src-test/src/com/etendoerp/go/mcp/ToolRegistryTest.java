@@ -76,6 +76,34 @@ public class ToolRegistryTest {
     assertEquals(java.util.Set.of("spec"), declared.get());
   }
 
+  /**
+   * ETP-5714: {@code etendo_schema} declares an optional {@code id} (the record whose actions are
+   * judged), next to its other arguments, so the unknown-argument guard accepts it.
+   */
+  @Test
+  public void testSchemaDeclaresTheOptionalIdArgument() {
+    java.util.Optional<java.util.Set<String>> declared =
+        ToolRegistry.declaredArgumentNames("etendo_schema");
+
+    assertTrue(declared.isPresent());
+    assertTrue(declared.get().toString(), declared.get().containsAll(
+        java.util.Set.of("spec", "entity", "view", "fields", "id")));
+  }
+
+  /**
+   * ETP-5714: the entity argument's description gave 'Header' as its example while the catalogue
+   * spells entities in lower camel case ('header'), so an agent following the description failed on
+   * its first call. The example is now the real spelling.
+   */
+  @Test
+  public void testEntityExampleUsesTheCatalogueSpelling() {
+    String source = McpSourceScanner.stripComments(
+        McpSourceScanner.read("com/etendoerp/go/mcp/ToolRegistry.java"));
+
+    assertFalse(source.contains("e.g. 'Header'"));
+    assertTrue(source.contains("e.g. 'header', 'lines'"));
+  }
+
   /** Tests that McpToolDefinition getters return the values provided at construction. */
   @Test
   public void testMcpToolDefinitionGetters() {
@@ -127,6 +155,19 @@ public class ToolRegistryTest {
   @Test
   public void testNeoBatchIsCrudTool() {
     assertTrue(ToolRegistry.isCrudTool("etendo_batch"));
+  }
+
+  /**
+   * ETP-5715: the unknown-argument guard knows {@code etendo_action_batch}'s arguments — {@code ids}
+   * is accepted, the singular {@code id} of {@code etendo_action} is not.
+   */
+  @Test
+  public void testActionBatchDeclaresItsOwnArguments() {
+    java.util.Optional<java.util.Set<String>> declared =
+        ToolRegistry.declaredArgumentNames("etendo_action_batch");
+
+    assertTrue(declared.isPresent());
+    assertEquals(java.util.Set.of("spec", "entity", "action", "ids", "parameters"), declared.get());
   }
 
   /**
@@ -195,6 +236,39 @@ public class ToolRegistryTest {
     assertNotNull(itemProps.get("entity"));
     assertNotNull(itemProps.get("parentRef"));
     assertNotNull(itemProps.get("body"));
+
+    // ETP-5676: the same option the REST body takes, optional (not in 'required').
+    Map<String, Object> onlyReturnIds =
+        (Map<String, Object>) props.get(com.etendoerp.go.schemaforge.BatchService.PARAM_ONLY_RETURN_IDS);
+    assertNotNull("etendo_batch must publish _onlyReturnIds", onlyReturnIds);
+    assertEquals("boolean", onlyReturnIds.get("type"));
+    assertTrue(String.valueOf(onlyReturnIds.get("description")).contains("default false"));
+
+    // ETP-5677: the asynchronous mode is optional and tells the agent it commits per row.
+    Map<String, Object> async = (Map<String, Object>) props.get("async");
+    assertNotNull("etendo_batch must publish async", async);
+    assertEquals("boolean", async.get("type"));
+    assertTrue(String.valueOf(async.get("description")).contains("ROW BY ROW"));
+    assertTrue(String.valueOf(async.get("description")).contains("etendo_job_status"));
+  }
+
+  /** ETP-5677: the job tools address a job, not a spec, and require a jobId. */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testJobToolsAreSpeclessAndRequireAJobId() {
+    for (String name : new String[] {"etendo_job_status", "etendo_job_cancel"}) {
+      assertTrue(name, ToolRegistry.isCrudTool(name));
+      org.junit.Assert.assertNull(name, ToolRegistry.resolveSpecName(name, new org.codehaus.jettison.json.JSONObject()));
+    }
+    McpToolDefinition status = new ToolRegistry().buildJobStatusTool();
+    McpToolDefinition cancel = new ToolRegistry().buildJobCancelTool();
+    assertEquals("etendo_job_status", status.getName());
+    assertEquals("etendo_job_cancel", cancel.getName());
+    for (McpToolDefinition tool : List.of(status, cancel)) {
+      assertEquals(List.of("jobId"), tool.getInputSchema().get("required"));
+      assertNotNull(((Map<String, Object>) tool.getInputSchema().get("properties")).get("jobId"));
+    }
+    assertTrue(status.getDescription().contains("INTERRUPTED"));
   }
 
   // ── IMP-41: targets enum on the vector-search tool ─────────────────────
@@ -253,5 +327,19 @@ public class ToolRegistryTest {
     assertEquals("array", targetsProp.get("type"));
     Map<String, Object> items = (Map<String, Object>) targetsProp.get("items");
     assertFalse("no enum should be present when the catalog is unknown", items.containsKey("enum"));
+  }
+
+  /**
+   * ETP-5680: etendo_defaults takes an optional {@code recordContext} object, so the
+   * unknown-argument guard accepts it and an agent can pass the record's current values.
+   */
+  @Test
+  public void testDefaultsDeclaresTheOptionalRecordContextArgument() {
+    java.util.Optional<java.util.Set<String>> declared =
+        ToolRegistry.declaredArgumentNames("etendo_defaults");
+
+    assertTrue(declared.isPresent());
+    assertTrue(declared.get().toString(), declared.get().containsAll(
+        java.util.Set.of("spec", "entity", "parentId", "assetId", "view", "recordContext")));
   }
 }

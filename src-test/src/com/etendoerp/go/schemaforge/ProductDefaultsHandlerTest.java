@@ -23,8 +23,10 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
@@ -42,6 +44,7 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Criterion;
+import org.junit.After;
 import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
@@ -66,6 +69,8 @@ import org.openbravo.model.pricing.pricelist.ProductPrice;
  * {@code ProductCategoryDefaultHandlerTest} and the interesting behavior here is the
  * client-then-System COALESCE fallback and the pre/post-hook wiring, not the Hibernate criteria
  * construction itself.
+ *
+ * @covers com.etendoerp.go.schemaforge.ProductDefaultsHandler
  */
 public class ProductDefaultsHandlerTest {
 
@@ -628,6 +633,393 @@ public class ProductDefaultsHandlerTest {
   }
 
   /**
+   * ETP-5676: {@code _skipPricesSeed} is read and stripped by the pre-hook — so it never reaches
+   * the generic write path — and the post-hook of the same operation then seeds nothing, because
+   * the caller writes the product's prices itself in the same request.
+   */
+  @Test
+  public void testSkipPricesSeedDirectiveIsStrippedAndSuppressesTheSeed() throws Exception {
+    OBContext obContext = obContextWithClient(CLIENT1);
+    try (SeedingMocks mocks = new SeedingMocks()) {
+      mocks.withBothDefaultTariffs(obContext);
+      mocks.utilsMock.when(() -> ProductHandlerUtils.findExistingPrice(anyString(), anyString()))
+          .thenReturn(null);
+      JSONObject body = new JSONObject();
+      body.put("name", "PERF5676-1");
+      body.put(ProductDefaultsHandler.DIRECTIVE_SKIP_PRICES_SEED, true);
+      NeoContext ctx = postCtx(body, obContext);
+      ProductDefaultsHandler handler = new ProductDefaultsHandler();
+
+      assertNull(handler.handle(ctx));
+      assertFalse(body.has(ProductDefaultsHandler.DIRECTIVE_SKIP_PRICES_SEED));
+
+      JSONObject row = new JSONObject();
+      row.put("id", PRODUCT_ID);
+      ctx.setPreviousResult(NeoResponse.ok(dataResponse(new JSONArray().put(row))));
+      handler.afterHandle(ctx);
+
+      verify(mocks.provider, never()).get(ProductPrice.class);
+      verify(mocks.dal, never()).save(any());
+    }
+  }
+
+  /**
+   * Review W2: the list form skips a direction only when the version the seed would use is one the
+   * request prices itself. Here the caller priced the server's sales default and some other
+   * purchase list: sales is not seeded, the server's purchase default still is — the case where
+   * the client's tariff choice and PriceListVersionResolver's disagree.
+   */
+  @Test
+  public void testSkipPricesSeedListSkipsOnlyTheListedDefaultVersions() throws Exception {
+    OBContext obContext = obContextWithClient(CLIENT1);
+    try (SeedingMocks mocks = new SeedingMocks()) {
+      mocks.withBothDefaultTariffs(obContext);
+      mocks.utilsMock.when(() -> ProductHandlerUtils.findExistingPrice(anyString(), anyString()))
+          .thenReturn(null);
+      ProductPrice purchasePrice = mock(ProductPrice.class);
+      when(mocks.provider.get(ProductPrice.class)).thenReturn(purchasePrice);
+      JSONObject body = new JSONObject().put("name", "PERF5676-2")
+          .put(ProductDefaultsHandler.DIRECTIVE_SKIP_PRICES_SEED,
+              new JSONArray().put(SALES_VERSION_ID).put("plv-some-other-purchase-list"));
+      NeoContext ctx = postCtx(body, obContext);
+      ProductDefaultsHandler handler = new ProductDefaultsHandler();
+
+      handler.handle(ctx);
+      assertFalse(body.has(ProductDefaultsHandler.DIRECTIVE_SKIP_PRICES_SEED));
+      ctx.setPreviousResult(NeoResponse.ok(createdRow()));
+      handler.afterHandle(ctx);
+
+      verify(mocks.provider, times(1)).get(ProductPrice.class);
+      verify(purchasePrice).setPriceListVersion(mocks.purchaseVersion);
+      verify(mocks.dal, times(1)).save(any());
+    }
+  }
+
+  /**
+   * Runs one create carrying {@code directive} as {@code _skipPricesSeed} (none when
+   * {@code null}) through both hooks, against a tenant with both default tariffs and no price yet.
+   *
+   * @return the versions the seed wrote a zero-priced row on
+   */
+  private static Set<PriceListVersion> seededVersionsFor(Object directive) throws Exception {
+    OBContext obContext = obContextWithClient(CLIENT1);
+    try (SeedingMocks mocks = new SeedingMocks()) {
+      mocks.withBothDefaultTariffs(obContext);
+      mocks.utilsMock.when(() -> ProductHandlerUtils.findExistingPrice(anyString(), anyString()))
+          .thenReturn(null);
+      Set<PriceListVersion> seeded = new java.util.HashSet<>();
+      when(mocks.provider.get(ProductPrice.class)).thenAnswer(invocation -> {
+        ProductPrice price = mock(ProductPrice.class);
+        org.mockito.Mockito.doAnswer(set -> seeded.add(set.getArgument(0)))
+            .when(price).setPriceListVersion(any());
+        return price;
+      });
+      JSONObject body = new JSONObject().put("name", "P");
+      if (directive != null) {
+        body.put(ProductDefaultsHandler.DIRECTIVE_SKIP_PRICES_SEED, directive);
+      }
+      NeoContext ctx = postCtx(body, obContext);
+      ProductDefaultsHandler handler = new ProductDefaultsHandler();
+
+      handler.handle(ctx);
+      assertFalse("the directive never reaches the write path, whatever its form",
+          body.has(ProductDefaultsHandler.DIRECTIVE_SKIP_PRICES_SEED));
+      ctx.setPreviousResult(NeoResponse.ok(createdRow()));
+      handler.afterHandle(ctx);
+
+      Set<PriceListVersion> named = new java.util.HashSet<>();
+      for (PriceListVersion version : seeded) {
+        named.add(version == mocks.salesVersion ? SALES : version == mocks.purchaseVersion
+            ? PURCHASE : version);
+      }
+      return named;
+    }
+  }
+
+  /** Stand-ins for "the sales / purchase default version" in {@link #seededVersionsFor}. */
+  private static final PriceListVersion SALES = mock(PriceListVersion.class);
+  private static final PriceListVersion PURCHASE = mock(PriceListVersion.class);
+
+  /**
+   * ETP-5676 list form, edge cases: only a listed default version is skipped. An empty list, a
+   * list of versions that are not the server's defaults, and a {@code "*"} inside the list (the
+   * internal skip-all marker, never a caller's id) all leave both defaults seeded; listing both
+   * skips both.
+   */
+  @Test
+  public void testSkipPricesSeedListEdgeCases() throws Exception {
+    assertEquals("empty list", Set.of(SALES, PURCHASE), seededVersionsFor(new JSONArray()));
+    assertEquals("unknown ids", Set.of(SALES, PURCHASE),
+        seededVersionsFor(new JSONArray().put("plv-unknown").put("plv-other")));
+    assertEquals("the skip-all marker inside a list is not honoured", Set.of(SALES, PURCHASE),
+        seededVersionsFor(new JSONArray().put(ProductDefaultsHandler.SKIP_ALL_TARIFFS)));
+    assertEquals("only purchase listed", Set.of(SALES),
+        seededVersionsFor(new JSONArray().put(PURCHASE_VERSION_ID)));
+    assertEquals("both listed", Set.of(),
+        seededVersionsFor(new JSONArray().put(SALES_VERSION_ID).put(PURCHASE_VERSION_ID)));
+  }
+
+  /** {@code true} (boolean or string) still skips both; any other type is ignored and seeds both. */
+  @Test
+  public void testSkipPricesSeedScalarForms() throws Exception {
+    assertEquals(Set.of(), seededVersionsFor(Boolean.TRUE));
+    assertEquals(Set.of(), seededVersionsFor("true"));
+    assertEquals("no directive", Set.of(SALES, PURCHASE), seededVersionsFor(null));
+    assertEquals(Set.of(SALES, PURCHASE), seededVersionsFor(Boolean.FALSE));
+    assertEquals(Set.of(SALES, PURCHASE), seededVersionsFor("yes"));
+    assertEquals(Set.of(SALES, PURCHASE), seededVersionsFor(1));
+    assertEquals(Set.of(SALES, PURCHASE), seededVersionsFor(SALES_VERSION_ID));
+    assertEquals(Set.of(SALES, PURCHASE),
+        seededVersionsFor(new JSONObject().put("ids", new JSONArray().put(SALES_VERSION_ID))));
+  }
+
+  /** The parsed list drops blank entries and trims ids. */
+  @Test
+  public void testConsumeSkipPricesSeedNormalisesTheList() throws Exception {
+    JSONObject body = new JSONObject().put(ProductDefaultsHandler.DIRECTIVE_SKIP_PRICES_SEED,
+        new JSONArray().put(" plv-1 ").put("").put("  ").put("plv-2"));
+
+    assertEquals(Set.of("plv-1", "plv-2"), ProductDefaultsHandler.consumeSkipPricesSeed(body));
+    assertFalse(body.has(ProductDefaultsHandler.DIRECTIVE_SKIP_PRICES_SEED));
+  }
+
+  /** The list form is stripped on PATCH too. */
+  @Test
+  public void testSkipPricesSeedListIsStrippedOnPatch() throws Exception {
+    JSONObject body = new JSONObject().put(ProductDefaultsHandler.DIRECTIVE_SKIP_PRICES_SEED,
+        new JSONArray().put(SALES_VERSION_ID));
+
+    assertNull(new ProductDefaultsHandler().handle(patchCtx(body)));
+
+    assertEquals(0, body.length());
+  }
+
+  /** A batch scope left open by a failed assertion must not leak into the next test. */
+  @After
+  public void clearLeakedBatchScope() {
+    while (NeoBatchScope.current() != null) {
+      NeoBatchScope.close(null);
+    }
+  }
+
+  /** A product create as each channel builds it; the customization is the same on all of them. */
+  private static NeoContext createOn(String channel, JSONObject body, OBContext obContext) {
+    NeoContext.Builder builder = NeoContext.builder()
+        .specName("product").entityName("product")
+        .httpMethod("POST").endpointType(NeoEndpointType.CRUD)
+        .requestBody(body).obContext(obContext);
+    switch (channel) {
+      case "batch":
+        builder.idsOnlyResponse(true);
+        break;
+      case "mcp":
+        builder.mcpOrigin(true);
+        break;
+      default:
+        break;
+    }
+    return builder.build();
+  }
+
+  private static JSONObject createdRow() throws JSONException {
+    return dataResponse(new JSONArray().put(new JSONObject().put("id", PRODUCT_ID)));
+  }
+
+  /**
+   * ETP-5676 parity: REST single create, a batch operation (here with {@code _onlyReturnIds}) and
+   * an MCP create all reach this same customization, and on each the directive is stripped before
+   * the generic write path and the seed is skipped.
+   */
+  @Test
+  public void testSkipPricesSeedIsHonouredOnEveryChannel() throws Exception {
+    for (String channel : new String[] { "rest", "batch", "mcp" }) {
+      OBContext obContext = obContextWithClient(CLIENT1);
+      try (SeedingMocks mocks = new SeedingMocks()) {
+        mocks.withBothDefaultTariffs(obContext);
+        JSONObject body = new JSONObject().put("name", "P")
+            .put(ProductDefaultsHandler.DIRECTIVE_SKIP_PRICES_SEED, true);
+        NeoContext ctx = createOn(channel, body, obContext);
+        ProductDefaultsHandler handler = new ProductDefaultsHandler();
+
+        assertNull(channel, handler.handle(ctx));
+        assertFalse(channel, body.has(ProductDefaultsHandler.DIRECTIVE_SKIP_PRICES_SEED));
+        ctx.setPreviousResult(NeoResponse.ok(createdRow()));
+        handler.afterHandle(ctx);
+
+        mocks.resolverMock.verify(
+            () -> PriceListVersionResolver.resolveDefaultVersionId(any(), anyBoolean()), never());
+        verify(mocks.dal, never()).save(any());
+      }
+    }
+  }
+
+  /** An explicit {@code false} is still stripped, and the product gets its seeded prices. */
+  @Test
+  public void testSkipPricesSeedFalseIsStrippedAndTheSeedRuns() throws Exception {
+    OBContext obContext = obContextWithClient(CLIENT1);
+    try (SeedingMocks mocks = new SeedingMocks()) {
+      mocks.withBothDefaultTariffs(obContext);
+      mocks.utilsMock.when(() -> ProductHandlerUtils.findExistingPrice(anyString(), anyString()))
+          .thenReturn(null);
+      ProductPrice salesPrice = mock(ProductPrice.class);
+      ProductPrice purchasePrice = mock(ProductPrice.class);
+      when(mocks.provider.get(ProductPrice.class)).thenReturn(salesPrice, purchasePrice);
+      JSONObject body = new JSONObject()
+          .put(ProductDefaultsHandler.DIRECTIVE_SKIP_PRICES_SEED, false);
+      NeoContext ctx = postCtx(body, obContext);
+      ProductDefaultsHandler handler = new ProductDefaultsHandler();
+
+      handler.handle(ctx);
+      assertFalse(body.has(ProductDefaultsHandler.DIRECTIVE_SKIP_PRICES_SEED));
+      ctx.setPreviousResult(NeoResponse.ok(createdRow()));
+      handler.afterHandle(ctx);
+
+      verify(mocks.dal).save(salesPrice);
+      verify(mocks.dal).save(purchasePrice);
+    }
+  }
+
+  /** On PATCH the directive is stripped too, so it never reaches the field filter or the DAL. */
+  @Test
+  public void testSkipPricesSeedIsStrippedOnPatch() throws Exception {
+    JSONObject body = new JSONObject().put("name", "renamed")
+        .put(ProductDefaultsHandler.DIRECTIVE_SKIP_PRICES_SEED, true);
+
+    assertNull(new ProductDefaultsHandler().handle(patchCtx(body)));
+
+    assertFalse(body.has(ProductDefaultsHandler.DIRECTIVE_SKIP_PRICES_SEED));
+    assertEquals("renamed", body.getString("name"));
+  }
+
+  @Test
+  public void testConsumeSkipPricesSeedAnswersEmptyWithoutTheDirective() throws Exception {
+    assertTrue(ProductDefaultsHandler.consumeSkipPricesSeed(null).isEmpty());
+    JSONObject body = new JSONObject().put("name", "P");
+    assertTrue(ProductDefaultsHandler.consumeSkipPricesSeed(body).isEmpty());
+    assertEquals(1, body.length());
+  }
+
+  /**
+   * {@code _onlyReturnIds} only drops the decoration of the echoed record; the seed is a write,
+   * not a decoration, and still runs on an ids-only create without the directive.
+   */
+  @Test
+  public void testIdsOnlyCreateWithoutTheDirectiveStillSeedsPrices() throws Exception {
+    OBContext obContext = obContextWithClient(CLIENT1);
+    try (SeedingMocks mocks = new SeedingMocks()) {
+      mocks.withBothDefaultTariffs(obContext);
+      mocks.utilsMock.when(() -> ProductHandlerUtils.findExistingPrice(anyString(), anyString()))
+          .thenReturn(null);
+      ProductPrice salesPrice = mock(ProductPrice.class);
+      ProductPrice purchasePrice = mock(ProductPrice.class);
+      when(mocks.provider.get(ProductPrice.class)).thenReturn(salesPrice, purchasePrice);
+      stubCostingCriteria(mocks.dal, Collections.emptyList());
+      NeoContext ctx = createOn("batch", new JSONObject().put("name", "P"), obContext);
+      ProductDefaultsHandler handler = new ProductDefaultsHandler();
+
+      handler.handle(ctx);
+      ctx.setPreviousResult(NeoResponse.ok(createdRow()));
+      handler.afterHandle(ctx);
+
+      verify(mocks.dal).save(salesPrice);
+      verify(mocks.dal).save(purchasePrice);
+    }
+  }
+
+  private static OBContext obContextWithOrg(String clientId, String orgId) {
+    OBContext obContext = obContextWithClient(clientId);
+    Organization org = mock(Organization.class);
+    when(org.getId()).thenReturn(orgId);
+    when(obContext.getCurrentOrganization()).thenReturn(org);
+    return obContext;
+  }
+
+  /** Seeds (into an already priced product, so nothing is written) for one create. */
+  private static void seedOnce(OBContext obContext) throws Exception {
+    new ProductDefaultsHandler().afterHandle(createdProductCtx(PRODUCT_ID, obContext));
+  }
+
+  /**
+   * ETP-5676: inside a batch the default tariff is resolved once per direction and organisation;
+   * an operation of another organisation resolves its own. Outside a batch every create resolves.
+   */
+  @Test
+  public void testDefaultTariffLookupIsMemoizedPerBatchAndOrganisation() throws Exception {
+    OBContext orgA = obContextWithOrg(CLIENT1, "ORG-A");
+    OBContext orgB = obContextWithOrg(CLIENT1, "ORG-B");
+    try (SeedingMocks mocks = new SeedingMocks()) {
+      mocks.withBothDefaultTariffs(orgA);
+      mocks.withBothDefaultTariffs(orgB);
+      mocks.utilsMock.when(() -> ProductHandlerUtils.findExistingPrice(anyString(), anyString()))
+          .thenReturn(mock(ProductPrice.class));
+
+      NeoBatchScope previous = NeoBatchScope.open(false);
+      try {
+        seedOnce(orgA);
+        seedOnce(orgA);
+        seedOnce(orgB);
+      } finally {
+        NeoBatchScope.close(previous);
+      }
+      for (boolean sales : new boolean[] { true, false }) {
+        mocks.resolverMock.verify(
+            () -> PriceListVersionResolver.resolveDefaultVersionId(orgA, sales), times(1));
+        mocks.resolverMock.verify(
+            () -> PriceListVersionResolver.resolveDefaultVersionId(orgB, sales), times(1));
+      }
+
+      seedOnce(orgA);
+      seedOnce(orgA);
+      mocks.resolverMock.verify(
+          () -> PriceListVersionResolver.resolveDefaultVersionId(orgA, true), times(3));
+    }
+  }
+
+  /**
+   * ETP-5676: the uOM / taxCategory default rows are looked up once per batch and client — not
+   * once per product — and another client looks up its own. Outside a batch every create asks.
+   */
+  @Test
+  public void testDefaultRowLookupIsMemoizedPerBatchAndClient() throws Exception {
+    ProductDefaultsHandler handler = handlerResolving(
+        UOM_CLIENT_DEFAULT, UOM_SYSTEM_DEFAULT, TAX_CLIENT_DEFAULT, "tax-system-default");
+    doReturn("uom-client2").when(handler).queryDefaultId(UOM.class, "CLIENT2");
+    doReturn("tax-client2").when(handler).queryDefaultId(TaxCategory.class, "CLIENT2");
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(mock(OBDal.class));
+
+      NeoBatchScope previous = NeoBatchScope.open(false);
+      try {
+        for (int i = 0; i < 3; i++) {
+          JSONObject body = new JSONObject();
+          handler.handle(postCtx(body, obContextWithClient(CLIENT1)));
+          assertEquals(UOM_CLIENT_DEFAULT, body.getString("uOM"));
+          assertEquals(TAX_CLIENT_DEFAULT, body.getString("taxCategory"));
+        }
+        JSONObject other = new JSONObject();
+        handler.handle(postCtx(other, obContextWithClient("CLIENT2")));
+        assertEquals("uom-client2", other.getString("uOM"));
+      } finally {
+        NeoBatchScope.close(previous);
+      }
+      verify(handler, times(1)).queryDefaultId(UOM.class, CLIENT1);
+      verify(handler, times(1)).queryDefaultId(TaxCategory.class, CLIENT1);
+      verify(handler, times(1)).queryDefaultId(UOM.class, "CLIENT2");
+
+      handler.handle(postCtx(new JSONObject(), obContextWithClient(CLIENT1)));
+      handler.handle(postCtx(new JSONObject(), obContextWithClient(CLIENT1)));
+      verify(handler, times(3)).queryDefaultId(UOM.class, CLIENT1);
+    }
+  }
+
+  /** ETP-5676: the directive is declared, so the MCP write verbs accept it and etendo_schema lists it. */
+  @Test
+  public void testSkipPricesSeedIsDeclaredAsACreateDirective() {
+    assertTrue(new ProductDefaultsHandler().createDirectives()
+        .containsKey(ProductDefaultsHandler.DIRECTIVE_SKIP_PRICES_SEED));
+  }
+
+  /**
    * Best-effort contract — the load-bearing guarantee of this whole post-hook: a database failure
    * while seeding is logged and swallowed, so the product the user just created still stands. The
    * CRUD create has already committed by the time {@code afterHandle} runs, so an exception
@@ -1165,6 +1557,33 @@ public class ProductDefaultsHandlerTest {
   }
 
   /**
+   * ETP-5676: a batch sent with {@code _onlyReturnIds} reads only the new id, so the create
+   * response is not annotated and the Costing lookup behind the flag is not run.
+   */
+  @Test
+  public void testAfterHandleSkipsTheCostFlagOnAnIdsOnlyCreate() throws Exception {
+    OBContext obContext = obContextWithClient(CLIENT1);
+    try (SeedingMocks mocks = new SeedingMocks()) {
+      mocks.withBothDefaultTariffs(obContext);
+      mocks.utilsMock.when(() -> ProductHandlerUtils.findExistingPrice(anyString(), anyString()))
+          .thenReturn(mock(ProductPrice.class));
+      stubCostingCriteria(mocks.dal, Collections.emptyList());
+      NeoContext ctx = NeoContext.builder()
+          .specName("product").entityName("product")
+          .httpMethod("POST").endpointType(NeoEndpointType.CRUD)
+          .idsOnlyResponse(true)
+          .obContext(obContext).previousResult(NeoResponse.ok(singleProductBody(PRODUCT_ID)))
+          .build();
+
+      new ProductDefaultsHandler().afterHandle(ctx);
+
+      assertFalse(ctx.getPreviousResult().getBody().getJSONObject("response")
+          .getJSONArray("data").getJSONObject(0).has("etgoHasCost"));
+      verify(mocks.dal, never()).createCriteria(Costing.class);
+    }
+  }
+
+  /**
    * The other side of the create case: a product that arrives already costed (e.g. the products
    * import, which posts its cost in the same batch) is annotated {@code true}, so the banner does
    * not flash on a product that is perfectly fine.
@@ -1358,6 +1777,350 @@ public class ProductDefaultsHandlerTest {
       assertEquals(2, listBody.getJSONObject("response").getJSONArray("data").length());
       categoryMock.verifyNoInteractions();
       verify(dal, never()).createCriteria(Costing.class);
+    }
+  }
+  // ── ETP-5680: tax category follows the product type ──────────────────────
+
+  private static ProductDefaultsHandler handlerWithTypeTaxCategories(String servicesId,
+      String goodsId) {
+    ProductDefaultsHandler handler = handlerResolving(
+        UOM_CLIENT_DEFAULT, UOM_SYSTEM_DEFAULT, TAX_CLIENT_DEFAULT, "tax-system-default");
+    doReturn(servicesId).when(handler).queryTaxCategoryIdByName(
+        ProductDefaultsHandler.TAX_CATEGORY_NAME_SERVICE, CLIENT1);
+    doReturn(goodsId).when(handler).queryTaxCategoryIdByName(
+        ProductDefaultsHandler.TAX_CATEGORY_NAME_GOODS, CLIENT1);
+    doReturn(null).when(handler).queryTaxCategoryIdByName(anyString(), org.mockito.ArgumentMatchers.eq(SYSTEM_CLIENT_ID));
+    return handler;
+  }
+
+  @Test
+  public void testTaxCategoryNameForTypeMapsServiceAndEveryOtherType() {
+    assertEquals("IVA Normal Servicios", ProductDefaultsHandler.taxCategoryNameForType("S"));
+    assertEquals("IVA Normal", ProductDefaultsHandler.taxCategoryNameForType("I"));
+    assertEquals("IVA Normal", ProductDefaultsHandler.taxCategoryNameForType("R"));
+    assertEquals("IVA Normal", ProductDefaultsHandler.taxCategoryNameForType("E"));
+    assertNull(ProductDefaultsHandler.taxCategoryNameForType(null));
+    assertNull(ProductDefaultsHandler.taxCategoryNameForType(" "));
+  }
+
+  @Test
+  public void testCreateFillsMissingTaxCategoryFromProductType() throws Exception {
+    ProductDefaultsHandler handler = handlerWithTypeTaxCategories("tax-services", "tax-goods");
+
+    JSONObject service = new JSONObject().put("productType", "S");
+    handler.handle(postCtx(service, obContextWithClient(CLIENT1)));
+    assertEquals("tax-services", service.getString("taxCategory"));
+
+    JSONObject item = new JSONObject().put("productType", "I");
+    handler.handle(postCtx(item, obContextWithClient(CLIENT1)));
+    assertEquals("tax-goods", item.getString("taxCategory"));
+  }
+
+  @Test
+  public void testCreateKeepsExplicitTaxCategoryAndFallsBackToIsDefault() throws Exception {
+    ProductDefaultsHandler handler = handlerWithTypeTaxCategories("tax-services", "tax-goods");
+
+    JSONObject explicit = new JSONObject().put("productType", "S").put("taxCategory", "mine");
+    handler.handle(postCtx(explicit, obContextWithClient(CLIENT1)));
+    assertEquals("mine", explicit.getString("taxCategory"));
+
+    // No productType in the body: legacy IsDefault fallback.
+    JSONObject noType = new JSONObject();
+    handler.handle(postCtx(noType, obContextWithClient(CLIENT1)));
+    assertEquals(TAX_CLIENT_DEFAULT, noType.getString("taxCategory"));
+  }
+
+  @Test
+  public void testCreateFallsBackToIsDefaultWhenTenantLacksTheNamedCategory() throws Exception {
+    ProductDefaultsHandler handler = handlerWithTypeTaxCategories(null, null);
+
+    JSONObject body = new JSONObject().put("productType", "S");
+    handler.handle(postCtx(body, obContextWithClient(CLIENT1)));
+    assertEquals(TAX_CLIENT_DEFAULT, body.getString("taxCategory"));
+  }
+
+  @Test
+  public void testPatchNeverRecalculatesTaxCategory() throws Exception {
+    ProductDefaultsHandler handler = handlerWithTypeTaxCategories("tax-services", "tax-goods");
+
+    JSONObject body = new JSONObject().put("productType", "S");
+    NeoContext ctx = NeoContext.builder()
+        .specName("product").entityName("product")
+        .httpMethod("PATCH").endpointType(NeoEndpointType.CRUD)
+        .requestBody(body).obContext(obContextWithClient(CLIENT1)).build();
+    handler.handle(ctx);
+    assertFalse(body.has("taxCategory"));
+  }
+
+  @Test
+  public void testDefaultsExposesTypeTaxCategoryOnlyWhenTypeSentAndNameExists() throws Exception {
+    ProductDefaultsHandler handler = handlerWithTypeTaxCategories("tax-services", null);
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(any(Class.class), anyString())).thenReturn(null);
+
+      NeoContext withType = NeoContext.builder()
+          .specName("product").entityName("product")
+          .httpMethod("GET").endpointType(NeoEndpointType.DEFAULTS)
+          .queryParams(Map.of("productType", "S"))
+          .obContext(obContextWithClient(CLIENT1))
+          .previousResult(NeoResponse.ok(new JSONObject().put("defaults", new JSONObject())))
+          .build();
+      JSONObject d = handler.afterHandle(withType).getBody().getJSONObject("defaults");
+      assertEquals("tax-services", d.getString("typeTaxCategory"));
+      assertEquals("tax-services", d.getString("taxCategory"));
+      assertEquals("S", d.getString("productType"));
+
+      // Name missing for this type (goods) -> key absent, UI leaves the field untouched.
+      NeoContext missing = NeoContext.builder()
+          .specName("product").entityName("product")
+          .httpMethod("GET").endpointType(NeoEndpointType.DEFAULTS)
+          .queryParams(Map.of("productType", "I"))
+          .obContext(obContextWithClient(CLIENT1))
+          .previousResult(NeoResponse.ok(new JSONObject().put("defaults", new JSONObject())))
+          .build();
+      JSONObject d2 = handler.afterHandle(missing).getBody().getJSONObject("defaults");
+      assertFalse(d2.has("typeTaxCategory"));
+      assertEquals(TAX_CLIENT_DEFAULT, d2.getString("taxCategory"));
+
+      // No productType parameter -> key absent.
+      JSONObject d3 = handler.afterHandle(defaultsCtx(obContextWithClient(CLIENT1),
+          NeoResponse.ok(new JSONObject().put("defaults", new JSONObject()))))
+          .getBody().getJSONObject("defaults");
+      assertFalse(d3.has("typeTaxCategory"));
+    }
+  }
+
+  @Test
+  public void testDefaultsReadsProductTypeFromServletRequestWhenContextHasNoQueryMap()
+      throws Exception {
+    // Fallback guard: a hook context built without a query map (not the REST /defaults path any
+    // more) still gets the type from the servlet request.
+    ProductDefaultsHandler handler = handlerWithTypeTaxCategories("tax-services", "tax-goods");
+    javax.servlet.http.HttpServletRequest req = mock(javax.servlet.http.HttpServletRequest.class);
+    when(req.getParameter("productType")).thenReturn("S");
+    org.openbravo.client.kernel.RequestContext rc =
+        mock(org.openbravo.client.kernel.RequestContext.class);
+    when(rc.getRequest()).thenReturn(req);
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<org.openbravo.client.kernel.RequestContext> rcMock =
+            Mockito.mockStatic(org.openbravo.client.kernel.RequestContext.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(any(Class.class), anyString())).thenReturn(null);
+      rcMock.when(org.openbravo.client.kernel.RequestContext::get).thenReturn(rc);
+
+      NeoResponse result = handler.afterHandle(defaultsCtx(obContextWithClient(CLIENT1),
+          NeoResponse.ok(new JSONObject().put("defaults", new JSONObject()))));
+      assertEquals("tax-services",
+          result.getBody().getJSONObject("defaults").getString("typeTaxCategory"));
+    }
+  }
+
+  @Test
+  public void testNewFormDefaultsStartAnItemOnItsTypeTaxCategory() throws Exception {
+    // Sequence: new form opens (no productType param, payload defaults to Item) -> the user
+    // changes the type (param sent as a query param, as NeoSubEndpointDispatcher now forwards it).
+    ProductDefaultsHandler handler = handlerWithTypeTaxCategories("tax-services", "tax-goods");
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(any(Class.class), anyString())).thenReturn(null);
+
+      JSONObject initial = handler.afterHandle(defaultsCtx(obContextWithClient(CLIENT1),
+          NeoResponse.ok(new JSONObject().put("defaults",
+              new JSONObject().put("productType", "I").put("taxCategory", "generic-first")))))
+          .getBody().getJSONObject("defaults");
+      assertEquals("tax-goods", initial.getString("taxCategory"));
+      assertFalse(initial.has("typeTaxCategory"));
+
+      NeoContext changed = NeoContext.builder()
+          .specName("product").entityName("product")
+          .httpMethod("GET").endpointType(NeoEndpointType.DEFAULTS)
+          .queryParams(Map.of("productType", "S"))
+          .obContext(obContextWithClient(CLIENT1))
+          .previousResult(NeoResponse.ok(new JSONObject().put("defaults",
+              new JSONObject().put("productType", "I"))))
+          .build();
+      JSONObject afterChange = handler.afterHandle(changed).getBody().getJSONObject("defaults");
+      assertEquals("tax-services", afterChange.getString("typeTaxCategory"));
+    }
+  }
+
+  @Test
+  public void testNewFormKeepsIsDefaultTaxCategoryWhenTenantLacksTheNamedCategory()
+      throws Exception {
+    ProductDefaultsHandler handler = handlerWithTypeTaxCategories(null, null);
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(any(Class.class), anyString())).thenReturn(null);
+
+      JSONObject initial = handler.afterHandle(defaultsCtx(obContextWithClient(CLIENT1),
+          NeoResponse.ok(new JSONObject().put("defaults", new JSONObject().put("productType", "I")))))
+          .getBody().getJSONObject("defaults");
+      assertEquals(TAX_CLIENT_DEFAULT, initial.getString("taxCategory"));
+    }
+  }
+
+  // ── ETP-5680 via MCP: fallback placeholders cede to the type's category ──
+
+  private static NeoContext postCtxWithPlaceholders(JSONObject body, String... placeholders) {
+    NeoContext ctx = postCtx(body, obContextWithClient(CLIENT1));
+    for (String key : placeholders) {
+      ctx.addFallbackDefault(key);
+    }
+    return ctx;
+  }
+
+  @Test
+  public void testPlaceholderTaxCategoryIsReplacedByTheTypesCategory() throws Exception {
+    ProductDefaultsHandler handler = handlerWithTypeTaxCategories("tax-services", "tax-goods");
+
+    JSONObject service = new JSONObject().put("productType", "S").put("taxCategory", "first-combo");
+    handler.handle(postCtxWithPlaceholders(service, "taxCategory"));
+    assertEquals("tax-services", service.getString("taxCategory"));
+
+    JSONObject item = new JSONObject().put("productType", "I").put("taxCategory", "first-combo");
+    handler.handle(postCtxWithPlaceholders(item, "taxCategory"));
+    assertEquals("tax-goods", item.getString("taxCategory"));
+  }
+
+  @Test
+  public void testExplicitTaxCategoryIsNeverAPlaceholder() throws Exception {
+    ProductDefaultsHandler handler = handlerWithTypeTaxCategories("tax-services", "tax-goods");
+
+    // Only uOM was a placeholder; the caller chose taxCategory (Exento), so it is kept.
+    JSONObject body = new JSONObject().put("productType", "S").put("taxCategory", "exento")
+        .put("uOM", "first-uom");
+    handler.handle(postCtxWithPlaceholders(body, "uOM"));
+    assertEquals("exento", body.getString("taxCategory"));
+  }
+
+  @Test
+  public void testPlaceholderTaxCategoryFallsBackToIsDefaultThenIsKept() throws Exception {
+    ProductDefaultsHandler lacking = handlerWithTypeTaxCategories(null, null);
+    JSONObject body = new JSONObject().put("productType", "S").put("taxCategory", "first-combo");
+    lacking.handle(postCtxWithPlaceholders(body, "taxCategory"));
+    assertEquals(TAX_CLIENT_DEFAULT, body.getString("taxCategory"));
+
+    ProductDefaultsHandler noDefaultAnywhere = spy(new ProductDefaultsHandler());
+    doReturn(null).when(noDefaultAnywhere).queryDefaultId(any(), anyString());
+    doReturn(null).when(noDefaultAnywhere).queryTaxCategoryIdByName(anyString(), anyString());
+    JSONObject kept = new JSONObject().put("productType", "S").put("taxCategory", "first-combo");
+    noDefaultAnywhere.handle(postCtxWithPlaceholders(kept, "taxCategory"));
+    assertEquals("first-combo", kept.getString("taxCategory"));
+  }
+
+  @Test
+  public void testPlaceholderUomIsReplacedByTheIsDefaultUnit() throws Exception {
+    ProductDefaultsHandler handler = handlerWithTypeTaxCategories("tax-services", "tax-goods");
+
+    JSONObject body = new JSONObject().put("productType", "I").put("uOM", "first-uom");
+    handler.handle(postCtxWithPlaceholders(body, "uOM"));
+    assertEquals(UOM_CLIENT_DEFAULT, body.getString("uOM"));
+
+    JSONObject chosen = new JSONObject().put("productType", "I").put("uOM", "my-uom");
+    handler.handle(postCtxWithPlaceholders(chosen));
+    assertEquals("my-uom", chosen.getString("uOM"));
+  }
+
+  @Test
+  public void testEmptyPlaceholderSetBehavesLikeRest() throws Exception {
+    ProductDefaultsHandler handler = handlerWithTypeTaxCategories("tax-services", "tax-goods");
+
+    JSONObject body = new JSONObject().put("productType", "S").put("taxCategory", "present");
+    handler.handle(postCtx(body, obContextWithClient(CLIENT1)));
+    assertEquals("present", body.getString("taxCategory"));
+
+    JSONObject missing = new JSONObject().put("productType", "S");
+    handler.handle(postCtx(missing, obContextWithClient(CLIENT1)));
+    assertEquals("tax-services", missing.getString("taxCategory"));
+  }
+
+  private static NeoContext defaultsCtxAsking(String productType, JSONObject defaults) throws Exception {
+    NeoContext.Builder builder = NeoContext.builder()
+        .specName("product").entityName("product")
+        .httpMethod("GET").endpointType(NeoEndpointType.DEFAULTS)
+        .obContext(obContextWithClient(CLIENT1))
+        .previousResult(NeoResponse.ok(new JSONObject().put("defaults", defaults)));
+    if (productType != null) {
+      builder.queryParams(Map.of("productType", productType));
+    }
+    return builder.build();
+  }
+
+  private static JSONObject genericDefaults() throws Exception {
+    return new JSONObject().put("productType", "I").put("productType$_identifier", "Item")
+        .put("taxCategory", "generic-first");
+  }
+
+  /** A copy of taxCategory from the defaults of a type must be that type's category. */
+  @Test
+  public void testDefaultsOfARequestedTypeAreConsistentWithThatType() throws Exception {
+    ProductDefaultsHandler handler = handlerWithTypeTaxCategories("tax-services", "tax-goods");
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(any(Class.class), anyString())).thenReturn(null);
+
+      JSONObject service = handler.afterHandle(defaultsCtxAsking("S", genericDefaults()))
+          .getBody().getJSONObject("defaults");
+      assertEquals("S", service.getString("productType"));
+      assertFalse(service.has("productType$_identifier"));
+      assertEquals("tax-services", service.getString("taxCategory"));
+      assertEquals("tax-services", service.getString("typeTaxCategory"));
+
+      JSONObject item = handler.afterHandle(defaultsCtxAsking("I", genericDefaults()))
+          .getBody().getJSONObject("defaults");
+      assertEquals("I", item.getString("productType"));
+      assertEquals("tax-goods", item.getString("taxCategory"));
+      assertEquals("tax-goods", item.getString("typeTaxCategory"));
+    }
+  }
+
+  /** No named category for the requested type: taxCategory stays, no typeTaxCategory, type follows. */
+  @Test
+  public void testDefaultsOfARequestedTypeWithoutItsNamedCategory() throws Exception {
+    ProductDefaultsHandler handler = handlerWithTypeTaxCategories(null, "tax-goods");
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(any(Class.class), anyString())).thenReturn(null);
+
+      JSONObject service = handler.afterHandle(defaultsCtxAsking("S", genericDefaults()))
+          .getBody().getJSONObject("defaults");
+      assertEquals("S", service.getString("productType"));
+      assertEquals(TAX_CLIENT_DEFAULT, service.getString("taxCategory"));
+      assertFalse(service.has("typeTaxCategory"));
+    }
+  }
+
+  /** Without a requested type, and for an unknown one, the payload keeps asking for Item. */
+  @Test
+  public void testDefaultsWithoutAValidRequestedTypeStayOnItem() throws Exception {
+    ProductDefaultsHandler handler = handlerWithTypeTaxCategories("tax-services", "tax-goods");
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(any(Class.class), anyString())).thenReturn(null);
+
+      for (String asked : new String[] { null, "ZZ" }) {
+        JSONObject d = handler.afterHandle(defaultsCtxAsking(asked, genericDefaults()))
+            .getBody().getJSONObject("defaults");
+        assertEquals("I", d.getString("productType"));
+        assertEquals("Item", d.getString("productType$_identifier"));
+        assertEquals("tax-goods", d.getString("taxCategory"));
+        assertFalse(d.has("typeTaxCategory"));
+      }
     }
   }
 }

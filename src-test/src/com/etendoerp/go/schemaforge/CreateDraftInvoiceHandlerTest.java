@@ -1129,6 +1129,7 @@ public class CreateDraftInvoiceHandlerTest {
     String sourceOrderStatus = "CO";
     boolean ensuredDocumentNo;
     boolean ensuredGrossAmounts;
+    Invoice alignedListPricesInvoice;
     List<Invoice> draftsToReturn = Collections.emptyList();
     RuntimeException checkFailure;
     List<String> checkedIds;
@@ -1189,6 +1190,11 @@ public class CreateDraftInvoiceHandlerTest {
         public void ensureLineGrossAmounts(Invoice invoice) {
           ensuredGrossAmounts = true;
         }
+
+        @Override
+        public void alignLineListPrices(Invoice invoice, java.util.Set<String> onlyLineIds) {
+          alignedListPricesInvoice = onlyLineIds == null ? invoice : null;
+        }
       };
     }
 
@@ -1213,6 +1219,10 @@ public class CreateDraftInvoiceHandlerTest {
     Map<String, BigDecimal> receivedOverrides;
     Invoice ensuredGrossInvoice;
     Invoice copiedDiscountsInvoice;
+    /** ETP-5714: the copy-side support calls in the order they happened (copy, align, gross). */
+    final List<String> supportCalls = new java.util.ArrayList<>();
+    Invoice alignedInvoice;
+    java.util.Set<String> alignedScope = Collections.singleton("unset");
 
     @Override
     protected JSONArray buildSelectedLinesForOrder(Order order, Map<String, BigDecimal> lineOverrides) {
@@ -1231,11 +1241,20 @@ public class CreateDraftInvoiceHandlerTest {
         @Override
         public void ensureLineGrossAmounts(Invoice invoice) {
           ensuredGrossInvoice = invoice;
+          supportCalls.add("gross");
         }
 
         @Override
         public void copyLineDiscountsFromOrder(Invoice invoice) {
           copiedDiscountsInvoice = invoice;
+          supportCalls.add("copy");
+        }
+
+        @Override
+        public void alignLineListPrices(Invoice invoice, java.util.Set<String> onlyLineIds) {
+          supportCalls.add("align");
+          alignedInvoice = invoice;
+          alignedScope = onlyLineIds;
         }
       };
     }
@@ -1522,6 +1541,99 @@ public class CreateDraftInvoiceHandlerTest {
   }
 
   /**
+   * A generated invoice whose org→document currency differs, in currency {@code currencyId} with
+   * header rate {@code rate}, for org {@code org-1} (organization currency {@code eur}).
+   */
+  private static Invoice generatedInvoice(String id, String currencyId, BigDecimal rate) {
+    Organization org = mock(Organization.class);
+    when(org.getId()).thenReturn("org-1");
+    Currency currency = mock(Currency.class);
+    when(currency.getId()).thenReturn(currencyId);
+    Invoice invoice = mock(Invoice.class);
+    when(invoice.getId()).thenReturn(id);
+    when(invoice.get(Invoice.PROPERTY_ORGANIZATION)).thenReturn(org);
+    when(invoice.get(Invoice.PROPERTY_CURRENCY)).thenReturn(currency);
+    when(invoice.get(Invoice.PROPERTY_ETGOCURRENCYRATE)).thenReturn(rate);
+    return invoice;
+  }
+
+  /**
+   * ETP-5840, table-driven: an invoice generated from a sales order or quotation in a foreign
+   * currency WITHOUT a rate (none configured for its accounting date) is refused BEFORE completing —
+   * 422 {@code exchange_rate_missing_on_complete} with its message keys and params, the generation
+   * rolled back ({@code rollbackAndClose}), the completion never run and the quotation not marked
+   * invoiced. With a rate, or in the organization currency, it completes as before; the shipment
+   * route is not checked.
+   */
+  @Test
+  public void handleCreate_foreignInvoiceWithoutRate_isRefusedAndRolledBack() throws Exception {
+    Object[][] cases = {
+        // name, spec, currency, rate, expected status
+        { "order, foreign, no rate", SPEC_SALES_ORDER, "usd", null, 422 },
+        { "quotation, foreign, no rate", SPEC_SALES_QUOTATION, "usd", null, 422 },
+        { "order, foreign, with rate", SPEC_SALES_ORDER, "usd", new BigDecimal("1.1"), 201 },
+        { "order, org currency", SPEC_SALES_ORDER, "eur", null, 201 },
+        { "shipment route is not checked", SPEC_GOODS_SHIPMENT, "usd", null, 201 },
+    };
+    for (Object[] c : cases) {
+      String name = (String) c[0];
+      String spec = (String) c[1];
+      try (MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+          MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+          MockedStatic<org.openbravo.erpCommon.utility.OBCurrencyUtils> currencies =
+              Mockito.mockStatic(org.openbravo.erpCommon.utility.OBCurrencyUtils.class);
+          MockedStatic<NeoInvoiceSupport> supportMock =
+              Mockito.mockStatic(NeoInvoiceSupport.class)) {
+        mockAdminMode(obContextMock);
+        OBDal dal = mock(OBDal.class);
+        obDalMock.when(OBDal::getInstance).thenReturn(dal);
+        when(dal.getSession()).thenReturn(mock(Session.class));
+        currencies.when(() -> org.openbravo.erpCommon.utility.OBCurrencyUtils.getOrgCurrency("org-1"))
+            .thenReturn("eur");
+        supportMock.when(() -> NeoInvoiceSupport.computePendingQtyPerLineOrThrow(eq("ship-1"),
+            eq(true))).thenReturn(Collections.singletonMap("sl-1", BigDecimal.ONE));
+
+        Invoice invoice = generatedInvoice("inv-fx", (String) c[2], (BigDecimal) c[3]);
+        DispatchHandler handler = new DispatchHandler();
+        handler.orderInvoice = invoice;
+        handler.shipmentInvoice = invoice;
+        handler.parsedShipmentIds = Collections.singletonList("ship-1");
+        handler.sourceOrderStatus = SPEC_SALES_QUOTATION.equals(spec) ? "UE" : "CO";
+
+        try (CompletionMocks completion = new CompletionMocks(dal, completionSuccess())) {
+          mockCompletedInvoice(dal, "inv-fx", "INV-FX-001", "CO");
+
+          NeoResponse response = handler.handle(NeoContext.builder()
+              .specName(spec).entityName(ENTITY_HEADER).httpMethod("POST")
+              .endpointType(NeoEndpointType.ACTION).fieldName(ACTION_CREATE)
+              .recordId(SPEC_GOODS_SHIPMENT.equals(spec) ? "ship-1" : "src-1")
+              .requestBody(new JSONObject()).build());
+
+          assertEquals(name, c[4], response.getHttpStatus());
+          if ((Integer) c[4] == 422) {
+            JSONObject error = response.getBody().getJSONObject("error");
+            assertEquals(name, DocumentRateMessages.CODE_MISSING_ON_COMPLETE,
+                error.getString("code"));
+            assertEquals(name, DocumentRateMessages.MSG_MISSING_ON_COMPLETE,
+                error.getJSONArray(NeoProcessService.MESSAGE_KEYS).getString(0));
+            JSONObject params = error.getJSONObject(NeoProcessService.MESSAGE_PARAMS);
+            assertEquals(name, "eur", params.getString("orgCurrency"));
+            assertEquals(name, "usd", params.getString("documentCurrency"));
+            verify(dal).rollbackAndClose();
+            verify(completion.processInvoiceUtil, never()).process(any(), any(), any(), any(),
+                any(), any(), any());
+            assertNull(name, handler.markedQuotationId);
+          } else {
+            verify(dal, never()).rollbackAndClose();
+            verify(completion.processInvoiceUtil, Mockito.times(1)).process(
+                eq("inv-fx"), eq("CO"), eq(""), eq(""), eq(""), any(), any());
+          }
+        }
+      }
+    }
+  }
+
+  /**
    * ETP-5381 ordering regression — {@code markQuotationAsInvoiceCreated} must run AFTER the
    * confirmation, never before. Marking first would leave the quotation in {@code ETGO_CI} even
    * though the invoice was rolled back, and {@code assertQuotationNotInvoiced} would then reject
@@ -1659,6 +1771,8 @@ public class CreateDraftInvoiceHandlerTest {
         assertEquals(Arrays.asList("ship-1", "ship-2"), handler.receivedShipmentIds);
         assertEquals(new BigDecimal("3"), handler.receivedLineOverrides.get("sl-1"));
         assertTrue(handler.ensuredGrossAmounts);
+      assertNotNull("ETP-5714: the shipment path aligns the list prices of its whole invoice",
+          handler.alignedListPricesInvoice);
         verify(dal, Mockito.times(2)).flush();
       }
     }
@@ -2089,6 +2203,13 @@ public class CreateDraftInvoiceHandlerTest {
       assertEquals(overrides, handler.receivedOverrides);
       assertSame(invoice, handler.ensuredGrossInvoice);
       assertSame(invoice, handler.copiedDiscountsInvoice);
+      // ETP-5714: the list price the native copy left at 0 is aligned for the whole invoice, after
+      // the discount copy (it reads the discount) and before the gross amounts
+      assertSame(invoice, handler.alignedInvoice);
+      assertNull(handler.alignedScope);
+      assertTrue(handler.supportCalls.toString(),
+          handler.supportCalls.indexOf("copy") < handler.supportCalls.indexOf("align")
+              && handler.supportCalls.indexOf("align") < handler.supportCalls.indexOf("gross"));
       verify(invoice).setDocumentType(handler.resolvedDocType);
       verify(invoice).setTransactionDocument(handler.resolvedDocType);
       // Factory delegates document numbering to DocumentNoHandlerLegacy

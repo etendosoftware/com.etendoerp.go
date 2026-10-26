@@ -34,6 +34,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
@@ -110,7 +111,8 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
           + "the invoice and, once nothing is pending, answers 400 'No pending lines to invoice "
           + "in this purchase order'. Only COMPLETED invoices count as invoiced: an invoice "
           + "left in draft by other means does not reduce what is pending.")
-      .withIdDescription("the id of the purchase order to invoice");
+      .withIdDescription("the id of the purchase order to invoice")
+      .availableWhen(DocumentAvailability.WHEN_COMPLETED);
 
   /**
    * The goods-receipt variant of {@code createPurchaseInvoice} (ETP-5709): the optional body keys
@@ -151,7 +153,8 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
               + "400 naming the line and its pending quantity (it is never capped silently), and "
               + "so is a list none of whose entries has a receiptLineId and a non-zero quantity. "
               + "Omit to invoice the pending quantity of every line."))
-      .withIdDescription("the id of the goods receipt to invoice");
+      .withIdDescription("the id of the goods receipt to invoice")
+      .availableWhen(DocumentAvailability.WHEN_COMPLETED);
 
   private static final String ERR_ORDER_NOT_COMPLETED =
       "Purchase order %s is not completed (status %s): complete it before creating the invoice";
@@ -237,47 +240,14 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     try {
       OBContext.setAdminMode(true);
       try {
-        Invoice invoice;
-        if (SPEC_GOODS_RECEIPT.equals(specName)) {
-          JSONObject body = context.getRequestBody();
-          List<String> receiptIds = parseReceiptIds(body, recordId);
-          // A caller that sends no receiptIds (every existing single-receipt caller) falls
-          // back to [recordId] via parseReceiptIds, so this always resolves to the ORIGINAL,
-          // untouched createFromReceipt path — zero behaviour change for it.
-          invoice = receiptIds.size() == 1
-              ? createFromReceipt(receiptIds.get(0), body)
-              : createFromReceipts(receiptIds, body);
-        } else {
-          invoice = createFromOrder(recordId);
-        }
-        OBDal.getInstance().flush();
-        // Refresh to pick up trigger-generated documentNo and totals set by CreateInvoiceLinesFromProcess.
-        OBDal.getInstance().getSession().refresh(invoice);
-        ensureDocumentNo(invoice);
-
-        // ETP-5381: create and confirm atomically — see CreateDraftInvoiceHandler.handleCreate for
-        // the full rationale. The id is captured before the call because ProcessInvoiceUtil commits
-        // and closes the session, leaving `invoice` detached.
-        String invoiceId = invoice.getId();
-        InvoiceCompletionService.completeInvoiceOrThrow(invoiceId, context.getObContext());
-        Invoice completed = OBDal.getInstance().get(Invoice.class, invoiceId);
-
-        JSONObject data = new JSONObject();
-        data.put("id", invoiceId);
-        data.put("documentNo", completed.getDocumentNo());
-        // Not sent before this ticket; the frontend needs it to render the resulting status.
-        data.put("documentStatus", completed.getDocumentStatus());
-
-        JSONObject responseData = new JSONObject();
-        responseData.put("data", data);
-
-        JSONObject wrapper = new JSONObject();
-        wrapper.put(KEY_RESPONSE, responseData);
-
-        return NeoResponse.created(wrapper);
+        return createAndCompleteInvoice(context, specName, recordId);
       } finally {
         OBContext.restorePreviousMode();
       }
+    } catch (DocumentCurrencyRate.MissingRateException e) {
+      OBDal.getInstance().rollbackAndClose();
+      log.warn("Refused to generate invoice from {}: {}", recordId, e.getMessage());
+      return e.toResponse();
     } catch (OBException e) {
       log.warn("Error creating purchase invoice from order {}: {}", recordId, e.getMessage());
       return errorResponse(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
@@ -286,6 +256,60 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "An internal error occurred while creating the purchase invoice");
     }
+  }
+
+  /**
+   * Creates the invoice from the receipt(s) or the purchase order and completes it in one step
+   * (ETP-5381). Runs inside {@link #handle}'s admin-mode block, whose catches turn the exceptions
+   * into responses: a {@link DocumentCurrencyRate.MissingRateException} (ETP-5840, order route
+   * only) rolls the whole generation back and answers the 422 completion refusal.
+   */
+  private NeoResponse createAndCompleteInvoice(NeoContext context, String specName,
+      String recordId) throws JSONException {
+    Invoice invoice;
+    if (SPEC_GOODS_RECEIPT.equals(specName)) {
+      JSONObject body = context.getRequestBody();
+      List<String> receiptIds = parseReceiptIds(body, recordId);
+      // A caller that sends no receiptIds (every existing single-receipt caller) falls
+      // back to [recordId] via parseReceiptIds, so this always resolves to the ORIGINAL,
+      // untouched createFromReceipt path — zero behaviour change for it.
+      invoice = receiptIds.size() == 1
+          ? createFromReceipt(receiptIds.get(0), body)
+          : createFromReceipts(receiptIds, body);
+    } else {
+      invoice = createFromOrder(recordId);
+    }
+    OBDal.getInstance().flush();
+    // Refresh to pick up trigger-generated documentNo and totals set by CreateInvoiceLinesFromProcess.
+    OBDal.getInstance().getSession().refresh(invoice);
+    ensureDocumentNo(invoice);
+
+    // ETP-5381: create and confirm atomically — see CreateDraftInvoiceHandler.handleCreate for
+    // the full rationale. The id is captured before the call because ProcessInvoiceUtil commits
+    // and closes the session, leaving `invoice` detached.
+    String invoiceId = invoice.getId();
+    // ETP-5840: an invoice generated from an order or quotation got its rate recomputed for its
+    // own accounting date; a foreign-currency one without a rate is refused before completing,
+    // and the generation rolled back (catch below) — nothing is left behind.
+    if (!SPEC_GOODS_RECEIPT.equals(specName)) {
+      DocumentCurrencyRate.requireRateForCompletion(invoice, Invoice.PROPERTY_ETGOCURRENCYRATE);
+    }
+    InvoiceCompletionService.completeInvoiceOrThrow(invoiceId, context.getObContext());
+    Invoice completed = OBDal.getInstance().get(Invoice.class, invoiceId);
+
+    JSONObject data = new JSONObject();
+    data.put("id", invoiceId);
+    data.put("documentNo", completed.getDocumentNo());
+    // Not sent before this ticket; the frontend needs it to render the resulting status.
+    data.put("documentStatus", completed.getDocumentStatus());
+
+    JSONObject responseData = new JSONObject();
+    responseData.put("data", data);
+
+    JSONObject wrapper = new JSONObject();
+    wrapper.put(KEY_RESPONSE, responseData);
+
+    return NeoResponse.created(wrapper);
   }
 
   /**
@@ -471,6 +495,8 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     // this EM_ extension column, so the generated invoice total drifted from the
     // source purchase order. Shared with CreateDraftInvoiceHandler (ETP-4006).
     getSupport().copyLineDiscountsFromOrder(invoice);
+    // ETP-5714: a source line without a list price gives a copied line the form would not store
+    getSupport().alignLineListPrices(invoice, null);
 
     InvoiceLineLinker.linkInvoiceLinesToExistingInouts(invoice.getId());
 
@@ -681,6 +707,8 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     // ETP-4726 pattern (see createFromReceipt/createFromReceiptNoPo): CreateInvoiceLinesFromProcess
     // never populates Line_Gross_Amount / grossUnitPrice; only this call does.
     getSupport().ensureLineGrossAmounts(invoice);
+    // ETP-5714: the native copy keeps a source list price of 0; the form would store the price
+    getSupport().alignLineListPrices(invoice, null);
 
     // Deliberately NOT called on this path, unlike createFromReceipt/createFromOrder:
     // copyLineDiscountsFromOrder / applyOrderDiscountToInvoice / propagateOrderRateToInvoice
@@ -962,6 +990,8 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     // ETP-4780: same discount copy as createFromOrder above — a receipt-originated
     // invoice must not lose the % Descuento carried by the linked purchase order line.
     getSupport().copyLineDiscountsFromOrder(invoice);
+    // ETP-5714: a source line without a list price gives a copied line the form would not store
+    getSupport().alignLineListPrices(invoice, null);
 
     InvoiceLineLinker.linkInvoiceLinesToExistingInouts(invoice.getId());
 
@@ -1145,6 +1175,9 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     ensureDocumentNo(invoice);
     // ETP-4726: same gap as createFromReceipt() above — never wired in this branch either.
     getSupport().ensureLineGrossAmounts(invoice);
+    // ETP-5714: same list-price gap as the other native-copy paths (the invoice is brand new, so
+    // every line is a copied one)
+    getSupport().alignLineListPrices(invoice, null);
 
     return invoice;
   }

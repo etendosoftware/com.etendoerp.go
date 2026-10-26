@@ -19,7 +19,8 @@ PUSH_REFS=""
 # ----------------------------------------------------------------------------
 # Hooks-Verified: every commit being pushed must carry a valid trailer, proving
 # the pre-commit hooks were installed and ran for that exact tree.
-# Set HOOKS_VERIFY_SKIP=1 to bypass (e.g. when pushing imported/legacy history).
+# HOOKS_VERIFY_SKIP=1 exists only for maintenance pushes of imported history; CI's verify
+# check applies regardless.
 # ----------------------------------------------------------------------------
 if [ "$HOOKS_VERIFY_SKIP" != "1" ]; then
   . "$SCRIPT_DIR/lib/hooks-proof.sh"
@@ -48,10 +49,10 @@ if [ "$HOOKS_VERIFY_SKIP" != "1" ]; then
       printf '     %s  %s\n' "$(git rev-parse --short "$sha")" "$(git log -1 --format=%s "$sha")"
     done
     echo ""
-    echo "   The git hooks were not active when those commits were made."
+    echo "   They were made without the git hooks, or changed after them (an amend with"
+    echo "   --no-verify, a rebase that resolved a conflict). CI's verify check refuses them too."
     echo "   Fix: git config core.hooksPath .githooks   (see .githooks/README.md)"
     echo "        git rebase --exec 'git commit --amend --no-edit' <base>"
-    echo "   Bypass (discouraged): HOOKS_VERIFY_SKIP=1 git push"
     exit 1
   fi
   echo "✔ Hooks-Verified trailer present on all pushed commits."
@@ -68,7 +69,7 @@ rm -f "$HANDOFF_FILE"
 cd "$MODULE_DIR"
 if [ -n "$(git status --porcelain)" ]; then
   echo "❌ ERROR: You have uncommitted or untracked changes in the module repository."
-  echo "   Please commit or stash them before pushing, or use 'git push --no-verify' to bypass."
+  echo "   Commit or stash them before pushing: the checks below must see what you push."
   echo "   Uncommitted files:"
   git status --porcelain
   exit 1
@@ -319,17 +320,18 @@ check_target_conflicts "$TARGET_BRANCH"
 #
 # A skipped step is REPORTED but never blocks the push; the commit stays valid.
 # ----------------------------------------------------------------------------
-RUN_STEP1=0; RUN_STEP2=0; RUN_STEP3=0
+RUN_STEP1=0; RUN_STEP2=0; RUN_STEP3=0; RUN_SCRIPTS=0
 if [ -n "$BASE_REF" ] && CHANGED_FILES="$(git diff --name-only "$BASE_REF"...HEAD 2>/dev/null)"; then
   CHECKS="$(printf '%s\n' "$CHANGED_FILES" | relevance_checks)"
   case " $CHECKS " in *" xml "*)      RUN_STEP1=1 ;; esac
   case " $CHECKS " in *" junit "*)    RUN_STEP2=1 ;; esac
   case " $CHECKS " in *" coverage "*) RUN_STEP3=1 ;; esac
+  case " $CHECKS " in *" scripts "*)  RUN_SCRIPTS=1 ;; esac
   n_files="$(printf '%s\n' "$CHANGED_FILES" | grep -Evc '^[[:space:]]*$' || true)"
   _p() { [ "$1" = "1" ] && printf run || printf skip; }
-  echo "==> Relevance: ${n_files} changed file(s) vs ${BASE_REF} → [1 XML]=$(_p $RUN_STEP1) · [1b Sonar issues]=$(_p $RUN_STEP2) · [2 JUnit]=$(_p $RUN_STEP2) · [3 Sonar]=$(_p $RUN_STEP3)"
+  echo "==> Relevance: ${n_files} changed file(s) vs ${BASE_REF} → [0 Script tests]=$(_p $RUN_SCRIPTS) · [1 XML]=$(_p $RUN_STEP1) · [1b Sonar issues]=$(_p $RUN_STEP2) · [2 JUnit]=$(_p $RUN_STEP2) · [3 Sonar]=$(_p $RUN_STEP3)"
 else
-  RUN_STEP1=1; RUN_STEP2=1; RUN_STEP3=1
+  RUN_STEP1=1; RUN_STEP2=1; RUN_STEP3=1; RUN_SCRIPTS=1
   echo "==> Relevance: no reliable change set (base='${BASE_REF:-none}') → running ALL steps."
 fi
 
@@ -386,6 +388,13 @@ else
   skip_step "0" "Unit/integration test split"
   skip_step "0" "Test hygiene (@covers, naming)"
 fi
+# The scripts' and hook libraries' own unit tests, the ones CI's unit-test-classification.yml runs:
+# seconds, so a change to scripts/ or .github/ runs them instead of goTestUnit and Sonar.
+if [ "$RUN_SCRIPTS" = "1" ]; then
+  run_convention_check "Script tests" "python3 -m unittest discover -s scripts"
+else
+  skip_step "0" "Script tests"
+fi
 
 # 1. Validate sourcedata XML record order + constraints (mirrors CI's
 # xml-order-check.yml). Cheap and fails fast BEFORE the expensive tests/Sonar, so
@@ -421,11 +430,11 @@ else
 fi
 
 # 2. Run the database-free half of the Etendo Go suite (goTestUnit, ETP-5695): no
-# Postgres, no Tomcat. The DB-backed *IntegrationTest classes run in CI's full
-# suite, not here. goTestUnitCoverageReport turns this run's goTestUnit.exec into
-# the XML that step 3 reads. The previous run's exec, XML and results are deleted
-# first: when this step fails, Gradle stops before the report, and step 3 must find
-# no XML rather than measure coverage from an older run.
+# Postgres, no Tomcat. The DB-backed *IntegrationTest classes run in CI (the PR's
+# mini pipeline and the daily cut), not here. goTestUnitCoverageReport turns this
+# run's goTestUnit.exec into the XML that step 3 reads. The previous run's exec,
+# XML and results are deleted first: when this step fails, Gradle stops before the
+# report, and step 3 must find no XML rather than measure coverage from an older run.
 # Step 2 is deliberately NOT keyed: it runs Gradle in $CORE_DIR, so its real input
 # set is the whole etendo_core build, not just this module's sources. A key built
 # from the module alone would miss a core change and produce a false pass.
@@ -532,7 +541,7 @@ if [ "${#FAILED_STEPS[@]}" -gt 0 ]; then
   done
   echo ""
   echo "   Fix everything listed, then re-push (each is re-checked together —"
-  echo "   no need to push once per problem). Bypass with 'git push --no-verify'."
+  echo "   no need to push once per problem)."
   echo "=========================================="
   exit 1
 fi

@@ -157,37 +157,21 @@ public class StripeCustomerPortalService {
         throw new IOException("Billing provider returned no subscription price");
       }
       JSONObject product = price.optJSONObject("product");
-      String plan = optText(price, "nickname");
+      String plan = StripeJson.text(price, "nickname");
       if (StringUtils.isBlank(plan) && product != null) {
-        plan = optText(product, "name");
+        plan = StripeJson.text(product, "name");
       }
       if (StringUtils.isBlank(plan)) {
-        plan = optText(price, "id");
+        plan = StripeJson.text(price, "id");
       }
       // Top level before API 2025-03-31, on the subscription item from then on.
       Instant renewal = SubscriptionLifecycleApplier.subscriptionPeriodBoundary(subscription,
           SubscriptionLifecycleApplier.CURRENT_PERIOD_END);
       String renewalAt = renewal == null ? null : renewal.toString();
       return new SubscriptionDetail(plan, price.optLong("unit_amount", 0L),
-          optText(price, "currency").toUpperCase(Locale.ROOT),
-          optText(subscription, "status"), renewalAt,
+          StripeJson.text(price, "currency").toUpperCase(Locale.ROOT),
+          StripeJson.text(subscription, "status"), renewalAt,
           subscription.optBoolean("cancel_at_period_end", false));
-    }
-
-    /**
-     * Reads a String field the way Stripe actually sends it, never as the literal word "null".
-     *
-     * <p>Jettison's {@code JSONObject.optString} does not fall back to the default when the key
-     * maps to {@link org.codehaus.jettison.json.JSONObject#NULL} — it stringifies the null marker
-     * into the literal text {@code "null"} instead. Every Stripe field that can legitimately be
-     * JSON {@code null} (e.g. an unset {@code nickname}) must be read through here, not through a
-     * bare {@code optString}, or the caller silently treats "null" as a real value.
-     */
-    private static String optText(JSONObject json, String key) {
-      if (json == null || !json.has(key) || json.isNull(key)) {
-        return "";
-      }
-      return StringUtils.trimToEmpty(json.optString(key, ""));
     }
 
     public String getPlan() {

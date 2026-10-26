@@ -1,0 +1,30 @@
+# Célula: compras
+# Compras (Ivan + Valeria): factura/pedido de compra, albarán de entrada, devoluciones a proveedor, aging de pagos.
+# Una clase de test por línea (nombre completo). Las *IntegrationTest / *DbTest son de integración;
+# el resto, con mocks. Ejecutar: ./gradlew goCellTest -Pcell=compras [-Pkind=mock|integration|all]
+
+# Tests comunes a ventas y compras (src-test/cells/compartidos/ventas-compras.txt)
+@incluye ventas-compras
+
+# --- con mocks (13)
+com.etendoerp.go.schemaforge.AgingPayableReportHandlerTest
+com.etendoerp.go.schemaforge.CreateGoodsReceiptHandlerTest
+com.etendoerp.go.schemaforge.CreatePurchaseInvoiceHandlerTest
+com.etendoerp.go.schemaforge.CreatePurchaseReturnHandlerTest
+com.etendoerp.go.schemaforge.GoodsReceiptHeaderHandlerTest
+com.etendoerp.go.schemaforge.GoodsReceiptLineHandlerTest
+com.etendoerp.go.schemaforge.PaymentDetailsHandlerTest
+com.etendoerp.go.schemaforge.PurchaseInvoiceHeaderHandlerTest
+com.etendoerp.go.schemaforge.PurchaseInvoiceLineHandlerTest
+com.etendoerp.go.schemaforge.PurchaseOrderHeaderHandlerTest
+com.etendoerp.go.schemaforge.ReturnToVendorShipmentHeaderHandlerPostingTest
+com.etendoerp.go.schemaforge.ReturnToVendorShipmentHeaderHandlerTest
+com.etendoerp.go.schemaforge.ReturnToVendorShipmentLineHandlerTest
+
+# --- integración (BD) (5)
+com.etendoerp.go.schemaforge.CreateGoodsReceiptHandlerNegativeQuantityIntegrationTest
+com.etendoerp.go.schemaforge.CreatePurchaseInvoiceHandlerGrossAmountIntegrationTest
+com.etendoerp.go.schemaforge.CreatePurchaseInvoiceHandlerNegativeQuantityIntegrationTest
+com.etendoerp.go.schemaforge.GoodsReceiptNoStockCompletionIntegrationTest
+com.etendoerp.go.schemaforge.GoodsReceiptWarehouseSwitchReanchorIntegrationTest
+

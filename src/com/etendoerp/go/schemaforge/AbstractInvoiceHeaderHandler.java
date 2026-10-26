@@ -41,6 +41,7 @@ import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBCurrencyUtils;
+import org.openbravo.model.common.businesspartner.Location;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.invoice.Invoice;
@@ -82,6 +83,8 @@ public abstract class AbstractInvoiceHeaderHandler {
   protected static final String FIELD_ORIGIN_INVOICES      = "originInvoices";
   protected static final String FIELD_TRANSACTION_DOCUMENT = "transactionDocument";
   private static final String FIELD_CURRENCY = "currency";
+  /** {@code C_BPartner_Location_ID}: the invoicing address. */
+  static final String FIELD_PARTNER_ADDRESS = "partnerAddress";
   // Package-private: also used by InvoiceCalloutHelper (S1448 extraction)
   static final String FIELD_VALUE = "value";
   private static final String FIELD_PROCESSED = "processed";
@@ -997,44 +1000,47 @@ public abstract class AbstractInvoiceHeaderHandler {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Server-side defaults for a write that leaves a field out (ETP-5703)
+  // ---------------------------------------------------------------------------
+
   /**
-   * Appends a {@code WARNING} message to the callout response body when the user directly
-   * changes the invoice's {@code currency} field and no {@code C_Conversion_Rate} exists for
-   * (docCurrency → orgCurrency, invoiceDate). Mirrors
-   * {@code AbstractOrderHeaderHandler#checkExchangeRateWarning}.
+   * Fills {@code partnerAddress} (the invoicing address, {@code C_Invoice.C_BPartner_Location_ID},
+   * mandatory) on a create that names a business partner but no address, when the partner has
+   * exactly one active bill-to location (ETP-5703).
    *
-   * <p>ETP-4838: rate availability is resolved by {@link NeoExchangeRateService#hasRate} — the same
-   * lookup {@code GET /sws/neo/validate-exchange-rate} serves the frontend — so the callout warning
-   * and the frontend's own pre-check can never disagree.
+   * <p><b>Why.</b> The SPA always sends the address it picked from the partner's locations, but an
+   * agent creating an invoice with only {@code businessPartner} was refused with a 422 naming
+   * {@code partnerAddress}, even for a partner with a single address: the business-partner callout
+   * cannot select one through NEO (the {@code _LOC} selector aux value it reads does not exist —
+   * see {@code McpBillToInjector}). Sales and purchase invoices alike.
    *
-   * <p>Call from each subclass's {@code afterCallout()} override.
+   * <p><b>Only when unambiguous.</b> With several bill-to locations the choice is the caller's —
+   * a plausible wrong invoicing address is worse than a precise 422 — so this abstains, as it does
+   * when the body already carries an address, when the partner is absent or still a batch
+   * {@code $ref:}, or when the partner has none. Runs in the caller's own DAL scope: a location this
+   * role cannot read never becomes the address of a document it writes.
    *
-   * @param body         the callout response body; messages are appended in-place
-   * @param requestBody  the original callout request payload (carries {@code field}/{@code value})
-   * @param formState    the callout {@code formState}, carries {@code invoiceDate} as fallback
-   * @param triggerField the field that triggered the callout
+   * <p><b>Channels.</b> Called from each subclass's {@code handle()} pre-hook, which runs before
+   * the create on REST single and REST batch / {@code etendo_batch} ({@code handleWithHooks}).
+   * On MCP {@code etendo_create} the mandatory pre-check runs before this pre-hook (ETP-5535), so
+   * the same rule is also run through this hook right before that pre-check (ETP-5710): the
+   * default is identical on every channel, and with several (or no) bill-to locations it abstains
+   * and the precise {@code missingFields} 422 stands.
+   *
+   * <p><b>ETP-5710 hook.</b> Deliberately NOT declared in {@link #serverResolvedCreateFields()}:
+   * that would demote the field to optional in {@code etendo_schema}, yet with several bill-to
+   * locations the default abstains and the field must still be reported missing. Overrides
+   * {@code NeoHandler#resolveServerCreateFields} in the concrete invoice handlers.
+   *
+   * <p>Total: never throws.
+   *
+   * @param context the create request context; its request body is mutated in place
    */
-  protected static void checkExchangeRateWarning(JSONObject body, JSONObject requestBody,
-      JSONObject formState, String triggerField) {
-    if (formState == null) {
-      return;
-    }
-    if (!FIELD_CURRENCY.equals(triggerField) && !"currencyid".equals(triggerField)) {
-      return;
-    }
-    String docCurrencyId = requestBody != null ? requestBody.optString(FIELD_VALUE, "") : "";
-    if (docCurrencyId.isEmpty()) {
-      docCurrencyId = formState.optString("currencyid", "");
-    }
-    String invoiceDate = formState.optString("invoiceDate", "");
-    String orgId = OBContext.getOBContext().getCurrentOrganization().getId();
-    String orgCurrencyId = OBCurrencyUtils.getOrgCurrency(orgId);
-    if (!docCurrencyId.isEmpty() && orgCurrencyId != null
-        && !docCurrencyId.equals(orgCurrencyId) && !invoiceDate.isEmpty()
-        && !NeoExchangeRateService.hasRate(orgCurrencyId, docCurrencyId, invoiceDate)) {
-      InvoiceCalloutHelper.appendMessage(body, "WARNING", "noExchangeRateAvailable");
-      log.debug("[ETP-4029] No conversion rate warning added (currency={})", docCurrencyId);
-    }
+  public void resolveServerCreateFields(NeoContext context) {
+    // The invoicing address column's AD rule ("C_BPartner Location - Bill To") requires IsBillTo.
+    PartnerLocationDefaults.fillIfMissing(context, FIELD_PARTNER_ADDRESS,
+        Location.PROPERTY_INVOICETOADDRESS);
   }
 
   // ---------------------------------------------------------------------------
@@ -1047,8 +1053,10 @@ public abstract class AbstractInvoiceHeaderHandler {
   // here invoke it with ("invoiceDate", "accountingDate").
 
   /**
-   * Shared {@code afterCallout} body: blocks callout-driven currency updates and appends an
-   * exchange-rate warning when the user directly changes the invoice currency (ETP-4029); and
+   * Shared {@code afterCallout} body: blocks callout-driven currency updates (ETP-4029); returns
+   * the recalculated exchange rate when the currency or the accounting date changes, including an
+   * accounting date the classic callout copied from a new invoice date (ETP-5840, see
+   * {@link DocumentCurrencyRate#applyToCallout}); and
    * blocks callout-driven document type updates on an already-saved invoice (ETP-4535).
    *
    * <p>Note that {@code accountingDate} is deliberately NOT guarded here — see the comment at the
@@ -1058,7 +1066,8 @@ public abstract class AbstractInvoiceHeaderHandler {
    * <p>Identical for both {@link PurchaseInvoiceHeaderHandler} and {@link SalesInvoiceHeaderHandler}
    * — each subclass's {@code afterCallout()} override should just delegate here.
    */
-  protected NeoResponse handleInvoiceAfterCallout(NeoContext context) {
+  protected NeoResponse handleInvoiceAfterCallout(NeoContext context,
+      DocumentCurrencyRate currencyRate) {
     try {
       NeoHandlerUtils.CalloutFields fields = NeoHandlerUtils.extractCalloutFields(context);
       if (fields == null) {
@@ -1073,8 +1082,10 @@ public abstract class AbstractInvoiceHeaderHandler {
       // DateInvoiced. Independent editing is preserved by restricting the server-side
       // mirror to creation (NeoHandlerUtils#mirrorAccountingDateOnCreate), not by
       // stripping the cascade.
-      checkExchangeRateWarning(fields.body(), fields.requestBody(), fields.formState(), fields.triggerField());
       String recordId = InvoiceCalloutHelper.resolveCalloutRecordId(context, fields.formState());
+      // ETP-5840: the recalculated rate for the accounting date — also when the classic callout
+      // copied a new invoice date into it — returned in updates.eTGOCurrencyRate.
+      currencyRate.applyToCallout(fields, recordId);
       blockCalloutDocTypeUpdateIfLocked(fields.updates(), fields.triggerField(), recordId);
       InvoiceCalloutHelper.applySiiAuthorizationCallout(fields.triggerField(), fields.requestBody(), fields.updates());
       InvoiceCalloutHelper.applyVerifactuInvTypeFromDocType(fields.triggerField(), fields.requestBody(), fields.updates());
@@ -1094,8 +1105,10 @@ public abstract class AbstractInvoiceHeaderHandler {
    * request body — so that {@code foreignAmount} stays in sync as {@code grandTotalAmount}
    * evolves while lines are added/edited after the currency was first set.
    *
-   * <p>No-op when the invoice has no currency or no {@code EM_ETGO_Currency_Rate} override has
-   * been set on the invoice yet. When the invoice currency equals the org currency, any
+   * <p>No-op when the invoice has no currency. When the invoice has no {@code EM_ETGO_Currency_Rate},
+   * its rows are deleted only when this header write left the rate empty
+   * ({@link DocumentRateGuards#invoiceHeaderWriteClearedRate}, ETP-5840); otherwise nothing is done. When the invoice
+   * currency equals the org currency, any
    * conversion-rate row left over from an earlier foreign-currency state is deleted instead
    * (ETP-4836) — switching back to the org currency must clear the tab, not leave it stale.
    *
@@ -1124,7 +1137,8 @@ public abstract class AbstractInvoiceHeaderHandler {
       return;
     }
     String invoiceId = InvoiceCalloutHelper.resolveInvoiceIdFromContext(context);
-    autoCreateOrUpdateConversionRateDocument(invoiceId);
+    autoCreateOrUpdateConversionRateDocument(invoiceId,
+        DocumentRateGuards.invoiceHeaderWriteClearedRate(context));
   }
 
   /**
@@ -1204,8 +1218,23 @@ public abstract class AbstractInvoiceHeaderHandler {
    *
    * @param invoiceId the invoice's primary key, already resolved by the caller; no-op if blank
    */
-  @SuppressWarnings("java:S2077")
   protected static void autoCreateOrUpdateConversionRateDocument(String invoiceId) {
+    autoCreateOrUpdateConversionRateDocument(invoiceId, false);
+  }
+
+  /**
+   * {@link #autoCreateOrUpdateConversionRateDocument(String)}, deciding what a null header rate
+   * means (ETP-5840): with {@code rateCleared} — the current header write, or the generation flow
+   * that just recomputed the rate, left it null — the invoice's rate rows are deleted so the tab
+   * mirrors the header; otherwise (a line save, a write that did not touch the rate) a null rate
+   * leaves the rows alone, as before.
+   *
+   * @param invoiceId   the invoice's primary key; no-op if blank
+   * @param rateCleared whether the caller itself left the header rate null
+   */
+  @SuppressWarnings("java:S2077")
+  protected static void autoCreateOrUpdateConversionRateDocument(String invoiceId,
+      boolean rateCleared) {
     if (StringUtils.isBlank(invoiceId)) {
       return;
     }
@@ -1248,8 +1277,15 @@ public abstract class AbstractInvoiceHeaderHandler {
           return;
         }
         BigDecimal rate = invoice.getETGOCurrencyRate();
-        if (rate == null) {
-          return; // no override set yet
+        if (rate == null || rate.signum() <= 0) {
+          // ETP-5840: when THIS write (or generation flow) left the header rate empty, the tab
+          // follows it — a row from an earlier rate is stale and must not survive. Never from a
+          // line save or a write that did not touch the rate: there a null rate means "no override
+          // set yet", as before.
+          if (rateCleared) {
+            ConversionRateDocumentSync.deleteAllForInvoice(invoice.getId(), orgCurrencyId);
+          }
+          return;
         }
 
         // EM_ETGO_Currency_Rate is the org→doc multiplyRate (mirrors C_Order semantics).

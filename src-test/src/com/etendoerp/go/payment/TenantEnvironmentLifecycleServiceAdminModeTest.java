@@ -33,6 +33,8 @@ import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.ad.domain.Preference;
 import org.openbravo.model.ad.system.Client;
 
+import com.etendoerp.go.schemaforge.data.Subscription;
+
 /**
  * The lifecycle preferences are system state read on every NEO request, as the calling user. A
  * role without read access on {@code AD_Preference} (any non-admin role) must still get an access
@@ -188,7 +190,19 @@ public class TenantEnvironmentLifecycleServiceAdminModeTest {
       }
       return query;
     });
-    when(dalInstance.get(Client.class, CLIENT_ID)).thenReturn(mock(Client.class));
+    // ETP-5046 reads the subscription row first (SubscriptionService, in admin mode); these
+    // tenants have none, so the plan falls through to the preferences under test.
+    OBQuery<Subscription> noSubscription = mock(OBQuery.class);
+    when(dalInstance.createQuery(eq(Subscription.class), anyString())).thenAnswer(invocation -> {
+      if (adminDepth.get() == 0) {
+        throw new OBSecurityException("Entity ETGO_Subscription is not readable by the user U1");
+      }
+      return noSubscription;
+    });
+    // ETP-5047's setPreference refuses a client whose id is not a tenant, so the mock carries one.
+    Client tenant = mock(Client.class);
+    when(tenant.getId()).thenReturn(CLIENT_ID);
+    when(dalInstance.get(Client.class, CLIENT_ID)).thenReturn(tenant);
     doAnswer(invocation -> {
       if (adminDepth.get() == 0) {
         throw new OBSecurityException("Entity ADPreference is not writable by the user U1");

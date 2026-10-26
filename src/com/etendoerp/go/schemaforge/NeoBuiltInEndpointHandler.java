@@ -14,6 +14,7 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.service.OBDal;
 
+import com.etendoerp.go.common.BoundedJsonParser;
 import com.etendoerp.go.schemaforge.email.TransactionalEmailService;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 import com.etendoerp.go.schemaforge.util.NeoImageHelper;
@@ -53,6 +54,7 @@ class NeoBuiltInEndpointHandler {
   private final NeoDiscoveryHandler discoveryHandler;
   private final Fiscal303BoxesHandler fiscal303Handler;
   private final Fiscal349BoxesHandler fiscal349Handler;
+  private final Fiscal390BoxesHandler fiscal390Handler;
   private final TransactionalEmailService transactionalEmailService;
 
   NeoBuiltInEndpointHandler(NeoServlet servlet, NeoDiscoveryHandler discoveryHandler) {
@@ -65,10 +67,23 @@ class NeoBuiltInEndpointHandler {
     this.discoveryHandler = discoveryHandler;
     this.fiscal303Handler = new Fiscal303BoxesHandler(servlet);
     this.fiscal349Handler = new Fiscal349BoxesHandler(servlet);
+    this.fiscal390Handler = new Fiscal390BoxesHandler(servlet);
     // ETP-5438 — every declaration PUT arrives through /fiscal303/declarations whatever its
-    // model, so each handler's CRUD delegate must reach both models' snapshot compute.
-    AbstractFiscalHandler.linkSubmittedSnapshotProviders(fiscal303Handler, fiscal349Handler);
+    // model, so each handler's CRUD delegate must reach every model's snapshot compute.
+    AbstractFiscalHandler.linkSubmittedSnapshotProviders(fiscal303Handler, fiscal349Handler,
+        fiscal390Handler);
     this.transactionalEmailService = transactionalEmailService;
+  }
+
+  /** The fiscal-model handler of {@code /fiscal303}, {@code /fiscal349} or {@code /fiscal390}. */
+  private AbstractFiscalHandler fiscalHandlerFor(String specName) {
+    if ("fiscal303".equals(specName)) {
+      return fiscal303Handler;
+    }
+    if ("fiscal349".equals(specName)) {
+      return fiscal349Handler;
+    }
+    return "fiscal390".equals(specName) ? fiscal390Handler : null;
   }
 
   boolean handle(NeoServlet.NeoPathInfo pathInfo, String method,
@@ -103,12 +118,9 @@ class NeoBuiltInEndpointHandler {
       handleAttachmentsEndpoint(method, request, response);
       return true;
     }
-    if ("fiscal303".equals(pathInfo.specName)) {
-      fiscal303Handler.handle(pathInfo.entityName, method, request, response);
-      return true;
-    }
-    if ("fiscal349".equals(pathInfo.specName)) {
-      fiscal349Handler.handle(pathInfo.entityName, method, request, response);
+    AbstractFiscalHandler fiscalHandler = fiscalHandlerFor(pathInfo.specName);
+    if (fiscalHandler != null) {
+      fiscalHandler.handle(pathInfo.entityName, method, request, response);
       return true;
     }
     if ("fiscal-models-catalog".equals(pathInfo.specName)) {
@@ -215,8 +227,13 @@ class NeoBuiltInEndpointHandler {
   private void handleFilterPresetMutation(NeoServlet.NeoPathInfo pathInfo, String method,
       HttpServletRequest request, HttpServletResponse response) throws IOException {
     if ("PUT".equals(method)) {
-      NeoFiltersService.savePreset(pathInfo.entityName, pathInfo.recordId,
-          NeoRequestBodyParser.readRequestBody(request));
+      try {
+        NeoFiltersService.savePreset(pathInfo.entityName, pathInfo.recordId,
+            NeoRequestBodyParser.readRequestBody(request));
+      } catch (IllegalArgumentException e) {
+        servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
+        return;
+      }
       OBDal.getInstance().flush();
       servlet.writeResponse(response, null);
       return;
@@ -524,7 +541,7 @@ class NeoBuiltInEndpointHandler {
       return Optional.empty();
     }
     try {
-      JSONObject json = new JSONObject(body);
+      JSONObject json = BoundedJsonParser.parseObject(body);
       if (!json.has(IS_MAIN_FIELD) || json.isNull(IS_MAIN_FIELD)) {
         servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
             "Required field: isMain");
@@ -574,7 +591,7 @@ class NeoBuiltInEndpointHandler {
       return null;
     }
     try {
-      JSONObject json = new JSONObject(body);
+      JSONObject json = BoundedJsonParser.parseObject(body);
       if (!json.has(DESCRIPTION_FIELD) || json.isNull(DESCRIPTION_FIELD)) {
         return null;
       }
@@ -619,7 +636,7 @@ class NeoBuiltInEndpointHandler {
     String assetId;
     try {
       String body = readBody(request);
-      JSONObject json = new JSONObject(body);
+      JSONObject json = BoundedJsonParser.parseObject(body);
       assetId = json.optString("assetId", null);
     } catch (Exception e) {
       servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,

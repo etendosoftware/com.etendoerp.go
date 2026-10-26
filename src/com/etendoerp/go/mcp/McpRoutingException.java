@@ -95,6 +95,16 @@ class McpRoutingException extends OBException {
   }
 
   /**
+   * The argument this refusal is about ({@code entity}, {@code spec}, {@code id}...), the same
+   * value the envelope carries under {@code field}.
+   *
+   * @return the field name, or {@code null} when the refusal is not about one argument
+   */
+  String getField() {
+    return field;
+  }
+
+  /**
    * The single WARN line this refusal leaves in the router's log, built from its error code
    * (ETP-5639).
    *
@@ -213,6 +223,22 @@ class McpRoutingException extends OBException {
         available.isEmpty()
             ? "This spec exposes no entities. Call etendo_discover to find one that does."
             : RETRY_WITH_AVAILABLE,
+        McpConstants.SEE_ALSO_READING);
+  }
+
+  /**
+   * The record an {@code etendo_schema(view:"actions")} call asked availability for does not exist
+   * (or is not readable by the caller's role) (ETP-5714).
+   *
+   * @param specName   the spec
+   * @param entityName the entity
+   * @param id         the id that matched nothing
+   * @return the exception to throw
+   */
+  static McpRoutingException recordNotFound(String specName, String entityName, String id) {
+    return new McpRoutingException("No record '" + id + "' in " + specName + "/" + entityName,
+        McpConstants.STATUS_NOT_FOUND, McpConstants.ERROR_NOT_FOUND, "id", List.of(),
+        "Look the id up with etendo_list, or omit id to get the catalogue without a record.",
         McpConstants.SEE_ALSO_READING);
   }
 
@@ -590,7 +616,9 @@ class McpRoutingException extends OBException {
         available == null ? List.of() : available,
         "This argument was ignored, not applied — if you meant it to narrow or change the result, "
             + "the result you would have got is not the one you asked for. Retry using only the "
-            + "names in 'available'.",
+            + "names in 'available'."
+            + (McpConstants.TOOL_NEO_ACTION.equals(toolName)
+                ? " The action's own parameters (e.g. docAction) go inside 'parameters'." : ""),
         McpConstants.SEE_ALSO_READING);
   }
 
@@ -788,6 +816,24 @@ class McpRoutingException extends OBException {
         McpConstants.ERROR_VALIDATION, field, List.of(),
         "Supply the argument named in 'field'. etendo_schema lists what each tool accepts.",
         McpConstants.SEE_ALSO_READING);
+  }
+
+  /**
+   * ETP-5669: names every missing argument under {@code missing} (empty list: nothing added).
+   *
+   * @param missing the argument keys that were absent
+   * @return this exception
+   */
+  McpRoutingException withMissing(List<String> missing) {
+    if (missing == null || missing.isEmpty()) {
+      return this;
+    }
+    try {
+      return withExtras(new JSONObject().put("missing", new JSONArray(missing)));
+    } catch (JSONException ignored) {
+      // A list of strings under a constant key cannot fail; the plain refusal still stands.
+      return this;
+    }
   }
 
   /**

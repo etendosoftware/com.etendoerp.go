@@ -26,9 +26,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
-import org.hibernate.Session;
 import org.hibernate.criterion.Restrictions;
-import org.hibernate.query.NativeQuery;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
@@ -38,6 +36,7 @@ import org.openbravo.model.ad.ui.Window;
 
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
+import com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy;
 import com.etendoerp.go.schemaforge.util.OwnerSupport;
 import com.etendoerp.webhookevents.services.BaseWebhookService;
 
@@ -195,7 +194,7 @@ public class SFWindowAccessMap extends BaseWebhookService {
       capabilities.put(IS_OWNER, isOwner);
     } else {
       populateWindowAccessForRole(role, windowAccess);
-      capabilities.put(SHOW_ACCOUNTING_FIELDS, resolveShowAccountingFields(role));
+      capabilities.put(SHOW_ACCOUNTING_FIELDS, NeoAccountingAccessPolicy.canSeeAccounting(role));
       capabilities.put(IS_ADMIN_OR_CLIENT_ADMIN, false);
       capabilities.put(PUBLIC_API_KEY_MANAGEMENT, true);
       capabilities.put(IS_OWNER, isOwner);
@@ -279,30 +278,5 @@ public class SFWindowAccessMap extends BaseWebhookService {
       String tier = Boolean.TRUE.equals(access.isEditableField()) ? FULL : READ_ONLY;
       windowAccess.put(window.getId(), tier);
     }
-  }
-
-  /**
-   * Reads {@code AD_Role.EM_ETGO_Show_Acct_Fields} directly for {@code role} via native SQL,
-   * rather than through the DAL entity model — this extension column was added straight to the
-   * physical table (ETP-4520) and is not yet mapped as a typed entity property, so a native
-   * query is the safe, immediately-functional way to read it without requiring an entity-model
-   * regeneration first.
-   *
-   * @param role the role to resolve the capability for (never the admin/client-admin bypass,
-   *             which always answers {@code true} without querying this column)
-   * @return {@code true} when the column is {@code 'Y'} for this role; {@code false} otherwise
-   *         (including when the role cannot be found, or the column is {@code 'N'}/unset)
-   */
-  private static boolean resolveShowAccountingFields(Role role) {
-    Session session = OBDal.getInstance().getSession();
-    // Result type is deliberately Object, not String: Hibernate maps a PostgreSQL char(1) column
-    // to Character for a plain scalar native query (no explicit addScalar type), and a
-    // generics-erased List<String>.get(0) throws ClassCastException: Character cannot be cast to
-    // String on any real row (confirmed live, ETP-4515 onboarding — same query shape).
-    NativeQuery<Object> query = session.createNativeQuery(
-        "SELECT em_etgo_show_acct_fields FROM ad_role WHERE ad_role_id = :roleId");
-    query.setParameter("roleId", role.getId());
-    List<Object> results = query.getResultList();
-    return !results.isEmpty() && results.get(0) != null && "Y".equals(results.get(0).toString());
   }
 }

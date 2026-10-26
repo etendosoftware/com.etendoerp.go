@@ -221,6 +221,16 @@ class McpWriteGateTest {
     return entity;
   }
 
+  /** A product entity, whose customization declares create directives (ETP-5676). */
+  private SFEntity productEntity() {
+    SFEntity entity = sfEntityFor("product", null);
+    com.etendoerp.go.schemaforge.data.SFSpec spec =
+        mock(com.etendoerp.go.schemaforge.data.SFSpec.class);
+    when(spec.getName()).thenReturn("product");
+    when(entity.getETGOSFSpec()).thenReturn(spec);
+    return entity;
+  }
+
   /** The SchemaForge entity handed to the gate — its own identity never matters to it. */
   private SFEntity specEntity() {
     return sfEntityFor("spec", null);
@@ -720,6 +730,55 @@ class McpWriteGateTest {
       assertFalse(response.has(McpFieldProjection.KEY_UNKNOWN_FIELDS),
           "a warning on a clean write is noise the agent has to rule out every time");
       assertFalse(response.has("unknownFieldsHint"));
+    }
+
+    /**
+     * ETP-5676: a create directive the entity's customization declares (the product's
+     * {@code _skipPricesSeed}) is honoured by its pre-hook, so it is not reported unknown — and it
+     * still travels on to that pre-hook. An undeclared underscore key is still reported.
+     */
+    @Test
+    @DisplayName("a declared create directive is carried through and not reported unknown")
+    void aDeclaredDirectiveIsNotReported() throws Exception {
+      declareProperty("name", "Name");
+      Set<String> unknown = new TreeSet<>();
+      JSONObject body = new JSONObject();
+      body.put("Name", "P");
+      body.put("_skipPricesSeed", true);
+      body.put("_notADirective", true);
+
+      JSONObject mapped;
+      try (MockedStatic<com.etendoerp.go.schemaforge.NeoExtensionDispatcher> dispatcher =
+          mockStatic(com.etendoerp.go.schemaforge.NeoExtensionDispatcher.class)) {
+        dispatcher.when(() -> com.etendoerp.go.schemaforge.NeoExtensionDispatcher
+            .resolveOnly(org.mockito.ArgumentMatchers.any()))
+            .thenReturn(new com.etendoerp.go.schemaforge.ProductDefaultsHandler());
+        mapped = McpWriteRequestSupport.mapFieldsToDalProperties(body, adTab, productEntity(),
+            unknown);
+        // Resolved once for the body, not once per unresolved key.
+        dispatcher.verify(
+            () -> com.etendoerp.go.schemaforge.NeoExtensionDispatcher
+                .resolveOnly(org.mockito.ArgumentMatchers.any()),
+            org.mockito.Mockito.times(1));
+      }
+
+      assertEquals(Set.of("_notADirective"), unknown);
+      assertTrue(mapped.getBoolean("_skipPricesSeed"),
+          "the directive must reach the customization's pre-hook, which strips it");
+    }
+
+    /** A body with nothing unresolved never asks the customization for its directives. */
+    @Test
+    @DisplayName("a clean write does not look up the create directives")
+    void aCleanWriteDoesNotResolveDirectives() throws Exception {
+      declareProperty("name", "Name");
+      try (MockedStatic<com.etendoerp.go.schemaforge.NeoExtensionDispatcher> dispatcher =
+          mockStatic(com.etendoerp.go.schemaforge.NeoExtensionDispatcher.class)) {
+        McpWriteRequestSupport.mapFieldsToDalProperties(fields("Name", "P"), adTab,
+            productEntity(), new TreeSet<>());
+
+        dispatcher.verifyNoInteractions();
+      }
     }
 
     /**

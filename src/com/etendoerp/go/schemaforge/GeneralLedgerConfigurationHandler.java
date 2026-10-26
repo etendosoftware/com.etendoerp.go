@@ -38,6 +38,7 @@ import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.core.SessionHandler;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.currency.Currency;
@@ -51,6 +52,7 @@ import org.openbravo.model.financialmgmt.accounting.coa.ElementValue;
 import org.openbravo.model.financialmgmt.calendar.Calendar;
 
 import com.etendoerp.go.schemaforge.util.PostingAccountCombinations;
+import com.etendoerp.go.schemaforge.util.PostingAccountGuard;
 
 /**
  * Aggregate handler for the custom General Ledger Configuration window.
@@ -75,8 +77,9 @@ import com.etendoerp.go.schemaforge.util.PostingAccountCombinations;
  *   <li><b>GET list</b> (`/general-ledger-configuration/General?...`) and returns exactly one
  *       aggregate row in `response.data[0]`.</li>
  *   <li><b>POST list</b> (`/general-ledger-configuration/General?...`) and persists the backed
- *       sections (`general`, `defaults`, `dimensions`) in one transaction, then returns the
- *       refreshed aggregate row.</li>
+ *       sections (`general`, `defaults`, `dimensions`, `generalAccounts`) in one transaction, then
+ *       returns the refreshed aggregate row. A balancing switch left on without its account is
+ *       refused with the {@code MISSING_REQUIRED_FIELDS} 400 ({@link GeneralLedgerBalancingRule}).</li>
  * </ul>
  */
 @Named("generalLedgerConfigurationHandler")
@@ -200,9 +203,12 @@ public class GeneralLedgerConfigurationHandler implements NeoHandler {
       }
       return null;
     } catch (OBException e) {
+      // A caught error still commits at request end: drop whatever was applied before the throw.
+      SessionHandler.getInstance().rollback();
       log.warn("general-ledger-configuration business error: {}", e.getMessage());
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, e);
     } catch (Exception e) {
+      SessionHandler.getInstance().rollback();
       log.error("general-ledger-configuration aggregate error", e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Internal Server Error");
     } finally {
@@ -243,6 +249,13 @@ public class GeneralLedgerConfigurationHandler implements NeoHandler {
       applyGeneralAccountsChanges(state, generalAccounts);
     }
 
+    NeoResponse refusal = GeneralLedgerBalancingRule.check(state.generalAccounts);
+    if (refusal != null) {
+      // The setters above already changed managed entities: drop them before the request commits.
+      SessionHandler.getInstance().rollback();
+      return refusal;
+    }
+
     OBDal.getInstance().save(state.organization);
     OBDal.getInstance().save(state.schema);
     OBDal.getInstance().save(state.defaults);
@@ -263,7 +276,7 @@ public class GeneralLedgerConfigurationHandler implements NeoHandler {
       orgId = current.getId();
     }
 
-    Organization org = OBDal.getInstance().get(Organization.class, orgId);
+    Organization org = TenantOwnership.loadOwned(Organization.class, orgId);
     if (org == null) {
       throw new OBException("Organization not found: " + orgId);
     }
@@ -470,7 +483,7 @@ public class GeneralLedgerConfigurationHandler implements NeoHandler {
     if (general.has(FIELD_CURRENCY) && !general.isNull(FIELD_CURRENCY)) {
       String currencyId = trimmedOrNull(general.optString(FIELD_CURRENCY, null));
       if (currencyId != null) {
-        Currency currency = OBDal.getInstance().get(Currency.class, currencyId);
+        Currency currency = TenantOwnership.loadOwned(Currency.class, currencyId);
         if (currency == null) {
           throw new OBException("Currency not found: " + currencyId);
         }
@@ -481,21 +494,10 @@ public class GeneralLedgerConfigurationHandler implements NeoHandler {
 
   private void applyDefaultChanges(AggregateState state, JSONObject defaults) {
     for (DefaultFieldMapping mapping : DEFAULT_FIELD_MAPPINGS) {
-      if (!defaults.has(mapping.apiKey)) {
-        continue;
+      if (defaults.has(mapping.apiKey)) {
+        state.defaults.set(mapping.property, resolveAccountingCombination(defaults, mapping.apiKey,
+            state.schema, (AccountingCombination) state.defaults.get(mapping.property)));
       }
-      Object raw = defaults.opt(mapping.apiKey);
-      AccountingCombination combo = null;
-      if (!(raw == null || raw == JSONObject.NULL)) {
-        String id = StringUtils.trimToNull(String.valueOf(raw));
-        if (id != null) {
-          combo = OBDal.getInstance().get(AccountingCombination.class, id);
-          if (combo == null) {
-            throw new OBException("Accounting combination not found: " + id);
-          }
-        }
-      }
-      state.defaults.set(mapping.property, combo);
     }
   }
 
@@ -505,22 +507,27 @@ public class GeneralLedgerConfigurationHandler implements NeoHandler {
       ga.setSuspenseBalancingUse(generalAccounts.optBoolean(FIELD_SUSPENSE_BALANCING_USE));
     }
     if (generalAccounts.has(FIELD_SUSPENSE_BALANCING)) {
-      ga.setSuspenseBalancing(resolveAccountingCombination(generalAccounts, FIELD_SUSPENSE_BALANCING));
+      ga.setSuspenseBalancing(resolveAccountingCombination(generalAccounts, FIELD_SUSPENSE_BALANCING,
+          state.schema, ga.getSuspenseBalancing()));
     }
     if (generalAccounts.has(FIELD_CURRENCY_BALANCING_USE)) {
       ga.setCurrencyBalancingUse(generalAccounts.optBoolean(FIELD_CURRENCY_BALANCING_USE));
     }
     if (generalAccounts.has(FIELD_CURRENCY_BALANCING_ACCOUNT)) {
-      ga.setCurrencyBalancingAcct(resolveAccountingCombination(generalAccounts, FIELD_CURRENCY_BALANCING_ACCOUNT));
+      ga.setCurrencyBalancingAcct(resolveAccountingCombination(generalAccounts, FIELD_CURRENCY_BALANCING_ACCOUNT,
+          state.schema, ga.getCurrencyBalancingAcct()));
     }
     if (generalAccounts.has(FIELD_RETAINED_EARNING)) {
-      ga.setRetainedEarning(resolveAccountingCombination(generalAccounts, FIELD_RETAINED_EARNING));
+      ga.setRetainedEarning(resolveAccountingCombination(generalAccounts, FIELD_RETAINED_EARNING,
+          state.schema, ga.getRetainedEarning()));
     }
     if (generalAccounts.has(FIELD_INCOME_SUMMARY)) {
-      ga.setIncomeSummary(resolveAccountingCombination(generalAccounts, FIELD_INCOME_SUMMARY));
+      ga.setIncomeSummary(resolveAccountingCombination(generalAccounts, FIELD_INCOME_SUMMARY,
+          state.schema, ga.getIncomeSummary()));
     }
     if (generalAccounts.has(FIELD_CFS_ORDER_ACCOUNT)) {
-      ga.setCFSOrderAccount(resolveAccountingCombination(generalAccounts, FIELD_CFS_ORDER_ACCOUNT));
+      ga.setCFSOrderAccount(resolveAccountingCombination(generalAccounts, FIELD_CFS_ORDER_ACCOUNT,
+          state.schema, ga.getCFSOrderAccount()));
     }
     if (generalAccounts.has(FIELD_ACTIVE)) {
       ga.setActive(generalAccounts.optBoolean(FIELD_ACTIVE));
@@ -530,7 +537,15 @@ public class GeneralLedgerConfigurationHandler implements NeoHandler {
     }
   }
 
-  private AccountingCombination resolveAccountingCombination(JSONObject payload, String key) {
+  /**
+   * Resolves a combination id from the request. A bare {@code OBDal.get} applies no tenant predicate
+   * and this handler runs in admin mode, so a foreign id was written into another tenant's ledger
+   * setup (ETP-5722). A row of another tenant is reported as "not found", indistinguishable from a
+   * missing one; client-0 combinations stay visible. A changed value must be a posting account of
+   * the ledger being edited (ETP-5693); the stored one is not re-checked.
+   */
+  private AccountingCombination resolveAccountingCombination(JSONObject payload, String key,
+      AcctSchema ledger, AccountingCombination current) {
     Object raw = payload.opt(key);
     if (raw == null || raw == JSONObject.NULL) {
       return null;
@@ -539,9 +554,12 @@ public class GeneralLedgerConfigurationHandler implements NeoHandler {
     if (id == null) {
       return null;
     }
-    AccountingCombination combo = OBDal.getInstance().get(AccountingCombination.class, id);
+    AccountingCombination combo = TenantOwnership.loadOwned(AccountingCombination.class, id);
     if (combo == null) {
       throw new OBException("Accounting combination not found: " + id);
+    }
+    if (current == null || !id.equals(current.getId())) {
+      PostingAccountGuard.requirePosting(combo, ledger, key);
     }
     return combo;
   }

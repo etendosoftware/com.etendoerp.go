@@ -133,7 +133,7 @@
       <unique name="ETGO_GOS_TOKENHASH_UQ">
         <unique-column name="SESSION_TOKEN_HASH"/>
       </unique>
-      <check name="ETGO_GOS_AUTHMETHOD"><![CDATA[AUTH_METHOD IN ('password', 'sso')]]></check>
+      <check name="ETGO_GOS_AUTHMETHOD"><![CDATA[AUTH_METHOD IN ('password', 'sso', 'link')]]></check>
       <check name="ETGO_GOS_ISACTIVE"><![CDATA[ISACTIVE IN ('Y', 'N')]]></check>
       <check name="ETGO_GOS_ISREVOKED"><![CDATA[IS_REVOKED IN ('Y', 'N')]]></check>
     </table>

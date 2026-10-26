@@ -78,6 +78,7 @@ import com.etendoerp.go.schemaforge.util.NeoReportCallability;
  *
  * @covers com.etendoerp.go.mcp.McpDeclaredActions
  * @covers com.etendoerp.go.mcp.McpActionsView
+ * @covers com.etendoerp.go.mcp.McpRoutingException
  */
 @SuppressWarnings("java:S2187")
 @DisplayName("MCP declared actions (ETP-5468)")
@@ -269,6 +270,100 @@ class McpDeclaredActionsTest {
           "view:\"actions\" must use a buildResponse overload that appends declared actions");
       assertEquals(declared, view.get(3),
           "the map passed to isActionOnlyEntity must be the one view:\"actions\" appends");
+    }
+
+    /**
+     * ETP-5714: with an id, the actions view is judged against that record — the record is resolved
+     * only for view:"actions" and handed to the 7-argument buildResponse as its last argument.
+     */
+    @Test
+    @DisplayName("view:\"actions\" resolves the record named by id and passes it to buildResponse")
+    void actionsViewIsJudgedAgainstTheRecord() {
+      String body = McpSourceScanner.methodBody(
+          McpSourceScanner.read("com/etendoerp/go/mcp/McpToolRouter.java"), "handleSchema");
+
+      int actionsView = body.indexOf("isActionsView");
+      List<String> view = McpSourceScanner.callArguments(body, "McpActionsView.buildResponse",
+          actionsView);
+      assertEquals(7, view.size(), "buildResponse(spec, entity, fields, declared, config, "
+          + "excluded, asked)");
+      assertTrue(body.indexOf("availabilityContextOf", actionsView) > actionsView,
+          "the record is only resolved inside the actions view");
+      assertEquals("asked", view.get(6));
+    }
+  }
+
+  @Nested
+  @DisplayName("unavailableFor (ETP-5714)")
+  class UnavailableFor {
+
+    @Test
+    @DisplayName("an entity with no customization, or one that throws, derives nothing")
+    void quietWhenNothingCanBeDerived() {
+      SFEntity none = mock(SFEntity.class);
+      when(none.getName()).thenReturn("none");
+      when(none.getJavaQualifier()).thenReturn(null);
+
+      assertTrue(McpDeclaredActions.unavailableFor(none, mock(org.openbravo.base.structure.BaseOBObject.class))
+          .isEmpty());
+      assertTrue(McpDeclaredActions.unavailableFor(null, null).isEmpty());
+    }
+
+    @Test
+    @DisplayName("the customization's own answer is returned, and a null or throwing one is empty")
+    void customizationAnswerIsRelayed() {
+      org.openbravo.base.structure.BaseOBObject subject =
+          mock(org.openbravo.base.structure.BaseOBObject.class);
+      SFEntity entity = recEntity();
+      try (org.mockito.MockedStatic<com.etendoerp.go.schemaforge.util.NeoHandlerLookup> lookup =
+          Mockito.mockStatic(com.etendoerp.go.schemaforge.util.NeoHandlerLookup.class)) {
+        com.etendoerp.go.schemaforge.NeoHandler handler =
+            mock(com.etendoerp.go.schemaforge.NeoHandler.class);
+        lookup.when(() -> com.etendoerp.go.schemaforge.util.NeoHandlerLookup
+            .byQualifierQuietly(QUALIFIER)).thenReturn(handler);
+        when(handler.unavailableActions(subject)).thenReturn(Map.of("a", "because"));
+
+        assertEquals(Map.of("a", "because"), McpDeclaredActions.unavailableFor(entity, subject));
+
+        when(handler.unavailableActions(subject)).thenReturn(null);
+        assertTrue(McpDeclaredActions.unavailableFor(entity, subject).isEmpty());
+        when(handler.unavailableActions(subject)).thenThrow(new IllegalStateException("boom"));
+        assertTrue(McpDeclaredActions.unavailableFor(entity, subject).isEmpty());
+      }
+    }
+
+    @Test
+    @DisplayName("ETP-5715: only a customization that opts in un-posts before a reactivation")
+    void unpostBeforeReactivateIsOptIn() {
+      SFEntity entity = recEntity();
+      try (org.mockito.MockedStatic<com.etendoerp.go.schemaforge.util.NeoHandlerLookup> lookup =
+          Mockito.mockStatic(com.etendoerp.go.schemaforge.util.NeoHandlerLookup.class)) {
+        com.etendoerp.go.schemaforge.NeoHandler plain = context -> null;
+        com.etendoerp.go.schemaforge.NeoHandler optsIn = new com.etendoerp.go.schemaforge.NeoHandler() {
+          @Override
+          public com.etendoerp.go.schemaforge.NeoResponse handle(
+              com.etendoerp.go.schemaforge.NeoContext context) {
+            return null;
+          }
+
+          @Override
+          public boolean unpostBeforeReactivate() {
+            return true;
+          }
+        };
+        lookup.when(() -> com.etendoerp.go.schemaforge.util.NeoHandlerLookup
+            .byQualifierQuietly(QUALIFIER)).thenReturn(plain);
+        assertFalse(McpDeclaredActions.unpostsBeforeReactivation(entity));
+
+        lookup.when(() -> com.etendoerp.go.schemaforge.util.NeoHandlerLookup
+            .byQualifierQuietly(QUALIFIER)).thenReturn(optsIn);
+        assertTrue(McpDeclaredActions.unpostsBeforeReactivation(entity));
+
+        lookup.when(() -> com.etendoerp.go.schemaforge.util.NeoHandlerLookup
+            .byQualifierQuietly(QUALIFIER)).thenReturn(null);
+        assertFalse(McpDeclaredActions.unpostsBeforeReactivation(entity));
+        assertFalse(McpDeclaredActions.unpostsBeforeReactivation(null));
+      }
     }
   }
 
@@ -519,6 +614,31 @@ class McpDeclaredActionsTest {
       List<McpToolDefinition> tools = tools();
       assertFalse(specEnumOf(tools, "etendo_action").contains(BANK_REC));
       assertTrue(specEnumOf(tools, "etendo_list").contains("sales-order"));
+    }
+  }
+
+  // ── declared-action 422 envelope ──────────────────────────────────────────
+
+  @Nested
+  @DisplayName("McpRoutingException.actionParametersInvalid (undeclared key)")
+  class UnknownParameterEnvelope {
+
+    @Test
+    @DisplayName("the envelope carries the id suffix, Nothing was run and idDescription")
+    void envelopeExplainsId() throws Exception {
+      Map<String, NeoActionContract> declared = Map.of("ping", NeoActionContract
+          .read("ping", "Pings.").withIdDescription("the thing."));
+      JSONObject error = NeoActionContract.validate(declared, "ping",
+          new JSONObject().put("zeta", "x")).getBody().getJSONObject("error");
+
+      JSONObject envelope = McpRoutingException
+          .actionParametersInvalid("spec", "entity", "ping", error).toEnvelope();
+
+      assertEquals("Action 'ping' does not accept parameter(s) zeta."
+          + " Record id ('id' argument, not a parameter): the thing. Nothing was run.",
+          envelope.getString("detail"));
+      assertEquals("the thing.", envelope.getString("idDescription"));
+      assertEquals("[\"zeta\"]", envelope.getJSONArray("unknownParameters").toString());
     }
   }
 }

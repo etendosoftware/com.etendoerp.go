@@ -25,11 +25,18 @@ import java.util.Map;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.Property;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.service.json.JsonConstants;
+
+import com.etendoerp.go.schemaforge.NeoContext;
+import com.etendoerp.go.schemaforge.NeoExtensionChannel;
+import com.etendoerp.go.schemaforge.NeoReadPredicates;
+
 
 /**
  * Support helpers for the {@code _distinct} fetch endpoint served by
@@ -45,7 +52,58 @@ public final class NeoDistinctFetchSupport {
 
   private static final String JSON_IDENTIFIER = "_identifier";
 
+  /** The client-sent search term of a {@code ?_distinct=} fetch; not a core param. */
+  public static final String DISTINCT_SEARCH_PARAM = "_distinctSearch";
+
   private NeoDistinctFetchSupport() {
+  }
+
+  /**
+   * The list params a {@code ?_distinct=} fetch filters by (ETP-5561): the params the list GET
+   * feeds core, minus everything that would change what core builds.
+   *
+   * <p>{@code _distinct} would flip core into its FK sub-entity mode, {@code _sortBy}/{@code _orderBy}
+   * would add joins to a SELECT DISTINCT, {@code _distinctSearch} is not a core param, and
+   * {@code id} would make core read one record. All are removed here, BEFORE the query service is
+   * created. The row window is forced to the page (core throws {@code OBJSON_NoPagedFetch}
+   * without one); the query itself pages through {@code first/max}.
+   *
+   * <p>A request that carried {@code id} is a read-by-id to {@link NeoReadPredicates#forRestListGet},
+   * which then returns no predicate. The fetch is a list read whatever the client sent, so the
+   * customization's read predicate is resolved here for that case: dropping {@code id} must never
+   * be a way to widen the set of values offered.
+   *
+   * @param params
+   *     the list params already built for the request; mutated and returned
+   * @param context
+   *     the request context; tells whether the request is a read-by-id and resolves the
+   *     customization read predicate for it
+   * @param startRow
+   *     the first row of the requested page, forced into the {@code _startRow} param
+   * @param pageSize
+   *     the number of rows of the requested page; the {@code _endRow} param is
+   *     {@code startRow + pageSize - 1}
+   * @return the same {@code params} map, ready to build the core query service: without the
+   *     params that would change what core builds, with the read predicate re-applied for a
+   *     read-by-id request and with the row window forced to the page
+   */
+  public static Map<String, String> toDistinctFilterParams(Map<String, String> params,
+      NeoContext context, int startRow, int pageSize) {
+    if (context.isReadById()) {
+      String readPredicate = NeoReadPredicates.resolve(context, NeoExtensionChannel.REST_SINGLE);
+      if (StringUtils.isNotBlank(readPredicate)) {
+        params.put(JsonConstants.WHERE_AND_FILTER_CLAUSE, NeoReadPredicates.and(
+            params.get(JsonConstants.WHERE_AND_FILTER_CLAUSE), readPredicate));
+      }
+    }
+    params.remove(JsonConstants.DISTINCT_PARAMETER);
+    params.remove(DISTINCT_SEARCH_PARAM);
+    params.remove(JsonConstants.SORTBY_PARAMETER);
+    params.remove(JsonConstants.ORDERBY_PARAMETER);
+    params.remove(JsonConstants.ID);
+    params.put(JsonConstants.STARTROW_PARAMETER, String.valueOf(startRow));
+    params.put(JsonConstants.ENDROW_PARAMETER, String.valueOf(startRow + pageSize - 1));
+    return params;
   }
 
   /**
@@ -262,6 +320,34 @@ public final class NeoDistinctFetchSupport {
       log.error("Failed to serialize distinct entry: {}", e.getMessage(), e);
     }
     return entry;
+  }
+
+  /**
+   * Builds the {@code data} array for {@code NeoCrudHandler#handleDistinctFetch}: for a
+   * to-one association property, resolves display identifiers in batch; for a
+   * primitive property, emits the raw distinct values as-is.
+   *
+   * @param prop
+   *     the resolved property being serialized (scalar or relation)
+   * @param isRelation
+   *     whether {@code prop} is a to-one association
+   * @param page
+   *     the page of distinct values fetched for the current request
+   * @return the {@code data} array for the distinct-fetch response envelope
+   */
+  public static JSONArray buildDistinctData(Property prop, boolean isRelation, List<Object> page) {
+    JSONArray data = new JSONArray();
+    if (isRelation) {
+      Map<String, String> identifierById = loadIdentifiers(prop.getTargetEntity(), page);
+      for (Object value : page) {
+        data.put(toRelationDistinctEntry(value, identifierById));
+      }
+    } else {
+      for (Object value : page) {
+        data.put(toDistinctEntry(value));
+      }
+    }
+    return data;
   }
 
   /**

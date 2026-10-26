@@ -59,6 +59,8 @@ import org.openbravo.test.base.OBBaseTest;
  * invoked from {@code handle()}/{@code afterHandle()} in the real request lifecycle — against a
  * live Hibernate session and a live {@code C_Invoice_Reverse} table (no mocks), then asserts the
  * GET-response enrichment ({@code enrichOriginInvoice}) surfaces BOTH origins.
+ *
+ * @covers com.etendoerp.go.schemaforge.AbstractInvoiceHeaderHandler
  */
 public class AbstractInvoiceHeaderHandlerOriginInvoiceIntegrationTest extends OBBaseTest {
 

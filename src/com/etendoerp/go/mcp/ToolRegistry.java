@@ -45,6 +45,8 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.ui.Process;
 
 import com.etendoerp.go.oauth2.ApiScopes;
+import com.etendoerp.go.schemaforge.BatchJobService;
+import com.etendoerp.go.schemaforge.BatchService;
 import com.etendoerp.go.schemaforge.NeoVectorSearchEndpoint;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
@@ -201,7 +203,8 @@ public class ToolRegistry {
     if (McpToolRouterSupport.isCatalogExcludedSpec(spec)) {
       return;
     }
-    if (!NeoAccessUtils.hasWindowAccessForSpec(spec, "GET")) {
+    if (!NeoAccessUtils.hasWindowAccessForSpec(spec, "GET")
+        || McpToolRouterSupport.isHiddenAccountingSpec(spec)) {
       return;
     }
     accessibleWindowSpecs.add(spec.getName());
@@ -285,9 +288,17 @@ public class ToolRegistry {
       // still refuses. See McpConstants#batchToolEnabled.
       if (McpConstants.batchToolEnabled()) {
         tools.add(buildBatchTool());
+        // ETP-5677: the follow-up of etendo_batch {async:true}; published with it.
+        tools.add(buildJobStatusTool());
+        tools.add(buildJobCancelTool());
       }
       tools.add(buildActionTool(ToolRegistryActionSpecs.withActionSpecs(accessibleWindowSpecs, actionReportSpecs)));
+      tools.add(McpActionBatch.definition(
+          ToolRegistryActionSpecs.withActionSpecs(accessibleWindowSpecs, actionReportSpecs)));
     }
+    // ETP-5715: the attachment tools — list on the read scope, upload and delete on the write scope.
+    McpAttachmentToolDefinitions.addTo(tools, accessibleWindowSpecs, permissions.canRead,
+        permissions.canWrite);
   }
 
   // ── Amortization plan tool ─────────────────────────────────────────────
@@ -369,6 +380,7 @@ public class ToolRegistry {
       case McpConstants.TOOL_NEO_SCHEMA:
       case "etendo_batch":
       case "etendo_action":
+      case McpConstants.TOOL_NEO_ACTION_BATCH:
       case McpConstants.TOOL_NEO_WIDGET:
       case McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN:
       // ETP-5184: listed here so resolveSpecName does not derive a spec name from the tool name.
@@ -377,6 +389,17 @@ public class ToolRegistry {
       case McpConstants.TOOL_NEO_REQUEST_IMAGE_UPLOAD:
       case McpConstants.TOOL_NEO_UPLOAD_IMAGE:
       case McpConstants.TOOL_NEO_GET_IMAGE_UPLOAD:
+      // ETP-5715: these address a spec by the `spec` argument like every CRUD tool.
+      case McpConstants.TOOL_NEO_REQUEST_ATTACHMENT_UPLOAD:
+      case McpConstants.TOOL_NEO_LIST_ATTACHMENTS:
+      case McpConstants.TOOL_NEO_DELETE_ATTACHMENT:
+      case McpConstants.TOOL_NEO_GET_DOCUMENT_PDF:
+      case McpConstants.TOOL_NEO_SEND_DOCUMENT_EMAIL:
+      case McpConstants.TOOL_NEO_REQUEST_DOCUMENT_EXTRACTION_UPLOAD:
+      case McpConstants.TOOL_NEO_EXTRACT_INVOICE_DOCUMENT:
+      // ETP-5677: they address a job, not a spec.
+      case McpConstants.TOOL_NEO_JOB_STATUS:
+      case McpConstants.TOOL_NEO_JOB_CANCEL:
         return true;
       default:
         return false;
@@ -683,6 +706,24 @@ public class ToolRegistry {
       case McpConstants.TOOL_NEO_DEFAULTS: definition = registry.buildDefaultsTool(List.of()); break;
       case McpConstants.TOOL_NEO_SCHEMA: definition = registry.buildSchemaTool(List.of()); break;
       case McpConstants.TOOL_NEO_DISCOVER: definition = registry.buildDiscoverTool(); break;
+      // ETP-5669: a top-level docAction was silently ignored and the call fell through to the
+      // generic executor; the action's own parameters belong under 'parameters'.
+      case McpConstants.TOOL_NEO_ACTION: definition = registry.buildActionTool(List.of()); break;
+      case McpConstants.TOOL_NEO_ACTION_BATCH: definition = McpActionBatch.definition(List.of()); break;
+      case McpConstants.TOOL_NEO_REQUEST_ATTACHMENT_UPLOAD:
+        definition = McpAttachmentToolDefinitions.requestAttachmentUpload(List.of()); break;
+      case McpConstants.TOOL_NEO_LIST_ATTACHMENTS:
+        definition = McpAttachmentToolDefinitions.listAttachments(List.of()); break;
+      case McpConstants.TOOL_NEO_DELETE_ATTACHMENT:
+        definition = McpAttachmentToolDefinitions.deleteAttachment(List.of()); break;
+      case McpConstants.TOOL_NEO_GET_DOCUMENT_PDF:
+        definition = McpDocumentPdfToolDefinition.definition(List.of()); break;
+      case McpConstants.TOOL_NEO_SEND_DOCUMENT_EMAIL:
+        definition = McpDocumentEmailToolDefinition.definition(List.of()); break;
+      case McpConstants.TOOL_NEO_REQUEST_DOCUMENT_EXTRACTION_UPLOAD:
+        definition = McpOcrToolDefinitions.requestUpload(List.of()); break;
+      case McpConstants.TOOL_NEO_EXTRACT_INVOICE_DOCUMENT:
+        definition = McpOcrToolDefinitions.extract(List.of()); break;
       default: return Optional.empty();
     }
     Object props = definition.getInputSchema().get(McpConstants.KEY_PROPERTIES);
@@ -913,6 +954,14 @@ public class ToolRegistry {
     props.put(McpConstants.PARAM_ASSET_ID, stringProp(
         "Optional asset ID for computing dynamic defaults that depend on a specific asset "
             + "(e.g. the amortization header name derived from the asset name and start date)"));
+    props.put(McpConstants.PARAM_RECORD_CONTEXT, objectProp(
+        "Optional current field values of the record you are drafting, for defaults that depend "
+            + "on them. For example {\"productType\": \"S\"} on product/product returns the "
+            + "defaults of a Service (type and tax category consistent with it). Each scalar entry "
+            + "(string, number, boolean; at most 32 entries of 256 characters) is passed to the "
+            + "entity's defaults customization as a query parameter, exactly like ?key=value on "
+            + "REST /defaults, so send only current field values of the record. parentId, "
+            + "assetId, view, spec and entity cannot be overridden by it."));
     props.put(McpDefaultsView.PARAM_VIEW, enumProp(
         "Optional response shape. Omit (or \"full\") for the historical flat map of every default. "
             + "\"grouped\" splits the result into `confirm` (writable fields you should review or "
@@ -949,8 +998,11 @@ public class ToolRegistry {
             + "entity), pass parentId with the parent record's id — omitting it does not resolve "
             + "parent-dependent fields (a storage bin scoped to the parent's warehouse, a "
             + "price-list version, a running line number); they are silently absent rather than "
-            + "erroring. Pass view:\"minimal\" (or \"grouped\") to collapse server-managed "
-            + "compliance flags and focus on the fields you actually confirm. "
+            + "erroring. When a default depends on another field's current value (for example "
+            + "the product's tax category follows its productType), pass those current values "
+            + "in recordContext to get the dependent default. Pass view:\"minimal\" (or "
+            + "\"grouped\") to collapse server-managed compliance flags and focus on the "
+            + "fields you actually confirm. "
             + "Date values come back ISO-8601 ('YYYY-MM-DD', or 'YYYY-MM-DDTHH:MM:SS' for "
             + "datetime fields) and can be passed straight back to etendo_create unchanged.",
         buildObjectSchema(props, List.of("spec", McpConstants.PARAM_ENTITY)));
@@ -986,7 +1038,7 @@ public class ToolRegistry {
     Map<String, Object> entityProp = new LinkedHashMap<>();
     entityProp.put("type", McpConstants.TYPE_STRING);
     entityProp.put(McpConstants.KEY_DESCRIPTION,
-        "Entity name within the spec (e.g. 'Header', 'Lines').");
+        "Entity name within the spec (e.g. 'header', 'lines'; use the exact names etendo_discover lists).");
     opProps.put(McpConstants.PARAM_ENTITY, entityProp);
 
     Map<String, Object> parentRefProp = new LinkedHashMap<>();
@@ -1017,10 +1069,35 @@ public class ToolRegistry {
 
     Map<String, Object> props = new LinkedHashMap<>();
     props.put("operations", operationsProp);
+    // ETP-5676: same name and meaning as the REST /sws/neo/batch body option.
+    props.put(BatchService.PARAM_ONLY_RETURN_IDS, booleanProp(
+        "Optional, default false. true = a bulk-write hint: each create skips decorating the record "
+            + "it would echo back (identifier enrichment, display flags), which only the id is read "
+            + "from anyway. The response is the same either way."));
+    props.put(BatchService.PARAM_SKIP_REDUNDANT_CALLOUTS, booleanProp(
+        "Optional, default false. true = a bulk-write hint for many similar creates: a field-change "
+            + "callout is skipped once an earlier operation of this batch, with the same field and "
+            + "value, showed that every value it sets is overwritten by fields you send yourself. "
+            + "The response is the same either way; the server may ignore it."));
+
+    // ETP-5677: the asynchronous mode, next to the synchronous one.
+    props.put(BatchJobService.PARAM_ASYNC, booleanProp(
+        "Optional, default TRUE. By default the call does not wait: it returns at once with "
+            + "{jobId, state:'QUEUED', totalRows, totalOps} and a background job writes the "
+            + "operations, so any volume is safe (a synchronous call can time out although the "
+            + "server keeps writing). Follow the job with etendo_job_status. The async job commits "
+            + "ROW BY ROW (a row = an op plus everything it references through parentRef/$ref), "
+            + "not as one atomic unit: a rejected row does not undo the others, and the status "
+            + "reports for every row whether it committed (with its recordIds) or why not. Resend "
+            + "only rows reported committed:false AND safeToResend:true. Send async:false to run "
+            + "the whole batch as ONE atomic transaction and wait for its answer: only for small "
+            + "batches that must be all-or-nothing."));
 
     return new McpToolDefinition(
         "etendo_batch",
-        "Run a sequence of cross-spec create operations in order, atomically: a failure rolls "
+        "Run a sequence of cross-spec create operations in order. By default it is asynchronous: it "
+            + "returns a jobId at once and the job commits row by row (see 'async' and "
+            + "etendo_job_status). With async:false it runs atomically instead: a failure rolls "
             + "the whole batch back, so retry the whole batch after fixing the reported operation. "
             + "One exception, and the response states it explicitly: if an operation triggers an "
             + "Etendo process, that process commits internally and cannot be rolled back — the "
@@ -1034,12 +1111,46 @@ public class ToolRegistry {
             + "to substitute the resolved recordId of an earlier op. Typically call "
             + "etendo_list / etendo_selectors first to look up existing records and only "
             + "include create ops for what is genuinely new. "
-            + "Returns {committed:true, operations:[{id,ok:true,recordId}]} on success "
+            + "With async:false it returns {committed:true, operations:[{id,ok:true,recordId}]} on success "
             + "or {committed:false, atomic:true, failedAt:{id,index}, persisted:[], hint, "
             + "error:{status,error,detail,seeAlso}} on failure, where 'error' is a stable code "
             + "(validation_error, not_found, method_not_allowed, server_error) naming what to fix "
             + "and 'persisted' is non-empty only in the process-commit case above.",
         buildObjectSchema(props, List.of("operations")));
+  }
+
+  // ── Async batch job tools (ETP-5677) ───────────────────────────────────
+
+  private static Map<String, Object> jobIdSchema(String description) {
+    Map<String, Object> props = new LinkedHashMap<>();
+    props.put("jobId", stringProp(description));
+    return buildObjectSchema(props, List.of("jobId"));
+  }
+
+  McpToolDefinition buildJobStatusTool() {
+    return new McpToolDefinition(
+        McpConstants.TOOL_NEO_JOB_STATUS,
+        "Status of an asynchronous batch job started with etendo_batch {async:true}. Returns "
+            + "{jobId, state, done, totalRows, processedRows, committedRows, failedRows, rows:[{index, "
+            + "ids, committed, operations:[{id,ok,recordId}] | failedAt, error, safeToResend}], hint?}. state is "
+            + "QUEUED, RUNNING, SUCCEEDED (every row committed), PARTIAL (some rows rejected), "
+            + "FAILED, CANCELLED or INTERRUPTED (the server running it stopped: rows listed are "
+            + "final, rows not listed may or may not exist — look them up before resending). Poll "
+            + "until done is true (every few seconds). A committed row exists. Resend only rows "
+            + "with committed:false AND safeToResend:true; a row with safeToResend:false (atomic:false, "
+            + "or no outcome) may have left records — see its 'persisted' and look them up first. "
+            + "Only the user who started the job can read it.",
+        jobIdSchema("The jobId returned by etendo_batch with async:true."));
+  }
+
+  McpToolDefinition buildJobCancelTool() {
+    return new McpToolDefinition(
+        McpConstants.TOOL_NEO_JOB_CANCEL,
+        "Ask an asynchronous batch job to stop. It stops before its next row: rows already "
+            + "committed stay committed and are listed by etendo_job_status; rows not started are "
+            + "never written. Answers with the job's status. Only the user who started the job "
+            + "can cancel it; a finished job cannot be cancelled.",
+        jobIdSchema("The jobId returned by etendo_batch with async:true."));
   }
 
   // ── Schema tool ────────────────────────────────────────────────────────
@@ -1048,7 +1159,7 @@ public class ToolRegistry {
     Map<String, Object> props = new LinkedHashMap<>();
     props.put("spec", enumProp("Spec name (use etendo_discover to find available specs)", specNames));
     props.put(McpConstants.PARAM_ENTITY,
-      stringProp("Entity name within the spec (e.g. 'Header', 'Lines')"));
+      stringProp("Entity name within the spec (e.g. 'header', 'lines'; use the exact names etendo_discover lists)"));
     // IMP-44: REQUIRED, and "full" is now a value you ask for rather than what you get for not
     // choosing. The full dump is 39.5 kB on sales-order/header against 5.4 kB for "create", and
     // the caller used to be told about the cheaper projection by a hint at the bottom of the
@@ -1069,6 +1180,13 @@ public class ToolRegistry {
             + "are reading, filtering or projecting, not when you are about to write.",
         List.of(McpSchemaCreateView.VIEW_CREATE, McpActionsView.VIEW_ACTIONS,
             McpSchemaCreateView.VIEW_FULL)));
+    props.put(McpConstants.PARAM_ID, stringProp(
+        "Optional, only for view:\"actions\": the id of ONE record. The catalogue then also says, "
+            + "per action, whether it applies to that record RIGHT NOW (availableNow true/false), "
+            + "why not (unavailableReason) and, for documentAction, which values apply "
+            + "(availableValuesNow). Without it you get each action's static availableWhen / "
+            + "valuesByStatus only. Advice only: it never blocks a call. Ask for it before "
+            + "offering the user an action on a document."));
     props.put(McpSchemaCreateView.PARAM_FIELDS, stringArrayProp(
         "Optional whitelist of field names to describe (e.g. [\"businessPartner\",\"invoiceDate\"]). "
             + "Returns only those descriptors instead of all of them. Names that match nothing come "
@@ -1108,7 +1226,8 @@ public class ToolRegistry {
     props.put(McpConstants.PARAM_ENTITY, stringProp(McpConstants.LABEL_ENTITY_NAME));
     props.put("id", stringProp("Record ID to act upon"));
     props.put("action", stringProp(
-        "Column name of the button field to trigger (e.g. 'Processed', 'Processing')"));
+        "The 'action' value of the button from etendo_schema view:\"actions\" (its field name, "
+            + "e.g. 'documentAction'; the DB column name, e.g. 'DocAction', is also accepted)"));
     props.put(McpConstants.PARAM_PARAMETERS, objectProp(
         "Process parameters. For a list-backed button, put the chosen value under the key "
             + "named by the field's 'actionParameter' — e.g. {\"docAction\": \"CO\"}"));
@@ -1126,6 +1245,10 @@ public class ToolRegistry {
             + "Which values are legal depends on the record's current state (e.g. "
             + "documentStatus): read the field's 'agentPrompt' for the document's workflow "
             + "rules, and etendo_get the record first if unsure. "
+            + "Reactivating (docAction 'RE') a POSTED document whose entity declares an unpost action "
+            + "(the invoices) un-posts it first, as the app does, and the answer then also carries "
+            + "steps:['unpost','documentAction']; if the reactivation fails after that, the un-post "
+            + "stays done ('partial' says so). "
             + "Returns {processResult: success|error|warning, processMessage: ...}. "
             + "Handler-served actions are listed by etendo_schema view:\"actions\" with a JSON "
             + "Schema for 'parameters' and an 'idDescription' saying what 'id' is; they return "

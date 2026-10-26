@@ -90,6 +90,26 @@ final class TenantOwnership {
     return hasReadableClient(entity, context) && hasReadableOrganization(entity, context);
   }
 
+  /**
+   * True when {@code entity} is visible ({@link #isVisibleToCurrentTenant}) AND its organization is
+   * one the session may WRITE in — what a change to the record needs, which is stricter than what a
+   * read needs for a role with read-only organizations (ETP-5715). A record without organization
+   * is not refused here, as in the read rule.
+   */
+  static boolean isWritableByCurrentTenant(BaseOBObject entity) {
+    if (!isVisibleToCurrentTenant(entity)) {
+      return false;
+    }
+    OBContext context = OBContext.getOBContext();
+    if (context == null || !(entity instanceof OrganizationEnabled)) {
+      return true;
+    }
+    Organization organization = ((OrganizationEnabled) entity).getOrganization();
+    return organization == null
+        || (context.getWritableOrganizations() != null
+            && context.getWritableOrganizations().contains(organization.getId()));
+  }
+
   private static boolean hasReadableClient(BaseOBObject entity, OBContext context) {
     if (!(entity instanceof ClientEnabled)) {
       return true;

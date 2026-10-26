@@ -126,7 +126,8 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
               + "(it is never capped silently), and so is a list none of whose entries has an "
               + "orderLineId and a quantity above zero. Omit to invoice the pending quantity of "
               + "every line."))
-      .withIdDescription("the id of the sales order to invoice");
+      .withIdDescription("the id of the sales order to invoice")
+      .availableWhen(DocumentAvailability.WHEN_COMPLETED);
 
   /**
    * What an agent reads about {@code createDraftInvoice} on a sales quotation (ETP-5709). No
@@ -187,7 +188,8 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
               + "quantity (it is never capped silently), and so is a list none of whose entries "
               + "has a shipmentLineId and a quantity above zero. Omit to invoice the pending "
               + "quantity of every line."))
-      .withIdDescription("the id of the goods shipment to invoice");
+      .withIdDescription("the id of the goods shipment to invoice")
+      .availableWhen(DocumentAvailability.WHEN_COMPLETED);
 
   @Inject
   InvoiceFromOrderSupport invoiceFromOrderSupport;
@@ -340,6 +342,8 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
         ensureDocumentNo(invoice);
         if (SPEC_GOODS_SHIPMENT.equals(specName)) {
           getSupport().ensureLineGrossAmounts(invoice);
+          // ETP-5714: the native copy of a shipment line keeps a source list price of 0
+          getSupport().alignLineListPrices(invoice, null);
           OBDal.getInstance().flush();
         }
 
@@ -351,6 +355,12 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
         // session, which also picks up the DocumentNo the completion may have reassigned from the
         // document type's sequence. On failure the internal rollback reverts the whole creation.
         String invoiceId = invoice.getId();
+        // ETP-5840: an invoice generated from an order or quotation got its rate recomputed for its
+        // own accounting date; a foreign-currency one without a rate is refused before completing,
+        // and the generation rolled back (catch below) — nothing is left behind.
+        if (!SPEC_GOODS_SHIPMENT.equals(specName)) {
+          DocumentCurrencyRate.requireRateForCompletion(invoice, Invoice.PROPERTY_ETGOCURRENCYRATE);
+        }
         InvoiceCompletionService.completeInvoiceOrThrow(invoiceId, context.getObContext());
         Invoice completed = OBDal.getInstance().get(Invoice.class, invoiceId);
 
@@ -376,6 +386,10 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
       } finally {
         OBContext.restorePreviousMode();
       }
+    } catch (DocumentCurrencyRate.MissingRateException e) {
+      OBDal.getInstance().rollbackAndClose();
+      log.warn("Refused to generate invoice from {}: {}", recordId, e.getMessage());
+      return e.toResponse();
     } catch (OBException e) {
       log.warn("Error creating draft invoice from {}: {}", specName, e.getMessage());
       return errorResponse(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
@@ -916,6 +930,8 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
     // ETP-4780: moved into InvoiceFromOrderSupport so CreatePurchaseInvoiceHandler
     // can reuse the same behaviour without duplication.
     getSupport().copyLineDiscountsFromOrder(invoice);
+    // ETP-5714: a source line without a list price gives a copied line the form would not store
+    getSupport().alignLineListPrices(invoice, null);
 
     InvoiceLineLinker.linkInvoiceLinesToExistingInouts(invoice.getId());
 

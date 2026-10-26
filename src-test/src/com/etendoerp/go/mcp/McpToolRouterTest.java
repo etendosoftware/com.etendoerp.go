@@ -1506,5 +1506,4 @@ public class McpToolRouterTest {
     assertTrue(envelope.getString("hint").contains("will not help"));
     assertFalse(body.startsWith("Error executing"));
   }
-
 }

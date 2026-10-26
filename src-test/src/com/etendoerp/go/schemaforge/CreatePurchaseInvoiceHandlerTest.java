@@ -109,6 +109,10 @@ public class CreatePurchaseInvoiceHandlerTest {
     DocumentType docTypeToReturn;
     JSONArray selectedLinesToReturn;
     Invoice copiedDiscountsInvoice;
+    /** ETP-5714: the copy-side support calls in the order they happened (copy, align, gross). */
+    final List<String> supportCalls = new ArrayList<>();
+    Invoice alignedInvoice;
+    java.util.Set<String> alignedScope = java.util.Collections.singleton("unset");
     /** ETP-5381: the quantity map createFromReceipt ended up using, explicit or seeded. */
     Map<String, BigDecimal> receivedReceiptOverrides;
     /** The selectedLines that map produced — what actually drives the invoice line quantities. */
@@ -147,6 +151,14 @@ public class CreatePurchaseInvoiceHandlerTest {
         @Override
         public void ensureLineGrossAmounts(Invoice invoice) {
           // no-op: tested separately in InvoiceFromOrderSupportTest
+          supportCalls.add("gross");
+        }
+
+        @Override
+        public void alignLineListPrices(Invoice invoice, java.util.Set<String> onlyLineIds) {
+          supportCalls.add("align");
+          alignedInvoice = invoice;
+          alignedScope = onlyLineIds;
         }
 
         // ETP-4780: no-op here so tests that don't stub invoice.getInvoiceLineList()
@@ -155,6 +167,7 @@ public class CreatePurchaseInvoiceHandlerTest {
         @Override
         public void copyLineDiscountsFromOrder(Invoice invoice) {
           copiedDiscountsInvoice = invoice;
+          supportCalls.add("copy");
         }
       };
     }
@@ -307,7 +320,26 @@ public class CreatePurchaseInvoiceHandlerTest {
       assertSame(invoice, result);
       assertSame("createFromOrder must delegate discount copy to getSupport()",
           invoice, handler.copiedDiscountsInvoice);
+      assertAlignedAfterCopyAndBeforeGross(handler, invoice);
     }
+  }
+
+  /**
+   * ETP-5714: the native copy takes the source line's list price exactly, so a line whose source has
+   * none must be given the price as list price (the form's value) — for the whole invoice (scope
+   * {@code null}), after the discount copy (the rule reads the discount) and before the gross
+   * amounts.
+   */
+  private static void assertAlignedAfterCopyAndBeforeGross(TestableHandler handler,
+      Invoice invoice) {
+    assertSame("the list prices are aligned on the new invoice", invoice, handler.alignedInvoice);
+    org.junit.Assert.assertNull("for every line of it", handler.alignedScope);
+    int copy = handler.supportCalls.indexOf("copy");
+    int align = handler.supportCalls.indexOf("align");
+    int gross = handler.supportCalls.indexOf("gross");
+    assertTrue("copy then align then gross: " + handler.supportCalls,
+        copy >= 0 && copy < align && align < gross);
+    assertEquals("once per path", 1, java.util.Collections.frequency(handler.supportCalls, "align"));
   }
 
   /**
@@ -379,6 +411,7 @@ public class CreatePurchaseInvoiceHandlerTest {
       assertSame(invoice, result);
       assertSame("createFromReceipt (linked-PO branch) must delegate discount copy to getSupport()",
           invoice, handler.copiedDiscountsInvoice);
+      assertAlignedAfterCopyAndBeforeGross(handler, invoice);
     }
   }
 
@@ -1174,12 +1207,20 @@ public class CreatePurchaseInvoiceHandlerTest {
       weldUtilsMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(CreateInvoiceLinesFromProcess.class))
           .thenReturn(process);
 
+      // ETP-5714: a line the native copy left with a price and no list price gets the price
+      InvoiceLine copied = mock(InvoiceLine.class);
+      when(copied.getId()).thenReturn("il-nopo");
+      when(copied.getUnitPrice()).thenReturn(new BigDecimal("50"));
+      when(copied.getListPrice()).thenReturn(BigDecimal.ZERO);
+      when(invoice.getInvoiceLineList()).thenReturn(Collections.singletonList(copied));
+
       Invoice result = new CreatePurchaseInvoiceHandler()
           .createFromReceiptNoPo(receipt, Collections.emptyMap());
 
       assertSame(invoice, result);
       verify(invoice).setPriceList(bpPriceList);
       verify(invoice).setCurrency(receiptCurrency);
+      verify(copied).setListPrice(new BigDecimal("50"));
     }
   }
 
@@ -1908,6 +1949,88 @@ public class CreatePurchaseInvoiceHandlerTest {
         assertEquals("CO", data.getString("documentStatus"));
         verify(completion.processInvoiceUtil, times(1)).process(
             eq("ap-inv-1"), eq("CO"), eq(""), eq(""), eq(""), any(), any());
+      }
+    }
+  }
+
+  /**
+   * ETP-5840, table-driven: an invoice generated from a purchase order in a foreign currency
+   * WITHOUT a rate is refused before completing — 422 {@code exchange_rate_missing_on_complete} with
+   * its identity, the generation rolled back, the completion never run. With a rate it completes as
+   * before; the goods-receipt route is not checked. The organization currency is {@code eur}.
+   */
+  @Test
+  public void handleCreate_foreignInvoiceWithoutRate_isRefusedAndRolledBack() throws Exception {
+    Object[][] cases = {
+        // name, spec, rate, expected status
+        { "purchase order, no rate", "purchase-order", null, 422 },
+        { "purchase order, with rate", "purchase-order", new BigDecimal("1.1"), 201 },
+        { "goods receipt is not checked", "goods-receipt", null, 201 },
+    };
+    for (Object[] c : cases) {
+      String name = (String) c[0];
+      try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+          MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+          MockedStatic<org.openbravo.erpCommon.utility.OBCurrencyUtils> currencies =
+              Mockito.mockStatic(org.openbravo.erpCommon.utility.OBCurrencyUtils.class)) {
+        obContextMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+        obContextMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+        OBDal dal = mock(OBDal.class);
+        obDalMock.when(OBDal::getInstance).thenReturn(dal);
+        when(dal.getSession()).thenReturn(mock(Session.class));
+        currencies.when(() -> org.openbravo.erpCommon.utility.OBCurrencyUtils.getOrgCurrency("org-1"))
+            .thenReturn("eur");
+
+        Organization org = mock(Organization.class);
+        when(org.getId()).thenReturn("org-1");
+        Currency usd = mock(Currency.class);
+        when(usd.getId()).thenReturn("usd");
+        Invoice created = mock(Invoice.class);
+        when(created.getId()).thenReturn("ap-inv-fx");
+        when(created.get(Invoice.PROPERTY_ORGANIZATION)).thenReturn(org);
+        when(created.get(Invoice.PROPERTY_CURRENCY)).thenReturn(usd);
+        when(created.get(Invoice.PROPERTY_ETGOCURRENCYRATE)).thenReturn((BigDecimal) c[2]);
+        Invoice completed = mock(Invoice.class);
+        when(completed.getDocumentNo()).thenReturn("AP-FX-1");
+        when(completed.getDocumentStatus()).thenReturn("CO");
+        when(dal.get(eq(Invoice.class), eq("ap-inv-fx"))).thenReturn(completed);
+
+        CreatePurchaseInvoiceHandler handler;
+        if ("goods-receipt".equals(c[1])) {
+          RoutingHandler routing = new RoutingHandler();
+          routing.invoiceToReturn = created;
+          handler = routing;
+        } else {
+          CompletingHandler completing = new CompletingHandler();
+          completing.createdInvoice = created;
+          handler = completing;
+        }
+
+        try (CompletionMocks completion = new CompletionMocks(dal, completionSuccess())) {
+          NeoResponse response = handler.handle(NeoContext.builder()
+              .endpointType(NeoEndpointType.ACTION).httpMethod("POST")
+              .fieldName("createPurchaseInvoice").specName((String) c[1]).recordId("src-1")
+              .build());
+
+          assertEquals(name, c[3], response.getHttpStatus());
+          if ((Integer) c[3] == 422) {
+            JSONObject error = response.getBody().getJSONObject("error");
+            assertEquals(name, DocumentRateMessages.CODE_MISSING_ON_COMPLETE,
+                error.getString("code"));
+            assertEquals(name, DocumentRateMessages.MSG_MISSING_ON_COMPLETE,
+                error.getJSONArray(NeoProcessService.MESSAGE_KEYS).getString(0));
+            JSONObject params = error.getJSONObject(NeoProcessService.MESSAGE_PARAMS);
+            assertEquals(name, "eur", params.getString("orgCurrency"));
+            assertEquals(name, "usd", params.getString("documentCurrency"));
+            verify(dal).rollbackAndClose();
+            verify(completion.processInvoiceUtil, never()).process(any(), any(), any(), any(),
+                any(), any(), any());
+          } else {
+            verify(dal, never()).rollbackAndClose();
+            verify(completion.processInvoiceUtil, times(1)).process(
+                eq("ap-inv-fx"), eq("CO"), eq(""), eq(""), eq(""), any(), any());
+          }
+        }
       }
     }
   }
@@ -2694,9 +2817,18 @@ public class CreatePurchaseInvoiceHandlerTest {
       HeaderStubHandler handler = new HeaderStubHandler();
       handler.headerToReturn = invoice;
 
+      // ETP-5714: the bulk path keeps no per-line source order, so a copied line with a price and
+      // no list price is aligned like on every other native-copy path
+      InvoiceLine copied = mock(InvoiceLine.class);
+      when(copied.getId()).thenReturn("il-bulk");
+      when(copied.getUnitPrice()).thenReturn(new BigDecimal("50"));
+      when(copied.getListPrice()).thenReturn(BigDecimal.ZERO);
+      when(invoice.getInvoiceLineList()).thenReturn(Collections.singletonList(copied));
+
       Invoice result = handler.createFromReceipts(Arrays.asList("r-1", "r-2"), null);
       assertSame(invoice, result);
       assertEquals(2, handler.receivedReceiptsForHeader.size());
+      verify(copied).setListPrice(new BigDecimal("50"));
 
       ArgumentCaptor<JSONArray> linesCaptor = ArgumentCaptor.forClass(JSONArray.class);
       verify(process).createInvoiceLinesFromDocumentLines(

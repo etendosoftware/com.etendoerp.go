@@ -64,6 +64,7 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.ad.ui.Tab;
+import org.openbravo.model.common.businesspartner.Location;
 import org.openbravo.model.ad.ui.Window;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
 
@@ -78,7 +79,7 @@ import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
  * </ul>
  *
  * <p>{@code handle()} is also covered, including the Reactivate refusal on orders with linked
- * documents.
+ * documents, and the create pre-hook's partnerAddress/invoiceAddress default (ETP-5703).
  *
  * @covers com.etendoerp.go.schemaforge.SalesOrderHeaderHandler
  * @covers com.etendoerp.go.schemaforge.CreateShipmentHandler
@@ -87,6 +88,7 @@ import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
  * @covers com.etendoerp.go.schemaforge.AbstractOrderHeaderHandler
  * @covers com.etendoerp.go.schemaforge.DocActionRequestSupport
  * @covers com.etendoerp.go.schemaforge.DocActionResolution
+ * @covers com.etendoerp.go.schemaforge.PartnerLocationDefaults
  */
 public class SalesOrderHeaderHandlerTest {
 
@@ -905,6 +907,260 @@ public class SalesOrderHeaderHandlerTest {
     assertNull(new SalesOrderHeaderHandler().handle(ctx));
   }
 
+  // ── ETP-5703: partnerAddress / invoiceAddress default on create ─────────────
+
+  /** A Location criteria whose list() answers {@code locations}, for every flag queried. */
+  @SuppressWarnings("unchecked")
+  private static void stubLocations(OBDal dal, List<Location> locations) {
+    OBCriteria<Location> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(Location.class)).thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.list()).thenReturn(locations);
+  }
+
+  private static NeoContext createCtx(JSONObject body) {
+    return NeoContext.builder().httpMethod("POST").endpointType(NeoEndpointType.CRUD)
+        .requestBody(body).build();
+  }
+
+  /**
+   * ETP-5703 repro: an etendo_batch sales-order header with only {@code businessPartner} (partner with
+   * a single location) answered 422 for {@code partnerAddress}. The create pre-hook fills it, and the
+   * bill-to address with it.
+   */
+  @Test
+  public void testHandleCreateWithSingleLocationFillsPartnerAndInvoiceAddress() throws Exception {
+    try (MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      Location only = mock(Location.class);
+      when(only.getId()).thenReturn("loc-1");
+      stubLocations(dal, Collections.singletonList(only));
+      JSONObject body = new JSONObject().put("businessPartner", "bp-1");
+
+      assertNull(new SalesOrderHeaderHandler().handle(createCtx(body)));
+
+      assertEquals("loc-1", body.getString("partnerAddress"));
+      assertEquals("loc-1", body.getString("invoiceAddress"));
+    }
+  }
+
+  /** Two eligible locations: the choice is the caller's, nothing is filled. */
+  @Test
+  public void testHandleCreateWithTwoLocationsAbstains() throws Exception {
+    try (MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      Location first = mock(Location.class);
+      Location second = mock(Location.class);
+      when(first.getId()).thenReturn("loc-1");
+      when(second.getId()).thenReturn("loc-2");
+      stubLocations(dal, java.util.Arrays.asList(first, second));
+      JSONObject body = new JSONObject().put("businessPartner", "bp-1");
+
+      assertNull(new SalesOrderHeaderHandler().handle(createCtx(body)));
+
+      assertFalse(body.has("partnerAddress"));
+      assertFalse(body.has("invoiceAddress"));
+    }
+  }
+
+  /** An address the caller sent is kept, and nothing is read. */
+  @Test
+  public void testHandleCreateWithSentAddressLeavesBodyAlone() throws Exception {
+    JSONObject body = new JSONObject().put("businessPartner", "bp-1")
+        .put("partnerAddress", "loc-caller");
+    try (MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
+      assertNull(new SalesOrderHeaderHandler().handle(createCtx(body)));
+
+      assertEquals("loc-caller", body.getString("partnerAddress"));
+      assertFalse(body.has("invoiceAddress"));
+      obDal.verifyNoInteractions();
+    }
+  }
+
+  /**
+   * Stubs Location reads: the criteria's list() answers {@code answers} in call order (ship-to
+   * query first), and {@code shipTo} is the location OBDal returns by id.
+   */
+  @SuppressWarnings("unchecked")
+  private static void stubLocationQueries(OBDal dal, Location shipTo, List<Location> shipToAnswer,
+      List<Location> secondAnswer) {
+    String shipToId = shipTo.getId();
+    OBCriteria<Location> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(Location.class)).thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.list()).thenReturn(shipToAnswer, secondAnswer);
+    when(dal.get(Location.class, shipToId)).thenReturn(shipTo);
+  }
+
+  /**
+   * ETP-5703 review W2: the ship-to was filled but the partner has two bill-to locations, so no
+   * single bill-to exists. BillTo must fall back to the ship-to, never stay null — a null BillTo makes
+   * the order impossible to invoice (C_INVOICE_CREATE copies it into a NOT NULL column).
+   */
+  @Test
+  public void testHandleCreateBillToFallsBackToShipToWhenNoSingleBillTo() throws Exception {
+    try (MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      Location shipTo = mock(Location.class);
+      Location billA = mock(Location.class);
+      Location billB = mock(Location.class);
+      when(shipTo.getId()).thenReturn("ship-1");
+      when(shipTo.get(Location.PROPERTY_INVOICETOADDRESS)).thenReturn(Boolean.FALSE);
+      stubLocationQueries(dal, shipTo, Collections.singletonList(shipTo),
+          java.util.Arrays.asList(billA, billB));
+      JSONObject body = new JSONObject().put("businessPartner", "bp-1");
+
+      assertNull(new SalesOrderHeaderHandler().handle(createCtx(body)));
+
+      assertEquals("ship-1", body.getString("partnerAddress"));
+      assertEquals("ship-1", body.getString("invoiceAddress"));
+    }
+  }
+
+  /**
+   * ETP-5703 review W1: on etendo_batch McpBillToInjector runs first and, with no ship-to yet,
+   * sets the partner's OLDEST bill-to. When the ship-to the pre-hook then fills is itself a bill-to
+   * address, the bill-to follows it — the injector's value is recognised as server-derived.
+   */
+  @Test
+  public void testHandleCreateReplacesInjectorBillToWithFilledShipToBillTo() throws Exception {
+    try (MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      Location shipTo = mock(Location.class);
+      Location oldest = mock(Location.class);
+      when(shipTo.getId()).thenReturn("ship-1");
+      when(shipTo.get(Location.PROPERTY_INVOICETOADDRESS)).thenReturn(Boolean.TRUE);
+      when(oldest.getId()).thenReturn("bill-old");
+      stubLocationQueries(dal, shipTo, Collections.singletonList(shipTo),
+          Collections.singletonList(oldest));
+      JSONObject body = new JSONObject().put("businessPartner", "bp-1")
+          .put("invoiceAddress", "bill-old");
+
+      assertNull(new SalesOrderHeaderHandler().handle(createCtx(body)));
+
+      assertEquals("ship-1", body.getString("partnerAddress"));
+      assertEquals("ship-1", body.getString("invoiceAddress"));
+    }
+  }
+
+  /** A bill-to that is not the injector's choice is the caller's, and is kept. */
+  @Test
+  public void testHandleCreateKeepsCallerBillTo() throws Exception {
+    try (MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      Location shipTo = mock(Location.class);
+      Location oldest = mock(Location.class);
+      when(shipTo.getId()).thenReturn("ship-1");
+      when(shipTo.get(Location.PROPERTY_INVOICETOADDRESS)).thenReturn(Boolean.TRUE);
+      when(oldest.getId()).thenReturn("bill-old");
+      stubLocationQueries(dal, shipTo, Collections.singletonList(shipTo),
+          Collections.singletonList(oldest));
+      JSONObject body = new JSONObject().put("businessPartner", "bp-1")
+          .put("invoiceAddress", "bill-chosen");
+
+      assertNull(new SalesOrderHeaderHandler().handle(createCtx(body)));
+
+      assertEquals("bill-chosen", body.getString("invoiceAddress"));
+    }
+  }
+
+  // ── partner-location lookups keep the tenant READ filters on ───────────────
+
+  /** A Location criteria that answers {@code locations} and records every filter toggle. */
+  @SuppressWarnings("unchecked")
+  private static OBCriteria<Location> stubFilteredCriteria(OBDal dal, List<Location> locations) {
+    OBCriteria<Location> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(Location.class)).thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.addOrderBy(anyString(), anyBoolean())).thenReturn(criteria);
+    when(criteria.setMaxResults(anyInt())).thenReturn(criteria);
+    when(criteria.list()).thenReturn(locations);
+    return criteria;
+  }
+
+  /**
+   * MCP runs these lookups under {@code OBContext.setAdminMode()}, which skips only the entity
+   * access check. The OBCriteria client/organization READ filters are what keeps another tenant's
+   * location out of the body when a caller sends a foreign businessPartner id, so no lookup may
+   * switch them off.
+   */
+  private static void assertTenantFiltersNeverDisabled(OBCriteria<Location> criteria) {
+    Mockito.verify(criteria, Mockito.never()).setFilterOnReadableClients(false);
+    Mockito.verify(criteria, Mockito.never()).setFilterOnReadableOrganization(false);
+    Mockito.verify(criteria, Mockito.never()).setFilterOnActive(false);
+  }
+
+  @Test
+  public void partnerLocationLookupsNeverDisableTheTenantReadFilters() throws Exception {
+    Location only = mock(Location.class);
+    when(only.getId()).thenReturn("loc-1");
+    try (MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      OBCriteria<Location> criteria = stubFilteredCriteria(dal, Collections.singletonList(only));
+
+      assertEquals("loc-1",
+          PartnerLocationDefaults.findSingleLocation("bp-1", Location.PROPERTY_SHIPTOADDRESS));
+      assertEquals("loc-1",
+          PartnerLocationDefaults.findOldestLocation("bp-1", Location.PROPERTY_INVOICETOADDRESS));
+
+      Mockito.verify(criteria, Mockito.times(2)).list(); // both lookups really ran
+      assertTenantFiltersNeverDisabled(criteria);
+    }
+  }
+
+  @Test
+  public void fillIfMissingAndShipToBillToKeepTheTenantReadFiltersOn() throws Exception {
+    Location shipTo = mock(Location.class);
+    when(shipTo.getId()).thenReturn("ship-1");
+    when(shipTo.get(Location.PROPERTY_INVOICETOADDRESS)).thenReturn(Boolean.FALSE);
+    try (MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      OBCriteria<Location> criteria = stubFilteredCriteria(dal, Collections.singletonList(shipTo));
+      when(dal.get(Location.class, "ship-1")).thenReturn(shipTo);
+      JSONObject body = new JSONObject().put("businessPartner", "bp-1");
+
+      PartnerLocationDefaults.fillShipToAndBillTo(createCtx(body), "partnerAddress",
+          Location.PROPERTY_SHIPTOADDRESS, "invoiceAddress", Location.PROPERTY_INVOICETOADDRESS);
+
+      assertEquals("ship-1", body.getString("partnerAddress"));
+      assertEquals("ship-1", body.getString("invoiceAddress"));
+      assertTenantFiltersNeverDisabled(criteria);
+    }
+  }
+
+  /**
+   * A foreign tenant's partner id: the filtered query returns no row, so nothing is written to the
+   * body (no partnerAddress, no invoiceAddress) and no fallback lookup bypasses the filter.
+   */
+  @Test
+  public void foreignPartnerWithNoVisibleLocationLeavesTheBodyUntouched() throws Exception {
+    try (MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      OBCriteria<Location> criteria = stubFilteredCriteria(dal, Collections.emptyList());
+      JSONObject body = new JSONObject().put("businessPartner", "bp-foreign");
+
+      assertFalse(PartnerLocationDefaults.fillIfMissing(createCtx(body), "partnerAddress",
+          Location.PROPERTY_SHIPTOADDRESS));
+      PartnerLocationDefaults.fillShipToAndBillTo(createCtx(body), "partnerAddress",
+          Location.PROPERTY_SHIPTOADDRESS, "invoiceAddress", Location.PROPERTY_INVOICETOADDRESS);
+
+      assertFalse(body.has("partnerAddress"));
+      assertFalse(body.has("invoiceAddress"));
+      assertEquals(1, body.length());
+      Mockito.verify(criteria, Mockito.atLeastOnce()).list(); // it did query, and found nothing
+      Mockito.verify(dal, Mockito.never()).get(Mockito.eq(Location.class), anyString());
+      assertTenantFiltersNeverDisabled(criteria);
+    }
+  }
+
   // ── declared action contracts (ETP-5709) ──────────────────────────────────
 
   @Test
@@ -937,5 +1193,171 @@ public class SalesOrderHeaderHandlerTest {
         new JSONArray().put(new JSONObject().put("orderLineId", "L1").put("quantity", "2")))));
     assertEquals(com.etendoerp.go.schemaforge.util.NeoActionContract.SC_UNPROCESSABLE, com.etendoerp.go.schemaforge.util.NeoActionContract.validate(contracts,
         "createShipment", new JSONObject().put("warehouseId", "W1")).getHttpStatus());
+  }
+
+  /**
+   * ETP-5714: the keys SalesOrderHeaderHandler's afterHandle adds to a GET record are declared, so an MCP
+   * {@code fields:[…]} projection does not report them in {@code unknownFields} while the same
+   * response carries them.
+   */
+  @org.junit.jupiter.api.Test
+  @org.junit.jupiter.api.DisplayName("sales order: enriched response keys are declared")
+  void enrichedKeysAreDeclaredSalesOrderHeaderHandler() {
+    java.util.Set<String> declared = new SalesOrderHeaderHandler().responseEnrichedFields();
+    for (String key : java.util.List.of("hasLinkedDocuments", "needsPrimaryDoc", "needsInvoiceDoc")) {
+      org.junit.jupiter.api.Assertions.assertTrue(declared.contains(key), key + " in " + declared);
+    }
+  }
+
+  // ── whole-set list totals (ETP-5757) ──────────────────────────────────────
+
+  private static NeoContext listTotalsListCtx() {
+    NeoContext ctx = listCtx();
+    NeoListAggregateQuery.remember(ctx, Collections.emptyMap());
+    return ctx;
+  }
+
+  /** Stubs {@code DocumentListTotals.create} for one document kind; everything else stays real. */
+  private static MockedStatic<DocumentListTotals> stubbedTotals(boolean invoices,
+      DocumentListTotals totals) {
+    MockedStatic<DocumentListTotals> mocked = Mockito.mockStatic(DocumentListTotals.class,
+        Mockito.CALLS_REAL_METHODS);
+    mocked.when(() -> DocumentListTotals.create(invoices)).thenReturn(totals);
+    return mocked;
+  }
+
+  private static NeoContext withEmptyPage(NeoContext ctx) throws Exception {
+    ctx.setPreviousResult(NeoResponse.ok(new JSONObject().put("response",
+        new JSONObject().put("data", new JSONArray()))));
+    return ctx;
+  }
+
+  @Test
+  public void listGetInjectsListTotalsEvenOnAnEmptyPage() throws Exception {
+    SalesOrderHeaderHandler handler = new SalesOrderHeaderHandler();
+    try (MockedStatic<DocumentListTotals> totalsMock = stubbedTotals(false,
+            DocumentListTotalsTest.stub(false, Collections.emptyList()))) {
+      NeoContext ctx = withEmptyPage(listTotalsListCtx());
+
+      NeoResponse result = handler.afterHandle(ctx);
+
+      assertNotNull(result);
+      JSONObject totals = result.getBody().getJSONObject("response").getJSONObject("listTotals");
+      assertEquals(0, totals.getInt("rowCount"));
+      assertEquals("EUR", totals.getString("orgCurrencyIso"));
+    }
+  }
+
+  @Test
+  public void listGetWithoutAggregateQueryLeavesTheEmptyPageUntouched() throws Exception {
+    SalesOrderHeaderHandler handler = new SalesOrderHeaderHandler();
+    try (MockedStatic<DocumentListTotals> totalsMock = stubbedTotals(false,
+            DocumentListTotalsTest.stub(false, Collections.emptyList()))) {
+      NeoContext ctx = withEmptyPage(listCtx());
+
+      assertNull(handler.afterHandle(ctx));
+    }
+  }
+
+  @Test
+  public void singleRecordGetDoesNotComputeListTotals() throws Exception {
+    try (MockedStatic<DocumentListTotals> totalsMock = Mockito.mockStatic(DocumentListTotals.class,
+            Mockito.CALLS_REAL_METHODS)) {
+      SalesOrderHeaderHandler handler = new SalesOrderHeaderHandler();
+      NeoContext ctx = withEmptyPage(getCtxWithId("rec-1"));
+      NeoListAggregateQuery.remember(ctx, Collections.emptyMap());
+
+      handler.afterHandle(ctx);
+
+      totalsMock.verify(() -> DocumentListTotals.create(Mockito.anyBoolean()),
+          Mockito.never());
+    }
+  }
+
+  @Test
+  public void failingListTotalsQueryIsSwallowedAndTheEmptyPageStaysUnchanged() throws Exception {
+    SalesOrderHeaderHandler handler = new SalesOrderHeaderHandler();
+    try (MockedStatic<DocumentListTotals> totalsMock = stubbedTotals(false,
+            DocumentListTotalsTest.failing(false))) {
+      NeoContext ctx = withEmptyPage(listTotalsListCtx());
+
+      assertNull(handler.afterHandle(ctx));
+      assertFalse(ctx.getPreviousResult().getBody().getJSONObject("response").has("listTotals"));
+    }
+  }
+
+  @Test
+  public void listGetWithRowsAddsListTotalsAndStillPostProcessesTheRows() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      stubNoLinkedDocuments(obDalMock);
+      SalesOrderHeaderHandler handler = new SalesOrderHeaderHandler();
+      try (MockedStatic<DocumentListTotals> totalsMock = stubbedTotals(false,
+              DocumentListTotalsTest.stub(false, Collections.emptyList()))) {
+        NeoContext ctx = listTotalsListCtx();
+        ctx.setPreviousResult(NeoResponse.ok(listBody("order-1")));
+
+        NeoResponse result = handler.afterHandle(ctx);
+
+        JSONObject response = result.getBody().getJSONObject("response");
+        assertFalse(response.getJSONArray("data").getJSONObject(0).getBoolean("hasLinkedDocuments"));
+        assertEquals(0, response.getJSONObject("listTotals").getInt("rowCount"));
+      }
+    }
+  }
+
+  @Test
+  public void failingListTotalsQueryWithRowsKeepsTheRowsAndOmitsListTotals() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      stubNoLinkedDocuments(obDalMock);
+      SalesOrderHeaderHandler handler = new SalesOrderHeaderHandler();
+      try (MockedStatic<DocumentListTotals> totalsMock = stubbedTotals(false,
+              DocumentListTotalsTest.failing(false))) {
+        NeoContext ctx = listTotalsListCtx();
+        ctx.setPreviousResult(NeoResponse.ok(listBody("order-1")));
+
+        NeoResponse result = handler.afterHandle(ctx);
+
+        JSONObject response = result.getBody().getJSONObject("response");
+        assertFalse(response.getJSONArray("data").getJSONObject(0).getBoolean("hasLinkedDocuments"));
+        assertFalse(response.has("listTotals"));
+      }
+    }
+  }
+
+  @Test
+  public void singleRecordGetWithRowsDoesNotComputeListTotals() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      stubNoLinkedDocuments(obDalMock);
+      try (MockedStatic<DocumentListTotals> totalsMock = Mockito.mockStatic(DocumentListTotals.class,
+              Mockito.CALLS_REAL_METHODS)) {
+        SalesOrderHeaderHandler handler = new SalesOrderHeaderHandler();
+        NeoContext ctx = ctxWithPreviousResult("order-1", singleRecordBody("order-1"));
+        NeoListAggregateQuery.remember(ctx, Collections.emptyMap());
+
+        NeoResponse result = handler.afterHandle(ctx);
+
+        assertFalse(result.getBody().getJSONObject("response").has("listTotals"));
+        totalsMock.verify(() -> DocumentListTotals.create(Mockito.anyBoolean()),
+            Mockito.never());
+      }
+    }
+  }
+
+  @Test
+  public void nonGetRequestDoesNotComputeListTotals() throws Exception {
+    for (String method : new String[] { "POST", "PATCH" }) {
+      try (MockedStatic<DocumentListTotals> totalsMock = Mockito.mockStatic(DocumentListTotals.class,
+              Mockito.CALLS_REAL_METHODS)) {
+        SalesOrderHeaderHandler handler = new SalesOrderHeaderHandler();
+        NeoContext ctx = withEmptyPage(NeoContext.builder().httpMethod(method)
+            .endpointType(NeoEndpointType.ACTION).build());
+        NeoListAggregateQuery.remember(ctx, Collections.emptyMap());
+
+        assertNull(method, handler.afterHandle(ctx));
+
+        totalsMock.verify(() -> DocumentListTotals.create(Mockito.anyBoolean()),
+            Mockito.never());
+      }
+    }
   }
 }

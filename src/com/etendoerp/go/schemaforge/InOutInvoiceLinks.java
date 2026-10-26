@@ -93,13 +93,22 @@ final class InOutInvoiceLinks {
    * voided, closed or draft). For a reader whose movement direction is fixed — e.g. the Goods
    * Receipt header, always {@link MatchTable#PURCHASE}. Meant to be {@code LEFT JOIN}ed on
    * {@code m_inoutline_id}.
+   *
+   * <p>{@code inOutLineIdsSubquery} must be a {@code SELECT m_inoutline_id …} selecting the
+   * movement lines to aggregate. It is applied to the match table's own {@code m_inoutline_id} —
+   * the {@code GROUP BY} key — so it keeps or drops whole groups and never changes a sum, while
+   * letting the planner read only the requested movement's lines instead of the whole match table
+   * (ETP-5653).
+   *
+   * @param inOutLineIdsSubquery a {@code SELECT m_inoutline_id …} restricting the aggregation
    */
-  static String matchedQtyPerInOutLineSql(MatchTable matchTable) {
+  static String matchedQtyPerInOutLineSql(MatchTable matchTable, String inOutLineIdsSubquery) {
     return "SELECT mt.m_inoutline_id, SUM(ABS(mt.qty)) AS qtymatched "
         + "FROM " + matchTable.tableName() + " mt "
         + "JOIN c_invoiceline mil ON mil.c_invoiceline_id = mt.c_invoiceline_id "
         + "JOIN c_invoice mi ON mi.c_invoice_id = mil.c_invoice_id "
-        + "WHERE " + countedInvoiceFilter("mi") + " "
+        + "WHERE " + countedInvoiceFilter("mi")
+        + " AND mt.m_inoutline_id IN (" + inOutLineIdsSubquery + ") "
         + "GROUP BY mt.m_inoutline_id";
   }
 

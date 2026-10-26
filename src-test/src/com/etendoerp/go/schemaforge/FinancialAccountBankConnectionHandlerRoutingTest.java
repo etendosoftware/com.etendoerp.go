@@ -246,6 +246,99 @@ public class FinancialAccountBankConnectionHandlerRoutingTest {
     }
   }
 
+  // ── ETP-5089: a connection that is still "active" but has stopped refreshing ─────────────
+
+  /**
+   * GET status on a connected account whose active connection is stale reports {@code stale=true}
+   * together with the bank's own failure message, so the SPA can say why. The account stays
+   * {@code connected} and is NOT {@code reconnectable}: that flag means "deactivated, can be
+   * revived" and the SPA uses it to block transfers, which a still-linked account must not get.
+   */
+  @Test
+  public void testStatusStaleConnectionReportsStaleWithMessageAndStaysConnected() throws Exception {
+    FIN_FinancialAccount finAcc = connectedAccount();
+    FinaccConnection connection = mock(FinaccConnection.class);
+    when(connection.getLastFailMessage()).thenReturn("Error interno del banco.");
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
+            mockStatic(SaltEdgeAccountLinkHelper.class)) {
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.getActiveConnectionForFinAcc(finAcc))
+          .thenReturn(connection);
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.isConnectionStale(connection))
+          .thenReturn(true);
+
+      JSONObject data = dataOf(handler.handle(getContext(statusParams())));
+
+      assertTrue(data.getBoolean("connected"));
+      assertTrue(data.getBoolean("stale"));
+      assertEquals("Error interno del banco.", data.getString("staleMessage"));
+      assertFalse("a stale connection is not a deactivated one", data.getBoolean("reconnectable"));
+    }
+  }
+
+  /** A healthy connection reports {@code stale=false} and carries no stale message. */
+  @Test
+  public void testStatusHealthyConnectionReportsNotStaleAndOmitsMessage() throws Exception {
+    FIN_FinancialAccount finAcc = connectedAccount();
+    FinaccConnection connection = mock(FinaccConnection.class);
+    when(connection.getLastFailMessage()).thenReturn("an old failure");
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
+            mockStatic(SaltEdgeAccountLinkHelper.class)) {
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.getActiveConnectionForFinAcc(finAcc))
+          .thenReturn(connection);
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.isConnectionStale(connection))
+          .thenReturn(false);
+
+      JSONObject data = dataOf(handler.handle(getContext(statusParams())));
+
+      assertFalse(data.getBoolean("stale"));
+      assertFalse("the failure text only travels while the connection is stale",
+          data.has("staleMessage"));
+    }
+  }
+
+  /** A stale connection with no failure text still reports {@code stale=true}, without the message. */
+  @Test
+  public void testStatusStaleConnectionWithoutMessageOmitsIt() throws Exception {
+    FIN_FinancialAccount finAcc = connectedAccount();
+    FinaccConnection connection = mock(FinaccConnection.class);
+    when(connection.getLastFailMessage()).thenReturn(null);
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
+            mockStatic(SaltEdgeAccountLinkHelper.class)) {
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.getActiveConnectionForFinAcc(finAcc))
+          .thenReturn(connection);
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.isConnectionStale(connection))
+          .thenReturn(true);
+
+      JSONObject data = dataOf(handler.handle(getContext(statusParams())));
+
+      assertTrue(data.getBoolean("stale"));
+      assertFalse(data.has("staleMessage"));
+    }
+  }
+
+  /** With no active connection there is nothing to be stale: the field is simply absent. */
+  @Test
+  public void testStatusWithoutActiveConnectionOmitsStale() throws Exception {
+    FIN_FinancialAccount finAcc = connectedAccount();
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
+            mockStatic(SaltEdgeAccountLinkHelper.class)) {
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.getActiveConnectionForFinAcc(finAcc))
+          .thenReturn(null);
+
+      JSONObject data = dataOf(handler.handle(getContext(statusParams())));
+
+      assertFalse(data.has("stale"));
+    }
+  }
+
   // ── ETP-5181: the provider's max fetch interval on GET status ─────────────
 
   /**

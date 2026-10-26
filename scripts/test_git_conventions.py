@@ -68,12 +68,13 @@ class BranchTest(unittest.TestCase):
         for branch, target in (('feature/ETP-5695', 'develop'), ('feature/ETP-3400-Y26', 'develop'),
                                ('epic/ETP-3504', 'develop'), ('hotfix/#42-ETP-3400', 'main'),
                                ('hotfix/ETP-3400', 'develop'), ('mergeblock/ETP-5717', 'main'),
-                               ('develop', 'main'), ('main', 'develop')):
+                               ('develop', 'develop'), ('main', 'develop')):
             self.assertEqual(self.problem(branch, target), '', branch)
 
     def test_blocks_a_branch_that_main_does_not_accept(self):
         self.assertTrue(self.problem('feature/ETP-5695', 'main').startswith('error: '))
         self.assertTrue(self.problem('epic/ETP-3504', 'main').startswith('error: '))
+        self.assertTrue(self.problem('develop', 'main').startswith('error: '))
 
     def test_only_warns_about_an_unusual_name(self):
         for branch in ('chore/bump-core', 'feature/etp-5695', 'feature/ETP-5695-extra'):

@@ -282,7 +282,9 @@ abstract class AbstractSqlReportHandler implements NeoHandler {
           "Pass a real C_Organization id, or omit orgId to use the session's organization, or "
               + "pass an empty string to report on every organization.");
     }
-    if (OBDal.getInstance().get(Organization.class, orgId) == null) {
+    // ETP-5793: another tenant's org answers like an unknown one — the report SQL is client-scoped,
+    // but an empty report would still confirm that the id exists.
+    if (TenantOwnership.loadOwned(Organization.class, orgId) == null) {
       return actionableError(400, "organization_not_resolved",
           "Could not resolve organization " + orgId + " for the " + reportLabel() + " report.",
           "Pass a valid orgId (a C_Organization id readable by your role), an empty string for "
@@ -340,7 +342,7 @@ abstract class AbstractSqlReportHandler implements NeoHandler {
       OBContext.setAdminMode(true);
       AcctSchema schema = null;
       if (!orgId.isEmpty()) {
-        Organization org = OBDal.getInstance().get(Organization.class, orgId);
+        Organization org = TenantOwnership.loadOwned(Organization.class, orgId);
         AcctSchema ledger = org != null ? org.getGeneralLedger() : null;
         if (ledger != null) {
           schema = ledger;

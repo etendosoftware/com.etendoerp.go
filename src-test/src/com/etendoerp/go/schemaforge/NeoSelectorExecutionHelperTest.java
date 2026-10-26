@@ -56,6 +56,8 @@ import com.etendoerp.go.schemaforge.selector.meta.SelectorMeta;
  * All methods under test are package-private and static. Where they delegate to
  * {@link SelectorValidationResolver} or {@link SelectorOrgFilter}, those
  * dependencies are stubbed via {@code MockedStatic}.
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoSelectorExecutionHelper
  */
 class NeoSelectorExecutionHelperTest {
 
@@ -352,6 +354,20 @@ class NeoSelectorExecutionHelperTest {
       NeoSelectorExecutionHelper.bindNamedParameters(query, params);
 
       verify(query).setParameterList(eq("ids"), eq(list));
+      verify(query, never()).setParameter(anyString(), any());
+    }
+
+    @Test
+    @DisplayName("array values (OBQuery's String[] client/org filters) use setParameterList")
+    void arrayValuesUseSetParameterList() {
+      org.hibernate.query.Query<?> query = mock(org.hibernate.query.Query.class);
+      String[] orgIds = { "0", "ORG1" };
+      Map<String, Object> params = new HashMap<>();
+      params.put("orgs", orgIds);
+
+      NeoSelectorExecutionHelper.bindNamedParameters(query, params);
+
+      verify(query).setParameterList(eq("orgs"), org.mockito.AdditionalMatchers.aryEq(orgIds));
       verify(query, never()).setParameter(anyString(), any());
     }
 

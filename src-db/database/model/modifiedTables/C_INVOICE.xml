@@ -13,5 +13,10 @@
         <default/>
         <onCreateDefault/>
       </column>
+      <index name="EM_ETGO_INVOICE_SOTRX_TOTAL" unique="false">
+        <index-column name="ISSOTRX"/>
+        <index-column name="GRANDTOTAL"/>
+        <index-column name="C_INVOICE_ID"/>
+      </index>
     </table>
   </database>

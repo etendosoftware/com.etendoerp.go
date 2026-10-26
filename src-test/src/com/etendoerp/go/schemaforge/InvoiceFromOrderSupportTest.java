@@ -39,6 +39,7 @@ import java.util.Collections;
 import org.hibernate.Session;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.MockedConstruction;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.dal.core.OBContext;
@@ -56,6 +57,8 @@ import org.openbravo.model.financialmgmt.tax.TaxRate;
 
 /**
  * Unit tests for {@link InvoiceFromOrderSupport}.
+ *
+ * @covers com.etendoerp.go.schemaforge.InvoiceFromOrderSupport
  */
 public class InvoiceFromOrderSupportTest {
 
@@ -139,6 +142,151 @@ public class InvoiceFromOrderSupportTest {
     }
   }
 
+  // ── alignLineListPrices (ETP-5714 round 8): a copied line carries the list price the form stores ──
+
+  private static InvoiceLine pricedLine(String unit, String list, String discount, String gross) {
+    InvoiceLine line = mock(InvoiceLine.class);
+    when(line.getId()).thenReturn("L-" + unit + "-" + list);
+    when(line.getUnitPrice()).thenReturn(unit == null ? null : new BigDecimal(unit));
+    when(line.getListPrice()).thenReturn(list == null ? null : new BigDecimal(list));
+    when(line.getEtgoDiscount()).thenReturn(discount == null ? null : new BigDecimal(discount));
+    when(line.getGrossUnitPrice()).thenReturn(gross == null ? null : new BigDecimal(gross));
+    return line;
+  }
+
+  /**
+   * The native line copy takes the prices of its source line exactly, so a source whose list price is
+   * 0 (an order line an agent created with only a price) gives an invoice line with a price and a
+   * list price of 0: the grid's "Precio" is the list price and showed 0,00. The form stores the price
+   * the user typed as the list price when there is no discount.
+   */
+  @Test
+  public void testAlignLineListPricesGivesAPricedLineWithoutListPriceItsPrice() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      InvoiceLine zeroList = pricedLine("50", "0", null, null);
+      InvoiceLine nullList = pricedLine("50", null, "0", "0");
+      InvoiceLine hasList = pricedLine("45", "50", null, null);
+      InvoiceLine discounted = pricedLine("45", "0", "10", null);
+      InvoiceLine grossPriced = pricedLine("50", "0", null, "60.5");
+      InvoiceLine free = pricedLine("0", "0", null, null);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getInvoiceLineList()).thenReturn(
+          Arrays.asList(zeroList, nullList, hasList, discounted, grossPriced, free));
+
+      new InvoiceFromOrderSupport().alignLineListPrices(invoice, null);
+
+      verify(zeroList).setListPrice(new BigDecimal("50"));
+      verify(nullList).setListPrice(new BigDecimal("50"));
+      verify(hasList, never()).setListPrice(any(BigDecimal.class));
+      // a discounted copy: the form sends unit = list x (1 - d/100), so list = unit / (1 - d/100)
+      ArgumentCaptor<BigDecimal> derived = ArgumentCaptor.forClass(BigDecimal.class);
+      verify(discounted).setListPrice(derived.capture());
+      assertEquals(0, new BigDecimal("50").compareTo(derived.getValue()));
+      verify(grossPriced, never()).setListPrice(any(BigDecimal.class));
+      verify(free, never()).setListPrice(any(BigDecimal.class));
+      verify(dal).save(zeroList);
+      verify(dal).flush();
+    }
+  }
+
+  /** Only the lines of the import are touched; the draft's own lines are left alone, and nothing flushes when nothing changed. */
+  @Test
+  public void testAlignLineListPricesScopedToTheGivenLines() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      InvoiceLine added = pricedLine("50", "0", null, null);
+      InvoiceLine existing = pricedLine("70", "0", null, null);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getInvoiceLineList()).thenReturn(Arrays.asList(added, existing));
+
+      new InvoiceFromOrderSupport().alignLineListPrices(invoice,
+          Collections.singleton(added.getId()));
+
+      verify(added).setListPrice(new BigDecimal("50"));
+      verify(existing, never()).setListPrice(any(BigDecimal.class));
+
+      InvoiceLine fine = pricedLine("50", "50", null, null);
+      when(invoice.getInvoiceLineList()).thenReturn(Collections.singletonList(fine));
+      org.mockito.Mockito.clearInvocations(dal);
+      new InvoiceFromOrderSupport().alignLineListPrices(invoice, null);
+      verify(dal, never()).flush();
+    }
+  }
+
+  /** Cases the form could not have produced, or that leave nothing to derive: left alone. */
+  @Test
+  public void testAlignLineListPricesLeavesUnderivableLinesAlone() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      InvoiceLine noPrice = pricedLine(null, "0", null, null);
+      InvoiceLine fullDiscount = pricedLine("0", "0", "100", null);
+      InvoiceLine over = pricedLine("5", "0", "120", null);
+      InvoiceLine markup = pricedLine("5", "0", "-10", null);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getInvoiceLineList()).thenReturn(
+          Arrays.asList(noPrice, fullDiscount, over, markup));
+
+      new InvoiceFromOrderSupport().alignLineListPrices(invoice, null);
+
+      for (InvoiceLine line : Arrays.asList(noPrice, fullDiscount, over, markup)) {
+        verify(line, never()).setListPrice(any(BigDecimal.class));
+      }
+      verify(dal, never()).flush();
+    }
+  }
+
+  /** A return line (negative price) is aligned like any other: the list price keeps the sign. */
+  @Test
+  public void testAlignLineListPricesKeepsTheSignOfANegativePrice() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      InvoiceLine negative = pricedLine("-50", "0", null, null);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getInvoiceLineList()).thenReturn(Collections.singletonList(negative));
+
+      new InvoiceFromOrderSupport().alignLineListPrices(invoice, null);
+
+      verify(negative).setListPrice(new BigDecimal("-50"));
+    }
+  }
+
+  /** An empty scope is a scope: nothing is touched, nothing flushed. */
+  @Test
+  public void testAlignLineListPricesWithAnEmptyScopeTouchesNothing() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      InvoiceLine line = pricedLine("50", "0", null, null);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getInvoiceLineList()).thenReturn(Collections.singletonList(line));
+
+      new InvoiceFromOrderSupport().alignLineListPrices(invoice, Collections.emptySet());
+
+      verify(line, never()).setListPrice(any(BigDecimal.class));
+      verify(dal, never()).flush();
+    }
+  }
+
+  /** A failing flush is the caller's failure (the import rolls back), never swallowed here. */
+  @Test(expected = IllegalStateException.class)
+  public void testAlignLineListPricesPropagatesAFailingFlush() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      org.mockito.Mockito.doThrow(new IllegalStateException("flush failed")).when(dal).flush();
+      InvoiceLine line = pricedLine("50", "0", null, null);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getInvoiceLineList()).thenReturn(Collections.singletonList(line));
+
+      new InvoiceFromOrderSupport().alignLineListPrices(invoice, null);
+    }
+  }
+
   // ── copyLineDiscountsFromOrder (ETP-4006 / ETP-4780) ─────────────────────
   //
   // Moved here from CreateDraftInvoiceHandlerTest so both CreateDraftInvoiceHandler
@@ -219,6 +367,88 @@ public class InvoiceFromOrderSupportTest {
       verify(dal, never()).save(any());
       verify(dal, never()).flush();
     }
+  }
+
+  /**
+   * ETP-5713: the line import adds lines to an invoice that already holds others. The copy is then
+   * restricted to the new lines: a line outside the set keeps its discount untouched (here, none),
+   * even when its source order line carries one, and {@code null} still means every line.
+   */
+  @Test
+  public void testCopyLineDiscountsFromOrderScopedToTheGivenLinesLeavesTheOthersAlone() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      OrderLine discounted = mock(OrderLine.class);
+      when(discounted.getDiscount()).thenReturn(new BigDecimal("10"));
+
+      InvoiceLine imported = mock(InvoiceLine.class);
+      when(imported.getId()).thenReturn("new-line");
+      when(imported.getSalesOrderLine()).thenReturn(discounted);
+      when(imported.getEtgoDiscount()).thenReturn(null);
+
+      InvoiceLine alreadyThere = mock(InvoiceLine.class);
+      when(alreadyThere.getId()).thenReturn("old-line");
+      when(alreadyThere.getSalesOrderLine()).thenReturn(discounted);
+      when(alreadyThere.getEtgoDiscount()).thenReturn(null);
+
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getInvoiceLineList()).thenReturn(Arrays.asList(alreadyThere, imported));
+
+      new InvoiceFromOrderSupport().copyLineDiscountsFromOrder(invoice,
+          Collections.singleton("new-line"));
+
+      verify(imported).setEtgoDiscount(new BigDecimal("10"));
+      verify(alreadyThere, never()).setEtgoDiscount(any(BigDecimal.class));
+      verify(dal).flush();
+
+      new InvoiceFromOrderSupport().copyLineDiscountsFromOrder(invoice, null);
+      verify(alreadyThere).setEtgoDiscount(new BigDecimal("10"));
+    }
+  }
+
+  /**
+   * ETP-5713: the gross repair of the line import is scoped to the lines it added. A deliberate
+   * zero line or a negative line already in the draft keeps the gross it has; only a new line with
+   * no gross gets one, and {@code null} still means every line.
+   */
+  @Test
+  public void testEnsureLineGrossAmountsScopedLeavesExistingZeroAndNegativeLinesAlone() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      Currency currency = mock(Currency.class);
+      when(currency.getStandardPrecision()).thenReturn(2L);
+
+      InvoiceLine zero = invoiceLineWithGross("zero", BigDecimal.ZERO);
+      InvoiceLine negative = invoiceLineWithGross("negative", new BigDecimal("-5"));
+      InvoiceLine added = invoiceLineWithGross("added", BigDecimal.ZERO);
+      when(added.getInvoicedQuantity()).thenReturn(new BigDecimal("2"));
+      when(added.getGrossUnitPrice()).thenReturn(new BigDecimal("3"));
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getCurrency()).thenReturn(currency);
+      when(invoice.getInvoiceLineList()).thenReturn(Arrays.asList(zero, negative, added));
+
+      new InvoiceFromOrderSupport().ensureLineGrossAmounts(invoice,
+          Collections.singleton("added"));
+
+      verify(added).setGrossAmount(new BigDecimal("6.00"));
+      verify(zero, never()).setGrossAmount(any(BigDecimal.class));
+      verify(negative, never()).setGrossAmount(any(BigDecimal.class));
+
+      new InvoiceFromOrderSupport().ensureLineGrossAmounts(invoice, null);
+      verify(zero).setGrossAmount(any(BigDecimal.class));
+    }
+  }
+
+  private static InvoiceLine invoiceLineWithGross(String id, BigDecimal gross) {
+    InvoiceLine line = mock(InvoiceLine.class);
+    when(line.getId()).thenReturn(id);
+    when(line.getGrossAmount()).thenReturn(gross);
+    when(line.getInvoicedQuantity()).thenReturn(BigDecimal.ONE);
+    when(line.getLineNetAmount()).thenReturn(BigDecimal.ONE);
+    return line;
   }
 
   // ── rebuildInvoiceTaxAggregates ──────────────────────────────────────────
@@ -633,420 +863,55 @@ public class InvoiceFromOrderSupportTest {
     }
   }
 
-  // ── propagateOrderRateToInvoice ───────────────────────────────────────────
+  // ── propagateOrderRateToInvoice (ETP-5840: recomputed, never copied) ───────
 
   /**
-   * No-op when the order carries no custom currency rate (null EM_ETGO_Currency_Rate).
-   * The method must return immediately without touching the DB.
+   * The generated invoice's rate is recomputed from the INVOICE's own reference date (its accounting
+   * date, the invoice rate type) — the order's rate is never read — and the exchange-rates tab is
+   * then synced with {@code rateCleared = true}, so a rate left null (none configured for that date)
+   * clears the tab instead of keeping a stale row. Same for a sales and a purchase invoice.
    */
   @Test
-  public void propagateOrderRateToInvoice_nullRate_noInsert() throws Exception {
-    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDalMock.when(OBDal::getInstance).thenReturn(dal);
-
+  public void propagateOrderRateToInvoice_recomputesOnTheInvoiceDateAndSyncsTheTab() {
+    for (boolean sales : new boolean[] { true, false }) {
       Order order = mock(Order.class);
-      when(order.getETGOCurrencyRate()).thenReturn(null);
-
       Invoice invoice = mock(Invoice.class);
+      when(invoice.getId()).thenReturn("inv-1");
+      when(invoice.isSalesTransaction()).thenReturn(sales);
+      java.util.List<Object> types = new java.util.ArrayList<>();
 
-      new InvoiceFromOrderSupport().propagateOrderRateToInvoice(order, invoice);
+      try (MockedConstruction<DocumentCurrencyRate> rates = Mockito.mockConstruction(
+               DocumentCurrencyRate.class, (rate, context) -> types.add(context.arguments().get(0)));
+           MockedStatic<AbstractInvoiceHeaderHandler> sync =
+               Mockito.mockStatic(AbstractInvoiceHeaderHandler.class)) {
 
-      // No DB connection should be acquired when rate is null.
-      verify(dal, never()).getConnection();
-      // ETP-4029: the invoice column must remain untouched on this no-op path.
-      verify(invoice, never()).setETGOCurrencyRate(any());
+        new InvoiceFromOrderSupport().propagateOrderRateToInvoice(order, invoice);
+
+        assertEquals(1, rates.constructed().size());
+        verify(rates.constructed().get(0)).recompute(invoice);
+        DocumentCurrencyRate.RateType type = (DocumentCurrencyRate.RateType) types.get(0);
+        assertEquals("sales=" + sales, Invoice.PROPERTY_ACCOUNTINGDATE,
+            type.referenceDateProperty());
+        assertEquals("sales=" + sales, Invoice.PROPERTY_ETGOCURRENCYRATE, type.rateProperty());
+        sync.verify(() -> AbstractInvoiceHeaderHandler
+            .autoCreateOrUpdateConversionRateDocument("inv-1", true));
+        verify(order, never()).getETGOCurrencyRate();
+      }
     }
   }
 
-  /**
-   * No-op when invoice.getCurrency() is null (partially built invoice).
-   * Must not throw and must not attempt DB access.
-   */
+  /** A null invoice is a no-op: nothing recomputed, no tab sync. */
   @Test
-  public void propagateOrderRateToInvoice_nullInvoiceCurrency_noInsert() throws Exception {
-    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDalMock.when(OBDal::getInstance).thenReturn(dal);
-
-      Order order = mock(Order.class);
-      when(order.getETGOCurrencyRate()).thenReturn(new BigDecimal("1.16"));
-
-      Invoice invoice = mock(Invoice.class);
-      when(invoice.getCurrency()).thenReturn(null);
-
-      new InvoiceFromOrderSupport().propagateOrderRateToInvoice(order, invoice);
-
-      verify(dal, never()).getConnection();
-      // ETP-4029: no-op path — the rate column must not be set.
-      verify(invoice, never()).setETGOCurrencyRate(any());
-    }
-  }
-
-  /**
-   * No-op when the invoice currency is the same as the org currency.
-   * A same-currency document does not need a conversion rate record.
-   */
-  @Test
-  public void propagateOrderRateToInvoice_sameCurrency_noInsert() throws Exception {
-    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
-        MockedStatic<OBCurrencyUtils> currencyUtilsMock = Mockito.mockStatic(OBCurrencyUtils.class)) {
-
-      OBDal dal = mock(OBDal.class);
-      obDalMock.when(OBDal::getInstance).thenReturn(dal);
-
-      Organization org = mock(Organization.class);
-      when(org.getId()).thenReturn("org-1");
-
-      Order order = mock(Order.class);
-      when(order.getETGOCurrencyRate()).thenReturn(new BigDecimal("1.0"));
-      when(order.getOrganization()).thenReturn(org);
-
-      // Org currency and invoice currency are both "EUR" — same currency, no record needed.
-      currencyUtilsMock.when(() -> OBCurrencyUtils.getOrgCurrency("org-1")).thenReturn("EUR");
-
-      Currency invoiceCurrency = mock(Currency.class);
-      when(invoiceCurrency.getId()).thenReturn("EUR");
-
-      Invoice invoice = mock(Invoice.class);
-      when(invoice.getCurrency()).thenReturn(invoiceCurrency);
-
-      new InvoiceFromOrderSupport().propagateOrderRateToInvoice(order, invoice);
-
-      verify(dal, never()).getConnection();
-      // ETP-4029: same-currency no-op — the rate column must not be set.
-      verify(invoice, never()).setETGOCurrencyRate(any());
-    }
-  }
-
-  /**
-   * No-op when a {@code c_conversion_rate_document} record already exists for
-   * this invoice + currency pair. The method must be idempotent — if the check
-   * query returns a row it returns immediately without executing the INSERT.
-   */
-  @Test
-  public void propagateOrderRateToInvoice_recordAlreadyExists_noInsert() throws Exception {
-    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
-        MockedStatic<OBCurrencyUtils> currencyUtilsMock = Mockito.mockStatic(OBCurrencyUtils.class)) {
-
-      OBDal dal = mock(OBDal.class);
-      obDalMock.when(OBDal::getInstance).thenReturn(dal);
-
-      Organization org = mock(Organization.class);
-      when(org.getId()).thenReturn("org-1");
-
-      Order order = mock(Order.class);
-      when(order.getETGOCurrencyRate()).thenReturn(new BigDecimal("1.16"));
-      when(order.getOrganization()).thenReturn(org);
-
-      currencyUtilsMock.when(() -> OBCurrencyUtils.getOrgCurrency("org-1")).thenReturn("EUR");
-
-      Currency invoiceCurrency = mock(Currency.class);
-      when(invoiceCurrency.getId()).thenReturn("USD");
-
-      Invoice invoice = mock(Invoice.class);
-      when(invoice.getCurrency()).thenReturn(invoiceCurrency);
-      when(invoice.getId()).thenReturn("inv-001");
-
-      // The check query finds an existing row → rs.next() = true.
-      Connection conn = mock(Connection.class);
-      when(dal.getConnection()).thenReturn(conn);
-
-      PreparedStatement checkPs = mock(PreparedStatement.class);
-      ResultSet checkRs = mock(ResultSet.class);
-      when(checkRs.next()).thenReturn(true);  // record exists
-      when(checkPs.executeQuery()).thenReturn(checkRs);
-      when(conn.prepareStatement(anyString())).thenReturn(checkPs);
-
-      new InvoiceFromOrderSupport().propagateOrderRateToInvoice(order, invoice);
-
-      // Only one prepareStatement call for the SELECT — no INSERT.
-      verify(conn, times(1)).prepareStatement(anyString());
-      // ETP-4029: the early return happens before the rate is ever persisted on the invoice.
-      verify(invoice, never()).setETGOCurrencyRate(any());
-    }
-  }
-
-  /**
-   * Happy path: rate is set, currencies differ, and no existing record.
-   * An INSERT INTO c_conversion_rate_document must be executed with:
-   * - correct invoice ID
-   * - correct currency IDs (from invoice and to orgCurrency)
-   * - docRate = 1 / EM_ETGO_Currency_Rate
-   */
-  @Test
-  public void propagateOrderRateToInvoice_allConditionsMet_insertsRecord() throws Exception {
-    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
-        MockedStatic<OBCurrencyUtils> currencyUtilsMock = Mockito.mockStatic(OBCurrencyUtils.class);
-        MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class)) {
-
-      OBDal dal = mock(OBDal.class);
-      obDalMock.when(OBDal::getInstance).thenReturn(dal);
-
-      Organization org = mock(Organization.class);
-      when(org.getId()).thenReturn("org-1");
-
-      // EM_ETGO_Currency_Rate = 2.0 → docRate = 1/2 = 0.5
-      BigDecimal etgoRate = new BigDecimal("2.0");
-
-      Order order = mock(Order.class);
-      when(order.getETGOCurrencyRate()).thenReturn(etgoRate);
-      when(order.getOrganization()).thenReturn(org);
-      when(order.getId()).thenReturn("order-001");
-
-      currencyUtilsMock.when(() -> OBCurrencyUtils.getOrgCurrency("org-1")).thenReturn("EUR");
-
-      Currency invoiceCurrency = mock(Currency.class);
-      when(invoiceCurrency.getId()).thenReturn("USD");
-
-      Client client = mock(Client.class);
-      when(client.getId()).thenReturn("client-1");
-
-      Organization invoiceOrg = mock(Organization.class);
-      when(invoiceOrg.getId()).thenReturn("org-1");
-
-      Invoice invoice = mock(Invoice.class);
-      when(invoice.getCurrency()).thenReturn(invoiceCurrency);
-      when(invoice.getId()).thenReturn("inv-001");
-      when(invoice.getClient()).thenReturn(client);
-      when(invoice.getOrganization()).thenReturn(invoiceOrg);
-      when(invoice.getGrandTotalAmount()).thenReturn(new BigDecimal("100.00"));
-
-      User user = mock(User.class);
-      when(user.getId()).thenReturn("user-1");
-      OBContext ctx = mock(OBContext.class);
-      when(ctx.getUser()).thenReturn(user);
-      obContextMock.when(OBContext::getOBContext).thenReturn(ctx);
-
-      Connection conn = mock(Connection.class);
-      when(dal.getConnection()).thenReturn(conn);
-
-      // Check query — no existing record.
-      PreparedStatement checkPs = mock(PreparedStatement.class);
-      ResultSet checkRs = mock(ResultSet.class);
-      when(checkRs.next()).thenReturn(false);
-      when(checkPs.executeQuery()).thenReturn(checkRs);
-
-      // Insert statement.
-      PreparedStatement insertPs = mock(PreparedStatement.class);
-
-      // First prepareStatement = check SELECT, second = INSERT.
-      when(conn.prepareStatement(anyString()))
-          .thenReturn(checkPs)
-          .thenReturn(insertPs);
-
-      new InvoiceFromOrderSupport().propagateOrderRateToInvoice(order, invoice);
-
-      // INSERT must have been executed.
-      verify(insertPs).executeUpdate();
-
-      // Verify invoice ID was set as parameter (position 6 in INSERT).
-      verify(insertPs).setString(eq(6), eq("inv-001"));
-
-      // Verify currency IDs: position 7 = invoice currency (USD), position 8 = orgCurrency (EUR).
-      verify(insertPs).setString(eq(7), eq("USD"));
-      verify(insertPs).setString(eq(8), eq("EUR"));
-
-      // docRate = 1 / 2.0 = 0.5 — verified via capture of setBigDecimal(9, ...).
-      // Use an ArgumentCaptor for the rate parameter to check the computed docRate value.
-      ArgumentCaptor<BigDecimal> rateCaptor =
-          ArgumentCaptor.forClass(BigDecimal.class);
-      verify(insertPs, times(2)).setBigDecimal(any(Integer.class), rateCaptor.capture());
-      // First setBigDecimal call is docRate (position 9), second is foreignAmount (position 10).
-      BigDecimal capturedDocRate = rateCaptor.getAllValues().get(0);
-      // 1 / 2.0 = 0.5, rounded to 12 decimal places.
-      assertEquals(0, new BigDecimal("0.5").compareTo(capturedDocRate.stripTrailingZeros()));
-
-      // ETP-4029: success path — the ORIGINAL EM_ETGO_Currency_Rate (org→doc, 2.0), not the
-      // computed docRate, must also be persisted on the invoice column so summaries/lists
-      // can display it, mirroring the source order's rate.
-      verify(invoice).setETGOCurrencyRate(etgoRate);
-      verify(dal).save(invoice);
-    }
-  }
-
-  /**
-   * Branch A: {@code OBCurrencyUtils.getOrgCurrency(orgId)} returns null.
-   * The method must return early without acquiring a DB connection.
-   * This is a distinct branch from sameCurrency — here orgCurrencyId itself is null.
-   */
-  @Test
-  public void propagateOrderRateToInvoice_nullOrgCurrency_noInsert() throws Exception {
-    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
-        MockedStatic<OBCurrencyUtils> currencyUtilsMock = Mockito.mockStatic(OBCurrencyUtils.class)) {
-
-      OBDal dal = mock(OBDal.class);
-      obDalMock.when(OBDal::getInstance).thenReturn(dal);
-
-      Organization org = mock(Organization.class);
-      when(org.getId()).thenReturn("org-null");
-
-      Order order = mock(Order.class);
-      when(order.getETGOCurrencyRate()).thenReturn(new BigDecimal("1.16"));
-      when(order.getOrganization()).thenReturn(org);
-
-      // getOrgCurrency returns null — triggers the early-return branch.
-      currencyUtilsMock.when(() -> OBCurrencyUtils.getOrgCurrency("org-null")).thenReturn(null);
-
-      Currency invoiceCurrency = mock(Currency.class);
-      when(invoiceCurrency.getId()).thenReturn("USD");
-
-      Invoice invoice = mock(Invoice.class);
-      when(invoice.getCurrency()).thenReturn(invoiceCurrency);
-
-      new InvoiceFromOrderSupport().propagateOrderRateToInvoice(order, invoice);
-
-      verify(dal, never()).getConnection();
-      // ETP-4029: null org currency no-op — rate must not be set.
-      verify(invoice, never()).setETGOCurrencyRate(any());
-    }
-  }
-
-  /**
-   * Branch B: {@code invoice.getGrandTotalAmount()} returns null.
-   * foreignAmount is null → the INSERT uses {@code ps.setNull(10, Types.NUMERIC)}
-   * instead of {@code ps.setBigDecimal(10, ...)}.
-   */
-  @Test
-  public void propagateOrderRateToInvoice_nullGrandTotal_usesSetNull() throws Exception {
-    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
-        MockedStatic<OBCurrencyUtils> currencyUtilsMock = Mockito.mockStatic(OBCurrencyUtils.class);
-        MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class)) {
-
-      OBDal dal = mock(OBDal.class);
-      obDalMock.when(OBDal::getInstance).thenReturn(dal);
-
-      Organization org = mock(Organization.class);
-      when(org.getId()).thenReturn("org-3");
-
-      Order order = mock(Order.class);
-      when(order.getETGOCurrencyRate()).thenReturn(new BigDecimal("2.0"));
-      when(order.getOrganization()).thenReturn(org);
-      when(order.getId()).thenReturn("order-003");
-
-      currencyUtilsMock.when(() -> OBCurrencyUtils.getOrgCurrency("org-3")).thenReturn("EUR");
-
-      Currency invoiceCurrency = mock(Currency.class);
-      when(invoiceCurrency.getId()).thenReturn("USD");
-
-      Client client = mock(Client.class);
-      when(client.getId()).thenReturn("client-3");
-
-      Organization invoiceOrg = mock(Organization.class);
-      when(invoiceOrg.getId()).thenReturn("org-3");
-
-      Invoice invoice = mock(Invoice.class);
-      when(invoice.getCurrency()).thenReturn(invoiceCurrency);
-      when(invoice.getId()).thenReturn("inv-003");
-      when(invoice.getClient()).thenReturn(client);
-      when(invoice.getOrganization()).thenReturn(invoiceOrg);
-      // null grand total → foreignAmount will be null → setNull(10, NUMERIC) path.
-      when(invoice.getGrandTotalAmount()).thenReturn(null);
-
-      User user = mock(User.class);
-      when(user.getId()).thenReturn("user-3");
-      OBContext ctx = mock(OBContext.class);
-      when(ctx.getUser()).thenReturn(user);
-      obContextMock.when(OBContext::getOBContext).thenReturn(ctx);
-
-      Connection conn = mock(Connection.class);
-      when(dal.getConnection()).thenReturn(conn);
-
-      // Check query — no existing record.
-      PreparedStatement checkPs = mock(PreparedStatement.class);
-      ResultSet checkRs = mock(ResultSet.class);
-      when(checkRs.next()).thenReturn(false);
-      when(checkPs.executeQuery()).thenReturn(checkRs);
-
-      PreparedStatement insertPs = mock(PreparedStatement.class);
-
-      when(conn.prepareStatement(anyString()))
-          .thenReturn(checkPs)
-          .thenReturn(insertPs);
-
-      new InvoiceFromOrderSupport().propagateOrderRateToInvoice(order, invoice);
-
-      verify(insertPs).setNull(eq(10), eq(java.sql.Types.NUMERIC));
-      verify(insertPs, never()).setBigDecimal(eq(10), any());
-      verify(insertPs).executeUpdate();
-
-      // ETP-4029: this is still the success path (INSERT executed) — the rate must be
-      // persisted on the invoice even though foreignAmount itself is null.
-      verify(invoice).setETGOCurrencyRate(new BigDecimal("2.0"));
-      verify(dal).save(invoice);
-    }
-  }
-
-  /**
-   * When the INSERT throws a SQL exception, the method must swallow it (log at
-   * WARN) and not rethrow. Invoice creation must not be broken by a conversion
-   * rate write failure.
-   */
-  @Test
-  public void propagateOrderRateToInvoice_insertThrows_swallowsException() throws Exception {
-    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
-        MockedStatic<OBCurrencyUtils> currencyUtilsMock = Mockito.mockStatic(OBCurrencyUtils.class);
-        MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class)) {
-
-      OBDal dal = mock(OBDal.class);
-      obDalMock.when(OBDal::getInstance).thenReturn(dal);
-
-      Organization org = mock(Organization.class);
-      when(org.getId()).thenReturn("org-2");
-
-      Order order = mock(Order.class);
-      when(order.getETGOCurrencyRate()).thenReturn(new BigDecimal("1.5"));
-      when(order.getOrganization()).thenReturn(org);
-      when(order.getId()).thenReturn("order-002");
-
-      currencyUtilsMock.when(() -> OBCurrencyUtils.getOrgCurrency("org-2")).thenReturn("EUR");
-
-      Currency invoiceCurrency = mock(Currency.class);
-      when(invoiceCurrency.getId()).thenReturn("USD");
-
-      Client client = mock(Client.class);
-      when(client.getId()).thenReturn("client-2");
-
-      Organization invoiceOrg = mock(Organization.class);
-      when(invoiceOrg.getId()).thenReturn("org-2");
-
-      Invoice invoice = mock(Invoice.class);
-      when(invoice.getCurrency()).thenReturn(invoiceCurrency);
-      when(invoice.getId()).thenReturn("inv-002");
-      when(invoice.getClient()).thenReturn(client);
-      when(invoice.getOrganization()).thenReturn(invoiceOrg);
-      when(invoice.getGrandTotalAmount()).thenReturn(new BigDecimal("200.00"));
-
-      User user = mock(User.class);
-      when(user.getId()).thenReturn("user-2");
-      OBContext ctx = mock(OBContext.class);
-      when(ctx.getUser()).thenReturn(user);
-      obContextMock.when(OBContext::getOBContext).thenReturn(ctx);
-
-      Connection conn = mock(Connection.class);
-      when(dal.getConnection()).thenReturn(conn);
-
-      // Check query — no existing record.
-      PreparedStatement checkPs = mock(PreparedStatement.class);
-      ResultSet checkRs = mock(ResultSet.class);
-      when(checkRs.next()).thenReturn(false);
-      when(checkPs.executeQuery()).thenReturn(checkRs);
-
-      // INSERT statement throws.
-      PreparedStatement insertPs = mock(PreparedStatement.class);
-      when(insertPs.executeUpdate()).thenThrow(new java.sql.SQLException("DB write failure"));
-
-      when(conn.prepareStatement(anyString()))
-          .thenReturn(checkPs)
-          .thenReturn(insertPs);
-
-      // Must NOT throw — exception is swallowed.
-      new InvoiceFromOrderSupport().propagateOrderRateToInvoice(order, invoice);
-
-      // ETP-4029: the rate-column write happens AFTER the INSERT succeeds; since the INSERT
-      // threw, the whole method's catch block swallows the exception before reaching that
-      // line, so the invoice column must remain untouched.
-      verify(invoice, never()).setETGOCurrencyRate(any());
+  public void propagateOrderRateToInvoice_nullInvoice_isNoOp() {
+    try (MockedConstruction<DocumentCurrencyRate> rates =
+             Mockito.mockConstruction(DocumentCurrencyRate.class);
+         MockedStatic<AbstractInvoiceHeaderHandler> sync =
+             Mockito.mockStatic(AbstractInvoiceHeaderHandler.class)) {
+
+      new InvoiceFromOrderSupport().propagateOrderRateToInvoice(mock(Order.class), null);
+
+      assertEquals(0, rates.constructed().size());
+      sync.verifyNoInteractions();
     }
   }
 }
