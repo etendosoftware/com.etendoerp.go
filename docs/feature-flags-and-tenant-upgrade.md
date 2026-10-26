@@ -500,6 +500,29 @@ length on every read rather than stored, so changing it — including the 15 →
 deadline of existing demos too, not only new ones. The renewal grace window is separate:
 `etendo.go.billing.grace.days` (`ETGO_BILLING_GRACE_DAYS`), 15 days.
 
+### Frozen demo trial (ETP-5847)
+
+A demo that must never expire (a sales demo) gets the client preference
+`ETGO_DemoTrialFrozenDays`, set by hand in Classic. Its value is the number of days left the demo
+always shows: `14` on a demo created today keeps showing 14.
+
+- **How it works:** `TenantEnvironmentLifecycleService.resolve` reports a trial start that moves
+  with the clock (`now - (trial days - frozen days)`). The access check, the trial bar of
+  `GET /sws/go/environments` and the HubSpot sync all read that snapshot, so the demo is never
+  expired and they all agree. `trialStartedAt` in the API therefore moves too.
+- **The stored start is kept:** `ETGO_DemoTrialStartedAt` is never rewritten. Removing (or
+  deactivating) the preference resumes the trial from its real start, so an old demo is expired at
+  once.
+- **Only the trial:** a demo associated with a productive environment
+  (`ETGO_AssociatedProductiveClientId`) stays blocked. To keep a demo next to its productive,
+  remove that preference from the demo as well.
+- **Notices and periods:** the daily *Demo Trial Notices* pass sends a frozen demo no notice (its
+  start moves, so the notice key would change every day) and opens its never-opened fiscal periods
+  through the end the trial shows, in the owner's default role and organization. Without that pass
+  scheduled, the demo can post only within the periods the onboarding opened.
+- **Invalid values:** anything but a whole number of 0 or more is ignored with a warning in the
+  log, and the trial runs as usual.
+
 ### Trial notices (ETP-5453)
 
 The owner of a demo is emailed before the trial ends and once it has ended, by the background
@@ -521,7 +544,8 @@ there. An instance where nobody scheduled it sends no notices at all.
   the first 3 days after the end: older demos are never mailed out of the blue, including on the
   first run after a deploy.
 - **Who is never notified:** productive environments, inactive clients, tenants with no lifecycle
-  metadata, and any demo associated with a productive environment. A demo is never converted:
+  metadata, demos with a frozen trial (see above), and any demo associated with a productive
+  environment. A demo is never converted:
   paying creates a new productive environment and the old demo is cut at once, so its owner must not
   be told that the trial "ended".
 - **Recipient and language:** the platform account (`ETGO_ACCOUNT`) behind the client's owner
