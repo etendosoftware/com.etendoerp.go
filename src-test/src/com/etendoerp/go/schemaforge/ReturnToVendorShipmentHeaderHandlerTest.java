@@ -1520,13 +1520,13 @@ public class ReturnToVendorShipmentHeaderHandlerTest {
   }
 
   /**
-   * ETP-5712: a second rectificative on the same return is ALLOWED (ETP-5381 removed the guard on
-   * purpose) but reported: the answer lists the non-voided ones the return already had BEFORE this
-   * call, so the agent sees it duplicated.
+   * ETP-5712: a second rectificative on the same return needs the explicit
+   * {@code allowDuplicate:true} (one per return, like the screen) and is then reported: the answer
+   * lists the non-voided ones the return already had BEFORE this call.
    */
   @Test
   @SuppressWarnings({"unchecked", "rawtypes"})
-  public void handleCreateReturnInvoice_secondCallIsAllowedAndListsPreviousReturnInvoices()
+  public void handleCreateReturnInvoice_secondCallWithAllowDuplicateTrueIsCreatedAndListsPreviousReturnInvoices()
       throws Exception {
     try (MockedStatic<OBContext> ignored = Mockito.mockStatic(OBContext.class);
          MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
@@ -1544,9 +1544,10 @@ public class ReturnToVendorShipmentHeaderHandlerTest {
 
         NeoResponse result = handler.handle(NeoContext.builder()
             .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
-            .fieldName("createReturnInvoice").recordId("ret-1").build());
+            .fieldName("createReturnInvoice").recordId("ret-1")
+            .requestBody(new JSONObject().put("allowDuplicate", true)).build());
 
-        assertEquals("a duplicate is allowed", 200, result.getHttpStatus());
+        assertEquals("a duplicate is allowed with the flag", 200, result.getHttpStatus());
         JSONObject data = result.getBody().getJSONObject("response").getJSONObject("data");
         assertEquals("REC-NEW", data.getString("documentNo"));
         JSONArray previous = data.getJSONArray("previousReturnInvoices");
@@ -1558,6 +1559,66 @@ public class ReturnToVendorShipmentHeaderHandlerTest {
             .process(eq("ret-inv-2"), eq("CO"), anyString(), anyString(), anyString(), any(), any());
       }
     }
+  }
+
+  /**
+   * ETP-5712: the vendor return refuses a second rectificativa too (409, the SPA's sentence, the
+   * existing ones listed) and creates nothing; the flag is a declared optional boolean.
+   */
+  @Test
+  @SuppressWarnings({"unchecked", "rawtypes"})
+  public void handleCreateReturnInvoice_secondCallWithoutTheFlagIs409AndCreatesNothing()
+      throws Exception {
+    try (MockedStatic<OBContext> ignored = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      stubReturnInvoiceQueries(dal, true, Arrays.asList("inv-src-1"), Arrays.asList("inv-src-1"),
+          Collections.singletonList(new String[] {"prev-inv-1", "REC-OLD", "CO", "ret-1"}));
+      mockCreateReturnInvoiceFlow(dal, provider, "ret-inv-2");
+
+      try (CompletionMocks completion = new CompletionMocks(dal, completionSuccess())) {
+        NeoResponse result = handler.handle(NeoContext.builder()
+            .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+            .fieldName("createReturnInvoice").recordId("ret-1").build());
+
+        assertEquals(409, result.getHttpStatus());
+        JSONObject error = result.getBody().getJSONObject("error");
+        assertEquals("A rectificative invoice already exists for this return document.",
+            error.getString("message"));
+        assertEquals("returnInvoiceAlreadyExists", error.getString("code"));
+        assertEquals("prev-inv-1", error.getJSONArray("previousReturnInvoices")
+            .getJSONObject(0).getString("id"));
+        verify(dal, Mockito.never()).save(any());
+        verify(dal, Mockito.never()).flush();
+        verify(provider, Mockito.never()).get(ReversedInvoice.class);
+        verify(completion.processInvoiceUtil, Mockito.never())
+            .process(anyString(), anyString(), anyString(), anyString(), anyString(), any(), any());
+      }
+    }
+  }
+
+  /** ETP-5712: allowDuplicate is declared (optional boolean) so it is not an unknown parameter. */
+  @Test
+  public void testCreateReturnInvoiceContractDeclaresAllowDuplicateAsOptionalBoolean()
+      throws Exception {
+    NeoActionContract contract = handler.actionContracts().get("createReturnInvoice");
+    NeoActionContract.Param found = null;
+    for (NeoActionContract.Param param : contract.getParams()) {
+      if ("allowDuplicate".equals(param.getName())) {
+        found = param;
+      }
+    }
+    assertNotNull("allowDuplicate must be declared", found);
+    assertEquals(NeoActionContract.TYPE_BOOLEAN, found.getType());
+    assertNull(NeoActionContract.validate(handler.actionContracts(), "createReturnInvoice",
+        new JSONObject()));
+    assertNull(NeoActionContract.validate(handler.actionContracts(), "createReturnInvoice",
+        new JSONObject().put("allowDuplicate", true)));
+    assertFalse(contract.getDescription().contains("is NOT refused"));
   }
 
   /**

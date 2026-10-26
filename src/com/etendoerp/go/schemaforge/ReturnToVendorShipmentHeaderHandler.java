@@ -175,18 +175,25 @@ public class ReturnToVendorShipmentHeaderHandler extends AbstractReturnDocumentH
             + "completed return shipment, links it to the invoices it rectifies and confirms it: "
             + "the invoice is left COMPLETED. Confirming the return does NOT do this; it is this "
             + "separate call. Refused with 400 when the shipment is not completed. A second call "
-            + "is NOT refused and creates a second factura rectificativa, so check "
-            + "hasReturnInvoice (in rectifiableInvoices) or returnInvoices (on the return header) "
-            + "first; the answer lists, in previousReturnInvoices, the ones the return already "
-            + "had before this call. Refused with 422 returnInvoiceWithoutAmount, creating "
-            + "nothing, when a product has no price to refund. Returns {id, documentNo, "
+            + "is refused with 409 returnInvoiceAlreadyExists, creating nothing, "
+            + "when the return already has a non-voided factura rectificativa (one per return, "
+            + "as on the screen; see hasReturnInvoice in rectifiableInvoices or returnInvoices on "
+            + "the return header), unless allowDuplicate:true is passed; the refusal lists the "
+            + "existing ones in previousReturnInvoices, and with allowDuplicate:true the answer "
+            + "lists the ones the return had before this call. Refused with 422 "
+            + "returnInvoiceWithoutAmount, creating nothing, when a product has no price to refund. Returns {id, documentNo, "
             + "documentStatus, documentType, isSalesTransaction, grandTotalAmount, totalLines, "
             + "linkedReturnId, returnDocumentNo, rectifiedInvoices:[{id, documentNo}], "
             + "previousReturnInvoices:[{id, documentNo, documentStatus}]}; the amounts are "
             + "negative, it refunds. Step 6." + FLOW,
         NeoActionContract.Param.array("originInvoices", NeoActionContract.TYPE_STRING, false,
             "Ids of the invoices it rectifies, from rectifiableInvoices. Default: the invoice "
-                + "auto-detected from the returned receipt lines; refused when none is found."))
+                + "auto-detected from the returned receipt lines; refused when none is found."),
+        NeoActionContract.Param.optional(ReturnShipmentUtils.PARAM_ALLOW_DUPLICATE,
+            NeoActionContract.TYPE_BOOLEAN,
+            "Only the JSON boolean true creates a second factura rectificativa for a return "
+                + "that already has one; anything else (absent, false, a string, a number) keeps "
+                + "the one-per-return refusal. Use it only when a second one is really intended."))
         .withIdDescription("The id of the completed return shipment.")
         .availableWhen(DocumentAvailability.WHEN_COMPLETED));
     contracts.putAll(GoodsPostingContracts.CONTRACTS);

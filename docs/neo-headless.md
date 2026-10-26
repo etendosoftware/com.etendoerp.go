@@ -3869,6 +3869,7 @@ not: `etendo_create` does not run it in shared code, so it is in the table below
 | `user` create — invitation (ETP-4830, declared by ETP-5194) | invitation committed by the post-hook | same, but mid-batch | the invitation's `commitAndClose()` commits every earlier operation of the batch, so a later failure answers `atomic: false` (§4.12.4.1). Same behaviour on REST `/batch`; declared, not changed. The ETP-5194 email correction is an update, which batch does not perform |
 | line creation of receipts, shipments and invoices (ETP-5713) | the lines CRUD, which is what the SPA's "Add from ..." modals post one line at a time: **not capped** by the server (the modal limits the quantity client-side), invoice-line `salesOrderLine` / `goodsShipmentLine` and header `salesOrder` refused as `read_only_field` on MCP | `etendo_batch` reaches the same CRUD: same refusals, same lack of cap | the declared import actions (`importOrderLines`, `importReceiptLines`, `importShipmentLines`, §4.12.34) are the MCP way to create linked lines: capped by what is pending (drafts included), linked, one transaction. They are served by the same delegates on REST and MCP, so the two channels agree on them; what differs is the CRUD line create, which the actions deliberately do not reuse |
 | availability, `etendo_schema` `id`, entity-name case, message-key hints (ETP-5714) | **not applicable**: the actions view, `availableNow` and the hints are MCP surfaces (`McpActionsView`, `McpToolRouter`); REST has no equivalent view and answers its own bodies | MCP only | declared, not a bug: availability is advisory and never judged by any channel, so a REST call and an MCP call to the same action are refused or served identically by the same handler. The costing retry (409 `costNotCalculated`) is NOT a divergence: it comes from `DocumentPostingService.handleAction`, shared by REST and MCP |
+| a second factura rectificativa of a return (ETP-5712) | **refused 409** `returnInvoiceAlreadyExists` when the return already has a non-voided one; the button is also hidden on screen (`hasReturnInvoice`), so the SPA never sends the flag | the same 409; **`allowDuplicate:true` is declared in the `createReturnInvoice` contract** and creates a second one on purpose (e.g. one per origin invoice) | an MCP-only capability the screen does not offer, kept deliberately (ETP-5381 said a return may legitimately have more than one). Strict: only a JSON boolean `true` (a string or number is 422). See §4.12.33 |
 | the grid price (`listPrice`) of an agent-written order line (ETP-5714) | explicit price → `listPrice` 0 (`OrderLineDiscountSupport`; 17 of 73 order lines in 3 days of local data) | same | declared, not fixed: the invoice-line side now aligns the list price on create, update and every native copy, so an invoice created or imported from such an order shows the price; the order line itself still shows 0,00 until its own helper gets the same rule |
 | document exchange rate on a create whose currency or reference date the create cascade derives (ETP-5840) | MCP `etendo_create` runs the defaults before the pre-hook, so the pre-hook decides and refuses (422, nothing saved) | `/batch` and `etendo_batch`: the post-hook refuses and the batch rolls back (nothing saved). **REST single** `POST` without `currency` or the reference date: the CRUD service has already committed when the post-hook knows them, so the document is created without a rate and the response carries the save text as a `warning` in `messages`; its next save is refused until it has one. The SPA always sends both, so it never takes this path | declared |
 | document actions over several documents (ETP-5715) | one document per call (`etendo_action`), one transaction, the call's own answer | `etendo_batch` is **create-only and atomic**; it has no ACTION surface | **`etendo_action_batch` is neither: per-document, NOT atomic, capped at 50 ids**, one result per document. Each document runs the `etendo_action` path in its own transaction (commit on success, rollback and a clean session on failure) and the batch carries on after a failure. REST has no equivalent call: the SPA's list toolbar posts one request per record. **Aligned with the SPA (bulk bar, row kebab, form kebab) and the same in single `etendo_action`:** reactivating a *posted* **invoice** un-posts it first (`preUnpostActions`), by per-entity opt-in (`NeoHandler#unpostBeforeReactivate`: goods documents, returns and journals do not, as in the SPA), §4.12.36. In `etendo_action` the un-post is committed in its own transaction before the reactivation, which REST/the SPA do as two requests; amortization's SPA un-posts but the module declares no `unpost` for it, so the MCP does not. **Not aligned, on purpose:** concurrency, the client-side `rowFilter` omission, and the SPA clone dialog stopping at the first failure. Declared in §4.12.36 |
@@ -10164,13 +10165,27 @@ the SPA's two calls. An agent that confirmed and stopped believed the refund was
 - The `FLOW` text carried by every return action's description repeats it, and so do both spec agent prompts
   (`agent-prompts/*/spec.md`, mirrored in `ETGO_SF_SPEC.AGENT_PROMPT`).
 
-**Duplicates are allowed, and reported.** ETP-5381 removed the duplicate guard on purpose (a return can legitimately
-have more than one rectificativa); that stays. What changes is that it can no longer happen unseen:
-`createReturnInvoice`'s description tells the agent to check `hasReturnInvoice` (`rectifiableInvoices`) /
-`returnInvoices` (header GET) first, and the answer lists `previousReturnInvoices`: the non-voided invoices the return
-had BEFORE this call, from the same query as `returnInvoices` / `hasReturnInvoice`
-(`ReturnShipmentUtils.fetchPreviousReturnInvoices`; unlike the enrichment it propagates a failure, answering 400, so a
-failed lookup is never read as "first one").
+**One factura rectificativa per return, unless `allowDuplicate:true`.** The screen offers *Crear Factura Rectificativa*
+only while the return is `CO` and has no non-voided invoice (`hasReturnInvoice`), and hides the button the moment one
+is created; so the screen allows exactly ONE per return. ETP-5381 had removed the server-side guard (a return can
+legitimately have more than one, for example one per origin invoice) and left that rule to the client; an agent has no
+button to hide, and refunded the same return twice (-44.00 for 2 returned units). Since ETP-5712 the action enforces it
+for every channel, in `ReturnInvoiceSupport.refuseIfAlreadyInvoiced`, BEFORE anything is written (and before the price
+probe):
+- the return has at least one **non-voided** invoice (`ReturnShipmentUtils.fetchPreviousReturnInvoices`, the same query
+  as `returnInvoices` / `hasReturnInvoice`; a VOIDED one does not count, it propagates a failure as 400 so a failed lookup
+  is never read as "first one") and the body does not carry `allowDuplicate:true` -> **409**
+  `{error:{status:409, code:"returnInvoiceAlreadyExists", message:"A rectificative invoice already exists for this
+  return document.", hint, previousReturnInvoices:[{id, documentNo, documentStatus}]}}`. Nothing is created. `message` is
+  the exact legacy sentence `backendErrors.js` already maps to `backendError.returnInvoiceAlreadyExists`; do not reword it.
+- `allowDuplicate` is **strict**: only the JSON boolean `true` lifts the refusal. `"true"`, `1`, `null` or any other
+  non-boolean is a **422** (it never fails open, and never reads as true); absent or `false` keeps the refusal.
+- with `allowDuplicate:true` it behaves as before: another one is created and the answer lists, in
+  `previousReturnInvoices`, the non-voided ones the return had BEFORE this call.
+- `allowDuplicate` is declared (optional boolean) in the `createReturnInvoice` contract of both headers, so it is not an
+  unknown parameter (422) on MCP.
+- the first rectificativa of a return is unaffected. The SPA never sends the flag, so for it only a stale-screen race
+  changes: a clean 409 instead of a silent duplicate.
 
 **Response (200).** `{id, documentNo, documentStatus}` as before, plus:
 
@@ -10188,17 +10203,29 @@ The invoice is left COMPLETED (decision kept from ETP-5381). The SPA carries `gr
 today, so there is nothing to format; a future display of it must go through `formatCurrency`.
 
 **Zero-amount guard.** `ReturnInvoiceSupport.refuseIfUnpriced` refuses with **422** `error.code
-returnInvoiceWithoutAmount` when ANY product line with a quantity would end at a unit price of 0, instead of
-creating and confirming a rectificativa of 0. It judges per line (one unpriced product among priced ones still
-refunds the wrong amount), the same stance as `InvoiceCompletionLineGuard` (ETP-5710), and it runs BEFORE the first
-`save`: it probes each line with the very sources `buildAndSaveInvoiceLine` uses (order line / source invoice line via
-`createShipmentInvoiceLine`, then the source invoice line, then the price list `standardPrice`) on a transient line,
-so a refusal persists nothing. Probe and line build share ONE resolver (`resolveLinePricing`), so they cannot drift. A deliberately free product therefore
-cannot be refunded through this action. Shape:
+returnInvoiceWithoutAmount` when ANY product line with a quantity has **no price source at all**, instead of
+creating and confirming a rectificativa of 0 because nothing priced it. It judges per line (one unpriced product among
+priced ones still refunds the wrong amount), the same stance as `InvoiceCompletionLineGuard` (ETP-5710), and it runs
+BEFORE the first `save`: it probes each line with the very sources `buildAndSaveInvoiceLine` uses, on a transient
+line, so a refusal persists nothing. Probe and line build share ONE resolver (`resolveLinePricing`), so they cannot
+drift. Resolution order: the handler's line (`createShipmentInvoiceLine`: order line, else a linked invoice line),
+then the price of the **completed invoice line being rectified**, then the price list `standardPrice`.
+
+A line counts as priced (`PricedLine.priceFound`) when it ends at a non-zero price, **or at the price of the source
+invoice line even if that price is 0**: a deliberately free product was invoiced at 0 and is refunded at 0 (the core
+`InvoiceFromShipmentActionHandler` does the same). A 0 that only the order line or the price list yields is NOT a
+price: with no invoice line behind it the line is still refused, so a missing price is never mistaken for a free one
+(ETP-5712 point 7; before it, a free product could not be refunded by any path, the SPA included). When `originInvoices`
+(or the auto-detected invoice) is known, the source-line lookup is restricted to THOSE invoices, so what is credited is
+literally what was invoiced; without them it takes the latest completed invoice line of the shipment line. A non-zero
+price from the order line still wins over the invoice line, so every amount that was already working is unchanged.
+Shape:
 `{error:{status:422, code:"returnInvoiceWithoutAmount", message:"The corrective invoice (factura rectificativa) cannot
-be created: no price could be found for Agua, Sal, so it would be confirmed with a zero amount. Set a price for those
-products (on the invoice being rectified or in its price list) and try again.", products:["Agua","Sal"]}}`. The SPA
-maps the sentence in `backendErrors.js` (`backendError.returnInvoiceWithoutAmount`).
+be created: no price source was found for Agua, Sal (not on the invoice being rectified, nor on its order line, nor in
+the price list), so it would be confirmed with a zero amount. Give those products a price in the price list, or
+rectify an invoice that has them.", products:["Agua","Sal"]}}`. The SPA maps the sentence in `backendErrors.js`
+(`backendError.returnInvoiceWithoutAmount`). The code and the `products` list are the contract; the sentence is only
+matched by the SPA translator, so change it there too.
 
 **The other refusals** (unchanged status codes): not completed 400, no product lines 400, no origin invoice
 **400** with `ERR_RECTIFIED_INVOICE_REQUIRED`, whose text now says what happened and what to do: `This return has no
@@ -10212,9 +10239,9 @@ to. Invoice the original document first, or pass originInvoices with the id of a
 headers (`MCP_CONFIG.actions.redirect` + a per-button `reasons` entry, next to the ETP-5711 Pick/Edit redirect in the
 same JSON); see the redirect table of §4.12.1.3 (rows for both return entities).
 
-**Channels.** REST, `etendo_batch` and MCP reach the same handlers through `NeoExtensionDispatcher`: no new
-divergence to declare in §4.12.9. The contracts and the redirects only affect what the MCP publishes; REST and the SPA
-still call the handlers as before.
+**Channels.** REST, `etendo_batch` and MCP reach the same handlers through `NeoExtensionDispatcher`, so the 409 applies to
+all of them. The contracts and the redirects only affect what the MCP publishes; REST and the SPA still call the
+handlers as before. The one capability the screen does not offer, `allowDuplicate:true`, is declared in §4.12.9.
 
 **Deployment.** `MCP_CONFIG` and `AGENT_PROMPT` are data rows (`ETGO_SF_ENTITY`, `ETGO_SF_SPEC`), shipped by the module's
 sourcedata XML; a database that already holds the ETP-5711 values gets the new ones through that sourcedata
@@ -10413,7 +10440,8 @@ that matters (the lines CRUD is uncapped, the actions are) is declared in the §
 **The defect.** `etendo_schema(view:"actions")` published the catalogue with no sense of time. An agent could not tell
 that completing is for drafts only, that a completed goods document can be neither reactivated nor voided through MCP
 and is corrected with a return, which `documentAction` value applies to the document in front of it, or that creating the
-factura rectificativa a second time is not refused and duplicates it; it learned each rule from a refusal (or did the
+factura rectificativa a second time is not refused and duplicates it (since ETP-5712 it is refused with a 409 unless
+`allowDuplicate:true`, see §4.12.33); it learned each rule from a refusal (or did the
 wrong thing). Other gaps found alongside: the full view called `documentAction` of a goods receipt `invokable:false` while
 the actions view listed its contract as invokable; the response keys the headers inject (`invoiceStatus`, `linkedReturns`,
 `hasLinkedDocuments`...) were reported in `unknownFields`; a post right after completing a goods document failed with a
@@ -10473,7 +10501,7 @@ verdict. Shared code names no entity; the handlers' customizations declare their
 | Document | Declared (static `availableWhen` unless noted) |
 |---|---|
 | goods receipt, goods shipment, return to vendor, customer return | `documentAction` (contract): `DR` only, `valuesByStatus` `DR` → CO, `CO` → none, with the "corrected with a return" note; a `docAction` outside `CO` answers 422 with that sentence as `hint`. `importOrderLines` / `importReceiptLines` / `importShipmentLines` and their `available*` lists: `DR` (the `id` is the draft target; ETP-5713). `createPurchaseInvoice`, `createDraftInvoice`, `createPurchaseReturn`, `createReturn`, `rectifiableInvoices`, `createReturnInvoice`: `CO`. `cloneRecord`: any state |
-| return documents | `createReturnInvoice` is also **derived**: a completed return with a non-voided factura rectificativa is `availableNow:false` ("calling it again would NOT be refused and would create a second one"), from `ReturnShipmentUtils.fetchPreviousReturnInvoices`, the query behind `hasReturnInvoice` |
+| return documents | `createReturnInvoice` is also **derived**: a completed return with a non-voided factura rectificativa is `availableNow:false` ("calling it again is refused with 409 `returnInvoiceAlreadyExists` and creates nothing, unless `allowDuplicate:true` is passed"), from `ReturnShipmentUtils.fetchPreviousReturnInvoices`, the query behind `hasReturnInvoice` |
 | purchase and sales invoice | `post`: `CO` and `posted` not `Y`; `unpost`: `CO` and `posted` = `Y`; import actions: `DR`. `documentAction` (AD button, `MCP_CONFIG.valuesByStatus`): `DR` → CO, `IP` → CO, VO, `CO` → RC, RE. Derived: RE is ruled out (`unavailableValues`) when `InvoiceReactivationGuard` would refuse it (fiscally accepted and already rectified). `RE` on a posted **invoice** un-posts it first, in `etendo_action` and in `etendo_action_batch` — invoice-only, by opt-in (`NeoHandler#unpostBeforeReactivate`, §4.12.36); when RE is ruled out nothing is un-posted |
 | purchase and sales order | `createGoodsReceipt` / `createShipment`, `createPurchaseInvoice` / `createDraftInvoice`: `CO`. `documentAction` (`MCP_CONFIG.valuesByStatus`): `DR` → CO, VO, PR; `IP` → CO, VO; `CO` → CL, RE. Derived: RE is ruled out while the order has linked shipments, receipts or invoices (`AbstractOrderHeaderHandler.hasLinkedDocuments`, the query behind the UI flag; enforced on the sales order by `OrderReactivationGuard`, only advised on the purchase order) |
 
