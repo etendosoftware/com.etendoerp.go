@@ -230,8 +230,9 @@ final class McpDefaultsView {
    * {@code DEFAULTS} hooks read through {@code NeoContext#getQueryParams()}, as the REST
    * {@code /defaults?key=value} form does. The tool's own arguments always win; nulls, objects and
    * arrays are ignored; at most {@link #MAX_RECORD_CONTEXT_ENTRIES} entries of at most
-   * {@link #MAX_RECORD_CONTEXT_VALUE_LENGTH} characters are taken. The generic defaults resolver
-   * does not read query params, so only a customization that asks for a key sees it.
+   * {@link #MAX_RECORD_CONTEXT_VALUE_LENGTH} characters are taken. The generic resolver applies
+   * every entry that names an included field before the callout cascade (ETP-5852), and a
+   * customization may read any key.
    */
   static void copyRecordContext(JSONObject recordContext, Map<String, String> queryParams) {
     if (recordContext == null) {

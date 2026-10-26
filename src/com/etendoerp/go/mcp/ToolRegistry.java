@@ -268,7 +268,8 @@ public class ToolRegistry {
           McpNamedFilterCatalog.summary(accessibleWindowSpecs)));
       tools.add(buildGetTool(accessibleWindowSpecs));
       tools.add(buildSelectorsTool(accessibleWindowSpecs));
-      tools.add(buildDefaultsTool(accessibleWindowSpecs));
+      tools.add(buildDefaultsTool(accessibleWindowSpecs,
+          McpDefaultsContextCatalog.summary(accessibleWindowSpecs)));
       tools.add(buildSchemaTool(ToolRegistryActionSpecs.withActionSpecs(accessibleWindowSpecs, actionReportSpecs)));
     }
     if (permissions.canWrite) {
@@ -703,7 +704,7 @@ public class ToolRegistry {
       case McpConstants.TOOL_NEO_UPDATE: definition = registry.buildUpdateTool(List.of()); break;
       case McpConstants.TOOL_NEO_DELETE: definition = registry.buildDeleteTool(List.of()); break;
       case McpConstants.TOOL_NEO_SELECTORS: definition = registry.buildSelectorsTool(List.of()); break;
-      case McpConstants.TOOL_NEO_DEFAULTS: definition = registry.buildDefaultsTool(List.of()); break;
+      case McpConstants.TOOL_NEO_DEFAULTS: definition = registry.buildDefaultsTool(List.of(), null); break;
       case McpConstants.TOOL_NEO_SCHEMA: definition = registry.buildSchemaTool(List.of()); break;
       case McpConstants.TOOL_NEO_DISCOVER: definition = registry.buildDiscoverTool(); break;
       // ETP-5669: a top-level docAction was silently ignored and the call fell through to the
@@ -943,7 +944,7 @@ public class ToolRegistry {
           List.of("spec", McpConstants.PARAM_ENTITY, McpConstants.PARAM_COLUMN)));
   }
 
-  private McpToolDefinition buildDefaultsTool(List<String> specNames) {
+  private McpToolDefinition buildDefaultsTool(List<String> specNames, String requiredContextSummary) {
     Map<String, Object> props = new LinkedHashMap<>();
     props.put("spec", enumProp(McpConstants.LABEL_SPEC_NAME, specNames));
     props.put(McpConstants.PARAM_ENTITY, stringProp(McpConstants.LABEL_ENTITY_NAME_WITH_EXAMPLE));
@@ -960,12 +961,17 @@ public class ToolRegistry {
             + "(e.g. the amortization header name derived from the asset name and start date)"));
     props.put(McpConstants.PARAM_RECORD_CONTEXT, objectProp(
         "Optional current field values of the record you are drafting, for defaults that depend "
-            + "on them. For example {\"productType\": \"S\"} on product/product returns the "
-            + "defaults of a Service (type and tax category consistent with it). Each scalar entry "
-            + "(string, number, boolean; at most 32 entries of 256 characters) is passed to the "
-            + "entity's defaults customization as a query parameter, exactly like ?key=value on "
-            + "REST /defaults, so send only current field values of the record. parentId, "
-            + "assetId, view, spec and entity cannot be overridden by it."));
+            + "on them: {\"<field>\": <value>}, ids for reference fields. Each one is applied to "
+            + "the record before the dependent defaults are derived, as when the field is set in "
+            + "the UI — e.g. {\"businessPartner\": \"<id>\"} on a document header returns that "
+            + "partner's payment terms, payment method and price list; "
+            + "{\"productType\": \"S\"} on product/product returns the defaults of a Service. "
+            + "Scalar entries only (string, number, boolean; at most 32 entries of 256 "
+            + "characters); a name that is not a field of the entity is ignored. parentId, "
+            + "assetId, view, spec and entity cannot be overridden by it."
+            + (requiredContextSummary == null ? ""
+                : " REQUIRED context per entity — send these or the defaults that depend on them "
+                    + "come back generic (spec/entity: fields — why):\n" + requiredContextSummary)));
     props.put(McpDefaultsView.PARAM_VIEW, enumProp(
         "Optional response shape. Omit (or \"full\") for the historical flat map of every default. "
             + "\"grouped\" splits the result into `confirm` (writable fields you should review or "
@@ -991,13 +997,14 @@ public class ToolRegistry {
             + "terms, a financial account, ...) is NOT copied into the record unless you send it "
             + "explicitly in fields, even though it showed a value here. Copy across the fields "
             + "from this result you want on the record; do not assume omitting one lets etendo_create "
-            + "fill it in the same way. BUT these values are resolved with no business partner and "
-            + "no record context, so a value here can be superseded the moment you choose one: on "
-            + "sales-order/header this call answers paymentTerms \"30 Días\" and the partner you "
-            + "pick may imply \"Inmediato\". A value you send is treated as deliberate and is "
-            + "protected from the callout that would have corrected it, so re-send a value from "
-            + "here only when the user actually chose it — not as a blanket echo. etendo_create "
-            + "reports anything your value displaced in \"supersededDefaults\"; read it. "
+            + "fill it in the same way. Defaults that depend on another field of the record (the "
+            + "payment terms of a document follow its business partner) are only right when that "
+            + "field is sent in recordContext — the entities that need it are listed under "
+            + "recordContext. Without it they are generic. A value you send to etendo_create is "
+            + "treated as deliberate and is protected from the callout that would have corrected "
+            + "it, so re-send a value from here only when it came from the right context or the "
+            + "user chose it — not as a blanket echo. etendo_create reports anything your value "
+            + "displaced in \"supersededDefaults\"; read it. "
             + "When entity is a child/line tab (not the spec's top-level "
             + "entity), pass parentId with the parent record's id — omitting it does not resolve "
             + "parent-dependent fields (a storage bin scoped to the parent's warehouse, a "
