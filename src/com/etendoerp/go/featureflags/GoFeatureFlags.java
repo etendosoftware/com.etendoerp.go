@@ -220,6 +220,24 @@ public final class GoFeatureFlags {
   public static final String FLAG_BATCH_CALLOUT_SKIP_DISABLED = "batch-callout-skip-disabled";
 
   /**
+   * ETP-5048 — whether the billing reconciliation is scheduled. Strictly off by default (and off
+   * on every failure of this class): while it is off {@code BillingReconciliationScheduleStartup}
+   * plants no process request, so turning it on takes effect at the next restart. The process also
+   * checks it on every scheduled run (a process request with timing {@code S}), whoever created
+   * the request, so turning it off stops all scheduled work without a restart: a scheduled run
+   * with the flag off does nothing, ends as ERROR in Process Monitor and raises one internal alert
+   * per UTC day. A run an operator starts from the Classic menu, and a run fired as part of a
+   * Process Group (it has no process-request id of its own), is not gated. Environment level,
+   * evaluated with an empty context;
+   * locally {@code etendo.go.flags.billing-reconciliation-schedule} /
+   * {@code ETGO_FLAG_BILLING_RECONCILIATION_SCHEDULE}. Backend-only. Its callers are
+   * {@code BillingReconciliationScheduleStartup} and
+   * {@code BillingReconciliationProcess}.
+   */
+  public static final String FLAG_BILLING_RECONCILIATION_SCHEDULE =
+      "billing-reconciliation-schedule";
+
+  /**
    * ConfigCat SDK key. Set ⇒ flags come from ConfigCat and can be flipped without a restart; unset
    * ⇒ {@link PropertiesFeatureProvider} resolves them from local configuration.
    */

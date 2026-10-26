@@ -420,7 +420,8 @@ A blocked environment's data is fully inaccessible. It is not deleted (TL, 2026-
   `environment-access-enforcement-off` is the same on every surface, and so is the structured
   body (`error.code` / `error.decision`) — with one exception: the OAuth2 API-key endpoints
   (`NEO_DATA`, through `OAuth2Servlet`) refuse in the OAuth2 servlet's own error envelope, not in
-  the guard's body (`open-and-notable-topics.md` §3.8).
+  the guard's body (`feature-flags-and-tenant-upgrade.md` §1, *Operating environment-access
+  enforcement*).
 
 ### Guards — `AuthenticationEntryPointGuardTest`
 

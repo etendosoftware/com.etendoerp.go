@@ -42,8 +42,11 @@ import org.openbravo.model.common.businesspartner.Location;
  * create; the target key is absent, null, blank, {@code "null"} or {@code "0"}; the partner is a
  * usable id (not blank, not a batch {@code $ref:}); and exactly one active location of the partner
  * carries the flag. With several the choice is the caller's: a plausible wrong address is worse
- * than a precise 422. Reads in the caller's own DAL scope, never admin mode: a location this role
- * cannot read never becomes an address of a document it writes.
+ * than a precise 422. The MCP call runs under {@code OBContext.setAdminMode()}, which skips only
+ * the entity access check; the {@code OBCriteria} here keep the readable-client and
+ * readable-organization filters on, so a location this role cannot read (another tenant's, when a
+ * foreign partner id is sent) is never found and never becomes an address of a document it writes.
+ * Never disable those filters in these lookups.
  *
  * <p>Total: never throws.
  */

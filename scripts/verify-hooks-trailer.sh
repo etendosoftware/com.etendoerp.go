@@ -66,10 +66,11 @@ done
 if [ "$FAILED" -gt 0 ]; then
   cat <<EOF
 
-$FAILED of $CHECKED commit(s) were created without active git hooks.
+$FAILED of $CHECKED commit(s) were created without active git hooks, or changed after
+them (an amend with --no-verify, a rebase that resolved a conflict).
 
 How to fix:
-  1. Enable the hooks:   npm install        # sets core.hooksPath=.githooks
+  1. Enable the hooks:   git config core.hooksPath .githooks
   2. Re-create the commits so they get stamped:
        git rebase --exec 'git commit --amend --no-edit' $BASE
   3. Push again (force-with-lease on your own branch).

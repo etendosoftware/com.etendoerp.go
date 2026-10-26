@@ -51,8 +51,11 @@ import org.openbravo.dal.service.OBDal;
  * at 0.862, so clients do not need to register both directions.
  *
  * <p>This endpoint allows the frontend to validate the existence of an exchange rate when the
- * user changes the document currency. Since ETP-4027 the backend no longer blocks completion on
- * a missing rate — the validation lives entirely in the frontend at currency-change time.
+ * user changes the document currency. It is not the only guard: since ETP-5840 the backend refuses
+ * to save or to complete a foreign-currency quotation, order or invoice that has no rate, on every
+ * channel (see {@link DocumentCurrencyRate}), and recalculates the document rate from this same
+ * lookup ({@link #rateAsDecimal(String, String, java.time.LocalDate, String, String)}) whenever the
+ * document's reference date or currency changes.
  */
 class NeoExchangeRateService {
 
@@ -129,10 +132,22 @@ class NeoExchangeRateService {
    */
   static Double rate(String fromCurrencyId, String toCurrencyId, java.time.LocalDate date,
       String orgId) throws java.sql.SQLException {
+    return rate(fromCurrencyId, toCurrencyId, date, orgId,
+        OBContext.getOBContext().getCurrentClient().getId());
+  }
+
+  /**
+   * {@link #rate(String, String, java.time.LocalDate, String)} for a given client as well (ETP-5840):
+   * a document's rate is looked up with the DOCUMENT's organization and client, never the session's,
+   * which may differ from the record's (a user working in another organization of the tenant).
+   *
+   * @param clientId the client whose rates are admitted next to the system client {@code 0}
+   */
+  static Double rate(String fromCurrencyId, String toCurrencyId, java.time.LocalDate date,
+      String orgId, String clientId) throws java.sql.SQLException {
     if (fromCurrencyId.equals(toCurrencyId)) {
       return 1.0;
     }
-    String clientId = OBContext.getOBContext().getCurrentClient().getId();
     Connection conn = OBDal.getInstance().getConnection();
     Double directRate = queryRate(conn, fromCurrencyId, toCurrencyId, clientId, orgId, date);
     if (directRate != null) {
@@ -161,6 +176,19 @@ class NeoExchangeRateService {
   }
 
   /**
+   * {@link #rateAsDecimal(String, String, java.time.LocalDate, String)} scoped to the document's
+   * client as well (ETP-5840): the lookup every document exchange-rate recalculation goes through.
+   *
+   * @return the rate, or {@code null} when there is none
+   * @throws java.sql.SQLException if the lookup fails
+   */
+  static BigDecimal rateAsDecimal(String fromCurrencyId, String toCurrencyId,
+      java.time.LocalDate date, String orgId, String clientId) throws java.sql.SQLException {
+    Double rate = rate(fromCurrencyId, toCurrencyId, date, orgId, clientId);
+    return rate != null ? BigDecimal.valueOf(rate) : null;
+  }
+
+  /**
    * Returns whether an exchange rate is usable for {@code from → to} on {@code dateStr},
    * applying exactly the same lookup as {@link #handleValidateExchangeRate} — client-or-system
    * scoped, with the inverse-direction fallback.
@@ -170,8 +198,9 @@ class NeoExchangeRateService {
    * this instead of rolling their own query: ETP-4838 was caused by two private copies that
    * filtered {@code ad_client_id = ?} only, so they stopped seeing the shared system ('0') rates
    * once ETP-4474 centralised the currencyLayer sync there. The frontend then got a
-   * {@code hasRate: true} from this service while the callout warned "noExchangeRateAvailable"
-   * for the very same pair and date.
+   * {@code hasRate: true} from this service while the callout warned of a missing rate for the very
+   * same pair and date. (Since ETP-5840 the header callouts no longer warn: they return the
+   * recalculated rate itself, through {@link DocumentCurrencyRate}.)
    *
    * @param fromCurrencyId source currency record id ({@code C_Currency_ID})
    * @param toCurrencyId   target currency record id ({@code C_Currency_ID})

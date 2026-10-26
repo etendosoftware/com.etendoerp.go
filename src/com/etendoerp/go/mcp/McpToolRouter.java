@@ -852,6 +852,11 @@ public class McpToolRouter {
     // McpBillToInjector for why this compensation lives in the MCP layer.
     McpBillToInjector.injectIfMissing(filteredBody, adTab, dalEntity, log);
 
+    // ETP-5710: the entity's customization may derive create defaults from the body (e.g. the
+    // invoice partner address) — they must exist before the mandatory check below, which runs
+    // ahead of its pre-hook. A no-op for entities that do not override the hook.
+    McpHookExecutor.resolveServerCreateFields(specName, entityName, adTab, sfEntity, filteredBody);
+
     // Fix FK sentinel values: "0" is a UI-level sentinel (means "not yet set") that can't
     // go through the DAL as an entity reference. Replace with a real value from the body
     // when possible (e.g. documentType="0" -> copy from transactionDocument); keep it when "0" is
@@ -893,6 +898,11 @@ public class McpToolRouter {
     // short-circuits, null proceeds to generic persistence, and the handler may have mutated the
     // body in place. The other five MCP hook sites are deliberately left alone in this step.
     NeoContext hookCtx = McpHookExecutor.buildHookContext(specName, entityName, HTTP_METHOD_POST, null, filteredBody, adTab, sfEntity);
+    // ETP-5680: the mandatory-defaults pass above filled some keys with a fallback placeholder
+    // (the first combo option, ...). The hook context is a new one, so without this copy the
+    // customization could not tell a placeholder from a value the caller chose, and the REST path
+    // (where the pre-hook runs before any placeholder exists) and this one would disagree.
+    McpHookExecutor.forwardFallbackDefaults(ctx, hookCtx);
     NeoExtensionRequest customizationRequest = NeoExtensionRequest.builder()
         .qualifier(sfEntity.getJavaQualifier())
         .specName(specName)
@@ -1263,6 +1273,8 @@ public class McpToolRouter {
     if (assetId != null) {
       queryParams.put(McpConstants.PARAM_ASSET_ID, assetId);
     }
+    McpDefaultsView.copyRecordContext(args.optJSONObject(McpConstants.PARAM_RECORD_CONTEXT),
+        queryParams);
 
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
     SFEntity sfEntity = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, entityName);

@@ -9,6 +9,7 @@
 package com.etendoerp.go.payment;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -22,7 +23,9 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Supplier;
 
 import org.junit.Test;
 import org.mockito.MockedStatic;
@@ -35,6 +38,13 @@ import com.etendoerp.go.payment.EnvironmentAccessPolicy.Decision;
 import com.etendoerp.go.payment.EnvironmentAccessPolicy.Environment;
 import com.etendoerp.go.payment.EnvironmentAccessPolicy.SubscriptionStatus;
 
+/**
+ * Unit tests for {@link EnvironmentAccessPolicy}: the trial, grace and membership rules, and the
+ * single grace-window definition ({@link EnvironmentAccessPolicy#graceEndsAt}) every response that
+ * reports the grace end reads.
+ *
+ * @covers com.etendoerp.go.payment.EnvironmentAccessPolicy
+ */
 public class EnvironmentAccessPolicyTest {
 
   private static final Instant START = Instant.parse("2026-01-01T00:00:00Z");
@@ -228,6 +238,70 @@ public class EnvironmentAccessPolicyTest {
       assertEquals(Decision.DEMO_TRIAL_EXPIRED,
           lifecycle.evaluateAccess("demo-client", true, now));
     }
+  }
+
+  // ===================== graceEndsAt =====================
+
+  @Test
+  public void graceEndsAtIsTheDueDatePlusTheConfiguredGraceDaysForAPastDueSubscription() {
+    Instant dueAt = Instant.parse("2026-03-10T08:30:00Z");
+
+    assertEquals(Instant.parse("2026-03-17T08:30:00Z"),
+        EnvironmentAccessPolicy.graceEndsAt(SubscriptionStatus.PAST_DUE, dueAt,
+            () -> new Configuration(15, 7)));
+    assertEquals(Instant.parse("2026-03-25T08:30:00Z"),
+        EnvironmentAccessPolicy.graceEndsAt(SubscriptionStatus.PAST_DUE, dueAt, () -> DEFAULTS));
+  }
+
+  /** Only a past-due subscription has a grace window; the configuration is never read otherwise. */
+  @Test
+  public void graceEndsAtIsNullAndReadsNoConfigurationUnlessPastDue() {
+    Instant dueAt = Instant.parse("2026-03-10T08:30:00Z");
+    AtomicInteger reads = new AtomicInteger();
+    Supplier<Configuration> unreadable = () -> {
+      reads.incrementAndGet();
+      throw new IllegalStateException("Grace configuration is not readable");
+    };
+
+    for (SubscriptionStatus status : SubscriptionStatus.values()) {
+      if (status != SubscriptionStatus.PAST_DUE) {
+        assertNull(status.name(), EnvironmentAccessPolicy.graceEndsAt(status, dueAt, unreadable));
+      }
+    }
+    assertNull(EnvironmentAccessPolicy.graceEndsAt(null, dueAt, unreadable));
+    assertEquals(0, reads.get());
+  }
+
+  @Test
+  public void graceEndsAtIsNullAndReadsNoConfigurationForAPastDueSubscriptionWithoutDueDate() {
+    AtomicInteger reads = new AtomicInteger();
+
+    assertNull(EnvironmentAccessPolicy.graceEndsAt(SubscriptionStatus.PAST_DUE, null, () -> {
+      reads.incrementAndGet();
+      return DEFAULTS;
+    }));
+    assertEquals(0, reads.get());
+  }
+
+  /** The instant graceEndsAt reports is exactly the instant evaluate() cuts access. */
+  @Test
+  public void evaluateCutsAccessExactlyAtTheReportedGraceEnd() {
+    Instant dueAt = START.plus(Duration.ofDays(40));
+    Configuration sevenDaysOfGrace = new Configuration(15, 7);
+    Instant graceEndsAt = EnvironmentAccessPolicy.graceEndsAt(SubscriptionStatus.PAST_DUE, dueAt,
+        () -> sevenDaysOfGrace);
+    // A demo whose trial ended long ago, kept open only by the grace of a past-due subscription.
+    Environment demo = Environment.demo(START, dueAt);
+    Environment productive = Environment.productive(dueAt);
+
+    assertEquals(Decision.ALLOWED, policy.evaluate(productive, true,
+        SubscriptionStatus.PAST_DUE, graceEndsAt.minusNanos(1), sevenDaysOfGrace));
+    assertEquals(Decision.SUBSCRIPTION_REQUIRED, policy.evaluate(productive, true,
+        SubscriptionStatus.PAST_DUE, graceEndsAt, sevenDaysOfGrace));
+    assertEquals(Decision.ALLOWED, policy.evaluate(demo, true,
+        SubscriptionStatus.PAST_DUE, graceEndsAt.minusNanos(1), sevenDaysOfGrace));
+    assertEquals(Decision.DEMO_TRIAL_EXPIRED, policy.evaluate(demo, true,
+        SubscriptionStatus.PAST_DUE, graceEndsAt, sevenDaysOfGrace));
   }
 
   @Test(expected = IllegalArgumentException.class)

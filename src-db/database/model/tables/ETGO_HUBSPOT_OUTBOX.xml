@@ -73,6 +73,14 @@
         <default><![CDATA[PENDING]]></default>
         <onCreateDefault/>
       </column>
+      <column name="EVENT_KEY" primaryKey="false" required="true" type="VARCHAR" size="255" autoIncrement="false">
+        <default><![CDATA[-]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="OCCURRED_AT" primaryKey="false" required="false" type="TIMESTAMP" size="7" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
       <foreign-key foreignTable="ETGO_ACCOUNT" name="ETGO_HSOUTBOX_ACCOUNT_FK">
         <reference local="ETGO_ACCOUNT_ID" foreign="ETGO_ACCOUNT_ID"/>
       </foreign-key>
@@ -85,6 +93,7 @@
       <index name="ETGO_HSOUTBOX_EVENT_UN" unique="true">
         <index-column name="ETGO_ACCOUNT_ID"/>
         <index-column name="EVENT_TYPE"/>
+        <index-column name="EVENT_KEY"/>
       </index>
       <index name="ETGO_HSOUTBOX_PENDING_IDX" unique="false">
         <index-column name="STATUS"/>
