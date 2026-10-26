@@ -75,7 +75,7 @@ class HubSpotSyncProcessTest {
     HubSpotOutboxStore store = mock(HubSpotOutboxStore.class);
     HubSpotEventSender sender = mock(HubSpotEventSender.class);
     PendingEvent event = new PendingEvent("1", "A", HubSpotOutboxStore.ACCOUNT_CREATED, null,
-        null, 0, null, "a@b.es", "A");
+        null, 0, null, "a@b.es", "A", null);
     when(store.findPending(HubSpotSyncService.BATCH_SIZE)).thenReturn(List.of(event));
     when(sender.send(any(), any())).thenReturn(Outcome.failed("HTTP 400"));
 

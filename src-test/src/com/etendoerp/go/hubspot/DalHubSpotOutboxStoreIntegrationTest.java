@@ -34,9 +34,11 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.test.base.OBBaseTest;
 
+import com.etendoerp.go.hubspot.HubSpotOutboxStore.EnvironmentDeal;
 import com.etendoerp.go.hubspot.HubSpotOutboxStore.OpenDemo;
 import com.etendoerp.go.hubspot.HubSpotOutboxStore.PaidCheckout;
 import com.etendoerp.go.hubspot.HubSpotOutboxStore.PendingEvent;
+import com.etendoerp.go.hubspot.HubSpotOutboxStore.SubscriptionEnvironment;
 
 /**
  * The HubSpot outbox against a real database: the SQL itself is what is under test.
@@ -47,6 +49,8 @@ import com.etendoerp.go.hubspot.HubSpotOutboxStore.PendingEvent;
  *   <li>The reads the sync detects events with: open demos, a first entry, a paid checkout.</li>
  *   <li>The status transitions a send leaves behind.</li>
  *   <li>The business-side writes of {@link HubSpotOutbox}, in plain JDBC inside a savepoint.</li>
+ *   <li>The billing events from the Stripe webhook: found by their purchase, keyed so a
+ *       redelivery adds nothing, and the deal each productive environment's events land on.</li>
  * </ul>
  *
  * <p>The store's writes join the caller's transaction, so each test commits what it needs to read
@@ -275,6 +279,128 @@ public class DalHubSpotOutboxStoreIntegrationTest extends OBBaseTest {
 
     assertEquals("the caller's own write still commits", "Juan Changed",
         scalar("select name from etgo_account where etgo_account_id = '" + account + "'"));
+  }
+
+  @Test
+  public void aStripePaymentIsRecordedOnceForThePurchasesAccount() throws Exception {
+    String account = createAccount("Kira", null);
+    String requestId = createPurchase(account);
+    String subscription = "sub_" + UUID.randomUUID().toString().replace("-", "");
+    OBContext.setOBContext(ZERO, ZERO, ZERO, ZERO);
+
+    HubSpotOutbox.stripeEvent("invoice.paid", paidInvoice("in_1", requestId, subscription));
+    HubSpotOutbox.stripeEvent("invoice.paid", paidInvoice("in_1", requestId, subscription));
+    HubSpotOutbox.stripeEvent("invoice.paid", paidInvoice("in_2", requestId, subscription));
+    OBDal.getInstance().commitAndClose();
+
+    List<PendingEvent> pending = pendingOf(account);
+    assertEquals("one row per invoice, however often Stripe delivers it", 2, pending.size());
+    PendingEvent first = pending.get(0);
+    assertEquals(HubSpotOutboxStore.PAYMENT, first.eventType());
+    assertEquals(Instant.ofEpochSecond(1_792_000_000L), first.occurredAt());
+    assertNull("the environment is decided when it is sent", first.environmentId());
+    assertEquals(subscription, new JSONObject(first.payload()).getString("subscriptionId"));
+  }
+
+  @Test
+  public void aStripeEventOfNoEtendoPurchaseIsNotRecorded() throws Exception {
+    String subscription = "sub_" + UUID.randomUUID().toString().replace("-", "");
+    OBContext.setOBContext(ZERO, ZERO, ZERO, ZERO);
+
+    HubSpotOutbox.stripeEvent("invoice.paid", paidInvoice("in_9", "unknown-request",
+        subscription));
+    OBDal.getInstance().commitAndClose();
+
+    assertEquals("0", scalar("select count(*) from etgo_hubspot_outbox where payload like '%"
+        + subscription + "%'"));
+  }
+
+  @Test
+  public void aSubscriptionPaysForTheEnvironmentItsPurchaseCreated() {
+    String account = createAccount("Lola", null);
+    String requestId = createPurchase(account);
+    String subscription = "sub_" + UUID.randomUUID().toString().replace("-", "");
+    assertFalse("not provisioned yet",
+        store.findSubscriptionEnvironment(subscription).isPresent());
+
+    execute("update etgo_checkout_request set stripe_subscription_id = '" + subscription
+        + "', created_client_id = '" + TEST_CLIENT_ID + "', client_name = 'Lola SL'"
+        + " where request_id = '" + requestId + "'");
+    store.commit();
+
+    SubscriptionEnvironment environment = store.findSubscriptionEnvironment(subscription)
+        .orElseThrow();
+    assertEquals(TEST_CLIENT_ID, environment.environmentId());
+    assertEquals("Lola SL", environment.name());
+    assertNull(environment.planKey());
+  }
+
+  @Test
+  public void anEnvironmentsDealIsRecordedOnceAndNeverSent() {
+    String account = createAccount("Mia", null);
+    assertEquals(0, store.countEnvironmentDeals(account));
+    assertFalse(store.findEnvironmentDeal(account, "P1").isPresent());
+
+    store.recordEnvironmentDeal(account, "P1", new EnvironmentDeal("deal-1", false));
+    store.recordEnvironmentDeal(account, "P1", new EnvironmentDeal("deal-other", true));
+    store.recordEnvironmentDeal(account, "P2", new EnvironmentDeal("deal-2", true));
+    store.commit();
+
+    assertEquals(new EnvironmentDeal("deal-1", false),
+        store.findEnvironmentDeal(account, "P1").orElseThrow());
+    assertEquals(new EnvironmentDeal("deal-2", true),
+        store.findEnvironmentDeal(account, "P2").orElseThrow());
+    assertEquals(2, store.countEnvironmentDeals(account));
+    assertTrue("a recorded deal is not work to send", pendingOf(account).isEmpty());
+  }
+
+  @Test
+  public void aLaterBillingEventAlreadySentMakesAnOlderOneStale() {
+    String account = createAccount("Nora", null);
+    Instant paidAt = Instant.parse("2026-10-20T10:00:00Z");
+    OBContext.setOBContext(ZERO, ZERO, ZERO, ZERO);
+    HubSpotOutbox.write("a payment", connection -> HubSpotOutbox.enqueue(connection, account,
+        HubSpotOutboxStore.PAYMENT, "in_1", null, null, paidAt));
+    OBDal.getInstance().commitAndClose();
+    PendingEvent payment = pendingOf(account).get(0);
+    store.assignEnvironment(payment.id(), "P1");
+    store.commit();
+    assertFalse("pending is not sent yet",
+        store.hasNewerBillingEvent(account, "P1", paidAt.minusSeconds(60)));
+
+    store.markSent(payment.id(), "deal-1");
+    store.commit();
+
+    assertTrue(store.hasNewerBillingEvent(account, "P1", paidAt.minusSeconds(60)));
+    assertFalse(store.hasNewerBillingEvent(account, "P1", paidAt.plusSeconds(60)));
+    assertFalse("another environment's events are its own",
+        store.hasNewerBillingEvent(account, "P2", paidAt.minusSeconds(60)));
+  }
+
+  private String createPurchase(String account) {
+    String requestId = MARKER + UUID.randomUUID();
+    execute("insert into etgo_checkout_request (etgo_checkout_request_id, ad_client_id, ad_org_id,"
+        + " created, createdby, updated, updatedby, request_id, etgo_account_id, account_email,"
+        + " client_name, checkout_status, provisioning_attempts, creating_at,"
+        + " demo_selection_recorded, transfer_products, transfer_contacts)"
+        + " select get_uuid(), '0', '0', now(), '0', now(), '0', '" + requestId + "', '"
+        + account + "', email, 'X', 'PAID', 0, now(), 'N', 'N', 'N'"
+        + " from etgo_account where etgo_account_id = '" + account + "'");
+    store.commit();
+    return requestId;
+  }
+
+  private static JSONObject paidInvoice(String invoiceId, String requestId, String subscription)
+      throws Exception {
+    JSONObject invoice = new JSONObject()
+        .put("id", invoiceId)
+        .put("amount_paid", 2200)
+        .put("currency", "eur")
+        .put("parent", new JSONObject().put("subscription_details", new JSONObject()
+            .put("subscription", subscription)
+            .put("metadata", new JSONObject().put("request_id", requestId))));
+    return new JSONObject().put("id", "evt_" + invoiceId).put("created", 1_792_000_000L)
+        .put("data", new JSONObject().put("object", invoice));
   }
 
   private String createAccount(String name, String email) {

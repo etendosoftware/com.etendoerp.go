@@ -22,6 +22,9 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Savepoint;
+import java.sql.Timestamp;
+import java.time.Instant;
+import java.util.Optional;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -34,8 +37,9 @@ import org.openbravo.dal.service.OBDal;
 import com.etendoerp.go.schemaforge.data.Account;
 
 /**
- * Where business code reports the account events HubSpot learns about. The other events (first
- * entry into the demo, payment, expired trial) are detected by {@link HubSpotSyncService} itself.
+ * Where business code reports the account events HubSpot learns about: a new account, a demo
+ * ready, and the Stripe billing events. The other events (first entry into the demo, payment,
+ * expired trial) are detected by {@link HubSpotSyncService} itself.
  *
  * <p>Each call adds a row to the outbox in the caller's transaction and does not commit: the event
  * exists exactly when the change it reports does. Only accounts the app's own registration
@@ -58,16 +62,35 @@ public final class HubSpotOutbox {
   // sends an account's events in CREATED order.
   static final String ENQUEUE_SQL = "insert into etgo_hubspot_outbox"
       + " (etgo_hubspot_outbox_id, ad_client_id, ad_org_id, isactive, created, createdby, updated,"
-      + " updatedby, etgo_account_id, event_type, environment_id, payload, status, attempt_count)"
+      + " updatedby, etgo_account_id, event_type, event_key, environment_id, payload, occurred_at,"
+      + " status, attempt_count)"
       + " values (get_uuid(), '0', '0', 'Y', clock_timestamp(), '0', clock_timestamp(), '0',"
-      + " ?, ?, ?, ?, 'PENDING', 0)"
-      + " on conflict (etgo_account_id, event_type) do nothing";
+      + " ?, ?, ?, ?, ?, ?, 'PENDING', 0)"
+      + " on conflict (etgo_account_id, event_type, event_key) do nothing";
+
+  /** The payload of a {@code PRODUCTIVE_DEAL} row whose deal the sync created. */
+  static final String OWNED_DEAL_PAYLOAD = "{\"owned\":true}";
+
+  // Written already sent: the row is the record of a decision the sync made, not work to do.
+  private static final String ENVIRONMENT_DEAL_SQL = "insert into etgo_hubspot_outbox"
+      + " (etgo_hubspot_outbox_id, ad_client_id, ad_org_id, isactive, created, createdby, updated,"
+      + " updatedby, etgo_account_id, event_type, event_key, environment_id, payload,"
+      + " hubspot_object_id, status, attempt_count, processed_at)"
+      + " values (get_uuid(), '0', '0', 'Y', clock_timestamp(), '0', clock_timestamp(), '0',"
+      + " ?, ?, ?, ?, ?, ?, 'SENT', 0, clock_timestamp())"
+      + " on conflict (etgo_account_id, event_type, event_key) do nothing";
 
   private static final String SELF_SERVE_ACCOUNT_SQL = "select etgo_account_id from etgo_account"
       + " where lower(email) = lower(?) and isactive = 'Y' and signup_channel is null";
 
   private static final String COUNTRY_NAME_SQL = "select name from c_country"
       + " where countrycode = ?";
+
+  // The purchase names the account: by the request id Etendo put in the subscription's metadata,
+  // else by the subscription, which the purchase records once paid.
+  private static final String PURCHASE_ACCOUNT_SQL = "select etgo_account_id"
+      + " from etgo_checkout_request where request_id = ? or stripe_subscription_id = ?"
+      + " order by created desc";
 
   /** One write against the open connection. */
   @FunctionalInterface
@@ -123,14 +146,71 @@ public final class HubSpotOutbox {
     });
   }
 
+  /**
+   * Reports a Stripe billing event, from the payment webhook, in its transaction: when applying
+   * the event fails, the row is rolled back with it and Stripe's redelivery adds it again.
+   *
+   * <p>The event is recorded even when its environment is not provisioned yet, which is common
+   * for the first payment; the sync waits for the environment before sending it.
+   *
+   * @param type  the Stripe event type
+   * @param event the full event
+   */
+  public static void stripeEvent(String type, JSONObject event) {
+    Optional<StripeSubscriptionEvents.Translated> translated;
+    try {
+      translated = StripeSubscriptionEvents.translate(type, event);
+    } catch (RuntimeException e) { // NOSONAR - reporting to HubSpot must never fail the caller
+      logLost("Stripe event " + type, e);
+      return;
+    }
+    if (translated.isEmpty()) {
+      return;
+    }
+    StripeSubscriptionEvents.Translated row = translated.get();
+    write("Stripe event " + type + " of subscription " + row.subscriptionId(), connection -> {
+      String accountId = selectString(connection, PURCHASE_ACCOUNT_SQL,
+          StringUtils.defaultString(row.requestId()), row.subscriptionId());
+      if (accountId == null) {
+        log.debug("Stripe subscription {} belongs to no Etendo purchase; HubSpot is not told",
+            row.subscriptionId());
+        return;
+      }
+      enqueue(connection, accountId, row.eventType(), row.eventKey(), null, row.payload(),
+          row.occurredAt());
+    });
+  }
+
   static boolean enqueue(Connection connection, String accountId, String eventType,
       String environmentId, String payload) throws SQLException {
+    return enqueue(connection, accountId, eventType, HubSpotOutboxStore.ONCE, environmentId,
+        payload, null);
+  }
+
+  static boolean enqueue(Connection connection, String accountId, String eventType,
+      String eventKey, String environmentId, String payload, Instant occurredAt)
+      throws SQLException {
     try (PreparedStatement statement = connection.prepareStatement(ENQUEUE_SQL)) {
       statement.setString(1, accountId);
       statement.setString(2, eventType);
-      statement.setString(3, environmentId);
-      statement.setString(4, payload);
+      statement.setString(3, StringUtils.defaultIfBlank(eventKey, HubSpotOutboxStore.ONCE));
+      statement.setString(4, environmentId);
+      statement.setString(5, payload);
+      statement.setTimestamp(6, occurredAt == null ? null : Timestamp.from(occurredAt));
       return statement.executeUpdate() > 0;
+    }
+  }
+
+  static void recordEnvironmentDeal(Connection connection, String accountId,
+      String environmentId, HubSpotOutboxStore.EnvironmentDeal deal) throws SQLException {
+    try (PreparedStatement statement = connection.prepareStatement(ENVIRONMENT_DEAL_SQL)) {
+      statement.setString(1, accountId);
+      statement.setString(2, HubSpotOutboxStore.PRODUCTIVE_DEAL);
+      statement.setString(3, environmentId);
+      statement.setString(4, environmentId);
+      statement.setString(5, deal.owned() ? OWNED_DEAL_PAYLOAD : null);
+      statement.setString(6, deal.dealId());
+      statement.executeUpdate();
     }
   }
 
@@ -155,10 +235,12 @@ public final class HubSpotOutbox {
     return StringUtils.defaultString(selectString(connection, COUNTRY_NAME_SQL, code), code);
   }
 
-  private static String selectString(Connection connection, String sql, String parameter)
+  private static String selectString(Connection connection, String sql, String... parameters)
       throws SQLException {
     try (PreparedStatement statement = connection.prepareStatement(sql)) {
-      statement.setString(1, parameter);
+      for (int i = 0; i < parameters.length; i++) {
+        statement.setString(i + 1, parameters[i]);
+      }
       try (ResultSet result = statement.executeQuery()) {
         return result.next() ? result.getString(1) : null;
       }
