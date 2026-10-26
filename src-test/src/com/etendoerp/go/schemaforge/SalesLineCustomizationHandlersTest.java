@@ -28,6 +28,7 @@ import static org.mockito.ArgumentMatchers.same;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.when;
 
 import java.util.LinkedHashSet;
@@ -41,6 +42,7 @@ import javax.inject.Named;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -64,6 +66,8 @@ import com.etendoerp.go.schemaforge.util.NeoExtensionIndex;
  * <p>Not covered: "a response from the parent's {@code handle} short-circuits". Neither
  * {@link OrderLineHandler#handle} nor {@link InvoiceLineHandler#handle} ever returns a non-null
  * response, so that branch cannot be reached through real input.
+ *
+ * @covers com.etendoerp.go.schemaforge.PurchaseOrderLineHandler
  */
 class SalesLineCustomizationHandlersTest {
 
@@ -230,5 +234,36 @@ class SalesLineCustomizationHandlersTest {
   static Stream<Arguments> invoiceCustomizations() {
     return Stream.of(Arguments.of(SalesInvoiceLineHandler.class, "sales-invoice"),
         Arguments.of(PurchaseInvoiceLineHandler.class, "purchase-invoice"));
+  }
+
+  /**
+   * {@link PurchaseOrderLineHandler} (ETP-5881) runs the parent's pre-hook and then prices the
+   * created line from the price list; it lets default CRUD continue. The parent's own response
+   * cannot be non-null (see the class note), so only the pricing leg is observable.
+   */
+  @Test
+  void purchaseOrderLineHandlerPricesACreatedLineAndContinuesCrud() throws Exception {
+    NeoContext ctx = createContext("purchase-order", "lines", new JSONObject("{\"product\":\"P1\"}"));
+
+    NeoResponse response;
+    try (MockedStatic<OrderLineDiscountSupport> pricing = mockStatic(
+        OrderLineDiscountSupport.class)) {
+      response = new PurchaseOrderLineHandler().handle(ctx);
+
+      pricing.verify(() -> OrderLineDiscountSupport.setStandardPriceOnCreate(same(ctx)), times(1));
+    }
+
+    assertNull(response, "the pre-hook must let default CRUD continue");
+  }
+
+  @Test
+  void purchaseOrderLineHandlerIsBoundByAnnotationOnly() {
+    NeoExtension binding = PurchaseOrderLineHandler.class.getAnnotation(NeoExtension.class);
+
+    assertNotNull(binding);
+    assertEquals("purchase-order", binding.spec());
+    assertEquals("lines", binding.entity());
+    assertNull(PurchaseOrderLineHandler.class.getAnnotation(Named.class));
+    assertTrue(OrderLineHandler.class.isAssignableFrom(PurchaseOrderLineHandler.class));
   }
 }
