@@ -41,12 +41,12 @@ import org.openbravo.base.model.Property;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.ad.domain.Reference;
 import org.openbravo.model.ad.ui.Tab;
 
-import com.etendoerp.go.schemaforge.util.NeoMessages;
 
 /**
  * ETP-5783 — a document action to a status the document is already in is answered
@@ -66,7 +66,7 @@ class DocActionIdempotencyTest {
 
   private MockedStatic<OBDal> obDalStatic;
   private MockedStatic<DocActionResolution> resolutionStatic;
-  private MockedStatic<NeoMessages> messagesStatic;
+  private MockedStatic<OBMessageUtils> messagesStatic;
   private OBDal dal;
   private BaseOBObject document;
   private Table table;
@@ -80,8 +80,8 @@ class DocActionIdempotencyTest {
     obDalStatic = mockStatic(OBDal.class);
     obDalStatic.when(OBDal::getInstance).thenReturn(dal);
     resolutionStatic = mockStatic(DocActionResolution.class);
-    messagesStatic = mockStatic(NeoMessages.class);
-    messagesStatic.when(() -> NeoMessages.tr("ETGO_DocActionAlreadyApplied"))
+    messagesStatic = mockStatic(OBMessageUtils.class);
+    messagesStatic.when(() -> OBMessageUtils.messageBD("ETGO_DocActionAlreadyApplied"))
         .thenReturn("El documento ya está en ese estado.");
 
     document = mock(BaseOBObject.class);
@@ -249,7 +249,7 @@ class DocActionIdempotencyTest {
   @Test
   void theMessageFallsBackWhenTheAdMessageIsMissing() throws Exception {
     tableWithStatusColumn("CO");
-    messagesStatic.when(() -> NeoMessages.tr("ETGO_DocActionAlreadyApplied"))
+    messagesStatic.when(() -> OBMessageUtils.messageBD("ETGO_DocActionAlreadyApplied"))
         .thenReturn("ETGO_DocActionAlreadyApplied");
 
     NeoResponse response = DocActionIdempotency.alreadyApplied(TAB_ID, RECORD_ID, "CO");

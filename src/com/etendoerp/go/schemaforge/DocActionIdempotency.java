@@ -34,10 +34,10 @@ import org.openbravo.base.model.Property;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Tab;
 
-import com.etendoerp.go.schemaforge.util.NeoMessages;
 
 /**
  * Idempotency of a document action (ETP-5783): asking a document to reach the status it is
@@ -218,7 +218,14 @@ final class DocActionIdempotency {
   }
 
   private static String message() {
-    String text = NeoMessages.tr(MSG_ALREADY_APPLIED);
-    return StringUtils.equals(text, MSG_ALREADY_APPLIED) ? DEFAULT_MESSAGE : text;
+    String text;
+    try {
+      text = OBMessageUtils.messageBD(MSG_ALREADY_APPLIED);
+    } catch (RuntimeException e) {
+      // A translation failure must never hide the answer itself.
+      text = null;
+    }
+    return StringUtils.isBlank(text) || StringUtils.equals(text, MSG_ALREADY_APPLIED)
+        ? DEFAULT_MESSAGE : text;
   }
 }
