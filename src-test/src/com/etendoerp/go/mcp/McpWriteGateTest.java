@@ -1183,7 +1183,8 @@ class McpWriteGateTest {
       String reason = note.getString("reason");
       assertFalse(reason.contains("eTGODeliveryStatus"), reason);
       assertEquals("The filter on deliveryStatus was evaluated on the stored value this list shows"
-          + " for deliveryStatus; that field is not exposed by this spec.", reason);
+          + " for deliveryStatus; the field holding that value is not exposed by this spec.",
+          reason);
     }
 
     /**

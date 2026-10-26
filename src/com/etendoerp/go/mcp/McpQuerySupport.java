@@ -461,11 +461,12 @@ final class McpQuerySupport {
    * {@code applied}.
    *
    * <p>Matched on the resolved property name, so a caller that spells the key as its DB column
-   * name is redirected too. The target is not checked against the spec's excluded fields: it is
-   * declared by the server, and the condition only compares the value the caller is already
-   * shown. A target that is not a property of the entity, or whose type differs from the
-   * filtered property's (the value is formatted for the latter), is a customization bug, not a
-   * caller mistake, so it fails the read instead of silently filtering on the raw value.</p>
+   * name is redirected too. The target is not checked against the spec's excluded fields for the
+   * evaluation: it is declared by the server, and the condition only compares the value the
+   * caller is already shown. A target that is not a property of the entity, or whose type
+   * differs from the filtered property's (the value is formatted for the latter), is a
+   * customization bug, not a caller mistake, so it fails the read instead of silently filtering
+   * on the raw value.</p>
    *
    * <p>The exclusion does decide what the note may name, though. A target the spec excludes is
    * recorded with a {@code null} value: the evaluation is the same, but naming it would invite a
@@ -551,7 +552,8 @@ final class McpQuerySupport {
     note.put("filter", filter);
     if (target == null) {
       note.put("reason", "The filter on " + filter + " was evaluated on the stored value this list"
-          + " shows for " + filter + "; that field is not exposed by this spec.");
+          + " shows for " + filter
+          + "; the field holding that value is not exposed by this spec.");
     } else {
       note.put("evaluatedOn", target);
       note.put("reason", "The filter on " + filter + " was evaluated on " + target

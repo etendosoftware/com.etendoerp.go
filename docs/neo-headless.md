@@ -9049,7 +9049,8 @@ against `coalesce(<target>, <virtual>)`:
 
 **The note names only a field the caller can filter on.** `evaluatedOn` is emitted only when the
 target is filterable in the spec being read — the same rule that answers a filter key with 422
-`unknown_filter_field`: a target whose `ETGO_SF_FIELD` row is excluded (`McpQuerySupport.excludedPropertyNames`)
+`unknown_filter_field`: a target whose `ETGO_SF_FIELD` row is excluded (after any MCP_CONFIG override;
+`McpQuerySupport.excludedPropertyNames`)
 is not named. The entry is still emitted, because the caller must know the filter was redirected,
 but without `evaluatedOn` and with a reason that does not name the target. Canonical case: the
 purchase order excludes `eTGODeliveryStatus`, so `{"deliveryStatus":{"lt":100}}` there answers
@@ -9057,7 +9058,7 @@ purchase order excludes `eTGODeliveryStatus`, so `{"deliveryStatus":{"lt":100}}`
 ```json
 "filterAliases": [{
   "filter": "deliveryStatus",
-  "reason": "The filter on deliveryStatus was evaluated on the stored value this list shows for deliveryStatus; that field is not exposed by this spec."
+  "reason": "The filter on deliveryStatus was evaluated on the stored value this list shows for deliveryStatus; the field holding that value is not exposed by this spec."
 }]
 ```
 
