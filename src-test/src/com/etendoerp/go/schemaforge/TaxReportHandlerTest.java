@@ -74,6 +74,11 @@ import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
  * otherwise each one would assert its own subject against a 403. The refusal itself is asserted
  * here ({@link #testPostWithoutTheProcessGrantIsRefused()}) and in
  * {@code ReportHandlerAccessGateTest}.</p>
+ *
+ * <p>A request {@code orgId} must belong to the caller's client and be readable by the role,
+ * else 400 {@code organization_not_resolved} (ETP-5794).</p>
+ *
+ * @covers com.etendoerp.go.schemaforge.TaxReportHandler
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -742,6 +747,146 @@ class TaxReportHandlerTest {
     NeoResponse response = handler.handle(buildPostContext(body));
 
     assertEquals(200, response.getHttpStatus());
+  }
+
+  // ---- Request orgId scoped to the tenant and the role ----------------------
+
+  /**
+   * A request {@code orgId} of another client, an unknown one, and one of the caller's own client
+   * that the role cannot read all answer the same 400 {@code organization_not_resolved} — the
+   * envelopes differ only by the echoed id, so the caller cannot tell which case it hit — and the
+   * report query never runs.
+   */
+  @Test
+  void testForeignUnknownAndUnreadableOrgIdsAnswerTheSameRefusal() throws Exception {
+    Client foreignClient = mock(Client.class);
+    when(foreignClient.getId()).thenReturn("foreign-client-id");
+    Organization foreignOrg = mock(Organization.class);
+    when(foreignOrg.getClient()).thenReturn(foreignClient);
+    when(obDal.get(Organization.class, "foreign-org-id")).thenReturn(foreignOrg);
+    Organization hiddenOrg = mock(Organization.class);
+    when(hiddenOrg.getClient()).thenReturn(client);
+    when(obDal.get(Organization.class, "hidden-org-id")).thenReturn(hiddenOrg);
+
+    String foreign = refusalWithoutId("foreign-org-id");
+    String unknown = refusalWithoutId("unknown-org-id");
+    String unreadable = refusalWithoutId("hidden-org-id");
+
+    assertEquals(foreign, unknown, "an unknown org must be indistinguishable from a foreign one");
+    assertEquals(foreign, unreadable,
+        "an own-client org the role cannot read must be indistinguishable from a foreign one");
+    verify(connection, org.mockito.Mockito.never()).prepareStatement(anyString());
+  }
+
+  /**
+   * Posts {@code orgId}, asserts the 400 {@code organization_not_resolved} envelope, and returns
+   * the body with the echoed id masked so the three refusals can be compared.
+   */
+  private String refusalWithoutId(String orgId) throws Exception {
+    JSONObject body = buildValidBody("P", false, false);
+    body.put("orgId", orgId);
+
+    NeoResponse response = handler.handle(buildPostContext(body));
+
+    assertEquals(400, response.getHttpStatus(), orgId);
+    assertEquals("organization_not_resolved", response.getBody().getString("error"), orgId);
+    return response.getBody().toString().replace(orgId, "<org>");
+  }
+
+  /** An own-client org that the role can read is accepted and reaches the query. */
+  @Test
+  void testOwnReadableOrgIdIsAccepted() throws Exception {
+    mockResultSetRows(0);
+    Organization customOrg = mock(Organization.class);
+    when(customOrg.getClient()).thenReturn(client);
+    when(obDal.get(Organization.class, "custom-org-id")).thenReturn(customOrg);
+    JSONObject body = buildValidBody("P", false, false);
+    body.put("orgId", "custom-org-id");
+
+    NeoResponse response = handler.handle(buildPostContext(body));
+
+    assertEquals(200, response.getHttpStatus());
+    assertTrue(captureBinds().contains("custom-org-id"), "the requested org must be bound");
+  }
+
+  /** An explicit {@code orgId: "0"} (system client, readable) is accepted. */
+  @Test
+  void testExplicitOrgZeroIsAccepted() throws Exception {
+    mockResultSetRows(0);
+    Client systemClient = mock(Client.class);
+    when(systemClient.getId()).thenReturn("0");
+    Organization orgZero = mock(Organization.class);
+    when(orgZero.getClient()).thenReturn(systemClient);
+    when(obDal.get(Organization.class, "0")).thenReturn(orgZero);
+    JSONObject body = buildValidBody("P", false, false);
+    body.put("orgId", "0");
+
+    NeoResponse response = handler.handle(buildPostContext(body));
+
+    assertEquals(200, response.getHttpStatus());
+  }
+
+  /**
+   * An omitted {@code orgId} defaults to the session organization, which is not validated: with
+   * session org {@code 0}, no Organization row resolvable and {@code 0} absent from the readable
+   * set, the report still answers 200 — the request-orgId check would have refused it.
+   */
+  @Test
+  void testOmittedOrgIdWithSessionOrgZeroIsNotValidated() throws Exception {
+    mockResultSetRows(0);
+    when(organization.getId()).thenReturn("0");
+    when(obContext.getReadableOrganizations()).thenReturn(new String[] { "test-org-id" });
+    JSONObject body = buildValidBody("P", false, false);
+
+    NeoResponse response = handler.handle(buildPostContext(body));
+
+    assertEquals(200, response.getHttpStatus());
+    assertTrue(captureBinds().contains("0"), "the session org must be bound");
+  }
+
+  /**
+   * With {@code currencyId} omitted and a foreign {@code orgId}, the default-currency lookup is
+   * never reached: neither the org's general ledger nor the {@code OrganizationAcctSchema} query
+   * is touched, so no foreign ledger currency can surface.
+   */
+  @Test
+  void testForeignOrgIdNeverReachesTheLedgerCurrencyLookup() throws Exception {
+    Client foreignClient = mock(Client.class);
+    when(foreignClient.getId()).thenReturn("foreign-client-id");
+    Organization foreignOrg = mock(Organization.class);
+    when(foreignOrg.getClient()).thenReturn(foreignClient);
+    AcctSchema foreignLedger = mock(AcctSchema.class);
+    Currency foreignCurrency = mock(Currency.class);
+    when(foreignCurrency.getId()).thenReturn("foreign-curr");
+    when(foreignLedger.getCurrency()).thenReturn(foreignCurrency);
+    when(foreignOrg.getGeneralLedger()).thenReturn(foreignLedger);
+    when(obDal.get(Organization.class, "foreign-org-id")).thenReturn(foreignOrg);
+    JSONObject body = buildValidBody("P", false, false);
+    body.put("orgId", "foreign-org-id");
+
+    NeoResponse response = handler.handle(buildPostContext(body));
+
+    assertEquals(400, response.getHttpStatus());
+    assertFalse(response.getBody().toString().contains("foreign-curr"));
+    verify(foreignOrg, org.mockito.Mockito.never()).getGeneralLedger();
+    verify(obDal, org.mockito.Mockito.never()).createQuery(eq(AcctSchema.class), anyString());
+  }
+
+  /** A context without a readable-organization set fails closed for a request {@code orgId}. */
+  @Test
+  void testMissingReadableOrgSetFailsClosed() throws Exception {
+    when(obContext.getReadableOrganizations()).thenReturn(null);
+    Organization customOrg = mock(Organization.class);
+    when(customOrg.getClient()).thenReturn(client);
+    when(obDal.get(Organization.class, "custom-org-id")).thenReturn(customOrg);
+    JSONObject body = buildValidBody("P", false, false);
+    body.put("orgId", "custom-org-id");
+
+    NeoResponse response = handler.handle(buildPostContext(body));
+
+    assertEquals(400, response.getHttpStatus());
+    assertEquals("organization_not_resolved", response.getBody().getString("error"));
+    verify(connection, org.mockito.Mockito.never()).prepareStatement(anyString());
   }
 
   // ---- dateType=invoice uses dateinvoiced -----------------------------------
