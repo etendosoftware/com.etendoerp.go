@@ -21,8 +21,11 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
@@ -57,6 +60,7 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.openbravo.model.ad.system.Client;
 
+import com.etendoerp.go.featureflags.GoFeatureFlags;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoHandler;
@@ -99,6 +103,8 @@ class ContactTypeRulesTest {
 
   private MockedStatic<OBDal> obDalStatic;
   private MockedStatic<OBMessageUtils> messagesStatic;
+  /** The {@code contact-category-type} flag: on by default here, the rules under test. */
+  private MockedStatic<GoFeatureFlags> flagsStatic;
   private Connection conn;
 
   @BeforeEach
@@ -111,10 +117,13 @@ class ContactTypeRulesTest {
     messagesStatic = mockStatic(OBMessageUtils.class);
     messagesStatic.when(() -> OBMessageUtils.messageBD(anyString()))
         .thenAnswer(inv -> inv.getArgument(0));
+    flagsStatic = mockStatic(GoFeatureFlags.class);
+    givenContactTypeFlag(true);
   }
 
   @AfterEach
   void tearDown() {
+    flagsStatic.close();
     messagesStatic.close();
     obDalStatic.close();
   }
@@ -385,6 +394,46 @@ class ContactTypeRulesTest {
   }
 
   // ── Helpers ────────────────────────────────────────────────────────────────────────────────
+
+  // ── contact-category-type flag off: the customizations return to the default CRUD ─────────
+
+  @Test
+  void isEnabledReadsTheContactCategoryTypeFlag() {
+    assertTrue(ContactTypeRules.isEnabled());
+    givenContactTypeFlag(false);
+    assertFalse(ContactTypeRules.isEnabled());
+  }
+
+  /** Flag off, a tab write that clears the only type is not judged (no stored-types lookup). */
+  @ParameterizedTest(name = "{1} tab")
+  @MethodSource("tabsClearingTheOnlyType")
+  void tabWriteIsNotJudgedWithTheFlagOff(NeoHandler tab, String flag, String storedCustomer,
+      String storedVendor) throws Exception {
+    givenContactTypeFlag(false);
+    JSONObject body = new JSONObject().put(flag, false);
+    givenRow(CONTACT_TYPES_SQL, storedCustomer, storedVendor);
+
+    assertNull(tab.handle(crudContext("PATCH", body, null)));
+    verify(conn, never()).prepareStatement(
+        argThat(sql -> sql != null && sql.contains(CONTACT_TYPES_SQL)));
+  }
+
+  /** Flag off, a category with neither type is saved by the default CRUD, create or update. */
+  @ParameterizedTest
+  @CsvSource({"POST", "PATCH"})
+  void categoryWriteIsNotJudgedWithTheFlagOff(String method) throws Exception {
+    givenContactTypeFlag(false);
+    JSONObject body = new JSONObject().put("name", "Clientes")
+        .put("etgoIscustomer", false).put("etgoIsvendor", false);
+
+    assertNull(new BusinessPartnerCategoryHandler().handle(crudContext(method, body, null)));
+    verify(conn, never()).prepareStatement(anyString());
+  }
+
+  private void givenContactTypeFlag(boolean enabled) {
+    flagsStatic.when(() -> GoFeatureFlags.isEnabled(
+        eq(GoFeatureFlags.FLAG_CONTACT_CATEGORY_TYPE), any())).thenReturn(enabled);
+  }
 
   private static NeoContext crudContext(String method, JSONObject body, OBContext obContext) {
     return NeoContext.builder()
