@@ -34,8 +34,11 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.util.Arrays;
 import java.util.Date;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
@@ -152,6 +155,138 @@ public class RectificationTotalGuardTest {
       }
       return RectificationTotalGuard.checkCompletion(context);
     }
+  }
+
+  /**
+   * Wires a {@link Connection} mock answering the guard's origins query with MULTIPLE origin
+   * ids, plus one completed-rectification-ids query PER origin, returned (via
+   * {@code conn.prepareStatement}) in the same order {@code originInvoiceIds} yields the origins
+   * — mirroring the production loop in {@code checkCompletion}, which calls
+   * {@code sumCompletedRectifications} once per origin, in order.
+   */
+  private static Connection connectionAnsweringMultiOrigin(List<String> originIds,
+      Map<String, List<String>> rectificationIdsByOrigin) throws SQLException {
+    Connection conn = mock(Connection.class);
+
+    // originInvoiceIds: SELECT DISTINCT reversed_c_invoice_id FROM c_invoice_reverse WHERE c_invoice_id = ?
+    PreparedStatement originsPs = mock(PreparedStatement.class);
+    ResultSet originsRs = mock(ResultSet.class);
+    when(originsPs.executeQuery()).thenReturn(originsRs);
+    Boolean[] originNexts = new Boolean[originIds.size() + 1];
+    for (int i = 0; i < originIds.size(); i++) {
+      originNexts[i] = true;
+    }
+    originNexts[originIds.size()] = false;
+    when(originsRs.next()).thenReturn(originNexts[0], Arrays.copyOfRange(originNexts, 1, originNexts.length));
+    when(originsRs.getString(1)).thenReturn(originIds.get(0),
+        originIds.subList(1, originIds.size()).toArray(new String[0]));
+    when(conn.prepareStatement(argThat(sql -> sql != null && sql.contains("reversed_c_invoice_id FROM c_invoice_reverse"))))
+        .thenReturn(originsPs);
+
+    // completedRectificationIds: one PreparedStatement per origin, in origin order.
+    PreparedStatement[] idsStatements = new PreparedStatement[originIds.size()];
+    for (int i = 0; i < originIds.size(); i++) {
+      List<String> ids = rectificationIdsByOrigin.getOrDefault(originIds.get(i), List.of());
+      PreparedStatement idsPs = mock(PreparedStatement.class);
+      ResultSet idsRs = mock(ResultSet.class);
+      when(idsPs.executeQuery()).thenReturn(idsRs);
+      if (ids.isEmpty()) {
+        when(idsRs.next()).thenReturn(false);
+      } else {
+        Boolean[] nexts = new Boolean[ids.size() + 1];
+        for (int j = 0; j < ids.size(); j++) {
+          nexts[j] = true;
+        }
+        nexts[ids.size()] = false;
+        when(idsRs.next()).thenReturn(nexts[0], Arrays.copyOfRange(nexts, 1, nexts.length));
+        when(idsRs.getString(1)).thenReturn(ids.get(0), ids.subList(1, ids.size()).toArray(new String[0]));
+      }
+      idsStatements[i] = idsPs;
+    }
+    when(conn.prepareStatement(argThat(sql -> sql != null && sql.contains("SELECT inv.c_invoice_id"))))
+        .thenReturn(idsStatements[0], Arrays.copyOfRange(idsStatements, 1, idsStatements.length));
+
+    return conn;
+  }
+
+  private static NeoResponse checkWithMultiOrigin(NeoContext context, Connection conn,
+      Map<String, Invoice> originsById, Map<String, Invoice> rectificationsById) throws Exception {
+    try (MockedStatic<OBDal> dal = Mockito.mockStatic(OBDal.class)) {
+      OBDal obDal = mock(OBDal.class);
+      dal.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.getConnection()).thenReturn(conn);
+      for (Map.Entry<String, Invoice> e : originsById.entrySet()) {
+        when(obDal.get(Invoice.class, e.getKey())).thenReturn(e.getValue());
+      }
+      for (Map.Entry<String, Invoice> e : rectificationsById.entrySet()) {
+        when(obDal.get(Invoice.class, e.getKey())).thenReturn(e.getValue());
+      }
+      return RectificationTotalGuard.checkCompletion(context);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // multi-origin — a single rectificativa can rectify MORE THAN ONE origin invoice at once
+  // (e.g. importing lines from two different source invoices into one rectificativa)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * One rectificativa (INVOICE_ID, grand total 300) rectifies two distinct origins with
+   * different totals; its own total stays within BOTH origins' limits, so completion is allowed.
+   */
+  @Test
+  public void multipleOriginsEachWithinTheirOwnTotalAreNotBlocked() throws Exception {
+    String originA = "ORIG-A-5745";
+    String originB = "ORIG-B-5745";
+    Currency eur = currency(EUR);
+    Invoice originAInvoice = invoice(new BigDecimal("363.00"), eur);
+    Invoice originBInvoice = invoice(new BigDecimal("400.00"), eur);
+    Invoice rectification = invoice(new BigDecimal("300.00"), eur);
+
+    Connection conn = connectionAnsweringMultiOrigin(List.of(originA, originB),
+        Map.of(originA, List.of(INVOICE_ID), originB, List.of(INVOICE_ID)));
+
+    Map<String, Invoice> origins = new LinkedHashMap<>();
+    origins.put(originA, originAInvoice);
+    origins.put(originB, originBInvoice);
+
+    assertNull(checkWithMultiOrigin(completeAction(INVOICE_ID), conn, origins,
+        Map.of(INVOICE_ID, rectification)));
+  }
+
+  /**
+   * Same rectificativa (total 300) against two origins, but the SECOND origin's own total (250)
+   * is lower than 300: the loop must still evaluate origin B after origin A passed, and refuse
+   * naming origin B specifically — proving every origin in the plural loop is actually checked,
+   * not just the first.
+   */
+  @Test
+  public void multipleOriginsOneExceededIsBlockedNamingThatOrigin() throws Exception {
+    String originA = "ORIG-A-5745";
+    String originB = "ORIG-B-5745";
+    Currency eur = currency(EUR);
+    Invoice originAInvoice = invoice(new BigDecimal("363.00"), eur); // 300 <= 363: passes
+    Invoice originBInvoice = invoice(new BigDecimal("250.00"), eur); // 300 > 250: exceeded
+    Invoice rectification = invoice(new BigDecimal("300.00"), eur);
+
+    Connection conn = connectionAnsweringMultiOrigin(List.of(originA, originB),
+        Map.of(originA, List.of(INVOICE_ID), originB, List.of(INVOICE_ID)));
+
+    Map<String, Invoice> origins = new LinkedHashMap<>();
+    origins.put(originA, originAInvoice);
+    origins.put(originB, originBInvoice);
+
+    NeoResponse response = checkWithMultiOrigin(completeAction(INVOICE_ID), conn, origins,
+        Map.of(INVOICE_ID, rectification));
+
+    assertNotNull("origin B's own total (250) is exceeded by the 300 rectified — expected a refusal",
+        response);
+    assertEquals(422, response.getHttpStatus());
+    JSONObject body = response.getBody();
+    JSONObject messageParams = body.getJSONObject("messageParams");
+    assertEquals(originB, messageParams.getString("originInvoiceId"));
+    assertEquals(0, new BigDecimal(messageParams.getString("originTotal")).compareTo(new BigDecimal("250.00")));
+    assertEquals(0, new BigDecimal(messageParams.getString("rectifiedTotal")).compareTo(new BigDecimal("300.00")));
   }
 
   // ---------------------------------------------------------------------------

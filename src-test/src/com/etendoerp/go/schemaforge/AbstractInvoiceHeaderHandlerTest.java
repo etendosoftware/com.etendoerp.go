@@ -1020,6 +1020,63 @@ public class AbstractInvoiceHeaderHandlerTest {
     }
   }
 
+  /**
+   * QA finding (ETP-5745): {@code enrichOriginInvoice} and {@code enrichRectifyingInvoices} are
+   * each tested in isolation only elsewhere in this file. The two queries read
+   * {@code C_Invoice_Reverse} in opposite directions with no shared state, so this is very likely
+   * a non-issue — but it had zero direct coverage of the "chain" case: invoice A rectifies origin
+   * B ({@code originInvoices} non-empty) AND is itself rectified by invoice C
+   * ({@code rectifyingInvoices} non-empty) at the same time. Asserted explicitly rather than
+   * assumed safe.
+   */
+  @Test
+  public void enrichOriginInvoiceAndEnrichRectifyingInvoices_bothNonEmpty_areIndependentlyPopulated()
+      throws Exception {
+    JSONObject rec = new JSONObject();
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+
+      // enrichOriginInvoice: invoice A (inv-a) rectifies origin B.
+      PreparedStatement originPs = mock(PreparedStatement.class);
+      ResultSet originRs = mock(ResultSet.class);
+      when(originPs.executeQuery()).thenReturn(originRs);
+      when(originRs.next()).thenReturn(true, false);
+      when(originRs.getString(1)).thenReturn("origin-b");
+      when(originRs.getString(2)).thenReturn("ORIG-B");
+
+      // enrichRectifyingInvoices: invoice A (inv-a) is itself rectified by invoice C.
+      PreparedStatement rectifyingPs = mock(PreparedStatement.class);
+      ResultSet rectifyingRs = mock(ResultSet.class);
+      when(rectifyingPs.executeQuery()).thenReturn(rectifyingRs);
+      when(rectifyingRs.next()).thenReturn(true, false);
+      when(rectifyingRs.getString(1)).thenReturn("rect-c");
+      when(rectifyingRs.getString(2)).thenReturn("FVR-C");
+
+      // Each call opens its own PreparedStatement via conn.prepareStatement(sql); returned in
+      // the same order the two enrichments are invoked below.
+      when(conn.prepareStatement(any())).thenReturn(originPs, rectifyingPs);
+
+      handler.callEnrichOriginInvoice(rec, "inv-a");
+      handler.callEnrichRectifyingInvoices(rec, "inv-a");
+
+      assertEquals("origin-b", rec.getString("originInvoice"));
+      assertEquals("ORIG-B", rec.getString("originInvoice$_identifier"));
+      JSONArray origins = rec.getJSONArray("originInvoices");
+      assertEquals(1, origins.length());
+      assertEquals("origin-b", origins.getJSONObject(0).getString("id"));
+
+      JSONArray rectifying = rec.getJSONArray("rectifyingInvoices");
+      assertEquals(1, rectifying.length());
+      assertEquals("rect-c", rectifying.getJSONObject(0).getString("id"));
+      assertEquals("FVR-C", rectifying.getJSONObject(0).getString("documentNo"));
+    }
+  }
+
   // ── enrichInvoiceSubtype ─────────────────────────────────────────────────────
 
   @Test
