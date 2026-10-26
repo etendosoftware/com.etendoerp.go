@@ -78,7 +78,8 @@ are saved and **before** anything irreversible (a completion that commits, the r
 | return invoice (return material receipt, return to vendor) | rectificative invoice | checked before completion |
 | follow-up documents (invoice → shipment / receipt, `FollowUpActionHandler`) | goods movement | |
 | clone (`neoCloneRecordHandler`, any window) | a copy of the record, with the children a hook copies | |
-| line imports (`Import*Lines*Handler`) | lines added to an existing document | only the added lines are checked |
+| line imports (`Import*Lines*Handler`: `importOrderLines`, `importShipmentLines` / `importReceiptLines` on invoices) | lines added to an existing document | only the added lines are checked |
+| return line imports (`importShipmentLines` on a return material receipt, `importReceiptLines` on a return to vendor; `ReturnShipmentUtils.importReturnLines`) | return lines added to an existing return | only the added lines are checked |
 
 A refusal rolls the whole action back (the generated invoice is never completed, the converted order
 never kept) and answers the CRUD gate's envelope: 403 `QUOTA_EXCEEDED` with the `quota` body, or 500

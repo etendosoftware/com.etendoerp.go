@@ -281,6 +281,8 @@ public class ReturnMaterialReceiptHeaderHandler extends AbstractReturnDocumentHe
       } finally {
         OBContext.restorePreviousMode();
       }
+    } catch (NeoQuotaCreateCheck.Refused e) {
+      return e.toResponse();
     } catch (Exception e) {
       log.error("Error importing shipment lines into return receipt {}: {}", receiptId, e.getMessage(), e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
