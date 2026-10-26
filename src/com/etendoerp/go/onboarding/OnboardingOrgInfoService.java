@@ -167,14 +167,21 @@ public class OnboardingOrgInfoService extends OnboardingContextSupport {
     location.setOrganization(org);
     location.setActive(true);
     location.setCountry(country);
-    // ETP-5806 — the structured fields take priority over the legacy free-text `address`: the
-    // servlet already guarantees streetName+buildingNumber are both present whenever the
-    // structured block was used at all (buildingName alone can never reach here).
-    if (StringUtils.isNotBlank(streetName)) {
-      location.setOBSEPAStreetName(streetName.trim());
+    // ETP-5806 — `structured-address-for-sepa` off: the 3 structured fields are ignored entirely
+    // (not read, not persisted), matching every sibling handler gated in c8c014007
+    // (ContactsLocationAddressHandler#applyGeoLocFields, WarehouseLocationHandler#applyGeoLocFields,
+    // BpLocationHandler). Falls back to the pre-ETP-5806 behaviour: only the legacy free-text
+    // `address` populates Address1.
+    boolean structuredAddressEnabled = StructuredAddressComposer.isEnabled();
+    String effectiveStreetName = structuredAddressEnabled ? streetName : null;
+    // The structured fields take priority over the legacy free-text `address`: the servlet already
+    // guarantees streetName+buildingNumber are both present whenever the structured block was used
+    // at all (buildingName alone can never reach here).
+    if (StringUtils.isNotBlank(effectiveStreetName)) {
+      location.setOBSEPAStreetName(effectiveStreetName.trim());
       location.setOBSEPABuildingNumber(StringUtils.trimToNull(buildingNumber));
       location.setOBSEPABuildingName(StringUtils.trimToNull(buildingName));
-      ComposedAddress composed = StructuredAddressComposer.composeAddressLines(streetName,
+      ComposedAddress composed = StructuredAddressComposer.composeAddressLines(effectiveStreetName,
           buildingNumber, buildingName);
       location.setAddressLine1(composed.getAddress1());
       location.setAddressLine2(composed.getAddress2());
