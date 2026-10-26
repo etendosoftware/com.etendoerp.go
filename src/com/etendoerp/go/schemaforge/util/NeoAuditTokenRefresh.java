@@ -76,8 +76,8 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  *
  * <p>The cost is one {@code OBDal.get} per write response, which is a Hibernate session-cache hit
  * for the record the request just wrote — the same read {@link NeoRecordVersion} already performs
- * on every update — and a no-op {@code put} when nothing changed. It runs only for CRUD writes
- * (POST/PUT/PATCH), never for a GET or a list.
+ * on every update. It runs for CRUD writes (POST/PUT/PATCH) and for the GET of one record, whose
+ * token it re-stamps with milliseconds (core serialises it to the second); never for a list.
  *
  * <h2>What it deliberately does not do</h2>
  *
@@ -154,7 +154,7 @@ public final class NeoAuditTokenRefresh {
   public static void refreshInBody(NeoContext context, JSONObject body) {
     if (context == null || body == null
         || !NeoEndpointType.CRUD.equals(context.getEndpointType())
-        || !isWriteMethod(context.getHttpMethod())) {
+        || !(isWriteMethod(context.getHttpMethod()) || isSingleRead(context))) {
       return;
     }
     String dalEntityName = dalEntityName(context);
@@ -182,6 +182,16 @@ public final class NeoAuditTokenRefresh {
    */
   private static boolean isWriteMethod(String method) {
     return "POST".equals(method) || "PUT".equals(method) || "PATCH".equals(method);
+  }
+
+  /**
+   * A GET of one record: its token is re-stamped too, because core serialises {@code updated} to
+   * the second and only {@link NeoDateFormat#toAuditToken} carries the milliseconds that let two
+   * writes inside the same second conflict. A list is left alone: one read per row is too much,
+   * and its token simply keeps the to-the-second comparison.
+   */
+  private static boolean isSingleRead(NeoContext context) {
+    return "GET".equals(context.getHttpMethod()) && StringUtils.isNotBlank(context.getRecordId());
   }
 
   /**

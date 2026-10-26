@@ -55,6 +55,8 @@ import org.openbravo.model.ad.ui.Process;
  * for {@link ProcessInstance} / {@link Process}. {@code OBMessageUtils.parseTranslation} is
  * mocked statically so the translated text is deterministic and clearly DIFFERENT from the raw
  * message — otherwise a test could not tell "translated" from "passed through unchanged".
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoProcessService
  */
 public class NeoProcessServiceMessageKeysTest {
 
@@ -118,8 +120,16 @@ public class NeoProcessServiceMessageKeysTest {
 
       NeoResponse response = invoke(pInstance(0L, RAW_DOC_ACTION_ERROR), process("Process Shipment"));
 
-      assertEquals(400, response.getHttpStatus());
+      assertEquals(422, response.getHttpStatus());
       assertEquals("error", response.getBody().getString("status"));
+      // ETP-5783: the same refusal, in the nested envelope every other NEO 4xx uses.
+      org.codehaus.jettison.json.JSONObject error = response.getBody().getJSONObject("error");
+      assertEquals(422, error.getInt("status"));
+      assertEquals("business_rule", error.getString("code"));
+      assertEquals(TRANSLATED_DOC_ACTION_ERROR, error.getString("message"));
+      assertEquals(
+          Arrays.asList("Inline", "ProductNotNullAndMovementQtyZero"),
+          keysOf(error.getJSONArray("messageKeys")));
       // `message` is untouched by ETP-5316 — a client that ignores messageKeys reads exactly
       // what it read before.
       assertEquals(TRANSLATED_DOC_ACTION_ERROR, response.getBody().getString("message"));
@@ -163,7 +173,7 @@ public class NeoProcessServiceMessageKeysTest {
       NeoResponse response = invoke(
           pInstance(0L, "@ERROR=Plain failure, no tokens"), process("P"));
 
-      assertEquals(400, response.getHttpStatus());
+      assertEquals(422, response.getHttpStatus());
       assertEquals("Plain failure, no tokens", response.getBody().getString("message"));
       assertFalse("messageKeys must be absent, not empty",
           response.getBody().has("messageKeys"));
@@ -179,7 +189,7 @@ public class NeoProcessServiceMessageKeysTest {
       throws Exception {
     NeoResponse response = invoke(pInstance(0L, null), process("P"));
 
-    assertEquals(400, response.getHttpStatus());
+    assertEquals(422, response.getHttpStatus());
     assertEquals("error", response.getBody().getString("status"));
     assertEquals("Process failed", response.getBody().getString("message"));
     assertFalse(response.getBody().has("messageKeys"));
@@ -193,7 +203,7 @@ public class NeoProcessServiceMessageKeysTest {
   public void testNullResultIsTreatedAsFailure() throws Exception {
     NeoResponse response = invoke(pInstance(null, null), process("P"));
 
-    assertEquals(400, response.getHttpStatus());
+    assertEquals(422, response.getHttpStatus());
     assertEquals("Process failed", response.getBody().getString("message"));
   }
 
@@ -267,7 +277,7 @@ public class NeoProcessServiceMessageKeysTest {
 
       NeoResponse response = invoke(pInstance(0L, RAW_DOC_ACTION_ERROR), process("P"));
 
-      assertEquals(400, response.getHttpStatus());
+      assertEquals(422, response.getHttpStatus());
       assertTrue(response.getBody().getString("message").contains("@Inline@"));
       assertEquals(
           Arrays.asList("Inline", "ProductNotNullAndMovementQtyZero"),

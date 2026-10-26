@@ -36,6 +36,9 @@ import com.etendoerp.go.oauth2.OAuth2Filter;
 import com.etendoerp.go.payment.EnvironmentAccessGuard;
 import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.schemaforge.util.NeoLanguage;
+// Known package cycle (auth <-> schemaforge, as with NeoLanguage below): the action-path rule must be
+// the very parser NeoServlet dispatches with, which lives in schemaforge.
+import com.etendoerp.go.schemaforge.NeoActionPath;
 import com.etendoerp.go.session.GoLegacyBearer;
 import com.etendoerp.go.session.GoSessionAuthResult;
 import com.etendoerp.go.session.GoSessionAuthenticator;
@@ -101,6 +104,8 @@ public class EnvironmentRequestAuthenticator {
   static final String MSG_MISSING_CLAIMS = "Invalid token: missing required claims";
   static final String MSG_INVALID_TOKEN = "Invalid or expired token";
   static final String MSG_INSUFFICIENT_SCOPE = "Insufficient scope or invalid token context";
+  /** Request attribute holding the OAuth2 token's scopes; absent for sessions and legacy JWTs. */
+  public static final String ATTR_GRANTED_SCOPES = "com.etendoerp.go.auth.grantedScopes";
   static final String MSG_CONTEXT_UNAVAILABLE = "Environment context could not be established";
   /** ETP-5047 — the role lookup that resolves a wildcard client failed; retry. */
   static final String MSG_TENANT_UNRESOLVED =
@@ -324,18 +329,51 @@ public class EnvironmentRequestAuthenticator {
     Identity identity = new Identity(AuthScheme.OAUTH2, validated.get(OAuth2Filter.ATTR_USER_ID),
         validated.get(OAuth2Filter.ATTR_ROLE_ID), validated.get(OAuth2Filter.ATTR_ORG_ID), null,
         validated.get(OAuth2Filter.ATTR_CLIENT_ID));
-    if (identity.isIncomplete()
-        || !hasRequiredScope(request.getMethod(), validated.get(OAuth2Filter.ATTR_SCOPES))) {
+    if (identity.isIncomplete()) {
       return Resolution.refused(Status.UNAUTHENTICATED, MSG_INSUFFICIENT_SCOPE, AuthScheme.OAUTH2);
     }
+    String scopes = validated.get(OAuth2Filter.ATTR_SCOPES);
+    String required = requiredScope(request.getMethod(), request.getPathInfo());
+    if (!ApiScopes.grants(scopes, required)) {
+      // ETP-5783 — 403, not 401: the token is valid, it just does not carry this scope.
+      return Resolution.refused(Status.INSUFFICIENT_SCOPE, ScopeRefusal.message(required),
+          AuthScheme.OAUTH2);
+    }
+    // Kept for the one decision the path cannot make (a process spec is told apart by its
+    // ETGO_SF_SPEC row, not by its path); see isScopeGranted.
+    request.setAttribute(ATTR_GRANTED_SCOPES, scopes == null ? "" : scopes);
     return Resolution.of(identity);
   }
 
-  private static boolean hasRequiredScope(String method, String scopes) {
+  /**
+   * The scope an OAuth2 request needs, decided by the request's structure alone: a read for
+   * {@code GET}/{@code HEAD}; for anything else {@code etendo:process} when the path is a NEO
+   * action route ({@code /{spec}/{entity}/{id}/action/{name}}, as {@code NeoServlet} parses it),
+   * {@code etendo:write} otherwise. No spec, entity or action name is consulted (ETP-5783).
+   *
+   * @param method   the HTTP method
+   * @param pathInfo the request's path info; may be {@code null}
+   * @return the scope to check with {@link ApiScopes#grants}
+   */
+  static String requiredScope(String method, String pathInfo) {
     if ("GET".equalsIgnoreCase(method) || "HEAD".equalsIgnoreCase(method)) {
-      return ApiScopes.grants(scopes, ApiScopes.READ);
+      return ApiScopes.READ;
     }
-    return ApiScopes.grants(scopes, ApiScopes.WRITE);
+    return NeoActionPath.isActionPath(pathInfo) ? ApiScopes.PROCESS : ApiScopes.WRITE;
+  }
+
+  /**
+   * Whether the request may use {@code scope}, for a check the authenticator could not make from
+   * the path. A cookie session or legacy JWT is never narrowed by scope (RBAC decides), so a request
+   * that was not authenticated with an OAuth2 token passes; an OAuth2 one must have been granted it.
+   *
+   * @param request the authenticated request
+   * @param scope   the scope to require
+   * @return {@code true} when the request is not scope-limited or holds the scope
+   */
+  public static boolean isScopeGranted(HttpServletRequest request, String scope) {
+    Object granted = request.getAttribute(ATTR_GRANTED_SCOPES);
+    return !(granted instanceof String) || ApiScopes.grants((String) granted, scope);
   }
 
   // ------------------------------------------------------------------ phase 2: bind
