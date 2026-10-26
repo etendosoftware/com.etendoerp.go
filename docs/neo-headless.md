@@ -1051,6 +1051,15 @@ When the batch closes it logs one line with the hits and misses per namespace (o
 lookup name), e.g. `[NEO-PERF] batch memo BatchService|spec hits=39 misses=1, BatchService|entity
 hits=36 misses=4, …`; nothing is logged for a batch that memoized nothing.
 
+**After-commit actions (ETP-5791).** `NeoBatchScope.runAfterCommit(action)` runs a side effect only
+once the write being handled is durable. Outside a batch it runs at once (core's
+`DefaultJsonDataService` has already committed when `afterHandle()` runs); inside a batch it is
+queued and `BatchService` runs the queue right after its `commitAndClose()`, so a batch or an async
+import row that rolls back runs none of its actions. Exceptions are logged and swallowed. Meant for
+telemetry and similar side effects, never for business writes. `NeoWriteChannel.current()` labels the
+write for telemetry: `rest`, `mcp`, `rest_batch`, `mcp_batch` (MCP is marked by `McpServlet` and by
+the async MCP job row runner).
+
 ### 4.4 Selectors (FK Dropdowns)
 
 The selector service resolves foreign key references and provides searchable dropdown values.
@@ -6085,6 +6094,13 @@ mandatory-defaults fallback `false` on every channel, as before ETP-5791.
 | `ContactCustomerTabHandler`, `ContactVendorTabHandler` (base `ContactTypeFlagGuardHandler`) | `@NeoExtension contacts/customer`, `contacts/vendorCreditor` | Same contact rule on updates through those tabs, only when the write sends `customer` or `vendor`. |
 
 Rejections carry the key in `messageKeys`; the SPA translates it (`BACKEND_ERROR_KEY_MAP`).
+
+**KPI telemetry (ETP-5791), flag on or off.** The same customizations emit
+`backend_contact_created` and `backend_contact_type_changed` through `ContactTypeTelemetry`, only
+once the write is committed (`NeoBatchScope.runAfterCommit`: at once for a single REST/MCP write,
+after the batch commits inside `/batch` / `etendo_batch`). Properties, `types_source` /
+`change_trigger` / `change_origin` / `channel` values and the no-identifier rule (tenant
+`account_id` only): `docs/backend-observability.md` § Contact Type KPIs.
 
 ## 6. Parent-Child Tab Filtering
 

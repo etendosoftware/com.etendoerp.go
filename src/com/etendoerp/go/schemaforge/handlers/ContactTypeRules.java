@@ -22,6 +22,8 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.Collection;
+import java.util.HashSet;
+import java.util.Set;
 
 import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONException;
@@ -109,6 +111,14 @@ public final class ContactTypeRules {
   static final String FIELD_CATEGORY_CUSTOMER = "etgoIscustomer";
   /** {@code C_BP_Group.EM_Etgo_Isvendor}. */
   static final String FIELD_CATEGORY_VENDOR = "etgoIsvendor";
+
+  /**
+   * {@link NeoContext#getAttribute attribute} holding the {@code Set<String>} of type fields
+   * ({@link #FIELD_CUSTOMER}/{@link #FIELD_VENDOR}) these rules wrote into the body from a category
+   * — on create or on a category change. Absent when nothing was inherited. Read by
+   * {@link ContactTypeTelemetry} to tell an inherited type from one the caller chose.
+   */
+  static final String ATTR_INHERITED_TYPE_FIELDS = "etgo.contactType.inheritedFields";
 
   /** {@code C_BPartner.IsCustomer} AD default — what a create without the key ends up with. */
   static final boolean CONTACT_CUSTOMER_CREATE_DEFAULT = true;
@@ -203,9 +213,11 @@ public final class ContactTypeRules {
       if (inherited != null && inherited.any()) {
         if (!customerExplicit) {
           body.put(FIELD_CUSTOMER, inherited.customer);
+          markInherited(ctx, FIELD_CUSTOMER);
         }
         if (!vendorExplicit) {
           body.put(FIELD_VENDOR, inherited.vendor);
+          markInherited(ctx, FIELD_VENDOR);
         }
       }
     }
@@ -274,6 +286,22 @@ public final class ContactTypeRules {
     }
     body.put(FIELD_CUSTOMER, inherited.customer);
     body.put(FIELD_VENDOR, inherited.vendor);
+    markInherited(ctx, FIELD_CUSTOMER);
+    markInherited(ctx, FIELD_VENDOR);
+  }
+
+  /** Records that {@code field} was written into the body from a category. */
+  @SuppressWarnings("unchecked")
+  private static void markInherited(NeoContext ctx, String field) {
+    Object current = ctx.getAttribute(ATTR_INHERITED_TYPE_FIELDS);
+    Set<String> fields;
+    if (current instanceof Set) {
+      fields = (Set<String>) current;
+    } else {
+      fields = new HashSet<>();
+      ctx.setAttribute(ATTR_INHERITED_TYPE_FIELDS, fields);
+    }
+    fields.add(field);
   }
 
   // ── Category (C_BP_Group) ────────────────────────────────────────────────────────────────────
@@ -364,7 +392,7 @@ public final class ContactTypeRules {
   }
 
   /** An FK value as sent: a plain id, or an object carrying {@code id}. */
-  private static String idOf(Object value) {
+  static String idOf(Object value) {
     if (value instanceof JSONObject) {
       return StringUtils.trimToNull(((JSONObject) value).optString("id", null));
     }
@@ -372,6 +400,11 @@ public final class ContactTypeRules {
       return null;
     }
     return StringUtils.trimToNull(value.toString());
+  }
+
+  /** The contact's two flags, or {@code null} when the id is blank or the row does not exist. */
+  static Types queryContactTypes(String contactId) throws SQLException {
+    return queryTypes(CONTACT_TYPES_SQL, contactId);
   }
 
   /** The category's two flags, or {@code null} when the id is blank or the row does not exist. */

@@ -47,6 +47,7 @@ import com.etendoerp.go.common.PublicUrlResolver;
 import com.etendoerp.go.oauth2.ApiScopes;
 import com.etendoerp.go.oauth2.OAuth2Filter;
 import com.etendoerp.go.payment.EnvironmentAccessGuard;
+import com.etendoerp.go.schemaforge.NeoWriteChannel;
 import com.etendoerp.go.session.GoLegacyBearer;
 import com.etendoerp.go.session.GoNeoAuth;
 import com.etendoerp.go.session.GoSessionAuthResult;
@@ -213,6 +214,8 @@ public class McpServlet extends HttpServlet {
 
     McpUsageTelemetry.setCurrentSessionKey(
         StringUtils.trimToNull(request.getHeader(McpUsageTelemetry.HEADER_SESSION_ID)));
+    // ETP-5791: label the writes this call makes as MCP (telemetry only). Restored in the finally.
+    String previousChannel = NeoWriteChannel.enter(NeoWriteChannel.MCP);
     try {
       method = rpcMessage.optString("method", "");
       Object id = rpcMessage.opt("id");
@@ -271,6 +274,7 @@ public class McpServlet extends HttpServlet {
       McpUsageTelemetry.clearCurrentSessionKey();
       McpUsageTelemetry.clearCurrentClient();
       McpUsageTelemetry.clearCurrentTenant();
+      NeoWriteChannel.restore(previousChannel);
     }
   }
 

@@ -469,6 +469,10 @@ public class BatchService {
       commitAttempted = true;
       OBDal.getInstance().commitAndClose();
       log.info("[BATCH] committed {} operation(s)", opResults.length());
+      // ETP-5791: side effects deferred until the batch is durable (see
+      // NeoBatchScope#runAfterCommit). A rollback above returns before this line, and the scope
+      // closed in the finally drops whatever was queued.
+      NeoBatchScope.runAfterCommitActions();
       JSONObject ok = new JSONObject();
       ok.put(FIELD_COMMITTED, true);
       ok.put("operations", opResults);

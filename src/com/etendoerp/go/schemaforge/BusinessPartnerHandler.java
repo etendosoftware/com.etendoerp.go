@@ -45,6 +45,7 @@ import org.openbravo.erpCommon.utility.OBMessageUtils;
 
 import com.etendoerp.go.common.SpanishTaxIdValidator;
 import com.etendoerp.go.schemaforge.handlers.ContactTypeRules;
+import com.etendoerp.go.schemaforge.handlers.ContactTypeTelemetry;
 import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
 
 /**
@@ -451,19 +452,30 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
    * category change); on create and on every update the write is rejected when the contact would
    * end up with neither type. Only CRUD writes are
    * judged — a selector or action request that happens to carry a body is not a save of the
-   * contact. A no-op while the {@code contact-category-type} feature flag is off.</p>
+   * contact. The rules are a no-op while the {@code contact-category-type} feature flag is off;
+   * the KPI snapshot of {@link ContactTypeTelemetry} is taken either way.</p>
    *
    * @return the rejection, or {@code null} to continue with the (possibly enriched) body
    */
   private static NeoResponse applyContactTypeRules(NeoContext ctx, JSONObject body, String method)
       throws Exception {
-    if (!ContactTypeRules.isEnabled() || !ContactTypeRules.isCrudWrite(ctx)) {
+    if (!ContactTypeRules.isCrudWrite(ctx)) {
       return null;
     }
+    boolean enabled = ContactTypeRules.isEnabled();
     if ("POST".equals(method)) {
-      return ContactTypeRules.inheritAndValidateOnCreate(ctx, body);
+      // KPI snapshot before the rules: it must see what the caller sent, not what was inherited.
+      ContactTypeTelemetry.beforeCreate(ctx, body, enabled);
+      return enabled ? ContactTypeRules.inheritAndValidateOnCreate(ctx, body) : null;
     }
-    return ContactTypeRules.inheritOnCategoryChangeAndValidateUpdate(ctx, body);
+    NeoResponse rejection = enabled
+        ? ContactTypeRules.inheritOnCategoryChangeAndValidateUpdate(ctx, body)
+        : null;
+    if (rejection == null) {
+      // After the rules (a re-inherited type is part of the write), before the write.
+      ContactTypeTelemetry.beforeUpdate(ctx, body, enabled, true);
+    }
+    return rejection;
   }
 
   /**
@@ -752,12 +764,15 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
         // ETP-5791: the type flags may have been inherited from the category in handle(). The
         // INSERT trigger already provisions both posting-account rows, so this is a safety net
         // that only writes a row that is still missing for a type the contact now has.
-        provisionBpAcctRowsAfterCreate(extractRecordId(body));
+        String createdId = extractRecordId(body);
+        provisionBpAcctRowsAfterCreate(createdId);
+        ContactTypeTelemetry.afterWrite(ctx, createdId);
       } else {
         // PUT/PATCH: flipping vendor/customer to Y on an already-persisted BP never runs through
         // c_bpartner_trg (it only fires on TG_OP='INSERT'), so backfill whichever posting-account
         // row is now missing. See provisionMissingBpAcctRows() for the full rationale (ETP-4565).
         provisionMissingBpAcctRows(ctx);
+        ContactTypeTelemetry.afterWrite(ctx, ctx.getRecordId());
       }
 
       modified |= injectViesMessage(body);

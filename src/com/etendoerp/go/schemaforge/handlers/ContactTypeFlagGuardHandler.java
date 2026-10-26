@@ -41,7 +41,8 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  * (REST single, MCP) resolves it through the same dispatcher.</p>
  *
  * <p>Behind the {@code contact-category-type} feature flag: off, this pre-hook returns
- * {@code null} and the tab saves through the default CRUD unchecked.</p>
+ * {@code null} and the tab saves through the default CRUD unchecked. Either way a saved change of
+ * a type emits {@code backend_contact_type_changed}, see {@link ContactTypeTelemetry}.</p>
  */
 public abstract class ContactTypeFlagGuardHandler implements NeoHandler {
 
@@ -49,16 +50,31 @@ public abstract class ContactTypeFlagGuardHandler implements NeoHandler {
 
   @Override
   public NeoResponse handle(NeoContext ctx) {
-    if (!ContactTypeRules.isEnabled() || !ContactTypeRules.isCrudWrite(ctx)
-        || ContactTypeRules.isCreate(ctx)) {
+    if (!ContactTypeRules.isCrudWrite(ctx) || ContactTypeRules.isCreate(ctx)) {
       return null;
     }
     try {
-      return ContactTypeRules.validateContactUpdate(ctx, ctx.getRequestBody(), true);
+      boolean enabled = ContactTypeRules.isEnabled();
+      NeoResponse rejection = enabled
+          ? ContactTypeRules.validateContactUpdate(ctx, ctx.getRequestBody(), true)
+          : null;
+      if (rejection == null) {
+        ContactTypeTelemetry.beforeUpdate(ctx, ctx.getRequestBody(), enabled, false);
+      }
+      return rejection;
     } catch (Exception e) {
       log.error("ContactTypeFlagGuardHandler: error validating contact type on {}/{}",
           ctx.getSpecName(), ctx.getEntityName(), e);
       throw new OBException("Error validating the contact type", e);
     }
+  }
+
+  /** Emits {@code backend_contact_type_changed} when the saved write changed a type (KPI). */
+  @Override
+  public NeoResponse afterHandle(NeoContext ctx) {
+    if (ContactTypeRules.isCrudWrite(ctx) && !ContactTypeRules.isCreate(ctx)) {
+      ContactTypeTelemetry.afterWrite(ctx, ctx.getRecordId());
+    }
+    return null;
   }
 }
