@@ -41,6 +41,7 @@ import org.hibernate.criterion.Restrictions;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.businesspartner.Location;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.order.Order;
 import org.openbravo.model.common.order.OrderLine;
@@ -142,6 +143,33 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
         && NeoHandlerUtils.isWriteMethod(context.getHttpMethod())) {
       NeoHandlerUtils.mirrorFieldValue(context.getRequestBody(), FIELD_ORDER_DATE, FIELD_ACCOUNTING_DATE);
     }
+  }
+
+  /**
+   * ETP-5703 / ETP-5852: a create that names a business partner but no address gets the partner's
+   * only ship-to location — the AD rule of {@code C_Order.C_BPartner_Location_ID} is "C_BPartner
+   * Location - Ship To" — and, only then, a bill-to for {@code BillTo_ID} that is never left empty
+   * (see {@link PartnerLocationDefaults#alignBillTo}). This is what the form does: picking the
+   * partner selects the address when its selector offers exactly one. With several it abstains and
+   * the mandatory-field check names the field.
+   *
+   * @param context the request context; only a CRUD {@code POST} create body is touched
+   */
+  static void fillPartnerLocations(NeoContext context) {
+    PartnerLocationDefaults.fillShipToAndBillTo(context, Order.PROPERTY_PARTNERADDRESS,
+        Location.PROPERTY_SHIPTOADDRESS, Order.PROPERTY_INVOICEADDRESS,
+        Location.PROPERTY_INVOICETOADDRESS);
+  }
+
+  /**
+   * Runs {@link #fillPartnerLocations} before MCP {@code etendo_create}'s mandatory-field check
+   * (ETP-5852). Until then only the pre-hook filled it, which runs after that check, so an agent got
+   * a 422 for an address the form would have selected by itself (the divergence §4.12.9 declared).
+   * Idempotent with the call in each subclass's {@code handle()}.
+   */
+  @Override
+  public void resolveServerCreateFields(NeoContext context) {
+    fillPartnerLocations(context);
   }
 
   /**

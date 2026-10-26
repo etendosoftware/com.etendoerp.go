@@ -127,6 +127,9 @@ public class PurchaseOrderHeaderHandler extends AbstractOrderHeaderHandler {
     if (paymentMethodSelector != null) {
       return paymentMethodSelector;
     }
+    // ETP-5852: the vendor's only address (and its bill-to) on a create without one, as the form
+    // selects it; purchase orders had no fill at all, on any channel.
+    AbstractOrderHeaderHandler.fillPartnerLocations(context);
     AbstractOrderHeaderHandler.mirrorAccountingDate(context);
     // ETP-5840: exchange rate — recalculation, save and completion validation — before anything
     // with side effects runs.

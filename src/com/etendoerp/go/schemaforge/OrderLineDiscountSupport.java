@@ -47,15 +47,15 @@ import org.openbravo.service.json.DataToJsonConverter;
 import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
 
 /**
- * Line-price rules of the sales order and sales quotation lines, for the two customizations that
- * call it: {@link SalesOrderLineHandler} and {@link SalesQuotationLineHandler} (ETP-5528).
+ * Line-price rules of the order lines, for the customizations that call it through
+ * {@link OrderLineCustomization}: {@link SalesOrderLineHandler}, {@link SalesQuotationLineHandler}
+ * (ETP-5528) and {@link PurchaseOrderLineHandler} (ETP-5852).
  *
  * <p><b>Entity knowledge, called explicitly.</b> Everything here is specific to {@code C_OrderLine}
  * — its {@code orderedQuantity}, its {@code salesOrder} parent, its {@code standardPrice}, the core
  * {@code SL_Order_Amt} callout on its {@code discount} column. That is why it is reached only from
- * the two customizations that call it (ETP-5415 T12), never from a shared write path: no entity is
- * selected here by a property-name guard. Purchase-order lines stay on the plain
- * {@link OrderLineHandler} and never get here. {@code McpLinePriceInjector} stays what it was — a
+ * the customizations that call it (ETP-5415 T12), never from a shared write path: no entity is
+ * selected here by a property-name guard. {@code McpLinePriceInjector} stays what it was — a
  * shared MCP compensation for every commercial line, tolerated until migration M4; nothing here
  * changes it or depends on its internals, only on the value it leaves in {@code unitPrice}.
  *

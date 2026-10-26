@@ -20,17 +20,19 @@ package com.etendoerp.go.schemaforge;
 import java.util.Set;
 
 /**
- * The customization shared by the sales order line entities that opt in (ETP-5528):
- * {@link SalesOrderLineHandler} ({@code sales-order/lines}) and {@link SalesQuotationLineHandler}
- * ({@code sales-quotation/quotationLine}). Everything {@link OrderLineHandler} does, plus the order
- * line's own price rules (see {@link OrderLineDiscountSupport}).
+ * The customization shared by the order line entities that opt in (ETP-5528, ETP-5852):
+ * {@link SalesOrderLineHandler} ({@code sales-order/lines}), {@link SalesQuotationLineHandler}
+ * ({@code sales-quotation/quotationLine}) and {@link PurchaseOrderLineHandler}
+ * ({@code purchase-order/lines}). Everything {@link OrderLineHandler} does, plus the order line's
+ * own price rules (see {@link OrderLineDiscountSupport}). All three are {@code C_OrderLine}, with
+ * the same column callouts and trigger, so the rules are the same; purchase lines joined in
+ * ETP-5852 after production agents reported a discount that was stored but never applied.
  *
  * <p>Abstract and not annotated, so it is never a bean nor an index entry: each concrete subclass
  * carries its own {@link NeoExtension} (the annotation is not repeatable and not inherited), and
- * {@code NeoExtensionIndex} reads it off the bean class. {@code purchase-order/lines} does not
- * extend it and stays on {@link OrderLineHandler} alone.
+ * {@code NeoExtensionIndex} reads it off the bean class.
  */
-abstract class SalesOrderLineCustomization extends OrderLineHandler {
+abstract class OrderLineCustomization extends OrderLineHandler {
 
   /**
    * Runs the parent's pre-hook first — a response from it still short-circuits — then the line
