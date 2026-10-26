@@ -251,6 +251,30 @@ tenant type by `OnboardingInitialPeriodStateService`, after the onboarding commi
   (search the logs for `ETP-5577 initial period state failed`). The next login of any user of the
   environment retries it.
 
+**Default contact category, after the commit (ETP-5791).** The GOClient dataset
+(`referencedata/sampledata/GOClient/C_BP_GROUP.xml`) ships four contact categories with their
+contact types (`EM_ETGO_ISCUSTOMER`/`EM_ETGO_ISVENDOR`): Proveedor (vendor), Cliente (customer,
+**the dataset default**), Acreedor (vendor) and Cliente/Proveedor (both). With the
+`contact-category-type` feature flag on, `OnboardingDefaultContactCategoryService` makes
+Cliente/Proveedor the tenant's only default category; with it off nothing runs and the tenant keeps
+Cliente, as before ETP-5791.
+
+- **Where.** `EtendoGoJwtServlet.applyDefaultContactCategoryBestEffort`, right after the initial
+  period state, for pooled and classic onboardings alike. The flag (environment level, the same read
+  as the contact rules, `ContactTypeRules.isEnabled()`) is evaluated **at hand-over**, never when
+  the pool fills: a pool tenant built with the flag off and claimed with it on gets the new default.
+- **How the category is found.** GOClient id `E075D97EFB264D028E8652E5CA057518` through the
+  import's `AD_REF_DATA_LOADED` mapping, falling back to `Value = 'Cliente/Proveedor'` within the
+  tenant; never by display name. Every other default category of the tenant is un-defaulted (the
+  contact's AD default takes `MAX(c_bp_group_id)` among defaults, so two would be arbitrary).
+- **Idempotent and best effort.** Only rows whose `IsDefault` changes are written. A tenant
+  without the category (a pool tenant built from an older dataset, a renamed or deleted category)
+  logs `ETP-5791 client <id> has no 'Cliente/Proveedor' contact category` and is skipped. Own
+  transaction; any failure rolls back only this step and never fails the onboarding.
+- **Existing tenants.** Tenants created while the flag was off keep Cliente as default when the
+  flag is later turned on — the same "existing data is not re-derived" rule the ticket applies to
+  contacts. No data-fix exists or is needed.
+
 **Demo trial window (ETP-5575).** A demo's trial lasts `etendo.go.demo.trial.days` /
 `ETGO_DEMO_TRIAL_DAYS` (default 14, `TenantEnvironmentLifecycleService.DEFAULT_TRIAL_DAYS`), so a signup at the end of a month must be able to post the
 next month. `openDemoTrialWindow` opens every never-opened period whose start is on or before
@@ -650,7 +674,8 @@ upgrade side effects (mark productive, revert forced test mode), `orgInfo` (tax 
 data — then data transfer, `markDemoReady` (the trial clock starts at the claim, not at pool time),
 commit, the initial period state (ETP-5577: a demo's trial window, re-evaluated for a pooled demo
 built in an earlier month, or a productive tenant's never-opened signup year; see
-`OnboardingPeriodControlService`), the `environment-ready` email and costing activation. The stream skips the `organization`
+`OnboardingPeriodControlService`), the default contact category (ETP-5791, flag
+`contact-category-type`, evaluated at claim time), the `environment-ready` email and costing activation. The stream skips the `organization`
 and `dataset`…`baseline` steps.
 
 ### Performance observability (ETP-5500)

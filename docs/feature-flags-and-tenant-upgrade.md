@@ -410,9 +410,15 @@ contact cannot be saved with no type, and moving a contact to another category r
 Unset or `false` (the default) keeps the pre-ETP-5791 behaviour: the contact and contact-category
 customizations return `null` and the default CRUD runs. Only behaviour is gated — the new
 `EM_ETGO_ISCUSTOMER`/`EM_ETGO_ISVENDOR` columns, AD metadata, `ETGO_SF_FIELD` rows and
-reference/sample data ship unconditionally. Environment level (account-less context); its only
-caller is `ContactTypeRules.isEnabled()`. Nothing in the browser reads it. Full reference:
+reference/sample data ship unconditionally. Environment level (account-less context), always read
+through `ContactTypeRules.isEnabled()`. Nothing in the browser reads it. Full reference:
 [`neo-headless.md`](neo-headless.md) §5.3.6.
+
+It also decides a new tenant's default contact category: on, the onboarding makes
+"Cliente/Proveedor" the default (`OnboardingDefaultContactCategoryService`, read at hand-over, so
+pool tenants built while it was off still get it when claimed); off, the dataset's "Cliente" stays
+default. Tenants created while it was off are never revisited. See
+[`onboarding-flow.md`](onboarding-flow.md) "Default contact category".
 
 ## 2. The onboarding paywall
 
