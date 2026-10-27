@@ -715,8 +715,9 @@ public class TaxReportHandler implements NeoHandler {
    * organizations: {@code loadOwned} checks only the client for an {@code Organization}, and the
    * report SQL binds {@code ad_org_id} straight from the request. A foreign, unreadable or unknown
    * org all answer the same {@code organization_not_resolved} 400 as the other report handlers
-   * (ETP-5793). An omitted/empty {@code orgId} keeps defaulting to the session organization —
-   * including {@code "0"} — which is never validated here.
+   * (ETP-5793). Only an omitted/empty {@code orgId} skips the check: it keeps defaulting to the
+   * session organization, {@code "0"} included. An explicit {@code "0"} is checked and passes,
+   * because client {@code 0} and org {@code 0} are always readable.
    *
    * @param orgId the raw {@code orgId} of the request body, {@code ""} when omitted
    * @return the error response, or {@code null} when {@code orgId} is usable
