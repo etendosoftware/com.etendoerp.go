@@ -10207,8 +10207,14 @@ header-link rule, response). Direction (purchase or sales) is read from the targ
 The `id` of `etendo_action` is always the **draft target** document; discovery needs no `businessPartner` (it is the
 target's).
 
-**Body and answers.** `importOrderLines`: `{orderId, lines?:[{sourceLineId, quantity}]}`; `importReceiptLines`:
-`{receiptId, lines?}`; `importShipmentLines`: `{shipmentId, lines?}`. `lines` omitted or empty imports **everything
+**Body and answers.** `importOrderLines`: `{orderId, lines?:[{sourceLineId, quantity}], carryGlobalDiscount?}` for one
+order, or `{orders:[{orderId, lines?}], carryGlobalDiscount?}` to import several orders in ONE call and ONE transaction,
+as the invoice window's "Add from order" popup does (ETP-5828). The two shapes are exclusive (`orderId` or top-level
+`lines` next to `orders` is a **400**, as are an empty `orders`, more than 50 entries, an entry without `orderId` and the
+same order twice); every order is validated (completed, partner, currency, direction, return), the lines of all of them
+are locked in one ascending pass and every order is planned against its cap **before the first write**, so one refusal on
+any order creates nothing. `carryGlobalDiscount` (default `true`) is described under *Header link* below.
+`importReceiptLines`: `{receiptId, lines?}`; `importShipmentLines`: `{shipmentId, lines?}`. `lines` omitted or empty imports **everything
 still pending**; given, it imports **exactly** those lines (the same line twice is summed; an entry without
 `sourceLineId` or with a missing / zero / non-numeric `quantity` is refused, never skipped). The answer is
 `{data:{importedCount, lines:[{id, sourceLineId, product, productName, quantity}], headerLinked, salesOrder?}}`
@@ -10241,6 +10247,7 @@ caller knows its id. Return orders and return documents are never listed.
 | `importNothingPending` | no `lines` and nothing left to import (names the covering drafts when that is why) |
 | `importQuantityExceedsPending` | more than what is pending of a line; extra keys `product`, `requested`, `pending`, `sourceLineId` |
 | `importQuantityNotHonoured` | order / receipt to invoice only: the native process created other quantities than planned; everything is rolled back |
+| `globalDiscountConflict` | `importOrderLines` into an invoice with `carryGlobalDiscount` true (the default) when the orders' global discount cannot be carried (see *Header link*); extra keys `conflict`, `orders:[{orderId, documentNo, globalDiscount}]`, `invoice:{totalDiscount, hadLines}`, `hint` |
 
 Example: `Cannot import 11 of Agua: only 10 is still pending on this line (quantities already in draft documents count as taken).`
 An unforeseen failure is rolled back whole and answers a generic **500** (`An internal error occurred while importing
@@ -10341,14 +10348,35 @@ the native process sets / clears the invoice's order reference (one order: linke
 found by their lines (`OrderInvoiceListSupport.listInvoices`). `salesOrder` / `headerLinked` report the truth (see the
 response above): a header that links order X while the lines come only from order Y answers `headerLinked:false,
 salesOrder:X`. For an
-invoice imported from an order, the header's `etgoTotalDiscount` (always a %, never an amount) takes the order's
-only when it is positive and, judged on the invoice as it was BEFORE the call, the invoice already had that same %, or
-had no total discount AND no lines (neither the `ETGO_DTO` total-discount line nor an inactive line counts as a line) (ETP-5828). It is left
-unchanged when the invoice has another % (an earlier order of a different % included; 0 % counts as different) or
-when it already had lines and no total discount, since applying it would also discount those lines. The import is
-never refused for this, and every line keeps its own line discount. One order per call, so with several orders the
-first one decides and each later one only confirms an equal %. The discount line itself is materialised when the
-invoice is completed. A receipt / shipment imported into an invoice does NOT carry the order's `etgoTotalDiscount`
+invoice imported from orders, the header's `etgoTotalDiscount` (always a %, never an amount) follows the popup's rule
+(ETP-5828, `ImportOrderLinesIntoInvoiceHandler.discountConflict`), judged on the invoice as it was BEFORE the call
+(neither the `ETGO_DTO` total-discount line nor an inactive line counts as a line):
+
+| Selected orders / invoice before the call | `carryGlobalDiscount` true (default) | `false` |
+|---|---|---|
+| no selected order has a positive % | nothing to carry, header untouched, import goes through | same |
+| all the same positive %, invoice with no total discount and no lines | header takes that % | header untouched |
+| all the same positive %, invoice already at that % | header keeps it | header untouched |
+| (a) `ordersDiffer`: the orders' % differ (0 % or none counts as different) | **422** `globalDiscountConflict`, nothing created | lines imported, header untouched |
+| (b) `invoiceHasOtherDiscount`: the invoice already has another % | **422** `globalDiscountConflict`, nothing created | lines imported, header untouched |
+| (c) `invoiceHasLinesWithoutDiscount`: lines and no total discount | **422** `globalDiscountConflict`, nothing created | lines imported, header untouched |
+
+The cases are checked in that order and the first that applies is reported. The import itself is never forbidden: the
+422 is the popup's orange warning, and its `hint` tells the agent to ask the user and, to import anyway, resend the same
+call with `carryGlobalDiscount:false`. Every line always keeps its own line discount. Example:
+
+```json
+{"error":{"status":422,"code":"globalDiscountConflict",
+  "message":"The invoice already has lines and no total discount: carrying the orders' 10% would discount those lines too",
+  "conflict":"invoiceHasLinesWithoutDiscount",
+  "orders":[{"orderId":"A1B2…","documentNo":"1000123","globalDiscount":10}],
+  "invoice":{"totalDiscount":0,"hadLines":true},
+  "hint":"Nothing was imported. Ask the user whether to import these lines without carrying the global discount. To import anyway, resend the same call with carryGlobalDiscount:false: every line keeps its own line discount and the invoice's total discount is left unchanged."}}
+```
+
+Before ETP-5828 the action took one order per call and silently left the header unchanged in cases (b) and (c); a
+single-order call now answers the 422 in those cases unless it sends `carryGlobalDiscount:false`. The discount line
+itself is materialised when the invoice is completed. A receipt / shipment imported into an invoice does NOT carry the order's `etgoTotalDiscount`
 (only the order import does), as in the window.
 
 **Over-delivered order lines (receipt / shipment import).** `InOutLineFromOrderFactory.pendingQuantityFor` computes

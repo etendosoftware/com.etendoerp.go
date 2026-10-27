@@ -27,6 +27,7 @@ import java.util.Map;
 import java.util.Set;
 
 import javax.inject.Named;
+import javax.servlet.http.HttpServletResponse;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
@@ -64,14 +65,20 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * protected from the native process swapping it for receipt lines; nothing is refused for having
  * deliveries.
  *
- * <p>The header's total discount (a percentage, never an amount) takes the order's
- * {@code etgoTotalDiscount} only when it is positive and, before this import, the invoice either
- * already had that same percentage, or had no total discount AND no lines (the total-discount line
- * itself does not count). It is not carried when the invoice already has a different percentage
- * (an earlier order of another percentage included, 0 counting as different) or when it already
- * had lines and no total discount: applying it would discount those lines too. The import is never
- * refused for this and the lines keep their own line discount. The discount line itself is
- * materialised when the invoice is completed, as always.
+ * <p>{@code importOrderLines} takes one order ({@code orderId} + {@code lines}) or several
+ * ({@code orders:[{orderId, lines?}]}), all validated, locked and planned before the first write
+ * and imported in ONE transaction, the way the window's "Add from order" popup does.
+ *
+ * <p><b>The global discount</b> (a percentage, never an amount) follows the popup (ETP-5828). With
+ * {@code carryGlobalDiscount} true (the default) the header's {@code etgoTotalDiscount} takes the
+ * orders' {@code etgoTotalDiscount} when every selected order has the same positive percentage and,
+ * judged on the invoice BEFORE the call, the invoice already had that percentage or had no total
+ * discount AND no lines (the total-discount line does not count). No positive discount among the
+ * orders means nothing to carry. Any other case is a conflict ({@link #discountConflict}) and
+ * answers 422 {@value #ERROR_GLOBAL_DISCOUNT_CONFLICT} before anything is written, so the caller
+ * can ask the user and resend with {@code carryGlobalDiscount:false}: the lines are imported and
+ * the header's total discount is not touched. The lines always keep their own line discount. The
+ * discount line itself is materialised when the invoice is completed, as always.
  */
 @Named("importOrderLinesIntoInvoiceHandler")
 public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImportHandler {
@@ -80,7 +87,18 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
   static final String ACTION_AVAILABLE_LINES = "availableOrderLines";
   static final String ACTION_IMPORT = "importOrderLines";
 
+  /** The orders' global discount cannot be carried to the invoice; nothing was imported. */
+  static final String ERROR_GLOBAL_DISCOUNT_CONFLICT = "globalDiscountConflict";
+  /** Conflict (a): the selected orders do not share one positive % (0 counts as different). */
+  static final String CONFLICT_ORDERS_DIFFER = "ordersDiffer";
+  /** Conflict (b): the invoice already has a total discount of another %. */
+  static final String CONFLICT_INVOICE_OTHER_DISCOUNT = "invoiceHasOtherDiscount";
+  /** Conflict (c): the invoice already has lines and no total discount. */
+  static final String CONFLICT_INVOICE_LINES_WITHOUT_DISCOUNT = "invoiceHasLinesWithoutDiscount";
+
   private static final String PARAM_ORDER_ID = "orderId";
+  private static final String PARAM_ORDERS = "orders";
+  private static final String PARAM_CARRY_DISCOUNT = "carryGlobalDiscount";
   private static final Set<String> ACTIONS =
       Set.of(ACTION_AVAILABLE_ORDERS, ACTION_AVAILABLE_LINES, ACTION_IMPORT);
   private static final int MAX_CANDIDATES = 200;
@@ -120,9 +138,11 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
         .withIdDescription(DocumentLineImport.ID_OF_THE_DRAFT + doc + " the lines would be imported into.")
         .availableWhen(DocumentLineImport.TARGET_IS_DRAFT));
     contracts.put(ACTION_IMPORT, NeoActionContract.write(ACTION_IMPORT,
-        "Adds lines of a completed " + order + " to this DRAFT " + doc + " (product, unit of "
-            + "measure, tax, price and discount copied from the order line, linked to it), in ONE "
-            + "transaction, WITHOUT completing the invoice. Without lines it imports everything "
+        "Adds lines of one or several completed " + order + "s to this DRAFT " + doc
+            + " (product, unit of measure, tax, price and discount copied from the order line, "
+            + "linked to it), in ONE transaction, WITHOUT completing the invoice. Pass either "
+            + "orderId (+ optional lines) for one order, or orders:[{orderId, lines?}] to import "
+            + "several orders together (never both). Without lines an order imports everything "
             + "still pending; with lines, exactly those. More than what is pending on a line "
             + "(drafts included, this invoice's own lines too; the same line listed twice counts "
             + "both) answers 422 importQuantityExceedsPending naming the product, the requested "
@@ -133,22 +153,39 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
             + "invoiced against the order line alone (also when a " + inout + " line is already "
             + "covered by another draft invoice: the order's pending counts drafts, so what is "
             + "left is what can still be invoiced). The invoice's order reference is set when every line comes from one order and "
-            + "left empty when several orders are mixed. The header's total discount (a %) takes "
-            + "the order's when it is positive and, before this call, the invoice had that same % "
-            + "or had neither a total discount nor lines; it is left unchanged when the invoice "
-            + "has another % or already had lines without one (never refused for this; lines "
-            + "keep their own line discount). The order's invoiced quantity only moves when the invoice is "
-            + "completed. Refused (422) when the invoice is not a draft, the order is not "
+            + "left empty when several orders are mixed. Global discount (always a %): with "
+            + "carryGlobalDiscount true (the default) the invoice's total discount takes the "
+            + "orders' global discount when ALL selected orders have the same positive % and, "
+            + "before this call, the invoice had that same % or had neither a total discount nor "
+            + "lines. When no selected order has a global discount there is nothing to carry. "
+            + "Otherwise it answers 422 " + ERROR_GLOBAL_DISCOUNT_CONFLICT + " and creates "
+            + "NOTHING: the orders have different % (0 counts as different), the invoice already "
+            + "has another total discount, or it already has lines and no total discount; ask the "
+            + "user, and to import anyway resend the same call with carryGlobalDiscount:false "
+            + "(lines keep their own line discount, the invoice's total discount is not touched). "
+            + "The order's invoiced quantity only moves when the invoice is "
+            + "completed. Refused (422) when the invoice is not a draft, an order is not "
             + "completed, or business partner, currency or direction differ. Returns "
             + "{data:{importedCount, lines:[{id, sourceLineId, product, productName, quantity}], "
             + "headerLinked, salesOrder}} (salesOrder is the order the header points at now; headerLinked is true only when an imported line belongs to it). Step 3." + flow,
-        NeoActionContract.Param.required(PARAM_ORDER_ID, NeoActionContract.TYPE_STRING,
-            "Id of the order to import from, returned by availableOrders."),
+        NeoActionContract.Param.optional(PARAM_ORDER_ID, NeoActionContract.TYPE_STRING,
+            "Id of the order to import from, returned by availableOrders. Required unless "
+                + "orders is given."),
         NeoActionContract.Param.array(DocumentLineImport.KEY_LINES,
             NeoActionContract.TYPE_OBJECT, false,
-            "Each {sourceLineId, quantity}: sourceLineId is the id of a line from "
-                + "availableOrderLines, quantity a number not above its pendingQuantity. Omit to "
-                + "import every pending line in full."))
+            "With orderId only. Each {sourceLineId, quantity}: sourceLineId is the id of a line "
+                + "from availableOrderLines, quantity a number not above its pendingQuantity. "
+                + "Omit to import every pending line in full."),
+        NeoActionContract.Param.array(PARAM_ORDERS, NeoActionContract.TYPE_OBJECT, false,
+            "Several orders imported together, instead of orderId + lines: each {orderId, "
+                + "lines?} with orderId from availableOrders (each order at most once, at most "
+                + MAX_ORDERS + ") and lines shaped as above, omitted to import that order's "
+                + "pending lines in full."),
+        NeoActionContract.Param.optional(PARAM_CARRY_DISCOUNT, NeoActionContract.TYPE_BOOLEAN,
+            "Default true: carry the orders' global discount % to the invoice's total discount, "
+                + "or answer 422 " + ERROR_GLOBAL_DISCOUNT_CONFLICT + " when it cannot be "
+                + "carried. false: import the lines and leave the invoice's total discount "
+                + "unchanged; send it only after the user chose so."))
         .withIdDescription(DocumentLineImport.ID_OF_THE_DRAFT + doc + " the lines are added to.")
         .availableWhen(DocumentLineImport.TARGET_IS_DRAFT));
     return contracts;
@@ -177,7 +214,7 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
     }
     if (ACTION_AVAILABLE_LINES.equals(action)) {
       Invoice invoice = requireExistingInvoice(context.getRecordId());
-      return availableOrderLines(requireSourceOrder(invoice, body));
+      return availableOrderLines(requireSourceOrder(invoice, requireParam(body, PARAM_ORDER_ID)));
     }
     return importLines(requireDraftInvoice(context.getRecordId()), body);
   }
@@ -186,34 +223,144 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
   // importOrderLines
   // ---------------------------------------------------------------------------
 
+  /** One order of the request: its id and its {@code lines} (empty = everything pending). */
+  static final class OrderRequest {
+    final String orderId;
+    final Map<String, BigDecimal> requested;
+
+    OrderRequest(String orderId, Map<String, BigDecimal> requested) {
+      this.orderId = orderId;
+      this.requested = requested;
+    }
+  }
+
+  /** One order being imported: the order, its lines, what will be created and how. */
+  static final class OrderImport {
+    final Order order;
+    final boolean sales;
+    final Map<String, BigDecimal> requested;
+    final Map<String, OrderLine> linesById = new LinkedHashMap<>();
+    final Map<String, String> documentLines = new LinkedHashMap<>();
+    Map<String, BigDecimal> planned;
+    Batches batches;
+
+    OrderImport(Order order, Map<String, BigDecimal> requested) {
+      this.order = order;
+      this.sales = Boolean.TRUE.equals(order.isSalesTransaction());
+      this.requested = requested;
+      for (OrderLine ol : order.getOrderLineList()) {
+        linesById.put(ol.getId(), ol);
+        documentLines.put(ol.getId(), label(ol));
+      }
+    }
+  }
+
+  /**
+   * Validates, locks and plans every order, decides the global discount, and only then creates
+   * the lines, order by order: any refusal leaves nothing written.
+   */
   private NeoResponse importLines(Invoice invoice, JSONObject body)
       throws SQLException, JSONException {
-    Map<String, BigDecimal> requested = DocumentLineImport.parseRequestedLines(body);
-    Order order = requireSourceOrder(invoice, body);
-    boolean sales = Boolean.TRUE.equals(order.isSalesTransaction());
-
-    Map<String, OrderLine> linesById = new LinkedHashMap<>();
-    Map<String, String> documentLines = new LinkedHashMap<>();
-    for (OrderLine ol : order.getOrderLineList()) {
-      linesById.put(ol.getId(), ol);
-      documentLines.put(ol.getId(), label(ol));
+    List<OrderRequest> requests = parseOrderRequests(body);
+    boolean carryDiscount = parseCarryDiscount(body);
+    List<OrderImport> imports = planImports(invoice, requests);
+    for (OrderImport item : imports) {
+      item.batches = buildBatches(item.linesById, item.planned, item.sales);
     }
-    lockOrderLines(linesById.keySet());
-    // What the cap reads is read AFTER the lock: a line loaded before it may carry the invoiced
-    // quantity from before another import completed.
-    refreshOrderLines(linesById.values());
-    Map<String, BigDecimal> pending = pendingToInvoice(order, sales);
-    Map<String, BigDecimal> planned = DocumentLineImport.plan(requested, documentLines, pending);
-
-    Batches batches = buildBatches(linesById, planned, sales);
     // Read BEFORE the lines of this call exist: they must not count as "the invoice had lines".
-    boolean hadLines = hasProductLines(invoice);
-    List<DocumentLineImport.ImportedLine> created = createLines(invoice, batches.calls,
-        OrderLine.class, planned, line -> line.getSalesOrderLine(),
-        (call, lines) -> unmarkRemainder(batches, call, lines));
-    carryOrderDiscount(invoice, order, hadLines);
+    BigDecimal discount = carryDiscount ? globalDiscountToCarry(invoice, imports) : null;
+
+    List<DocumentLineImport.ImportedLine> created = new ArrayList<>();
+    for (OrderImport item : imports) {
+      Batches batches = item.batches;
+      created.addAll(createLines(invoice, batches.calls, OrderLine.class, item.planned,
+          line -> line.getSalesOrderLine(),
+          (call, lines) -> unmarkRemainder(batches, call, lines)));
+    }
+    applyGlobalDiscount(invoice, discount);
     return DocumentLineImport.ok(created, invoice.getSalesOrder() == null ? null
         : invoice.getSalesOrder().getId());
+  }
+
+  /**
+   * Every order is checked before any is locked, then the lines of all of them are locked in ONE
+   * ascending pass, and the cap is read AFTER the lock: a line loaded before it may carry the
+   * invoiced quantity from before another import completed.
+   */
+  private List<OrderImport> planImports(Invoice invoice, List<OrderRequest> requests)
+      throws SQLException {
+    List<OrderImport> imports = new ArrayList<>();
+    Set<String> lineIds = new java.util.LinkedHashSet<>();
+    for (OrderRequest request : requests) {
+      OrderImport item = new OrderImport(requireSourceOrder(invoice, request.orderId),
+          request.requested);
+      lineIds.addAll(item.linesById.keySet());
+      imports.add(item);
+    }
+    lockOrderLines(lineIds);
+    for (OrderImport item : imports) {
+      refreshOrderLines(item.linesById.values());
+      item.planned = DocumentLineImport.plan(item.requested, item.documentLines,
+          pendingToInvoice(item.order, item.sales));
+    }
+    return imports;
+  }
+
+  /**
+   * The orders of the request: {@code orders:[{orderId, lines?}]}, or the single
+   * {@code orderId} + {@code lines} of the original shape. Mixing both, an empty or oversized
+   * {@code orders}, an entry without {@code orderId} or the same order twice is a 400.
+   */
+  static List<OrderRequest> parseOrderRequests(JSONObject body) {
+    if (body == null || !body.has(PARAM_ORDERS)) {
+      return List.of(new OrderRequest(requireParam(body, PARAM_ORDER_ID),
+          DocumentLineImport.parseRequestedLines(body)));
+    }
+    JSONArray orders = body.optJSONArray(PARAM_ORDERS);
+    if (orders == null || orders.length() == 0 || orders.length() > MAX_ORDERS) {
+      throw badRequest(PARAM_ORDERS + " must be a list of 1 to " + MAX_ORDERS
+          + " entries {orderId, lines?}");
+    }
+    if (body.has(PARAM_ORDER_ID) || body.has(DocumentLineImport.KEY_LINES)) {
+      throw badRequest("Send either orderId (+ lines) or orders, not both: the lines of each "
+          + "order go inside its orders entry");
+    }
+    List<OrderRequest> requests = new ArrayList<>();
+    Set<String> seen = new java.util.HashSet<>();
+    for (int i = 0; i < orders.length(); i++) {
+      JSONObject entry = orders.optJSONObject(i);
+      String orderId = DocumentLineImport.text(entry, PARAM_ORDER_ID);
+      if (orderId == null) {
+        throw badRequest(PARAM_ORDERS + "[" + i + "] needs an orderId");
+      }
+      if (!seen.add(orderId)) {
+        throw badRequest("Order " + orderId + " is listed twice in " + PARAM_ORDERS
+            + ": put all its lines in one entry");
+      }
+      requests.add(new OrderRequest(orderId, DocumentLineImport.parseRequestedLines(entry)));
+    }
+    return requests;
+  }
+
+  /** {@code carryGlobalDiscount}: absent or null is {@code true}; a non-boolean is a 400. */
+  static boolean parseCarryDiscount(JSONObject body) {
+    Object value = body == null ? null : body.opt(PARAM_CARRY_DISCOUNT);
+    if (value == null || JSONObject.NULL.equals(value)) {
+      return true;
+    }
+    if (value instanceof Boolean) {
+      return (Boolean) value;
+    }
+    String text = String.valueOf(value).trim();
+    if ("true".equalsIgnoreCase(text) || "false".equalsIgnoreCase(text)) {
+      return Boolean.parseBoolean(text);
+    }
+    throw badRequest(PARAM_CARRY_DISCOUNT + " must be true or false");
+  }
+
+  private static DocumentLineImport.ImportRefusal badRequest(String message) {
+    return new DocumentLineImport.ImportRefusal(HttpServletResponse.SC_BAD_REQUEST,
+        DocumentLineImport.ERROR_INVALID_LINE, message, null);
   }
 
   // ---------------------------------------------------------------------------
@@ -396,23 +543,137 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
         && orderLine.getUOM().getId().equals(movement.getUOM().getId());
   }
 
+  // ---------------------------------------------------------------------------
+  // Global discount
+  // ---------------------------------------------------------------------------
+
   /**
-   * The order's total discount, when it is positive and the invoice already has the same one, or
-   * has none and had no lines before this import ({@code hadLines}): a discount set over lines that
-   * were already there would discount them too.
+   * The % to set on the invoice's total discount, or {@code null} when no selected order has a
+   * positive global discount. Judged on the invoice as it is BEFORE this call's lines exist.
+   *
+   * @throws DocumentLineImport.ImportRefusal 422 {@value #ERROR_GLOBAL_DISCOUNT_CONFLICT} when it
+   *         cannot be carried
    */
-  private void carryOrderDiscount(Invoice invoice, Order order, boolean hadLines) {
-    BigDecimal discount = order.getEtgoTotalDiscount();
-    if (discount == null || discount.signum() <= 0) {
+  private BigDecimal globalDiscountToCarry(Invoice invoice, List<OrderImport> imports)
+      throws JSONException {
+    List<BigDecimal> discounts = new ArrayList<>();
+    for (OrderImport item : imports) {
+      discounts.add(item.order.getEtgoTotalDiscount());
+    }
+    BigDecimal common = firstPositive(discounts);
+    if (common == null) {
+      return null;
+    }
+    boolean hadLines = hasProductLines(invoice);
+    String conflict = discountConflict(discounts, invoice.getEtgoTotalDiscount(), hadLines);
+    if (conflict != null) {
+      throw discountConflictRefusal(conflict, imports, invoice.getEtgoTotalDiscount(), hadLines);
+    }
+    return common;
+  }
+
+  /**
+   * Which popup conflict applies, or {@code null} when the discount can be carried (or there is
+   * nothing to carry): (a) {@value #CONFLICT_ORDERS_DIFFER} when the orders do not all have the
+   * same positive % (0 or none counts as different), (b) {@value #CONFLICT_INVOICE_OTHER_DISCOUNT}
+   * when the invoice already has another total discount, (c)
+   * {@value #CONFLICT_INVOICE_LINES_WITHOUT_DISCOUNT} when it has lines and no total discount:
+   * carrying it would discount those lines too. Checked in that order.
+   *
+   * @param orderDiscounts  the global discount of each selected order, {@code null} as 0
+   * @param invoiceDiscount the invoice's total discount before the call, {@code null} as 0
+   * @param hadLines        whether the invoice had lines (other than the discount line) before
+   */
+  static String discountConflict(List<BigDecimal> orderDiscounts, BigDecimal invoiceDiscount,
+      boolean hadLines) {
+    BigDecimal common = firstPositive(orderDiscounts);
+    if (common == null) {
+      return null;
+    }
+    for (BigDecimal discount : orderDiscounts) {
+      if (orZero(discount).compareTo(common) != 0) {
+        return CONFLICT_ORDERS_DIFFER;
+      }
+    }
+    BigDecimal current = orZero(invoiceDiscount);
+    if (current.signum() != 0) {
+      return current.compareTo(common) == 0 ? null : CONFLICT_INVOICE_OTHER_DISCOUNT;
+    }
+    return hadLines ? CONFLICT_INVOICE_LINES_WITHOUT_DISCOUNT : null;
+  }
+
+  private static BigDecimal firstPositive(List<BigDecimal> values) {
+    for (BigDecimal value : values) {
+      if (value != null && value.signum() > 0) {
+        return value;
+      }
+    }
+    return null;
+  }
+
+  private static BigDecimal orZero(BigDecimal value) {
+    return value == null ? BigDecimal.ZERO : value;
+  }
+
+  /**
+   * The 422 the caller turns into a question to the user: each order's %, the invoice's state
+   * before the call, the case, and how to import anyway.
+   */
+  static DocumentLineImport.ImportRefusal discountConflictRefusal(String conflict,
+      List<OrderImport> imports, BigDecimal invoiceDiscount, boolean hadLines)
+      throws JSONException {
+    JSONArray orders = new JSONArray();
+    for (OrderImport item : imports) {
+      orders.put(new JSONObject().put(PARAM_ORDER_ID, item.order.getId())
+          .put("documentNo", item.order.getDocumentNo())
+          .put("globalDiscount", orZero(item.order.getEtgoTotalDiscount())));
+    }
+    Map<String, Object> extra = new LinkedHashMap<>();
+    extra.put("conflict", conflict);
+    extra.put(PARAM_ORDERS, orders);
+    extra.put("invoice", new JSONObject().put("totalDiscount", orZero(invoiceDiscount))
+        .put("hadLines", hadLines));
+    extra.put("hint", "Nothing was imported. Ask the user whether to import these lines without "
+        + "carrying the global discount. To import anyway, resend the same call with "
+        + PARAM_CARRY_DISCOUNT + ":false: every line keeps its own line discount and the "
+        + "invoice's total discount is left unchanged.");
+    return new DocumentLineImport.ImportRefusal(DocumentLineImport.SC_UNPROCESSABLE,
+        ERROR_GLOBAL_DISCOUNT_CONFLICT, conflictMessage(conflict, imports, invoiceDiscount),
+        extra);
+  }
+
+  private static String conflictMessage(String conflict, List<OrderImport> imports,
+      BigDecimal invoiceDiscount) {
+    List<BigDecimal> discounts = new ArrayList<>();
+    for (OrderImport item : imports) {
+      discounts.add(item.order.getEtgoTotalDiscount());
+    }
+    String orderPct = percent(firstPositive(discounts));
+    if (CONFLICT_ORDERS_DIFFER.equals(conflict)) {
+      return "The selected orders have different global discounts (0% counts as different): "
+          + "no single total discount can be carried to the invoice";
+    }
+    if (CONFLICT_INVOICE_OTHER_DISCOUNT.equals(conflict)) {
+      return "The invoice already has a total discount of " + percent(invoiceDiscount)
+          + ", different from the orders' " + orderPct;
+    }
+    return "The invoice already has lines and no total discount: carrying the orders' "
+        + orderPct + " would discount those lines too";
+  }
+
+  private static String percent(BigDecimal value) {
+    BigDecimal stripped = orZero(value).stripTrailingZeros();
+    return (stripped.scale() < 0 ? stripped.setScale(0) : stripped).toPlainString() + "%";
+  }
+
+  /** Sets the carried % on the header; {@code null} leaves the header untouched. */
+  private void applyGlobalDiscount(Invoice invoice, BigDecimal discount) {
+    if (discount == null) {
       return;
     }
-    BigDecimal current = invoice.getEtgoTotalDiscount();
-    boolean none = current == null || current.signum() == 0;
-    if ((none && !hadLines) || (!none && current.compareTo(discount) == 0)) {
-      invoice.setEtgoTotalDiscount(discount);
-      OBDal.getInstance().save(invoice);
-      OBDal.getInstance().flush();
-    }
+    invoice.setEtgoTotalDiscount(discount);
+    OBDal.getInstance().save(invoice);
+    OBDal.getInstance().flush();
   }
 
   /** Whether the invoice holds an active line other than the total-discount line. */
@@ -514,8 +775,7 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
         && Boolean.TRUE.equals(order.getTransactionDocument().isReturn());
   }
 
-  private Order requireSourceOrder(Invoice invoice, JSONObject body) {
-    String orderId = requireParam(body, PARAM_ORDER_ID);
+  private Order requireSourceOrder(Invoice invoice, String orderId) {
     Order order = loadOrder(orderId);
     if (order == null) {
       throw DocumentLineImport.notFound("Order", orderId);
