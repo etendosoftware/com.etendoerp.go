@@ -199,6 +199,63 @@ class NeoTelemetryServiceTest {
     assertEquals(10, sink.events.get(2).getProperties().get("total"));
   }
 
+  /** ETP-5791: the contact KPI properties pass the allowlist with their declared types. */
+  @Test
+  void emitKeepsTheContactKpiPropertiesWithTheirTypes() {
+    RecordingSink sink = new RecordingSink();
+    NeoTelemetryService service = service(sink, 0L);
+
+    service.emit(NeoTelemetryEvents.BACKEND_CONTACT_TYPE_CHANGED, mapOf(
+        "account_id", "4028E6C72959682B01295A070852010D",
+        "channel", "rest_batch",
+        "flag_enabled", true,
+        "previous_is_customer", true,
+        "previous_is_vendor", false,
+        "is_customer", true,
+        "is_vendor", true,
+        "days_since_created", 12L,
+        "change_trigger", "category_change",
+        "change_origin", "system",
+        "types_source", "mixed"));
+
+    Map<String, Object> emitted = sink.last().getProperties();
+    assertEquals(11, emitted.size(), emitted.toString());
+    assertEquals("4028E6C72959682B01295A070852010D", emitted.get("account_id"));
+    assertEquals(true, emitted.get("flag_enabled"));
+    assertEquals(false, emitted.get("previous_is_vendor"));
+    assertEquals(12L, emitted.get("days_since_created"));
+    assertEquals("category_change", emitted.get("change_trigger"));
+    assertEquals("system", emitted.get("change_origin"));
+    assertEquals("mixed", emitted.get("types_source"));
+  }
+
+  /** The contact flags must be real booleans and the contact age a whole number within bounds. */
+  @Test
+  void emitDropsMistypedOrOutOfBoundsContactKpiValues() {
+    RecordingSink sink = new RecordingSink();
+    NeoTelemetryService service = service(sink, 0L);
+
+    service.emit(NeoTelemetryEvents.BACKEND_CONTACT_CREATED, mapOf(
+        "is_customer", "Y", "is_vendor", 1, "flag_enabled", "true", "status", "success"));
+    Map<String, Object> created = sink.last().getProperties();
+    assertFalse(created.containsKey("is_customer"));
+    assertFalse(created.containsKey("is_vendor"));
+    assertFalse(created.containsKey("flag_enabled"));
+
+    service.emit(NeoTelemetryEvents.BACKEND_CONTACT_TYPE_CHANGED,
+        mapOf("days_since_created", 0L));
+    assertEquals(0L, sink.last().getProperties().get("days_since_created"));
+    service.emit(NeoTelemetryEvents.BACKEND_CONTACT_TYPE_CHANGED,
+        mapOf("days_since_created", 36500L));
+    assertEquals(36500L, sink.last().getProperties().get("days_since_created"));
+    for (Object outOfBounds : new Object[] { -1L, 36501L, "12" }) {
+      service.emit(NeoTelemetryEvents.BACKEND_CONTACT_TYPE_CHANGED,
+          mapOf("days_since_created", outOfBounds));
+      assertFalse(sink.last().getProperties().containsKey("days_since_created"),
+          "must drop " + outOfBounds);
+    }
+  }
+
   @Test
   void measureBackendOperationEmitsWriteTimingWithoutRecordId() throws Exception {
     RecordingSink sink = new RecordingSink();

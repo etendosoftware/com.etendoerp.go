@@ -54,6 +54,7 @@ import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.ad.ui.Tab;
 
+import com.etendoerp.go.schemaforge.FinancialAccountHandler;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoExtensionDispatcher;
 import com.etendoerp.go.schemaforge.NeoExtensionRequest;
@@ -85,11 +86,15 @@ import com.etendoerp.go.schemaforge.selector.policy.NeoSelectorPolicy;
  *
  * <p>The same helper also answers the read side ({@link McpServerResolvedFields#enrichedOnRead},
  * ETP-5576): the keys a customization injects on every GET record; and the create directives a
- * customization declares ({@link McpServerResolvedFields#createDirectives}, ETP-5676).</p>
+ * customization declares ({@link McpServerResolvedFields#createDirectives}, ETP-5676); and the
+ * opposite of a server-resolved field — one the customization refuses a create without although
+ * {@code etendo_defaults} suggests a value ({@link McpServerResolvedFields#callerRequiredOnCreate},
+ * ETP-5473).</p>
  *
  * @covers com.etendoerp.go.mcp.McpServerResolvedFields
  * @covers com.etendoerp.go.schemaforge.SalesQuotationLineHandler
  * @covers com.etendoerp.go.schemaforge.SalesOrderLineHandler
+ * @covers com.etendoerp.go.schemaforge.FinancialAccountHandler
  */
 @DisplayName("ETP-5368 / ETP-5535 — server-resolved fields in view:\"create\" and etendo_create")
 class McpSchemaServerResolvedFieldsTest {
@@ -479,6 +484,122 @@ class McpSchemaServerResolvedFieldsTest {
     String view = add.group(1);
     assertTrue(body.indexOf("wrapAsTextContent(" + view + ")", add.end()) > 0,
         "the view the directives were added to (" + view + ") must be the one returned");
+  }
+
+  // ── ETP-5473: fields the customization requires although etendo_defaults suggests them ─────
+
+  private static SFEntity financialAccountEntity() {
+    SFSpec spec = mock(SFSpec.class);
+    when(spec.getName()).thenReturn("financial-account");
+    SFEntity sfEntity = mock(SFEntity.class);
+    when(sfEntity.getName()).thenReturn("account");
+    when(sfEntity.getETGOSFSpec()).thenReturn(spec);
+    when(sfEntity.getJavaQualifier()).thenReturn("financialAccountHeaderHandler");
+    return sfEntity;
+  }
+
+  /**
+   * {@code financial-account/account}: {@code etendo_defaults} answers both {@code currency} and
+   * {@code country}, but the handler refuses a create without a country. The real customization is
+   * read through the CREATE surface, and the create view lists {@code country} under
+   * {@code required} with no {@code serverDefaulted}, while {@code currency} stays server-defaulted.
+   */
+  @Test
+  @DisplayName("a field the customization requires on create is required, never serverDefaulted")
+  void callerRequiredFieldIsRequiredEvenWhenDefaultsSuggestIt() throws Exception {
+    SFEntity sfEntity = financialAccountEntity();
+    JSONArray fields = new JSONArray();
+    fields.put(field("currency", false));
+    fields.put(field("country", false));
+    fields.put(field("name", true));
+    Set<String> serverResolved = new HashSet<>(Set.of("currency", "country"));
+
+    try (MockedStatic<NeoExtensionDispatcher> dispatcher =
+        mockStatic(NeoExtensionDispatcher.class)) {
+      dispatcher.when(() -> NeoExtensionDispatcher.resolveOnly(any()))
+          .thenReturn(new FinancialAccountHandler());
+
+      Set<String> callerRequired = McpServerResolvedFields.callerRequiredOnCreate(sfEntity);
+      McpServerResolvedFields.markCallerRequired(fields, callerRequired);
+      serverResolved.removeAll(callerRequired);
+      JSONObject response = McpSchemaCreateView.buildResponse("financial-account", "account",
+          fields, serverResolved);
+
+      assertEquals(Set.of("country"), callerRequired);
+      assertTrue(fields.getJSONObject(1).getBoolean(McpSchemaFieldBuilder.KEY_USER_REQUIRED),
+          "the full dump must flag country userRequired too");
+      List<String> required = new ArrayList<>();
+      for (int i = 0; i < response.getJSONArray("required").length(); i++) {
+        JSONObject f = response.getJSONArray("required").getJSONObject(i);
+        assertFalse(f.has("serverDefaulted"), f.getString("name"));
+        required.add(f.getString("name"));
+      }
+      assertEquals(List.of("country", "name"), required);
+      JSONObject currency = response.getJSONArray("optional").getJSONObject(0);
+      assertEquals("currency", currency.getString("name"));
+      assertTrue(currency.getBoolean("serverDefaulted"));
+      dispatcher.verify(() -> NeoExtensionDispatcher.resolveOnly(
+          argThat((NeoExtensionRequest request) -> request.surface() == NeoExtensionSurface.CREATE)));
+    }
+  }
+
+  /**
+   * A customization that cannot be read, or declares nothing, requires nothing extra — every other
+   * entity's schema is unchanged — and marking with an empty set leaves the fields alone.
+   */
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("unusableCustomizations")
+  void callerRequiredOnCreateIsEmptyWhenTheCustomizationIsUnusable(String scenario,
+      Consumer<MockedStatic<NeoExtensionDispatcher>> stubDispatcher) throws Exception {
+    try (MockedStatic<NeoExtensionDispatcher> dispatcher =
+        mockStatic(NeoExtensionDispatcher.class)) {
+      stubDispatcher.accept(dispatcher);
+
+      Set<String> callerRequired =
+          McpServerResolvedFields.callerRequiredOnCreate(quotationLineEntity());
+      JSONArray fields = new JSONArray().put(field("country", false));
+      McpServerResolvedFields.markCallerRequired(fields, callerRequired);
+
+      assertTrue(callerRequired.isEmpty(), scenario);
+      assertFalse(fields.getJSONObject(0).getBoolean(McpSchemaFieldBuilder.KEY_USER_REQUIRED),
+          scenario);
+    }
+  }
+
+  @Test
+  @DisplayName("callerRequiredOnCreate of a null entity is empty; a NeoHandler declares none")
+  void callerRequiredOnCreateDefaults() {
+    assertTrue(McpServerResolvedFields.callerRequiredOnCreate(null).isEmpty());
+    assertTrue(DECLARES_NULL.callerRequiredCreateFields().isEmpty());
+    assertDoesNotThrow(() -> McpServerResolvedFields.markCallerRequired(null, Set.of("country")));
+  }
+
+  /**
+   * Both effects live in {@code handleSchema}, which needs a live DAL: the declared names are
+   * flagged on the field array every view is built from, and removed from the server-resolved set
+   * the create view partitions by — after the union, or the union would put them back.
+   */
+  @Test
+  @DisplayName("handleSchema flags caller-required fields and keeps them out of serverDefaulted")
+  void handleSchemaAppliesTheCallerRequiredFields() {
+    String body = McpSourceScanner.methodBody(McpSourceScanner.read(ROUTER), "handleSchema");
+
+    Matcher declared = Pattern.compile(
+        "(\\w+)\\s*=\\s*McpServerResolvedFields\\s*\\.\\s*callerRequiredOnCreate"
+            + "\\s*\\(\\s*sfEntity\\s*\\)").matcher(body);
+    assertTrue(declared.find(), "handleSchema must read the caller-required create fields");
+    String names = declared.group(1);
+    assertTrue(body.indexOf("markCallerRequired(fieldsArray, " + names + ")", declared.end()) > 0,
+        "the declared names must be flagged on fieldsArray");
+
+    Matcher union = UNION.matcher(body);
+    assertTrue(union.find());
+    String setVariable = union.group(1);
+    int removal = body.indexOf(setVariable + ".removeAll(" + names + ")", union.end());
+    assertTrue(removal > 0,
+        "the declared names must be removed from " + setVariable + " after the union");
+    assertTrue(removal < body.indexOf("buildResponse(", union.end()),
+        "the removal must happen before the create view is built");
   }
 
   private static SFEntity quotationLineEntity() {

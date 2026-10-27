@@ -236,6 +236,27 @@ public final class GoFeatureFlags {
   public static final String FLAG_BATCH_CALLOUT_SKIP_DISABLED = "batch-callout-skip-disabled";
 
   /**
+   * ETP-5791 — contact types driven by the contact category. On, a contact category
+   * ({@code C_BP_Group}) must declare Customer and/or Vendor/Creditor, a new contact inherits
+   * those types from its category unless the request sends them explicitly, a contact cannot be
+   * saved with no type, moving a contact to another category re-inherits both types, and a new
+   * tenant gets "Cliente/Proveedor" as its default contact category (decided when the tenant is
+   * handed to the user, pool tenants included). Off (the default), the customizations skip those
+   * rules, every write behaves as before the ticket and new tenants keep "Cliente" as default.
+   *
+   * <p><b>It gates behaviour, not schema.</b> The {@code EM_Etgo_Iscustomer} /
+   * {@code EM_Etgo_Isvendor} columns, their AD metadata, the {@code ETGO_SF_FIELD} rows and the
+   * reference/sample data ship unconditionally; with the flag off nothing enforces or reads them.
+   *
+   * <p><b>Environment level and backend-only.</b> Evaluated with an account-less context by
+   * {@code ContactTypeRules#isEnabled()}, the only place it is read (the onboarding's
+   * {@code OnboardingDefaultContactCategoryService} goes through it too); nothing in the browser reads it, so
+   * never add it to the web client's {@code flag-keys.js}. Locally
+   * {@code etendo.go.flags.contact-category-type} / {@code ETGO_FLAG_CONTACT_CATEGORY_TYPE}.
+   */
+  public static final String FLAG_CONTACT_CATEGORY_TYPE = "contact-category-type";
+
+  /**
    * ETP-5048 — whether the billing reconciliation is scheduled. Strictly off by default (and off
    * on every failure of this class): while it is off {@code BillingReconciliationScheduleStartup}
    * plants no process request, so turning it on takes effect at the next restart. The process also
