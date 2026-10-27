@@ -39,6 +39,8 @@ import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.domain.Preference;
 import org.openbravo.model.ad.system.Client;
 
+import com.etendoerp.go.common.MalformedJsonException;
+
 /**
  * Persists one personal list-column view per authenticated user, spec and entity.
  *
@@ -55,6 +57,16 @@ class NeoGridViewsService {
   private static final int MAX_ID_LENGTH = 128;
   private static final double MIN_WIDTH = 0;
   private static final double MAX_WIDTH = 1200;
+  private static final String AMBIGUOUS_SCOPE_MESSAGE = "Grid view preference scope is ambiguous";
+  private static final String INVALID_WIDTH_MESSAGE = "Grid view contains an invalid column width";
+  private static final String SURFACE_LIST = "list";
+  private static final String KEY_VERSION = "version";
+  private static final String KEY_SURFACE = "surface";
+  private static final String KEY_COLUMNS = "columns";
+  private static final String KEY_ID = "id";
+  private static final String KEY_VISIBLE = "visible";
+  private static final String KEY_ORDER = "order";
+  private static final String KEY_WIDTH = "width";
   private static final Pattern SAFE_SPEC_NAME = Pattern.compile("[A-Za-z0-9][A-Za-z0-9._-]{0,127}");
   private static final Pattern SAFE_ENTITY_NAME =
       Pattern.compile("[\\p{L}\\p{N}][\\p{L}\\p{N}._()\\-]{0,127}");
@@ -72,7 +84,7 @@ class NeoGridViewsService {
     if (preferences.size() != 1) {
       log.error("Found {} duplicate grid view preferences for spec {}, entity {}",
           preferences.size(), specName, entityName);
-      throw new IllegalStateException("Grid view preference scope is ambiguous");
+      throw new IllegalStateException(AMBIGUOUS_SCOPE_MESSAGE);
     }
     try {
       return validateAndCanonicalize(preferences.get(0).getSearchKey());
@@ -90,7 +102,7 @@ class NeoGridViewsService {
     String attribute = attributeFor(specName, entityName);
     List<Preference> existing = findScopedPreferences(attribute);
     if (existing.size() > 1) {
-      throw new IllegalStateException("Grid view preference scope is ambiguous");
+      throw new IllegalStateException(AMBIGUOUS_SCOPE_MESSAGE);
     }
     OBContext context = currentUserContext();
     Preferences.setPreferenceValue(attribute, canonical.toString(), false,
@@ -103,7 +115,7 @@ class NeoGridViewsService {
     validateScope(specName, entityName);
     List<Preference> preferences = findScopedPreferences(attributeFor(specName, entityName));
     if (preferences.size() > 1) {
-      throw new IllegalStateException("Grid view preference scope is ambiguous");
+      throw new IllegalStateException(AMBIGUOUS_SCOPE_MESSAGE);
     }
     for (Preference preference : preferences) {
       OBDal.getInstance().remove(preference);
@@ -117,85 +129,99 @@ class NeoGridViewsService {
     final JSONObject input;
     try {
       input = NeoRequestBodyParser.parseJsonObjectSafely(body);
-    } catch (Exception e) {
-      throw new IllegalArgumentException("Invalid grid view JSON body");
+    } catch (MalformedJsonException e) {
+      throw new IllegalArgumentException("Invalid grid view JSON body", e);
     }
-
     try {
-      rejectUnknownKeys(input, "version", "surface", "columns");
-      Object version = input.get("version");
-      Object surface = input.get("surface");
-      if (!(version instanceof Number) || ((Number) version).doubleValue() != 1
-          || !(surface instanceof String) || !"list".equals(surface)) {
-        throw new IllegalArgumentException("Unsupported grid view version or surface");
-      }
-      JSONArray columns = input.getJSONArray("columns");
+      rejectUnknownKeys(input, KEY_VERSION, KEY_SURFACE, KEY_COLUMNS);
+      requireSupportedVersionAndSurface(input);
+      JSONArray columns = input.getJSONArray(KEY_COLUMNS);
       if (columns.length() == 0 || columns.length() > MAX_COLUMNS) {
         throw new IllegalArgumentException("Grid view must contain between 1 and 300 columns");
       }
-      List<JSONObject> canonicalColumns = new ArrayList<>();
-      Set<String> ids = new HashSet<>();
-      Set<Integer> orders = new HashSet<>();
-      for (int index = 0; index < columns.length(); index++) {
-        JSONObject column = columns.getJSONObject(index);
-        rejectUnknownKeys(column, "id", "visible", "order", "width");
-        Object rawId = column.get("id");
-        if (!(rawId instanceof String)) {
-          throw new IllegalArgumentException("Grid view contains an invalid column id");
-        }
-        String id = (String) rawId;
-        if (id.length() == 0 || id.length() > MAX_ID_LENGTH || !ids.add(id)) {
-          throw new IllegalArgumentException("Grid view contains an invalid or duplicate column id");
-        }
-        Object rawVisible = column.get("visible");
-        Object orderValue = column.get("order");
-        if (!(rawVisible instanceof Boolean) || !(orderValue instanceof Number)) {
-          throw new IllegalArgumentException("Grid view contains an invalid column value");
-        }
-        boolean visible = (Boolean) rawVisible;
-        double rawOrder = ((Number) orderValue).doubleValue();
-        if (!Double.isFinite(rawOrder) || rawOrder < 0 || rawOrder >= columns.length()
-            || rawOrder != Math.rint(rawOrder)) {
-          throw new IllegalArgumentException("Grid view contains an invalid column order");
-        }
-        int order = (int) rawOrder;
-        if (!orders.add(order)) {
-          throw new IllegalArgumentException("Grid view contains duplicate column order values");
-        }
-        JSONObject normalized = new JSONObject();
-        normalized.put("id", id);
-        normalized.put("visible", visible);
-        normalized.put("order", order);
-        if (column.has("width")) {
-          Object widthValue = column.get("width");
-          if (!(widthValue instanceof Number)) {
-            throw new IllegalArgumentException("Grid view contains an invalid column width");
-          }
-          double width = ((Number) widthValue).doubleValue();
-          if (!Double.isFinite(width) || width < MIN_WIDTH || width > MAX_WIDTH
-              || width != Math.rint(width)) {
-            throw new IllegalArgumentException("Grid view contains an invalid column width");
-          }
-          normalized.put("width", width);
-        }
-        canonicalColumns.add(normalized);
-      }
-      canonicalColumns.sort((left, right) -> Integer.compare(left.optInt("order"), right.optInt("order")));
-      JSONArray sorted = new JSONArray();
-      for (JSONObject column : canonicalColumns) {
-        sorted.put(column);
-      }
-      if (orders.size() != columns.length()) {
-        throw new IllegalArgumentException("Grid view column order is incomplete");
-      }
-      JSONObject result = new JSONObject();
-      result.put("version", 1);
-      result.put("surface", "list");
-      result.put("columns", sorted);
-      return result;
+      return buildCanonicalView(columns);
     } catch (JSONException e) {
-      throw new IllegalArgumentException("Invalid grid view contract");
+      throw new IllegalArgumentException("Invalid grid view contract", e);
     }
+  }
+
+  private static void requireSupportedVersionAndSurface(JSONObject input) throws JSONException {
+    Object version = input.get(KEY_VERSION);
+    Object surface = input.get(KEY_SURFACE);
+    if (!(version instanceof Number) || ((Number) version).doubleValue() != 1
+        || !SURFACE_LIST.equals(surface)) {
+      throw new IllegalArgumentException("Unsupported grid view version or surface");
+    }
+  }
+
+  private static JSONObject buildCanonicalView(JSONArray columns) throws JSONException {
+    List<JSONObject> canonicalColumns = new ArrayList<>();
+    Set<String> ids = new HashSet<>();
+    Set<Integer> orders = new HashSet<>();
+    for (int index = 0; index < columns.length(); index++) {
+      JSONObject normalized = canonicalColumn(columns.getJSONObject(index), columns.length(), ids);
+      if (!orders.add(normalized.getInt(KEY_ORDER))) {
+        throw new IllegalArgumentException("Grid view contains duplicate column order values");
+      }
+      canonicalColumns.add(normalized);
+    }
+    canonicalColumns.sort(
+        (left, right) -> Integer.compare(left.optInt(KEY_ORDER), right.optInt(KEY_ORDER)));
+    JSONArray sorted = new JSONArray();
+    for (JSONObject column : canonicalColumns) {
+      sorted.put(column);
+    }
+    JSONObject result = new JSONObject();
+    result.put(KEY_VERSION, 1);
+    result.put(KEY_SURFACE, SURFACE_LIST);
+    result.put(KEY_COLUMNS, sorted);
+    return result;
+  }
+
+  /** Validates one column entry and returns its canonical form; registers its id in {@code ids}. */
+  private static JSONObject canonicalColumn(JSONObject column, int columnCount, Set<String> ids)
+      throws JSONException {
+    rejectUnknownKeys(column, KEY_ID, KEY_VISIBLE, KEY_ORDER, KEY_WIDTH);
+    Object rawId = column.get(KEY_ID);
+    if (!(rawId instanceof String)) {
+      throw new IllegalArgumentException("Grid view contains an invalid column id");
+    }
+    String id = (String) rawId;
+    if (id.length() == 0 || id.length() > MAX_ID_LENGTH || !ids.add(id)) {
+      throw new IllegalArgumentException("Grid view contains an invalid or duplicate column id");
+    }
+    Object rawVisible = column.get(KEY_VISIBLE);
+    Object rawOrder = column.get(KEY_ORDER);
+    if (!(rawVisible instanceof Boolean) || !(rawOrder instanceof Number)) {
+      throw new IllegalArgumentException("Grid view contains an invalid column value");
+    }
+    JSONObject normalized = new JSONObject();
+    normalized.put(KEY_ID, id);
+    normalized.put(KEY_VISIBLE, ((Boolean) rawVisible).booleanValue());
+    normalized.put(KEY_ORDER, validOrder(((Number) rawOrder).doubleValue(), columnCount));
+    if (column.has(KEY_WIDTH)) {
+      normalized.put(KEY_WIDTH, validWidth(column.get(KEY_WIDTH)));
+    }
+    return normalized;
+  }
+
+  private static int validOrder(double order, int columnCount) {
+    if (!Double.isFinite(order) || order < 0 || order >= columnCount || order != Math.rint(order)) {
+      throw new IllegalArgumentException("Grid view contains an invalid column order");
+    }
+    return (int) order;
+  }
+
+  private static double validWidth(Object widthValue) {
+    if (!(widthValue instanceof Number)) {
+      throw new IllegalArgumentException(INVALID_WIDTH_MESSAGE);
+    }
+    double width = ((Number) widthValue).doubleValue();
+    if (!Double.isFinite(width) || width < MIN_WIDTH || width > MAX_WIDTH
+        || width != Math.rint(width)) {
+      throw new IllegalArgumentException(INVALID_WIDTH_MESSAGE);
+    }
+    return width;
   }
 
   private static void rejectUnknownKeys(JSONObject object, String... allowed) throws JSONException {
