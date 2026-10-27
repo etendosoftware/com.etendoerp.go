@@ -421,6 +421,21 @@ final class McpActionsSection {
       return name == null ? "" : name.replaceAll("[^A-Za-z0-9]", "").toLowerCase(Locale.ROOT);
     }
 
+    /**
+     * Every action {@code hidden} withholds, with the reason it gives (ETP-5714): what the actions
+     * view lists under {@code withheldActions}, so an agent that cannot find an action in the
+     * catalogue learns it exists, is deliberately not run through MCP, and why.
+     *
+     * @return {@code action → reason}, in declaration order; empty when nothing is hidden
+     */
+    Map<String, String> withheldActions() {
+      Map<String, String> withheld = new LinkedHashMap<>();
+      for (String name : hidden) {
+        withheld.put(name, reasonOf(name));
+      }
+      return withheld;
+    }
+
     /** @return whether the MCP must not offer or run {@code action} */
     boolean isHidden(String action) {
       return action != null && hidden.contains(action);
