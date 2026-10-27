@@ -264,11 +264,12 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
     List<OrderRequest> requests = parseOrderRequests(body);
     boolean carryDiscount = parseCarryDiscount(body);
     List<OrderImport> imports = planImports(invoice, requests);
+    // Decided before the movement lines are locked and read, and BEFORE the lines of this call
+    // exist: they must not count as "the invoice had lines".
+    BigDecimal discount = carryDiscount ? globalDiscountToCarry(invoice, imports) : null;
     for (OrderImport item : imports) {
       item.batches = buildBatches(item.linesById, item.planned, item.sales);
     }
-    // Read BEFORE the lines of this call exist: they must not count as "the invoice had lines".
-    BigDecimal discount = carryDiscount ? globalDiscountToCarry(invoice, imports) : null;
 
     List<DocumentLineImport.ImportedLine> created = new ArrayList<>();
     for (OrderImport item : imports) {
@@ -308,11 +309,12 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
 
   /**
    * The orders of the request: {@code orders:[{orderId, lines?}]}, or the single
-   * {@code orderId} + {@code lines} of the original shape. Mixing both, an empty or oversized
+   * {@code orderId} + {@code lines} of the original shape; a key sent as JSON null counts as
+   * absent (MCP clients fill optional parameters with null). Mixing both, an empty or oversized
    * {@code orders}, an entry without {@code orderId} or the same order twice is a 400.
    */
   static List<OrderRequest> parseOrderRequests(JSONObject body) {
-    if (body == null || !body.has(PARAM_ORDERS)) {
+    if (!present(body, PARAM_ORDERS)) {
       return List.of(new OrderRequest(requireParam(body, PARAM_ORDER_ID),
           DocumentLineImport.parseRequestedLines(body)));
     }
@@ -321,7 +323,7 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
       throw badRequest(PARAM_ORDERS + " must be a list of 1 to " + MAX_ORDERS
           + " entries {orderId, lines?}");
     }
-    if (body.has(PARAM_ORDER_ID) || body.has(DocumentLineImport.KEY_LINES)) {
+    if (present(body, PARAM_ORDER_ID) || present(body, DocumentLineImport.KEY_LINES)) {
       throw badRequest("Send either orderId (+ lines) or orders, not both: the lines of each "
           + "order go inside its orders entry");
     }
@@ -340,6 +342,11 @@ public class ImportOrderLinesIntoInvoiceHandler extends AbstractInvoiceLineImpor
       requests.add(new OrderRequest(orderId, DocumentLineImport.parseRequestedLines(entry)));
     }
     return requests;
+  }
+
+  /** Whether {@code key} carries a value: a key sent as JSON null counts as absent. */
+  private static boolean present(JSONObject body, String key) {
+    return body != null && body.has(key) && !body.isNull(key);
   }
 
   /** {@code carryGlobalDiscount}: absent or null is {@code true}; a non-boolean is a 400. */

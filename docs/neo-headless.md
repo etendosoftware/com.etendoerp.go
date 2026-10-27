@@ -10241,7 +10241,7 @@ caller knows its id. Return orders and return documents are never listed.
 | `importDirectionMismatch` | a sales source into a purchase target or the reverse; a return document or a return ORDER (`DocumentType.isReturn`) is never importable into an invoice; the action of the other side (`importShipmentLines` on a purchase invoice) |
 | `importPriceListRequired` | the target invoice has no price list |
 | `importNoStorageBin` | a stockable line was planned but the target's warehouse has no active bin (receipt / shipment) |
-| `importInvalidLine` | an entry of `lines` is not understood, or a required id (`orderId`, `receiptId`, `shipmentId`) is missing (this one is a **400**) |
+| `importInvalidLine` | an entry of `lines` is not understood (422). As a **400**: a required id (`orderId`, `receiptId`, `shipmentId`) is missing; `importOrderLines` into an invoice gets `orders` next to `orderId` or top-level `lines`, an `orders` that is not an array, is empty or has more than 50 entries, an entry without `orderId`, the same order twice, or a `carryGlobalDiscount` that is not a boolean. A key sent as JSON `null` counts as absent (MCP clients fill optional parameters with null) |
 | `importDocumentNotFound` | the target or the source does not exist **for the caller's client** (**404**): a document of another client answers exactly like a missing one (admin mode reads across clients, so the delegates check `OBContext.getCurrentClient()` and the discovery queries filter by it) |
 | `importLineNotInDocument` | a `sourceLineId` that is not a line of the source |
 | `importNothingPending` | no `lines` and nothing left to import (names the covering drafts when that is why) |

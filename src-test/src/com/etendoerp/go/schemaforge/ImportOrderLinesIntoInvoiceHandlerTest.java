@@ -993,7 +993,8 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
 
   /**
    * {@code orders:[...]}: the lines of both orders in one call, the lines of all of them locked in
-   * one pass, the header's order reference left empty (orders mixed), and their shared % carried.
+   * one pass, and their shared % carried. The header link is set by the native process, which the
+   * probe does not run, so it is not asserted here.
    */
   @Test
   public void importOrderLines_severalOrders_importsTheLinesOfAll_inOneCall() throws Exception {
@@ -1015,8 +1016,6 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
     assertEquals(0, bd("3").compareTo(qtyOf(probe.batches.get(1).getJSONObject(0))));
     assertEquals("one lock pass for every order", 1,
         probe.calls.stream().filter("lock"::equals).count());
-    assertFalse("several orders: the header points at none", data.has("salesOrder"));
-    assertFalse(data.getBoolean("headerLinked"));
     verify(probe.invoice).setEtgoTotalDiscount(bd("10"));
   }
 
@@ -1085,6 +1084,10 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
       assertEquals(row[0], "importInvalidLine", errorCode(response));
       assertTrue(row[0], probe.calls.isEmpty());
     }
+    // MCP clients fill optional parameters with null: a null key is absent, never "both shapes".
+    NeoResponse nulls = run(scenario(), "importOrderLines", "{\"orderId\":null,\"lines\":null,"
+        + "\"orders\":[{\"orderId\":\"o1\"}],\"carryGlobalDiscount\":null}");
+    assertEquals("null keys count as absent", 200, nulls.getHttpStatus());
   }
 
   // ── what the native process produced ──────────────────────────────────────

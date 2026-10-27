@@ -216,9 +216,12 @@ final class DocumentLineImport {
     return requested;
   }
 
-  /** A body value as text, or {@code null} when absent or blank. */
+  /**
+   * A body value as text, or {@code null} when absent, JSON null or blank. Jettison's
+   * {@code optString} turns a JSON null into the text {@code "null"}, so it is checked first.
+   */
   static String text(JSONObject body, String key) {
-    String value = body == null ? null : body.optString(key, null);
+    String value = body == null || body.isNull(key) ? null : body.optString(key, null);
     return StringUtils.isBlank(value) ? null : value;
   }
 
