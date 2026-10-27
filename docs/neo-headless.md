@@ -3890,6 +3890,8 @@ not: `etendo_create` does not run it in shared code, so it is in the table below
 | who supervises the scanned invoice (ETP-5715) | a person drives the review modals, so every decision is taken before anything is sent | the **agent** must ask the user every `pendingDecisions` entry and create only after the whole summary is confirmed. The server cannot enforce that: `status`, the `supervision` block, the tool descriptions and the agent prompt say it; nothing blocks `etendo_batch` | an agent is not a modal. Same class of known risk as the free recipients of `etendo_send_document_email` (§4.12.39): a prompt, not a control |
 | reading the PDF (ETP-5715) | the browser uploads it to `/sws/copilot/file` and runs `/sws/copilot/executeTool`; the copilot module's HTTP client waits **without a timeout** | the MCP uses its **own client** to the same service (same properties, same two calls, same question and schema from the same configuration) with a **90 s** budget in total: a service that does not answer is `503 ocr_unavailable`, and a successful reading is **cached per staged document** so a retry does not pay again (§4.12.40) | an MCP call that waits forever on a paid external model holds a server thread |
 | the supplier's PDF as the invoice's main attachment (ETP-5715) | the panel attaches it to the new record right after the batch commits (`uploadAndMarkMainAttachment`, `?markAsMain=true`); a failure is non-fatal | the agent attaches the **staged** file with `etendo_request_attachment_upload {staged_document_id, main:true}` after creating the invoice (the same store, no second upload); if it never does, the invoice has no PDF — the same non-fatal outcome | the creation is the agent's `etendo_batch`, not a server flow, so the attach is a separate step |
+| clearing a required field on update (ETP-5726) | `PUT`/`PATCH` of a field AD declares mandatory but the table leaves nullable (e.g. an order's `scheduledDeliveryDate`) with `null` is **accepted** by REST single, `/batch` and the SPA's save path | **refused 422 `validation_error`** with `missingFields[{name,column,type,label}]` (label in the user's language), only for keys the caller actually sent as `null` or `""`; a key left out is never refused. Server-resolved fields, the primary key and the system columns are excluded | MCP-only; REST parity is a follow-up, not done. See §4.12.41 |
+| currency change of a draft order whose price list is in another currency (ETP-5726) — `purchase-order` and `sales-order` headers | accepted; the screen keeps the price list as it was (it does not reset it) | **refused 422** naming the requested currency and the price list, saying to send a price list in that currency or keep the current one. The stored price list stands when the body does not carry one (the SPA sends sparse bodies) | MCP-only, by decision: `OrderCurrencyPriceListGuard` acts on `context.isMcpOrigin()` + `PUT` and is called from each header's `handle()`. Etendo core's order completion (`C_Order_Post`) does **not** check the price list's currency either, so on REST the mismatch reaches the document. See §4.12.41 |
 
 This is a **declared** list, not an unknown one: the point is that the next person to touch either
 path can see what is deliberately unequal. Closing a row means adding the step to
@@ -11257,3 +11259,61 @@ failure, against a stub server on loopback — never the real service), `NeoStag
 `NeoAttachmentTargetTest` (`requireWriteAccess`), `McpOcrToolsTest` (both tools, the cache, `nothing_extracted`, `ocr_unavailable`, the receiver block, injection),
 `McpAttachmentToolsTest` (the staged attach), `McpToolRouterRouteTest`, `ToolRegistryGenerateToolsTest`, `McpToolAnnotationsTest`, `McpToolTitlesTest`,
 `McpAuthorizationServiceVectorTest`, `McpUsageTenantQaTest`; on the SPA side `useOcrConfig.vitest.jsx`, `OcrInlineUploader.vitest.jsx`, `ocrDocTypes.prefill.vitest.js`, `ocrDocTypes.test.js`.
+
+
+#### 4.12.41 Header validations on `etendo_update`: required fields (every spec) and the order currency (ETP-5726)
+
+Two refusals, both **MCP `etendo_update` only** — the MCP has to work like the screen, and an agent
+cannot see what a person would notice. Rule 1 (a required field cannot be cleared) applies to
+**every** `etendo_update` on **every** spec; only rule 2 (currency vs price list) is specific to the
+purchase-order and sales-order headers. Neither changes REST single, `/batch` or the SPA.
+
+**1. A required field cannot be cleared.** `McpWriteRequestSupport.rejectClearedMandatoryFields`,
+called once from `McpToolRouter.handleUpdate` right after the type coercion and before the entity
+pre-hook. Until now `scheduledDeliveryDate` (`C_Order.DatePromised`: mandatory in AD, nullable in
+the database) could be saved as `null` through the MCP, which the form never allows.
+
+- **Structural**, like `validateMandatoryFields`: the AD mandatory flag of the column plus the key
+  the caller sent. No spec, table or property name is involved.
+- Only keys **sent** as `null` or `""` are refused. A sparse update that does not mention the field
+  keeps the stored value. A key with a value passes.
+- Excluded: the fields the wrapper policy resolves on the server
+  (`NeoSelectorPolicy.serverResolvedFieldNames`), the primary key and the system/audit columns.
+  Read-only and excluded fields never get here: the write gates of `mapFieldsToDalProperties`
+  refuse them first.
+- Answer: 422 with the usual `validation_error` envelope: `detail` names each field,
+  `missingFields[{name, column, type, label}]` carries the label in the user's language
+  (`McpSchemaFieldBuilder.loadFieldLabels(adTab, NeoLanguage.currentCode())`, AD name as fallback)
+  and a `hint`.
+- **What this newly refuses on every spec:** a GET-then-PUT echo of a mandatory field that is already
+  `null` in legacy data, and an AD-mandatory field the form hides that an agent clears on purpose.
+  Both match the screen, which cannot save either. Refusing only when the stored value is non-null
+  is a possible follow-up.
+- **REST parity (follow-up, not done):** `NeoCrudHandler`/`/batch` still accept the clear. Closing
+  it there changes what the SPA and every integration may send, so it needs its own decision.
+
+**2. A currency change must stay coherent with the price list.** For a **draft** order, an MCP
+`PUT` whose `currency` differs from the stored one and whose price list (the body's `priceList`, else
+the **stored** one) is in another currency is refused 422: "The order's price list '<name>' is in
+<ISO>, not in the requested currency <ISO>", with a hint to send a price list of that currency in the
+same update or to keep the current currency. A same-currency price list, an order without a price
+list, an unchanged currency and a non-draft order pass.
+
+- Mechanism: `OrderCurrencyPriceListGuard.refuseCurrencyOutsidePriceList(context)`, a static helper
+  called from `PurchaseOrderHeaderHandler.handle()` and `SalesOrderHeaderHandler.handle()` (the
+  quotation header does not call it). It runs on the existing pre-hook and acts on
+  `context.isMcpOrigin()` + `PUT`, the way other handlers already branch on the origin; it is a
+  separate class, like `DocumentRateGuards`, so `AbstractOrderHeaderHandler` does not grow
+  (java:S1448). No new `NeoHandler` method was needed.
+- Why MCP-only: the screen does not reset the price list when the currency changes, and Etendo core
+  (`C_Order_Post`) does not validate the price list's currency at completion either; changing REST
+  would change what the SPA can save. Declared in the §4.12.9 table above.
+- Not covered on purpose: changing only the price list to one in another currency (the form's
+  price-list callout owns that, and GO blocks its currency write-back).
+
+**Accounting date (documented, unchanged).** The order's accounting date is the order date by
+design (ETP-4531, "unified date"): `mirrorAccountingDate` copies `orderDate` to `accountingDate` on
+every write. Changing the order date through the MCP therefore also changes the accounting date;
+no separate field is published. The agent prompts of `purchase-order` and `sales-order` say so.
+
+Tests: `McpWriteRequestSupportClearedMandatoryTest`, `OrderCurrencyPriceListGuardTest`.

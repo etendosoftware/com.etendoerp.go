@@ -128,6 +128,11 @@ public class PurchaseOrderHeaderHandler extends AbstractOrderHeaderHandler {
       return paymentMethodSelector;
     }
     AbstractOrderHeaderHandler.mirrorAccountingDate(context);
+    // ETP-5726: MCP only — a draft order's currency may not leave its price list in another one.
+    NeoResponse currencyRefusal = OrderCurrencyPriceListGuard.refuseCurrencyOutsidePriceList(context);
+    if (currencyRefusal != null) {
+      return currencyRefusal;
+    }
     // ETP-5840: exchange rate — recalculation, save and completion validation — before anything
     // with side effects runs.
     NeoResponse rateRefusal = DocumentRateGuards.guardOrderHeader(context, currencyRate);

@@ -1032,6 +1032,13 @@ public class McpToolRouter {
       return wrapAsErrorContent(McpWriteRequestSupport.buildInvalidDatesError(invalidDates));
     }
 
+    // ETP-5726: a required field cannot be emptied by sending null/"" (the screen cannot either).
+    JSONObject clearedError = McpWriteRequestSupport.rejectClearedMandatoryFields(filteredBody,
+        adTab, dalEntity, SYSTEM_COLUMNS, SELECTOR_REFS, sfEntity, NeoLanguage.currentCode(), log);
+    if (clearedError != null) {
+      return wrapAsErrorContent(clearedError);
+    }
+
     // Run the entity's NeoHandler pre-hook (parity with the REST CRUD path).
     // ETP-5415: routed through NeoExtensionDispatcher so this write is traced. Resolution and the
     // pre-hook contract are unchanged — any non-null response still short-circuits.
