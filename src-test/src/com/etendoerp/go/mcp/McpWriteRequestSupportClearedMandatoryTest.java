@@ -32,8 +32,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.AfterEach;
@@ -65,7 +63,6 @@ import com.etendoerp.go.schemaforge.selector.policy.NeoSelectorPolicy;
 @DisplayName("etendo_update rejects clearing a required field")
 class McpWriteRequestSupportClearedMandatoryTest {
 
-  private static final Logger LOG = LogManager.getLogger();
   private static final String TABLE = "Mock_Doc";
   private static final String LANG = "es_ES";
 
@@ -118,7 +115,7 @@ class McpWriteRequestSupportClearedMandatoryTest {
 
   private JSONObject reject(JSONObject body, Set<String> systemColumns) throws Exception {
     return McpWriteRequestSupport.rejectClearedMandatoryFields(body, adTab, entity, systemColumns,
-        new HashSet<>(), sfEntity, LANG, LOG);
+        new HashSet<>(), sfEntity, LANG);
   }
 
   private JSONObject reject(JSONObject body) throws Exception {
@@ -233,9 +230,9 @@ class McpWriteRequestSupportClearedMandatoryTest {
   @DisplayName("a null body or a null entity is a no-op")
   void nullInputsAreNoOps() throws Exception {
     assertNull(McpWriteRequestSupport.rejectClearedMandatoryFields(null, adTab, entity,
-        new HashSet<>(), new HashSet<>(), sfEntity, LANG, LOG));
+        new HashSet<>(), new HashSet<>(), sfEntity, LANG));
     assertNull(McpWriteRequestSupport.rejectClearedMandatoryFields(new JSONObject(), adTab, null,
-        new HashSet<>(), new HashSet<>(), sfEntity, LANG, LOG));
+        new HashSet<>(), new HashSet<>(), sfEntity, LANG));
   }
 
   // ── wiring: MCP update only ──────────────────────────────────────────────

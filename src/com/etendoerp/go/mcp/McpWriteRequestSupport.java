@@ -30,6 +30,7 @@ import javax.servlet.http.HttpServletResponse;
 
 
 import org.apache.commons.lang3.StringUtils;
+import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
@@ -68,6 +69,8 @@ import com.etendoerp.go.schemaforge.util.NeoValidationErrorResponseBuilder;
  * rather than an arbitrary one: no field carried along, no constructor needed.
  */
 final class McpWriteRequestSupport {
+
+  private static final Logger LOG = LogManager.getLogger(McpWriteRequestSupport.class);
 
   private static final String FK_ZERO = "0";
   /** Target entity name → whether it holds a record with id "0". See {@link #isExistingZeroRecord}. */
@@ -565,13 +568,12 @@ final class McpWriteRequestSupport {
    * @param sfEntity      the Schema Forge entity, consulted for the server-resolved field names;
    *                      may be {@code null}
    * @param langCode      the user's language, for the field label; blank falls back to the AD name
-   * @param log           logger for the best-effort item building
    * @return the 422 {@code validation_error} envelope naming each cleared field, or {@code null}
    *         when none was cleared
    */
   static JSONObject rejectClearedMandatoryFields(JSONObject body, Tab adTab, Entity dalEntity,
-      Set<String> systemColumns, Set<String> selectorRefs, SFEntity sfEntity, String langCode,
-      Logger log) throws JSONException {
+      Set<String> systemColumns, Set<String> selectorRefs, SFEntity sfEntity, String langCode)
+      throws JSONException {
     if (body == null || dalEntity == null) {
       return null;
     }
@@ -597,7 +599,7 @@ final class McpWriteRequestSupport {
         }
         cleared.put(info);
       } catch (Exception e) {
-        log.warn("Error building cleared field info for column {}: {}", col.getDBColumnName(),
+        LOG.warn("Error building cleared field info for column {}: {}", col.getDBColumnName(),
             e.getMessage());
       }
     }
