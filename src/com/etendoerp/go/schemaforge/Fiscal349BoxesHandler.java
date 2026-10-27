@@ -174,6 +174,7 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
   }
 
   JSONObject computeOperators(String orgId, int year, String period) throws Exception {
+    // tenant-ok: orgId is dispatch's resolveEffectiveOrg() (session org), never the request
     Organization org = OBDal.getInstance().get(Organization.class, orgId);
     if (org == null) {
       throw new OBException("Organization not found: " + orgId);

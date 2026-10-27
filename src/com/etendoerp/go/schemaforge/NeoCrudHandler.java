@@ -41,10 +41,8 @@ import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
 import org.openbravo.base.secureApp.VariablesSecureApp;
-import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
-import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
@@ -59,6 +57,7 @@ import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryService;
 import com.etendoerp.go.schemaforge.util.NeoCrudHelper;
 import com.etendoerp.go.schemaforge.util.NeoDistinctFetchSupport;
 import com.etendoerp.go.schemaforge.util.NeoErrorSanitizer;
+import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
 import com.etendoerp.go.schemaforge.util.NeoListIdentifierHelper;
 import com.etendoerp.go.schemaforge.util.NeoListReferenceError;
 import com.etendoerp.go.schemaforge.util.NeoLocatorIdentifierHelper;
@@ -102,7 +101,7 @@ class NeoCrudHandler {
    * name the client sends, the name the filter would look up and the name the DAL persists are
    * all the same string.
    */
-  private static final String FIELD_UPDATED = "updated";
+  static final String FIELD_UPDATED = "updated";
   private static final String MSG_BODY_REQUIRED = "Request body is required";
 
   /**
@@ -200,8 +199,9 @@ class NeoCrudHandler {
     // paginated set of distinct values for the given scalar field, so UI
     // filter selectors can show all possible options without loading the
     // entire dataset or inventing them client-side. Runs through the same
-    // tab-where + parent-filter + readable-client/org filtering as the
-    // standard list fetch, just with a different projection — and, since
+    // criteria + tab-where + parent-filter + readable-client/org filtering as
+    // the standard list fetch (so the options follow the filtered view), just
+    // with a different projection — and, since
     // ETP-5009, through the same customization read predicates
     // (NeoHandler#readPredicates), so it never offers a value only rows the
     // list hides carry. The pre/post hooks still do not run for it.
@@ -303,6 +303,12 @@ class NeoCrudHandler {
 
   private NeoResponse dispatchCrudRequestInternal(SFEntity entity, NeoContext neoContext,
       HttpServletRequest request, HttpServletResponse response) {
+    // ETP-5785: before ANY customization — its handle() may persist on its own — and once per
+    // write. handleDefault does not repeat it. See NeoWritePreflight.
+    NeoResponse refusal = NeoWritePreflight.refusalFor(neoContext);
+    if (refusal != null) {
+      return refusal;
+    }
     // ETP-5693: always through the hook pipeline, so an @NeoExtension on an entity without a
     // Java_Qualifier runs on REST too (ETP-5415 removed this early return from batch/MCP only).
     // handleWithDefaultStep falls back to handleDefault when nothing resolves.
@@ -311,6 +317,10 @@ class NeoCrudHandler {
 
   /**
    * Executes the default DAL-based handler for a CRUD request.
+   *
+   * <p>Reference ownership (ETP-5785) is NOT checked here: both callers that reach this for a write
+   * ({@code dispatchCrudRequestInternal} and {@code BatchService.createRecord}) run
+   * {@link NeoWritePreflight} before dispatching to a customization.
    */
   NeoResponse handleDefault(NeoContext context) {
     try {
@@ -351,7 +361,6 @@ class NeoCrudHandler {
       // otherwise have silently dropped. Reject instead, so the caller sees why nothing changed.
       return NeoReadOnlyFieldResponse.build(e);
     } catch (Exception e) {
-      log.error("Error in default handler for {} {}", context.getHttpMethod(), context.getEntityName(), e);
       // ETP-4793 / IMP-17: same reclassification as the RPC-failure branch in
       // checkJsonServiceResponse, for the case where the violation is thrown rather than swallowed.
       // The column is read off the raw chain because sanitize() maps any DB exception to a generic
@@ -360,19 +369,19 @@ class NeoCrudHandler {
         String column = NeoErrorSanitizer.notNullViolationColumn(e);
         String fieldName = resolvePropertyNameForColumn(column, context.getAdTab());
         if (fieldName != null) {
+          log.warn("Default handler for {} {} refused: missing required field {}",
+              context.getHttpMethod(), context.getEntityName(), fieldName);
+          NeoErrorResponses.rollbackUnlessBatchOwned();
           return buildMissingRequiredFieldsResponse(
               new MissingRequiredFieldsException(List.of(fieldName)));
         }
       }
-      // A unique-constraint violation is a data conflict, not a server failure — the
-      // client sent a value that already exists, which is a 409, never a 500. Reusing
-      // this same classification is also what keeps the message worded consistently
-      // with NeoErrorSanitizer.DUPLICATE_KEY_ERROR (see its javadoc for why the import
-      // UI depends on that exact wording).
-      int status = NeoErrorSanitizer.isDuplicateKeyViolation(e)
-          ? HttpServletResponse.SC_CONFLICT
-          : HttpServletResponse.SC_INTERNAL_SERVER_ERROR;
-      return NeoResponse.error(status, NeoErrorSanitizer.sanitize(e));
+      // ETP-5782: every other thrown failure is classified by what it is (SQLState, exception
+      // type), answered with its error code, logged once and rolled back. A unique-constraint
+      // violation stays the 409 worded as NeoErrorSanitizer.DUPLICATE_KEY_ERROR (the import UI
+      // depends on that exact wording); anything unrecognised stays a sanitized 500.
+      return NeoErrorResponses.fromException(e, context.getHttpMethod(),
+          "Default handler for " + context.getHttpMethod() + " " + context.getEntityName(), null);
     }
   }
 
@@ -711,10 +720,11 @@ class NeoCrudHandler {
     String route = NeoRecordVersion.routeOf(context.getHttpMethod(), context.getSpecName(),
         context.getEntityName(), context.getRecordId());
     if (!NeoRecordVersion.isStale(dalEntityName, context.getRecordId(), clientValue, route)) {
+      NeoRecordVersion.forCore(body, FIELD_UPDATED);
       return null;
     }
     NeoWriteRefusalLog.staleRecord(context, clientValue);
-    return buildStaleRecordResponse(STALE_RECORD_MESSAGE);
+    return NeoErrorResponses.staleRecord(STALE_RECORD_MESSAGE);
   }
 
   /**
@@ -770,36 +780,6 @@ class NeoCrudHandler {
     }
   }
 
-  /**
-   * ETP-5073 / DOC-04: the structured 409 returned when core's optimistic-locking check fails —
-   * somebody else saved this record between our read and our write.
-   *
-   * <p>A distinguishable code matters more than usual here: {@link #checkJsonServiceResponse}
-   * already answers 409 for a duplicate-key conflict, and the two need opposite remedies (change
-   * your data vs. re-read and reapply). The client keys the reload-and-reapply offer required by
-   * the ticket's first acceptance criterion off {@code error == "stale_record"}, never off status
-   * alone.
-   *
-   * @param translated core's already-translated conflict message, kept as {@code message} so a
-   *                   human reading the response still gets Etendo's own wording
-   */
-  private NeoResponse buildStaleRecordResponse(String translated) {
-    try {
-      JSONObject errorObj = new JSONObject();
-      errorObj.put(KEY_STATUS, HttpServletResponse.SC_CONFLICT);
-      errorObj.put(KEY_ERROR, "stale_record");
-      errorObj.put(KEY_MESSAGE, translated);
-      errorObj.put(KEY_DETAIL, "This record was modified by someone else after you read it. Your"
-          + " write was refused so their change is not lost.");
-      errorObj.put(KEY_HINT, "Re-read the record to get the current values and the fresh '"
-          + FIELD_UPDATED + "', reapply your changes on top of it, then retry.");
-      errorObj.put(KEY_SEE_ALSO, "docs(topic:\"updating records\")");
-      return NeoResponse.error(HttpServletResponse.SC_CONFLICT, errorObj);
-    } catch (Exception fallback) {
-      log.warn("Could not build stale_record body: {}", fallback.getMessage());
-      return NeoResponse.error(HttpServletResponse.SC_CONFLICT, translated);
-    }
-  }
 
   /**
    * Validates the response for error/validation-error status codes.
@@ -812,9 +792,21 @@ class NeoCrudHandler {
     }
     int status = innerResponse.optInt(JsonConstants.RESPONSE_STATUS, 0);
     if (status == JsonConstants.RPCREQUEST_STATUS_FAILURE) {
+      return checkJsonWriteFailure(innerResponse, adTab);
+    }
+    if (status == JsonConstants.RPCREQUEST_STATUS_VALIDATION_ERROR) {
+      // ETP-5323: delegated to NeoValidationErrorResponseBuilder (kept out of this class to stay
+      // under SonarQube's method-count limit, java:S1448) — see its javadoc for the full
+      // RPCREQUEST_STATUS_VALIDATION_ERROR body shape and rationale.
+      return NeoValidationErrorResponseBuilder.build(innerResponse);
+    }
+    return null;
+  }
+
+  private NeoResponse checkJsonWriteFailure(JSONObject innerResponse, Tab adTab) throws Exception {
       String errMsg = innerResponse.has(JsonConstants.RESPONSE_ERROR)
           ? innerResponse.getJSONObject(JsonConstants.RESPONSE_ERROR)
-              .optString("message", "Write operation failed")
+              .optString(KEY_MESSAGE, "Write operation failed")
           : "Write operation failed";
       String translated = OBMessageUtils.messageBD(errMsg);
       // ETP-5073 / DOC-04: a concurrent-modification conflict, classified before the generic
@@ -824,7 +816,7 @@ class NeoCrudHandler {
       // core skips translation and its bare message code survives intact. Only the untranslated
       // message is worth inspecting, for that same reason.
       if (NeoErrorSanitizer.isStaleRecordMessage(errMsg)) {
-        return buildStaleRecordResponse(translated);
+        return NeoErrorResponses.staleRecord(translated);
       }
       // ETP-4793 / IMP-17: a not-null violation means the caller omitted a value the table
       // requires — their request to fix, so it is a 400 naming the field, never a 500. It reaches
@@ -847,6 +839,17 @@ class NeoCrudHandler {
             .put(NeoProcessService.MESSAGE_KEYS, new JSONArray(periodKeys));
         return refusal;
       }
+      // ETP-5782: a failure NEO's write service captured carries the classification of its
+      // throwable — a trigger refusal (422), a row still in use (409), a deadlock (409), a lost
+      // connection (503)… Unique violations are left to the branch below, which keeps Etendo's own
+      // wording. Captured 5xx failures use the sanitized classification message. An uncaptured
+      // failure keeps the legacy answer; its class is never guessed from its text.
+      if (!NeoErrorSanitizer.isDuplicateKeyMessage(translated)) {
+        NeoResponse classified = NeoErrorResponses.fromClassifiedWriteFailure(innerResponse);
+        if (classified != null) {
+          return NeoListReferenceError.enrichServerError(classified);
+        }
+      }
       // DefaultJsonDataService catches a unique-constraint violation internally and
       // returns it as a normal RPC failure response (this branch), never as a thrown
       // exception — so NeoErrorSanitizer.isDuplicateKeyViolation(Throwable), which only
@@ -867,14 +870,6 @@ class NeoCrudHandler {
       return NeoResponse.error(httpStatus,
           NeoErrorSanitizer.stripRowDump(NeoErrorSanitizer.redactObjectReferences(
             NeoListReferenceError.enrich(translated))));
-    }
-    if (status == JsonConstants.RPCREQUEST_STATUS_VALIDATION_ERROR) {
-      // ETP-5323: delegated to NeoValidationErrorResponseBuilder (kept out of this class to stay
-      // under SonarQube's method-count limit, java:S1448) — see its javadoc for the full
-      // RPCREQUEST_STATUS_VALIDATION_ERROR body shape and rationale.
-      return NeoValidationErrorResponseBuilder.build(innerResponse);
-    }
-    return null;
   }
 
   /**
@@ -917,20 +912,17 @@ class NeoCrudHandler {
     // declares the stronger "must not populate or overwrite", and its fields are precisely the
     // ones NOT in the body, so merging the two made every such declaration a silent no-op.
     Set<String> suppressedCalloutFields = new HashSet<>();
-    String javaQualifier = context.getSfEntity() != null
-        ? context.getSfEntity().getJavaQualifier() : null;
-    if (StringUtils.isNotBlank(javaQualifier)) {
-      // Resolved statically, NOT through `servlet`. This runs in the DEFAULT create path, which
-      // BatchService.forBatchOnly() is allowed to reach with a null servlet — its javadoc states
-      // that contract ("only handleWithHooks touches the owning servlet"). Going through
-      // servlet.lookupHandler here broke it: every etendo_batch create on an entity with a
-      // Java_Qualifier died with an NPE on `this.servlet`. NeoServlet.lookupHandler is itself a
-      // one-line delegation to this same static, so the behaviour is identical on both paths
-      // (same precedent as NeoActionSurface's CDI_RESOLVER).
-      NeoHandler handler = NeoServletSupport.lookupHandler(javaQualifier);
-      if (handler != null) {
-        suppressedCalloutFields.addAll(handler.protectedCreateCalloutFields(context));
-      }
+    // Resolved statically, NOT through `servlet`. This runs in the DEFAULT create path, which
+    // BatchService.forBatchOnly() is allowed to reach with a null servlet — its javadoc states
+    // that contract ("only handleWithHooks touches the owning servlet"). Going through
+    // servlet.lookupHandler here broke it: every etendo_batch create on an entity with a
+    // Java_Qualifier died with an NPE on `this.servlet`. NeoServlet.lookupHandler is itself a
+    // one-line delegation to this same static, so the behaviour is identical on both paths
+    // (same precedent as NeoActionSurface's CDI_RESOLVER). Annotation first, like every hook.
+    NeoHandler handler = NeoHandlerLookup.forEntity(context.getSfEntity(),
+        NeoServletSupport::lookupHandler);
+    if (handler != null) {
+      suppressedCalloutFields.addAll(handler.protectedCreateCalloutFields(context));
     }
     executePostCalloutCascade(filteredBody, adTab, context, protectedCalloutFields,
         suppressedCalloutFields);
@@ -1140,6 +1132,9 @@ class NeoCrudHandler {
     // API key ("accountingDate") — filterWriteRequest already remapped every other field to
     // its DAL name via NeoFieldFilter#remapApiKeys, and DefaultJsonDataService only recognizes
     // DAL property names; injecting under the API key would silently no-op.
+    // Pending: move to the @NeoExtension of each entity that needs it (invoice, order and in/out
+    // headers) through a NeoHandler hook that declares the read-only fields its pre-hook writes on
+    // update; kept here until those entities are migrated (ETP-5588, skill neo-extension-migration).
     if (hadAccountingDate) {
       filteredBody.put(fieldFilter.resolveWritablePropName(FIELD_ACCOUNTING_DATE), accountingDateBeforeFilter);
     }
@@ -1193,13 +1188,14 @@ class NeoCrudHandler {
     }
   }
 
+  private static final String DISTINCT_SEARCH_PARAM = NeoDistinctFetchSupport.DISTINCT_SEARCH_PARAM;
   private static final int DISTINCT_DEFAULT_PAGE_SIZE = 50;
   private static final int DISTINCT_MAX_PAGE_SIZE = 200;
 
   /**
    * Handles a {@code ?_distinct=<field>} list GET: returns the paginated set of
    * distinct values of a single scalar property, reusing the same tab where
-   * clause and parent filter as the standard list fetch. {@link OBQuery}
+   * clause and parent filter as the standard list fetch. The query
    * automatically applies readable-client/organization/active filters from the
    * current {@link OBContext}.
    *
@@ -1207,8 +1203,11 @@ class NeoCrudHandler {
    * exactly as the list GET does, so the values offered are the values of the rows the list
    * can actually return — not those of rows a customization excludes from it.
    *
-   * @param context the request context, from which the customization is resolved; may be
-   *                {@code null}, in which case no read predicate is applied
+   * <p>ETP-5561: the grid {@code criteria} (date range, subset tab, advanced and column
+   * filters) now narrows the values too, so a dropdown offers only values present in the current
+   * view. The caller drops the filtered field's own condition to keep its alternatives listed.
+   *
+   * @param context the request context, from which the params and the customization are resolved
    */
   private NeoResponse handleDistinctFetch(Tab adTab, Map<String, String> queryParams,
       NeoContext context) {
@@ -1244,15 +1243,9 @@ class NeoCrudHandler {
     int requestedSize = (endRow >= startRow) ? (endRow - startRow + 1) : DISTINCT_DEFAULT_PAGE_SIZE;
     int pageSize = Math.max(1, Math.min(requestedSize, DISTINCT_MAX_PAGE_SIZE));
 
-    String parentId = queryParams.get(PARAM_PARENT_ID);
-    String search = queryParams.get("_distinctSearch");
-
-    // Build the same where clause used by the list GET (tab HQL where with
-    // @token@ substitution + parent filter for child tabs). Prefixed with
-    // "as e" so OBQuery picks up the alias for its own client/org filters.
-    String searchPredicate = NeoDistinctFetchSupport.buildDistinctSearchPredicate(prop, resolvedProperty, search);
-    List<String> predicates = NeoDistinctFetchSupport.buildDistinctPredicates(adTab,
-        resolvedProperty, parentId, searchPredicate);
+    String search = queryParams.get(DISTINCT_SEARCH_PARAM);
+    String searchPredicate = NeoDistinctFetchSupport.buildDistinctSearchPredicate(prop,
+        resolvedProperty, search);
 
     // For to-one associations (FK properties), project through the identifier
     // column (".id") instead of the bare association path, and reuse the exact
@@ -1266,21 +1259,16 @@ class NeoCrudHandler {
     try {
       // Inside the try: a customization whose predicate throws fails the fetch (500) instead of
       // silently offering the values of the rows it was meant to exclude.
-      NeoReadPredicates.addRestTo(predicates, context);
-      StringBuilder where = new StringBuilder(" as e where ")
-          .append(String.join(HQL_AND_OPERATOR, predicates))
-          .append(" order by ").append(projection).append(" asc");
+      // ETP-5561: the filtered set is the list's own — same params, same where clause — so the
+      // tab, the parent filter, the read predicates AND the grid `criteria` all narrow the values.
+      Map<String, String> params = NeoDistinctFetchSupport.toDistinctFilterParams(
+          buildDalParams(context, adTab, dalEntityName), context, startRow, pageSize);
 
-      OBQuery<BaseOBObject> obQuery = OBDal.getInstance()
-          .createQuery(dalEntityName, where.toString());
-      obQuery.setSelectClause("DISTINCT " + projection);
-      if (searchPredicate != null) {
-        obQuery.setNamedParameter("search", "%" + search.toLowerCase() + "%");
-      }
-      obQuery.setFirstResult(startRow);
-      obQuery.setMaxResult(pageSize + 1); // fetch one extra to detect hasMore
-
-      List<Object> results = obQuery.createQuery(Object.class).list();
+      Map<String, Object> searchParams = searchPredicate == null ? null
+          : Map.of("search", "%" + search.toLowerCase() + "%");
+      // fetch one extra row to detect hasMore
+      List<Object> results = NeoListAggregateQuery.forParams(params)
+          .distinctValues(projection, searchPredicate, searchParams, startRow, pageSize + 1);
       boolean hasMore = results.size() > pageSize;
       List<Object> page = hasMore ? new ArrayList<>(results.subList(0, pageSize)) : results;
 

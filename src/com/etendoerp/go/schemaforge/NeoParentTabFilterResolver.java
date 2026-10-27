@@ -46,8 +46,8 @@ import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
  * filter constrains this child tab, given the parent record?" — and none of them touch
  * {@code NeoCrudHandler}'s own instance state ({@code servlet}, {@code telemetryService}). Two
  * independent call sites in {@code NeoCrudHandler} share this logic: the ordinary list GET's where
- * clause ({@code applyWhereClause}) and the {@code ?_distinct=} fetch's predicate list
- * ({@code buildDistinctPredicates}).
+ * clause ({@code applyWhereClause}) and, since ETP-5561, the {@code ?_distinct=} fetch, which
+ * builds its filtered set through the same {@code buildDalParams}.
  *
  * <p>Moved verbatim — signatures, order of operations, exception handling and logging are
  * unchanged from their previous home in {@code NeoCrudHandler}.</p>

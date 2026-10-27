@@ -109,6 +109,7 @@ class Fiscal390SubmissionSupport {
           "Missing required param: id");
       return;
     }
+    // tenant-ok: request declId, but isOwned390() below 404s another client/org's declaration
     FiscalDecl decl = OBDal.getInstance().get(FiscalDecl.class, declId);
     if (!isOwned390(decl, year)) {
       owner.servlet.sendError(response, HttpServletResponse.SC_NOT_FOUND,
@@ -127,6 +128,7 @@ class Fiscal390SubmissionSupport {
       return;
     }
 
+    // tenant-ok: orgId is dispatch's resolveEffectiveOrg() (session org), never the request
     Organization org = OBDal.getInstance().get(Organization.class, orgId);
     AEAT303SubmissionService service = newSubmissionService();
     if (!testMode && !service.hasOrgCertificate(org)) {

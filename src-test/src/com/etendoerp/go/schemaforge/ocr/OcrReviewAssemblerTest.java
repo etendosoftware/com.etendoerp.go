@@ -205,6 +205,10 @@ class OcrReviewAssemblerTest {
     return new Candidate(id, name, "80");
   }
 
+  private static Candidate candidate(String id, String name, String similarity) {
+    return new Candidate(id, name, similarity);
+  }
+
   // ── vendor ─────────────────────────────────────────────────────────────────
 
   @Nested
@@ -463,6 +467,129 @@ class OcrReviewAssemblerTest {
       JSONObject product = decision(run(extraction(line("Tornillo", 1, 1, 21))), "line_0_product");
       assertEquals("suggested", product.getString("state"));
       assertEquals("P1", product.getJSONObject("suggestion").getString("id"));
+    }
+
+    @Test
+    @DisplayName("a single candidate at 96.7% similarity is auto-matched (ETP-5654)")
+    void autoMatchedBySimilarity() throws JSONException {
+      lookups.products = List.of(List.of(candidate("P1", "Tornillo M9", "96.7")));
+      JSONObject product = decision(run(extraction(line("Tornillo M8", 1, 1, 21))), "line_0_product");
+      assertEquals("auto_matched", product.getString("state"));
+      assertEquals("P1", product.getJSONObject("match").getString("id"));
+      assertFalse(product.getBoolean("blocking"));
+    }
+
+    @Test
+    @DisplayName("90 is the inclusive threshold: 90 is auto-matched, 89.9 is only suggested")
+    void similarityThreshold() throws JSONException {
+      lookups.products = List.of(List.of(candidate("P1", "Widget B", "90")),
+          List.of(candidate("P2", "Widget C", "89.9")));
+      JSONObject decisions = run(extraction(line("Widget A", 1, 1, 21), line("Widget A", 1, 1, 21)));
+      assertEquals("auto_matched", decision(decisions, "line_0_product").getString("state"));
+      assertEquals("suggested", decision(decisions, "line_1_product").getString("state"));
+    }
+
+    @Test
+    @DisplayName("the single highest candidate >= 90 wins even with a runner-up >= 90, in any order")
+    void similarityHighestWins() throws JSONException {
+      lookups.products = List.of(
+          List.of(candidate("P1", "Tornillo A", "96"), candidate("P2", "Tornillo B", "94")),
+          List.of(candidate("P3", "Perno B", "94"), candidate("P4", "Perno A", "96")),
+          List.of(candidate("P5", "Clavo A", "94"), candidate("P6", "Clavo B", "96"),
+              candidate("P7", "Clavo C", "94")));
+      JSONObject decisions = run(extraction(line("Tornillo", 1, 1, 21), line("Perno", 1, 1, 21),
+          line("Clavo", 1, 1, 21)));
+      String[] winners = {"P1", "P4", "P6"};
+      for (int i = 0; i < winners.length; i++) {
+        JSONObject product = decision(decisions, "line_" + i + "_product");
+        assertEquals("auto_matched", product.getString("state"));
+        assertEquals(winners[i], product.getJSONObject("match").getString("id"));
+      }
+    }
+
+    @Test
+    @DisplayName("a tie at the highest value (>= 90) is only a suggestion: the first candidate")
+    void similarityTieAtTop() throws JSONException {
+      lookups.products = List.of(
+          List.of(candidate("P1", "Arnes talla L", "96.7"), candidate("P2", "Arnes talla M", "96.7")),
+          List.of(candidate("P3", "A", "95"), candidate("P4", "B", "95"), candidate("P5", "C", "95")),
+          List.of(candidate("P6", "W1", "90"), candidate("P7", "W2", "90")),
+          List.of(candidate("P8", "W3", "85"), candidate("P9", "W4", "85")));
+      JSONObject decisions = run(extraction(line("Arnes talla N", 1, 1, 21), line("Tornillo", 1, 1, 21),
+          line("Widget", 1, 1, 21), line("Widget", 1, 1, 21)));
+      String[] firsts = {"P1", "P3", "P6", "P8"};
+      for (int i = 0; i < firsts.length; i++) {
+        JSONObject product = decision(decisions, "line_" + i + "_product");
+        assertEquals("suggested", product.getString("state"));
+        assertEquals(firsts[i], product.getJSONObject("suggestion").getString("id"));
+      }
+    }
+
+    @Test
+    @DisplayName("a missing, blank or non-numeric similarity never auto-matches")
+    void similarityUnparseable() throws JSONException {
+      lookups.products = List.of(List.of(candidate("P1", "Widget B", null)),
+          List.of(candidate("P2", "Widget B", "")), List.of(candidate("P3", "Widget B", "96.7%")),
+          List.of(candidate("P4", "Widget B", "abc")));
+      JSONObject decisions = run(extraction(line("Widget A", 1, 1, 21), line("Widget A", 1, 1, 21),
+          line("Widget A", 1, 1, 21), line("Widget A", 1, 1, 21)));
+      for (int i = 0; i < 4; i++) {
+        assertEquals("suggested", decision(decisions, "line_" + i + "_product").getString("state"));
+      }
+    }
+
+    @Test
+    @DisplayName("an unparseable similarity is ignored for ranking: the valid one is ranked and wins")
+    void similarityUnparseableMixedWithValid() throws JSONException {
+      lookups.products = List.of(
+          List.of(candidate("P1", "Servicio A", "96.7%"), candidate("P2", "Servicio B", "92")),
+          List.of(candidate("P3", "Perno A", "abc"), candidate("P4", "Perno B", "92")),
+          List.of(candidate("P5", "Clavo A", "92"), candidate("P6", "Clavo B", "abc")));
+      JSONObject decisions = run(extraction(line("Servicio", 1, 1, 21), line("Perno", 1, 1, 21),
+          line("Clavo", 1, 1, 21)));
+      String[] winners = {"P2", "P4", "P5"};
+      for (int i = 0; i < winners.length; i++) {
+        JSONObject product = decision(decisions, "line_" + i + "_product");
+        assertEquals("auto_matched", product.getString("state"));
+        assertEquals(winners[i], product.getJSONObject("match").getString("id"));
+      }
+    }
+
+    @Test
+    @DisplayName("two products with the very same name stay ambiguous at 100: suggested, first one")
+    void ambiguousExactIsNotAutoMatchedBySimilarity() throws JSONException {
+      lookups.products = List.of(
+          List.of(candidate("P1", "Tornillo", "100"), candidate("P2", "Tornillo", "100")));
+      JSONObject product = decision(run(extraction(line("Tornillo", 1, 1, 21))), "line_0_product");
+      assertEquals("suggested", product.getString("state"));
+      assertEquals("P1", product.getJSONObject("suggestion").getString("id"));
+      assertTrue(product.getBoolean("blocking"));
+      assertFalse(product.has("match"));
+    }
+
+    @Test
+    @DisplayName("a unique exact name beats a higher similarity listed before it")
+    void exactNameBeatsHigherSimilarity() throws JSONException {
+      lookups.products = List.of(
+          List.of(candidate("P1", "Tornillo M9", "99.5"), candidate("P2", "Tornillo M8", "91")));
+      JSONObject product = decision(run(extraction(line("Tornillo M8", 1, 1, 21))), "line_0_product");
+      assertEquals("auto_matched", product.getString("state"));
+      assertEquals("P2", product.getJSONObject("match").getString("id"));
+    }
+
+    @Test
+    @DisplayName("a blank description has no exact name, so the similarity path still runs (ETP-5654)")
+    void blankDescriptionFallsBackToSimilarity() throws JSONException {
+      // Intentional per the ETP-5654 spec: with no exact name to compare, a single candidate at
+      // >= 90 similarity is taken automatically.
+      lookups.products = List.of(List.of(candidate("P1", "Tornillo", "99")),
+          List.of(candidate("P2", "Tuerca", "99")));
+      JSONObject decisions = run(extraction(line("", 1, 1, 21), line(null, 1, 1, 21)));
+      for (int i = 0; i < 2; i++) {
+        JSONObject product = decision(decisions, "line_" + i + "_product");
+        assertEquals("auto_matched", product.getString("state"));
+        assertEquals(i == 0 ? "P1" : "P2", product.getJSONObject("match").getString("id"));
+      }
     }
 
     @Test

@@ -138,8 +138,10 @@ public interface NeoHandler {
    * compares the value the caller is already shown.</p>
    *
    * <p><b>Where it is applied.</b> MCP {@code etendo_list} only, and the response says so when it
-   * happens. The REST list does not consult it — the SPA filters on the stored columns directly —
-   * a divergence declared in {@code docs/neo-headless.md} §4.12.9.</p>
+   * happens, in a {@code filterAliases} note that names the target only when the spec exposes it
+   * (an excluded target is never named: the caller could not filter on it). The REST list does
+   * not consult it — the SPA filters on the stored columns directly — a divergence declared in
+   * {@code docs/neo-headless.md} §4.12.9.</p>
    *
    * @param context the read context: spec, entity, {@code GET}, no record id, the query params
    * @return displayed property name to the property the filter is evaluated on; empty by default
@@ -213,6 +215,28 @@ public interface NeoHandler {
    */
   default Set<String> serverResolvedCreateFields() {
     return Collections.emptySet();
+  }
+
+  /**
+   * Fills create-body defaults that this customization can derive from the body alone, on the
+   * channels whose mandatory-field pre-check runs <b>before</b> the pre-hook (ETP-5710).
+   *
+   * <p>MCP {@code etendo_create} validates mandatory fields before it dispatches the pre-hook
+   * ({@link #handle}), so a default that only {@code handle()} fills is refused there with a 422
+   * the REST channels never produce. The MCP create path therefore calls this method on the
+   * resolved customization right before that pre-check. The default is a no-op, so an entity that
+   * does not override it behaves exactly as before.</p>
+   *
+   * <p>Contract: <b>idempotent</b> (the same logic may also run later from {@code handle()}),
+   * <b>never overwrites</b> a value the caller sent, and <b>never throws</b> for missing data —
+   * when the value cannot be established it abstains and leaves the body untouched, so the
+   * pre-check still reports the field. The body is {@link NeoContext#getRequestBody()}, mutated
+   * in place.</p>
+   *
+   * @param context a CRUD {@code POST} create context carrying the live request body
+   */
+  default void resolveServerCreateFields(NeoContext context) {
+    // no-op by default
   }
 
   /**

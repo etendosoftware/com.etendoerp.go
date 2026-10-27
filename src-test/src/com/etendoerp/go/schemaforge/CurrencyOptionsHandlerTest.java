@@ -17,10 +17,15 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.atMostOnce;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -35,14 +40,27 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.MockedStatic;
+import org.mockito.Mockito;
+import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.OBCurrencyUtils;
+import org.openbravo.model.ad.system.Client;
+import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.model.common.invoice.Invoice;
 
 /**
  * Pure unit tests for {@link CurrencyOptionsHandler}: the Connection-based private logic that
  * builds currency options, queries direct/inverse rates, and resolves ISO codes. Reached via
- * reflection (mirroring {@code SelectorQueryExecutorTest}). All JDBC objects are Mockito mocks; the
- * {@code handle}/{@code afterHandle} OBContext/OBDal paths are out of scope (DB-dependent).
+ * reflection (mirroring {@code SelectorQueryExecutorTest}). All JDBC objects are Mockito mocks.
+ * {@code handle} is covered for how it scopes the rates (ETP-5840: rate type from the context
+ * attribute, {@code date} and {@code organization} parameters, 400 on a bad date), with
+ * OBContext/OBDal/OBCurrencyUtils statically mocked.
+ *
+ * @covers com.etendoerp.go.schemaforge.CurrencyOptionsHandler
  */
 public class CurrencyOptionsHandlerTest {
 
@@ -135,7 +153,7 @@ public class CurrencyOptionsHandlerTest {
     verify(conn).prepareStatement(sqlCaptor.capture());
     String sql = sqlCaptor.getValue();
     assertTrue(sql.contains("cr.ad_client_id IN ('0', ?)"));
-    assertTrue(sql.contains("ORDER BY c.iso_code, cr.ad_client_id ASC"));
+    assertTrue(sql.contains("ORDER BY c.iso_code, cr.ad_client_id ASC, cr.validfrom ASC"));
   }
 
   @Test
@@ -154,7 +172,7 @@ public class CurrencyOptionsHandlerTest {
     verify(conn).prepareStatement(sqlCaptor.capture());
     String sql = sqlCaptor.getValue();
     assertTrue(sql.contains("cr.ad_client_id IN ('0', ?)"));
-    assertTrue(sql.contains("ORDER BY c.iso_code, cr.ad_client_id ASC"));
+    assertTrue(sql.contains("ORDER BY c.iso_code, cr.ad_client_id ASC, cr.validfrom ASC"));
   }
 
   @Test
@@ -317,8 +335,16 @@ public class CurrencyOptionsHandlerTest {
   // buildCurrencyOptions (full flow via mocked OBDal connection)
   // ---------------------------------------------------------------
 
+  /**
+   * ETP-5840: the org currency comes first ({@code rate 1}, {@code isOrgCurrency: true}), then, by
+   * ISO code, every currency with a conversion range to or from it on ANY date — one with a rate
+   * for the date carries it, one whose ranges miss the date is listed with {@code rate: null}, so it
+   * can be picked. Currencies with no range at all are filtered out by the selectable query, which
+   * is scoped by client, org and org currency.
+   */
   @Test
-  public void testBuildCurrencyOptionsPrependsOrgCurrencyWithRateOne() throws Exception {
+  public void testBuildCurrencyOptionsListsRangedCurrenciesWithNullRateWhenMissing()
+      throws Exception {
     CurrencyOptionsHandler handler = new CurrencyOptionsHandler();
     Connection conn = mock(Connection.class);
 
@@ -343,34 +369,181 @@ public class CurrencyOptionsHandlerTest {
     when(rsIsoOrg.getString(1)).thenReturn("USD");
     when(psIsoOrg.executeQuery()).thenReturn(rsIsoOrg);
 
-    // resolveIsoCode for EUR-ID → "EUR"
-    PreparedStatement psIsoEur = mock(PreparedStatement.class);
-    ResultSet rsIsoEur = mock(ResultSet.class);
-    when(rsIsoEur.next()).thenReturn(true);
-    when(rsIsoEur.getString(1)).thenReturn("EUR");
-    when(psIsoEur.executeQuery()).thenReturn(rsIsoEur);
+    // selectable currencies (with a range on any date, by ISO code) → EUR (rated), GBP (range not
+    // covering the date), USD (the org's, skipped)
+    PreparedStatement psCurrencies = mock(PreparedStatement.class);
+    ResultSet rsCurrencies = mock(ResultSet.class);
+    when(rsCurrencies.next()).thenReturn(true, true, true, false);
+    when(rsCurrencies.getString(1)).thenReturn("EUR-ID", "GBP-ID", "USD-ID");
+    when(rsCurrencies.getString(2)).thenReturn("EUR", "GBP", "USD");
+    when(psCurrencies.executeQuery()).thenReturn(rsCurrencies);
 
-    when(conn.prepareStatement(anyString())).thenReturn(psDirect, psInverse, psIsoOrg, psIsoEur);
+    when(conn.prepareStatement(anyString())).thenReturn(psDirect, psInverse, psIsoOrg, psCurrencies);
 
-    try (org.mockito.MockedStatic<org.openbravo.dal.service.OBDal> obDalMock =
-             org.mockito.Mockito.mockStatic(org.openbravo.dal.service.OBDal.class)) {
-      org.openbravo.dal.service.OBDal obDal = mock(org.openbravo.dal.service.OBDal.class);
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal obDal = mock(OBDal.class);
       when(obDal.getConnection()).thenReturn(conn);
-      obDalMock.when(org.openbravo.dal.service.OBDal::getInstance).thenReturn(obDal);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
 
       JSONArray result = invokeBuildCurrencyOptions(handler, "USD-ID", "org-1", "client-1",
           java.time.LocalDate.of(2026, 1, 15));
 
-      assertEquals(2, result.length());
-      // org currency first
-      assertEquals("USD-ID", result.getJSONObject(0).getString("id"));
-      assertEquals("USD", result.getJSONObject(0).getString("isoCode"));
-      assertEquals(1.0, result.getJSONObject(0).getDouble("rate"), 0.0001);
-      // then EUR
-      assertEquals("EUR-ID", result.getJSONObject(1).getString("id"));
-      assertEquals("EUR", result.getJSONObject(1).getString("isoCode"));
-      assertEquals(1.16, result.getJSONObject(1).getDouble("rate"), 0.0001);
+      assertEquals(3, result.length());
+      JSONObject org = result.getJSONObject(0);
+      assertEquals("USD-ID", org.getString("id"));
+      assertEquals("USD", org.getString("isoCode"));
+      assertEquals(1.0, org.getDouble("rate"), 0.0001);
+      assertTrue(org.getBoolean("isOrgCurrency"));
+      JSONObject eur = result.getJSONObject(1);
+      assertEquals("EUR-ID", eur.getString("id"));
+      assertEquals(1.16, eur.getDouble("rate"), 0.0001);
+      assertFalse(eur.getBoolean("isOrgCurrency"));
+      JSONObject gbp = result.getJSONObject(2);
+      assertEquals("GBP", gbp.getString("isoCode"));
+      assertTrue(gbp.isNull("rate"));
+      assertFalse(gbp.getBoolean("isOrgCurrency"));
+      verify(psCurrencies).setString(1, "client-1");
+      verify(psCurrencies).setString(2, "client-1");
+      verify(psCurrencies).setString(3, "org-1");
+      verify(psCurrencies).setString(4, "USD-ID");
+      verify(psCurrencies).setString(5, "USD-ID");
+      ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
+      verify(conn, Mockito.times(4)).prepareStatement(sql.capture());
+      assertTrue("only currencies with a conversion range are selectable",
+          sql.getAllValues().get(3).contains("EXISTS (SELECT 1 FROM c_conversion_rate cr"));
     }
+  }
+
+  // ---------------------------------------------------------------
+  // handle: which organization, client and date scope the rates (ETP-5840)
+  // ---------------------------------------------------------------
+
+  private static final String SESSION_ORG = "session-org";
+  private static final String SESSION_CLIENT = "session-client";
+
+  /** One handle() run: what it resolved is read back from the statics and the bound statements. */
+  private static final class HandleRun {
+    final OBDal dal = mock(OBDal.class);
+    final OBContext obContext = mock(OBContext.class);
+    final PreparedStatement ps = mock(PreparedStatement.class);
+
+    HandleRun() throws SQLException {
+      Organization sessionOrg = mock(Organization.class);
+      when(sessionOrg.getId()).thenReturn(SESSION_ORG);
+      Client sessionClient = mock(Client.class);
+      when(sessionClient.getId()).thenReturn(SESSION_CLIENT);
+      when(obContext.getCurrentOrganization()).thenReturn(sessionOrg);
+      when(obContext.getCurrentClient()).thenReturn(sessionClient);
+      when(obContext.getReadableOrganizations()).thenReturn(new String[] { SESSION_ORG, "org-2" });
+      ResultSet empty = mock(ResultSet.class);
+      when(empty.next()).thenReturn(false);
+      when(ps.executeQuery()).thenReturn(empty);
+      Connection conn = mock(Connection.class);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      when(dal.getConnection()).thenReturn(conn);
+    }
+
+    NeoResponse handle(NeoContext ctx) {
+      try (MockedStatic<OBContext> obCtx = Mockito.mockStatic(OBContext.class);
+           MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class);
+           MockedStatic<OBCurrencyUtils> currencies = Mockito.mockStatic(OBCurrencyUtils.class)) {
+        obCtx.when(OBContext::getOBContext).thenReturn(obContext);
+        obDal.when(OBDal::getInstance).thenReturn(dal);
+        currencies.when(() -> OBCurrencyUtils.getOrgCurrency(anyString())).thenReturn("EUR-ID");
+        NeoResponse response = new CurrencyOptionsHandler().handle(ctx);
+        ArgumentCaptor<String> org = ArgumentCaptor.forClass(String.class);
+        currencies.verify(() -> OBCurrencyUtils.getOrgCurrency(org.capture()), atMostOnce());
+        resolvedOrg = org.getAllValues().isEmpty() ? null : org.getValue();
+        return response;
+      }
+    }
+
+    /** The organization whose currency handle() asked for, or {@code null} when it did not. */
+    String resolvedOrg;
+  }
+
+  private static NeoContext currencyOptions(String recordId, Map<String, String> query,
+      JSONObject body, DocumentCurrencyRate.RateType type) {
+    NeoContext ctx = NeoContext.builder().httpMethod("GET").endpointType(NeoEndpointType.ACTION)
+        .fieldName("currencyOptions").recordId(recordId).queryParams(query).requestBody(body)
+        .build();
+    if (type != null) {
+      ctx.setAttribute(DocumentCurrencyRate.ATTR_RATE_TYPE, type);
+    }
+    return ctx;
+  }
+
+  /**
+   * Table-driven: the organization, client and date the rates are scoped by. A new record uses the
+   * {@code organization} parameter only when the role
+   * can read it, else the session's, and the {@code date} parameter (query string or, from MCP, the
+   * action body) else today. A saved document uses ITS organization and client and the reference
+   * date its customization declares ({@code accountingDate} for an invoice), unless {@code date}
+   * asks for another.
+   */
+  @Test
+  public void testHandleScopesRatesByTheResolvedOrganizationClientAndDate() throws Exception {
+    Organization docOrg = mock(Organization.class);
+    when(docOrg.getId()).thenReturn("doc-org");
+    Client docClient = mock(Client.class);
+    when(docClient.getId()).thenReturn("doc-client");
+    Invoice invoice = mock(Invoice.class);
+    when(invoice.get("organization")).thenReturn(docOrg);
+    when(invoice.get("client")).thenReturn(docClient);
+    when(invoice.get(Invoice.PROPERTY_ACCOUNTINGDATE))
+        .thenReturn(java.sql.Date.valueOf("2026-02-28"));
+    when(invoice.get(Invoice.PROPERTY_INVOICEDATE)).thenReturn(java.sql.Date.valueOf("2026-02-01"));
+    DocumentCurrencyRate.RateType invoiceType = SalesInvoiceHeaderHandler.RATE_TYPE;
+    String today = java.time.LocalDate.now().toString();
+
+    Object[][] cases = {
+        // name, recordId, query, body, rate type, expected org, client, date
+        { "new, readable org and date params", "new",
+            Map.of("organization", "org-2", "date", "2026-03-31"), null, null,
+            "org-2", SESSION_CLIENT, "2026-03-31" },
+        { "new, unreadable org param falls back to session", "new",
+            Map.of("organization", "other-org"), null, null,
+            SESSION_ORG, SESSION_CLIENT, today },
+        { "new, date in the action body (MCP)", null, null,
+            new JSONObject().put("date", "2026-04-01"), invoiceType,
+            SESSION_ORG, SESSION_CLIENT, "2026-04-01" },
+        { "saved invoice, accounting date", "inv-1", null, null, invoiceType,
+            "doc-org", "doc-client", "2026-02-28" },
+        { "saved invoice, date param wins", "inv-1", Map.of("date", "2026-05-05"), null,
+            invoiceType, "doc-org", "doc-client", "2026-05-05" },
+    };
+    for (Object[] c : cases) {
+      String name = (String) c[0];
+      HandleRun run = new HandleRun();
+      when(run.dal.get(Invoice.ENTITY_NAME, "inv-1")).thenReturn(invoice);
+      @SuppressWarnings("unchecked")
+      NeoResponse response = run.handle(currencyOptions((String) c[1], (Map<String, String>) c[2],
+          (JSONObject) c[3], (DocumentCurrencyRate.RateType) c[4]));
+
+      assertEquals(name, 200, response.getHttpStatus());
+      JSONArray data = response.getBody().getJSONObject("response").getJSONArray("data");
+      assertTrue(name, data.getJSONObject(0).getBoolean("isOrgCurrency"));
+      assertEquals(name, c[5], run.resolvedOrg);
+      verify(run.ps, atLeastOnce()).setString(anyInt(), eq((String) c[6]));
+      verify(run.ps, atLeastOnce()).setDate(anyInt(), eq(java.sql.Date.valueOf((String) c[7])));
+    }
+  }
+
+  /** A {@code date} that is not {@code yyyy-MM-dd} is the caller's error (400); a missing document is 404. */
+  @Test
+  public void testHandleAnswers400ForABadDateAnd404ForAMissingDocument() throws Exception {
+    HandleRun badDate = new HandleRun();
+    assertEquals(400, badDate.handle(currencyOptions("new", Map.of("date", "31/03/2026"), null,
+        null)).getHttpStatus());
+
+    HandleRun missing = new HandleRun();
+    assertEquals(404, missing.handle(currencyOptions("inv-404", null, null,
+        SalesInvoiceHeaderHandler.RATE_TYPE)).getHttpStatus());
+
+    // A saved id with neither a rate type nor a tab cannot be resolved: 404, never scoped like a
+    // new record (the record is looked up before any organization is considered).
+    HandleRun untyped = new HandleRun();
+    assertEquals(404, untyped.handle(currencyOptions("inv-1", null, null, null)).getHttpStatus());
   }
 
   // ---------------------------------------------------------------

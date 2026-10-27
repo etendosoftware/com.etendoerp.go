@@ -105,7 +105,7 @@ class McpFieldValuesActionTest {
     McpConfigSections.resetForTests();
     McpConfigCache.invalidateAll();
     indexMock = mockStatic(NeoExtensionIndex.class);
-    lookupMock = mockStatic(NeoHandlerLookup.class);
+    lookupMock = mockStatic(NeoHandlerLookup.class, org.mockito.Mockito.CALLS_REAL_METHODS);
     lookupMock.when(() -> NeoHandlerLookup.byQualifierQuietly(anyString()))
         .thenReturn(new PeriodOpenCloseHandler());
     buttonMock = mockStatic(NeoButtonActionHelper.class,

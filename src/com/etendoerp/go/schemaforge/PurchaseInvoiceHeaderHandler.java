@@ -24,7 +24,8 @@ import java.util.Collections;
 import java.util.List;
 
 import javax.inject.Inject;
-import javax.inject.Named;
+
+import org.openbravo.model.common.invoice.Invoice;
 
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -77,8 +78,13 @@ import org.openbravo.base.structure.BaseOBObject;
  *   <li>legacy fallback — {@code APC} (Credit Note) or {@code API} + isReturn (Return Invoice) → RECTIFICATIVA</li>
  *   <li>otherwise → FAC (Standard Invoice)</li>
  * </ul>
+ *
+ * <p><b>Binding.</b> {@link NeoExtension} only (ETP-5588): the ETGO_SF_ENTITY row carries no
+ * {@code Java_Qualifier} and the class no {@code @Named}. Every surface — REST single and batch,
+ * MCP, callout, actions, field filter — reaches it through the annotation. See
+ * {@code neo-headless.md} §5.3.a.
  */
-@Named("purchaseInvoiceHeaderHandler")
+@NeoExtension(spec = "purchase-invoice", entity = "header")
 public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(PurchaseInvoiceHeaderHandler.class);
@@ -97,6 +103,18 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
 
   @Inject
   private TotalDiscountService totalDiscountService;
+
+  /**
+   * ETP-5840: the rate is the one valid on the {@code accountingDate} ({@code DateAcct}) — not the
+   * invoice date — shown as "Accounting date". Invoice-family rules in
+   * {@link DocumentRateGuards#guardInvoiceHeader}.
+   */
+  static final DocumentCurrencyRate.RateType RATE_TYPE = new DocumentCurrencyRate.RateType(
+      Invoice.ENTITY_NAME, Invoice.PROPERTY_ETGOCURRENCYRATE, Invoice.PROPERTY_ACCOUNTINGDATE,
+      DocumentRateMessages.LABEL_ACCOUNTING_DATE);
+
+  private final DocumentCurrencyRate currencyRate = new DocumentCurrencyRate(RATE_TYPE);
+
 
   @Inject
   private DocumentPostingService postingService;
@@ -187,8 +205,13 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
     }
     NeoHandlerUtils.mirrorAccountingDateOnCreate(context, "invoiceDate", "accountingDate");
     // ETP-5703: server-side defaults for a write that leaves them out (an agent; the SPA sends both).
-    injectPartnerAddressIfMissing(context);
-    currencyRateDefaults.capture(context);
+    resolveServerCreateFields(context);
+    // ETP-5840: exchange rate — recalculation on the accounting date, save and completion
+    // validation — before anything with side effects runs.
+    NeoResponse rateRefusal = DocumentRateGuards.guardInvoiceHeader(context, currencyRate);
+    if (rateRefusal != null) {
+      return rateRefusal;
+    }
     captureOriginInvoice(context);
     NeoResponse siiAuthError = captureAndValidateSiiAuthorization(context);
     if (siiAuthError != null) {
@@ -240,14 +263,15 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
   }
 
   /**
-   * Post-callout hook: blocks callout-driven currency updates and appends an exchange-rate
-   * warning when the user directly changes the invoice currency (ETP-4029), and blocks
+   * Post-callout hook: blocks callout-driven currency updates (ETP-4029), returns the exchange rate
+   * recalculated for the accounting date when the currency or that date changes (ETP-5840), and
+   * blocks
    * callout-driven document type updates once the invoice has been saved (ETP-4535). Mirrors
    * {@code AbstractOrderHeaderHandler#afterCallout}.
    */
   @Override
   public NeoResponse afterCallout(NeoContext context) {
-    return handleInvoiceAfterCallout(context);
+    return handleInvoiceAfterCallout(context, currencyRate);
   }
 
   /**
@@ -273,8 +297,12 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
    */
   @Override
   public NeoResponse afterHandle(NeoContext context) {
-    // ETP-5703: before the rate-document sync, which is a no-op while the rate is null.
-    currencyRateDefaults.apply(context);
+    // ETP-5840: a create whose currency or accounting date only the create cascade derived; before
+    // the rate-document sync, which must see the resolved rate.
+    NeoResponse rateRefusal = currencyRate.afterWrite(context);
+    if (rateRefusal != null) {
+      return rateRefusal;
+    }
     autoCreateOrUpdateConversionRateDocument(context);
     try {
       // POST/PUT/PATCH: persist origin invoice relationship after the record is saved.

@@ -27,7 +27,15 @@ import static org.junit.Assert.fail;
 
 import java.sql.SQLException;
 import java.sql.Timestamp;
+import java.util.Date;
+import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 
 import javax.persistence.PersistenceException;
 
@@ -75,6 +83,17 @@ import com.etendoerp.go.schemaforge.data.Account;
  * admin-mode stack and leaves the context swap in place — so the caller silently continued as
  * system. The same defect {@code CheckoutRequestStore} carried (ETP-5045), fixed here the same
  * way, and pinned here by the same three specs.
+ *
+ * <p><b>Groups 10 and 11 (ETP-5048) — what the billing reconciliation reads and writes:</b> the
+ * deterministic {@code recordReconciliation} row and its duplicate answer, {@code exists}, the
+ * {@code touchReconciliation} upsert of its back-off marker, the open-review queries
+ * ({@code hasOpenReconciliation}, the two counts, {@code latestReconciliationSummary}) and the
+ * {@code findStaleReceived} page query behind the stuck-event sweep, and
+ * {@code countReceivedUnderReview}, the stuck events parked for review still awaiting it. Their
+ * fixtures use an event type or a review prefix unique to the test, so rows the environment
+ * already holds never change a count.
+ *
+ * @covers com.etendoerp.go.payment.BillingEventStore
  */
 public class BillingEventStoreIntegrationTest extends OBBaseTest {
 
@@ -924,6 +943,444 @@ public class BillingEventStoreIntegrationTest extends OBBaseTest {
     assertNotNull("The fixture must genuinely fail, or this test asserts nothing at all", failure);
     assertSame("A store call that throws must still give the caller's context back — the caller "
         + "handles the failure next, and it must do so as itself", caller, contextAfterFailure);
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Group 10 — ETP-5048: what the billing reconciliation reads and writes
+  // ---------------------------------------------------------------------------------------------
+
+  @Test
+  public void testRecordReconciliationWritesAReconcilerRowLinkedToItsRequest() {
+    String email = newEmail("reconcile-row");
+    String requestId = createRequest(createAccount(email), email);
+    String eventId = newEventId();
+
+    assertTrue(store.recordReconciliation(eventId, "reconciliation.checkout-expired", requestId,
+        BillingEventStore.RESULT_APPLIED, "Abandoned checkout closed", "{\"session\":\"cs_x\"}"));
+
+    assertEquals(1L, rawCount(eventId));
+    assertEquals(BillingEventStore.PROVIDER_RECONCILER, rawColumn(eventId, "PROVIDER"));
+    assertEquals("reconciliation.checkout-expired", rawColumn(eventId, "EVENT_TYPE"));
+    assertEquals(APPLIED, rawResult(eventId));
+    assertEquals(requestId, rawColumn(eventId, "REQUEST_ID"));
+    assertEquals(rawRequestPk(requestId), rawColumn(eventId, "ETGO_CHECKOUT_REQUEST_ID"));
+    assertEquals("Abandoned checkout closed", rawColumn(eventId, "FAILURE_REASON"));
+    assertNotNull(rawTimestamp(eventId, "PROCESSED_AT"));
+  }
+
+  /** A deterministic id already recorded is the "already done" answer, never a second row. */
+  @Test
+  public void testRecordReconciliationOfAnExistingIdAnswersFalseAndWritesNothing() {
+    String eventId = newEventId();
+    assertTrue(store.recordReconciliation(eventId, "reconciliation.needs-review", null,
+        BillingEventStore.RESULT_FAILED, "first", null));
+
+    assertFalse(store.recordReconciliation(eventId, "reconciliation.needs-review", null,
+        BillingEventStore.RESULT_FAILED, "second", null));
+
+    assertEquals(1L, rawCount(eventId));
+    assertEquals("The first row is kept", "first", rawColumn(eventId, "FAILURE_REASON"));
+    assertNull("No request named, no FK", rawColumn(eventId, "ETGO_CHECKOUT_REQUEST_ID"));
+  }
+
+  @Test
+  public void testRecordReconciliationRefusesABlankId() {
+    try {
+      store.recordReconciliation("  ", "reconciliation.x", null, APPLIED, null, null);
+      fail("A reconciliation row needs an event id");
+    } catch (IllegalArgumentException expected) {
+      assertTrue(expected.getMessage().contains("event id"));
+    }
+  }
+
+  @Test
+  public void testExistsTellsWhetherAnIdIsRecorded() {
+    String eventId = newEventId();
+    assertFalse(store.exists(eventId));
+
+    assertTrue(store.claim(eventId, COMPLETED, null, null));
+
+    assertTrue(store.exists(eventId));
+    assertTrue("The id is trimmed", store.exists(" " + eventId + " "));
+    assertFalse(store.exists(null));
+    assertFalse(store.exists("  "));
+  }
+
+  /**
+   * Only provider events still {@code RECEIVED} before the threshold come back. The threshold is
+   * moved rather than the rows backdated, so no fixture is ever old enough for a live
+   * reconciliation run to sweep.
+   */
+  @Test
+  public void testFindStaleReceivedReturnsOnlyStripeEventsStillReceivedBeforeTheThreshold() {
+    Date beforeAnything = new Date(System.currentTimeMillis() - 60_000L);
+    String received = newEventId();
+    String applied = newEventId();
+    String reconcilerRow = newEventId();
+    assertTrue(store.claim(received, "customer.subscription.updated", "req-x", null));
+    assertTrue(store.claim(applied, COMPLETED, null, null));
+    store.markApplied(applied);
+    // A reconciliation row is never a provider event, even in RECEIVED.
+    assertTrue(store.recordReconciliation(reconcilerRow, "reconciliation.x", null, RECEIVED,
+        null, null));
+    Date afterEverything = new Date(System.currentTimeMillis() + 60_000L);
+
+    List<BillingEventStore.StaleEvent> stale = ours(store.findStaleReceived(afterEverything,
+        10_000));
+
+    assertEquals(1, stale.size());
+    assertEquals(received, stale.get(0).eventId());
+    assertEquals("customer.subscription.updated", stale.get(0).eventType());
+    assertEquals("req-x", stale.get(0).requestId());
+    assertTrue("Nothing of ours was received before a minute ago",
+        ours(store.findStaleReceived(beforeAnything, 10_000)).isEmpty());
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Group 11 — ETP-5048 review fixes: the back-off marker, the review queue, paged stale events
+  // ---------------------------------------------------------------------------------------------
+
+  /** An event type no real row carries, so the counts below see only this test's rows. */
+  private static String uniqueType() {
+    return "reconciliation.etp5045it-" + UUID.randomUUID().toString().replace("-", "");
+  }
+
+  private static String uniqueRequest() {
+    return REQUEST_MARKER + "rq-" + UUID.randomUUID().toString().replace("-", "");
+  }
+
+  /**
+   * Review F5: ending a pause episode renames its open marker, which keeps it as history and frees
+   * the deterministic id, so the next pause writes it (and alerts) again.
+   */
+  @Test
+  public void testRenamingAMarkerFreesItsIdForTheNextEpisode() {
+    String eventId = newEventId();
+    String requestId = uniqueRequest();
+    assertTrue(store.recordReconciliation(eventId, "reconciliation.subscription-paused",
+        requestId, BillingEventStore.RESULT_IGNORED, "paused", null));
+
+    assertTrue(store.renameReconciliationMarker(eventId, eventId + ":ended:1", "Pause ended"));
+
+    assertEquals(0L, rawCount(eventId));
+    assertEquals(1L, rawCount(eventId + ":ended:1"));
+    assertEquals("Pause ended", rawColumn(eventId + ":ended:1", "FAILURE_REASON"));
+    assertFalse("Nothing left to rename",
+        store.renameReconciliationMarker(eventId, eventId + ":ended:2", "again"));
+    assertTrue("The id is free for the next episode", store.recordReconciliation(eventId,
+        "reconciliation.subscription-paused", requestId, BillingEventStore.RESULT_IGNORED,
+        "paused again", null));
+  }
+
+  @Test
+  public void testTouchReconciliationInsertsOnceThenRefreshesTheSameRow() {
+    String eventId = newEventId();
+    String requestId = uniqueRequest();
+
+    store.touchReconciliation(eventId, "reconciliation.retry-later", requestId, "first failure");
+
+    assertEquals(1L, rawCount(eventId));
+    assertEquals(FAILED, rawResult(eventId));
+    assertEquals(BillingEventStore.PROVIDER_RECONCILER, rawColumn(eventId, "PROVIDER"));
+    assertEquals(requestId, rawColumn(eventId, "REQUEST_ID"));
+    assertEquals("first failure", rawColumn(eventId, "FAILURE_REASON"));
+    assertEquals(0L, rawDuplicateCount(eventId));
+    assertNull(rawTimestamp(eventId, "LAST_DUPLICATE_AT"));
+
+    store.touchReconciliation(eventId, "reconciliation.retry-later", requestId, "second failure");
+    store.touchReconciliation(eventId, "reconciliation.retry-later", requestId, "third failure");
+
+    assertEquals("One row per marker, however often it is touched", 1L, rawCount(eventId));
+    assertEquals(2L, rawDuplicateCount(eventId));
+    assertNotNull("The refresh is what the back-off is measured from",
+        rawTimestamp(eventId, "LAST_DUPLICATE_AT"));
+    assertEquals("third failure", rawColumn(eventId, "FAILURE_REASON"));
+    assertEquals(FAILED, rawResult(eventId));
+  }
+
+  /**
+   * Two runs failing the same request at once both touch a marker that does not exist yet. One
+   * inserts it; the other either refreshes it or loses the insert and refreshes instead. Either
+   * way there is one row, touched twice, and neither caller fails.
+   */
+  @Test
+  public void testTwoConcurrentTouchesOfANewMarkerEndInOneRow() throws Exception {
+    String eventId = newEventId();
+    String requestId = uniqueRequest();
+    CountDownLatch go = new CountDownLatch(1);
+    ExecutorService callers = Executors.newFixedThreadPool(2);
+    try {
+      List<Future<Boolean>> touches = List.of(
+          callers.submit(() -> touchWhenReleased(go, eventId, requestId, "run A")),
+          callers.submit(() -> touchWhenReleased(go, eventId, requestId, "run B")));
+      go.countDown();
+      for (Future<Boolean> touch : touches) {
+        assertTrue("Neither caller fails", touch.get(60, TimeUnit.SECONDS));
+      }
+    } finally {
+      go.countDown();
+      callers.shutdownNow();
+      callers.awaitTermination(60, TimeUnit.SECONDS);
+    }
+
+    assertEquals("One row per marker", 1L, rawCount(eventId));
+    assertEquals("Touched twice: one insert and one refresh", 1L, rawDuplicateCount(eventId));
+    assertEquals(FAILED, rawResult(eventId));
+  }
+
+  private boolean touchWhenReleased(CountDownLatch go, String eventId, String requestId,
+      String reason) throws InterruptedException {
+    try {
+      assertTrue(go.await(60, TimeUnit.SECONDS));
+      store.touchReconciliation(eventId, "reconciliation.retry-later", requestId, reason);
+      return true;
+    } finally {
+      try {
+        OBDal.getInstance().rollbackAndClose();
+      } finally {
+        OBContext.setOBContext((OBContext) null);
+      }
+    }
+  }
+
+  @Test
+  public void testTheOpenReviewQueriesCountOnlyTheReconcilersRowsOfThatType() {
+    String type = uniqueType();
+    String requestId = uniqueRequest();
+    String otherRequest = uniqueRequest();
+    String open = newEventId();
+    assertTrue(store.recordReconciliation(open, type, requestId, FAILED, "parked", null));
+    assertTrue(store.recordReconciliation(newEventId(), type, requestId, IGNORED, "released",
+        null));
+    assertTrue(store.recordReconciliation(newEventId(), type, otherRequest, FAILED, "parked",
+        null));
+    // Neither of these is one of the reconciler's rows of this type.
+    assertTrue(store.recordReconciliation(newEventId(), uniqueType(), requestId, FAILED,
+        "another type", null));
+    assertTrue(store.claim(newEventId(), type, requestId, null));
+
+    assertTrue(store.hasOpenReconciliation(type, requestId));
+    assertTrue(store.hasOpenReconciliation(type, otherRequest));
+    assertFalse(store.hasOpenReconciliation(type, uniqueRequest()));
+    assertEquals("Whatever the result", 2, store.countReconciliations(type, requestId));
+    assertEquals("Across requests, open rows only", 2, store.countOpenReconciliations(type));
+  }
+
+  /**
+   * The W1 release procedure ({@code docs/billing-reconciliation.md} §7.1): an operator sets the
+   * review row to {@code IGNORED} and the purchase is no longer held. The count follows, and the
+   * released row stays as history.
+   */
+  @Test
+  public void testSettingAReviewRowToIgnoredReleasesIt() {
+    String type = uniqueType();
+    String requestId = uniqueRequest();
+    String review = newEventId();
+    assertTrue(store.recordReconciliation(review, type, requestId, FAILED, "parked",
+        "{\"attempts\":\"5\"}"));
+    assertTrue(store.hasOpenReconciliation(type, requestId));
+
+    store.markIgnored(review, "Released by the operator");
+
+    assertFalse(store.hasOpenReconciliation(type, requestId));
+    assertEquals(0, store.countOpenReconciliations(type));
+    assertEquals(1, store.countReconciliations(type, requestId));
+    assertEquals("{\"attempts\":\"5\"}",
+        store.latestReconciliationSummary(type, requestId, IGNORED));
+  }
+
+  @Test
+  public void testLatestReconciliationSummaryReadsTheNewestRowOfThatResult() {
+    String type = uniqueType();
+    String requestId = uniqueRequest();
+    String older = newEventId();
+    String newer = newEventId();
+    assertTrue(store.recordReconciliation(older, type, requestId, IGNORED, null,
+        "{\"attempts\":\"5\"}"));
+    assertTrue(store.recordReconciliation(newer, type, requestId, IGNORED, null,
+        "{\"attempts\":\"10\"}"));
+    assertTrue(store.recordReconciliation(newEventId(), type, requestId, FAILED, null,
+        "{\"attempts\":\"15\"}"));
+    // Seconds apart, so the order does not rest on clock resolution. Reconciler rows are never
+    // stuck-event candidates, whatever their age.
+    long now = System.currentTimeMillis();
+    forceEventTimestamp(older, "RECEIVED_AT", new Timestamp(now - 20_000L));
+    forceEventTimestamp(newer, "RECEIVED_AT", new Timestamp(now - 10_000L));
+
+    assertEquals("{\"attempts\":\"10\"}",
+        store.latestReconciliationSummary(type, requestId, IGNORED));
+    assertEquals("{\"attempts\":\"15\"}",
+        store.latestReconciliationSummary(type, requestId, FAILED));
+    assertNull(store.latestReconciliationSummary(type, uniqueRequest(), IGNORED));
+    assertNull(store.latestReconciliationSummary(uniqueType(), requestId, IGNORED));
+  }
+
+  @Test
+  public void testFindStaleReceivedNarrowsByTypeAndCarriesTheSummary() {
+    String typeA = "etp5045it.a." + UUID.randomUUID();
+    String typeB = "etp5045it.b." + UUID.randomUUID();
+    String a1 = newEventId();
+    String b1 = newEventId();
+    assertTrue(store.claim(a1, typeA, null, "{\"id\":\"sub_1\"}"));
+    assertTrue(store.claim(b1, typeB, null, null));
+    Date future = new Date(System.currentTimeMillis() + 60_000L);
+
+    List<BillingEventStore.StaleEvent> onlyA = ours(store.findStaleReceived(future,
+        List.of(typeA), null, 0, 10_000));
+
+    assertEquals(1, onlyA.size());
+    assertEquals(a1, onlyA.get(0).eventId());
+    assertEquals("{\"id\":\"sub_1\"}", onlyA.get(0).summary());
+    assertEquals(2, ours(store.findStaleReceived(future, List.of(typeA, typeB), null, 0, 10_000))
+        .size());
+    assertTrue("No type asked for, no event", store.findStaleReceived(future, List.of(), null, 0,
+        10_000).isEmpty());
+  }
+
+  /** An event parked for review ({@code <prefix><event id>} exists) leaves the sweep's pages. */
+  @Test
+  public void testFindStaleReceivedLeavesOutAnEventParkedForReview() {
+    String type = "etp5045it.c." + UUID.randomUUID();
+    String reviewPrefix = EVENT_MARKER + "review:";
+    String parked = newEventId();
+    String free = newEventId();
+    assertTrue(store.claim(parked, type, null, null));
+    assertTrue(store.claim(free, type, null, null));
+    assertTrue(store.recordReconciliation(reviewPrefix + parked, "reconciliation.x", null, FAILED,
+        null, null));
+    Date future = new Date(System.currentTimeMillis() + 60_000L);
+
+    List<BillingEventStore.StaleEvent> page = ours(store.findStaleReceived(future, List.of(type),
+        reviewPrefix, 0, 10_000));
+
+    assertEquals(1, page.size());
+    assertEquals(free, page.get(0).eventId());
+    assertEquals("Without the prefix both are returned", 2, ours(store.findStaleReceived(future,
+        List.of(type), null, 0, 10_000)).size());
+  }
+
+  /**
+   * A review prefix unique to the test: the count reads the whole table, so only review rows
+   * under this prefix can reach it. Still inside {@link #EVENT_MARKER}, so cleanup removes them.
+   */
+  private static String uniqueReviewPrefix() {
+    return EVENT_MARKER + "rv" + UUID.randomUUID().toString().replace("-", "") + ":";
+  }
+
+  /** Records the reconciler's review row {@code <prefix><eventId>}, left FAILED (open). */
+  private void parkForReview(String reviewPrefix, String eventId) {
+    assertTrue(store.recordReconciliation(reviewPrefix + eventId, "reconciliation.x", null,
+        FAILED, "parked", null));
+  }
+
+  /** A stuck Stripe event with a review row is one awaiting review; the sweep leaves it out. */
+  @Test
+  public void testCountReceivedUnderReviewCountsAStripeEventStillReceivedWithAReviewRow() {
+    String reviewPrefix = uniqueReviewPrefix();
+    String type = "etp5045it.e." + UUID.randomUUID();
+    String parked = newEventId();
+    String free = newEventId();
+    assertTrue(store.claim(parked, type, null, null));
+    assertTrue(store.claim(free, type, null, null));
+    parkForReview(reviewPrefix, parked);
+
+    assertEquals("Only the event with a review row", 1,
+        store.countReceivedUnderReview(reviewPrefix));
+    assertEquals("The sweep still leaves the reviewed event out", List.of(free),
+        ids(ours(store.findStaleReceived(new Date(System.currentTimeMillis() + 60_000L),
+            List.of(type), reviewPrefix, 0, 10_000))));
+  }
+
+  /**
+   * Resolved is read off the original event: once it leaves {@code RECEIVED} the count clears,
+   * even though the review row is still {@code FAILED}.
+   */
+  @Test
+  public void testCountReceivedUnderReviewClearsOnceTheOriginalLeavesReceived() {
+    String reviewPrefix = uniqueReviewPrefix();
+    String ignored = newEventId();
+    String failed = newEventId();
+    String applied = newEventId();
+    for (String eventId : List.of(ignored, failed, applied)) {
+      assertTrue(store.claim(eventId, COMPLETED, null, null));
+      parkForReview(reviewPrefix, eventId);
+    }
+    assertEquals(3, store.countReceivedUnderReview(reviewPrefix));
+
+    store.markIgnored(ignored, "Resolved by the operator");
+    assertEquals(2, store.countReceivedUnderReview(reviewPrefix));
+    store.markFailed(failed, "Resent from the Stripe dashboard");
+    assertEquals(1, store.countReceivedUnderReview(reviewPrefix));
+    store.markApplied(applied);
+    assertEquals(0, store.countReceivedUnderReview(reviewPrefix));
+
+    for (String eventId : List.of(ignored, failed, applied)) {
+      assertEquals("The review row is left as it is", FAILED, rawResult(reviewPrefix + eventId));
+    }
+  }
+
+  @Test
+  public void testCountReceivedUnderReviewIgnoresUnreviewedAndNonProviderRows() {
+    String reviewPrefix = uniqueReviewPrefix();
+    // RECEIVED, but no review row.
+    assertTrue(store.claim(newEventId(), COMPLETED, null, null));
+    // A review row, but over a reconciler row, which is never a provider event.
+    String reconcilerRow = newEventId();
+    assertTrue(store.recordReconciliation(reconcilerRow, "reconciliation.x", null, RECEIVED,
+        null, null));
+    parkForReview(reviewPrefix, reconcilerRow);
+    // Reviewed, but under another prefix.
+    String reviewedElsewhere = newEventId();
+    assertTrue(store.claim(reviewedElsewhere, COMPLETED, null, null));
+    parkForReview(uniqueReviewPrefix(), reviewedElsewhere);
+
+    assertEquals(0, store.countReceivedUnderReview(reviewPrefix));
+  }
+
+  /**
+   * With an empty prefix every event would be its own review row, so every RECEIVED event would
+   * count; a blank prefix counts nothing instead.
+   */
+  @Test
+  public void testCountReceivedUnderReviewWithABlankPrefixCountsNothing() {
+    assertTrue(store.claim(newEventId(), COMPLETED, null, null));
+
+    assertEquals(0, store.countReceivedUnderReview(null));
+    assertEquals(0, store.countReceivedUnderReview(""));
+    assertEquals(0, store.countReceivedUnderReview("   "));
+  }
+
+  @Test
+  public void testFindStaleReceivedPagesOldestFirstByOffset() {
+    String type = "etp5045it.d." + UUID.randomUUID();
+    String first = newEventId();
+    String second = newEventId();
+    String third = newEventId();
+    assertTrue(store.claim(first, type, null, null));
+    assertTrue(store.claim(second, type, null, null));
+    assertTrue(store.claim(third, type, null, null));
+    // A few seconds apart, never near the reconciler's 60-minute stale threshold.
+    long now = System.currentTimeMillis();
+    forceEventTimestamp(first, "RECEIVED_AT", new Timestamp(now - 3_000L));
+    forceEventTimestamp(second, "RECEIVED_AT", new Timestamp(now - 2_000L));
+    forceEventTimestamp(third, "RECEIVED_AT", new Timestamp(now - 1_000L));
+    Date future = new Date(now + 60_000L);
+    List<String> types = List.of(type);
+
+    assertEquals(List.of(first, second), ids(store.findStaleReceived(future, types, null, 0, 2)));
+    assertEquals(List.of(second, third), ids(store.findStaleReceived(future, types, null, 1, 2)));
+    assertEquals(List.of(third), ids(store.findStaleReceived(future, types, null, 2, 2)));
+    assertTrue(store.findStaleReceived(future, types, null, 3, 2).isEmpty());
+  }
+
+  private static List<String> ids(List<BillingEventStore.StaleEvent> events) {
+    return events.stream().map(BillingEventStore.StaleEvent::eventId)
+        .collect(Collectors.toList());
+  }
+
+  private static List<BillingEventStore.StaleEvent> ours(List<BillingEventStore.StaleEvent> all) {
+    return all.stream().filter(event -> event.eventId().startsWith(EVENT_MARKER))
+        .collect(Collectors.toList());
   }
 
   // ---------------------------------------------------------------------------------------------

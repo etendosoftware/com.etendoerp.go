@@ -38,6 +38,7 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
 
 import com.etendoerp.go.schemaforge.data.Plan;
+import com.etendoerp.go.schemaforge.data.PlanQuota;
 
 /**
  * Unit specs for {@link PlanCatalogService} (ETP-5046).
@@ -45,6 +46,8 @@ import com.etendoerp.go.schemaforge.data.Plan;
  * <p>The catalog replaced a single deployment property as the answer to "what can be bought", so
  * the two things that matter are that the lookup is scoped to active rows and that "exists" and
  * "is sellable" stay separate questions — they map onto different HTTP answers at the call site.
+ *
+ * @covers com.etendoerp.go.payment.PlanCatalogService
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -54,6 +57,7 @@ class PlanCatalogServiceTest {
 
   @Mock private OBDal obDal;
   @Mock private OBQuery<Plan> planQuery;
+  @Mock private OBQuery<PlanQuota> quotaQuery;
 
   private MockedStatic<OBDal> obDalMock;
   private MockedStatic<OBContext> obContextMock;
@@ -66,6 +70,7 @@ class PlanCatalogServiceTest {
     obContextMock = mockStatic(OBContext.class);
     obDalMock.when(OBDal::getInstance).thenReturn(obDal);
     when(obDal.createQuery(eq(Plan.class), anyString())).thenReturn(planQuery);
+    when(obDal.createQuery(eq(PlanQuota.class), anyString())).thenReturn(quotaQuery);
   }
 
   @AfterEach
@@ -277,5 +282,102 @@ class PlanCatalogServiceTest {
   @ValueSource(strings = { "productive-monthly", "legacy-productive-2", "tampered-key" })
   void anyOtherKeyDoesNotAskForTheGrandfatheredPlan(String planKey) {
     assertFalse(PlanCatalogService.namesLegacyPlan(planKey));
+  }
+
+  // ===================== listActiveQuotas (ETP-5049) =====================
+
+  @Test
+  void listsNoQuotasForANullPlanWithoutQuerying() {
+    List<PlanQuota> quotas = service.listActiveQuotas(null);
+
+    assertTrue(quotas.isEmpty());
+    verify(obDal, never()).createQuery(eq(PlanQuota.class), anyString());
+  }
+
+  @Test
+  void listsThePlansActiveQuotasOrderedByResourceKey() {
+    Plan plan = mock(Plan.class);
+    when(plan.getId()).thenReturn("PLAN-1");
+    PlanQuota invoices = mock(PlanQuota.class);
+    PlanQuota users = mock(PlanQuota.class);
+    when(quotaQuery.list()).thenReturn(List.of(invoices, users));
+
+    List<PlanQuota> quotas = service.listActiveQuotas(plan);
+
+    assertEquals(List.of(invoices, users), quotas);
+    ArgumentCaptor<String> hql = ArgumentCaptor.forClass(String.class);
+    verify(obDal).createQuery(eq(PlanQuota.class), hql.capture());
+    String query = hql.getValue();
+    assertTrue(query.contains("quota.plan.id = :planId"), query);
+    assertTrue(query.contains("quota.active = true"), query);
+    assertTrue(query.endsWith("order by quota.billingResource.searchKey"), query);
+    verify(quotaQuery).setNamedParameter("planId", "PLAN-1");
+    // Quota rows live with the catalog at client 0, read from a tenant's request context.
+    verify(quotaQuery).setFilterOnReadableClients(false);
+    verify(quotaQuery).setFilterOnReadableOrganization(false);
+  }
+
+  @Test
+  void aPlanWithoutQuotaRowsListsNothingRatherThanFailing() {
+    Plan plan = mock(Plan.class);
+    when(plan.getId()).thenReturn("PLAN-UNLIMITED");
+    when(quotaQuery.list()).thenReturn(Collections.emptyList());
+
+    // No quota rows means unlimited; the caller renders that, this method just reports it.
+    assertTrue(service.listActiveQuotas(plan).isEmpty());
+  }
+
+  // ===================== findDefaultPurchasablePlan (ETP-5049) =====================
+
+  @Test
+  void theDefaultPlanIsTheGrandfatheredOneWhileTheFallbackIsActive() {
+    service.configuredFallbackPriceId = () -> LEGACY_PRICE_ID;
+    Plan legacy = planWithPrice(null);
+    when(planQuery.list()).thenReturn(List.of(legacy));
+    when(planQuery.uniqueResult()).thenReturn(legacy);
+
+    PlanCatalogService.DefaultPlan defaultPlan =
+        service.findDefaultPurchasablePlan().orElseThrow();
+
+    assertSame(legacy, defaultPlan.plan());
+    // Sold at the configured legacy price, exactly what a checkout naming no plan charges.
+    assertTrue(defaultPlan.isLegacyFallback());
+    verify(planQuery).setNamedParameter("searchKey", PlanCatalogService.LEGACY_PLAN_KEY);
+  }
+
+  @Test
+  void theDefaultPlanIsTheFirstPurchasablePlanOnceThePricedCatalogRetiresTheFallback() {
+    service.configuredFallbackPriceId = () -> LEGACY_PRICE_ID;
+    Plan legacy = planWithPrice(null);
+    Plan cheapest = planWithPrice("price_cheap");
+    Plan dearer = planWithPrice("price_dear");
+    // The query orders cheapest first; the priceless legacy row is not purchasable on its own.
+    when(planQuery.list()).thenReturn(List.of(legacy, cheapest, dearer));
+
+    PlanCatalogService.DefaultPlan defaultPlan =
+        service.findDefaultPurchasablePlan().orElseThrow();
+
+    assertSame(cheapest, defaultPlan.plan());
+    assertFalse(defaultPlan.isLegacyFallback());
+    verify(planQuery, never()).setNamedParameter("searchKey", PlanCatalogService.LEGACY_PLAN_KEY);
+  }
+
+  @Test
+  void thereIsNoDefaultPlanWhenNothingIsForSale() {
+    service.configuredFallbackPriceId = () -> "";
+    Plan legacy = planWithPrice(null);
+    when(planQuery.list()).thenReturn(List.of(legacy));
+
+    assertTrue(service.findDefaultPurchasablePlan().isEmpty());
+  }
+
+  @Test
+  void thereIsNoDefaultPlanWhenTheFallbackIsActiveButItsRowIsMissing() {
+    service.configuredFallbackPriceId = () -> LEGACY_PRICE_ID;
+    when(planQuery.list()).thenReturn(Collections.emptyList());
+    when(planQuery.uniqueResult()).thenReturn(null);
+
+    // Never a priced plan in its place: with the fallback active there is none to fall back to.
+    assertTrue(service.findDefaultPurchasablePlan().isEmpty());
   }
 }

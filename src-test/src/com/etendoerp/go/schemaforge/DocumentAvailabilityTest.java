@@ -263,7 +263,9 @@ class DocumentAvailabilityTest {
 
           assertEquals(Set.of("createReturnInvoice"), unavailable.keySet());
           assertTrue(unavailable.get("createReturnInvoice").contains("R-1, R-2"));
-          assertTrue(unavailable.get("createReturnInvoice").contains("NOT be refused"));
+          assertTrue(unavailable.get("createReturnInvoice")
+              .contains("refused with 409 returnInvoiceAlreadyExists and creates nothing"));
+          assertTrue(unavailable.get("createReturnInvoice").contains("allowDuplicate:true"));
         }
       }
     }
