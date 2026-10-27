@@ -1329,6 +1329,15 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
         + " WHERE vc.c_validcombination_id = a." + column + ")";
   }
 
+  /** Account values behind {@code t_due_acct} / {@code t_credit_acct} of {@code c_tax_acct a}. */
+  private static final String TAX_DUE_ACCT_VALUE_SQL = taxAcctValue("t_due_acct");
+  private static final String TAX_CREDIT_ACCT_VALUE_SQL = taxAcctValue("t_credit_acct");
+
+  /** A rule-tax row whose due or credit account value is not yet its rule account value. */
+  private static final String SPANISH_TAX_ACCT_OFF_TARGET_PREDICATE =
+      "(" + TAX_DUE_ACCT_VALUE_SQL + " IS DISTINCT FROM r.acct_value"
+      + " OR " + TAX_CREDIT_ACCT_VALUE_SQL + " IS DISTINCT FROM r.acct_value)";
+
   /**
    * ETP-5902 — sets both tax accounts of every rule tax of {@code :schemaId} to its rule account.
    * The combination is the tenant's own, found by account value, deterministically: the plain one
@@ -1339,9 +1348,9 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
    */
   private static final String SPANISH_TAX_ACCT_OVERRIDE_SQL =
       "UPDATE c_tax_acct a"
-      + " SET t_due_acct = CASE WHEN " + taxAcctValue("t_due_acct") + " = r.acct_value"
+      + " SET t_due_acct = CASE WHEN " + TAX_DUE_ACCT_VALUE_SQL + " = r.acct_value"
       + "       THEN a.t_due_acct ELSE r.combination_id END,"
-      + "   t_credit_acct = CASE WHEN " + taxAcctValue("t_credit_acct") + " = r.acct_value"
+      + "   t_credit_acct = CASE WHEN " + TAX_CREDIT_ACCT_VALUE_SQL + " = r.acct_value"
       + "       THEN a.t_credit_acct ELSE r.combination_id END,"
       + "   updated = now(), updatedby = '0'"
       + " FROM (SELECT rt.c_tax_id, rt.acct_value,"
@@ -1358,16 +1367,14 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
       + "   FROM (" + SPANISH_TAX_RULES_SQL + ") rt) r"
       + " WHERE a.c_tax_id = r.c_tax_id AND a.c_acctschema_id = :schemaId"
       + "   AND a.ad_client_id = :clientId AND r.combination_id IS NOT NULL"
-      + "   AND (" + taxAcctValue("t_due_acct") + " IS DISTINCT FROM r.acct_value"
-      + "     OR " + taxAcctValue("t_credit_acct") + " IS DISTINCT FROM r.acct_value)";
+      + "   AND " + SPANISH_TAX_ACCT_OFF_TARGET_PREDICATE;
 
   /** ETP-5902 — counts the rule-tax rows of {@code :schemaId} still off their rule account value. */
   private static final String SPANISH_TAX_ACCT_OFF_TARGET_SQL =
       "SELECT count(*) FROM c_tax_acct a"
       + " JOIN (" + SPANISH_TAX_RULES_SQL + ") r ON r.c_tax_id = a.c_tax_id"
       + " WHERE a.c_acctschema_id = :schemaId AND a.ad_client_id = :clientId"
-      + "   AND (" + taxAcctValue("t_due_acct") + " IS DISTINCT FROM r.acct_value"
-      + "     OR " + taxAcctValue("t_credit_acct") + " IS DISTINCT FROM r.acct_value)";
+      + "   AND " + SPANISH_TAX_ACCT_OFF_TARGET_PREDICATE;
 
   // Financial-account posting accounts (ETP-4565): FIN_FINANCIAL_ACCOUNT is bulk-imported by the
   // dataset importer with triggers disabled (see OnboardingDatasetDefinition.INCLUDED_TABLES), so
