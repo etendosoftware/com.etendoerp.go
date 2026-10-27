@@ -76,7 +76,9 @@ public final class NeoTelemetryEvent {
    *
    * <p>Deliberately not one of {@link #getProperties()}: properties are what every sink receives,
    * Mixpanel included, and the tenant id stays on our side. Only {@code LogNeoTelemetrySink} prints
-   * it, so a failure seen in Datadog can be traced to its tenant (ETP-5639).</p>
+   * it, so a failure seen in Datadog can be traced to its tenant (ETP-5639). An event that must be
+   * segmented by tenant in Mixpanel sends it explicitly as the allowlisted {@code account_id}
+   * property instead (the contact KPI events, ETP-5791).</p>
    *
    * @return the AD client id, or {@code null} when the event carries none
    */

@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+  <database name="MODIFIED TABLE C_BP_GROUP">
+    <table name="C_BP_GROUP" primaryKey="C_BP_GROUP_KEY">
+      <column name="EM_ETGO_ISCUSTOMER" primaryKey="false" required="true" type="CHAR" size="1" autoIncrement="false">
+        <default><![CDATA[N]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="EM_ETGO_ISVENDOR" primaryKey="false" required="true" type="CHAR" size="1" autoIncrement="false">
+        <default><![CDATA[N]]></default>
+        <onCreateDefault/>
+      </column>
+      <check name="EM_ETGO_BPG_ISCUSTOMER_CHK"><![CDATA[EM_ETGO_ISCUSTOMER IN ('Y', 'N')]]></check>
+      <check name="EM_ETGO_BPG_ISVENDOR_CHK"><![CDATA[EM_ETGO_ISVENDOR IN ('Y', 'N')]]></check>
+    </table>
+  </database>

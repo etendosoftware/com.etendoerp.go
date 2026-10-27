@@ -910,6 +910,11 @@ public class McpToolRouter {
     // short-circuits, null proceeds to generic persistence, and the handler may have mutated the
     // body in place. The other five MCP hook sites are deliberately left alone in this step.
     NeoContext hookCtx = McpHookExecutor.buildHookContext(specName, entityName, HTTP_METHOD_POST, null, filteredBody, adTab, sfEntity);
+    // ETP-5791: injectMandatoryDefaults ran above, so key presence in filteredBody no longer says
+    // what the agent chose. Hand the pre-hook the pre-defaults key set, which REST gets for free
+    // (its pre-hook runs before the defaults pass).
+    hookCtx.setAttribute(NeoContext.ATTR_CLIENT_PROVIDED_FIELDS,
+        NeoCrudHelper.snapshotBodyFields(userProvided));
     // ETP-5680: the mandatory-defaults pass above filled some keys with a fallback placeholder
     // (the first combo option, ...). The hook context is a new one, so without this copy the
     // customization could not tell a placeholder from a value the caller chose, and the REST path

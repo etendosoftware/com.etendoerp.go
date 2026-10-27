@@ -1079,6 +1079,15 @@ When the batch closes it logs one line with the hits and misses per namespace (o
 lookup name), e.g. `[NEO-PERF] batch memo BatchService|spec hits=39 misses=1, BatchService|entity
 hits=36 misses=4, …`; nothing is logged for a batch that memoized nothing.
 
+**After-commit actions (ETP-5791).** `NeoBatchScope.runAfterCommit(action)` runs a side effect only
+once the write being handled is durable. Outside a batch it runs at once (core's
+`DefaultJsonDataService` has already committed when `afterHandle()` runs); inside a batch it is
+queued and `BatchService` runs the queue right after its `commitAndClose()`, so a batch or an async
+import row that rolls back runs none of its actions. Exceptions are logged and swallowed. Meant for
+telemetry and similar side effects, never for business writes. `NeoWriteChannel.current()` labels the
+write for telemetry: `rest`, `mcp`, `rest_batch`, `mcp_batch` (MCP is marked by `McpServlet` and by
+the async MCP job row runner).
+
 #### 4.3.8 Error classification — a refused request is a 4xx with a readable message (ETP-5782)
 
 > Numbered 4.3.8 because ETP-5785 adds its own 4.3.7 (reference ownership).
@@ -3616,7 +3625,7 @@ metadata.
 | Section | Level | Purpose |
 |---|---|---|
 | `parent` | entity | How a child entity identifies its parent, and for which verbs the parent key is required (`field`, `entity`, `optionalFor`, `mode`, `reason`). See §6. |
-| `fields` | spec / entity / field | Reclassifies the MCP's view of field curation — `visibility`, `included`, `readOnly`, `businessCritical`, `reason`. |
+| `fields` | spec / entity / field | Reclassifies the MCP's view of field curation — `visibility`, `included`, `readOnly`, `businessCritical`, `userRequired`, `reason`. |
 | `verbs` | entity (spec applies to every entity without its own) | Hides MCP write verbs the `ETGO_SF_ENTITY` flags still enable for REST and the SPA — `create`, `update`, `delete`, `reason`, `instead` (ETP-5558). |
 | `actions` | entity (spec applies to every entity without its own) | Hides actions (declared handler actions or AD buttons) from the MCP and redirects buttons to the action to use instead — `hidden`, `redirect`, `reason` (ETP-5558). See §4.12.1.3. |
 
@@ -3629,6 +3638,7 @@ metadata.
     "included": true,
     "readOnly": false,
     "businessCritical": true,
+    "userRequired": false,
     "reason": "why the shared curation is wrong for agent use"
   }
 }
@@ -3647,6 +3657,19 @@ metadata.
   carry. Like `visibility`, it widens what is *offered*, never what is *allowed*.
 - `readOnly`, `businessCritical` — JSON booleans, unquoted. An absent key is *not* a configured
   `false`: it leaves the `ETGO_SF_FIELD` value standing.
+- `userRequired` — JSON boolean (ETP-5791). Replaces the `userRequired` flag `etendo_schema`
+  derives for the field (editable + AD-mandatory + no AD default), and with it whether
+  `view:"create"` lists the field under `required` or `optional`. For a value a customization
+  supplies in its pre-hook, which the structural rule cannot see: `contacts/businessPartner.vendor`
+  (`C_BPartner.IsVendor`, mandatory, no default) carries `userRequired:false` at field level because
+  `BusinessPartnerHandler` inherits it from the business partner category when a create omits it
+  (with the `contact-category-type` flag on; off, the omitted value falls to the mandatory-defaults
+  `false`, see §5.3.6).
+  It changes the advice, never the contract: the raw `required` (AD NOT NULL) is left as it is and
+  no write-side check is relaxed. Ignored on buttons. Applied before the precondition overlay
+  (`ETGO_SF_ENTITY.preconditions`), which can still force `userRequired:true`. An absent key leaves
+  the derived flag standing. Meant for the field level — at entity/spec level it would set the flag
+  on every field of the scope.
 - `reason` — **mandatory** whenever the section is present, and non-blank. Every row of this section
   asserts that the shared curation is wrong for agent use; that claim has to be auditable on the row
   that makes it.
@@ -6494,6 +6517,51 @@ the created record (with the derived `name`) is in `response.data[0]`.
 
 Access is the window's: writing needs `AD_Window_Access.IsReadWrite = 'Y'` on window 141 (Payment
 Term) — a role that may edit invoices but holds 141 read-only gets the standard 403.
+
+#### 5.3.6 "Did the caller send this field?" on create — `ATTR_CLIENT_PROVIDED_FIELDS` (ETP-5791)
+
+A pre-hook that must tell an explicit value from a default cannot always use key presence in the
+body. REST single, REST `/batch` and `etendo_batch` run the pre-hook **before** the create-defaults
+pass, so there the body holds exactly what the caller sent. MCP `etendo_create` runs
+`injectMandatoryDefaults` **first**, so its body also carries every defaulted field.
+
+`McpToolRouter#handleCreate` therefore sets `NeoContext.ATTR_CLIENT_PROVIDED_FIELDS`
+(`"neo.clientProvidedFields"`): a `Set<String>` of the DAL property names the agent itself sent,
+snapshotted before defaults. It is the only setter. A customization reads "explicit" as: attribute
+present → the set contains the key; attribute absent → `body.has(key)`. See
+`ContactTypeRules#isExplicit`. Updates never need it (no defaults pass runs on PATCH/PUT or on
+MCP `etendo_update`, so the body handed to the pre-hook is exactly what the caller sent).
+
+**Contact types (ETP-5791).** `C_BP_Group.EM_Etgo_Iscustomer/Isvendor` say whether a category's
+contacts are customers, vendors/creditors or both. Rules live in `handlers/ContactTypeRules`
+(an entity util, called only by the customizations below).
+
+**Behind the `contact-category-type` feature flag** (`GoFeatureFlags.FLAG_CONTACT_CATEGORY_TYPE`,
+environment level, default **off** — `etendo.go.flags.contact-category-type` /
+`ETGO_FLAG_CONTACT_CATEGORY_TYPE`; see `docs/feature-flags-and-tenant-upgrade.md` §1). Every
+customization in the table asks `ContactTypeRules.isEnabled()` first; off, it returns `null` and the
+default CRUD runs exactly as before ETP-5791 (no inheritance, no "at least one type" rejection, no
+post-create posting-account backfill). What stays unconditional: the `C_BP_Group` columns and their
+AD metadata, the `ETGO_SF_FIELD` rows, reference/sample data, the demo-data copy of both columns
+(`DemoDataTransferEntityCopier`), `ATTR_CLIENT_PROVIDED_FIELDS` (inert unless a customization reads
+it) and the generic `MCP_CONFIG.fields.userRequired` key. The `vendor` override therefore keeps
+advertising the field as optional with the flag off; an omitted `vendor` then gets the
+mandatory-defaults fallback `false` on every channel, as before ETP-5791.
+
+| Customization | Binding | Behaviour |
+|---|---|---|
+| `BusinessPartnerHandler` | `@Named` / `contacts/businessPartner` | On create, `customer`/`vendor` not sent explicitly are taken from the category (the request's, else the AD default category); a category with neither flag passes nothing on. On update, a write that changes `businessPartnerCategory` to a different category and carries **neither** `customer` nor `vendor` takes **both** from the new category (parity with the Contacts form, which overwrites its checkboxes on a category change); a write that carries either flag decides the type itself. Same rule on REST PATCH/PUT and MCP `etendo_update` (both hand the pre-hook the body as sent; `/batch` is create-only). Create and every update reject a contact with neither type (`ETGO_BPartnerContactTypeRequired`). After create, missing posting-account rows are backfilled; after an update that sets a flag to true (sent or re-inherited), the ETP-4565 backfill adds the missing row. Otherwise existing contacts are never re-derived. MCP: `vendor` carries `MCP_CONFIG.fields.userRequired:false` (§4.12.6), so `view:"create"` lists it as optional. |
+| `BusinessPartnerCategoryHandler` | `@NeoExtension business-partner-category/businessPartnerCategory` | Create/update reject a category with neither flag (`ETGO_BPGroupContactTypeRequired`). |
+| `ContactCustomerTabHandler`, `ContactVendorTabHandler` (base `ContactTypeFlagGuardHandler`) | `@NeoExtension contacts/customer`, `contacts/vendorCreditor` | Same contact rule on updates through those tabs, only when the write sends `customer` or `vendor`. |
+
+Rejections carry the key in `messageKeys`; the SPA translates it (`BACKEND_ERROR_KEY_MAP`).
+
+**KPI telemetry (ETP-5791), flag on or off.** The same customizations emit
+`backend_contact_created` and `backend_contact_type_changed` through `ContactTypeTelemetry`, only
+once the write is committed (`NeoBatchScope.runAfterCommit`: at once for a single REST/MCP write,
+after the batch commits inside `/batch` / `etendo_batch`). Properties, `types_source` /
+`change_trigger` / `change_origin` / `channel` values and the no-identifier rule (tenant
+`account_id` only): `docs/backend-observability.md` § Contact Type KPIs.
 
 ## 6. Parent-Child Tab Filtering
 
