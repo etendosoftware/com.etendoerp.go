@@ -24,6 +24,7 @@ import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -42,6 +43,8 @@ import org.openbravo.model.ad.ui.Tab;
 
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
+import com.etendoerp.go.schemaforge.NeoExtensionDispatcher;
+import com.etendoerp.go.schemaforge.NeoExtensionRequest;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.data.SFEntity;
@@ -631,5 +634,128 @@ public class McpHookExecutorTest {
       assertEquals(adTab, ctx.getAdTab());
       assertEquals(sfEntity, ctx.getSfEntity());
     }
+  }
+
+  // ── runPostHook after the write committed (ETP-5782) ─────────────────
+
+  /**
+   * The write before the post-hook is committed, so a refusal raised by {@code afterHandle} — here
+   * a keyed one, a 422 anywhere else — is the server-side 500 it always was, with a hint telling
+   * the agent to read the record before re-sending, never a "correct and retry" refusal.
+   */
+  @Test
+  public void testPostHookFailureAfterTheCommitIsNotARetryableRefusal() throws Exception {
+    NeoContext ctx = NeoContext.builder().httpMethod("POST").specName("sales-order")
+        .entityName("header").build();
+    com.etendoerp.go.schemaforge.NeoExtensionRequest request =
+        com.etendoerp.go.schemaforge.NeoExtensionRequest.builder()
+            .qualifier("q").specName("sales-order").entityName("header")
+            .surface(com.etendoerp.go.schemaforge.NeoExtensionSurface.of(ctx))
+            .channel(com.etendoerp.go.schemaforge.NeoExtensionChannel.MCP)
+            .context(ctx).build();
+    org.openbravo.dal.service.OBDal dal = mock(org.openbravo.dal.service.OBDal.class);
+
+    try (MockedStatic<com.etendoerp.go.schemaforge.NeoExtensionDispatcher> dispatcher =
+        mockStatic(com.etendoerp.go.schemaforge.NeoExtensionDispatcher.class);
+        MockedStatic<org.openbravo.dal.service.OBDal> obdal =
+            mockStatic(org.openbravo.dal.service.OBDal.class)) {
+      dispatcher.when(() -> com.etendoerp.go.schemaforge.NeoExtensionDispatcher.dispatch(any()))
+          .thenThrow(new org.openbravo.base.exception.OBException("@20502@"));
+      obdal.when(org.openbravo.dal.service.OBDal::getInstance).thenReturn(dal);
+
+      JSONObject result = McpHookExecutor.runPostHook(request, new JSONObject().put("id", "A"));
+
+      assertTrue(result.getBoolean(FIELD_IS_ERROR));
+      JSONObject envelope = new JSONObject(
+          result.getJSONArray(FIELD_CONTENT).getJSONObject(0).getString(FIELD_TEXT));
+      assertEquals(500, envelope.getInt(FIELD_STATUS));
+      assertEquals("server_error", envelope.getString("error"));
+      assertEquals(com.etendoerp.go.schemaforge.NeoErrorResponses.AFTER_COMMIT_HINT,
+          envelope.getString("hint"));
+      verify(dal).rollbackAndClose();
+    }
+  }
+  // ── ETP-5680: placeholder forwarding ──
+
+  /** The placeholders the mandatory-defaults pass recorded reach the pre-hook's context. */
+  @Test
+  public void testFallbackPlaceholdersAreForwardedToTheHookContext() {
+    NeoContext from = NeoContext.builder()
+        .specName("product").entityName("product").httpMethod("POST").build();
+    from.addFallbackDefault("taxCategory");
+    from.addFallbackDefault("uOM");
+    NeoContext to = NeoContext.builder()
+        .specName("product").entityName("product").httpMethod("POST").build();
+
+    McpHookExecutor.forwardFallbackDefaults(from, to);
+
+    assertEquals(java.util.Set.of("taxCategory", "uOM"), to.getFallbackDefaults());
+    assertFalse(to.getFallbackDefaults().contains("productType"));
+  }
+
+  /** With nothing recorded (a value the caller sent is never recorded) nothing is forwarded. */
+  @Test
+  public void testNoPlaceholdersMeansNothingForwarded() {
+    NeoContext from = NeoContext.builder()
+        .specName("product").entityName("product").httpMethod("POST").build();
+    NeoContext to = NeoContext.builder()
+        .specName("product").entityName("product").httpMethod("POST").build();
+
+    McpHookExecutor.forwardFallbackDefaults(from, to);
+
+    assertTrue(to.getFallbackDefaults().isEmpty());
+  }
+
+  // ── resolveServerCreateFields (ETP-5710) ──────────────────────────────
+
+  @Test
+  public void testResolveServerCreateFieldsCallsCustomizationWithLiveBody() throws Exception {
+    NeoHandler customization = mock(NeoHandler.class);
+    SFEntity sfEntity = mock(SFEntity.class);
+    JSONObject body = new JSONObject().put("businessPartner", "bp-1");
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+        MockedStatic<NeoExtensionDispatcher> dispatcher = mockStatic(NeoExtensionDispatcher.class)) {
+      obContextMock.when(OBContext::getOBContext).thenReturn(null);
+      dispatcher.when(() -> NeoExtensionDispatcher.resolveOnly(any(NeoExtensionRequest.class)))
+          .thenReturn(customization);
+
+      McpHookExecutor.resolveServerCreateFields("sales-invoice", "header", null, sfEntity, body);
+
+      verify(customization).resolveServerCreateFields(argThat(ctx ->
+          ctx.getRequestBody() == body && "POST".equals(ctx.getHttpMethod())
+              && ctx.getRecordId() == null && ctx.getEndpointType() == NeoEndpointType.CRUD));
+    }
+  }
+
+  @Test
+  public void testResolveServerCreateFieldsWithoutCustomizationOrOnFailureLeavesBody()
+      throws Exception {
+    SFEntity sfEntity = mock(SFEntity.class);
+    JSONObject body = new JSONObject().put("a", "b");
+
+    try (MockedStatic<NeoExtensionDispatcher> dispatcher = mockStatic(NeoExtensionDispatcher.class)) {
+      dispatcher.when(() -> NeoExtensionDispatcher.resolveOnly(any(NeoExtensionRequest.class)))
+          .thenReturn(null);
+      McpHookExecutor.resolveServerCreateFields("s", "e", null, sfEntity, body);
+
+      dispatcher.when(() -> NeoExtensionDispatcher.resolveOnly(any(NeoExtensionRequest.class)))
+          .thenThrow(new IllegalStateException("boom"));
+      McpHookExecutor.resolveServerCreateFields("s", "e", null, sfEntity, body);
+    }
+    assertEquals(1, body.length());
+  }
+
+  @Test
+  public void testNeoHandlerDefaultResolveServerCreateFieldsIsNoOp() throws Exception {
+    NeoHandler plain = new NeoHandler() {
+      @Override
+      public NeoResponse handle(NeoContext context) {
+        return null;
+      }
+    };
+    JSONObject body = new JSONObject().put("a", "b");
+    plain.resolveServerCreateFields(NeoContext.builder().requestBody(body).build());
+    assertEquals(1, body.length());
   }
 }

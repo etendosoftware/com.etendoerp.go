@@ -252,6 +252,7 @@ class Fiscal303SubmissionSupport {
     }
 
     String clientId = OBContext.getOBContext().getCurrentClient().getId();
+    // tenant-ok: request declId, but belongsTo() below 404s another client/org's declaration
     FiscalDecl decl = OBDal.getInstance().get(FiscalDecl.class, declId);
     if (!owner.belongsTo(decl, clientId, orgId)) {
       owner.servlet.sendError(response, HttpServletResponse.SC_NOT_FOUND,
@@ -291,6 +292,7 @@ class Fiscal303SubmissionSupport {
     boolean effectivelyCorrective = "Y".equalsIgnoreCase(request.getParameter("Rectificativa"));
     owner.guardCorrectiveConsistency(orgId, year, period, "303", effectivelyCorrective);
 
+    // tenant-ok: orgId is dispatch's resolveEffectiveOrg() (session org), never the request
     Organization org = OBDal.getInstance().get(Organization.class, orgId);
     AEAT303SubmissionService service = new AEAT303SubmissionService();
 

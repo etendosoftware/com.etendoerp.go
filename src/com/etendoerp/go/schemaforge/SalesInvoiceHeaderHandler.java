@@ -193,7 +193,7 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
     }
     NeoHandlerUtils.mirrorAccountingDateOnCreate(context, "invoiceDate", "accountingDate");
     // ETP-5703: server-side defaults for a write that leaves them out (an agent; the SPA sends both).
-    injectPartnerAddressIfMissing(context);
+    resolveServerCreateFields(context);
     // ETP-5840: exchange rate — recalculation on the accounting date, save and completion
     // validation — before anything with side effects runs.
     NeoResponse rateRefusal = DocumentRateGuards.guardInvoiceHeader(context, currencyRate);

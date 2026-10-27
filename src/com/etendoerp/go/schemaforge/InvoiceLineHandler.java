@@ -34,6 +34,8 @@ import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.invoice.InvoiceLine;
 import org.openbravo.model.common.order.Order;
 
+import com.etendoerp.go.schemaforge.util.NeoAdminMode;
+
 /**
  * NeoHandler for invoice line entities (Sales Invoice, Purchase Invoice).
  *
@@ -230,7 +232,7 @@ public class InvoiceLineHandler implements NeoHandler {
    */
   private NeoResponse autoFillExemptionCauseAfterLineSave(NeoContext context) {
     try {
-      OBContext.setAdminMode(true);
+      NeoAdminMode.enter();
       try {
         String invoiceId = resolveParentInvoiceIdAfterSave(context);
         if (StringUtils.isBlank(invoiceId) || !shouldAutoFillExemptionCause(invoiceId)) {

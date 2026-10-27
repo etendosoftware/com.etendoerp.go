@@ -54,8 +54,8 @@ import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
  * — its {@code orderedQuantity}, its {@code salesOrder} parent, its {@code standardPrice}, the core
  * {@code SL_Order_Amt} callout on its {@code discount} column. That is why it is reached only from
  * the two customizations that call it (ETP-5415 T12), never from a shared write path: no entity is
- * selected here by a property-name guard. Purchase-order lines stay on the plain
- * {@link OrderLineHandler} and never get here. {@code McpLinePriceInjector} stays what it was — a
+ * selected here by a property-name guard. Purchase-order lines get only
+ * {@link #setStandardPriceOnCreate}, from {@link PurchaseOrderLineHandler}. {@code McpLinePriceInjector} stays what it was — a
  * shared MCP compensation for every commercial line, tolerated until migration M4; nothing here
  * changes it or depends on its internals, only on the value it leaves in {@code unitPrice}.
  *
@@ -195,6 +195,12 @@ final class OrderLineDiscountSupport {
    * {@code PriceStd 0} — or, with an explicit {@code unitPrice}, the price the defaults cascade
    * copied from it ({@code SL_Order_Amt} on {@code unitPrice} publishes {@code inppricestd}).
    *
+   * <p><b>A line sent without a price</b> (ETP-5881) also gets {@code unitPrice} (and the catalog
+   * {@code listPrice}, when the product has one) from that same price-list entry
+   * ({@link LinePriceListSupport}), on every channel: REST single and batch run no product callout
+   * for it, and {@code McpLinePriceInjector} only covers MCP. A non-zero price in the body is never
+   * replaced.
+   *
    * <p><b>Why overwriting is safe.</b> {@code standardPrice} is published read-only
    * ({@code ETGO_SF_FIELD.IsReadOnly = Y}, visibility {@code system}) on both sales-order/lines and
    * sales-quotation/quotationLine, so it is never a value the caller chose: MCP refuses it, and the
@@ -220,9 +226,19 @@ final class OrderLineDiscountSupport {
       return;
     }
     try {
+      // The caller's own list price is the price (ETP-5881): the price list is not applied to it.
+      boolean clientPriced = LinePriceListSupport.applyClientListPrice(body, FIELD_UNIT_PRICE,
+          FIELD_LIST_PRICE, FIELD_DISCOUNT);
       ProductPrice productPrice = resolveProductPrice(body);
       if (productPrice == null) {
         return;
+      }
+      // A line sent without a price takes the price list's (ETP-5881); a price the caller sent stays.
+      // Not after the client's own list price: a 100% discount leaves a unit price of 0, which
+      // would otherwise read as "no price" and be replaced by the catalog's.
+      if (!clientPriced) {
+        LinePriceListSupport.applyCatalogPrice(body, productPrice, FIELD_UNIT_PRICE,
+            FIELD_LIST_PRICE);
       }
       BigDecimal standardPrice = productPrice.getStandardPrice();
       if (standardPrice != null) {
@@ -238,6 +254,7 @@ final class OrderLineDiscountSupport {
           ctx.getSpecName(), ctx.getEntityName(), e.getMessage());
     }
   }
+
 
   /**
    * The list price the form gives a new line whose product has no list price in the order's price

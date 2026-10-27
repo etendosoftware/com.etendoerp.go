@@ -229,7 +229,10 @@ class MainGitErrorTest(unittest.TestCase):
 class GitDecodingTest(unittest.TestCase):
 
     def test_reads_a_non_utf8_file_without_raising(self):
-        with tempfile.TemporaryDirectory() as root:
+        # A hook run from a linked worktree exports GIT_DIR; inherited, it would send the fixture's
+        # add/commit to the real repository's index instead of the temporary one.
+        env = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
+        with mock.patch.dict(os.environ, env, clear=True), tempfile.TemporaryDirectory() as root:
             def run(*args):
                 subprocess.run(['git', *args], cwd=root, check=True, capture_output=True)
             run('init', '-q')

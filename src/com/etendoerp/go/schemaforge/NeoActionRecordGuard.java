@@ -32,7 +32,9 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
 
 /**
- * Tenant ownership of the record an action runs on (ETP-5558), checked once for every action of
+ * Record ownership for actions and CRUD targets. The strict CRUD contract is documented by
+ * {@link #writeRefusalFor}; the remaining rules below describe action compatibility (ETP-5558).
+ * Tenant ownership of the record an action runs on is checked once for every action of
  * every entity, on both channels, before the entity's customization or the AD button runs.
  *
  * <p><b>Why.</b> Both channels run the whole request in admin mode, and nothing between the request
@@ -88,6 +90,33 @@ public final class NeoActionRecordGuard {
   }
 
   /**
+   * Strict CRUD target guard, before customization dispatch or optimistic-version reads.
+   * Unlike actions, CRUD always addresses a row in its tab: missing rows/model/session are refused.
+   * Write ownership uses the current client and writable organizations, never readable System data.
+   *
+   * @param entity   the SchemaForge entity whose tab holds the targeted row
+   * @param recordId the id of the row the CRUD request writes or deletes
+   * @return a 404 when the row is missing, unresolvable or not writable by the current tenant, or
+   *         {@code null} when the write may proceed
+   */
+  public static NeoResponse writeRefusalFor(SFEntity entity, String recordId) {
+    if (entity == null || StringUtils.isBlank(recordId) || OBContext.getOBContext() == null) {
+      return NeoResponse.error(404, MSG_RECORD_NOT_FOUND);
+    }
+    OBContext.setAdminMode(true);
+    try {
+      BaseOBObject row = resolveRecord(entity, recordId);
+      return TenantOwnership.isWritableByCurrentTenant(row)
+          ? null : NeoResponse.error(404, MSG_RECORD_NOT_FOUND);
+    } catch (RuntimeException e) {
+      log.warn("CRUD target refused: ownership lookup failed ({})", e.getClass().getSimpleName());
+      return NeoResponse.error(404, MSG_RECORD_NOT_FOUND);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
    * The refusal for a document action on an id that is not a row of the entity's table, or
    * {@code null} when it may run (ETP-5715).
    *
@@ -133,6 +162,16 @@ public final class NeoActionRecordGuard {
     }
   }
 
+  private static BaseOBObject resolveRecord(SFEntity entity, String recordId) {
+    Tab tab = entity.getADTab();
+    if (tab == null || tab.getTable() == null) {
+      return null;
+    }
+    Entity dalEntity = ModelProvider.getInstance().getEntityByTableId(tab.getTable().getId());
+    return dalEntity == null ? null
+        : (BaseOBObject) OBDal.getInstance().get(dalEntity.getName(), recordId);
+  }
+
   /**
    * {@link TenantOwnership#loadOwned} for the customizations outside this package: the entity, or
    * {@code null} when the id is blank, unknown, or owned by another tenant.
@@ -164,7 +203,7 @@ public final class NeoActionRecordGuard {
       if (dalEntity == null) {
         return false;
       }
-      BaseOBObject row = (BaseOBObject) OBDal.getInstance().get(dalEntity.getName(), recordId);
+      BaseOBObject row = resolveRecord(entity, recordId);
       if (row == null || TenantOwnership.isVisibleToCurrentTenant(row)) {
         return false;
       }

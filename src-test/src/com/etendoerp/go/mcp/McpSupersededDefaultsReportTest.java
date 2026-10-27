@@ -74,8 +74,10 @@ class McpSupersededDefaultsReportTest {
         + "rejection and retry");
     assertTrue(hint.contains("etendo_defaults"),
         "the hint must name where a blindly echoed value came from");
-    assertTrue(hint.contains("omit"),
-        "and the remedy is to omit the field, not to guess a different value");
+    assertTrue(hint.contains("ignore") && hint.contains("0 or empty"),
+        "a callout that merely proposed 0/empty, or a field another rule governs, is ignorable");
+    assertFalse(hint.contains("omit that field"),
+        "omitting is wrong when the callout only proposed 0 for a field another rule governs");
   }
 
   /**

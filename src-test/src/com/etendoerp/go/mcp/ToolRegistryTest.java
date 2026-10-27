@@ -328,4 +328,18 @@ public class ToolRegistryTest {
     Map<String, Object> items = (Map<String, Object>) targetsProp.get("items");
     assertFalse("no enum should be present when the catalog is unknown", items.containsKey("enum"));
   }
+
+  /**
+   * ETP-5680: etendo_defaults takes an optional {@code recordContext} object, so the
+   * unknown-argument guard accepts it and an agent can pass the record's current values.
+   */
+  @Test
+  public void testDefaultsDeclaresTheOptionalRecordContextArgument() {
+    java.util.Optional<java.util.Set<String>> declared =
+        ToolRegistry.declaredArgumentNames("etendo_defaults");
+
+    assertTrue(declared.isPresent());
+    assertTrue(declared.get().toString(), declared.get().containsAll(
+        java.util.Set.of("spec", "entity", "parentId", "assetId", "view", "recordContext")));
+  }
 }

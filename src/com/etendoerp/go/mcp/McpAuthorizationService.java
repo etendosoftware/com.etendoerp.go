@@ -92,8 +92,6 @@ final class McpAuthorizationService {
       case "etendo_create":
       case "etendo_update":
       case "etendo_delete":
-      case "etendo_action":
-      case McpConstants.TOOL_NEO_ACTION_BATCH:
       // ETP-5184: all three image-upload tools are write-tier. The two upload tools create an
       // AD_Image row; the status lookup is bundled with them deliberately — it is a step of the
       // write flow and has nothing to offer a read-only session.
@@ -112,6 +110,12 @@ final class McpAuthorizationService {
       // ETP-5677: cancelling stops further writes of a job the caller started with etendo_batch.
       case McpConstants.TOOL_NEO_JOB_CANCEL:
         return SCOPE_WRITE;
+      // ETP-5783: etendo_action runs a document action or a process, exactly what REST asks
+      // etendo:process for on an action route; write alone must not complete a document.
+      case McpConstants.TOOL_NEO_ACTION:
+      // ETP-5873: a batch of actions asks what each action asks, never less.
+      case McpConstants.TOOL_NEO_ACTION_BATCH:
+        return SCOPE_PROCESS;
       default:
         return toolName.startsWith(McpConstants.GENERATE_PREFIX)
             ? SCOPE_REPORT

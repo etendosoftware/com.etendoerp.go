@@ -101,7 +101,7 @@ class NeoCrudHandler {
    * name the client sends, the name the filter would look up and the name the DAL persists are
    * all the same string.
    */
-  private static final String FIELD_UPDATED = "updated";
+  static final String FIELD_UPDATED = "updated";
   private static final String MSG_BODY_REQUIRED = "Request body is required";
 
   /**
@@ -303,6 +303,12 @@ class NeoCrudHandler {
 
   private NeoResponse dispatchCrudRequestInternal(SFEntity entity, NeoContext neoContext,
       HttpServletRequest request, HttpServletResponse response) {
+    // ETP-5785: before ANY customization — its handle() may persist on its own — and once per
+    // write. handleDefault does not repeat it. See NeoWritePreflight.
+    NeoResponse refusal = NeoWritePreflight.refusalFor(neoContext);
+    if (refusal != null) {
+      return refusal;
+    }
     // ETP-5693: always through the hook pipeline, so an @NeoExtension on an entity without a
     // Java_Qualifier runs on REST too (ETP-5415 removed this early return from batch/MCP only).
     // handleWithDefaultStep falls back to handleDefault when nothing resolves.
@@ -311,6 +317,10 @@ class NeoCrudHandler {
 
   /**
    * Executes the default DAL-based handler for a CRUD request.
+   *
+   * <p>Reference ownership (ETP-5785) is NOT checked here: both callers that reach this for a write
+   * ({@code dispatchCrudRequestInternal} and {@code BatchService.createRecord}) run
+   * {@link NeoWritePreflight} before dispatching to a customization.
    */
   NeoResponse handleDefault(NeoContext context) {
     try {
@@ -351,7 +361,6 @@ class NeoCrudHandler {
       // otherwise have silently dropped. Reject instead, so the caller sees why nothing changed.
       return NeoReadOnlyFieldResponse.build(e);
     } catch (Exception e) {
-      log.error("Error in default handler for {} {}", context.getHttpMethod(), context.getEntityName(), e);
       // ETP-4793 / IMP-17: same reclassification as the RPC-failure branch in
       // checkJsonServiceResponse, for the case where the violation is thrown rather than swallowed.
       // The column is read off the raw chain because sanitize() maps any DB exception to a generic
@@ -360,19 +369,19 @@ class NeoCrudHandler {
         String column = NeoErrorSanitizer.notNullViolationColumn(e);
         String fieldName = resolvePropertyNameForColumn(column, context.getAdTab());
         if (fieldName != null) {
+          log.warn("Default handler for {} {} refused: missing required field {}",
+              context.getHttpMethod(), context.getEntityName(), fieldName);
+          NeoErrorResponses.rollbackUnlessBatchOwned();
           return buildMissingRequiredFieldsResponse(
               new MissingRequiredFieldsException(List.of(fieldName)));
         }
       }
-      // A unique-constraint violation is a data conflict, not a server failure — the
-      // client sent a value that already exists, which is a 409, never a 500. Reusing
-      // this same classification is also what keeps the message worded consistently
-      // with NeoErrorSanitizer.DUPLICATE_KEY_ERROR (see its javadoc for why the import
-      // UI depends on that exact wording).
-      int status = NeoErrorSanitizer.isDuplicateKeyViolation(e)
-          ? HttpServletResponse.SC_CONFLICT
-          : HttpServletResponse.SC_INTERNAL_SERVER_ERROR;
-      return NeoResponse.error(status, NeoErrorSanitizer.sanitize(e));
+      // ETP-5782: every other thrown failure is classified by what it is (SQLState, exception
+      // type), answered with its error code, logged once and rolled back. A unique-constraint
+      // violation stays the 409 worded as NeoErrorSanitizer.DUPLICATE_KEY_ERROR (the import UI
+      // depends on that exact wording); anything unrecognised stays a sanitized 500.
+      return NeoErrorResponses.fromException(e, context.getHttpMethod(),
+          "Default handler for " + context.getHttpMethod() + " " + context.getEntityName(), null);
     }
   }
 
@@ -711,10 +720,11 @@ class NeoCrudHandler {
     String route = NeoRecordVersion.routeOf(context.getHttpMethod(), context.getSpecName(),
         context.getEntityName(), context.getRecordId());
     if (!NeoRecordVersion.isStale(dalEntityName, context.getRecordId(), clientValue, route)) {
+      NeoRecordVersion.forCore(body, FIELD_UPDATED);
       return null;
     }
     NeoWriteRefusalLog.staleRecord(context, clientValue);
-    return buildStaleRecordResponse(STALE_RECORD_MESSAGE);
+    return NeoErrorResponses.staleRecord(STALE_RECORD_MESSAGE);
   }
 
   /**
@@ -770,36 +780,6 @@ class NeoCrudHandler {
     }
   }
 
-  /**
-   * ETP-5073 / DOC-04: the structured 409 returned when core's optimistic-locking check fails —
-   * somebody else saved this record between our read and our write.
-   *
-   * <p>A distinguishable code matters more than usual here: {@link #checkJsonServiceResponse}
-   * already answers 409 for a duplicate-key conflict, and the two need opposite remedies (change
-   * your data vs. re-read and reapply). The client keys the reload-and-reapply offer required by
-   * the ticket's first acceptance criterion off {@code error == "stale_record"}, never off status
-   * alone.
-   *
-   * @param translated core's already-translated conflict message, kept as {@code message} so a
-   *                   human reading the response still gets Etendo's own wording
-   */
-  private NeoResponse buildStaleRecordResponse(String translated) {
-    try {
-      JSONObject errorObj = new JSONObject();
-      errorObj.put(KEY_STATUS, HttpServletResponse.SC_CONFLICT);
-      errorObj.put(KEY_ERROR, "stale_record");
-      errorObj.put(KEY_MESSAGE, translated);
-      errorObj.put(KEY_DETAIL, "This record was modified by someone else after you read it. Your"
-          + " write was refused so their change is not lost.");
-      errorObj.put(KEY_HINT, "Re-read the record to get the current values and the fresh '"
-          + FIELD_UPDATED + "', reapply your changes on top of it, then retry.");
-      errorObj.put(KEY_SEE_ALSO, "docs(topic:\"updating records\")");
-      return NeoResponse.error(HttpServletResponse.SC_CONFLICT, errorObj);
-    } catch (Exception fallback) {
-      log.warn("Could not build stale_record body: {}", fallback.getMessage());
-      return NeoResponse.error(HttpServletResponse.SC_CONFLICT, translated);
-    }
-  }
 
   /**
    * Validates the response for error/validation-error status codes.
@@ -812,9 +792,21 @@ class NeoCrudHandler {
     }
     int status = innerResponse.optInt(JsonConstants.RESPONSE_STATUS, 0);
     if (status == JsonConstants.RPCREQUEST_STATUS_FAILURE) {
+      return checkJsonWriteFailure(innerResponse, adTab);
+    }
+    if (status == JsonConstants.RPCREQUEST_STATUS_VALIDATION_ERROR) {
+      // ETP-5323: delegated to NeoValidationErrorResponseBuilder (kept out of this class to stay
+      // under SonarQube's method-count limit, java:S1448) — see its javadoc for the full
+      // RPCREQUEST_STATUS_VALIDATION_ERROR body shape and rationale.
+      return NeoValidationErrorResponseBuilder.build(innerResponse);
+    }
+    return null;
+  }
+
+  private NeoResponse checkJsonWriteFailure(JSONObject innerResponse, Tab adTab) throws Exception {
       String errMsg = innerResponse.has(JsonConstants.RESPONSE_ERROR)
           ? innerResponse.getJSONObject(JsonConstants.RESPONSE_ERROR)
-              .optString("message", "Write operation failed")
+              .optString(KEY_MESSAGE, "Write operation failed")
           : "Write operation failed";
       String translated = OBMessageUtils.messageBD(errMsg);
       // ETP-5073 / DOC-04: a concurrent-modification conflict, classified before the generic
@@ -824,7 +816,7 @@ class NeoCrudHandler {
       // core skips translation and its bare message code survives intact. Only the untranslated
       // message is worth inspecting, for that same reason.
       if (NeoErrorSanitizer.isStaleRecordMessage(errMsg)) {
-        return buildStaleRecordResponse(translated);
+        return NeoErrorResponses.staleRecord(translated);
       }
       // ETP-4793 / IMP-17: a not-null violation means the caller omitted a value the table
       // requires — their request to fix, so it is a 400 naming the field, never a 500. It reaches
@@ -847,6 +839,17 @@ class NeoCrudHandler {
             .put(NeoProcessService.MESSAGE_KEYS, new JSONArray(periodKeys));
         return refusal;
       }
+      // ETP-5782: a failure NEO's write service captured carries the classification of its
+      // throwable — a trigger refusal (422), a row still in use (409), a deadlock (409), a lost
+      // connection (503)… Unique violations are left to the branch below, which keeps Etendo's own
+      // wording. Captured 5xx failures use the sanitized classification message. An uncaptured
+      // failure keeps the legacy answer; its class is never guessed from its text.
+      if (!NeoErrorSanitizer.isDuplicateKeyMessage(translated)) {
+        NeoResponse classified = NeoErrorResponses.fromClassifiedWriteFailure(innerResponse);
+        if (classified != null) {
+          return NeoListReferenceError.enrichServerError(classified);
+        }
+      }
       // DefaultJsonDataService catches a unique-constraint violation internally and
       // returns it as a normal RPC failure response (this branch), never as a thrown
       // exception — so NeoErrorSanitizer.isDuplicateKeyViolation(Throwable), which only
@@ -867,14 +870,6 @@ class NeoCrudHandler {
       return NeoResponse.error(httpStatus,
           NeoErrorSanitizer.stripRowDump(NeoErrorSanitizer.redactObjectReferences(
             NeoListReferenceError.enrich(translated))));
-    }
-    if (status == JsonConstants.RPCREQUEST_STATUS_VALIDATION_ERROR) {
-      // ETP-5323: delegated to NeoValidationErrorResponseBuilder (kept out of this class to stay
-      // under SonarQube's method-count limit, java:S1448) — see its javadoc for the full
-      // RPCREQUEST_STATUS_VALIDATION_ERROR body shape and rationale.
-      return NeoValidationErrorResponseBuilder.build(innerResponse);
-    }
-    return null;
   }
 
   /**

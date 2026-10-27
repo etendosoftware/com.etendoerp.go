@@ -201,6 +201,13 @@ public final class NeoDateFormat {
     // server's own zone, and re-emitted WITH that zone's offset. The offset is derived by the
     // JDK from the parsed instant, never concatenated onto the string: hand-appending it would
     // get DST wrong twice a year, which is precisely the class of bug this method exists to end.
+    // The raw Postgres shape keeps its fraction through Timestamp.valueOf (server-local, like the
+    // canonical path below), so it yields the same token as the Date branch, milliseconds included.
+    try {
+      return xsdStamp(java.sql.Timestamp.valueOf(String.valueOf(rawUpdated)));
+    } catch (IllegalArgumentException notTheJdbcShape) {
+      // fall through to the canonical path
+    }
     String canonical = toCanonical(String.valueOf(rawUpdated), true);
     if (canonical == null) {
       return null;
@@ -214,12 +221,16 @@ public final class NeoDateFormat {
   }
 
   /**
-   * Core's datetime writer and its XSD colon-inserter, applied as the pair core documents them as.
-   * The single place the audit token's wire shape is decided, so the two branches above cannot
-   * drift apart.
+   * Core's datetime pattern plus milliseconds, and core's XSD colon-inserter. The single place the
+   * audit token's wire shape is decided, so the two branches above cannot drift apart.
+   *
+   * <p>The milliseconds are what let {@code NeoRecordVersion} tell apart two writes inside the
+   * same second (core's pattern stops at seconds). Core's reader cannot parse them, so every write
+   * path hands core {@code NeoRecordVersion.forCore(token)} instead of the raw token.
    */
   private static String xsdStamp(java.util.Date instant) {
-    return JsonUtils.convertToCorrectXSDFormat(JsonUtils.createDateTimeFormat().format(instant));
+    return JsonUtils.convertToCorrectXSDFormat(
+        new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSZZZZZ").format(instant));
   }
 
   private static java.time.ZonedDateTime zoned(java.util.Date ts) {
