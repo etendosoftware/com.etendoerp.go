@@ -177,6 +177,9 @@ public final class ContactTypeRules {
   /**
    * Whether the request is a write on the CRUD surface of the entity (not a selector, action,
    * defaults or callout request that happens to carry a body).
+   *
+   * @param ctx the request context; {@code null} is not a CRUD write
+   * @return {@code true} for a POST, PATCH or PUT with a body on the CRUD surface
    */
   public static boolean isCrudWrite(NeoContext ctx) {
     if (ctx == null || ctx.getRequestBody() == null) {
@@ -190,7 +193,12 @@ public final class ContactTypeRules {
     return METHOD_POST.equals(method) || METHOD_PATCH.equals(method) || METHOD_PUT.equals(method);
   }
 
-  /** Whether the CRUD write is a create. */
+  /**
+   * Whether the CRUD write is a create.
+   *
+   * @param ctx the request context
+   * @return {@code true} when the request is a POST
+   */
   public static boolean isCreate(NeoContext ctx) {
     return METHOD_POST.equals(ctx.getHttpMethod());
   }
@@ -201,7 +209,11 @@ public final class ContactTypeRules {
    * Create of a contact: fills every type flag the request did not carry explicitly from the
    * contact's category, then rejects the write when it would leave the contact with no type.
    *
+   * @param ctx the request context; records which flags were inherited
+   * @param body the request body; inherited flags are written into it
    * @return the rejection, or {@code null} to continue with the (possibly enriched) body
+   * @throws SQLException if the category's types cannot be read
+   * @throws JSONException if an inherited flag cannot be written into the body
    */
   public static NeoResponse inheritAndValidateOnCreate(NeoContext ctx, JSONObject body)
       throws SQLException, JSONException {
@@ -231,10 +243,13 @@ public final class ContactTypeRules {
    * Update of a contact: rejects the write when the flags it leaves on the record (the request's
    * own, else the persisted ones) are both off.
    *
+   * @param ctx the request context; carries the contact's id
+   * @param body the request body
    * @param onlyWhenTouched {@code true} to check only a write that sends {@code customer} or
    *     {@code vendor} (the Customer / Vendor tabs, which also save unrelated fields);
    *     {@code false} to check every update (the contact header, per the story)
    * @return the rejection, or {@code null} to continue
+   * @throws SQLException if the persisted types cannot be read
    */
   public static NeoResponse validateContactUpdate(NeoContext ctx, JSONObject body,
       boolean onlyWhenTouched) throws SQLException {
@@ -256,7 +271,11 @@ public final class ContactTypeRules {
    * why either flag switches this off); then rejects the write when the contact would be left with
    * no type, exactly as {@link #validateContactUpdate} does for {@code onlyWhenTouched = false}.
    *
+   * @param ctx the request context; carries the contact's id and records inherited flags
+   * @param body the request body; inherited flags are written into it
    * @return the rejection, or {@code null} to continue with the (possibly enriched) body
+   * @throws SQLException if the persisted category or types cannot be read
+   * @throws JSONException if an inherited flag cannot be written into the body
    */
   public static NeoResponse inheritOnCategoryChangeAndValidateUpdate(NeoContext ctx, JSONObject body)
       throws SQLException, JSONException {
@@ -310,7 +329,10 @@ public final class ContactTypeRules {
    * Create or update of a contact category: rejects the write when it leaves the category with
    * neither {@code etgoIscustomer} nor {@code etgoIsvendor}.
    *
+   * @param ctx the request context; carries the category's id on an update
+   * @param body the request body
    * @return the rejection, or {@code null} to continue
+   * @throws SQLException if the persisted category types cannot be read
    */
   public static NeoResponse validateCategoryWrite(NeoContext ctx, JSONObject body) throws SQLException {
     Types base;

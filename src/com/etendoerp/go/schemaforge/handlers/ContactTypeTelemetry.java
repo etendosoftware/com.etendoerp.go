@@ -25,6 +25,7 @@ import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -120,18 +121,18 @@ public final class ContactTypeTelemetry {
     final Instant created;
     final boolean categoryChanged;
 
+    // previous: the stored row before the write, or null on a create (no previous types, no date)
     private Snapshot(boolean create, boolean flagEnabled, String accountId, boolean customerExplicit,
-        boolean vendorExplicit, boolean previousCustomer, boolean previousVendor, Instant created,
-        boolean categoryChanged) {
+        boolean vendorExplicit, ContactState previous, boolean categoryChanged) {
       this.create = create;
       this.flagEnabled = flagEnabled;
       this.accountId = accountId;
       this.channel = NeoWriteChannel.current();
       this.customerExplicit = customerExplicit;
       this.vendorExplicit = vendorExplicit;
-      this.previousCustomer = previousCustomer;
-      this.previousVendor = previousVendor;
-      this.created = created;
+      this.previousCustomer = previous != null && previous.customer;
+      this.previousVendor = previous != null && previous.vendor;
+      this.created = previous != null ? previous.created : null;
       this.categoryChanged = categoryChanged;
     }
   }
@@ -141,13 +142,17 @@ public final class ContactTypeTelemetry {
   /**
    * Create of a contact, before the type rules run: remembers which flags the caller sent. Never
    * throws.
+   *
+   * @param ctx the request context the snapshot is stored on
+   * @param body the request body, before any type is inherited into it
+   * @param flagEnabled whether {@code contact-category-type} is on for the tenant
    */
   public static void beforeCreate(NeoContext ctx, JSONObject body, boolean flagEnabled) {
     try {
       ctx.setAttribute(ATTR_SNAPSHOT, new Snapshot(true, flagEnabled, accountId(ctx),
           ContactTypeRules.isExplicit(ctx, body, ContactTypeRules.FIELD_CUSTOMER),
           ContactTypeRules.isExplicit(ctx, body, ContactTypeRules.FIELD_VENDOR),
-          false, false, null, false));
+          null, false));
     } catch (RuntimeException e) {
       log.debug("Contact telemetry: could not snapshot a create: {}", e.getMessage());
     }
@@ -158,6 +163,9 @@ public final class ContactTypeTelemetry {
    * stored types. A write that carries neither type flag (after any re-inheritance) cannot change
    * them, so it costs no query. Never throws.
    *
+   * @param ctx the request context the snapshot is stored on; carries the contact's id
+   * @param body the request body, after any re-inheritance from the category
+   * @param flagEnabled whether {@code contact-category-type} is on for the tenant
    * @param categoryAware {@code true} on the contact header, where the write may change the
    *     category; {@code false} on the Customer / Vendor tabs
    */
@@ -179,7 +187,7 @@ public final class ContactTypeTelemetry {
       }
       ctx.setAttribute(ATTR_SNAPSHOT, new Snapshot(false, flagEnabled, accountId(ctx),
           body.has(ContactTypeRules.FIELD_CUSTOMER), body.has(ContactTypeRules.FIELD_VENDOR),
-          stored.customer, stored.vendor, stored.created, categoryChanged));
+          stored, categoryChanged));
     } catch (Exception e) {
       log.debug("Contact telemetry: could not snapshot an update: {}", e.getMessage());
     }
@@ -192,6 +200,7 @@ public final class ContactTypeTelemetry {
    * commit. A no-op without a snapshot, for a failed write, or when the types did not change.
    * Never throws.
    *
+   * @param ctx the request context holding the pre-hook snapshot and the write's result
    * @param recordId the contact's id — the created record's on a create, the request's on update
    */
   public static void afterWrite(NeoContext ctx, String recordId) {
@@ -210,7 +219,7 @@ public final class ContactTypeTelemetry {
       Map<String, Object> properties = snapshot.create
           ? createdProperties(ctx, snapshot, now)
           : typeChangedProperties(ctx, snapshot, now);
-      if (properties == null) {
+      if (properties.isEmpty()) {
         return;
       }
       String event = snapshot.create ? NeoTelemetryEvents.BACKEND_CONTACT_CREATED
@@ -230,11 +239,11 @@ public final class ContactTypeTelemetry {
     return properties;
   }
 
-  /** @return the properties, or {@code null} when neither type actually changed */
+  /** @return the properties, or an empty map when neither type actually changed */
   static Map<String, Object> typeChangedProperties(NeoContext ctx, Snapshot snapshot,
       ContactState now) {
     if (now.customer == snapshot.previousCustomer && now.vendor == snapshot.previousVendor) {
-      return null;
+      return Collections.emptyMap();
     }
     Map<String, Object> properties = base(snapshot);
     properties.put("previous_is_customer", snapshot.previousCustomer);
