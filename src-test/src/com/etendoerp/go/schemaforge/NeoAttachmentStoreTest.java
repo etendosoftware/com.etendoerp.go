@@ -294,10 +294,7 @@ class NeoAttachmentStoreTest {
     return stored;
   }
 
-  private static final byte[] WEBP = "RIFF\u0000\u0000\u0000\u0000WEBPVP8 "
-      .getBytes(StandardCharsets.ISO_8859_1);
-
-  private void stubUpdateDataType(boolean result) {
+    private void stubUpdateDataType(boolean result) {
     helper.when(() -> NeoAttachmentsHelper.updateDataType(anyString(), anyString()))
         .thenReturn(result);
   }
@@ -309,13 +306,13 @@ class NeoAttachmentStoreTest {
   }
 
   @Test
-  @DisplayName("an octet-stream data type stored for a WEBP is corrected to image/webp by a native update")
+  @DisplayName("an octet-stream data type stored for a NeoAttachmentTestFixtures.WEBP is corrected to image/webp by a native update")
   void octetStreamIsCorrected() throws Exception {
     Attachment stored = storedAs("foto.webp", "application/octet-stream");
     stubUpdateDataType(true);
 
     NeoResponse response = NeoAttachmentStore.store(
-        upload("foto.webp", WEBP.length, writing(WEBP), false));
+        upload("foto.webp", NeoAttachmentTestFixtures.WEBP.length, writing(NeoAttachmentTestFixtures.WEBP), false));
 
     assertEquals(201, response.getHttpStatus());
     helper.verify(() -> NeoAttachmentsHelper.updateDataType("ATT1", "image/webp"));
@@ -328,7 +325,7 @@ class NeoAttachmentStoreTest {
     Attachment stored = storedAs("foto.webp", "  ");
     stubUpdateDataType(true);
 
-    NeoAttachmentStore.store(upload("foto.webp", WEBP.length, writing(WEBP), false));
+    NeoAttachmentStore.store(upload("foto.webp", NeoAttachmentTestFixtures.WEBP.length, writing(NeoAttachmentTestFixtures.WEBP), false));
 
     helper.verify(() -> NeoAttachmentsHelper.updateDataType("ATT1", "image/webp"));
     verifyEntityUntouched(stored);
@@ -340,7 +337,7 @@ class NeoAttachmentStoreTest {
     Attachment stored = storedAs("foto.webp", null);
     stubUpdateDataType(true);
 
-    NeoAttachmentStore.store(upload("foto.webp", WEBP.length, writing(WEBP), false));
+    NeoAttachmentStore.store(upload("foto.webp", NeoAttachmentTestFixtures.WEBP.length, writing(NeoAttachmentTestFixtures.WEBP), false));
 
     helper.verify(() -> NeoAttachmentsHelper.updateDataType("ATT1", "image/webp"));
     verifyEntityUntouched(stored);
@@ -353,7 +350,7 @@ class NeoAttachmentStoreTest {
     stubUpdateDataType(false);
 
     NeoResponse response = NeoAttachmentStore.store(
-        upload("foto.webp", WEBP.length, writing(WEBP), false));
+        upload("foto.webp", NeoAttachmentTestFixtures.WEBP.length, writing(NeoAttachmentTestFixtures.WEBP), false));
 
     assertEquals(201, response.getHttpStatus());
     verifyEntityUntouched(stored);
@@ -366,7 +363,7 @@ class NeoAttachmentStoreTest {
     Attachment stored = storedAs("foto.webp", "image/png");
 
     NeoResponse response = NeoAttachmentStore.store(
-        upload("foto.webp", WEBP.length, writing(WEBP), false));
+        upload("foto.webp", NeoAttachmentTestFixtures.WEBP.length, writing(NeoAttachmentTestFixtures.WEBP), false));
 
     assertEquals(201, response.getHttpStatus());
     helper.verify(() -> NeoAttachmentsHelper.updateDataType(any(), any()), never());
@@ -380,7 +377,7 @@ class NeoAttachmentStoreTest {
         "foto.webp")).thenReturn(null);
 
     NeoResponse response = NeoAttachmentStore.store(
-        upload("foto.webp", WEBP.length, writing(WEBP), false));
+        upload("foto.webp", NeoAttachmentTestFixtures.WEBP.length, writing(NeoAttachmentTestFixtures.WEBP), false));
 
     assertEquals(201, response.getHttpStatus());
     verify(dal, never()).save(any());
@@ -398,7 +395,7 @@ class NeoAttachmentStoreTest {
         "foto.webp")).thenReturn(stored);
 
     NeoResponse response = NeoAttachmentStore.store(
-        upload("foto.webp", WEBP.length, writing(WEBP), false));
+        upload("foto.webp", NeoAttachmentTestFixtures.WEBP.length, writing(NeoAttachmentTestFixtures.WEBP), false));
 
     assertEquals(201, response.getHttpStatus());
     helper.verify(() -> NeoAttachmentsHelper.updateDataType(any(), any()), never());
@@ -413,7 +410,7 @@ class NeoAttachmentStoreTest {
         .thenThrow(new IllegalStateException("boom"));
 
     NeoResponse response = NeoAttachmentStore.store(
-        upload("foto.webp", WEBP.length, writing(WEBP), false));
+        upload("foto.webp", NeoAttachmentTestFixtures.WEBP.length, writing(NeoAttachmentTestFixtures.WEBP), false));
 
     assertEquals(201, response.getHttpStatus());
     assertEquals("foto.webp", response.getBody().getString("name"));
@@ -428,7 +425,7 @@ class NeoAttachmentStoreTest {
     helper.when(() -> NeoAttachmentsHelper.markAsMain(stored)).then(invocation -> null);
 
     NeoResponse response = NeoAttachmentStore.store(
-        upload("foto.webp", WEBP.length, writing(WEBP), true));
+        upload("foto.webp", NeoAttachmentTestFixtures.WEBP.length, writing(NeoAttachmentTestFixtures.WEBP), true));
 
     assertEquals(201, response.getHttpStatus());
     assertEquals("ATT1", response.getBody().getString("id"));
@@ -445,7 +442,7 @@ class NeoAttachmentStoreTest {
         "foto.webp")).thenThrow(new IllegalStateException("query failed"));
 
     NeoResponse response = NeoAttachmentStore.store(
-        upload("foto.webp", WEBP.length, writing(WEBP), false));
+        upload("foto.webp", NeoAttachmentTestFixtures.WEBP.length, writing(NeoAttachmentTestFixtures.WEBP), false));
 
     assertEquals(201, response.getHttpStatus());
     verify(dal, never()).save(any());
@@ -459,7 +456,7 @@ class NeoAttachmentStoreTest {
         "foto.webp")).thenThrow(new IllegalStateException("query failed"));
 
     NeoResponse response = NeoAttachmentStore.store(
-        upload("foto.webp", WEBP.length, writing(WEBP), true));
+        upload("foto.webp", NeoAttachmentTestFixtures.WEBP.length, writing(NeoAttachmentTestFixtures.WEBP), true));
 
     assertEquals(500, response.getHttpStatus());
     verify(dal).rollbackAndClose();
@@ -475,7 +472,7 @@ class NeoAttachmentStoreTest {
     helper.when(() -> NeoAttachmentsHelper.markAsMain(stored)).then(invocation -> null);
 
     NeoResponse response = NeoAttachmentStore.store(
-        upload("foto.webp", WEBP.length, writing(WEBP), true));
+        upload("foto.webp", NeoAttachmentTestFixtures.WEBP.length, writing(NeoAttachmentTestFixtures.WEBP), true));
 
     assertEquals(201, response.getHttpStatus());
     assertEquals("ATT1", response.getBody().getString("id"));

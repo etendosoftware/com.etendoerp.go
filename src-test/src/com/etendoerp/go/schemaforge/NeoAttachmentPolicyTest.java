@@ -29,6 +29,7 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.util.Arrays;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
@@ -212,15 +213,13 @@ public class NeoAttachmentPolicyTest {
 
   // ── resolveMimeType: the MIME the policy tables imply, content-checked ───────
 
-  private static final byte[] WEBP_HEADER = "RIFF\u0000\u0000\u0000\u0000WEBPVP8 "
-      .getBytes(StandardCharsets.ISO_8859_1);
-  private static final byte[] JPEG_HEADER = new byte[] { (byte) 0xFF, (byte) 0xD8, (byte) 0xFF,
+    private static final byte[] JPEG_HEADER = new byte[] { (byte) 0xFF, (byte) 0xD8, (byte) 0xFF,
       (byte) 0xE0, 0x00, 0x10 };
 
   @Test
   public void resolveMimeTypeReturnsThePrimaryMimeWhenTheSignatureMatches() throws IOException {
     assertEquals("image/webp",
-        NeoAttachmentPolicy.resolveMimeType("a.webp", writeFile("a.webp", WEBP_HEADER)));
+        NeoAttachmentPolicy.resolveMimeType("a.webp", writeFile("a.webp", NeoAttachmentTestFixtures.WEBP)));
     assertEquals("image/png",
         NeoAttachmentPolicy.resolveMimeType("a.png", writeFile("a.png", PNG_HEADER)));
     assertEquals("image/jpeg",
@@ -234,13 +233,13 @@ public class NeoAttachmentPolicyTest {
   @Test
   public void resolveMimeTypeIsCaseInsensitiveOnTheExtension() throws IOException {
     assertEquals("image/webp",
-        NeoAttachmentPolicy.resolveMimeType("PHOTO.WEBP", writeFile("PHOTO.WEBP", WEBP_HEADER)));
+        NeoAttachmentPolicy.resolveMimeType("PHOTO.WEBP", writeFile("PHOTO.WEBP", NeoAttachmentTestFixtures.WEBP)));
   }
 
   @Test
   public void resolveMimeTypeReturnsNullWhenTheBytesDoNotMatchTheExtension() throws IOException {
     assertNull(NeoAttachmentPolicy.resolveMimeType("a.webp", writeFile("a.webp", PDF_HEADER)));
-    assertNull(NeoAttachmentPolicy.resolveMimeType("a.pdf", writeFile("a.pdf", WEBP_HEADER)));
+    assertNull(NeoAttachmentPolicy.resolveMimeType("a.pdf", writeFile("a.pdf", NeoAttachmentTestFixtures.WEBP)));
   }
 
   @Test
@@ -269,6 +268,30 @@ public class NeoAttachmentPolicyTest {
         NeoAttachmentPolicy.resolveMimeType("a.docx", writeFile("a.docx", ZIP_HEADER)));
     assertEquals("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         NeoAttachmentPolicy.resolveMimeType("a.xlsx", writeFile("a.xlsx", ZIP_HEADER)));
+  }
+
+  // ── OCR-readable types (ETP-5735) ────────────────────────────────────────────
+
+  @Test
+  public void isOcrDocumentAcceptsPdfAndTheThreeImageFormatsInAnyCase() {
+    for (String name : new String[] {"a.pdf", "a.jpg", "a.jpeg", "a.png", "a.webp", "A.PDF",
+        "A.Jpg", "A.JPEG", "A.PNG", "A.WebP"}) {
+      assertTrue(name, NeoAttachmentPolicy.isOcrDocument(name));
+    }
+  }
+
+  @Test
+  public void isOcrDocumentRejectsEverythingElse() {
+    for (String name : new String[] {"a.gif", "a.svg", "a.docx", "a.xlsx", "a.zip", "a.bmp",
+        "a.exe", "noextension", "trailingdot.", "", null}) {
+      assertFalse(String.valueOf(name), NeoAttachmentPolicy.isOcrDocument(name));
+    }
+  }
+
+  @Test
+  public void ocrExtensionsListsTheReadableTypesInTableOrder() {
+    assertEquals(Arrays.asList("pdf", "png", "jpg", "jpeg", "webp"),
+        NeoAttachmentPolicy.ocrExtensions());
   }
 
   // ── Helpers ─────────────────────────────────────────────────────────────────

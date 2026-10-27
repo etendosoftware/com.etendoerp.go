@@ -30,6 +30,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 import java.util.function.Predicate;
+import java.util.stream.Collectors;
 
 import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONArray;
@@ -102,6 +103,8 @@ public final class NeoAttachmentPolicy {
     private final String group;
     private final List<String> mimeTypes;
     private final Predicate<byte[]> signature;
+    /** Whether the data extraction (OCR) can read this type; set by {@link #ocr()}. */
+    private boolean ocrReadable;
 
     private AllowedType(String extension, String group, Predicate<byte[]> signature,
         String... mimeTypes) {
@@ -109,6 +112,12 @@ public final class NeoAttachmentPolicy {
       this.group = group;
       this.signature = signature;
       this.mimeTypes = Collections.unmodifiableList(Arrays.asList(mimeTypes));
+    }
+
+    /** Marks the type as readable by the data extraction (a fluent step of the table below). */
+    private AllowedType ocr() {
+      this.ocrReadable = true;
+      return this;
     }
   }
 
@@ -150,7 +159,7 @@ public final class NeoAttachmentPolicy {
    * document bundles are real, in-use cases.</p>
    */
   private static final List<AllowedType> ALLOWED_TYPES = Collections.unmodifiableList(Arrays.asList(
-      new AllowedType("pdf", GROUP_PDF, SIG_PDF, "application/pdf"),
+      new AllowedType("pdf", GROUP_PDF, SIG_PDF, "application/pdf").ocr(),
       new AllowedType("doc", GROUP_WORD, SIG_OLE2, "application/msword"),
       new AllowedType("docx", GROUP_WORD, SIG_ZIP,
           "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
@@ -160,12 +169,12 @@ public final class NeoAttachmentPolicy {
       new AllowedType("ppt", GROUP_POWERPOINT, SIG_OLE2, "application/vnd.ms-powerpoint"),
       new AllowedType("pptx", GROUP_POWERPOINT, SIG_ZIP,
           "application/vnd.openxmlformats-officedocument.presentationml.presentation"),
-      new AllowedType("png", GROUP_IMAGE, SIG_PNG, "image/png"),
-      new AllowedType("jpg", GROUP_IMAGE, SIG_JPEG, "image/jpeg"),
-      new AllowedType("jpeg", GROUP_IMAGE, SIG_JPEG, "image/jpeg"),
+      new AllowedType("png", GROUP_IMAGE, SIG_PNG, "image/png").ocr(),
+      new AllowedType("jpg", GROUP_IMAGE, SIG_JPEG, "image/jpeg").ocr(),
+      new AllowedType("jpeg", GROUP_IMAGE, SIG_JPEG, "image/jpeg").ocr(),
       new AllowedType("gif", GROUP_IMAGE, SIG_GIF, "image/gif"),
       new AllowedType("bmp", GROUP_IMAGE, SIG_BMP, "image/bmp"),
-      new AllowedType("webp", GROUP_IMAGE, SIG_WEBP, "image/webp"),
+      new AllowedType("webp", GROUP_IMAGE, SIG_WEBP, "image/webp").ocr(),
       new AllowedType("tif", GROUP_IMAGE, SIG_TIFF, "image/tiff"),
       new AllowedType("tiff", GROUP_IMAGE, SIG_TIFF, "image/tiff"),
       new AllowedType("heic", GROUP_IMAGE, SIG_ISO_BMFF, "image/heic"),
@@ -174,6 +183,11 @@ public final class NeoAttachmentPolicy {
       new AllowedType("xml", GROUP_XML, SIG_TEXT_MARKUP, "application/xml", "text/xml"),
       new AllowedType("zip", GROUP_ZIP, SIG_ZIP, "application/zip", "application/x-zip-compressed"),
       new AllowedType("rtf", GROUP_RTF, SIG_RTF, "application/rtf")));
+
+  /** The extensions of the OCR-readable types, computed once from the table above. */
+  private static final List<String> OCR_EXTENSIONS = Collections.unmodifiableList(
+      ALLOWED_TYPES.stream().filter(type -> type.ocrReadable).map(type -> type.extension)
+          .collect(Collectors.toList()));
 
   private NeoAttachmentPolicy() {
   }
@@ -311,6 +325,24 @@ public final class NeoAttachmentPolicy {
       }
     }
     return type.mimeTypes.get(0);
+  }
+
+  /**
+   * Whether the data extraction (OCR) can read a file, by its name: PDF and the common image
+   * formats (JPG, PNG, WEBP) of the allowlist. The content is still checked by
+   * {@link #validateContent}, so a renamed file is refused there.
+   *
+   * @param fileName the file name
+   * @return {@code true} when its extension is an OCR-readable type
+   */
+  public static boolean isOcrDocument(String fileName) {
+    AllowedType type = findType(extensionOf(fileName));
+    return type != null && type.ocrReadable;
+  }
+
+  /** @return the extensions the data extraction reads, lower-case, without the dot, in table order. */
+  public static List<String> ocrExtensions() {
+    return OCR_EXTENSIONS;
   }
 
   // ── Internals ───────────────────────────────────────────────────────────────
