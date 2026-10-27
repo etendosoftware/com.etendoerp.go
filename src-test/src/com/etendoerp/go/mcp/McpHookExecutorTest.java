@@ -43,11 +43,10 @@ import org.openbravo.model.ad.ui.Tab;
 
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
-import com.etendoerp.go.schemaforge.NeoExtensionDispatcher;
-import com.etendoerp.go.schemaforge.NeoExtensionRequest;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.data.SFEntity;
+import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
 
 /**
  * Unit tests for {@link McpHookExecutor}.
@@ -715,9 +714,9 @@ public class McpHookExecutorTest {
     JSONObject body = new JSONObject().put("businessPartner", "bp-1");
 
     try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
-        MockedStatic<NeoExtensionDispatcher> dispatcher = mockStatic(NeoExtensionDispatcher.class)) {
+        MockedStatic<NeoHandlerLookup> lookup = mockStatic(NeoHandlerLookup.class)) {
       obContextMock.when(OBContext::getOBContext).thenReturn(null);
-      dispatcher.when(() -> NeoExtensionDispatcher.resolveOnly(any(NeoExtensionRequest.class)))
+      lookup.when(() -> NeoHandlerLookup.forEntity(sfEntity))
           .thenReturn(customization);
 
       McpHookExecutor.resolveServerCreateFields("sales-invoice", "header", null, sfEntity, body);
@@ -734,12 +733,12 @@ public class McpHookExecutorTest {
     SFEntity sfEntity = mock(SFEntity.class);
     JSONObject body = new JSONObject().put("a", "b");
 
-    try (MockedStatic<NeoExtensionDispatcher> dispatcher = mockStatic(NeoExtensionDispatcher.class)) {
-      dispatcher.when(() -> NeoExtensionDispatcher.resolveOnly(any(NeoExtensionRequest.class)))
+    try (MockedStatic<NeoHandlerLookup> lookup = mockStatic(NeoHandlerLookup.class)) {
+      lookup.when(() -> NeoHandlerLookup.forEntity(sfEntity))
           .thenReturn(null);
       McpHookExecutor.resolveServerCreateFields("s", "e", null, sfEntity, body);
 
-      dispatcher.when(() -> NeoExtensionDispatcher.resolveOnly(any(NeoExtensionRequest.class)))
+      lookup.when(() -> NeoHandlerLookup.forEntity(sfEntity))
           .thenThrow(new IllegalStateException("boom"));
       McpHookExecutor.resolveServerCreateFields("s", "e", null, sfEntity, body);
     }
