@@ -649,6 +649,32 @@ class McpRoutingException extends OBException {
   }
 
   /**
+   * A filter value that is not of the field's type (ETP-5914): a word on a number, a date that is
+   * not {@code YYYY-MM-DD}, a boolean other than {@code true}/{@code false}. It used to reach the
+   * query and fail it with a 500, or be cleaned into a filter that matched everything.
+   *
+   * @param key          the filter key
+   * @param expectedType {@code number}, {@code date} or {@code boolean}
+   * @param received     the value as sent
+   * @return the exception to throw
+   */
+  static McpRoutingException invalidFilterValue(String key, String expectedType, Object received) {
+    JSONObject extras = new JSONObject();
+    try {
+      extras.put("expectedType", expectedType);
+      extras.put("received", received == null ? JSONObject.NULL : received);
+    } catch (JSONException e) {
+      // a String key and a JSON value cannot fail; the refusal still carries field and detail
+    }
+    return new McpRoutingException(
+        "Filter '" + key + "' expects a " + expectedType + " value"
+            + ("date".equals(expectedType) ? " (YYYY-MM-DD)" : "") + ", got '" + received + "'.",
+        McpConstants.STATUS_UNPROCESSABLE, McpConstants.ERROR_VALIDATION, key, List.of(),
+        "Correct the value and retry; nothing was read.", McpConstants.SEE_ALSO_READING)
+        .withExtras(extras);
+  }
+
+  /**
    * A call on a child entity did not name its parent record (ETP-5184).
    *
    * <p>The detail is written for an agent that does not know Etendo's data model: it says why there

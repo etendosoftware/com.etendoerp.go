@@ -123,7 +123,7 @@ final class McpQuerySupport {
       if (value instanceof JSONObject) {
         appendOperatorConditions(where, prop, target, key, (JSONObject) value);
       } else {
-        appendEqualityCondition(where, prop, target, value);
+        appendEqualityCondition(where, key, prop, target, value);
       }
     }
     return where.length() > 0 ? where.toString() : null;
@@ -566,15 +566,16 @@ final class McpQuerySupport {
    * Append {@code <path> = value} (or {@code <path>.id = 'value'} for a FK), type-aware, where
    * {@code <path>} is the expression from {@link #filterPath}.
    */
-  private static void appendEqualityCondition(StringBuilder where, Property prop, Property target,
+  private static void appendEqualityCondition(StringBuilder where, String key, Property prop,
+      Property target,
       Object value) {
     appendAnd(where);
     if (!prop.isPrimitive()) {
       where.append(filterPath(prop, target, ".id")).append('=')
-          .append(McpBusinessFilters.formatHqlValue(String.class, false, value));
+          .append(McpBusinessFilters.formatHqlValue(key, String.class, false, value));
     } else {
       where.append(filterPath(prop, target, "")).append('=').append(
-          McpBusinessFilters.formatHqlValue(prop.getPrimitiveObjectType(), true, value));
+          McpBusinessFilters.formatHqlValue(key, prop.getPrimitiveObjectType(), true, value));
     }
   }
 
@@ -597,9 +598,9 @@ final class McpQuerySupport {
         }
         appendAnd(where);
         where.append(path).append(" between ")
-            .append(McpBusinessFilters.formatHqlValue(type, prop.isPrimitive(), bounds.get(0)))
+            .append(McpBusinessFilters.formatHqlValue(key, type, prop.isPrimitive(), bounds.get(0)))
             .append(" and ")
-            .append(McpBusinessFilters.formatHqlValue(type, prop.isPrimitive(), bounds.get(1)));
+            .append(McpBusinessFilters.formatHqlValue(key, type, prop.isPrimitive(), bounds.get(1)));
       } else if (McpBusinessFilters.OP_CONTAINS.equals(op)) {
         // ETP-5852: partial text search. Only on a text column — on a number, date, boolean or
         // foreign key a substring match is meaningless, so refuse it instead of guessing.
@@ -627,7 +628,7 @@ final class McpQuerySupport {
         }
         String inPath = prop.isPrimitive() ? path : filterPath(prop, target, ".id");
         appendAnd(where);
-        where.append(McpBusinessFilters.inCondition(inPath, type, prop.isPrimitive(), list));
+        where.append(McpBusinessFilters.inCondition(key, inPath, type, prop.isPrimitive(), list));
       } else {
         String sql = McpBusinessFilters.operatorToSql(op);
         if (sql == null) {
@@ -636,7 +637,7 @@ final class McpQuerySupport {
         }
         appendAnd(where);
         where.append(path).append(' ').append(sql).append(' ')
-            .append(McpBusinessFilters.formatHqlValue(type, prop.isPrimitive(), operators.get(op)));
+            .append(McpBusinessFilters.formatHqlValue(key, type, prop.isPrimitive(), operators.get(op)));
       }
     }
   }

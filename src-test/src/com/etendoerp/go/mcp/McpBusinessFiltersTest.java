@@ -74,52 +74,77 @@ class McpBusinessFiltersTest {
   @DisplayName("formatHqlValue")
   class FormatHqlValue {
 
-    @Test
-    @DisplayName("renders numbers unquoted")
-    void numbersUnquoted() {
-      assertEquals("1000", McpBusinessFilters.formatHqlValue(BigDecimal.class, true, 1000));
-      assertEquals("12.5", McpBusinessFilters.formatHqlValue(Long.class, true, "12.5"));
+    static java.util.stream.Stream<org.junit.jupiter.params.provider.Arguments> validValues() {
+      return java.util.stream.Stream.of(
+          org.junit.jupiter.params.provider.Arguments.of(BigDecimal.class, 1000, "1000"),
+          org.junit.jupiter.params.provider.Arguments.of(Long.class, "12.5", "12.5"),
+          org.junit.jupiter.params.provider.Arguments.of(BigDecimal.class, " -3 ", "-3"),
+          org.junit.jupiter.params.provider.Arguments.of(Boolean.class, true, "true"),
+          org.junit.jupiter.params.provider.Arguments.of(Boolean.class, "FALSE", "false"),
+          org.junit.jupiter.params.provider.Arguments.of(Date.class, "2026-07-31",
+              "to_date('2026-07-31','YYYY-MM-DD')"),
+          org.junit.jupiter.params.provider.Arguments.of(Date.class, "2026-07-31T10:15:00",
+              "to_date('2026-07-31','YYYY-MM-DD')"));
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest(name = "{0} {1}")
+    @org.junit.jupiter.params.provider.MethodSource("validValues")
+    @DisplayName("renders a value of the property's type")
+    void rendersValidValues(Class<?> type, Object value, String expected) {
+      assertEquals(expected, McpBusinessFilters.formatHqlValue("f", type, true, value));
+    }
+
+    /** ETP-5914: these reached the query (500) or were cleaned into a filter that matched all. */
+    static java.util.stream.Stream<org.junit.jupiter.params.provider.Arguments> invalidValues() {
+      return java.util.stream.Stream.of(
+          org.junit.jupiter.params.provider.Arguments.of(BigDecimal.class, "abc", "number"),
+          org.junit.jupiter.params.provider.Arguments.of(BigDecimal.class, "1=1", "number"),
+          org.junit.jupiter.params.provider.Arguments.of(Boolean.class, "abc", "boolean"),
+          org.junit.jupiter.params.provider.Arguments.of(Boolean.class, "Y", "boolean"),
+          org.junit.jupiter.params.provider.Arguments.of(Date.class, "ayer", "date"),
+          org.junit.jupiter.params.provider.Arguments.of(Date.class, "2026-02-30", "date"),
+          org.junit.jupiter.params.provider.Arguments.of(Date.class, "31/07/2026", "date"),
+          org.junit.jupiter.params.provider.Arguments.of(Date.class, "2026-07-31'); drop", "date"));
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest(name = "{0} {1}")
+    @org.junit.jupiter.params.provider.MethodSource("invalidValues")
+    @DisplayName("refuses a value of another type with a 422 naming field, type and value")
+    void refusesInvalidValues(Class<?> type, Object value, String expectedType) {
+      McpRoutingException e = org.junit.jupiter.api.Assertions.assertThrows(
+          McpRoutingException.class,
+          () -> McpBusinessFilters.formatHqlValue("grandTotalAmount", type, true, value));
+
+      assertEquals(McpConstants.ERROR_VALIDATION, e.getErrorCode());
+      assertTrue(e.getMessage().contains("'grandTotalAmount' expects a " + expectedType),
+          e.getMessage());
+      assertTrue(e.getMessage().contains(String.valueOf(value)), e.getMessage());
     }
 
     @Test
-    @DisplayName("renders booleans as true/false")
-    void booleans() {
-      assertEquals("true", McpBusinessFilters.formatHqlValue(Boolean.class, true, true));
-      assertEquals("false", McpBusinessFilters.formatHqlValue(Boolean.class, true, "false"));
-    }
-
-    @Test
-    @DisplayName("wraps dates in to_date(...,'YYYY-MM-DD')")
-    void dates() {
-      assertEquals("to_date('2026-07-31','YYYY-MM-DD')",
-          McpBusinessFilters.formatHqlValue(Date.class, true, "2026-07-31"));
+    @DisplayName("an 'in' list with one bad element is refused as a whole")
+    void inListIsValidatedPerElement() {
+      org.junit.jupiter.api.Assertions.assertThrows(McpRoutingException.class,
+          () -> McpBusinessFilters.inCondition("qty", "e.qty", BigDecimal.class, true,
+              java.util.List.of(1, "x")));
+      assertEquals("e.qty in (1, 2)", McpBusinessFilters.inCondition("qty", "e.qty",
+          BigDecimal.class, true, java.util.List.of(1, 2)));
     }
 
     @Test
     @DisplayName("quotes and escapes strings and foreign keys")
     void stringsAndForeignKeys() {
-      assertEquals("'ACME'", McpBusinessFilters.formatHqlValue(String.class, true, "ACME"));
+      assertEquals("'ACME'", McpBusinessFilters.formatHqlValue("f", String.class, true, "ACME"));
       // a FK (non-primitive) is compared by id string regardless of the declared type
-      assertEquals("'ABC123'", McpBusinessFilters.formatHqlValue(String.class, false, "ABC123"));
+      assertEquals("'ABC123'",
+          McpBusinessFilters.formatHqlValue("f", BigDecimal.class, false, "ABC123"));
     }
 
     @Test
     @DisplayName("escapes embedded single quotes to prevent HQL injection")
     void escapesQuotes() {
-      assertEquals("'O''Brien'", McpBusinessFilters.formatHqlValue(String.class, true, "O'Brien"));
-    }
-
-    @Test
-    @DisplayName("a non-numeric value on a numeric property is quoted, never inlined raw")
-    void malformedNumberIsQuoted() {
-      assertEquals("'1=1'", McpBusinessFilters.formatHqlValue(BigDecimal.class, true, "1=1"));
-    }
-
-    @Test
-    @DisplayName("strips non-date characters before building the to_date literal")
-    void sanitizesDate() {
-      assertEquals("to_date('2026-07-31','YYYY-MM-DD')",
-          McpBusinessFilters.formatHqlValue(Date.class, true, "2026-07-31'); drop"));
+      assertEquals("'O''Brien'",
+          McpBusinessFilters.formatHqlValue("f", String.class, true, "O'Brien"));
     }
   }
 
@@ -145,11 +170,9 @@ class McpBusinessFiltersTest {
     @DisplayName("in renders each value for the property's type")
     void inRendersTypedValues() {
       assertEquals("e.searchKey in ('SK-1', 'it''s')", McpBusinessFilters.inCondition(
-          "e.searchKey", String.class, true, java.util.List.of("SK-1", "it's")));
+          "searchKey", "e.searchKey", String.class, true, java.util.List.of("SK-1", "it's")));
       assertEquals("e.qty in (1, 2.5)", McpBusinessFilters.inCondition(
-          "e.qty", BigDecimal.class, true, java.util.List.of(1, "2.5")));
-      assertEquals("e.qty in ('1 or 1=1')", McpBusinessFilters.inCondition(
-          "e.qty", BigDecimal.class, true, java.util.List.of("1 or 1=1")));
+          "qty", "e.qty", BigDecimal.class, true, java.util.List.of(1, "2.5")));
     }
 
     @Test
