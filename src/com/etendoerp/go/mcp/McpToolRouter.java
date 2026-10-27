@@ -1770,6 +1770,7 @@ public class McpToolRouter {
         // error code instead of the raw DAL sub-response BatchService forwards to REST callers.
         McpBatchEnvelope.toMcpBatchFailure(result);
       }
+      McpRecordUrls.addBatchUrls(result, operations);
       return wrapAsTextContent(result);
     } catch (SecurityException e) {
       log.warn("etendo_batch access denied session={}", McpUsageTelemetry.sessionForLog(), e);
@@ -2373,7 +2374,29 @@ public class McpToolRouter {
 
   static {
     HINT_BY_MESSAGE_KEY.put(PERIOD_NOT_AVAILABLE_KEY, PERIOD_NOT_AVAILABLE_HINT);
+    // ETP-5945 (in ETP-5852): a date with no valid period at all gets the same advice.
+    HINT_BY_MESSAGE_KEY.put("PeriodNotValid", PERIOD_NOT_AVAILABLE_HINT);
     HINT_BY_MESSAGE_KEY.put(DOCUMENT_PROCESSED_KEY, DOCUMENT_PROCESSED_HINT);
+  }
+
+  /**
+   * The recovery hint for the first known message key of a refusal (ETP-5945, in ETP-5852), so a
+   * classified envelope carries the specific advice ({@code PeriodNotValid}: open the period)
+   * rather than the generic one for its class.
+   *
+   * @param messageKeys the refusal's AD message keys; may be {@code null}
+   * @return the hint, or {@code null} when no key is known
+   */
+  static String hintForMessageKeys(java.util.Collection<String> messageKeys) {
+    if (messageKeys == null) {
+      return null;
+    }
+    for (Map.Entry<String, String> entry : HINT_BY_MESSAGE_KEY.entrySet()) {
+      if (messageKeys.contains(entry.getKey())) {
+        return entry.getValue();
+      }
+    }
+    return null;
   }
 
   /**

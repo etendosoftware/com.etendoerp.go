@@ -85,6 +85,7 @@ final class McpBatchJobTools {
       if (!result.optBoolean("committed", false)) {
         McpBatchEnvelope.toMcpBatchFailure(result);
       }
+      McpRecordUrls.addBatchUrls(result, rowOps);
       return result;
     } finally {
       OBContext.restorePreviousMode();

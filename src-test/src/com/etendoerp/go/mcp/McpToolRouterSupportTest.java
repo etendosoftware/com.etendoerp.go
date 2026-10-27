@@ -2249,6 +2249,35 @@ class McpToolRouterSupportTest {
       return body;
     }
 
+    /**
+     * ETP-5945 (in ETP-5852): a keyed refusal (REST's 400 with {@code error.messageKeys}, here a
+     * date with no valid period) reaches the agent as etendo_create answers it: 422, code
+     * business_rule, the keys and the period hint — not REST's bare 400 "rejected by server".
+     */
+    @Test
+    @DisplayName("answers a keyed refusal as etendo_create does")
+    void keyedRefusalMatchesCreate() throws Exception {
+      JSONObject keyed = new JSONObject();
+      keyed.put("message", "Periodo no válido para esta fecha de contabilidad");
+      keyed.put("messageKeys", new JSONArray().put("PeriodNotValid"));
+      JSONObject error = new JSONObject();
+      error.put("status", 400);
+      error.put("message", "Operation 'j' rejected by server");
+      error.put("detail", new JSONObject().put("error", keyed));
+      JSONObject body = new JSONObject();
+      body.put("committed", false);
+      body.put("failedAt", new JSONObject().put("index", 0).put("id", "j"));
+      body.put("error", error);
+
+      JSONObject out = McpBatchEnvelope.toMcpBatchFailure(body).getJSONObject("error");
+
+      assertEquals(422, out.getInt("status"));
+      assertEquals("business_rule", out.getString("code"));
+      assertEquals("Periodo no válido para esta fecha de contabilidad", out.getString("detail"));
+      assertEquals("PeriodNotValid", out.getJSONArray("messageKeys").getString(0));
+      assertEquals(McpToolRouter.PERIOD_NOT_AVAILABLE_HINT, out.getString("hint"));
+    }
+
     @Test
     @DisplayName("replaces the raw DAL detail with the IMP-5 envelope, keeping the failedAt pointer")
     void rewritesTheFailure() throws Exception {

@@ -150,7 +150,8 @@ final class McpToolResponses {
     if (messageKeys != null && !messageKeys.isEmpty()) {
       envelope.put("messageKeys", new JSONArray(messageKeys));
     }
-    envelope.put(McpConstants.KEY_HINT, hintFor(code));
+    String keyHint = McpToolRouter.hintForMessageKeys(messageKeys);
+    envelope.put(McpConstants.KEY_HINT, keyHint != null ? keyHint : hintFor(code));
     return envelope;
   }
 

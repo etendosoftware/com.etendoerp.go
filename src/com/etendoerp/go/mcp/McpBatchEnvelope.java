@@ -22,6 +22,7 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 
 import com.etendoerp.go.schemaforge.BatchService;
+import com.etendoerp.go.schemaforge.NeoErrorClassifier;
 
 /**
  * The outcome envelope {@code etendo_batch} answers a failed batch with, whether the batch was
@@ -134,6 +135,25 @@ final class McpBatchEnvelope {
     JSONArray missingFields = McpSupportInternals.extractMissingFields(detail);
     if (missingFields != null) {
       result.put(McpConstants.KEY_ERROR, McpSupportInternals.buildBatchMissingFieldsError(missingFields));
+      return result;
+    }
+
+    // ETP-5945 (in ETP-5852): a refusal NEO identified by its message keys (a date with no valid
+    // period: REST answers it 400 with error.messageKeys) gets the envelope etendo_create answers
+    // for the same refusal — 422, code business_rule, the keys and their recovery hint — instead of
+    // a bare 400 "rejected by server". The op is already named by failedAt.
+    JSONObject keyed = detail == null ? null : detail.optJSONObject(McpConstants.KEY_ERROR);
+    JSONArray keys = keyed == null ? null : keyed.optJSONArray("messageKeys");
+    if (keys != null && keys.length() > 0 && status < 500) {
+      java.util.List<String> keyList = new java.util.ArrayList<>();
+      for (int i = 0; i < keys.length(); i++) {
+        keyList.add(keys.optString(i));
+      }
+      JSONObject envelope = McpToolResponses.classifiedEnvelope(status,
+          keyed.optString("code", NeoErrorClassifier.CODE_BUSINESS_RULE),
+          keyed.optString(McpConstants.KEY_MESSAGE, message), keyList);
+      envelope.put(McpConstants.KEY_SEE_ALSO, McpConstants.SEE_ALSO_WRITING);
+      result.put(McpConstants.KEY_ERROR, envelope);
       return result;
     }
 

@@ -16,12 +16,17 @@
  */
 package com.etendoerp.go.mcp;
 
+import java.util.HashMap;
+import java.util.Map;
+
 import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 
 import com.etendoerp.go.common.PublicUrlResolver;
+import com.etendoerp.go.schemaforge.data.SFEntity;
+import com.etendoerp.go.schemaforge.data.SFSpec;
 
 /**
  * Builds Etendo Go application links for records reached through the MCP (ETP-5200, resolved in
@@ -160,5 +165,56 @@ public final class McpRecordUrls {
     }
     JSONObject first = data.optJSONObject(0);
     return first == null ? null : StringUtils.trimToNull(first.optString(KEY_ID, null));
+  }
+
+  /**
+   * ETP-5945 (in ETP-5852): adds the record {@code url} to each committed create of an
+   * {@code etendo_batch} envelope ({@code operations:[{id, ok, recordId}]}), as
+   * {@code etendo_create} answers it — only for an op on its spec's primary entity, and only when
+   * the app base URL is configured. The spec and entity of each op are read from the request.
+   *
+   * @param envelope the batch outcome, mutated in place; {@code null} is tolerated
+   * @param requested the operations as sent ({@code id}, {@code spec}, {@code entity})
+   */
+  static void addBatchUrls(JSONObject envelope, JSONArray requested) throws JSONException {
+    JSONArray done = envelope == null ? null : envelope.optJSONArray("operations");
+    if (done == null || requested == null
+        || StringUtils.isBlank(PublicUrlResolver.resolveConfiguredAppBaseUrl())) {
+      return;
+    }
+    Map<String, JSONObject> byId = new HashMap<>();
+    for (int i = 0; i < requested.length(); i++) {
+      JSONObject op = requested.optJSONObject(i);
+      if (op != null) {
+        byId.put(op.optString(KEY_ID), op);
+      }
+    }
+    Map<String, Boolean> primary = new HashMap<>();
+    for (int i = 0; i < done.length(); i++) {
+      JSONObject result = done.optJSONObject(i);
+      JSONObject op = result == null ? null : byId.get(result.optString(KEY_ID));
+      String recordId = result == null ? null : result.optString("recordId", null);
+      if (op == null || StringUtils.isBlank(recordId)) {
+        continue;
+      }
+      String spec = op.optString("spec");
+      String entity = op.optString("entity");
+      if (primary.computeIfAbsent(spec + "/" + entity, k -> isPrimary(spec, entity))) {
+        String url = buildRecordUrl(spec, recordId);
+        if (url != null) {
+          result.put(KEY_URL, url);
+        }
+      }
+    }
+  }
+
+  private static boolean isPrimary(String specName, String entityName) {
+    try {
+      SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
+      SFEntity entity = McpToolRouterSupport.findIncludedEntity(spec.getId(), entityName);
+      return McpToolRouterSupport.isPrimaryTab(entity.getADTab());
+    } catch (RuntimeException e) {
+      return false;
+    }
   }
 }
