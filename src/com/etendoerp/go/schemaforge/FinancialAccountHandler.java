@@ -113,11 +113,19 @@ public class FinancialAccountHandler implements NeoHandler {
   static final String FIELD_IBAN = "iBAN";
   private static final String FIELD_SWIFT_CODE = "swiftCode";
   private static final String FIELD_COUNTRY = "country";
-  /** ETP-5473. Fixed English literals on purpose: the SPA translates them by exact match through
-   *  {@code tools/app-shell/src/lib/backendErrors.js} ({@code BACKEND_ERROR_MAP}), so the wording
-   *  is a wire contract — rewording any of them silently un-translates the toast. */
-  private static final String MSG_COUNTRY_REQUIRED = "Country is required";
-  private static final String MSG_INVALID_COUNTRY = "Invalid country";
+  /** ETP-5473 country refusals: {@code AD_MESSAGE} values of this module, answered in the request
+   *  language through {@link NeoMessageText} (English base text {@code "Country is required"} /
+   *  {@code "Invalid country"}, Spanish in {@code messages/neo_hints_es.properties}) and published
+   *  in {@code error.messageKeys}. REST and MCP callers read the translated text; the SPA maps the
+   *  key ({@code backendErrors.js BACKEND_ERROR_KEY_MAP}), so the prose is no longer a wire
+   *  contract. Package-private for the tests.
+   *  <p>{@link #MSG_INVALID_COUNTRY} is a defensive fallback only: an unresolvable country id is
+   *  refused first by the ETP-5785 write preflight ({@code NeoWritePreflight} /
+   *  {@code NeoReferenceOwnership}, {@code unknown_reference}) or, for a non-id value on MCP, by
+   *  {@code McpFkResolver} ({@code not_found}); it reaches this handler only when that preflight
+   *  fails open (no session, no AD tab). Those shared refusals stay in English for now. */
+  static final String MSG_COUNTRY_REQUIRED = "ETGO_FinAccCountryRequired";
+  static final String MSG_INVALID_COUNTRY = "ETGO_FinAccInvalidCountry";
   private static final String FIELD_MATCHING_ALGORITHM = "matchingAlgorithm";
   /** Computed flag (ETP-4530): {@code true} when the account has at least one active
    *  {@link FIN_FinaccTransaction}. Injected into every GET row so the frontend can lock the
@@ -254,6 +262,17 @@ public class FinancialAccountHandler implements NeoHandler {
     return contracts;
   }
 
+  /**
+   * ETP-5473: {@code country} is refused when missing on create ({@link #validateBodyCountry}),
+   * although AD does not mark the column mandatory and the DEFAULTS post-hook suggests the
+   * organization's country. Declared so {@code etendo_schema} advertises it as required instead of
+   * {@code serverDefaulted}.
+   */
+  @Override
+  public Set<String> callerRequiredCreateFields() {
+    return Set.of(FIELD_COUNTRY);
+  }
+
   @Override
   public NeoResponse handle(NeoContext context) {
     if (!SPEC.equals(context.getSpecName())) {
@@ -335,7 +354,8 @@ public class FinancialAccountHandler implements NeoHandler {
     if (prev.getHttpStatus() < 200 || prev.getHttpStatus() >= 300) {
       return;
     }
-    LocalDate importFromDay = requestedCalendarDay(request.optString("pSD2ImportFromDate", null));
+    LocalDate importFromDay = FinancialAccountSupport.requestedCalendarDay(
+        request.optString("pSD2ImportFromDate", null));
     if (importFromDay == null) {
       return;
     }
@@ -357,22 +377,6 @@ public class FinancialAccountHandler implements NeoHandler {
       log.error("financial-account afterHandle: failed to evaluate the import-from advisory", e);
     } finally {
       exitAdminMode();
-    }
-  }
-
-  /**
-   * The calendar day the caller sent. Taken from the request string, not from the persisted
-   * {@code Date}: the generic CRUD stores a {@code yyyy-MM-dd} at local midnight, so reading it back
-   * in another zone could shift the day.
-   */
-  private static LocalDate requestedCalendarDay(String raw) {
-    if (raw == null || raw.trim().length() < 10) {
-      return null;
-    }
-    try {
-      return LocalDate.parse(raw.trim().substring(0, 10));
-    } catch (java.time.format.DateTimeParseException e) {
-      return null;
     }
   }
 
@@ -806,9 +810,12 @@ public class FinancialAccountHandler implements NeoHandler {
    * {@code EditAccountModal} on update.
    * <ul>
    *   <li><b>Create</b>, any type (Bank, Cash, Card): {@code country} is mandatory — missing,
-   *       {@code null} or blank is {@value #MSG_COUNTRY_REQUIRED}; an id that does not resolve is
-   *       {@value #MSG_INVALID_COUNTRY}.</li>
-   *   <li><b>Update</b>: a new value must resolve ({@value #MSG_INVALID_COUNTRY} otherwise). An
+   *       {@code null} or blank is {@link #MSG_COUNTRY_REQUIRED} ("Country is required"). An id
+   *       that does not resolve is normally refused before this handler runs, by the ETP-5785
+   *       write preflight ({@code unknown_reference}) or MCP's {@code McpFkResolver}
+   *       ({@code not_found}); {@link #MSG_INVALID_COUNTRY} ("Invalid country") is the defensive
+   *       fallback for when that preflight fails open.</li>
+   *   <li><b>Update</b>: a new value must resolve (same preflight, same fallback). An
    *       explicit clear ({@code null} / blank) is allowed — and normalized to JSON {@code null}
    *       so it persists as {@code NULL}, never {@code ''} — EXCEPT on a Bank account whose
    *       effective IBAN is non-blank, which the pair check below rejects. A body that does not
@@ -821,7 +828,7 @@ public class FinancialAccountHandler implements NeoHandler {
    *
    * <p>IBAN pair rule (Bank accounts only): when the effective IBAN is non-blank, the effective
    * country — the body's (including an explicit clear), else the stored account's — must exist
-   * ({@value FinancialAccountCountrySupport#MSG_IBAN_REQUIRES_COUNTRY} otherwise: clearing the country of a bank account that
+   * ({@link FinancialAccountCountrySupport#MSG_IBAN_REQUIRES_COUNTRY} otherwise: clearing the country of a bank account that
    * keeps an IBAN, or a PATCH adding an IBAN to a legacy country-less bank account) and match the
    * IBAN's prefix, length and checksum. On create the body country was already required above, so
    * that message is only reachable on update.
@@ -877,7 +884,7 @@ public class FinancialAccountHandler implements NeoHandler {
       // Update only: the country was explicitly cleared, or left untouched on a legacy row that
       // has none, while the account keeps/gets an IBAN. No derivation from the IBAN prefix
       // (ETP-5473) — the caller must send the country, as the UI does.
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+      return NeoMessageText.error(HttpServletResponse.SC_BAD_REQUEST,
           FinancialAccountCountrySupport.MSG_IBAN_REQUIRES_COUNTRY);
     }
 
@@ -893,7 +900,9 @@ public class FinancialAccountHandler implements NeoHandler {
 
   /**
    * The body-level half of the ETP-5473 country rule. Create: {@code country} must be present and
-   * non-blank. Both: a non-blank id must resolve, and is written back trimmed. Update: an explicit
+   * non-blank. Both: a non-blank id must resolve, and is written back trimmed — normally already
+   * guaranteed by the ETP-5785 write preflight, so {@link #MSG_INVALID_COUNTRY} here is a defensive
+   * fallback for when that preflight fails open. Update: an explicit
    * clear ({@code null} / blank) is normalized to JSON {@code null} so it persists as a real
    * {@code NULL} rather than {@code ''}; whether that clear is allowed at all (not on a Bank
    * account that keeps an IBAN) is decided by the pair check in {@link #validateCountryAndIban}.
@@ -903,7 +912,7 @@ public class FinancialAccountHandler implements NeoHandler {
     boolean bodyHasCountry = body.has(FIELD_COUNTRY);
     boolean cleared = FinancialAccountCountrySupport.isExplicitClear(body, FIELD_COUNTRY);
     if (isCreate && (!bodyHasCountry || cleared)) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, MSG_COUNTRY_REQUIRED);
+      return NeoMessageText.error(HttpServletResponse.SC_BAD_REQUEST, MSG_COUNTRY_REQUIRED);
     }
     if (cleared) {
       body.put(FIELD_COUNTRY, JSONObject.NULL);
@@ -914,7 +923,7 @@ public class FinancialAccountHandler implements NeoHandler {
     }
     String countryId = FinancialAccountCountrySupport.bodyString(body, FIELD_COUNTRY).trim();
     if (loadCountry(countryId) == null) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, MSG_INVALID_COUNTRY);
+      return NeoMessageText.error(HttpServletResponse.SC_BAD_REQUEST, MSG_INVALID_COUNTRY);
     }
     body.put(FIELD_COUNTRY, countryId);
     return null;

@@ -47,7 +47,11 @@ import org.openbravo.model.ad.system.Language;
  *
  * <p>The two message queries are answered by mocked JDBC statements; the catalog is the real one.
  *
+ * <p>The resolution itself lives in {@link NeoMessageText} (shared with the ETP-5473
+ * financial-account refusals); this class exercises it through both entry points.
+ *
  * @covers com.etendoerp.go.schemaforge.DocumentRateMessages
+ * @covers com.etendoerp.go.schemaforge.NeoMessageText
  */
 public class DocumentRateMessagesTest {
 
@@ -91,7 +95,7 @@ public class DocumentRateMessagesTest {
   /**
    * Table-driven resolution order: a translated TRL row wins (its {@code %n} placeholders
    * substituted); without one, the language's catalog; a language the catalog lacks falls to the
-   * {@code AD_MESSAGE} base text, not to the English catalog; with nothing at all, the key.
+   * {@code AD_MESSAGE} base text before the English catalog; with nothing at all, the key.
    */
   @Test
   public void textResolvesTrlThenCatalogThenBaseThenKey() throws Exception {
@@ -104,6 +108,8 @@ public class DocumentRateMessagesTest {
             "No hay tipo de cambio de EUR a USD para el 31/03/2026 (Fecha contable)" },
         { "language without catalog reads the AD base", key, "fr_FR", null,
             "No rate from %0 to %1", "No rate from EUR to USD" },
+        { "no catalog, no AD row: the English catalog", key, "fr_FR", null, null,
+            "There is no exchange rate from EUR to USD for 31/03/2026" },
         { "nothing anywhere gives the key", "ETGO_NoSuchMessage", "fr_FR", null, null,
             "ETGO_NoSuchMessage" },
     };
@@ -160,5 +166,26 @@ public class DocumentRateMessagesTest {
     assertEquals("2026-03-31",
         error.getJSONObject(NeoProcessService.MESSAGE_PARAMS).getString("date"));
     assertEquals(422, error.getInt("status"));
+  }
+
+  /**
+   * {@link NeoMessageText#error} keeps the caller's status and the usual {@code error} envelope,
+   * writes the text in the request language and names the key in {@code messageKeys}.
+   */
+  @Test
+  public void keyedErrorCarriesTheTranslatedTextAndTheKey() throws Exception {
+    JSONObject error = withMessageRows(null, null, "es_ES", trl -> {
+      try {
+        return NeoMessageText.error(400, "ETGO_FinAccCountryRequired")
+            .getBody().getJSONObject("error");
+      } catch (Exception e) {
+        throw new IllegalStateException(e);
+      }
+    });
+
+    assertEquals(400, error.getInt("status"));
+    assertEquals("El pa\u00eds es obligatorio", error.getString("message"));
+    assertEquals("ETGO_FinAccCountryRequired",
+        error.getJSONArray(NeoProcessService.MESSAGE_KEYS).getString(0));
   }
 }
