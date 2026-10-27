@@ -1011,6 +1011,10 @@ public class McpToolRouter {
     if (targetRefusal != null) {
       return McpHookExecutor.neoResponseToMcpResult(targetRefusal);
     }
+    JSONObject updateOutOfScope = McpSpecScope.refusalFor(specName, entityName, adTab, recordId);
+    if (updateOutOfScope != null) {
+      return wrapAsErrorContent(updateOutOfScope);
+    }
 
 
     String dalEntityName = adTab.getTable().getName();
@@ -1164,6 +1168,10 @@ public class McpToolRouter {
     NeoResponse targetRefusal = NeoActionRecordGuard.writeRefusalFor(sfEntity, recordId);
     if (targetRefusal != null) {
       return McpHookExecutor.neoResponseToMcpResult(targetRefusal);
+    }
+    JSONObject deleteOutOfScope = McpSpecScope.refusalFor(specName, entityName, adTab, recordId);
+    if (deleteOutOfScope != null) {
+      return wrapAsErrorContent(deleteOutOfScope);
     }
 
 
@@ -1986,6 +1994,12 @@ public class McpToolRouter {
     }
     if (foreignRecord != null) {
       return McpHookExecutor.neoResponseToMcpResult(foreignRecord);
+    }
+    // ETP-5852 (M-51): a record outside the spec's tab filter is not this spec's to act on.
+    JSONObject actionOutOfScope = McpSpecScope.refusalFor(specName, entityName,
+        sfEntity.getADTab(), recordId);
+    if (actionOutOfScope != null) {
+      return wrapAsErrorContent(actionOutOfScope);
     }
 
     // The body object is shared with executeButtonActionCore on purpose, so a handler that

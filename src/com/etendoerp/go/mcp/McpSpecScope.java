@@ -36,16 +36,17 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 
 /**
- * Keeps {@code etendo_get} inside its spec (ETP-5852, M-51): a spec whose AD tab filters its table
+ * Keeps {@code etendo_get}, {@code etendo_update}, {@code etendo_delete} and {@code etendo_action}
+ * inside their spec (ETP-5852, M-51): a spec whose AD tab filters its table
  * (sales invoices are {@code C_Invoice} rows with {@code salesTransaction = true}, purchase
- * invoices the others) reads a record by id only when that filter admits it, as
+ * invoices the others) touches a record by id only when that filter admits it, as
  * {@code etendo_list} already does. Core's read by id ({@code DefaultJsonDataService} with an
  * {@code id}) ignores the tab filter, so before this a purchase invoice id read through
  * {@code sales-invoice/header} came back as if it were a sales invoice.
  *
  * <p>A record outside the filter is answered 404, naming the spec(s) over the same table that hold
  * it when the caller's role can see it, so the agent retries on the right one instead of
- * concluding it does not exist. MCP only: the REST GET by id is unchanged.</p>
+ * concluding it does not exist. MCP only: the REST paths are unchanged.</p>
  */
 final class McpSpecScope {
 
@@ -73,7 +74,7 @@ final class McpSpecScope {
   }
 
   /**
-   * The 404 of a read by id whose record exists in the table but outside the spec's filter.
+   * The 404 of a call by id whose record exists in the table but outside the spec's filter.
    *
    * @param specName   the spec of the call
    * @param entityName the entity of the call
@@ -97,7 +98,7 @@ final class McpSpecScope {
     if (!holders.isEmpty()) {
       error.put(McpConstants.KEY_DETAIL, "Record " + recordId + " is not a " + specName + "/"
           + entityName + " record: it belongs to " + String.join(", ", holders)
-          + ". Read it there.");
+          + ". Use that spec instead.");
       error.put(KEY_FOUND_IN, new JSONArray(holders));
     }
     return error;
