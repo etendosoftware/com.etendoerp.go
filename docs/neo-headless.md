@@ -1293,6 +1293,48 @@ copy, untouched body, parent sources), the pre-dispatch cases of `NeoCrudHandler
 legacy id case of `McpFkResolverTest`, and the two-tenant `NeoReferenceOwnershipIntegrationTest`
 (REST and batch, through customizations, nothing written).
 
+#### A write never SETS a reference to an inactive row (ETP-5802)
+
+External QA (retest "Pasada 2") reproduced `etendo_create` on `product` with `taxCategory` pointing
+at a `FinancialMgmtTaxCategory` row that had just been deactivated (System-level "OLD IVA Normal",
+`828E8E40DD3C4FA6A4F531569D26A6AF`): the write answered status 0, and the response echoed the
+inactive row's own identifier, visually indistinguishable from an active "IVA Normal". Core's
+`JsonToDataConverter` resolves a foreign-key value with a bare `OBDal.get` and never looks at the
+referenced row's `IsActive` flag, on any channel.
+
+`NeoReferenceActiveness.findInactiveReference(adTab, requestFields)` closes it, wired into the same
+pre-dispatch points as `NeoReferenceOwnership` above (§4.3.7), run immediately after it on each
+channel — REST `NeoWritePreflight` (single writes and every `/batch` create), MCP `etendo_create`
+right after FK-by-name resolution, and MCP `etendo_update` right after FK-by-name resolution. REST
+answers **422** `INACTIVE_REFERENCE_VALUE` (`NeoInactiveReferenceResponse`, same flat
+status/error/detail/field/hint/seeAlso shape as `ReadOnlyFieldRejectedException`'s response); MCP
+answers the same **422** envelope with `error: "INACTIVE_REFERENCE_VALUE"`.
+
+**Structure only.** A body key is checked when the DAL model says it is a persisted reference of the
+written entity (same test as `NeoReferenceOwnership.isPersistedReference`) AND its target entity is
+`ActiveEnabled` (`Entity.isActiveEnabled()`) — i.e. the target table declares an `IsActive` column
+at all. A reference to a table with no `IsActive` column (most system/lookup tables — Currency,
+Country, `AD_Reference_List` combos) is structurally exempt, not special-cased. A reference that
+resolves to no row, or to a row of another tenant, is left to `NeoReferenceOwnership`; the two checks
+never disagree about the same value.
+
+**Changed, not merely present (CP-6 regression guard).** The check inspects exactly the `JSONObject`
+it is handed, and both write paths build that object from ONLY the keys the request itself set — the
+REST DAL-keyed copy (`NeoWritePreflight`) and the MCP `filteredBody` (`mapFieldsToDalProperties`,
+which never carries a key the caller did not send). An update that leaves an already-inactive
+reference untouched elsewhere on the record never has that key in the checked object, so it is not
+re-validated and the write proceeds — this is what QA's CP-6 (editing an unrelated field on a record
+that already carries the deactivated tax category) verifies stays working.
+
+**Out of scope.** `parentId` is addressed structurally, not set as an ordinary FK/TableDir value, so
+it is not re-checked for activeness. A reference to a non-active-tracked target is exempt, as is a
+reference that does not resolve to any row (ownership's job).
+
+Tests: `NeoReferenceActivenessTest` (structural detection, active/inactive/unresolvable/sentinel
+values, the not-active-tracked exemption, no-session fail-open), the wiring cases of
+`NeoWritePreflightTest` (422 on an inactive reference, not re-checked once ownership already
+refused).
+
 #### 4.3.9 Document actions over REST: refusal and idempotency (ETP-5783)
 
 `POST /sws/neo/{spec}/{entity}/{id}/action/documentAction` with `{"docAction":"CO"}` runs the

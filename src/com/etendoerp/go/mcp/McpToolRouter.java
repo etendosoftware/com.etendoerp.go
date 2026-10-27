@@ -801,6 +801,13 @@ public class McpToolRouter {
       return wrapAsErrorContent(unownedReference);
     }
 
+    // ETP-5802: a reference the agent set must not point at an inactive row. Checked right after
+    // ownership, on the same ids-only body.
+    JSONObject inactiveReference = McpWriteRequestSupport.refuseInactiveReference(adTab, filteredBody);
+    if (inactiveReference != null) {
+      return wrapAsErrorContent(inactiveReference);
+    }
+
     // Snapshot user-provided fields BEFORE callout cascade can overwrite them.
     // Callouts derive dependent fields (e.g. product → tax, UOM) and may reset them
     // to sentinel "0" even when the user explicitly provided valid values.
@@ -1052,6 +1059,14 @@ public class McpToolRouter {
         filteredBody, null, updateUserProvidedFields);
     if (unownedReference != null) {
       return wrapAsErrorContent(unownedReference);
+    }
+
+    // ETP-5802: same inactive-reference check as handleCreate. filteredBody here carries only the
+    // keys the caller sent (no defaults pass runs on update, per the IMP-16 note below), so a field
+    // the caller does not touch is never re-validated — CP-6 regression guard.
+    JSONObject inactiveReference = McpWriteRequestSupport.refuseInactiveReference(adTab, filteredBody);
+    if (inactiveReference != null) {
+      return wrapAsErrorContent(inactiveReference);
     }
 
     // ETP-4793 / IMP-16: the same coercion pass handleCreate runs, and for the same reason. Until

@@ -53,10 +53,17 @@ import com.etendoerp.go.schemaforge.util.NeoValidationErrorResponseBuilder;
  * <p>This is the single pre-dispatch point for REST CRUD writes: a further write check that must
  * hold whatever the customization does belongs here.
  *
- * <p><b>What it checks today.</b> {@link NeoReferenceOwnership}: every reference the request sets
- * and its {@code parentId} (body or query string) must be a row of the caller's client or of
- * System. The body is read, never modified: API keys are resolved to DAL property names on a copy,
- * and the server-owned tenant fields, which every write path drops, are left out.
+ * <p><b>What it checks today.</b>
+ * <ul>
+ *   <li>{@link NeoReferenceOwnership}: every reference the request sets and its {@code parentId}
+ *       (body or query string) must be a row of the caller's client or of System.</li>
+ *   <li>{@link NeoReferenceActiveness} (ETP-5802): every reference the request sets must not point
+ *       at an inactive row. Checked only once ownership passes, and only on the same caller-only
+ *       field sets — {@code parentId} is not re-checked for activeness, since a parent is addressed
+ *       structurally, not set as an ordinary FK/TableDir value.</li>
+ * </ul>
+ * The body is read, never modified: API keys are resolved to DAL property names on a copy, and the
+ * server-owned tenant fields, which every write path drops, are left out.
  */
 final class NeoWritePreflight {
 
@@ -103,7 +110,20 @@ final class NeoWritePreflight {
       // A customization may read either; both must be the caller's.
       refusal = NeoReferenceOwnership.refuseUnownedReferences(adTab, null, queryParent);
     }
-    return refusal == null ? null : toResponse(refusal);
+    if (refusal != null) {
+      return toResponse(refusal);
+    }
+    // ETP-5802: every reference the request SETS must not point at an inactive row. Checked on
+    // the same DAL-keyed, caller-only field sets as ownership above — an update that never touches
+    // an already-inactive reference elsewhere on the record is not re-validated (CP-6).
+    for (JSONObject fieldSet : fieldSets) {
+      NeoReferenceActiveness.InactiveReference inactive =
+          NeoReferenceActiveness.findInactiveReference(adTab, fieldSet);
+      if (inactive != null) {
+        return NeoInactiveReferenceResponse.build(inactive);
+      }
+    }
+    return null;
   }
 
   private static boolean isCreateOrUpdate(String method) {
