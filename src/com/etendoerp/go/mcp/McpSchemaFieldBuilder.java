@@ -227,7 +227,7 @@ final class McpSchemaFieldBuilder {
         excludedColumnIds.add(colId);
       }
       // ETP-5791: only an override that states the flag lands here; an absent entry keeps the
-      // derived userRequired (see applyUserRequiredOverride).
+      // derived userRequired (see McpUserRequiredOverride).
       view.getUserRequiredOverride().ifPresent(flag -> userRequiredByColumnId.put(colId, flag));
     }
     return new FieldMetadata(visibilityByColumnId, businessCriticalByColumnId, readOnlyByColumnId,
@@ -567,30 +567,12 @@ final class McpSchemaFieldBuilder {
         JSONObject fieldObj = buildSchemaField(col, adTab, dalEntity,
             fieldMetadata.visibilityByColumnId, fieldMetadata.businessCriticalByColumnId,
             fieldMetadata.readOnlyByColumnId, promptByColumnId, selectorRefs);
-        applyUserRequiredOverride(fieldObj,
+        McpUserRequiredOverride.apply(fieldObj,
             fieldMetadata.userRequiredByColumnId.get((String) col.getId()));
         fieldsArray.put(fieldObj);
       }
     }
     return fieldsArray;
-  }
-
-  /**
-   * Replaces the derived {@code userRequired} with the {@code MCP_CONFIG.fields.userRequired}
-   * override when one is configured (ETP-5791); a no-op otherwise, and always for a button, which
-   * carries no payload value to require. Runs after {@link #addVisibility}, so it overrides the
-   * structural rule, and before {@link #applyPreconditionRequirements}, so an explicit precondition
-   * can still force the flag on. The raw {@code required} (AD NOT NULL) is left untouched.
-   *
-   * @param fieldObj the built descriptor, mutated in place
-   * @param override the configured flag, or {@code null} when none is configured
-   */
-  static void applyUserRequiredOverride(JSONObject fieldObj, Boolean override)
-      throws JSONException {
-    if (override == null || TYPE_BUTTON.equals(fieldObj.optString("type", null))) {
-      return;
-    }
-    fieldObj.put(KEY_USER_REQUIRED, override.booleanValue());
   }
 
   /**

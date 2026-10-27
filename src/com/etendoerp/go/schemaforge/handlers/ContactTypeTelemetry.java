@@ -32,6 +32,7 @@ import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -103,7 +104,8 @@ public final class ContactTypeTelemetry {
   private static final int QUEUE_CAPACITY = 1000;
 
   private static final ThreadPoolExecutor SENDER = buildSender();
-  private static volatile NeoTelemetryService telemetryService;
+  private static final AtomicReference<NeoTelemetryService> TELEMETRY_SERVICE =
+      new AtomicReference<>();
 
   private ContactTypeTelemetry() {
   }
@@ -349,17 +351,17 @@ public final class ContactTypeTelemetry {
 
   /** Package-private seam for tests; pass {@code null} to restore the runtime service. */
   static void setTelemetryService(NeoTelemetryService service) {
-    telemetryService = service;
+    TELEMETRY_SERVICE.set(service);
   }
 
   private static NeoTelemetryService telemetry() {
-    NeoTelemetryService local = telemetryService;
+    NeoTelemetryService local = TELEMETRY_SERVICE.get();
     if (local == null) {
       synchronized (ContactTypeTelemetry.class) {
-        local = telemetryService;
+        local = TELEMETRY_SERVICE.get();
         if (local == null) {
           local = NeoTelemetryService.runtime();
-          telemetryService = local;
+          TELEMETRY_SERVICE.set(local);
         }
       }
     }

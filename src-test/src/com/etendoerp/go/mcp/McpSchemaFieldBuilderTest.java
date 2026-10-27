@@ -71,18 +71,21 @@ import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
  * per-entity field metadata load used by etendo_schema.</p>
  *
  * @covers com.etendoerp.go.mcp.McpSchemaFieldBuilder
+ * @covers com.etendoerp.go.mcp.McpUserRequiredOverride
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
 class McpSchemaFieldBuilderTest {
 
   @Test
-  @DisplayName("Utility class hides its constructor")
+  @DisplayName("Utility classes hide their constructor")
   void utilityClassHidesConstructor() throws ReflectiveOperationException {
-    Constructor<McpSchemaFieldBuilder> constructor = McpSchemaFieldBuilder.class.getDeclaredConstructor();
-    assertEquals(Modifier.PRIVATE, constructor.getModifiers() & Modifier.PRIVATE);
-    constructor.setAccessible(true);
-    constructor.newInstance();
+    for (Class<?> utility : List.of(McpSchemaFieldBuilder.class, McpUserRequiredOverride.class)) {
+      Constructor<?> constructor = utility.getDeclaredConstructor();
+      assertEquals(Modifier.PRIVATE, constructor.getModifiers() & Modifier.PRIVATE);
+      constructor.setAccessible(true);
+      constructor.newInstance();
+    }
   }
 
   private static Object invokeStatic(String methodName, Class<?>[] paramTypes, Object... args)
@@ -2322,7 +2325,7 @@ class McpSchemaFieldBuilderTest {
       JSONObject fieldObj = derivedEditable(mandatory);
       Boolean configured = "-".equals(override) ? null : Boolean.valueOf(override);
 
-      McpSchemaFieldBuilder.applyUserRequiredOverride(fieldObj, configured);
+      McpUserRequiredOverride.apply(fieldObj, configured);
 
       assertEquals(expected, fieldObj.getBoolean(McpSchemaFieldBuilder.KEY_USER_REQUIRED));
       assertEquals(mandatory, fieldObj.getBoolean("required"),
@@ -2334,7 +2337,7 @@ class McpSchemaFieldBuilderTest {
     void buttonIgnoresTheOverride() throws Exception {
       JSONObject button = new JSONObject().put("name", "docAction").put("type", "button");
 
-      McpSchemaFieldBuilder.applyUserRequiredOverride(button, Boolean.TRUE);
+      McpUserRequiredOverride.apply(button, Boolean.TRUE);
 
       assertFalse(button.has(McpSchemaFieldBuilder.KEY_USER_REQUIRED));
     }
@@ -2343,7 +2346,7 @@ class McpSchemaFieldBuilderTest {
     @DisplayName("a precondition requirement still forces userRequired over a false override")
     void preconditionOutranksAFalseOverride() throws Exception {
       JSONObject fieldObj = derivedEditable(true);
-      McpSchemaFieldBuilder.applyUserRequiredOverride(fieldObj, Boolean.FALSE);
+      McpUserRequiredOverride.apply(fieldObj, Boolean.FALSE);
       JSONArray fields = new JSONArray().put(fieldObj);
 
       McpSchemaFieldBuilder.applyPreconditionRequirements(fields, Map.of("vendor", ""));
