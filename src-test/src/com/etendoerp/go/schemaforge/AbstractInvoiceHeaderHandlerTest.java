@@ -85,6 +85,7 @@ import org.openbravo.model.common.invoice.ReversedInvoice;
  *
  * @covers com.etendoerp.go.schemaforge.AbstractInvoiceHeaderHandler
  * @covers com.etendoerp.go.schemaforge.DocumentRateGuards
+ * @covers com.etendoerp.go.schemaforge.InvoiceDetailEnrichment
  */
 public class AbstractInvoiceHeaderHandlerTest {
 
@@ -3486,7 +3487,7 @@ public class AbstractInvoiceHeaderHandlerTest {
           java.sql.Date.valueOf("2026-03-15"));
       when(rs.getString(7)).thenReturn("OB", "SO");
 
-      handler.enrichLinkedOrders(rec, "inv-multi");
+      InvoiceDetailEnrichment.enrichLinkedOrders(rec, "inv-multi");
     }
 
     JSONArray orders = rec.getJSONArray("linkedOrders");
@@ -3535,7 +3536,7 @@ public class AbstractInvoiceHeaderHandlerTest {
       when(rs.getDate(6)).thenReturn(null);
       when(rs.getString(7)).thenReturn(null);
 
-      handler.enrichLinkedOrders(rec, "inv-nulls");
+      InvoiceDetailEnrichment.enrichLinkedOrders(rec, "inv-nulls");
     }
 
     JSONArray orders = rec.getJSONArray("linkedOrders");
@@ -3561,7 +3562,7 @@ public class AbstractInvoiceHeaderHandlerTest {
       when(ps.executeQuery()).thenReturn(rs);
       when(rs.next()).thenReturn(false);
 
-      handler.enrichLinkedOrders(rec, "inv-binds");
+      InvoiceDetailEnrichment.enrichLinkedOrders(rec, "inv-binds");
     }
 
     verify(ps).setString(1, "inv-binds");
@@ -3580,7 +3581,7 @@ public class AbstractInvoiceHeaderHandlerTest {
       when(ps.executeQuery()).thenReturn(rs);
       when(rs.next()).thenReturn(false);
 
-      handler.enrichLinkedOrders(rec, "inv-no-orders");
+      InvoiceDetailEnrichment.enrichLinkedOrders(rec, "inv-no-orders");
     }
 
     assertTrue(rec.has("linkedOrders"));
@@ -3596,7 +3597,7 @@ public class AbstractInvoiceHeaderHandlerTest {
       stubLinkedOrdersConnection(dalMock, ps);
       when(ps.executeQuery()).thenThrow(new SQLException("relation does not exist"));
 
-      handler.enrichLinkedOrders(rec, "inv-sql-fail");
+      InvoiceDetailEnrichment.enrichLinkedOrders(rec, "inv-sql-fail");
     }
 
     assertFalse(rec.has("linkedOrders"));
@@ -3608,8 +3609,8 @@ public class AbstractInvoiceHeaderHandlerTest {
   public void enrichLinkedOrders_blankInvoiceId_skipsQueryAndKey() throws Exception {
     JSONObject rec = new JSONObject();
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
-      handler.enrichLinkedOrders(rec, " ");
-      handler.enrichLinkedOrders(rec, null);
+      InvoiceDetailEnrichment.enrichLinkedOrders(rec, " ");
+      InvoiceDetailEnrichment.enrichLinkedOrders(rec, null);
       dalMock.verifyNoInteractions();
     }
 

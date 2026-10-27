@@ -81,6 +81,8 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  *
  * @covers com.etendoerp.go.schemaforge.ImportOrderLinesIntoInvoiceHandler
  * @covers com.etendoerp.go.schemaforge.AbstractInvoiceLineImportHandler
+ * @covers com.etendoerp.go.schemaforge.InvoiceGlobalDiscountRule
+ * @covers com.etendoerp.go.schemaforge.OrderImportRequest
  */
 public class ImportOrderLinesIntoInvoiceHandlerTest {
 
@@ -976,7 +978,7 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
     for (Object[] row : rows) {
       @SuppressWarnings("unchecked")
       List<BigDecimal> orders = (List<BigDecimal>) row[1];
-      assertEquals((String) row[0], row[4], ImportOrderLinesIntoInvoiceHandler.discountConflict(
+      assertEquals((String) row[0], row[4], InvoiceGlobalDiscountRule.discountConflict(
           orders, (BigDecimal) row[2], (Boolean) row[3]));
     }
   }
