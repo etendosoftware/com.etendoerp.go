@@ -628,6 +628,76 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
         fixture.run(() -> service.resolve(CLIENT_ID)).getSubscriptionStatus());
   }
 
+  // ===================== ETP-5847: a frozen demo trial =====================
+
+  private static final Instant LONG_AGO = Instant.parse("2025-01-01T00:00:00Z");
+
+  /** A demo whose real trial ended long ago, frozen (or not) at {@code frozenDays}. */
+  private TenantEnvironmentLifecycleService.EnvironmentSnapshot resolveDemoFrozenAt(
+      String frozenDays) {
+    givenEveryPlanLookupSaysFree();
+    Fixture fixture = new Fixture()
+        .withPreference(TenantEnvironmentLifecycleService.DEMO_TRIAL_STARTED_ATTRIBUTE,
+            LONG_AGO.toString());
+    if (frozenDays != null) {
+      fixture.withPreference(TenantEnvironmentLifecycleService.DEMO_TRIAL_FROZEN_DAYS_ATTRIBUTE,
+          frozenDays);
+    }
+    return fixture.run(() -> service.resolve(freshClientId()));
+  }
+
+  private long daysLeft(TenantEnvironmentLifecycleService.EnvironmentSnapshot snapshot) {
+    return new EnvironmentAccessPolicy().remainingTrialDays(snapshot.toPolicyEnvironment(),
+        Instant.now(), service.configuration());
+  }
+
+  private EnvironmentAccessPolicy.Decision access(
+      TenantEnvironmentLifecycleService.EnvironmentSnapshot snapshot) {
+    return new EnvironmentAccessPolicy().evaluate(snapshot.toPolicyEnvironment(), true,
+        snapshot.getSubscriptionStatus(), Instant.now(), service.configuration());
+  }
+
+  @Test
+  public void aFrozenDemoAlwaysShowsItsFrozenDaysAndIsNeverExpired() {
+    TenantEnvironmentLifecycleService.EnvironmentSnapshot snapshot = resolveDemoFrozenAt("14");
+
+    assertEquals(14L, daysLeft(snapshot));
+    assertEquals(EnvironmentAccessPolicy.Decision.ALLOWED, access(snapshot));
+  }
+
+  @Test
+  public void theFrozenValueIsTheDaysLeftNotTheTrialLength() {
+    assertEquals(3L, daysLeft(resolveDemoFrozenAt("3")));
+  }
+
+  @Test
+  public void withoutThePreferenceTheStoredStartStillDecides() {
+    TenantEnvironmentLifecycleService.EnvironmentSnapshot snapshot = resolveDemoFrozenAt(null);
+
+    assertEquals(LONG_AGO, snapshot.getTrialStartedAt());
+    assertEquals(EnvironmentAccessPolicy.Decision.DEMO_TRIAL_EXPIRED, access(snapshot));
+  }
+
+  @Test
+  public void aValueThatIsNotAWholeNumberOfDaysIsIgnored() {
+    assertEquals(LONG_AGO, resolveDemoFrozenAt("catorce").getTrialStartedAt());
+    assertEquals(LONG_AGO, resolveDemoFrozenAt("-1").getTrialStartedAt());
+  }
+
+  @Test
+  public void freezingTheTrialWritesNothing() {
+    givenEveryPlanLookupSaysFree();
+    Fixture fixture = new Fixture()
+        .withPreference(TenantEnvironmentLifecycleService.DEMO_TRIAL_STARTED_ATTRIBUTE,
+            LONG_AGO.toString())
+        .withPreference(TenantEnvironmentLifecycleService.DEMO_TRIAL_FROZEN_DAYS_ATTRIBUTE, "14");
+
+    fixture.run(() -> service.resolve(freshClientId()));
+
+    assertTrue("the stored trial start is kept, so unfreezing resumes it: "
+        + fixture.savedPreferenceAttributes, fixture.savedPreferenceAttributes.isEmpty());
+  }
+
   // ===================== review fix B1: any row makes the tenant productive =====================
 
   private static final String LEGACY_ACTIVATION = "2026-01-01T00:00:00Z";

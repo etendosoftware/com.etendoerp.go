@@ -30,6 +30,7 @@ import javax.servlet.http.HttpServletResponse;
 
 
 import org.apache.commons.lang3.StringUtils;
+import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
@@ -68,6 +69,8 @@ import com.etendoerp.go.schemaforge.util.NeoValidationErrorResponseBuilder;
  * rather than an arbitrary one: no field carried along, no constructor needed.
  */
 final class McpWriteRequestSupport {
+
+  private static final Logger LOG = LogManager.getLogger(McpWriteRequestSupport.class);
 
   private static final String FK_ZERO = "0";
   /** Target entity name → whether it holds a record with id "0". See {@link #isExistingZeroRecord}. */
@@ -539,6 +542,93 @@ final class McpWriteRequestSupport {
       }
     }
     return missing;
+  }
+
+  /**
+   * ETP-5726: refuses an {@code etendo_update} that CLEARS a field AD declares mandatory.
+   *
+   * <p>The update path never runs {@link #validateMandatoryFields} (that pre-check is about what a
+   * create omitted), so a mandatory column whose database constraint is nullable — AD says
+   * mandatory, the table says {@code NULL} — could be saved empty by sending {@code null}; the
+   * screen never offers that, because its mandatory inputs cannot be emptied. Only the keys the
+   * caller actually SENT are inspected: a sparse update that does not mention the field leaves the
+   * stored value alone and is never refused here.
+   *
+   * <p>Structural only, like {@link #validateMandatoryFields}: it reads the AD mandatory flag and
+   * the key names, never an entity or a business property. The primary key, the audit/system
+   * columns and the fields the wrapper policy resolves on the server are skipped (the same
+   * exclusions the create pre-check applies); read-only and excluded fields never reach this
+   * point, they are refused earlier by the write gates of the field mapping.
+   *
+   * @param body          the mapped update body, every key of which is the caller's own
+   * @param adTab         the entity's AD tab, whose table columns are walked
+   * @param dalEntity     the DAL entity of that table
+   * @param systemColumns upper-cased system/audit column names that are never checked
+   * @param selectorRefs  AD_Reference ids of foreign-key selectors, for the {@code type} of each item
+   * @param sfEntity      the Schema Forge entity, consulted for the server-resolved field names;
+   *                      may be {@code null}
+   * @param langCode      the user's language, for the field label; blank falls back to the AD name
+   * @return the 422 {@code validation_error} envelope naming each cleared field, or {@code null}
+   *         when none was cleared
+   */
+  static JSONObject rejectClearedMandatoryFields(JSONObject body, Tab adTab, Entity dalEntity,
+      Set<String> systemColumns, Set<String> selectorRefs, SFEntity sfEntity, String langCode)
+      throws JSONException {
+    if (body == null || dalEntity == null) {
+      return null;
+    }
+    Set<String> serverResolved = NeoSelectorPolicy.serverResolvedFieldNames(sfEntity);
+    Map<String, String[]> labels = null;
+    JSONArray cleared = new JSONArray();
+    for (Column col : adTab.getTable().getADColumnList()) {
+      Property prop = McpToolRouterSupport.resolveMandatoryProperty(adTab, dalEntity, col,
+          systemColumns);
+      if (prop == null || serverResolved.contains(prop.getName()) || !body.has(prop.getName())
+          || !McpToolRouterSupport.isMandatoryValueMissing(body, prop.getName())) {
+        continue;
+      }
+      if (labels == null) {
+        labels = McpSchemaFieldBuilder.loadFieldLabels(adTab, langCode);
+      }
+      try {
+        JSONObject info = McpToolRouterSupport.buildMissingFieldInfo(col, prop.getName(),
+            selectorRefs);
+        String[] label = labels.get(col.getDBColumnName().toUpperCase());
+        if (label != null && StringUtils.isNotBlank(label[0])) {
+          info.put("label", label[0]);
+        }
+        cleared.put(info);
+      } catch (Exception e) {
+        LOG.warn("Error building cleared field info for column {}: {}", col.getDBColumnName(),
+            e.getMessage());
+      }
+    }
+    return cleared.length() == 0 ? null : buildClearedMandatoryError(cleared);
+  }
+
+  /** The 422 for {@link #rejectClearedMandatoryFields}: same envelope as the create pre-check. */
+  private static JSONObject buildClearedMandatoryError(JSONArray cleared) throws JSONException {
+    StringBuilder names = new StringBuilder();
+    for (int i = 0; i < cleared.length(); i++) {
+      JSONObject item = cleared.getJSONObject(i);
+      if (i > 0) {
+        names.append(", ");
+      }
+      names.append(item.getString("name"));
+      String label = item.optString("label", "");
+      if (!label.isEmpty() && !label.equals(item.getString("name"))) {
+        names.append(" (").append(label).append(")");
+      }
+    }
+    JSONObject error = new JSONObject();
+    error.put(McpConstants.KEY_STATUS, McpConstants.STATUS_UNPROCESSABLE);
+    error.put(McpConstants.KEY_ERROR, McpConstants.ERROR_VALIDATION);
+    error.put(McpConstants.KEY_DETAIL, "Required fields cannot be cleared: " + names);
+    error.put(McpConstants.KEY_MISSING_FIELDS, cleared);
+    error.put(McpConstants.KEY_HINT, "These fields are required: send a value for them, or leave them out of "
+        + "the update to keep the stored one");
+    error.put(McpConstants.KEY_SEE_ALSO, McpConstants.SEE_ALSO_WRITING);
+    return error;
   }
 
   /**
