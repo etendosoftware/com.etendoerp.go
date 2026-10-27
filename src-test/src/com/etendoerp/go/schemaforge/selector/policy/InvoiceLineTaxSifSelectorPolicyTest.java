@@ -31,6 +31,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.lang.reflect.Field;
+import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -60,6 +61,8 @@ import com.etendoerp.go.schemaforge.selector.meta.SelectorMeta;
  * correct SQL projection columns, a single BATCHED query regardless of row count (not
  * N+1), correct column-to-JSON-key mapping, and safe handling of unmatched ids / null DB
  * values / a thrown SQLException.
+ *
+ * @covers com.etendoerp.go.schemaforge.selector.policy.InvoiceLineTaxSifSelectorPolicy
  */
 public class InvoiceLineTaxSifSelectorPolicyTest {
 
@@ -362,6 +365,69 @@ public class InvoiceLineTaxSifSelectorPolicyTest {
     }
   }
 
+  // ── ETP-5902 — labelPrefix (the rate the pickers show before the label) ────
+
+  @Test
+  public void enrichAddsLabelPrefixFromTheLabelRateAndLeavesLabelUntouched() throws Exception {
+    JSONArray items = new JSONArray()
+        .put(new JSONObject().put("id", "tax-1").put("label", "Entregas IVA 21%"));
+    NeoResponse response = new NeoResponse(200, new JSONObject().put("items", items));
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      Connection conn = wireConnection(dalMock);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+      when(conn.prepareStatement(sqlCaptor.capture())).thenReturn(ps);
+      Map<String, String> row = new HashMap<>();
+      row.put("c_tax_id", "tax-1");
+      stubResultSetForTax(ps, row);
+      when(ps.executeQuery().getBigDecimal("label_rate")).thenReturn(new BigDecimal("21.000000"));
+
+      policy.enrich(response, metaFor(TARGET_TAX_RATE), ctx(ENTITY_LINES, WINDOW_SALES_INVOICE));
+
+      // A summary tax shows the sum of its active POSITIVE children, 0 when there is none.
+      String sql = sqlCaptor.getValue().toLowerCase();
+      assertTrue(sql.contains("case when t.issummary = 'y' then coalesce("));
+      assertTrue(sql.contains("c.parent_tax_id = t.c_tax_id and c.isactive = 'y' and c.rate > 0"));
+      assertTrue(sql.contains("else t.rate end as label_rate"));
+
+      JSONObject item = items.getJSONObject(0);
+      assertEquals("21 %", item.getString("labelPrefix"));
+      // The plain label is what the picker searches to pin its committed value (ETP-5846).
+      assertEquals("Entregas IVA 21%", item.getString("label"));
+    }
+  }
+
+  @Test
+  public void enrichOmitsLabelPrefixWhenTheLabelRateIsNull() throws Exception {
+    JSONArray items = new JSONArray().put(new JSONObject().put("id", "tax-1"));
+    NeoResponse response = new NeoResponse(200, new JSONObject().put("items", items));
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      Connection conn = wireConnection(dalMock);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      Map<String, String> row = new HashMap<>();
+      row.put("c_tax_id", "tax-1");
+      row.put("issummary", "N");
+      stubResultSetForTax(ps, row);
+
+      policy.enrich(response, metaFor(TARGET_TAX_RATE), ctx(ENTITY_LINES, WINDOW_SALES_INVOICE));
+
+      assertEquals("N", items.getJSONObject(0).getString("isSummary"));
+      assertFalse(items.getJSONObject(0).has("labelPrefix"));
+    }
+  }
+
+  @Test
+  public void formatRateStripsTrailingZerosAndUsesTheGivenDecimalSeparator() {
+    assertEquals("21 %", InvoiceLineTaxSifSelectorPolicy.formatRate(new BigDecimal("21.00"), ","));
+    assertEquals("0 %", InvoiceLineTaxSifSelectorPolicy.formatRate(new BigDecimal("0.000"), ","));
+    assertEquals("5,2 %", InvoiceLineTaxSifSelectorPolicy.formatRate(new BigDecimal("5.20"), ","));
+    assertEquals("5.2 %", InvoiceLineTaxSifSelectorPolicy.formatRate(new BigDecimal("5.20"), "."));
+    assertEquals("-24 %", InvoiceLineTaxSifSelectorPolicy.formatRate(new BigDecimal("-24"), ","));
+  }
+
   /**
    * Sibling of the "all columns" test above, isolating JUST the 3 structural columns
    * added for compound/summary-tax resolution — a summary tax row with a non-null
@@ -633,7 +699,8 @@ public class InvoiceLineTaxSifSelectorPolicyTest {
       String sql = sqlCaptor.getValue().toLowerCase();
       assertFalse("must not reference the override table at all",
           sql.contains("etsg_tax_sif_config"));
-      assertFalse("must not COALESCE anything", sql.contains("coalesce"));
+      // The only COALESCE left is the ETP-5902 label rate, never a SIF value override.
+      assertFalse("must not COALESCE any SIF value column", sql.contains("coalesce(nullif"));
 
       // Only the tax id is bound — no organization parameter ever set.
       verify(ps, times(1)).setString(1, "tax-1");
