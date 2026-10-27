@@ -844,7 +844,8 @@ public class ToolRegistry {
 
     return new McpToolDefinition(
         McpConstants.TOOL_NEO_CREATE,
-        "Create a new record in an Etendo API spec. "
+        "Create a new record in an Etendo API spec. The created record comes back as an object in "
+            + "`data` ({\"data\": {…}}), like etendo_get. "
             + "Creating a child/line record? Pass parentId with the parent's id — without it the "
             + "server cannot derive the values it inherits from the parent. "
             + "Recommended: call etendo_defaults first to get the initial/base set of field values "
@@ -889,7 +890,8 @@ public class ToolRegistry {
 
     return new McpToolDefinition(
         McpConstants.TOOL_NEO_UPDATE,
-        "Update an existing record in an Etendo API spec. "
+        "Update an existing record in an Etendo API spec. The updated record comes back as an object "
+            + "in `data` ({\"data\": {…}}), like etendo_get. "
             + "Read the record with etendo_get first: its 'updated' value is a required argument and "
             + "guards against overwriting somebody else's concurrent edit. A 409 with "
             + "error 'stale_record' means the record changed since that read — re-read it, reapply "
@@ -1249,7 +1251,9 @@ public class ToolRegistry {
 
     return new McpToolDefinition(
         "etendo_action",
-        "Fire a type:button action on a record and return the process result. "
+        "Fire a type:button action on a record and return the process result. Every result carries "
+            + "`success` (boolean) and `message` (the outcome, translated); other keys depend on the "
+            + "action. "
             + "Call etendo_schema with view:\"actions\" first: each button field carries 'action' "
             + "(the name to pass "
             + "here), and list-backed buttons also carry 'actionValues' (the values it "

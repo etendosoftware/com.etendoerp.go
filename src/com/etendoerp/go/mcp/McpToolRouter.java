@@ -256,7 +256,9 @@ public class McpToolRouter {
             }
             return McpBatchJobTools.handleBatchJob(toolName, arguments);
           case "etendo_action":
-            return McpActionBatchUnpost.runSingle(specName, arguments, this::handleAction);
+            // ETP-5945 (in ETP-5852): every action result also carries success + message.
+            return McpActionEnvelope.normalize(
+                McpActionBatchUnpost.runSingle(specName, arguments, this::handleAction));
           case McpConstants.TOOL_NEO_ACTION_BATCH:
             return McpActionBatch.handle(specName, arguments, this::handleAction);
           case McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN:
@@ -974,7 +976,8 @@ public class McpToolRouter {
     // carries no defaults invitation, and there is no cascade of this shape behind it.
     McpWriteRequestSupport.reportSupersededDefaults(flat, ctx.getSupersededDefaults());
     McpWriteRequestSupport.reportServerOwnedFields(flat, serverOwnedFields);
-    return wrapAsTextContent(flat);
+    // ETP-5945 (in ETP-5852): one record answers {data:{…}}, as etendo_get does.
+    return wrapAsTextContent(McpToolRouterSupport.unwrapSingleRecord(flat));
   }
 
 
@@ -1144,9 +1147,12 @@ public class McpToolRouter {
     // IMP-5 clause (iii): the post-hook still sees core's wrapped body, for parity with the REST
     // CRUD path a handler was written against; only the body handed to the agent is flattened.
     JSONObject flat = McpToolRouterSupport.flattenCoreResponse(responseJson);
+    // ETP-5945 (in ETP-5852): the record link and the {data:{…}} shape etendo_get and
+    // etendo_create answer with.
+    McpRecordUrls.addRecordUrl(flat, specName, recordId, McpToolRouterSupport.isPrimaryTab(adTab));
     McpWriteRequestSupport.reportUnknownFields(flat, unknownWriteFields);
     McpWriteRequestSupport.reportServerOwnedFields(flat, serverOwnedFields);
-    return wrapAsTextContent(flat);
+    return wrapAsTextContent(McpToolRouterSupport.unwrapSingleRecord(flat));
   }
 
   // ── etendo_delete ────────────────────────────────────────────────────────
