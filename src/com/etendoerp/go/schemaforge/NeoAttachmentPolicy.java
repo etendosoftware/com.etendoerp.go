@@ -284,6 +284,35 @@ public final class NeoAttachmentPolicy {
     return null;
   }
 
+  /**
+   * Resolves the MIME type of an accepted file from the policy tables — the content signature
+   * of the type its extension implies, with the extension's primary MIME as the answer.
+   *
+   * <p>Exists because the core's MIME detection (Tika 0.9) classifies formats it does not know,
+   * such as WEBP, as {@code application/octet-stream}. Total: never throws.</p>
+   *
+   * @param fileName the stored file name (drives the expected type)
+   * @param file     the file holding the bytes, or {@code null} to resolve by extension only
+   * @return the MIME type, or {@code null} when the extension is not allowed or the content
+   *         does not match it
+   */
+  public static String resolveMimeType(String fileName, File file) {
+    AllowedType type = findType(extensionOf(fileName));
+    if (type == null || type.mimeTypes.isEmpty()) {
+      return null;
+    }
+    if (file != null && file.isFile()) {
+      try {
+        if (!type.signature.test(readHead(file))) {
+          return null;
+        }
+      } catch (IOException e) {
+        // Unreadable head: the extension alone decides.
+      }
+    }
+    return type.mimeTypes.get(0);
+  }
+
   // ── Internals ───────────────────────────────────────────────────────────────
 
   private static AllowedType findType(String extension) {

@@ -93,6 +93,9 @@ class NeoAttachmentStoreTest {
     helper.when(() -> NeoAttachmentsHelper.resolveTabId(TABLE_ID, TAB_ID)).thenReturn(TAB_ID);
     helper.when(() -> NeoAttachmentsHelper.recordExists(TABLE_ID, RECORD)).thenReturn(true);
     helper.when(NeoAttachmentsHelper::getAttachManager).thenReturn(manager);
+    // The store looks the uploaded row up after every upload; default: nothing found.
+    helper.when(() -> NeoAttachmentsHelper.findLatestUploadedAttachment(anyString(), anyString(),
+        anyString())).thenReturn(null);
   }
 
   @AfterEach
@@ -277,5 +280,206 @@ class NeoAttachmentStoreTest {
     assertEquals(500, NeoAttachmentStore.store(
         upload("factura.pdf", PDF.length, failing, false)).getHttpStatus());
     verify(dal).rollbackAndClose();
+  }
+
+  // ── ETP-5735: the stored MIME type is corrected after the core upload ────────
+
+  private Attachment storedAs(String name, String dataType) {
+    Attachment stored = mock(Attachment.class);
+    when(stored.getId()).thenReturn("ATT1");
+    when(stored.getName()).thenReturn(name);
+    when(stored.getDataType()).thenReturn(dataType);
+    helper.when(() -> NeoAttachmentsHelper.findLatestUploadedAttachment(TABLE_ID, RECORD, name))
+        .thenReturn(stored);
+    return stored;
+  }
+
+  private static final byte[] WEBP = "RIFF\u0000\u0000\u0000\u0000WEBPVP8 "
+      .getBytes(StandardCharsets.ISO_8859_1);
+
+  private void stubUpdateDataType(boolean result) {
+    helper.when(() -> NeoAttachmentsHelper.updateDataType(anyString(), anyString()))
+        .thenReturn(result);
+  }
+
+  /** The entity must never be dirtied: that is what failed the DAL write check at flush. */
+  private void verifyEntityUntouched(Attachment stored) {
+    verify(stored, never()).setDataType(any());
+    verify(dal, never()).save(any());
+  }
+
+  @Test
+  @DisplayName("an octet-stream data type stored for a WEBP is corrected to image/webp by a native update")
+  void octetStreamIsCorrected() throws Exception {
+    Attachment stored = storedAs("foto.webp", "application/octet-stream");
+    stubUpdateDataType(true);
+
+    NeoResponse response = NeoAttachmentStore.store(
+        upload("foto.webp", WEBP.length, writing(WEBP), false));
+
+    assertEquals(201, response.getHttpStatus());
+    helper.verify(() -> NeoAttachmentsHelper.updateDataType("ATT1", "image/webp"));
+    verifyEntityUntouched(stored);
+  }
+
+  @Test
+  @DisplayName("a blank stored data type is corrected too")
+  void blankIsCorrected() throws Exception {
+    Attachment stored = storedAs("foto.webp", "  ");
+    stubUpdateDataType(true);
+
+    NeoAttachmentStore.store(upload("foto.webp", WEBP.length, writing(WEBP), false));
+
+    helper.verify(() -> NeoAttachmentsHelper.updateDataType("ATT1", "image/webp"));
+    verifyEntityUntouched(stored);
+  }
+
+  @Test
+  @DisplayName("a null stored data type is corrected too")
+  void nullIsCorrected() throws Exception {
+    Attachment stored = storedAs("foto.webp", null);
+    stubUpdateDataType(true);
+
+    NeoAttachmentStore.store(upload("foto.webp", WEBP.length, writing(WEBP), false));
+
+    helper.verify(() -> NeoAttachmentsHelper.updateDataType("ATT1", "image/webp"));
+    verifyEntityUntouched(stored);
+  }
+
+  @Test
+  @DisplayName("a failed native update (false) still leaves the upload successful")
+  void updateReturningFalseIsHarmless() throws Exception {
+    Attachment stored = storedAs("foto.webp", "application/octet-stream");
+    stubUpdateDataType(false);
+
+    NeoResponse response = NeoAttachmentStore.store(
+        upload("foto.webp", WEBP.length, writing(WEBP), false));
+
+    assertEquals(201, response.getHttpStatus());
+    verifyEntityUntouched(stored);
+    verify(dal, never()).rollbackAndClose();
+  }
+
+  @Test
+  @DisplayName("an already-correct data type is left untouched and nothing is saved")
+  void correctDataTypeIsKept() throws Exception {
+    Attachment stored = storedAs("foto.webp", "image/png");
+
+    NeoResponse response = NeoAttachmentStore.store(
+        upload("foto.webp", WEBP.length, writing(WEBP), false));
+
+    assertEquals(201, response.getHttpStatus());
+    helper.verify(() -> NeoAttachmentsHelper.updateDataType(any(), any()), never());
+    verifyEntityUntouched(stored);
+  }
+
+  @Test
+  @DisplayName("when the core lookup finds nothing the upload still succeeds")
+  void lookupReturningNullIsHarmless() throws Exception {
+    helper.when(() -> NeoAttachmentsHelper.findLatestUploadedAttachment(TABLE_ID, RECORD,
+        "foto.webp")).thenReturn(null);
+
+    NeoResponse response = NeoAttachmentStore.store(
+        upload("foto.webp", WEBP.length, writing(WEBP), false));
+
+    assertEquals(201, response.getHttpStatus());
+    verify(dal, never()).save(any());
+  }
+
+  @Test
+  @DisplayName("an unresolvable type leaves the stored value as it is and the upload succeeds")
+  void unresolvedTypeLeavesTheValue() throws Exception {
+    // the stored name carries an extension the policy does not know, so nothing resolves
+    Attachment stored = mock(Attachment.class);
+    when(stored.getId()).thenReturn("ATT1");
+    when(stored.getName()).thenReturn("foto.unknown");
+    when(stored.getDataType()).thenReturn("application/octet-stream");
+    helper.when(() -> NeoAttachmentsHelper.findLatestUploadedAttachment(TABLE_ID, RECORD,
+        "foto.webp")).thenReturn(stored);
+
+    NeoResponse response = NeoAttachmentStore.store(
+        upload("foto.webp", WEBP.length, writing(WEBP), false));
+
+    assertEquals(201, response.getHttpStatus());
+    helper.verify(() -> NeoAttachmentsHelper.updateDataType(any(), any()), never());
+    verifyEntityUntouched(stored);
+  }
+
+  @Test
+  @DisplayName("a RuntimeException inside the correction is swallowed and the upload succeeds")
+  void correctionFailureIsSwallowed() throws Exception {
+    storedAs("foto.webp", "application/octet-stream");
+    helper.when(() -> NeoAttachmentsHelper.updateDataType(anyString(), anyString()))
+        .thenThrow(new IllegalStateException("boom"));
+
+    NeoResponse response = NeoAttachmentStore.store(
+        upload("foto.webp", WEBP.length, writing(WEBP), false));
+
+    assertEquals(201, response.getHttpStatus());
+    assertEquals("foto.webp", response.getBody().getString("name"));
+    verify(dal, never()).rollbackAndClose();
+  }
+
+  @Test
+  @DisplayName("combined with markAsMain the response still carries id and isMain")
+  void correctionAndMainTogether() throws Exception {
+    Attachment stored = storedAs("foto.webp", "application/octet-stream");
+    stubUpdateDataType(true);
+    helper.when(() -> NeoAttachmentsHelper.markAsMain(stored)).then(invocation -> null);
+
+    NeoResponse response = NeoAttachmentStore.store(
+        upload("foto.webp", WEBP.length, writing(WEBP), true));
+
+    assertEquals(201, response.getHttpStatus());
+    assertEquals("ATT1", response.getBody().getString("id"));
+    assertTrue(response.getBody().getBoolean("isMain"));
+    helper.verify(() -> NeoAttachmentsHelper.updateDataType("ATT1", "image/webp"));
+    verifyEntityUntouched(stored);
+    helper.verify(() -> NeoAttachmentsHelper.markAsMain(stored));
+  }
+
+  @Test
+  @DisplayName("a lookup failure on a plain upload skips the correction; the upload is not rolled back")
+  void lookupFailureOnPlainUploadIsSwallowed() throws Exception {
+    helper.when(() -> NeoAttachmentsHelper.findLatestUploadedAttachment(TABLE_ID, RECORD,
+        "foto.webp")).thenThrow(new IllegalStateException("query failed"));
+
+    NeoResponse response = NeoAttachmentStore.store(
+        upload("foto.webp", WEBP.length, writing(WEBP), false));
+
+    assertEquals(201, response.getHttpStatus());
+    verify(dal, never()).save(any());
+    verify(dal, never()).rollbackAndClose();
+  }
+
+  @Test
+  @DisplayName("a lookup failure on a markAsMain upload still fails the request, as before")
+  void lookupFailureOnMainUploadFails() throws Exception {
+    helper.when(() -> NeoAttachmentsHelper.findLatestUploadedAttachment(TABLE_ID, RECORD,
+        "foto.webp")).thenThrow(new IllegalStateException("query failed"));
+
+    NeoResponse response = NeoAttachmentStore.store(
+        upload("foto.webp", WEBP.length, writing(WEBP), true));
+
+    assertEquals(500, response.getHttpStatus());
+    verify(dal).rollbackAndClose();
+    helper.verify(() -> NeoAttachmentsHelper.markAsMain(any()), never());
+  }
+
+  @Test
+  @DisplayName("a correction failure does not fail a markAsMain upload; it is still marked")
+  void correctionFailureOnMainUploadIsSwallowed() throws Exception {
+    Attachment stored = storedAs("foto.webp", "application/octet-stream");
+    helper.when(() -> NeoAttachmentsHelper.updateDataType(anyString(), anyString()))
+        .thenThrow(new IllegalStateException("boom"));
+    helper.when(() -> NeoAttachmentsHelper.markAsMain(stored)).then(invocation -> null);
+
+    NeoResponse response = NeoAttachmentStore.store(
+        upload("foto.webp", WEBP.length, writing(WEBP), true));
+
+    assertEquals(201, response.getHttpStatus());
+    assertEquals("ATT1", response.getBody().getString("id"));
+    assertTrue(response.getBody().getBoolean("isMain"));
+    helper.verify(() -> NeoAttachmentsHelper.markAsMain(stored));
   }
 }

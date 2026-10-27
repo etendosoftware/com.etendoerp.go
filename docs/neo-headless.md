@@ -1678,6 +1678,19 @@ Plain text (`text/plain`) is deliberately **not** accepted — the ticket's orig
 that `.txt` uploaded fine while the UI advertised "PDF, Word, Excel, PowerPoint, images". ZIP, XML
 and RTF are kept: Facturae XML and zipped document bundles are real use cases.
 
+**Stored data type correction (ETP-5735).** The core stores `C_File.datatype` using `MimeTypeUtil`
+(Apache Tika 0.9), which does not know WEBP (and any other format newer than the library) and
+answers `application/octet-stream`. The SPA routes its viewer on that value, so a WEBP main
+attachment rendered through the PDF viewer. After `aim.upload(...)`, `NeoAttachmentStore` now
+replaces a blank or `application/octet-stream` data type with `NeoAttachmentPolicy.resolveMimeType(
+fileName, file)` (the policy's own extension + signature tables; unchanged when nothing resolves).
+The write is a native `UPDATE C_File SET C_DataType_ID` (`NeoAttachmentsHelper.updateDataType`, inside a
+savepoint, skipped when the MIME exceeds the 32-char column), never `setDataType` on the entity: a dirty
+`ADAttachment` fails the DAL write-access check when the session flushes at request commit, which turned
+the upload into a 500 with rollback (same reason `markAsMain` is native SQL).
+Rows stored before this change keep `application/octet-stream`; the SPA derives the type from the
+file extension in that case.
+
 #### Write-tier authorization (ETP-5205)
 
 Every attachment **write** — `POST` upload, `DELETE /attachments/file/{id}`,
