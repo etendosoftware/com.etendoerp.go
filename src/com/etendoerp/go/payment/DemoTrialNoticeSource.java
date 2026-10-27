@@ -45,4 +45,18 @@ public interface DemoTrialNoticeSource {
    *     environment, no owner, no active platform account)
    */
   Optional<DemoTrialNoticeRecord> findOwedNotice(String clientId, Instant now);
+
+  /**
+   * ETP-5847 — looks after an environment whose trial is frozen
+   * ({@code ETGO_DemoTrialFrozenDays}): it is owed no notice, ever, and its fiscal periods are kept
+   * open as the calendar moves on, since the window the onboarding opened covers only the original
+   * trial.
+   *
+   * @param clientId the environment's {@code AD_Client_ID}
+   * @param now the evaluation instant
+   * @return true when the trial is frozen and was looked after; the pass then skips the notice
+   */
+  default boolean keepFrozenTrial(String clientId, Instant now) {
+    return false;
+  }
 }

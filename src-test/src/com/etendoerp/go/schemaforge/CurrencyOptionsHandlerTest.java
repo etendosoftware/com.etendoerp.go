@@ -336,12 +336,15 @@ public class CurrencyOptionsHandlerTest {
   // ---------------------------------------------------------------
 
   /**
-   * ETP-5840: the org currency comes first ({@code rate 1}, {@code isOrgCurrency: true}), then EVERY
-   * active currency of the client or system by ISO code — one with a rate for the date carries it,
-   * one without is still listed, with {@code rate: null}, so it can be picked.
+   * ETP-5840: the org currency comes first ({@code rate 1}, {@code isOrgCurrency: true}), then, by
+   * ISO code, every currency with a conversion range to or from it on ANY date — one with a rate
+   * for the date carries it, one whose ranges miss the date is listed with {@code rate: null}, so it
+   * can be picked. Currencies with no range at all are filtered out by the selectable query, which
+   * is scoped by client, org and org currency.
    */
   @Test
-  public void testBuildCurrencyOptionsListsEveryCurrencyWithNullRateWhenMissing() throws Exception {
+  public void testBuildCurrencyOptionsListsRangedCurrenciesWithNullRateWhenMissing()
+      throws Exception {
     CurrencyOptionsHandler handler = new CurrencyOptionsHandler();
     Connection conn = mock(Connection.class);
 
@@ -366,7 +369,8 @@ public class CurrencyOptionsHandlerTest {
     when(rsIsoOrg.getString(1)).thenReturn("USD");
     when(psIsoOrg.executeQuery()).thenReturn(rsIsoOrg);
 
-    // selectable currencies (by ISO code) → EUR (rated), GBP (no rate), USD (the org's, skipped)
+    // selectable currencies (with a range on any date, by ISO code) → EUR (rated), GBP (range not
+    // covering the date), USD (the org's, skipped)
     PreparedStatement psCurrencies = mock(PreparedStatement.class);
     ResultSet rsCurrencies = mock(ResultSet.class);
     when(rsCurrencies.next()).thenReturn(true, true, true, false);
@@ -399,6 +403,14 @@ public class CurrencyOptionsHandlerTest {
       assertTrue(gbp.isNull("rate"));
       assertFalse(gbp.getBoolean("isOrgCurrency"));
       verify(psCurrencies).setString(1, "client-1");
+      verify(psCurrencies).setString(2, "client-1");
+      verify(psCurrencies).setString(3, "org-1");
+      verify(psCurrencies).setString(4, "USD-ID");
+      verify(psCurrencies).setString(5, "USD-ID");
+      ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
+      verify(conn, Mockito.times(4)).prepareStatement(sql.capture());
+      assertTrue("only currencies with a conversion range are selectable",
+          sql.getAllValues().get(3).contains("EXISTS (SELECT 1 FROM c_conversion_rate cr"));
     }
   }
 
