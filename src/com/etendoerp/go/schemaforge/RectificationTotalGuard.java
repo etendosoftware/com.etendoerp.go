@@ -31,7 +31,6 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.service.OBDal;
-import org.openbravo.model.common.invoice.Invoice;
 
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 
@@ -56,11 +55,13 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  *
  * <p><b>Same-currency assumption (product decision, ETP-5745 CP-9 follow-up).</b> A
  * multi-currency QA finding briefly had this guard converting each rectificativa's total to its
- * origin's currency before summing ({@code FinancialUtils.getConversionRate}). Reverted: the
+ * origin's currency before summing, which also meant reading every invoice through
+ * {@code OBDal.get(Invoice.class, id)} instead of plain aggregate SQL. Both are reverted: the
  * product owner confirmed a rectificativa is never meant to carry a different currency than its
  * origin ("Tú tienes una original y haces la rectificativa sobre la misma moneda") — it is a
  * functional misuse the UI should prevent at the source, not a case this guard needs to reconcile
- * numerically. The comparison is therefore a plain same-currency total comparison again; a
+ * numerically. With no conversion to do, there is nothing left that needs an entity read, so the
+ * totals are read back with the original {@code SUM(ABS(...))} aggregate queries below; a
  * rectificativa in a different currency than its origin is out of this guard's scope.
  *
  * <p><b>Placement.</b> Invoice-specific, not shared NEO code: wired from
@@ -101,9 +102,8 @@ final class RectificationTotalGuard {
     }
     try {
       for (String originId : originInvoiceIds(invoiceId)) {
-        Invoice origin = OBDal.getInstance().get(Invoice.class, originId);
-        BigDecimal originTotal = absTotal(origin);
-        if (origin == null || originTotal == null) {
+        BigDecimal originTotal = absGrandTotal(originId);
+        if (originTotal == null) {
           continue;
         }
         BigDecimal rectifiedTotal = sumCompletedRectifications(originId, invoiceId);
@@ -139,23 +139,35 @@ final class RectificationTotalGuard {
     return origins;
   }
 
-  /** The absolute grand total of {@code invoice}, or {@code null} when it has none. */
-  private static BigDecimal absTotal(Invoice invoice) {
-    if (invoice == null || invoice.getGrandTotalAmount() == null) {
-      return null;
+  /** The absolute grand total of {@code invoiceId}, or {@code null} when it cannot be read. */
+  @SuppressWarnings("java:S2077")
+  private static BigDecimal absGrandTotal(String invoiceId) {
+    String sql = "SELECT grandtotal FROM c_invoice WHERE c_invoice_id = ?";
+    Connection conn = OBDal.getInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+      ps.setString(1, invoiceId);
+      try (ResultSet rs = ps.executeQuery()) {
+        if (rs.next()) {
+          BigDecimal total = rs.getBigDecimal(1);
+          return total != null ? total.abs() : null;
+        }
+      }
+    } catch (Exception e) {
+      log.warn("Could not resolve grand total for invoice {}: {}", invoiceId, e.getMessage());
     }
-    return invoice.getGrandTotalAmount().abs();
+    return null;
   }
 
   /**
-   * The ids of every rectificativa linked to {@code originId} that IS ALREADY completed, OR is
-   * {@code excludeOrIncludeInvoiceId} itself (the one about to become completed by this very
-   * request, still in whatever status it currently holds).
+   * The sum of {@code ABS(GrandTotal)} of every rectificativa linked to {@code originId} that IS
+   * ALREADY completed, OR is {@code excludeOrIncludeInvoiceId} itself (the one about to become
+   * completed by this very request, still in whatever status it currently holds). Same-currency
+   * comparison only — see the class javadoc's "Same-currency assumption" section for why no
+   * conversion is attempted here.
    */
   @SuppressWarnings("java:S2077")
-  private static List<String> completedRectificationIds(String originId, String excludeOrIncludeInvoiceId) {
-    List<String> ids = new ArrayList<>();
-    String sql = "SELECT inv.c_invoice_id "
+  private static BigDecimal sumCompletedRectifications(String originId, String excludeOrIncludeInvoiceId) {
+    String sql = "SELECT COALESCE(SUM(ABS(inv.grandtotal)), 0) "
         + "FROM c_invoice_reverse r "
         + "JOIN c_invoice inv ON inv.c_invoice_id = r.c_invoice_id "
         + "WHERE r.reversed_c_invoice_id = ? AND r.isactive = 'Y' "
@@ -166,40 +178,15 @@ final class RectificationTotalGuard {
       ps.setString(2, STATUS_COMPLETED);
       ps.setString(3, excludeOrIncludeInvoiceId);
       try (ResultSet rs = ps.executeQuery()) {
-        while (rs.next()) {
-          ids.add(rs.getString(1));
+        if (rs.next()) {
+          BigDecimal sum = rs.getBigDecimal(1);
+          return sum != null ? sum : BigDecimal.ZERO;
         }
       }
     } catch (Exception e) {
-      log.warn("Could not list completed rectifications for origin {}: {}", originId, e.getMessage());
+      log.warn("Could not sum completed rectifications for origin {}: {}", originId, e.getMessage());
     }
-    return ids;
-  }
-
-  /**
-   * The sum of {@code ABS(GrandTotal)} of every rectificativa linked to {@code originId} that IS
-   * ALREADY completed, OR is {@code excludeOrIncludeInvoiceId} itself (the one about to become
-   * completed by this very request). Same-currency comparison only — see the class javadoc's
-   * "Same-currency assumption" section for why no conversion is attempted here.
-   *
-   * <p>Reads each rectificativa via {@code OBDal.get} rather than a single aggregate SQL: one
-   * origin can be rectified by more than one rectificativa across more than one of ITS origins
-   * (the multi-origin case {@link #checkCompletion} loops over), and the per-row entity read is
-   * what lets that loop and this method share the same invoice lookups cleanly. Bounded by the
-   * small set of rectificativas against one origin on a document-completion path, never a
-   * list/report path.
-   */
-  private static BigDecimal sumCompletedRectifications(String originId, String excludeOrIncludeInvoiceId) {
-    BigDecimal sum = BigDecimal.ZERO;
-    for (String id : completedRectificationIds(originId, excludeOrIncludeInvoiceId)) {
-      Invoice rectification = OBDal.getInstance().get(Invoice.class, id);
-      BigDecimal abs = absTotal(rectification);
-      if (abs == null) {
-        continue;
-      }
-      sum = sum.add(abs);
-    }
-    return sum;
+    return BigDecimal.ZERO;
   }
 
   /**
