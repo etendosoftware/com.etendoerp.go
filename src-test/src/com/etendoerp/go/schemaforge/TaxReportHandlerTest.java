@@ -791,7 +791,11 @@ class TaxReportHandlerTest {
 
     assertEquals(400, response.getHttpStatus(), orgId);
     assertEquals("organization_not_resolved", response.getBody().getString("error"), orgId);
-    return response.getBody().toString().replace(orgId, "<org>");
+    // Anchored on the echoed sentence, so a blank or padded id masks exactly its own occurrence.
+    String echoed = "organization " + orgId + " for";
+    String refusal = response.getBody().toString();
+    assertTrue(refusal.contains(echoed), orgId);
+    return refusal.replace(echoed, "organization <org> for");
   }
 
   /** An own-client org that the role can read is accepted and reaches the query. */
@@ -888,6 +892,109 @@ class TaxReportHandlerTest {
     assertEquals(400, response.getHttpStatus());
     assertEquals("organization_not_resolved", response.getBody().getString("error"));
     verify(connection, never()).prepareStatement(anyString());
+  }
+
+  /**
+   * A blank-but-not-empty {@code orgId} is not an omitted one: it is not defaulted to the session
+   * organization (which would answer 200) but refused exactly like a foreign id, and the query
+   * never runs.
+   */
+  @Test
+  void testBlankOrgIdIsRefusedNotTreatedAsOmitted() throws Exception {
+    mockResultSetRows(0);
+    stubForeignOrg("foreign-org-id");
+    String foreign = refusalWithoutId("foreign-org-id");
+
+    String blank = refusalWithoutId("   ");
+
+    assertEquals(foreign, blank, "a blank orgId must answer the same refusal as a foreign one");
+    verify(connection, never()).prepareStatement(anyString());
+  }
+
+  /**
+   * A valid, own-client, readable org id padded with spaces is not trimmed into that id: the
+   * trimmed id would be accepted, the padded one is refused like a foreign id and never bound.
+   */
+  @Test
+  void testPaddedOwnReadableOrgIdIsRefusedNotTrimmed() throws Exception {
+    mockResultSetRows(0);
+    Organization customOrg = mock(Organization.class);
+    when(customOrg.getClient()).thenReturn(client);
+    when(obDal.get(Organization.class, "custom-org-id")).thenReturn(customOrg);
+    stubForeignOrg("foreign-org-id");
+    String foreign = refusalWithoutId("foreign-org-id");
+
+    String padded = refusalWithoutId(" custom-org-id ");
+
+    assertEquals(foreign, padded, "a padded orgId must answer the same refusal as a foreign one");
+    verify(connection, never()).prepareStatement(anyString());
+  }
+
+  // ---- The org check runs before every other parameter ----------------------
+
+  /**
+   * A foreign {@code orgId} with an explicit {@code currencyId} is refused before the
+   * currency-symbol lookup.
+   */
+  @Test
+  void testForeignOrgIdWithExplicitCurrencyIsRefusedBeforeTheSymbolLookup() throws Exception {
+    JSONObject body = buildValidBody("P", false, false);
+    body.put("currencyId", "curr-001");
+
+    assertRefusedBeforeAnyParameterIsResolved(body);
+  }
+
+  /**
+   * A foreign {@code orgId} with missing or empty dates answers {@code organization_not_resolved},
+   * not the "dates required" error.
+   */
+  @Test
+  void testForeignOrgIdWithoutDatesAnswersTheOrgRefusalNotTheDatesError() throws Exception {
+    JSONObject missing = buildValidBody("P", false, false);
+    missing.remove("dateFrom");
+    missing.remove("dateTo");
+    JSONObject empty = buildValidBody("P", false, false);
+    empty.put("dateFrom", "");
+    empty.put("dateTo", "");
+
+    assertRefusedBeforeAnyParameterIsResolved(missing);
+    assertRefusedBeforeAnyParameterIsResolved(empty);
+  }
+
+  /** A foreign {@code orgId} on a sales-only report is refused like any other. */
+  @Test
+  void testForeignOrgIdOnASalesOnlyReportIsRefused() throws Exception {
+    assertRefusedBeforeAnyParameterIsResolved(buildValidBody("S", false, false));
+  }
+
+  /**
+   * Posts {@code body} with a foreign {@code orgId} and asserts the {@code organization_not_resolved}
+   * 400 came first: no currency (symbol or default) was resolved and no query was prepared.
+   */
+  private void assertRefusedBeforeAnyParameterIsResolved(JSONObject body) throws Exception {
+    Organization foreignOrg = stubForeignOrg("foreign-org-id");
+    body.put("orgId", "foreign-org-id");
+
+    NeoResponse response = handler.handle(buildPostContext(body));
+
+    assertEquals(400, response.getHttpStatus());
+    assertEquals("organization_not_resolved", response.getBody().getString("error"));
+    assertFalse(response.getBody().toString().contains("dateFrom and dateTo are required"));
+    verify(obDal, never()).get(eq(Currency.class), anyString());
+    verify(obDal, never()).createQuery(eq(AcctSchema.class), anyString());
+    verify(foreignOrg, never()).getGeneralLedger();
+    verify(client, never()).getCurrency();
+    verify(connection, never()).prepareStatement(anyString());
+  }
+
+  /** Stubs {@code orgId} as an Organization owned by another client. */
+  private Organization stubForeignOrg(String orgId) {
+    Client foreignClient = mock(Client.class);
+    when(foreignClient.getId()).thenReturn("foreign-client-id");
+    Organization foreignOrg = mock(Organization.class);
+    when(foreignOrg.getClient()).thenReturn(foreignClient);
+    when(obDal.get(Organization.class, orgId)).thenReturn(foreignOrg);
+    return foreignOrg;
   }
 
   // ---- dateType=invoice uses dateinvoiced -----------------------------------
