@@ -272,6 +272,35 @@ public final class NeoErrorResponses {
   }
 
   /**
+   * The 409 for a captured unique violation, worded with core's own translated sentence — or
+   * {@code null} when the failure was not captured or is not a {@code duplicate_key}.
+   *
+   * <p>Core already translates a unique violation into the request language ("There is already a
+   * … with the same (…). (…) must be unique." / "Ya existe … debe ser único."), and both the SPA's
+   * duplicate-identifier message and the import UI's {@code isDuplicateKeyError()} recognise that
+   * sentence. The classification's generic {@code DUPLICATE_KEY_ERROR} is English only, so it is
+   * used only when core gave no sentence. The class is read from the classification, never from
+   * the text: a text check only knows the English wording, and under any other language it let the
+   * classification replace core's sentence (ETP-5953).
+   *
+   * @param innerResponse core's {@code response} object
+   * @param translated    core's failure message, already translated
+   * @return the response, or {@code null}
+   */
+  static NeoResponse duplicateWithCoreWording(JSONObject innerResponse, String translated) {
+    JSONObject classification = classificationOf(innerResponse);
+    if (classification == null
+        || !NeoErrorClassifier.CODE_DUPLICATE_KEY.equals(classification.optString(KEY_CODE, null))) {
+      return null;
+    }
+    String message = translated == null || translated.isBlank()
+        ? classification.optString(KEY_MESSAGE, NeoErrorSanitizer.DUPLICATE_KEY_ERROR)
+        : translated;
+    return toResponse(HttpServletResponse.SC_CONFLICT, NeoErrorClassifier.CODE_DUPLICATE_KEY,
+        NeoErrorSanitizer.stripRowDump(NeoErrorSanitizer.redactObjectReferences(message)), null);
+  }
+
+  /**
    * Re-translates the messages of a batch failure once the batch has rolled back.
    *
    * <p>A refusal classified while a batch still owned the transaction was displayed on a session

@@ -1106,7 +1106,7 @@ it carries an AD message key. The message text is only displayed, never matched.
 |---|---|---|---|
 | `RAISE_APPLICATION_ERROR` in a trigger/function (SQLState `P0001`) | `422` | `business_rule` | the rule's message, translated (`@20502@` → *"Cannot change business partner or price list if there are lines."*) |
 | an exception carrying an AD message key: `MessageKeyedException`, or an `OBException` chain whose message is `@Key@` tokens | `422` | `business_rule` | translated |
-| unique violation (`23505`) | `409` | `duplicate_key` | the existing duplicate-key wording (unchanged) |
+| unique violation (`23505`) | `409` | `duplicate_key` | the existing duplicate-key wording (unchanged): core's own translated sentence when core swallowed the failure (*"Ya existe … debe ser único."*), in the request language — decided by the code, not by matching the English *must be unique* (ETP-5953) — and `NeoErrorSanitizer.DUPLICATE_KEY_ERROR` when it was thrown |
 | not-null violation (`23502`), Hibernate `PropertyValueException` | `400` | `missing_required_value` | generic |
 | FK violation (`23503`) on a `DELETE` | `409` | `record_in_use` | translated constraint or `ForeignKeyViolation` AD message, generic if unavailable |
 | FK violation on any other verb, Hibernate `TransientObjectException`, an unknown id in the body (core's import-set error keyed `id`, recognised by its fixed `New object … refered to but not present in the import set` template — core's body has no category, and `id` alone also carries invalid property paths) | `400` | `unknown_reference` | generic, **byte-identical for a missing and a foreign id** |
