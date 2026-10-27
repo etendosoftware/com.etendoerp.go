@@ -3834,6 +3834,78 @@ entity's schema and undiscoverable. Omitting the id fails the generic mandatory-
 422; sending it without address fields fails with a constraint violation. Only "a throwaway id plus
 the address fields" works, and nothing in the machine-readable contract says so — hence the prompt.
 
+**ETP-5806 — structured address fields.** `streetName`, `buildingNumber` and `buildingName` (backed
+by `EM_OBSEPA_StrtNm`/`BldgNb`/`BldgNm` on `C_Location`, from `org.openbravo.sepa.iso20022`) joined
+the raw-field create/update shape above, for both `contacts/locationAddress` and
+`warehouse/location`. `addressLine1`/`addressLine2` are no longer accepted as free-form input in
+practice: the handler computes them itself from the 3 structured fields (`StructuredAddressComposer`,
+porting Classic's `LocationSEPA.fillAddressLines` exactly) whenever `streetName` is non-blank, and
+ignores whatever the caller sent for the two lines in that case. `streetName`, `buildingNumber`,
+`cityName` and `country` are mandatory on every create/update that is not the "reuse an existing
+C_Location" mode — stricter than Classic, where the 3 SEPA fields are optional. A create/update
+missing any of them gets a 400 naming the missing keys. **Pending:** this field-level `AGENT_PROMPT`
+on `ETGO_SF_FIELD` for `C_Location_ID` has not yet been updated in the database to mention the 3 new
+fields and the mandatoriness rule — needs an `sf-alter-db`/webhook pass, left for the user to apply.
+
+**Gated behind `structured-address-for-sepa` (relaunch, backend-only flag, TTL 2026-11-15 —
+`docs/feature-flags-and-tenant-upgrade.md` §1).** Everything described in this note and the two
+below it is conditional on the flag. **While off** (default pre-launch), the 3 structured fields are
+omitted entirely from the MCP schema for every entity that would otherwise carry them —
+`AddressVirtualSelectorPolicy.resolveVirtualColumns` drops `EM_OBSEPA_StrtNm`/`BldgNb`/`BldgNm` from
+the virtual-column set it resolves for `contacts/locationAddress` and `warehouse/location`, and
+`McpSchemaFieldBuilder.shouldIncludeSchemaColumn` drops the same 3 columns from a direct table walk
+(the `bp-location` case below). An MCP agent calling `etendo_schema`/`etendo_selectors` while the
+flag is off cannot discover `streetName`/`buildingNumber`/`buildingName` at all — not merely
+undiscoverable-without-the-AGENT_PROMPT as the pending item above describes, but structurally absent
+from the schema. **While on**, the schema carries them as described below, still subject to the
+pending `AGENT_PROMPT` gap.
+
+**ETP-5806 follow-up — `bp-location`/`BpLocationHandler`.** The AD window behind the `bp-location`
+spec (AD_Window 121 "Location", inactive in the menu but served regardless via NEO Headless/MCP)
+maps `C_Location` directly through generic CRUD, with no prior dedicated handler — found to accept
+plain-text `addressLine1`/`addressLine2` writes with none of the rules above applied, letting an
+MCP agent create or edit a `bp-location` address and bypass the structured-address requirement
+entirely. `BpLocationHandler` (`@NeoExtension(spec = "bp-location", entity = "bpLocation")`) now
+intercepts POST/PUT the same way the other two handlers do: a pre-hook validates
+`streetName`/`buildingNumber`/`cityName`/`country` as mandatory-together and the 3 structured
+fields against their max lengths, computes `addressLine1`/`addressLine2` via the same
+`StructuredAddressComposer`, and a post-hook persists all 5 columns directly via DAL — bypassing
+`NeoFieldFilter`, which has no curated `ETGO_SF_FIELD` row for any of them on this entity — before
+mirroring the final values back into the response under the published names
+(`streetName`/`buildingNumber`/`buildingName`). Every GET (list or by id) is enriched the same way.
+Country/Region/City/Postal and the base record lifecycle (id generation, client/org, active flag)
+stay on the generic CRUD fallthrough, unintercepted.
+
+Unlike `contacts/locationAddress` and `warehouse/location`, `bp-location` was **not** given curated
+`MCP_CONFIG`/`ETGO_SF_FIELD` visibility for these 3 columns through a push-to-neo run: the live
+`ETGO_SF_ENTITY.Name = 'bpLocation'` row was found to be a hand-populated pipeline orphan (see
+`schema_forge/artifacts/bp-location/`), too risky to rewrite as part of this fix. The handler
+therefore owns the 3 fields entirely outside the curated schema — which is also why
+`etendo_schema`/`etendo_get` still report `streetName`/`buildingNumber`/`buildingName` as
+`unknownFields` for this entity even though the handler accepts, persists and returns them under
+those exact names.
+
+**MCP naming unification.** The three handlers that read/write the SEPA columns
+(`ContactsLocationAddressHandler`, `WarehouseLocationHandler`, `BpLocationHandler`) all agree on
+`streetName`/`buildingNumber`/`buildingName` in their own request/response JSON — never the raw
+Hibernate property names Openbravo's codegen produced for `EM_OBSEPA_StrtNm`/`BldgNb`/`BldgNm`
+(`oBSEPAStreetName`/`oBSEPABuildingNumber`/`oBSEPABuildingName`). The generic schema-discovery path
+(`McpSchemaFieldBuilder#resolvePropertyName`) has no way to know a handler renamed a field
+downstream, so it still reported the raw property name wherever the field reached `etendo_schema`/
+`etendo_selectors` through the generic walk rather than through a handler's own response —
+`AddressVirtualSelectorPolicy.PUBLISHED_NAME_OVERRIDES` corrects it: a structural map keyed by
+DB column name (upper-cased), consulted identically for any entity that happens to carry one of
+the 3 columns, direct table walk or virtual-column wrapper alike. Extend that map — never add a
+per-entity conditional — if another `EM_`-prefixed column ever needs the same treatment.
+
+**Pending DB update — confirmed still outstanding.** The field-level `AGENT_PROMPT` on
+`ETGO_SF_FIELD` for `C_Location_ID` still has not been updated in the database to mention the 3
+structured fields, the mandatory-together rule, or `bp-location`'s separate handler-owned path (no
+curated row exists for `bpLocation` at all — see above). Applying it needs an `sf-alter-db`/webhook
+pass against a running instance; Docs did not attempt it — mutating live curation/AGENT_PROMPT data
+is outside the Documentarian's remit and risks colliding with in-flight QA/review state on the same
+tenant — so this is left, explicitly, for the user to apply.
+
 Note which level serves that example, because the two are easy to conflate: `contacts/locationAddress`
 is fixed by a **field**-level prompt on `ETGO_SF_FIELD.AGENT_PROMPT` for `C_Location_ID`, which
 predates ETP-5184 and reaches the response through `McpSchemaFieldBuilder`'s per-field
@@ -4653,6 +4725,37 @@ default (`async:false` opts out); on REST it is opt-in (`async:true`). The synch
 single-transaction contract on both channels. REST and MCP differ in the async mode only
 by what already differs in the synchronous one (the MCP preprocessor and its failure-envelope rewrite
 inside each row's result).
+
+##### Classic vs Go mandatoriness on structured address fields (ETP-5806, declared)
+
+Not a REST/MCP divergence — both NEO channels apply the same rule, on every path
+(`ContactsLocationAddressHandler`, `WarehouseLocationHandler`, `BpLocationHandler`,
+`OnboardingOrgInfoService`) — but a **Classic vs Go** divergence, declared here per the NeoHandler
+pattern's "a divergence must be declared, not discovered" rule, because it is exactly the kind of
+"why does Go require it when Classic doesn't" question a future reader will ask.
+
+Classic has **zero** DB-level, AD-level or UI-level mandatoriness on the 3 SEPA columns
+(`EM_OBSEPA_StrtNm`/`BldgNb`/`BldgNm`, from `org.openbravo.sepa.iso20022`): `AD_COLUMN.ISMANDATORY = 'N'`
+on all three, the underlying DB columns are nullable, no `AD_FIELD` exists for them on the
+Location/SEPA tab, and neither Classic's `LocationSEPA_F1.html` nor its `getEditVariables()`
+refuses a blank value. Classic only treats them as *conditionally* required at a different moment
+entirely — SEPA-remittance-file generation — via `SEPAUtil.getBusinessPartnerAddressError()`, and
+only when `isOutsideEU(location) && !hasStructuredAddress(location)`: a blanket requirement for
+non-EU third parties, not for every business partner or every address.
+
+Go's rule, gated behind `structured-address-for-sepa` (backend-only flag, TTL 2026-11-15 — see
+`docs/feature-flags-and-tenant-upgrade.md` §1), is stricter and applies at a different moment: while
+the flag is on, `streetName`/`buildingNumber`/`cityName`/`country` are mandatory-together **at
+entry** (create/update time) on every address popup and on the onboarding company step, for every
+business partner and every address, regardless of EU/non-EU status. This is a **deliberate,
+independent Go product decision**, not a port of Classic's remittance-time rule — Go chose to
+require the fields up front so the data is always SEPA-ready when a remittance is eventually
+generated, rather than discovering a gap only at generation time the way Classic does. If product
+later asks why Go's behavior differs from Classic's here, the answer is "Go chose to", not "Go
+inherited it". GitHub issue
+[etendosoftware/etendo-ai#24](https://github.com/etendosoftware/etendo-ai/issues/24) tracks
+Classic's own, separate SEPA-compliance work, which may eventually change Classic's behavior here —
+that work is out of scope for this flag and this divergence note.
 
 #### 4.12.10 An excluded field does not exist, on every verb (ETP-5335, IMP-39)
 
