@@ -17,8 +17,10 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.function.Supplier;
 
@@ -42,8 +44,8 @@ import com.etendoerp.go.featureflags.GoFeatureFlags;
  * {@link #current()} is {@code null} and every reader behaves exactly as before.</p>
  *
  * <p>What it holds is generic: the request's options ({@code _onlyReturnIds},
- * {@code _skipRedundantCallouts}), the per-batch callout-discard memory and a lookup memo
- * ({@link #memoize}). Nothing in it names an entity; a customization that memoizes names its own
+ * {@code _skipRedundantCallouts}), the per-batch callout-discard memory, a lookup memo
+ * ({@link #memoize}) and the actions deferred until the batch commits ({@link #runAfterCommit}). Nothing in it names an entity; a customization that memoizes names its own
  * keys.</p>
  *
  * <p>The callout-discard memory exists only when the request opted in with
@@ -66,6 +68,8 @@ public final class NeoBatchScope {
   private Object memoSession;
   /** Namespace to {hits, misses}, reported once when the batch closes. Insertion-ordered. */
   private final Map<String, int[]> memoStats = new LinkedHashMap<>();
+  /** Actions to run once the batch has committed; dropped when it rolls back. */
+  private final List<Runnable> afterCommitActions = new ArrayList<>();
 
   private NeoBatchScope(boolean onlyReturnIds, boolean skipRedundantCallouts) {
     this.onlyReturnIds = onlyReturnIds;
@@ -141,6 +145,58 @@ public final class NeoBatchScope {
       } else {
         CURRENT.set(previous);
       }
+    }
+  }
+
+  /**
+   * Runs {@code action} once the write that is being handled on this thread is durable (ETP-5791).
+   *
+   * <p>Outside a batch a NEO write (REST single, MCP {@code etendo_create}/{@code etendo_update})
+   * goes through core's self-committing {@code DefaultJsonDataService}, so by the time a
+   * customization's {@code afterHandle()} runs the record is committed and the action runs at
+   * once. Inside a batch the commit is deferred to {@link BatchService} (IMP-23): the action is
+   * queued and runs only after the batch's {@code commitAndClose()} succeeded, so a batch — or an
+   * import row — that rolls back runs none of its actions.</p>
+   *
+   * <p>Meant for side effects that must not describe a write that never happened, such as
+   * telemetry. An action that throws is logged and swallowed: it can neither undo the commit nor
+   * stop the next action.</p>
+   *
+   * @param action the side effect to run after commit
+   */
+  public static void runAfterCommit(Runnable action) {
+    if (action == null) {
+      return;
+    }
+    NeoBatchScope scope = CURRENT.get();
+    if (scope == null) {
+      runQuietly(action);
+    } else {
+      scope.afterCommitActions.add(action);
+    }
+  }
+
+  /**
+   * Runs and clears the actions {@link #runAfterCommit} queued on the current batch. Called by
+   * {@link BatchService} right after the batch committed, and only then.
+   */
+  static void runAfterCommitActions() {
+    NeoBatchScope scope = CURRENT.get();
+    if (scope == null || scope.afterCommitActions.isEmpty()) {
+      return;
+    }
+    List<Runnable> actions = new ArrayList<>(scope.afterCommitActions);
+    scope.afterCommitActions.clear();
+    for (Runnable action : actions) {
+      runQuietly(action);
+    }
+  }
+
+  private static void runQuietly(Runnable action) {
+    try {
+      action.run();
+    } catch (RuntimeException e) {
+      log.warn("After-commit action failed: {} {}", e.getClass().getSimpleName(), e.getMessage());
     }
   }
 

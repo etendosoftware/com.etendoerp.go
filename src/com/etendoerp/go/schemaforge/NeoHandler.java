@@ -362,8 +362,9 @@ public interface NeoHandler {
    * <p>Advisory, like the rest of availability: {@code etendo_schema(view:"actions")} reports the
    * entry as {@code availableNow:false} with the sentence as {@code unavailableReason} when it is
    * asked about a record. It never refuses a call, so the handler's own guard stays the
-   * enforcement. An implementation must not throw for a record it cannot judge: it omits the
-   * action instead.</p>
+   * enforcement. An implementation omits an action it cannot judge; one whose lookup fails may let
+   * the failure propagate, because the caller ({@code McpDeclaredActions#unavailableFor}) catches
+   * a {@link RuntimeException}, logs it and answers "nothing derived" for the whole record.</p>
    *
    * @param subject the record the agent asked about
    * @return {@code action name → reason}; empty by default

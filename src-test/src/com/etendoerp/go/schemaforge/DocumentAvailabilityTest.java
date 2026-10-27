@@ -20,12 +20,16 @@ package com.etendoerp.go.schemaforge;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyCollection;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.when;
 
+import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -36,14 +40,19 @@ import java.util.Set;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.Session;
+import org.hibernate.query.Query;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.mockito.MockedStatic;
 import org.openbravo.base.exception.OBException;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.order.Order;
+import org.openbravo.model.common.order.OrderLine;
+import org.openbravo.model.common.plm.Product;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 
 import com.etendoerp.go.schemaforge.util.NeoActionAvailability;
@@ -56,6 +65,7 @@ import com.etendoerp.go.schemaforge.util.NeoActionAvailability;
  *
  * @covers com.etendoerp.go.schemaforge.DocumentAvailability
  * @covers com.etendoerp.go.schemaforge.OrderDocumentAvailability
+ * @covers com.etendoerp.go.schemaforge.InOutInvoiceAvailability
  * @covers com.etendoerp.go.schemaforge.InvoiceDocumentAvailability
  * @covers com.etendoerp.go.schemaforge.ReturnDocumentAvailability
  */
@@ -143,12 +153,15 @@ class DocumentAvailabilityTest {
     @DisplayName("a completed order with linked documents rules Reactivate out, keeping the others")
     void linkedOrderRulesOutReactivate() throws Exception {
       try (MockedStatic<OBDal> ignored = linkedDocuments(true)) {
-        Map<String, String> unavailable = new SalesOrderHeaderHandler()
-            .unavailableActions(order("CO"));
+        Map<String, String> unavailable = OrderDocumentAvailability.unavailable(order("CO"));
 
         assertEquals(Set.of("documentAction:RE"), unavailable.keySet());
         assertTrue(unavailable.get("documentAction:RE").contains("linked"));
-        assertEquals(unavailable, new PurchaseOrderHeaderHandler().unavailableActions(order("CO")));
+        // both headers add it to their own answer, next to the creation actions' (ETP-5714)
+        assertEquals(unavailable.get("documentAction:RE"), new SalesOrderHeaderHandler()
+            .unavailableActions(order("CO")).get("documentAction:RE"));
+        assertEquals(unavailable.get("documentAction:RE"), new PurchaseOrderHeaderHandler()
+            .unavailableActions(order("CO")).get("documentAction:RE"));
       }
     }
 
@@ -156,7 +169,7 @@ class DocumentAvailabilityTest {
     @DisplayName("a completed order with nothing linked, a draft, or another record rules nothing out")
     void unlinkedDraftOrOtherRulesNothingOut() throws Exception {
       try (MockedStatic<OBDal> ignored = linkedDocuments(false)) {
-        assertTrue(new SalesOrderHeaderHandler().unavailableActions(order("CO")).isEmpty());
+        assertTrue(OrderDocumentAvailability.unavailable(order("CO")).isEmpty());
       }
       try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
         assertTrue(new SalesOrderHeaderHandler().unavailableActions(order("DR")).isEmpty());
@@ -184,6 +197,225 @@ class DocumentAvailabilityTest {
     void enrichedFields() {
       assertEquals(Set.of("hasLinkedDocuments", "needsPrimaryDoc", "needsInvoiceDoc"),
           OrderDocumentAvailability.RESPONSE_ENRICHED_FIELDS);
+    }
+  }
+
+  @Nested
+  @DisplayName("order creation actions (ETP-5714)")
+  class OrderCreationActions {
+
+    private static final String RECEIVE = "createGoodsReceipt";
+    private static final String INVOICE = "createPurchaseInvoice";
+
+    private final OrderDocumentAvailability.Flow purchase =
+        new OrderDocumentAvailability.Flow(false, RECEIVE, INVOICE, false);
+    private final OrderDocumentAvailability.Flow sales =
+        new OrderDocumentAvailability.Flow(true, "createShipment", "createDraftInvoice", true);
+
+    private OrderLine line(String productId, String ordered, String invoiced) {
+      OrderLine line = mock(OrderLine.class);
+      Product product = mock(Product.class);
+      when(product.getId()).thenReturn(productId);
+      when(line.isActive()).thenReturn(true);
+      when(line.getProduct()).thenReturn(product);
+      when(line.getOrderedQuantity()).thenReturn(new BigDecimal(ordered));
+      when(line.getInvoicedQuantity()).thenReturn(new BigDecimal(invoiced));
+      return line;
+    }
+
+    private Order completed(OrderLine... lines) {
+      Order order = mock(Order.class);
+      when(order.getDocumentStatus()).thenReturn("CO");
+      when(order.getId()).thenReturn("O1");
+      when(order.getOrderLineList()).thenReturn(List.of(lines));
+      return order;
+    }
+
+    /** Runs {@code body} with the goods-side pending lines and the draft invoices stubbed. */
+    private Map<String, String> judge(Order order, OrderDocumentAvailability.Flow flow,
+        boolean goodsPending, Set<String> goodsDrafts, List<String> draftInvoices)
+        throws Exception {
+      try (MockedStatic<InOutLineFromOrderFactory> factory =
+          mockStatic(InOutLineFromOrderFactory.class);
+          MockedStatic<AbstractOrderHeaderHandler> linked =
+              mockStatic(AbstractOrderHeaderHandler.class);
+          MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+          MockedStatic<OBContext> obContext = mockStatic(OBContext.class)) {
+        OBContext context = mock(OBContext.class);
+        obContext.when(OBContext::getOBContext).thenReturn(context);
+        when(context.getReadableClients()).thenReturn(new String[] { "C1" });
+        when(context.getReadableOrganizations()).thenReturn(new String[] { "O1" });
+        factory.when(() -> InOutLineFromOrderFactory.collectPendingLines(any(), anyBoolean(),
+            any())).thenAnswer(invocation -> {
+              Set<String> sink = invocation.getArgument(2);
+              sink.addAll(goodsDrafts);
+              return goodsPending
+                  ? List.of(mock(InOutLineFromOrderFactory.PendingOrderLine.class)) : List.of();
+            });
+        linked.when(() -> AbstractOrderHeaderHandler.hasLinkedDocuments(anyString()))
+            .thenReturn(false);
+        OBDal dal = mock(OBDal.class);
+        Session session = mock(Session.class);
+        @SuppressWarnings("unchecked")
+        Query<String> query = mock(Query.class);
+        obDal.when(OBDal::getInstance).thenReturn(dal);
+        when(dal.getSession()).thenReturn(session);
+        when(session.createQuery(OrderDocumentAvailability.DRAFT_INVOICES_HQL, String.class))
+            .thenReturn(query);
+        when(query.setParameter(anyString(), any())).thenReturn(query);
+        when(query.setParameterList(anyString(), anyCollection())).thenReturn(query);
+        when(query.list()).thenReturn(draftInvoices);
+        return OrderDocumentAvailability.unavailable(order, flow);
+      }
+    }
+
+    @Test
+    @DisplayName("nothing left to receive or invoice: both actions are unavailable, with a reason each")
+    void nothingLeftRulesBothOut() throws Exception {
+      Map<String, String> unavailable = judge(completed(line("P1", "5", "5")), purchase, false,
+          Set.of(), List.of());
+
+      assertTrue(unavailable.get(RECEIVE).startsWith("Nothing is left to receive"));
+      assertTrue(unavailable.get(INVOICE).startsWith("Nothing is left to invoice"));
+    }
+
+    @Test
+    @DisplayName("a draft goods receipt covering the pending quantity is named, and so is a draft invoice")
+    void draftsCountAsNotPending() throws Exception {
+      Map<String, String> unavailable = judge(completed(line("P1", "5", "0")), purchase, false,
+          Set.of("GR-1"), List.of("INV-D1", "INV-D2"));
+
+      assertTrue(unavailable.get(RECEIVE).contains("draft goods receipt (GR-1)"));
+      assertTrue(unavailable.get(RECEIVE).contains("complete or delete it"));
+      assertTrue(unavailable.get(INVOICE).contains("draft invoice (INV-D1, INV-D2)"));
+    }
+
+    @Test
+    @DisplayName("something left and no draft: neither action is ruled out")
+    void pendingAndNoDraftRulesNothingOut() throws Exception {
+      Map<String, String> unavailable = judge(completed(line("P1", "5", "2")), purchase, true,
+          Set.of(), List.of());
+
+      assertTrue(unavailable.isEmpty(), unavailable.toString());
+    }
+
+    @Test
+    @DisplayName("an over-invoiced line is not pending; a negative ordered line is")
+    void quantitySignDecidesPending() throws Exception {
+      assertTrue(judge(completed(line("P1", "2", "4")), purchase, true, Set.of(), List.of())
+          .containsKey(INVOICE));
+      assertTrue(judge(completed(line("P1", "-3", "0")), purchase, true, Set.of(), List.of())
+          .isEmpty());
+    }
+
+    @Test
+    @DisplayName("the total-discount line counts for the purchase flow only when asked, never for sales")
+    void discountLineIsSkippedWhenTheFlowSaysSo() throws Exception {
+      Order order = completed(line(TotalDiscountService.DISCOUNT_PRODUCT_ID, "1", "0"));
+
+      assertTrue(judge(order, sales, true, Set.of(), List.of())
+          .get("createDraftInvoice").startsWith("Nothing is left to invoice"));
+      assertTrue(judge(order, purchase, true, Set.of(), List.of()).isEmpty());
+    }
+
+    @Test
+    @DisplayName("a failure judging a creation action keeps the Reactivate advice and the other action")
+    void aFailingPartDoesNotDropTheOthers() throws Exception {
+      Order order = completed(line("P1", "5", "5"));
+      try (MockedStatic<InOutLineFromOrderFactory> factory =
+          mockStatic(InOutLineFromOrderFactory.class);
+          MockedStatic<AbstractOrderHeaderHandler> linked =
+              mockStatic(AbstractOrderHeaderHandler.class)) {
+        factory.when(() -> InOutLineFromOrderFactory.collectPendingLines(any(), anyBoolean(),
+            any())).thenThrow(new IllegalStateException("boom"));
+        linked.when(() -> AbstractOrderHeaderHandler.hasLinkedDocuments(anyString()))
+            .thenReturn(true);
+
+        Map<String, String> unavailable = OrderDocumentAvailability.unavailable(order, purchase);
+
+        assertTrue(unavailable.containsKey("documentAction:RE"));
+        assertTrue(!unavailable.containsKey(RECEIVE));
+        assertTrue(unavailable.get(INVOICE).startsWith("Nothing is left to invoice"));
+      }
+    }
+
+    @Test
+    @DisplayName("sales wording, and a draft, a non-completed order or another record are judged right")
+    void salesWordingAndGuards() throws Exception {
+      Map<String, String> unavailable = judge(completed(line("P1", "5", "5")), sales, false,
+          Set.of(), List.of());
+      assertTrue(unavailable.get("createShipment").startsWith("Nothing is left to ship"));
+
+      Order draft = mock(Order.class);
+      when(draft.getDocumentStatus()).thenReturn("DR");
+      assertTrue(judge(draft, sales, false, Set.of(), List.of()).isEmpty());
+      assertTrue(OrderDocumentAvailability.unavailable(mock(Invoice.class), sales).isEmpty());
+    }
+  }
+
+  @Nested
+  @DisplayName("goods receipt / shipment invoice action (ETP-5714)")
+  class InOutInvoiceAction {
+
+    private ShipmentInOut inout(String status) {
+      ShipmentInOut inout = mock(ShipmentInOut.class);
+      when(inout.getDocumentStatus()).thenReturn(status);
+      when(inout.getId()).thenReturn("IO1");
+      return inout;
+    }
+
+    private Map<String, String> judge(ShipmentInOut inout, Map<String, BigDecimal> withDrafts,
+        Map<String, BigDecimal> withoutDrafts) {
+      try (MockedStatic<NeoInvoiceSupport> support = mockStatic(NeoInvoiceSupport.class)) {
+        support.when(() -> NeoInvoiceSupport.computePendingQtyPerLineOrThrow("IO1", true))
+            .thenReturn(withDrafts);
+        support.when(() -> NeoInvoiceSupport.computePendingQtyPerLineOrThrow("IO1", false))
+            .thenReturn(withoutDrafts);
+        return InOutInvoiceAvailability.unavailable(inout, "createPurchaseInvoice",
+            "goods receipt");
+      }
+    }
+
+    @Test
+    @DisplayName("everything invoiced: the action is unavailable and says so")
+    void fullyInvoiced() {
+      Map<String, String> unavailable = judge(inout("CO"), Map.of(), Map.of());
+
+      assertEquals(Set.of("createPurchaseInvoice"), unavailable.keySet());
+      assertTrue(unavailable.get("createPurchaseInvoice").startsWith("Nothing is left to invoice"));
+    }
+
+    @Test
+    @DisplayName("only a draft invoice covers what is left: the reason names the draft")
+    void coveredByADraft() {
+      Map<String, String> unavailable = judge(inout("CO"), Map.of(),
+          Map.of("L1", BigDecimal.ONE));
+
+      assertTrue(unavailable.get("createPurchaseInvoice").contains("A draft invoice already covers"));
+      assertTrue(unavailable.get("createPurchaseInvoice").contains("complete or delete it"));
+    }
+
+    @Test
+    @DisplayName("something left to invoice, a draft receipt or another record rules nothing out")
+    void otherwiseNothingRuledOut() {
+      assertTrue(judge(inout("CO"), Map.of("L1", BigDecimal.ONE), Map.of("L1", BigDecimal.ONE))
+          .isEmpty());
+      assertTrue(judge(inout("DR"), Map.of(), Map.of()).isEmpty());
+      assertTrue(InOutInvoiceAvailability.unavailable(mock(Invoice.class), "a", "b").isEmpty());
+    }
+
+    @Test
+    @DisplayName("the receipt and shipment headers delegate with their own action name")
+    void handlersDelegate() {
+      try (MockedStatic<NeoInvoiceSupport> support = mockStatic(NeoInvoiceSupport.class)) {
+        support.when(() -> NeoInvoiceSupport.computePendingQtyPerLineOrThrow(anyString(),
+            anyBoolean())).thenReturn(Map.of());
+
+        assertEquals(Set.of("createPurchaseInvoice"),
+            new GoodsReceiptHeaderHandler().unavailableActions(inout("CO")).keySet());
+        assertEquals(Set.of("createDraftInvoice"),
+            new GoodsShipmentHeaderHandler().unavailableActions(inout("CO")).keySet());
+      }
     }
   }
 

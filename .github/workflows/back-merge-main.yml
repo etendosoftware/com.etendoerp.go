@@ -2,11 +2,15 @@ name: Back-merge main into develop
 
 # ETP-5904: whatever enters main (a hotfix, a fix or revert made on the daily cut, the cut's own
 # merge commit) comes back to develop at once through a main -> develop PR (etendo_schema_forge
-# docs/branch-workflow.md § Back to develop). This opens that PR when main moves, instead of
-# waiting for someone to remember it. Merging it stays human, after review and required checks.
+# docs/branch-workflow.md § Back to develop). This opens that PR when main moves, assigns it to
+# whoever made main's last commit and, unless it conflicts, turns on auto-merge (ETP-5950): that
+# code was already reviewed on its way into main, so GitHub merges it once the required checks pass.
 #
 # ETENDOBOT_TOKEN, not GITHUB_TOKEN: a PR opened with GITHUB_TOKEN triggers no pull_request
 # workflow, so its required checks would never report and the PR could not be merged.
+# develop requires one approval here, and GitHub never lets the PR's author (etendobot) approve
+# it: GITHUB_TOKEN approves it as github-actions[bot] (Settings → Actions → "Allow GitHub Actions
+# to create and approve pull requests").
 
 on:
   push:
@@ -19,6 +23,7 @@ concurrency:
 
 permissions:
   contents: read
+  pull-requests: write   # the approval made with GITHUB_TOKEN
 
 jobs:
   open-pr:
@@ -34,5 +39,5 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.ETENDOBOT_TOKEN }}
           GH_REPO: ${{ github.repository }}
-          MERGED_SHA: ${{ github.event_name == 'push' && github.sha || '' }}
+          APPROVE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash scripts/back-merge-main.sh

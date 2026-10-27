@@ -23,6 +23,10 @@ Thumbs.db
 # Gradle
 .gradle/
 
+# Python bytecode cache (scripts/ pre-push hooks)
+__pycache__/
+*.pyc
+
 # Claude
 .claude/
 

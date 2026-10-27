@@ -236,6 +236,27 @@ public final class GoFeatureFlags {
   public static final String FLAG_BATCH_CALLOUT_SKIP_DISABLED = "batch-callout-skip-disabled";
 
   /**
+   * ETP-5791 — contact types driven by the contact category. On, a contact category
+   * ({@code C_BP_Group}) must declare Customer and/or Vendor/Creditor, a new contact inherits
+   * those types from its category unless the request sends them explicitly, a contact cannot be
+   * saved with no type, moving a contact to another category re-inherits both types, and a new
+   * tenant gets "Cliente/Proveedor" as its default contact category (decided when the tenant is
+   * handed to the user, pool tenants included). Off (the default), the customizations skip those
+   * rules, every write behaves as before the ticket and new tenants keep "Cliente" as default.
+   *
+   * <p><b>It gates behaviour, not schema.</b> The {@code EM_Etgo_Iscustomer} /
+   * {@code EM_Etgo_Isvendor} columns, their AD metadata, the {@code ETGO_SF_FIELD} rows and the
+   * reference/sample data ship unconditionally; with the flag off nothing enforces or reads them.
+   *
+   * <p><b>Environment level and backend-only.</b> Evaluated with an account-less context by
+   * {@code ContactTypeRules#isEnabled()}, the only place it is read (the onboarding's
+   * {@code OnboardingDefaultContactCategoryService} goes through it too); nothing in the browser reads it, so
+   * never add it to the web client's {@code flag-keys.js}. Locally
+   * {@code etendo.go.flags.contact-category-type} / {@code ETGO_FLAG_CONTACT_CATEGORY_TYPE}.
+   */
+  public static final String FLAG_CONTACT_CATEGORY_TYPE = "contact-category-type";
+
+  /**
    * ETP-5048 — whether the billing reconciliation is scheduled. Strictly off by default (and off
    * on every failure of this class): while it is off {@code BillingReconciliationScheduleStartup}
    * plants no process request, so turning it on takes effect at the next restart. The process also
@@ -252,6 +273,42 @@ public final class GoFeatureFlags {
    */
   public static final String FLAG_BILLING_RECONCILIATION_SCHEDULE =
       "billing-reconciliation-schedule";
+
+  /**
+   * ETP-5806 — whether the structured address fields (Street/Number/Building Name) are visible,
+   * writable and validated across the 4 address popups (Contacts, Warehouse, Business Partner
+   * location, onboarding's Company step), MCP, and the onboarding mandatory-address check.
+   * Relaunch flag for a feature built, reviewed and QA'd once already, then reverted at product's
+   * request before it shipped (TTL 2026-11-15 — by then the feature must be live, or this flag is
+   * reclassified as a permanent toggle).
+   *
+   * <p><b>Positive polarity, not inverted</b> — unlike {@link #FLAG_MCP_MODERN_ERA_DISABLED} or
+   * {@link #FLAG_BATCH_CALLOUT_SKIP_DISABLED}. {@code true} = feature visible/active; the default
+   * ({@code false}, every failure of this class) is "hidden", which is the required pre-launch
+   * state.
+   *
+   * <p><b>Both ends evaluate it, deliberately against the ETP-4966 "one flag, one evaluator"
+   * default</b> — because it must also hide <em>data</em> (3 fields), not just a UI entry point,
+   * the backend's answer is the single source of truth and the frontend never evaluates the flag
+   * itself: it reads {@code capabilities.structuredAddressForSepa} off {@code SFWindowAccessMap}'s
+   * response (populated here via {@code isEnabled(FLAG_STRUCTURED_ADDRESS_FOR_SEPA, ...)}) and the
+   * onboarding session bootstrap, and never imports a flag key of its own. See
+   * {@code docs/neo-headless.md} §8c and the ETP-5806 plan for the full architecture.
+   *
+   * <p><b>Environment level for now</b> (plain boolean, no per-account targeting) — the TTL is a
+   * hard global deadline, not a staged per-tenant rollout; revisit if that changes.
+   * Locally {@code etendo.go.flags.structured-address-for-sepa} / {@code ETGO_FLAG_STRUCTURED_ADDRESS_FOR_SEPA}.
+   * Must also be created as a boolean setting in the ConfigCat dashboard before it can be toggled
+   * in any environment with an SDK key configured — an undeclared ConfigCat setting resolves to
+   * this class's code default ({@code false}) regardless of local configuration.
+   *
+   * <p>Callers: {@code SFWindowAccessMap} (capability), {@code ContactsLocationAddressHandler},
+   * {@code WarehouseLocationHandler}, {@code BpLocationHandler} (NEO read/write gating),
+   * {@code AddressVirtualSelectorPolicy}/{@code McpSchemaFieldBuilder} (MCP schema gating),
+   * {@code StructuredAddressComposer} and {@code EtendoGoJwtServlet} (mandatory-field
+   * validation).
+   */
+  public static final String FLAG_STRUCTURED_ADDRESS_FOR_SEPA = "structured-address-for-sepa";
 
   /**
    * ConfigCat SDK key. Set ⇒ flags come from ConfigCat and can be flipped without a restart; unset

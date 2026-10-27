@@ -1079,6 +1079,15 @@ When the batch closes it logs one line with the hits and misses per namespace (o
 lookup name), e.g. `[NEO-PERF] batch memo BatchService|spec hits=39 misses=1, BatchService|entity
 hits=36 misses=4, …`; nothing is logged for a batch that memoized nothing.
 
+**After-commit actions (ETP-5791).** `NeoBatchScope.runAfterCommit(action)` runs a side effect only
+once the write being handled is durable. Outside a batch it runs at once (core's
+`DefaultJsonDataService` has already committed when `afterHandle()` runs); inside a batch it is
+queued and `BatchService` runs the queue right after its `commitAndClose()`, so a batch or an async
+import row that rolls back runs none of its actions. Exceptions are logged and swallowed. Meant for
+telemetry and similar side effects, never for business writes. `NeoWriteChannel.current()` labels the
+write for telemetry: `rest`, `mcp`, `rest_batch`, `mcp_batch` (MCP is marked by `McpServlet` and by
+the async MCP job row runner).
+
 #### 4.3.8 Error classification — a refused request is a 4xx with a readable message (ETP-5782)
 
 > Numbered 4.3.8 because ETP-5785 adds its own 4.3.7 (reference ownership).
@@ -1417,7 +1426,11 @@ OBUISEL selectors with custom HQL queries are fully supported. The service uses 
 
 **One item per value, view-backed selectors (ETP-5707).** A standard (non-custom-HQL) OBUISEL selector over a view whose Value Field is not the entity primary key (`Product` on `M_Product_Price_Warehouse_v` — order, quotation and returns lines — `ETRX_OrgsByRole`, `ETRX_RolesByUser`) returns one row per value × something (product × warehouse). It used to be collapsed with `e.id in (select min(id) … group by <value>)`, which repeats the whole filter and which PostgreSQL planned as a nested-loop semi join re-running the grouped subselect once per outer row (1000 products × 8 warehouses: 40.3 s for the count alone). `executeRichQuery` now routes these selectors to `executeValuePagedRichQuery`, which pages **by value**, like ETP-5703 does for custom HQL: (1) `count(distinct e.<value>)` is the `totalCount`; (2) one page of distinct values — `group by e.<value> order by min(e.<display>), e.<value>` with `offset`/`limit`; (3) the rows of those values (`and e.<value> in (:sfPageValues) order by e.<value>, e.id`), keeping the **first row per value**, which is the row the old `min(id)` picked, so `_aux` values (prices) do not change. Rows whose value is `null` are excluded from all three steps. When the display property does not resolve to a primitive path (the price view's identifier is the association `product`), step 2 orders by the value alone (`displayIsPrimitivePath`). The filtered HQL comes from `OBQuery` (`getQueryString()` + `getNamedParameters()`), so the readable client / organization / active filters are kept; the session query extends it because an `OBQuery` where clause cannot carry a `group by`, and `NeoSelectorExecutionHelper.bindNamedParameters` binds `Object[]` parameters (the readable-organization filter is a `String[]`) with `setParameterList`. Stock-breakdown selectors (aux out-fields `_QTY`/`_LOC`) keep their row-per-row shape, and `ProductSimple` (custom HQL) stays on ETP-5703's by-record paging. Measured: opening the sales-order product picker with 1000 products × 8 warehouses went from over 45 s to about 1.3 s.
 
+**Every page has a total order (ETP-5903).** A page fetched with `offset`/`limit` is only stable when the ORDER BY is total: with a sort key that ties (two records with the same display value), PostgreSQL may return them in any order on each query, so a row can show up on two pages or on none. The paging flows that ordered by the display value alone now add the id as the last key: the simple and rich OBUISEL flows (`ORDER BY e.<display>, e.id`), the row-paged custom-HQL flow (`<alias>.<display>, <alias>.id`), list references (`SEQUENCENUMBER`, then `id`) and the payment-method selector (`name`, then `id`). The row-paged custom-HQL flow skips the tiebreaker when its HQL has a `DISTINCT` or a `GROUP BY` (`SelectorQueryExecutor.rowPageOrder`): PostgreSQL rejects an ORDER BY item outside a DISTINCT select list or the grouping, and that failure would mark the transaction rollback-only. The ETP-5703 / ETP-5707 flows were already total. Not covered: FK selectors with a SQL validation rule, which are served by core `ComboTableData` (its own ORDER BY). The SPA relies on this when it pages forward to find the committed value of a reopened selector.
+
 **Search fragments and their alias (ETP-5670).** On a standard (non-custom) OBUISEL selector, a searchable field's `property` is a DAL path relative to the entity (`product.name`), so the search always qualifies it with the query alias (`e.product.name`), dotted or not. A `clause_left_part` (used only when `property` is blank) is raw HQL and keeps its own alias (`bp.name`). Custom-HQL selectors keep their original rule: a dotted fragment is used as written. Before ETP-5707 an unqualified relative path bound to the outer row once the where clause was copied into the `min(id)` de-dup subquery of view-backed selectors (Value Field ≠ `id`), turning it into a correlated subquery that PostgreSQL re-ran once per candidate row; that subquery no longer exists, the qualification rule stays.
+
+**Organization tree resolved once, not per row (ETP-5707).** The dictionary where clause of the `ProductByPriceAndWarehouse` selector (order, quotation and returns lines) filters with `AD_ORG_ISINNATURALTREE(e.orgwarehouse, @AD_Org_ID@, @AD_Client_ID@) = 'Y'` and the same function over `e.productPrice.organization.id`. The view has one row per product × price × warehouse, so the function ran for every row, in each of the count, page and rows queries (about 1.2 s for 2500 products and 3 warehouses). `OrgTreeWhereSelectorPolicy` (reached through `NeoSelectorPolicy.resolveOrgTreeWhere`, called from `SelectorQueryBuilder.buildRichQueryWhereClause`) evaluates the same function once per request, over the organizations and the active warehouses, and rewrites the predicates to `e.warehouse.id in (:ids)` and `e.productPrice.organization.id in (:ids)`. The rows selected are the same, because the lists come from the very function the clause called; the warehouse predicate is written over the warehouse id and not over `orgwarehouse` because only the id form lets the planner push the filter down to the warehouse table. An empty tree becomes `1 = 0`, a predicate whose parameters cannot be read is left as it was, and no selector other than this entity is touched.
 
 The service resolves `@param@` placeholders in OBUISEL HQL where clauses: `@AD_Org_ID@`, `@AD_Client_ID@`, `@AD_User_ID@`, `@AD_Role_ID@`.
 
@@ -2422,6 +2435,12 @@ Behavior details (`McpActionsView`):
   (redirect, unusable configuration) is left alone: that one is real. Display logic is still not invokability (above).
 - **`invokableCount`** sits next to `actionCount` so the split is visible before reading the array.
   On `sales-invoice/header` the catalog has 22 actions and only a handful are callable.
+- **`withheldActions`** (ETP-5714 follow-up) lists every action `MCP_CONFIG.actions.hidden` withholds as `{action, reason}`, the reason
+  being the entry's own (`reasons`) or the section's (`McpActionsSection.View#reasonOf`). A hidden button is left out of `actions`, so before
+  this an agent looking for `Cancelandreplace` or `RM_Pickfromreceipt` found nothing and learned the reason only after a refused
+  `etendo_action`. The entries are NOT counted in `actionCount` or `invokableCount` and are not invokable (`etendo_action` still refuses
+  them with 405). The key is absent when nothing is hidden. Structural: it reads the configuration, never an entity name.
+  Built in `McpActionsView.buildResponse` from `McpActionsSection.View#withheldActions`.
 - A button carries **no `required` flag** (IMP-21). A button has no payload value, so AD's NOT NULL
   flag on the trigger column says nothing about what the agent must send; it used to be reported as
   `required: true` right next to an honest `userRequired: false`.
@@ -3019,8 +3038,8 @@ there). So an agent could not record a deposit at all: in blind run `20261001T19
 created a bank-statement line instead — what the bank reports, waiting to be matched — not a
 movement of the account.
 
-`FinancialAccountHandler#actionContracts()` (the account's customization, `Java_Qualifier`
-`financialAccountHeaderHandler`) now declares, from `FinancialAccountMovementActions`; for all of
+`FinancialAccountHandler#actionContracts()` (the account's customization, bound by
+`@NeoExtension(spec = "financial-account", entity = "account")`) now declares, from `FinancialAccountMovementActions`; for all of
 them `id` = the financial account:
 
 | Action | Kind | Parameters (required in **bold**) | UI gate it mirrors |
@@ -3660,7 +3679,7 @@ metadata.
 | Section | Level | Purpose |
 |---|---|---|
 | `parent` | entity | How a child entity identifies its parent, and for which verbs the parent key is required (`field`, `entity`, `optionalFor`, `mode`, `reason`). See §6. |
-| `fields` | spec / entity / field | Reclassifies the MCP's view of field curation — `visibility`, `included`, `readOnly`, `businessCritical`, `reason`. |
+| `fields` | spec / entity / field | Reclassifies the MCP's view of field curation — `visibility`, `included`, `readOnly`, `businessCritical`, `userRequired`, `reason`. |
 | `verbs` | entity (spec applies to every entity without its own) | Hides MCP write verbs the `ETGO_SF_ENTITY` flags still enable for REST and the SPA — `create`, `update`, `delete`, `reason`, `instead` (ETP-5558). |
 | `actions` | entity (spec applies to every entity without its own) | Hides actions (declared handler actions or AD buttons) from the MCP and redirects buttons to the action to use instead — `hidden`, `redirect`, `reason` (ETP-5558). See §4.12.1.3. |
 
@@ -3673,6 +3692,7 @@ metadata.
     "included": true,
     "readOnly": false,
     "businessCritical": true,
+    "userRequired": false,
     "reason": "why the shared curation is wrong for agent use"
   }
 }
@@ -3691,6 +3711,19 @@ metadata.
   carry. Like `visibility`, it widens what is *offered*, never what is *allowed*.
 - `readOnly`, `businessCritical` — JSON booleans, unquoted. An absent key is *not* a configured
   `false`: it leaves the `ETGO_SF_FIELD` value standing.
+- `userRequired` — JSON boolean (ETP-5791). Replaces the `userRequired` flag `etendo_schema`
+  derives for the field (editable + AD-mandatory + no AD default), and with it whether
+  `view:"create"` lists the field under `required` or `optional`. For a value a customization
+  supplies in its pre-hook, which the structural rule cannot see: `contacts/businessPartner.vendor`
+  (`C_BPartner.IsVendor`, mandatory, no default) carries `userRequired:false` at field level because
+  `BusinessPartnerHandler` inherits it from the business partner category when a create omits it
+  (with the `contact-category-type` flag on; off, the omitted value falls to the mandatory-defaults
+  `false`, see §5.3.6).
+  It changes the advice, never the contract: the raw `required` (AD NOT NULL) is left as it is and
+  no write-side check is relaxed. Ignored on buttons. Applied before the precondition overlay
+  (`ETGO_SF_ENTITY.preconditions`), which can still force `userRequired:true`. An absent key leaves
+  the derived flag standing. Meant for the field level — at entity/spec level it would set the flag
+  on every field of the scope.
 - `reason` — **mandatory** whenever the section is present, and non-blank. Every row of this section
   asserts that the shared curation is wrong for agent use; that claim has to be auditable on the row
   that makes it.
@@ -3836,7 +3869,7 @@ The shape and the rules are in §4.12.1.3.
 
 | Entity | `hidden` | `values` / `redirect` | Why |
 |---|---|---|---|
-| `sales-invoice/header`, `purchase-invoice/header` | the five PIS actions, `psd2GenerateBankPayment`, `posted` (ETP-5692), `etblkpBulkposting` (ETP-5714) | redirect `aPRMAddpayment` → `registerPayment`; `Createfromorders` → `importOrderLines`, `Createfrominouts` → `importShipmentLines` (sales) / `importReceiptLines` (purchase), `CreateFrom` → `importOrderLines` (ETP-5713, §4.12.34); `reasons.posted` and one reason per Create From button; `valuesByStatus.documentAction`: `DR` → CO, `IP` → CO, VO, `CO` → RC, RE (ETP-5714, §4.12.35) | PIS needs a person to authorize at the bank (SCA); Classic's *Add Payment* is not the Etendo payment flow. `posted` is the AD button behind the *Posted* column — a blind toggle that answered "Process completed successfully" on a draft while doing nothing, and that the window never shows. Agents book and unbook the invoice with the header's **declared** `post` / `unpost` contracts instead (`InvoicePostingGate.CONTRACTS`, §4.12.29). `posted` has its own `reasons` entry naming both, so a refusal on it never carries the PIS sentence, and the section `reason` stays the PIS one. The `posted` *field* (curated `readOnly`) stays readable in `view:"full"` / `fields:[…]` as a plain value (§4.12.1.3) |
+| `sales-invoice/header`, `purchase-invoice/header` | the five PIS actions, `psd2GenerateBankPayment`, `posted` (ETP-5692), `etblkpBulkposting` (ETP-5714) | redirect `aPRMAddpayment` → `registerPayment`; `Createfromorders` → `importOrderLines`, `Createfrominouts` → `importShipmentLines` (sales) / `importReceiptLines` (purchase), `CreateFrom` → `importOrderLines` (ETP-5713, §4.12.34); `reasons.posted` and one reason per Create From button; `valuesByStatus.documentAction`: `DR` → CO, `IP` → CO, `CO` → RE; `values: {"DocAction": ["CO","RE"]}` (ETP-5714, §4.12.35; the QA follow-up removed RC and VO and enforces the list) | PIS needs a person to authorize at the bank (SCA); Classic's *Add Payment* is not the Etendo payment flow. `posted` is the AD button behind the *Posted* column — a blind toggle that answered "Process completed successfully" on a draft while doing nothing, and that the window never shows. Agents book and unbook the invoice with the header's **declared** `post` / `unpost` contracts instead (`InvoicePostingGate.CONTRACTS`, §4.12.29). `posted` has its own `reasons` entry naming both, so a refusal on it never carries the PIS sentence, and the section `reason` stays the PIS one. The `posted` *field* (curated `readOnly`) stays readable in `view:"full"` / `fields:[…]` as a plain value (§4.12.1.3) |
 | `payment-in/finPayment`, `payment-out/header` | `psd2GenerateBankPayment`, `aPRMAddScheduledpayments`, `aprmExecutepayment`, `aPRMReversePayment`, `aPRMReconcilePayment`, `aeatsiiSend`, `etblkpBulkposting`, `posted`, `retryPisPayment`, `pisPaymentStatus` | `aPRMProcessPayment: ["P"]` | agents get exactly the window's three buttons, all with `parameters:{}`: *Confirmar* (`aPRMProcessPayment`), *Reactivar* (`etprReactivatePayment`) and *Eliminar* (`eTPRRemovePayment`). *Eliminar* is offered with the UI's own gate: the trash icon and the row action call it at every status except `RPVOID` and except when `pisLocked`, so `ReactivatePaymentHandler` refuses an agent with **422** in those two cases (same `isLifecycleLockedByTransfer` predicate the GET emits as `pisLocked`). On a processed payment it reactivates and then deletes it, and it gives **no** consumed credit back — exactly as in the UI; the invoice's `deletePayment` still deletes a draft and does give the credit back. `retryPisPayment` / `pisPaymentStatus` (served by `ReactivatePaymentHandler` on the payment record) are PIS, hidden like every PIS action under the fiscal/bank-integration criterion (§4.12.9). Payments are created and allocated through `registerPayment` on the invoice header. `values` keeps the catalogue honest but is **not** a safety boundary: `ReactivatePaymentHandler` always sends `action:"P"` for `aPRMProcessPayment` and ignores what the agent passes |
 | `financial-account/transaction` | `etprReactivateTransaction`, `etprRemoveTransaction`, `posted`, `etblkpBulkposting` | — | the UI's movements are reactivated, deleted and recorded through the account's movement flow; for agents, the account's `reactivateMovement` / `deleteMovement` / `createMovement` (§4.12.1.4). What stays for agents is `post` / `unpost` — `etendo_action(spec:'financial-account', entity:'transaction', id:<transactionId>, action:'post'\|'unpost', parameters:{})`, served by the `document-posting` qualifier (`DocumentPostingService`, as the SPA's kebab). They are handler-served, not declared contracts, so `view:"actions"` does not list them |
 | `open-close-period-control/documents` | `openClose`, `processNow` | — | the calendar has no per-document-type open/close since ETP-4948; the period's own `openClose` (§4.12.1.6) opens or closes every document type at once |
@@ -3846,8 +3879,9 @@ The shape and the rules are in §4.12.1.3.
 | `return-to-vendor-shipment/returnToVendorShipment` | `posted`, `etblkpBulkposting` (ETP-5714) | redirect `RM_Shipment_Pickedit` → `importReceiptLines` (ETP-5711), `GenerateTo` and `Invoicefromshipment` → `createReturnInvoice` (ETP-5712); `reasons` for the last two | *Pick/Edit Lines* has no process connected. `GenerateTo` (AD_Process 154, *Generate Invoice from Shipment*, `isdisplayed = N` in the tab) and `Invoicefromshipment` (no process) are the classic ways to invoice a shipment; on a return they would not build the factura rectificativa the app builds (negative lines, link to the invoice it rectifies, confirmed). The target is the header's declared `createReturnInvoice` (§4.12.33). Keys are AD column names |
 | `return-material-receipt/returnMaterialReceipt` | `posted`, `etblkpBulkposting` (ETP-5714) | redirect `RM_Receipt_PickEdit` → `importShipmentLines` (ETP-5711), `GenerateTo` and `Invoicefromshipment` → `createReturnInvoice` (ETP-5712); `reasons` for the last two | the sales mirror of the previous row |
 | `purchase-order/header` | — | redirect `rMReceiveMaterials` → `createGoodsReceipt`, `rMCreateInvoice` → `createPurchaseInvoice` (ETP-5709) | the classic *Receive Materials* button has no process connected for an agent, and *Create Invoice* is undocumented for it. The targets are the header's declared contracts (`PurchaseOrderHeaderHandler`): `createGoodsReceipt` creates a DRAFT receipt, `createPurchaseInvoice` creates AND completes a purchase invoice. The preconditions (source must be completed, draft-aware pending quantity) are described in the ETP-5709 paragraphs of §4.12.9 and apply to a redirected call exactly as to a direct one |
-| `purchase-order/header` (ETP-5714) | `RM_Pickfromreceipt`, `Cancelandreplace`, `Confirmcancelandreplace`, each with its own `reasons` entry | `valuesByStatus.documentAction`: `DR` → CO, VO, PR; `IP` → CO, VO; `CO` → CL, RE | *Pick from Receipt* is a pick-and-edit window with no process an agent can run; Cancel and Replace is a classic multi-step flow (replacement order plus reversal of the original's documents) with no MCP equivalent, and its second step has no meaning alone. The redirect row above is kept. `valuesByStatus` is advisory availability (§4.12.35), from core's `ActionButtonUtility.docAction` |
-| `sales-order/header` (ETP-5714) | `Cancelandreplace`, `Confirmcancelandreplace`, each with its own `reasons` entry | `valuesByStatus.documentAction`: as the purchase order | the sales order had no `MCP_CONFIG` until now. Cancel and Replace is a real flow in the app, but it is a multi-step flow with no declared contract, so it is withheld from agents with a reason rather than offered half-supported; reactivate (RE, only without linked documents), edit and complete again instead |
+| `purchase-order/header` (ETP-5714) | `RM_Pickfromreceipt`, `Cancelandreplace`, `Confirmcancelandreplace`, `Create_POLines` (ETP-5714 follow-up), each with its own `reasons` entry | `valuesByStatus.documentAction`: `DR` → CO, VO, PR; `IP` → CO, VO; `CO` → CL, RE | *Pick from Receipt* is a pick-and-edit window with no process an agent can run; Cancel and Replace is a classic multi-step flow (replacement order plus reversal of the original's documents) with no MCP equivalent, and its second step has no meaning alone. The redirect row above is kept. `valuesByStatus` is advisory availability (§4.12.35), from core's `ActionButtonUtility.docAction` |
+| `sales-order/header` (ETP-5714) | `Cancelandreplace`, `Confirmcancelandreplace`, `Create_POLines`, `RM_Pickfromreceipt` (the last two: ETP-5714 follow-up), each with its own `reasons` entry | `valuesByStatus.documentAction`: as the purchase order | the sales order had no `MCP_CONFIG` until now. Cancel and Replace is a real flow in the app, but it is a multi-step flow with no declared contract, so it is withheld from agents with a reason rather than offered half-supported; reactivate (RE, only without linked documents), edit and complete again instead |
+| `sales-quotation/quotation` (ETP-5714 follow-up) | `Create_POLines`, `RM_Pickfromreceipt`, `Cancelandreplace`, `Confirmcancelandreplace` (the last two added after the live test), each with its own `reasons` entry | — | the quotation tab carries the same two classic buttons. *Create Lines From* and *Pick from Receipt* open pick-and-edit windows that no Etendo GO screen renders (`api.actions` in the generated pages is metadata, `processes` is empty), so an agent that could call them would do something the app cannot show. `Create_POLines` is also hidden on `purchase-order/header`, where `decisions.json` keeps it `discarded` (it has no spec field there; the hidden entry is what lists it under `withheldActions` and refuses it with its reason). The legacy return specs have no screen and are left as they are |
 
 **A redirect target is not validated at runtime (ETP-5709).** `McpActionsSection.validateRedirect` only requires each target to be a non-blank string; it never checks that the target is an action the entity serves. A typo or a renamed action still loads, and the agent is then told to call something that answers 404. Every `redirect` target must therefore be an action the entity declares (an `actionContracts()` entry or a handler-served action). Also, `reason` is mandatory in every `actions` section, `redirect`-only ones included: `validate` rejects a section without it, and an unusable section fails the entity closed (§4.12.6). `redirectReason` and `reasons` refine the text per action; they do not replace `reason`.
 
@@ -3883,6 +3917,78 @@ brand-new one). The fields the handler actually reads — `addressLine1`, `cityN
 entity's schema and undiscoverable. Omitting the id fails the generic mandatory-field check with a
 422; sending it without address fields fails with a constraint violation. Only "a throwaway id plus
 the address fields" works, and nothing in the machine-readable contract says so — hence the prompt.
+
+**ETP-5806 — structured address fields.** `streetName`, `buildingNumber` and `buildingName` (backed
+by `EM_OBSEPA_StrtNm`/`BldgNb`/`BldgNm` on `C_Location`, from `org.openbravo.sepa.iso20022`) joined
+the raw-field create/update shape above, for both `contacts/locationAddress` and
+`warehouse/location`. `addressLine1`/`addressLine2` are no longer accepted as free-form input in
+practice: the handler computes them itself from the 3 structured fields (`StructuredAddressComposer`,
+porting Classic's `LocationSEPA.fillAddressLines` exactly) whenever `streetName` is non-blank, and
+ignores whatever the caller sent for the two lines in that case. `streetName`, `buildingNumber`,
+`cityName` and `country` are mandatory on every create/update that is not the "reuse an existing
+C_Location" mode — stricter than Classic, where the 3 SEPA fields are optional. A create/update
+missing any of them gets a 400 naming the missing keys. **Pending:** this field-level `AGENT_PROMPT`
+on `ETGO_SF_FIELD` for `C_Location_ID` has not yet been updated in the database to mention the 3 new
+fields and the mandatoriness rule — needs an `sf-alter-db`/webhook pass, left for the user to apply.
+
+**Gated behind `structured-address-for-sepa` (relaunch, backend-only flag, TTL 2026-11-15 —
+`docs/feature-flags-and-tenant-upgrade.md` §1).** Everything described in this note and the two
+below it is conditional on the flag. **While off** (default pre-launch), the 3 structured fields are
+omitted entirely from the MCP schema for every entity that would otherwise carry them —
+`AddressVirtualSelectorPolicy.resolveVirtualColumns` drops `EM_OBSEPA_StrtNm`/`BldgNb`/`BldgNm` from
+the virtual-column set it resolves for `contacts/locationAddress` and `warehouse/location`, and
+`McpSchemaFieldBuilder.shouldIncludeSchemaColumn` drops the same 3 columns from a direct table walk
+(the `bp-location` case below). An MCP agent calling `etendo_schema`/`etendo_selectors` while the
+flag is off cannot discover `streetName`/`buildingNumber`/`buildingName` at all — not merely
+undiscoverable-without-the-AGENT_PROMPT as the pending item above describes, but structurally absent
+from the schema. **While on**, the schema carries them as described below, still subject to the
+pending `AGENT_PROMPT` gap.
+
+**ETP-5806 follow-up — `bp-location`/`BpLocationHandler`.** The AD window behind the `bp-location`
+spec (AD_Window 121 "Location", inactive in the menu but served regardless via NEO Headless/MCP)
+maps `C_Location` directly through generic CRUD, with no prior dedicated handler — found to accept
+plain-text `addressLine1`/`addressLine2` writes with none of the rules above applied, letting an
+MCP agent create or edit a `bp-location` address and bypass the structured-address requirement
+entirely. `BpLocationHandler` (`@NeoExtension(spec = "bp-location", entity = "bpLocation")`) now
+intercepts POST/PUT the same way the other two handlers do: a pre-hook validates
+`streetName`/`buildingNumber`/`cityName`/`country` as mandatory-together and the 3 structured
+fields against their max lengths, computes `addressLine1`/`addressLine2` via the same
+`StructuredAddressComposer`, and a post-hook persists all 5 columns directly via DAL — bypassing
+`NeoFieldFilter`, which has no curated `ETGO_SF_FIELD` row for any of them on this entity — before
+mirroring the final values back into the response under the published names
+(`streetName`/`buildingNumber`/`buildingName`). Every GET (list or by id) is enriched the same way.
+Country/Region/City/Postal and the base record lifecycle (id generation, client/org, active flag)
+stay on the generic CRUD fallthrough, unintercepted.
+
+Unlike `contacts/locationAddress` and `warehouse/location`, `bp-location` was **not** given curated
+`MCP_CONFIG`/`ETGO_SF_FIELD` visibility for these 3 columns through a push-to-neo run: the live
+`ETGO_SF_ENTITY.Name = 'bpLocation'` row was found to be a hand-populated pipeline orphan (see
+`schema_forge/artifacts/bp-location/`), too risky to rewrite as part of this fix. The handler
+therefore owns the 3 fields entirely outside the curated schema — which is also why
+`etendo_schema`/`etendo_get` still report `streetName`/`buildingNumber`/`buildingName` as
+`unknownFields` for this entity even though the handler accepts, persists and returns them under
+those exact names.
+
+**MCP naming unification.** The three handlers that read/write the SEPA columns
+(`ContactsLocationAddressHandler`, `WarehouseLocationHandler`, `BpLocationHandler`) all agree on
+`streetName`/`buildingNumber`/`buildingName` in their own request/response JSON — never the raw
+Hibernate property names Openbravo's codegen produced for `EM_OBSEPA_StrtNm`/`BldgNb`/`BldgNm`
+(`oBSEPAStreetName`/`oBSEPABuildingNumber`/`oBSEPABuildingName`). The generic schema-discovery path
+(`McpSchemaFieldBuilder#resolvePropertyName`) has no way to know a handler renamed a field
+downstream, so it still reported the raw property name wherever the field reached `etendo_schema`/
+`etendo_selectors` through the generic walk rather than through a handler's own response —
+`AddressVirtualSelectorPolicy.PUBLISHED_NAME_OVERRIDES` corrects it: a structural map keyed by
+DB column name (upper-cased), consulted identically for any entity that happens to carry one of
+the 3 columns, direct table walk or virtual-column wrapper alike. Extend that map — never add a
+per-entity conditional — if another `EM_`-prefixed column ever needs the same treatment.
+
+**Pending DB update — confirmed still outstanding.** The field-level `AGENT_PROMPT` on
+`ETGO_SF_FIELD` for `C_Location_ID` still has not been updated in the database to mention the 3
+structured fields, the mandatory-together rule, or `bp-location`'s separate handler-owned path (no
+curated row exists for `bpLocation` at all — see above). Applying it needs an `sf-alter-db`/webhook
+pass against a running instance; Docs did not attempt it — mutating live curation/AGENT_PROMPT data
+is outside the Documentarian's remit and risks colliding with in-flight QA/review state on the same
+tenant — so this is left, explicitly, for the user to apply.
 
 Note which level serves that example, because the two are easy to conflate: `contacts/locationAddress`
 is fixed by a **field**-level prompt on `ETGO_SF_FIELD.AGENT_PROMPT` for `C_Location_ID`, which
@@ -4204,6 +4310,8 @@ not: `etendo_create` does not run it in shared code, so it is in the table below
 | who supervises the scanned invoice (ETP-5715) | a person drives the review modals, so every decision is taken before anything is sent | the **agent** must ask the user every `pendingDecisions` entry and create only after the whole summary is confirmed. The server cannot enforce that: `status`, the `supervision` block, the tool descriptions and the agent prompt say it; nothing blocks `etendo_batch` | an agent is not a modal. Same class of known risk as the free recipients of `etendo_send_document_email` (§4.12.39): a prompt, not a control |
 | reading the PDF (ETP-5715) | the browser uploads it to `/sws/copilot/file` and runs `/sws/copilot/executeTool`; the copilot module's HTTP client waits **without a timeout** | the MCP uses its **own client** to the same service (same properties, same two calls, same question and schema from the same configuration) with a **90 s** budget in total: a service that does not answer is `503 ocr_unavailable`, and a successful reading is **cached per staged document** so a retry does not pay again (§4.12.40) | an MCP call that waits forever on a paid external model holds a server thread |
 | the supplier's PDF as the invoice's main attachment (ETP-5715) | the panel attaches it to the new record right after the batch commits (`uploadAndMarkMainAttachment`, `?markAsMain=true`); a failure is non-fatal | the agent attaches the **staged** file with `etendo_request_attachment_upload {staged_document_id, main:true}` after creating the invoice (the same store, no second upload); if it never does, the invoice has no PDF — the same non-fatal outcome | the creation is the agent's `etendo_batch`, not a server flow, so the attach is a separate step |
+| clearing a required field on update (ETP-5726) | `PUT`/`PATCH` of a field AD declares mandatory but the table leaves nullable (e.g. an order's `scheduledDeliveryDate`) with `null` is **accepted** by REST single, `/batch` and the SPA's save path | **refused 422 `validation_error`** with `missingFields[{name,column,type,label}]` (label in the user's language), only for keys the caller actually sent as `null` or `""`; a key left out is never refused. Server-resolved fields, the primary key and the system columns are excluded | MCP-only; REST parity is a follow-up, not done. See §4.12.41 |
+| currency change of a draft order whose price list is in another currency (ETP-5726) — `purchase-order` and `sales-order` headers | accepted; the screen keeps the price list as it was (it does not reset it) | **refused 422** naming the requested currency and the price list, saying to send a price list in that currency or keep the current one. The stored price list stands when the body does not carry one (the SPA sends sparse bodies) | MCP-only, by decision: `OrderCurrencyPriceListGuard` acts on `context.isMcpOrigin()` + `PUT` and is called from each header's `handle()`. Etendo core's order completion (`C_Order_Post`) does **not** check the price list's currency either, so on REST the mismatch reaches the document. See §4.12.41 |
 
 This is a **declared** list, not an unknown one: the point is that the next person to touch either
 path can see what is deliberately unequal. Closing a row means adding the step to
@@ -4240,7 +4348,7 @@ Same handler, same business validations, but the MCP channel refuses more, on pu
 **Invoice quantities (ETP-5709).** What `createPurchaseInvoice` and `createDraftInvoice` invoice is always limited to what is still pending, and "nothing pending" is an explicit 400, never reinterpreted as "invoice everything":
 
 - **Which base:** the order routes' pending is ORDERED-based (`ordered − C_OrderLine.QtyInvoiced`, `CreateDraftInvoiceHandler#resolvePendingForLine`, `CreatePurchaseInvoiceHandler#getPendingQuantity`), not delivered-based, except that without `lines` core invoices a line that has completed, not-yet-invoiced shipments for the quantity of those shipments (not the order's full pending). On the sales order route, an explicit `lines` quantity on an order line that has completed, not-yet-invoiced shipment lines is **refused** (see *Explicit `lines` on a sales order*, below), because core would re-derive the quantity from those shipment lines and ignore the one requested.
-- **From an order** (`createPurchaseInvoice` on `purchase-order`, `createDraftInvoice` on `sales-order`/`sales-quotation`): pending = `ordered − C_OrderLine.QtyInvoiced`, and a line counts only when it is non-zero AND has the same sign as the ordered quantity (so an over-invoiced line, ordered 2 / invoiced 4, is skipped instead of producing a −2 invoice line, while a legit negative line, ordered −3 / invoiced 0, is still invoiced — ETP-4722). `QtyInvoiced` is written by `C_Invoice_Post`: only COMPLETED invoices reduce the pending quantity on this route; an invoice left in draft by other means does not (the order routes complete their own invoice in the same call, ETP-5381).
+- **From an order** (`createPurchaseInvoice` on `purchase-order`, `createDraftInvoice` on `sales-order`/`sales-quotation`): pending = `ordered − C_OrderLine.QtyInvoiced`, and a line counts only when it is non-zero AND has the same sign as the ordered quantity (so an over-invoiced line, ordered 2 / invoiced 4, is skipped instead of producing a −2 invoice line, while a legit negative line, ordered −3 / invoiced 0, is still invoiced — ETP-4722). `QtyInvoiced` is written by `C_Invoice_Post`: only COMPLETED invoices reduce the pending quantity on this route; an invoice left in draft by other means does not (the order routes complete their own invoice in the same call, ETP-5381). **A linked DRAFT invoice of the order is refused instead (ETP-5714 follow-up):** `OrderInvoiceDuplicateGuard.refuseIfDraftExists`, called by `CreatePurchaseInvoiceHandler` and `CreateDraftInvoiceHandler` on their ORDER route only, answers **409** `error.code: "draftInvoiceExists"` (message naming the draft numbers, `hint`, `existingDraftInvoices:[documentNo…]`) and creates nothing, unless the body carries the JSON boolean `allowDuplicate:true` (declared as an optional boolean in both contracts; a string or number is a 422, as for `createReturnInvoice`, ETP-5712), in which case the invoice is created and the 201 `data` lists `existingDraftInvoices`. The drafts come from `OrderDocumentAvailability.draftInvoiceNumbers` (active, readable client/organization), the same query as the `availableNow:false` advice, so catalogue, call and screen (which hides the button through `needsInvoiceDoc`) agree on every channel; no divergence to declare in §4.12.9. The SPA never calls the action with a draft present (the manage-documents modal, the confirm modals and both bulk menus gate on `needsInvoiceDoc` / skip orders with a draft invoice), so nothing is shown for the 409 and `backendErrors.js` has no entry for it (the message carries document numbers, so it could not be matched by sentence either). The sales quotation route is unchanged.
 - **From movements** (`createPurchaseInvoice` on `goods-receipt`, `createDraftInvoice` on `goods-shipment`): pending per movement line comes from `NeoInvoiceSupport.computePendingQtyPerLineOrThrow(id, true)` (draft invoices count). That query **omits** lines with nothing pending, so a non-null pending map is authoritative: `MultiDocumentInvoiceSupport.resolveInOutLineQty` treats an absent line as pending 0 and skips it (it used to fall back to the full movement quantity, which re-invoiced already-invoiced lines of a multi-receipt / multi-shipment invoice). Only a `null` map (no pending information, the legacy 3-arg seam `CreateDraftInvoiceHandler#resolveShipmentLineQty`) falls back to the movement quantity. Every decision path uses the **throwing** variant, so a DB failure is an error, not an empty map; the swallowing `computePendingQtyPerLine` remains only for the billing-status badge and `pendingInvoiceLines`. When nothing is pending the call answers 400 (`Goods receipt <no> has nothing left to invoice`, `Goods receipts <no>, <no> have …`, `No hay líneas pendientes de facturar en este albarán`) before any header is built.
 - **One shipment with a linked order** (`createDraftInvoice` on `goods-shipment`, `CreateDraftInvoiceHandler#buildShipmentScopedOrderSelection`, handed to `createFromOrderLines` for the header/pricing): the selection is scoped to THIS shipment, ONE entry per shipment line `{id: orderLineId, orderedQuantity, shipmentInOutLine: lineId}` (plus `orderQuantity` / `operativeQuantity` / `operativeUOM` scaled to the invoiced fraction), at the line's draft-aware pending quantity or the explicit `lines` quantity. **Why the entry names its shipment line:** core (`CreateInvoiceLinesFromProcess#getLinesToProcess`, `CreateLinesFromUtil#isOrderLineWithRelatedShipmentReceiptLines`) replaces an order-line entry WITHOUT a non-empty `shipmentInOutLine` that has related shipment lines by ALL of their not-yet-invoiced lines at their full quantity, discarding the quantity sent; an entry that names its line is used as is. Until ETP-5709 the handler sent an empty selection: it gave the right answer for a first call (order of 5, shipment lowered to 3 and completed → 3 units, verified live, still true), but a second call on an already-invoiced shipment invoiced the order line's remaining never-shipped quantity, and invoicing shipment A of an order shipped in A and B also invoiced B. Nothing pending on the shipment is now a 400 `No hay líneas pendientes de facturar en este albarán` before anything is created. The shipment and its lines are detached from the session before the native process links to them (`evictShipmentFromSession`, as the receipt path does). Pinned by `CreateDraftInvoiceHandlerTest#testSingleShipment*`.
 - **Explicit `lines`** (every path above): a quantity may not exceed what is pending for that line, must have the sign of the line, and a line with nothing pending cannot be requested — otherwise 400 naming the line and the pending quantity (purchase handler in English, sales handler in Spanish); nothing is capped silently. A `lines` array none of whose entries parses (missing id, zero or malformed quantity) is a 400 as well: the empty override map it used to leave meant "no lines requested" and the whole pending document was invoiced. The check is `MultiDocumentInvoiceSupport.requireOverridesWithinPending` (movements, also the single-shipment route's explicit lines) / `CreateDraftInvoiceHandler#requireOverridesWithinPending` (orders, on the 3-arg `createFromOrder` only; the single-shipment route validates through the movement check above and no longer goes through `createFromOrder`); it reads document structure (status, sign, quantity), names no spec.
@@ -4705,6 +4813,37 @@ default (`async:false` opts out); on REST it is opt-in (`async:true`). The synch
 single-transaction contract on both channels. REST and MCP differ in the async mode only
 by what already differs in the synchronous one (the MCP preprocessor and its failure-envelope rewrite
 inside each row's result).
+
+##### Classic vs Go mandatoriness on structured address fields (ETP-5806, declared)
+
+Not a REST/MCP divergence — both NEO channels apply the same rule, on every path
+(`ContactsLocationAddressHandler`, `WarehouseLocationHandler`, `BpLocationHandler`,
+`OnboardingOrgInfoService`) — but a **Classic vs Go** divergence, declared here per the NeoHandler
+pattern's "a divergence must be declared, not discovered" rule, because it is exactly the kind of
+"why does Go require it when Classic doesn't" question a future reader will ask.
+
+Classic has **zero** DB-level, AD-level or UI-level mandatoriness on the 3 SEPA columns
+(`EM_OBSEPA_StrtNm`/`BldgNb`/`BldgNm`, from `org.openbravo.sepa.iso20022`): `AD_COLUMN.ISMANDATORY = 'N'`
+on all three, the underlying DB columns are nullable, no `AD_FIELD` exists for them on the
+Location/SEPA tab, and neither Classic's `LocationSEPA_F1.html` nor its `getEditVariables()`
+refuses a blank value. Classic only treats them as *conditionally* required at a different moment
+entirely — SEPA-remittance-file generation — via `SEPAUtil.getBusinessPartnerAddressError()`, and
+only when `isOutsideEU(location) && !hasStructuredAddress(location)`: a blanket requirement for
+non-EU third parties, not for every business partner or every address.
+
+Go's rule, gated behind `structured-address-for-sepa` (backend-only flag, TTL 2026-11-15 — see
+`docs/feature-flags-and-tenant-upgrade.md` §1), is stricter and applies at a different moment: while
+the flag is on, `streetName`/`buildingNumber`/`cityName`/`country` are mandatory-together **at
+entry** (create/update time) on every address popup and on the onboarding company step, for every
+business partner and every address, regardless of EU/non-EU status. This is a **deliberate,
+independent Go product decision**, not a port of Classic's remittance-time rule — Go chose to
+require the fields up front so the data is always SEPA-ready when a remittance is eventually
+generated, rather than discovering a gap only at generation time the way Classic does. If product
+later asks why Go's behavior differs from Classic's here, the answer is "Go chose to", not "Go
+inherited it". GitHub issue
+[etendosoftware/etendo-ai#24](https://github.com/etendosoftware/etendo-ai/issues/24) tracks
+Classic's own, separate SEPA-compliance work, which may eventually change Classic's behavior here —
+that work is out of scope for this flag and this divergence note.
 
 #### 4.12.10 An excluded field does not exist, on every verb (ETP-5335, IMP-39)
 
@@ -5485,18 +5624,89 @@ dispatches; with nothing resolved, the default CRUD path runs exactly as before.
 `NO_CUSTOMIZATION` trace is logged at DEBUG when the qualifier is blank (the normal case); a
 qualifier that is configured and resolves to nothing keeps its INFO `(warn)` line.
 
-**Migration is opportunistic, not a campaign.** Existing handlers are not being rewritten in bulk;
-one moves to the annotation when someone has a reason to open it anyway. Do not add a new
-`Java_Qualifier` binding: that is what is being retired.
+**Touching a legacy handler means migrating it in the same change (ETP-5588).** Fixes land on
+whatever binding exists, so while a handler stays on `Java_Qualifier` every fix to it keeps the
+legacy alive — "migrate when convenient" let the distinct qualifier count drift from 90 to 97
+unnoticed. Do not add a new `Java_Qualifier` binding, and when you open a qualifier-bound handler
+for any reason, move its pair to the annotation (recipe: the `neo-extension-migration` skill in
+etendo_schema_forge). CI enforces it — see "Guardrails" below.
 
-**Conflicts do not fail the build**, by design — a gradual migration passes through exactly those
-states. Two annotated classes claiming the same `(spec, entity)`, or an annotated pair whose row
-still names a different class by qualifier, are logged at `ERROR`. Run `make extension-parity` to
-catch them offline instead of in production.
+**Resolving an entity's customization outside a hook dispatch.** Code that needs the handler of
+an entity without running a hook (contracts, capabilities, side hooks such as `afterCallout`, "is
+it customized?") goes through `NeoHandlerLookup`, never through `SFEntity.getJavaQualifier()`:
+
+| Need | Call |
+|---|---|
+| the handler, annotation first, qualifier fallback (MCP/discovery resolver) | `NeoHandlerLookup.forEntity(entity)` / `forEntityQuietly(entity)` |
+| the same, with the REST resolver kept as the fallback | `NeoHandlerLookup.forEntity(entity, NeoServletSupport::lookupHandler)` |
+| "is this entity customized?" without instantiating anything | `NeoHandlerLookup.hasCustomization(entity)` |
+| a report spec's handler / entity | `NeoReportCallability.resolveReportHandler(spec)` / `resolveReportEntity(spec)` |
+
+Hook dispatch itself keeps going through `NeoExtensionDispatcher`, which already resolves
+annotation first. Since ETP-5588 every reader that used to read the qualifier directly — the MCP
+read post-hook, `NeoFieldFilter`'s read-only exemption, the REST `afterCallout`, the action
+contracts in discover, `protectedCreateCalloutFields`, the action surface of tab-less entities and
+the report path — resolves through these, so an entity bound **only** by annotation behaves
+exactly as a qualifier-bound one on every surface.
+
+**Guardrails (CI, `.github/workflows/extension-guardrails.yml`).**
+
+- `make extension-parity` is a ratchet: the distinct `Java_Qualifier` count must **equal**
+  `EXTENSION_CEILING`. Migrating a handler lowers the ceiling in the same PR; the job also fails if
+  the count rises against the base branch. `make extension-parity HOOKS=1` lists, per bound pair,
+  the `NeoHandler` hooks its class overrides — the inventory to check before clearing a qualifier.
+- `scripts/check-extension-guardrails.py` fails on a new `@Named`-only `NeoHandler`, on a new direct
+  `getJavaQualifier()` read, and on a spec name in a string literal inside a generic service. The
+  existing debt is listed in `scripts/extension-guardrails-allowlist.json`, which may only shrink:
+  an entry that no longer matches the code fails the job until it is removed.
+
+**Conflicts do not fail the build.** Two annotated classes claiming the same `(spec, entity)`, or
+an annotated pair whose row still names a different class by qualifier, are logged at `ERROR` and
+listed by `make extension-parity`. They are the transient state of a migration, not an end state.
 
 > Note: `NeoExtension`'s own javadoc describes the annotation as "additive, never a migration",
 > which was accurate as the acceptance criterion of the step that introduced it. The direction
 > above supersedes it for **new** code; the additive runtime behaviour it describes is unchanged.
+
+**Migrated (ETP-5588).** Six `(spec, entity)` pairs bind by annotation **only**: their
+`ETGO_SF_ENTITY` rows carry no `JAVA_QUALIFIER`, their `decisions.json` no `javaQualifier`, and the
+classes no `@Named`.
+
+| `(spec, entity)` | class |
+|---|---|
+| `financial-account` / `account` | `FinancialAccountHandler` |
+| `sales-invoice` / `header` | `SalesInvoiceHeaderHandler` |
+| `purchase-invoice` / `header` | `PurchaseInvoiceHeaderHandler` |
+| `open-close-period-control` / `periodControl` | `PeriodOpenCloseHandler` |
+| `payment-in` / `finPayment` | `PaymentInReactivateHandler` |
+| `payment-out` / `header` | `PaymentOutReactivateHandler` |
+
+`ReactivatePaymentHandler` serves two entities, and the annotation is not repeatable, so its
+behaviour stays in that class and each entity is bound by a concrete (empty) subclass — the same
+shape `SalesOrderLineHandler`/`SalesQuotationLineHandler` use (§4.12.20). Nothing binds the base
+class itself.
+
+Still pending from the same audit: the `accountingDate` re-injection in
+`NeoCrudHandler.executeUpdate` is header-document logic (invoice, order and in/out headers) living
+in the generic update path; it moves to a `NeoHandler` hook answered by those NeoExtensions when
+they are migrated.
+
+Reviewed in the same audit and **kept generic on purpose**, because they are keyed on something
+other than a window — moving them into one NeoExtension would duplicate them across every window
+that shares the key:
+
+| Where | Keyed on |
+|---|---|
+| `NeoSelectorService` + `FinancialAccountPaymentMethodSelectorPolicy` | the selector's target entity (`FIN_Financial_Account`) |
+| `ReferenceOverrideSelectorPolicy` | the `AD_Reference` of the selector |
+| `NeoResponse` (`@ETPR_PeriodClosedForUnRemovePayment@` → `PeriodNotAvailable`) | the core message key |
+| `DocTypeResolver.resolveDocBaseType` | the table (`C_Invoice` → `ARI`/`API`, …) |
+| `NeoBackgroundDefaultsService` (SII key deferred to the trigger) | the presence of the SII properties; the factories pass the target spec as data |
+
+The email download link (`NeoDocumentDownloadService`) no longer lists windows: it binds the
+attachment to the table of the spec's header entity (its included entity on a level-0 tab), read
+from `ETGO_SF_SPEC`/`ETGO_SF_ENTITY`; the frontend reads the same table from the window contract's
+primary entity (`documentEmailSend.js#resolveAttachmentTable`).
 
 #### 5.3.b The legacy binding (`@Named` + `Java_Qualifier`)
 
@@ -5719,6 +5929,8 @@ Core Etendo's accounting engine (`AcctServer`) doesn't always say *which* entity
 **`PeriodNotAvailable` is keyed on every channel that refuses a closed period (ETP-5577):** a productive tenant now starts with every period never-opened, so "the period is not open" is its first refusal and the SPA/MCP must be able to recognize it by identity. Completions already carried it (core procedures raise `@PeriodNotAvailable@`; `NeoProcessService` extracts the key). Posting: `errorMessageOf` re-localizes `STATUS_PeriodClosed` through `localizedMessage("PeriodNotAvailable")` and `failureOf` sets `messageKeys = ["PeriodNotAvailable"]`, like the locked-document case. Payments: `AddPaymentService` and `PaymentRegistrationService.checkPeriodOpen` throw `MessageKeyedException("PeriodNotAvailable")` (an `OBException` that keeps its `AD_MESSAGE` key, message resolved in the GO locale), and `NeoResponse.error(int, OBException)` adds `error.messageKeys` when the exception is keyed — used by `FinancialAccountTransactionsSupport.runMutation`, `PaymentRegistrationService.doRegisterPayment` and `PaymentActionHandlerSupport`. The reconciliation payment flows still answer the localized text only. MCP: `McpToolRouter.wrapAsErrorContent(JSONObject)` adds a `hint` (`PERIOD_NOT_AVAILABLE_HINT`: ask the user first, then `etendo_list` on `open-close-period-control` / `periodControl` and `etendo_action` `openClose` with `openClose = 'O'`) when `messageKeys`, top level or under `error`, contains `PeriodNotAvailable` and the body has no hint yet. Known gap: the generic button path (`McpToolRouterSupport.mapNeoResponseToActionResult`) drops a nested `error` object, so a keyed nested refusal from a non-customized button would lose its key there; none exists today.
 
 **`DocumentPostingService` names the real reason behind a "locked" post (ETP-5692):** the ETP-5529 paragraph above lists what a failed lock can mean — another posting process, or a document that is already posted, unprocessed, or stuck with `Processing='Y'` — because the lock statement (`AcctServer_data.xsql` `update`: `UPDATE <table> SET Processing='Y' WHERE <table>_ID=? AND Processed='Y' AND (Processing='N' OR Processing IS NULL) AND Posted<>'Y'`) folds all of them into `STATUS_DocumentLocked`. Live QA hit the consequence: posting a **draft** invoice answered "This record is being posted by another process" with `Processing='N'`. `post()` now re-reads, on that status only, the two columns of that very statement (`notPostableFailure`: `SELECT Processed, Posted FROM <AcctServer.tableName> WHERE <table>_ID = ?`, through the provider's non-transaction connection, after the rollback) and answers "Only processed (completed) documents can be posted. Complete the document first." with `messageKeys:["ETGO_PostingDocumentNotProcessed"]` when `Processed <> 'Y'` — plain English built in Java, like the service's own "Document posted" / "Unposted (N entries removed)"; the key is a stable identity string, **not** an `AD_MESSAGE` record (no core message says exactly this for every table) — `["PostedDocument"]` (core, `AD_MESSAGE_ID 800116`, "Document already Posted.", translated by the language packs) when `Posted = 'Y'`, and keeps `OtherPostingProcessActive` otherwise. **Structural, not identity**: the columns are the ones `AcctServer` requires of every table it posts and the table name is the one `AcctServer.get` resolved, so it applies to every caller of `post()` — every document window and `NotPostedDocumentsHandler` — without naming a table. It **fails open** (unknown table name, a name that is not `\w+`, a missing row or a failed read keep the lock answer). The happy path is untouched: the read only runs after a failed post. The SPA maps `OtherPostingProcessActive` today; it only offers *Contabilizar* on a processed, unposted row, so it meets the two new answers only on stale data (a row posted or reactivated elsewhere since it was read). If it is ever wanted in Spanish, map `ETGO_PostingDocumentNotProcessed` in `backendErrors.js` (SPA i18n), not in the AD.
+
+**The goods documents' `unpost` gate is not in `DocumentPostingService` either (ETP-5714):** see `GoodsPostingContracts.checkUnpost` (§ goods post/unpost contracts below): the four goods headers refuse an `unpost` of a document that is not posted with a 422, per entity.
 
 **The invoice `unpost` status gate is NOT in `DocumentPostingService` (ETP-5692):** for every table this service serves, unposting a document that is not posted is a handled `200` "0 entries removed" (ETP-5445, Internal Consumption — the `InternalConsumptionHeaderHandler` paragraph above), and that stays. An invoice is narrower, and the rule is invoice semantics, not structure: only a **Completed** (`CO`) **and posted** invoice may be unposted — the only case the SPA offers. Without a gate, `ResetAccounting.delete` ran on drafts (a no-op answered as success) and on **voided** invoices, where it flipped `Posted` from `'D'` to `'N'` and so made a voided document eligible for background posting again. The gate is `InvoicePostingGate.checkUnpost`, called from `InvoicePostingGate.checkHeaderRequest` by both invoice header customizations before they delegate to the service: **422** with the flat `{success:false, message, messageKeys}` body `handleAction` answers: "Only a completed invoice can be unposted. This invoice's status is <code>." (`messageKeys:["ETGO_InvoiceUnpostNotCompleted"]`, `messageParams.docStatus`) or "This invoice is not posted, so it has no accounting entries to remove." (`["ETGO_InvoiceUnpostNotPosted"]`). Plain English built in Java; the keys are identity strings, not `AD_MESSAGE` records (core's `NotCompletedInvoice`, "The invoice must be completed", cannot carry the status an agent needs). The same `D → N` hazard exists for any other window whose voided documents carry `Posted='D'`; it is not changed there (out of scope, flagged in the ETP-5692 report).
 
@@ -6266,7 +6478,7 @@ A list response carries one page, so a total drawn next to it covers the loaded 
 - The helper names no entity; each customization owns its own select (payments: `PaymentListSummary`).
 - Currency folding is shared with the Financial Accounts sidebar through `NeoCurrencyTotals` (today's rate, a missing rate excludes the currency and is reported, each subtotal rounded `HALF_UP` to the org precision).
 
-**Payment list summary** (`payment-reactivate` handler, `payment-in` and `payment-out`). `response.summary`, a sibling of `data`, identical on every page and present even for an empty list; a failure is logged and the key omitted:
+**Payment list summary** (`ReactivatePaymentHandler`, bound as `PaymentInReactivateHandler` / `PaymentOutReactivateHandler`, `payment-in` and `payment-out`). `response.summary`, a sibling of `data`, identical on every page and present even for an empty list; a failure is logged and the key omitted:
 
 ```json
 { "orgCurrencyIso":"EUR", "rowCount":18,
@@ -6363,6 +6575,51 @@ the created record (with the derived `name`) is in `response.data[0]`.
 
 Access is the window's: writing needs `AD_Window_Access.IsReadWrite = 'Y'` on window 141 (Payment
 Term) — a role that may edit invoices but holds 141 read-only gets the standard 403.
+
+#### 5.3.6 "Did the caller send this field?" on create — `ATTR_CLIENT_PROVIDED_FIELDS` (ETP-5791)
+
+A pre-hook that must tell an explicit value from a default cannot always use key presence in the
+body. REST single, REST `/batch` and `etendo_batch` run the pre-hook **before** the create-defaults
+pass, so there the body holds exactly what the caller sent. MCP `etendo_create` runs
+`injectMandatoryDefaults` **first**, so its body also carries every defaulted field.
+
+`McpToolRouter#handleCreate` therefore sets `NeoContext.ATTR_CLIENT_PROVIDED_FIELDS`
+(`"neo.clientProvidedFields"`): a `Set<String>` of the DAL property names the agent itself sent,
+snapshotted before defaults. It is the only setter. A customization reads "explicit" as: attribute
+present → the set contains the key; attribute absent → `body.has(key)`. See
+`ContactTypeRules#isExplicit`. Updates never need it (no defaults pass runs on PATCH/PUT or on
+MCP `etendo_update`, so the body handed to the pre-hook is exactly what the caller sent).
+
+**Contact types (ETP-5791).** `C_BP_Group.EM_Etgo_Iscustomer/Isvendor` say whether a category's
+contacts are customers, vendors/creditors or both. Rules live in `handlers/ContactTypeRules`
+(an entity util, called only by the customizations below).
+
+**Behind the `contact-category-type` feature flag** (`GoFeatureFlags.FLAG_CONTACT_CATEGORY_TYPE`,
+environment level, default **off** — `etendo.go.flags.contact-category-type` /
+`ETGO_FLAG_CONTACT_CATEGORY_TYPE`; see `docs/feature-flags-and-tenant-upgrade.md` §1). Every
+customization in the table asks `ContactTypeRules.isEnabled()` first; off, it returns `null` and the
+default CRUD runs exactly as before ETP-5791 (no inheritance, no "at least one type" rejection, no
+post-create posting-account backfill). What stays unconditional: the `C_BP_Group` columns and their
+AD metadata, the `ETGO_SF_FIELD` rows, reference/sample data, the demo-data copy of both columns
+(`DemoDataTransferEntityCopier`), `ATTR_CLIENT_PROVIDED_FIELDS` (inert unless a customization reads
+it) and the generic `MCP_CONFIG.fields.userRequired` key. The `vendor` override therefore keeps
+advertising the field as optional with the flag off; an omitted `vendor` then gets the
+mandatory-defaults fallback `false` on every channel, as before ETP-5791.
+
+| Customization | Binding | Behaviour |
+|---|---|---|
+| `BusinessPartnerHandler` | `@Named` / `contacts/businessPartner` | On create, `customer`/`vendor` not sent explicitly are taken from the category (the request's, else the AD default category); a category with neither flag passes nothing on. On update, a write that changes `businessPartnerCategory` to a different category and carries **neither** `customer` nor `vendor` takes **both** from the new category (parity with the Contacts form, which overwrites its checkboxes on a category change); a write that carries either flag decides the type itself. Same rule on REST PATCH/PUT and MCP `etendo_update` (both hand the pre-hook the body as sent; `/batch` is create-only). Create and every update reject a contact with neither type (`ETGO_BPartnerContactTypeRequired`). After create, missing posting-account rows are backfilled; after an update that sets a flag to true (sent or re-inherited), the ETP-4565 backfill adds the missing row. Otherwise existing contacts are never re-derived. MCP: `vendor` carries `MCP_CONFIG.fields.userRequired:false` (§4.12.6), so `view:"create"` lists it as optional. |
+| `BusinessPartnerCategoryHandler` | `@NeoExtension business-partner-category/businessPartnerCategory` | Create/update reject a category with neither flag (`ETGO_BPGroupContactTypeRequired`). |
+| `ContactCustomerTabHandler`, `ContactVendorTabHandler` (base `ContactTypeFlagGuardHandler`) | `@NeoExtension contacts/customer`, `contacts/vendorCreditor` | Same contact rule on updates through those tabs, only when the write sends `customer` or `vendor`. |
+
+Rejections carry the key in `messageKeys`; the SPA translates it (`BACKEND_ERROR_KEY_MAP`).
+
+**KPI telemetry (ETP-5791), flag on or off.** The same customizations emit
+`backend_contact_created` and `backend_contact_type_changed` through `ContactTypeTelemetry`, only
+once the write is committed (`NeoBatchScope.runAfterCommit`: at once for a single REST/MCP write,
+after the batch commits inside `/batch` / `etendo_batch`). Properties, `types_source` /
+`change_trigger` / `change_origin` / `channel` values and the no-identifier rule (tenant
+`account_id` only): `docs/backend-observability.md` § Contact Type KPIs.
 
 ## 6. Parent-Child Tab Filtering
 
@@ -7090,10 +7347,24 @@ fix stops the existence leak (an empty report used to confirm that the id existe
 client for an `Organization`, which is not `OrganizationEnabled`. An org of the caller's own client
 outside the role's org access still resolves; that is unchanged and is not a tenant leak. Pinned by
 `TenantIsolationPolicyTest`, which guards the aging, trial balance, general ledger, journal entries,
-balance sheet and P&L handlers. The fiscal reports (`TaxReportHandler`, `Fiscal303BoxesHandler`)
-are swept separately (ETP-5794). Years, accounting schemas and journals are `OrganizationEnabled`,
-so `loadOwned` also requires their organization to be readable by the role: one of the caller's
-own client in an organization outside the role's access now answers as unknown too.
+balance sheet and P&L handlers. The tax report and the Modelo 303, 349 and 390 handlers were swept
+in ETP-5794: `tax-report` (and MCP `generate_tax_report`) answers a foreign, unknown or
+role-unreadable `orgId` with the same `organization_not_resolved` (400) envelope, before anything
+is resolved from it. That check is stricter than the reports above: it also requires the org to be
+in the role's readable organizations, because the tax report SQL binds `ad_org_id` straight from
+the request. An omitted or empty `orgId` still defaults to the session organization (which may
+itself be `"0"`); an explicit `"0"` passes the check, a blank or space-padded `orgId` is refused.
+Before the fix, an MCP call without `currencyId` answered with the ledger currency of another
+tenant's org. The Modelo 303, 349 and 390 handlers and their submission, incidents and sources
+supports take no org from the request: every org lookup uses the `resolveEffectiveOrg()` org of the
+session. A declaration they load by request `declId` is answered 404 by `belongsTo` /
+`isOwned390` unless it is of the session client and org. So their bare lookups only carry a
+`tenant-ok` justification, and `TenantIsolationPolicyTest` guards them too. Only those seven fiscal
+classes and `TaxReportHandler` are in its `GUARDED_CLASSES`; the other `Fiscal*` / `FiscalDecl*`
+classes (snapshot, generate, preload, VIES, reactivation, CRUD) are not. For the ETP-5793 ids:
+years, accounting schemas and journals are `OrganizationEnabled`, so `loadOwned` also requires their
+organization to be readable by the role: one of the caller's own client in an organization outside
+the role's access now answers as unknown too.
 
 The same change scopes three other request ids:
 - `GlJournalHeaderHandler`: the journal its PATCH pre-hook loads by URL id to mirror
@@ -9433,15 +9704,13 @@ annotated: it keeps 0 / 0 on `etendo_create`, as on `develop`.
 
 ##### Binding: the `Java_Qualifier` stays
 
-`ETGO_SF_ENTITY.Java_Qualifier` still reads `orderLineHandler` on both rows, deliberately. Several
-readers resolve the qualifier directly instead of going through `NeoExtensionDispatcher`: the REST
-CRUD gate (`NeoCrudHandler.dispatchCrudRequestInternal` only calls `handleWithHooks` when a qualifier
-exists), the MCP read post-hook (`McpHookExecutor.resolveEntityHandler`), `NeoFieldFilter`'s
-read-only rejection and `protectedCreateCalloutFields`. Clearing the qualifier would switch the
-customization off on REST single and drop the discount-line filter from MCP reads. With it kept,
-those readers resolve the parent class — whose behaviour the customizations inherit unchanged — and
-the dispatched surfaces resolve the annotation. The cost is one `(warn)` ERROR line per resolution
-from `NeoExtensionIndex.warnOnQualifierDisagreement`, and a conflict line in `make extension-parity`.
+`ETGO_SF_ENTITY.Java_Qualifier` still reads `orderLineHandler` on both rows. When this was written
+several readers resolved the qualifier directly instead of going through `NeoExtensionDispatcher`,
+so clearing it would have switched the customization off on some surfaces. Since ETP-5588 those
+readers resolve annotation first (§5.3.a), so the qualifier is only a fallback here: clearing it is
+the next step of the migration, not a risk. Until then the cost is one `(warn)` ERROR line per
+resolution from `NeoExtensionIndex.warnOnQualifierDisagreement`, and a conflict line in
+`make extension-parity`.
 
 ##### Scope
 
@@ -10838,9 +11107,10 @@ verdict. Shared code names no entity; the handlers' customizations declare their
 | Document | Declared (static `availableWhen` unless noted) |
 |---|---|
 | goods receipt, goods shipment, return to vendor, customer return | `documentAction` (contract): `DR` only, `valuesByStatus` `DR` → CO, `CO` → none, with the "corrected with a return" note; a `docAction` outside `CO` answers 422 with that sentence as `hint`. `importOrderLines` / `importReceiptLines` / `importShipmentLines` and their `available*` lists: `DR` (the `id` is the draft target; ETP-5713). `createPurchaseInvoice`, `createDraftInvoice`, `createPurchaseReturn`, `createReturn`, `rectifiableInvoices`, `createReturnInvoice`: `CO`. `cloneRecord`: any state |
+| goods receipt, goods shipment | **derived** (ETP-5714 follow-up, `InOutInvoiceAvailability`): `createPurchaseInvoice` / `createDraftInvoice` is `availableNow:false` when `NeoInvoiceSupport.computePendingQtyPerLineOrThrow(id, true)` is empty, i.e. everything is invoiced ("Nothing is left to invoice") or only a draft invoice covers it (the same question as `pendingExists`, and the call's own "has nothing left to invoice" refusal); a failed lookup answers "nothing derived" and is logged by `McpDeclaredActions.unavailableFor` |
 | return documents | `createReturnInvoice` is also **derived**: a completed return with a non-voided factura rectificativa is `availableNow:false` ("calling it again is refused with 409 `returnInvoiceAlreadyExists` and creates nothing, unless `allowDuplicate:true` is passed"), from `ReturnShipmentUtils.fetchPreviousReturnInvoices`, the query behind `hasReturnInvoice` |
-| purchase and sales invoice | `post`: `CO` and `posted` not `Y`; `unpost`: `CO` and `posted` = `Y`; import actions: `DR`. `documentAction` (AD button, `MCP_CONFIG.valuesByStatus`): `DR` → CO, `IP` → CO, VO, `CO` → RC, RE. Derived: RE is ruled out (`unavailableValues`) when `InvoiceReactivationGuard` would refuse it (fiscally accepted and already rectified). `RE` on a posted **invoice** un-posts it first, in `etendo_action` and in `etendo_action_batch` — invoice-only, by opt-in (`NeoHandler#unpostBeforeReactivate`, §4.12.36); when RE is ruled out nothing is un-posted |
-| purchase and sales order | `createGoodsReceipt` / `createShipment`, `createPurchaseInvoice` / `createDraftInvoice`: `CO`. `documentAction` (`MCP_CONFIG.valuesByStatus`): `DR` → CO, VO, PR; `IP` → CO, VO; `CO` → CL, RE. Derived: RE is ruled out while the order has linked shipments, receipts or invoices (`AbstractOrderHeaderHandler.hasLinkedDocuments`, the query behind the UI flag; enforced on the sales order by `OrderReactivationGuard`, only advised on the purchase order) |
+| purchase and sales invoice | `post`: `CO` and `posted` not `Y`; `unpost`: `CO` and `posted` = `Y`; import actions: `DR`. `documentAction` (AD button, `MCP_CONFIG.valuesByStatus`): `DR` → CO, `IP` → CO, `CO` → RE only: the screen offers Reactivate and nothing else on a completed invoice, and Confirm on a draft (its menu, the bulk bar and every custom component were searched: none sends RC or VO), and a classic reversal of an issued invoice is a fiscal risk next to the factura rectificativa flow. `valuesByStatus` itself is advisory, so the invoice header entities also carry `MCP_CONFIG.actions.values: {"DocAction": ["CO","RE"]}`, which IS enforced: `etendo_action` and each item of `etendo_action_batch` (both go through `McpDeclaredActions.precheck`) answer **422** `422 validation_error` listing `allowedValues` for any other `docAction` (RC, VO, PR, AP, CL, XL...), and the actions view narrows `actionValues` to the two. `etendo_update` cannot run a document action (the CRUD layer never calls a process; `documentAction` is a system field there). MCP-only: the REST and SPA layers never read `MCP_CONFIG`. Derived: RE is ruled out (`unavailableValues`) when `InvoiceReactivationGuard` would refuse it (fiscally accepted and already rectified). `RE` on a posted **invoice** un-posts it first, in `etendo_action` and in `etendo_action_batch` — invoice-only, by opt-in (`NeoHandler#unpostBeforeReactivate`, §4.12.36); when RE is ruled out nothing is un-posted |
+| purchase and sales order | `createGoodsReceipt` / `createShipment`, `createPurchaseInvoice` / `createDraftInvoice`: `CO`; **derived** (ETP-5714 follow-up, `OrderDocumentAvailability.unavailable(subject, Flow)`): the goods action is `availableNow:false` when no line has quantity left to receive/ship (`InOutLineFromOrderFactory.collectPendingLines`, the call's own rule) or a draft receipt/shipment covers it (the reason names the draft), the invoice action when no line has quantity left to invoice (ordered minus invoiced with the ordered sign) or a draft invoice of the order exists (HQL over active `Invoice`s and lines by `salesOrder` or by its lines, restricted to the clients and organizations the role reads inside the query itself, since `Session.createQuery` applies no readable filter, the app's "needs an invoice" rule), each with a reason that says what to do instead; each action is judged on its own, so a failure in one is logged at warn and does not drop the Reactivate advice or the other action. Advisory, and the calls agree: the invoice actions refuse a linked draft with 409 `draftInvoiceExists` unless `allowDuplicate:true` (see "From an order" in §4.12.9). `documentAction` (`MCP_CONFIG.valuesByStatus`): `DR` → CO, VO, PR; `IP` → CO, VO; `CO` → CL, RE. Derived: RE is ruled out while the order has linked shipments, receipts or invoices (`AbstractOrderHeaderHandler.hasLinkedDocuments`, the query behind the UI flag; enforced on the sales order by `OrderReactivationGuard`, only advised on the purchase order) |
 
 The `documentAction` values come from core's `ActionButtonUtility.docAction` (the real transitions), not from the AD list:
 a draft **invoice** is completed (CO) and, unlike a draft order, cannot be voided from the combo; goods documents offer CO
@@ -10887,12 +11157,21 @@ pre-check (ETP-5360, ETP-5445) is unchanged and still answers 422.
 
 ##### "Documento ya procesado" (message key `20501`)
 
-`McpToolRouter.addMessageKeyHint` (the mechanism of `PeriodNotAvailable`, ETP-5577, generalised to a key -> hint map) adds a
-`hint` to any MCP refusal whose `messageKeys` (top level or under `error`) contain `20501`: the document is processed;
-reactivate it first (`documentAction` RE) if its document actions allow it, and `etendo_schema(view:"actions", id)` says what
-applies now and why not. The hint is generic on purpose (the key is shared by every document type); the goods-specific wording (a
-completed receipt, shipment or return is corrected with a return) lives only in the availability reasons. Keyed on the message, never on the entity; a body that already has
-a `hint` keeps it; the key must match exactly.
+`McpMessageKeyHints` (the mechanism of `PeriodNotAvailable`, ETP-5577, generalised to a key -> hint map; moved out of `McpToolRouter`
+in the ETP-5714 follow-up) adds a `hint` to any MCP refusal whose `messageKeys` (top level or under `error`) contain `20501`: the
+document is processed; if `etendo_schema(view:"actions", id)` offers `documentAction` RE for it, reactivate it, edit it and complete it
+again, otherwise it cannot be edited and that action's `unavailableReason` says why. The hint states no per-document rule (an order's "no
+linked documents", an invoice's fiscal guard, a goods document that has no RE at all): the actions view is where each one is answered. The hint is generic on purpose (the key
+is shared by every document type); the goods-specific wording (a completed receipt, shipment or return is corrected with a return)
+lives only in the availability reasons. Keyed on the message, never on the entity; a body that already has a `hint` keeps it; the
+key must match exactly.
+
+**It reaches classified write failures too (ETP-5714 follow-up).** The hint used to be added only by the error wrapper
+(`McpToolRouter.wrapAsErrorContent`), and a write that failed on the 20501 trigger (`c_orderline_chk_restrictions_trg`, an edit of a
+line of a completed order, purchase or sales) is answered by `McpToolResponses.classifiedEnvelope`, which always put the generic
+hint of its class (`business_rule`: "read detail...") first, and the keyed one never replaced it. `classifiedEnvelope` now asks
+`McpMessageKeyHints.hintFor(messageKeys)` before `hintFor(code)`, so any document that raises 20501 gets the same advice on every
+path. A key with no keyed hint keeps the class hint.
 
 ##### Smaller fixes in the same change
 
@@ -10902,6 +11181,8 @@ a `hint` keeps it; the key must match exactly.
   ambiguous or unknown name keeps its `404 not_found` with the exact names. The tool description's example is now `'header'`.
 - **Hidden classic buttons.** `purchase-order/header`: `RM_Pickfromreceipt`, `Cancelandreplace`, `Confirmcancelandreplace`;
   `sales-order/header`: `Cancelandreplace`, `Confirmcancelandreplace`, each with its reason (table in §4.12.1.3).
+  The follow-up QA added `Create_POLines` and `RM_Pickfromreceipt` to `sales-order/header`, `Create_POLines` to `purchase-order/header`
+  and both to `sales-quotation/quotation` (no Etendo GO screen renders them), and lists every hidden action under `withheldActions`.
 - **Spec prompts** of the six document windows explain `documentAction` / `--`, the injected keys, `availableNow` and the
   costing retry (`schema_forge/agent-prompts/<window>/spec.md`).
 
@@ -10940,7 +11221,13 @@ that pressed `Posted` got core's raw cost error with no retry guidance. Now:
   same states as the invoices', from the four `actionContracts()`. Declaring them **changes no routing** — the handlers still
   hand both to the posting service first, and REST and the SPA do not read contracts. The `post` description tells the agent what
   to do with the 409 `costNotCalculated` (wait `retryAfterSeconds`, repeat) and the 422 `costCalculationStalled` (do not retry).
-  Unlike an invoice, `unpost` has no status gate: on a document that is not posted it answers 200 "0 entries removed".
+  **`unpost` of a document that is not posted is refused (ETP-5714 follow-up):** `GoodsPostingContracts.checkUnpost`, called by the
+  four header handlers (`GoodsReceiptHeaderHandler`, `GoodsShipmentHeaderHandler`, and `AbstractReturnDocumentHeaderHandler` for both
+  returns) before they delegate to the service, answers **422** `{success:false, message, messageKeys:["ETGO_GoodsUnpostNotPosted"]}`
+  ("This document is not posted, so it has no accounting entries to remove.") when `posted` is not `Y`; a posted document reaches the
+  service as before, and an unreadable document fails open. Per entity on purpose, like `InvoicePostingGate`: the service keeps its
+  handled 200 for every other table (ETP-5445, Internal Consumption, which does not use these contracts). It holds on REST and MCP
+  alike (the handler is the one customization), so no channel divergence needs declaring in §4.12.9.
 - `MCP_CONFIG.actions.hidden: ["posted"]` on the four header entities, with its own `reasons.posted` naming both actions (the
   existing redirects and reasons are kept). It is hidden, not redirected: a redirect names ONE target, and there are two. The
   round-2 precheck answers `Posted`, `posted` and any other spelling with that reason (405) instead of running core's process.
@@ -11430,7 +11717,7 @@ Sending a document the SPA's preview would show differently (a stale-but-newer P
 **Agent prompt (applied to the sourcedata, ETP-5715).** The cross-cutting rules live in the tool descriptions (always visible to the agent); the per-window
 guidance is the spec prompt (`ETGO_SF_SPEC.AGENT_PROMPT`, mirrored in `schema_forge/agent-prompts/<spec>/spec.md`, delivered by `etendo_discover`). Each spec prompt ends
 with a short "Document tools." paragraph that points to the tools instead of repeating their descriptions and states only what is true of that window: the batch
-examples valid there (invoices: complete, or reverse completed ones with RC, reactivating a posted invoice un-posts it first; orders: complete, or void drafts; others:
+examples valid there (invoices: complete them all; reactivating a posted invoice un-posts it first; orders: complete, or void drafts; others:
 complete), whether `main:true` is meant for attachments (only on `purchase-invoice` and `goods-receipt`, whose PDF is the supplier document; on the rendered windows the
 main file is the document's own PDF), supplier vs rendered PDF, and email (none on `purchase-invoice` / `goods-receipt`; on `return-material-receipt` the preview stores
 nothing, so `no_pdf` / `pdf_stale` are solved by sending from the application, and the first send is done there). Applied to `sales-invoice`, `goods-shipment`,
@@ -11593,3 +11880,61 @@ failure, against a stub server on loopback — never the real service), `NeoStag
 `NeoAttachmentTargetTest` (`requireWriteAccess`), `McpOcrToolsTest` (both tools, the cache, `nothing_extracted`, `ocr_unavailable`, the receiver block, injection),
 `McpAttachmentToolsTest` (the staged attach), `McpToolRouterRouteTest`, `ToolRegistryGenerateToolsTest`, `McpToolAnnotationsTest`, `McpToolTitlesTest`,
 `McpAuthorizationServiceVectorTest`, `McpUsageTenantQaTest`; on the SPA side `useOcrConfig.vitest.jsx`, `OcrInlineUploader.vitest.jsx`, `ocrDocTypes.prefill.vitest.js`, `ocrDocTypes.test.js`.
+
+
+#### 4.12.41 Header validations on `etendo_update`: required fields (every spec) and the order currency (ETP-5726)
+
+Two refusals, both **MCP `etendo_update` only** — the MCP has to work like the screen, and an agent
+cannot see what a person would notice. Rule 1 (a required field cannot be cleared) applies to
+**every** `etendo_update` on **every** spec; only rule 2 (currency vs price list) is specific to the
+purchase-order and sales-order headers. Neither changes REST single, `/batch` or the SPA.
+
+**1. A required field cannot be cleared.** `McpWriteRequestSupport.rejectClearedMandatoryFields`,
+called once from `McpToolRouter.handleUpdate` right after the type coercion and before the entity
+pre-hook. Until now `scheduledDeliveryDate` (`C_Order.DatePromised`: mandatory in AD, nullable in
+the database) could be saved as `null` through the MCP, which the form never allows.
+
+- **Structural**, like `validateMandatoryFields`: the AD mandatory flag of the column plus the key
+  the caller sent. No spec, table or property name is involved.
+- Only keys **sent** as `null` or `""` are refused. A sparse update that does not mention the field
+  keeps the stored value. A key with a value passes.
+- Excluded: the fields the wrapper policy resolves on the server
+  (`NeoSelectorPolicy.serverResolvedFieldNames`), the primary key and the system/audit columns.
+  Read-only and excluded fields never get here: the write gates of `mapFieldsToDalProperties`
+  refuse them first.
+- Answer: 422 with the usual `validation_error` envelope: `detail` names each field,
+  `missingFields[{name, column, type, label}]` carries the label in the user's language
+  (`McpSchemaFieldBuilder.loadFieldLabels(adTab, NeoLanguage.currentCode())`, AD name as fallback)
+  and a `hint`.
+- **What this newly refuses on every spec:** a GET-then-PUT echo of a mandatory field that is already
+  `null` in legacy data, and an AD-mandatory field the form hides that an agent clears on purpose.
+  Both match the screen, which cannot save either. Refusing only when the stored value is non-null
+  is a possible follow-up.
+- **REST parity (follow-up, not done):** `NeoCrudHandler`/`/batch` still accept the clear. Closing
+  it there changes what the SPA and every integration may send, so it needs its own decision.
+
+**2. A currency change must stay coherent with the price list.** For a **draft** order, an MCP
+`PUT` whose `currency` differs from the stored one and whose price list (the body's `priceList`, else
+the **stored** one) is in another currency is refused 422: "The order's price list '<name>' is in
+<ISO>, not in the requested currency <ISO>", with a hint to send a price list of that currency in the
+same update or to keep the current currency. A same-currency price list, an order without a price
+list, an unchanged currency and a non-draft order pass.
+
+- Mechanism: `OrderCurrencyPriceListGuard.refuseCurrencyOutsidePriceList(context)`, a static helper
+  called from `PurchaseOrderHeaderHandler.handle()` and `SalesOrderHeaderHandler.handle()` (the
+  quotation header does not call it). It runs on the existing pre-hook and acts on
+  `context.isMcpOrigin()` + `PUT`, the way other handlers already branch on the origin; it is a
+  separate class, like `DocumentRateGuards`, so `AbstractOrderHeaderHandler` does not grow
+  (java:S1448). No new `NeoHandler` method was needed.
+- Why MCP-only: the screen does not reset the price list when the currency changes, and Etendo core
+  (`C_Order_Post`) does not validate the price list's currency at completion either; changing REST
+  would change what the SPA can save. Declared in the §4.12.9 table above.
+- Not covered on purpose: changing only the price list to one in another currency (the form's
+  price-list callout owns that, and GO blocks its currency write-back).
+
+**Accounting date (documented, unchanged).** The order's accounting date is the order date by
+design (ETP-4531, "unified date"): `mirrorAccountingDate` copies `orderDate` to `accountingDate` on
+every write. Changing the order date through the MCP therefore also changes the accounting date;
+no separate field is published. The agent prompts of `purchase-order` and `sales-order` say so.
+
+Tests: `McpWriteRequestSupportClearedMandatoryTest`, `OrderCurrencyPriceListGuardTest`.

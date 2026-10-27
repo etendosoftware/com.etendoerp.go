@@ -39,6 +39,7 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
@@ -154,9 +155,23 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
     return RESPONSE_ENRICHED_FIELDS;
   }
 
+  /**
+   * {@inheritDoc} The invoice action does not apply once nothing is left to invoice or a draft
+   * invoice already covers it (ETP-5714).
+   */
+  @Override
+  public Map<String, String> unavailableActions(BaseOBObject subject) {
+    return InOutInvoiceAvailability.unavailable(subject,
+        CreateDraftInvoiceHandler.SHIPMENT_CONTRACT.getName(), "goods shipment");
+  }
+
   @Override
   public NeoResponse handle(NeoContext context) {
     mirrorAccountingDate(context);
+    NeoResponse unpostRefusal = GoodsPostingContracts.checkUnpost(context);
+    if (unpostRefusal != null) {
+      return unpostRefusal;
+    }
     NeoResponse posting = postingService != null ? postingService.handleAction(context) : null;
     if (posting != null) {
       return posting;

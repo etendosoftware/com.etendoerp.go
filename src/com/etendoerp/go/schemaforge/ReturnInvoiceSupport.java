@@ -25,8 +25,6 @@ import java.util.Date;
 import java.util.List;
 import java.util.Optional;
 
-import javax.servlet.http.HttpServletResponse;
-
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
@@ -258,27 +256,10 @@ final class ReturnInvoiceSupport {
    * @return the 409 or 422, or {@code null} when the creation may go on
    */
   static NeoResponse refuseIfAlreadyInvoiced(JSONObject body, JSONArray previous) {
-    Object raw = body != null ? body.opt(ReturnShipmentUtils.PARAM_ALLOW_DUPLICATE) : null;
-    if (raw != null && !(raw instanceof Boolean)) {
-      return NeoResponse.error(ReturnableQuantity.SC_UNPROCESSABLE,
-          ReturnShipmentUtils.MSG_ALLOW_DUPLICATE_NOT_BOOLEAN);
-    }
-    if (Boolean.TRUE.equals(raw) || previous == null || previous.length() == 0) {
-      return null;
-    }
-    try {
-      JSONObject error = new JSONObject();
-      error.put("status", HttpServletResponse.SC_CONFLICT);
-      error.put("code", ReturnShipmentUtils.ERROR_RETURN_INVOICE_ALREADY_EXISTS);
-      error.put("message", ReturnShipmentUtils.MSG_RETURN_INVOICE_ALREADY_EXISTS);
-      error.put("hint", ReturnShipmentUtils.HINT_RETURN_INVOICE_ALREADY_EXISTS);
-      error.put("previousReturnInvoices", previous);
-      return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
-          new JSONObject().put("error", error));
-    } catch (Exception e) {
-      return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
-          ReturnShipmentUtils.MSG_RETURN_INVOICE_ALREADY_EXISTS);
-    }
+    return DuplicateCreationRefusal.refuseUnlessAllowed(body, previous,
+        ReturnShipmentUtils.ERROR_RETURN_INVOICE_ALREADY_EXISTS,
+        ReturnShipmentUtils.MSG_RETURN_INVOICE_ALREADY_EXISTS,
+        ReturnShipmentUtils.HINT_RETURN_INVOICE_ALREADY_EXISTS, "previousReturnInvoices");
   }
 
   /**

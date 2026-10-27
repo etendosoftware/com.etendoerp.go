@@ -13,6 +13,7 @@
 package com.etendoerp.go.payment;
 
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.Locale;
 import java.util.Optional;
 
@@ -47,6 +48,12 @@ public class TenantEnvironmentLifecycleService {
   public static final String LEGACY_TRANSITION_STARTED_ATTRIBUTE = "ETGO_LegacyTransitionStartedAt";
   public static final String ASSOCIATED_DEMO_ATTRIBUTE = "ETGO_AssociatedDemoClientId";
   public static final String ASSOCIATED_PRODUCTIVE_ATTRIBUTE = "ETGO_AssociatedProductiveClientId";
+  /**
+   * ETP-5847 — freezes a demo's trial: its value is the number of days left the demo always shows.
+   * Set by hand in Classic for a demo that must never expire (a sales demo). See
+   * {@link #frozenTrialDays}.
+   */
+  public static final String DEMO_TRIAL_FROZEN_DAYS_ATTRIBUTE = "ETGO_DemoTrialFrozenDays";
   public static final String TYPE_DEMO = "DEMO";
   public static final String TYPE_PRODUCTIVE = "PRODUCTIVE";
   /** Product definition of the demo trial (ETP-5548); override per instance with the property. */
@@ -196,8 +203,13 @@ public class TenantEnvironmentLifecycleService {
           renewalDueAt = productive.getRenewalDueAt();
         }
       }
+      Instant trialStartedAt = Instant.parse(startedAt);
+      Integer frozenDays = frozenTrialDays(clientId);
+      if (frozenDays != null) {
+        trialStartedAt = frozenTrialStart(Instant.now(), frozenDays, configuration().getTrialDays());
+      }
       return new EnvironmentSnapshot(EnvironmentAccessPolicy.EnvironmentType.DEMO,
-          Instant.parse(startedAt), subscriptionStatus, renewalDueAt, associatedWithProductive);
+          trialStartedAt, subscriptionStatus, renewalDueAt, associatedWithProductive);
     } catch (RuntimeException e) {
       log.warn("Could not resolve environment lifecycle for client {}", clientId, e);
       return null;
@@ -289,6 +301,58 @@ public class TenantEnvironmentLifecycleService {
       return EnvironmentAccessPolicy.SubscriptionStatus.EXPIRED;
     }
     return EnvironmentAccessPolicy.SubscriptionStatus.LEGACY_ENTITLEMENT;
+  }
+
+  /**
+   * ETP-5847 — the days left a demo's trial is frozen at ({@link #DEMO_TRIAL_FROZEN_DAYS_ATTRIBUTE}).
+   *
+   * <p>A frozen trial never expires and always shows these days left: {@link #resolve} reports a
+   * trial start that moves with the clock, so the access check, the trial bar and HubSpot, which
+   * all read the snapshot, agree without knowing about the freeze. The stored
+   * {@code ETGO_DemoTrialStartedAt} is not touched, so removing the preference resumes the trial
+   * from its real start. It only freezes the trial: a demo associated with a productive environment
+   * stays blocked.
+   *
+   * @param clientId environment client id
+   * @return the frozen days left, or null when the trial is not frozen or the value is not a
+   *     whole number of zero or more (logged)
+   */
+  public Integer frozenTrialDays(String clientId) {
+    if (isNotATenant(clientId)) {
+      return null;
+    }
+    String value = readPreference(DEMO_TRIAL_FROZEN_DAYS_ATTRIBUTE, clientId);
+    if (value == null) {
+      return null;
+    }
+    Integer days = wholeDays(value);
+    if (days != null) {
+      return days;
+    }
+    log.warn("Ignoring {}='{}' of client {}: it must be a whole number of days, 0 or more",
+        DEMO_TRIAL_FROZEN_DAYS_ATTRIBUTE, value, clientId);
+    return null;
+  }
+
+  private static Integer wholeDays(String value) {
+    try {
+      int days = Integer.parseInt(value);
+      return days >= 0 ? days : null;
+    } catch (NumberFormatException e) {
+      return null;
+    }
+  }
+
+  /**
+   * The trial start that leaves exactly {@code daysLeft} days at {@code now}.
+   *
+   * @param now the evaluation instant
+   * @param daysLeft the frozen days left
+   * @param trialDays the configured trial length
+   * @return the start to evaluate the trial from
+   */
+  static Instant frozenTrialStart(Instant now, int daysLeft, int trialDays) {
+    return now.minus((long) trialDays - daysLeft, ChronoUnit.DAYS);
   }
 
   /** A blank id, or the System pseudo-client: nothing with a lifecycle. */

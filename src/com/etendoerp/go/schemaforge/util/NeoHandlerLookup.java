@@ -19,6 +19,7 @@ package com.etendoerp.go.schemaforge.util;
 
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Function;
 
 import javax.enterprise.inject.spi.Bean;
 import javax.enterprise.inject.spi.BeanManager;
@@ -29,6 +30,8 @@ import org.apache.logging.log4j.Logger;
 import org.openbravo.base.weld.WeldUtils;
 
 import com.etendoerp.go.schemaforge.NeoHandler;
+import com.etendoerp.go.schemaforge.data.SFEntity;
+import com.etendoerp.go.schemaforge.data.SFSpec;
 
 /**
  * Resolves a {@link NeoHandler} CDI bean from the {@code Java_Qualifier} declared on an
@@ -119,5 +122,85 @@ public final class NeoHandlerLookup {
       log.debug("NeoHandler lookup failed for qualifier '{}': {}", qualifier, e.getMessage());
       return null;
     }
+  }
+
+  /**
+   * Resolve the customization of an entity in the order {@code NeoExtensionDispatcher} uses: the
+   * {@code @NeoExtension} claiming the entity's {@code (spec, entity)} first, the row's
+   * {@code Java_Qualifier} second.
+   *
+   * <p>The single entry point for code that needs an entity's customization without dispatching
+   * a hook (contracts, capabilities, side hooks such as {@code afterCallout}). Reading
+   * {@code getJavaQualifier()} directly instead misses every entity bound only by annotation —
+   * which is the state a migrated entity ends in.</p>
+   *
+   * @param entity      the SF entity; {@code null} yields {@code null}
+   * @param byQualifier the qualifier resolver of the caller's channel, kept as it was: REST callers
+   *                    pass {@code NeoServletSupport::lookupHandler}, MCP and discovery callers
+   *                    {@link #byQualifier}. The two are not equivalent (see
+   *                    {@code NeoExtensionDispatcher}); choosing between them is not this
+   *                    method's call. Only invoked with a non-blank qualifier.
+   * @return the customization, or {@code null} when the entity has none
+   */
+  public static NeoHandler forEntity(SFEntity entity, Function<String, NeoHandler> byQualifier) {
+    if (entity == null) {
+      return null;
+    }
+    SFSpec spec = entity.getETGOSFSpec();
+    String qualifier = entity.getJavaQualifier();
+    NeoHandler annotated = NeoExtensionIndex.resolve(spec == null ? null : spec.getName(),
+        entity.getName(), qualifier);
+    if (annotated != null) {
+      return annotated;
+    }
+    return StringUtils.isBlank(qualifier) ? null : byQualifier.apply(qualifier);
+  }
+
+  /**
+   * {@link #forEntity(SFEntity, Function)} with the MCP/discovery qualifier resolver.
+   *
+   * @param entity the SF entity; {@code null} yields {@code null}
+   * @return the customization, or {@code null} when the entity has none
+   */
+  public static NeoHandler forEntity(SFEntity entity) {
+    return forEntity(entity, NeoHandlerLookup::byQualifier);
+  }
+
+  /**
+   * Same as {@link #forEntity(SFEntity)} but never propagates a lookup failure, for discovery
+   * paths — see {@link #byQualifierQuietly}.
+   *
+   * @param entity the SF entity; {@code null} yields {@code null}
+   * @return the customization, or {@code null} when there is none or the lookup failed
+   */
+  public static NeoHandler forEntityQuietly(SFEntity entity) {
+    try {
+      return forEntity(entity, NeoHandlerLookup::byQualifierQuietly);
+    } catch (Exception e) {
+      log.debug("NeoHandler lookup failed for entity '{}': {}",
+          entity == null ? null : entity.getName(), e.getMessage());
+      return null;
+    }
+  }
+
+  /**
+   * Whether the entity is customized at all — bound by {@code @NeoExtension} or by a
+   * {@code Java_Qualifier} — without instantiating anything.
+   *
+   * <p>A non-blank qualifier counts even when no handler is deployed under it, exactly as the
+   * callers that used to test the qualifier alone treated it.</p>
+   *
+   * @param entity the SF entity; {@code null} yields {@code false}
+   * @return {@code true} when the entity declares a customization by either mechanism
+   */
+  public static boolean hasCustomization(SFEntity entity) {
+    if (entity == null) {
+      return false;
+    }
+    if (StringUtils.isNotBlank(entity.getJavaQualifier())) {
+      return true;
+    }
+    SFSpec spec = entity.getETGOSFSpec();
+    return NeoExtensionIndex.claims(spec == null ? null : spec.getName(), entity.getName());
   }
 }

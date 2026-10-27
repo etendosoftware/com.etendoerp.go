@@ -51,6 +51,11 @@ public abstract class AbstractReturnDocumentHeaderHandler implements NeoHandler 
   @Override
   public NeoResponse handle(NeoContext context) {
     mirrorAccountingDate(context);
+    // ETP-5714: an unpost of a return that is not posted is refused, not answered as a no-op 200.
+    NeoResponse unpostRefusal = GoodsPostingContracts.checkUnpost(context);
+    if (unpostRefusal != null) {
+      return unpostRefusal;
+    }
     return NeoHandlerUtils.delegateToPostingServiceOrElse(context, postingService, this::continueHandling);
   }
 

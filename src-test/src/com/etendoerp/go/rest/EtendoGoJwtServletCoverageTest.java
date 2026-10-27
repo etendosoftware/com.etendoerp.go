@@ -101,6 +101,7 @@ import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.Organization;
 
+import com.etendoerp.go.featureflags.GoFeatureFlags;
 import com.etendoerp.go.onboarding.OnboardingForceTestModeService;
 import com.etendoerp.go.payment.CheckoutRequestStore;
 import com.etendoerp.go.payment.ProvisioningFailureReason;
@@ -158,6 +159,12 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  * the webhook's own {@code applyReactivationIfPending}. A purchase that is not the owner's, not
  * confirmed as paid, or whose recorded demo is gone is refused before the claim, and a successful
  * repair sends the provisioning alert and the environment-ready email like the browser path.
+ *
+ * <p>And the ETP-5806 {@code structured-address-for-sepa} flag propagation: the onboarding
+ * pre-flight checks {@code validateStructuredAddressBlock}/{@code validateStructuredAddressLength}
+ * are a no-op while the flag is off (an incomplete or oversized block is accepted, not rejected)
+ * and still enforce their rules when it is on, and {@code buildSessionCapabilities()} (the
+ * onboarding session-bootstrap response) mirrors the live flag value in both directions.
  *
  * @covers com.etendoerp.go.rest.EtendoGoJwtServlet
  * @covers com.etendoerp.go.rest.PaidReactivationService
@@ -1661,6 +1668,146 @@ public class EtendoGoJwtServletCoverageTest {
     }
   }
 
+  // ── ETP-5806: structured-address-for-sepa — onboarding validation + session capability ──
+
+  private static Object newOnboardingRequestData() throws Exception {
+    Class<?> requestType = Class.forName(
+        "com.etendoerp.go.rest.EtendoGoJwtServlet$OnboardingRequestData");
+    Constructor<?> constructor = requestType.getDeclaredConstructor();
+    constructor.setAccessible(true);
+    return constructor.newInstance();
+  }
+
+  private static void setOnboardingField(Object data, String fieldName, String value)
+      throws Exception {
+    Field field = data.getClass().getDeclaredField(fieldName);
+    field.setAccessible(true);
+    field.set(data, value);
+  }
+
+  private static MockedStatic<GoFeatureFlags> mockStructuredAddressFlag(boolean enabled) {
+    MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class);
+    flags.when(() -> GoFeatureFlags.isEnabled(
+        eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(enabled);
+    return flags;
+  }
+
+  /**
+   * Flag off: {@code validateStructuredAddressBlock} is a no-op — a street present with
+   * buildingNumber/city both blank would be a 400 "Missing required field(s)" with the flag on,
+   * but is skipped entirely while it is off.
+   */
+  @Test
+  public void validateStructuredAddressBlockIsANoOpWhenTheFlagIsOff() throws Exception {
+    Object data = newOnboardingRequestData();
+    setOnboardingField(data, "streetName", "Gran Via");
+    // buildingNumber and city intentionally left unset (null) — would trigger the mandatory
+    // check with the flag on.
+
+    Method validate = EtendoGoJwtServlet.class.getDeclaredMethod(
+        "validateStructuredAddressBlock", data.getClass(), HttpServletResponse.class);
+    validate.setAccessible(true);
+    ResponseCapture resp = mockResponse();
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(false)) {
+      boolean result = (boolean) validate.invoke(servlet, data, resp.response);
+
+      assertTrue("flag off: validation never runs, so the incomplete block is accepted", result);
+      verify(resp.response, never()).setStatus(anyInt());
+    }
+  }
+
+  /** Flag on (for comparison): the same incomplete block is rejected with a clean 400. */
+  @Test
+  public void validateStructuredAddressBlockStillRejectsAnIncompleteBlockWhenTheFlagIsOn()
+      throws Exception {
+    Object data = newOnboardingRequestData();
+    setOnboardingField(data, "streetName", "Gran Via");
+
+    Method validate = EtendoGoJwtServlet.class.getDeclaredMethod(
+        "validateStructuredAddressBlock", data.getClass(), HttpServletResponse.class);
+    validate.setAccessible(true);
+    ResponseCapture resp = mockResponse();
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
+      boolean result = (boolean) validate.invoke(servlet, data, resp.response);
+
+      assertFalse(result);
+      assertEquals(400, resp.status);
+      assertTrue(resp.body(), resp.body().contains("buildingNumber"));
+      assertTrue(resp.body(), resp.body().contains("city"));
+    }
+  }
+
+  /**
+   * Flag off: {@code validateStructuredAddressLength} is a no-op — a street longer than its DB
+   * column would be a 400 with the flag on, but is skipped entirely while it is off.
+   */
+  @Test
+  public void validateStructuredAddressLengthIsANoOpWhenTheFlagIsOff() throws Exception {
+    Object data = newOnboardingRequestData();
+    setOnboardingField(data, "streetName", "A".repeat(71)); // EM_OBSEPA_StrtNm is VARCHAR(70)
+
+    Method validate = EtendoGoJwtServlet.class.getDeclaredMethod(
+        "validateStructuredAddressLength", data.getClass(), HttpServletResponse.class);
+    validate.setAccessible(true);
+    ResponseCapture resp = mockResponse();
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(false)) {
+      boolean result = (boolean) validate.invoke(servlet, data, resp.response);
+
+      assertTrue("flag off: the oversized field is never checked", result);
+      verify(resp.response, never()).setStatus(anyInt());
+    }
+  }
+
+  /** Flag on (for comparison): the same oversized field is rejected with a clean 400. */
+  @Test
+  public void validateStructuredAddressLengthStillRejectsAnOversizedFieldWhenTheFlagIsOn()
+      throws Exception {
+    Object data = newOnboardingRequestData();
+    setOnboardingField(data, "streetName", "A".repeat(71));
+
+    Method validate = EtendoGoJwtServlet.class.getDeclaredMethod(
+        "validateStructuredAddressLength", data.getClass(), HttpServletResponse.class);
+    validate.setAccessible(true);
+    ResponseCapture resp = mockResponse();
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
+      boolean result = (boolean) validate.invoke(servlet, data, resp.response);
+
+      assertFalse(result);
+      assertEquals(400, resp.status);
+      assertTrue(resp.body(), resp.body().contains("streetName"));
+    }
+  }
+
+  /**
+   * {@code buildSessionCapabilities()} (the onboarding session-bootstrap response) mirrors the
+   * live flag value in both directions.
+   */
+  @Test
+  public void buildSessionCapabilitiesReflectsTheFlagOn() throws Exception {
+    Method build = EtendoGoJwtServlet.class.getDeclaredMethod("buildSessionCapabilities");
+    build.setAccessible(true);
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
+      JSONObject capabilities = (JSONObject) build.invoke(null);
+      assertTrue(capabilities.getBoolean("structuredAddressForSepa"));
+    }
+  }
+
+  @Test
+  public void buildSessionCapabilitiesReflectsTheFlagOff() throws Exception {
+    Method build = EtendoGoJwtServlet.class.getDeclaredMethod("buildSessionCapabilities");
+    build.setAccessible(true);
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(false)) {
+      JSONObject capabilities = (JSONObject) build.invoke(null);
+      assertFalse(capabilities.getBoolean("structuredAddressForSepa"));
+    }
+  }
+
   @Test
   public void onboardingEmptyClientNameReturnsBadRequest() throws Exception {
     ResponseCapture resp = mockResponse();
@@ -1719,6 +1866,112 @@ public class EtendoGoJwtServletCoverageTest {
 
     assertEquals(400, resp.status);
     assertTrue(new JSONObject(resp.body()).toString().contains("Unknown currency"));
+  }
+
+  /**
+   * ETP-5806 — the structured address block (streetName/buildingNumber/city) is optional on the
+   * minimalist onboarding step, but once the user starts filling it in, all three become
+   * mandatory together — same rule as the Contacts/Warehouse address popups.
+   */
+  @Test
+  public void onboardingPartiallyStartedAddressBlockReturnsBadRequest() throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = jsonRequest("/onboarding",
+        "{\"clientName\":\"Acme\",\"streetName\":\"Gran Via\"}");
+    when(req.getHeader("Authorization")).thenReturn("Bearer valid-token");
+
+    try (var ctxMock = mockStatic(OBContext.class);
+         var dalMock = mockStatic(EtendoGoJwtDalHelper.class);
+         MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
+      stubAuthenticatedAccount(dalMock);
+
+      servlet.doPost(req, resp.response);
+    }
+
+    assertEquals(400, resp.status);
+    String body = new JSONObject(resp.body()).toString();
+    assertTrue(body, body.contains("buildingNumber"));
+    assertTrue(body, body.contains("city"));
+  }
+
+  /**
+   * The counterweight: an entirely empty address block (the pre-ETP-5806 shape, or a caller that
+   * never asks about addresses at all) must NOT be rejected — it is optional. Proven by letting
+   * the request fail at the UNRELATED currency check instead, which is only reached once the
+   * address validation has already passed.
+   */
+  @Test
+  public void onboardingEmptyAddressBlockIsAcceptedByValidation() throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = jsonRequest("/onboarding",
+        "{\"clientName\":\"Acme\",\"currency\":\"XYZ\"}");
+    when(req.getHeader("Authorization")).thenReturn("Bearer valid-token");
+
+    try (var ctxMock = mockStatic(OBContext.class);
+         var dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      stubAuthenticatedAccount(dalMock);
+      dalMock.when(() -> EtendoGoJwtDalHelper.findCurrencyByIsoCode("XYZ")).thenReturn(null);
+
+      servlet.doPost(req, resp.response);
+    }
+
+    assertEquals(400, resp.status);
+    assertTrue(new JSONObject(resp.body()).toString().contains("Unknown currency"));
+  }
+
+  /**
+   * ETP-5806 follow-up (the production 500 bug class): a structured field longer than its DB
+   * column is rejected with a clean 400 naming it, via the same
+   * {@code StructuredAddressComposer#fieldsExceedingMaxLength} check the Contacts/Warehouse
+   * handlers use — never a downstream data-truncation failure mid-provisioning.
+   */
+  @Test
+  public void onboardingOversizedStructuredAddressFieldReturnsBadRequest() throws Exception {
+    ResponseCapture resp = mockResponse();
+    String tooLongStreetName = "A".repeat(71); // EM_OBSEPA_StrtNm is VARCHAR(70)
+    HttpServletRequest req = jsonRequest("/onboarding",
+        "{\"clientName\":\"Acme\",\"streetName\":\"" + tooLongStreetName
+            + "\",\"buildingNumber\":\"1\",\"city\":\"Madrid\"}");
+    when(req.getHeader("Authorization")).thenReturn("Bearer valid-token");
+
+    try (var ctxMock = mockStatic(OBContext.class);
+         var dalMock = mockStatic(EtendoGoJwtDalHelper.class);
+         MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
+      stubAuthenticatedAccount(dalMock);
+
+      servlet.doPost(req, resp.response);
+    }
+
+    assertEquals(400, resp.status);
+    assertTrue(new JSONObject(resp.body()).toString().contains("streetName"));
+  }
+
+  /**
+   * City is validated through {@code OnboardingFieldLimits.CITY} (it is not one of the 3
+   * structured SEPA fields {@code StructuredAddressComposer} covers), and reported through the
+   * machine-readable {@code FIELD_TOO_LONG} envelope rather than a plain message string.
+   */
+  @Test
+  public void onboardingCityExceedingFieldLimitReturnsFieldTooLong() throws Exception {
+    ResponseCapture resp = mockResponse();
+    String tooLongCity = "A".repeat(61); // OnboardingFieldLimits.CITY is 60
+    HttpServletRequest req = jsonRequest("/onboarding",
+        "{\"clientName\":\"Acme\",\"streetName\":\"Gran Via\",\"buildingNumber\":\"1\",\"city\":\""
+            + tooLongCity + "\"}");
+    when(req.getHeader("Authorization")).thenReturn("Bearer valid-token");
+
+    try (var ctxMock = mockStatic(OBContext.class);
+         var dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      stubAuthenticatedAccount(dalMock);
+
+      servlet.doPost(req, resp.response);
+    }
+
+    assertEquals(400, resp.status);
+    JSONObject error = new JSONObject(resp.body()).getJSONObject("error");
+    assertEquals("FIELD_TOO_LONG", error.getString("code"));
+    assertEquals("city", error.getString("field"));
+    assertEquals(60, error.getInt("max"));
   }
 
   @Test
@@ -3891,7 +4144,8 @@ public class EtendoGoJwtServletCoverageTest {
       throws Exception {
     PaidOnboardingStage stage = stagePaidOnboarding(pooled);
     doThrow(new OBException("Org info unavailable")).when(servlet.onboardingOrgInfoService)
-        .ensureOrgInfo(anyString(), anyString(), anyString(), anyString(), any(), any(), any());
+        .ensureOrgInfo(anyString(), anyString(), anyString(), anyString(), any(), any(), any(),
+            any(), any(), any(), any());
     when(servlet.tenantPlanService.resolvePlan("own-productive"))
         .thenReturn(TenantPlanService.PLAN_PRODUCTIVE);
     runStagedPaidOnboarding(stage, (support, dal, transactions) -> {
@@ -3977,7 +4231,8 @@ public class EtendoGoJwtServletCoverageTest {
     ArgumentCaptor<String> address = ArgumentCaptor.forClass(String.class);
     ArgumentCaptor<String> taxId = ArgumentCaptor.forClass(String.class);
     verify(servlet.onboardingOrgInfoService).ensureOrgInfo(anyString(), anyString(), anyString(),
-        anyString(), eq(input.countryCode()), address.capture(), taxId.capture());
+        anyString(), eq(input.countryCode()), address.capture(), any(), any(), any(), any(),
+        taxId.capture());
     return new String[] { address.getValue(), taxId.getValue() };
   }
 

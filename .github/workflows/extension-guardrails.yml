@@ -1,0 +1,47 @@
+name: NeoExtension Guardrails
+
+# Keeps new customizations off the legacy Java_Qualifier binding (ETP-5588, see the
+# neo-extension-migration skill in etendo_schema_forge):
+#   - make extension-parity: the distinct Java_Qualifier count must equal EXTENSION_CEILING
+#     (a migration lowers it in the same PR; nothing may raise it)
+#   - scripts/check-extension-guardrails.py: no new @Named-only NeoHandler, no new direct
+#     getJavaQualifier() read, no spec name in a generic service; the allowlist only shrinks.
+# Offline: reads committed sources and src-db XML, no DB and no build.
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+jobs:
+  extension-guardrails:
+    name: NeoExtension guardrails
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Unit-test the guardrail scripts
+        run: python3 -m unittest discover -s scripts
+
+      - name: The qualifier count never rises
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          # Compared with the base branch's real count, not its EXTENSION_CEILING: before
+          # ETP-5588 the ceiling was not enforced and had fallen behind the data.
+          count() { python3 -c 'import re,sys; print(len(set(re.findall(r"<JAVA_QUALIFIER><!\[CDATA\[([^\]]*)\]\]>", sys.stdin.read()))))'; }
+          base=$(git show "$BASE_SHA:src-db/database/sourcedata/ETGO_SF_ENTITY.xml" | count)
+          head=$(count < src-db/database/sourcedata/ETGO_SF_ENTITY.xml)
+          echo "distinct Java_Qualifier base=$base head=$head"
+          if [ "$head" -gt "$base" ]; then
+            echo "::error::The distinct Java_Qualifier count rose from $base to $head. New customizations use @NeoExtension(spec, entity), not Java_Qualifier."
+            exit 1
+          fi
+
+      - name: Qualifier count equals the ceiling
+        run: make extension-parity
+
+      - name: No new legacy binding, qualifier read or spec literal
+        run: python3 scripts/check-extension-guardrails.py
