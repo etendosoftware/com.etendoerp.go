@@ -418,7 +418,7 @@ public final class NeoActionContract {
       criteria.add(Restrictions.eq(SFEntity.PROPERTY_ISACTIVE, true));
       criteria.addOrder(Order.asc(SFEntity.PROPERTY_NAME));
       for (SFEntity entity : criteria.list()) {
-        NeoHandler handler = NeoHandlerLookup.byQualifierQuietly(entity.getJavaQualifier());
+        NeoHandler handler = NeoHandlerLookup.forEntityQuietly(entity);
         Map<String, NeoActionContract> contracts = handler != null
             ? handler.actionContracts() : Collections.emptyMap();
         if (contracts != null && !contracts.isEmpty()) {

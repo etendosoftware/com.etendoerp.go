@@ -34,6 +34,8 @@ import org.openbravo.model.ad.access.Role;
 import org.openbravo.model.ad.access.WindowAccess;
 import org.openbravo.model.ad.ui.Window;
 
+import com.etendoerp.go.featureflags.FeatureFlagContext;
+import com.etendoerp.go.featureflags.GoFeatureFlags;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 import com.etendoerp.go.schemaforge.util.NeoAccountingAccessPolicy;
@@ -88,6 +90,15 @@ import com.etendoerp.webhookevents.services.BaseWebhookService;
  * Roles" menu item, backed by {@code SFRolesOverview} — up front, instead of showing them to
  * every role and handling denial only once the page itself loads.</p>
  *
+ * <p>{@code capabilities.structuredAddressForSepa} (ETP-5806, TTL 2026-11-15) mirrors the backend-only
+ * {@code structured-address-for-sepa} flag ({@link GoFeatureFlags#FLAG_STRUCTURED_ADDRESS_FOR_SEPA}). It is
+ * environment-level, not role-scoped — the same value regardless of which branch above resolved
+ * — and is the only signal the frontend ever reads for this flag: it never evaluates the flag
+ * key itself. The 4 address popups and the onboarding Company step render the structured
+ * Street/Number/Building Name fields only while this is {@code true}; off, they fall back to the
+ * pre-ETP-5806 single-line address editor, matching what the backend accepts/returns for the
+ * same flag state.</p>
+ *
  * GET /webhooks/SFWindowAccessMap
  */
 public class SFWindowAccessMap extends BaseWebhookService {
@@ -111,6 +122,17 @@ public class SFWindowAccessMap extends BaseWebhookService {
 
   /** JSON key used for the tenant-owner capability (ETP-5395, backed by ETP-4830's owner flag). */
   private static final String IS_OWNER = "isOwner";
+
+  /**
+   * JSON key used for the {@code structured-address-for-sepa} backend-only flag's capability signal
+   * (ETP-5806, TTL 2026-11-15). Environment-level, not role-scoped — evaluated with an
+   * account-less context, same value in both branches of {@link #buildAccessMap}, unlike
+   * {@code showAccountingFields}/{@code isAdminOrClientAdmin} which do vary by branch.
+   */
+  private static final String STRUCTURED_ADDRESS = "structuredAddressForSepa";
+
+  /** Account-less evaluation context for the environment-level {@code structured-address-for-sepa} flag. */
+  private static final FeatureFlagContext ENVIRONMENT = FeatureFlagContext.forAccount(null);
 
   /** Access-tier value for a role with full (read+write) access to a window. */
   private static final String FULL = "full";
@@ -199,6 +221,11 @@ public class SFWindowAccessMap extends BaseWebhookService {
       capabilities.put(PUBLIC_API_KEY_MANAGEMENT, true);
       capabilities.put(IS_OWNER, isOwner);
     }
+
+    // ETP-5806 — environment-level, identical in both branches above (unlike the per-role
+    // capabilities), so computed once here rather than duplicated in each arm.
+    capabilities.put(STRUCTURED_ADDRESS,
+        GoFeatureFlags.isEnabled(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA, ENVIRONMENT));
 
     JSONObject result = new JSONObject();
     result.put(WINDOW_ACCESS, windowAccess);

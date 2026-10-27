@@ -122,6 +122,30 @@ public final class NeoExtensionIndex {
   }
 
   /**
+   * Whether a class claims this {@code (spec, entity)} through {@link NeoExtension}, without
+   * instantiating it.
+   *
+   * <p>For callers that only need to know that the entity is customized — e.g. to relax a check
+   * the customization is trusted to handle itself — and must not create a handler for that.</p>
+   *
+   * @param specName the spec, as {@code ETGO_SF_SPEC.Name} spells it
+   * @param entity   the entity, as {@code ETGO_SF_ENTITY.Name} spells it
+   * @return {@code true} when an annotated class claims the pair; {@code false} when none does or
+   *         the index cannot be built
+   */
+  public static boolean claims(String specName, String entity) {
+    if (StringUtils.isBlank(specName) || StringUtils.isBlank(entity)) {
+      return false;
+    }
+    try {
+      return index(WeldUtils.getStaticInstanceBeanManager()).containsKey(Key.of(specName, entity));
+    } catch (RuntimeException e) {
+      log.debug("@NeoExtension claim check failed for {}/{}: {}", specName, entity, e.getMessage());
+      return false;
+    }
+  }
+
+  /**
    * Drop the index so the next resolution rescans CDI.
    *
    * <p>For tests, and for a caller that deliberately wants a rebuild. Nothing in normal operation

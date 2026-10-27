@@ -33,6 +33,7 @@ import org.openbravo.model.ad.ui.Tab;
 import com.etendoerp.go.schemaforge.NeoServlet.NeoPathInfo;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
 
 /**
  * Callout endpoint collaborator for {@link NeoServlet}. Resolves the target
@@ -151,29 +152,26 @@ class NeoCalloutEndpoint {
 
   private void applyAfterCalloutHook(NeoContext neoContext, SFEntity sfEntity,
       NeoResponse calloutResult) {
-    String qualifier = sfEntity.getJavaQualifier();
-    if (StringUtils.isBlank(qualifier)) {
-      return;
-    }
-    NeoHandler handler = servlet.lookupHandler(qualifier);
+    NeoHandler handler = NeoHandlerLookup.forEntity(sfEntity, servlet::lookupHandler);
     if (handler != null) {
-      runAfterCalloutHook(neoContext, calloutResult, handler, qualifier);
+      runAfterCalloutHook(neoContext, calloutResult, handler);
     }
   }
 
   private void runAfterCalloutHook(NeoContext neoContext, NeoResponse calloutResult,
-      NeoHandler handler, String qualifier) {
+      NeoHandler handler) {
+    String handlerName = handler.getClass().getName();
     try {
       neoContext.setPreviousResult(calloutResult);
       NeoResponse handlerResult = handler.afterCallout(neoContext);
       if (handlerResult != null && handlerResult.getBody() != null) {
         mergeCalloutResponse(calloutResult.getBody(), handlerResult.getBody());
         log.debug("[NEO-CALLOUT] Handler '{}' merged additional fields via afterCallout",
-            qualifier);
+            handlerName);
       }
     } catch (Exception e) {
       log.warn("[NEO-CALLOUT] afterCallout for handler '{}' failed (non-fatal): {}",
-          qualifier, e.getMessage());
+          handlerName, e.getMessage());
     }
   }
 

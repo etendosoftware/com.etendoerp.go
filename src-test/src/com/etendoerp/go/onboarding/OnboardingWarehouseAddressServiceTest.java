@@ -598,6 +598,12 @@ public class OnboardingWarehouseAddressServiceTest {
         mock(org.openbravo.model.common.geography.City.class);
     when(src.getRegion()).thenReturn(region);
     when(src.getCity()).thenReturn(city);
+    // ETP-5806 — the 3 structured SEPA fields must travel with the rest of the address, so a
+    // warehouse address created from the onboarding fiscal address is not left with composed
+    // Address1/2 lines but no structured source data behind them.
+    when(src.getOBSEPAStreetName()).thenReturn("Gran Via");
+    when(src.getOBSEPABuildingNumber()).thenReturn("45");
+    when(src.getOBSEPABuildingName()).thenReturn("Torre A");
 
     service.copyAddressFields(src, dst);
 
@@ -609,6 +615,9 @@ public class OnboardingWarehouseAddressServiceTest {
     verify(dst).setRegion(region);
     verify(dst).setRegionName("Region");
     verify(dst).setCity(city);
+    verify(dst).setOBSEPAStreetName("Gran Via");
+    verify(dst).setOBSEPABuildingNumber("45");
+    verify(dst).setOBSEPABuildingName("Torre A");
     verify(dst, never()).setCountry(any());
   }
 

@@ -39,8 +39,8 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  * <p>Per ETP-4255, Etendo Go / NEO Headless / MCP must never execute Jasper,
  * JRXML, classic AD_Process report execution, or {@code ReportingUtils.exportJR}.
  * A report spec is callable only when it is backed by a NEO-native report handler
- * (a {@code NeoHandler} CDI bean matched by the {@code Java_Qualifier} declared on
- * one of the spec's entities). Report specs without such a handler are exposed as
+ * (a {@code NeoHandler} CDI bean bound to one of the spec's entities by {@code @NeoExtension}
+ * or, until it is migrated, by its {@code Java_Qualifier}). Report specs without such a handler are exposed as
  * non-callable with a stable {@code not_configured_for_report_generation} status,
  * identical across MCP discover, the MCP report tool, and the NEO HTTP endpoint.</p>
  *
@@ -58,28 +58,74 @@ public final class NeoReportCallability {
   }
 
   /**
-   * Resolve the NEO-native report handler qualifier for the spec: the first non-blank
-   * {@code Java_Qualifier} among the spec's entities.
+   * Resolve the spec's report entity: the first of its entities that is customized, by
+   * {@code @NeoExtension} or by {@code Java_Qualifier} (see
+   * {@link NeoHandlerLookup#hasCustomization}).
    *
    * @param spec the report spec to inspect
-   * @return the handler qualifier, or {@code null} when the spec has no NEO-native handler
+   * @return the report entity, or {@code null} when the spec has no NEO-native handler
    */
-  public static String resolveReportHandlerQualifier(SFSpec spec) {
+  public static SFEntity resolveReportEntity(SFSpec spec) {
     try {
       OBCriteria<SFEntity> criteria = OBDal.getInstance().createCriteria(SFEntity.class);
       criteria.add(Restrictions.eq(SFEntity.PROPERTY_ETGOSFSPEC + ".id", spec.getId()));
       List<SFEntity> entities = criteria.list();
       for (SFEntity entity : entities) {
-        String qualifier = entity.getJavaQualifier();
-        if (StringUtils.isNotBlank(qualifier)) {
-          return qualifier;
+        if (NeoHandlerLookup.hasCustomization(entity)) {
+          return entity;
         }
       }
     } catch (Exception e) {
-      log.warn("Error resolving report handler qualifier for spec '{}': {}",
+      log.warn("Error resolving the report entity for spec '{}': {}",
           spec.getName(), e.getMessage());
     }
     return null;
+  }
+
+  /**
+   * The {@code Java_Qualifier} of the spec's report entity, for callers that pass it to
+   * {@code NeoExtensionDispatcher} as the fallback of the annotation lookup.
+   *
+   * <p>{@code null} does NOT mean "no handler": an entity bound only by {@code @NeoExtension} has
+   * no qualifier. Ask {@link #resolveReportEntity} or {@link #resolveReportHandler} for that.</p>
+   *
+   * @param spec the report spec to inspect
+   * @return the qualifier, or {@code null} when the report entity has none or there is no entity
+   */
+  public static String resolveReportHandlerQualifier(SFSpec spec) {
+    SFEntity entity = resolveReportEntity(spec);
+    return entity == null ? null : StringUtils.trimToNull(entity.getJavaQualifier());
+  }
+
+  /**
+   * Resolve the spec's report handler, annotation first, never propagating a lookup failure.
+   *
+   * @param spec the report spec to inspect
+   * @return the handler, or {@code null} when the spec has none or it could not be resolved
+   */
+  public static NeoHandler resolveReportHandler(SFSpec spec) {
+    return NeoHandlerLookup.forEntityQuietly(resolveReportEntity(spec));
+  }
+
+  /**
+   * Name the spec's report handler for diagnostics and for the {@code reportHandler} attribute
+   * MCP publishes: the entity's {@code Java_Qualifier} while it has one (the value published so
+   * far), otherwise the simple name of the annotated class.
+   *
+   * @param spec the report spec to inspect
+   * @return the name, or {@code null} when the spec has no resolvable handler
+   */
+  public static String reportHandlerName(SFSpec spec) {
+    SFEntity entity = resolveReportEntity(spec);
+    return handlerName(entity, NeoHandlerLookup.forEntityQuietly(entity));
+  }
+
+  private static String handlerName(SFEntity entity, NeoHandler handler) {
+    String qualifier = entity == null ? null : StringUtils.trimToNull(entity.getJavaQualifier());
+    if (qualifier != null || handler == null) {
+      return qualifier;
+    }
+    return handler.getClass().getSimpleName();
   }
 
   /**
@@ -116,12 +162,13 @@ public final class NeoReportCallability {
    * one contract and judged against another. That divergence is what IMP-19 records.</p>
    *
    * @param spec the report spec to inspect
-   * @return the contract, or {@code Optional.empty()} when the spec has no qualifier, no
+   * @return the contract, or {@code Optional.empty()} when the spec has no customized entity, no
    *         deployed handler, or a handler that does not declare itself a report generator
    */
   public static Optional<NeoReportContract> resolveReportContract(SFSpec spec) {
-    String qualifier = resolveReportHandlerQualifier(spec);
-    return contractOf(NeoHandlerLookup.byQualifierQuietly(qualifier), qualifier);
+    SFEntity entity = resolveReportEntity(spec);
+    NeoHandler handler = NeoHandlerLookup.forEntityQuietly(entity);
+    return contractOf(handler, handlerName(entity, handler));
   }
 
   /**
