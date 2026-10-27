@@ -17,9 +17,11 @@
 package com.etendoerp.go.schemaforge;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -65,17 +67,31 @@ final class SelectorQueryExecutor {
   static NeoResponse execute(SelectorMeta meta, String search, int limit, int offset,
       String validationFilter, String contextOrganizationId,
       Map<String, Object> extraFilterParams) throws Exception {
+    return execute(meta, search, limit, offset, validationFilter, contextOrganizationId,
+        extraFilterParams, Collections.emptySet());
+  }
+
+  /**
+   * @param searchMatchIds ids a {@code SelectorSearchPolicy} says the search also matches
+   *     (ETP-5948); OR'ed into the search predicate.
+   */
+  static NeoResponse execute(SelectorMeta meta, String search, int limit, int offset,
+      String validationFilter, String contextOrganizationId,
+      Map<String, Object> extraFilterParams, Set<String> searchMatchIds) throws Exception {
     if (meta.isRich) {
+      // shortcut: search-match ids are only applied to simple selectors (the tax policy's case);
+      // wire them into the rich query builders when a rich selector needs one.
       return executeRichQuery(meta, search, limit, offset, validationFilter, contextOrganizationId,
           extraFilterParams);
     }
     return executeQuery(meta, search, limit, offset, validationFilter, contextOrganizationId,
-        extraFilterParams);
+        extraFilterParams, searchMatchIds);
   }
 
   private static NeoResponse executeQuery(SelectorMeta meta,
       String search, int limit, int offset, String validationFilter,
-      String contextOrganizationId, Map<String, Object> extraFilterParams) throws Exception {
+      String contextOrganizationId, Map<String, Object> extraFilterParams,
+      Set<String> searchMatchIds) throws Exception {
 
     // Extract language before binding — it is not an HQL parameter
     String language = null;
@@ -98,12 +114,15 @@ final class SelectorQueryExecutor {
     String searchLang = resolveEnrichLanguage(language);
     NeoTrl.TrlSearchMeta trlSearch = (StringUtils.isNotBlank(search) && StringUtils.isNotBlank(searchLang))
         ? NeoTrl.resolveSearchMeta(meta.entityName) : null;
+    StringBuilder searchPredicate = new StringBuilder();
     if (trlSearch != null) {
-      NeoSelectorExecutionHelper.appendTranslatedSearchFilter(hql, meta.displayProperty, search, trlSearch);
+      NeoSelectorExecutionHelper.appendTranslatedSearchFilter(searchPredicate, meta.displayProperty, search,
+          trlSearch);
       queryParams.put(PARAM_SEARCH_LANG, searchLang);
     } else {
-      NeoSelectorExecutionHelper.appendSimpleSearchFilter(hql, meta.displayProperty, search);
+      NeoSelectorExecutionHelper.appendSimpleSearchFilter(searchPredicate, meta.displayProperty, search);
     }
+    NeoSelectorExecutionHelper.appendSearchWithMatchIds(hql, searchPredicate, searchMatchIds, queryParams);
     if (safeExtraParams != null) {
       queryParams.putAll(safeExtraParams);
     }

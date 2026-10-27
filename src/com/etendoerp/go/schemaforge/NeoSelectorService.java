@@ -411,7 +411,8 @@ public class NeoSelectorService {
     }
     return SelectorQueryExecutor.execute(
         meta, search, limit, offset, combineFilters(combinedFilter, ctxParamFilter),
-        contextOrganizationId, ctxFilterParams);
+        contextOrganizationId, ctxFilterParams,
+        NeoSelectorPolicy.resolveSearchMatchIds(meta, safeContextParams, search));
   }
 
   private static NeoResponse enrichProductSelectorIfNeeded(NeoResponse selectorResult, SelectorMeta meta,

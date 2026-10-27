@@ -25,6 +25,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -35,6 +36,7 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 
 import com.etendoerp.go.common.NeoCurrencyFormatConfig;
@@ -129,8 +131,14 @@ import com.etendoerp.go.schemaforge.selector.meta.SelectorMeta;
  * (e.g. {@code "21 %"}), which the pickers render before the label. {@code label} itself is left
  * untouched. The MCP {@code etendo_selectors} tool passes the source entity too, so it gets the
  * same columns as the REST selector.
+ *
+ * <p><b>ETP-5948 — the rate is searchable:</b> as {@link SelectorSearchPolicy}, a numeric term
+ * ({@code "11,4"}, {@code "11.4"}, {@code "21%"}) also matches the taxes whose shown rate
+ * starts with it, computed with the same {@code LABEL_RATE_SQL} as the prefix, so what the user
+ * reads is what the user can type.
  */
-public final class InvoiceLineTaxSifSelectorPolicy implements SelectorEnrichmentPolicy {
+public final class InvoiceLineTaxSifSelectorPolicy
+    implements SelectorEnrichmentPolicy, SelectorSearchPolicy {
 
   private static final Logger log = LogManager.getLogger(InvoiceLineTaxSifSelectorPolicy.class);
 
@@ -214,7 +222,7 @@ public final class InvoiceLineTaxSifSelectorPolicy implements SelectorEnrichment
   // extra child rows this flag causes enrich() to append.
   private static final String INCLUDE_CHILDREN_PARAM = "includeTaxChildren";
 
-  // ETP-5902 — JSON key of the rate the pickers render before the label ("21 % - <label>").
+  // ETP-5902 — JSON key of the rate the pickers render before the label ("21% - <label>").
   // A separate key, not a prefixed `label`: the picker finds its committed value again by
   // searching the plain label (ETP-5846), which a prefixed label would never match.
   static final String LABEL_PREFIX_KEY = "labelPrefix";
@@ -477,8 +485,54 @@ public final class InvoiceLineTaxSifSelectorPolicy implements SelectorEnrichment
     return row;
   }
 
-  /** {@code 21.00} → {@code "21 %"}, {@code 5.2} → {@code "5,2 %"} with a {@code ","} separator. */
+  /** {@code 21.00} → {@code "21%"}, {@code 5.2} → {@code "5,2%"} with a {@code ","} separator. */
   static String formatRate(BigDecimal rate, String decimalSeparator) {
-    return rate.stripTrailingZeros().toPlainString().replace(".", decimalSeparator) + " %";
+    return plainRate(rate).replace(".", decimalSeparator) + "%";
+  }
+
+  private static String plainRate(BigDecimal rate) {
+    return rate.stripTrailingZeros().toPlainString();
+  }
+
+  @Override
+  public Set<String> searchMatchIds(SelectorMeta meta, Map<String, String> contextParams,
+      String search) {
+    String term = normalizeRateTerm(search);
+    if (term == null) {
+      return Collections.emptySet();
+    }
+    // Same scope as the picker offers: the client's and System's active top-level taxes. The
+    // selector's own filters still apply around this match, so it can only narrow, never widen.
+    String sql = "SELECT t.c_tax_id, " + LABEL_RATE_SQL + " AS " + LABEL_RATE_COLUMN
+        + " FROM c_tax t WHERE t.isactive = 'Y' AND t.parent_tax_id IS NULL"
+        + " AND t.ad_client_id IN (?, '0')";
+    Set<String> ids = new LinkedHashSet<>();
+    Connection conn = OBDal.getReadOnlyInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+      ps.setString(1, OBContext.getOBContext().getCurrentClient().getId());
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          BigDecimal rate = rs.getBigDecimal(LABEL_RATE_COLUMN);
+          if (rate != null && plainRate(rate).startsWith(term)) {
+            ids.add(rs.getString("c_tax_id"));
+          }
+        }
+      }
+    } catch (SQLException e) {
+      log.warn("[InvoiceLineTaxSifSelectorPolicy] Rate search failed: {}", e.getMessage(), e);
+      return Collections.emptySet();
+    }
+    return ids;
+  }
+
+  /**
+   * A search term read as a rate prefix, in plain form ({@code "11,4 %"} → {@code "11.4"}), or
+   * {@code null} when it is not a number — then it stays a plain name search.
+   */
+  static String normalizeRateTerm(String search) {
+    String term = StringUtils.deleteWhitespace(StringUtils.defaultString(search));
+    term = StringUtils.removeEnd(StringUtils.removeEnd(term, "%"), ".").replace(',', '.');
+    term = StringUtils.removeEnd(term, ".");
+    return term.matches("\\d+(\\.\\d+)?") ? term : null;
   }
 }
