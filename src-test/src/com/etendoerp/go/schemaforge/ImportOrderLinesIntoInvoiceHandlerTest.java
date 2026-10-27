@@ -886,6 +886,9 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
     assertDiscountOutcome("another %", false, null, "10", "5", CONFLICT_B);
     assertDiscountOutcome("order at 0 %", false, null, "0", null, UNTOUCHED);
     assertDiscountOutcome("order without %", false, null, null, null, UNTOUCHED);
+    assertDiscountOutcome("order at 0 %, invoice at 5 %", false, null, "0", "5", CONFLICT_B);
+    assertDiscountOutcome("carry=false, order at 0 %, invoice at 5 %", false, false, "0", "5",
+        UNTOUCHED);
     assertDiscountOutcome("sales: empty invoice, no %", true, null, "10", null, CARRIED);
     assertDiscountOutcome("carry=false, a product line already there", false, false, "10", null,
         UNTOUCHED, existingLine("pre-product-2", sal, true));
@@ -960,7 +963,15 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
         { "lines and no % on the invoice", pcts("10"), null, true, CONFLICT_C },
         { "lines and an invoice at 0 %", pcts("10"), bd("0"), true, CONFLICT_C },
         { "same % on the invoice, with lines: carry", pcts("10"), bd("10.00"), true, null },
-        { "no positive % among the orders: nothing", pcts("0", null), bd("5"), true, null },
+        { "orders without %, invoice at 5 with lines", pcts("0", null), bd("5"), true,
+            CONFLICT_B },
+        { "orders and invoice without %, with lines: nothing", pcts("0", null), null, true,
+            null },
+        { "a negative order % counts as 0", pcts("-5", "0"), null, true, null },
+        { "same % once rounded to 4 decimals: carry", pcts("10.00004", "10"), bd("9.99996"),
+            true, null },
+        { "a difference at the 4th decimal: the orders differ", pcts("10.0001", "10"), null,
+            false, a },
     };
     for (Object[] row : rows) {
       @SuppressWarnings("unchecked")
@@ -1052,6 +1063,32 @@ public class ImportOrderLinesIntoInvoiceHandlerTest {
     assertFalse(invoice.getBoolean("hadLines"));
     assertTrue(error.getString("hint"), error.getString("hint").contains("carryGlobalDiscount:false"));
     assertTrue(probe.batches.isEmpty());
+    verify(probe.invoice, never()).setEtgoTotalDiscount(any());
+  }
+
+  /**
+   * One transaction for every order: an order refused while planning (here nothing pending) leaves
+   * nothing created for the others and the header's discount untouched, and the refusal names the
+   * order that failed.
+   */
+  @Test
+  public void importOrderLines_severalOrders_oneRefused_createsNothingAndNamesTheOrder()
+      throws Exception {
+    Probe probe = scenario();
+    when(probe.order.getEtgoTotalDiscount()).thenReturn(bd("10"));
+    secondOrder(probe, "10");
+    doReturn(bd("4")).when(probe.lineById.get("ol3")).getInvoicedQuantity();
+
+    NeoResponse response = run(probe, "importOrderLines",
+        "{\"orders\":[{\"orderId\":\"o1\"},{\"orderId\":\"o2\"}]}");
+
+    assertEquals(422, response.getHttpStatus());
+    JSONObject error = response.getBody().getJSONObject("error");
+    assertEquals("importNothingPending", error.getString("code"));
+    assertTrue(error.getString("message"), error.getString("message").contains("PO-o2"));
+    assertEquals("o2", error.getString("orderId"));
+    assertEquals("PO-o2", error.getString("documentNo"));
+    assertTrue("nothing created for o1 either", probe.batches.isEmpty());
     verify(probe.invoice, never()).setEtgoTotalDiscount(any());
   }
 
