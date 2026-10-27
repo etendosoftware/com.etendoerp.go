@@ -10,14 +10,19 @@ No database and no build: the committed XML *is* the shipped configuration, so t
 reproducible from a clean checkout. Precedent for reading that XML offline is ``make regen-check``
 in the sibling ``schema_forge`` repo.
 
-The distinct-qualifier count is a one-way gate. It fails above ``--ceiling`` (default 90, the
-count at the time the annotation landed) because a new qualifier means somebody chose the old
-mechanism with the new one available. A *decreasing* count is printed and never gated: in a
-release where no handler was touched there is nothing legitimate to drop, so gating a decrease
-would manufacture work instead of preventing it.
+The distinct-qualifier count is a ratchet. It fails above ``--ceiling`` because a new qualifier
+means somebody chose the old mechanism with the new one available. With ``--exact`` (what
+``make extension-parity`` and CI run, ETP-5588) it also fails *below* the ceiling: the PR that
+migrates a handler lowers the ceiling in the same change, so the slack can never be spent by a
+later PR adding a qualifier back. A release that touches no handler keeps count == ceiling and
+pays nothing.
+
+``--hooks`` lists, for every bound pair, the ``NeoHandler`` hooks its class (or a superclass
+under ``src/``) overrides — the inventory to check before clearing a qualifier, since every hook
+the class answers must be reached by an annotation-aware reader.
 
 Usage:
-    python3 extension-parity.py [--all] [--ceiling N]
+    python3 extension-parity.py [--all] [--hooks] [--ceiling N] [--exact]
 """
 
 import argparse
@@ -37,6 +42,10 @@ NAMED_RE = re.compile(r'@Named\s*\(\s*"(?P<value>[^"]*)"\s*\)')
 CLASS_RE = re.compile(r'\b(?:class|interface)\s+(?P<name>\w+)')
 COMMENT_RE = re.compile(r'/\*.*?\*/|//[^\n]*', re.S)
 PACKAGE_RE = re.compile(r'^\s*package\s+([\w.]+)\s*;', re.M)
+NEO_HANDLER = os.path.join(JAVA_ROOT, 'com', 'etendoerp', 'go', 'schemaforge', 'NeoHandler.java')
+# A NeoHandler member: two-space indented, optional `default`, a return type, the name, `(`.
+HOOK_DECL_RE = re.compile(r'^  (?:default\s+)?[\w.<>\[\], ?]+?\s+(\w+)\s*\(', re.M)
+EXTENDS_RE = re.compile(r'\bclass\s+(\w+)(?:<[^>{]*>)?\s+extends\s+(\w+)')
 
 
 def _text(row, tag):
@@ -99,13 +108,58 @@ def read_annotated():
     return sorted(found, key=lambda f: f[2])
 
 
+def read_hooks():
+    """The method names NeoHandler declares, in declaration order."""
+    with open(NEO_HANDLER, encoding='utf-8', errors='replace') as handle:
+        source = COMMENT_RE.sub('', handle.read())
+    names = []
+    for match in HOOK_DECL_RE.finditer(source):
+        if match.group(1) not in names:
+            names.append(match.group(1))
+    return names
+
+
+def index_classes():
+    """Simple class name -> (comment-free source, own @Named or None), for every class in src/."""
+    classes = {}
+    for base, _dirs, files in os.walk(JAVA_ROOT):
+        for name in files:
+            if not name.endswith('.java'):
+                continue
+            with open(os.path.join(base, name), encoding='utf-8', errors='replace') as handle:
+                source = COMMENT_RE.sub('', handle.read())
+            named = NAMED_RE.search(source)
+            classes[name[:-5]] = (source, named.group('value') if named else None)
+    return classes
+
+
+def hooks_of(simple, classes, hooks):
+    """The hooks a class declares itself or inherits from a superclass under src/."""
+    found = []
+    seen = set()
+    while simple in classes and simple not in seen:
+        seen.add(simple)
+        source = classes[simple][0]
+        for hook in hooks:
+            if hook not in found and re.search(
+                    r'\b(?:public|protected)\s+[\w.<>\[\], ?]+?\s+%s\s*\(' % hook, source):
+                found.append(hook)
+        parent = EXTENDS_RE.search(source)
+        simple = parent.group(2) if parent and parent.group(1) == simple else None
+    return [hook for hook in hooks if hook in found]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--all', action='store_true',
                         help='also list the rows no mechanism binds')
+    parser.add_argument('--hooks', action='store_true',
+                        help='list the NeoHandler hooks each bound pair\'s class overrides')
     parser.add_argument('--ceiling', type=int, default=90,
                         help='fail when the distinct Java_Qualifier count exceeds this')
+    parser.add_argument('--exact', action='store_true',
+                        help='also fail when the count is below the ceiling (ratchet)')
     args = parser.parse_args()
 
     entities = read_entities(read_specs())
@@ -161,6 +215,20 @@ def main():
     distinct = sorted({q for _s, _e, q in entities if q})
     rows_with_qualifier = sum(1 for _s, _e, q in entities if q)
 
+    if args.hooks:
+        hooks = read_hooks()
+        classes = index_classes()
+        by_named = {named: simple for simple, (_src, named) in classes.items() if named}
+        print()
+        print('=== hooks per bound pair ===')
+        for spec, entity, qualifier in entities:
+            hit = by_pair.get(((spec or '').lower(), (entity or '').lower()))
+            simple = hit[0] if hit else by_named.get(qualifier) if qualifier else None
+            if not simple:
+                continue
+            print('%-34s %-28s %-36s %s' % (spec, entity, simple,
+                                            ', '.join(hooks_of(simple, classes, hooks)) or '-'))
+
     print()
     print('=== conflicts ===')
     if conflicts:
@@ -189,8 +257,14 @@ def main():
 
     if len(distinct) < args.ceiling:
         print()
-        print('NOTE: the distinct count is %d below the ceiling. Not a failure — lower the '
-              'ceiling when the drop is deliberate.' % (args.ceiling - len(distinct)))
+        if args.exact:
+            print('FAIL: the distinct Java_Qualifier count is %d, below the ceiling of %d.'
+                  % (len(distinct), args.ceiling))
+            print('      Lower EXTENSION_CEILING in the Makefile to %d in this same change, so '
+                  'the freed slack cannot be spent on a new qualifier.' % len(distinct))
+            return 1
+        print('NOTE: the distinct count is %d below the ceiling. Lower the ceiling when the drop '
+              'is deliberate.' % (args.ceiling - len(distinct)))
 
     return 0
 

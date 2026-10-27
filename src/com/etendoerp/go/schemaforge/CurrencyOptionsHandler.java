@@ -53,9 +53,10 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  *   { "id": "&lt;C_Currency_ID&gt;", "isoCode": "USD", "rate": 1.1523, "isOrgCurrency": false },
  *   { "id": "&lt;C_Currency_ID&gt;", "isoCode": "GBP", "rate": null,   "isOrgCurrency": false }
  * ]</pre>
- * The organization currency comes first with {@code rate = 1}; then EVERY active currency of the
- * client (or system), by ISO code — a currency without a rate for the date is listed with
- * {@code rate: null} (ETP-5840; before, it was left out and could not be picked at all).
+ * The organization currency comes first with {@code rate = 1}; then, by ISO code, every active
+ * currency that has a conversion range with the organization currency on ANY date — a currency
+ * whose ranges do not cover the reference date is listed with {@code rate: null} (ETP-5840; before,
+ * it was left out and could not be picked at all). A currency with no range at all is not listed.
  *
  * <p><b>Reference date.</b> The {@code date} parameter when present (query string; an MCP call may
  * pass it in the action body) — for a new record and for a saved one alike, so the form can ask for
@@ -90,9 +91,10 @@ public class CurrencyOptionsHandler implements NeoHandler {
    * contract says so, and the MCP calls it that way.
    */
   static final NeoActionContract CONTRACT = NeoActionContract.read(ACTION_NAME,
-      "Lists every currency this document can use with its conversion rate from the organization "
-          + "currency on the document's reference date: [{id, isoCode, rate, isOrgCurrency}]. "
-          + "rate is null when no rate is configured for that date; the organization currency has "
+      "Lists the currencies this document can use (those with a conversion range to or from the "
+          + "organization currency) with the rate on the document's reference date: "
+          + "[{id, isoCode, rate, isOrgCurrency}]. "
+          + "rate is null when no range covers that date; the organization currency has "
           + "rate 1. Optional 'date' (yyyy-MM-dd) asks for another date. Use it to find "
           + "registerPayment's conversionRate when the account currency differs from the invoice "
           + "currency.")
@@ -252,7 +254,8 @@ public class CurrencyOptionsHandler implements NeoHandler {
 
   /**
    * Builds the option list: the org currency first ({@code rate = 1}, {@code isOrgCurrency: true}),
-   * then every active currency of the client or the system by ISO code, with the rate
+   * then every active currency with a conversion range to or from it (any date) by ISO code, with
+   * the rate
    * {@code C_Conversion_Rate} gives for {@code orderDate} (direct, else the inverse of the reverse
    * rate), or {@code rate: null} when there is none.
    */
@@ -275,7 +278,8 @@ public class CurrencyOptionsHandler implements NeoHandler {
     orgEntry.put("isOrgCurrency", true);
     arr.put(orgEntry);
 
-    for (Map.Entry<String, String> currency : selectableCurrencies(conn, clientId).entrySet()) {
+    for (Map.Entry<String, String> currency
+        : selectableCurrencies(conn, orgCurrencyId, clientId, orgId).entrySet()) {
       String cid = currency.getKey();
       if (cid.equals(orgCurrencyId)) {
         continue; // already added above
@@ -292,14 +296,31 @@ public class CurrencyOptionsHandler implements NeoHandler {
     return arr;
   }
 
-  /** Every active currency of the system or of {@code clientId}: id → ISO code, by ISO code. */
-  private Map<String, String> selectableCurrencies(Connection conn, String clientId)
-      throws java.sql.SQLException {
+  /**
+   * Every active currency of the system or of {@code clientId} that has at least one active
+   * conversion range with {@code orgCurrencyId}, in either direction and on ANY date, scoped like
+   * the rate queries (client or system, document org or '0'): id → ISO code, by ISO code. A
+   * currency with no range at all is not offered; one whose ranges do not cover the reference date
+   * is, with {@code rate: null} (ETP-5840 plan de pruebas, casos 8 / N2).
+   */
+  private Map<String, String> selectableCurrencies(Connection conn, String orgCurrencyId,
+      String clientId, String orgId) throws java.sql.SQLException {
     Map<String, String> currencies = new LinkedHashMap<>();
     try (PreparedStatement ps = conn.prepareStatement(
-        "SELECT c_currency_id, iso_code FROM c_currency"
-      + " WHERE isactive = 'Y' AND ad_client_id IN ('0', ?) ORDER BY iso_code")) {
+        "SELECT c.c_currency_id, c.iso_code FROM c_currency c"
+      + " WHERE c.isactive = 'Y' AND c.ad_client_id IN ('0', ?)"
+      + " AND EXISTS (SELECT 1 FROM c_conversion_rate cr"
+      + " WHERE cr.isactive = 'Y'"
+      + " AND cr.ad_client_id IN ('0', ?)"
+      + " AND (cr.ad_org_id = '0' OR cr.ad_org_id = ?)"
+      + " AND ((cr.c_currency_id = ? AND cr.c_currency_id_to = c.c_currency_id)"
+      + " OR (cr.c_currency_id_to = ? AND cr.c_currency_id = c.c_currency_id)))"
+      + " ORDER BY c.iso_code")) {
       ps.setString(1, clientId);
+      ps.setString(2, clientId);
+      ps.setString(3, orgId);
+      ps.setString(4, orgCurrencyId);
+      ps.setString(5, orgCurrencyId);
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
           currencies.put(rs.getString(1), rs.getString(2));

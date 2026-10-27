@@ -1417,6 +1417,8 @@ OBUISEL selectors with custom HQL queries are fully supported. The service uses 
 
 **One item per value, view-backed selectors (ETP-5707).** A standard (non-custom-HQL) OBUISEL selector over a view whose Value Field is not the entity primary key (`Product` on `M_Product_Price_Warehouse_v` — order, quotation and returns lines — `ETRX_OrgsByRole`, `ETRX_RolesByUser`) returns one row per value × something (product × warehouse). It used to be collapsed with `e.id in (select min(id) … group by <value>)`, which repeats the whole filter and which PostgreSQL planned as a nested-loop semi join re-running the grouped subselect once per outer row (1000 products × 8 warehouses: 40.3 s for the count alone). `executeRichQuery` now routes these selectors to `executeValuePagedRichQuery`, which pages **by value**, like ETP-5703 does for custom HQL: (1) `count(distinct e.<value>)` is the `totalCount`; (2) one page of distinct values — `group by e.<value> order by min(e.<display>), e.<value>` with `offset`/`limit`; (3) the rows of those values (`and e.<value> in (:sfPageValues) order by e.<value>, e.id`), keeping the **first row per value**, which is the row the old `min(id)` picked, so `_aux` values (prices) do not change. Rows whose value is `null` are excluded from all three steps. When the display property does not resolve to a primitive path (the price view's identifier is the association `product`), step 2 orders by the value alone (`displayIsPrimitivePath`). The filtered HQL comes from `OBQuery` (`getQueryString()` + `getNamedParameters()`), so the readable client / organization / active filters are kept; the session query extends it because an `OBQuery` where clause cannot carry a `group by`, and `NeoSelectorExecutionHelper.bindNamedParameters` binds `Object[]` parameters (the readable-organization filter is a `String[]`) with `setParameterList`. Stock-breakdown selectors (aux out-fields `_QTY`/`_LOC`) keep their row-per-row shape, and `ProductSimple` (custom HQL) stays on ETP-5703's by-record paging. Measured: opening the sales-order product picker with 1000 products × 8 warehouses went from over 45 s to about 1.3 s.
 
+**Every page has a total order (ETP-5903).** A page fetched with `offset`/`limit` is only stable when the ORDER BY is total: with a sort key that ties (two records with the same display value), PostgreSQL may return them in any order on each query, so a row can show up on two pages or on none. The paging flows that ordered by the display value alone now add the id as the last key: the simple and rich OBUISEL flows (`ORDER BY e.<display>, e.id`), the row-paged custom-HQL flow (`<alias>.<display>, <alias>.id`), list references (`SEQUENCENUMBER`, then `id`) and the payment-method selector (`name`, then `id`). The row-paged custom-HQL flow skips the tiebreaker when its HQL has a `DISTINCT` or a `GROUP BY` (`SelectorQueryExecutor.rowPageOrder`): PostgreSQL rejects an ORDER BY item outside a DISTINCT select list or the grouping, and that failure would mark the transaction rollback-only. The ETP-5703 / ETP-5707 flows were already total. Not covered: FK selectors with a SQL validation rule, which are served by core `ComboTableData` (its own ORDER BY). The SPA relies on this when it pages forward to find the committed value of a reopened selector.
+
 **Search fragments and their alias (ETP-5670).** On a standard (non-custom) OBUISEL selector, a searchable field's `property` is a DAL path relative to the entity (`product.name`), so the search always qualifies it with the query alias (`e.product.name`), dotted or not. A `clause_left_part` (used only when `property` is blank) is raw HQL and keeps its own alias (`bp.name`). Custom-HQL selectors keep their original rule: a dotted fragment is used as written. Before ETP-5707 an unqualified relative path bound to the outer row once the where clause was copied into the `min(id)` de-dup subquery of view-backed selectors (Value Field ≠ `id`), turning it into a correlated subquery that PostgreSQL re-ran once per candidate row; that subquery no longer exists, the qualification rule stays.
 
 The service resolves `@param@` placeholders in OBUISEL HQL where clauses: `@AD_Org_ID@`, `@AD_Client_ID@`, `@AD_User_ID@`, `@AD_Role_ID@`.
@@ -3019,8 +3021,8 @@ there). So an agent could not record a deposit at all: in blind run `20261001T19
 created a bank-statement line instead — what the bank reports, waiting to be matched — not a
 movement of the account.
 
-`FinancialAccountHandler#actionContracts()` (the account's customization, `Java_Qualifier`
-`financialAccountHeaderHandler`) now declares, from `FinancialAccountMovementActions`; for all of
+`FinancialAccountHandler#actionContracts()` (the account's customization, bound by
+`@NeoExtension(spec = "financial-account", entity = "account")`) now declares, from `FinancialAccountMovementActions`; for all of
 them `id` = the financial account:
 
 | Action | Kind | Parameters (required in **bold**) | UI gate it mirrors |
@@ -3831,6 +3833,78 @@ brand-new one). The fields the handler actually reads — `addressLine1`, `cityN
 entity's schema and undiscoverable. Omitting the id fails the generic mandatory-field check with a
 422; sending it without address fields fails with a constraint violation. Only "a throwaway id plus
 the address fields" works, and nothing in the machine-readable contract says so — hence the prompt.
+
+**ETP-5806 — structured address fields.** `streetName`, `buildingNumber` and `buildingName` (backed
+by `EM_OBSEPA_StrtNm`/`BldgNb`/`BldgNm` on `C_Location`, from `org.openbravo.sepa.iso20022`) joined
+the raw-field create/update shape above, for both `contacts/locationAddress` and
+`warehouse/location`. `addressLine1`/`addressLine2` are no longer accepted as free-form input in
+practice: the handler computes them itself from the 3 structured fields (`StructuredAddressComposer`,
+porting Classic's `LocationSEPA.fillAddressLines` exactly) whenever `streetName` is non-blank, and
+ignores whatever the caller sent for the two lines in that case. `streetName`, `buildingNumber`,
+`cityName` and `country` are mandatory on every create/update that is not the "reuse an existing
+C_Location" mode — stricter than Classic, where the 3 SEPA fields are optional. A create/update
+missing any of them gets a 400 naming the missing keys. **Pending:** this field-level `AGENT_PROMPT`
+on `ETGO_SF_FIELD` for `C_Location_ID` has not yet been updated in the database to mention the 3 new
+fields and the mandatoriness rule — needs an `sf-alter-db`/webhook pass, left for the user to apply.
+
+**Gated behind `structured-address-for-sepa` (relaunch, backend-only flag, TTL 2026-11-15 —
+`docs/feature-flags-and-tenant-upgrade.md` §1).** Everything described in this note and the two
+below it is conditional on the flag. **While off** (default pre-launch), the 3 structured fields are
+omitted entirely from the MCP schema for every entity that would otherwise carry them —
+`AddressVirtualSelectorPolicy.resolveVirtualColumns` drops `EM_OBSEPA_StrtNm`/`BldgNb`/`BldgNm` from
+the virtual-column set it resolves for `contacts/locationAddress` and `warehouse/location`, and
+`McpSchemaFieldBuilder.shouldIncludeSchemaColumn` drops the same 3 columns from a direct table walk
+(the `bp-location` case below). An MCP agent calling `etendo_schema`/`etendo_selectors` while the
+flag is off cannot discover `streetName`/`buildingNumber`/`buildingName` at all — not merely
+undiscoverable-without-the-AGENT_PROMPT as the pending item above describes, but structurally absent
+from the schema. **While on**, the schema carries them as described below, still subject to the
+pending `AGENT_PROMPT` gap.
+
+**ETP-5806 follow-up — `bp-location`/`BpLocationHandler`.** The AD window behind the `bp-location`
+spec (AD_Window 121 "Location", inactive in the menu but served regardless via NEO Headless/MCP)
+maps `C_Location` directly through generic CRUD, with no prior dedicated handler — found to accept
+plain-text `addressLine1`/`addressLine2` writes with none of the rules above applied, letting an
+MCP agent create or edit a `bp-location` address and bypass the structured-address requirement
+entirely. `BpLocationHandler` (`@NeoExtension(spec = "bp-location", entity = "bpLocation")`) now
+intercepts POST/PUT the same way the other two handlers do: a pre-hook validates
+`streetName`/`buildingNumber`/`cityName`/`country` as mandatory-together and the 3 structured
+fields against their max lengths, computes `addressLine1`/`addressLine2` via the same
+`StructuredAddressComposer`, and a post-hook persists all 5 columns directly via DAL — bypassing
+`NeoFieldFilter`, which has no curated `ETGO_SF_FIELD` row for any of them on this entity — before
+mirroring the final values back into the response under the published names
+(`streetName`/`buildingNumber`/`buildingName`). Every GET (list or by id) is enriched the same way.
+Country/Region/City/Postal and the base record lifecycle (id generation, client/org, active flag)
+stay on the generic CRUD fallthrough, unintercepted.
+
+Unlike `contacts/locationAddress` and `warehouse/location`, `bp-location` was **not** given curated
+`MCP_CONFIG`/`ETGO_SF_FIELD` visibility for these 3 columns through a push-to-neo run: the live
+`ETGO_SF_ENTITY.Name = 'bpLocation'` row was found to be a hand-populated pipeline orphan (see
+`schema_forge/artifacts/bp-location/`), too risky to rewrite as part of this fix. The handler
+therefore owns the 3 fields entirely outside the curated schema — which is also why
+`etendo_schema`/`etendo_get` still report `streetName`/`buildingNumber`/`buildingName` as
+`unknownFields` for this entity even though the handler accepts, persists and returns them under
+those exact names.
+
+**MCP naming unification.** The three handlers that read/write the SEPA columns
+(`ContactsLocationAddressHandler`, `WarehouseLocationHandler`, `BpLocationHandler`) all agree on
+`streetName`/`buildingNumber`/`buildingName` in their own request/response JSON — never the raw
+Hibernate property names Openbravo's codegen produced for `EM_OBSEPA_StrtNm`/`BldgNb`/`BldgNm`
+(`oBSEPAStreetName`/`oBSEPABuildingNumber`/`oBSEPABuildingName`). The generic schema-discovery path
+(`McpSchemaFieldBuilder#resolvePropertyName`) has no way to know a handler renamed a field
+downstream, so it still reported the raw property name wherever the field reached `etendo_schema`/
+`etendo_selectors` through the generic walk rather than through a handler's own response —
+`AddressVirtualSelectorPolicy.PUBLISHED_NAME_OVERRIDES` corrects it: a structural map keyed by
+DB column name (upper-cased), consulted identically for any entity that happens to carry one of
+the 3 columns, direct table walk or virtual-column wrapper alike. Extend that map — never add a
+per-entity conditional — if another `EM_`-prefixed column ever needs the same treatment.
+
+**Pending DB update — confirmed still outstanding.** The field-level `AGENT_PROMPT` on
+`ETGO_SF_FIELD` for `C_Location_ID` still has not been updated in the database to mention the 3
+structured fields, the mandatory-together rule, or `bp-location`'s separate handler-owned path (no
+curated row exists for `bpLocation` at all — see above). Applying it needs an `sf-alter-db`/webhook
+pass against a running instance; Docs did not attempt it — mutating live curation/AGENT_PROMPT data
+is outside the Documentarian's remit and risks colliding with in-flight QA/review state on the same
+tenant — so this is left, explicitly, for the user to apply.
 
 Note which level serves that example, because the two are easy to conflate: `contacts/locationAddress`
 is fixed by a **field**-level prompt on `ETGO_SF_FIELD.AGENT_PROMPT` for `C_Location_ID`, which
@@ -4652,6 +4726,37 @@ single-transaction contract on both channels. REST and MCP differ in the async m
 by what already differs in the synchronous one (the MCP preprocessor and its failure-envelope rewrite
 inside each row's result).
 
+##### Classic vs Go mandatoriness on structured address fields (ETP-5806, declared)
+
+Not a REST/MCP divergence — both NEO channels apply the same rule, on every path
+(`ContactsLocationAddressHandler`, `WarehouseLocationHandler`, `BpLocationHandler`,
+`OnboardingOrgInfoService`) — but a **Classic vs Go** divergence, declared here per the NeoHandler
+pattern's "a divergence must be declared, not discovered" rule, because it is exactly the kind of
+"why does Go require it when Classic doesn't" question a future reader will ask.
+
+Classic has **zero** DB-level, AD-level or UI-level mandatoriness on the 3 SEPA columns
+(`EM_OBSEPA_StrtNm`/`BldgNb`/`BldgNm`, from `org.openbravo.sepa.iso20022`): `AD_COLUMN.ISMANDATORY = 'N'`
+on all three, the underlying DB columns are nullable, no `AD_FIELD` exists for them on the
+Location/SEPA tab, and neither Classic's `LocationSEPA_F1.html` nor its `getEditVariables()`
+refuses a blank value. Classic only treats them as *conditionally* required at a different moment
+entirely — SEPA-remittance-file generation — via `SEPAUtil.getBusinessPartnerAddressError()`, and
+only when `isOutsideEU(location) && !hasStructuredAddress(location)`: a blanket requirement for
+non-EU third parties, not for every business partner or every address.
+
+Go's rule, gated behind `structured-address-for-sepa` (backend-only flag, TTL 2026-11-15 — see
+`docs/feature-flags-and-tenant-upgrade.md` §1), is stricter and applies at a different moment: while
+the flag is on, `streetName`/`buildingNumber`/`cityName`/`country` are mandatory-together **at
+entry** (create/update time) on every address popup and on the onboarding company step, for every
+business partner and every address, regardless of EU/non-EU status. This is a **deliberate,
+independent Go product decision**, not a port of Classic's remittance-time rule — Go chose to
+require the fields up front so the data is always SEPA-ready when a remittance is eventually
+generated, rather than discovering a gap only at generation time the way Classic does. If product
+later asks why Go's behavior differs from Classic's here, the answer is "Go chose to", not "Go
+inherited it". GitHub issue
+[etendosoftware/etendo-ai#24](https://github.com/etendosoftware/etendo-ai/issues/24) tracks
+Classic's own, separate SEPA-compliance work, which may eventually change Classic's behavior here —
+that work is out of scope for this flag and this divergence note.
+
 #### 4.12.10 An excluded field does not exist, on every verb (ETP-5335, IMP-39)
 
 **A field the spec excludes is absent from `etendo_schema`, refused by `etendo_list` as a filter, and
@@ -5431,18 +5536,89 @@ dispatches; with nothing resolved, the default CRUD path runs exactly as before.
 `NO_CUSTOMIZATION` trace is logged at DEBUG when the qualifier is blank (the normal case); a
 qualifier that is configured and resolves to nothing keeps its INFO `(warn)` line.
 
-**Migration is opportunistic, not a campaign.** Existing handlers are not being rewritten in bulk;
-one moves to the annotation when someone has a reason to open it anyway. Do not add a new
-`Java_Qualifier` binding: that is what is being retired.
+**Touching a legacy handler means migrating it in the same change (ETP-5588).** Fixes land on
+whatever binding exists, so while a handler stays on `Java_Qualifier` every fix to it keeps the
+legacy alive — "migrate when convenient" let the distinct qualifier count drift from 90 to 97
+unnoticed. Do not add a new `Java_Qualifier` binding, and when you open a qualifier-bound handler
+for any reason, move its pair to the annotation (recipe: the `neo-extension-migration` skill in
+etendo_schema_forge). CI enforces it — see "Guardrails" below.
 
-**Conflicts do not fail the build**, by design — a gradual migration passes through exactly those
-states. Two annotated classes claiming the same `(spec, entity)`, or an annotated pair whose row
-still names a different class by qualifier, are logged at `ERROR`. Run `make extension-parity` to
-catch them offline instead of in production.
+**Resolving an entity's customization outside a hook dispatch.** Code that needs the handler of
+an entity without running a hook (contracts, capabilities, side hooks such as `afterCallout`, "is
+it customized?") goes through `NeoHandlerLookup`, never through `SFEntity.getJavaQualifier()`:
+
+| Need | Call |
+|---|---|
+| the handler, annotation first, qualifier fallback (MCP/discovery resolver) | `NeoHandlerLookup.forEntity(entity)` / `forEntityQuietly(entity)` |
+| the same, with the REST resolver kept as the fallback | `NeoHandlerLookup.forEntity(entity, NeoServletSupport::lookupHandler)` |
+| "is this entity customized?" without instantiating anything | `NeoHandlerLookup.hasCustomization(entity)` |
+| a report spec's handler / entity | `NeoReportCallability.resolveReportHandler(spec)` / `resolveReportEntity(spec)` |
+
+Hook dispatch itself keeps going through `NeoExtensionDispatcher`, which already resolves
+annotation first. Since ETP-5588 every reader that used to read the qualifier directly — the MCP
+read post-hook, `NeoFieldFilter`'s read-only exemption, the REST `afterCallout`, the action
+contracts in discover, `protectedCreateCalloutFields`, the action surface of tab-less entities and
+the report path — resolves through these, so an entity bound **only** by annotation behaves
+exactly as a qualifier-bound one on every surface.
+
+**Guardrails (CI, `.github/workflows/extension-guardrails.yml`).**
+
+- `make extension-parity` is a ratchet: the distinct `Java_Qualifier` count must **equal**
+  `EXTENSION_CEILING`. Migrating a handler lowers the ceiling in the same PR; the job also fails if
+  the count rises against the base branch. `make extension-parity HOOKS=1` lists, per bound pair,
+  the `NeoHandler` hooks its class overrides — the inventory to check before clearing a qualifier.
+- `scripts/check-extension-guardrails.py` fails on a new `@Named`-only `NeoHandler`, on a new direct
+  `getJavaQualifier()` read, and on a spec name in a string literal inside a generic service. The
+  existing debt is listed in `scripts/extension-guardrails-allowlist.json`, which may only shrink:
+  an entry that no longer matches the code fails the job until it is removed.
+
+**Conflicts do not fail the build.** Two annotated classes claiming the same `(spec, entity)`, or
+an annotated pair whose row still names a different class by qualifier, are logged at `ERROR` and
+listed by `make extension-parity`. They are the transient state of a migration, not an end state.
 
 > Note: `NeoExtension`'s own javadoc describes the annotation as "additive, never a migration",
 > which was accurate as the acceptance criterion of the step that introduced it. The direction
 > above supersedes it for **new** code; the additive runtime behaviour it describes is unchanged.
+
+**Migrated (ETP-5588).** Six `(spec, entity)` pairs bind by annotation **only**: their
+`ETGO_SF_ENTITY` rows carry no `JAVA_QUALIFIER`, their `decisions.json` no `javaQualifier`, and the
+classes no `@Named`.
+
+| `(spec, entity)` | class |
+|---|---|
+| `financial-account` / `account` | `FinancialAccountHandler` |
+| `sales-invoice` / `header` | `SalesInvoiceHeaderHandler` |
+| `purchase-invoice` / `header` | `PurchaseInvoiceHeaderHandler` |
+| `open-close-period-control` / `periodControl` | `PeriodOpenCloseHandler` |
+| `payment-in` / `finPayment` | `PaymentInReactivateHandler` |
+| `payment-out` / `header` | `PaymentOutReactivateHandler` |
+
+`ReactivatePaymentHandler` serves two entities, and the annotation is not repeatable, so its
+behaviour stays in that class and each entity is bound by a concrete (empty) subclass — the same
+shape `SalesOrderLineHandler`/`SalesQuotationLineHandler` use (§4.12.20). Nothing binds the base
+class itself.
+
+Still pending from the same audit: the `accountingDate` re-injection in
+`NeoCrudHandler.executeUpdate` is header-document logic (invoice, order and in/out headers) living
+in the generic update path; it moves to a `NeoHandler` hook answered by those NeoExtensions when
+they are migrated.
+
+Reviewed in the same audit and **kept generic on purpose**, because they are keyed on something
+other than a window — moving them into one NeoExtension would duplicate them across every window
+that shares the key:
+
+| Where | Keyed on |
+|---|---|
+| `NeoSelectorService` + `FinancialAccountPaymentMethodSelectorPolicy` | the selector's target entity (`FIN_Financial_Account`) |
+| `ReferenceOverrideSelectorPolicy` | the `AD_Reference` of the selector |
+| `NeoResponse` (`@ETPR_PeriodClosedForUnRemovePayment@` → `PeriodNotAvailable`) | the core message key |
+| `DocTypeResolver.resolveDocBaseType` | the table (`C_Invoice` → `ARI`/`API`, …) |
+| `NeoBackgroundDefaultsService` (SII key deferred to the trigger) | the presence of the SII properties; the factories pass the target spec as data |
+
+The email download link (`NeoDocumentDownloadService`) no longer lists windows: it binds the
+attachment to the table of the spec's header entity (its included entity on a level-0 tab), read
+from `ETGO_SF_SPEC`/`ETGO_SF_ENTITY`; the frontend reads the same table from the window contract's
+primary entity (`documentEmailSend.js#resolveAttachmentTable`).
 
 #### 5.3.b The legacy binding (`@Named` + `Java_Qualifier`)
 
@@ -6212,7 +6388,7 @@ A list response carries one page, so a total drawn next to it covers the loaded 
 - The helper names no entity; each customization owns its own select (payments: `PaymentListSummary`).
 - Currency folding is shared with the Financial Accounts sidebar through `NeoCurrencyTotals` (today's rate, a missing rate excludes the currency and is reported, each subtotal rounded `HALF_UP` to the org precision).
 
-**Payment list summary** (`payment-reactivate` handler, `payment-in` and `payment-out`). `response.summary`, a sibling of `data`, identical on every page and present even for an empty list; a failure is logged and the key omitted:
+**Payment list summary** (`ReactivatePaymentHandler`, bound as `PaymentInReactivateHandler` / `PaymentOutReactivateHandler`, `payment-in` and `payment-out`). `response.summary`, a sibling of `data`, identical on every page and present even for an empty list; a failure is logged and the key omitted:
 
 ```json
 { "orgCurrencyIso":"EUR", "rowCount":18,
@@ -9393,15 +9569,13 @@ annotated: it keeps 0 / 0 on `etendo_create`, as on `develop`.
 
 ##### Binding: the `Java_Qualifier` stays
 
-`ETGO_SF_ENTITY.Java_Qualifier` still reads `orderLineHandler` on both rows, deliberately. Several
-readers resolve the qualifier directly instead of going through `NeoExtensionDispatcher`: the REST
-CRUD gate (`NeoCrudHandler.dispatchCrudRequestInternal` only calls `handleWithHooks` when a qualifier
-exists), the MCP read post-hook (`McpHookExecutor.resolveEntityHandler`), `NeoFieldFilter`'s
-read-only rejection and `protectedCreateCalloutFields`. Clearing the qualifier would switch the
-customization off on REST single and drop the discount-line filter from MCP reads. With it kept,
-those readers resolve the parent class — whose behaviour the customizations inherit unchanged — and
-the dispatched surfaces resolve the annotation. The cost is one `(warn)` ERROR line per resolution
-from `NeoExtensionIndex.warnOnQualifierDisagreement`, and a conflict line in `make extension-parity`.
+`ETGO_SF_ENTITY.Java_Qualifier` still reads `orderLineHandler` on both rows. When this was written
+several readers resolved the qualifier directly instead of going through `NeoExtensionDispatcher`,
+so clearing it would have switched the customization off on some surfaces. Since ETP-5588 those
+readers resolve annotation first (§5.3.a), so the qualifier is only a fallback here: clearing it is
+the next step of the migration, not a risk. Until then the cost is one `(warn)` ERROR line per
+resolution from `NeoExtensionIndex.warnOnQualifierDisagreement`, and a conflict line in
+`make extension-parity`.
 
 ##### Scope
 
