@@ -111,6 +111,18 @@ public final class NeoSelectorPolicy {
   }
 
   /**
+   * The {@code etendo_schema} field name a caller should see for a DB column, when a handler
+   * downstream already publishes it under a different name than the raw DAL property (ETP-5806
+   * naming unification — see {@code AddressVirtualSelectorPolicy#PUBLISHED_NAME_OVERRIDES}).
+   *
+   * @param dbColumnName AD column DB name (any case)
+   * @return the published name override, or {@code null} when the column has none
+   */
+  public static String publishedNameOverride(String dbColumnName) {
+    return AddressVirtualSelectorPolicy.publishedNameOverride(dbColumnName);
+  }
+
+  /**
    * Enrich selector results through the registered enrichment policies.
    *
    * @param response selector response to enrich

@@ -22,6 +22,19 @@ import org.openbravo.model.common.geography.Location;
 
 /**
  * Static helpers for address formatting used in printable documents.
+ *
+ * <p>ETP-5806: the structured-address columns added to {@code C_Location} by
+ * {@code org.openbravo.sepa.iso20022} ({@code EM_OBSEPA_StrtNm}, {@code EM_OBSEPA_BldgNb},
+ * {@code EM_OBSEPA_BldgNm}) are read/written in {@code ContactsLocationAddressHandler} and
+ * {@code WarehouseLocationHandler} through the typed DAL getters/setters
+ * ({@code Location.getOBSEPAStreetName()} and friends), not a generic column-name accessor:
+ * {@code com.etendoerp.go} depends on {@code com.etendoerp.localization.spain.extensions}, whose
+ * {@code AD_MODULE_DEPENDENCY} brings in {@code org.openbravo.sepa.iso20022} transitively, so that
+ * module — and its generated {@code Location.java} accessors — is guaranteed present at both
+ * compile and runtime wherever this module is installed. (A generic-accessor approach, by
+ * {@code ModelProvider}/column-name lookup, is the right call elsewhere in this handler pair —
+ * e.g. {@code AddressVirtualSelectorPolicy}'s virtual-column exposure — where the field being
+ * resolved is not pinned to one specific, always-present dependency.)
  */
 public final class NeoAddressHelper {
 
