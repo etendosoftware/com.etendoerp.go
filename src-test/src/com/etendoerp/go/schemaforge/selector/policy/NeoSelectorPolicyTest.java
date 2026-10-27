@@ -73,4 +73,17 @@ public class NeoSelectorPolicyTest {
 
     assertNull(NeoSelectorPolicy.resolveContextParamFilter("SomeUnrelatedEntity", ctx, "e"));
   }
+
+  /**
+   * ETP-5806 — {@code publishedNameOverride} is a thin delegate to
+   * {@link AddressVirtualSelectorPolicy#publishedNameOverride}, so {@code etendo_schema}'s naming
+   * unification is reachable through this class too, under whichever name a caller spells the
+   * column.
+   */
+  @Test
+  public void publishedNameOverrideDelegatesToAddressVirtualSelectorPolicy() {
+    org.junit.Assert.assertEquals("streetName",
+        NeoSelectorPolicy.publishedNameOverride("EM_OBSEPA_StrtNm"));
+    assertNull(NeoSelectorPolicy.publishedNameOverride("C_Region_ID"));
+  }
 }

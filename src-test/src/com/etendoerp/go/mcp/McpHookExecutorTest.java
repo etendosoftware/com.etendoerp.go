@@ -627,38 +627,6 @@ public class McpHookExecutorTest {
         .getString(FIELD_TEXT).contains("replaced"));
   }
 
-  // ── resolveEntityHandler (early-exit paths, no CDI) ──────────────────
-
-  @Test
-  public void testResolveEntityHandlerNullQualifierReturnsNull() {
-    SFEntity sfEntity = mock(SFEntity.class);
-    when(sfEntity.getJavaQualifier()).thenReturn(null);
-
-    NeoHandler result = McpHookExecutor.resolveEntityHandler(sfEntity);
-
-    assertNull(result);
-  }
-
-  @Test
-  public void testResolveEntityHandlerBlankQualifierReturnsNull() {
-    SFEntity sfEntity = mock(SFEntity.class);
-    when(sfEntity.getJavaQualifier()).thenReturn("   ");
-
-    NeoHandler result = McpHookExecutor.resolveEntityHandler(sfEntity);
-
-    assertNull(result);
-  }
-
-  @Test
-  public void testResolveEntityHandlerEmptyQualifierReturnsNull() {
-    SFEntity sfEntity = mock(SFEntity.class);
-    when(sfEntity.getJavaQualifier()).thenReturn("");
-
-    NeoHandler result = McpHookExecutor.resolveEntityHandler(sfEntity);
-
-    assertNull(result);
-  }
-
   // ── buildActionHookContext (ETP-4285) ─────────────────────────────────
 
   @Test

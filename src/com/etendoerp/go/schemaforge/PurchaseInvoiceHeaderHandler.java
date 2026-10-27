@@ -24,7 +24,6 @@ import java.util.Collections;
 import java.util.List;
 
 import javax.inject.Inject;
-import javax.inject.Named;
 
 import org.openbravo.model.common.invoice.Invoice;
 
@@ -79,8 +78,13 @@ import org.openbravo.base.structure.BaseOBObject;
  *   <li>legacy fallback — {@code APC} (Credit Note) or {@code API} + isReturn (Return Invoice) → RECTIFICATIVA</li>
  *   <li>otherwise → FAC (Standard Invoice)</li>
  * </ul>
+ *
+ * <p><b>Binding.</b> {@link NeoExtension} only (ETP-5588): the ETGO_SF_ENTITY row carries no
+ * {@code Java_Qualifier} and the class no {@code @Named}. Every surface — REST single and batch,
+ * MCP, callout, actions, field filter — reaches it through the annotation. See
+ * {@code neo-headless.md} §5.3.a.
  */
-@Named("purchaseInvoiceHeaderHandler")
+@NeoExtension(spec = "purchase-invoice", entity = "header")
 public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(PurchaseInvoiceHeaderHandler.class);
