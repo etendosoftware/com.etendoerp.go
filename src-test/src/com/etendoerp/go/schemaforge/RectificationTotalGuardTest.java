@@ -22,10 +22,8 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
-import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -35,7 +33,6 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.Arrays;
-import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -45,11 +42,7 @@ import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.dal.service.OBDal;
-import org.openbravo.financial.FinancialUtils;
-import org.openbravo.model.ad.system.Client;
-import org.openbravo.model.common.currency.ConversionRate;
 import org.openbravo.model.common.currency.Currency;
-import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.invoice.Invoice;
 
 /**
@@ -57,10 +50,8 @@ import org.openbravo.model.common.invoice.Invoice;
  * invoice is refused when it would push the total of every COMPLETED rectificativa against the
  * same origin past the origin's own total. Every other completion keeps running unchanged.
  *
- * <p>Also covers the multi-currency correction (QA finding): a rectificativa booked in a
- * different currency than its origin is converted to the origin's currency before summing, and a
- * rectificativa whose amount cannot be converted (no rate configured) is excluded from the sum
- * rather than blocking the completion.
+ * <p>Same-currency assumption only (product decision): a rectificativa in a different currency
+ * than its origin is out of scope for this guard — see the production class javadoc.
  *
  * @covers com.etendoerp.go.schemaforge.RectificationTotalGuard
  */
@@ -69,7 +60,6 @@ public class RectificationTotalGuardTest {
   private static final String INVOICE_ID = "RECT-5745";
   private static final String ORIGIN_ID = "ORIG-5745";
   private static final String EUR = "EUR-CURR-ID";
-  private static final String USD = "USD-CURR-ID";
 
   private static NeoContext completeAction(String recordId) throws Exception {
     JSONObject body = new JSONObject().put("documentAction", "CO");
@@ -88,14 +78,16 @@ public class RectificationTotalGuardTest {
     return c;
   }
 
-  /** An {@link Invoice} mock carrying everything {@code RectificationTotalGuard} reads off it. */
+  /**
+   * An {@link Invoice} mock carrying everything {@code RectificationTotalGuard} reads off it.
+   * {@code currency} is kept as a fixture parameter (every test here uses the same {@link #EUR}
+   * currency on both sides) purely to document that these are same-currency scenarios — the guard
+   * itself no longer reads {@code getCurrency()} after the multi-currency revert.
+   */
   private static Invoice invoice(BigDecimal grandTotal, Currency currency) {
     Invoice inv = mock(Invoice.class);
     when(inv.getGrandTotalAmount()).thenReturn(grandTotal);
     when(inv.getCurrency()).thenReturn(currency);
-    when(inv.getInvoiceDate()).thenReturn(new Date());
-    when(inv.getOrganization()).thenReturn(mock(Organization.class));
-    when(inv.getClient()).thenReturn(mock(Client.class));
     return inv;
   }
 
@@ -367,98 +359,6 @@ public class RectificationTotalGuardTest {
     Connection conn = connectionAnswering(ORIGIN_ID, List.of(INVOICE_ID));
 
     assertNotNull(checkWith(completeAction(INVOICE_ID), conn, origin, List.of(rect), List.of(INVOICE_ID)));
-  }
-
-  // ---------------------------------------------------------------------------
-  // multi-currency (QA finding) — convert every rectificativa to the origin's currency
-  // ---------------------------------------------------------------------------
-
-  @Test
-  public void aRectificationInADifferentCurrencyIsConvertedBeforeComparison() throws Exception {
-    // Origin: 100 EUR. Rectification: 120 USD, rate USD->EUR = 0.90 -> 108 EUR. 108 <= 100? No:
-    // this IS over the origin (108 > 100), proving the comparison used the CONVERTED amount, not
-    // the raw 120 (which would also exceed, so the real proof is the next test using a rate that
-    // flips the verdict).
-    Currency eur = currency(EUR);
-    Currency usd = currency(USD);
-    Invoice origin = invoice(new BigDecimal("100.00"), eur);
-    Invoice rect = invoice(new BigDecimal("120.00"), usd);
-    Connection conn = connectionAnswering(ORIGIN_ID, List.of(INVOICE_ID));
-
-    ConversionRate rate = mock(ConversionRate.class);
-    when(rate.getMultipleRateBy()).thenReturn(new BigDecimal("0.90"));
-    try (MockedStatic<FinancialUtils> fx = Mockito.mockStatic(FinancialUtils.class)) {
-      fx.when(() -> FinancialUtils.getConversionRate(any(Date.class), eq(usd), eq(eur),
-          any(Organization.class), any(Client.class))).thenReturn(rate);
-
-      NeoResponse response = checkWith(completeAction(INVOICE_ID), conn, origin,
-          List.of(rect), List.of(INVOICE_ID));
-
-      assertNotNull("108 EUR exceeds the 100 EUR origin — expected a refusal", response);
-      JSONObject messageParams = response.getBody().getJSONObject("messageParams");
-      // 120 * 0.90 = 108.00, not the raw 120.00 — proves the converted amount was used.
-      assertEquals(0, new BigDecimal(messageParams.getString("rectifiedTotal"))
-          .compareTo(new BigDecimal("108.00")));
-    }
-  }
-
-  /**
-   * Same 120 USD rectificativa, but with a rate that converts it to LESS than the origin's own
-   * total — the repro the ticket asked for: a naive raw-number comparison (120 vs 100) would
-   * refuse this completion; the correct, converted comparison (90 vs 100) must allow it.
-   */
-  @Test
-  public void aConvertedRectificationWithinTheOriginalIsNotBlocked() throws Exception {
-    Currency eur = currency(EUR);
-    Currency usd = currency(USD);
-    Invoice origin = invoice(new BigDecimal("100.00"), eur);
-    Invoice rect = invoice(new BigDecimal("120.00"), usd);
-    Connection conn = connectionAnswering(ORIGIN_ID, List.of(INVOICE_ID));
-
-    ConversionRate rate = mock(ConversionRate.class);
-    when(rate.getMultipleRateBy()).thenReturn(new BigDecimal("0.75"));
-    try (MockedStatic<FinancialUtils> fx = Mockito.mockStatic(FinancialUtils.class)) {
-      fx.when(() -> FinancialUtils.getConversionRate(any(Date.class), eq(usd), eq(eur),
-          any(Organization.class), any(Client.class))).thenReturn(rate);
-
-      // 120 * 0.75 = 90.00 EUR, under the 100 EUR origin: allowed.
-      assertNull(checkWith(completeAction(INVOICE_ID), conn, origin, List.of(rect), List.of(INVOICE_ID)));
-    }
-  }
-
-  /**
-   * No conversion rate configured for the pair/date: the rectificativa is SKIPPED from the sum
-   * (fails open for that one row) rather than blocking the completion — mirrors this guard's
-   * fail-open stance on every other read error.
-   */
-  @Test
-  public void aRectificationWithNoConversionRateIsSkippedNotBlocking() throws Exception {
-    Currency eur = currency(EUR);
-    Currency usd = currency(USD);
-    Invoice origin = invoice(new BigDecimal("100.00"), eur);
-    Invoice rect = invoice(new BigDecimal("1000000.00"), usd); // would clearly exceed if counted
-    Connection conn = connectionAnswering(ORIGIN_ID, List.of(INVOICE_ID));
-
-    try (MockedStatic<FinancialUtils> fx = Mockito.mockStatic(FinancialUtils.class)) {
-      fx.when(() -> FinancialUtils.getConversionRate(any(Date.class), eq(usd), eq(eur),
-          any(Organization.class), any(Client.class))).thenReturn(null);
-
-      assertNull("no rate for USD->EUR: the rectification must be excluded, not block completion",
-          checkWith(completeAction(INVOICE_ID), conn, origin, List.of(rect), List.of(INVOICE_ID)));
-    }
-  }
-
-  @Test
-  public void sameCurrencyNeverConsultsFinancialUtils() throws Exception {
-    Currency eur = currency(EUR);
-    Invoice origin = invoice(new BigDecimal("100.00"), eur);
-    Invoice rect = invoice(new BigDecimal("50.00"), eur);
-    Connection conn = connectionAnswering(ORIGIN_ID, List.of(INVOICE_ID));
-
-    try (MockedStatic<FinancialUtils> fx = Mockito.mockStatic(FinancialUtils.class)) {
-      assertNull(checkWith(completeAction(INVOICE_ID), conn, origin, List.of(rect), List.of(INVOICE_ID)));
-      fx.verifyNoInteractions();
-    }
   }
 
   // ---------------------------------------------------------------------------

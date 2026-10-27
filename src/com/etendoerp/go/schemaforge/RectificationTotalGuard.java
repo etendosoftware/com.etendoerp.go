@@ -31,9 +31,6 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.service.OBDal;
-import org.openbravo.financial.FinancialUtils;
-import org.openbravo.model.common.currency.ConversionRate;
-import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.invoice.Invoice;
 
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
@@ -57,23 +54,14 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * <p><b>Fails OPEN on a read error</b>, mirroring {@link InvoiceReactivationGuard}: this guard's
  * own failure to read the invoice totals must never block a legitimate completion.
  *
- * <p><b>Multi-currency (QA finding, ETP-5745 CP-9 follow-up).</b> {@code RectifiableInvoiceUtils}'
- * "eligible source invoices" query filters by organization and business partner, never by
- * currency, and nothing else constrains a rectificativa to its origin's currency — so in a
- * multi-currency org a rectificativa can legitimately be booked in a different currency than its
- * origin. Every rectificativa total is converted to the ORIGIN's currency (the unit the comparison
- * is actually made in) before summing, reusing the exact general-rate lookup pattern
- * {@code PaymentCurrencyConverter#generalRate} already established for this kind of problem:
- * {@link FinancialUtils#getConversionRate}, as of the rectificativa's OWN invoice date (not the
- * origin's — each rectificativa converts at the rate in effect when IT was issued), scoped to its
- * own org/client. A rectificativa's document-level rate ({@code C_Conversion_Rate_Doc}) is
- * deliberately NOT consulted here: that table records an invoice's rate to a PAYMENT/account
- * currency, not to another invoice's currency, so it has no natural meaning for this comparison.
- * Same currency → no lookup, multiply by 1. <b>No rate configured for the pair/date → fails OPEN
- * for that one rectificativa</b> (logged, excluded from the sum, the rest of the check proceeds
- * normally): consistent with every other failure mode in this guard, an unconvertible amount must
- * not block a legitimate completion — the alternative (hard-blocking on a missing FX rate) would
- * make a configuration gap in Application Dictionary degrade into a frozen AP/AR process.
+ * <p><b>Same-currency assumption (product decision, ETP-5745 CP-9 follow-up).</b> A
+ * multi-currency QA finding briefly had this guard converting each rectificativa's total to its
+ * origin's currency before summing ({@code FinancialUtils.getConversionRate}). Reverted: the
+ * product owner confirmed a rectificativa is never meant to carry a different currency than its
+ * origin ("Tú tienes una original y haces la rectificativa sobre la misma moneda") — it is a
+ * functional misuse the UI should prevent at the source, not a case this guard needs to reconcile
+ * numerically. The comparison is therefore a plain same-currency total comparison again; a
+ * rectificativa in a different currency than its origin is out of this guard's scope.
  *
  * <p><b>Placement.</b> Invoice-specific, not shared NEO code: wired from
  * {@link AbstractInvoiceHeaderHandler#completeInvoiceIfNeeded}, immediately before
@@ -118,7 +106,7 @@ final class RectificationTotalGuard {
         if (origin == null || originTotal == null) {
           continue;
         }
-        BigDecimal rectifiedTotal = sumCompletedRectifications(originId, invoiceId, origin.getCurrency());
+        BigDecimal rectifiedTotal = sumCompletedRectifications(originId, invoiceId);
         if (rectifiedTotal.compareTo(originTotal) > 0) {
           return reject(originId, originTotal, rectifiedTotal);
         }
@@ -190,19 +178,18 @@ final class RectificationTotalGuard {
 
   /**
    * The sum of {@code ABS(GrandTotal)} of every rectificativa linked to {@code originId} that IS
-   * ALREADY completed, OR is {@code excludeOrIncludeInvoiceId} itself — each one converted to
-   * {@code originCurrency} first when its own currency differs (see the class javadoc's
-   * "Multi-currency" section). A rectificativa whose amount cannot be converted (no rate for its
-   * currency pair/date) is skipped — excluded from the sum, not treated as a blocking failure —
-   * consistent with this guard's fail-open stance everywhere else.
+   * ALREADY completed, OR is {@code excludeOrIncludeInvoiceId} itself (the one about to become
+   * completed by this very request). Same-currency comparison only — see the class javadoc's
+   * "Same-currency assumption" section for why no conversion is attempted here.
    *
-   * <p>One {@code OBDal.get} per rectification id (N+1 vs. the single aggregate SQL this replaced)
-   * — needed now that currency/date/org/client must be read per row for conversion. Accepted: this
-   * runs on document completion, bounded by the small set of rectificativas against one origin,
-   * never a list/report path.
+   * <p>Reads each rectificativa via {@code OBDal.get} rather than a single aggregate SQL: one
+   * origin can be rectified by more than one rectificativa across more than one of ITS origins
+   * (the multi-origin case {@link #checkCompletion} loops over), and the per-row entity read is
+   * what lets that loop and this method share the same invoice lookups cleanly. Bounded by the
+   * small set of rectificativas against one origin on a document-completion path, never a
+   * list/report path.
    */
-  private static BigDecimal sumCompletedRectifications(String originId, String excludeOrIncludeInvoiceId,
-      Currency originCurrency) {
+  private static BigDecimal sumCompletedRectifications(String originId, String excludeOrIncludeInvoiceId) {
     BigDecimal sum = BigDecimal.ZERO;
     for (String id : completedRectificationIds(originId, excludeOrIncludeInvoiceId)) {
       Invoice rectification = OBDal.getInstance().get(Invoice.class, id);
@@ -210,54 +197,9 @@ final class RectificationTotalGuard {
       if (abs == null) {
         continue;
       }
-      BigDecimal converted = convertToCurrency(abs, rectification, originCurrency);
-      if (converted == null) {
-        log.warn("Skipping rectification {} from the ETP-5745 over-rectification sum against "
-            + "origin {}: no conversion rate {} -> {} for its invoice date", id, originId,
-            rectification.getCurrency() != null ? rectification.getCurrency().getISOCode() : null,
-            originCurrency != null ? originCurrency.getISOCode() : null);
-        continue;
-      }
-      sum = sum.add(converted);
+      sum = sum.add(abs);
     }
     return sum;
-  }
-
-  /**
-   * {@code amount} (already {@code rectification}'s own absolute total) expressed in
-   * {@code targetCurrency}, or {@code null} when it cannot be converted — missing currency/date on
-   * either side, or no {@code C_Conversion_Rate} configured for the pair as of
-   * {@code rectification}'s own invoice date. Same currency on both sides short-circuits with no
-   * lookup. Mirrors the general-rate half of {@code PaymentCurrencyConverter#resolveInvoiceRate}
-   * (document-level {@code ConversionRateDoc} is deliberately NOT consulted — see the class
-   * javadoc).
-   */
-  private static BigDecimal convertToCurrency(BigDecimal amount, Invoice rectification,
-      Currency targetCurrency) {
-    if (rectification == null || targetCurrency == null) {
-      return null;
-    }
-    Currency sourceCurrency = rectification.getCurrency();
-    if (sourceCurrency == null) {
-      return null;
-    }
-    if (sourceCurrency.getId().equals(targetCurrency.getId())) {
-      return amount;
-    }
-    if (rectification.getInvoiceDate() == null || rectification.getOrganization() == null
-        || rectification.getClient() == null) {
-      return null;
-    }
-    ConversionRate rate = FinancialUtils.getConversionRate(rectification.getInvoiceDate(),
-        sourceCurrency, targetCurrency, rectification.getOrganization(), rectification.getClient());
-    if (rate == null) {
-      return null;
-    }
-    BigDecimal multiplyRate = rate.getMultipleRateBy();
-    if (multiplyRate == null || multiplyRate.signum() == 0) {
-      return null;
-    }
-    return amount.multiply(multiplyRate);
   }
 
   /**
