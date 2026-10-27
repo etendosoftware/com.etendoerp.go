@@ -138,7 +138,8 @@ public class ContactHandler extends AbstractPersonNameHandler {
       return null;
     }
     // ETP-5351 (Vigia H1): a contact is an AD_User row; a support session may not create one nor
-    // write email/username/defaultRole on any (that pairs it with a GO account). Other fields stay.
+    // change access fields on any (email, username, roles, password, active/locked/owner flags).
+    // Other fields stay.
     JSONObject body = ctx.getRequestBody();
     if (SupportAccessGuard.isActingSupportUser(ctx.getObContext())
         && (METHOD_POST.equals(method) || SupportAccessGuard.changesAccessFields(body, ctx.getRecordId()))) {

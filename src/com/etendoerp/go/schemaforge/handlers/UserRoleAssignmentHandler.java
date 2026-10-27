@@ -313,7 +313,8 @@ public class UserRoleAssignmentHandler implements NeoHandler {
 
   /**
    * ETP-5351 (Vigia H1) — a support session may not create a user, nor write the fields that
-   * grant or redirect access to the tenant ({@code email}, {@code username}, {@code defaultRole})
+   * grant or redirect access to the tenant ({@code email}, {@code username}, roles, a new {@code password},
+   * {@code active}/{@code locked}/owner flags; see {@link SupportAccessGuard#changesAccessFields})
    * on any user, so it cannot leave persistent access behind. Everything else it edits is unchanged.
    *
    * @param context the request

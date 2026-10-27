@@ -96,6 +96,14 @@ class SupportUserManagementLockoutTest {
     when(stored.getEmail()).thenReturn("Op@X.com");
     when(stored.getUsername()).thenReturn("op");
     when(stored.getDefaultRole()).thenReturn(defaultRole);
+    Role wsRole = mock(Role.class);
+    when(wsRole.getId()).thenReturn("WSR1");
+    when(stored.get("active")).thenReturn(true);
+    when(stored.get("locked")).thenReturn(false);
+    when(stored.get("isPasswordExpired")).thenReturn(false);
+    when(stored.get("eTGOIsOwner")).thenReturn(false);
+    when(stored.get("grantPortalAccess")).thenReturn(false);
+    when(stored.get("smfswsDefaultWsRole")).thenReturn(wsRole);
     OBDal obDal = mock(OBDal.class);
     when(obDal.get(User.class, TARGET)).thenReturn(stored);
     try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
@@ -119,6 +127,24 @@ class SupportUserManagementLockoutTest {
         assertTrue(SupportAccessGuard.changesAccessFields(new JSONObject().put("defaultRole", "R2"), TARGET));
         assertTrue(SupportAccessGuard.changesAccessFields(new JSONObject().put(EMAIL, ""), TARGET));
         assertTrue(SupportAccessGuard.changesAccessFields(new JSONObject().put(EMAIL, "a@b.c"), "UNKNOWN"));
+        // password: any non-blank value is a change; blank/null/absent is not
+        assertTrue(SupportAccessGuard.changesAccessFields(new JSONObject().put("password", "x"), TARGET));
+        assertFalse(SupportAccessGuard.changesAccessFields(new JSONObject().put("password", ""), TARGET));
+        assertFalse(SupportAccessGuard.changesAccessFields(new JSONObject().put("password", "  "), TARGET));
+        assertFalse(SupportAccessGuard.changesAccessFields(new JSONObject().put("password", JSONObject.NULL), TARGET));
+        // flags: stored active=true, locked=false, owner=false, ws role WSR1
+        assertFalse(SupportAccessGuard.changesAccessFields(new JSONObject().put("active", true), TARGET));
+        assertFalse(SupportAccessGuard.changesAccessFields(new JSONObject().put("active", "Y"), TARGET));
+        assertFalse(SupportAccessGuard.changesAccessFields(new JSONObject().put("locked", "false"), TARGET));
+        assertFalse(SupportAccessGuard.changesAccessFields(new JSONObject().put("eTGOIsOwner", "N"), TARGET));
+        assertFalse(SupportAccessGuard.changesAccessFields(
+            new JSONObject().put("smfswsDefaultWsRole", new JSONObject().put("id", "WSR1")), TARGET));
+        assertTrue(SupportAccessGuard.changesAccessFields(new JSONObject().put("active", false), TARGET));
+        assertTrue(SupportAccessGuard.changesAccessFields(new JSONObject().put("locked", "Y"), TARGET));
+        assertTrue(SupportAccessGuard.changesAccessFields(new JSONObject().put("isPasswordExpired", true), TARGET));
+        assertTrue(SupportAccessGuard.changesAccessFields(new JSONObject().put("eTGOIsOwner", true), TARGET));
+        assertTrue(SupportAccessGuard.changesAccessFields(new JSONObject().put("grantPortalAccess", "Y"), TARGET));
+        assertTrue(SupportAccessGuard.changesAccessFields(new JSONObject().put("smfswsDefaultWsRole", "WSR2"), TARGET));
       } catch (Exception e) {
         throw new IllegalStateException(e);
       }
@@ -135,6 +161,7 @@ class SupportUserManagementLockoutTest {
         assertEquals(403, handler.handle(request("PATCH", new JSONObject().put(EMAIL, "o@y.com"), support)).getHttpStatus());
         assertEquals(403, handler.handle(request("PUT", new JSONObject().put("username", "u"), support)).getHttpStatus());
         assertEquals(403, handler.handle(request("PATCH", new JSONObject().put("defaultRole", "R2"), support)).getHttpStatus());
+        assertEquals(403, handler.handle(request("PATCH", new JSONObject().put("password", "known"), support)).getHttpStatus());
       } catch (Exception e) {
         throw new IllegalStateException(e);
       }
@@ -157,6 +184,8 @@ class SupportUserManagementLockoutTest {
         OBContext support = context(SUPPORT_USER);
         assertEquals(403, handler.handle(request("POST", new JSONObject().put("name", "n"), support)).getHttpStatus());
         assertEquals(403, handler.handle(request("PATCH", new JSONObject().put(EMAIL, "o@x.com"), support)).getHttpStatus());
+        assertEquals(403, handler.handle(request("PATCH", new JSONObject().put("password", "known"), support)).getHttpStatus());
+        assertEquals(403, handler.handle(request("PATCH", new JSONObject().put("locked", true), support)).getHttpStatus());
       } catch (Exception e) {
         throw new IllegalStateException(e);
       }

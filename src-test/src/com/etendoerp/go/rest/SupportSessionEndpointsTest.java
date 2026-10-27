@@ -24,6 +24,7 @@ import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
@@ -59,6 +60,8 @@ import org.openbravo.model.ad.system.Client;
 import com.auth0.jwt.interfaces.Claim;
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.etendoerp.go.payment.CheckoutRequestStore;
+import com.etendoerp.go.payment.EnvironmentPlanCache;
+import com.etendoerp.go.payment.SubscriptionService;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.session.GoSessionRecord;
 import com.etendoerp.go.session.GoSessionRoleReconciler;
@@ -103,6 +106,7 @@ public class SupportSessionEndpointsTest {
     servlet.supportAccessService = supportAccessService;
     servlet.supportHandoffService = supportHandoffService;
     servlet.checkoutRequestStore = mock(CheckoutRequestStore.class);
+    servlet.subscriptionService = mock(SubscriptionService.class);
   }
 
   private static GoSessionRecord supportSession() {
@@ -392,7 +396,8 @@ public class SupportSessionEndpointsTest {
           SupportAccessGuard.SUPPORT_ACCOUNT_ID)).thenReturn(account);
       dal.when(() -> EtendoGoJwtDalHelper.findNonStarOrganizations(CLIENT))
           .thenReturn(Collections.emptyList());
-      dal.when(() -> EtendoGoJwtDalHelper.buildEnvironmentJson(client, null, user))
+      dal.when(() -> EtendoGoJwtDalHelper.buildEnvironmentJson(eq(client), isNull(), eq(user),
+          any(EnvironmentPlanCache.class)))
           .thenReturn(new JSONObject().put("clientId", CLIENT));
       servlet.doGet(request("GET", "/environments", null), resp.response);
       dal.verify(() -> EtendoGoJwtDalHelper.findEnvironmentUsersByAccountEmail(anyString()),

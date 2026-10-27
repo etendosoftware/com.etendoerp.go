@@ -24,6 +24,7 @@ import java.util.Set;
 
 import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.access.Role;
@@ -171,32 +172,85 @@ public final class SupportAccessGuard {
         && isSupportUser(callerUserId, callerRole.getClient().getId());
   }
 
+  /** Access-bearing flags compared as Y/N against the stored user. */
+  private static final String[] ACCESS_FLAGS = { "active", "locked", "isPasswordExpired",
+      "eTGOIsOwner", "grantPortalAccess" };
+  private static final String FIELD_PASSWORD = "password";
+  private static final String FIELD_WS_ROLE = "smfswsDefaultWsRole";
+
   /**
-   * Whether a PUT/PATCH body CHANGES a field that grants or redirects access to the tenant:
-   * {@code email}, {@code username} or {@code defaultRole}, compared with the stored user. A field
-   * that is absent or equal (trimmed; email and username ignoring case; null equals blank) is not
-   * a change, so a form that resends the whole record keeps working. Fails closed: an unknown
-   * user counts as a change.
+   * Whether a PUT/PATCH body CHANGES a field that grants, redirects or keeps access to the tenant:
+   * <ul>
+   *   <li>{@code password}: any non-blank value is a change (the stored value is a hash, so it
+   *       cannot be compared); blank, null or absent is not, since forms resend an empty field;</li>
+   *   <li>{@code email}, {@code username} (ignoring case), {@code defaultRole} and
+   *       {@code smfswsDefaultWsRole} (plain id or {@code {id}}), and the flags {@code active},
+   *       {@code locked}, {@code isPasswordExpired}, {@code eTGOIsOwner},
+   *       {@code grantPortalAccess} (Y/N/true/false): a change only when it differs from the
+   *       stored user (trimmed; null equals blank), so a form that resends the whole record keeps
+   *       working.</li>
+   * </ul>
+   * Fails closed: an unknown user counts as a change.
    *
    * @param body   a request body, may be null
    * @param userId the {@code AD_User_ID} being written, may be null
-   * @return {@code true} when any access-bearing field differs from the stored value
+   * @return {@code true} when any access-bearing field is changed
    */
   public static boolean changesAccessFields(JSONObject body, String userId) {
-    if (body == null || !(body.has("email") || body.has("username") || body.has("defaultRole"))) {
+    if (body == null) {
+      return false;
+    }
+    if (body.has(FIELD_PASSWORD) && StringUtils.isNotBlank(body.optString(FIELD_PASSWORD, null))
+        && !body.isNull(FIELD_PASSWORD)) {
+      return true;
+    }
+    boolean any = body.has("email") || body.has("username") || body.has("defaultRole")
+        || body.has(FIELD_WS_ROLE);
+    for (String flag : ACCESS_FLAGS) {
+      any |= body.has(flag);
+    }
+    if (!any) {
       return false;
     }
     OBContext.setAdminMode(true);
     try {
       User user = userId == null ? null : OBDal.getInstance().get(User.class, userId);
-      return user == null
-          || differs(body, "email", user.getEmail(), true)
+      if (user == null) {
+        return true;
+      }
+      for (String flag : ACCESS_FLAGS) {
+        Object stored = user.get(flag);
+        if (body.has(flag) && !normalizeBoolean(incoming(body, flag))
+            .equals(normalizeBoolean(stored == null ? null : stored.toString()))) {
+          return true;
+        }
+      }
+      return differs(body, "email", user.getEmail(), true)
           || differs(body, "username", user.getUsername(), true)
           || differs(body, "defaultRole",
-              user.getDefaultRole() == null ? null : user.getDefaultRole().getId(), false);
+              user.getDefaultRole() == null ? null : user.getDefaultRole().getId(), false)
+          || differs(body, FIELD_WS_ROLE, idOf(user.get(FIELD_WS_ROLE)), false);
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  private static String idOf(Object entity) {
+    return entity instanceof BaseOBObject ? (String) ((BaseOBObject) entity).getId() : null;
+  }
+
+  private static String normalizeBoolean(String value) {
+    String v = StringUtils.trimToEmpty(value);
+    if ("true".equalsIgnoreCase(v) || "Y".equalsIgnoreCase(v)) {
+      return "Y";
+    }
+    return "false".equalsIgnoreCase(v) || "N".equalsIgnoreCase(v) ? "N" : v;
+  }
+
+  private static String incoming(JSONObject body, String field) {
+    Object raw = body.opt(field);
+    return raw instanceof JSONObject ? ((JSONObject) raw).optString("id", null)
+        : (raw == null || JSONObject.NULL.equals(raw) ? null : raw.toString());
   }
 
   private static boolean differs(JSONObject body, String field, String current,
@@ -204,10 +258,7 @@ public final class SupportAccessGuard {
     if (!body.has(field)) {
       return false;
     }
-    Object raw = body.opt(field);
-    String incoming = raw instanceof JSONObject ? ((JSONObject) raw).optString("id", null)
-        : (raw == null || JSONObject.NULL.equals(raw) ? null : raw.toString());
-    String a = StringUtils.trimToEmpty(incoming);
+    String a = StringUtils.trimToEmpty(incoming(body, field));
     String b = StringUtils.trimToEmpty(current);
     return ignoreCase ? !a.equalsIgnoreCase(b) : !a.equals(b);
   }
