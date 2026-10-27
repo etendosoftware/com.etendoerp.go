@@ -38,6 +38,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import org.apache.logging.log4j.Level;
 import org.hibernate.Session;
 import org.hibernate.query.NativeQuery;
 import org.junit.After;
@@ -61,6 +62,8 @@ import org.openbravo.model.financialmgmt.accounting.coa.ElementValue;
 import org.openbravo.model.financialmgmt.gl.GLItem;
 import org.openbravo.model.financialmgmt.gl.GLItemAccounts;
 
+import com.etendoerp.go.payment.TestLogCapture;
+
 /**
  * Unit tests for {@link OnboardingAccountingWiringService} (Gap A1/A2).
  *
@@ -73,6 +76,8 @@ import org.openbravo.model.financialmgmt.gl.GLItemAccounts;
  * <p>Not covered here: the private XML-parsing / tree-node methods ({@code loadSourceTreeNodes},
  * {@code resolveParentTenantId}, {@code parseSeqno}) — they depend on bundled classpath sourcedata
  * XML and cannot be exercised by a pure unit test.
+ *
+ * @covers com.etendoerp.go.onboarding.OnboardingAccountingWiringService
  */
 public class OnboardingAccountingWiringServiceTest {
 
@@ -309,6 +314,12 @@ public class OnboardingAccountingWiringServiceTest {
         service.overrideAcreedorGroupAccountsCount);
     assertEquals("Invoice Price Variance default backfill must run once", 1,
         service.backfillInvoicePriceVarianceDefaultCount);
+    // ETP-5902: the Spanish tax-account override runs once, right after the c_tax_acct insert
+    // whose default 477/472 rows it overrides.
+    assertEquals(1, service.overrideSpanishTaxAccountsAfterInserts.size());
+    int insertsBefore = service.overrideSpanishTaxAccountsAfterInserts.get(0);
+    assertTrue("override must run after the tax-account insert",
+        service.acctInserts.get(insertsBefore - 1).sql.contains("INSERT INTO c_tax_acct"));
   }
 
   /**
@@ -790,6 +801,74 @@ public class OnboardingAccountingWiringServiceTest {
     verify(query).setParameter("notInvoicedReceivablesAcctValue", "41090000");
     verify(query).setParameter("prepaymentAcctValue", "41700000");
     verify(query).executeUpdate();
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // overrideSpanishTaxAccounts() — ETP-5902. Mocks the DB, so this tests the wiring, not the rule
+  // SQL (that was checked against a real DB: 51/8/15/15 rule taxes).
+  // ---------------------------------------------------------------------------------------------
+
+  @SuppressWarnings("unchecked")
+  private static List<String> runOverrideSpanishTaxAccounts(int updatedRows, Number offTarget,
+      NativeQuery query) {
+    OBDal dal = mock(OBDal.class);
+    Session session = mock(Session.class);
+    when(dal.getSession()).thenReturn(session);
+    ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+    when(session.createNativeQuery(sqlCaptor.capture())).thenReturn(query);
+    when(query.setParameter(anyString(), any())).thenReturn(query);
+    when(query.executeUpdate()).thenReturn(updatedRows);
+    when(query.uniqueResult()).thenReturn(offTarget);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      new OnboardingAccountingWiringService().overrideSpanishTaxAccounts("C1", "S1");
+    }
+    return sqlCaptor.getAllValues();
+  }
+
+  @Test
+  public void testOverrideSpanishTaxAccountsUpdatesThenChecksBothScopedToClientAndSchema() {
+    NativeQuery query = mock(NativeQuery.class);
+    List<String> sqls = runOverrideSpanishTaxAccounts(89, 0L, query);
+
+    assertEquals(2, sqls.size());
+    String update = sqls.get(0);
+    assertTrue(update.startsWith("UPDATE c_tax_acct"));
+    for (String acct : new String[] {"'47510000'", "'47300000'", "'47200000'", "'47700000'"}) {
+      assertTrue("rule SQL must target " + acct, update.contains(acct));
+    }
+    assertTrue("only system taxes", update.contains("t.ad_client_id = '0'"));
+    assertTrue(sqls.get(1).startsWith("SELECT count(*) FROM c_tax_acct"));
+    verify(query, times(2)).setParameter("clientId", "C1");
+    verify(query, times(2)).setParameter("schemaId", "S1");
+    verify(query).executeUpdate();
+    verify(query).uniqueResult();
+  }
+
+  @Test
+  public void testOverrideSpanishTaxAccountsDoesNotWarnWhenNothingChangedButAllOnTarget() {
+    // ETP-5901's trigger may already have applied the rules at insert: 0 updated rows is normal.
+    TestLogCapture logs = TestLogCapture.attachTo(OnboardingAccountingWiringService.class, Level.WARN);
+    try {
+      runOverrideSpanishTaxAccounts(0, 0L, mock(NativeQuery.class));
+      assertTrue(logs.messagesAt(Level.WARN).isEmpty());
+    } finally {
+      logs.detach();
+    }
+  }
+
+  @Test
+  public void testOverrideSpanishTaxAccountsWarnsWhenRuleTaxesAreStillOffTarget() {
+    TestLogCapture logs = TestLogCapture.attachTo(OnboardingAccountingWiringService.class, Level.WARN);
+    try {
+      runOverrideSpanishTaxAccounts(0, 89L, mock(NativeQuery.class));
+      List<String> warnings = logs.messagesAt(Level.WARN);
+      assertEquals(1, warnings.size());
+      assertTrue(warnings.get(0).startsWith("89 Spanish tax posting-account row(s) of client C1"));
+    } finally {
+      logs.detach();
+    }
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -1353,6 +1432,8 @@ public class OnboardingAccountingWiringServiceTest {
     int ensureAcreedorPrepaymentAccountCount;
     int overrideAcreedorGroupAccountsCount;
     int backfillInvoicePriceVarianceDefaultCount;
+    /** Number of recorded inserts at each overrideSpanishTaxAccounts() call. */
+    final List<Integer> overrideSpanishTaxAccountsAfterInserts = new ArrayList<>();
 
     @Override
     protected void runEntityAcctInsert(String sql, String clientId, String schemaId) {
@@ -1372,6 +1453,11 @@ public class OnboardingAccountingWiringServiceTest {
     @Override
     protected void backfillInvoicePriceVarianceDefault(String clientId, String schemaId) {
       backfillInvoicePriceVarianceDefaultCount++;
+    }
+
+    @Override
+    protected void overrideSpanishTaxAccounts(String clientId, String schemaId) {
+      overrideSpanishTaxAccountsAfterInserts.add(acctInserts.size());
     }
   }
 }
