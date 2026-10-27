@@ -319,11 +319,7 @@ public final class NeoAccessHelper {
    */
   private static HandlerRule handlerRule(SFSpec spec) {
     try {
-      String qualifier = NeoReportCallability.resolveReportHandlerQualifier(spec);
-      if (qualifier == null || qualifier.isBlank()) {
-        return HandlerRule.NONE;
-      }
-      NeoHandler handler = NeoHandlerLookup.byQualifierQuietly(qualifier);
+      NeoHandler handler = NeoReportCallability.resolveReportHandler(spec);
       if (handler == null) {
         return HandlerRule.NONE;
       }

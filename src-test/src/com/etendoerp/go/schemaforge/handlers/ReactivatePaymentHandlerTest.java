@@ -40,7 +40,6 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
-import javax.inject.Named;
 import javax.servlet.http.HttpServletResponse;
 
 import org.codehaus.jettison.json.JSONArray;
@@ -89,7 +88,7 @@ import com.etendoerp.payment.removal.util.PaymentRemovalUtil;
  * <p>Covers the ETP-4479 addition: on a single-record GET, {@code afterHandle} injects a
  * nullable {@code financialTransactionId} so the payment-in / payment-out detail view can
  * navigate to the reconciled {@code FIN_Finacc_Transaction}. The Reactivate/Confirm action
- * behavior is pre-existing and only re-verified at the {@code @Named} qualifier level here.
+ * behavior is pre-existing and not re-verified here.
  * The Remove action ({@code eTPRRemovePayment}) is fully covered below — it is the new
  * behavior fixing the "cannot be deleted, see Linked Items" FK violation on applied payments.
  *
@@ -202,20 +201,6 @@ public class ReactivatePaymentHandlerTest {
   private static void verifyNoInvoiceRecompute(MockedStatic<PaymentRemovalUtil> removalUtilMock) {
     removalUtilMock.verify(
         () -> PaymentRemovalUtil.updateInvoicesAfterPaymentRemoval(Mockito.anySet()), never());
-  }
-
-  // ── @Named qualifier ──────────────────────────────────────────────────────
-
-  /**
-   * The class must carry {@code @Named("payment-reactivate")} so {@code lookupHandler()} can
-   * match it against the {@code ETGO_SF_ENTITY.Java_Qualifier} value shared by both the
-   * payment-in and payment-out windows.
-   */
-  @Test
-  public void carriesPaymentReactivateNamedQualifier() {
-    Named named = ReactivatePaymentHandler.class.getAnnotation(Named.class);
-    assertNotNull("ReactivatePaymentHandler must be annotated @Named", named);
-    assertEquals("payment-reactivate", named.value());
   }
 
   // ── handle — Remove action (eTPRRemovePayment) ────────────────────────────

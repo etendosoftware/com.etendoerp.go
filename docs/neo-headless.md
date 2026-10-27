@@ -3021,8 +3021,8 @@ there). So an agent could not record a deposit at all: in blind run `20261001T19
 created a bank-statement line instead — what the bank reports, waiting to be matched — not a
 movement of the account.
 
-`FinancialAccountHandler#actionContracts()` (the account's customization, `Java_Qualifier`
-`financialAccountHeaderHandler`) now declares, from `FinancialAccountMovementActions`; for all of
+`FinancialAccountHandler#actionContracts()` (the account's customization, bound by
+`@NeoExtension(spec = "financial-account", entity = "account")`) now declares, from `FinancialAccountMovementActions`; for all of
 them `id` = the financial account:
 
 | Action | Kind | Parameters (required in **bold**) | UI gate it mirrors |
@@ -5536,18 +5536,89 @@ dispatches; with nothing resolved, the default CRUD path runs exactly as before.
 `NO_CUSTOMIZATION` trace is logged at DEBUG when the qualifier is blank (the normal case); a
 qualifier that is configured and resolves to nothing keeps its INFO `(warn)` line.
 
-**Migration is opportunistic, not a campaign.** Existing handlers are not being rewritten in bulk;
-one moves to the annotation when someone has a reason to open it anyway. Do not add a new
-`Java_Qualifier` binding: that is what is being retired.
+**Touching a legacy handler means migrating it in the same change (ETP-5588).** Fixes land on
+whatever binding exists, so while a handler stays on `Java_Qualifier` every fix to it keeps the
+legacy alive — "migrate when convenient" let the distinct qualifier count drift from 90 to 97
+unnoticed. Do not add a new `Java_Qualifier` binding, and when you open a qualifier-bound handler
+for any reason, move its pair to the annotation (recipe: the `neo-extension-migration` skill in
+etendo_schema_forge). CI enforces it — see "Guardrails" below.
 
-**Conflicts do not fail the build**, by design — a gradual migration passes through exactly those
-states. Two annotated classes claiming the same `(spec, entity)`, or an annotated pair whose row
-still names a different class by qualifier, are logged at `ERROR`. Run `make extension-parity` to
-catch them offline instead of in production.
+**Resolving an entity's customization outside a hook dispatch.** Code that needs the handler of
+an entity without running a hook (contracts, capabilities, side hooks such as `afterCallout`, "is
+it customized?") goes through `NeoHandlerLookup`, never through `SFEntity.getJavaQualifier()`:
+
+| Need | Call |
+|---|---|
+| the handler, annotation first, qualifier fallback (MCP/discovery resolver) | `NeoHandlerLookup.forEntity(entity)` / `forEntityQuietly(entity)` |
+| the same, with the REST resolver kept as the fallback | `NeoHandlerLookup.forEntity(entity, NeoServletSupport::lookupHandler)` |
+| "is this entity customized?" without instantiating anything | `NeoHandlerLookup.hasCustomization(entity)` |
+| a report spec's handler / entity | `NeoReportCallability.resolveReportHandler(spec)` / `resolveReportEntity(spec)` |
+
+Hook dispatch itself keeps going through `NeoExtensionDispatcher`, which already resolves
+annotation first. Since ETP-5588 every reader that used to read the qualifier directly — the MCP
+read post-hook, `NeoFieldFilter`'s read-only exemption, the REST `afterCallout`, the action
+contracts in discover, `protectedCreateCalloutFields`, the action surface of tab-less entities and
+the report path — resolves through these, so an entity bound **only** by annotation behaves
+exactly as a qualifier-bound one on every surface.
+
+**Guardrails (CI, `.github/workflows/extension-guardrails.yml`).**
+
+- `make extension-parity` is a ratchet: the distinct `Java_Qualifier` count must **equal**
+  `EXTENSION_CEILING`. Migrating a handler lowers the ceiling in the same PR; the job also fails if
+  the count rises against the base branch. `make extension-parity HOOKS=1` lists, per bound pair,
+  the `NeoHandler` hooks its class overrides — the inventory to check before clearing a qualifier.
+- `scripts/check-extension-guardrails.py` fails on a new `@Named`-only `NeoHandler`, on a new direct
+  `getJavaQualifier()` read, and on a spec name in a string literal inside a generic service. The
+  existing debt is listed in `scripts/extension-guardrails-allowlist.json`, which may only shrink:
+  an entry that no longer matches the code fails the job until it is removed.
+
+**Conflicts do not fail the build.** Two annotated classes claiming the same `(spec, entity)`, or
+an annotated pair whose row still names a different class by qualifier, are logged at `ERROR` and
+listed by `make extension-parity`. They are the transient state of a migration, not an end state.
 
 > Note: `NeoExtension`'s own javadoc describes the annotation as "additive, never a migration",
 > which was accurate as the acceptance criterion of the step that introduced it. The direction
 > above supersedes it for **new** code; the additive runtime behaviour it describes is unchanged.
+
+**Migrated (ETP-5588).** Six `(spec, entity)` pairs bind by annotation **only**: their
+`ETGO_SF_ENTITY` rows carry no `JAVA_QUALIFIER`, their `decisions.json` no `javaQualifier`, and the
+classes no `@Named`.
+
+| `(spec, entity)` | class |
+|---|---|
+| `financial-account` / `account` | `FinancialAccountHandler` |
+| `sales-invoice` / `header` | `SalesInvoiceHeaderHandler` |
+| `purchase-invoice` / `header` | `PurchaseInvoiceHeaderHandler` |
+| `open-close-period-control` / `periodControl` | `PeriodOpenCloseHandler` |
+| `payment-in` / `finPayment` | `PaymentInReactivateHandler` |
+| `payment-out` / `header` | `PaymentOutReactivateHandler` |
+
+`ReactivatePaymentHandler` serves two entities, and the annotation is not repeatable, so its
+behaviour stays in that class and each entity is bound by a concrete (empty) subclass — the same
+shape `SalesOrderLineHandler`/`SalesQuotationLineHandler` use (§4.12.20). Nothing binds the base
+class itself.
+
+Still pending from the same audit: the `accountingDate` re-injection in
+`NeoCrudHandler.executeUpdate` is header-document logic (invoice, order and in/out headers) living
+in the generic update path; it moves to a `NeoHandler` hook answered by those NeoExtensions when
+they are migrated.
+
+Reviewed in the same audit and **kept generic on purpose**, because they are keyed on something
+other than a window — moving them into one NeoExtension would duplicate them across every window
+that shares the key:
+
+| Where | Keyed on |
+|---|---|
+| `NeoSelectorService` + `FinancialAccountPaymentMethodSelectorPolicy` | the selector's target entity (`FIN_Financial_Account`) |
+| `ReferenceOverrideSelectorPolicy` | the `AD_Reference` of the selector |
+| `NeoResponse` (`@ETPR_PeriodClosedForUnRemovePayment@` → `PeriodNotAvailable`) | the core message key |
+| `DocTypeResolver.resolveDocBaseType` | the table (`C_Invoice` → `ARI`/`API`, …) |
+| `NeoBackgroundDefaultsService` (SII key deferred to the trigger) | the presence of the SII properties; the factories pass the target spec as data |
+
+The email download link (`NeoDocumentDownloadService`) no longer lists windows: it binds the
+attachment to the table of the spec's header entity (its included entity on a level-0 tab), read
+from `ETGO_SF_SPEC`/`ETGO_SF_ENTITY`; the frontend reads the same table from the window contract's
+primary entity (`documentEmailSend.js#resolveAttachmentTable`).
 
 #### 5.3.b The legacy binding (`@Named` + `Java_Qualifier`)
 
@@ -6317,7 +6388,7 @@ A list response carries one page, so a total drawn next to it covers the loaded 
 - The helper names no entity; each customization owns its own select (payments: `PaymentListSummary`).
 - Currency folding is shared with the Financial Accounts sidebar through `NeoCurrencyTotals` (today's rate, a missing rate excludes the currency and is reported, each subtotal rounded `HALF_UP` to the org precision).
 
-**Payment list summary** (`payment-reactivate` handler, `payment-in` and `payment-out`). `response.summary`, a sibling of `data`, identical on every page and present even for an empty list; a failure is logged and the key omitted:
+**Payment list summary** (`ReactivatePaymentHandler`, bound as `PaymentInReactivateHandler` / `PaymentOutReactivateHandler`, `payment-in` and `payment-out`). `response.summary`, a sibling of `data`, identical on every page and present even for an empty list; a failure is logged and the key omitted:
 
 ```json
 { "orgCurrencyIso":"EUR", "rowCount":18,
@@ -9498,15 +9569,13 @@ annotated: it keeps 0 / 0 on `etendo_create`, as on `develop`.
 
 ##### Binding: the `Java_Qualifier` stays
 
-`ETGO_SF_ENTITY.Java_Qualifier` still reads `orderLineHandler` on both rows, deliberately. Several
-readers resolve the qualifier directly instead of going through `NeoExtensionDispatcher`: the REST
-CRUD gate (`NeoCrudHandler.dispatchCrudRequestInternal` only calls `handleWithHooks` when a qualifier
-exists), the MCP read post-hook (`McpHookExecutor.resolveEntityHandler`), `NeoFieldFilter`'s
-read-only rejection and `protectedCreateCalloutFields`. Clearing the qualifier would switch the
-customization off on REST single and drop the discount-line filter from MCP reads. With it kept,
-those readers resolve the parent class — whose behaviour the customizations inherit unchanged — and
-the dispatched surfaces resolve the annotation. The cost is one `(warn)` ERROR line per resolution
-from `NeoExtensionIndex.warnOnQualifierDisagreement`, and a conflict line in `make extension-parity`.
+`ETGO_SF_ENTITY.Java_Qualifier` still reads `orderLineHandler` on both rows. When this was written
+several readers resolved the qualifier directly instead of going through `NeoExtensionDispatcher`,
+so clearing it would have switched the customization off on some surfaces. Since ETP-5588 those
+readers resolve annotation first (§5.3.a), so the qualifier is only a fallback here: clearing it is
+the next step of the migration, not a risk. Until then the cost is one `(warn)` ERROR line per
+resolution from `NeoExtensionIndex.warnOnQualifierDisagreement`, and a conflict line in
+`make extension-parity`.
 
 ##### Scope
 
