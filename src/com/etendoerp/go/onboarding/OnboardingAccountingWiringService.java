@@ -657,8 +657,45 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
     runEntityAcctInsert(BP_VENDOR_ACCT_SQL, clientId, schemaId);
     runEntityAcctInsert(PRODUCT_ACCT_SQL, clientId, schemaId);
     runEntityAcctInsert(TAX_ACCT_SQL, clientId, schemaId);
+    overrideSpanishTaxAccounts(clientId, schemaId);
     runEntityAcctInsert(FIN_FINANCIAL_ACCOUNT_ACCT_SQL, clientId, schemaId);
     runEntityAcctInsert(WAREHOUSE_ACCT_SQL, clientId, schemaId);
+  }
+
+  /**
+   * ETP-5902 — points both tax accounts ({@code t_due_acct} and {@code t_credit_acct}) of the
+   * Spanish withholding, intra-community and reverse-charge child taxes at one dedicated account,
+   * instead of the generic {@code C_ACCTSCHEMA_DEFAULT} 477/472 that {@link #TAX_ACCT_SQL} just
+   * copied. The rules live in {@link #SPANISH_TAX_RULES_SQL}. Runs right after {@code TAX_ACCT_SQL},
+   * in the same {@link #wire} transaction.
+   *
+   * <p>Logs a warning when, after the update, a rule tax of this schema is still off target (one of
+   * the four accounts is missing from the tenant's chart). It does not count updated rows: the
+   * Classic {@code ESTAX_TAX_ACCT_TRG} trigger (ETP-5901) may already have applied the same rules
+   * when {@code TAX_ACCT_SQL} inserted the rows, so 0 updated rows is a normal outcome.
+   *
+   * @param clientId target client identifier
+   * @param schemaId the accounting schema whose tax accounts are overridden
+   */
+  protected void overrideSpanishTaxAccounts(String clientId, String schemaId) {
+    int rows = OBDal.getInstance().getSession()
+        .createNativeQuery(SPANISH_TAX_ACCT_OVERRIDE_SQL)
+        .setParameter(PARAM_CLIENT_ID, clientId)
+        .setParameter(PARAM_SCHEMA_ID, schemaId)
+        .executeUpdate();
+    if (rows > 0 && log.isDebugEnabled()) {
+      log.debug("Overrode {} Spanish tax posting-account row(s) for client {}", rows, clientId);
+    }
+    Number offTarget = (Number) OBDal.getInstance().getSession()
+        .createNativeQuery(SPANISH_TAX_ACCT_OFF_TARGET_SQL)
+        .setParameter(PARAM_CLIENT_ID, clientId)
+        .setParameter(PARAM_SCHEMA_ID, schemaId)
+        .uniqueResult();
+    if (offTarget != null && offTarget.intValue() > 0) {
+      log.warn("{} Spanish tax posting-account row(s) of client {} are still off their rule account"
+          + " after the override; one of the accounts 47510000/47300000/47200000/47700000 or its"
+          + " C_ValidCombination may be missing from the tenant's chart", offTarget, clientId);
+    }
   }
 
   /**
@@ -1247,6 +1284,97 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
       + "  AND d.t_due_acct IS NOT NULL AND d.t_credit_acct IS NOT NULL "
       + "  AND NOT EXISTS (SELECT 1 FROM c_tax_acct a"
       + "    WHERE a.c_tax_id = t.c_tax_id AND a.c_acctschema_id = :schemaId)";
+
+  /**
+   * ETP-5902 — the Spanish tax-account rules: one row per matching system child tax, with the
+   * account value both of its tax accounts must point at. Evaluated in order, first match wins:
+   * <ol>
+   *   <li>purchase withholding → {@code 47510000}</li>
+   *   <li>sales withholding → {@code 47300000}</li>
+   *   <li>purchase intra-community and/or reverse charge, rate &gt; 0 → {@code 47200000}</li>
+   *   <li>purchase intra-community and/or reverse charge, rate &lt; 0 → {@code 47700000}</li>
+   * </ol>
+   * Only active, non-summary system taxes with a parent ({@code ad_client_id = '0'}, i.e. the
+   * {@code com.etendoerp.go.localization.es.data} catalog): 51/8/15/15 = 89 taxes. Two taxes match
+   * both rule 1 and rule 4; rule 1 wins.
+   *
+   * <p><b>Lockstep twins:</b> the corrective data-fix {@code R5x-spanish-tax-accounts} in
+   * {@code etendo_schema_forge/cli/src/data-fixes/} and the Classic trigger {@code ESTAX_TAX_ACCT_TRG}
+   * (module {@code org.openbravo.localization.spain.referencedata.taxes}, ETP-5901). Change all three
+   * together.
+   *
+   * <p>Accepted limits: a rule tax that is inactive at onboarding and reactivated later keeps
+   * 477/472; a rule tax added to the catalog later gets the defaults (whoever adds one needs a new
+   * corrective data-fix).
+   */
+  private static final String SPANISH_TAX_RULES_SQL =
+      "SELECT * FROM ("
+      + "  SELECT t.c_tax_id, CASE"
+      + "    WHEN t.sopotype = 'P' AND t.iswithholdingtax = 'Y' THEN '47510000'"
+      + "    WHEN t.sopotype = 'S' AND t.iswithholdingtax = 'Y' THEN '47300000'"
+      + "    WHEN t.sopotype = 'P' AND (t.em_obspti_isintracommunity = 'Y'"
+      + "      OR t.em_obspti_isreversecharge = 'Y') AND t.rate > 0 THEN '47200000'"
+      + "    WHEN t.sopotype = 'P' AND (t.em_obspti_isintracommunity = 'Y'"
+      + "      OR t.em_obspti_isreversecharge = 'Y') AND t.rate < 0 THEN '47700000'"
+      + "  END AS acct_value"
+      + "  FROM c_tax t"
+      + "  WHERE t.ad_client_id = '0' AND t.isactive = 'Y' AND t.issummary = 'N'"
+      + "    AND t.parent_tax_id IS NOT NULL"
+      + ") rules WHERE rules.acct_value IS NOT NULL";
+
+  /** Account value behind the combination in column {@code a.<column>} of {@code c_tax_acct}. */
+  private static String taxAcctValue(String column) {
+    return "(SELECT ev.value FROM c_validcombination vc"
+        + " JOIN c_elementvalue ev ON ev.c_elementvalue_id = vc.account_id"
+        + " WHERE vc.c_validcombination_id = a." + column + ")";
+  }
+
+  /** Account values behind {@code t_due_acct} / {@code t_credit_acct} of {@code c_tax_acct a}. */
+  private static final String TAX_DUE_ACCT_VALUE_SQL = taxAcctValue("t_due_acct");
+  private static final String TAX_CREDIT_ACCT_VALUE_SQL = taxAcctValue("t_credit_acct");
+
+  /** A rule-tax row whose due or credit account value is not yet its rule account value. */
+  private static final String SPANISH_TAX_ACCT_OFF_TARGET_PREDICATE =
+      "(" + TAX_DUE_ACCT_VALUE_SQL + " IS DISTINCT FROM r.acct_value"
+      + " OR " + TAX_CREDIT_ACCT_VALUE_SQL + " IS DISTINCT FROM r.acct_value)";
+
+  /**
+   * ETP-5902 — sets both tax accounts of every rule tax of {@code :schemaId} to its rule account.
+   * The combination is the tenant's own, found by account value, deterministically: the plain one
+   * ({@code ad_org_id = '0'}, no dimensions) first, then the oldest. "On target" compares the
+   * account VALUE, not the combination id, so a column the ETP-5901 trigger already pointed at
+   * another combination of the same account is left alone. Rows whose account is missing from the
+   * chart are skipped.
+   */
+  private static final String SPANISH_TAX_ACCT_OVERRIDE_SQL =
+      "UPDATE c_tax_acct a"
+      + " SET t_due_acct = CASE WHEN " + TAX_DUE_ACCT_VALUE_SQL + " = r.acct_value"
+      + "       THEN a.t_due_acct ELSE r.combination_id END,"
+      + "   t_credit_acct = CASE WHEN " + TAX_CREDIT_ACCT_VALUE_SQL + " = r.acct_value"
+      + "       THEN a.t_credit_acct ELSE r.combination_id END,"
+      + "   updated = now(), updatedby = '0'"
+      + " FROM (SELECT rt.c_tax_id, rt.acct_value,"
+      + "     (SELECT vc.c_validcombination_id FROM c_validcombination vc"
+      + "       JOIN c_elementvalue ev ON ev.c_elementvalue_id = vc.account_id"
+      + "       WHERE vc.ad_client_id = :clientId AND vc.c_acctschema_id = :schemaId"
+      + "         AND vc.isactive = 'Y' AND ev.value = rt.acct_value"
+      + "       ORDER BY (vc.ad_org_id = '0' AND vc.c_bpartner_id IS NULL AND vc.m_product_id IS NULL"
+      + "         AND vc.c_project_id IS NULL AND vc.c_campaign_id IS NULL AND vc.c_activity_id IS NULL"
+      + "         AND vc.c_salesregion_id IS NULL AND vc.ad_orgtrx_id IS NULL"
+      + "         AND vc.c_locfrom_id IS NULL AND vc.c_locto_id IS NULL"
+      + "         AND vc.user1_id IS NULL AND vc.user2_id IS NULL) DESC, vc.created"
+      + "       LIMIT 1) AS combination_id"
+      + "   FROM (" + SPANISH_TAX_RULES_SQL + ") rt) r"
+      + " WHERE a.c_tax_id = r.c_tax_id AND a.c_acctschema_id = :schemaId"
+      + "   AND a.ad_client_id = :clientId AND r.combination_id IS NOT NULL"
+      + "   AND " + SPANISH_TAX_ACCT_OFF_TARGET_PREDICATE;
+
+  /** ETP-5902 — counts the rule-tax rows of {@code :schemaId} still off their rule account value. */
+  private static final String SPANISH_TAX_ACCT_OFF_TARGET_SQL =
+      "SELECT count(*) FROM c_tax_acct a"
+      + " JOIN (" + SPANISH_TAX_RULES_SQL + ") r ON r.c_tax_id = a.c_tax_id"
+      + " WHERE a.c_acctschema_id = :schemaId AND a.ad_client_id = :clientId"
+      + "   AND " + SPANISH_TAX_ACCT_OFF_TARGET_PREDICATE;
 
   // Financial-account posting accounts (ETP-4565): FIN_FINANCIAL_ACCOUNT is bulk-imported by the
   // dataset importer with triggers disabled (see OnboardingDatasetDefinition.INCLUDED_TABLES), so

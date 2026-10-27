@@ -101,6 +101,7 @@ import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.Organization;
 
+import com.etendoerp.go.featureflags.GoFeatureFlags;
 import com.etendoerp.go.onboarding.OnboardingForceTestModeService;
 import com.etendoerp.go.payment.CheckoutRequestStore;
 import com.etendoerp.go.payment.ProvisioningFailureReason;
@@ -149,7 +150,24 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  * <p>And the purchase-source eligibility specs (ETP-5548, ETP-5047): a spent demo or a productive
  * environment, a canceled one included, is never the demo source of a purchase.
  *
+ * <p>And the specs for {@code provisionPaidPurchase} (ETP-5048), the browser-less paid onboarding
+ * the billing reconciliation drives through {@code PaidProvisioningService}: it runs under the
+ * same fenced {@code claimForProvisioning} as the HTTP path, a refused claim runs nothing, and the
+ * NDJSON progress reaches the given sink. The draft's address and fiscal identifier reach the
+ * organization, and a value the HTTP path would refuse is dropped with a WARN instead of failing
+ * the run. A lost paid re-subscription is applied through {@code PaidReactivationService} over
+ * the webhook's own {@code applyReactivationIfPending}. A purchase that is not the owner's, not
+ * confirmed as paid, or whose recorded demo is gone is refused before the claim, and a successful
+ * repair sends the provisioning alert and the environment-ready email like the browser path.
+ *
+ * <p>And the ETP-5806 {@code structured-address-for-sepa} flag propagation: the onboarding
+ * pre-flight checks {@code validateStructuredAddressBlock}/{@code validateStructuredAddressLength}
+ * are a no-op while the flag is off (an incomplete or oversized block is accepted, not rejected)
+ * and still enforce their rules when it is on, and {@code buildSessionCapabilities()} (the
+ * onboarding session-bootstrap response) mirrors the live flag value in both directions.
+ *
  * @covers com.etendoerp.go.rest.EtendoGoJwtServlet
+ * @covers com.etendoerp.go.rest.PaidReactivationService
  */
 public class EtendoGoJwtServletCoverageTest {
 
@@ -1650,6 +1668,146 @@ public class EtendoGoJwtServletCoverageTest {
     }
   }
 
+  // ── ETP-5806: structured-address-for-sepa — onboarding validation + session capability ──
+
+  private static Object newOnboardingRequestData() throws Exception {
+    Class<?> requestType = Class.forName(
+        "com.etendoerp.go.rest.EtendoGoJwtServlet$OnboardingRequestData");
+    Constructor<?> constructor = requestType.getDeclaredConstructor();
+    constructor.setAccessible(true);
+    return constructor.newInstance();
+  }
+
+  private static void setOnboardingField(Object data, String fieldName, String value)
+      throws Exception {
+    Field field = data.getClass().getDeclaredField(fieldName);
+    field.setAccessible(true);
+    field.set(data, value);
+  }
+
+  private static MockedStatic<GoFeatureFlags> mockStructuredAddressFlag(boolean enabled) {
+    MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class);
+    flags.when(() -> GoFeatureFlags.isEnabled(
+        eq(GoFeatureFlags.FLAG_STRUCTURED_ADDRESS_FOR_SEPA), any())).thenReturn(enabled);
+    return flags;
+  }
+
+  /**
+   * Flag off: {@code validateStructuredAddressBlock} is a no-op — a street present with
+   * buildingNumber/city both blank would be a 400 "Missing required field(s)" with the flag on,
+   * but is skipped entirely while it is off.
+   */
+  @Test
+  public void validateStructuredAddressBlockIsANoOpWhenTheFlagIsOff() throws Exception {
+    Object data = newOnboardingRequestData();
+    setOnboardingField(data, "streetName", "Gran Via");
+    // buildingNumber and city intentionally left unset (null) — would trigger the mandatory
+    // check with the flag on.
+
+    Method validate = EtendoGoJwtServlet.class.getDeclaredMethod(
+        "validateStructuredAddressBlock", data.getClass(), HttpServletResponse.class);
+    validate.setAccessible(true);
+    ResponseCapture resp = mockResponse();
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(false)) {
+      boolean result = (boolean) validate.invoke(servlet, data, resp.response);
+
+      assertTrue("flag off: validation never runs, so the incomplete block is accepted", result);
+      verify(resp.response, never()).setStatus(anyInt());
+    }
+  }
+
+  /** Flag on (for comparison): the same incomplete block is rejected with a clean 400. */
+  @Test
+  public void validateStructuredAddressBlockStillRejectsAnIncompleteBlockWhenTheFlagIsOn()
+      throws Exception {
+    Object data = newOnboardingRequestData();
+    setOnboardingField(data, "streetName", "Gran Via");
+
+    Method validate = EtendoGoJwtServlet.class.getDeclaredMethod(
+        "validateStructuredAddressBlock", data.getClass(), HttpServletResponse.class);
+    validate.setAccessible(true);
+    ResponseCapture resp = mockResponse();
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
+      boolean result = (boolean) validate.invoke(servlet, data, resp.response);
+
+      assertFalse(result);
+      assertEquals(400, resp.status);
+      assertTrue(resp.body(), resp.body().contains("buildingNumber"));
+      assertTrue(resp.body(), resp.body().contains("city"));
+    }
+  }
+
+  /**
+   * Flag off: {@code validateStructuredAddressLength} is a no-op — a street longer than its DB
+   * column would be a 400 with the flag on, but is skipped entirely while it is off.
+   */
+  @Test
+  public void validateStructuredAddressLengthIsANoOpWhenTheFlagIsOff() throws Exception {
+    Object data = newOnboardingRequestData();
+    setOnboardingField(data, "streetName", "A".repeat(71)); // EM_OBSEPA_StrtNm is VARCHAR(70)
+
+    Method validate = EtendoGoJwtServlet.class.getDeclaredMethod(
+        "validateStructuredAddressLength", data.getClass(), HttpServletResponse.class);
+    validate.setAccessible(true);
+    ResponseCapture resp = mockResponse();
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(false)) {
+      boolean result = (boolean) validate.invoke(servlet, data, resp.response);
+
+      assertTrue("flag off: the oversized field is never checked", result);
+      verify(resp.response, never()).setStatus(anyInt());
+    }
+  }
+
+  /** Flag on (for comparison): the same oversized field is rejected with a clean 400. */
+  @Test
+  public void validateStructuredAddressLengthStillRejectsAnOversizedFieldWhenTheFlagIsOn()
+      throws Exception {
+    Object data = newOnboardingRequestData();
+    setOnboardingField(data, "streetName", "A".repeat(71));
+
+    Method validate = EtendoGoJwtServlet.class.getDeclaredMethod(
+        "validateStructuredAddressLength", data.getClass(), HttpServletResponse.class);
+    validate.setAccessible(true);
+    ResponseCapture resp = mockResponse();
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
+      boolean result = (boolean) validate.invoke(servlet, data, resp.response);
+
+      assertFalse(result);
+      assertEquals(400, resp.status);
+      assertTrue(resp.body(), resp.body().contains("streetName"));
+    }
+  }
+
+  /**
+   * {@code buildSessionCapabilities()} (the onboarding session-bootstrap response) mirrors the
+   * live flag value in both directions.
+   */
+  @Test
+  public void buildSessionCapabilitiesReflectsTheFlagOn() throws Exception {
+    Method build = EtendoGoJwtServlet.class.getDeclaredMethod("buildSessionCapabilities");
+    build.setAccessible(true);
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
+      JSONObject capabilities = (JSONObject) build.invoke(null);
+      assertTrue(capabilities.getBoolean("structuredAddressForSepa"));
+    }
+  }
+
+  @Test
+  public void buildSessionCapabilitiesReflectsTheFlagOff() throws Exception {
+    Method build = EtendoGoJwtServlet.class.getDeclaredMethod("buildSessionCapabilities");
+    build.setAccessible(true);
+
+    try (MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(false)) {
+      JSONObject capabilities = (JSONObject) build.invoke(null);
+      assertFalse(capabilities.getBoolean("structuredAddressForSepa"));
+    }
+  }
+
   @Test
   public void onboardingEmptyClientNameReturnsBadRequest() throws Exception {
     ResponseCapture resp = mockResponse();
@@ -1708,6 +1866,112 @@ public class EtendoGoJwtServletCoverageTest {
 
     assertEquals(400, resp.status);
     assertTrue(new JSONObject(resp.body()).toString().contains("Unknown currency"));
+  }
+
+  /**
+   * ETP-5806 — the structured address block (streetName/buildingNumber/city) is optional on the
+   * minimalist onboarding step, but once the user starts filling it in, all three become
+   * mandatory together — same rule as the Contacts/Warehouse address popups.
+   */
+  @Test
+  public void onboardingPartiallyStartedAddressBlockReturnsBadRequest() throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = jsonRequest("/onboarding",
+        "{\"clientName\":\"Acme\",\"streetName\":\"Gran Via\"}");
+    when(req.getHeader("Authorization")).thenReturn("Bearer valid-token");
+
+    try (var ctxMock = mockStatic(OBContext.class);
+         var dalMock = mockStatic(EtendoGoJwtDalHelper.class);
+         MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
+      stubAuthenticatedAccount(dalMock);
+
+      servlet.doPost(req, resp.response);
+    }
+
+    assertEquals(400, resp.status);
+    String body = new JSONObject(resp.body()).toString();
+    assertTrue(body, body.contains("buildingNumber"));
+    assertTrue(body, body.contains("city"));
+  }
+
+  /**
+   * The counterweight: an entirely empty address block (the pre-ETP-5806 shape, or a caller that
+   * never asks about addresses at all) must NOT be rejected — it is optional. Proven by letting
+   * the request fail at the UNRELATED currency check instead, which is only reached once the
+   * address validation has already passed.
+   */
+  @Test
+  public void onboardingEmptyAddressBlockIsAcceptedByValidation() throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = jsonRequest("/onboarding",
+        "{\"clientName\":\"Acme\",\"currency\":\"XYZ\"}");
+    when(req.getHeader("Authorization")).thenReturn("Bearer valid-token");
+
+    try (var ctxMock = mockStatic(OBContext.class);
+         var dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      stubAuthenticatedAccount(dalMock);
+      dalMock.when(() -> EtendoGoJwtDalHelper.findCurrencyByIsoCode("XYZ")).thenReturn(null);
+
+      servlet.doPost(req, resp.response);
+    }
+
+    assertEquals(400, resp.status);
+    assertTrue(new JSONObject(resp.body()).toString().contains("Unknown currency"));
+  }
+
+  /**
+   * ETP-5806 follow-up (the production 500 bug class): a structured field longer than its DB
+   * column is rejected with a clean 400 naming it, via the same
+   * {@code StructuredAddressComposer#fieldsExceedingMaxLength} check the Contacts/Warehouse
+   * handlers use — never a downstream data-truncation failure mid-provisioning.
+   */
+  @Test
+  public void onboardingOversizedStructuredAddressFieldReturnsBadRequest() throws Exception {
+    ResponseCapture resp = mockResponse();
+    String tooLongStreetName = "A".repeat(71); // EM_OBSEPA_StrtNm is VARCHAR(70)
+    HttpServletRequest req = jsonRequest("/onboarding",
+        "{\"clientName\":\"Acme\",\"streetName\":\"" + tooLongStreetName
+            + "\",\"buildingNumber\":\"1\",\"city\":\"Madrid\"}");
+    when(req.getHeader("Authorization")).thenReturn("Bearer valid-token");
+
+    try (var ctxMock = mockStatic(OBContext.class);
+         var dalMock = mockStatic(EtendoGoJwtDalHelper.class);
+         MockedStatic<GoFeatureFlags> flags = mockStructuredAddressFlag(true)) {
+      stubAuthenticatedAccount(dalMock);
+
+      servlet.doPost(req, resp.response);
+    }
+
+    assertEquals(400, resp.status);
+    assertTrue(new JSONObject(resp.body()).toString().contains("streetName"));
+  }
+
+  /**
+   * City is validated through {@code OnboardingFieldLimits.CITY} (it is not one of the 3
+   * structured SEPA fields {@code StructuredAddressComposer} covers), and reported through the
+   * machine-readable {@code FIELD_TOO_LONG} envelope rather than a plain message string.
+   */
+  @Test
+  public void onboardingCityExceedingFieldLimitReturnsFieldTooLong() throws Exception {
+    ResponseCapture resp = mockResponse();
+    String tooLongCity = "A".repeat(61); // OnboardingFieldLimits.CITY is 60
+    HttpServletRequest req = jsonRequest("/onboarding",
+        "{\"clientName\":\"Acme\",\"streetName\":\"Gran Via\",\"buildingNumber\":\"1\",\"city\":\""
+            + tooLongCity + "\"}");
+    when(req.getHeader("Authorization")).thenReturn("Bearer valid-token");
+
+    try (var ctxMock = mockStatic(OBContext.class);
+         var dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      stubAuthenticatedAccount(dalMock);
+
+      servlet.doPost(req, resp.response);
+    }
+
+    assertEquals(400, resp.status);
+    JSONObject error = new JSONObject(resp.body()).getJSONObject("error");
+    assertEquals("FIELD_TOO_LONG", error.getString("code"));
+    assertEquals("city", error.getString("field"));
+    assertEquals(60, error.getInt("max"));
   }
 
   @Test
@@ -2916,6 +3180,83 @@ public class EtendoGoJwtServletCoverageTest {
     verify(servlet.billingEventStore).markApplied("evt_1");
   }
 
+  // ===================== PaidReactivationService over the webhook path (ETP-5048) =============
+  //
+  // The billing reconciliation applies a re-subscription whose payment webhook was lost through
+  // applyReactivationIfPending, the webhook's own method, with the provider instant it read.
+
+  private boolean applyThroughTheReconciliation(java.time.Instant paidAt, OBContext caller) {
+    try (MockedStatic<OBContext> context = mockStatic(OBContext.class);
+        MockedStatic<EtendoGoJwtSupport> support = mockStatic(EtendoGoJwtSupport.class);
+        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class)) {
+      context.when(OBContext::getOBContext).thenReturn(caller);
+      support.when(() -> EtendoGoJwtSupport.findStarOrgId(PAID_CLIENT_ID))
+          .thenReturn(PAID_STAR_ORG_ID);
+      boolean applied = new PaidReactivationService(() -> servlet).applyIfPending(PAID_TOKEN,
+          paidAt);
+      if (applied) {
+        // Every context switch on the way was undone: the last context installed is the caller's.
+        ArgumentCaptor<OBContext> restored = ArgumentCaptor.forClass(OBContext.class);
+        context.verify(() -> OBContext.setOBContext(restored.capture()),
+            org.mockito.Mockito.atLeastOnce());
+        assertSame(caller, restored.getValue());
+      }
+      return applied;
+    }
+  }
+
+  @Test
+  public void theReconciliationAppliesALostReactivationThroughTheWebhookPath() {
+    PaidUpgradeFixture fixture = givenPaidReactivation();
+    servlet.subscriptionModelSwitch = switchThatIs(false);
+    when(fixture.subscriptionService.hasAnySubscription(PAID_CLIENT_ID)).thenReturn(false);
+    when(fixture.tenantPlanService.markProductive(PAID_CLIENT_ID, PAID_STAR_ORG_ID))
+        .thenReturn(true);
+    java.time.Instant paidAt = java.time.Instant.ofEpochSecond(REACTIVATION_PAID_EPOCH + 60);
+
+    assertTrue(applyThroughTheReconciliation(paidAt, mock(OBContext.class)));
+
+    verify(fixture.lifecycleService).markProductive(PAID_CLIENT_ID);
+    // The preference watermark moves to the provider instant the reconciliation read.
+    verify(fixture.lifecycleService).recordSubscriptionEventAt(PAID_CLIENT_ID, paidAt);
+    verify(fixture.checkoutRequestStore).recordProvisioned(PAID_TOKEN, PAID_CLIENT_ID);
+    verify(fixture.subscriptionService).fillPeriodFromProviderAfterCommit(PAID_CLIENT_ID);
+  }
+
+  @Test
+  public void theReconciliationFindsNothingToApplyOnceTheWebhookApplied() {
+    PaidUpgradeFixture fixture = givenPaidReactivation();
+    when(fixture.checkoutRequestStore.findPaidReactivation(PAID_TOKEN)).thenReturn(null);
+
+    assertFalse(applyThroughTheReconciliation(null, mock(OBContext.class)));
+
+    verify(fixture.checkoutRequestStore, never()).recordProvisioned(anyString(), anyString());
+    verify(fixture.lifecycleService, never()).markProductive(anyString());
+  }
+
+  @Test
+  public void aReactivationTheReconciliationCannotRecordFailsItsCaller() {
+    PaidUpgradeFixture fixture = givenPaidReactivation();
+    when(fixture.lifecycleService.markProductive(PAID_CLIENT_ID)).thenReturn(false);
+    OBContext caller = mock(OBContext.class);
+
+    try (MockedStatic<OBContext> context = mockStatic(OBContext.class);
+        MockedStatic<EtendoGoJwtSupport> support = mockStatic(EtendoGoJwtSupport.class);
+        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class)) {
+      context.when(OBContext::getOBContext).thenReturn(caller);
+      support.when(() -> EtendoGoJwtSupport.findStarOrgId(PAID_CLIENT_ID))
+          .thenReturn(PAID_STAR_ORG_ID);
+      assertThrows(OBException.class, () -> new PaidReactivationService(() -> servlet)
+          .applyIfPending(PAID_TOKEN, null));
+      ArgumentCaptor<OBContext> restored = ArgumentCaptor.forClass(OBContext.class);
+      context.verify(() -> OBContext.setOBContext(restored.capture()),
+          org.mockito.Mockito.atLeastOnce());
+      assertSame("A failure still hands the caller its context back", caller,
+          restored.getValue());
+    }
+    verify(fixture.checkoutRequestStore, never()).recordProvisioned(anyString(), anyString());
+  }
+
   // ===================== fillSubscriptionPeriodBestEffort — the post-commit period read ========
   //
   // A paid onboarding opens the subscription row without a billing period: the purchase's first
@@ -3803,7 +4144,8 @@ public class EtendoGoJwtServletCoverageTest {
       throws Exception {
     PaidOnboardingStage stage = stagePaidOnboarding(pooled);
     doThrow(new OBException("Org info unavailable")).when(servlet.onboardingOrgInfoService)
-        .ensureOrgInfo(anyString(), anyString(), anyString(), anyString(), any(), any(), any());
+        .ensureOrgInfo(anyString(), anyString(), anyString(), anyString(), any(), any(), any(),
+            any(), any(), any(), any());
     when(servlet.tenantPlanService.resolvePlan("own-productive"))
         .thenReturn(TenantPlanService.PLAN_PRODUCTIVE);
     runStagedPaidOnboarding(stage, (support, dal, transactions) -> {
@@ -3831,6 +4173,322 @@ public class EtendoGoJwtServletCoverageTest {
       this.request = request;
       this.store = store;
     }
+  }
+
+  /** What a staged run executes instead of {@code doPost}, when set (ETP-5048). */
+  private StagedAction stagedAction;
+
+  /** A staged run's body other than the HTTP POST. */
+  @FunctionalInterface
+  private interface StagedAction {
+    void run() throws Exception;
+  }
+
+  /** Records what a browser-less paid onboarding reports to its sink. */
+  private static final class RecordingSink implements com.etendoerp.go.onboarding.OnboardingProgressSink {
+    final List<String> lines = new ArrayList<>();
+
+    @Override
+    public void progress(String step, String status, String message) {
+      lines.add("progress:" + step + ":" + status);
+    }
+
+    @Override
+    public void result(boolean success, String message, String code) {
+      lines.add("result:" + success + ":" + code);
+    }
+  }
+
+  private static PaidProvisioningService.PaidInput paidInput(String currencyIso) {
+    return new PaidProvisioningService.PaidInput("purchase-1", "account-1", "user@test.com",
+        "User", "Acme", null, "en_US", currencyIso, "ES", null, null);
+  }
+
+  private static PaidProvisioningService.PaidInput paidInput(String countryCode, String address,
+      String taxId) {
+    return new PaidProvisioningService.PaidInput("purchase-1", "account-1", "user@test.com",
+        "User", "Acme", null, "en_US", "EUR", countryCode, address, taxId);
+  }
+
+  /**
+   * Runs a committed browser-less paid onboarding with these inputs and returns the address and
+   * the fiscal identifier the organization step received, plus the outcome and the servlet WARNs.
+   */
+  private String[] provisionWithCompanyData(PaidProvisioningService.PaidInput input,
+      List<String> warnings) throws Exception {
+    PaidProvisioningService.Outcome[] outcome = new PaidProvisioningService.Outcome[1];
+    stagedAction = () -> outcome[0] = servlet.provisionPaidPurchase(input, new RecordingSink());
+    com.etendoerp.go.payment.TestLogCapture log = com.etendoerp.go.payment.TestLogCapture
+        .attachTo(EtendoGoJwtServlet.class, org.apache.logging.log4j.Level.WARN);
+    try {
+      runCommittedPaidOnboarding(true, mock(SubscriptionService.class), new ArrayList<>());
+      warnings.addAll(log.messagesAt(org.apache.logging.log4j.Level.WARN));
+    } finally {
+      log.detach();
+    }
+    assertEquals("Company data never fails the provisioning",
+        PaidProvisioningService.Status.PROVISIONED, outcome[0].status());
+    ArgumentCaptor<String> address = ArgumentCaptor.forClass(String.class);
+    ArgumentCaptor<String> taxId = ArgumentCaptor.forClass(String.class);
+    verify(servlet.onboardingOrgInfoService).ensureOrgInfo(anyString(), anyString(), anyString(),
+        anyString(), eq(input.countryCode()), address.capture(), any(), any(), any(), any(),
+        taxId.capture());
+    return new String[] { address.getValue(), taxId.getValue() };
+  }
+
+  /** ETP-5048 S4 — the draft's address and fiscal identifier reach the organization. */
+  @Test
+  public void aPaidPurchaseCarriesTheDraftAddressAndTaxIdToTheOrganization() throws Exception {
+    List<String> warnings = new ArrayList<>();
+
+    String[] orgInfo = provisionWithCompanyData(paidInput("ES", " Calle Mayor 1 ", "12345678Z"),
+        warnings);
+
+    assertEquals("Calle Mayor 1", orgInfo[0]);
+    assertEquals("12345678Z", orgInfo[1]);
+    assertTrue(warnings.toString(), warnings.stream().noneMatch(w -> w.contains("left out")));
+  }
+
+  /** ETP-5048 S4 — an address over the HTTP limit is dropped with a WARN, never truncated. */
+  @Test
+  public void anOverLongDraftAddressIsDroppedWithAWarning() throws Exception {
+    List<String> warnings = new ArrayList<>();
+    String tooLong = org.apache.commons.lang3.StringUtils.repeat('a',
+        OnboardingFieldLimits.ADDRESS + 1);
+
+    String[] orgInfo = provisionWithCompanyData(paidInput("ES", tooLong, "12345678Z"), warnings);
+
+    assertEquals("", orgInfo[0]);
+    assertEquals("The tax id is unaffected", "12345678Z", orgInfo[1]);
+    assertTrue(warnings.toString(), warnings.contains("Server-side provisioning of purchase-1: "
+        + "the draft address exceeds " + OnboardingFieldLimits.ADDRESS + " characters and is "
+        + "left out"));
+  }
+
+  /** ETP-5048 S4 — an invalid Spanish tax id is dropped with a WARN, never failing the run. */
+  @Test
+  public void anInvalidSpanishDraftTaxIdIsDroppedWithAWarning() throws Exception {
+    List<String> badCheckDigit = new ArrayList<>();
+    String[] orgInfo = provisionWithCompanyData(paidInput("ES", "Calle Mayor 1", "12345678A"),
+        badCheckDigit);
+
+    assertEquals("Calle Mayor 1", orgInfo[0]);
+    assertEquals("", orgInfo[1]);
+    assertTrue(badCheckDigit.toString(), badCheckDigit.contains("Server-side provisioning of "
+        + "purchase-1: the draft fiscal identifier is not valid (BAD_CHECK_DIGIT) and is left out"));
+  }
+
+  @Test
+  public void aMalformedSpanishDraftTaxIdIsDroppedToo() throws Exception {
+    List<String> warnings = new ArrayList<>();
+
+    String[] orgInfo = provisionWithCompanyData(paidInput("ES", "", "not-a-nif"), warnings);
+
+    assertEquals("", orgInfo[1]);
+    assertTrue(warnings.toString(), warnings.stream()
+        .anyMatch(w -> w.contains("is not valid (BAD_FORMAT) and is left out")));
+  }
+
+  /** Only a Spanish identifier is checked: another country's is passed through as given. */
+  @Test
+  public void aForeignDraftTaxIdIsPassedThroughUnchecked() throws Exception {
+    List<String> warnings = new ArrayList<>();
+
+    String[] orgInfo = provisionWithCompanyData(paidInput("FR", null, "FR12345678901"), warnings);
+
+    assertEquals("A missing address is blank, not null", "", orgInfo[0]);
+    assertEquals("FR12345678901", orgInfo[1]);
+  }
+
+  /** ETP-5048 — a currency the instance does not know needs review; nothing is claimed. */
+  @Test
+  public void aPaidPurchaseInAnUnknownCurrencyNeedsReviewAndIsNeverClaimed() throws Exception {
+    PaidOnboardingStage stage = stagePaidOnboarding(true);
+    PaidProvisioningService.Outcome[] outcome = new PaidProvisioningService.Outcome[1];
+    stagedAction = () -> outcome[0] = servlet.provisionPaidPurchase(paidInput("XXX"),
+        new RecordingSink());
+
+    runStagedPaidOnboarding(stage, (support, dal, transactions) -> { },
+        (support, dal, transactions) -> { });
+
+    assertEquals(PaidProvisioningService.Status.NEEDS_REVIEW, outcome[0].status());
+    assertEquals("UNKNOWN_CURRENCY", outcome[0].code());
+    verify(stage.store, never()).claimForProvisioning(anyString(), anyString(), anyString());
+  }
+
+  /**
+   * ETP-5048 — the reconciliation provisions under the same fence as the browser: when another
+   * attempt holds the purchase the claim is refused and no tenant is touched.
+   */
+  @Test
+  public void aPaidPurchaseWhoseClaimIsRefusedRunsNothing() throws Exception {
+    PaidOnboardingStage stage = stagePaidOnboarding(true);
+    when(stage.store.claimForProvisioning("purchase-1", "account-1", "user@test.com"))
+        .thenReturn(false);
+    RecordingSink sink = new RecordingSink();
+    PaidProvisioningService.Outcome[] outcome = new PaidProvisioningService.Outcome[1];
+    stagedAction = () -> outcome[0] = servlet.provisionPaidPurchase(paidInput("EUR"), sink);
+
+    runStagedPaidOnboarding(stage, (support, dal, transactions) -> { },
+        (support, dal, transactions) -> { });
+
+    assertEquals(PaidProvisioningService.Status.NOT_CLAIMED, outcome[0].status());
+    assertNull(outcome[0].attempt());
+    verify(stage.store).claimForProvisioning("purchase-1", "account-1", "user@test.com");
+    verify(servlet.pooledTenantClaimService, never()).claim(any(), any(), anyString());
+    assertTrue(sink.lines.toString(), sink.lines.isEmpty());
+  }
+
+  /**
+   * ETP-5048 — a claimed purchase runs the shared onboarding to its commit; the outcome carries
+   * the claimed attempt and the sink receives the run's progress and its successful result.
+   */
+  @Test
+  public void aClaimedPaidPurchaseIsProvisionedAndReportsToTheSink() throws Exception {
+    RecordingSink sink = new RecordingSink();
+    PaidProvisioningService.Outcome[] outcome = new PaidProvisioningService.Outcome[1];
+    stagedAction = () -> outcome[0] = servlet.provisionPaidPurchase(paidInput("EUR"), sink);
+    List<String> steps = new ArrayList<>();
+
+    runCommittedPaidOnboarding(true, mock(SubscriptionService.class), steps);
+
+    assertEquals(PaidProvisioningService.Status.PROVISIONED, outcome[0].status());
+    assertEquals(Long.valueOf(1L), outcome[0].attempt());
+    assertTrue(steps.toString(), steps.contains("recordProvisioned"));
+    assertTrue(sink.lines.toString(), sink.lines.stream().anyMatch(l -> l.startsWith("progress:")));
+    assertEquals("result:true:null", sink.lines.get(sink.lines.size() - 1));
+  }
+
+  /** Runs a browser-less paid onboarding that is refused before its claim, and returns why. */
+  private PaidProvisioningService.Outcome refusedPaidPurchase(PaidOnboardingStage stage,
+      StagedStatics before) throws Exception {
+    PaidProvisioningService.Outcome[] outcome = new PaidProvisioningService.Outcome[1];
+    stagedAction = () -> outcome[0] = servlet.provisionPaidPurchase(paidInput("EUR"),
+        new RecordingSink());
+    runStagedPaidOnboarding(stage, before, (support, dal, transactions) -> { });
+    verify(stage.store, never()).claimForProvisioning(anyString(), anyString(), anyString());
+    verify(servlet.pooledTenantClaimService, never()).claim(any(), any(), anyString());
+    return outcome[0];
+  }
+
+  private static void confirmPayments(TenantPaywallService paywall, boolean confirmed)
+      throws Exception {
+    Field confirmation = TenantPaywallService.class.getDeclaredField("paymentConfirmation");
+    confirmation.setAccessible(true);
+    confirmation.set(paywall,
+        (TenantPaywallService.PaymentConfirmation) (token, email, name) -> confirmed);
+  }
+
+  /** ETP-5048 G1 — an account owning environments must be a marked owner to be provisioned. */
+  @Test
+  public void aPaidPurchaseOfAnAccountThatIsNotTheOwnerNeedsReviewAndIsNeverClaimed()
+      throws Exception {
+    PaidOnboardingStage stage = stagePaidOnboarding(true);
+
+    PaidProvisioningService.Outcome outcome = refusedPaidPurchase(stage,
+        (support, dal, transactions) -> dal.when(
+            () -> EtendoGoJwtDalHelper.hasOwnedEnvironmentForAccountEmail("user@test.com"))
+            .thenReturn(false));
+
+    assertEquals(PaidProvisioningService.Status.NEEDS_REVIEW, outcome.status());
+    assertEquals("BILLING_OWNER_REQUIRED", outcome.code());
+    assertNull(outcome.attempt());
+  }
+
+  /** ETP-5048 G1 — a paywall that blocks the purchase (no confirmed payment) is NOT_PAID. */
+  @Test
+  public void aPaidPurchaseThePaywallBlocksIsNotPaidAndIsNeverClaimed() throws Exception {
+    PaidOnboardingStage stage = stagePaidOnboarding(true);
+    confirmPayments(servlet.tenantPaywallService, false);
+
+    PaidProvisioningService.Outcome outcome = refusedPaidPurchase(stage,
+        (support, dal, transactions) -> { });
+
+    assertEquals(PaidProvisioningService.Status.NOT_PAID, outcome.status());
+    assertNull(outcome.code());
+  }
+
+  /**
+   * ETP-5048 G1 — a paywall that allows the purchase only as a free one (the account owns no
+   * environment, and no payment is confirmed) is not productive, so it is NOT_PAID too.
+   */
+  @Test
+  public void aPaidPurchaseThePaywallDoesNotConfirmAsProductiveIsNotPaid() throws Exception {
+    PaidOnboardingStage stage = stagePaidOnboarding(true);
+    confirmPayments(servlet.tenantPaywallService, false);
+
+    PaidProvisioningService.Outcome outcome = refusedPaidPurchase(stage,
+        (support, dal, transactions) -> dal.when(
+            () -> EtendoGoJwtDalHelper.countTenantsOwnedByAccountEmail("user@test.com"))
+            .thenReturn(0));
+
+    assertEquals(PaidProvisioningService.Status.NOT_PAID, outcome.status());
+  }
+
+  /** ETP-5048 G1 — a recorded demo source that is no longer a free demo of the account. */
+  @Test
+  public void aPaidPurchaseWhoseRecordedDemoIsGoneNeedsReviewAndIsNeverClaimed()
+      throws Exception {
+    PaidOnboardingStage stage = stagePaidOnboarding(true);
+    when(stage.store.hasRecordedDemoSelection("purchase-1", "account-1", "user@test.com"))
+        .thenReturn(true);
+    when(stage.store.findDemoClientId("purchase-1", "account-1", "user@test.com"))
+        .thenReturn("demo-1");
+
+    PaidProvisioningService.Outcome outcome = refusedPaidPurchase(stage,
+        (support, dal, transactions) -> dal.when(
+            () -> EtendoGoJwtDalHelper.findFreeTenantIdsByAccountEmail("user@test.com"))
+            .thenReturn(java.util.Set.of("demo-other")));
+
+    assertEquals(PaidProvisioningService.Status.NEEDS_REVIEW, outcome.status());
+    assertEquals(EtendoGoJwtServlet.CODE_DEMO_SELECTION_REQUIRED, outcome.code());
+    assertTrue(outcome.detail(), outcome.detail().contains("no longer available"));
+  }
+
+  /**
+   * ETP-5048 G4 (decision 10) — a browser-less repair runs the same post-commit steps as the
+   * browser: the internal {@code environment-provisioning} alert and the customer's
+   * environment-ready email both go out.
+   */
+  @Test
+  public void aServerSideRepairSendsTheProvisioningAlertAndTheEnvironmentReadyEmail()
+      throws Exception {
+    PaidProvisioningService.Outcome[] outcome = new PaidProvisioningService.Outcome[1];
+    stagedAction = () -> outcome[0] = servlet.provisionPaidPurchase(paidInput("EUR"),
+        new RecordingSink());
+
+    runCommittedPaidOnboarding(true, mock(SubscriptionService.class), new ArrayList<>());
+
+    assertEquals(PaidProvisioningService.Status.PROVISIONED, outcome[0].status());
+    ArgumentCaptor<com.etendoerp.go.schemaforge.email.InternalAlertEvent> alerts =
+        ArgumentCaptor.forClass(com.etendoerp.go.schemaforge.email.InternalAlertEvent.class);
+    verify(servlet.internalAlertService, org.mockito.Mockito.atLeastOnce())
+        .sendAfterTransaction(alerts.capture());
+    assertTrue(alerts.getAllValues().stream().anyMatch(alert ->
+        "environment-provisioning".equals(alert.getEvent())
+            && alert.getStatus() == com.etendoerp.go.schemaforge.email.InternalAlertEvent.Status.OK
+            && "PRODUCTIVE".equals(alert.getEnvironmentType())
+            && "client-1".equals(alert.getClientId())));
+    Field sender = EtendoGoJwtServlet.class.getDeclaredField("authEmailSender");
+    sender.setAccessible(true);
+    TransactionalAuthEmailSender emails = (TransactionalAuthEmailSender) sender.get(servlet);
+    verify(emails).sendEnvironmentReady(any(), eq("client-1"), eq("en_US"));
+  }
+
+  /** ETP-5048 — a failed run is classified FAILED with the step's own code and the attempt. */
+  @Test
+  public void aFailedPaidPurchaseRunIsReportedAsFailedWithItsAttempt() throws Exception {
+    RecordingSink sink = new RecordingSink();
+    PaidProvisioningService.Outcome[] outcome = new PaidProvisioningService.Outcome[1];
+    stagedAction = () -> outcome[0] = servlet.provisionPaidPurchase(paidInput("EUR"), sink);
+
+    runPaidOnboarding(true, false);
+
+    assertEquals(PaidProvisioningService.Status.FAILED, outcome[0].status());
+    assertEquals(Long.valueOf(1L), outcome[0].attempt());
+    assertNotNull(outcome[0].code());
+    assertTrue(sink.lines.toString(), sink.lines.get(sink.lines.size() - 1)
+        .startsWith("result:false:"));
   }
 
   /** Per-spec stubs or verifications on the static mocks of a staged paid onboarding. */
@@ -3871,6 +4529,10 @@ public class EtendoGoJwtServletCoverageTest {
     servlet.tenantEnvironmentLifecycleService = mock(TenantEnvironmentLifecycleService.class);
     servlet.onboardingForceTestModeService = mock(OnboardingForceTestModeService.class);
     servlet.onboardingOrgInfoService = mock(com.etendoerp.go.onboarding.OnboardingOrgInfoService.class);
+    // ETP-5577 (develop) — finishTenantMetadata marks the initial period state pending, which
+    // writes an AD_Preference; a mock keeps the staged run DB-free.
+    servlet.onboardingInitialPeriodStateService =
+        mock(com.etendoerp.go.onboarding.OnboardingInitialPeriodStateService.class);
     return new PaidOnboardingStage(response, request, store);
   }
 
@@ -3901,7 +4563,11 @@ public class EtendoGoJwtServletCoverageTest {
       support.when(() -> EtendoGoJwtSupport.findStarOrgId("client-1")).thenReturn("star-org");
       dal.when(() -> EtendoGoJwtDalHelper.findFirstOrganization("client-1")).thenReturn(org);
       before.apply(support, dal, transactions);
-      servlet.doPost(stage.request, stage.response.response);
+      if (stagedAction == null) {
+        servlet.doPost(stage.request, stage.response.response);
+      } else {
+        stagedAction.run();
+      }
       after.apply(support, dal, transactions);
     }
   }

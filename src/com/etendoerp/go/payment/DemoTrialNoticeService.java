@@ -87,11 +87,13 @@ public class DemoTrialNoticeService {
     for (String clientId : candidates) {
       result.checked++;
       try {
-        if (!source.findOwedNotice(clientId, now).isPresent()) {
+        if (source.keepFrozenTrial(clientId, now)) {
+          result.frozen++;
+        } else if (!source.findOwedNotice(clientId, now).isPresent()) {
           result.notOwed++;
-          continue;
+        } else {
+          tally(result, clientId, sender.send(clientId));
         }
-        tally(result, clientId, sender.send(clientId));
       } catch (RuntimeException e) {
         log.warn("Demo trial notice for client {} failed; it is retried on the next run",
             clientId, e);
@@ -176,6 +178,7 @@ public class DemoTrialNoticeService {
     private int notOwed;
     private int sent;
     private int alreadySent;
+    private int frozen;
     private final Map<String, String> failures = new LinkedHashMap<>();
 
     public int getChecked() {
@@ -194,6 +197,11 @@ public class DemoTrialNoticeService {
       return alreadySent;
     }
 
+    /** @return environments whose trial is frozen, owed no notice */
+    public int getFrozen() {
+      return frozen;
+    }
+
     public int getFailed() {
       return failures.size();
     }
@@ -206,7 +214,8 @@ public class DemoTrialNoticeService {
     @Override
     public String toString() {
       return checked + " environment(s) checked: " + sent + " notice(s) sent, " + alreadySent
-          + " already sent, " + notOwed + " with nothing owed, " + failures.size() + " failed";
+          + " already sent, " + notOwed + " with nothing owed, " + frozen + " frozen, "
+          + failures.size() + " failed";
     }
   }
 }

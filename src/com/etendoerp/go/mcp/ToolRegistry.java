@@ -292,6 +292,9 @@ public class ToolRegistry {
         tools.add(buildJobStatusTool());
         tools.add(buildJobCancelTool());
       }
+    }
+    // ETP-5783: published under the scope its call requires (etendo:process), not under write.
+    if (permissions.canProcess) {
       tools.add(buildActionTool(ToolRegistryActionSpecs.withActionSpecs(accessibleWindowSpecs, actionReportSpecs)));
       tools.add(McpActionBatch.definition(
           ToolRegistryActionSpecs.withActionSpecs(accessibleWindowSpecs, actionReportSpecs)));
@@ -954,6 +957,14 @@ public class ToolRegistry {
     props.put(McpConstants.PARAM_ASSET_ID, stringProp(
         "Optional asset ID for computing dynamic defaults that depend on a specific asset "
             + "(e.g. the amortization header name derived from the asset name and start date)"));
+    props.put(McpConstants.PARAM_RECORD_CONTEXT, objectProp(
+        "Optional current field values of the record you are drafting, for defaults that depend "
+            + "on them. For example {\"productType\": \"S\"} on product/product returns the "
+            + "defaults of a Service (type and tax category consistent with it). Each scalar entry "
+            + "(string, number, boolean; at most 32 entries of 256 characters) is passed to the "
+            + "entity's defaults customization as a query parameter, exactly like ?key=value on "
+            + "REST /defaults, so send only current field values of the record. parentId, "
+            + "assetId, view, spec and entity cannot be overridden by it."));
     props.put(McpDefaultsView.PARAM_VIEW, enumProp(
         "Optional response shape. Omit (or \"full\") for the historical flat map of every default. "
             + "\"grouped\" splits the result into `confirm` (writable fields you should review or "
@@ -990,8 +1001,11 @@ public class ToolRegistry {
             + "entity), pass parentId with the parent record's id — omitting it does not resolve "
             + "parent-dependent fields (a storage bin scoped to the parent's warehouse, a "
             + "price-list version, a running line number); they are silently absent rather than "
-            + "erroring. Pass view:\"minimal\" (or \"grouped\") to collapse server-managed "
-            + "compliance flags and focus on the fields you actually confirm. "
+            + "erroring. When a default depends on another field's current value (for example "
+            + "the product's tax category follows its productType), pass those current values "
+            + "in recordContext to get the dependent default. Pass view:\"minimal\" (or "
+            + "\"grouped\") to collapse server-managed compliance flags and focus on the "
+            + "fields you actually confirm. "
             + "Date values come back ISO-8601 ('YYYY-MM-DD', or 'YYYY-MM-DDTHH:MM:SS' for "
             + "datetime fields) and can be passed straight back to etendo_create unchanged.",
         buildObjectSchema(props, List.of("spec", McpConstants.PARAM_ENTITY)));

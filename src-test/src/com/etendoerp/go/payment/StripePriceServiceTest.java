@@ -14,7 +14,10 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.when;
 
@@ -36,11 +39,12 @@ import org.mockito.MockedStatic;
 import com.etendoerp.go.schemaforge.data.Plan;
 
 /**
- * Contract tests for retrieving the exact recurring Stripe Price configured for checkout, and for
- * the hosted checkout's reopening of an existing session.
+ * Contract tests for retrieving the exact recurring Stripe Price configured for checkout, for the
+ * billing offer quoted from it, and for the hosted checkout's reopening of an existing session.
  *
  * @covers com.etendoerp.go.payment.StripePriceService
  * @covers com.etendoerp.go.payment.HostedCheckoutService
+ * @covers com.etendoerp.go.payment.BillingOfferConfiguration
  */
 class StripePriceServiceTest {
 
@@ -59,16 +63,81 @@ class StripePriceServiceTest {
       configuration.when(CheckoutConfiguration::apiBaseUrl).thenReturn(stripe.baseUrl());
       configuration.when(CheckoutConfiguration::mode).thenReturn("subscription");
 
-      BillingOfferConfiguration.Offer offer = BillingOfferConfiguration.current();
+      // While the legacy fallback is active the offer quotes the configured price (ETP-5049).
+      Plan legacy = mock(Plan.class);
+      when(legacy.getSearchKey()).thenReturn(PlanCatalogService.LEGACY_PLAN_KEY);
+      PlanCatalogService catalog = mock(PlanCatalogService.class);
+      when(catalog.findDefaultPurchasablePlan()).thenReturn(
+          Optional.of(new PlanCatalogService.DefaultPlan(legacy, true)));
+
+      BillingOfferConfiguration.Offer offer =
+          BillingOfferConfiguration.current(catalog, new StripePriceService());
 
       assertEquals("/v1/prices/price_configured", requestPath.get());
       assertEquals("GET", requestMethod.get());
       assertEquals("Bearer sk_test_server_only", authorization.get());
-      assertEquals("price_configured", offer.getPriceId());
+      assertEquals(PlanCatalogService.LEGACY_PLAN_KEY, offer.getPlanKey());
       assertEquals(1000L, offer.getAmountMinor());
       assertEquals("USD", offer.getCurrency());
       assertEquals("year", offer.getInterval());
     }
+  }
+
+  /** Once a priced plan retires the fallback, the offer is that plan at its own provider price. */
+  @Test
+  void theOfferQuotesTheFirstPurchasablePlanAtItsOwnProviderPrice() throws Exception {
+    Plan plan = mock(Plan.class);
+    when(plan.getSearchKey()).thenReturn("productive-monthly");
+    when(plan.getProviderPriceID()).thenReturn("price_plan_monthly");
+    PlanCatalogService catalog = mock(PlanCatalogService.class);
+    when(catalog.findDefaultPurchasablePlan()).thenReturn(
+        Optional.of(new PlanCatalogService.DefaultPlan(plan, false)));
+    StripePriceService prices = mock(StripePriceService.class);
+    when(prices.retrievePrice("price_plan_monthly")).thenReturn(StripePriceService.parsePrice(
+        new JSONObject("{\"id\":\"price_plan_monthly\",\"active\":true,\"unit_amount\":4900,"
+            + "\"currency\":\"eur\",\"recurring\":{\"interval\":\"month\","
+            + "\"interval_count\":1}}")));
+
+    BillingOfferConfiguration.Offer offer = BillingOfferConfiguration.current(catalog, prices);
+
+    assertEquals("productive-monthly", offer.getPlanKey());
+    assertEquals(4900L, offer.getAmountMinor());
+    assertEquals("EUR", offer.getCurrency());
+    assertEquals("month", offer.getInterval());
+    // The legacy property may still be set; once the fallback is retired it is never quoted.
+    verify(prices, never()).retrieveConfiguredPrice();
+  }
+
+  @Test
+  void theLegacyOfferQuotesTheConfiguredPriceAndNeverThePlansOwn() throws Exception {
+    Plan legacy = mock(Plan.class);
+    when(legacy.getSearchKey()).thenReturn(PlanCatalogService.LEGACY_PLAN_KEY);
+    PlanCatalogService catalog = mock(PlanCatalogService.class);
+    when(catalog.findDefaultPurchasablePlan()).thenReturn(
+        Optional.of(new PlanCatalogService.DefaultPlan(legacy, true)));
+    StripePriceService prices = mock(StripePriceService.class);
+    when(prices.retrieveConfiguredPrice()).thenReturn(StripePriceService.parsePrice(
+        new JSONObject("{\"id\":\"price_configured\",\"active\":true,\"unit_amount\":2900,"
+            + "\"currency\":\"eur\",\"recurring\":{\"interval\":\"month\","
+            + "\"interval_count\":1}}")));
+
+    BillingOfferConfiguration.Offer offer = BillingOfferConfiguration.current(catalog, prices);
+
+    assertEquals(PlanCatalogService.LEGACY_PLAN_KEY, offer.getPlanKey());
+    assertEquals(2900L, offer.getAmountMinor());
+    verify(prices, never()).retrievePrice(anyString());
+  }
+
+  @Test
+  void anEmptyCatalogHasNoOfferAndReachesNoProvider() {
+    PlanCatalogService catalog = mock(PlanCatalogService.class);
+    when(catalog.findDefaultPurchasablePlan()).thenReturn(Optional.empty());
+    StripePriceService prices = mock(StripePriceService.class);
+
+    // Nothing for sale is a configuration state the endpoint answers with 503, never a guess.
+    assertThrows(IllegalStateException.class,
+        () -> BillingOfferConfiguration.current(catalog, prices));
+    verifyNoInteractions(prices);
   }
 
   @Test
@@ -159,7 +228,8 @@ class StripePriceServiceTest {
       JSONObject result = checkout.createSession("account-1", "owner@example.test", "Acme",
           "https://app.example.test", "productive-monthly");
 
-      assertEquals("price_retrieved", result.getString("priceId"));
+      // ETP-5049: the provider price id goes to Stripe, never back to the browser.
+      assertFalse(result.has("priceId"));
       assertTrue(stripe.checkoutForm.get().contains("line_items%5B0%5D%5Bprice%5D=price_retrieved"),
           stripe.checkoutForm.get());
       assertFalse(stripe.checkoutForm.get().contains("price_current_config"),
@@ -201,6 +271,10 @@ class StripePriceServiceTest {
           "An open Stripe session must be reused instead of creating a second payable session");
       assertEquals(2, stripe.retrieveSessionCalls.get());
       verify(store, org.mockito.Mockito.times(2)).findStripeSessionId("purchase-1");
+      // ETP-5049: a reused session answers no provider price id, so the stored one is not read.
+      assertFalse(first.has("priceId"), first.toString());
+      assertFalse(second.has("priceId"), second.toString());
+      verify(store, never()).findStripePriceId("purchase-1");
     }
   }
 
@@ -257,8 +331,11 @@ class StripePriceServiceTest {
       assertEquals(1, stripe.createSessionCalls.get());
       assertEquals(HostedCheckoutService.replacementIdempotencyKey("purchase-expired", "cs_existing"),
           stripe.idempotencyKeys.get(0));
+      // The replacement charges the price id stored on the request, and does not echo it.
       assertTrue(stripe.checkoutForms.get(0).contains(
           "line_items%5B0%5D%5Bprice%5D=price_saved"), stripe.checkoutForms.get(0));
+      assertFalse(replacement.has("priceId"), replacement.toString());
+      assertFalse(replacement.toString().contains("price_saved"), replacement.toString());
       assertFalse(stripe.checkoutForms.get(0).contains("price_default"),
           stripe.checkoutForms.get(0));
     }

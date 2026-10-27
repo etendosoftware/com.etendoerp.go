@@ -83,12 +83,15 @@ public class YearAccountingHandler implements NeoHandler {
   // type='A' rows for the same year before this fix).
   private static final List<String> YEAR_END_CLOSING_TYPES = List.of("O", "C", "D", "R");
 
+  // Grouped by accounting schema too (ETP-5592): Fact_Acct amounts are in the schema's currency,
+  // so summing across schemas would mix currencies. Each row carries its schema's ISO code.
   private static final String HQL =
-      "select max(fa.id), fa.account.searchKey, fa.type, sum(fa.debit), sum(fa.credit), max(fa.description) "
-          + "from FinancialMgmtAccountingFact fa "
+      "select max(fa.id), fa.account.searchKey, fa.type, sum(fa.debit), sum(fa.credit), max(fa.description), "
+          + "fa.account.name, sc.iSOCode "
+          + "from FinancialMgmtAccountingFact fa join fa.accountingSchema.currency sc "
           + "where fa.period.year.id = :yearId "
           + "and fa.type in (:closingTypes) "
-          + "group by fa.account.searchKey, fa.type "
+          + "group by fa.accountingSchema.id, sc.iSOCode, fa.account.searchKey, fa.account.name, fa.type "
           + "having sum(fa.credit - fa.debit) <> 0 "
           + "order by fa.account.searchKey";
 
@@ -142,6 +145,9 @@ public class YearAccountingHandler implements NeoHandler {
       entry.put("debit", nullToZero((BigDecimal) row[3]));
       entry.put("credit", nullToZero((BigDecimal) row[4]));
       entry.put("description", nullToEmpty((String) row[5]));
+      entry.put("accountName", nullToEmpty((String) row[6]));
+      // NEO's FK-identifier key, so the SPA's amount cells pick the currency up like any NEO row.
+      entry.put("currency$_identifier", nullToEmpty((String) row[7]));
       data.put(entry);
     }
     JSONObject body = new JSONObject();

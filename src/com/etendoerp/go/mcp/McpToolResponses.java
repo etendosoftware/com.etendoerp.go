@@ -17,11 +17,17 @@
 
 package com.etendoerp.go.mcp;
 
+import java.util.List;
+
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 
+import com.etendoerp.go.schemaforge.NeoErrorClassifier;
+import com.etendoerp.go.schemaforge.NeoErrorClassifier.Classification;
+import com.etendoerp.go.schemaforge.NeoErrorResponses;
 import com.etendoerp.go.schemaforge.util.NeoErrorSanitizer;
 
 /**
@@ -61,7 +67,7 @@ final class McpToolResponses {
       return McpResponseSanitizer.serialize(envelope);
     } catch (JSONException jsonEx) {
       log.error("Could not build routing error envelope for '{}'", toolName, jsonEx);
-      return "Error executing " + toolName + ": " + e.getMessage();
+      return "Error executing " + toolName + ": " + NeoErrorSanitizer.sanitize(e);
     }
   }
 
@@ -79,6 +85,26 @@ final class McpToolResponses {
    */
   static String buildUnexpectedErrorBody(String toolName, Exception e) {
     try {
+      // ETP-5782: a failure the agent can act on — a trigger or an AD-message-keyed refusal, an
+      // unknown reference, a row still in use, a deadlock — is classified by what the exception
+      // is, not answered as a server fault. The session is rolled back first, discarding only
+      // uncommitted work; earlier steps may already be committed. Translation then reads
+      // AD_Message on a usable session. A post-hook failure never gets here (afterCommitFailure).
+      Classification c = NeoErrorClassifier.classify(e, null);
+      NeoErrorResponses.rollbackUnlessBatchOwned();
+      if (c.isServerSide()) {
+        log.error("MCP tool '{}' failed: {} {} session={}", toolName, c.status(), c.code(),
+            McpUsageTelemetry.sessionForLog(), e);
+      } else {
+        log.warn("MCP tool '{}' refused: {} {} ({}) session={}", toolName, c.status(), c.code(),
+            e.getClass().getSimpleName(), McpUsageTelemetry.sessionForLog());
+      }
+      if (!c.isServerSide() || c.status() == HTTP_SERVICE_UNAVAILABLE) {
+        JSONObject envelope = classifiedEnvelope(c.status(), c.code(),
+            NeoErrorClassifier.displayMessage(c), c.messageKeys());
+        envelope.put(McpConstants.KEY_TOOL, toolName);
+        return McpResponseSanitizer.serialize(envelope);
+      }
       JSONObject envelope = new JSONObject();
       envelope.put(McpConstants.KEY_STATUS, McpConstants.STATUS_SERVER_ERROR);
       envelope.put(McpConstants.KEY_ERROR, McpConstants.ERROR_SERVER);
@@ -91,7 +117,88 @@ final class McpToolResponses {
       return McpResponseSanitizer.serialize(envelope);
     } catch (JSONException jsonEx) {
       log.error("Could not build error envelope for '{}'", toolName, jsonEx);
-      return "Error executing " + toolName + ": " + e.getMessage();
+      return "Error executing " + toolName + ": " + NeoErrorSanitizer.sanitize(e);
+    }
+  }
+
+  private static final int HTTP_SERVICE_UNAVAILABLE = 503;
+
+  /**
+   * The IMP-5 envelope for a failure {@link NeoErrorClassifier} classified (ETP-5782), shared by
+   * the router's catch-all and by the DAL failure path ({@code McpWriteRequestSupport}).
+   *
+   * <p>REST's 400s ({@code unknown_reference}, {@code missing_required_value}) are answered as the
+   * MCP surface's {@code 422 validation_error}, as every other rejected value already is on this
+   * channel; the class itself travels in {@code code}. Declared in {@code neo-headless.md}
+   * §4.12.9.
+   *
+   * @param restStatus  the status REST answers for the class
+   * @param code        the class, {@code NeoErrorClassifier.CODE_*}
+   * @param detail      the display message
+   * @param messageKeys the AD message keys of the failure; may be empty
+   * @return the envelope (no {@code tool}, no {@code seeAlso}: the caller adds what applies)
+   * @throws JSONException if the envelope cannot be built
+   */
+  static JSONObject classifiedEnvelope(int restStatus, String code, String detail,
+      List<String> messageKeys) throws JSONException {
+    int status = restStatus == 400 ? McpConstants.STATUS_UNPROCESSABLE : restStatus;
+    JSONObject envelope = new JSONObject();
+    envelope.put(McpConstants.KEY_STATUS, status);
+    envelope.put(McpConstants.KEY_ERROR, errorFor(status));
+    envelope.put("code", code);
+    envelope.put(McpConstants.KEY_DETAIL, detail);
+    if (messageKeys != null && !messageKeys.isEmpty()) {
+      envelope.put("messageKeys", new JSONArray(messageKeys));
+    }
+    // ETP-5714: a hint keyed by the AD message (e.g. 20501, "Documento ya procesado") is more
+    // specific than the one for the class of failure, so it wins.
+    String keyed = McpMessageKeyHints.hintFor(messageKeys);
+    envelope.put(McpConstants.KEY_HINT, keyed != null ? keyed : hintFor(code));
+    return envelope;
+  }
+
+  private static String errorFor(int status) {
+    switch (status) {
+      case McpConstants.STATUS_FORBIDDEN:
+        return McpConstants.ERROR_FORBIDDEN;
+      case McpConstants.STATUS_CONFLICT:
+        return McpConstants.ERROR_CONFLICT;
+      case McpConstants.STATUS_UNPROCESSABLE:
+        return McpConstants.ERROR_VALIDATION;
+      default:
+        return McpConstants.ERROR_SERVER;
+    }
+  }
+
+  private static String hintFor(String code) {
+    switch (code) {
+      case NeoErrorClassifier.CODE_BUSINESS_RULE:
+        return "A business rule rejected the request. Read 'detail' (the rule's own message), "
+            + "check the current record state, then correct what it names and retry.";
+      case NeoErrorClassifier.CODE_UNKNOWN_REFERENCE:
+        return "A referenced id does not exist or is not accessible. Look the record up with "
+            + "etendo_list and send an id from the result.";
+      case NeoErrorClassifier.CODE_RECORD_IN_USE:
+        return "Other records still reference this one. Delete or reassign them first; retrying "
+            + "unchanged will fail the same way.";
+      case NeoErrorClassifier.CODE_INVALID_VALUE:
+        return "A value was rejected by a database check. Call etendo_schema with view:\"create\" "
+            + "for the field types and allowed values, correct the value and retry.";
+      case NeoErrorClassifier.CODE_MISSING_REQUIRED_VALUE:
+        return "A required value is missing. Call etendo_schema with view:\"create\" to see "
+            + "the mandatory fields, send them and retry.";
+      case NeoErrorClassifier.CODE_RETRYABLE_CONFLICT:
+        return "Another operation was changing the same data at the same time. Retry the same "
+            + "call unchanged.";
+      case NeoErrorClassifier.CODE_SERVICE_UNAVAILABLE:
+        return "The service is temporarily unavailable. Retry the same call later.";
+      case NeoErrorClassifier.CODE_FORBIDDEN:
+        return "The current role is not allowed to do this; retrying will not change that.";
+      case NeoErrorClassifier.CODE_DUPLICATE_KEY:
+        return "A record with this business key already exists. Find it with etendo_list and "
+            + "update it, or send a different key.";
+      default:
+        return "Read 'detail' for what failed.";
     }
   }
 

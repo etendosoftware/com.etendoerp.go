@@ -53,14 +53,27 @@ class McpAuthorizationServiceVectorTest {
         e.getMessage().contains("'etendo:write'"), e.getMessage());
   }
 
+  /** ETP-5783: etendo_action runs a document action, so it needs the process scope like REST. */
   @Test
-  void actionBatchRequiresTheSameWriteScopeAsEtendoAction() {
+  void etendoActionRequiresProcessNotWrite() {
+    assertThrows(OBSecurityException.class,
+        () -> McpAuthorizationService.authorizeToolCall("etendo_action", Set.of("etendo:write")));
+    assertThrows(OBSecurityException.class,
+        () -> McpAuthorizationService.authorizeToolCall("etendo_action", Set.of("neo:write")));
+    McpAuthorizationService.authorizeToolCall("etendo_action", Set.of("neo:process"));
+    McpAuthorizationService.authorizeToolCall("etendo_action", Set.of("etendo:process"));
+    McpAuthorizationService.authorizeToolCall("etendo_action", Set.of("etendo:*"));
+  }
+
+  /** ETP-5873: a batch of actions asks for what each action asks, the process scope. */
+  @Test
+  void actionBatchRequiresTheSameScopeAsEtendoAction() {
     for (String tool : new String[] {"etendo_action", McpConstants.TOOL_NEO_ACTION_BATCH}) {
       assertThrows(OBSecurityException.class,
           () -> McpAuthorizationService.authorizeToolCall(tool, Set.of("etendo:read")), tool);
       assertThrows(OBSecurityException.class,
-          () -> McpAuthorizationService.authorizeToolCall(tool, Set.of("etendo:process")), tool);
-      McpAuthorizationService.authorizeToolCall(tool, Set.of("etendo:write"));
+          () -> McpAuthorizationService.authorizeToolCall(tool, Set.of("etendo:write")), tool);
+      McpAuthorizationService.authorizeToolCall(tool, Set.of("etendo:process"));
     }
   }
 

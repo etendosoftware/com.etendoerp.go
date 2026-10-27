@@ -29,7 +29,11 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.financial.FinancialUtils;
+import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.invoice.InvoiceLine;
+import org.openbravo.model.common.plm.Product;
+import org.openbravo.model.pricing.pricelist.ProductPrice;
 
 /**
  * Price and amount derivation of a written invoice line, for the customizations that call it
@@ -115,6 +119,9 @@ final class InvoiceLineAmountSupport {
 
   private static final Logger log = LogManager.getLogger(InvoiceLineAmountSupport.class);
 
+  static final String FIELD_PRODUCT = "product";
+  static final String FIELD_PARENT_ID = "parentId";
+  static final String FIELD_INVOICE = "invoice";
   static final String FIELD_INVOICED_QTY = InvoiceLine.PROPERTY_INVOICEDQUANTITY;
   static final String FIELD_UNIT_PRICE = InvoiceLine.PROPERTY_UNITPRICE;
   static final String FIELD_LIST_PRICE = InvoiceLine.PROPERTY_LISTPRICE;
@@ -123,6 +130,8 @@ final class InvoiceLineAmountSupport {
   static final String FIELD_TAX = InvoiceLine.PROPERTY_TAX;
   static final String FIELD_LINE_NET_AMOUNT = InvoiceLine.PROPERTY_LINENETAMOUNT;
   static final String FIELD_GROSS_AMOUNT = InvoiceLine.PROPERTY_GROSSAMOUNT;
+  /** {@code C_InvoiceLine.TaxBaseAmt}: the tax base, the net after the discount. */
+  static final String FIELD_TAXABLE_AMOUNT = InvoiceLine.PROPERTY_TAXABLEAMOUNT;
 
   /** The scale of a derived unit price: the one the SPA posts ({@code toFixed(6)}). */
   static final int PRICE_SCALE = 6;
@@ -168,6 +177,53 @@ final class InvoiceLineAmountSupport {
     deriveAmountsOnCreate(ctx);
     deriveAmountsOnUpdate(ctx);
     return null;
+  }
+
+  /**
+   * A created line sent without a price takes its product's price in the parent invoice's price
+   * list at the invoice date (ETP-5881), the call core makes for a line
+   * ({@link FinancialUtils#getProductPrice}) — what the SPA gets from the product callout and REST
+   * never ran. A price in the body is never replaced ({@link LinePriceListSupport}). Abstains when
+   * the product or invoice cannot be read, the invoice has no price list or its list includes tax
+   * (deriving the net side is the callout's job), or the product has no price there. Total: never
+   * throws.
+   *
+   * @param ctx the pre-hook context; its request body is mutated in place
+   */
+  static void setPriceFromPriceListOnCreate(NeoContext ctx) {
+    if (ctx == null || !NeoEndpointType.CRUD.equals(ctx.getEndpointType())
+        || !METHOD_POST.equals(ctx.getHttpMethod()) || ctx.getRequestBody() == null) {
+      return;
+    }
+    JSONObject body = ctx.getRequestBody();
+    try {
+      if (!LinePriceListSupport.hasNoPrice(body, FIELD_UNIT_PRICE)
+          || LinePriceListSupport.applyClientListPrice(body, FIELD_UNIT_PRICE, FIELD_LIST_PRICE,
+              FIELD_DISCOUNT)) {
+        return;
+      }
+      String productId = body.optString(FIELD_PRODUCT, null);
+      String invoiceId = body.optString(FIELD_PARENT_ID, null);
+      if (StringUtils.isBlank(invoiceId) || "null".equals(invoiceId)) {
+        invoiceId = body.optString(FIELD_INVOICE, null);
+      }
+      if (StringUtils.isBlank(productId) || StringUtils.isBlank(invoiceId)) {
+        return;
+      }
+      Product product = OBDal.getInstance().get(Product.class, productId);
+      Invoice invoice = OBDal.getInstance().get(Invoice.class, invoiceId);
+      if (product == null || invoice == null || invoice.getInvoiceDate() == null
+          || invoice.getPriceList() == null
+          || Boolean.TRUE.equals(invoice.getPriceList().isPriceIncludesTax())) {
+        return;
+      }
+      ProductPrice catalog = FinancialUtils.getProductPrice(product, invoice.getInvoiceDate(),
+          Boolean.TRUE.equals(invoice.isSalesTransaction()), invoice.getPriceList(), false);
+      LinePriceListSupport.applyCatalogPrice(body, catalog, FIELD_UNIT_PRICE, FIELD_LIST_PRICE);
+    } catch (Exception e) {
+      log.warn("[INVOICE-LINE-PRICE] Could not price the line on {} {}: {}", ctx.getSpecName(),
+          ctx.getEntityName(), e.getMessage());
+    }
   }
 
   /**
@@ -271,6 +327,7 @@ final class InvoiceLineAmountSupport {
               discounted, scale);
         }
       }
+      writeTaxableAmount(body, netToStore(body, derived), scale);
     } catch (Exception e) {
       log.warn("[INVOICE-LINE-AMOUNTS] Could not derive the line amounts on {} {}: {}",
           ctx.getSpecName(), ctx.getEntityName(), e.getMessage());
@@ -322,6 +379,9 @@ final class InvoiceLineAmountSupport {
         if (value != null && !sent.has(out)) {
           body.put(out, value.setScale(scale.getAsInt(), RoundingMode.HALF_UP));
         }
+      }
+      if (!sent.has(FIELD_TAXABLE_AMOUNT)) {
+        writeTaxableAmount(body, netToStore(body, derived), scale);
       }
     } catch (Exception | LinkageError e) {
       log.warn("[INVOICE-LINE-AMOUNTS] Could not recalculate the line {} on {} {}: {}",
@@ -525,6 +585,41 @@ final class InvoiceLineAmountSupport {
       return unit != null && unit.compareTo(list) == 0 ? list : null;
     }
     return patch.has(FIELD_DISCOUNT) || patch.has(FIELD_LIST_PRICE) ? list : null;
+  }
+
+  /**
+   * The net amount the line will be stored with: the body's {@code lineNetAmount} when it carries
+   * one (the caller's, or one the amount writes above just set), otherwise the derived net.
+   *
+   * @param body    the request body, after the amount writes
+   * @param derived the amounts the policy derived
+   * @return the net to persist, or {@code null} when there is none
+   */
+  private static Object netToStore(JSONObject body, JSONObject derived) {
+    if (LineAmountSupport.decimal(body.opt(FIELD_LINE_NET_AMOUNT)) != null) {
+      return body.opt(FIELD_LINE_NET_AMOUNT);
+    }
+    return derived.opt(FIELD_LINE_NET_AMOUNT);
+  }
+
+  /**
+   * Sets {@code taxableAmount} ({@code TaxBaseAmt}) to the line's final net amount, the core
+   * semantics ({@code UpdateTax.updateTaxableAmount}: the net after the line discount). Unlike
+   * {@link #writeIfStale} it overwrites whatever the body carries and writes a net of exactly 0
+   * (100 % discount, free line): only the SPA's callout filled it, before the discount, so a line
+   * written through REST or MCP kept 0 or the undiscounted quantity x price. A sign is kept as is
+   * (returns). Nothing is written when there is no net to copy.
+   *
+   * @param body  the request body; mutated in place
+   * @param net   the final net amount of the line, any JSON number or string
+   * @param scale the invoice currency's standard precision
+   */
+  private static void writeTaxableAmount(JSONObject body, Object net, IntSupplier scale)
+      throws JSONException {
+    BigDecimal value = LineAmountSupport.decimal(net);
+    if (value != null) {
+      body.put(FIELD_TAXABLE_AMOUNT, value.setScale(scale.getAsInt(), RoundingMode.HALF_UP));
+    }
   }
 
   /**

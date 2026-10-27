@@ -267,6 +267,9 @@ grandfathered plan's own name (with an empty description, see above); and
 the charged price while the fallback is active, a different price once a priced plan has retired it,
 and a `503 BILLING_OFFER_UNAVAILABLE` once the property is removed. The upgrade page quotes the plan
 catalog and falls back to the offer only while that lookup is in flight or has failed.
+*Since ETP-5049 the offer quotes the plan catalog's default plan instead (the legacy plan at the
+configured price while the fallback is active, else the first purchasable plan), so this cost is
+gone — see `feature-flags-and-tenant-upgrade.md` §2, *The billing offer*.*
 
 ### 6.2 Going live — operator checklist
 
@@ -289,7 +292,7 @@ optional — an environment may stay on the preference path indefinitely.
 3. **Switch the environment to the subscription model — once, when ready.** In this order (switch
    first, then backfill — decided 2026-10-14, Martin Taal):
    1. Re-verify the R37 `@report` pre-check (production Stripe checkout has not gone live since
-      2026-08-27) against the **target** environment — `open-and-notable-topics.md` §2.4.
+      2026-08-27) against the **target** environment.
    2. Bring every tenant's data-fix chain current: `make data-fixes` in `schema_forge`. R37 is
       **opt-in** (`-- @optIn: true`): a full run never applies it, and `FIX=` refuses a tenant whose
       chain is behind R37's date (`BLOCKED_CHAIN_BEHIND`) — this is what keeps the ordering

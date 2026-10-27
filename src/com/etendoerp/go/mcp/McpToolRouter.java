@@ -59,6 +59,7 @@ import com.etendoerp.go.schemaforge.NeoActionRecordGuard;
 import com.etendoerp.go.schemaforge.NeoCommercialLinePolicy;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
+import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
 import com.etendoerp.go.schemaforge.util.NeoLanguage;
 import com.etendoerp.go.schemaforge.util.NeoReportContract;
 import com.etendoerp.go.schemaforge.NeoContext;
@@ -322,8 +323,6 @@ public class McpToolRouter {
           toolName, e.getMessage(), McpUsageTelemetry.sessionForLog());
       return wrapAsErrorContent(McpRouterErrorBodies.forbidden(toolName, e.getMessage()));
     } catch (Exception e) {
-      log.error("Error routing MCP tool '{}' session={}", toolName,
-          McpUsageTelemetry.sessionForLog(), e);
       return wrapAsErrorContent(buildUnexpectedErrorBody(toolName, e));
     }
   }
@@ -724,12 +723,7 @@ public class McpToolRouter {
     // got a 422 for parent-derived fields it was never told to send. Copied into `fields`
     // rather than handled separately so there stays exactly ONE downstream reader of it (the
     // resolveParentFK block below); the top-level argument wins, because it is the declared one.
-    if (args.has(McpConstants.PARAM_PARENT_ID) && !args.isNull(McpConstants.PARAM_PARENT_ID)) {
-      String topLevelParentId = args.getString(McpConstants.PARAM_PARENT_ID);
-      if (StringUtils.isNotBlank(topLevelParentId)) {
-        fields.put(McpConstants.PARAM_PARENT_ID, topLevelParentId);
-      }
-    }
+    McpArgumentUtils.copyTopLevelParentId(args, fields);
 
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
     SFEntity sfEntity = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, entityName);
@@ -743,9 +737,19 @@ public class McpToolRouter {
     // unmappable link on its own and attach the record to a parent nobody chose.
     McpWriteRequestSupport.requireApplicableParent(sfEntity,
         fields.optString(McpConstants.PARAM_PARENT_ID, null));
+    // ETP-5785: the parent must be a row of the caller's client or of System. Checked before the
+    // selector context, the defaults pass or resolveParentFK read it.
+    JSONObject unownedParent = McpWriteRequestSupport.refuseUnownedReferences(adTab, null,
+        fields.optString(McpConstants.PARAM_PARENT_ID, null),
+        NeoCrudHelper.snapshotBodyFields(fields));
+    if (unownedParent != null) {
+      return wrapAsErrorContent(unownedParent);
+    }
 
     String dalEntityName = adTab.getTable().getName();
-    DefaultJsonDataService jsonService = DefaultJsonDataService.getInstance();
+    // ETP-5782: NEO's write service, which keeps the exception of a failed write so the
+    // failure is classified by what it is (see McpWriteRequestSupport.checkJsonServiceError).
+    DefaultJsonDataService jsonService = BatchService.currentJsonService();
     NeoFieldFilter fieldFilter = NeoFieldFilter.forEntity(sfEntity, dalEntityName);
 
     Map<String, String> params = McpWriteRequestSupport.buildBaseParams(adTab, dalEntityName);
@@ -787,6 +791,14 @@ public class McpToolRouter {
             adTab), log);
     if (fkError != null) {
       return wrapAsErrorContent(fkError);
+    }
+
+    // ETP-5785: every reference the agent set is now an id (names were resolved above), and must
+    // be a row of the caller's client or of System — checked before defaults or callouts use it.
+    JSONObject unownedReference = McpWriteRequestSupport.refuseUnownedReferences(adTab,
+        filteredBody, null, NeoCrudHelper.snapshotBodyFields(filteredBody));
+    if (unownedReference != null) {
+      return wrapAsErrorContent(unownedReference);
     }
 
     // Snapshot user-provided fields BEFORE callout cascade can overwrite them.
@@ -852,6 +864,11 @@ public class McpToolRouter {
     // McpBillToInjector for why this compensation lives in the MCP layer.
     McpBillToInjector.injectIfMissing(filteredBody, adTab, dalEntity, log);
 
+    // ETP-5710: the entity's customization may derive create defaults from the body (e.g. the
+    // invoice partner address) — they must exist before the mandatory check below, which runs
+    // ahead of its pre-hook. A no-op for entities that do not override the hook.
+    McpHookExecutor.resolveServerCreateFields(specName, entityName, adTab, sfEntity, filteredBody);
+
     // Fix FK sentinel values: "0" is a UI-level sentinel (means "not yet set") that can't
     // go through the DAL as an entity reference. Replace with a real value from the body
     // when possible (e.g. documentType="0" -> copy from transactionDocument); keep it when "0" is
@@ -893,6 +910,11 @@ public class McpToolRouter {
     // short-circuits, null proceeds to generic persistence, and the handler may have mutated the
     // body in place. The other five MCP hook sites are deliberately left alone in this step.
     NeoContext hookCtx = McpHookExecutor.buildHookContext(specName, entityName, HTTP_METHOD_POST, null, filteredBody, adTab, sfEntity);
+    // ETP-5680: the mandatory-defaults pass above filled some keys with a fallback placeholder
+    // (the first combo option, ...). The hook context is a new one, so without this copy the
+    // customization could not tell a placeholder from a value the caller chose, and the REST path
+    // (where the pre-hook runs before any placeholder exists) and this one would disagree.
+    McpHookExecutor.forwardFallbackDefaults(ctx, hookCtx);
     NeoExtensionRequest customizationRequest = NeoExtensionRequest.builder()
         .qualifier(sfEntity.getJavaQualifier())
         .specName(specName)
@@ -945,6 +967,7 @@ public class McpToolRouter {
     return wrapAsTextContent(flat);
   }
 
+
   // ── etendo_update ────────────────────────────────────────────────────────
 
   /**
@@ -963,6 +986,10 @@ public class McpToolRouter {
     String recordId = args.getString("id");
     JSONObject fields = args.getJSONObject(McpConstants.PARAM_FIELDS);
     String updated = args.getString(McpConstants.PARAM_UPDATED);
+    if (StringUtils.isBlank(updated) || "null".equals(updated)) {
+      throw McpRoutingException.missingArgument(
+          "Missing required argument: " + McpConstants.PARAM_UPDATED, McpConstants.PARAM_UPDATED);
+    }
 
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
     SFEntity sfEntity = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, entityName);
@@ -970,9 +997,16 @@ public class McpToolRouter {
     // role-level check — so the entity-level flag consulted here is ISPUT.
     McpToolRouterSupport.requireMethodEnabled(spec, sfEntity, HTTP_METHOD_PUT);
     Tab adTab = McpWriteRequestSupport.getAdTabOrThrow(sfEntity, entityName);
+    NeoResponse targetRefusal = NeoActionRecordGuard.writeRefusalFor(sfEntity, recordId);
+    if (targetRefusal != null) {
+      return McpHookExecutor.neoResponseToMcpResult(targetRefusal);
+    }
+
 
     String dalEntityName = adTab.getTable().getName();
-    DefaultJsonDataService jsonService = DefaultJsonDataService.getInstance();
+    // ETP-5782: NEO's write service, which keeps the exception of a failed write so the
+    // failure is classified by what it is (see McpWriteRequestSupport.checkJsonServiceError).
+    DefaultJsonDataService jsonService = BatchService.currentJsonService();
     NeoFieldFilter fieldFilter = NeoFieldFilter.forEntity(sfEntity, dalEntityName);
 
     Map<String, String> params = McpWriteRequestSupport.buildBaseParams(adTab, dalEntityName);
@@ -1008,6 +1042,13 @@ public class McpToolRouter {
       return wrapAsErrorContent(fkError);
     }
 
+    // ETP-5785: same reference-ownership check as handleCreate; an update has no parent.
+    JSONObject unownedReference = McpWriteRequestSupport.refuseUnownedReferences(adTab,
+        filteredBody, null, updateUserProvidedFields);
+    if (unownedReference != null) {
+      return wrapAsErrorContent(unownedReference);
+    }
+
     // ETP-4793 / IMP-16: the same coercion pass handleCreate runs, and for the same reason. Until
     // this call site existed the date branch was unreachable from etendo_update, so the agent's raw
     // string went straight to the DAL's lenient parser: orderDate "09-08-2026" was accepted under
@@ -1020,6 +1061,13 @@ public class McpToolRouter {
     JSONArray invalidDates = McpWriteRequestSupport.coerceFieldTypes(filteredBody, dalEntity, null, log);
     if (invalidDates.length() > 0) {
       return wrapAsErrorContent(McpWriteRequestSupport.buildInvalidDatesError(invalidDates));
+    }
+
+    // ETP-5726: a required field cannot be emptied by sending null/"" (the screen cannot either).
+    JSONObject clearedError = McpWriteRequestSupport.rejectClearedMandatoryFields(filteredBody,
+        adTab, dalEntity, SYSTEM_COLUMNS, SELECTOR_REFS, sfEntity, NeoLanguage.currentCode());
+    if (clearedError != null) {
+      return wrapAsErrorContent(clearedError);
     }
 
     // Run the entity's NeoHandler pre-hook (parity with the REST CRUD path).
@@ -1058,7 +1106,7 @@ public class McpToolRouter {
     // caller is editing: core reads it, compares it, and then overwrites the column with its own
     // stamp on save. Keeping it out of the caller's field map is what makes that distinction
     // visible in the tool schema.
-    filteredBody.put(McpConstants.PARAM_UPDATED, updated);
+    filteredBody.put(McpConstants.PARAM_UPDATED, NeoRecordVersion.forCore(updated));
 
     // Wrap for DefaultJsonDataService with record ID
     String wrappedBody = McpToolRouterSupport.wrapForSmartclient(filteredBody, dalEntityName, recordId, log);
@@ -1103,9 +1151,16 @@ public class McpToolRouter {
     // ETP-4254: entity-level DELETE flag, refused before any DAL work happens.
     McpToolRouterSupport.requireMethodEnabled(spec, sfEntity, HTTP_METHOD_DELETE);
     Tab adTab = McpWriteRequestSupport.getAdTabOrThrow(sfEntity, entityName);
+    NeoResponse targetRefusal = NeoActionRecordGuard.writeRefusalFor(sfEntity, recordId);
+    if (targetRefusal != null) {
+      return McpHookExecutor.neoResponseToMcpResult(targetRefusal);
+    }
+
 
     String dalEntityName = adTab.getTable().getName();
-    DefaultJsonDataService jsonService = DefaultJsonDataService.getInstance();
+    // ETP-5782: NEO's write service, which keeps the exception of a failed write so the
+    // failure is classified by what it is (see McpWriteRequestSupport.checkJsonServiceError).
+    DefaultJsonDataService jsonService = BatchService.currentJsonService();
 
     Map<String, String> params = McpWriteRequestSupport.buildBaseParams(adTab, dalEntityName);
     params.put(JsonConstants.ID, recordId);
@@ -1263,6 +1318,8 @@ public class McpToolRouter {
     if (assetId != null) {
       queryParams.put(McpConstants.PARAM_ASSET_ID, assetId);
     }
+    McpDefaultsView.copyRecordContext(args.optJSONObject(McpConstants.PARAM_RECORD_CONTEXT),
+        queryParams);
 
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
     SFEntity sfEntity = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, entityName);
@@ -2048,10 +2105,10 @@ public class McpToolRouter {
   private JSONObject handleReport(String specName, JSONObject args) throws Exception {
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
 
-    // First included entity declaring a NEO report handler qualifier, or null.
+    // First included entity that is customized (@NeoExtension or Java_Qualifier), or null.
     SFEntity reportEntity = null;
     for (SFEntity entity : McpToolRouterSupport.listIncludedEntities(spec.getId())) {
-      if (StringUtils.isNotBlank(entity.getJavaQualifier())) {
+      if (NeoHandlerLookup.hasCustomization(entity)) {
         reportEntity = entity;
         break;
       }
@@ -2081,7 +2138,8 @@ public class McpToolRouter {
     // contract is not a report generator: it gets the not-configured answer rather than a POST
     // it can only reject.
     Optional<NeoReportContract> contract = NeoReportCallability.contractOf(handler,
-        reportEntity.getJavaQualifier());
+        StringUtils.defaultIfBlank(reportEntity.getJavaQualifier(),
+            handler.getClass().getSimpleName()));
     if (contract.isEmpty()) {
       return wrapAsTextContent(
           NeoReportCallability.buildNotConfiguredResponse(specName));
@@ -2247,67 +2305,6 @@ public class McpToolRouter {
     }
   }
 
-  /** Recovery hint for a refusal keyed {@code PeriodNotAvailable} (ETP-5577). */
-  static final String PERIOD_NOT_AVAILABLE_HINT = "The date falls in an accounting period that is "
-      + "not open (a new company starts with every period never-opened). Do not open it on your "
-      + "own: ask the user first. If they agree, find the period with etendo_list on spec "
-      + "'open-close-period-control', entity 'periodControl', then call etendo_action on it with "
-      + "action 'openClose' and openClose = 'O', and retry.";
-
-  private static final String PERIOD_NOT_AVAILABLE_KEY = "PeriodNotAvailable";
-
-  /**
-   * Core's {@code AD_MESSAGE} 20501 ("Document posted/processed", shown in Spanish as "Documento
-   * ya procesado"): the document is already processed and the request needed it editable
-   * (ETP-5714).
-   */
-  static final String DOCUMENT_PROCESSED_KEY = "20501";
-
-  /** Recovery hint for a refusal keyed {@code 20501} (ETP-5714). */
-  static final String DOCUMENT_PROCESSED_HINT = "The document is already processed (completed), "
-      + "so it cannot be changed or processed again as it is. Reactivate it first if its document "
-      + "actions allow that (etendo_action with documentAction RE) and retry. "
-      + "etendo_schema(view:'actions', id:<record id>) says which actions apply to this record "
-      + "right now and why the others do not.";
-
-  /**
-   * Recovery hints keyed on the message key that identifies the refusal (ETP-5577, ETP-5714). The
-   * key is the identity — never the entity — so a refusal of any document gets the same advice.
-   */
-  private static final Map<String, String> HINT_BY_MESSAGE_KEY = new LinkedHashMap<>();
-
-  static {
-    HINT_BY_MESSAGE_KEY.put(PERIOD_NOT_AVAILABLE_KEY, PERIOD_NOT_AVAILABLE_HINT);
-    HINT_BY_MESSAGE_KEY.put(DOCUMENT_PROCESSED_KEY, DOCUMENT_PROCESSED_HINT);
-  }
-
-  /**
-   * ETP-5577 / ETP-5714: a refusal that names a known {@code messageKeys} entry — wherever the key
-   * sits, top level or under a nested {@code error} — gets the {@code hint} for it ({@code
-   * PeriodNotAvailable} names the {@code openClose} action, {@code 20501} names reactivation),
-   * unless the body already carries one.
-   */
-  private static void addMessageKeyHint(JSONObject body) throws JSONException {
-    if (body == null || body.has(McpConstants.KEY_HINT)) {
-      return;
-    }
-    JSONObject nested = body.optJSONObject(McpConstants.KEY_ERROR);
-    JSONArray keys = body.optJSONArray("messageKeys");
-    if (keys == null && nested != null) {
-      keys = nested.optJSONArray("messageKeys");
-    }
-    if (keys == null) {
-      return;
-    }
-    String rendered = keys.toString();
-    for (Map.Entry<String, String> entry : HINT_BY_MESSAGE_KEY.entrySet()) {
-      if (rendered.contains('"' + entry.getKey() + '"')) {
-        body.put(McpConstants.KEY_HINT, entry.getValue());
-        return;
-      }
-    }
-  }
-
   /**
    * Wrap a JSON error body as MCP tool result content with the {@code isError} flag.
    *
@@ -2320,7 +2317,7 @@ public class McpToolRouter {
    */
   static JSONObject wrapAsErrorContent(JSONObject body) {
     try {
-      addMessageKeyHint(body);
+      McpMessageKeyHints.addTo(body);
       return wrapAsErrorContent(McpResponseSanitizer.render(body));
     } catch (JSONException e) {
       throw new McpToolException(ERROR_BUILDING_CONTENT, e);

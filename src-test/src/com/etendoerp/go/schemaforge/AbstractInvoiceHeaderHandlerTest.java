@@ -3298,7 +3298,7 @@ public class AbstractInvoiceHeaderHandlerTest {
       locationCriteria(dal, Collections.singletonList(only));
       JSONObject body = new JSONObject().put("businessPartner", "bp-1");
 
-      AbstractInvoiceHeaderHandler.injectPartnerAddressIfMissing(createContext(body));
+      handler.resolveServerCreateFields(createContext(body));
 
       assertEquals("loc-1", body.getString("partnerAddress"));
     }
@@ -3317,7 +3317,7 @@ public class AbstractInvoiceHeaderHandlerTest {
       locationCriteria(dal, java.util.Arrays.asList(first, second));
       JSONObject body = new JSONObject().put("businessPartner", "bp-1");
 
-      AbstractInvoiceHeaderHandler.injectPartnerAddressIfMissing(createContext(body));
+      handler.resolveServerCreateFields(createContext(body));
 
       assertFalse(body.has("partnerAddress"));
     }
@@ -3334,13 +3334,76 @@ public class AbstractInvoiceHeaderHandlerTest {
         .put("partnerAddress", "loc-caller");
     JSONObject withRef = new JSONObject().put("businessPartner", BatchService.REF_PREFIX + "op1");
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
-      AbstractInvoiceHeaderHandler.injectPartnerAddressIfMissing(createContext(withAddress));
-      AbstractInvoiceHeaderHandler.injectPartnerAddressIfMissing(createContext(withRef));
+      handler.resolveServerCreateFields(createContext(withAddress));
+      handler.resolveServerCreateFields(createContext(withRef));
 
       assertEquals("loc-caller", withAddress.getString("partnerAddress"));
       assertFalse(withRef.has("partnerAddress"));
       dalMock.verifyNoInteractions();
     }
+  }
+
+  /**
+   * ETP-5710 repro: MCP etendo_create runs the mandatory pre-check before the pre-hook, so the
+   * partner-address default has to be reachable through the generic hook the MCP path calls.
+   */
+  @Test
+  public void resolveServerCreateFields_singleBillToLocation_fillsPartnerAddress() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      Location only = mock(Location.class);
+      when(only.getId()).thenReturn("loc-1");
+      locationCriteria(dal, Collections.singletonList(only));
+      JSONObject body = new JSONObject().put("businessPartner", "bp-1");
+
+      handler.resolveServerCreateFields(createContext(body));
+
+      assertEquals("loc-1", body.getString("partnerAddress"));
+    }
+  }
+
+  /** Several bill-to locations: the hook abstains, so the pre-check still reports the field. */
+  @Test
+  public void resolveServerCreateFields_twoBillToLocations_leavesFieldMissing() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      Location first = mock(Location.class);
+      Location second = mock(Location.class);
+      locationCriteria(dal, java.util.Arrays.asList(first, second));
+      JSONObject body = new JSONObject().put("businessPartner", "bp-1");
+
+      handler.resolveServerCreateFields(createContext(body));
+
+      assertFalse(body.has("partnerAddress"));
+    }
+  }
+
+  /** A caller-sent address wins and the hook is idempotent (second run changes nothing). */
+  @Test
+  public void resolveServerCreateFields_callerAddress_keptAndIdempotent() throws Exception {
+    JSONObject body = new JSONObject().put("businessPartner", "bp-1")
+        .put("partnerAddress", "loc-caller");
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      handler.resolveServerCreateFields(createContext(body));
+      handler.resolveServerCreateFields(createContext(body));
+
+      assertEquals("loc-caller", body.getString("partnerAddress"));
+      dalMock.verifyNoInteractions();
+    }
+  }
+
+  /**
+   * partnerAddress must NOT be declared server-resolved: etendo_schema would demote it to optional
+   * while the default abstains with several addresses and the field is still required.
+   */
+  @Test
+  public void serverResolvedCreateFields_doesNotDeclarePartnerAddress() {
+    assertFalse(new SalesInvoiceHeaderHandler().serverResolvedCreateFields()
+        .contains("partnerAddress"));
+    assertFalse(new PurchaseInvoiceHeaderHandler().serverResolvedCreateFields()
+        .contains("partnerAddress"));
   }
 
   /** A partner with no active bill-to location: nothing to pick, the address stays absent. */
@@ -3352,7 +3415,7 @@ public class AbstractInvoiceHeaderHandlerTest {
       locationCriteria(dal, Collections.emptyList());
       JSONObject body = new JSONObject().put("businessPartner", "bp-1");
 
-      AbstractInvoiceHeaderHandler.injectPartnerAddressIfMissing(createContext(body));
+      handler.resolveServerCreateFields(createContext(body));
 
       assertFalse(body.has("partnerAddress"));
     }
@@ -3376,7 +3439,7 @@ public class AbstractInvoiceHeaderHandlerTest {
     };
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
       for (NeoContext ctx : contexts) {
-        AbstractInvoiceHeaderHandler.injectPartnerAddressIfMissing(ctx);
+        handler.resolveServerCreateFields(ctx);
 
         assertFalse(ctx.getHttpMethod() + " " + ctx.getEndpointType(),
             ctx.getRequestBody().has("partnerAddress"));

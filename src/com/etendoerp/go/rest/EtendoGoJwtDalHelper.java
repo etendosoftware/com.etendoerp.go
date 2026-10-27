@@ -90,6 +90,7 @@ final class EtendoGoJwtDalHelper {
   private static final String FIELD_ASSOCIATED_WITH_PRODUCTIVE = "associatedWithProductive";
   private static final String FIELD_SUBSCRIPTION_STATUS = "subscriptionStatus";
   private static final String FIELD_RENEWAL_DUE_AT = "renewalDueAt";
+  private static final String FIELD_GRACE_ENDS_AT = "graceEndsAt";
   private static final String FIELD_RELATIONSHIP = "relationship";
   private static final String FIELD_OWNED_BY_ACCOUNT = "ownedByAccount";
   private static final String PROPERTY_PASSWORD_CHANGED = Account.PROPERTY_PASSWORDCHANGED;
@@ -807,6 +808,14 @@ final class EtendoGoJwtDalHelper {
       if (lifecycle.getRenewalDueAt() != null) {
         env.put(FIELD_RENEWAL_DUE_AT, lifecycle.getRenewalDueAt().toString());
       }
+      // ETP-5049: when a PAST_DUE subscription's payment grace ends, so the in-app grace banner
+      // needs no copy of the grace-days setting. The same rule as the access policy and as
+      // GET /billing/subscription. Present with the other lifecycle fields; JSON null unless the
+      // subscription is past due.
+      Instant graceEndsAt = EnvironmentAccessPolicy.graceEndsAt(
+          lifecycle.getSubscriptionStatus(), lifecycle.getRenewalDueAt(),
+          ENVIRONMENT_LIFECYCLE_SERVICE::configuration);
+      env.put(FIELD_GRACE_ENDS_AT, graceEndsAt == null ? JSONObject.NULL : graceEndsAt.toString());
       if (lifecycle.getType() == EnvironmentAccessPolicy.EnvironmentType.DEMO) {
         Instant now = Instant.now();
         EnvironmentAccessPolicy policy = new EnvironmentAccessPolicy();

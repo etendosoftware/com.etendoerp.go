@@ -73,6 +73,13 @@ import com.etendoerp.go.schemaforge.data.Subscription;
  * tests: {@code resolvePlan} must read committed state, so every fixture is committed and removed
  * afterwards by the {@value #MARKER} marker with native SQL. The tenants are synthetic
  * {@code AD_CLIENT} rows this class creates; no real tenant is read or written.
+ *
+ * <p><b>Group 4 is the exception</b>: it puts ACTIVE plans and quotas in place, which a running
+ * server sharing this database would see if committed, so those rows are only flushed and are
+ * rolled back. The catalog reads them in the same transaction.
+ *
+ * @covers com.etendoerp.go.payment.TenantPlanService
+ * @covers com.etendoerp.go.payment.PlanCatalogService
  */
 public class GrandfatheredSubscriptionIntegrationTest extends OBBaseTest {
 
@@ -306,6 +313,157 @@ public class GrandfatheredSubscriptionIntegrationTest extends OBBaseTest {
   }
 
   // ---------------------------------------------------------------------------------------------
+  // Group 4 — the catalog HQL against real rows (ETP-5049)
+  // ---------------------------------------------------------------------------------------------
+
+  /**
+   * {@code listActiveQuotas} is what the billing offer shows a plan includes. A mocked
+   * {@code OBQuery} only restates its HQL; here the HQL runs. Three filters, each with a row that
+   * only that filter excludes: an inactive quota of the plan, and an active quota of another plan
+   * on a resource the plan also has. The two returned rows are inserted out of search-key order,
+   * so the order can only come from the {@code order by}.
+   *
+   * <p>Rows are flushed, never committed — a running server sharing this database never sees
+   * them — and rolled back at the end.
+   */
+  @Test
+  public void testListActiveQuotasReturnsOnlyThePlansActiveRowsOrderedByResourceKey() {
+    PlanCatalogService catalog = new PlanCatalogService();
+    OBContext.setOBContext(ZERO, ZERO, ZERO, ZERO);
+    try {
+      String plan = insertPlan("quota-owner", true, null, null);
+      String otherPlan = insertPlan("quota-neighbour", true, null, null);
+      String resourceB = insertBillingResource("B");
+      String resourceA = insertBillingResource("A");
+      String resourceC = insertBillingResource("C");
+      insertQuota(plan, resourceB, true);
+      insertQuota(plan, resourceC, false);
+      insertQuota(plan, resourceA, true);
+      insertQuota(otherPlan, resourceC, true);
+
+      assertEquals("only the plan's own ACTIVE quotas, ordered by resource search key",
+          List.of(resourceA, resourceB), quotaResourceIds(catalog, plan));
+      assertEquals("the other plan's quota is scoped to it alone",
+          List.of(resourceC), quotaResourceIds(catalog, otherPlan));
+    } finally {
+      OBDal.getInstance().rollbackAndClose();
+    }
+  }
+
+  /**
+   * The counterpart of Group 3: once an ACTIVE priced plan exists the legacy price fallback is
+   * retired — even with a legacy price configured — and the default plan the billing offer quotes
+   * is the cheapest purchasable one. An inactive plan priced below it, and a priced plan inserted
+   * first, are there so neither "first row" nor "cheapest row" alone can produce the answer.
+   *
+   * <p>Skipped when this database already sells a plan at or below the fixture's price, which
+   * would rightly be the default instead. Rows are flushed, never committed.
+   */
+  @Test
+  public void testOnceAPricedPlanExistsTheDefaultIsTheCheapestPurchasablePlan() {
+    PlanCatalogService catalog = new PlanCatalogService();
+    catalog.configuredFallbackPriceId = () -> "price_" + MARKER + "legacy";
+    OBContext.setOBContext(ZERO, ZERO, ZERO, ZERO);
+    try {
+      org.junit.Assume.assumeTrue("this database already sells a plan at or below 0.0001",
+          ((Number) uniqueResult("SELECT COUNT(*) FROM ETGO_PLAN WHERE ISACTIVE = 'Y' "
+              + "AND PROVIDER_PRICE_ID IS NOT NULL AND DISPLAY_PRICE <= 0.0001")).longValue()
+              == 0L);
+      String expensive = insertPlan("expensive", true, "price_" + MARKER + newId(),
+          new java.math.BigDecimal("99.00"));
+      insertPlan("switched-off", false, "price_" + MARKER + newId(),
+          java.math.BigDecimal.ZERO);
+      String cheapest = insertPlan("cheapest", true, "price_" + MARKER + newId(),
+          new java.math.BigDecimal("0.0001"));
+
+      PlanCatalogService.DefaultPlan chosen = inAdminMode(catalog::findDefaultPurchasablePlan)
+          .orElseThrow(() -> new AssertionError("a priced plan is on sale, so a default exists"));
+
+      assertFalse("an active priced plan retires the legacy price fallback",
+          chosen.isLegacyFallback());
+      assertEquals(cheapest, chosen.plan().getId());
+      assertTrue(inAdminMode(catalog::listPurchasablePlans).stream()
+          .anyMatch(p -> expensive.equals(p.getId())));
+    } finally {
+      OBDal.getInstance().rollbackAndClose();
+    }
+  }
+
+  private List<String> quotaResourceIds(PlanCatalogService catalog, String planId) {
+    return inAdminMode(() -> {
+      List<String> ids = new java.util.ArrayList<>();
+      for (PlanQuota quota : catalog.listActiveQuotas(OBDal.getInstance().get(Plan.class,
+          planId))) {
+        ids.add(quota.getBillingResource().getId());
+      }
+      return ids;
+    });
+  }
+
+  private static <T> T inAdminMode(java.util.function.Supplier<T> read) {
+    OBContext.setAdminMode(true);
+    try {
+      return read.get();
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Inserts an uncommitted {@code ETGO_PLAN} row with native SQL, so the plan's save-time event
+   * handlers (which price a plan from the provider) never run.
+   *
+   * @return the new {@code ETGO_PLAN_ID}
+   */
+  private String insertPlan(String label, boolean active, String priceId,
+      java.math.BigDecimal displayPrice) {
+    String id = newId();
+    String columns = "ETGO_PLAN_ID, AD_CLIENT_ID, AD_ORG_ID, ISACTIVE, CREATEDBY, UPDATEDBY, "
+        + "VALUE, NAME";
+    String values = ":id, '0', '0', :active, '0', '0', :value, :name";
+    if (priceId == null) {
+      // The unpriced shape ETGO_PLAN_PRICED_CHK allows. Left to the column defaults (NULL) rather
+      // than bound, because a bound null has no SQL type for the driver to send.
+      nativeUpdate("INSERT INTO ETGO_PLAN (" + columns + ") VALUES (" + values + ")",
+          "id", id, "active", active ? "Y" : "N", "value", MARKER + newId(),
+          "name", MARKER + label + " " + id);
+    } else {
+      nativeUpdate("INSERT INTO ETGO_PLAN (" + columns + ", PROVIDER_PRICE_ID, BILLING_INTERVAL, "
+              + "DISPLAY_PRICE, CURRENCY_CODE) VALUES (" + values + ", :priceId, 'month', "
+              + ":displayPrice, 'EUR')",
+          "id", id, "active", active ? "Y" : "N", "value", MARKER + newId(),
+          "name", MARKER + label + " " + id, "priceId", priceId, "displayPrice", displayPrice);
+    }
+    return id;
+  }
+
+  /** @return the new uncommitted {@code ETGO_BILLING_RESOURCE_ID}, keyed MARKER + suffix */
+  private String insertBillingResource(String keySuffix) {
+    String id = newId();
+    nativeUpdate("INSERT INTO ETGO_BILLING_RESOURCE (ETGO_BILLING_RESOURCE_ID, AD_CLIENT_ID, "
+            + "AD_ORG_ID, CREATEDBY, UPDATEDBY, VALUE, NAME, UNIT_LABEL) "
+            + "VALUES (:id, '0', '0', '0', '0', :value, :name, 'units')",
+        "id", id, "value", MARKER + "res-" + keySuffix, "name", MARKER + keySuffix);
+    return id;
+  }
+
+  private void insertQuota(String planId, String resourceId, boolean active) {
+    nativeUpdate("INSERT INTO ETGO_PLAN_QUOTA (ETGO_PLAN_QUOTA_ID, AD_CLIENT_ID, AD_ORG_ID, "
+            + "ISACTIVE, CREATEDBY, UPDATEDBY, ETGO_PLAN_ID, ETGO_BILLING_RESOURCE_ID, "
+            + "INCLUDED_QTY, ENFORCEMENT_MODE) VALUES (:id, '0', '0', :active, '0', '0', :plan, "
+            + ":resource, 10, 'warn')",
+        "id", newId(), "active", active ? "Y" : "N", "plan", planId, "resource", resourceId);
+  }
+
+  /** Runs a native insert in the current transaction and flushes it, without committing. */
+  @SuppressWarnings("rawtypes")
+  private void nativeUpdate(String sql, Object... nameValuePairs) {
+    NativeQuery query = OBDal.getInstance().getSession().createNativeQuery(sql);
+    bind(query, nameValuePairs);
+    query.executeUpdate();
+  }
+
+  // ---------------------------------------------------------------------------------------------
   // Fixtures (committed)
   // ---------------------------------------------------------------------------------------------
 
@@ -471,7 +629,8 @@ public class GrandfatheredSubscriptionIntegrationTest extends OBBaseTest {
    * Removes everything this class committed, by marker rather than by collected id so rows left
    * behind by a test that died mid-way are cleaned up too. Order follows the foreign keys:
    * subscriptions, then the {@code AD_SEQUENCE} rows the {@code AD_CLIENT} insert trigger created,
-   * then the tenants, then the plans.
+   * then the tenants, then the plans. Quotas and billing resources go first: Group 4 never commits
+   * them, but a run killed before its rollback must not leave a quota pinning a fixture plan.
    */
   @SuppressWarnings("rawtypes")
   private void deleteCommittedFixtures() {
@@ -480,6 +639,9 @@ public class GrandfatheredSubscriptionIntegrationTest extends OBBaseTest {
     try {
       String tenants = "(SELECT AD_CLIENT_ID FROM AD_CLIENT WHERE VALUE LIKE :marker)";
       for (String sql : new String[] {
+          "DELETE FROM ETGO_PLAN_QUOTA WHERE ETGO_PLAN_ID IN "
+              + "(SELECT ETGO_PLAN_ID FROM ETGO_PLAN WHERE VALUE LIKE :marker)",
+          "DELETE FROM ETGO_BILLING_RESOURCE WHERE VALUE LIKE :marker",
           "DELETE FROM ETGO_SUBSCRIPTION WHERE ENVIRONMENT_CLIENT_ID IN " + tenants,
           "DELETE FROM AD_SEQUENCE WHERE AD_CLIENT_ID IN " + tenants,
           "DELETE FROM AD_CLIENT WHERE VALUE LIKE :marker",

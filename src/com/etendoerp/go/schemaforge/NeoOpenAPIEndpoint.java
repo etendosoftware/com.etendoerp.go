@@ -29,7 +29,7 @@ import org.openbravo.dal.service.OBDal;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
-import com.etendoerp.go.common.ConfigPropertyReader;
+import com.etendoerp.go.session.GoSessionSecurity;
 import com.etendoerp.openapi.model.OpenAPIEndpoint;
 
 import io.swagger.v3.oas.models.OpenAPI;
@@ -40,6 +40,7 @@ import io.swagger.v3.oas.models.media.ArraySchema;
 import io.swagger.v3.oas.models.media.BinarySchema;
 import io.swagger.v3.oas.models.media.BooleanSchema;
 import io.swagger.v3.oas.models.media.Content;
+import io.swagger.v3.oas.models.media.IntegerSchema;
 import io.swagger.v3.oas.models.media.MediaType;
 import io.swagger.v3.oas.models.media.ObjectSchema;
 import io.swagger.v3.oas.models.media.Schema;
@@ -48,6 +49,7 @@ import io.swagger.v3.oas.models.parameters.Parameter;
 import io.swagger.v3.oas.models.parameters.RequestBody;
 import io.swagger.v3.oas.models.responses.ApiResponse;
 import io.swagger.v3.oas.models.responses.ApiResponses;
+import io.swagger.v3.oas.models.security.SecurityRequirement;
 import io.swagger.v3.oas.models.tags.Tag;
 
 /**
@@ -67,9 +69,28 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
    */
   private static final String LEGACY_TAG_NAME = "EtendoGo";
   private static final String BASE_PATH = "/sws/neo/";
-  private static final String PUBLIC_API_KEYS_PATH_PROPERTY = "etgo.public.api.keys.path";
-  private static final String PUBLIC_API_KEYS_PATH_ENV = "ETGO_PUBLIC_API_KEYS_PATH";
-  private static final String DEFAULT_PUBLIC_API_KEYS_PATH = "/oauth2/api-keys";
+  /** The fixed {@code OAuth2Servlet} route of the self-service API key lifecycle. */
+  private static final String PUBLIC_API_KEYS_PATH =
+      "/oauth2/api-keys"; // NOSONAR java:S1075 — fixed OAuth2Servlet route (ETP-5781)
+  /** Security scheme of the Etendo bearer JWT, declared by the OpenAPI controller. */
+  private static final String SECURITY_BEARER = "bearerAuth";
+  private static final String FIELD_TOKENS_REVOKED = "tokensRevoked";
+  private static final String FIELD_NAME = "name";
+  private static final String FIELD_CAPABILITIES = "capabilities";
+  /**
+   * How the API key operations authenticate besides {@code bearerAuth}. The session cookie is
+   * stated in prose, not as a components scheme: the OpenAPI controller serializes with a plain
+   * Jackson mapper that writes swagger enums by name ({@code "APIKEY"}, {@code "COOKIE"}), which
+   * is not valid OpenAPI (ETP-5781).
+   */
+  private static final String API_KEY_AUTH_NOTE = " Authentication: the Etendo Go session cookie `"
+      + GoSessionSecurity.COOKIE_NAME + "` (with the `" + GoSessionSecurity.CSRF_HEADER
+      + "` header on writes) or, while the legacy switch allows it, the bearer JWT. OAuth2 access"
+      + " tokens issued to an API key are not accepted.";
+  private static final String MSG_API_KEY_BAD_REQUEST =
+      "Malformed or empty JSON body, a field of the wrong type, an invalid name, or an unsupported capability";
+  private static final String MSG_API_KEY_CONFLICT =
+      "The active-key limit is reached or another active key already has this name";
 
   /** HTTP 401 response description. */
   private static final String MSG_UNAUTHORIZED = "Unauthorized";
@@ -733,114 +754,146 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
     openAPI.getPaths().addPathItem(path, pathItem);
   }
 
-  /** Add the authenticated self-service OAuth2 public API key contract. */
+  /**
+   * Add the authenticated self-service OAuth2 public API key contract.
+   *
+   * <p>The path is fixed: it is the {@code OAuth2Servlet} route, which no setting moves, so the
+   * documentation must not let one move it either (ETP-5781 removed
+   * {@code etgo.public.api.keys.path}). Every operation names its security requirement, and every
+   * status the servlet can answer is documented on every operation that can answer it.
+   */
   private void addPublicApiKeyPaths(OpenAPI openAPI) {
-    final String basePath = ConfigPropertyReader.readConfigValue(PUBLIC_API_KEYS_PATH_PROPERTY,
-        PUBLIC_API_KEYS_PATH_ENV, DEFAULT_PUBLIC_API_KEYS_PATH);
+    final String basePath = PUBLIC_API_KEYS_PATH;
     final String itemPath = basePath + "/{id}";
     final String rotatePath = itemPath + "/rotate";
     final String revokePath = itemPath + "/revoke-tokens";
 
     ObjectSchema requestSchema = new ObjectSchema();
-    requestSchema.setDescription("Public capability request. Identity is always derived from the bearer token.");
-    requestSchema.addProperties("name", new StringSchema().maxLength(120));
+    requestSchema.setDescription("Public capability request. Identity is always derived from the authenticated session.");
+    requestSchema.addProperties(FIELD_NAME, new StringSchema().maxLength(120));
     ArraySchema capabilitySchema = new ArraySchema();
     StringSchema capabilityItem = new StringSchema();
     capabilityItem.addEnumItem("public-api:read");
     capabilityItem.addEnumItem("public-api:write");
     capabilityItem.addEnumItem("public-api:process");
     capabilitySchema.items(capabilityItem);
-    requestSchema.addProperties("capabilities", capabilitySchema);
+    requestSchema.addProperties(FIELD_CAPABILITIES, capabilitySchema);
+    requestSchema.setRequired(List.of(FIELD_NAME, FIELD_CAPABILITIES));
 
-    Operation list = createOperation("List public API keys",
-        "Lists only active and inactive public API keys owned by the authenticated user in the current tenant and organization.");
-    list.responses(new ApiResponses()
-        .addApiResponse("200", createJsonResponse("Public API keys", publicApiKeysResponseSchema(false)))
-        .addApiResponse("401", new ApiResponse().description(MSG_UNAUTHORIZED))
-        .addApiResponse("403", new ApiResponse().description("Role is not allowed to manage public API keys")));
+    Operation list = publicApiKeyOperation("List public API keys",
+        "Lists the active and inactive public API keys owned by the authenticated user in the current tenant and organization.");
+    list.responses(publicApiKeyResponses(false)
+        .addApiResponse("200", createJsonResponse("Public API keys", publicApiKeyListSchema())));
     openAPI.getPaths().addPathItem(basePath, new PathItem().get(list));
 
-    Operation create = createOperation("Create public API key",
+    Operation create = publicApiKeyOperation("Create public API key",
         "Creates an owned credential. The plaintext client secret is returned once and is never returned by list or update.");
-    create.setRequestBody(new RequestBody().required(true).description("Name and public capabilities; AD identity fields are ignored/rejected.")
+    create.setRequestBody(new RequestBody().required(true).description("Name and public capabilities; AD identity fields are ignored.")
         .content(new Content().addMediaType(CONTENT_TYPE_JSON, new MediaType().schema(requestSchema))));
-    create.responses(new ApiResponses()
-        .addApiResponse("201", createJsonResponse("Created public API key", publicApiKeysResponseSchema(true)))
-        .addApiResponse("400", new ApiResponse().description(MSG_BAD_REQUEST))
-        .addApiResponse("401", new ApiResponse().description(MSG_UNAUTHORIZED))
-        .addApiResponse("403", new ApiResponse().description("Role is not allowed to manage public API keys"))
-        .addApiResponse("409", new ApiResponse().description("Active key name or owner limit conflict")));
+    create.responses(publicApiKeyResponses(false)
+        .addApiResponse("201", createJsonResponse("Created public API key", publicApiKeySchema(true, false)))
+        .addApiResponse("400", new ApiResponse().description(MSG_API_KEY_BAD_REQUEST))
+        .addApiResponse("409", new ApiResponse().description(MSG_API_KEY_CONFLICT)));
     openAPI.getPaths().get(basePath).post(create);
 
     Parameter id = new Parameter().in("path").name("id").required(true)
         .schema(new Schema<String>().type(TYPE_STRING)).description(LABEL_RECORD_ID);
-    Operation get = createOperation("Get public API key", "Returns safe metadata for an owned public API key.");
-    get.addParametersItem(id).responses(new ApiResponses()
-        .addApiResponse("200", createJsonResponse("Public API key", publicApiKeysResponseSchema(false)))
-        .addApiResponse("401", new ApiResponse().description(MSG_UNAUTHORIZED))
-        .addApiResponse("404", new ApiResponse().description(MSG_RECORD_NOT_FOUND)));
+    Operation get = publicApiKeyOperation("Get public API key", "Returns safe metadata for an owned public API key.");
+    get.addParametersItem(id).responses(publicApiKeyResponses(true)
+        .addApiResponse("200", createJsonResponse("Public API key", publicApiKeySchema(false, false))));
     PathItem item = new PathItem().get(get);
 
-    Operation update = createOperation("Update public API key", "Updates only the owned key name and active state.");
+    Operation update = publicApiKeyOperation("Update public API key",
+        "Updates only the owned key name and active state. Reactivating a key is subject to the active-key limit and, like a rename, to the unique active name rule.");
     update.addParametersItem(id);
     ObjectSchema updateSchema = new ObjectSchema();
-    updateSchema.addProperties("name", new StringSchema().maxLength(120));
+    updateSchema.addProperties(FIELD_NAME, new StringSchema().maxLength(120));
     updateSchema.addProperties("isActive", new BooleanSchema());
     update.setRequestBody(new RequestBody().required(true).content(new Content()
         .addMediaType(CONTENT_TYPE_JSON, new MediaType().schema(updateSchema))));
-    update.responses(new ApiResponses()
-        .addApiResponse("200", createJsonResponse("Updated public API key", publicApiKeysResponseSchema(false)))
-        .addApiResponse("400", new ApiResponse().description(MSG_BAD_REQUEST))
-        .addApiResponse("401", new ApiResponse().description(MSG_UNAUTHORIZED))
-        .addApiResponse("404", new ApiResponse().description(MSG_RECORD_NOT_FOUND)));
+    update.responses(publicApiKeyResponses(true)
+        .addApiResponse("200", createJsonResponse("Updated public API key", publicApiKeySchema(false, false)))
+        .addApiResponse("400", new ApiResponse().description(MSG_API_KEY_BAD_REQUEST))
+        .addApiResponse("409", new ApiResponse().description(MSG_API_KEY_CONFLICT)));
     item.put(update);
 
-    Operation delete = createOperation("Delete public API key", "Deletes an owned key and revokes its tokens; repeated deletes are idempotent.");
-    delete.addParametersItem(id).responses(new ApiResponses()
-        .addApiResponse("200", createJsonResponse("Deletion result", createObjectSchema("{deleted, id}")))
-        .addApiResponse("401", new ApiResponse().description(MSG_UNAUTHORIZED)));
+    Operation delete = publicApiKeyOperation("Delete public API key",
+        "Deletes an owned key and its tokens. Repeated deletes are idempotent: a key that does not exist or is not owned answers 200 with deleted=false.");
+    ObjectSchema deleteSchema = new ObjectSchema();
+    deleteSchema.addProperties("id", new StringSchema());
+    deleteSchema.addProperties("deleted", new BooleanSchema());
+    delete.addParametersItem(id).responses(publicApiKeyResponses(false)
+        .addApiResponse("200", createJsonResponse("Deletion result", deleteSchema)));
     item.delete(delete);
     openAPI.getPaths().addPathItem(itemPath, item);
 
-    PathItem actions = new PathItem();
-    Operation rotate = createOperation("Rotate public API key secret",
-        "Replaces the stored secret hash, revokes existing tokens, and returns the new plaintext secret once.");
-    rotate.addParametersItem(id).responses(new ApiResponses()
-        .addApiResponse("200", createJsonResponse("Rotated public API key", publicApiKeysResponseSchema(true)))
-        .addApiResponse("401", new ApiResponse().description(MSG_UNAUTHORIZED))
-        .addApiResponse("404", new ApiResponse().description(MSG_RECORD_NOT_FOUND)));
-    actions.post(rotate);
-    openAPI.getPaths().addPathItem(rotatePath, actions);
+    Operation rotate = publicApiKeyOperation("Rotate public API key secret",
+        "Replaces the stored secret hash, revokes every token the key issued, and returns the new plaintext secret once.");
+    rotate.addParametersItem(id).responses(publicApiKeyResponses(true)
+        .addApiResponse("200", createJsonResponse("Rotated public API key", publicApiKeySchema(true, true))));
+    openAPI.getPaths().addPathItem(rotatePath, new PathItem().post(rotate));
 
-    PathItem revoke = new PathItem();
-    Operation revokeOp = createOperation("Revoke public API key tokens", "Revokes all active tokens for an owned key without returning credential data.");
-    revokeOp.addParametersItem(id).responses(new ApiResponses()
-        .addApiResponse("200", createJsonResponse("Revocation result", createObjectSchema("{revoked, id, tokensRevoked}")))
-        .addApiResponse("401", new ApiResponse().description(MSG_UNAUTHORIZED))
-        .addApiResponse("404", new ApiResponse().description(MSG_RECORD_NOT_FOUND)));
-    revoke.post(revokeOp);
-    openAPI.getPaths().addPathItem(revokePath, revoke);
+    Operation revokeOp = publicApiKeyOperation("Revoke public API key tokens",
+        "Revokes every still-valid token of an owned key without returning credential data.");
+    ObjectSchema revokeSchema = new ObjectSchema();
+    revokeSchema.addProperties("id", new StringSchema());
+    revokeSchema.addProperties("revoked", new BooleanSchema());
+    revokeSchema.addProperties(FIELD_TOKENS_REVOKED, new IntegerSchema());
+    revokeOp.addParametersItem(id).responses(publicApiKeyResponses(true)
+        .addApiResponse("200", createJsonResponse("Revocation result", revokeSchema)));
+    openAPI.getPaths().addPathItem(revokePath, new PathItem().post(revokeOp));
   }
 
-  private Schema<?> publicApiKeysResponseSchema(boolean includeSecret) {
+  /**
+   * An API key operation. They are management endpoints of the signed-in user; the requirement
+   * names {@code bearerAuth}, the only scheme the document declares, and the description states
+   * the session cookie alternative (see {@link #API_KEY_AUTH_NOTE}).
+   */
+  private Operation publicApiKeyOperation(String summary, String description) {
+    Operation op = createOperation(summary, description + API_KEY_AUTH_NOTE);
+    op.addSecurityItem(new SecurityRequirement().addList(SECURITY_BEARER));
+    return op;
+  }
+
+  /** The error statuses every API key operation can answer, plus 404 on the owned-key ones. */
+  private ApiResponses publicApiKeyResponses(boolean ownedKey) {
+    ApiResponses responses = new ApiResponses()
+        .addApiResponse("401", new ApiResponse().description(MSG_UNAUTHORIZED))
+        .addApiResponse("402", new ApiResponse().description(
+            "The environment is not available (subscription or commercial block)"))
+        .addApiResponse("403", new ApiResponse().description(
+            "The session, role or requested capability is not allowed for the active role"));
+    if (ownedKey) {
+      responses.addApiResponse("404", new ApiResponse().description(
+          "API key not found, or not owned by the authenticated user"));
+    }
+    return responses;
+  }
+
+  /** The bare key object returned by every single-key operation. */
+  private Schema<?> publicApiKeySchema(boolean includeSecret, boolean includeTokensRevoked) {
     ObjectSchema key = new ObjectSchema();
     key.addProperties("id", new StringSchema());
-    key.addProperties("name", new StringSchema());
+    key.addProperties(FIELD_NAME, new StringSchema());
     key.addProperties("clientId", new StringSchema());
-    key.addProperties("capabilities", new ArraySchema().items(new StringSchema()));
+    key.addProperties(FIELD_CAPABILITIES, new ArraySchema().items(new StringSchema()));
     key.addProperties("isActive", new BooleanSchema());
     if (includeSecret) {
       StringSchema secret = new StringSchema();
-      secret.setWriteOnly(true);
       secret.setDescription("Plaintext secret returned only by create or rotate; store it immediately.");
       key.addProperties("clientSecret", secret);
     }
-    if (!includeSecret) {
-      ObjectSchema response = new ObjectSchema();
-      response.addProperties("apiKeys", new ArraySchema().items(key));
-      return response;
+    if (includeTokensRevoked) {
+      key.addProperties(FIELD_TOKENS_REVOKED, new IntegerSchema());
     }
     return key;
+  }
+
+  /** The list wrapper, used only by {@code GET /oauth2/api-keys}. */
+  private Schema<?> publicApiKeyListSchema() {
+    ObjectSchema response = new ObjectSchema();
+    response.addProperties("apiKeys", new ArraySchema().items(publicApiKeySchema(false, false)));
+    return response;
   }
 
   // ---------------------------------------------------------------------------

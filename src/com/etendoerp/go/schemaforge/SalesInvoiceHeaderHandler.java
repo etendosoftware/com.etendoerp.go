@@ -27,7 +27,6 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
 import javax.inject.Inject;
-import javax.inject.Named;
 
 import org.openbravo.model.common.invoice.Invoice;
 
@@ -74,8 +73,13 @@ import org.openbravo.base.structure.BaseOBObject;
  *       {@link InvoicePendingResolver} + {@link InOutFollowUpCreator} ({@code SALES}): the draft
  *       goods shipment for the still-pending quantities (ETP-5576)</li>
  * </ul>
+ *
+ * <p><b>Binding.</b> {@link NeoExtension} only (ETP-5588): the ETGO_SF_ENTITY row carries no
+ * {@code Java_Qualifier} and the class no {@code @Named}. Every surface — REST single and batch,
+ * MCP, callout, actions, field filter — reaches it through the annotation. See
+ * {@code neo-headless.md} §5.3.a.
  */
-@Named("salesInvoiceHeaderHandler")
+@NeoExtension(spec = "sales-invoice", entity = "header")
 public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(SalesInvoiceHeaderHandler.class);
@@ -189,7 +193,7 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
     }
     NeoHandlerUtils.mirrorAccountingDateOnCreate(context, "invoiceDate", "accountingDate");
     // ETP-5703: server-side defaults for a write that leaves them out (an agent; the SPA sends both).
-    injectPartnerAddressIfMissing(context);
+    resolveServerCreateFields(context);
     // ETP-5840: exchange rate — recalculation on the accounting date, save and completion
     // validation — before anything with side effects runs.
     NeoResponse rateRefusal = DocumentRateGuards.guardInvoiceHeader(context, currencyRate);

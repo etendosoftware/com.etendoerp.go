@@ -1095,15 +1095,21 @@ public abstract class AbstractInvoiceHeaderHandler {
    *
    * <p><b>Channels.</b> Called from each subclass's {@code handle()} pre-hook, which runs before
    * the create on REST single and REST batch / {@code etendo_batch} ({@code handleWithHooks}).
-   * <b>Declared divergence:</b> on MCP {@code etendo_create} the mandatory pre-check runs before
-   * this pre-hook by design (ETP-5535), so a missing {@code partnerAddress} still answers the
-   * precise {@code missingFields} 422 there — see {@code neo-headless.md} §4.12.9.
+   * On MCP {@code etendo_create} the mandatory pre-check runs before this pre-hook (ETP-5535), so
+   * the same rule is also run through this hook right before that pre-check (ETP-5710): the
+   * default is identical on every channel, and with several (or no) bill-to locations it abstains
+   * and the precise {@code missingFields} 422 stands.
+   *
+   * <p><b>ETP-5710 hook.</b> Deliberately NOT declared in {@link #serverResolvedCreateFields()}:
+   * that would demote the field to optional in {@code etendo_schema}, yet with several bill-to
+   * locations the default abstains and the field must still be reported missing. Overrides
+   * {@code NeoHandler#resolveServerCreateFields} in the concrete invoice handlers.
    *
    * <p>Total: never throws.
    *
-   * @param context the current request context; its request body is mutated in place
+   * @param context the create request context; its request body is mutated in place
    */
-  protected static void injectPartnerAddressIfMissing(NeoContext context) {
+  public void resolveServerCreateFields(NeoContext context) {
     // The invoicing address column's AD rule ("C_BPartner Location - Bill To") requires IsBillTo.
     PartnerLocationDefaults.fillIfMissing(context, FIELD_PARTNER_ADDRESS,
         Location.PROPERTY_INVOICETOADDRESS);
