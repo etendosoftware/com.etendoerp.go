@@ -7036,10 +7036,24 @@ fix stops the existence leak (an empty report used to confirm that the id existe
 client for an `Organization`, which is not `OrganizationEnabled`. An org of the caller's own client
 outside the role's org access still resolves; that is unchanged and is not a tenant leak. Pinned by
 `TenantIsolationPolicyTest`, which guards the aging, trial balance, general ledger, journal entries,
-balance sheet and P&L handlers. The fiscal reports (`TaxReportHandler`, `Fiscal303BoxesHandler`)
-are swept separately (ETP-5794). Years, accounting schemas and journals are `OrganizationEnabled`,
-so `loadOwned` also requires their organization to be readable by the role: one of the caller's
-own client in an organization outside the role's access now answers as unknown too.
+balance sheet and P&L handlers. The tax report and the Modelo 303, 349 and 390 handlers were swept
+in ETP-5794: `tax-report` (and MCP `generate_tax_report`) answers a foreign, unknown or
+role-unreadable `orgId` with the same `organization_not_resolved` (400) envelope, before anything
+is resolved from it. That check is stricter than the reports above: it also requires the org to be
+in the role's readable organizations, because the tax report SQL binds `ad_org_id` straight from
+the request. An omitted or empty `orgId` still defaults to the session organization (which may
+itself be `"0"`); an explicit `"0"` passes the check, a blank or space-padded `orgId` is refused.
+Before the fix, an MCP call without `currencyId` answered with the ledger currency of another
+tenant's org. The Modelo 303, 349 and 390 handlers and their submission, incidents and sources
+supports take no org from the request: every org lookup uses the `resolveEffectiveOrg()` org of the
+session. A declaration they load by request `declId` is answered 404 by `belongsTo` /
+`isOwned390` unless it is of the session client and org. So their bare lookups only carry a
+`tenant-ok` justification, and `TenantIsolationPolicyTest` guards them too. Only those seven fiscal
+classes and `TaxReportHandler` are in its `GUARDED_CLASSES`; the other `Fiscal*` / `FiscalDecl*`
+classes (snapshot, generate, preload, VIES, reactivation, CRUD) are not. For the ETP-5793 ids:
+years, accounting schemas and journals are `OrganizationEnabled`, so `loadOwned` also requires their
+organization to be readable by the role: one of the caller's own client in an organization outside
+the role's access now answers as unknown too.
 
 The same change scopes three other request ids:
 - `GlJournalHeaderHandler`: the journal its PATCH pre-hook loads by URL id to mirror

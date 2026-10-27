@@ -23,6 +23,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -139,7 +140,8 @@ public class TaxReportHandler implements NeoHandler {
             "Restrict to these business partners: one C_BPartner id, or several separated by "
                 + "commas. Default: every partner."),
         NeoReportParam.optional(PARAM_ORG_ID, NeoReportParam.TYPE_STRING,
-            "Organization id to report on. Default: the session's organization."),
+            "Organization id to report on, readable by your role. Default: the session's "
+                + "organization."),
         NeoReportParam.optional(PARAM_CURRENCY_ID, NeoReportParam.TYPE_STRING,
             "Currency id (C_Currency) every amount is CONVERTED to, so invoices issued in other "
                 + "currencies are summed in one currency (same as Classic and the SPA). Default: "
@@ -199,6 +201,10 @@ public class TaxReportHandler implements NeoHandler {
       JSONObject body = context.getRequestBody();
       if (body == null) {
         return NeoResponse.error(400, "Request body is required");
+      }
+      NeoResponse orgError = validateRequestedOrgId(body.optString(PARAM_ORG_ID, ""));
+      if (orgError != null) {
+        return orgError;
       }
 
       ReportParams p = parseParams(body);
@@ -698,6 +704,44 @@ public class TaxReportHandler implements NeoHandler {
     return map;
   }
 
+  /**
+   * Validates a request-supplied {@code orgId} before anything is resolved from it (ETP-5794).
+   *
+   * <p>The handler runs in admin mode, where a bare {@code OBDal.get} applies no client predicate.
+   * The report SQL is scoped to the session client, so no rows leak, but the default currency
+   * ({@link #resolveOrgAcctSchemaCurrency}) used to answer with another tenant's ledger currency,
+   * and an empty report confirmed that the id existed. The org must therefore belong to the
+   * caller's tenant ({@link TenantOwnership#loadOwned}) AND be one of the role's readable
+   * organizations: {@code loadOwned} checks only the client for an {@code Organization}, and the
+   * report SQL binds {@code ad_org_id} straight from the request. A foreign, unreadable or unknown
+   * org all answer the same {@code organization_not_resolved} 400 as the other report handlers
+   * (ETP-5793). Only an omitted/empty {@code orgId} skips the check: it keeps defaulting to the
+   * session organization, {@code "0"} included. An explicit {@code "0"} is checked and passes,
+   * because client {@code 0} and org {@code 0} are always readable.
+   *
+   * @param orgId the raw {@code orgId} of the request body, {@code ""} when omitted
+   * @return the error response, or {@code null} when {@code orgId} is usable
+   */
+  static NeoResponse validateRequestedOrgId(String orgId) {
+    if (orgId.isEmpty()) {
+      return null;
+    }
+    if (TenantOwnership.loadOwned(Organization.class, orgId) == null || !isReadableOrg(orgId)) {
+      return AbstractSqlReportHandler.actionableError(400, "organization_not_resolved",
+          "Could not resolve organization " + orgId + " for the tax report.",
+          "Pass a valid orgId (a C_Organization id readable by your role), or omit it to use "
+              + "the session's current organization.");
+    }
+    return null;
+  }
+
+  /** True when {@code orgId} is one of the role's readable organizations (fails closed). */
+  private static boolean isReadableOrg(String orgId) {
+    OBContext context = OBContext.getOBContext();
+    String[] readable = context != null ? context.getReadableOrganizations() : null;
+    return readable != null && Arrays.asList(readable).contains(orgId);
+  }
+
   private static String resolveOrgId(JSONObject body) {
     String orgId = body.optString(PARAM_ORG_ID, "");
     if (orgId.isEmpty()) {
@@ -787,8 +831,11 @@ public class TaxReportHandler implements NeoHandler {
     }
     try {
       OBContext.setAdminMode(true);
-      Organization org = OBDal.getInstance().get(Organization.class, orgId);
-      AcctSchema ledger = org != null ? org.getGeneralLedger() : null;
+      Organization org = TenantOwnership.loadOwned(Organization.class, orgId);
+      if (org == null) {
+        return null;
+      }
+      AcctSchema ledger = org.getGeneralLedger();
       if (ledger != null && ledger.getCurrency() != null) {
         return ledger.getCurrency();
       }
@@ -818,8 +865,8 @@ public class TaxReportHandler implements NeoHandler {
     }
     try {
       OBContext.setAdminMode(true);
-      org.openbravo.model.common.currency.Currency cur =
-          OBDal.getInstance().get(org.openbravo.model.common.currency.Currency.class, currencyId);
+      // tenant-ok: C_Currency is system reference data (client 0), shared by every tenant
+      Currency cur = OBDal.getInstance().get(Currency.class, currencyId);
       return cur != null ? cur.getSymbol() : "";
     } catch (Exception e) {
       log.warn("Could not resolve currency symbol for id {}", currencyId, e);
