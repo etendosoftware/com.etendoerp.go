@@ -41,6 +41,7 @@ import com.etendoerp.go.onboarding.OnboardingOrgInfoService;
 import com.etendoerp.go.onboarding.OnboardingPeriodControlService;
 import com.etendoerp.go.onboarding.OnboardingProgressSink;
 import com.etendoerp.go.onboarding.OnboardingSequenceGeneratorService;
+import com.etendoerp.go.onboarding.OnboardingSurveyConfigService;
 import com.etendoerp.go.onboarding.OnboardingWarehouseAddressService;
 import com.etendoerp.go.schemaforge.util.OwnerSupport;
 
@@ -68,7 +69,7 @@ public class OnboardingProvisioningChain {
    * changes onboarding never hands out a tenant built by the previous code. <b>Bump it whenever a
    * step is added, removed, reordered or changes what it provisions.</b>
    */
-  public static final String CHAIN_REVISION = "2026-10-14.1";
+  public static final String CHAIN_REVISION = "2026-10-21.1";
 
   /**
    * The provisioning version a pooled tenant is stamped with and claimed by: this chain's revision
@@ -99,6 +100,7 @@ public class OnboardingProvisioningChain {
   private static final String PROGRESS_ACCTDIM_VISIBILITY = "acctdimVisibility";
   private static final String PROGRESS_ADMIN_IDENTITY = "adminIdentity";
   private static final String PROGRESS_FORCE_TEST_MODE = "forceTestMode";
+  private static final String PROGRESS_SURVEY_CONFIG = "surveyConfig";
   private static final String LEGAL_WITH_ACCOUNTING_ORG_TYPE_ID = "1";
   static final String ERROR_CODE_CLIENT_CREATION_FAILED = "CLIENT_CREATION_FAILED";
   static final String ERROR_CODE_ORG_CREATION_FAILED = "ORG_CREATION_FAILED";
@@ -125,6 +127,8 @@ public class OnboardingProvisioningChain {
   OnboardingBaselineService onboardingBaselineService = new OnboardingBaselineService();
   OnboardingForceTestModeService onboardingForceTestModeService =
       new OnboardingForceTestModeService();
+  OnboardingSurveyConfigService onboardingSurveyConfigService =
+      new OnboardingSurveyConfigService();
   OnboardingCostingScheduleService onboardingCostingScheduleService =
       new OnboardingCostingScheduleService();
 
@@ -424,6 +428,16 @@ public class OnboardingProvisioningChain {
     if (!forceTestModeForFreeTenant(sink, clientId, orgId)) {
       return false;
     }
+    // ETP-5870 (gap Q1): seed visible defaults for the "Survey Configuration" window so NPS/CSAT
+    // tuning is no longer hidden in schema_forge hardcoded fallbacks. Runs here (no dependency on
+    // any earlier step; could slot anywhere in the chain) and BEFORE the baseline stamp — see
+    // OnboardingSurveyConfigService for the full explanation, including why this step's rows are
+    // System pseudo-tenant singletons (NOT per-client) and why ONBOARDING_PROVISIONED_THROUGH is
+    // deliberately NOT bumped for it (unlike the usual gap-closing recipe) — its lockstep
+    // corrective twin is R51-etgo-survey-config-seed.sql, run once via `--fix ... --client 0`.
+    if (!wireSurveyConfig(sink, clientId)) {
+      return false;
+    }
     // Final action before commitDalChanges: stamp the tenant's data-fix baseline so it lands in the
     // same atomic onboarding commit. A genuine SQL error propagates (not caught here) so the outer
     // handleOnboarding catch rolls back cleanly; the expected ON CONFLICT->0-rows case is benign.
@@ -436,6 +450,9 @@ public class OnboardingProvisioningChain {
     // WHEN ADDING A NEW ONBOARDING SERVICE (gap fix): bump ONBOARDING_PROVISIONED_THROUGH to the
     // timestamp of the corresponding .sql fix in cli/src/data-fixes/sql/. See the gap-closing
     // workflow in docs/etendo-ad/onboarding-and-datafixes-map.md §0. Bump CHAIN_REVISION too.
+    // EXCEPTION: a step whose data is a System pseudo-tenant singleton (ad_client_id='0', never
+    // swept per-tenant by the runner) does NOT bump the CUT -- see wireSurveyConfig below and gaps
+    // O1/U1 for the established precedent and the concrete risk of bumping it anyway.
     return registerBaseline(sink, clientId);
   }
 
@@ -642,6 +659,30 @@ public class OnboardingProvisioningChain {
     } catch (Exception e) {
       EtendoGoDalHelper.rollbackDalChanges("onboarding force-test-mode", e, log);
       return fail(sink, PROGRESS_FORCE_TEST_MODE, e, "Fiscal test mode configuration failed");
+    }
+  }
+
+  /**
+   * Seeds visible defaults for the "Survey Configuration" window (ETP-5870, gap Q1) — see
+   * {@link OnboardingSurveyConfigService} for the full explanation, including why this step's
+   * rows are a System pseudo-tenant singleton rather than per-{@code clientId} data, and its
+   * corrective twin ({@code R51-etgo-survey-config-seed.sql}).
+   */
+  boolean wireSurveyConfig(OnboardingProgressSink sink, String clientId) {
+    sink.progress(PROGRESS_SURVEY_CONFIG, PROGRESS_IN_PROGRESS,
+        "Seeding survey configuration defaults...");
+    try {
+      // clientId is NOT used to scope the seed (it is a System pseudo-tenant singleton, see
+      // OnboardingSurveyConfigService) -- kept as a parameter only for the progress/log trail that
+      // ties this step back to the onboarding run that triggered it, same as every sibling step.
+      onboardingSurveyConfigService.seedSurveyConfig();
+      log.debug("Survey configuration defaults ensured during onboarding of client '{}'",
+          clientId);
+      sink.progress(PROGRESS_SURVEY_CONFIG, PROGRESS_DONE, "Survey configuration defaults seeded");
+      return true;
+    } catch (Exception e) {
+      EtendoGoDalHelper.rollbackDalChanges("onboarding survey config seed", e, log);
+      return fail(sink, PROGRESS_SURVEY_CONFIG, e, "Survey configuration seed failed");
     }
   }
 
