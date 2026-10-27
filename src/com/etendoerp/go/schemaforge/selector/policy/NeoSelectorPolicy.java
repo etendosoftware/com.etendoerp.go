@@ -50,6 +50,11 @@ public final class NeoSelectorPolicy {
   /**
    * Ids the search term also matches, beyond the display column (ETP-5948). Empty for a blank
    * term or when no {@link SelectorSearchPolicy} applies.
+   *
+   * @param meta resolved selector metadata
+   * @param contextParams validated selector context parameters
+   * @param search the raw search term
+   * @return the matching record ids, never {@code null}
    */
   public static Set<String> resolveSearchMatchIds(SelectorMeta meta,
       Map<String, String> contextParams, String search) {

@@ -184,7 +184,7 @@ class NeoSelectorServiceTest {
         NeoSelectorPolicy.class); MockedStatic<SelectorQueryExecutor> eMock = mockStatic(SelectorQueryExecutor.class)) {
       pMock.when(() -> NeoSelectorPolicy.resolveContextParamFilter(anyString(), any(), anyString())).thenReturn(null);
       eMock.when(() -> SelectorQueryExecutor.execute(any(), anyString(), anyInt(), anyInt(), any(), anyString(),
-          any(), any())).thenAnswer(inv -> {
+          any())).thenAnswer(inv -> {
         captured[0] = inv.getArgument(6);
         return null;
       });
@@ -210,7 +210,7 @@ class NeoSelectorServiceTest {
         NeoSelectorPolicy.class); MockedStatic<SelectorQueryExecutor> eMock = mockStatic(SelectorQueryExecutor.class)) {
       pMock.when(() -> NeoSelectorPolicy.resolveContextParamFilter(anyString(), any(), anyString())).thenReturn(null);
       eMock.when(() -> SelectorQueryExecutor.execute(any(), anyString(), anyInt(), anyInt(), any(), anyString(),
-          any(), any())).thenAnswer(inv -> {
+          any())).thenAnswer(inv -> {
         captured[0] = inv.getArgument(6);
         return null;
       });
@@ -234,7 +234,7 @@ class NeoSelectorServiceTest {
         NeoSelectorPolicy.class); MockedStatic<SelectorQueryExecutor> eMock = mockStatic(SelectorQueryExecutor.class)) {
       pMock.when(() -> NeoSelectorPolicy.resolveContextParamFilter(anyString(), any(), anyString())).thenReturn(null);
       eMock.when(() -> SelectorQueryExecutor.execute(any(), anyString(), anyInt(), anyInt(), any(), anyString(),
-          any(), any())).thenAnswer(inv -> {
+          any())).thenAnswer(inv -> {
         captured[0] = inv.getArgument(6);
         return null;
       });

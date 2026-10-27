@@ -140,6 +140,7 @@ import com.etendoerp.go.schemaforge.selector.meta.SelectorMeta;
 public final class InvoiceLineTaxSifSelectorPolicy
     implements SelectorEnrichmentPolicy, SelectorSearchPolicy {
 
+  private static final String TAX_ID_COLUMN = "c_tax_id";
   private static final Logger log = LogManager.getLogger(InvoiceLineTaxSifSelectorPolicy.class);
 
   // AD_Window_Id — sales-invoice (167), purchase-invoice (183), sales-order (143),
@@ -391,7 +392,7 @@ public final class InvoiceLineTaxSifSelectorPolicy
       }
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
-          childIds.add(rs.getString("c_tax_id"));
+          childIds.add(rs.getString(TAX_ID_COLUMN));
         }
       }
     }
@@ -438,7 +439,7 @@ public final class InvoiceLineTaxSifSelectorPolicy
       }
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
-          result.put(rs.getString("c_tax_id"), extractRow(rs, decimalSeparator));
+          result.put(rs.getString(TAX_ID_COLUMN), extractRow(rs, decimalSeparator));
         }
       }
     }
@@ -514,7 +515,7 @@ public final class InvoiceLineTaxSifSelectorPolicy
         while (rs.next()) {
           BigDecimal rate = rs.getBigDecimal(LABEL_RATE_COLUMN);
           if (rate != null && plainRate(rate).startsWith(term)) {
-            ids.add(rs.getString("c_tax_id"));
+            ids.add(rs.getString(TAX_ID_COLUMN));
           }
         }
       }
