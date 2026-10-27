@@ -200,7 +200,7 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
     if (rateRefusal != null) {
       return rateRefusal;
     }
-    captureOriginInvoice(context);
+    rectificationLinks.captureOriginInvoice(context);
     NeoResponse siiAuthError = captureAndValidateSiiAuthorization(context);
     if (siiAuthError != null) {
       return siiAuthError;
@@ -282,7 +282,7 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
     // C_Invoice_Reverse, same mechanism shared through AbstractInvoiceHeaderHandler.
     if (NeoEndpointType.CRUD.equals(context.getEndpointType())
         && NeoHandlerUtils.isWriteMethod(context.getHttpMethod())) {
-      persistOriginInvoice(context);
+      rectificationLinks.persistOriginInvoice(context);
       persistSiiAuthorizationno(context);
     }
     if (!"GET".equals(context.getHttpMethod()) || !NeoEndpointType.CRUD.equals(context.getEndpointType())) {
@@ -315,12 +315,12 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
       if (context.getRecordId() != null) {
         JSONObject rec = dataArr.getJSONObject(0);
         enrichSourceInvoice(rec, context.getRecordId());
-        enrichOriginInvoice(rec, context.getRecordId());
-        enrichRectifyingInvoices(rec, context.getRecordId());
+        rectificationLinks.enrichOriginInvoice(rec, context.getRecordId());
+        rectificationLinks.enrichRectifyingInvoices(rec, context.getRecordId());
         enrichDocTypeLocked(rec);
         enrichIsRectificative(rec);
         enrichTbaiConfigActive(rec);
-        enrichHasRectifications(rec, context.getRecordId());
+        rectificationLinks.enrichHasRectifications(rec, context.getRecordId());
         InvoiceExemptTaxes.enrich(rec, context.getRecordId());
         enrichLinkedShipments(rec, context.getRecordId());
         SifSubRecordAttachments.enrich(rec, context.getRecordId());

@@ -259,7 +259,7 @@ public final class InvoiceReactivationGuard {
 
   /**
    * The document numbers of every COMPLETED rectificativa linked back to {@code invoiceId} via
-   * {@code C_Invoice_Reverse} — the same table {@link AbstractInvoiceHeaderHandler#enrichOriginInvoice}
+   * {@code C_Invoice_Reverse} — the same table {@link InvoiceRectificationLinkSupport#enrichOriginInvoice}
    * reads, in the opposite direction: here {@code invoiceId} is the ORIGIN
    * ({@code reversed_c_invoice_id}), and the rows returned are its rectificativa(s)
    * ({@code c_invoice_id}). A rectificativa still in draft is deliberately excluded by the

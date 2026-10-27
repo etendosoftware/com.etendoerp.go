@@ -82,6 +82,7 @@ import org.openbravo.model.common.invoice.ReversedInvoice;
  * </ul>
  *
  * @covers com.etendoerp.go.schemaforge.AbstractInvoiceHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.InvoiceRectificationLinkSupport
  * @covers com.etendoerp.go.schemaforge.DocumentRateGuards
  */
 public class AbstractInvoiceHeaderHandlerTest {
@@ -121,25 +122,25 @@ public class AbstractInvoiceHeaderHandlerTest {
     }
 
     public void callCaptureOriginInvoice(NeoContext ctx) {
-      captureOriginInvoice(ctx);
+      rectificationLinks.captureOriginInvoice(ctx);
     }
 
     public void callPersistOriginInvoice(NeoContext ctx) {
-      persistOriginInvoice(ctx);
+      rectificationLinks.persistOriginInvoice(ctx);
     }
 
     /** Exposes both capture + persist as a single roundtrip, mirroring real handle()→afterHandle(). */
     public void callCaptureThenPersistOriginInvoice(NeoContext captureCtx, NeoContext persistCtx) {
-      captureOriginInvoice(captureCtx);
-      persistOriginInvoice(persistCtx);
+      rectificationLinks.captureOriginInvoice(captureCtx);
+      rectificationLinks.persistOriginInvoice(persistCtx);
     }
 
     public void callEnrichOriginInvoice(JSONObject rec, String id) throws Exception {
-      enrichOriginInvoice(rec, id);
+      rectificationLinks.enrichOriginInvoice(rec, id);
     }
 
     public void callEnrichRectifyingInvoices(JSONObject rec, String id) throws Exception {
-      enrichRectifyingInvoices(rec, id);
+      rectificationLinks.enrichRectifyingInvoices(rec, id);
     }
 
     public void callEnrichInvoiceSubtype(JSONObject rec, String key) throws Exception {
