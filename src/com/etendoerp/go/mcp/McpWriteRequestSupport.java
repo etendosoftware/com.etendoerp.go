@@ -26,6 +26,9 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
+import javax.servlet.http.HttpServletResponse;
+
+
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
@@ -40,12 +43,16 @@ import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.service.json.JsonConstants;
 
+import com.etendoerp.go.schemaforge.NeoErrorClassifier;
+import com.etendoerp.go.schemaforge.NeoErrorResponses;
+import com.etendoerp.go.schemaforge.NeoReferenceOwnership;
 import com.etendoerp.go.schemaforge.NeoServerOwnedFields;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.selector.policy.NeoSelectorPolicy;
 import com.etendoerp.go.schemaforge.util.NeoErrorSanitizer;
 import com.etendoerp.go.schemaforge.util.NeoListReferenceError;
+import com.etendoerp.go.schemaforge.util.NeoValidationErrorResponseBuilder;
 
 /**
  * Request-body preparation and DAL-response classification helpers extracted from
@@ -888,6 +895,30 @@ final class McpWriteRequestSupport {
   }
 
   /**
+   * Refuse a write whose request references a row of another tenant (ETP-5785).
+   *
+   * <p>The check itself is {@link NeoReferenceOwnership}, shared with the REST CRUD path. Its
+   * refusal is the body core returns for a reference that names no row, so it is turned into the
+   * agent's answer by {@link #checkJsonServiceError(JSONObject, String, Set)} — the same envelope a
+   * genuinely missing id produces, which is what keeps the two indistinguishable.</p>
+   *
+   * @param adTab                the tab being written
+   * @param fields               the body keyed by DAL property name, holding only what the caller
+   *                             sent; {@code null} to check the parent alone
+   * @param parentId             the parent id of a child create, or {@code null}
+   * @param callerProvidedFields the caller's own field names, for the envelope's hint
+   * @return the 422 validation envelope, or {@code null} when every reference is acceptable
+   * @throws JSONException if the envelope cannot be built
+   */
+  static JSONObject refuseUnownedReferences(Tab adTab, JSONObject fields, String parentId,
+      Set<String> callerProvidedFields) throws JSONException {
+    String refusal = NeoReferenceOwnership.refuseUnownedReferences(adTab, fields, parentId);
+    return refusal == null ? null
+        : checkJsonServiceError(new JSONObject(refusal), McpConstants.SEE_ALSO_WRITING,
+            callerProvidedFields);
+  }
+
+  /**
    * Check if a DefaultJsonDataService response contains an error.
    *
    * <p>Returns the IMP-5 envelope describing it, or {@code null} when the response is not a failure.
@@ -935,12 +966,55 @@ final class McpWriteRequestSupport {
           ? innerResponse.getJSONObject(JsonConstants.RESPONSE_ERROR)
               .optString(McpConstants.KEY_MESSAGE, "Operation failed")
           : "Operation failed";
-      return buildDalFailureEnvelope(message, seeAlso);
+      JSONObject classified = buildClassifiedDalFailure(innerResponse, message, seeAlso);
+      return classified != null ? classified : buildDalFailureEnvelope(message, seeAlso);
     }
     if (status == JsonConstants.RPCREQUEST_STATUS_VALIDATION_ERROR) {
+      if (NeoValidationErrorResponseBuilder.isUnknownReference(
+          innerResponse.optJSONObject(JsonConstants.RESPONSE_ERRORS))) {
+        // ETP-5782: core's message names the entity class and echoes the id, and would tell a
+        // missing id apart from another tenant's. The same generic answer REST gives, as MCP's 422.
+        JSONObject envelope = McpToolResponses.classifiedEnvelope(
+            HttpServletResponse.SC_BAD_REQUEST, NeoErrorClassifier.CODE_UNKNOWN_REFERENCE,
+            NeoErrorClassifier.MSG_UNKNOWN_REFERENCE, null);
+        envelope.put(McpConstants.KEY_SEE_ALSO, seeAlso);
+        return envelope;
+      }
       return buildDalValidationEnvelope(innerResponse, seeAlso, callerProvidedFields);
     }
     return null;
+  }
+
+  /**
+   * ETP-5782: the envelope for a write failure NEO's write service captured and classified (a
+   * trigger refusal, a row still in use, a deadlock, a lost connection…), or {@code null} to keep
+   * the existing handling — for a failure that was not captured, for the stale-record and
+   * duplicate-key wordings handled by {@link #buildDalFailureEnvelope}, and for a failure classified
+   * as a server fault, which keeps this channel's existing answer (declared in
+   * {@code neo-headless.md} §4.12.9).
+   */
+  private static JSONObject buildClassifiedDalFailure(JSONObject innerResponse, String message,
+      String seeAlso) throws JSONException {
+    JSONObject classification = NeoErrorResponses.classificationOf(innerResponse);
+    if (classification == null || NeoErrorSanitizer.isStaleRecordMessage(message)
+        || NeoErrorSanitizer.isDuplicateKeyMessage(message)) {
+      return null;
+    }
+    int status = classification.optInt(McpConstants.KEY_STATUS,
+        McpConstants.STATUS_SERVER_ERROR);
+    if (status >= McpConstants.STATUS_SERVER_ERROR && status != 503) {
+      return null;
+    }
+    List<String> keys = new ArrayList<>();
+    JSONArray rawKeys = classification.optJSONArray("messageKeys");
+    for (int i = 0; rawKeys != null && i < rawKeys.length(); i++) {
+      keys.add(rawKeys.optString(i));
+    }
+    JSONObject envelope = McpToolResponses.classifiedEnvelope(status,
+        classification.optString("code", NeoErrorClassifier.CODE_SERVER_ERROR),
+        classification.optString(McpConstants.KEY_MESSAGE, null), keys);
+    envelope.put(McpConstants.KEY_SEE_ALSO, seeAlso);
+    return envelope;
   }
 
   /**

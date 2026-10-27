@@ -668,6 +668,45 @@ public class McpHookExecutorTest {
     }
   }
 
+  // ── runPostHook after the write committed (ETP-5782) ─────────────────
+
+  /**
+   * The write before the post-hook is committed, so a refusal raised by {@code afterHandle} — here
+   * a keyed one, a 422 anywhere else — is the server-side 500 it always was, with a hint telling
+   * the agent to read the record before re-sending, never a "correct and retry" refusal.
+   */
+  @Test
+  public void testPostHookFailureAfterTheCommitIsNotARetryableRefusal() throws Exception {
+    NeoContext ctx = NeoContext.builder().httpMethod("POST").specName("sales-order")
+        .entityName("header").build();
+    com.etendoerp.go.schemaforge.NeoExtensionRequest request =
+        com.etendoerp.go.schemaforge.NeoExtensionRequest.builder()
+            .qualifier("q").specName("sales-order").entityName("header")
+            .surface(com.etendoerp.go.schemaforge.NeoExtensionSurface.of(ctx))
+            .channel(com.etendoerp.go.schemaforge.NeoExtensionChannel.MCP)
+            .context(ctx).build();
+    org.openbravo.dal.service.OBDal dal = mock(org.openbravo.dal.service.OBDal.class);
+
+    try (MockedStatic<com.etendoerp.go.schemaforge.NeoExtensionDispatcher> dispatcher =
+        mockStatic(com.etendoerp.go.schemaforge.NeoExtensionDispatcher.class);
+        MockedStatic<org.openbravo.dal.service.OBDal> obdal =
+            mockStatic(org.openbravo.dal.service.OBDal.class)) {
+      dispatcher.when(() -> com.etendoerp.go.schemaforge.NeoExtensionDispatcher.dispatch(any()))
+          .thenThrow(new org.openbravo.base.exception.OBException("@20502@"));
+      obdal.when(org.openbravo.dal.service.OBDal::getInstance).thenReturn(dal);
+
+      JSONObject result = McpHookExecutor.runPostHook(request, new JSONObject().put("id", "A"));
+
+      assertTrue(result.getBoolean(FIELD_IS_ERROR));
+      JSONObject envelope = new JSONObject(
+          result.getJSONArray(FIELD_CONTENT).getJSONObject(0).getString(FIELD_TEXT));
+      assertEquals(500, envelope.getInt(FIELD_STATUS));
+      assertEquals("server_error", envelope.getString("error"));
+      assertEquals(com.etendoerp.go.schemaforge.NeoErrorResponses.AFTER_COMMIT_HINT,
+          envelope.getString("hint"));
+      verify(dal).rollbackAndClose();
+    }
+  }
   // ── ETP-5680: placeholder forwarding ──
 
   /** The placeholders the mandatory-defaults pass recorded reach the pre-hook's context. */

@@ -45,9 +45,12 @@ import org.mockito.MockedStatic;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.Property;
 import org.openbravo.base.structure.BaseOBObject;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Column;
+import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.ad.ui.Tab;
+import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.NeoSelectorService;
@@ -63,6 +66,7 @@ import com.etendoerp.go.schemaforge.NeoSelectorService;
  * <b>what context each selector call is given</b>.
  *
  * @covers com.etendoerp.go.mcp.McpFkResolver
+ * @covers com.etendoerp.go.schemaforge.NeoReferenceOwnership
  */
 // Test methods live in the @Nested inner classes below; S2187 only inspects
 // the outer class for @Test methods, hence the suppression.
@@ -208,6 +212,44 @@ class McpFkResolverTest {
         // Untouched: it was already the id, which is exactly what etendo_defaults hands back.
         assertEquals(LEGACY_ID, body.getString(KEY));
         selector.verifyNoInteractions();
+      }
+    }
+
+    /**
+     * ETP-5785: the id probe only counts the caller's own (or System) rows. A legacy id of another
+     * tenant used to report "exists" and skip the name path, while a missing id reached it and
+     * answered not_found — an existence oracle. Both now end in the same not_found.
+     */
+    @Test
+    @DisplayName("a legacy id of another tenant is answered exactly like a missing one")
+    void foreignLegacyIdIsIndistinguishableFromAMissingOne() throws Exception {
+      String foreignId = "201";
+      String missingId = "202";
+      FIN_FinancialAccount foreignRow = mock(FIN_FinancialAccount.class);
+      Client otherClient = mock(Client.class);
+      when(otherClient.getId()).thenReturn("client-other");
+      when(foreignRow.getClient()).thenReturn(otherClient);
+      when(obDalInstance.<BaseOBObject>get(TARGET_ENTITY, foreignId)).thenReturn(foreignRow);
+      OBContext context = mock(OBContext.class);
+      when(context.getReadableClients()).thenReturn(new String[] {"client-own", "0"});
+      Column column = mock(Column.class);
+      try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+          MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+          MockedStatic<NeoSelectorService> selector = mockStatic(NeoSelectorService.class);
+          MockedStatic<McpSchemaFieldBuilder> fields = mockStatic(McpSchemaFieldBuilder.class)) {
+        obDal.when(OBDal::getInstance).thenReturn(obDalInstance);
+        obContext.when(OBContext::getOBContext).thenReturn(context);
+        fields.when(() -> McpSchemaFieldBuilder.findColumn(adTab, KEY, dalEntity)).thenReturn(column);
+        selector.when(() -> NeoSelectorService.querySelectorByColumn(any(), anyString(), anyString(),
+            anyInt(), anyInt(), any())).thenReturn(selectorHits());
+
+        JSONObject foreign = McpFkResolver.resolveFkNames(bodyWith(foreignId), dalEntity, adTab,
+            Map.of(), log);
+        JSONObject missing = McpFkResolver.resolveFkNames(bodyWith(missingId), dalEntity, adTab,
+            Map.of(), log);
+
+        assertNotNull(foreign);
+        assertEquals(missing.toString(), foreign.toString().replace(foreignId, missingId));
       }
     }
 

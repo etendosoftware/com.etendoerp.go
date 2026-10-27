@@ -43,6 +43,13 @@ public final class EnvironmentAuthOutcome {
     AUTHENTICATED(HttpServletResponse.SC_OK),
     CSRF_REJECTED(HttpServletResponse.SC_FORBIDDEN),
     UNAUTHENTICATED(HttpServletResponse.SC_UNAUTHORIZED),
+    /**
+     * ETP-5783 — a valid OAuth2 token that lacks the scope the request needs. Not a 401: the token
+     * is fine, and a client reads 401 as "your token is gone" and discards it (the API gateway
+     * evicts it from its cache), when what is missing is a scope that re-authenticating with the
+     * same credential would not add. RFC 6750 §3.1 answers {@code insufficient_scope} with 403.
+     */
+    INSUFFICIENT_SCOPE(HttpServletResponse.SC_FORBIDDEN),
     /** javax.servlet predates RFC 7231 and has no constant for 402. */
     PAYMENT_REQUIRED(402),
     /**
