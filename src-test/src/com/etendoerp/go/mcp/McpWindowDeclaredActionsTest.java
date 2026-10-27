@@ -1389,6 +1389,39 @@ class McpWindowDeclaredActionsTest {
       }
     }
 
+    /**
+     * ETP-5714: strict screen parity on both invoice headers. The shipped {@code values} entry
+     * lets {@code documentAction} take CO or RE and nothing else, so a reversal (RC), a void, a
+     * close or any other value of the shared list is a 422 listing the allowed values, under
+     * every spelling of the button and of the parameter ({@code docAction} / {@code action}).
+     */
+    @Test
+    @DisplayName("invoice documentAction accepts CO and RE only: RC, VO, PR, AP, CL, XL are refused with 422")
+    void invoiceDocActionIsRestrictedToCoAndRe() throws Exception {
+      for (String rowId : List.of("7240CAF07810439B85DE61E70BE8DC0B",
+          "0D654005B02741A29A0491FD5AFEA6E8")) {
+        SFEntity entity = shipped("C_Invoice", rowId,
+            new String[][] { { "DocAction", "documentAction" } });
+        for (String typed : List.of("documentAction", "DocAction")) {
+          for (String key : List.of("docAction", "action")) {
+            for (String value : List.of("RC", "VO", "PR", "AP", "CL", "XL")) {
+              McpRoutingException e = assertThrows(McpRoutingException.class,
+                  () -> McpDeclaredActions.precheck(entity, typed,
+                      new JSONObject().put(key, value)), rowId + typed + key + value);
+              JSONObject env = e.toEnvelope();
+              assertEquals(422, env.getInt(McpConstants.KEY_STATUS));
+              assertEquals(Set.of("CO", "RE"), Set.of(env.getJSONArray("allowedValues").getString(0),
+                  env.getJSONArray("allowedValues").getString(1)));
+              assertTrue(env.getString(McpConstants.KEY_DETAIL).contains("'" + value + "'"));
+            }
+          }
+          assertNull(McpDeclaredActions.precheck(entity, typed, new JSONObject().put("docAction", "CO")));
+          assertNull(McpDeclaredActions.precheck(entity, typed, new JSONObject().put("docAction", "RE")));
+          assertNull(McpDeclaredActions.precheck(entity, typed, new JSONObject()));
+        }
+      }
+    }
+
     private SFEntity payment() throws Exception {
       return shipped("FIN_Payment", PAYMENT_IN, new String[][] {
           { "em_etpr_remove_payment", "eTPRRemovePayment" },

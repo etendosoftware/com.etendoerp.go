@@ -59,6 +59,8 @@ import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
  * {@code OBContext}; the CRUD/DEFAULTS context builders remain integration-covered.
  *
  * @covers com.etendoerp.go.mcp.McpHookExecutor
+ * @covers com.etendoerp.go.mcp.McpMessageKeyHints
+ * @covers com.etendoerp.go.mcp.McpToolResponses
  */
 public class McpHookExecutorTest {
 
@@ -234,7 +236,7 @@ public class McpHookExecutorTest {
       JSONObject result = McpHookExecutor.neoResponseToMcpResult(NeoResponse.error(400, body));
       JSONObject envelope = new JSONObject(
           result.getJSONArray(FIELD_CONTENT).getJSONObject(0).getString(FIELD_TEXT));
-      assertEquals(McpToolRouter.PERIOD_NOT_AVAILABLE_HINT, envelope.getString("hint"));
+      assertEquals(McpMessageKeyHints.PERIOD_NOT_AVAILABLE_HINT, envelope.getString("hint"));
     }
   }
 
@@ -249,7 +251,7 @@ public class McpHookExecutorTest {
     String text = result.getJSONArray(FIELD_CONTENT).getJSONObject(0).getString(FIELD_TEXT);
     JSONObject envelope = new JSONObject(text);
     assertFalse(text.contains("ETPR_"));
-    assertEquals(McpToolRouter.PERIOD_NOT_AVAILABLE_HINT, envelope.getString("hint"));
+    assertEquals(McpMessageKeyHints.PERIOD_NOT_AVAILABLE_HINT, envelope.getString("hint"));
   }
 
   /** Any other refusal keeps its envelope without the period hint. */
@@ -283,12 +285,12 @@ public class McpHookExecutorTest {
       JSONObject result = McpHookExecutor.neoResponseToMcpResult(NeoResponse.error(400, body));
       JSONObject envelope = new JSONObject(
           result.getJSONArray(FIELD_CONTENT).getJSONObject(0).getString(FIELD_TEXT));
-      assertEquals(McpToolRouter.DOCUMENT_PROCESSED_HINT, envelope.getString("hint"));
+      assertEquals(McpMessageKeyHints.DOCUMENT_PROCESSED_HINT, envelope.getString("hint"));
     }
-    assertTrue(McpToolRouter.DOCUMENT_PROCESSED_HINT.contains("documentAction RE"));
-    assertTrue(McpToolRouter.DOCUMENT_PROCESSED_HINT.contains("view:'actions'"));
+    assertTrue(McpMessageKeyHints.DOCUMENT_PROCESSED_HINT.contains("documentAction RE"));
+    assertTrue(McpMessageKeyHints.DOCUMENT_PROCESSED_HINT.contains("view:'actions'"));
     assertFalse("the hint is keyed by message, not entity: no goods-specific wording",
-        McpToolRouter.DOCUMENT_PROCESSED_HINT.contains("goods"));
+        McpMessageKeyHints.DOCUMENT_PROCESSED_HINT.contains("goods"));
 
     JSONObject own = new JSONObject().put("message", "x").put("hint", "mine")
         .put("messageKeys", new JSONArray().put("20501"));
@@ -296,6 +298,24 @@ public class McpHookExecutorTest {
         NeoResponse.error(400, own)).getJSONArray(FIELD_CONTENT).getJSONObject(0)
         .getString(FIELD_TEXT));
     assertEquals("mine", kept.getString("hint"));
+  }
+
+  /**
+   * ETP-5714: a classified write failure (the DAL path) that carries message key {@code 20501}
+   * gets the keyed hint, not the generic one of its class; without a known key the class hint
+   * stays. Covers purchase and sales lines alike: the key is the identity, never the entity.
+   */
+  @Test
+  public void testClassifiedEnvelopePrefersTheMessageKeyHint() throws Exception {
+    JSONObject keyed = McpToolResponses.classifiedEnvelope(400, "business_rule",
+        "Documento ya procesado", List.of("20501"));
+    JSONObject plain = McpToolResponses.classifiedEnvelope(400, "business_rule", "rule",
+        List.of("OtherKey"));
+    JSONObject none = McpToolResponses.classifiedEnvelope(400, "business_rule", "rule", null);
+
+    assertEquals(McpMessageKeyHints.DOCUMENT_PROCESSED_HINT, keyed.getString("hint"));
+    assertTrue(plain.getString("hint").startsWith("A business rule rejected"));
+    assertTrue(none.getString("hint").startsWith("A business rule rejected"));
   }
 
   /** The two keyed hints do not leak into each other, and a key that merely contains 20501 is not it. */
@@ -313,7 +333,7 @@ public class McpHookExecutorTest {
         NeoResponse.error(400, lookalike)).getJSONArray(FIELD_CONTENT).getJSONObject(0)
         .getString(FIELD_TEXT));
 
-    assertEquals(McpToolRouter.PERIOD_NOT_AVAILABLE_HINT, periodEnvelope.getString("hint"));
+    assertEquals(McpMessageKeyHints.PERIOD_NOT_AVAILABLE_HINT, periodEnvelope.getString("hint"));
     assertFalse(lookalikeEnvelope.has("hint"));
   }
 
@@ -716,8 +736,7 @@ public class McpHookExecutorTest {
     try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
         MockedStatic<NeoHandlerLookup> lookup = mockStatic(NeoHandlerLookup.class)) {
       obContextMock.when(OBContext::getOBContext).thenReturn(null);
-      lookup.when(() -> NeoHandlerLookup.forEntity(sfEntity))
-          .thenReturn(customization);
+      lookup.when(() -> NeoHandlerLookup.forEntity(sfEntity)).thenReturn(customization);
 
       McpHookExecutor.resolveServerCreateFields("sales-invoice", "header", null, sfEntity, body);
 
@@ -734,8 +753,7 @@ public class McpHookExecutorTest {
     JSONObject body = new JSONObject().put("a", "b");
 
     try (MockedStatic<NeoHandlerLookup> lookup = mockStatic(NeoHandlerLookup.class)) {
-      lookup.when(() -> NeoHandlerLookup.forEntity(sfEntity))
-          .thenReturn(null);
+      lookup.when(() -> NeoHandlerLookup.forEntity(sfEntity)).thenReturn(null);
       McpHookExecutor.resolveServerCreateFields("s", "e", null, sfEntity, body);
 
       lookup.when(() -> NeoHandlerLookup.forEntity(sfEntity))
