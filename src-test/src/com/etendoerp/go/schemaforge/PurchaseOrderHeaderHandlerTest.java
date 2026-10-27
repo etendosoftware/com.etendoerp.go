@@ -627,15 +627,23 @@ public class PurchaseOrderHeaderHandlerTest {
   // ── declared action contracts (ETP-5709) ──────────────────────────────────
 
   @Test
-  public void actionContracts_declaresReceiptInvoiceAndCloneWithoutParams() {
+  public void actionContracts_declaresReceiptInvoiceAndCloneWithoutParams() throws Exception {
     Map<String, NeoActionContract> contracts = new PurchaseOrderHeaderHandler().actionContracts();
 
     assertEquals(List.of("createGoodsReceipt", "createPurchaseInvoice", "cloneRecord"),
         List.copyOf(contracts.keySet()));
     for (NeoActionContract c : contracts.values()) {
       assertEquals("POST", c.getHttpMethod());
-      assertTrue(c.getName() + " takes no parameters", c.getParams().isEmpty());
+      // ETP-5714: createPurchaseInvoice declares only the optional boolean allowDuplicate
+      assertEquals(c.getName() + " parameters",
+          "createPurchaseInvoice".equals(c.getName()) ? List.of("allowDuplicate") : List.<String>of(),
+          c.getParams().stream().map(NeoActionContract.Param::getName)
+              .collect(java.util.stream.Collectors.toList()));
     }
+    assertEquals(422, NeoActionContract.validate(contracts, "createPurchaseInvoice",
+        new JSONObject().put("allowDuplicate", "true")).getHttpStatus());
+    assertNull(NeoActionContract.validate(contracts, "createPurchaseInvoice",
+        new JSONObject().put("allowDuplicate", true)));
     assertTrue(contracts.get("createGoodsReceipt").getDescription().contains("DRAFT"));
     assertTrue(contracts.get("createPurchaseInvoice").getDescription().contains("COMPLETES"));
     assertTrue(contracts.get("cloneRecord").getDescription().contains("NEW DRAFT"));
